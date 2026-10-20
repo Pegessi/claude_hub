@@ -65,7 +65,7 @@
           class="subthread-message"
         >
           <MarkdownContent
-            :text="renderAgentDirectives(sub.text)"
+            :text="renderAgentDirectives(sub.text, { complete: subthreadTerminal(thread) })"
             :tab-id="markdownImageScope"
             compact
             :complete="subthreadTerminal(thread)"

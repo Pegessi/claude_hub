@@ -14,6 +14,10 @@
   longer show as tofu glyphs and raw JSON: a directive with a local path
   becomes an "Open visualization" card that opens the in-page HTML preview,
   others are dropped, and a directive still streaming in stays hidden.
+- Only absolute paths with a previewable type become cards; the skill's
+  `title` labels the card, each path segment is percent-encoded so `#`/`?`
+  survive, directives quoted in fenced code stay as readable code, and an
+  unclosed marker hides text only while the turn is still streaming.
 - Copied turns carry the directive as its plain file path.
 
 ### feat(chat): Codex-style transcript with readable tool activity
