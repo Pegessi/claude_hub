@@ -341,3 +341,26 @@ async def test_conversation_reset_allows_new_intent_without_delivering_old(tmp_p
     assert h.inbox.messages[old.message_id].state == "failed"
     assert h.inbox.messages[new.message_id].state == "accepted"
     assert h.calls == ["new-intent"]
+
+
+@pytest.mark.asyncio
+async def test_reset_then_initial_provider_id_binds_same_new_epoch(tmp_path):
+    h = Harness(tmp_path / "store.json")
+    old = await h.enqueue()
+    h.target_value = InboxTarget("inc-1", None)
+    new = await h.enqueue("post-reset-intent")
+    new_epoch = h.inbox.messages[new.message_id].incarnation
+
+    async def assign_provider_id(item, before):
+        h.calls.append(item.call_id)
+        # Native readiness may persist its initial provider ID only after the
+        # new intent was accepted. This binds the reset epoch, not a new one.
+        h.target_value = InboxTarget("inc-1", "conversation-2")
+        before()
+
+    h.inbox.submit = assign_provider_id
+    await h.inbox.pump("tab")
+    assert h.inbox.messages[old.message_id].state == "failed"
+    assert h.inbox.messages[new.message_id].state == "accepted"
+    assert h.inbox.messages[new.message_id].incarnation == new_epoch
+    assert h.calls == ["post-reset-intent"]
