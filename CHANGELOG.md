@@ -7,6 +7,12 @@
 
 ## Released
 
+### feat(dot): a newer Feishu message stops Dot's answer in progress
+
+- On the Dot Chat, a Feishu message that arrives while Dot answers the previous
+  one stops that answer (no failure reply); the next turn answers both. Other
+  Chats keep queueing it as a follow-up.
+
 ### fix(chat): render Codex inline directives instead of leaking markers
 
 - Codex writes rich-content requests inline as private-use-delimited

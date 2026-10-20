@@ -510,6 +510,16 @@ class FeishuMessageDispatcher:
         )
         return f"{intro}\n\n{messages}"
 
+    def _interrupted_text(self, earlier: str, items: list[_TabDispatchItem]) -> str:
+        messages = "\n\n".join(
+            f"[新消息 {index}]\n{item.event.text}" for index, item in enumerate(items, start=1)
+        )
+        return (
+            "你回复用户上一条消息时，用户又发来了新消息，上一次回复已停止、未发出。"
+            "请结合两者给出一个回复：\n\n"
+            f"[上一条]\n{earlier}\n\n{messages}"
+        )
+
     def _batch_matches(self, first: _TabDispatchItem, candidate: _TabDispatchItem) -> bool:
         return (
             candidate.bot_id == first.bot_id
@@ -616,6 +626,11 @@ class FeishuMessageDispatcher:
                     )
                 batch[0].reaction_dispatch_started.set()
                 visible_text = self._batch_visible_text(batch, followup=followup)
+                if queue.interrupted_text:
+                    # The answer in progress was stopped for these messages.
+                    visible_text = self._interrupted_text(queue.interrupted_text, batch)
+                    queue.interrupted_text = ""
+                queue.active_text = visible_text
                 attachments: list[AgentStreamAttachment] = []
                 attachment_bytes = 0
                 omitted_images: list[str] = []
@@ -752,6 +767,10 @@ class FeishuMessageDispatcher:
                     return status
                 raise
             except Exception:
+                if batch and any(item.superseded for item in batch):
+                    # Stopped for a newer message, which answers this one too.
+                    status = "superseded"
+                    return status
                 logger.exception("Feishu Bot message dispatch failed")
                 target = batch[-1] if batch else leader
                 await self.bindings.reply_if_current(

@@ -48,6 +48,19 @@ Design: [docs/DOT.md](../DOT.md) ("Delegation and wake-up").
 - Not fixed: a task started from the Dot Chat that ends between two watcher
   passes (under a minute) is not watched.
 
+## Follow-up: a newer Feishu message interrupts
+
+The user saw a Feishu message become a follow-up instead of interrupting. Only
+Dot's own wake/tidy turns gave way; a message during Dot's answer to an earlier
+Feishu message waited in the Feishu queue. Now, on the Dot Chat, a newer
+message in the same chat marks the active batch superseded and stops its turn
+(`manager.cancel_turn` with its turn id); the stopped batch ends as
+`superseded` without a failure reply, and the next batch's text carries the
+previous message and the new ones. If the stop fails (the answer ended first),
+the flags are undone and the message follows as before. Not covered: a Feishu
+message during a web turn on the Dot tab, and web messages (the web composer
+still queues behind a user turn).
+
 ## Activation
 
 The live Dot keeps its session pack until the session rotates (`claude-hub dot
