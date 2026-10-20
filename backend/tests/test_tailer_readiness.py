@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from claude_hub.api import agent_stream
+from claude_hub.api.routes.agent_stream import messages
 from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
 from claude_hub.services.agent_stream.native import ProviderSession
 from claude_hub.services.agent_stream.tailer import SessionTailer, StructuredSourceUnavailable
@@ -125,7 +126,7 @@ async def test_scheduled_probe_yields_one_tick_for_new_consumer(
     ensure_started = _patch_scheduled_probe(monkeypatch, tailer)
     asyncio.get_running_loop().call_soon(setattr, transport, "_started", True)
 
-    assert await agent_stream._ensure_scheduled_chat_runtime("tab")
+    assert await messages.ensure_chat_runtime("tab")
     ensure_started.assert_awaited_once()
     assert not tailer.is_running()
 
@@ -139,9 +140,9 @@ async def test_scheduled_probe_does_not_wait_for_persistent_handshake(
     _patch_scheduled_probe(monkeypatch, tailer)
     asyncio.get_running_loop().call_soon(setattr, transport, "_handshake_complete", True)
 
-    assert not await agent_stream._ensure_scheduled_chat_runtime("tab")
+    assert not await messages.ensure_chat_runtime("tab")
     await asyncio.sleep(0)
-    assert await agent_stream._ensure_scheduled_chat_runtime("tab")
+    assert await messages.ensure_chat_runtime("tab")
 
 
 @pytest.mark.asyncio
@@ -153,7 +154,7 @@ async def test_scheduled_probe_uses_public_read_only_contract(
         native_transport=object(), native_error=None, native_started=True, native_ready=True
     )
     _patch_scheduled_probe(monkeypatch, tailer)
-    assert await agent_stream._ensure_scheduled_chat_runtime("tab")
+    assert await messages.ensure_chat_runtime("tab")
 
 
 @pytest.mark.parametrize("failure", ["absent", "native_error", "hard_failed", "still_starting"])
@@ -166,7 +167,7 @@ async def test_scheduled_probe_fails_closed(monkeypatch: pytest.MonkeyPatch, fai
     )
     tailer = _tailer(transport, native_error="unavailable" if failure == "native_error" else None)
     _patch_scheduled_probe(monkeypatch, tailer, hard_failed=failure == "hard_failed")
-    assert not await agent_stream._ensure_scheduled_chat_runtime("tab")
+    assert not await messages.ensure_chat_runtime("tab")
 
 
 @pytest.mark.parametrize("error_type", [ValueError, StructuredSourceUnavailable])
@@ -176,7 +177,7 @@ async def test_scheduled_probe_retries_unavailable_runtime(
 ) -> None:
     ensure_started = _patch_scheduled_probe(monkeypatch, _tailer(None))
     ensure_started.side_effect = error_type("unavailable")
-    assert not await agent_stream._ensure_scheduled_chat_runtime("tab")
+    assert not await messages.ensure_chat_runtime("tab")
 
 
 @pytest.mark.asyncio
@@ -186,7 +187,7 @@ async def test_scheduled_probe_missing_tab_does_not_create_manager(
     monkeypatch.setattr(agent_stream, "_terminal_tab_stream_session", lambda _tab_id: None)
     create_manager = AsyncMock()
     monkeypatch.setattr(agent_stream, "_get_tab_tailer_manager", create_manager)
-    assert not await agent_stream._ensure_scheduled_chat_runtime("gone")
+    assert not await messages.ensure_chat_runtime("gone")
     create_manager.assert_not_called()
 
 

@@ -1,7 +1,7 @@
 """Strict public contracts for ordinary Chat inbox messages."""
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -61,6 +61,19 @@ class ChatMessageEnvelope(ChatMessageReceipt):
     attempts: int = 0
     submission_started: bool = False
     expired: bool = False
+
+    # Trusted internal fields; absent from the strict public create contract.
+    scheduled_run_id: str | None = None
+    scheduled_task_id: str | None = None
+    turn_metadata: dict[str, Any] = Field(default_factory=dict)
+    legacy_recovery: bool = False
+    recovery_checked_at: datetime | None = None
+
+    @property
+    def blocks_queue(self) -> bool:
+        return self.state not in TERMINAL_STATES and not (
+            self.scheduled_run_id is not None and self.state == "uncertain"
+        )
 
     def receipt(self) -> ChatMessageReceipt:
         return ChatMessageReceipt.model_validate(self.model_dump())

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from typing import Callable
@@ -16,6 +17,7 @@ from ....services.chat_message_inbox import (
     InboxError,
     InboxEvidence,
     InboxTarget,
+    inspect_chat_delivery,
 )
 from ....services.runtime_isolation import resolve_runtime_home
 
@@ -62,7 +64,7 @@ def _require_actor(item: ChatMessageEnvelope) -> None:
     from ....config import settings
 
     # Preserve local-network shared trust. This is not per-agent identity.
-    if item.principal == "local" or not settings.auth_enabled:
+    if item.scheduled_run_id or item.principal == "local" or not settings.auth_enabled:
         return
     allowed_ids = settings.allowed_open_ids_list
     allowed_emails = [email.lower() for email in settings.allowed_emails_list]
@@ -76,6 +78,41 @@ def _require_actor(item: ChatMessageEnvelope) -> None:
         raise InboxError(403, "Chat message sender authorization was revoked")
 
 
+async def ensure_chat_runtime(tab_id: str) -> bool:
+    """Ensure a direct Chat tab's native runtime is spawned and ready.
+
+    Shared inbox cold-runtime gate. Idempotent: a warm Chat returns
+    immediately; a cold or idle-reaped Chat is lazily created and its consumer
+    started. Returns ``True`` only once a turn can actually be delivered, so the
+    scheduler parks and retries while a first-time provider spawn (or a Codex
+    app-server handshake) is still in flight instead of delivering into a
+    runtime that does not exist yet.
+    """
+    from ....services.agent_stream.tailer import StructuredSourceUnavailable
+    from ... import agent_stream as stream
+
+    session = stream._terminal_tab_stream_session(tab_id)
+    if session is None:
+        return False
+    manager = stream._get_tab_tailer_manager()
+    try:
+        tailer = await manager.ensure_started(session)
+    except (ValueError, StructuredSourceUnavailable):
+        stream.logger.info(
+            "scheduled Chat cold runtime unavailable for tab=%s; will retry",
+            tab_id,
+        )
+        return False
+    transport = tailer.native_transport
+    if transport is None or tailer.native_error is not None or manager.hard_failed(session.id):
+        return False
+    # Let the freshly started consumer's first tick run provider start().
+    # Persistent app-servers also require a completed protocol handshake.
+    if not tailer.native_started:
+        await asyncio.sleep(0)
+    return tailer.native_ready
+
+
 async def _submit(item: ChatMessageEnvelope, before_delivery: Callable[[], None]) -> None:
     from ....services.goal_run import get_goal_admission_lock, get_goal_manager
     from ... import agent_stream as stream
@@ -84,7 +121,8 @@ async def _submit(item: ChatMessageEnvelope, before_delivery: Callable[[], None]
         _require_actor(item)
         goal = get_goal_manager().current(item.tab_id)
         if goal is not None and (
-            goal.status.value in {"active", "blocked"} or goal.dispatch_state.value != "idle"
+            (goal.status.value in ({"active"} if item.scheduled_run_id else {"active", "blocked"}))
+            or goal.dispatch_state.value != "idle"
         ):
             raise InboxError(409, "Waiting for Goal ownership to be released in Web Chat")
         target = _target(item.tab_id)
@@ -94,17 +132,20 @@ async def _submit(item: ChatMessageEnvelope, before_delivery: Callable[[], None]
         manager = stream._get_tab_tailer_manager()
         if await manager.turn_in_flight(session):
             raise InboxError(409, "Waiting for the current Chat turn")
-        tailer = await manager.ensure_started(session)
-        if not tailer.native_ready:
+        if not await ensure_chat_runtime(item.tab_id):
             raise InboxError(503, "Waiting for the Chat runtime to start")
-        metadata = {
-            "origin": "hub_message",
-            "hub_message": {
-                "message_id": item.message_id,
-                "actor": item.actor,
-                **({"source_tab_id": item.source_tab_id} if item.source_tab_id else {}),
-            },
-        }
+        metadata = (
+            item.turn_metadata
+            if item.scheduled_run_id
+            else {
+                "origin": "hub_message",
+                "hub_message": {
+                    "message_id": item.message_id,
+                    "actor": item.actor,
+                    **({"source_tab_id": item.source_tab_id} if item.source_tab_id else {}),
+                },
+            }
+        )
 
         # Check incarnation again inside the native send lock, then durably
         # mark possible submission immediately before touching the provider.
@@ -134,43 +175,22 @@ async def _submit(item: ChatMessageEnvelope, before_delivery: Callable[[], None]
 
 
 async def _evidence(item: ChatMessageEnvelope) -> InboxEvidence:
-    from ....services.agent_stream.store import AgentStreamStore
     from ... import agent_stream as stream
 
-    # Store remains readable even if the target was deleted. Never create a
-    # provider runtime merely to inspect recovery evidence.
-    store = AgentStreamStore("terminal-tabs", f"terminal-tab-{item.tab_id}")
-    lifecycle = await store.inspect_turn_lifecycle(item.turn_id)
-    if lifecycle.state.value == "terminal":
-        # Completion status must be read, not inferred from mere start/error.
-        after = -1
-        completion = None
-        while True:
-            page = await store.read_since(after, limit=1000)
-            for event in page.events:
-                if (
-                    event.turn_id == item.turn_id
-                    and event.type == AgentStreamEventType.TURN_COMPLETED
-                ):
-                    completion = event
-            if not page.has_more:
-                break
-            after = page.next_sequence
-        if completion is not None and not completion.payload.get("delivery_rejected"):
-            status = completion.payload.get("status")
-            return InboxEvidence(
-                "completed"
-                if status == "completed"
-                else ("cancelled" if status in {"cancelled", "canceled"} else "failed")
-            )
-        return InboxEvidence("started")
+    proof = await inspect_chat_delivery(
+        item.tab_id,
+        item.turn_id,
+        legacy_errors_terminal=bool(item.scheduled_run_id and item.legacy_recovery),
+    )
+    if proof.state in {"completed", "failed", "cancelled"}:
+        return proof
     if stream._tab_tailer_manager is not None:
         tailer = stream._tab_tailer_manager.get_tailer(f"terminal-tab-{item.tab_id}")
         if tailer and tailer.native_transport and tailer.native_transport.turn_in_flight:
             session = stream._terminal_tab_stream_session(item.tab_id)
             if session and await stream._tab_tailer_manager.active_turn_id(session) == item.turn_id:
                 return InboxEvidence("live")
-    return InboxEvidence("absent" if lifecycle.state.value == "not_started" else "started")
+    return proof
 
 
 def get_inbox() -> ChatMessageInbox:
@@ -183,7 +203,12 @@ def get_inbox() -> ChatMessageInbox:
 
 
 async def start_inbox() -> None:
+    from ... import agent_stream as stream
+
+    # Import persisted legacy occurrences before the coordinator can submit.
+    stream.workspace_manager._admit_scheduled_intents()
     await get_inbox().start()
+    stream.workspace_manager._scheduled_chat_recovery_pending = False
 
 
 async def stop_inbox() -> None:
