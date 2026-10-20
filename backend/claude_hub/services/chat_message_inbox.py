@@ -105,6 +105,10 @@ class ChatMessageInbox:
         self._pump_locks: dict[str, asyncio.Lock] = {}
         self._wakeup = asyncio.Event()
         self._runner: asyncio.Task[None] | None = None
+        # Failed startup evidence reads must be retried with startup policy on
+        # ordinary coordinator passes. A new process rebuilds this set from
+        # durable in-flight states; no new delivery state or schema is needed.
+        self._restart_recovery: set[str] = set()
         self._retry_handles: dict[str, asyncio.TimerHandle] = {}
         self._pump_tasks: dict[str, asyncio.Task[None]] = {}
         self.redrain_seconds = 3.0
@@ -371,10 +375,23 @@ class ChatMessageInbox:
 
     async def reconcile(self, *, restarting: bool = False, now: datetime | None = None) -> None:
         current_time = self._aware(now or utc_now())
+        scheduled_inflight = {
+            item.message_id
+            for item in self.messages.values()
+            if item.scheduled_run_id and item.state in {"dispatching", "accepted"}
+        }
+        self._restart_recovery.intersection_update(scheduled_inflight)
+        if restarting:
+            self._restart_recovery.update(scheduled_inflight)
         for old in list(self.messages.values()):
+            recovering_startup = old.message_id in self._restart_recovery
             if old.scheduled_run_id and old.state == "uncertain":
                 continue  # scheduler uncertainty is terminal history, not a direct-send fence
-            if old.scheduled_run_id and old.state in {"dispatching", "accepted"} and not restarting:
+            if (
+                old.scheduled_run_id
+                and old.state in {"dispatching", "accepted"}
+                and not recovering_startup
+            ):
                 if current_time - self._aware(old.updated_at) < timedelta(minutes=10):
                     continue
                 if old.recovery_checked_at and current_time - self._aware(
@@ -387,7 +404,13 @@ class ChatMessageInbox:
                 try:
                     proof = await self.evidence(old)
                 except Exception:
-                    proof = InboxEvidence("started")  # unknown is never absent
+                    if old.scheduled_run_id:
+                        # Unknown evidence cannot release a scheduled slot or
+                        # become terminal uncertainty. Keep its state and retry;
+                        # startup retries retain the original recovery policy.
+                        logger.exception("Scheduled Chat delivery evidence read failed")
+                        continue
+                    proof = InboxEvidence("started")  # direct uncertainty stays blocking
                 liveness = "unknown"
                 if old.scheduled_run_id and proof.state not in {
                     "completed",
@@ -398,7 +421,7 @@ class ChatMessageInbox:
                     try:
                         liveness = (
                             "dead"
-                            if restarting
+                            if recovering_startup
                             else (
                                 await self.scheduled_liveness(old)
                                 if self.scheduled_liveness
@@ -413,6 +436,7 @@ class ChatMessageInbox:
                         continue
                     if item.state in TERMINAL_STATES:
                         continue
+                    self._restart_recovery.discard(item.message_id)
                     if proof.state in {"completed", "failed", "cancelled"}:
                         self._change(item.message_id, cast(ChatMessageState, proof.state))
                     elif item.scheduled_run_id:
