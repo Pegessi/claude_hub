@@ -5,52 +5,75 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
-from datetime import datetime
+
+# Explicit same-name aliases preserve legacy patch/import seams in this facade.
+import os as os
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import nullcontext as nullcontext
+from datetime import datetime as datetime
 from typing import Any, AsyncIterator, Callable, Dict, List, Literal, NoReturn, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from fastapi.responses import RedirectResponse, StreamingResponse
-from pydantic import BaseModel, Field, model_validator
+from fastapi import (
+    APIRouter,
+)
+from fastapi import Depends as Depends
+from fastapi import (
+    HTTPException,
+)
+from fastapi import Query as Query
+from fastapi import Response as Response
+from fastapi.responses import RedirectResponse as RedirectResponse
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel as BaseModel
+from pydantic import Field as Field
+from pydantic import model_validator as model_validator
 
 from claude_hub.api.routes.agent_stream import attachments as attachment_routes
-from claude_hub.api.routes.agent_stream import controls, dispatch, media, observation
+from claude_hub.api.routes.agent_stream import controls, dispatch, media, messages, observation
 from claude_hub.api.routes.agent_stream import runtime as stream_runtime
 from claude_hub.api.routes.agent_stream import task_context
 
-from ..auth.dependencies import get_current_user
+from ..auth.dependencies import get_current_user as get_current_user
+from ..models import TERMINAL_GOAL_STATUSES as TERMINAL_GOAL_STATUSES
+from ..models import AgentRuntimeStatus as AgentRuntimeStatus
 from ..models import (
-    TERMINAL_GOAL_STATUSES,
-    AgentRuntimeStatus,
     AgentStreamEvent,
     AgentStreamEventPage,
     AgentStreamEventType,
     AgentType,
-    ChatMode,
+)
+from ..models import ChatMode as ChatMode
+from ..models import (
     ManagedSession,
-    ManagedSessionStatus,
+)
+from ..models import ManagedSessionStatus as ManagedSessionStatus
+from ..models import (
     ScheduledTask,
     ScheduledTaskRun,
     SessionKind,
     StreamCapabilities,
-    User,
-    WorkspaceAttachmentCreate,
-    WorkspaceSessionRole,
 )
+from ..models import User as User
+from ..models import WorkspaceAttachmentCreate as WorkspaceAttachmentCreate
+from ..models import WorkspaceSessionRole as WorkspaceSessionRole
 from ..models.chat_image import ChatImageAttachment as AgentStreamAttachment
-from ..models.schemas import TaskExecutionControl, TaskExecutionReference
+from ..models.schemas import TaskExecutionControl as TaskExecutionControl
+from ..models.schemas import TaskExecutionReference as TaskExecutionReference
 from ..services import ttyd_manager, workspace_manager
+from ..services.agent_stream import ExternalTurnRetirement as ExternalTurnRetirement
 from ..services.agent_stream import (
-    ExternalTurnRetirement,
     StructuredSourceUnavailable,
     TailerManager,
     get_adapter_for_session,
-    quoted_images,
 )
+from ..services.agent_stream import quoted_images as quoted_images
 from ..services.agent_stream.attachments import AgentStreamAttachmentStore
-from ..services.agent_stream.base import NativeInputNotSubmittedError, discover_source_cached
-from ..services.agent_stream.local_images import AgentImageUnavailable, read_cached_agent_image
+from ..services.agent_stream.base import (
+    NativeInputNotSubmittedError,
+)
+from ..services.agent_stream.base import discover_source_cached as discover_source_cached
+from ..services.agent_stream.local_images import AgentImageUnavailable as AgentImageUnavailable
+from ..services.agent_stream.local_images import read_cached_agent_image as read_cached_agent_image
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +102,10 @@ async def _notify_goal_turn_completed(event: AgentStreamEvent) -> None:
         return
     from ..services.goal_run import get_goal_manager
 
+    try:
+        await messages.observe_completion(event)
+    except Exception:
+        logger.exception("Chat inbox completion persistence failed")
     payload = event.payload
     try:
         await get_goal_manager().on_turn_completed(
@@ -814,3 +841,7 @@ __all__ = [
     "router",
     "_reset_tailer_manager",
 ]
+
+
+# Ordinary Chat messages do not acquire Workspace Task ownership.
+messages.register_message_routes(router)
