@@ -676,9 +676,49 @@ function expandedItems(): { tool: TimelineTool, activity: ToolActivity }[] {
   border-radius: var(--ch-radius-sm);
 }
 
+/* Touch: there is no hover to reveal affordances, and a fingertip needs a
+   taller target than a pointer. */
+@media (hover: none), (pointer: coarse) {
+  .tool-chevron {
+    opacity: 0.7;
+  }
+
+  .tool-header {
+    min-height: 40px;
+  }
+
+  .tool-block--raw > summary {
+    padding: 6px 0;
+  }
+}
+
 @media (max-width: 640px) {
   .tool-group-names {
     display: none;
+  }
+
+  .tool-header {
+    gap: 7px;
+    padding: 4px 6px;
+  }
+
+  .tool-group-item {
+    padding: 9px 8px;
+  }
+
+  .activity-terminal pre,
+  .tool-block pre,
+  .activity-diff {
+    font-size: 11px;
+  }
+
+  .activity-terminal-output,
+  .tool-block pre {
+    max-height: 180px;
+  }
+
+  .activity-diff {
+    max-height: 260px;
   }
 }
 

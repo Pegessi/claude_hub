@@ -348,4 +348,17 @@ defineProps<{
   font-size: 14px;
   line-height: 1.65;
 }
+
+@media (hover: none), (pointer: coarse) {
+  .process-fold {
+    min-height: 40px;
+    padding: 6px 12px 6px 10px;
+  }
+}
+
+@media (max-width: 640px) {
+  .conversation-bubble :deep(.markdown-content.compact) {
+    font-size: 15px;
+  }
+}
 </style>

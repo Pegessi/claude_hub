@@ -89,7 +89,10 @@
     <!-- Turn-level actions close the turn the way the message actions
                open it, so a long turn's controls sit with its result rather
                than floating back at the top. -->
-    <div class="turn-actions turn-actions--turn">
+    <div
+      class="turn-actions turn-actions--turn"
+      :class="{ 'turn-actions--live': !turn.completed }"
+    >
       <button
         v-if="turnCopyText(turn)"
         type="button"
@@ -201,6 +204,12 @@ defineProps<{
   opacity: 1;
   pointer-events: auto;
 }
+/* Copy/fork describe a finished answer; while it streams they are noise,
+   especially on touch where action rows are always visible. */
+.turn-actions--live {
+  display: none;
+}
+
 .turn-time {
   font-size: 11px;
   font-variant-numeric: tabular-nums;
