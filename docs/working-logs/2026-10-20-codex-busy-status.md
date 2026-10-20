@@ -28,3 +28,16 @@ resize replays. Added strict elapsed-time/bullet + interrupt-prefix recognition
 and derived soft-wrap handling, opted in only by CODEX terminal status. Default
 shared detector policy (including auto-continue and TraeX) is unchanged. Full
 commands/provenance/byte hashes are in the resized fixture README and manifest.
+
+Acceptance follow-up: native Chat and reviewer kinds now have lifecycle-to-API
+and real CLI regression tests. Claude/Codex streaming and tool records pass
+through real adapters/tailers for orchestrator and reviewer roles; tool-end
+stays working until turn-end, then idle despite retained Working-like text.
+All six real reviewer screens replay through tab/board APIs and CLI. Four are
+read-only shared idle captures; the busy/idle pair is a real installed TUI in
+an isolated managed reviewer/WorkspaceManager with a loopback mock turn.
+No shared reviewer was stimulated to create evidence. The panel test mounts
+the actual runtime and Agents/Reviewers component, and a private Vite browser
+probe checks 36 status/text/color states at desktop/mobile widths. The probe's
+API rows are synthetic and provider calls blocked; no deployed acceptance is
+claimed. Product classification code is unchanged in this follow-up.

@@ -15,6 +15,8 @@
   paths; replay real ANSI busy/idle captures and rapid frames in regression tests.
 - Recognize narrow Codex status ellipses with an elapsed-time/bullet header and
   interrupt-hint prefix; actual private-TUI width/height captures cover resize.
+- Verify native Chat and reviewer roles through stream/tool lifecycle, status
+  APIs/CLI, real reviewer-screen replay and Agents/Reviewers panel badges.
 
 ### fix(chat): render Codex inline directives instead of leaking markers
 
