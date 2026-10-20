@@ -364,3 +364,37 @@ async def test_reset_then_initial_provider_id_binds_same_new_epoch(tmp_path):
     assert h.inbox.messages[new.message_id].state == "accepted"
     assert h.inbox.messages[new.message_id].incarnation == new_epoch
     assert h.calls == ["post-reset-intent"]
+
+
+@pytest.mark.asyncio
+async def test_lifespan_pump_wakes_for_enqueue_and_completion_without_scheduler(tmp_path):
+    h = Harness(tmp_path / "store.json")
+    await h.inbox.start()
+    try:
+        first = await h.enqueue(call="first")
+        second = await h.enqueue(call="second")
+        for _ in range(100):
+            if h.calls:
+                break
+            await asyncio.sleep(0.001)
+        assert h.calls == [first.call_id]
+        await h.inbox.completed("tab", first.turn_id, "completed")
+        for _ in range(100):
+            if len(h.calls) == 2:
+                break
+            await asyncio.sleep(0.001)
+        assert h.calls == [first.call_id, second.call_id]
+    finally:
+        await h.inbox.stop()
+    assert h.inbox._runner is None
+
+
+@pytest.mark.asyncio
+async def test_accepted_lost_runtime_becomes_uncertain_without_restart(tmp_path):
+    h = Harness(tmp_path / "store.json")
+    row = await h.enqueue()
+    await h.inbox.pump("tab")
+    h.inbox.messages[row.message_id].updated_at = utc_now() - timedelta(seconds=61)
+    await h.inbox.reconcile()
+    assert (await h.inbox.get("tab", row.message_id, "actor")).state == "uncertain"
+    assert h.calls == [row.call_id]
