@@ -510,6 +510,13 @@ class FeishuMessageDispatcher:
         )
         return f"{intro}\n\n{messages}"
 
+    async def _stopped_for_newer(self, batch: list[_TabDispatchItem]) -> bool | None:
+        """None when no newer message asked to stop this batch; else whether it stopped."""
+        stop = next((item.stop_task for item in batch if item.stop_task is not None), None)
+        if stop is None:
+            return None
+        return await asyncio.shield(stop)
+
     def _interrupted_text(self, earlier: str, items: list[_TabDispatchItem]) -> str:
         messages = "\n\n".join(
             f"[新消息 {index}]\n{item.event.text}" for index, item in enumerate(items, start=1)
@@ -630,7 +637,6 @@ class FeishuMessageDispatcher:
                     # The answer in progress was stopped for these messages.
                     visible_text = self._interrupted_text(queue.interrupted_text, batch)
                     queue.interrupted_text = ""
-                queue.active_text = visible_text
                 attachments: list[AgentStreamAttachment] = []
                 attachment_bytes = 0
                 omitted_images: list[str] = []
@@ -658,6 +664,7 @@ class FeishuMessageDispatcher:
                         + "、".join(omitted_images)
                         + "。请勿假设已经看到这些图片；如需分析，请提示用户重新发送。]"
                     )
+                queue.active_text = visible_text
                 for item in batch:
                     item.native_bridge_started = True
                 assistant_text = await self.bindings.dispatch_tab_chat_and_wait(
@@ -680,6 +687,10 @@ class FeishuMessageDispatcher:
                     attachments=attachments,
                     admission_guard=lambda: self._admit_batch_dispatch(queue, batch),
                 )
+                if await self._stopped_for_newer(batch) is not None:
+                    # It ended before the stop took: this answer is sent, so the
+                    # newer message follows it as usual.
+                    queue.interrupted_text = ""
                 status = (
                     "completed"
                     if await self.bindings.reply_if_current(
@@ -767,7 +778,7 @@ class FeishuMessageDispatcher:
                     return status
                 raise
             except Exception:
-                if batch and any(item.superseded for item in batch):
+                if await self._stopped_for_newer(batch):
                     # Stopped for a newer message, which answers this one too.
                     status = "superseded"
                     return status

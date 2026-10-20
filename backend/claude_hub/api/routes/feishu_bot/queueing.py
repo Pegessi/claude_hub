@@ -37,6 +37,8 @@ class TabDispatchItem:
     cancelled: bool = False
     # Stopped by a newer message (Dot Chat): answered together with it, no reply.
     superseded: bool = False
+    # The stop asked for by that newer message; its result says whether it took.
+    stop_task: asyncio.Task[bool] | None = None
 
 
 @dataclass

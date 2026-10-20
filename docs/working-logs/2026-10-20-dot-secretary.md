@@ -61,6 +61,15 @@ the flags are undone and the message follows as before. Not covered: a Feishu
 message during a web turn on the Dot tab, and web messages (the web composer
 still queues behind a user turn).
 
+Review fixes: the reply is skipped only when the stop is confirmed (the
+batch awaits the stop task), so a turn that failed on its own still gets the
+failure reply; an answer that finished before the stop took is sent and the
+next batch is a plain follow-up (no "stopped" claim); the carried text is set
+by the stop task only when it stopped, so a late revert cannot wipe a newer
+interrupt; the carried text includes the omitted-image note. Not covered: if
+the newer message is withdrawn before it is sent (e.g. the binding changes),
+the stopped message gets no answer.
+
 ## Activation
 
 The live Dot keeps its session pack until the session rotates (`claude-hub dot
