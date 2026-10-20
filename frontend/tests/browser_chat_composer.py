@@ -184,7 +184,13 @@ async def main(browser_run: BrowserRun) -> None:
                 return
 
             body: object
-            if method == "GET" and path == "/api/tabs":
+            if (
+                request.method == "GET"
+                and path.startswith("/api/workspaces/tabs/")
+                and path.endswith("/messages")
+            ):
+                body = {"messages": []}
+            elif method == "GET" and path == "/api/tabs":
                 body = [
                     tab,
                     {
