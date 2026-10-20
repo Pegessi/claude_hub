@@ -203,5 +203,13 @@ function formatTime(value: string): string { return new Date(value).toLocaleStri
 .goal-checkpoint-warning { color: var(--ch-color-warning, #e0a800); }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 @media (pointer: coarse) { .goal-status-summary, .goal-status-actions button, .goal-status-details-close { min-height: 44px; } .goal-status-actions button, .goal-status-details-close { min-width: 44px; } }
-@media (max-width: 640px) { .goal-status { flex-wrap: wrap; padding: 7px 12px; } .goal-status-actions { width: 100%; justify-content: flex-end; } }
+/* Phones keep the Goal to one row: the summary yields width (down to its
+   status label) and extra actions scroll sideways instead of wrapping. */
+@media (max-width: 640px) {
+  .goal-status { gap: 6px; padding: 4px 10px; }
+  .goal-status-summary { flex: 1 1 auto; min-width: 64px; }
+  .goal-status-actions { flex: 0 1 auto; min-width: 0; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+  .goal-status-actions::-webkit-scrollbar { display: none; }
+  .goal-status-actions button { flex: 0 0 auto; padding: 3px 9px; white-space: nowrap; }
+}
 </style>

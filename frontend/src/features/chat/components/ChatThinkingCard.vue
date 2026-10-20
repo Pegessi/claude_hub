@@ -133,6 +133,27 @@ defineProps<{
   border-radius: var(--ch-radius-sm);
 }
 
+@media (hover: none), (pointer: coarse) {
+  .thinking-chevron {
+    opacity: 0.7;
+  }
+
+  .thinking-card summary {
+    min-height: 40px;
+  }
+
+  .details-collapse {
+    padding: 8px 14px;
+  }
+}
+
+@media (max-width: 640px) {
+  .thinking-body {
+    margin-left: 8px;
+    padding-left: 10px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .thinking-card summary,
   .thinking-chevron {

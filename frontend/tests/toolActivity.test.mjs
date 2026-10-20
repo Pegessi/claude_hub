@@ -116,3 +116,16 @@ test('activity and group summaries are cached until their inputs change', () => 
   assert.equal(toolGroupSummary(tools).verb, 'Ran 1 command, read 1 file, edited 1 file')
   assert.doesNotMatch(toolGroup, /v-for="head in/, 'the summary must not remount while streaming')
 })
+
+test('touch screens get visible affordances and finger-sized targets', async () => {
+  const thinking = await readFile(new URL('../src/features/chat/components/ChatThinkingCard.vue', import.meta.url), 'utf8')
+  const turn = await readFile(new URL('../src/features/chat/components/ChatTurn.vue', import.meta.url), 'utf8')
+  for (const [component, chevron] of [[toolGroup, 'tool-chevron'], [thinking, 'thinking-chevron']]) {
+    const touch = component.match(/@media \(hover: none\), \(pointer: coarse\) \{[\s\S]*?\n\}/)
+    assert.ok(touch, 'a touch media block exists')
+    assert.match(touch[0], new RegExp(`\\.${chevron} \\{\\s*opacity: 0\\.7;`))
+    assert.match(touch[0], /min-height: 40px;/)
+  }
+  // Copy/fork appear once the answer is finished, not while it streams.
+  assert.match(turn, /:class="\{ 'turn-actions--live': !turn\.completed \}"/)
+})
