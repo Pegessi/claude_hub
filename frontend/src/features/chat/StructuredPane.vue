@@ -90,6 +90,11 @@
       @refresh="hydrateGoal"
     />
 
+    <ChatMessageInbox
+      v-if="!isManagedChat && currentTab && !currentTab.archived && ['claude', 'codex', 'cursor', 'maso'].includes(currentTab.agent_type ?? '')"
+      :tab-id="props.tabId"
+    />
+
     <!-- Composer -->
     <ChatComposer />
 
@@ -110,6 +115,7 @@
 import { provide } from 'vue'
 import { chatIdentityKey, chatGoalKey, chatTimelineKey, chatActionsKey, chatDeliveryKey, chatQueueKey, chatAttachmentsKey, chatImagesKey, chatSettingsKey, chatComposerKey } from './owners'
 import ChatTimeline from './components/ChatTimeline.vue'
+import ChatMessageInbox from './components/ChatMessageInbox.vue'
 import ChatComposer from './components/ChatComposer.vue'
 import ChatGoalSetup from './components/ChatGoalSetup.vue'
 import AttachmentPreviewDialog from '@/components/AttachmentPreviewDialog.vue'

@@ -923,7 +923,7 @@ async def test_chat_turn_cold_runtime_redrives_via_self_scheduled_drain(
     assert dispatched == [run.id]
     assert run.status == ScheduledTaskRunStatus.RUNNING
     # Exactly one redrain task exists per tab, never a pile-up.
-    assert len(manager._sched_chat_redrain_tasks) <= 1
+    assert len(manager._delivery_inbox()._retry_handles) <= 1
 
 
 async def test_chat_turn_cold_runtime_gate_skipped_while_goal_active(
@@ -3073,3 +3073,643 @@ def test_cli_schedule_get_and_delete(monkeypatch: MonkeyPatch) -> None:
     result = runner.invoke(cli, ["schedule", "delete", "st-1"])
     assert result.exit_code == 0, result.output
     assert "deleted st-1" in result.output
+
+
+async def test_chat_turn_one_shot_fires_once(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch
+) -> None:
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    delivered: list[str] = []
+
+    async def dispatch(run: Any, _task: ScheduledTask) -> None:
+        delivered.append(run.id)
+
+    manager.configure_scheduled_chat_dispatch(dispatch)
+    now = datetime.now()
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="one shot chat",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            run_at=now + timedelta(seconds=1),
+            tab_id=chat.id,
+            message="once",
+        )
+    )
+    await manager._fire_scheduled_task(task, now + timedelta(seconds=2))
+    run = manager.scheduled_task_runs[task.last_run_id or ""]
+    assert run.status == ScheduledTaskRunStatus.RUNNING
+    assert delivered == [run.id]
+    assert not task.enabled
+    await manager._fire_scheduled_task(task, now + timedelta(seconds=4))
+    assert delivered == [run.id]
+    assert task.run_count == 1
+
+
+def _shared_delivery(manager: WorkspaceManager, path: Path, calls: list[str]) -> Any:
+    """One production-shaped core, with a fenced fake native submission."""
+    from claude_hub.services.chat_message_inbox import ChatMessageInbox, InboxEvidence, InboxTarget
+
+    async def submit(item: Any, before: Callable[[], None]) -> None:
+        from claude_hub.services.chat_message_inbox import InboxError
+        from claude_hub.services.goal_run import get_goal_manager
+
+        if get_goal_manager().current(item.tab_id) is not None:
+            raise InboxError(409, "Goal owns Chat")
+        before()
+        calls.append(item.message)
+
+    async def evidence(item: Any) -> InboxEvidence:
+        return InboxEvidence("absent")
+
+    inbox = ChatMessageInbox(path, lambda tab: InboxTarget("shared"), submit, evidence)
+    manager.configure_chat_delivery(lambda: inbox)
+    manager._delivery_inbox()
+    return inbox
+
+
+async def test_shared_pump_mixed_fifo_and_supersede_is_explicit_policy(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_hub.models.chat_message import ChatMessageCreate
+
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    goals = _stub_goal(monkeypatch)
+    goals["goal"] = SimpleNamespace(
+        status=SimpleNamespace(value="active"), dispatch_state=SimpleNamespace(value="idle")
+    )
+    calls: list[str] = []
+    inbox = _shared_delivery(manager, tmp_path / "shared.json", calls)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="timer",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="timer-old",
+        )
+    )
+    now = datetime.now()
+    await manager._fire_scheduled_task(task, now, manual=True)
+    old = manager.scheduled_task_runs[task.last_run_id or ""]
+    direct = await inbox.enqueue(
+        chat.id, "local", "CLI", ChatMessageCreate(message="direct", call_id="direct")
+    )
+    task.message = "timer-new"
+    await manager._fire_scheduled_task(task, now + timedelta(seconds=2), manual=True)
+    latest = manager.scheduled_task_runs[task.last_run_id or ""]
+    assert old.status == ScheduledTaskRunStatus.SKIPPED
+    assert inbox.messages[old.id].state == "cancelled"
+    assert inbox.messages[direct.message_id].state == "waiting"
+    assert calls == []
+    assert latest.status == ScheduledTaskRunStatus.QUEUED
+    goals["goal"] = None
+    await inbox.pump(chat.id)
+    assert calls == ["direct"]
+    await inbox.completed(chat.id, direct.turn_id, "completed")
+    await manager._drain_scheduled_chat_runs(chat.id)
+    assert calls == ["direct", "timer-new"]
+    assert latest.status == ScheduledTaskRunStatus.RUNNING
+    assert inbox.messages[latest.id].submission_started
+    assert inbox.messages[latest.id].turn_metadata["origin"] == "scheduled_task"
+
+
+async def test_shared_pump_direct_then_timer_then_direct_fifo(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_hub.models.chat_message import ChatMessageCreate
+
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    calls: list[str] = []
+    inbox = _shared_delivery(manager, tmp_path / "shared.json", calls)
+    first = await inbox.enqueue(
+        chat.id, "local", "CLI", ChatMessageCreate(message="direct-first", call_id="a")
+    )
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="timer",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="timer",
+        )
+    )
+    await manager._fire_scheduled_task(task, datetime.now(), manual=True)
+    scheduled = manager.scheduled_task_runs[task.last_run_id or ""]
+    last = await inbox.enqueue(
+        chat.id, "local", "CLI", ChatMessageCreate(message="direct-last", call_id="b")
+    )
+    assert calls == ["direct-first"]
+    await inbox.completed(chat.id, first.turn_id, "completed")
+    await inbox.pump(chat.id)
+    assert calls == ["direct-first", "timer"]
+    await manager.on_scheduled_chat_turn_completed(chat.id, scheduled.client_turn_id, "completed")
+    assert calls == ["direct-first", "timer", "direct-last"]
+    assert inbox.messages[last.message_id].state == "accepted"
+
+
+async def test_shared_pump_cancel_modes_do_not_broaden_public_cancel(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_hub.models.chat_message import ChatMessageCreate
+    from claude_hub.services.chat_message_inbox import InboxError
+
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    calls: list[str] = []
+    inbox = _shared_delivery(manager, tmp_path / "shared.json", calls)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="timer",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="timer",
+        )
+    )
+    await manager._fire_scheduled_task(task, datetime.now(), manual=True)
+    run = manager.scheduled_task_runs[task.last_run_id or ""]
+    direct = await inbox.enqueue(
+        chat.id, "local", "CLI", ChatMessageCreate(message="direct", call_id="a")
+    )
+    cancelled = await inbox.enqueue(
+        chat.id, "local", "CLI", ChatMessageCreate(message="never", call_id="b")
+    )
+    await inbox.cancel(chat.id, cancelled.message_id, "local")
+    await manager.cancel_scheduled_task_run(run.id)
+    assert calls == ["timer", "direct"]
+    assert run.status == ScheduledTaskRunStatus.CANCELLED
+    with pytest.raises(InboxError, match="not-yet-submitted"):
+        await inbox.cancel(chat.id, direct.message_id, "local")
+    assert inbox.messages[cancelled.message_id].state == "cancelled"
+    # A late native completion cannot resurrect the released scheduler slot.
+    await manager.on_scheduled_chat_turn_completed(chat.id, run.client_turn_id, "completed")
+    assert run.status == ScheduledTaskRunStatus.CANCELLED
+
+
+async def test_shared_pump_restart_keeps_submission_fence_and_pending_order(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_hub.models.chat_message import ChatMessageCreate
+
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    calls: list[str] = []
+    path = tmp_path / "shared.json"
+    inbox = _shared_delivery(manager, path, calls)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="timer",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="timer",
+        )
+    )
+    await manager._fire_scheduled_task(task, datetime.now(), manual=True)
+    run_id = task.last_run_id or ""
+    direct = await inbox.enqueue(
+        chat.id, "local", "CLI", ChatMessageCreate(message="direct", call_id="a")
+    )
+    reloaded = WorkspaceManager()
+    recovered = _shared_delivery(reloaded, path, calls)
+    await reloaded._recover_scheduled_chat_runs()
+    assert reloaded.scheduled_task_runs[run_id].status == ScheduledTaskRunStatus.UNCERTAIN
+    assert calls == ["timer"]  # possible submission is never replayed
+    await recovered.pump(chat.id)
+    assert calls == ["timer", "direct"]
+    # The same proof-absent restart retains direct uncertainty as a FIFO fence.
+    again = WorkspaceManager()
+    third = _shared_delivery(again, path, calls)
+    await again._recover_scheduled_chat_runs()
+    assert third.messages[direct.message_id].state == "uncertain"
+    await third.enqueue(chat.id, "local", "CLI", ChatMessageCreate(message="later", call_id="b"))
+    await third.pump(chat.id)
+    assert calls == ["timer", "direct"]
+
+
+async def test_shared_pump_imports_legacy_inflight_without_inbox_file(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_hub.services.chat_message_inbox import InboxEvidence
+
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="legacy",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="legacy",
+        )
+    )
+    run = manager._queue_scheduled_chat_run(task, datetime.now(), datetime.now())
+    run.status = ScheduledTaskRunStatus.DISPATCHING
+    manager._save_scheduled_tasks()
+    reloaded = WorkspaceManager()
+    calls: list[str] = []
+    inbox = _shared_delivery(reloaded, tmp_path / "new-inbox.json", calls)
+    await reloaded._recover_scheduled_chat_runs()
+    assert reloaded.scheduled_task_runs[run.id].status == ScheduledTaskRunStatus.QUEUED
+    assert inbox.messages[run.id].turn_id == run.client_turn_id
+    assert inbox.messages[run.id].legacy_recovery is False
+    await inbox.pump(chat.id)
+    assert calls == ["legacy"]
+    assert reloaded.scheduled_task_runs[run.id].status == ScheduledTaskRunStatus.RUNNING
+    assert (await inbox.evidence(inbox.messages[run.id])) == InboxEvidence("absent")
+
+
+@pytest.mark.parametrize("hold", ["archive", "goal"])
+async def test_chat_turn_one_shot_survives_hold_but_explicit_disable_stops_it(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch, hold: str
+) -> None:
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    goals = _stub_goal(monkeypatch)
+    calls: list[str] = []
+
+    async def dispatch(run: Any, task: ScheduledTask) -> None:
+        calls.append(run.id)
+
+    manager.configure_scheduled_chat_dispatch(dispatch)
+    if hold == "archive":
+        chat.archived = True
+    else:
+        goals["goal"] = SimpleNamespace(
+            status=SimpleNamespace(value="active"), dispatch_state=SimpleNamespace(value="idle")
+        )
+    now = datetime.now()
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="one shot",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            run_at=now + timedelta(seconds=1),
+            tab_id=chat.id,
+            message="once",
+        )
+    )
+    await manager._fire_scheduled_task(task, now + timedelta(seconds=2))
+    run = manager.scheduled_task_runs[task.last_run_id or ""]
+    assert not task.enabled
+    assert run.status == ScheduledTaskRunStatus.WAITING
+    chat.archived = False
+    goals["goal"] = None
+    await manager._drain_scheduled_chat_runs(chat.id)
+    assert calls == [run.id]
+    # A second consumed one-shot is explicitly stopped while held.
+    chat.archived = True
+    second = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="stopped one shot",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            run_at=now + timedelta(seconds=3),
+            tab_id=chat.id,
+            message="never",
+        )
+    )
+    await manager._fire_scheduled_task(second, now + timedelta(seconds=4))
+    stopped = manager.scheduled_task_runs[second.last_run_id or ""]
+    manager.update_scheduled_task(second.id, ScheduledTaskUpdate(enabled=False))
+    await manager.on_scheduled_chat_turn_completed(chat.id, run.client_turn_id, "completed")
+    chat.archived = False
+    await manager._drain_scheduled_chat_runs(chat.id)
+    assert stopped.status == ScheduledTaskRunStatus.CANCELLED
+    assert calls == [run.id]
+
+
+async def test_supersede_crash_cannot_persist_advanced_timer_without_replacement(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    goals = _stub_goal(monkeypatch)
+    goals["goal"] = SimpleNamespace(
+        status=SimpleNamespace(value="active"), dispatch_state=SimpleNamespace(value="idle")
+    )
+    inbox = _shared_delivery(manager, tmp_path / "shared.json", [])
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="crash",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="replacement",
+        )
+    )
+    now = datetime.now()
+    await manager._fire_scheduled_task(task, now, manual=True)
+    first_id = task.last_run_id
+    due = task.next_run_at
+    assert due is not None
+    original = inbox.cancel_scheduled
+
+    class Crash(BaseException):
+        pass
+
+    def crash_after_cancel(message_id: str, *, release: bool = False) -> bool:
+        original(message_id, release=release)
+        raise Crash()
+
+    monkeypatch.setattr(inbox, "cancel_scheduled", crash_after_cancel)
+    with pytest.raises(Crash):
+        await manager._fire_scheduled_task(task, due + timedelta(seconds=1))
+    reloaded = WorkspaceManager()
+    persisted = reloaded.scheduled_tasks[task.id]
+    assert persisted.run_count == 1
+    assert persisted.next_run_at == due
+    monkeypatch.setattr(inbox, "cancel_scheduled", original)
+    goals["goal"] = None
+    calls: list[str] = []
+    _shared_delivery(reloaded, inbox.path, calls)
+    await reloaded._fire_scheduled_task(persisted, due + timedelta(seconds=2))
+    assert persisted.run_count == 2
+    assert persisted.last_run_id != first_id
+    assert calls == ["replacement"]
+
+
+async def test_deleted_running_schedule_recovers_using_envelope_identity(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_hub.models.chat_message import ChatMessageCreate, utc_now
+    from claude_hub.services.chat_message_inbox import InboxEvidence
+
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    calls: list[str] = []
+    inbox = _shared_delivery(manager, tmp_path / "shared.json", calls)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="deleted",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="timer",
+        )
+    )
+    await manager._fire_scheduled_task(task, datetime.now(), manual=True)
+    item = inbox.messages[task.last_run_id or ""]
+    await inbox.enqueue(chat.id, "local", "CLI", ChatMessageCreate(message="direct", call_id="d"))
+    manager.delete_scheduled_task(task.id)
+    item.updated_at = utc_now() - timedelta(minutes=11)
+
+    async def evidence(item: Any) -> InboxEvidence:
+        return InboxEvidence("started")
+
+    async def dead(tab: str, turn: str) -> ScheduledChatLivenessResult:
+        return "dead"
+
+    inbox.evidence = evidence
+    manager.configure_scheduled_chat_liveness(dead)
+    await inbox.reconcile()
+    assert item.state == "uncertain"
+    await inbox.completed(chat.id, item.turn_id, "completed")
+    assert item.state == "uncertain"  # terminal scheduler uncertainty stays terminal
+    await inbox.pump(chat.id)
+    assert calls == ["timer", "direct"]
+
+
+async def test_import_keeps_cold_attempt_budget_across_busy_holds(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_hub.services.chat_message_inbox import InboxError
+
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="cold",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="cold",
+        )
+    )
+    run = manager._queue_scheduled_chat_run(task, datetime.now(), datetime.now())
+    run.status, run.dispatch_attempts = ScheduledTaskRunStatus.WAITING, 11
+    manager._save_scheduled_tasks()
+    reloaded = WorkspaceManager()
+    inbox = _shared_delivery(reloaded, tmp_path / "new-inbox.json", [])
+    mode = "cold"
+
+    async def unavailable(item: Any, before: Callable[[], None]) -> None:
+        raise InboxError(409 if mode == "busy" else 503, mode)
+
+    inbox.submit = unavailable
+    await reloaded._drain_scheduled_chat_runs(chat.id)
+    loaded = reloaded.scheduled_task_runs[run.id]
+    assert loaded.dispatch_attempts == 12
+    assert loaded.status == ScheduledTaskRunStatus.WAITING
+    mode = "busy"
+    await reloaded._drain_scheduled_chat_runs(chat.id)
+    assert inbox.messages[run.id].attempts == 12
+    mode = "cold"
+    await reloaded._drain_scheduled_chat_runs(chat.id)
+    assert loaded.status == ScheduledTaskRunStatus.FAILED
+
+
+async def test_legacy_import_does_not_drop_intents_above_shared_cap(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_hub.models.chat_message import ChatMessageCreate
+    from claude_hub.services.chat_message_inbox import InboxError
+
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="legacy",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="legacy",
+        )
+    )
+    run = manager._queue_scheduled_chat_run(task, datetime.now(), datetime.now())
+    manager._save_scheduled_tasks()
+    reloaded = WorkspaceManager()
+    inbox = _shared_delivery(reloaded, tmp_path / "new-inbox.json", [])
+    inbox.max_pending = 1
+    await inbox.enqueue(chat.id, "local", "CLI", ChatMessageCreate(message="direct", call_id="d"))
+    reloaded._admit_scheduled_intents()
+    assert len(inbox.messages) == 2
+    assert inbox.messages[run.id].state == "queued"
+    assert reloaded.scheduled_task_runs[run.id].status == ScheduledTaskRunStatus.QUEUED
+    with pytest.raises(InboxError, match="backlog"):
+        await inbox.enqueue(
+            chat.id, "local", "CLI", ChatMessageCreate(message="new", call_id="new")
+        )
+
+
+@pytest.mark.parametrize("error_type", [ValueError, OSError])
+async def test_scheduled_unsubmitted_transport_error_keeps_failure_semantics(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch, error_type: type[Exception]
+) -> None:
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+
+    async def dispatch(run: Any, task: ScheduledTask) -> None:
+        raise error_type("transport rejected before submission")
+
+    manager.configure_scheduled_chat_dispatch(dispatch)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="rejected",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="reject",
+        )
+    )
+    await manager._fire_scheduled_task(task, datetime.now(), manual=True)
+    run = manager.scheduled_task_runs[task.last_run_id or ""]
+    assert run.status == ScheduledTaskRunStatus.FAILED
+    assert run.error == "transport rejected before submission"
+
+
+@pytest.mark.parametrize("restarting", [True, False], ids=["restart", "stale"])
+@pytest.mark.parametrize(
+    "initial", [ScheduledTaskRunStatus.DISPATCHING, ScheduledTaskRunStatus.RUNNING]
+)
+@pytest.mark.parametrize("recovered_proof", ["absent", "completed"])
+async def test_scheduled_evidence_read_error_retains_slot_until_successful_retry(
+    manager: WorkspaceManager,
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+    restarting: bool,
+    initial: ScheduledTaskRunStatus,
+    recovered_proof: str,
+) -> None:
+    from claude_hub.models.chat_message import ChatMessageCreate, utc_now
+    from claude_hub.services.chat_message_inbox import InboxEvidence
+
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    calls: list[str] = []
+    inbox = _shared_delivery(manager, tmp_path / "shared.json", calls)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="evidence retry",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="timer",
+        )
+    )
+    run = manager._queue_scheduled_chat_run(task, datetime.now(), datetime.now())
+    run.status = initial
+    manager._admit_scheduled_intents()
+    item = inbox.messages[run.id]
+    stamp = utc_now()
+    item.updated_at = stamp if restarting else stamp - timedelta(minutes=11)
+    inbox._save()
+    direct = await inbox.enqueue(
+        chat.id, "local", "CLI", ChatMessageCreate(message="direct", call_id="next")
+    )
+    proof_calls = 0
+    probes: list[str] = []
+
+    async def evidence(envelope: Any) -> InboxEvidence:
+        nonlocal proof_calls
+        proof_calls += 1
+        if proof_calls == 1:
+            raise OSError("temporary transcript read failure")
+        return InboxEvidence("absent" if recovered_proof == "absent" else "completed")
+
+    async def dead(tab: str, turn: str) -> ScheduledChatLivenessResult:
+        probes.append(turn)
+        return "dead"
+
+    inbox.evidence = evidence
+    manager.configure_scheduled_chat_liveness(dead)
+    state, updated_at = item.state, item.updated_at
+    await inbox.reconcile(restarting=restarting, now=stamp)
+    assert (item.state, item.updated_at) == (state, updated_at)
+    assert item.blocks_queue
+    assert run.status == initial
+    assert probes == []  # unknown transcript evidence cannot authorize a liveness decision
+    await inbox.pump(chat.id)
+    assert calls == []
+    persisted = {one["message_id"]: one for one in json.loads(inbox.path.read_text())["messages"]}
+    assert persisted[run.id]["state"] == state
+    # A normal coordinator pass must retain failed startup recovery semantics,
+    # even for a fresh dispatch that has not reached the live stale grace.
+    await inbox.reconcile(now=stamp + timedelta(seconds=1 if restarting else 61))
+    assert proof_calls == 2
+    if recovered_proof == "absent":
+        assert run.status == ScheduledTaskRunStatus.QUEUED
+        await inbox.pump(chat.id)
+        assert calls == ["timer"]
+        await inbox.completed(chat.id, item.turn_id, "completed")
+    else:
+        assert run.status == ScheduledTaskRunStatus.COMPLETED
+        assert probes == []
+    await inbox.pump(chat.id)
+    assert calls == (["timer", "direct"] if recovered_proof == "absent" else ["direct"])
+    assert inbox.messages[direct.message_id].state == "accepted"
+
+
+async def test_inbox_coordinator_retries_failed_startup_evidence_and_drains_fifo(
+    manager: WorkspaceManager, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    from claude_hub.models.chat_message import ChatMessageCreate
+    from claude_hub.services.chat_message_inbox import InboxEvidence
+
+    chat = _chat_tab()
+    _stub_chat_target(monkeypatch, chat)
+    _stub_goal(monkeypatch)
+    calls: list[str] = []
+    inbox = _shared_delivery(manager, tmp_path / "shared.json", calls)
+    task = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="startup retry",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            interval_seconds=60,
+            tab_id=chat.id,
+            message="timer",
+        )
+    )
+    run = manager._queue_scheduled_chat_run(task, datetime.now(), datetime.now())
+    run.status = ScheduledTaskRunStatus.DISPATCHING
+    manager._admit_scheduled_intents()
+    await inbox.enqueue(
+        chat.id, "local", "CLI", ChatMessageCreate(message="direct", call_id="next")
+    )
+    proof_calls = 0
+    delivered = asyncio.Event()
+
+    async def evidence(item: Any) -> InboxEvidence:
+        nonlocal proof_calls
+        proof_calls += 1
+        if proof_calls == 1:
+            raise OSError("transcript temporarily unavailable at startup")
+        return InboxEvidence("absent")
+
+    async def submit(item: Any, before: Callable[[], None]) -> None:
+        before()
+        calls.append(item.message)
+        await inbox.completed(item.tab_id, item.turn_id, "completed")
+        if item.message == "direct":
+            delivered.set()
+
+    inbox.evidence, inbox.submit = evidence, submit
+    await inbox.start()
+    try:
+        await asyncio.wait_for(delivered.wait(), timeout=2)
+        assert calls == ["timer", "direct"]
+        assert proof_calls == 2
+        assert run.status == ScheduledTaskRunStatus.COMPLETED
+    finally:
+        await inbox.stop()

@@ -306,6 +306,7 @@ class SessionState(ABC):
         strip_goal_protocol: bool = False,
         before_send: Optional[Callable[[], Awaitable[None]]] = None,
         before_delivery: Optional[Callable[[], None]] = None,
+        allow_question_answer: bool = True,
     ) -> None:
         raise NotImplementedError()
 

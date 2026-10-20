@@ -7,7 +7,6 @@ No Hub backend, provider, or real Feishu application is contacted.
 import asyncio
 import base64
 import json
-import re
 import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -97,6 +96,18 @@ def history():
             },
         ),
         ("feishu-legacy-looking-id", "Older message", None),
+        (
+            "hub-turn",
+            "Injected message",
+            {
+                "origin": "hub_message",
+                "hub_message": {
+                    "message_id": "hub-1",
+                    "actor": "local CLI",
+                    "source_tab_id": "unverified-tab",
+                },
+            },
+        ),
     ]
     events = []
     for index, (turn_id, text, metadata) in enumerate(messages):
@@ -177,9 +188,9 @@ async def main(browser_run: BrowserRun) -> None:
     pool_revision = 0
     events = history()
     pool_response_gate = asyncio.Event()
-    stream_base = f'/api/workspaces/tabs/{tab["id"]}/stream'
-    goal_current_path = f'/api/tabs/{tab["id"]}/goal/current'
-    viewed_path = f'/api/tabs/{tab["id"]}/view'
+    stream_base = f"/api/workspaces/tabs/{tab['id']}/stream"
+    goal_current_path = f"/api/tabs/{tab['id']}/goal/current"
+    viewed_path = f"/api/tabs/{tab['id']}/view"
     final_sequence = events[-1]["stream_sequence"]
     report = dict(
         result="FAIL",
@@ -242,6 +253,17 @@ async def main(browser_run: BrowserRun) -> None:
                     report["api_requests"].append([method, request.url])
                     if method == "GET" and path == "/api/auth/check" and not query:
                         body = {"auth_required": False, "user": None}
+                    elif method == "GET" and path.endswith("/messages"):
+                        body = {
+                            "messages": [
+                                {
+                                    "message_id": "pending-1",
+                                    "state": "waiting",
+                                    "waiting_reason": "busy",
+                                },
+                                {"message_id": "uncertain-1", "state": "uncertain"},
+                            ]
+                        }
                     elif method == "GET" and path == "/api/tabs" and not query:
                         body = [tab]
                     elif (
@@ -349,13 +371,26 @@ async def main(browser_run: BrowserRun) -> None:
                         ("web", LONG_FIRST_MESSAGE),
                         ("feishu", "Remote message"),
                         ("unknown", "Older message"),
+                        ("hub_message", "Injected message"),
                     ):
                         bubble = page.locator(
                             f'.conversation-bubble--user[data-message-origin="{kind}"]'
                         )
                         await expect(bubble).to_have_count(1)
                         await expect(bubble).to_contain_text(text)
-                    labels = page.get_by_test_id("conversation-message-source")
+                    hub = page.locator(
+                        '.conversation-bubble--user[data-message-origin="hub_message"]'
+                    )
+                    await expect(hub).to_contain_text("Hub message · local CLI")
+                    await expect(
+                        hub.get_by_test_id("conversation-message-source-avatar")
+                    ).to_have_count(0)
+                    await expect(
+                        page.get_by_role("complementary", name="Hub message inbox")
+                    ).to_contain_text("Delivery uncertain")
+                    labels = page.locator(
+                        '.conversation-bubble--user[data-message-origin="feishu"]'
+                    ).get_by_test_id("conversation-message-source")
                     await expect(labels).to_have_count(1)
                     await expect(
                         labels.locator(".conversation-message-source__label")
@@ -543,6 +578,33 @@ async def main(browser_run: BrowserRun) -> None:
                 assert not overlap["intersections"], overlap
                 await page.screenshot(path=str(output / "mobile-unbound.png"), full_page=True)
                 report["screenshots"].append("mobile-unbound.png")
+
+                hub_bubble = page.locator(
+                    '.conversation-bubble--user[data-message-origin="hub_message"]'
+                )
+                await hub_bubble.scroll_into_view_if_needed()
+                await expect(hub_bubble).to_be_in_viewport()
+                hub_badge = hub_bubble.get_by_test_id("conversation-message-source")
+                await expect(hub_badge).to_be_visible()
+                await expect(hub_badge).to_have_text("Hub message · local CLI")
+                # source_tab_id is an unverified caller hint, never identity.
+                await expect(hub_bubble).not_to_contain_text("unverified-tab")
+                await expect(
+                    hub_bubble.get_by_test_id("conversation-message-source-avatar")
+                ).to_have_count(0)
+                hub_geometry = await hub_badge.evaluate("""element => {
+                  const badge = element.getBoundingClientRect();
+                  const bubble = element.closest('.conversation-bubble').getBoundingClientRect();
+                  return {badge: badge.toJSON(), bubble: bubble.toJSON(), width: innerWidth};
+                }""")
+                report["mobile_hub_badge_geometry"] = hub_geometry
+                assert hub_geometry["badge"]["left"] >= hub_geometry["bubble"]["left"]
+                assert hub_geometry["badge"]["right"] <= min(
+                    hub_geometry["bubble"]["right"], hub_geometry["width"]
+                )
+                await page.screenshot(path=str(output / "mobile-hub-message.png"))
+                report["screenshots"].append("mobile-hub-message.png")
+
                 assert not report["unknown_api_requests"], report["unknown_api_requests"]
                 assert not report["unexpected_external_requests"], report[
                     "unexpected_external_requests"

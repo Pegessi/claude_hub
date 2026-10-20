@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from functools import partial
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ....models import AgentStreamEventType, AgentType
 from ..base import NativeInputNotSubmittedError, NormalizeContext
-from ..native import ProviderSession
 from ..redaction import redact_event
 from .session_state import SessionState
 from .values import _PendingApproval
@@ -120,6 +118,7 @@ class InputMixin(SessionState):
         strip_goal_protocol: bool = False,
         before_send: Optional[Callable[[], Awaitable[None]]] = None,
         before_delivery: Optional[Callable[[], None]] = None,
+        allow_question_answer: bool = True,
     ) -> None:
         """Atomically deliver a user turn (text + images) to the native transport.
 
@@ -198,7 +197,7 @@ class InputMixin(SessionState):
         # answer, so the busy-check below would either raise or steer-cancel
         # the very turn we are answering. Intercept before the send lock;
         # providers without a question channel return False and fall through.
-        if not images:
+        if allow_question_answer and not images:
             parsed_answers = self._deps.parse_ask_question_response(text)
             if parsed_answers is not None:
                 consumed = await transport.answer_pending_question(parsed_answers)
@@ -429,7 +428,7 @@ class InputMixin(SessionState):
                     )
                 completed = ctx.event(
                     AgentStreamEventType.TURN_COMPLETED,
-                    {"status": "failed"},
+                    {"status": "failed", "delivery_rejected": True},
                 )
                 completed = redact_event(completed)
                 try:
