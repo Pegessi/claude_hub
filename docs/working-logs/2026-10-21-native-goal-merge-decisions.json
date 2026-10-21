@@ -1,0 +1,190 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "08b5110b0b599b2cf6e99cd16f6cd7597b867fcf",
+  "parents": [
+    "a0af21f207a347d4cac4ee9dd76e11899ebf81c3",
+    "0459f83b8226f52f43aecc7bf2221efef8ba591f"
+  ],
+  "base": "34dc7c8d1c1c05540af2cceb2012e71c1471670f",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "7ede49d99f2b0849ebac0a940f2feda387dcd16a",
+  "reconstructed_tree": "09846da2fc3d4765989b8c753f950f5a68af24fb",
+  "conflicts": [
+    "CHANGELOG.md",
+    "backend/claude_hub/api/agent_stream.py"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "15feb715e271878019e34d3351f223b9281b920e"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "7a8976f586add926efb61726a1a35a16feaf92de"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "7db0857198720b1466b4f8ba7154d6c3f5c8d9e7"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3fa5dbc17d189a17145368dde4cccd1f21239d91"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "e2110165e2c95b079c387901003d2c512f5a9310"
+      },
+      "reason": "Retain the native Goal ownership and follow-up repair entry together with all release notes from fixed main, preserving section separation.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/api/agent_stream.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b1229d4558ffeaeed7f3a3734f65fb63b68e7f95"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "206cc54262ce73ea2a98e59625cbd3ed6ace7c97"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "677af6199b9515b8e1db1fb7ec526b0068fc2859"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a53c8505d0ebe700ae2d92b5c54e73347605b68c"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "543004a1002c82f4d456c7b6c0af57bd680c0b8c"
+      },
+      "reason": "Combine direct native Goal start/status refresh with the inbox completion observer. Inbox persistence errors remain isolated; Goal and scheduled completion handling retain their existing ordering and finally boundary.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/api/routes/agent_stream/messages.py",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ce2bd4d3e904ba9162d2c47cde1b36b51f52bb32"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ce2bd4d3e904ba9162d2c47cde1b36b51f52bb32"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "793d7d50f8b28572440381bffd5943a0ed163900"
+      },
+      "reason": "Adapt the new inbox caller to authoritative async Goal reads under admission. Native read failures park delivery for retry; remove the deleted historical output-filter argument so ordinary inbox and scheduled output stays intact.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/tests/test_chat_message_routes.py",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "743d99cc9bcabf6bcb373db7eec1a4c4aacda083"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "743d99cc9bcabf6bcb373db7eec1a4c4aacda083"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3dbd39ffe5e4e058c41a1b3f828fba5fd36372ff"
+      },
+      "reason": "Update the new inbox test doubles to the async authoritative Goal read contract without changing receipt, approval-interception or completion-owner expectations.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/tests/test_native_goal_inbox_integration.py",
+      "base": null,
+      "parent1": null,
+      "parent2": null,
+      "reconstructed": null,
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "6d3edaf53d4e515e5f273821113d329bc75bc50d"
+      },
+      "reason": "Add merge-boundary regressions using the real Goal coordinator with a fake native provider: stale active/paused projection, transient read failure and retry, and preservation of both Goal observation and inbox completion.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "docs/working-logs/2026-10-20-provider-native-goals.md",
+      "base": null,
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3db426617f0983566c93e9254ce9a2d18fdfac54"
+      },
+      "parent2": null,
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3db426617f0983566c93e9254ce9a2d18fdfac54"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "1b291f684f5e270c0873680f81b3ca3f67ac6505"
+      },
+      "reason": "Document fixed-main integration, the precise completed-before-ACK outcome rules, preserved capability/history behavior, and the inbox browser fixture adaptation.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/tests/browser_chat_native_goal.py",
+      "base": null,
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "1113a0a7ae32ffcd8ebb8781bd700b3dc70c382a"
+      },
+      "parent2": null,
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "1113a0a7ae32ffcd8ebb8781bd700b3dc70c382a"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "cb790035e7e044242947b9409ff7810c80e7db48"
+      },
+      "reason": "Model only the new exact GET /api/workspaces/tabs/{TAB}/messages route with an empty inbox response. Preserve all output/control assertions and rejection of unexpected message requests.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
