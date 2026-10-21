@@ -7,6 +7,15 @@
 
 ## Released
 
+### fix(workspace): recover undelivered review verdicts
+
+- Prefer the Hub-specific bind port over inherited provider PORT when generating
+  report commands; advertise the launcher-selected port to the backend.
+- Remind an idle reviewer once per open review dispatch, then surface a durable
+  attention event without closing the round or bypassing human acceptance.
+- Clarify canonical report submission, HTTP receipts and the supported operator
+  resubmission command; retain wrong-path 404 behavior.
+
 ### fix(terminal): recognize busy Codex with persistent prompt footer
 
 - Give Codex's explicit live Working indicator precedence over the persistent

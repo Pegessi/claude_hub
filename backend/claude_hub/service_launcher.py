@@ -392,6 +392,7 @@ def main() -> int:
             str(args.port),
         ],
         health_url(args.host, args.port),
+        env={**os.environ, "CLAUDE_HUB_PORT": str(args.port)},
         dependency_sync_command=[uv, "sync", "--locked", "--inexact"],
         dependency_sync_cwd=backend_directory,
         dependency_sync_timeout=20,
