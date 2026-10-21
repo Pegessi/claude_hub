@@ -119,6 +119,8 @@ async def main(browser_run: BrowserRun) -> None:
     sends: list[dict] = []
     interrupts: list[dict] = []
     managed_stream_paths: list[tuple[str, str]] = []
+    capability_requests: list[dict[str, str]] = []
+    retry_requests: list[str] = []
     codex_session_requests = 0
     model_changes: list[dict] = []
     preflight_requests: list[dict] = []
@@ -146,10 +148,28 @@ async def main(browser_run: BrowserRun) -> None:
         "turn_open": False,
         "maso_available": False,
         "existing_maso_available": True,
+        "managed_available": True,
+        "capability_delays": {},
+        "capability_status": {},
+        "retry_delays": {},
+        "retry_status": {},
         "previews": {},
     }
 
-    async with browser_run.context(viewport={"width": 1280, "height": 900}) as context:
+    initial_manual_capabilities = asyncio.Event()
+    state["capability_delays"][f"{BASE}/capabilities"] = initial_manual_capabilities
+
+    def capability_count(path: str, query: str | None = None) -> int:
+        return sum(
+            1
+            for item in capability_requests
+            if item["path"] == path and (query is None or item["query"] == query)
+        )
+
+    async with browser_run.context(
+        viewport={"width": 1280, "height": 900},
+        launch_args=["--no-proxy-server"],
+    ) as context:
 
         async def block_websocket(socket) -> None:
             await socket.close(code=1000, reason="mocked Chat composer smoke")
@@ -228,19 +248,54 @@ async def main(browser_run: BrowserRun) -> None:
             elif (
                 method == "GET" and path in {f"{BASE}/capabilities", f"{MANAGED_BASE}/capabilities"}
             ) or (method == "POST" and path in {f"{BASE}/retry", f"{MANAGED_BASE}/retry"}):
+                if method == "POST":
+                    retry_requests.append(path)
+                    delay = state["retry_delays"].pop(path, None)
+                    if delay is not None:
+                        await delay.wait()
+                    status = state["retry_status"].get(path, 200)
+                    if status != 200:
+                        await route.fulfill(
+                            status=status,
+                            content_type="application/json",
+                            body=json.dumps({"detail": "fixture retry unavailable"}),
+                        )
+                        return
+                else:
+                    capability_requests.append({"path": path, "query": parsed.query})
+                    delay = state["capability_delays"].pop(path, None)
+                    if delay is not None:
+                        await delay.wait()
+                    status = state["capability_status"].get(path, 200)
+                    if status != 200:
+                        await route.fulfill(
+                            status=status,
+                            content_type="application/json",
+                            body=json.dumps({"detail": "fixture capabilities unavailable"}),
+                        )
+                        return
+                is_managed = path.startswith(MANAGED_BASE)
+                available = (
+                    state["managed_available"] if is_managed else state["existing_maso_available"]
+                )
+                agent_type = "codex" if is_managed else "maso"
+                model_key = "CODEX_MODEL" if is_managed else "MASO_MODEL"
                 body = {
-                    "structured": state["existing_maso_available"],
+                    "structured": available,
                     "unavailable_reason": (
                         None
-                        if state["existing_maso_available"]
+                        if available
                         else "MASO service is unavailable and cannot be used. Start MASO, then retry."
                     ),
+                    "adapter_id": "codex-native" if is_managed else "maso_http",
+                    "schema_version": 1,
+                    "sources": ["native"],
                     "send_message": True,
                     "supports_goals": False,
                     "supports_images": True,
-                    "agent_type": "maso",
+                    "agent_type": agent_type,
                     "supports_mode_switch": False,
-                    "current_model": tab["env"].get("MASO_MODEL", "seed-high"),
+                    "current_model": tab["env"].get(model_key, "seed-high"),
                     "available_models": [
                         {
                             "id": "seed",
@@ -460,6 +515,7 @@ async def main(browser_run: BrowserRun) -> None:
 
         composer = page.locator(".composer-textarea")
         send_button = page.locator(".composer-send-btn")
+        model_trigger = page.locator(".composer-model-picker .composer-mode-trigger")
         await expect(composer).to_be_visible()
         await expect(send_button).to_be_visible()
         await expect(page.locator(".structured-turn")).to_have_count(1)
@@ -467,6 +523,138 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(page.get_by_text("Context condensed", exact=True)).to_have_count(1)
         await expect(page.get_by_text("Condensing context…", exact=True)).to_have_count(0)
         await expect(page.locator(".edit-resend-hover-btn")).to_have_count(0)
+        assert await page.locator(".structured-timeline").evaluate(
+            "element => !element.classList.contains('is-timeline-hidden')"
+        ), "history must render before delayed capabilities resolve"
+        await expect(composer).to_be_disabled()
+        await expect(send_button).to_be_disabled()
+        await expect(model_trigger).to_be_disabled()
+        assert capability_count(f"{BASE}/capabilities") == 1
+        initial_manual_capabilities.set()
+        await expect(composer).to_be_enabled()
+        await expect(model_trigger).to_be_enabled()
+        await composer.fill("Capability gate probe")
+        await expect(send_button).to_be_enabled()
+        await composer.fill("")
+
+        # Cached history renders before managed capabilities too. MASO's live
+        # readiness is not cached, while the managed native fixture is reused.
+        managed_capabilities = asyncio.Event()
+        state["capability_delays"][f"{MANAGED_BASE}/capabilities"] = managed_capabilities
+        await page.evaluate("""async () => {
+          const { useTerminalStore } = await import('/src/stores/terminalStore.ts')
+          useTerminalStore().setActiveTab('fixture-managed-tab')
+        }""")
+        await expect(page.get_by_text("First answer.", exact=True)).to_have_count(1)
+        assert await page.locator(".structured-timeline").evaluate(
+            "element => !element.classList.contains('is-timeline-hidden')"
+        ), "managed history must render before delayed capabilities resolve"
+        await expect(composer).to_be_disabled()
+        await expect(send_button).to_be_disabled()
+        await expect(model_trigger).to_be_disabled()
+        assert capability_count(f"{MANAGED_BASE}/capabilities") == 1
+        managed_capabilities.set()
+        await expect(composer).to_be_enabled()
+        await expect(model_trigger).to_be_enabled()
+        await composer.fill("Managed capability gate probe")
+        await expect(send_button).to_be_enabled()
+        await composer.fill("")
+        manual_capability_requests = capability_count(f"{BASE}/capabilities")
+        managed_capability_requests = capability_count(f"{MANAGED_BASE}/capabilities")
+        await page.evaluate(f"""async () => {{
+          const {{ useTerminalStore }} = await import('/src/stores/terminalStore.ts')
+          useTerminalStore().setActiveTab('{TAB}')
+        }}""")
+        await expect(page.locator(".chat-sidebar__item.active")).to_contain_text(
+            "MASO composer fixture"
+        )
+        await expect(composer).to_be_enabled()
+        assert capability_count(f"{BASE}/capabilities") > manual_capability_requests
+        manual_capability_requests = capability_count(f"{BASE}/capabilities")
+        await page.evaluate("""async () => {
+          const { useTerminalStore } = await import('/src/stores/terminalStore.ts')
+          useTerminalStore().setActiveTab('fixture-managed-tab')
+        }""")
+        await page.wait_for_function("""async () => {
+          const { useTerminalStore } = await import('/src/stores/terminalStore.ts')
+          return useTerminalStore().activeTabId === 'fixture-managed-tab'
+        }""")
+        await page.wait_for_timeout(100)
+        assert capability_count(f"{MANAGED_BASE}/capabilities") == managed_capability_requests
+        await page.evaluate(f"""async () => {{
+          const {{ useTerminalStore }} = await import('/src/stores/terminalStore.ts')
+          useTerminalStore().setActiveTab('{TAB}')
+        }}""")
+        await expect(page.locator(".chat-sidebar__item.active")).to_contain_text(
+            "MASO composer fixture"
+        )
+        await expect(composer).to_be_enabled()
+        assert capability_count(f"{BASE}/capabilities") > manual_capability_requests
+
+        # A capabilities HTTP failure must not hide the already fetched history.
+        # Pending and failed transport Retry keep that history readable before a
+        # later successful Retry refreshes capabilities.
+        state["capability_status"][f"{BASE}/capabilities"] = 503
+        await page.reload()
+        await expect(page.get_by_text("First answer.", exact=True)).to_have_count(1)
+        alert = page.locator(".structured-banner[role='alert']")
+        await expect(alert).to_contain_text("capabilities HTTP 503")
+        await expect(composer).to_be_disabled()
+        await expect(send_button).to_be_disabled()
+        await expect(model_trigger).to_be_disabled()
+        retry_delay = asyncio.Event()
+        state["retry_delays"][f"{BASE}/retry"] = retry_delay
+        state["retry_status"][f"{BASE}/retry"] = 503
+        retries_before = retry_requests.count(f"{BASE}/retry")
+        await alert.get_by_role("button", name="Retry", exact=True).click()
+        for _ in range(20):
+            if retry_requests.count(f"{BASE}/retry") > retries_before:
+                break
+            await asyncio.sleep(0.05)
+        assert retry_requests.count(f"{BASE}/retry") > retries_before
+        await expect(page.get_by_text("First answer.", exact=True)).to_have_count(1)
+        assert await page.locator(".structured-timeline").evaluate(
+            "element => !element.classList.contains('is-timeline-hidden')"
+        ), "history must remain visible while Retry is pending"
+        retry_delay.set()
+        await expect(alert).to_contain_text("fixture retry unavailable")
+        await expect(page.get_by_text("First answer.", exact=True)).to_have_count(1)
+        assert await page.locator(".structured-timeline").evaluate(
+            "element => !element.classList.contains('is-timeline-hidden')"
+        ), "history must remain visible after Retry fails"
+        await expect(composer).to_be_disabled()
+        await expect(send_button).to_be_disabled()
+        await expect(model_trigger).to_be_disabled()
+
+        before_retry_caps = capability_count(f"{BASE}/capabilities")
+        state["retry_status"][f"{BASE}/retry"] = 200
+        state["capability_status"][f"{BASE}/capabilities"] = 200
+        await alert.get_by_role("button", name="Retry", exact=True).click()
+        await expect(alert).to_have_count(0)
+        await expect(composer).to_be_enabled()
+        assert capability_count(f"{BASE}/capabilities") > before_retry_caps
+        assert f"{BASE}/retry" in retry_requests
+        await composer.fill("")
+
+        # A structured=false capabilities response also leaves history readable
+        # and keeps input disabled until explicit Retry refreshes runtime caps.
+        state["existing_maso_available"] = False
+        await page.reload()
+        await expect(page.get_by_text("First answer.", exact=True)).to_have_count(1)
+        banner = page.locator(".structured-banner[role='alert']")
+        await expect(banner).to_contain_text("MASO service is unavailable and cannot be used")
+        await expect(banner).to_contain_text("Start the MASO HTTP service, then retry.")
+        await expect(banner).not_to_contain_text("Create a Terminal session")
+        await expect(composer).to_be_disabled()
+        await expect(send_button).to_be_disabled()
+        await expect(model_trigger).to_be_disabled()
+        before_retry_caps = capability_count(f"{BASE}/capabilities")
+        state["existing_maso_available"] = True
+        await banner.get_by_role("button", name="Retry", exact=True).click()
+        await expect(banner).to_have_count(0)
+        await expect(composer).to_be_enabled()
+        assert capability_count(f"{BASE}/capabilities") > before_retry_caps
+        await composer.fill("")
 
         # MASO can be selected for Chat, and switching to Terminal clears it.
         await page.locator(".add-tab").click()
@@ -495,9 +683,11 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(preflight).to_contain_text("MASO service is ready.")
         await expect(create_button).to_be_enabled()
         await expect(page.locator(".modal").get_by_text("Solo Mode", exact=True)).to_have_count(0)
-        await page.locator(".session-kind-control").get_by_role(
-            "button", name="Terminal", exact=True
-        ).click()
+        await (
+            page.locator(".session-kind-control")
+            .get_by_role("button", name="Terminal", exact=True)
+            .click()
+        )
         terminal_picker = page.get_by_label("Terminal Profile", exact=True)
         await expect(terminal_picker).to_have_value("claude")
         await expect(terminal_picker.locator('option[value="maso"]')).to_have_count(0)
@@ -534,15 +724,26 @@ async def main(browser_run: BrowserRun) -> None:
         await page.locator(".modal").get_by_role("button", name="Cancel", exact=True).click()
         await page.set_viewport_size({"width": 1280, "height": 900})
 
-        # Effort selection must send MASO's provider key, not Codex effort env.
-        trigger = page.locator(".composer-model-picker .composer-mode-trigger")
+        # Effort selection must send MASO's provider key, not Codex effort env,
+        # and it must force a fresh capabilities read for the new model config.
+        trigger = model_trigger
         await expect(trigger).to_contain_text("seed · High")
+        refresh_caps_before = capability_count(f"{BASE}/capabilities", "refresh=true")
         await trigger.click()
-        await page.get_by_role("listbox", name="Thinking effort", exact=True).get_by_role(
-            "option", name=re.compile(r"^High")
-        ).click()
+        await (
+            page.get_by_role("listbox", name="Thinking effort", exact=True)
+            .get_by_role("option", name=re.compile(r"^High"))
+            .click()
+        )
         await expect(trigger).to_contain_text("High")
         assert model_changes[-1]["env"] == {"MASO_MODEL": "seed-high"}, model_changes
+        for _ in range(20):
+            if capability_count(f"{BASE}/capabilities", "refresh=true") == refresh_caps_before + 1:
+                break
+            await asyncio.sleep(0.1)
+        assert (
+            capability_count(f"{BASE}/capabilities", "refresh=true") == refresh_caps_before + 1
+        ), capability_requests
         await page.set_viewport_size({"width": 390, "height": 844})
         await trigger.click()
         menu = page.get_by_role("dialog", name="Model and thinking effort", exact=True)
@@ -1481,6 +1682,8 @@ async def main(browser_run: BrowserRun) -> None:
                     "codex_session_requests": codex_session_requests,
                     "maso_model_changes": model_changes,
                     "maso_preflight_requests": preflight_requests,
+                    "capability_requests": capability_requests,
+                    "retry_requests": retry_requests,
                     "image_turns": sum(bool(item.get("attachments")) for item in sends),
                     "unknown_requests": unknown_requests,
                     "blocked_external_requests": len(blocked),

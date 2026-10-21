@@ -7,7 +7,7 @@ export interface AgentStreamHistoryDetailEntry {
 }
 
 export interface AgentStreamHistorySnapshot {
-  capabilities: StreamCapabilities
+  capabilities: StreamCapabilities | null
   events: AgentStreamEvent[]
   cursor: number
   historyDetails?: Record<string, AgentStreamHistoryDetailEntry>

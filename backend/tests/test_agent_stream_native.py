@@ -518,6 +518,41 @@ async def test_codex_send_message_injects_hub_guidance_once() -> None:
     assert "<<<HUB_RUNTIME_V1>>>" not in second
 
 
+@pytest.mark.asyncio
+async def test_codex_capability_metadata_retries_after_empty_model_list() -> None:
+    native = CodexNativeSession(_session(AgentType.CODEX))
+    native._mode_discovery_attempted = True
+    responses = iter(
+        [
+            {"data": []},
+            {
+                "data": [
+                    {
+                        "model": "recovered-model",
+                        "displayName": "Recovered Model",
+                        "description": "Recovered metadata",
+                    }
+                ]
+            },
+        ]
+    )
+    native.start = AsyncMock()  # type: ignore[method-assign]
+    native._send_request = AsyncMock(side_effect=lambda *_args: next(responses))  # type: ignore[method-assign]
+
+    await native.prepare_capabilities()
+    first = native.capabilities()
+    assert native._model_discovery_attempted is False
+    await native.prepare_capabilities()
+    recovered = native.capabilities()
+
+    assert first.metadata_cacheable is False
+    assert first.available_models
+    assert native._model_discovery_attempted is True
+    assert recovered.metadata_cacheable is True
+    assert [item.id for item in recovered.available_models] == ["recovered-model"]
+    assert native._send_request.await_count == 2
+
+
 def test_terminal_session_never_gets_native_guidance_injection() -> None:
     """Terminal (non-Chat) sessions never construct a ProviderSession, so the
     first-turn wrap that lives on its send path cannot run for them."""
