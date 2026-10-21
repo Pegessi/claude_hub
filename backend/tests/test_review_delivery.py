@@ -231,7 +231,12 @@ def test_wrong_paths_stay_404_without_state_effects(delivery_env, monkeypatch):
         response = client.post(
             path, json={"task_id": "t", "state": "review_passed", "call_id": "wrong-path"}
         )
-        assert response.status_code == 404
+        # No API route must consume these requests. A checkout with
+        # frontend/dist mounted at "/" answers an unmatched POST 405; a
+        # dist-less checkout (e.g. isolated verify env) returns 404. Both are
+        # safe rejections — the state-equality assertions below are the real
+        # guarantee.
+        assert response.status_code in (404, 405)
     assert {k: v.model_dump() for k, v in manager.tasks.items()} == before
     assert not manager.reports
     assert not manager.task_mailbox._events
