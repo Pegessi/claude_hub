@@ -95,6 +95,8 @@ export interface StreamReasoningEffortOption {
 export interface StreamCapabilities {
   structured: boolean
   unavailable_reason?: string | null
+  /** False when capability discovery is incomplete and must not be reused. */
+  metadata_cacheable?: boolean
   adapter_id: string
   schema_version: number
   sources: string[]

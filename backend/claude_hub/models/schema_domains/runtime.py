@@ -134,6 +134,9 @@ class StreamCapabilities(BaseModel):
     goal_usage_quality: Literal["exact", "estimated", "unavailable"] = "unavailable"
     current_model: Optional[str] = None
     current_reasoning_effort: Optional[str] = None
+    # False when metadata (for example provider model catalogs) is a fallback
+    # that should not receive long-lived client or backend capability caching.
+    metadata_cacheable: bool = True
 
 
 class ExecutionTarget(str, Enum):

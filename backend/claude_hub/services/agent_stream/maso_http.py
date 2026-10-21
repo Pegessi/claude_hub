@@ -320,6 +320,7 @@ class MasoHttpSession(ProviderSession):
             current_model=self.current_model(),
             current_reasoning_effort=self.current_reasoning_effort(),
             unavailable_reason=self._last_error,
+            metadata_cacheable=False,
         )
 
     async def _with_first_turn_prefixes(self, text: str) -> Tuple[str, bool]:

@@ -326,18 +326,37 @@ def _is_chat_native(session: ManagedSession) -> bool:
 
 
 async def _capabilities_for(
-    session: ManagedSession, manager: Optional[TailerManager] = None
+    session: ManagedSession,
+    manager: Optional[TailerManager] = None,
+    *,
+    cache_preparation: bool = False,
+    refresh: bool = False,
 ) -> StreamCapabilities:
     return await stream_runtime.capabilities_for(
-        _get_tailer_manager, _is_chat_native, get_adapter_for_session, session, manager
+        _get_tailer_manager,
+        _is_chat_native,
+        get_adapter_for_session,
+        session,
+        manager,
+        cache_preparation=cache_preparation,
+        refresh=refresh,
     )
 
 
 async def _tab_capabilities_for(
-    session: ManagedSession, manager: TailerManager
+    session: ManagedSession,
+    manager: TailerManager,
+    *,
+    cache_preparation: bool = False,
+    refresh: bool = False,
 ) -> StreamCapabilities:
     return await stream_runtime.tab_capabilities_for(
-        _capabilities_for, get_adapter_for_session, session, manager
+        _capabilities_for,
+        get_adapter_for_session,
+        session,
+        manager,
+        cache_preparation=cache_preparation,
+        refresh=refresh,
     )
 
 
@@ -433,13 +452,37 @@ class _AgentStreamBindings:
         _require_current_managed_session(session, manager)
 
     async def capabilities_for(
-        self, session: ManagedSession, manager: Optional[TailerManager] = None
+        self,
+        session: ManagedSession,
+        manager: Optional[TailerManager] = None,
+        *,
+        cache_preparation: bool = False,
+        refresh: bool = False,
     ) -> StreamCapabilities:
+        if cache_preparation or refresh:
+            return await _capabilities_for(
+                session,
+                manager,
+                cache_preparation=cache_preparation,
+                refresh=refresh,
+            )
         return await _capabilities_for(session, manager)
 
     async def tab_capabilities_for(
-        self, session: ManagedSession, manager: TailerManager
+        self,
+        session: ManagedSession,
+        manager: TailerManager,
+        *,
+        cache_preparation: bool = False,
+        refresh: bool = False,
     ) -> StreamCapabilities:
+        if cache_preparation or refresh:
+            return await _tab_capabilities_for(
+                session,
+                manager,
+                cache_preparation=cache_preparation,
+                refresh=refresh,
+            )
         return await _tab_capabilities_for(session, manager)
 
     async def stream_events_for(self, *args: Any, **kwargs: Any) -> AgentStreamEventPage:
@@ -540,6 +583,7 @@ async def _stream_events_for(
     view: Literal["raw", "conversation"] = "raw",
     turn_id: Optional[str] = None,
     through_sequence: Optional[int] = None,
+    persisted_only: bool = False,
 ) -> AgentStreamEventPage:
     return await observation.stream_events_for(
         session,
@@ -552,6 +596,7 @@ async def _stream_events_for(
         view,
         turn_id,
         through_sequence,
+        persisted_only,
     )
 
 

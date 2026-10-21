@@ -7,6 +7,23 @@
 
 ## Released
 
+### fix(chat): show history before runtime preparation and reuse capability metadata
+
+- Read durable Chat history and execution details without starting a provider;
+  model/network preparation no longer blocks the existing transcript, including
+  when capabilities fail. Input remains gated on valid observation readiness.
+- Reuse successful capability metadata for up to 30 minutes, with bounded
+  browser retention, configuration-aware invalidation, and explicit refresh on
+  retry or settings updates. Dynamic model/mode state and action validation stay
+  current; MASO's combined service-readiness check is not cached.
+- Ignore superseded capability responses and retain a clear error with readable
+  history when a live capability handshake becomes unavailable. Pending or failed
+  Retry keeps the same-source transcript visible, and queued observers use the
+  same configuration identity as the active Chat pane.
+- Keep incomplete model discovery out of long-lived capability caches. Managed
+  persisted-history reads do not wait behind runtime preparation, while stale
+  session incarnations are still rejected.
+
 ### fix(workspace): recover undelivered review verdicts
 
 - Prefer the Hub-specific bind port over inherited provider PORT when generating

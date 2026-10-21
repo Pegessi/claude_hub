@@ -120,8 +120,9 @@ import ChatComposer from './components/ChatComposer.vue'
 import ChatGoalSetup from './components/ChatGoalSetup.vue'
 import AttachmentPreviewDialog from '@/components/AttachmentPreviewDialog.vue'
 import { provideAttachmentPreview } from '@/composables/useAttachmentPreview'
-import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAgentStream } from '@/composables/useAgentStream'
+import { streamCapabilityConfiguration } from '@/utils/agentStreamCapabilitiesCache'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useAppStore } from '@/stores/appStore'
 import { useFeishuBotPoolStore } from '@/stores/feishuBotPoolStore'
@@ -149,6 +150,10 @@ const markdownImageScope = computed(() => isManagedChat.value ? streamBasePath.v
 const terminalStore = useTerminalStore()
 const appStore = useAppStore()
 const feishuBotPoolStore = useFeishuBotPoolStore()
+const currentTab = computed(() =>
+  terminalStore.tabs.find(t => t.id === props.tabId) ?? null,
+)
+const capabilityConfiguration = computed(() => streamCapabilityConfiguration(currentTab.value))
 const {
   events,
   historyDetails,
@@ -164,10 +169,9 @@ const {
   stop,
   nudge,
   reset: resetStream,
-} = useAgentStream()
-const isHistoryVisible = computed(() =>
-  connectionState.value === 'live' || connectionState.value === 'reconciling'
-)
+  historyReady,
+} = useAgentStream(() => capabilityConfiguration.value)
+const isHistoryVisible = computed(() => historyReady.value)
 function startStream() {
   if (managedIdentityMissing.value) {
     errorMessage.value = 'Managed Chat identity is not available yet. Refresh Workspace sessions and try again.'
@@ -176,9 +180,6 @@ function startStream() {
   }
   void start(streamSourceId.value, streamSource.value)
 }
-const currentTab = computed(() =>
-  terminalStore.tabs.find(t => t.id === props.tabId) ?? null,
-)
 const supportsEditResend = computed(() =>
   !isManagedChat.value && ['claude', 'codex', 'cursor'].includes(currentTab.value?.agent_type ?? '')
 )
@@ -278,6 +279,7 @@ const composer = useChatComposer({
   get composerTurnInFlight() { return delivery.composerTurnInFlight },
 })
 const timeline = useChatTimeline({
+  get historyReady() { return historyReady },
   get connectionState() { return connectionState },
   get events() { return events },
   get historyDetails() { return historyDetails },
@@ -391,6 +393,9 @@ settings.registerMenuWatchers()
 composer.registerWatchers()
 queue.registerReconciliationWatcher()
 delivery.registerGoalRecoveryWatcher()
+watch(capabilityConfiguration, () => {
+  if (isPaneActivated.value) startStream()
+})
 queue.registerAutoFlushWatcher()
 delivery.registerTerminalWatcher()
 timeline.registerWatchers()

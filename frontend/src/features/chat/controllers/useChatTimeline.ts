@@ -14,6 +14,7 @@ import { createSubthreadThinkingPresenter } from '@/utils/thinkingPresentation'
 import { isTurnProcessExpanded, presentTurnParts, turnProcessFoldSignature } from '@/features/chat/presentation/chatTurnPresentation'
 
 interface Dependencies {
+  historyReady: Ref<boolean>
   connectionState: Ref<'idle' | 'hydrating' | 'live' | 'reconciling' | 'failed'>
   events: Ref<AgentStreamEvent[]>
   historyDetails: Ref<Record<string, AgentStreamHistoryDetailEntry>>
@@ -366,8 +367,8 @@ export function useChatTimeline(deps: Dependencies) {
     //
     // ``immediate`` covers a quick tab switch-back: cached history enters
     // ``reconciling`` immediately, without waiting for network hydration.
-    watch(deps.connectionState, (state) => {
-      if (state === 'live' || state === 'reconciling') {
+    watch([deps.historyReady, deps.connectionState], ([ready, state]) => {
+      if (ready) {
         // Reconciliation finishing within this visit must not interrupt reading.
         // Each activation resets the gate before starting reconciliation.
         if (timelinePhase.value === 'revealed') return
@@ -385,8 +386,8 @@ export function useChatTimeline(deps: Dependencies) {
       } else if (state === 'hydrating') {
         resetActivation()
       }
-      // 'failed' and 'idle' leave the timeline hidden; failed shows the Retry
-      // banner. Retry re-enters 'hydrating' and the gate runs again.
+      // A capability failure does not hide successfully loaded history.
+      // A failed history read stays hidden until Retry hydrates it.
     }, { immediate: true })
 
     onMounted(() => {
