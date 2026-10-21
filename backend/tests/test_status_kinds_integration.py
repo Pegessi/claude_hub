@@ -126,8 +126,10 @@ async def test_native_chat_lifecycle_through_status_apis_and_cli(
     _isolate_state_root(monkeypatch, tmp_path)
     session = _native_session(agent_type).model_copy(
         update={
-            "id": f"native-status-{role.value}",
-            "tab_id": f"native-tab-{role.value}",
+            # Global weak tailer owners may survive GC until the next case.
+            # Distinct provider cases must never share a runtime identity.
+            "id": f"native-status-{role.value}-{agent_type.value}",
+            "tab_id": f"native-tab-{role.value}-{agent_type.value}",
             "role": role,
             "session_kind": SessionKind.CHAT,
         }

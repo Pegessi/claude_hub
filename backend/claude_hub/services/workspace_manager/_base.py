@@ -704,6 +704,9 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     async def _reap_stuck_reviews(self, workspace_id: str) -> int: ...
 
     @abstractmethod
+    def _review_submission_block(self, task: WorkspaceTask, reviewer: ManagedSession) -> str: ...
+
+    @abstractmethod
     def _first_available_reviewer(
         self,
         workspace_id: str,

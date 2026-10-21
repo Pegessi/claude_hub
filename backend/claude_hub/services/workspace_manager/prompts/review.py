@@ -1,6 +1,20 @@
 """Prompt builders split from the compatibility mixin."""
 
-from .._constants import *  # noqa: F401,F403
+from .._constants import (
+    INTERNAL_API_CURL,
+    AgentReport,
+    Any,
+    AutonomyPolicy,
+    ExecutionTarget,
+    ManagedSession,
+    Path,
+    ReviewProfile,
+    Workspace,
+    WorkspaceTask,
+    WorkspaceTaskMode,
+    json,
+    state_policy,
+)
 from .assignment import _AssignmentPromptsMixin
 
 
@@ -259,13 +273,6 @@ class _ReviewPromptsMixin(_AssignmentPromptsMixin):
             ),
             workspace_id=workspace.id,
         )
-        review_attempt = max(task.review_attempts, 1)
-        review_started_call_id = self._report_prompt_call_id(
-            task.id, "review-started", attempt=review_attempt
-        )
-        review_passed_call_id = self._report_prompt_call_id(
-            task.id, "review-passed", attempt=review_attempt
-        )
         return (
             "Review workspace task.\n\n"
             f"Workspace: {workspace.name}; Task ID: {task.id}\n"
@@ -297,9 +304,29 @@ class _ReviewPromptsMixin(_AssignmentPromptsMixin):
             f"Task history JSON (prior reports; most recent {self._FULL_REPORT_WINDOW} full; "
             f"earlier summarized with verbose fields truncated; trigger report is above):\n"
             f"{json.dumps(report_payload, indent=2)}\n\n"
+            f"{self._review_submission_block(task, reviewer)}"
+        )
+
+    def _review_submission_block(self, task: WorkspaceTask, reviewer: ManagedSession) -> str:
+        review_attempt = max(task.review_attempts, 1)
+        review_started_call_id = self._report_prompt_call_id(
+            task.id, "review-started", attempt=review_attempt
+        )
+        review_passed_call_id = self._report_prompt_call_id(
+            task.id, "review-passed", attempt=review_attempt
+        )
+        return (
+            "Canonical report submission (copy these commands; retain the supplied host/port).\n"
+            "Do not POST to /api/sessions/... or any preview* path: those are not report "
+            "routes and return 404. A 404 means delivery FAILED; terminal text is not a "
+            "recorded verdict. If this exact URL fails, inspect the Hub connection/port "
+            "and surface the delivery error; do not stop silently or guess a route.\n"
+            "Fill in actual evidence and choose the appropriate final verdict; never infer "
+            "review_passed from this example. Require HTTP 201 and a report id as receipt.\n"
             "Report workflow: first POST review_started, then exactly one final verdict "
             "(use a stable call_id per report; reuse the same call_id on retry; include a "
             "round counter so repeated reviews don't collide):\n"
+            "```bash\n"
             f"{INTERNAL_API_CURL} -X POST {self._report_base_url(reviewer)}/api/workspaces/sessions/{reviewer.id}/reports "
             "-H 'Content-Type: application/json' "
             f'-d \'{{"task_id":"{task.id}","state":"review_started",'
@@ -318,6 +345,7 @@ class _ReviewPromptsMixin(_AssignmentPromptsMixin):
             '"status":"passed","evidence":"Evidence reviewed.","blocking_findings":[],'
             '"non_blocking_findings":[]}],"artifact_refs":[],"confidence":0.8,'
             '"requires_human_judgment":false}\'\n\n'
+            "```\n"
             "Use review_failed when the implementation agent can still fix concrete defects. "
             "Use review_needs_input only for genuine blockers outside its control."
         )
