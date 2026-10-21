@@ -1,0 +1,49 @@
+[
+  {
+    "file": "busy.ansi",
+    "name": "agent4-visible-ansi",
+    "command": [
+      "tmux",
+      "capture-pane",
+      "-e",
+      "-p",
+      "-t",
+      "claude-hub-13656409"
+    ],
+    "timestamp": "2026-10-20T12:04:07.121516+00:00",
+    "exit_code": 0,
+    "stderr": "",
+    "sha256": "3cbdfd53d6e940fee229436437fec55c0b0d1342f6145d76c57df300741694e2"
+  },
+  {
+    "file": "idle.ansi",
+    "name": "agent3-pane-ansi",
+    "command": [
+      "tmux",
+      "capture-pane",
+      "-e",
+      "-p",
+      "-t",
+      "claude-hub-93962adf",
+      "-S",
+      "-200"
+    ],
+    "timestamp": "2026-10-20T12:04:07.127227+00:00",
+    "exit_code": 0,
+    "stderr": "",
+    "sha256": "08b173337a622032ebc8fa1d68a8ebc3ee86914ca5b654618b5b368df3dfc2f8"
+  },
+  {
+    "file": "busy-subagent.ansi",
+    "timestamp": "2026-10-20T12:10:53.854766+00:00",
+    "command": [
+      "tmux",
+      "capture-pane",
+      "-e",
+      "-p",
+      "-t",
+      "claude-hub-13656409"
+    ],
+    "sha256": "6e3fefddad0f62d93a05530695b77b787041fc85b50f9960c7f65fdc63ea4078"
+  }
+]
