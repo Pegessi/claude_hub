@@ -7,6 +7,17 @@
 
 ## Released
 
+### fix(terminal): recognize busy Codex with persistent prompt footer
+
+- Give Codex's explicit live Working indicator precedence over the persistent
+  shortcuts footer, so managed agent and tab badges remain Working mid-turn.
+- Preserve selection/shell precedence, frozen-frame alerts and other provider
+  paths; replay real ANSI busy/idle captures and rapid frames in regression tests.
+- Recognize narrow Codex status ellipses with an elapsed-time/bullet header and
+  interrupt-hint prefix; actual private-TUI width/height captures cover resize.
+- Verify native Chat and reviewer roles through stream/tool lifecycle, status
+  APIs/CLI, real reviewer-screen replay and Agents/Reviewers panel badges.
+
 ### refactor(chat): share inbox delivery between timers and direct messages
 
 - Route scheduled Chat turns through the same durable FIFO, native submission fence and recovery pump as direct tab messages. Keep schedule superseding/cancellation policy, legacy run history, stale-turn recovery and Dot provenance; let one-shot Chat schedules fire once even after their timer disables itself.

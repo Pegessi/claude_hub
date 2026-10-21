@@ -1,0 +1,132 @@
+[
+  {
+    "file": "evo-workspace-reviewer-2-idle.ansi",
+    "session_id": "evo-workspace-reviewer-2",
+    "role": "reviewer",
+    "session_kind": "terminal",
+    "agent_type": "claude",
+    "tab_id": "23661c92-b8e2-4256-888b-5bac838ff762",
+    "command": [
+      "tmux",
+      "capture-pane",
+      "-e",
+      "-p",
+      "-t",
+      "claude-hub-23661c92",
+      "-S",
+      "-120"
+    ],
+    "timestamp": "2026-10-20T15:21:15.715730+00:00",
+    "sha256": "3d546ec24eb2ab534e00ee9cdfa95248a819da46de6fb1a2bc75dd2c2482d7f3",
+    "observed": "idle"
+  },
+  {
+    "file": "evo-workspace-reviewer-3-idle.ansi",
+    "session_id": "evo-workspace-reviewer-3",
+    "role": "reviewer",
+    "session_kind": "terminal",
+    "agent_type": "codex",
+    "tab_id": "ce3911d7-4fec-441b-88d5-df938ae47557",
+    "command": [
+      "tmux",
+      "capture-pane",
+      "-e",
+      "-p",
+      "-t",
+      "claude-hub-ce3911d7",
+      "-S",
+      "-120"
+    ],
+    "timestamp": "2026-10-20T15:21:15.720644+00:00",
+    "sha256": "256dc9196a1d31ea5c5c5835372a0e4e0a186bea743aec377af5e313eced5938",
+    "observed": "idle"
+  },
+  {
+    "file": "evo-workspace-reviewer-5-idle.ansi",
+    "session_id": "evo-workspace-reviewer-5",
+    "role": "reviewer",
+    "session_kind": "terminal",
+    "agent_type": "codex",
+    "tab_id": "5849c1dd-e68d-4036-8c6e-3697b8e2b8f2",
+    "command": [
+      "tmux",
+      "capture-pane",
+      "-e",
+      "-p",
+      "-t",
+      "claude-hub-5849c1dd",
+      "-S",
+      "-120"
+    ],
+    "timestamp": "2026-10-20T15:21:15.725571+00:00",
+    "sha256": "a697808e48121b48ad1a12f7de6ecc8b45f73b573d427e9af06a4a95b87b2c19",
+    "observed": "idle"
+  },
+  {
+    "file": "evo-workspace-reviewer-6-idle.ansi",
+    "session_id": "evo-workspace-reviewer-6",
+    "role": "reviewer",
+    "session_kind": "terminal",
+    "agent_type": "codex",
+    "tab_id": "a89e106d-c90d-48d2-8d1b-1e5fe418f745",
+    "command": [
+      "tmux",
+      "capture-pane",
+      "-e",
+      "-p",
+      "-t",
+      "claude-hub-a89e106d",
+      "-S",
+      "-120"
+    ],
+    "timestamp": "2026-10-20T15:21:15.730370+00:00",
+    "sha256": "22a6148c4bb3c34843834e3688e1e504941f32cf6636c283b3232a55c234f23e",
+    "observed": "idle"
+  },
+  {
+    "file": "isolated-managed-reviewer-busy.ansi",
+    "session_id": "isolated-managed-reviewer",
+    "role": "reviewer",
+    "session_kind": "terminal",
+    "agent_type": "codex",
+    "observed": "busy",
+    "provenance": "actual isolated managed reviewer with loopback mock model turn",
+    "timestamp": "2026-10-20T15:29:30.452048+00:00",
+    "sha256": "7fd7678925b7d3a940f5078dded0dc45ce6c9c46c776f8a314c73300f0cce80b",
+    "capture_command": [
+      "tmux",
+      "-L",
+      "codex-status-reviewer-task5",
+      "capture-pane",
+      "-e",
+      "-p",
+      "-t",
+      "claude-hub-reviewer",
+      "-S",
+      "-120"
+    ]
+  },
+  {
+    "file": "isolated-managed-reviewer-idle.ansi",
+    "session_id": "isolated-managed-reviewer",
+    "role": "reviewer",
+    "session_kind": "terminal",
+    "agent_type": "codex",
+    "observed": "idle",
+    "provenance": "actual isolated managed reviewer with loopback mock model turn",
+    "timestamp": "2026-10-20T15:29:31.548956+00:00",
+    "sha256": "d8b20d6e67feea3287e5e0b5b4425eeac288618dd1eff30beddfc5682df1c17e",
+    "capture_command": [
+      "tmux",
+      "-L",
+      "codex-status-reviewer-task5",
+      "capture-pane",
+      "-e",
+      "-p",
+      "-t",
+      "claude-hub-reviewer",
+      "-S",
+      "-120"
+    ]
+  }
+]
