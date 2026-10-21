@@ -10,7 +10,7 @@
   >
     <div class="conversation-bubble conversation-bubble--assistant">
       <MarkdownContent
-        :text="renderAgentDirectives(stripTrailingGoalProtocol(part.text), { complete: turn.completed })"
+        :text="renderAgentDirectives(part.text, { complete: turn.completed })"
         :tab-id="markdownImageScope"
         compact
         :complete="turn.completed"
@@ -142,7 +142,6 @@
 import { requireChatOwner, chatImagesKey, chatTimelineKey, chatIdentityKey } from '../owners'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import ThinkingIndicator from '@/components/ThinkingIndicator.vue'
-import { stripTrailingGoalProtocol } from '@/utils/chatGoalPolicy'
 import { renderAgentDirectives } from '@/utils/agentDirectives'
 import ChatThinkingCard from './ChatThinkingCard.vue'
 import ChatToolGroup from './ChatToolGroup.vue'

@@ -96,6 +96,145 @@ def test_complete_retry_stop_preserves_completed_goal(native_api):
     assert provider.calls[calls:] == ["stop"]
 
 
+@pytest.mark.parametrize("expected_id", [None, "native-turn"])
+@pytest.mark.parametrize("transition", ["complete", "ended", "new-turn", "cleared", "new-goal"])
+def test_stop_reconciles_native_state_change_without_cancelling_new_work(
+    native_api, monkeypatch, expected_id, transition
+):
+    client, provider, controller, _ = native_api
+    original = create(client)
+    provider.turn = "native-turn"
+    read = provider.read
+    reads = 0
+
+    async def change_on_pause_read():
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            if transition == "cleared":
+                provider.goal = None
+            elif transition == "new-goal":
+                provider.goal = {
+                    **provider.goal,
+                    "objective": "New provider Goal",
+                    "createdAt": provider.goal["createdAt"] + 1,
+                }
+            else:
+                provider.goal["status"] = "complete"
+                if transition == "ended":
+                    provider.turn = None
+                elif transition == "new-turn":
+                    provider.turn = "new-turn"
+        return await read()
+
+    monkeypatch.setattr(provider, "read", change_on_pause_read)
+    client._transport.raise_server_exceptions = False
+    calls = len(provider.calls)
+    response = client.post(
+        "/api/workspaces/tabs/tab/stream/cancel", json={"expected_turn_id": expected_id}
+    )
+    if transition == "new-goal":
+        assert response.status_code == 409, response.text
+        assert provider.turn == "native-turn"
+        assert provider.goal["objective"] == "New provider Goal"
+        assert provider.calls[calls:] == []
+    else:
+        assert response.status_code == 200, response.text
+        cancelled = transition in {"complete", "cleared"}
+        assert response.json()["cancelled"] is cancelled
+        if cancelled:
+            assert provider.turn is None
+            assert provider.calls[calls:] == ["manual-cancel"]
+        else:
+            assert provider.calls[calls:] == []
+            assert provider.turn == ("new-turn" if transition == "new-turn" else None)
+        if transition != "cleared":
+            assert provider.goal["status"] == "complete"
+            assert controller.get(original["id"]).status.value == "complete"
+
+
+@pytest.mark.parametrize("expected_id", [None, "old-hub-turn"])
+@pytest.mark.parametrize("claimed", [False, True], ids=["before-start", "claimed-start"])
+def test_stop_pauses_native_goal_before_hub_id_exists(
+    native_api, monkeypatch, expected_id, claimed
+):
+    client, provider, _, _ = native_api
+    create(client)
+    initial_turn = "claimed-native-turn" if claimed else None
+    provider.turn = initial_turn
+    monkeypatch.setattr(provider, "active_turn", AsyncMock(return_value=None))
+    manager = stream_api._get_tab_tailer_manager()
+    monkeypatch.setattr(manager, "active_turn_id", AsyncMock(return_value=None))
+    calls = len(provider.calls)
+    response = client.post(
+        "/api/workspaces/tabs/tab/stream/cancel", json={"expected_turn_id": expected_id}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["cancelled"] is (expected_id is None)
+    if expected_id is None:
+        assert provider.goal["status"] == "paused"
+        assert provider.turn is None
+        assert provider.calls[calls:] == [("set", {"status": "paused"}), "stop"]
+    else:
+        assert provider.goal["status"] == "active"
+        assert provider.turn == initial_turn
+        assert provider.calls[calls:] == []
+
+
+def test_unconfirmed_claimed_native_stop_can_be_retried_without_hub_id(native_api, monkeypatch):
+    client, provider, _, _ = native_api
+    create(client)
+    provider.turn = "claimed-native-turn"
+    monkeypatch.setattr(provider, "active_turn", AsyncMock(return_value=None))
+    manager = stream_api._get_tab_tailer_manager()
+    monkeypatch.setattr(manager, "active_turn_id", AsyncMock(return_value=None))
+    provider.stop_error = True
+    endpoint = "/api/workspaces/tabs/tab/stream/cancel"
+    assert client.post(endpoint).status_code == 503
+    pending = client.get("/api/tabs/tab/goal/current").json()
+    assert pending["provider_stop_pending"]
+    assert pending["current_turn_id"] is None
+    provider.stop_error = False
+    retried = client.post(endpoint)
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["cancelled"] is True
+    assert provider.goal["status"] == "paused"
+    assert provider.turn is None
+
+
+@pytest.mark.parametrize("transition", ["complete", "cleared", "replaced"])
+def test_changed_goal_with_unknown_hub_turn_requires_fresh_stop(
+    native_api, monkeypatch, transition
+):
+    client, provider, _, _ = native_api
+    create(client)
+    provider.turn = "claimed-native-turn"
+    monkeypatch.setattr(provider, "active_turn", AsyncMock(return_value=None))
+    manager = stream_api._get_tab_tailer_manager()
+    monkeypatch.setattr(manager, "active_turn_id", AsyncMock(return_value=None))
+    read = provider.read
+    reads = 0
+
+    async def change_on_pause_read():
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            if transition == "cleared":
+                provider.goal = None
+            elif transition == "replaced":
+                provider.goal = {**provider.goal, "createdAt": provider.goal["createdAt"] + 1}
+            else:
+                provider.goal["status"] = "complete"
+        return await read()
+
+    monkeypatch.setattr(provider, "read", change_on_pause_read)
+    calls = len(provider.calls)
+    response = client.post("/api/workspaces/tabs/tab/stream/cancel")
+    assert response.status_code == 409, response.text
+    assert provider.calls[calls:] == []
+    assert provider.turn == "claimed-native-turn"
+
+
 @pytest.mark.asyncio
 async def test_provider_binding_waits_for_handshake_and_stops_cold_queued_turn(monkeypatch):
     session = SimpleNamespace(

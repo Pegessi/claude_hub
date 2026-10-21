@@ -117,7 +117,6 @@ class InputMixin(SessionState):
         reuse_attachments: Optional[List[Dict[str, Any]]] = None,
         visible_text: Optional[str] = None,
         turn_metadata: Optional[Dict[str, Any]] = None,
-        strip_goal_protocol: bool = False,
         before_send: Optional[Callable[[], Awaitable[None]]] = None,
         before_delivery: Optional[Callable[[], None]] = None,
     ) -> None:
@@ -316,10 +315,10 @@ class InputMixin(SessionState):
             self._goal_protocol_turn = bool(
                 turn_metadata and turn_metadata.get("protocol") == "goal-continuation-v1"
             )
+            # Goal history is not permission to rewrite ordinary assistant
+            # output. Only this turn's trusted continuation metadata opts in.
             self._goal_protocol_sanitizer = (
-                self._deps._GoalProtocolSanitizer(trailing_only=not self._goal_protocol_turn)
-                if self._goal_protocol_turn or strip_goal_protocol
-                else None
+                self._deps._GoalProtocolSanitizer() if self._goal_protocol_turn else None
             )
             self._run_epoch += 1
             self._turn_completed_seen = False
@@ -412,6 +411,17 @@ class InputMixin(SessionState):
                 except Exception as exc:
                     submit_exception = exc
             if submit_exception is not None:
+                delivery_uncertain = getattr(transport, "_delivery_uncertain", False)
+                outcome_uncertain = getattr(transport, "_submission_outcome_uncertain", False)
+                if delivery_uncertain or outcome_uncertain:
+                    # The provider exposed a main turn before the request
+                    # response failed. Keep its durable Hub turn active and
+                    # avoid a second synthetic terminal edge. A contradictory
+                    # post-completion rejection is a one-shot caller outcome;
+                    # consume it here so it cannot leak into the next send.
+                    if outcome_uncertain:
+                        transport._submission_outcome_uncertain = False
+                    raise submit_exception
                 # The provider rejected or failed to start the turn. Publish an
                 # error and a failed completion for the same turn_id so the
                 # frontend can mark it failed instead of leaving it pending.
@@ -442,10 +452,9 @@ class InputMixin(SessionState):
                 self._terminalize_native_runtime("failed")
                 self._active_turn_id = None
                 raise submit_exception
-            # Provider submission reached the transport's known accepted (or
-            # provider-owned uncertain) boundary. A cancelled HTTP caller no
-            # longer owns the outcome; return normally so managed Chat records
-            # the handoff as accepted instead of overwriting it as uncertain.
+            # Provider submission reached its known accepted boundary. A
+            # provider-owned uncertain response raises above while retaining
+            # this durable turn for completion or explicit Stop.
 
     @staticmethod
     def _answer_covers_card(

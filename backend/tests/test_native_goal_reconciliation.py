@@ -91,10 +91,6 @@ async def test_native_absence_preserves_hub_terminal_history(native_controller, 
     historical = controller.get(goal.id).model_dump()
     assert await controller.refresh_current("tab") is None
     assert controller.get(goal.id).model_dump() == historical
-    assert not controller.uses_hub_goal_protocol("tab")
-    provider.supported = False
-    await controller.refresh_current("tab")
-    assert controller.uses_hub_goal_protocol("tab")
 
 
 @pytest.mark.asyncio

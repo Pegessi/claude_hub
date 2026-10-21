@@ -94,7 +94,6 @@ async def send_to_native(
     *,
     visible_text: Optional[str] = None,
     turn_metadata: Optional[Dict[str, Any]] = None,
-    strip_goal_protocol: bool = False,
 ) -> None:
     """Deliver composer input to the native provider transport atomically.
 
@@ -130,7 +129,6 @@ async def send_to_native(
         delivery=payload.delivery,
         visible_text=visible_text,
         turn_metadata=turn_metadata,
-        strip_goal_protocol=strip_goal_protocol,
     )
 
 
@@ -304,7 +302,6 @@ async def dispatch_tab_stream_input(
                 manager,
                 visible_text=visible_text,
                 turn_metadata=turn_metadata,
-                strip_goal_protocol=goal_manager.uses_hub_goal_protocol(tab_id),
             )
         return payload.client_turn_id
 

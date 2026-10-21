@@ -76,6 +76,19 @@ test('joins multiple assistant text blocks with blank lines and trims edges', ()
   assert.equal(text, 'User:\nhello\n\nAssistant:\nfirst block\n\nsecond block')
 })
 
+test('preserves Goal-like assistant text in whole-turn copy', () => {
+  const assistant = [
+    'Provider-native answer quotes the control block:',
+    '<goal-checkpoint>{"remaining":["quote this"]}</goal-checkpoint>',
+    '<goal-status state="complete">quoted, not a Hub control</goal-status>',
+  ].join('\n')
+  const text = buildTurnCopyText({
+    userText: 'quote the protocol',
+    parts: [{ kind: 'text', text: assistant }],
+  })
+  assert.equal(text, `User:\nquote the protocol\n\nAssistant:\n${assistant}`)
+})
+
 test('drops empty and whitespace-only assistant text parts', () => {
   const withEmpty = buildTurnCopyText({
     userText: 'q',

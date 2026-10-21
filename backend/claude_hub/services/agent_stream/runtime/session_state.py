@@ -303,7 +303,6 @@ class SessionState(ABC):
         reuse_attachments: Optional[List[Dict[str, Any]]] = None,
         visible_text: Optional[str] = None,
         turn_metadata: Optional[Dict[str, Any]] = None,
-        strip_goal_protocol: bool = False,
         before_send: Optional[Callable[[], Awaitable[None]]] = None,
         before_delivery: Optional[Callable[[], None]] = None,
     ) -> None:

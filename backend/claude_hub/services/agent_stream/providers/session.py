@@ -97,6 +97,14 @@ class SessionCore(ABC):
         # the moment ``_spawn_oneshot`` returned).
         self._turn_in_flight: bool = False
         self._turn_completion: Optional[asyncio.Future[None]] = None
+        # A provider can expose acceptance before its request response arrives.
+        # If that response is lost, completion or confirmed Stop still owns the
+        # live turn; generic send failure cleanup must not release its guard.
+        self._delivery_uncertain = False
+        # Completion can settle execution while the request response reports a
+        # contradictory rejection. Runtime input surfaces that response without
+        # writing a second terminal edge.
+        self._submission_outcome_uncertain = False
         # Set while a client Stop deliberately kills/restarts the persistent
         # provider because its native interrupt could not be confirmed. The EOF
         # of that dying process is expected: the tailer restarts (resuming the
@@ -323,6 +331,8 @@ class SessionCore(ABC):
         async with self._send_lock:
             await self._prepare_for_send()
             self.check_delivery_admission()
+            self._delivery_uncertain = False
+            self._submission_outcome_uncertain = False
             self._begin_turn()
             try:
                 if images:
@@ -343,8 +353,9 @@ class SessionCore(ABC):
                 if seed_included:
                     await self._mark_seed_delivered()
             except Exception:
-                self._clear_staged_images()
-                self._end_turn()
+                if not (self._delivery_uncertain or self._submission_outcome_uncertain):
+                    self._clear_staged_images()
+                    self._end_turn()
                 raise
 
     async def _with_first_turn_prefixes(self, text: str) -> Tuple[str, bool]:

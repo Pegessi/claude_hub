@@ -67,10 +67,13 @@ def native_api(monkeypatch, tmp_path):
         name="Local",
         email="local@example.test",
     )
+    # These route tests replace the runtime. Running the shared app lifespan
+    # would leave its shutdown flag set for tests collected after this module.
+    client = TestClient(app)
     try:
-        with TestClient(app) as client:
-            yield client, provider, controller, dispatch
+        yield client, provider, controller, dispatch
     finally:
+        client.close()
         app.dependency_overrides.pop(get_current_user, None)
 
 

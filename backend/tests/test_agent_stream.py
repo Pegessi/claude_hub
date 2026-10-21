@@ -2518,7 +2518,6 @@ async def test_direct_tab_route_reuses_durable_tab_incarnation_and_rejects_repla
     goal_manager = SimpleNamespace(
         current=lambda _tab_id: None,
         refresh_current=AsyncMock(return_value=None),
-        uses_hub_goal_protocol=lambda _tab_id: False,
     )
     monkeypatch.setattr(goal_run_service, "get_goal_manager", lambda: goal_manager)
 
@@ -4056,7 +4055,7 @@ async def test_goal_turn_hides_internal_prompt_and_protocol_from_visible_transcr
     assert completed.payload["assistant_text"] == visible
     assert "_goal_protocol_text" not in completed.payload
     assert observed and "<goal-checkpoint>" in observed[-1].payload["_goal_protocol_text"]
-    sanitizer_factory.assert_called_once_with(trailing_only=False)
+    sanitizer_factory.assert_called_once_with()
     await tailer.stop()
 
 
@@ -4260,10 +4259,10 @@ async def test_goal_turn_provider_owned_completion_is_not_synthesized(
 
 
 @pytest.mark.asyncio
-async def test_ordinary_turn_in_goal_chat_hides_envelope_without_goal_synthesis(
+async def test_ordinary_turn_preserves_goal_envelope_without_goal_synthesis(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A manual turn after a Goal may echo the protocol; hide it, never end the turn."""
+    """An ordinary reply keeps protocol-like text and cannot end itself as a Goal."""
     from claude_hub.services.agent_stream import tailer as tailer_module
     from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
 
@@ -4285,7 +4284,6 @@ async def test_ordinary_turn_in_goal_chat_hides_envelope_without_goal_synthesis(
         [],
         client_turn_id="manual-turn",
         turn_metadata={"origin": "web"},
-        strip_goal_protocol=True,
     )
     transport._records.put_nowait(
         {
@@ -4316,13 +4314,17 @@ async def test_ordinary_turn_in_goal_chat_hides_envelope_without_goal_synthesis(
         for event in page.events
         if event.type == AgentStreamEventType.TEXT_DELTA
     )
-    assert visible == 'Answer: `<goal-status state="complete">x</goal-status>` is the signal.\n'
+    assert visible == (
+        'Answer: `<goal-status state="complete">x</goal-status>` is the signal.\n'
+        '<goal-checkpoint>{"remaining":[]}</goal-checkpoint>'
+        '<goal-status state="complete">done</goal-status>'
+    )
     assert completed.payload["assistant_text"] == visible
     await tailer.stop()
 
 
 @pytest.mark.asyncio
-async def test_ordinary_turn_failure_releases_text_held_for_a_possible_envelope(
+async def test_ordinary_turn_preserves_partial_goal_tags_on_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from claude_hub.services.agent_stream import tailer as tailer_module
@@ -4345,7 +4347,6 @@ async def test_ordinary_turn_failure_releases_text_held_for_a_possible_envelope(
         [],
         client_turn_id="manual-failed-turn",
         turn_metadata={"origin": "web"},
-        strip_goal_protocol=True,
     )
     text = 'Parse <goal-status state="complete"> openers carefully.'
     transport._records.put_nowait(

@@ -307,7 +307,6 @@ def install_stream(monkeypatch, on_send, *, subscribe_release=None, goal_lock=No
         lambda: SimpleNamespace(
             current=lambda tab_id: None,
             refresh_current=AsyncMock(return_value=None),
-            uses_hub_goal_protocol=lambda tab_id: False,
         ),
     )
     return SimpleNamespace(

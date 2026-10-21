@@ -20,6 +20,12 @@ from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
 TAB = "native-goal-tab"
 THREAD = "native-thread"
 NOW = "2026-10-20T00:00:00Z"
+GOAL_LIKE_ASSISTANT_TEXT = "\n".join(
+    [
+        "Provider-native answer preserves a trailing Goal-like block:",
+        '<goal-status state="complete">VISIBLE_TRAILING_STATUS</goal-status>',
+    ]
+)
 
 
 def origin(url: str) -> tuple[str, str | None, int | None]:
@@ -73,6 +79,52 @@ def notification(sequence: int, goal: dict | None) -> dict:
     }
 
 
+def turn_event(sequence: int, event_type: str, turn_id: str, payload: dict) -> dict:
+    return {
+        "stream_sequence": sequence,
+        "session_id": f"terminal-tab-{TAB}",
+        "tab_id": TAB,
+        "agent_type": "codex",
+        "type": event_type,
+        "run_epoch": 1,
+        "turn_id": turn_id,
+        "message_id": f"{turn_id}:user" if event_type == "turn_started" else None,
+        "call_id": None,
+        "payload": payload,
+        "created_at": NOW,
+        "redacted": False,
+    }
+
+
+def transcript_events() -> list[dict]:
+    turn_id = "native-visible-output-turn"
+    return [
+        turn_event(
+            0,
+            "turn_started",
+            turn_id,
+            {
+                "summary": "Please quote the Goal protocol",
+                "attachments": [],
+                "mode": "default",
+                "metadata": {"origin": "web", "goal_execution_owner": "provider_native"},
+            },
+        ),
+        turn_event(
+            1,
+            "text_delta",
+            turn_id,
+            {"text": GOAL_LIKE_ASSISTANT_TEXT},
+        ),
+        turn_event(
+            2,
+            "turn_completed",
+            turn_id,
+            {"status": "completed", "assistant_text": GOAL_LIKE_ASSISTANT_TEXT},
+        ),
+    ]
+
+
 async def main(browser_run: BrowserRun) -> None:
     base = sys.argv[1].rstrip("/")
     parsed = urlparse(base)
@@ -100,7 +152,7 @@ async def main(browser_run: BrowserRun) -> None:
     }
     current: dict | None = snapshot("active", 200)
     stale: list[dict | None] = []
-    events: list[dict] = []
+    events: list[dict] = transcript_events()
     supports_goals = True
     page = None
 
@@ -209,8 +261,23 @@ async def main(browser_run: BrowserRun) -> None:
             await context.route_web_socket("**/*", block_socket)
             await context.route("**/*", route_all)
             page = await context.new_page()
+            await page.add_init_script("""window.__copiedTurns = [];
+                Object.defineProperty(navigator, 'clipboard', { configurable: true,
+                  value: { writeText: async text => window.__copiedTurns.push(text) } });""")
             page.on("pageerror", lambda error: report["page_errors"].append(str(error)))
             await page.goto(base + f"/?tab={TAB}", wait_until="domcontentloaded")
+            transcript = page.get_by_role("log", name="Chat conversation")
+            await expect(transcript).to_contain_text("VISIBLE_TRAILING_STATUS")
+            first_turn = page.locator(".structured-turn").first
+            await first_turn.hover()
+            await first_turn.get_by_role("button", name="Copy conversation", exact=True).click()
+            copied = await page.evaluate("window.__copiedTurns.at(-1)")
+            assert copied == (
+                "User:\nPlease quote the Goal protocol\n\n"
+                f"Assistant:\n{GOAL_LIKE_ASSISTANT_TEXT}"
+            )
+            report["checks"].append("ordinary/native Goal-like text remains visible and copyable")
+
             bar = page.get_by_role("region", name="Chat Goal status")
             await expect(bar).to_have_attribute("data-status", "active")
             await expect(bar).to_have_attribute("data-execution-owner", "provider_native")

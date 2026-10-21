@@ -99,6 +99,12 @@ class CodexConfiguredSession(ProcessSession):
         self._jsonrpc_id = 0
         self._thread_id: Optional[str] = None
         self._provider_turn_id: Optional[str] = None
+        # True only while one Hub-issued turn/start request is awaiting its RPC
+        # response. An early matching start is ordinary Hub work even if the
+        # previous provider id remains cached after normal completion.
+        self._turn_start_request_pending = False
+        self._turn_start_claimed_while_pending = False
+        self._turn_start_claimed_id_while_pending: Optional[str] = None
         # Stop may encounter a native continuation before the tailer consumes
         # its start. Keep those turns fenced until their execution has stopped.
         self._discard_turn_id: Optional[str] = None
@@ -173,6 +179,11 @@ class CodexConfiguredSession(ProcessSession):
             self._pending_questions = {}
             await super().stop()
             self._native_stop_requires_confirmation = False
+            self._turn_start_request_pending = False
+            self._turn_start_claimed_while_pending = False
+            self._turn_start_claimed_id_while_pending = None
+            self._delivery_uncertain = False
+            self._submission_outcome_uncertain = False
             self._cleanup_images(staged)
             self._cleanup_images(inflight)
 

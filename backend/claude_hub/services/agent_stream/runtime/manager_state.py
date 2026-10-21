@@ -116,7 +116,6 @@ class ManagerState(ABC):
         delivery: str = "normal",
         visible_text: Optional[str] = None,
         turn_metadata: Optional[Dict[str, Any]] = None,
-        strip_goal_protocol: bool = False,
         before_send: Optional[Callable[[], Awaitable[None]]] = None,
         before_delivery: Optional[Callable[[], None]] = None,
     ) -> None:

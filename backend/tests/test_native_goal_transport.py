@@ -7,7 +7,7 @@ import importlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -352,13 +352,74 @@ async def test_native_ids_follow_consumption_and_replayed_retired_starts_are_ign
     assert native._provider_turn_id is None
     await native.read_line()
     assert native._provider_turn_id == "first"
+    assert native.turn_in_flight
+    assert native._native_stop_requires_confirmation
     await native.read_line()
     assert native._provider_turn_id == "first"
+    assert not native._native_stop_requires_confirmation
     await native.read_line()
     assert native._provider_turn_id == "second"
+    assert native._native_stop_requires_confirmation
     await native._handle_notification(_turn_record("turn/started", "first"))
     assert native._notification_queue.empty()
     assert native._provider_turn_id == "second"
+
+
+@pytest.mark.asyncio
+async def test_old_completion_keeps_consumed_successor_confirmation_requirement() -> None:
+    native = CodexNativeSession(_session())
+    native._thread_id, native._provider_turn_id = "main-thread", "first"
+    native._begin_turn()
+    await native._handle_notification(_turn_record("turn/started", "second"))
+    await native.read_line()
+    assert native._provider_turn_id == "second"
+    assert native._native_stop_requires_confirmation
+
+    await native._handle_notification(_turn_record("turn/completed", "first"))
+    await native.read_line()
+    assert native._provider_turn_id == "second"
+    assert native._native_stop_requires_confirmation
+
+
+@pytest.mark.asyncio
+async def test_second_hub_turn_early_start_keeps_ordinary_cancel_fallback() -> None:
+    native = CodexNativeSession(_session())
+    native._thread_id = "main-thread"
+    native._started = True
+    native._process = MagicMock(spec=asyncio.subprocess.Process)
+    starts = iter(("first", "second"))
+
+    async def request(method: str, _params: Dict[str, Any]) -> Dict[str, Any]:
+        if method == "turn/interrupt":
+            raise RuntimeError("interrupt rejected")
+        assert method == "turn/start"
+        turn_id = next(starts)
+        await native._handle_notification(_turn_record("turn/started", turn_id))
+        # Exercise the early-notification ordering: read_line claims this start
+        # before the matching turn/start response reaches _send_text.
+        assert await native.read_line() == _turn_record("turn/started", turn_id)
+        return {"turn": {"id": turn_id}}
+
+    native._send_request = AsyncMock(side_effect=request)  # type: ignore[method-assign]
+    native._begin_turn()
+    await native._send_text("first")
+    assert native._provider_turn_id == "first"
+    assert not native._native_stop_requires_confirmation
+    await native._handle_notification(_turn_record("turn/completed", "first"))
+    await native.read_line()
+    native.acknowledge_turn_complete()
+    assert "first" in native._retired_provider_turn_ids
+
+    native._begin_turn()
+    await native._send_text("second")
+    assert native._provider_turn_id == "second"
+    assert not native._native_stop_requires_confirmation
+
+    restart = AsyncMock()
+    native.restart_for_recovery = restart  # type: ignore[method-assign]
+    await native.cancel_active_turn()
+    restart.assert_awaited_once()
+    assert not native.turn_in_flight
 
 
 @pytest.mark.asyncio
@@ -381,6 +442,7 @@ async def test_turn_start_response_cannot_overwrite_a_consumed_native_continuati
     native._send_request = AsyncMock(side_effect=request)  # type: ignore[method-assign]
     await native._send_text("user input")
     assert native._provider_turn_id == "second"
+    assert native._native_stop_requires_confirmation
 
 
 def test_retired_native_start_guard_is_bounded() -> None:
@@ -490,6 +552,313 @@ async def test_stop_fences_successor_received_during_interrupt_and_pending_read(
         if not reader.done():
             reader.cancel()
         await asyncio.gather(reader, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "ack_error",
+    [RuntimeError("turn/start timed out"), ProviderRpcError("turn/start rejected", code=-32000)],
+    ids=["timeout", "rejected"],
+)
+async def test_claimed_start_ack_failure_keeps_tailer_turn_and_images(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ack_error: Exception
+) -> None:
+    workspace_module = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path)
+    native = CodexNativeSession(_session())
+    native._thread_id = "main-thread"
+    native._started = True
+    native._process = MagicMock(spec=asyncio.subprocess.Process)
+    native._prepare_turn_context = AsyncMock(return_value="")  # type: ignore[method-assign]
+    image_path = tmp_path / "accepted.png"
+
+    def stage_images(_images: List[bytes]) -> None:
+        image_path.write_bytes(b"accepted image")
+        native._staged_images = [image_path]
+
+    native._stage_images = stage_images  # type: ignore[assignment]
+
+    async def request(method: str, _params: Dict[str, Any]) -> Dict[str, Any]:
+        assert method == "turn/start"
+        await native._handle_notification(_turn_record("turn/started", "accepted-turn"))
+        for _ in range(100):
+            if native._provider_turn_id == "accepted-turn":
+                break
+            await asyncio.sleep(0)
+        assert native._provider_turn_id == "accepted-turn"
+        raise ack_error
+
+    native._send_request = AsyncMock(side_effect=request)  # type: ignore[method-assign]
+    tailer = SessionTailer(
+        workspace_id=native.session.workspace_id,
+        session_id=native.session.id,
+        session_getter=lambda: native.session,
+        adapter=CodexJsonlAdapter(),
+        native_transport=native,
+    )
+    await tailer.start()
+    try:
+        with pytest.raises(type(ack_error), match="turn/start"):
+            await tailer.send_message("hello", [b"image"], "hub-turn")
+
+        assert tailer._active_turn_id == "hub-turn"
+        assert native.turn_in_flight
+        assert native._provider_turn_id == "accepted-turn"
+        assert native._native_stop_requires_confirmation
+        assert native._delivery_uncertain
+        assert native._inflight_images == [image_path]
+        assert image_path.exists()
+        with pytest.raises(RuntimeError, match="turn is already in flight"):
+            await native.send_message("duplicate", [])
+        page = await tailer._store.read_since(-1, limit=20, compact=False)
+        assert [event.type for event in page.events] == [AgentStreamEventType.TURN_STARTED]
+
+        await native._handle_notification(_turn_record("turn/completed", "accepted-turn"))
+        for _ in range(100):
+            if tailer._active_turn_id is None:
+                break
+            await asyncio.sleep(0.01)
+        assert tailer._active_turn_id is None
+        assert not native.turn_in_flight
+        assert not native._delivery_uncertain
+        assert native._inflight_images == []
+        assert not image_path.exists()
+        page = await tailer._store.read_since(-1, limit=20, compact=False)
+        assert [event.type for event in page.events] == [
+            AgentStreamEventType.TURN_STARTED,
+            AgentStreamEventType.TURN_COMPLETED,
+        ]
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ack_error", "raises"),
+    [
+        (RuntimeError("turn/start response lost"), False),
+        (ProviderRpcError("turn/start rejected", code=-32000), True),
+    ],
+    ids=["lost-ack", "explicit-rejection"],
+)
+async def test_completion_before_ack_failure_is_the_only_terminal_edge(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    ack_error: Exception,
+    raises: bool,
+) -> None:
+    workspace_module = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path)
+    native = CodexNativeSession(_session())
+    native._thread_id = "main-thread"
+    native._started = True
+    native._process = MagicMock(spec=asyncio.subprocess.Process)
+    native._prepare_turn_context = AsyncMock(return_value="")  # type: ignore[method-assign]
+    image_path = tmp_path / "completed-before-ack.png"
+
+    def stage_images(_images: List[bytes]) -> None:
+        image_path.write_bytes(b"completed image")
+        native._staged_images = [image_path]
+
+    native._stage_images = stage_images  # type: ignore[assignment]
+
+    async def request(_method: str, _params: Dict[str, Any]) -> Dict[str, Any]:
+        await native._handle_notification(_turn_record("turn/started", "accepted-turn"))
+        for _ in range(100):
+            if native._provider_turn_id == "accepted-turn":
+                break
+            await asyncio.sleep(0)
+        await native._handle_notification(_turn_record("turn/completed", "accepted-turn"))
+        for _ in range(100):
+            if "accepted-turn" in native._retired_provider_turn_ids:
+                break
+            await asyncio.sleep(0)
+        assert "accepted-turn" in native._retired_provider_turn_ids
+        raise ack_error
+
+    native._send_request = AsyncMock(side_effect=request)  # type: ignore[method-assign]
+    tailer = SessionTailer(
+        workspace_id=native.session.workspace_id,
+        session_id=native.session.id,
+        session_getter=lambda: native.session,
+        adapter=CodexJsonlAdapter(),
+        native_transport=native,
+    )
+    await tailer.start()
+    try:
+        if raises:
+            with pytest.raises(ProviderRpcError, match="turn/start rejected"):
+                await tailer.send_message("hello", [b"image"], "hub-turn")
+        else:
+            await tailer.send_message("hello", [b"image"], "hub-turn")
+        for _ in range(100):
+            if tailer._active_turn_id is None:
+                break
+            await asyncio.sleep(0.01)
+
+        assert tailer._active_turn_id is None
+        assert not native.turn_in_flight
+        assert not native._native_stop_requires_confirmation
+        assert not native._delivery_uncertain
+        assert not native._submission_outcome_uncertain
+        assert native._inflight_images == []
+        assert not image_path.exists()
+        page = await tailer._store.read_since(-1, limit=20, compact=False)
+        assert [event.type for event in page.events] == [
+            AgentStreamEventType.TURN_STARTED,
+            AgentStreamEventType.TURN_COMPLETED,
+        ]
+        assert page.events[-1].payload["status"] == "completed"
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_claimed_start_cancellation_keeps_images_until_confirmed_stop(tmp_path: Path) -> None:
+    native = CodexNativeSession(_session())
+    native._thread_id = "main-thread"
+    native._started = True
+    native._process = MagicMock(spec=asyncio.subprocess.Process)
+    native._prepare_turn_context = AsyncMock(return_value="")  # type: ignore[method-assign]
+    image_path = tmp_path / "cancelled-ack.png"
+
+    def stage_images(_images: List[bytes]) -> None:
+        image_path.write_bytes(b"accepted image")
+        native._staged_images = [image_path]
+
+    native._stage_images = stage_images  # type: ignore[assignment]
+
+    async def cancelled_start(_method: str, _params: Dict[str, Any]) -> Dict[str, Any]:
+        await native._handle_notification(_turn_record("turn/started", "accepted-turn"))
+        record = await native.read_line()
+        assert record is not None and record["method"] == "turn/started"
+        raise asyncio.CancelledError
+
+    native._send_request = AsyncMock(side_effect=cancelled_start)  # type: ignore[method-assign]
+    with pytest.raises(asyncio.CancelledError):
+        await native.send_message("hello", [b"image"])
+    assert native.turn_in_flight
+    assert native._provider_turn_id == "accepted-turn"
+    assert native._native_stop_requires_confirmation
+    assert native._delivery_uncertain
+    assert native._inflight_images == [image_path]
+    assert image_path.exists()
+
+    async def interrupt(_method: str, _params: Dict[str, Any]) -> Dict[str, Any]:
+        await native._handle_notification(_turn_record("turn/completed", "accepted-turn"))
+        return {}
+
+    native._send_request = AsyncMock(side_effect=interrupt)  # type: ignore[method-assign]
+    await native.cancel_active_turn()
+    assert not native.turn_in_flight
+    assert not native._delivery_uncertain
+    assert native._inflight_images == []
+    assert not image_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_unaccepted_start_error_releases_guard_and_images(tmp_path: Path) -> None:
+    native = CodexNativeSession(_session())
+    native._thread_id = "main-thread"
+    native._started = True
+    native._process = MagicMock(spec=asyncio.subprocess.Process)
+    native._prepare_turn_context = AsyncMock(return_value="")  # type: ignore[method-assign]
+    image_path = tmp_path / "rejected.png"
+
+    def stage_images(_images: List[bytes]) -> None:
+        image_path.write_bytes(b"rejected image")
+        native._staged_images = [image_path]
+
+    native._stage_images = stage_images  # type: ignore[assignment]
+    native._send_request = AsyncMock(side_effect=RuntimeError("turn/start rejected"))  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="turn/start rejected"):
+        await native.send_message("hello", [b"image"])
+    assert not native.turn_in_flight
+    assert not native._delivery_uncertain
+    assert native._inflight_images == []
+    assert not image_path.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interrupt_failure", [False, True], ids=["confirmed", "unconfirmed"])
+async def test_stop_claims_start_at_wait_for_consumer_handoff(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, interrupt_failure: bool
+) -> None:
+    """Stop owns a main start as soon as unmodified read_line returns it."""
+    workspace_module = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path)
+    native = CodexNativeSession(_session())
+    native._thread_id = "main-thread"
+    native._started = True
+    request_params: List[Dict[str, Any]] = []
+
+    async def interrupt(_method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        request_params.append(params)
+        if interrupt_failure:
+            raise RuntimeError("interrupt rejected")
+        await native._handle_notification(_turn_record("turn/completed", "native-turn"))
+        return {}
+
+    native._send_request = AsyncMock(side_effect=interrupt)  # type: ignore[method-assign]
+    tailer = SessionTailer(
+        workspace_id=native.session.workspace_id,
+        session_id=native.session.id,
+        session_getter=lambda: native.session,
+        adapter=CodexJsonlAdapter(),
+        native_transport=native,
+    )
+    loop = asyncio.get_running_loop()
+    original_factory = loop.get_task_factory()
+    read_task_created = asyncio.Event()
+    stop_task_created = asyncio.Event()
+    stop_tasks: List[asyncio.Task[None]] = []
+
+    def task_factory(loop, coroutine, context=None):
+        task = asyncio.Task(coroutine, loop=loop, context=context)
+        code = getattr(coroutine, "cr_code", None)
+        if getattr(code, "co_qualname", "").endswith("CodexProtocolSession.read_line"):
+            read_task_created.set()
+
+            def schedule_stop(_completed):
+                if not stop_tasks:
+                    stop_tasks.append(loop.create_task(native.cancel_active_turn()))
+                    stop_task_created.set()
+
+            # wait_for registers its wake callback after this factory returns.
+            # Stop is therefore scheduled after read_line claims the record but
+            # before the consumer resumes with it.
+            task.add_done_callback(schedule_stop)
+        return task
+
+    loop.set_task_factory(task_factory)
+    try:
+        await tailer.start()
+        await asyncio.wait_for(read_task_created.wait(), timeout=1)
+        await native._handle_notification(_turn_record("turn/started", "native-turn"))
+        await asyncio.wait_for(stop_task_created.wait(), timeout=1)
+        if interrupt_failure:
+            with pytest.raises(RuntimeError, match="stop could not be confirmed"):
+                await asyncio.wait_for(stop_tasks[0], timeout=1)
+        else:
+            await asyncio.wait_for(stop_tasks[0], timeout=1)
+        await asyncio.sleep(0)
+
+        assert request_params == [{"threadId": "main-thread", "turnId": "native-turn"}]
+        assert tailer._active_turn_id is None
+        page = await tailer._store.read_since(-1, limit=10, compact=False)
+        assert not any(event.type == AgentStreamEventType.TURN_STARTED for event in page.events)
+        if interrupt_failure:
+            assert native.turn_in_flight
+            assert native._provider_turn_id == "native-turn"
+            assert native._native_stop_requires_confirmation
+            await native._handle_notification(_turn_record("turn/completed", "native-turn"))
+            await native.cancel_active_turn()
+        assert not native.turn_in_flight
+        assert not native._native_stop_requires_confirmation
+        assert len(request_params) == 1
+    finally:
+        loop.set_task_factory(original_factory)
+        await tailer.stop()
 
 
 @pytest.mark.asyncio

@@ -21,6 +21,14 @@
 - Limit Hub checkpoint/status formatting instructions to their own response.
   One-shot runtime guidance on a fresh/resumed transport also expires historical
   formatting instructions; assistant output remains unchanged and visible.
+- Native Stop claims provider-initiated starts before the stream consumer can
+  yield. Failed or unconfirmed interrupts remain retryable; completion/clear
+  races return a bounded result without cancelling newer work.
+- A start notification followed by a lost or rejected start response preserves
+  the live turn and its images as uncertain until completion or confirmed Stop.
+- Remove historical-Goal and text-shape filters from ordinary output. Rendering,
+  copy and sharing preserve Goal-like text; only a genuine Hub continuation's
+  trusted turn metadata enables backend protocol processing.
 - Providers without native Goal support retain Hub management. Temporary errors
   do not trigger fallback, and native absence does not rewrite terminal history.
 
