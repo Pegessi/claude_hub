@@ -122,6 +122,15 @@ class ManagerStatusMixin(ManagerHost):
                 last_changed_at,
             )
 
+        # Current Codex keeps "? for shortcuts" and its composer visible even
+        # during a turn. Its explicit live indicator must win over that chrome;
+        # the prompt alone is not evidence of idle. Preserve attention/shell
+        # precedence and the frozen-frame guard.
+        if process.agent_type == AgentType.CODEX and codex_output_is_working(
+            output, allow_resized=True
+        ):
+            return working_or_stale()
+
         # Claude Code / Codex idle hints ("? for shortcuts", "/ for commands")
         # on the bottom lines also mean the agent is idle and waiting for
         # input. Like the shell prompt, these take priority over working
@@ -135,19 +144,8 @@ class ManagerStatusMixin(ManagerHost):
                     last_changed_at,
                 )
 
-        # Codex (GPT-5.5) and its TraeX fork render the same working indicator
-        # ("⠞ Working  4.03k tokens" / "• Working (3s • esc to interrupt)")
-        # ABOVE a tall persistent bottom chrome — the ›/❯ composer, a growing
-        # "Queued follow-up inputs" panel, and a model footer — so the indicator
-        # falls outside the bottom-10 window scanned below. Detect it against
-        # the wider frame using the shared codex-family marker set. Runs after
-        # the ATTENTION and idle-prompt checks so a selection prompt or idle
-        # hint still wins, and through working_or_stale() so the frozen-frame
-        # guard still applies.
-        if process.agent_type in {
-            AgentType.CODEX,
-            AgentType.TRAEX,
-        } and codex_output_is_working(output):
+        # Preserve TraeX's existing idle-hint precedence.
+        if process.agent_type == AgentType.TRAEX and codex_output_is_working(output):
             return working_or_stale()
 
         for pattern in _WORKING_TAIL_PATTERNS:

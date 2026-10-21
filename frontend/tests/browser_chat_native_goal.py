@@ -218,6 +218,8 @@ async def main(browser_run: BrowserRun) -> None:
                         "agent_type": "codex",
                         "supports_mode_switch": False,
                     }
+                elif request.method == "GET" and path == f"/api/workspaces/tabs/{TAB}/messages":
+                    body = {"messages": []}
                 elif path.endswith("/events") or path.endswith("/wait"):
                     if path.endswith("/wait"):
                         await asyncio.sleep(0.1)

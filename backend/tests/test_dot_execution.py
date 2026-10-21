@@ -866,6 +866,6 @@ async def test_deleted_dot_tab_pending_run_blocks_migration_until_settled(
     switched = apply(setup, "codex")
     assert switched.status_code == 200, switched.text
     new_id = switched.json()["tab_id"]
-    await workspace_manager._drain_scheduled_chat_tab(old_id)
+    await workspace_manager._drain_scheduled_chat_runs(old_id)
     assert workspace_manager.scheduled_tasks[wake_id].tab_id == new_id
     assert workspace_manager.scheduled_tasks[wake_id].enabled

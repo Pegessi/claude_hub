@@ -538,10 +538,11 @@ class CodexConfiguredSession(ProcessSession):
             await self._discover_modes()
         if self._provider_model_options is not None:
             self._available_models = self._provider_model_options
-        elif not self._model_discovery_attempted:
+        else:
             await self._discover_models()
+        self._metadata_cacheable = self._provider_model_options is not None
 
-    async def _discover_models(self) -> None:
+    async def _discover_models(self) -> bool:
         """Load the app-server's model-specific reasoning capabilities."""
 
         pages: List[Dict[str, Any]] = []
@@ -555,16 +556,15 @@ class CodexConfiguredSession(ProcessSession):
                 self._runtime.logger().warning(
                     "%s model/list unavailable; using static fallback", self.adapter_id
                 )
-                return
+                return False
             if not isinstance(response, dict) or not isinstance(response.get("data"), list):
-                return
+                return False
             pages.append(response)
             next_cursor = response.get("nextCursor")
             if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
                 break
             seen_cursors.add(next_cursor)
             cursor = next_cursor
-        self._model_discovery_attempted = True
         options: List[StreamModelOption] = []
         seen: set[str] = set()
         data = [item for page in pages for item in page["data"]]
@@ -614,8 +614,11 @@ class CodexConfiguredSession(ProcessSession):
                 )
             )
         if options:
+            self._model_discovery_attempted = True
             self._provider_model_options = options
             self._available_models = options
+            return True
+        return False
 
     def available_modes(self) -> List[StreamModeOption]:
         options = [self._runtime.default_mode()]

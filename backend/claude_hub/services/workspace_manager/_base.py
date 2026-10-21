@@ -10,30 +10,45 @@ from ...models import AgentReportState, AgentType
 from .contracts.runtime import _RuntimeHostContract
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Mapping
+    from collections.abc import AsyncIterator, Callable
     from contextvars import ContextVar
-    from typing import Any, Literal
+    from typing import Any
 
-    from ...models import ChatMode, FeedbackSummaryMode, TaskCleanupResult
-    from ...models.agent_stream import AgentStreamEvent, AgentStreamEventType
-    from ...models.schemas import (
-        TaskExecutionControl,
-        TaskExecutionHandoffRequest,
-        TaskExecutionMutationResult,
-        TaskExecutionReference,
-        TaskManualProgressRequest,
-        TaskProgressRequest,
-        TaskProgressSnapshot,
-        TaskProgressState,
-        TaskRuntimeObservation,
-    )
-    from ...models.task_mailbox import TaskActorRole, TaskEvent, TaskEventType
-    from .. import managed_chat
-    from ..feedback_automation import FeedbackAutomationSettings, FeedbackAutomationStore
+    from ..chat_message_inbox import ChatMessageInbox
     from ..task_mailbox import TaskMailbox
     from ._attachments import _PreparedWorkspaceAttachment
-    from ._constants import *  # noqa: F403
-    from ._task_updates import _TaskEditPlan
+    from ._constants import (
+        AgentReport,
+        AgentRuntimeStatus,
+        AutonomousRun,
+        AutonomousRunPhase,
+        ContinueTaskRequest,
+        EnsureWorkspaceAgentRequest,
+        ExecutionTarget,
+        FeedbackLessonStore,
+        FeedbackSummaryRequest,
+        FeedbackSummaryRun,
+        ManagedSession,
+        ManagedSessionStatus,
+        Optional,
+        Path,
+        ScheduledChatDispatch,
+        ScheduledChatLiveness,
+        ScheduledChatReadiness,
+        ScheduledTask,
+        ScheduledTaskRun,
+        SessionKind,
+        StartTaskRequest,
+        Workspace,
+        WorkspaceAttachment,
+        WorkspaceAttachmentCreate,
+        WorkspaceMarkdownDocument,
+        WorkspaceTask,
+        WorkspaceTaskCreate,
+        WorkspaceTaskStatus,
+        asyncio,
+        datetime,
+    )
 
 
 class _WorkspaceManagerBase(_RuntimeHostContract):
@@ -47,14 +62,14 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     _pump_locks: dict[str, asyncio.Lock]
     _report_intake_committed: set[str]
     _report_intake_locks: dict[str, asyncio.Lock]
-    _sched_chat_redrain_tasks: dict[str, asyncio.Task[None]]
     _sched_fire_locks: dict[str, asyncio.Lock]
-    _sched_reap_checked_at: dict[str, datetime]
+    _chat_delivery_getter: Callable[[], ChatMessageInbox] | None
+    _chat_delivery_instance: ChatMessageInbox | None
     _scheduled_chat_dispatch: ScheduledChatDispatch | None
     _scheduled_chat_liveness: ScheduledChatLiveness | None
     _scheduled_chat_readiness: ScheduledChatReadiness | None
+    _scheduled_legacy_run_ids: set[str]
     _scheduled_chat_recovery_pending: bool
-    _scheduled_chat_tab_locks: dict[str, asyncio.Lock]
     _task_activity_cursors: dict[str, tuple[int, int]]
     _task_execution_operations: dict[str, int]
     _workspace_mutation_held: ContextVar[tuple[str, asyncio.Task[Any] | None] | None]
@@ -687,6 +702,9 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
 
     @abstractmethod
     async def _reap_stuck_reviews(self, workspace_id: str) -> int: ...
+
+    @abstractmethod
+    def _review_submission_block(self, task: WorkspaceTask, reviewer: ManagedSession) -> str: ...
 
     @abstractmethod
     def _first_available_reviewer(

@@ -204,6 +204,12 @@ async def main(browser_run: BrowserRun) -> None:
             requests.append((request.method, path))
             if path == "/api/auth/check":
                 body = {"auth_required": False, "user": None}
+            elif (
+                request.method == "GET"
+                and path.startswith("/api/workspaces/tabs/")
+                and path.endswith("/messages")
+            ):
+                body = {"messages": []}
             elif path == "/api/tabs":
                 body = [
                     {

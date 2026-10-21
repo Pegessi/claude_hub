@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "92b07ff4e6a14ae3d976d3f6c118d2c50dac5bd6",
+  "parents": [
+    "bac48c3bd6c42ba8ecc02f55855cb54cc1ab26ab",
+    "1c947fad333235d99937f815fa4755a85290ec74"
+  ],
+  "base": "34dc7c8d1c1c05540af2cceb2012e71c1471670f",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "791340bb05e721bc4a61b1f88aa8d474c33a4030",
+  "reconstructed_tree": "e2ee5fe51527365fa9db831c6d2d8cf318cb98ae",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "15feb715e271878019e34d3351f223b9281b920e"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "fe31da38b77ba853e37182e4454c31402df688aa"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "730af69c0ae4885962f0b8b52d84b7b402beb5dd"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a997d6ea8efaf631d9b40c46072a3666ab0a7016"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "7db0857198720b1466b4f8ba7154d6c3f5c8d9e7"
+      },
+      "reason": "Retain all existing main release entries and the complete incoming capability-cache entry, placing the newly integrated feature first. No behavior or source code is changed by this conflict resolution.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

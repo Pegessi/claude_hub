@@ -78,16 +78,19 @@ test('explicit retry replaces the failed backend transport before hydration', ()
 test('mode updates are scoped to the active stream and replace capabilities only after success', () => {
   const modeIndex = composable.indexOf('async function setMode(')
   const putIndex = composable.indexOf("method: 'PUT'", modeIndex)
-  const responseIndex = composable.indexOf('const nextCapabilities', putIndex)
-  const assignmentIndex = composable.indexOf('capabilities.value = nextCapabilities', responseIndex)
+  const responseIndex = composable.indexOf('return (await res.json())', putIndex)
+  const updateIndex = composable.indexOf('async function updateCapabilities(')
+  const requestIndex = composable.indexOf('await request(streamPath, controller.signal)', updateIndex)
+  const assignmentIndex = composable.indexOf('capabilities.value = nextCapabilities', requestIndex)
 
   assert.ok(modeIndex >= 0)
   assert.ok(putIndex > modeIndex)
   assert.ok(responseIndex > putIndex)
-  assert.ok(assignmentIndex > responseIndex)
+  assert.ok(assignmentIndex > requestIndex)
+  assert.match(composable.slice(modeIndex, responseIndex), /await updateCapabilities/)
   assert.match(composable.slice(modeIndex, responseIndex), /`\$\{streamPath\}\/mode`/)
   assert.match(composable.slice(modeIndex, responseIndex), /JSON\.stringify\(\{ mode \}\)/)
-  assert.match(composable.slice(modeIndex, assignmentIndex), /currentSessionId !== sourceId/)
+  assert.match(composable.slice(requestIndex, assignmentIndex), /currentSessionId !== sourceId/)
 })
 
 test('initial hydration uses bounded compacted pages instead of replaying every raw delta', () => {
@@ -101,12 +104,14 @@ test('a remounted Chat restores cached history and reconciles from its cursor', 
   const startIndex = composable.indexOf('async function start(')
   const cacheIndex = composable.indexOf('agentStreamHistoryCache.get(streamPath)', startIndex)
   const reconcileIndex = composable.indexOf('let since = sequenceBuffer.cursor', cacheIndex)
-  const capabilitiesIndex = composable.indexOf('await fetchCapabilities(', cacheIndex)
+  const capabilitiesIndex = composable.indexOf('const prepared =', cacheIndex)
 
   assert.ok(startIndex >= 0)
   assert.ok(cacheIndex > startIndex)
   assert.ok(capabilitiesIndex > cacheIndex)
   assert.ok(reconcileIndex > capabilitiesIndex)
+  assert.ok(composable.indexOf('await prepared', reconcileIndex) > reconcileIndex)
+  assert.match(composable.slice(reconcileIndex, composable.indexOf('await prepared', reconcileIndex)), /historyReady\.value = true/)
   assert.match(
     composable.slice(cacheIndex, capabilitiesIndex),
     /connectionState\.value = cached \? 'reconciling' : 'hydrating'/,

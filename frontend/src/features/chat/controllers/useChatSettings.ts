@@ -89,6 +89,7 @@ export function useChatSettings(deps: Dependencies) {
   }
 
   async function selectModelAndEffort(model: StreamModelOption, effort: string) {
+    if (deps.modeInteractionLocked.value || isUpdatingModel.value || isUpdatingReasoningEffort.value) return
     closeModelMenu(true)
     const key = modelEnvVar.value
     if (!key) return
