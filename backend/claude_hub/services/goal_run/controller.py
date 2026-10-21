@@ -184,14 +184,6 @@ class GoalRunController:
     def has_goal_history(self, tab_id: str) -> bool:
         return self.store.has_goal_history(tab_id)
 
-    def uses_hub_goal_protocol(self, tab_id: str) -> bool:
-        latest = self.store.latest_for_tab(tab_id)
-        return (
-            not self.native.owns_tab(tab_id)
-            and latest is not None
-            and latest.execution_owner == "hub_managed"
-        )
-
     def replay_create(self, tab_id: str, request: GoalRunCreate) -> GoalRun | None:
         return self.store.replay_create(tab_id, request)
 

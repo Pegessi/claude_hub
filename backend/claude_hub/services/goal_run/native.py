@@ -52,11 +52,6 @@ class NativeGoalCoordinator:
         self.store = store
         self.resolver: NativeGoalResolver | None = None
         self._locks: dict[str, asyncio.Lock] = {}
-        self._native_tabs: set[str] = set()
-
-    def owns_tab(self, tab_id: str) -> bool:
-        """Return the last confirmed API owner, including supported absence."""
-        return tab_id in self._native_tabs
 
     def lock(self, tab_id: str) -> asyncio.Lock:
         return self._locks.setdefault(tab_id, asyncio.Lock())
@@ -80,10 +75,6 @@ class NativeGoalCoordinator:
             )
         ):
             raise NativeGoalError("The existing Goal requires its native provider API")
-        if connection is None:
-            self._native_tabs.discard(tab_id)
-        else:
-            self._native_tabs.add(tab_id)
         return connection
 
     def _put(self, goal: GoalRun) -> GoalRun:

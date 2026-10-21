@@ -69,3 +69,12 @@ test('buildTabShareText URL-encodes the tab id in the events URL', () => {
   const text = buildTabShareText('a b&c')
   assert.match(text, /https:\/\/hub.example.com\/api\/workspaces\/tabs\/a%20b%26c\/stream\/events/)
 })
+
+test('share text delegates transcript retrieval to raw stream events without filtering output', () => {
+  globalThis.window = {
+    location: { origin: 'https://hub.example.com', pathname: '/app/' },
+  }
+  const text = buildTabShareText('native-goal-tab')
+  assert.match(text, /\/api\/workspaces\/tabs\/native-goal-tab\/stream\/events\?since_sequence=-1&limit=5000/)
+  assert.doesNotMatch(text, /goal-status|goal-checkpoint|saniti[sz]e|strip/i)
+})

@@ -776,7 +776,6 @@ async def test_external_goal_input_does_not_consume_pending_question(
         lambda: SimpleNamespace(
             current=lambda _tab_id: current,
             refresh_current=AsyncMock(return_value=current),
-            uses_hub_goal_protocol=lambda _tab_id: True,
         ),
     )
     monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab_id: object())

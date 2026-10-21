@@ -179,7 +179,6 @@ class TailerManager(EditResendMixin):
         delivery: str = "normal",
         visible_text: Optional[str] = None,
         turn_metadata: Optional[Dict[str, Any]] = None,
-        strip_goal_protocol: bool = False,
         before_send: Optional[Callable[[], Awaitable[None]]] = None,
         before_delivery: Optional[Callable[[], None]] = None,
     ) -> None:
@@ -203,7 +202,6 @@ class TailerManager(EditResendMixin):
             delivery=delivery,
             visible_text=visible_text,
             turn_metadata=turn_metadata,
-            strip_goal_protocol=strip_goal_protocol,
             before_send=before_send,
             before_delivery=before_delivery,
         )

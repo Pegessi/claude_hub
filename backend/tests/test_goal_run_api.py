@@ -556,22 +556,28 @@ def test_failed_goal_steer_reports_error_and_keeps_input(goal_client, monkeypatc
     assert current.pending_input == "Keep me"
 
 
-def test_manual_turn_in_goal_chat_strips_goal_protocol(goal_client, monkeypatch, tmp_path):
+def test_only_hub_goal_turns_enable_goal_protocol_handling(goal_client, monkeypatch, tmp_path):
     manager, sent, _ = _steerable_goal(monkeypatch, tmp_path)
     url = "/api/workspaces/tabs/tab-1/stream/send"
     assert goal_client.post(url, json={"text": "hi", "client_turn_id": "before"}).status_code == 200
-    assert sent[-1][1]["strip_goal_protocol"] is False
+    assert sent[-1][1]["turn_metadata"] == {"origin": "web"}
     goal = goal_client.post(
         "/api/tabs/tab-1/goal",
         json={"objective": "Finish it", "client_request_id": "create"},
     ).json()
+    assert sent[-1][1]["turn_metadata"] == {"origin": "goal", "protocol": "goal-continuation-v1"}
     goal_client.post(f"/api/goals/{goal['id']}/pause", json={"client_request_id": "pause"})
+    assert (
+        goal_client.post(url, json={"text": "while paused", "client_turn_id": "paused"}).status_code
+        == 200
+    )
+    assert sent[-1][1]["turn_metadata"] == {"origin": "web"}
     goal_client.post(f"/api/goals/{goal['id']}/clear", json={"client_request_id": "clear"})
     assert (
         goal_client.post(url, json={"text": "next", "client_turn_id": "after"}).status_code == 200
     )
     assert sent[-1][0].delivery == "normal"
-    assert sent[-1][1]["strip_goal_protocol"] is True
+    assert sent[-1][1]["turn_metadata"] == {"origin": "web"}
 
 
 @pytest.mark.asyncio

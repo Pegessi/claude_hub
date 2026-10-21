@@ -48,21 +48,6 @@ test('legacy retry-stop routing is unchanged without native pending interruption
   }), 'clear')
 })
 
-test('only a trailing Goal control envelope is hidden from assistant text', () => {
-  const envelope = '\n<goal-checkpoint>\n{"remaining":[]}\n</goal-checkpoint>\n<goal-status state="complete">done</goal-status>\n'
-  assert.equal(policy.stripTrailingGoalProtocol(`Done.${envelope}`), 'Done.')
-  assert.equal(
-    policy.stripTrailingGoalProtocol('Done.\n<goal-status state="continue">next</goal-status>'),
-    'Done.',
-  )
-  const prose = 'Use `<goal-checkpoint>` then </goal-checkpoint> in docs.'
-  assert.equal(policy.stripTrailingGoalProtocol(`${prose}${envelope}`), prose)
-  const quoted = 'Example: <goal-status state="complete">done</goal-status> appears mid-answer.'
-  assert.equal(policy.stripTrailingGoalProtocol(quoted), quoted)
-  const opener = 'Parse <goal-status state="complete"> openers carefully.'
-  assert.equal(policy.stripTrailingGoalProtocol(`${opener}${envelope}`), opener)
-  assert.equal(policy.stripTrailingGoalProtocol('Plain answer'), 'Plain answer')
-})
 
 test('terminal and display states cover the public Goal contract', () => {
   assert.equal(policy.isGoalTerminal('complete'), true)

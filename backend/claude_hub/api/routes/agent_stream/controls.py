@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 from claude_hub.api.routes.agent_stream.bindings import AgentStreamRouteBindings
 from claude_hub.api.routes.agent_stream.dispatch import require_tab_input_available
 from claude_hub.auth.dependencies import get_current_user
-from claude_hub.models import TERMINAL_GOAL_STATUSES, ManagedSession, User
+from claude_hub.models import TERMINAL_GOAL_STATUSES, GoalRunStatus, ManagedSession, User
 from claude_hub.services.agent_stream import StructuredSourceUnavailable, TailerManager
 
 CHAT_ERROR_REASON_HEADER = "X-Claude-Hub-Error-Reason"
@@ -139,7 +139,11 @@ def register_control_routes(
         payload: Optional[StreamCancelRequest] = None,
         current_user: User = Depends(get_current_user),
     ) -> Dict[str, Any]:
-        from claude_hub.services.goal_run import get_goal_admission_lock, get_goal_manager
+        from claude_hub.services.goal_run import (
+            GoalPolicyError,
+            get_goal_admission_lock,
+            get_goal_manager,
+        )
         from claude_hub.services.goal_run.native import NativeGoalError
         from claude_hub.services.restart_continuation import cancel_pending_continuation
 
@@ -163,16 +167,45 @@ def register_control_routes(
                     if goal is not None and goal.execution_owner == "provider_native"
                     else None
                 )
+                # Native continuation may be queued before its start is read,
+                # or claimed before the consumer assigns a Hub ID. Pause the
+                # active Goal even if the transport guard has not risen yet.
+                native_goal_without_turn = (
+                    goal is not None
+                    and goal.execution_owner == "provider_native"
+                    and active is None
+                    and (goal.status == GoalRunStatus.ACTIVE or goal.provider_stop_pending)
+                )
                 if (
                     goal is not None
                     and goal.execution_owner == "provider_native"
-                    and active is not None
-                    and active in goal.provider_owned_turn_ids
+                    and (
+                        (active is not None and active in goal.provider_owned_turn_ids)
+                        or native_goal_without_turn
+                    )
                     and (goal.status not in TERMINAL_GOAL_STATUSES or goal.provider_stop_pending)
                 ):
                     if expected is not None and active != expected:
                         return {"ok": True, "cancelled": False, "outcome": "already_terminal"}
-                    paused = await goal_manager.pause(goal.id, f"stop:{uuid4()}")
+                    try:
+                        paused = await goal_manager.pause(goal.id, f"stop:{uuid4()}")
+                    except GoalPolicyError as exc:
+                        # The provider can finish/clear its Goal between our
+                        # first snapshot and pause. Stop only the originally
+                        # observed turn; a replacement Goal needs a fresh action.
+                        latest = await goal_manager.refresh_current(tab_id)
+                        if active is None or (
+                            latest is not None
+                            and (
+                                latest.id != goal.id or latest.status not in TERMINAL_GOAL_STATUSES
+                            )
+                        ):
+                            raise HTTPException(status_code=409, detail=str(exc)) from exc
+                        if await manager.active_turn_id(session) != active:
+                            return {"ok": True, "cancelled": False, "outcome": "already_terminal"}
+                        return await bindings.cancel_native_turn(
+                            session, manager, StreamCancelRequest(expected_turn_id=active)
+                        )
                     if paused.dispatch_state.value != "idle":
                         raise NativeGoalError(
                             paused.status_message or "Provider Goal stop is unconfirmed"

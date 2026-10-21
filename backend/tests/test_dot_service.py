@@ -1093,7 +1093,6 @@ def _install_tab_dispatch(monkeypatch: MonkeyPatch, manager: Any, calls: list[An
         lambda: SimpleNamespace(
             current=lambda tab_id: None,
             refresh_current=AsyncMock(return_value=None),
-            uses_hub_goal_protocol=lambda tab_id: False,
             has_goal_history=lambda tab_id: False,
         ),
     )

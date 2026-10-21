@@ -30,8 +30,8 @@ previous runtime terminal state.
   unrelated or cleared generations do not authorize mutation of a newer Goal.
   Confirmed absence is recorded separately from a terminal outcome: a later
   replacement receives a new local identity even if Codex reuses a second-level
-  creation timestamp. Supported absence still disables the Hub protocol when
-  the last historical Goal was Hub-managed.
+  creation timestamp. Protocol processing depends only on the current trusted
+  Hub continuation metadata, never the existence of a historical Goal.
 - Native user controls include explicit `origin: user`. Pause/Stop first pause
   native continuation, then interrupt its Goal-owned turn. Complete and Clear
   also stop Goal-owned execution before reporting confirmation. Failed stop
@@ -69,6 +69,39 @@ A fresh/resumed transport receives this rule with its first text input. An
 image-only first input defers guidance as before. Already-running transports
 that received older guidance require their normal restart/rotation before this
 rule is sent; the implementation does not modify those live conversations.
+
+## Cross-validation follow-up
+
+The initial `a07826b` candidate passed the standard checks but failed independent
+cross-validation. Those earlier green results do not validate this repair.
+
+- A real `asyncio.wait_for(read_line())` boundary let Stop report success before
+  the consumer claimed a provider-started turn. `read_line` now claims the guard
+  and provider ID together; strict Stop requires completion confirmation and
+  cannot report success through the ordinary kill/restart fallback.
+- Retired provider IDs must not turn a later explicitly requested Hub turn into
+  a native successor. Early notifications before a Hub `turn/start` ACK retain
+  ordinary cancellation behavior when the ACK confirms the same turn.
+- If the start was observed but the ACK failed, delivery remains uncertain.
+  The provider guard, ID, image files and durable Hub turn remain owned until
+  completion or confirmed Stop. The error remains visible; no failed completion
+  or successful delivery is invented, including for explicit RPC rejection.
+- If Goal state completes, disappears or changes while Stop is being admitted,
+  the route re-reads it and only targets the originally observed turn. A changed
+  Goal or an unknown Hub turn identity requires a fresh action (409), not a 500
+  or an untargeted cancellation of newer work. A claimed active native turn
+  without a Hub ID is still stopped through the native Goal path when the user
+  did not specify an obsolete turn ID.
+- Remove the backend's history-based `strip_goal_protocol` option and the
+  frontend's unconditional trailing-envelope heuristic. Ordinary and native
+  output stays intact in rendered text, copy and sharing. Actual Hub continuation
+  turns keep their existing protocol handling, selected by trusted metadata.
+
+Regressions include the original read/consumer counterexample, rejected Stop and
+retry, two manual Hub sends with early notifications, accepted-start/ACK failure
+with image ownership and durable completion, and completed/cleared/replaced Goal
+races. API fixtures do not run the application lifespan: doing so in these
+mock-runtime tests leaked its shutdown flag into later stream tests.
 
 ## Validation
 

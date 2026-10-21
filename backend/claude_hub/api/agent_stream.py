@@ -704,7 +704,6 @@ async def _send_to_native(
     *,
     visible_text: Optional[str] = None,
     turn_metadata: Optional[Dict[str, Any]] = None,
-    strip_goal_protocol: bool = False,
 ) -> None:
     await dispatch.send_to_native(
         session,
@@ -713,7 +712,6 @@ async def _send_to_native(
         _agent_stream_bindings,
         visible_text=visible_text,
         turn_metadata=turn_metadata,
-        strip_goal_protocol=strip_goal_protocol,
     )
 
 

@@ -59,6 +59,8 @@ class CodexProtocolSession(CodexConfiguredSession):
         finally:
             self._cancel_state = None
         self._native_stop_requires_confirmation = False
+        self._delivery_uncertain = False
+        self._submission_outcome_uncertain = False
         self._pending_questions.clear()
         self._clear_staged_images()
         inflight = self._inflight_images
@@ -222,11 +224,25 @@ class CodexProtocolSession(CodexConfiguredSession):
         # handler would see an empty list and the temp files would leak.
         self._inflight_images = image_paths
         previous_turn_id = self._provider_turn_id
+        self._turn_start_request_pending = True
+        self._turn_start_claimed_while_pending = False
+        self._turn_start_claimed_id_while_pending = None
         try:
             self.check_delivery_admission()
             response = await self._send_request("turn/start", params)
             turn = response.get("turn") if isinstance(response, dict) else None
             turn_id = turn.get("id") if isinstance(turn, dict) else None
+            claimed_turn_id = self._provider_turn_id
+            if (
+                claimed_turn_id is not None
+                and claimed_turn_id != previous_turn_id
+                and turn_id is not None
+                and claimed_turn_id != turn_id
+            ):
+                # The start consumed while this request was pending belongs to a
+                # different provider continuation. Preserve it and require its
+                # own confirmed Stop rather than treating it as this Hub turn.
+                self._native_stop_requires_confirmation = True
             # A queued native continuation can already have been consumed
             # before this RPC response. Do not overwrite its newer turn ID.
             if self._provider_turn_id == previous_turn_id and (
@@ -237,14 +253,57 @@ class CodexProtocolSession(CodexConfiguredSession):
                 )
             ):
                 self._provider_turn_id = turn_id
-        except Exception:
-            # The turn never started (or the server rejected it). The image
-            # temp files are still ours to clean up; the turn/completed
-            # handler will not run for a turn that never started.
-            inflight = self._inflight_images
-            self._inflight_images = []
-            self._cleanup_images(inflight)
+            self._delivery_uncertain = False
+        except asyncio.CancelledError:
+            claimed_id = self._turn_start_claimed_id_while_pending
+            claimed_completed = (
+                claimed_id is not None and claimed_id in self._retired_provider_turn_ids
+            )
+            if self._turn_start_claimed_while_pending and not claimed_completed:
+                self._native_stop_requires_confirmation = True
+                self._delivery_uncertain = True
+            elif not self._turn_start_claimed_while_pending:
+                inflight = self._inflight_images
+                self._inflight_images = []
+                self._cleanup_images(inflight)
+                self._end_turn()
             raise
+        except Exception as exc:
+            claimed_id = self._turn_start_claimed_id_while_pending
+            claimed_completed = (
+                claimed_id is not None and claimed_id in self._retired_provider_turn_ids
+            )
+            if self._turn_start_claimed_while_pending and claimed_completed:
+                # Matching provider completion is stronger than an ambiguous
+                # lost ACK. A definite rejection still reaches the caller, but
+                # Input must not add a second terminal edge for the completed
+                # execution it could not correlate to this request.
+                self._native_stop_requires_confirmation = False
+                self._delivery_uncertain = False
+                self._last_error = None
+                if isinstance(exc, ProviderRpcError):
+                    self._submission_outcome_uncertain = True
+                    raise
+                return
+            if self._turn_start_claimed_while_pending:
+                # The server exposed a live main turn but did not acknowledge
+                # this request. It may be this Hub turn or unrelated native
+                # work, so retain ownership and surface an uncertain failure;
+                # only matching completion or confirmed Stop may release it.
+                self._native_stop_requires_confirmation = True
+                self._delivery_uncertain = True
+                self._last_error = None
+            else:
+                # No provider start was observed. The turn never crossed the
+                # accepted boundary, so its image files remain ours to delete.
+                inflight = self._inflight_images
+                self._inflight_images = []
+                self._cleanup_images(inflight)
+            raise
+        finally:
+            self._turn_start_request_pending = False
+            self._turn_start_claimed_while_pending = False
+            self._turn_start_claimed_id_while_pending = None
 
     def _stage_images(self, images: List[bytes]) -> None:
         """Stage images to temp files for the next turn/start as localImage.
@@ -514,13 +573,43 @@ class CodexProtocolSession(CodexConfiguredSession):
         )
         if not is_child:
             if record.get("method") == "turn/started":
-                # Track the consumed turn, not a later start already queued by
-                # stdout while the tailer still owns the preceding turn.
+                # Claim the consumed start before handing it to the tailer. Stop
+                # can run as soon as this read_line task completes; keeping the
+                # provider id and guard in one synchronous handoff prevents that
+                # boundary from looking idle while the provider is already live.
                 turn_id = self._notification_turn_id(record)
-                if turn_id:
-                    self._provider_turn_id = turn_id
+                previous_turn_id = self._provider_turn_id
+                previous_retired = previous_turn_id in self._retired_provider_turn_ids
+                provider_initiated = not self._turn_in_flight
+                successor = (
+                    previous_turn_id is not None
+                    and turn_id != previous_turn_id
+                    and not (previous_retired and self._turn_start_request_pending)
+                )
+                self._provider_turn_id = turn_id
+                if self._turn_start_request_pending:
+                    self._turn_start_claimed_while_pending = True
+                    self._turn_start_claimed_id_while_pending = turn_id
+                if provider_initiated or successor:
+                    # A native continuation may outlive a failed interrupt. It
+                    # cannot use the ordinary kill/restart fallback, which could
+                    # resume the same provider-owned execution and report a false
+                    # successful Stop.
+                    self._native_stop_requires_confirmation = True
+                if provider_initiated:
+                    self._begin_turn()
             elif record.get("method") == "turn/completed":
+                completed_turn_id = self._notification_turn_id(record)
                 self._remember_retired_turn(record)
+                # A normally consumed completion closes its own provider-start
+                # confirmation requirement. An older completion arriving after
+                # a successor start must not downgrade that successor to the
+                # ordinary kill/restart cancellation path. Completions captured
+                # by Stop never reach this branch; the cancelling operation
+                # clears the flag only after its own confirmation succeeds.
+                if completed_turn_id == self._provider_turn_id:
+                    self._native_stop_requires_confirmation = False
+                    self._delivery_uncertain = False
         return record
 
     @staticmethod
