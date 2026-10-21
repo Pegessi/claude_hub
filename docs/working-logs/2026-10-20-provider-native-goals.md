@@ -126,6 +126,29 @@ Main's history-first hydration, capability metadata caching, retryable model
 catalog discovery and `metadata_cacheable` fields are preserved. A cached Goal
 owner is only a capability hint; the Goal API projection remains authoritative.
 
+## Final acceptance record
+
+- Fixed candidate-side merge: `08b5110b0b599b2cf6e99cd16f6cd7597b867fcf`;
+  product/test tree: `7ede49d99f2b0849ebac0a940f2feda387dcd16a`.
+- Strict standard checks passed: 5164 backend tests, 10 conditional skips,
+  1135 frontend tests, backend types for 570 files, formatting, frontend
+  lint/types/build and documentation checks. The clean-tree provenance skip is
+  checked again after the documentation commit.
+- All 15 shared browser-mock scenarios passed. After narrowing the added inbox
+  mock to its exact GET path, the native Goal scenario and formatting check
+  passed again; no product files changed. The first 14/15 run is retained as
+  fixture-drift evidence, not reported as a product failure or a complete pass.
+- Terminal HMR: 12 tests passed. Its first invocation exceeded the command
+  timeout; the bounded retry completed with a larger command timeout.
+- Independent runtime and integration reviews approved the fixed tree. The
+  seven manual merge decisions are recorded in
+  `2026-10-21-native-goal-merge-decisions.json` and checked against the fixed merge.
+
+Browser checks use the real SPA with mocked APIs, not the shared Hub or real
+models. Owned launchers and ports were checked after cleanup. The browser
+runner's generic report does not certify every possible descendant process.
+No primary-main merge, push, deployment or shared-service restart was performed.
+
 ## Validation
 
 Installed Codex 0.163.0 schemas and feature descriptions were generated offline
