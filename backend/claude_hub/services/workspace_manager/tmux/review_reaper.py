@@ -1,10 +1,33 @@
 """Orphan tab pruning and stuck-review recovery."""
 
-from claude_hub.services.workspace_manager._base import _WorkspaceManagerBase
-from claude_hub.services.workspace_manager._constants import *  # noqa: F401,F403
+from claude_hub.services.workspace_manager._constants import (
+    ORPHAN_TAB_PRUNE_GRACE_SECONDS,
+    REVIEW_REAPER_DISPATCH_GRACE_SECONDS,
+    AgentReport,
+    AgentReportState,
+    AgentRuntimeStatus,
+    ExecutionTarget,
+    GoalPacketStatus,
+    ManagedSession,
+    ManagedSessionStatus,
+    Optional,
+    ReviewDecision,
+    SessionKind,
+    WorkspaceSessionRole,
+    WorkspaceTask,
+    WorkspaceTaskMode,
+    WorkspaceTaskStatus,
+    datetime,
+    logger,
+    state_policy,
+    ttyd_manager,
+    uuid,
+)
+
+from .review_delivery import _ReviewDeliveryMixin
 
 
-class _ReviewReaperMixin(_WorkspaceManagerBase):
+class _ReviewReaperMixin(_ReviewDeliveryMixin):
     async def _prune_orphan_workspace_tabs(self, workspace_id: str) -> int:
         """Delete managed terminal tabs for this workspace that have no backing
         ManagedSession.
@@ -167,6 +190,12 @@ class _ReviewReaperMixin(_WorkspaceManagerBase):
                     task.reviewed_cycle,
                 )
                 continue
+            async with self.workspace_mutation_lock(task.workspace_id):
+                live_task = self.tasks.get(task.id)
+                if live_task is not None and self._workspace_owns_task(live_task):
+                    await self._recover_idle_review_delivery(live_task)
+            # Delivery recovery never creates a new review round.
+            task = self.tasks.get(task.id, task)
             needs_review_dispatch = False
             if state_policy.review_in_flight(
                 task.review_requested_at, task.review_completed_at

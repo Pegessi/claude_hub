@@ -82,10 +82,12 @@ cross-validation. Those earlier green results do not validate this repair.
 - Retired provider IDs must not turn a later explicitly requested Hub turn into
   a native successor. Early notifications before a Hub `turn/start` ACK retain
   ordinary cancellation behavior when the ACK confirms the same turn.
-- If the start was observed but the ACK failed, delivery remains uncertain.
-  The provider guard, ID, image files and durable Hub turn remain owned until
-  completion or confirmed Stop. The error remains visible; no failed completion
-  or successful delivery is invented, including for explicit RPC rejection.
+- If the start was observed and remains live when the ACK fails, delivery stays
+  uncertain. The provider guard, ID, images and durable Hub turn remain owned
+  until completion or confirmed Stop. Matching completion already observed is
+  stronger evidence than an ambiguous lost ACK. An explicit RPC rejection stays
+  visible even then, without adding a second terminal event or leaving stale
+  uncertainty flags. A rejected request is never reported as successful.
 - If Goal state completes, disappears or changes while Stop is being admitted,
   the route re-reads it and only targets the originally observed turn. A changed
   Goal or an unknown Hub turn identity requires a fresh action (409), not a 500
@@ -102,6 +104,27 @@ retry, two manual Hub sends with early notifications, accepted-start/ACK failure
 with image ownership and durable completion, and completed/cleared/replaced Goal
 races. API fixtures do not run the application lifespan: doing so in these
 mock-runtime tests leaked its shutdown flag into later stream tests.
+
+## Fixed-main integration
+
+The follow-up repair `a0af21f` is integrated on the candidate branch with main
+`0459f83b8226f52f43aecc7bf2221efef8ba591f`. The primary checkout is not changed.
+Both release-note sections and both stream-observer responsibilities are retained:
+native Goal notifications refresh authoritative state, and persisted completions
+notify the inbox before Goal/scheduled completion handling.
+
+The added inbox path must use `refresh_current`, not the local Goal projection,
+before deciding whether delivery is allowed. A native read failure parks the
+message for retry without claiming submission; paused native state releases the
+message. The removed historical output-filter option is not passed by this new
+caller. Regressions use the real Goal coordinator with a fake provider to exercise
+stale local active/paused state and transient read failure. The native Goal
+browser fixture also provides the merged inbox's empty message-list response;
+unexpected requests remain test failures.
+
+Main's history-first hydration, capability metadata caching, retryable model
+catalog discovery and `metadata_cacheable` fields are preserved. A cached Goal
+owner is only a capability hint; the Goal API projection remains authoritative.
 
 ## Validation
 

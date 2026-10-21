@@ -422,11 +422,13 @@ def test_strip_hub_runtime_guidance_never_pairs_different_formats(first) -> None
     assert strip_hub_runtime_guidance(later_complete) == later_complete
 
 
-def test_hub_runtime_guidance_content_uses_literal_env_and_chat_kind() -> None:
+def test_hub_runtime_guidance_content_uses_literal_env_and_tab_inbox() -> None:
     """The model must expand the tab id from its own env (no backend
-    substitution) and be steered to the Chat-native schedule kind."""
+    substitution) and use the durable ordinary Chat inbox."""
     assert "$CLAUDE_HUB_TAB_ID" in HUB_RUNTIME_GUIDANCE
-    assert "--kind chat_turn" in HUB_RUNTIME_GUIDANCE
+    assert 'tab message "$CLAUDE_HUB_TAB_ID"' in HUB_RUNTIME_GUIDANCE
+    assert "--call-id" in HUB_RUNTIME_GUIDANCE
+    assert "--interval <seconds>" not in HUB_RUNTIME_GUIDANCE
     assert "tab_message" in HUB_RUNTIME_GUIDANCE
     # The literal marker is the only tab reference; no concrete id is baked in.
     assert "tab-1" not in HUB_RUNTIME_GUIDANCE
@@ -514,6 +516,41 @@ async def test_codex_send_message_injects_hub_guidance_once() -> None:
     assert second == "second"
     assert "<claude_hub_instructions>" not in second
     assert "<<<HUB_RUNTIME_V1>>>" not in second
+
+
+@pytest.mark.asyncio
+async def test_codex_capability_metadata_retries_after_empty_model_list() -> None:
+    native = CodexNativeSession(_session(AgentType.CODEX))
+    native._mode_discovery_attempted = True
+    responses = iter(
+        [
+            {"data": []},
+            {
+                "data": [
+                    {
+                        "model": "recovered-model",
+                        "displayName": "Recovered Model",
+                        "description": "Recovered metadata",
+                    }
+                ]
+            },
+        ]
+    )
+    native.start = AsyncMock()  # type: ignore[method-assign]
+    native._send_request = AsyncMock(side_effect=lambda *_args: next(responses))  # type: ignore[method-assign]
+
+    await native.prepare_capabilities()
+    first = native.capabilities()
+    assert native._model_discovery_attempted is False
+    await native.prepare_capabilities()
+    recovered = native.capabilities()
+
+    assert first.metadata_cacheable is False
+    assert first.available_models
+    assert native._model_discovery_attempted is True
+    assert recovered.metadata_cacheable is True
+    assert [item.id for item in recovered.available_models] == ["recovered-model"]
+    assert native._send_request.await_count == 2
 
 
 def test_terminal_session_never_gets_native_guidance_injection() -> None:

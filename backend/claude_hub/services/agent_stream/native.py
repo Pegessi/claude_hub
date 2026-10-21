@@ -87,6 +87,7 @@ from .provider_network import (
 from .providers import images as provider_images
 from .providers.claude import ClaudeSession
 from .providers.codex_rpc import CodexProtocolSession
+from .providers.contracts import ModelCatalog
 from .providers.contracts import ProviderGoal as ProviderGoal
 from .providers.contracts import ProviderRuntime
 from .providers.cursor import CursorSession
@@ -404,10 +405,36 @@ async def _probe_cursor_models() -> Tuple[List[StreamModelOption], bool]:
 class _ModelsCacheEntry:
     options: List[StreamModelOption]
     expires_at: float
+    metadata_cacheable: bool = True
 
 
 _models_cache: Dict[str, _ModelsCacheEntry] = {}
 _models_lock = asyncio.Lock()
+
+
+async def model_catalog_for(agent_type: str) -> ModelCatalog:
+    """Return the model catalog and whether long-lived metadata caching is safe."""
+    entry = _models_cache.get(agent_type)
+    now = time.monotonic()
+    if entry is not None and entry.expires_at > now:
+        return ModelCatalog(entry.options, metadata_cacheable=entry.metadata_cacheable)
+    async with _models_lock:
+        entry = _models_cache.get(agent_type)
+        now = time.monotonic()
+        if entry is not None and entry.expires_at > now:
+            return ModelCatalog(entry.options, metadata_cacheable=entry.metadata_cacheable)
+        metadata_cacheable = True
+        if agent_type == "cursor":
+            options, is_fallback = await _probe_cursor_models()
+            ttl = _MODELS_NEGATIVE_TTL_S if is_fallback else _MODELS_POSITIVE_TTL_S
+            metadata_cacheable = not is_fallback
+        else:
+            options = _static_options(agent_type)
+            ttl = _MODELS_POSITIVE_TTL_S
+        _models_cache[agent_type] = _ModelsCacheEntry(
+            options, now + ttl, metadata_cacheable=metadata_cacheable
+        )
+        return ModelCatalog(options, metadata_cacheable=metadata_cacheable)
 
 
 async def available_models_for(agent_type: str) -> List[StreamModelOption]:
@@ -418,23 +445,7 @@ async def available_models_for(agent_type: str) -> List[StreamModelOption]:
     double-checked checking dedups concurrent probes (contention is negligible:
     one probe per TTL per agent type).
     """
-    entry = _models_cache.get(agent_type)
-    now = time.monotonic()
-    if entry is not None and entry.expires_at > now:
-        return entry.options
-    async with _models_lock:
-        entry = _models_cache.get(agent_type)
-        now = time.monotonic()
-        if entry is not None and entry.expires_at > now:
-            return entry.options
-        if agent_type == "cursor":
-            options, is_fallback = await _probe_cursor_models()
-            ttl = _MODELS_NEGATIVE_TTL_S if is_fallback else _MODELS_POSITIVE_TTL_S
-        else:
-            options = _static_options(agent_type)
-            ttl = _MODELS_POSITIVE_TTL_S
-        _models_cache[agent_type] = _ModelsCacheEntry(options, now + ttl)
-        return options
+    return (await model_catalog_for(agent_type)).options
 
 
 # Keep the runtime-home and per-provider directory lookups at the public seam.
@@ -497,7 +508,7 @@ _NATIVE_RUNTIME = ProviderRuntime(
     proxy_env_names=lambda: PROXY_ENV_NAMES,
     logger=lambda: logger,
     claude_env_options=lambda env: _claude_env_options(env),
-    available_models_for=lambda agent_type: available_models_for(agent_type),
+    model_catalog_for=lambda agent_type: model_catalog_for(agent_type),
     provider_subprocess_env=lambda provider, parent, overrides: provider_subprocess_env(
         provider, parent, overrides
     ),

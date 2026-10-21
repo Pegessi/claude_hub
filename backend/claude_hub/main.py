@@ -166,6 +166,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         continuation_task = asyncio.create_task(continue_interrupted_chats())
         workspace_manager.start_background_monitor()
+        from .api.routes.agent_stream.messages import start_inbox
+
+        try:
+            await start_inbox()
+        except Exception:
+            # Corrupt delivery evidence disables the inbox, not unrelated Chats.
+            logger.exception("Chat message inbox unavailable; refusing inbox delivery")
         try:
             from .services.dot import get_dot_service
 
@@ -186,6 +193,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             from .api.agent_stream import _quiesce_tailer_managers
 
             _quiesce_tailer_managers()
+            from .api.routes.agent_stream.messages import stop_inbox
+
+            try:
+                await stop_inbox()
+            except Exception:
+                logger.exception("Chat inbox shutdown failed")
             continuation_task.cancel()
             await asyncio.gather(continuation_task, return_exceptions=True)
             try:

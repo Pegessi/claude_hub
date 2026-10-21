@@ -3,17 +3,23 @@ import math
 from typing import List, Optional
 from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """Application settings."""
 
-    model_config = SettingsConfigDict(env_file=".env", hide_input_in_errors=True)
+    model_config = SettingsConfigDict(
+        env_file=".env", hide_input_in_errors=True, populate_by_name=True
+    )
 
     host: str = "127.0.0.1"
-    port: int = 8173
+    # Hub-specific bind port wins over provider-inherited PORT (e.g. MASO).
+    port: int = Field(
+        default=8173, validation_alias=AliasChoices("CLAUDE_HUB_PORT", "PORT", "port")
+    )
+    review_verdict_idle_timeout_seconds: int = Field(default=180, ge=45, le=1800)
     frontend_url: str = "http://localhost:5173"
     ttyd_path: str = "ttyd"
     ttyd_base_port: int = 10000

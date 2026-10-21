@@ -32,6 +32,52 @@
 - Providers without native Goal support retain Hub management. Temporary errors
   do not trigger fallback, and native absence does not rewrite terminal history.
 
+### fix(chat): show history before runtime preparation and reuse capability metadata
+
+- Read durable Chat history and execution details without starting a provider;
+  model/network preparation no longer blocks the existing transcript, including
+  when capabilities fail. Input remains gated on valid observation readiness.
+- Reuse successful capability metadata for up to 30 minutes, with bounded
+  browser retention, configuration-aware invalidation, and explicit refresh on
+  retry or settings updates. Dynamic model/mode state and action validation stay
+  current; MASO's combined service-readiness check is not cached.
+- Ignore superseded capability responses and retain a clear error with readable
+  history when a live capability handshake becomes unavailable. Pending or failed
+  Retry keeps the same-source transcript visible, and queued observers use the
+  same configuration identity as the active Chat pane.
+- Keep incomplete model discovery out of long-lived capability caches. Managed
+  persisted-history reads do not wait behind runtime preparation, while stale
+  session incarnations are still rejected.
+
+### fix(workspace): recover undelivered review verdicts
+
+- Prefer the Hub-specific bind port over inherited provider PORT when generating
+  report commands; advertise the launcher-selected port to the backend.
+- Remind an idle reviewer once per open review dispatch, then surface a durable
+  attention event without closing the round or bypassing human acceptance.
+- Clarify canonical report submission, HTTP receipts and the supported operator
+  resubmission command; retain wrong-path 404 behavior.
+
+### fix(terminal): recognize busy Codex with persistent prompt footer
+
+- Give Codex's explicit live Working indicator precedence over the persistent
+  shortcuts footer, so managed agent and tab badges remain Working mid-turn.
+- Preserve selection/shell precedence, frozen-frame alerts and other provider
+  paths; replay real ANSI busy/idle captures and rapid frames in regression tests.
+- Recognize narrow Codex status ellipses with an elapsed-time/bullet header and
+  interrupt-hint prefix; actual private-TUI width/height captures cover resize.
+- Verify native Chat and reviewer roles through stream/tool lifecycle, status
+  APIs/CLI, real reviewer-screen replay and Agents/Reviewers panel badges.
+
+### refactor(chat): share inbox delivery between timers and direct messages
+
+- Route scheduled Chat turns through the same durable FIFO, native submission fence and recovery pump as direct tab messages. Keep schedule superseding/cancellation policy, legacy run history, stale-turn recovery and Dot provenance; let one-shot Chat schedules fire once even after their timer disables itself.
+- Keep scheduled recovery pending when transcript evidence cannot be read; retry startup recovery through the coordinator without releasing its FIFO slot or losing the occurrence.
+
+### feat(chat): add a durable tab message inbox
+
+- Add a durable native Chat tab message inbox, enqueue/status/cancel CLI, and Hub message provenance with pending receipt UI. Ambiguous delivery never auto-replays; no scheduler records are created.
+
 ### fix(chat): render Codex inline directives instead of leaking markers
 
 - Codex writes rich-content requests inline as private-use-delimited

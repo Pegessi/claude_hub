@@ -237,6 +237,11 @@ class WorkspaceTask(BaseModel):
     review_cycle: int = 1
     reviewed_cycle: int = 0
     review_requested_at: Optional[datetime] = None
+    # One delivery reminder per exact review dispatch, durable across restarts.
+    review_delivery_round: Optional[str] = None
+    review_delivery_message: Optional[str] = None
+    review_delivery_nudged_at: Optional[datetime] = None
+    review_delivery_escalated_at: Optional[datetime] = None
     review_completed_at: Optional[datetime] = None
     review_skipped_at: Optional[datetime] = None
     review_skip_reason: Optional[str] = None

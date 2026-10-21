@@ -63,7 +63,14 @@ export interface TimelineAttachment {
   height?: number
 }
 
-export type TimelineTurnOrigin = 'feishu' | 'web' | 'unknown'
+export type TimelineTurnOrigin = 'feishu' | 'web' | 'hub_message' | 'unknown'
+
+export interface TimelineHubMessageProvenance {
+  messageId: string
+  actor: string
+  /** Caller-supplied, unverified routing hint; never an authenticated identity. */
+  sourceTabId: string | null
+}
 
 export interface TimelineFeishuProvenance {
   appId: string
@@ -162,6 +169,7 @@ export interface TimelineTurn {
   origin: TimelineTurnOrigin
   /** Verified Feishu callback identity, present only when origin is feishu. */
   feishu: TimelineFeishuProvenance | null
+  hubMessage: TimelineHubMessageProvenance | null
   /** Mode when this turn began, not the composer's current selection. */
   mode: 'default' | 'plan' | null
   /** The backend stops this turn when the user sends (Dot's own wake-up or tidy). */

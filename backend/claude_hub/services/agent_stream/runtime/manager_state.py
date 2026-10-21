@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from contextlib import asynccontextmanager
 from typing import (
     TYPE_CHECKING,
     Any,
     AsyncContextManager,
-    AsyncIterator,
     Awaitable,
     Callable,
     Dict,
@@ -118,6 +116,7 @@ class ManagerState(ABC):
         turn_metadata: Optional[Dict[str, Any]] = None,
         before_send: Optional[Callable[[], Awaitable[None]]] = None,
         before_delivery: Optional[Callable[[], None]] = None,
+        allow_question_answer: bool = True,
     ) -> None:
         raise NotImplementedError()
 

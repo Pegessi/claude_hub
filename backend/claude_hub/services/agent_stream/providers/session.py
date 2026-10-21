@@ -136,6 +136,7 @@ class SessionCore(ABC):
         # Available models, populated by ``prepare_capabilities`` from the
         # runtime-discovered (cursor) or curated static (claude/codex) list.
         self._available_models: List[StreamModelOption] = []
+        self._metadata_cacheable = True
         # Claude prepares a settings file and matching process environment as
         # one unit before calling the shared one-shot launcher.
         self._prepared_provider_env: Optional[Dict[str, str]] = None
@@ -238,17 +239,18 @@ class SessionCore(ABC):
         Claude uses the model ids configured for this specific session, with
         the curated list only as a fallback. Cursor is probed at runtime via
         ``agent --list-models``; other agent types use the curated static list.
-        Shared results are cached with a TTL (see ``available_models_for``), so
+        Shared results are cached with a TTL (see ``model_catalog_for``), so
         this is cheap to call on every capabilities fetch.
         """
         if self.session.agent_type == AgentType.CLAUDE:
             configured = self._runtime.claude_env_options(self.session.env)
             if configured:
                 self._available_models = configured
+                self._metadata_cacheable = True
                 return
-        self._available_models = await self._runtime.available_models_for(
-            self.session.agent_type.value
-        )
+        catalog = await self._runtime.model_catalog_for(self.session.agent_type.value)
+        self._available_models = catalog.options
+        self._metadata_cacheable = catalog.metadata_cacheable
 
     async def set_mode(self, mode: str) -> None:
         """Select the mode used by the next turn and reject unsafe changes."""
@@ -646,6 +648,7 @@ class SessionCore(ABC):
             goal_usage_quality=self.goal_usage_quality,
             current_model=self.current_model(),
             current_reasoning_effort=self.current_reasoning_effort(),
+            metadata_cacheable=self._metadata_cacheable,
         )
 
     @property

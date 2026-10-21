@@ -1,0 +1,80 @@
+[
+  {
+    "file": "busy-frame-0.ansi",
+    "timestamp": "2026-10-20T12:07:04.313329+00:00",
+    "command": [
+      "tmux",
+      "capture-pane",
+      "-e",
+      "-p",
+      "-t",
+      "claude-hub-13656409"
+    ],
+    "sha256": "fd69d9497fb5bc09cb36e1a9b1e25ce61116415bb67c3c3d7748e6b2e63792a9"
+  },
+  {
+    "file": "busy-frame-1.ansi",
+    "timestamp": "2026-10-20T12:07:04.539397+00:00",
+    "command": [
+      "tmux",
+      "capture-pane",
+      "-e",
+      "-p",
+      "-t",
+      "claude-hub-13656409"
+    ],
+    "sha256": "fd69d9497fb5bc09cb36e1a9b1e25ce61116415bb67c3c3d7748e6b2e63792a9"
+  },
+  {
+    "file": "busy-frame-2.ansi",
+    "timestamp": "2026-10-20T12:07:04.765600+00:00",
+    "command": [
+      "tmux",
+      "capture-pane",
+      "-e",
+      "-p",
+      "-t",
+      "claude-hub-13656409"
+    ],
+    "sha256": "022df8a8124eea62c646feb522ff560f81f9ecb1e8e6fe7a617327f016c6392e"
+  },
+  {
+    "file": "busy-frame-3.ansi",
+    "timestamp": "2026-10-20T12:07:04.991789+00:00",
+    "command": [
+      "tmux",
+      "capture-pane",
+      "-e",
+      "-p",
+      "-t",
+      "claude-hub-13656409"
+    ],
+    "sha256": "b6b460ecd266dd1e7aa692d581f797d71ee8ab15573d3752f9cfcaa6af153e20"
+  },
+  {
+    "file": "busy-frame-4.ansi",
+    "timestamp": "2026-10-20T12:07:05.217955+00:00",
+    "command": [
+      "tmux",
+      "capture-pane",
+      "-e",
+      "-p",
+      "-t",
+      "claude-hub-13656409"
+    ],
+    "sha256": "4968bbff2416a55a39726bb88c57b61cd0a27b6f909a8e86af8901571ea2ab73"
+  },
+  {
+    "file": "busy-frame-5.ansi",
+    "timestamp": "2026-10-20T12:07:05.444320+00:00",
+    "command": [
+      "tmux",
+      "capture-pane",
+      "-e",
+      "-p",
+      "-t",
+      "claude-hub-13656409"
+    ],
+    "sha256": "a5b2698991cecedd5a94ebbe90a55225c2ba16ac6225521523592731a25e8629"
+  }
+]

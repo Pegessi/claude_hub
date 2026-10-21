@@ -2,55 +2,76 @@
 
 from __future__ import annotations
 
-import asyncio
+import asyncio as asyncio
 import json
 import logging
-import os
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
-from datetime import datetime
+
+# Explicit same-name aliases preserve legacy patch/import seams in this facade.
+import os as os
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import nullcontext as nullcontext
+from datetime import datetime as datetime
 from typing import Any, AsyncIterator, Callable, Dict, List, Literal, NoReturn, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from fastapi.responses import RedirectResponse, StreamingResponse
-from pydantic import BaseModel, Field, model_validator
+from fastapi import (
+    APIRouter,
+)
+from fastapi import Depends as Depends
+from fastapi import (
+    HTTPException,
+)
+from fastapi import Query as Query
+from fastapi import Response as Response
+from fastapi.responses import RedirectResponse as RedirectResponse
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel as BaseModel
+from pydantic import Field as Field
+from pydantic import model_validator as model_validator
 
 from claude_hub.api.routes.agent_stream import attachments as attachment_routes
-from claude_hub.api.routes.agent_stream import controls, dispatch, media, observation
+from claude_hub.api.routes.agent_stream import controls, dispatch, media, messages, observation
 from claude_hub.api.routes.agent_stream import runtime as stream_runtime
 from claude_hub.api.routes.agent_stream import task_context
 
-from ..auth.dependencies import get_current_user
+from ..auth.dependencies import get_current_user as get_current_user
+from ..models import TERMINAL_GOAL_STATUSES as TERMINAL_GOAL_STATUSES
+from ..models import AgentRuntimeStatus as AgentRuntimeStatus
 from ..models import (
-    TERMINAL_GOAL_STATUSES,
-    AgentRuntimeStatus,
     AgentStreamEvent,
     AgentStreamEventPage,
     AgentStreamEventType,
     AgentType,
-    ChatMode,
+)
+from ..models import ChatMode as ChatMode
+from ..models import (
     ManagedSession,
-    ManagedSessionStatus,
-    ScheduledTask,
-    ScheduledTaskRun,
+)
+from ..models import ManagedSessionStatus as ManagedSessionStatus
+from ..models import (
     SessionKind,
     StreamCapabilities,
-    User,
-    WorkspaceAttachmentCreate,
-    WorkspaceSessionRole,
 )
+from ..models import User as User
+from ..models import WorkspaceAttachmentCreate as WorkspaceAttachmentCreate
+from ..models import WorkspaceSessionRole as WorkspaceSessionRole
 from ..models.chat_image import ChatImageAttachment as AgentStreamAttachment
-from ..models.schemas import TaskExecutionControl, TaskExecutionReference
+from ..models.schemas import TaskExecutionControl as TaskExecutionControl
+from ..models.schemas import TaskExecutionReference as TaskExecutionReference
 from ..services import ttyd_manager, workspace_manager
+from ..services.agent_stream import ExternalTurnRetirement as ExternalTurnRetirement
+from ..services.agent_stream import StructuredSourceUnavailable as StructuredSourceUnavailable
 from ..services.agent_stream import (
-    ExternalTurnRetirement,
-    StructuredSourceUnavailable,
     TailerManager,
     get_adapter_for_session,
-    quoted_images,
 )
+from ..services.agent_stream import quoted_images as quoted_images
 from ..services.agent_stream.attachments import AgentStreamAttachmentStore
-from ..services.agent_stream.base import NativeInputNotSubmittedError, discover_source_cached
-from ..services.agent_stream.local_images import AgentImageUnavailable, read_cached_agent_image
+from ..services.agent_stream.base import (
+    NativeInputNotSubmittedError,
+)
+from ..services.agent_stream.base import discover_source_cached as discover_source_cached
+from ..services.agent_stream.local_images import AgentImageUnavailable as AgentImageUnavailable
+from ..services.agent_stream.local_images import read_cached_agent_image as read_cached_agent_image
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +111,10 @@ async def _notify_goal_turn_completed(event: AgentStreamEvent) -> None:
         return
     if event.type != AgentStreamEventType.TURN_COMPLETED or not event.turn_id:
         return
+    try:
+        await messages.observe_completion(event)
+    except Exception:
+        logger.exception("Chat inbox completion persistence failed")
     if not direct:
         await workspace_manager.on_scheduled_chat_turn_completed(
             event.tab_id, event.turn_id, str(event.payload.get("status") or "failed")
@@ -220,29 +245,6 @@ def _get_tab_tailer_manager() -> TailerManager:
     return _tab_tailer_manager
 
 
-async def _dispatch_scheduled_chat_turn(run: ScheduledTaskRun, task: ScheduledTask) -> None:
-    """Deliver one durable automation run through the native Chat path."""
-    from ..services.dot import get_dot_service
-
-    session = _terminal_tab_session_or_404(run.tab_id)
-    metadata: Dict[str, Any] = {
-        "origin": "scheduled_task",
-        "scheduled_task_id": task.id,
-        "scheduled_task_run_id": run.id,
-        "scheduled_task_name": task.name,
-    }
-    if get_dot_service().is_system_schedule(task.id):
-        # The user's next message stops this turn (see ``_yield_dot_turn``), so the
-        # composer sends right away instead of queueing behind it.
-        metadata["yields_to_user"] = True
-    await _send_to_native(
-        session,
-        AgentStreamSendRequest(text=run.message, client_turn_id=run.client_turn_id),
-        _get_tab_tailer_manager(),
-        turn_metadata=metadata,
-    )
-
-
 async def _scheduled_chat_turn_liveness(tab_id: str, turn_id: str) -> _ChatLiveness | None:
     return await stream_runtime.scheduled_chat_turn_liveness(
         tab_id,
@@ -251,38 +253,6 @@ async def _scheduled_chat_turn_liveness(tab_id: str, turn_id: str) -> _ChatLiven
         get_tab_tailer_manager=_get_tab_tailer_manager,
         logger=logger,
     )
-
-
-async def _ensure_scheduled_chat_runtime(tab_id: str) -> bool:
-    """Ensure a direct Chat tab's native runtime is spawned and ready.
-
-    The scheduler's cold-runtime gate. Idempotent: a warm Chat returns
-    immediately; a cold or idle-reaped Chat is lazily created and its consumer
-    started. Returns ``True`` only once a turn can actually be delivered, so the
-    scheduler parks and retries while a first-time provider spawn (or a Codex
-    app-server handshake) is still in flight instead of delivering into a
-    runtime that does not exist yet.
-    """
-    session = _terminal_tab_stream_session(tab_id)
-    if session is None:
-        return False
-    manager = _get_tab_tailer_manager()
-    try:
-        tailer = await manager.ensure_started(session)
-    except (ValueError, StructuredSourceUnavailable):
-        logger.info(
-            "scheduled Chat cold runtime unavailable for tab=%s; will retry",
-            tab_id,
-        )
-        return False
-    transport = tailer.native_transport
-    if transport is None or tailer.native_error is not None or manager.hard_failed(session.id):
-        return False
-    # Let the freshly started consumer's first tick run provider start().
-    # Persistent app-servers also require a completed protocol handshake.
-    if not tailer.native_started:
-        await asyncio.sleep(0)
-    return tailer.native_ready
 
 
 def _feedback_chat_busy() -> bool:
@@ -300,9 +270,8 @@ def _feedback_chat_busy() -> bool:
 
 
 workspace_manager._feedback_chat_busy = _feedback_chat_busy
-workspace_manager.configure_scheduled_chat_dispatch(_dispatch_scheduled_chat_turn)
+workspace_manager.configure_chat_delivery(messages.get_inbox)
 workspace_manager.configure_scheduled_chat_liveness(_scheduled_chat_turn_liveness)
-workspace_manager.configure_scheduled_chat_readiness(_ensure_scheduled_chat_runtime)
 
 
 async def _stop_all_tailer_managers() -> None:
@@ -373,18 +342,37 @@ def _is_chat_native(session: ManagedSession) -> bool:
 
 
 async def _capabilities_for(
-    session: ManagedSession, manager: Optional[TailerManager] = None
+    session: ManagedSession,
+    manager: Optional[TailerManager] = None,
+    *,
+    cache_preparation: bool = False,
+    refresh: bool = False,
 ) -> StreamCapabilities:
     return await stream_runtime.capabilities_for(
-        _get_tailer_manager, _is_chat_native, get_adapter_for_session, session, manager
+        _get_tailer_manager,
+        _is_chat_native,
+        get_adapter_for_session,
+        session,
+        manager,
+        cache_preparation=cache_preparation,
+        refresh=refresh,
     )
 
 
 async def _tab_capabilities_for(
-    session: ManagedSession, manager: TailerManager
+    session: ManagedSession,
+    manager: TailerManager,
+    *,
+    cache_preparation: bool = False,
+    refresh: bool = False,
 ) -> StreamCapabilities:
     return await stream_runtime.tab_capabilities_for(
-        _capabilities_for, get_adapter_for_session, session, manager
+        _capabilities_for,
+        get_adapter_for_session,
+        session,
+        manager,
+        cache_preparation=cache_preparation,
+        refresh=refresh,
     )
 
 
@@ -480,13 +468,37 @@ class _AgentStreamBindings:
         _require_current_managed_session(session, manager)
 
     async def capabilities_for(
-        self, session: ManagedSession, manager: Optional[TailerManager] = None
+        self,
+        session: ManagedSession,
+        manager: Optional[TailerManager] = None,
+        *,
+        cache_preparation: bool = False,
+        refresh: bool = False,
     ) -> StreamCapabilities:
+        if cache_preparation or refresh:
+            return await _capabilities_for(
+                session,
+                manager,
+                cache_preparation=cache_preparation,
+                refresh=refresh,
+            )
         return await _capabilities_for(session, manager)
 
     async def tab_capabilities_for(
-        self, session: ManagedSession, manager: TailerManager
+        self,
+        session: ManagedSession,
+        manager: TailerManager,
+        *,
+        cache_preparation: bool = False,
+        refresh: bool = False,
     ) -> StreamCapabilities:
+        if cache_preparation or refresh:
+            return await _tab_capabilities_for(
+                session,
+                manager,
+                cache_preparation=cache_preparation,
+                refresh=refresh,
+            )
         return await _tab_capabilities_for(session, manager)
 
     async def stream_events_for(self, *args: Any, **kwargs: Any) -> AgentStreamEventPage:
@@ -587,6 +599,7 @@ async def _stream_events_for(
     view: Literal["raw", "conversation"] = "raw",
     turn_id: Optional[str] = None,
     through_sequence: Optional[int] = None,
+    persisted_only: bool = False,
 ) -> AgentStreamEventPage:
     return await observation.stream_events_for(
         session,
@@ -599,6 +612,7 @@ async def _stream_events_for(
         view,
         turn_id,
         through_sequence,
+        persisted_only,
     )
 
 
@@ -828,3 +842,7 @@ __all__ = [
     "router",
     "_reset_tailer_manager",
 ]
+
+
+# Ordinary Chat messages do not acquire Workspace Task ownership.
+messages.register_message_routes(router)

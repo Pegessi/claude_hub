@@ -15,9 +15,10 @@ near) the bottom line, so a small bottom-of-frame scan classifies them. Codex
    indicator, so a busy codex frame is misread as idle.
 
 This module is the single authoritative home for the codex working-marker set
-so that both the runtime-status classifier (``ttyd_manager``) and the
-auto-continue busy-check (``workspace_state_policy``) agree by construction —
-they call the same detector. Keeping one explicit marker set per agent type
+for the runtime-status classifier (``ttyd_manager``) and the auto-continue
+busy-check (``workspace_state_policy``). They share the default detector;
+Codex terminal status alone opts into resize handling, preserving the existing
+continuation policy. Keeping one explicit marker set per agent type
 (rather than loosening a single shared regex list) follows the lesson learned
 when the cursor agent type was added: every consumer that parsed session output
 kept using Claude-CLI-specific markers and silently returned wrong results for
@@ -46,6 +47,20 @@ CODEX_WORKING_STATUS_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
+# At narrow widths Codex 0.163.0 ellipsizes its live status line instead of
+# wrapping it. Require the observed elapsed-time + bullet header and a literal
+# prefix of the interrupt hint; arbitrary "Working (...)" prose is not enough.
+_CODEX_TRUNCATED_STATUS_RE = re.compile(
+    r"^[ \t•⠀-⣿]*working[ \t]+\(\d+[hms](?:[ \t]+\d+[hms])*"
+    r"[ \t]+[•·][ \t]+(?P<hint>[a-z ]+)…[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_CODEX_WRAPPED_STATUS_RE = re.compile(
+    r"^[ \t•⠀-⣿]*working[ \t]+\(\d+[hms](?:[ \t]+\d+[hms])*"
+    r"[ \t]+[•·][ \t]+esc\s+to\s+interrupt\)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 # Codex runs as a full-screen (alternate-screen) TUI, so a tmux capture returns
 # the current frame with no accumulated scrollback — the marker is present iff
 # codex is showing it right now. We still bound the search to the recent frame
@@ -55,14 +70,25 @@ CODEX_WORKING_STATUS_RE = re.compile(
 _CODEX_SCAN_LINES = 60
 
 
-def codex_output_is_working(output: str) -> bool:
+def codex_output_is_working(output: str, *, allow_resized: bool = False) -> bool:
     """Return True if a codex pane shows a live working indicator.
 
     Codex places the indicator above its persistent bottom chrome, so callers
     must pass the whole captured frame (not just the bottom lines). A genuinely
     idle codex frame repaints the indicator away, so its absence is a reliable
-    idle signal.
+    idle signal. ``allow_resized`` opts Codex terminal status into observed
+    narrow-screen truncation and derived soft-wrap handling. Other consumers
+    retain their existing marker policy.
     """
 
     recent = "\n".join(output.splitlines()[-_CODEX_SCAN_LINES:])
-    return bool(CODEX_WORKING_STATUS_RE.search(recent))
+    if CODEX_WORKING_STATUS_RE.search(recent):
+        return True
+    if not allow_resized:
+        return False
+    if _CODEX_WRAPPED_STATUS_RE.search(recent):
+        return True
+    return any(
+        "esc to interrupt".startswith(match.group("hint").lower())
+        for match in _CODEX_TRUNCATED_STATUS_RE.finditer(recent)
+    )

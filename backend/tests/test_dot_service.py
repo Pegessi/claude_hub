@@ -1132,7 +1132,10 @@ def _system_runs(service: DotService, monkeypatch: MonkeyPatch) -> dict[str, Any
     running, queued = ScheduledTaskRunStatus.RUNNING, ScheduledTaskRunStatus.QUEUED
     runs = {
         run_id: SimpleNamespace(
-            client_turn_id=f"scheduled-{run_id}", scheduled_task_id=task_id, status=status
+            id=run_id,
+            client_turn_id=f"scheduled-{run_id}",
+            scheduled_task_id=task_id,
+            status=status,
         )
         for run_id, task_id, status in (
             ("r-wake", "sched-wake", running),
@@ -1449,23 +1452,11 @@ async def test_a_wake_up_stopped_by_hand_or_failed_runs_again(
 async def test_dot_schedules_mark_their_turns_as_giving_way(
     service: DotService, monkeypatch: MonkeyPatch
 ) -> None:
-    from claude_hub.api import agent_stream as stream_api
-
     service.store.update_state(wake_schedule_id="sched-wake")
     sent: list[dict[str, Any]] = []
-
-    async def send(session: Any, payload: Any, manager: Any, **kwargs: Any) -> None:
-        sent.append(kwargs["turn_metadata"])
-
-    monkeypatch.setattr(
-        stream_api, "_terminal_tab_session_or_404", lambda tab_id: SimpleNamespace(id="s")
-    )
-    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: None)
-    monkeypatch.setattr(stream_api, "_send_to_native", send)
     for task_id in ("sched-wake", "sched-other"):
-        run = SimpleNamespace(
-            id=f"run-{task_id}", tab_id=TAB_ID, message="m", client_turn_id=f"turn-{task_id}"
-        )
+        run = SimpleNamespace(id=f"run-{task_id}", scheduled_task_id=task_id)
         task = SimpleNamespace(id=task_id, name=task_id)
-        await stream_api._dispatch_scheduled_chat_turn(run, task)  # type: ignore[arg-type]
+        sent.append(workspace_manager._scheduled_intent_metadata(run, task))  # type: ignore[arg-type]
     assert sent[0]["yields_to_user"] is True and "yields_to_user" not in sent[1]
+    assert all(one["origin"] == "scheduled_task" for one in sent)

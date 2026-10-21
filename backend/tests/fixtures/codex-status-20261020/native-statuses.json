@@ -1,0 +1,98 @@
+[
+  {
+    "agent_type": "maso",
+    "status": "working",
+    "detail": "native provider turn is in flight",
+    "sampled_at": "2026-10-20T20:04:11.911581"
+  },
+  {
+    "agent_type": "maso",
+    "status": "working",
+    "detail": "native provider turn is in flight",
+    "sampled_at": "2026-10-20T20:04:11.911623"
+  },
+  {
+    "agent_type": "maso",
+    "status": "working",
+    "detail": "native provider turn is in flight",
+    "sampled_at": "2026-10-20T20:04:11.911645"
+  },
+  {
+    "agent_type": "maso",
+    "status": "idle",
+    "detail": "native provider turn completed",
+    "sampled_at": "2026-10-20T20:04:11.911713"
+  },
+  {
+    "agent_type": "claude",
+    "status": "idle",
+    "detail": "native provider turn completed",
+    "sampled_at": "2026-10-20T20:04:11.911732"
+  },
+  {
+    "agent_type": "claude",
+    "status": "idle",
+    "detail": "no activity indicators",
+    "sampled_at": "2026-10-20T20:04:11.911768"
+  },
+  {
+    "agent_type": "maso",
+    "status": "idle",
+    "detail": "native provider is ready",
+    "sampled_at": "2026-10-20T20:04:11.925715"
+  },
+  {
+    "agent_type": "claude",
+    "status": "idle",
+    "detail": "claude is waiting",
+    "sampled_at": "2026-10-20T20:04:11.925748"
+  },
+  {
+    "agent_type": "maso",
+    "status": "working",
+    "detail": "native provider turn is in flight",
+    "sampled_at": "2026-10-20T20:04:11.939747"
+  },
+  {
+    "agent_type": "maso",
+    "status": "idle",
+    "detail": "native provider turn completed",
+    "sampled_at": "2026-10-20T20:04:11.940021"
+  },
+  {
+    "agent_type": "maso",
+    "status": "idle",
+    "detail": "native provider is ready",
+    "sampled_at": "2026-10-20T20:04:11.940084"
+  },
+  {
+    "agent_type": "cursor",
+    "status": "idle",
+    "detail": "native provider is ready",
+    "sampled_at": "2026-10-20T20:04:11.940137"
+  },
+  {
+    "agent_type": "cursor",
+    "status": "idle",
+    "detail": "native provider is ready",
+    "sampled_at": "2026-10-20T20:04:11.940193"
+  },
+  {
+    "agent_type": "maso",
+    "status": "idle",
+    "detail": "native provider is ready",
+    "sampled_at": "2026-10-20T20:04:11.940231"
+  },
+  {
+    "agent_type": "claude",
+    "status": "idle",
+    "detail": "native provider turn completed",
+    "sampled_at": "2026-10-20T20:04:11.940246"
+  },
+  {
+    "agent_type": "claude",
+    "status": "working",
+    "detail": "native provider turn is in flight",
+    "sampled_at": "2026-10-20T20:04:11.940264"
+  }
+]

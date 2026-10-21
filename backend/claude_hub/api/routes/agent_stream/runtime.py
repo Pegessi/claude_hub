@@ -3,8 +3,9 @@
 import asyncio
 import logging
 import os
+import time
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Literal, Optional
+from typing import Any, Awaitable, Callable, Literal, Optional, Tuple, cast
 
 from claude_hub.models import (
     AgentRuntimeStatus,
@@ -20,6 +21,93 @@ from claude_hub.services.agent_stream import StructuredSourceUnavailable, Tailer
 from claude_hub.services.agent_stream.base import AgentStreamAdapter
 
 ChatLiveness = Literal["active", "dead", "terminalized", "unknown"]
+
+_CAPABILITY_PREPARATION_TTL_S = 30 * 60.0
+_CapabilityPreparationKey = Tuple[Any, ...]
+_CAPABILITY_PREPARATION_STATE_ATTR = "_hub_capability_preparation_cache_state"
+
+
+class _CapabilityPreparationCacheState:
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.key: Optional[_CapabilityPreparationKey] = None
+        self.expires_at = 0.0
+
+
+def _capability_preparation_state(transport: Any) -> _CapabilityPreparationCacheState:
+    state = getattr(transport, _CAPABILITY_PREPARATION_STATE_ATTR, None)
+    if isinstance(state, _CapabilityPreparationCacheState):
+        return state
+    state = _CapabilityPreparationCacheState()
+    setattr(transport, _CAPABILITY_PREPARATION_STATE_ATTR, state)
+    return state
+
+
+def _capability_preparation_key(session: ManagedSession) -> _CapabilityPreparationKey:
+    env_items = tuple(sorted((str(key), str(value)) for key, value in session.env.items()))
+    return (
+        session.id,
+        session.workspace_id,
+        session.tab_id,
+        session.agent_type.value,
+        session.session_kind.value,
+        session.created_at,
+        session.workspace_path,
+        session.target.value,
+        session.remote_profile_id,
+        session.remote_cwd,
+        session.remote_reconnect,
+        session.solo_mode,
+        session.agent_session_id,
+        session.agent_session_id_verified,
+        env_items,
+        session.cursor_transport,
+        session.cursor_data_dir,
+        session.cursor_cli_version,
+        session.cursor_transcript_path,
+        session.cursor_transcript_schema,
+    )
+
+
+def _invalidate_capability_preparation_state(transport: Any) -> None:
+    state = getattr(transport, _CAPABILITY_PREPARATION_STATE_ATTR, None)
+    if isinstance(state, _CapabilityPreparationCacheState):
+        state.key = None
+        state.expires_at = 0.0
+
+
+async def _capabilities_from_transport(
+    session: ManagedSession,
+    transport: Any,
+    *,
+    cache_preparation: bool,
+    refresh: bool,
+) -> StreamCapabilities:
+    if not cache_preparation:
+        _invalidate_capability_preparation_state(transport)
+        await transport.prepare_capabilities()
+        return cast(StreamCapabilities, transport.capabilities())
+
+    state = _capability_preparation_state(transport)
+    key = _capability_preparation_key(session)
+    async with state.lock:
+        now = time.monotonic()
+        cached = not refresh and state.key == key and state.expires_at > now
+        if cached:
+            caps = cast(StreamCapabilities, transport.capabilities())
+            if caps.metadata_cacheable:
+                return caps
+        state.key = None
+        state.expires_at = 0.0
+        await transport.prepare_capabilities()
+        caps = cast(StreamCapabilities, transport.capabilities())
+        if caps.structured and caps.metadata_cacheable:
+            state.key = key
+            state.expires_at = time.monotonic() + _CAPABILITY_PREPARATION_TTL_S
+        else:
+            state.key = None
+            state.expires_at = 0.0
+        return caps
 
 
 def terminal_tab_stream_session(
@@ -146,6 +234,9 @@ async def capabilities_for(
     adapter_for_session: Callable[[ManagedSession], Optional[AgentStreamAdapter]],
     session: ManagedSession,
     manager: Optional[TailerManager] = None,
+    *,
+    cache_preparation: bool = False,
+    refresh: bool = False,
 ) -> StreamCapabilities:
     """Return structured-stream capabilities for ``session``.
 
@@ -174,8 +265,13 @@ async def capabilities_for(
         transport = tailer.native_transport
         if transport is None:
             return StreamCapabilities(structured=False)
-        await transport.prepare_capabilities()
-        caps = transport.capabilities()
+        cache = cache_preparation and session.agent_type != AgentType.MASO
+        caps = await _capabilities_from_transport(
+            session,
+            transport,
+            cache_preparation=cache,
+            refresh=refresh,
+        )
         if manager.hard_failed(session.id):
             caps = caps.model_copy(update={"structured": False})
         return caps
@@ -196,6 +292,9 @@ async def tab_capabilities_for(
     adapter_for_session: Callable[[ManagedSession], Optional[AgentStreamAdapter]],
     session: ManagedSession,
     manager: TailerManager,
+    *,
+    cache_preparation: bool = False,
+    refresh: bool = False,
 ) -> StreamCapabilities:
     """Advertise an empty, ready-to-compose view before its first transcript.
 
@@ -206,7 +305,15 @@ async def tab_capabilities_for(
     remain fail-closed because they have no adapter at all.
     """
 
-    caps = await capabilities(session, manager)
+    if cache_preparation or refresh:
+        caps = await capabilities(
+            session,
+            manager,
+            cache_preparation=cache_preparation,
+            refresh=refresh,
+        )
+    else:
+        caps = await capabilities(session, manager)
     adapter = adapter_for_session(session)
     if (
         not caps.structured
