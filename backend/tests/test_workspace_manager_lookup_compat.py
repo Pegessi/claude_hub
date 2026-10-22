@@ -204,6 +204,7 @@ def test_session_inventory_and_reviewer_observe_identity_source_patches(
         role=payload.role,
         agent_type=payload.agent_type,
         session_kind=payload.session_kind,
+        archived=False,
         chat_paused=False,
         solo_mode=False,
         status=ManagedSessionStatus.IDLE,
@@ -250,6 +251,7 @@ def test_session_inventory_and_reviewer_observe_identity_source_patches(
     reviewer = SimpleNamespace(
         role=WorkspaceSessionRole.REVIEWER,
         session_kind=SessionKind.TERMINAL,
+        archived=False,
         chat_paused=False,
         status=ManagedSessionStatus.IDLE,
         runtime_status=AgentRuntimeStatus.IDLE,
