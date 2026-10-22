@@ -41,7 +41,15 @@ Failed archive retains the owner paused and needing attention for inspection or
 retry. A failed persistence operation can leave the tab archived while the
 session remains quarantined; retry archive completes the transition.
 
-The stream fence survives archive until durable restore. Runtime admission also
+The stream fence survives archive until durable restore. A successful archive
+also persists `archive_provider_fenced` when a runtime fence was verified.
+Session and workspace deletion can use this evidence after a cold backend
+restart, only while the session remains archived and unable to start a provider.
+Restore clears the evidence before admitting a new runtime. Delivery validation
+still rejects uncertain MASO receipts, even with a verified fence; a missing
+proof never becomes a guessed fence. Legacy records default to no proof.
+
+The process-local fence survives archive until durable restore. Runtime admission also
 checks the current persisted archive flag, including after a backend restart.
 Restore commits the available session before releasing the fence and attempting
 provider startup. Stream history reads use the persisted store for archived
@@ -65,7 +73,9 @@ session and workspace ids and verified provider conversation id.
 5. Attempt archive while a disposable task is queued/working/in review and
    confirm 409 without losing ownership. Verify direct managed tab archive is 409.
 6. If permanent removal is desired for this disposable session only, archive and
-   then `session delete SESSION`; confirm its record and structured history vanish.
+   then restart a disposable isolated backend and run `session delete SESSION`;
+   confirm its record and structured history vanish. Never restart the shared Hub
+   merely for this verification.
 
 No deployment, merge or shared runtime mutation is performed by this change.
 
@@ -80,3 +90,18 @@ format also differs from the base Black formatting in three touched files.
 These existing convention differences are retained rather than reformatting
 unrelated code. Tests use isolated runtime homes/state and fake providers;
 no live provider continuity or future deployment is claimed. No lessons needed.
+
+
+## Review corrections
+
+Managed review reproduced a cold-restart gap: successful archive retained MASO
+delivery receipts while its verified fence existed only in process memory. The
+new persisted fence evidence fixes archive/reload/delete without bypassing
+uncertain-delivery validation. Regression coverage includes session and workspace
+deletion after serialized reload, missing/stale proof, uncertain receipts and
+proof clearing on restore.
+
+The two history tests now use pytest-managed async execution instead of
+`asyncio.run`, which left the main thread without an event loop and broke a
+later synchronous transport test. Both session/stream/CLI file orders and the
+reviewer's minimal order reproducer are rerun; final counts are in the Task report.

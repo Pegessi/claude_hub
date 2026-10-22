@@ -519,11 +519,10 @@ def _archive_chat(client: TestClient, repo: Path) -> tuple[dict, ManagedSession,
     return workspace, session, f"/api/workspaces/{workspace['id']}/sessions/{session.id}"
 
 
-def test_archive_restore_retains_history_and_provider_identity(
+@pytest.mark.asyncio
+async def test_archive_restore_retains_history_and_provider_identity(
     tmp_path: Path, archive_runtime: list[str], monkeypatch: MonkeyPatch
 ) -> None:
-    import asyncio
-
     from claude_hub.models import AgentStreamEvent, AgentStreamEventType
     from claude_hub.services.agent_stream import AgentStreamStore
     from claude_hub.services.agent_stream.tailer import _DELETION_FENCED_SESSION_IDS
@@ -531,17 +530,15 @@ def test_archive_restore_retains_history_and_provider_identity(
     client = TestClient(app)
     workspace, session, url = _archive_chat(client, tmp_path / "repo")
     store = AgentStreamStore(workspace["id"], session.id)
-    asyncio.run(
-        store.append(
-            AgentStreamEvent(
-                session_id=session.id,
-                tab_id=session.tab_id,
-                agent_type=session.agent_type,
-                stream_sequence=-1,
-                created_at=datetime.now(),
-                type=AgentStreamEventType.TEXT_DELTA,
-                payload={"text": "Retain this conversation"},
-            )
+    await store.append(
+        AgentStreamEvent(
+            session_id=session.id,
+            tab_id=session.tab_id,
+            agent_type=session.agent_type,
+            stream_sequence=-1,
+            created_at=datetime.now(),
+            type=AgentStreamEventType.TEXT_DELTA,
+            payload={"text": "Retain this conversation"},
         )
     )
     history = store.path.read_bytes()
@@ -649,33 +646,33 @@ def test_archive_rejects_wrong_workspace_and_terminal(
 def test_archive_old_state_normalization(tmp_path: Path) -> None:
     client = TestClient(app)
     _, session, _ = _archive_chat(client, tmp_path / "repo")
-    legacy = session.model_dump(mode="json", exclude={"archived", "archived_at"})
+    legacy = session.model_dump(
+        mode="json", exclude={"archived", "archived_at", "archive_provider_fenced"}
+    )
     restored = ManagedSession.model_validate(workspace_manager._normalize_session_item(legacy))
     assert restored.archived is False and restored.archived_at is None
+    assert not restored.archive_provider_fenced
 
 
-def test_delete_archived_session_discards_retained_history(
+@pytest.mark.asyncio
+async def test_delete_archived_session_discards_retained_history(
     tmp_path: Path, archive_runtime: list[str], monkeypatch: MonkeyPatch
 ) -> None:
-    import asyncio
-
     from claude_hub.models import AgentStreamEvent, AgentStreamEventType
     from claude_hub.services.agent_stream import AgentStreamStore
 
     client = TestClient(app)
     workspace, session, url = _archive_chat(client, tmp_path / "repo")
     store = AgentStreamStore(workspace["id"], session.id)
-    asyncio.run(
-        store.append(
-            AgentStreamEvent(
-                session_id=session.id,
-                tab_id=session.tab_id,
-                agent_type=session.agent_type,
-                stream_sequence=-1,
-                created_at=datetime.now(),
-                type=AgentStreamEventType.TEXT_DELTA,
-                payload={"text": "history"},
-            )
+    await store.append(
+        AgentStreamEvent(
+            session_id=session.id,
+            tab_id=session.tab_id,
+            agent_type=session.agent_type,
+            stream_sequence=-1,
+            created_at=datetime.now(),
+            type=AgentStreamEventType.TEXT_DELTA,
+            payload={"text": "history"},
         )
     )
 
@@ -841,3 +838,71 @@ def test_archive_preserves_provider_identity_captured_during_shutdown(
     assert response.status_code == 200
     assert response.json()["agent_session_id"] == "captured-on-stop"
     assert response.json()["agent_session_id_verified"] is True
+
+
+@pytest.mark.parametrize("delete_scope", ["session", "workspace"])
+def test_archived_session_delete_after_reload_retains_verified_fence(
+    tmp_path: Path, archive_runtime: list[str], monkeypatch: MonkeyPatch, delete_scope: str
+) -> None:
+    import json
+
+    from claude_hub.services.agent_stream import AgentStreamStore, tailer
+
+    client = TestClient(app)
+    workspace, session, url = _archive_chat(client, tmp_path / "repo")
+    store = AgentStreamStore(workspace["id"], session.id)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar = store.path.with_suffix(".maso-delivery.json")
+    sidecar.write_text(json.dumps({"uncertain": False}))
+    # A previously verified shutdown is the same evidence archive obtains from
+    # a live owner; the native transport test covers that acquisition path.
+    tailer._PROVIDER_FENCED_SESSION_IDS.add(session.id)
+    assert client.post(url + "/archive").status_code == 200
+    saved = tmp_path / "archived-session.json"
+    saved.write_text(json.dumps(workspace_manager._workspace_state_payload(workspace["id"])))
+    workspace_manager.sessions.clear()
+    for item in json.loads(saved.read_text())["sessions"]:
+        restored = ManagedSession.model_validate(workspace_manager._normalize_session_item(item))
+        workspace_manager.sessions[restored.id] = restored
+    assert workspace_manager.sessions[session.id].archive_provider_fenced
+    tailer._PROVIDER_FENCED_SESSION_IDS.clear()
+    tailer._DELETION_FENCED_SESSION_IDS.clear()
+
+    async def delete_tab(_tab_id: str) -> bool:
+        return True
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "delete_tab", delete_tab)
+    target = (
+        f"/api/workspaces/sessions/{session.id}"
+        if delete_scope == "session"
+        else f"/api/workspaces/{workspace['id']}"
+    )
+    response = client.delete(target)
+    assert response.status_code == 204, response.text
+    assert session.id not in workspace_manager.sessions
+    assert not sidecar.exists()
+
+
+@pytest.mark.parametrize(
+    "archived,verified,uncertain", [(True, True, True), (True, False, False), (False, True, False)]
+)
+def test_archived_fence_does_not_bypass_uncertain_or_unverified_delivery(
+    tmp_path: Path, archive_runtime: list[str], archived: bool, verified: bool, uncertain: bool
+) -> None:
+    import json
+
+    from claude_hub.services.agent_stream import AgentStreamStore
+
+    client = TestClient(app)
+    workspace, session, _ = _archive_chat(client, tmp_path / "repo")
+    workspace_manager.sessions[session.id] = session.model_copy(
+        update={"archived": archived, "archive_provider_fenced": verified}
+    )
+    store = AgentStreamStore(workspace["id"], session.id)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar = store.path.with_suffix(".maso-delivery.json")
+    sidecar.write_text(json.dumps({"uncertain": uncertain}))
+    response = client.delete(f"/api/workspaces/sessions/{session.id}")
+    assert response.status_code == 400, response.text
+    assert session.id in workspace_manager.sessions
+    assert sidecar.exists()

@@ -16,7 +16,8 @@
 - Archived sessions are hidden from ordinary lists and excluded from dispatch,
   agent reuse and reviewer selection. CLI adds `session archive`,
   `session unarchive` and `session list --include-archived`; permanent deletion
-  remains available. Terminal sessions continue to use tab archive controls.
+  remains available, including after a backend restart with retained delivery
+  evidence. Terminal sessions continue to use tab archive controls.
 
 ### fix(goal): follow native provider state and continuation ownership
 
