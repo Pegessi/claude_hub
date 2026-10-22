@@ -74,6 +74,10 @@ class _SessionLifecycleMixin(_WorkspaceManagerBase):
         from claude_hub.services.agent_stream import fence_session_stream
 
         provider_fenced = await fence_session_stream(session.id)
+        # Archived owners cannot restart; their committed fence remains valid
+        # across backend restarts until restore clears it. Delivery validation
+        # below still rejects uncertain receipts even with a verified fence.
+        provider_fenced = provider_fenced or (session.archived and session.archive_provider_fenced)
         if session.session_kind == SessionKind.CHAT:
             managed_chat.validate_delivery_state_discard(
                 session.workspace_id,
@@ -124,6 +128,7 @@ class _SessionLifecycleMixin(_WorkspaceManagerBase):
         self.sessions[session.id] = session.model_copy(
             update={
                 "archived": True,
+                "archive_provider_fenced": provider_fenced,
                 "archived_at": now,
                 "chat_paused": True,
                 "status": ManagedSessionStatus.STOPPED,
@@ -163,6 +168,7 @@ class _SessionLifecycleMixin(_WorkspaceManagerBase):
         self.sessions[session.id] = session.model_copy(
             update={
                 "archived": False,
+                "archive_provider_fenced": False,
                 "archived_at": None,
                 "chat_paused": False,
                 "status": ManagedSessionStatus.IDLE,

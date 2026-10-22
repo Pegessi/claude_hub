@@ -31,6 +31,9 @@ class ManagedSession(BaseModel):
     chat_mode: ChatMode = ChatMode.DEFAULT
     archived: bool = False
     archived_at: Optional[datetime] = None
+    # A successful archive may retain delivery evidence requiring proof that
+    # its provider was stopped. Valid only while this incarnation is archived.
+    archive_provider_fenced: bool = False
     chat_paused: bool = False
     status: ManagedSessionStatus
     runtime_status: AgentRuntimeStatus = AgentRuntimeStatus.IDLE

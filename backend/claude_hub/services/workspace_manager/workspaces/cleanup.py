@@ -61,6 +61,9 @@ class _WorkspaceCleanupMixin(_WorkspaceManagerBase):
                 try:
                     for session in sessions:
                         provider_fenced = await fence_session_stream(session.id)
+                        provider_fenced = provider_fenced or (
+                            session.archived and session.archive_provider_fenced
+                        )
                         provider_fences[session.id] = provider_fenced
                         if session.session_kind == SessionKind.CHAT:
                             managed_chat.validate_delivery_state_discard(

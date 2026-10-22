@@ -6909,6 +6909,7 @@ async def test_managed_archive_fences_native_owner_and_restores_conversation(
     try:
         await manager.archive_session(session.workspace_id, session.id)
         assert transports[0].stop_called
+        assert manager.sessions[session.id].archive_provider_fenced
         assert tailers.get_tailer(session.id) is None
         page = await owner.store.read_since(-1, 100)
         assert any(item.payload.get("text") == "before archive" for item in page.events)
@@ -6920,6 +6921,7 @@ async def test_managed_archive_fences_native_owner_and_restores_conversation(
         assert len(transports) == 2
         assert identities == ["retained-conversation", "retained-conversation"]
         restored = manager.sessions[session.id]
+        assert not restored.archive_provider_fenced
         await tailers.send_message(restored, "continue", [], "restored-turn")
         assert transports[1].sent_messages == [("continue", [])]
         assert manager.sessions[session.id].agent_session_id == "retained-conversation"
