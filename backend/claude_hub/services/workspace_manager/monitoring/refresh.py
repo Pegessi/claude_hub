@@ -20,7 +20,8 @@ class _StatusRefreshMixin(_WorkspaceManagerBase):
         sessions = [
             session
             for session in self.sessions.values()
-            if workspace_id is None or session.workspace_id == workspace_id
+            if not session.archived
+            and (workspace_id is None or session.workspace_id == workspace_id)
         ]
         tab_ids = [
             session.tab_id for session in sessions if session.session_kind != SessionKind.CHAT

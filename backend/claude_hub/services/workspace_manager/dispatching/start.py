@@ -337,7 +337,11 @@ class _TaskStartMixin(_WorkspaceManagerBase):
         return None
 
     def _can_assign_or_queue_to(self, session: ManagedSession) -> bool:
-        if session.role != WorkspaceSessionRole.ORCHESTRATOR or session.chat_paused:
+        if (
+            session.archived
+            or session.role != WorkspaceSessionRole.ORCHESTRATOR
+            or session.chat_paused
+        ):
             return False
         if session.status == ManagedSessionStatus.STOPPED:
             return False

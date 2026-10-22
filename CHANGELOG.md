@@ -7,6 +7,17 @@
 
 ## Released
 
+### feat(session): archive and restore managed Chat sessions
+
+- Archive idle managed Chat agents and reviewers through workspace session
+  controls, releasing the runtime while retaining Hub history, attachments and
+  the provider conversation identity. Restore makes the session available again
+  and attempts to reopen its runtime.
+- Archived sessions are hidden from ordinary lists and excluded from dispatch,
+  agent reuse and reviewer selection. CLI adds `session archive`,
+  `session unarchive` and `session list --include-archived`; permanent deletion
+  remains available. Terminal sessions continue to use tab archive controls.
+
 ### fix(goal): follow native provider state and continuation ownership
 
 - Native-capable providers own Goal state and continuation. Hub reads their

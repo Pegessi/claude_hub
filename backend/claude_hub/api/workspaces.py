@@ -204,6 +204,7 @@ async def get_workspace_board(
     workspace_id: str,
     request: Request,
     response: Response,
+    include_archived: bool = Query(False, description="Include archived managed sessions."),
     tasks_limit: int | None = Query(
         default=None,
         ge=1,
@@ -231,6 +232,7 @@ async def get_workspace_board(
     try:
         board = await workspace_manager.get_board(
             workspace_id,
+            include_archived=include_archived,
             tasks_limit=tasks_limit,
             tasks_cursor=tasks_cursor,
         )

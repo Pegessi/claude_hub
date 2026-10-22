@@ -444,6 +444,8 @@ class _NormalizeMixin(_WorkspaceManagerBase):
             SessionKind.CHAT.value,
         }:
             normalized["session_kind"] = SessionKind.TERMINAL.value
+        normalized.setdefault("archived", False)
+        normalized.setdefault("archived_at", None)
         normalized.setdefault("chat_paused", False)
         normalized["chat_mode"] = "default"
         return normalized

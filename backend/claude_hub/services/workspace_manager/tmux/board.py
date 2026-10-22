@@ -28,6 +28,7 @@ class _WorkspaceBoardMixin(_WorkspaceManagerBase):
         self,
         workspace_id: str,
         *,
+        include_archived: bool = False,
         tasks_limit: int | None = None,
         tasks_cursor: str | None = None,
     ) -> WorkspaceBoard:
@@ -71,7 +72,7 @@ class _WorkspaceBoardMixin(_WorkspaceManagerBase):
             for report in self.latest_reports_per_task_for_workspace(workspace_id)
             if report.task_id in task_ids
         ]
-        sessions = self.sessions_for_workspace(workspace_id)
+        sessions = self.sessions_for_workspace(workspace_id, include_archived=include_archived)
         return WorkspaceBoard(
             workspace=self.workspaces[workspace_id],
             tasks=page_tasks,

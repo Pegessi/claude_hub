@@ -362,6 +362,7 @@ class _ReviewReaperMixin(_ReviewDeliveryMixin):
             for session in self._sessions_for_workspace_raw(workspace_id)
             if session.role == WorkspaceSessionRole.REVIEWER
             and (session_kind is None or session.session_kind == session_kind)
+            and not session.archived
             and not session.chat_paused
             and session.status != ManagedSessionStatus.STOPPED
             and session.runtime_status == AgentRuntimeStatus.IDLE

@@ -29,6 +29,8 @@ class ManagedSession(BaseModel):
     agent_type: AgentType
     session_kind: SessionKind = SessionKind.TERMINAL
     chat_mode: ChatMode = ChatMode.DEFAULT
+    archived: bool = False
+    archived_at: Optional[datetime] = None
     chat_paused: bool = False
     status: ManagedSessionStatus
     runtime_status: AgentRuntimeStatus = AgentRuntimeStatus.IDLE

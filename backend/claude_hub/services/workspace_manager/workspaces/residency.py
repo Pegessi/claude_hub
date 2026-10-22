@@ -262,6 +262,8 @@ class _ResidentAgentMixin(_WorkspaceManagerBase):
         if workspace.resident_agent_session_id and existing is None:
             self._reconcile_workspace_session_pointers(workspace.id)
             workspace = self.workspaces[workspace.id]
+        if existing is not None and existing.archived:
+            return
         if existing is not None and existing.status == ManagedSessionStatus.STOPPED:
             existing = None
         if existing is not None and existing.runtime_status == AgentRuntimeStatus.WORKING:

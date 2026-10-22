@@ -58,6 +58,8 @@ class WorkspaceExecutionEndpoints:
     abort_task: Callable[..., Any]
     apply_dispatch_decision: Callable[..., Any]
     dispatch_workspace: Callable[..., Any]
+    archive_session: Callable[..., Any]
+    unarchive_session: Callable[..., Any]
     delete_session: Callable[..., Any]
     send_session_message: Callable[..., Any]
     retry_uncertain_delivery: Callable[..., Any]
@@ -251,6 +253,45 @@ def register_execution_routes(
         except RuntimeError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
 
+    @router.post(
+        "/{workspace_id}/sessions/{managed_session_id}/archive", response_model=ManagedSessionPublic
+    )
+    async def archive_session(
+        workspace_id: str,
+        managed_session_id: str,
+        current_user: User = Depends(get_current_user),
+    ) -> ManagedSessionPublic:
+        """Release a managed Chat runtime while retaining resumable history."""
+        try:
+            session = await bindings.workspace_manager().archive_session(
+                workspace_id, managed_session_id
+            )
+            return ManagedSessionPublic.from_managed_session(session)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Session not found in workspace") from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @router.post(
+        "/{workspace_id}/sessions/{managed_session_id}/unarchive",
+        response_model=ManagedSessionPublic,
+    )
+    async def unarchive_session(
+        workspace_id: str,
+        managed_session_id: str,
+        current_user: User = Depends(get_current_user),
+    ) -> ManagedSessionPublic:
+        """Restore a managed Chat and best-effort restart its provider runtime."""
+        try:
+            session = await bindings.workspace_manager().unarchive_session(
+                workspace_id, managed_session_id
+            )
+            return ManagedSessionPublic.from_managed_session(session)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Session not found in workspace") from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @router.post("/sessions/{managed_session_id}/send", status_code=204)
     async def send_session_message(
         managed_session_id: str,
@@ -401,6 +442,8 @@ def register_execution_routes(
         abort_task=abort_task,
         apply_dispatch_decision=apply_dispatch_decision,
         dispatch_workspace=dispatch_workspace,
+        archive_session=archive_session,
+        unarchive_session=unarchive_session,
         delete_session=delete_session,
         send_session_message=send_session_message,
         retry_uncertain_delivery=retry_uncertain_delivery,

@@ -33,6 +33,49 @@ class _SessionCleanupMixin(_WorkspaceManagerBase):
                     self._quarantine_failed_session_deletion(session_id)
                     raise
 
+    async def archive_session(self, workspace_id: str, session_id: str) -> ManagedSession:
+        return await self._set_session_archived(workspace_id, session_id, archived=True)
+
+    async def unarchive_session(self, workspace_id: str, session_id: str) -> ManagedSession:
+        return await self._set_session_archived(workspace_id, session_id, archived=False)
+
+    async def _set_session_archived(
+        self, workspace_id: str, session_id: str, *, archived: bool
+    ) -> ManagedSession:
+        async with self.workspace_mutation_lock(workspace_id):
+            pump_lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
+            async with pump_lock:
+                session = self.sessions.get(session_id)
+                if session is None or session.workspace_id != workspace_id:
+                    raise KeyError(session_id)
+                if session.session_kind != SessionKind.CHAT:
+                    raise ValueError(
+                        "Session archive supports Chat only; use tab archive for terminals"
+                    )
+                if session.archived == archived:
+                    return session
+                if self._non_terminal_tasks_referencing_session(session_id) or (
+                    self._session_raw_task_bindings_block_cleanup(session)
+                ):
+                    raise RuntimeError(
+                        "Cannot archive or restore an agent with queued, working, or review tasks"
+                    )
+                cleanup = asyncio.create_task(
+                    (
+                        self._archive_session_locked(session)
+                        if archived
+                        else self._unarchive_session_locked(session)
+                    ),
+                    name=f"workspace-session-archive-{session_id}",
+                )
+                try:
+                    await self._await_lifecycle_cleanup(cleanup)
+                except BaseException:
+                    if archived and not self.sessions[session_id].archived:
+                        self._quarantine_failed_session_deletion(session_id)
+                    raise
+                return self.sessions[session_id]
+
     async def cleanup_task_session(self, task_id: str) -> TaskCleanupResult:
         task = self.tasks.get(task_id)
         if not task:

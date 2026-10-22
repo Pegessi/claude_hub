@@ -91,7 +91,11 @@ class _DispatchQueueMixin(_WorkspaceManagerBase):
             await self._dispatch_task_to_session(next_task, session)
 
     def _can_dispatch_to(self, session: ManagedSession) -> bool:
-        if session.role != WorkspaceSessionRole.ORCHESTRATOR or session.chat_paused:
+        if (
+            session.archived
+            or session.role != WorkspaceSessionRole.ORCHESTRATOR
+            or session.chat_paused
+        ):
             return False
         if session.status == ManagedSessionStatus.STOPPED:
             return False

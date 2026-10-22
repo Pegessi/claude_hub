@@ -10,9 +10,15 @@ class _SessionInventoryMixin(_WorkspaceManagerBase):
         {WorkspaceTaskStatus.DONE, WorkspaceTaskStatus.FAILED}
     )
 
-    def sessions_for_workspace(self, workspace_id: str) -> list[ManagedSession]:
+    def sessions_for_workspace(
+        self, workspace_id: str, *, include_archived: bool = False
+    ) -> list[ManagedSession]:
         sessions = self._sessions_for_workspace_raw(workspace_id)
-        return [self._with_assignment_summary(session) for session in sessions]
+        return [
+            self._with_assignment_summary(session)
+            for session in sessions
+            if include_archived or not session.archived
+        ]
 
     def _sessions_for_workspace_raw(self, workspace_id: str) -> list[ManagedSession]:
         return [
@@ -28,6 +34,7 @@ class _SessionInventoryMixin(_WorkspaceManagerBase):
             session
             for session in self._sessions_for_workspace_raw(workspace_id)
             if session.role == WorkspaceSessionRole.ORCHESTRATOR
+            and not session.archived
             and (include_stopped or session.status != ManagedSessionStatus.STOPPED)
         ]
 
@@ -41,7 +48,7 @@ class _SessionInventoryMixin(_WorkspaceManagerBase):
         if not workspace.dispatcher_session_id:
             return None
         session = self.sessions.get(workspace.dispatcher_session_id)
-        if session and session.status != ManagedSessionStatus.STOPPED:
+        if session and not session.archived and session.status != ManagedSessionStatus.STOPPED:
             return session
         self.workspaces[workspace.id] = workspace.model_copy(
             update={"dispatcher_session_id": None, "updated_at": self._runtime_now()}
@@ -179,7 +186,7 @@ class _SessionInventoryMixin(_WorkspaceManagerBase):
         """
         changed = False
         for session in self._sessions_for_workspace_raw(workspace_id):
-            if session.role != WorkspaceSessionRole.ORCHESTRATOR:
+            if session.archived or session.role != WorkspaceSessionRole.ORCHESTRATOR:
                 continue
             if self._reconcile_orchestrator_session_assignment(session.id):
                 changed = True
@@ -230,7 +237,7 @@ class _SessionInventoryMixin(_WorkspaceManagerBase):
         compatible: list[ManagedSession] = []
         reconcile_changed = False
         for session in self._sessions_for_workspace_raw(workspace.id):
-            if session.role != payload.role:
+            if session.archived or session.role != payload.role:
                 continue
             if session.agent_type != payload.agent_type:
                 continue
@@ -288,7 +295,7 @@ class _SessionInventoryMixin(_WorkspaceManagerBase):
         if not task.review_session_id:
             return False
         reviewer = self.sessions.get(task.review_session_id)
-        if not reviewer:
+        if not reviewer or reviewer.archived:
             return False
         if reviewer.status == ManagedSessionStatus.STOPPED:
             return False
@@ -327,7 +334,7 @@ class _SessionInventoryMixin(_WorkspaceManagerBase):
         if not task.review_session_id:
             return True
         reviewer = self.sessions.get(task.review_session_id)
-        if not reviewer:
+        if not reviewer or reviewer.archived:
             return True
         if reviewer.status == ManagedSessionStatus.STOPPED:
             return True
@@ -427,7 +434,7 @@ class _SessionInventoryMixin(_WorkspaceManagerBase):
         changed = False
         now = self._runtime_now()
         for session in self._sessions_for_workspace_raw(workspace_id):
-            if session.role != WorkspaceSessionRole.REVIEWER:
+            if session.archived or session.role != WorkspaceSessionRole.REVIEWER:
                 continue
             if not session.task_id and not session.current_task_id:
                 continue

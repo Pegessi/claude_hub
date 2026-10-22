@@ -42,6 +42,7 @@ class _FeedbackMixin(_WorkspaceManagerBase):
     def _feedback_foreground_busy(self, workspace_id: str) -> bool:
         active = any(
             session.workspace_id == workspace_id
+            and not session.archived
             and (
                 session.status in {ManagedSessionStatus.SPAWNING, ManagedSessionStatus.WORKING}
                 or session.runtime_status == AgentRuntimeStatus.WORKING
