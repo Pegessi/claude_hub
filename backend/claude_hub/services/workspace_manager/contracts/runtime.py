@@ -104,7 +104,9 @@ class _RuntimeHostContract(ABC):
     def latest_reports_per_task_for_workspace(self, workspace_id: str) -> list[AgentReport]: ...
 
     @abstractmethod
-    def sessions_for_workspace(self, workspace_id: str) -> list[ManagedSession]: ...
+    def sessions_for_workspace(
+        self, workspace_id: str, *, include_archived: bool = False
+    ) -> list[ManagedSession]: ...
 
     @abstractmethod
     def _emit_delivery_uncertain(
@@ -154,3 +156,12 @@ class _RuntimeHostContract(ABC):
 
     @abstractmethod
     async def _delete_session_locked(self, session: ManagedSession) -> None: ...
+
+    @abstractmethod
+    async def _archive_session_locked(self, session: ManagedSession) -> None: ...
+
+    @abstractmethod
+    async def _unarchive_session_locked(self, session: ManagedSession) -> None: ...
+
+    @abstractmethod
+    def _clear_retired_session_pointers(self, session: ManagedSession) -> None: ...

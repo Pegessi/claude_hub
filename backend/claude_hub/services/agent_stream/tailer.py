@@ -701,6 +701,15 @@ async def discard_retired_session_artifacts(workspace_id: str, session_id: str) 
     _DELETION_FENCED_SESSION_IDS.discard(session_id)
 
 
+def release_session_stream_fence(session_id: str) -> None:
+    """Allow a durably restored owner to restart without deleting its history.
+
+    Only call under the owning session lifecycle locks after restoration commits.
+    """
+    _PROVIDER_FENCED_SESSION_IDS.discard(session_id)
+    _DELETION_FENCED_SESSION_IDS.discard(session_id)
+
+
 async def stop_session_stream(session_id: str) -> None:
     """Stop in-process tailers/transports for a session WITHOUT clearing history.
 

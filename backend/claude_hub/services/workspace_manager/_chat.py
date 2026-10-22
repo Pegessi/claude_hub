@@ -37,6 +37,8 @@ class _ChatMixin(_WorkspaceManagerBase):
             or current.created_at != expected_session.created_at
         ):
             raise KeyError(f"session {session_id} was deleted or replaced")
+        if current.archived:
+            raise ValueError("Unarchive the managed Chat session before sending input")
         if current.session_kind != SessionKind.CHAT:
             raise ValueError("This endpoint requires a managed Chat session")
         if not message.strip() and not attachments:
@@ -78,6 +80,8 @@ class _ChatMixin(_WorkspaceManagerBase):
         so another answer cannot validate the same card before it is resolved.
         """
         session = self.sessions[session_id]
+        if session.archived:
+            raise ValueError("Unarchive the managed Chat session before sending input")
         if session.session_kind != SessionKind.CHAT:
             raise ValueError("This endpoint requires a managed Chat session")
         if not message.strip() and not attachments:
@@ -121,6 +125,8 @@ class _ChatMixin(_WorkspaceManagerBase):
         session = self.sessions.get(session_id)
         if session is None or session.session_kind != SessionKind.CHAT or not session.chat_paused:
             return
+        if session.archived:
+            raise RuntimeError("Unarchive the managed Chat session before resuming")
         if session.uncertain_call_ids:
             raise RuntimeError("Chat delivery is uncertain; reconcile it before resuming")
         self.sessions[session_id] = session.model_copy(

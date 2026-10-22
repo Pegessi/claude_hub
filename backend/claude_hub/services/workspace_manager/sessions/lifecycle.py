@@ -86,22 +86,7 @@ class _SessionLifecycleMixin(_WorkspaceManagerBase):
 
         snapshot = self._snapshot_report_intake_workspace(session.workspace_id)
         self.sessions.pop(session.id, None)
-        workspace = self.workspaces.get(session.workspace_id)
-        if workspace:
-            workspace_update: dict[str, Any] = {}
-            if workspace.dispatcher_session_id == session.id:
-                workspace_update["dispatcher_session_id"] = None
-            if workspace.resident_agent_session_id == session.id:
-                workspace_update.update(
-                    {
-                        "resident_agent_session_id": None,
-                        "resident_agent_last_run_at": None,
-                        "resident_agent_enabled": False,
-                    }
-                )
-            if workspace_update:
-                workspace_update["updated_at"] = self._runtime_now()
-                self.workspaces[workspace.id] = workspace.model_copy(update=workspace_update)
+        self._clear_retired_session_pointers(session)
         try:
             self._save_state()
         except BaseException:
@@ -113,6 +98,91 @@ class _SessionLifecycleMixin(_WorkspaceManagerBase):
             name=f"workspace-session-delete-{session.id}",
         )
         await self._await_lifecycle_cleanup(cleanup)
+
+    async def _archive_session_locked(self, session: ManagedSession) -> None:
+        """Release runtime under workspace/pump locks, retaining all evidence."""
+        from claude_hub.services.agent_stream import fence_session_stream
+        from claude_hub.services.agent_stream.tailer import stop_session_stream
+
+        provider_fenced = await fence_session_stream(session.id)
+        managed_chat.validate_delivery_state_discard(
+            session.workspace_id,
+            session.id,
+            acknowledged_call_ids=set(session.delivered_call_ids),
+            provider_fenced=provider_fenced,
+        )
+        # The headless tab owns navigation metadata; the managed stream owns
+        # the provider transport. Archive both without deleting either store.
+        tab = await ttyd_manager.archive_tab(session.tab_id)
+        if tab is None:
+            raise RuntimeError("Managed Chat backing tab is missing; cannot archive session")
+        await stop_session_stream(session.id)
+        # Provider shutdown may durably capture its conversation id. Preserve
+        # that latest identity instead of restoring the pre-fence snapshot.
+        session = self.sessions[session.id]
+        snapshot = self._snapshot_report_intake_workspace(session.workspace_id)
+        now = self._runtime_now()
+        self.sessions[session.id] = session.model_copy(
+            update={
+                "archived": True,
+                "archived_at": now,
+                "chat_paused": True,
+                "status": ManagedSessionStatus.STOPPED,
+                "runtime_status": AgentRuntimeStatus.OFFLINE,
+                "updated_at": now,
+            }
+        )
+        self._clear_retired_session_pointers(session)
+        try:
+            self._save_state()
+        except BaseException:
+            self._restore_report_intake_workspace(session.workspace_id, snapshot)
+            raise
+
+    def _clear_retired_session_pointers(self, session: ManagedSession) -> None:
+        workspace = self.workspaces.get(session.workspace_id)
+        if workspace is None:
+            return
+        update: dict[str, Any] = {}
+        if workspace.dispatcher_session_id == session.id:
+            update["dispatcher_session_id"] = None
+        if workspace.resident_agent_session_id == session.id:
+            update.update(
+                resident_agent_session_id=None,
+                resident_agent_last_run_at=None,
+                resident_agent_enabled=False,
+            )
+        if update:
+            update["updated_at"] = self._runtime_now()
+            self.workspaces[workspace.id] = workspace.model_copy(update=update)
+
+    async def _unarchive_session_locked(self, session: ManagedSession) -> None:
+        from claude_hub.services.agent_stream.tailer import release_session_stream_fence
+
+        # Keep the managed session unavailable until the backing tab is restored.
+        tab = await ttyd_manager.unarchive_tab(session.tab_id)
+        if tab is None:
+            raise RuntimeError("Managed Chat backing tab is missing; cannot restore session")
+        self.sessions[session.id] = session.model_copy(
+            update={
+                "archived": False,
+                "archived_at": None,
+                "chat_paused": False,
+                "status": ManagedSessionStatus.IDLE,
+                "runtime_status": AgentRuntimeStatus.IDLE,
+                "updated_at": self._runtime_now(),
+            }
+        )
+        try:
+            self._save_state()
+        except BaseException:
+            self.sessions[session.id] = session
+            raise
+        release_session_stream_fence(session.id)
+        try:
+            await managed_chat.start(self.sessions[session.id])
+        except Exception:
+            logger.exception("Best-effort managed Chat restart failed session_id=%s", session.id)
 
     @staticmethod
     def _effective_agent_target(

@@ -23,11 +23,19 @@ class _WorkspaceLifecycleMixin(_WorkspaceManagerBase):
         updates: dict[str, Any] = {}
         if workspace.dispatcher_session_id:
             session = self.sessions.get(workspace.dispatcher_session_id)
-            if session is None or session.status == ManagedSessionStatus.STOPPED:
+            if (
+                session is None
+                or session.archived
+                or session.status == ManagedSessionStatus.STOPPED
+            ):
                 updates["dispatcher_session_id"] = None
         if workspace.resident_agent_session_id:
             session = self.sessions.get(workspace.resident_agent_session_id)
-            if session is None or session.status == ManagedSessionStatus.STOPPED:
+            if (
+                session is None
+                or session.archived
+                or session.status == ManagedSessionStatus.STOPPED
+            ):
                 updates["resident_agent_session_id"] = None
         if updates:
             updates["updated_at"] = self._runtime_now()

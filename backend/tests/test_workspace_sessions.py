@@ -50,6 +50,10 @@ workspace_module = import_module("claude_hub.services.workspace_manager")
 @pytest.fixture(autouse=True)
 def isolated_workspace_manager(monkeypatch: MonkeyPatch) -> Generator[None, None, None]:
     """Clear the in-memory manager and bypass auth/state persistence per test."""
+    from claude_hub.services.agent_stream import tailer
+
+    monkeypatch.setattr(tailer, "_DELETION_FENCED_SESSION_IDS", set())
+    monkeypatch.setattr(tailer, "_PROVIDER_FENCED_SESSION_IDS", set())
     workspace_manager.workspaces.clear()
     workspace_manager.tasks.clear()
     workspace_manager.sessions.clear()
@@ -463,3 +467,370 @@ def test_dispatch_decision_unknown_task_returns_404(tmp_path: Path) -> None:
         json={"target_session_id": "whatever"},
     )
     assert response.status_code == 404
+
+
+@pytest.fixture
+def archive_runtime(monkeypatch: MonkeyPatch) -> list[str]:
+    """Stub resource owners, retaining the real stream fence and disk store."""
+    import claude_hub.services.managed_chat as managed_chat
+
+    calls: list[str] = []
+
+    async def archive_tab(tab_id: str):
+        calls.append(f"archive:{tab_id}")
+        return object()
+
+    async def unarchive_tab(tab_id: str):
+        calls.append(f"unarchive:{tab_id}")
+        return object()
+
+    class Runtime:
+        async def ensure_started(self, session):
+            assert not session.archived
+            assert session.agent_session_id == "provider-conversation"
+            calls.append("restart")
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "archive_tab", archive_tab)
+    monkeypatch.setattr(workspace_module.ttyd_manager, "unarchive_tab", unarchive_tab)
+    monkeypatch.setattr(managed_chat, "_manager", lambda: Runtime())
+    return calls
+
+
+def _archive_chat(client: TestClient, repo: Path) -> tuple[dict, ManagedSession, str]:
+    repo.mkdir()
+    workspace = _make_workspace(client, repo)
+    session = _make_session(workspace["id"], repo)
+    session = session.model_copy(
+        update={
+            "session_kind": SessionKind.CHAT,
+            "agent_session_id": "provider-conversation",
+            "agent_session_id_verified": True,
+            "role": WorkspaceSessionRole.ORCHESTRATOR,
+        }
+    )
+    workspace_manager.sessions[session.id] = session
+    return workspace, session, f"/api/workspaces/{workspace['id']}/sessions/{session.id}"
+
+
+def test_archive_restore_retains_history_and_provider_identity(
+    tmp_path: Path, archive_runtime: list[str], monkeypatch: MonkeyPatch
+) -> None:
+    import asyncio
+
+    from claude_hub.models import AgentStreamEvent, AgentStreamEventType
+    from claude_hub.services.agent_stream import AgentStreamStore
+    from claude_hub.services.agent_stream.tailer import _DELETION_FENCED_SESSION_IDS
+
+    client = TestClient(app)
+    workspace, session, url = _archive_chat(client, tmp_path / "repo")
+    store = AgentStreamStore(workspace["id"], session.id)
+    asyncio.run(
+        store.append(
+            AgentStreamEvent(
+                session_id=session.id,
+                tab_id=session.tab_id,
+                agent_type=session.agent_type,
+                stream_sequence=-1,
+                created_at=datetime.now(),
+                type=AgentStreamEventType.TEXT_DELTA,
+                payload={"text": "Retain this conversation"},
+            )
+        )
+    )
+    history = store.path.read_bytes()
+    workspace_manager.workspaces[workspace["id"]] = workspace_manager.workspaces[
+        workspace["id"]
+    ].model_copy(
+        update={
+            "resident_agent_session_id": session.id,
+            "resident_agent_enabled": True,
+            "dispatcher_session_id": session.id,
+        }
+    )
+    response = client.post(url + "/archive")
+    assert response.status_code == 200, response.text
+    archived_at = response.json()["archived_at"]
+    assert response.json()["archived"] and archived_at
+    assert session.id in _DELETION_FENCED_SESSION_IDS
+    assert archive_runtime == [f"archive:{session.tab_id}"]
+    assert client.post(url + "/archive").json()["archived_at"] == archived_at
+    assert len(archive_runtime) == 1
+    assert store.path.read_bytes() == history
+    assert workspace_manager.sessions_for_workspace(workspace["id"]) == []
+    assert (
+        len(workspace_manager.sessions_for_workspace(workspace["id"], include_archived=True)) == 1
+    )
+    assert workspace_manager._workspace_agents(workspace["id"], include_stopped=True) == []
+    assert not workspace_manager._can_assign_or_queue_to(workspace_manager.sessions[session.id])
+    assert not workspace_manager._can_dispatch_to(workspace_manager.sessions[session.id])
+    board = client.get(f"/api/workspaces/{workspace['id']}/board")
+    assert board.status_code == 200 and board.json()["sessions"] == []
+    assert (
+        len(
+            client.get(f"/api/workspaces/{workspace['id']}/board?include_archived=true").json()[
+                "sessions"
+            ]
+        )
+        == 1
+    )
+    current = workspace_manager.workspaces[workspace["id"]]
+    assert current.dispatcher_session_id is None
+    assert current.resident_agent_session_id is None and not current.resident_agent_enabled
+    replay = client.get(f"/api/workspaces/sessions/{session.id}/stream/events")
+    assert replay.status_code == 200, replay.text
+    assert any(
+        event["payload"].get("text") == "Retain this conversation"
+        for event in replay.json()["events"]
+    )
+    assert (
+        client.post(
+            f"/api/workspaces/sessions/{session.id}/send", json={"message": "hello"}
+        ).status_code
+        == 400
+    )
+    restored = client.post(url + "/unarchive")
+    assert restored.status_code == 200, restored.text
+    assert not restored.json()["archived"] and restored.json()["archived_at"] is None
+    assert restored.json()["agent_session_id"] == "provider-conversation"
+    assert restored.json()["agent_session_id_verified"] is True
+    assert session.id not in _DELETION_FENCED_SESSION_IDS
+    assert archive_runtime[-2:] == [f"unarchive:{session.tab_id}", "restart"]
+    assert len(workspace_manager.sessions_for_workspace(workspace["id"])) == 1
+    assert client.post(url + "/unarchive").status_code == 200
+    assert archive_runtime.count("restart") == 1
+    assert store.path.read_bytes() == history
+
+
+@pytest.mark.parametrize(
+    "status", [WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING, WorkspaceTaskStatus.REVIEW]
+)
+@pytest.mark.parametrize("binding", ["session_id", "review_session_id"])
+def test_archive_refuses_nonterminal_task_bindings(
+    tmp_path: Path, archive_runtime: list[str], status: WorkspaceTaskStatus, binding: str
+) -> None:
+    client = TestClient(app)
+    workspace, session, url = _archive_chat(client, tmp_path / "repo")
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks", json={"title": "Busy", "prompt": "work"}
+    ).json()
+    stored = workspace_manager.tasks[task["id"]]
+    workspace_manager.tasks[task["id"]] = stored.model_copy(
+        update={binding: session.id, "status": status}
+    )
+    response = client.post(url + "/archive")
+    assert response.status_code == 409, response.text
+    assert not workspace_manager.sessions[session.id].archived
+    assert archive_runtime == []
+
+
+def test_archive_rejects_wrong_workspace_and_terminal(
+    tmp_path: Path, archive_runtime: list[str]
+) -> None:
+    client = TestClient(app)
+    _, session, url = _archive_chat(client, tmp_path / "repo")
+    assert client.post(f"/api/workspaces/wrong/sessions/{session.id}/archive").status_code == 404
+    workspace_manager.sessions[session.id] = session.model_copy(
+        update={"session_kind": SessionKind.TERMINAL}
+    )
+    for action in ("archive", "unarchive"):
+        response = client.post(url + "/" + action)
+        assert response.status_code == 409
+        assert "Chat only" in response.json()["detail"]
+    assert archive_runtime == []
+
+
+def test_archive_old_state_normalization(tmp_path: Path) -> None:
+    client = TestClient(app)
+    _, session, _ = _archive_chat(client, tmp_path / "repo")
+    legacy = session.model_dump(mode="json", exclude={"archived", "archived_at"})
+    restored = ManagedSession.model_validate(workspace_manager._normalize_session_item(legacy))
+    assert restored.archived is False and restored.archived_at is None
+
+
+def test_delete_archived_session_discards_retained_history(
+    tmp_path: Path, archive_runtime: list[str], monkeypatch: MonkeyPatch
+) -> None:
+    import asyncio
+
+    from claude_hub.models import AgentStreamEvent, AgentStreamEventType
+    from claude_hub.services.agent_stream import AgentStreamStore
+
+    client = TestClient(app)
+    workspace, session, url = _archive_chat(client, tmp_path / "repo")
+    store = AgentStreamStore(workspace["id"], session.id)
+    asyncio.run(
+        store.append(
+            AgentStreamEvent(
+                session_id=session.id,
+                tab_id=session.tab_id,
+                agent_type=session.agent_type,
+                stream_sequence=-1,
+                created_at=datetime.now(),
+                type=AgentStreamEventType.TEXT_DELTA,
+                payload={"text": "history"},
+            )
+        )
+    )
+
+    async def delete_tab(_tab_id: str) -> bool:
+        return True
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "delete_tab", delete_tab)
+    assert client.post(url + "/archive").status_code == 200
+    assert store.path.exists()
+    assert client.delete(f"/api/workspaces/sessions/{session.id}").status_code == 204
+    assert session.id not in workspace_manager.sessions
+    assert not store.path.exists()
+
+
+def test_archive_failure_retains_quarantined_owner(
+    tmp_path: Path, archive_runtime: list[str], monkeypatch: MonkeyPatch
+) -> None:
+    client = TestClient(app)
+    _, session, url = _archive_chat(client, tmp_path / "repo")
+
+    async def fail(_tab_id: str):
+        raise RuntimeError("runtime stop failed")
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "archive_tab", fail)
+    response = client.post(url + "/archive")
+    assert response.status_code == 409
+    retained = workspace_manager.sessions[session.id]
+    assert not retained.archived and retained.chat_paused
+    assert retained.runtime_status == AgentRuntimeStatus.ATTENTION
+    assert retained.agent_session_id == session.agent_session_id
+
+
+@pytest.mark.asyncio
+async def test_archive_cancellation_finishes_under_lifecycle_locks(
+    tmp_path: Path, archive_runtime: list[str], monkeypatch: MonkeyPatch
+) -> None:
+    import asyncio
+
+    client = TestClient(app)
+    workspace, session, _ = _archive_chat(client, tmp_path / "repo")
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def archive_tab(_tab_id: str):
+        entered.set()
+        await release.wait()
+        return object()
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "archive_tab", archive_tab)
+    archiving = asyncio.create_task(workspace_manager.archive_session(workspace["id"], session.id))
+    await asyncio.wait_for(entered.wait(), 1)
+    archiving.cancel()
+    await asyncio.sleep(0)
+    assert not archiving.done()
+    assert workspace_manager._pump_locks[session.id].locked()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(archiving, 1)
+    assert workspace_manager.sessions[session.id].archived
+    assert not workspace_manager._pump_locks[session.id].locked()
+
+
+def test_unarchive_restart_failure_is_best_effort(
+    tmp_path: Path, archive_runtime: list[str], monkeypatch: MonkeyPatch
+) -> None:
+    import claude_hub.services.managed_chat as managed_chat
+
+    client = TestClient(app)
+    _, session, url = _archive_chat(client, tmp_path / "repo")
+    assert client.post(url + "/archive").status_code == 200
+
+    class UnavailableRuntime:
+        async def ensure_started(self, _session):
+            raise RuntimeError("provider offline")
+
+    monkeypatch.setattr(managed_chat, "_manager", lambda: UnavailableRuntime())
+    response = client.post(url + "/unarchive")
+    assert response.status_code == 200
+    assert not workspace_manager.sessions[session.id].archived
+    assert response.json()["agent_session_id"] == session.agent_session_id
+
+
+def test_archive_excludes_reuse_and_reviewer_selection_even_if_idle(tmp_path: Path) -> None:
+    client = TestClient(app)
+    workspace, session, _ = _archive_chat(client, tmp_path / "repo")
+    archived = session.model_copy(update={"archived": True})
+    workspace_manager.sessions[session.id] = archived
+    request = EnsureWorkspaceAgentRequest(agent_type=AgentType.CODEX, session_kind=SessionKind.CHAT)
+    assert (
+        workspace_manager._find_compatible_workspace_agent(
+            workspace_manager.workspaces[workspace["id"]], request
+        )
+        is None
+    )
+    workspace_manager.sessions[session.id] = archived.model_copy(
+        update={"role": WorkspaceSessionRole.REVIEWER}
+    )
+    assert (
+        workspace_manager._first_available_reviewer(
+            workspace["id"],
+            target=ExecutionTarget.LOCAL,
+            cwd=str(tmp_path / "repo"),
+            session_kind=SessionKind.CHAT,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("operation", ["archive", "unarchive"])
+def test_archive_state_commit_failure_retains_owner_for_retry(
+    tmp_path: Path, archive_runtime: list[str], monkeypatch: MonkeyPatch, operation: str
+) -> None:
+    client = TestClient(app)
+    _, session, url = _archive_chat(client, tmp_path / "repo")
+    if operation == "unarchive":
+        assert client.post(url + "/archive").status_code == 200
+
+    def fail_save() -> None:
+        raise RuntimeError("state storage unavailable")
+
+    monkeypatch.setattr(workspace_manager, "_save_state", fail_save)
+    response = client.post(url + "/" + operation)
+    assert response.status_code == 409
+    retained = workspace_manager.sessions[session.id]
+    assert retained.archived == (operation == "unarchive")
+    assert retained.chat_paused
+    assert retained.agent_session_id == "provider-conversation"
+    monkeypatch.setattr(workspace_manager, "_save_state", lambda: None)
+    assert client.post(url + "/" + operation).status_code == 200
+    assert workspace_manager.sessions[session.id].archived == (operation == "archive")
+
+
+def test_archive_validates_delivery_before_retiring_tab(
+    tmp_path: Path, archive_runtime: list[str], monkeypatch: MonkeyPatch
+) -> None:
+    import claude_hub.services.managed_chat as managed_chat
+
+    client = TestClient(app)
+    _, session, url = _archive_chat(client, tmp_path / "repo")
+
+    def reject(*_args, **_kwargs):
+        raise RuntimeError("delivery is uncertain")
+
+    monkeypatch.setattr(managed_chat, "validate_delivery_state_discard", reject)
+    response = client.post(url + "/archive")
+    assert response.status_code == 409
+    assert archive_runtime == []
+    assert session.id in workspace_manager.sessions
+    assert not workspace_manager.sessions[session.id].archived
+
+
+def test_archive_preserves_provider_identity_captured_during_shutdown(
+    tmp_path: Path, archive_runtime: list[str], monkeypatch: MonkeyPatch
+) -> None:
+    client = TestClient(app)
+    _, session, url = _archive_chat(client, tmp_path / "repo")
+
+    async def archive_tab(_tab_id: str) -> object:
+        workspace_manager.set_session_agent_session_id(session.id, "captured-on-stop")
+        return object()
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "archive_tab", archive_tab)
+    response = client.post(url + "/archive")
+    assert response.status_code == 200
+    assert response.json()["agent_session_id"] == "captured-on-stop"
+    assert response.json()["agent_session_id_verified"] is True

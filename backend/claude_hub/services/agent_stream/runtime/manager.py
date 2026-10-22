@@ -59,6 +59,9 @@ class TailerManager(EditResendMixin):
         async with self._lock:
             if not self.session_is_current(session):
                 raise StructuredSourceUnavailable("managed session was deleted or replaced")
+            live = self._session_getter(session.id)
+            if session.archived or (live is not None and live.archived):
+                raise StructuredSourceUnavailable("managed session is archived; unarchive it first")
             if session.id in self._deps._DELETION_FENCED_SESSION_IDS:
                 raise StructuredSourceUnavailable("structured runtime is fenced for deletion")
             if not self._accepting_sends:

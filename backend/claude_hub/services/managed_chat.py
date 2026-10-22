@@ -610,6 +610,11 @@ async def reset_context(session: ManagedSession) -> None:
         _persist_fresh_identity(session)
 
 
+async def start(session: ManagedSession) -> None:
+    """Best-effort lifecycle callers may reopen this retained conversation."""
+    await _manager().ensure_started(session)
+
+
 async def close(session: ManagedSession) -> None:
     """Release this session's runtime without deleting history or receipts."""
 

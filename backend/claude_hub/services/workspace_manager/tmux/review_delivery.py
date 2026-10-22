@@ -30,6 +30,7 @@ class _ReviewDeliveryMixin(_WorkspaceManagerBase):
         reviewer = self.sessions.get(task.review_session_id or "")
         if (
             reviewer is None
+            or reviewer.archived
             or reviewer.workspace_id != task.workspace_id
             or (reviewer.current_task_id or reviewer.task_id) != task.id
             or reviewer.runtime_status != AgentRuntimeStatus.IDLE

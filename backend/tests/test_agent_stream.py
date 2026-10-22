@@ -6843,3 +6843,89 @@ def test_wait_drain_skips_duplicate_sequence(
     assert [e.stream_sequence for e in page.events] == [10, 11, 12, 13]
     assert page.next_sequence == 13
     assert page.has_more is False
+
+
+@pytest.mark.asyncio
+async def test_managed_archive_fences_native_owner_and_restores_conversation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Archive stops the real tailer, then restore resumes its provider identity."""
+    import importlib
+    import weakref
+
+    from claude_hub.services import managed_chat
+    from claude_hub.services.ttyd_manager import ttyd_manager
+    from claude_hub.services.workspace_manager import WorkspaceManager
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    module = importlib.import_module("claude_hub.services.agent_stream.tailer")
+    monkeypatch.setattr(module, "_TAILER_MANAGERS", weakref.WeakSet())
+    monkeypatch.setattr(module, "_DELETION_FENCED_SESSION_IDS", set())
+    monkeypatch.setattr(module, "_PROVIDER_FENCED_SESSION_IDS", set())
+    manager = WorkspaceManager()
+    monkeypatch.setattr(manager, "_save_state", lambda: None)
+    monkeypatch.setattr(manager, "_assert_session_seat", lambda _session: "seat")
+    session = _native_session().model_copy(
+        update={
+            "session_kind": SessionKind.CHAT,
+            "tmux_session": "",
+            "agent_session_id": "retained-conversation",
+            "agent_session_id_verified": True,
+        }
+    )
+    manager.sessions[session.id] = session
+    tailers = TailerManager(session_getter=manager.sessions.get)
+    transports: list[_FakeNativeTransport] = []
+    identities: list[str | None] = []
+
+    def create_native(current: ManagedSession, *_args: Any, **_kwargs: Any) -> Any:
+        identities.append(current.agent_session_id)
+        transport = _FakeNativeTransport()
+        transport.session = current
+        transport.active_thread_id = current.agent_session_id
+        transports.append(transport)
+        return transport
+
+    monkeypatch.setattr(module, "create_native_session", create_native)
+    monkeypatch.setattr(managed_chat, "_manager", lambda: tailers)
+
+    async def tab_action(_tab_id: str) -> object:
+        return object()
+
+    monkeypatch.setattr(ttyd_manager, "archive_tab", tab_action)
+    monkeypatch.setattr(ttyd_manager, "unarchive_tab", tab_action)
+    owner = await tailers.ensure_started(session)
+    await owner.store.append(
+        AgentStreamEvent(
+            session_id=session.id,
+            tab_id=session.tab_id,
+            agent_type=session.agent_type,
+            stream_sequence=-1,
+            created_at=datetime.now(timezone.utc),
+            type=AgentStreamEventType.TEXT_DELTA,
+            payload={"text": "before archive"},
+        )
+    )
+    try:
+        await manager.archive_session(session.workspace_id, session.id)
+        assert transports[0].stop_called
+        assert tailers.get_tailer(session.id) is None
+        page = await owner.store.read_since(-1, 100)
+        assert any(item.payload.get("text") == "before archive" for item in page.events)
+        # Simulate the absence of process-local fences after a cold restart.
+        module.release_session_stream_fence(session.id)
+        with pytest.raises(RuntimeError, match="archived"):
+            await tailers.ensure_started(manager.sessions[session.id])
+        await manager.unarchive_session(session.workspace_id, session.id)
+        assert len(transports) == 2
+        assert identities == ["retained-conversation", "retained-conversation"]
+        restored = manager.sessions[session.id]
+        await tailers.send_message(restored, "continue", [], "restored-turn")
+        assert transports[1].sent_messages == [("continue", [])]
+        assert manager.sessions[session.id].agent_session_id == "retained-conversation"
+        assert any(
+            item.payload.get("text") == "before archive"
+            for item in (await owner.store.read_since(-1, 100)).events
+        )
+    finally:
+        await tailers.forget_session(session.id)

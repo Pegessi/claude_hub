@@ -138,7 +138,7 @@ async def stream_events_for(
         )
     if view == "conversation" and turn_id is not None:
         raise HTTPException(status_code=400, detail="conversation view cannot filter one turn")
-    if persisted_only:
+    if persisted_only or session.archived:
         store = manager.get_store(session.workspace_id, session.id)
         if view == "conversation":
             return await store.read_conversation(since_sequence, limit, compact=compact)
@@ -547,7 +547,7 @@ def register_observation_routes(
     ) -> AgentStreamEventPage:
         session = bindings.session_or_404(managed_session_id)
         manager = bindings.get_tailer_manager()
-        if persisted_only:
+        if persisted_only or session.archived:
             bindings.require_current_managed_session(session, manager)
             page = await bindings.stream_events_for(
                 session,

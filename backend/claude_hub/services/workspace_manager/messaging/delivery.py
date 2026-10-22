@@ -481,7 +481,8 @@ class _MessageDeliveryMixin(_WorkspaceManagerBase):
                 # Already claimed by a concurrent pump cycle.
                 continue
             if session.session_kind == SessionKind.CHAT and (
-                session.chat_paused
+                session.archived
+                or session.chat_paused
                 or session.uncertain_call_ids
                 or managed_chat.is_turn_running(session)
             ):
