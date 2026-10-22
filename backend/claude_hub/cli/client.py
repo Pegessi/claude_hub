@@ -258,9 +258,10 @@ class HubClient:
         """PATCH /api/workspaces/{workspace_id}."""
         return self._request("PATCH", f"/api/workspaces/{workspace_id}", json=body)
 
-    def get_board(self, workspace_id: str) -> Any:
+    def get_board(self, workspace_id: str, *, include_archived: bool = False) -> Any:
         """GET /api/workspaces/{workspace_id}/board."""
-        return self._request("GET", f"/api/workspaces/{workspace_id}/board")
+        params = {"include_archived": True} if include_archived else None
+        return self._request("GET", f"/api/workspaces/{workspace_id}/board", params=params)
 
     def dispatch_workspace(self, workspace_id: str) -> None:
         """POST /api/workspaces/{workspace_id}/dispatch (204)."""
@@ -412,6 +413,20 @@ class HubClient:
     def ensure_agent(self, workspace_id: str, body: Dict[str, Any]) -> Any:
         """POST /api/workspaces/{workspace_id}/agent."""
         data = self._request("POST", f"/api/workspaces/{workspace_id}/agent", json=body)
+        return redact_session_json_payload(data)
+
+    def archive_session(self, workspace_id: str, session_id: str) -> Any:
+        """Archive an idle managed Chat session while retaining its history."""
+        data = self._request(
+            "POST", f"/api/workspaces/{workspace_id}/sessions/{session_id}/archive"
+        )
+        return redact_session_json_payload(data)
+
+    def unarchive_session(self, workspace_id: str, session_id: str) -> Any:
+        """Restore an archived managed Chat session."""
+        data = self._request(
+            "POST", f"/api/workspaces/{workspace_id}/sessions/{session_id}/unarchive"
+        )
         return redact_session_json_payload(data)
 
     def delete_session(self, session_id: str) -> None:

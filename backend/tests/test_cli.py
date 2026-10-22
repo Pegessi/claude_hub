@@ -1431,3 +1431,66 @@ def test_lessons_delete(monkeypatch, status):
     assert methods[0] == "DELETE"
     if status == 204:
         assert "deleted l1" in result.output
+
+
+@pytest.mark.parametrize("include_archived", [False, True])
+def test_session_list_archived_filter(monkeypatch, include_archived):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/workspaces/wsA/board"
+        assert request.url.params.get("include_archived") == ("true" if include_archived else None)
+        return httpx.Response(
+            200,
+            json={"sessions": [{"id": "active"}, {"id": "old", "archived": True}]},
+        )
+
+    patch_get_client(monkeypatch, handler)
+    args = ["--json", "session", "list", "wsA"]
+    if include_archived:
+        args.append("--include-archived")
+    result = CliRunner().invoke(cli, args)
+    assert result.exit_code == 0, result.output
+    assert [row["id"] for row in json.loads(result.output)] == (
+        ["active", "old"] if include_archived else ["active"]
+    )
+
+
+@pytest.mark.parametrize("action", ["archive", "unarchive"])
+@pytest.mark.parametrize("explicit_workspace", [False, True])
+def test_session_archive_commands(monkeypatch, action, explicit_workspace):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/workspaces":
+            assert not explicit_workspace
+            return httpx.Response(200, json=[{"id": "wsA"}])
+        if request.url.path == "/api/workspaces/wsA/board":
+            assert request.url.params.get("include_archived") == "true"
+            return httpx.Response(200, json={"sessions": [{"id": "old", "archived": True}]})
+        assert request.method == "POST"
+        assert request.url.path == f"/api/workspaces/wsA/sessions/old/{action}"
+        return httpx.Response(200, json={"id": "old", "archived": action == "archive"})
+
+    captured = patch_get_client(monkeypatch, handler)
+    args = ["--json", "session", action, "old"]
+    if explicit_workspace:
+        args.extend(["--workspace-id", "wsA"])
+    result = CliRunner().invoke(cli, args)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"id": "old", "archived": action == "archive"}
+    assert len(captured) == (1 if explicit_workspace else 3)
+
+
+@pytest.mark.parametrize("action", ["archive", "unarchive"])
+def test_session_archive_command_reports_backend_error(monkeypatch, action):
+    patch_get_client(
+        monkeypatch,
+        lambda request: httpx.Response(400, json={"detail": "Session has non-terminal tasks"}),
+    )
+    result = CliRunner().invoke(cli, ["session", action, "old", "--workspace-id", "wsA"])
+    assert result.exit_code != 0
+    assert "Session has non-terminal tasks" in result.output
+
+
+def test_session_unarchive_unknown_session(monkeypatch):
+    patch_get_client(monkeypatch, lambda request: httpx.Response(200, json=[]))
+    result = CliRunner().invoke(cli, ["session", "unarchive", "missing"])
+    assert result.exit_code != 0
+    assert "Session missing not found" in result.output
