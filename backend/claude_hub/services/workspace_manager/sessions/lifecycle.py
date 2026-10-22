@@ -1,6 +1,8 @@
 """Cancellation-safe retirement and task deletion lifecycle."""
 
+import claude_hub.services.agent_stream as agent_stream
 import claude_hub.services.managed_chat as managed_chat
+from claude_hub.services.agent_stream import tailer as stream_lifecycle
 from claude_hub.services.task_dependencies import TaskHasDependentsError
 from claude_hub.services.task_graph import TaskHasDescendantsError, task_has_descendants
 from claude_hub.services.workspace_manager._base import _WorkspaceManagerBase
@@ -101,10 +103,7 @@ class _SessionLifecycleMixin(_WorkspaceManagerBase):
 
     async def _archive_session_locked(self, session: ManagedSession) -> None:
         """Release runtime under workspace/pump locks, retaining all evidence."""
-        from claude_hub.services.agent_stream import fence_session_stream
-        from claude_hub.services.agent_stream.tailer import stop_session_stream
-
-        provider_fenced = await fence_session_stream(session.id)
+        provider_fenced = await agent_stream.fence_session_stream(session.id)
         managed_chat.validate_delivery_state_discard(
             session.workspace_id,
             session.id,
@@ -116,7 +115,7 @@ class _SessionLifecycleMixin(_WorkspaceManagerBase):
         tab = await ttyd_manager.archive_tab(session.tab_id)
         if tab is None:
             raise RuntimeError("Managed Chat backing tab is missing; cannot archive session")
-        await stop_session_stream(session.id)
+        await stream_lifecycle.stop_session_stream(session.id)
         # Provider shutdown may durably capture its conversation id. Preserve
         # that latest identity instead of restoring the pre-fence snapshot.
         session = self.sessions[session.id]
@@ -157,8 +156,6 @@ class _SessionLifecycleMixin(_WorkspaceManagerBase):
             self.workspaces[workspace.id] = workspace.model_copy(update=update)
 
     async def _unarchive_session_locked(self, session: ManagedSession) -> None:
-        from claude_hub.services.agent_stream.tailer import release_session_stream_fence
-
         # Keep the managed session unavailable until the backing tab is restored.
         tab = await ttyd_manager.unarchive_tab(session.tab_id)
         if tab is None:
@@ -178,7 +175,7 @@ class _SessionLifecycleMixin(_WorkspaceManagerBase):
         except BaseException:
             self.sessions[session.id] = session
             raise
-        release_session_stream_fence(session.id)
+        stream_lifecycle.release_session_stream_fence(session.id)
         try:
             await managed_chat.start(self.sessions[session.id])
         except Exception:
