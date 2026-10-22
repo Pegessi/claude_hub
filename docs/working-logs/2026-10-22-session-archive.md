@@ -75,7 +75,7 @@ Focused API/session/CLI tests: 116 passed. Native transport archive/restore test
 1 passed. Full repository checks and independent review results are recorded in
 the final Task report. Canonical formatting uses Black/isort. Supplemental
 Ruff check passes with the repository wildcard-import/re-export diagnostics
-(F405/F401) excluded; unfiltered Ruff already reports these on the base. Ruff
+(F405/F401 and the existing E402 import-order exception) excluded; unfiltered Ruff already reports these on the base. Ruff
 format also differs from the base Black formatting in three touched files.
 These existing convention differences are retained rather than reformatting
 unrelated code. Tests use isolated runtime homes/state and fake providers;
