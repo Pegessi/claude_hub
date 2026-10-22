@@ -474,6 +474,13 @@ def archive_runtime(monkeypatch: MonkeyPatch) -> list[str]:
     """Stub resource owners, retaining the real stream fence and disk store."""
     import claude_hub.services.managed_chat as managed_chat
 
+    # Own the observation manager instead of inheriting a shutdown/quiesced
+    # singleton left by application-lifespan tests earlier in the full suite.
+    stream_api = import_module("claude_hub.api.agent_stream")
+    from claude_hub.services.agent_stream import TailerManager
+
+    observation = TailerManager(session_getter=workspace_manager.sessions.get)
+    monkeypatch.setattr(stream_api, "_get_tailer_manager", lambda: observation)
     calls: list[str] = []
 
     async def archive_tab(tab_id: str):
