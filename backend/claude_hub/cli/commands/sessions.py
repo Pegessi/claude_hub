@@ -37,6 +37,7 @@ SESSION_COLUMNS = [
     "role",
     "agent_type",
     "status",
+    "archived",
     "current_task_id",
     "last_activity_at",
 ]
@@ -46,6 +47,7 @@ SESSION_STATUS_FIELDS = [
     "role",
     "agent_type",
     "status",
+    "archived",
     "runtime_status",
     "current_task_id",
     "tab_id",
@@ -61,15 +63,20 @@ SESSION_STATUS_FIELDS = [
 @session.command("list")
 @click.argument("workspace_id")
 @click.option("--role", default=None, help="Client-side filter on session role.")
+@click.option("--include-archived", is_flag=True, help="Include archived sessions.")
 @click.pass_context
-def session_list(ctx: click.Context, workspace_id: str, role: Optional[str]) -> None:
+def session_list(
+    ctx: click.Context, workspace_id: str, role: Optional[str], include_archived: bool
+) -> None:
     """List managed sessions for a workspace."""
     try:
         with cli_main.get_client(ctx) as client:
-            board = client.get_board(workspace_id)
+            board = client.get_board(workspace_id, include_archived=include_archived)
     except HubError as e:
         raise click.ClickException(str(e)) from e
     sessions: List[dict] = board.get("sessions", []) if isinstance(board, dict) else []
+    if not include_archived:
+        sessions = [s for s in sessions if not s.get("archived", False)]
     if role is not None:
         sessions = [s for s in sessions if s.get("role") == role]
     if cli_main.as_json(ctx):
@@ -86,7 +93,7 @@ def _find_session_board(client: Any, session_id: str) -> tuple[Optional[str], Op
         ws_id = ws.get("id") if isinstance(ws, dict) else None
         if not ws_id:
             continue
-        board = client.get_board(ws_id)
+        board = client.get_board(ws_id, include_archived=True)
         sessions: List[dict] = board.get("sessions", []) if isinstance(board, dict) else []
         match = next((s for s in sessions if s.get("id") == session_id), None)
         if match is not None:
@@ -112,7 +119,7 @@ def session_status(
         with cli_main.get_client(ctx) as client:
             ws_id: Optional[str]
             if workspace_id is not None:
-                board = client.get_board(workspace_id)
+                board = client.get_board(workspace_id, include_archived=True)
                 sessions: List[dict] = board.get("sessions", []) if isinstance(board, dict) else []
                 match = next((s for s in sessions if s.get("id") == session_id), None)
                 ws_id = workspace_id
@@ -168,7 +175,7 @@ def _find_session_tab(client: Any, session_id: str) -> Optional[str]:
         ws_id = ws.get("id") if isinstance(ws, dict) else None
         if not ws_id:
             continue
-        board = client.get_board(ws_id)
+        board = client.get_board(ws_id, include_archived=True)
         sessions: List[dict] = board.get("sessions", []) if isinstance(board, dict) else []
         match = next((s for s in sessions if s.get("id") == session_id), None)
         if match is not None:
@@ -231,11 +238,51 @@ def session_send(
         click.echo("sent")
 
 
+def _change_session_archive(
+    ctx: click.Context, session_id: str, workspace_id: Optional[str], *, archived: bool
+) -> None:
+    try:
+        with cli_main.get_client(ctx) as client:
+            if workspace_id is None:
+                workspace_id, _ = _find_session_board(client, session_id)
+                if workspace_id is None:
+                    raise click.ClickException(f"Session {session_id} not found.")
+            if archived:
+                data = client.archive_session(workspace_id, session_id)
+            else:
+                data = client.unarchive_session(workspace_id, session_id)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    if cli_main.as_json(ctx):
+        emit(data, True)
+    else:
+        action = "archived" if archived else "unarchived"
+        click.echo(f"{action} {session_id}")
+
+
+@session.command("archive")
+@click.argument("session_id")
+@click.option("--workspace-id", default=None, help="Workspace containing the session.")
+@click.pass_context
+def session_archive(ctx: click.Context, session_id: str, workspace_id: Optional[str]) -> None:
+    """Release an idle managed Chat session's runtime, retaining resumable history."""
+    _change_session_archive(ctx, session_id, workspace_id, archived=True)
+
+
+@session.command("unarchive")
+@click.argument("session_id")
+@click.option("--workspace-id", default=None, help="Workspace containing the session.")
+@click.pass_context
+def session_unarchive(ctx: click.Context, session_id: str, workspace_id: Optional[str]) -> None:
+    """Restore an archived managed Chat session and best-effort restart its runtime."""
+    _change_session_archive(ctx, session_id, workspace_id, archived=False)
+
+
 @session.command("delete")
 @click.argument("session_id")
 @click.pass_context
 def session_delete(ctx: click.Context, session_id: str) -> None:
-    """Delete an idle managed session and its terminal tab."""
+    """Permanently delete an active or archived idle session and its history."""
     try:
         with cli_main.get_client(ctx) as client:
             client.delete_session(session_id)
