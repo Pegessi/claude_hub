@@ -158,19 +158,38 @@ checkpoints. Both consume Layer 2/3 events.
 - `monitoring/lifecycle.py` runs after each dispatch pass. It compares the
   derived lifecycle with the persisted `WorkspaceTask.lifecycle_mark` and
   records each change once. The change is emitted once as a `lifecycle` Task
-  mailbox event, so `task wait` and Dot wake on runtime loss too, not only on
-  reports.
+  mailbox event, and waiters are woken after the per-workspace save, so
+  `task wait` long-polls see runtime loss too, not only reports. Dot does not
+  read the mailbox; it keeps its own watcher, now with lifecycle-aware stall
+  text.
 - Notices are deterministic and do not depend on an LLM choosing to notify:
   - attention phases (`needs_user`, `awaiting_acceptance`, `orphaned`,
-    `failed`) are announced after a 30 s settle window;
-  - a new Goal Packet is announced as a plan checkpoint.
-- Delivery goes through an injected notifier (`api/task_notifications.py`).
-  It routes to the Feishu chat bound to the source Chat, or to Dot when Dot
+    `failed`) are announced after settling, 30 s for recorded facts and
+    180 s for reasons inferred only from sampled runtime output;
+  - the same `phase:reason` is not announced again within 30 min, so
+    flapping does not page twice;
+  - a new Goal Packet is announced as a submitted plan.
+- Delivery runs in one background job per workspace, never inline in the
+  monitor loop. Each send is bounded at 20 s and a pass sends at most 5. It
+  goes through an injected notifier (`api/task_notifications.py`), which
+  routes to the Feishu chat bound to the source Chat, or to Dot when Dot
   tracks the Task.
+- Not pushed:
+  - states an initiator Chat reported itself (its own reply already reached
+    the person);
+  - children of an open parent Task, which the parent's agent supervises.
 - Notification state lives in the mark itself (`notified_at`, attempts,
-  backoff up to 1 h, `plan_digest`), so it survives restarts. Conditions
-  already older than 24 h at first observation (upgrades) are recorded but
-  not pushed.
+  backoff up to 1 h, `plan_digest`, last notice key and time), so it
+  survives restarts. Conditions already older than 24 h at first
+  observation (upgrades) are recorded but not pushed. A recent failure seen
+  first as failed is announced.
+- Next steps in notices depend on the board status: `task followup` for
+  working Tasks, `continue`/`accept` for review, `continue` for failed.
+- Known limits:
+  - Task mailbox events still have no retention.
+  - Derivation scans all reports once per workspace per tick.
+  - A Feishu pool error makes a recipient look unbound, so that notice is
+    dropped as unroutable.
 - Dot:
   - The wake prompt no longer repeats Hub notices.
   - The brief asks for a plan first, milestone reports, and stopping to ask

@@ -355,12 +355,16 @@ NOTICE_REASON_TEXT = {
     "completed": "已完成",
 }
 
+# Next steps differ by board status: `task continue` only reopens review or
+# failed Tasks; a working Task is steered with a follow-up message.
 NEXT_STEP_TEXT = {
-    TaskPhase.NEEDS_USER: "回覆：`claude-hub task continue {id} --message ...`，或在飛書直接回覆 dot。",
-    TaskPhase.AWAITING_ACCEPTANCE: "驗收：`claude-hub task accept {id}`；要修改：`claude-hub task continue {id} --message ...`。",
-    TaskPhase.ORPHANED: "決定去向：在看板重新派發，或關閉 `claude-hub task abort {id} --reason ...`。",
-    TaskPhase.FAILED: "重試：`claude-hub task continue {id} --message ...`。",
+    "working": "回覆或調整方向：`claude-hub task followup {ws} {id} --message ...`，或在飛書直接回覆 dot。",
+    "review": "回覆或要求修改：`claude-hub task continue {id} --message ...`；驗收：`claude-hub task accept {id}`。",
+    "failed": "重試：`claude-hub task continue {id} --message ...`。",
+    "queued": "可在看板重新派發，或關閉 `claude-hub task abort {id} --reason ...`。",
+    "todo": "可在看板派發，或關閉 `claude-hub task abort {id} --reason ...`。",
 }
+ORPHANED_STEP_TEXT = "決定去向：在看板重新派發，或關閉 `claude-hub task abort {id} --reason ...`。"
 
 PHASE_TONE = {
     TaskPhase.NEEDS_USER: "warning",
@@ -397,9 +401,13 @@ def attention_notice(
     lines = [f"**{notice_reason_text(reason)}**", f"Task `{task.id}`（{task.status.value}）"]
     if detail.strip():
         lines += ["", _clip(detail.strip(), 600)]
-    step = NEXT_STEP_TEXT.get(phase)
+    step = (
+        ORPHANED_STEP_TEXT
+        if phase == TaskPhase.ORPHANED
+        else NEXT_STEP_TEXT.get(task.status.value, "")
+    )
     if step:
-        lines += ["", step.format(id=task.id)]
+        lines += ["", step.format(id=task.id, ws=task.workspace_id)]
     return TaskNotice(
         kind="attention",
         title=f"{_clip(task.title, 60)}",
@@ -423,7 +431,7 @@ def plan_notice(task: WorkspaceTask) -> Optional[TaskNotice]:
     if packet is None or not packet.objective.strip():
         return None
     lines = [
-        "**計劃已制定，正在執行**",
+        "**計劃已提交**（審核或執行中）",
         f"Task `{task.id}`",
         "",
         f"目標：{_clip(packet.objective, 400)}",

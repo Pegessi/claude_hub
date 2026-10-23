@@ -280,3 +280,138 @@ def test_dot_stall_hint_names_the_blocking_task() -> None:
     hint = _lifecycle_hint(manager, queued)
     assert "Disk cleanup phase 4" in hint
     assert "AI reviewer has a question for you" in hint
+
+
+def _stop_worker(worker_id: str) -> None:
+    workspace_manager.sessions[worker_id] = workspace_manager.sessions[worker_id].model_copy(
+        update={"status": ManagedSessionStatus.STOPPED}
+    )
+
+
+def test_lifecycle_events_wake_task_wait(isolated_hub: Path) -> None:  # noqa: F811
+    from claude_hub.services.task_graph import make_task_consumer_key
+
+    client = TestClient(app)
+    workspace, worker, task = _running_task(client, isolated_hub)
+    workspace_manager._observe_task_lifecycles(workspace["id"])
+    key = make_task_consumer_key(task["id"])
+    since = max(event["sequence"] for event in _lifecycle_events(workspace["id"]))
+
+    async def wait_while_agent_dies() -> list[Any]:
+        wait = asyncio.create_task(
+            workspace_manager.task_mailbox.wait_for(
+                workspace["id"], key, since_sequence=since, timeout_seconds=5
+            )
+        )
+        await asyncio.sleep(0.05)
+        _stop_worker(worker["id"])
+        workspace_manager._observe_task_lifecycles(workspace["id"])
+        return await asyncio.wait_for(wait, timeout=2)
+
+    events = asyncio.run(wait_while_agent_dies())
+    assert [event.payload["phase"] for event in events] == ["orphaned"]
+
+
+def test_flapping_condition_is_not_announced_again_within_cooldown(
+    isolated_hub: Path,  # noqa: F811
+) -> None:
+    client = TestClient(app)
+    workspace, worker, task = _running_task(client, isolated_hub)
+    sent: list[TaskNotice] = []
+
+    async def notifier(_task: WorkspaceTask, notice: TaskNotice) -> str:
+        sent.append(notice)
+        return "sent"
+
+    workspace_manager.configure_task_notifier(notifier)
+    try:
+        for _ in range(3):
+            _stop_worker(worker["id"])
+            workspace_manager._observe_task_lifecycles(workspace["id"])
+            _age_mark(task["id"], 60)
+            asyncio.run(workspace_manager._deliver_task_notices(workspace["id"]))
+            # The agent comes back, then disappears again.
+            workspace_manager.sessions[worker["id"]] = workspace_manager.sessions[
+                worker["id"]
+            ].model_copy(update={"status": ManagedSessionStatus.WORKING})
+            workspace_manager._observe_task_lifecycles(workspace["id"])
+    finally:
+        workspace_manager.configure_task_notifier(None)
+    assert len(sent) == 1
+
+
+def test_recent_failure_seen_first_as_failed_is_announced(isolated_hub: Path) -> None:  # noqa: F811
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Fail", "path": str(isolated_hub), "session_prefix": "fl"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks", json={"title": "Doomed", "prompt": "x"}
+    ).json()
+    now = datetime.now()
+    workspace_manager.tasks[task["id"]] = workspace_manager.tasks[task["id"]].model_copy(
+        update={
+            "status": WorkspaceTaskStatus.FAILED,
+            "failed_at": now,
+            "failure_reason": "dispatch failed",
+        }
+    )
+    workspace_manager._observe_task_lifecycles(workspace["id"])
+    mark = workspace_manager.tasks[task["id"]].lifecycle_mark
+    assert mark is not None and mark.phase == TaskPhase.FAILED
+    assert mark.notified_at is None
+
+
+def test_self_reported_initiator_states_and_supervised_children_are_not_pushed(
+    isolated_hub: Path,  # noqa: F811
+) -> None:
+    client = TestClient(app)
+    workspace, _worker, parent = _running_task(client, isolated_hub)
+    child = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Child", "prompt": "sub", "parent_task_id": parent["id"]},
+    ).json()
+    workspace_manager.tasks[child["id"]] = workspace_manager.tasks[child["id"]].model_copy(
+        update={"status": WorkspaceTaskStatus.FAILED, "failed_at": datetime.now()}
+    )
+    assert not workspace_manager._task_notice_wanted(workspace_manager.tasks[child["id"]], "failed")
+    assert not workspace_manager._task_notice_wanted(
+        workspace_manager.tasks[parent["id"]], "initiator_needs_input"
+    )
+    assert workspace_manager._task_notice_wanted(
+        workspace_manager.tasks[parent["id"]], "agent_gone"
+    )
+
+
+def test_slow_notifier_times_out_without_blocking(
+    isolated_hub: Path, monkeypatch: MonkeyPatch  # noqa: F811
+) -> None:
+    from claude_hub.services.workspace_manager.monitoring import lifecycle as lifecycle_module
+
+    monkeypatch.setattr(lifecycle_module, "NOTICE_SEND_TIMEOUT_SECONDS", 0.05)
+    client = TestClient(app)
+    workspace, worker, task = _running_task(client, isolated_hub)
+    _stop_worker(worker["id"])
+    workspace_manager._observe_task_lifecycles(workspace["id"])
+    _age_mark(task["id"], 60)
+
+    async def hanging(_task: WorkspaceTask, _notice: TaskNotice) -> str:
+        await asyncio.sleep(10)
+        return "sent"
+
+    workspace_manager.configure_task_notifier(hanging)
+    try:
+        assert asyncio.run(workspace_manager._deliver_task_notices(workspace["id"])) == 0
+    finally:
+        workspace_manager.configure_task_notifier(None)
+    mark = workspace_manager.tasks[task["id"]].lifecycle_mark
+    assert mark is not None and mark.notify_attempts == 1
+
+
+def test_working_task_next_step_uses_followup_not_continue() -> None:
+    notice = attention_notice(
+        _task(status=WorkspaceTaskStatus.WORKING), TaskPhase.NEEDS_USER, "agent_needs_input"
+    )
+    assert "claude-hub task followup ws-1 task-1" in notice.text
+    assert "task continue" not in notice.text
