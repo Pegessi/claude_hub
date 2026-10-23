@@ -89,6 +89,12 @@ class SubagentCreate(SubagentTurnCreate):
     env_preset: Optional[str] = Field(default=None, min_length=1, max_length=200)
     env: Dict[str, str] = Field(default_factory=dict)
     parent_tab_id: Optional[str] = Field(default=None, min_length=1, max_length=256)
+    # Who is asking (the CLI sends $CLAUDE_HUB_TAB_ID / $CLAUDE_HUB_SUBAGENT_ID
+    # whatever --parent-tab-id/--no-parent say). Nesting depth is computed from
+    # the caller, and a subagent caller is always the parent, so neither option
+    # escapes the depth limit or the parent-retirement cascade.
+    caller_tab_id: Optional[str] = Field(default=None, min_length=1, max_length=256)
+    caller_subagent_id: Optional[str] = Field(default=None, min_length=1, max_length=256)
     name: Optional[str] = Field(default=None, min_length=1, max_length=200)
     keep: bool = Field(
         default=False,
@@ -102,9 +108,16 @@ class SubagentCreate(SubagentTurnCreate):
         ),
     )
 
-    _fields = field_validator("model", "effort", "cwd", "env_preset", "parent_tab_id", "name")(
-        _nonblank
-    )
+    _fields = field_validator(
+        "model",
+        "effort",
+        "cwd",
+        "env_preset",
+        "parent_tab_id",
+        "caller_tab_id",
+        "caller_subagent_id",
+        "name",
+    )(_nonblank)
 
 
 class SubagentTurn(BaseModel):

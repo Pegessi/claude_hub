@@ -64,16 +64,33 @@ entry, Goal Packet, review or acceptance step.
     period lets trailing provider events (usage, transcript flush) land before
     the runtime stops. History remains restorable.
   - `keep=true`: the tab stays open for `POST /turns` until it is closed.
-  - Closing cancels any running turn and archives the tab.
+  - Closing cancels any running turn and archives the tab. The record reports
+    `closed` only after the tab is archived (an in-progress close is tracked
+    separately, so a cancelled turn does not start a second close and a
+    follow-up is refused); a close cut off by shutdown leaves the record open
+    for startup reconciliation.
   - Every task the service spawns (turns, delayed and listener-triggered
     closes) is tracked; shutdown cancels and joins them. A non-kept subagent
     whose delayed close was cut off by shutdown is closed by the next startup
-    reconciliation.
+    reconciliation. After joining, shutdown saves once more so a result whose
+    own save was interrupted is still persisted. A create that was in flight
+    when shutdown began re-checks before publishing: it archives its tab,
+    drops the unpublished record from disk and returns 503 instead of spawning
+    an untracked turn.
 - **Nesting.** A subagent may start one more level of subagents (max depth 2,
   counted through the tabs' `subagent_id`/`parent_tab_id` chain); a deeper
-  create returns 400 with "Subagent nesting limit reached". Subagent Chats also
-  get runtime guidance without the `agent run` recipe, so they do not fan out
-  by default. `--no-parent` (no chain) is not limited.
+  create returns 400 with "Subagent nesting limit reached". The CLI always
+  sends the caller's identity (`caller_tab_id` from `$CLAUDE_HUB_TAB_ID`,
+  `caller_subagent_id` from `$CLAUDE_HUB_SUBAGENT_ID`) separately from
+  `--parent-tab-id`/`--no-parent`. The server counts depth from the caller
+  (the tab record wins over the env id), and when the caller is a subagent it
+  refuses `--no-parent` (400) and links the new subagent to the caller's own
+  Chat whatever parent the request named, so closing the caller cascades. An
+  unknown or closed `caller_subagent_id` without a live caller tab returns 409.
+  Caller fields are not part of the `call_id` request digest. Subagent Chats
+  also get runtime guidance without the `agent run` recipe, so they do not fan
+  out by default; that choice follows the tab's `subagent_id` (copied onto the
+  terminal-tab stream session), not the env key.
 
 ### Parent binding: why a tab-retirement listener
 
@@ -98,7 +115,9 @@ archived, the record is closed. A tab that has a `subagent_id` but no open recor
 
 Unarchiving a subagent tab through the normal tab unarchive path detaches it:
 the manager clears its `subagent_id`, `parent_tab_id` and
-`CLAUDE_HUB_SUBAGENT_ID`, so it becomes an ordinary Chat. Neither parent closure
+`CLAUDE_HUB_SUBAGENT_ID`, so it becomes an ordinary Chat. Duplicating or forking
+a subagent tab likewise yields an ordinary Chat: the copy gets no link and its
+launch env drops `CLAUDE_HUB_SUBAGENT_ID`. Neither parent closure
 nor startup reconciliation re-archives it, and a record that still pointed at it
 is closed as "subagent tab detached" without touching the tab.
 
@@ -116,7 +135,7 @@ is closed as "subagent tab detached" without touching the tab.
 
 Create body: `agent_type` (`claude|codex|traex|cursor|maso`; `terminal` is
 rejected), `prompt`, optional `model`, `effort`, `cwd`, `env_preset`, `env`,
-`parent_tab_id`, `name`, `keep`, `call_id`, `timeout_seconds` (default 1800,
+`parent_tab_id`, `caller_tab_id`, `caller_subagent_id`, `name`, `keep`, `call_id`, `timeout_seconds` (default 1800,
 max 86400) and `solo_mode` (default: the parent's setting; `true` without a
 parent).
 
@@ -182,8 +201,8 @@ $ claude-hub agent close "$SA"
 Chat runtime guidance gains one line: "For help from another provider:
 `claude-hub agent run --provider X --prompt-file -` returns its final answer …
 Use Workspace Tasks only for tracked, reviewed work." The `agent` group help and
-the `agent run` help repeat the same recipe. A Chat whose env has
-`CLAUDE_HUB_SUBAGENT_ID` gets the same guidance without that line.
+the `agent run` help repeat the same recipe. A Chat whose tab is linked to a
+subagent (`subagent_id`) gets the same guidance without that line.
 
 ## Review follow-ups (2026-10-24)
 
@@ -195,6 +214,24 @@ during create leaving a running in-memory record with a live tab; (6) CLI
 Ctrl-C during the create POST and `result --wait` cancelling; (7) archiving
 before trailing provider events; (8) untracked post-turn close tasks at
 shutdown.
+
+## Re-review follow-ups (2026-10-24)
+
+- M1: `--no-parent` / `--parent-tab-id OTHER` no longer escape the depth limit
+  or the close cascade (caller identity, see Nesting).
+- M2: `closed` is set after the tab is archived; the test that waited on
+  `closed` and then asserted the archive is now stable (20/20 runs).
+- L1: final guarded save in `stop()`.
+- L3: shutdown re-check before a create publishes or spawns (503).
+- L4: duplicate/fork strip `CLAUDE_HUB_SUBAGENT_ID`; reduced guidance follows
+  the tab link.
+- L5: trimmed turns lose `call_id` idempotency (see Limitations).
+- L2 (not done): `_save` still re-raises a cancellation that arrived while its
+  shielded write completed. Swallowing it would break `asyncio.timeout`/task
+  cancellation semantics for callers. The written snapshot is current, and the
+  remaining window (a caller's cleanup after a cancelled save, e.g. a follow-up
+  turn removed in memory but present on disk) is corrected by the next save and,
+  after a crash, by restart recovery marking the turn failed.
 
 ## Validation
 
@@ -212,6 +249,15 @@ shutdown.
     retry, concurrent same-`call_id` creates while the tab is starting,
     per-turn cancel, the archive grace period and shutdown joining a pending
     close, and `prefer_final_text` in `dispatch_tab_chat_and_wait`.
+  - Re-review follow-ups: a subagent caller (by tab or subagent id) cannot use
+    `--no-parent` or another parent, is linked as the parent, cannot exceed
+    depth 2 and cascades its close; a top-level caller may still run unlinked;
+    an unknown caller subagent is refused; `closed` is never reported while the
+    tab is live; `stop()` persists in-memory state; a create in flight during
+    shutdown returns 503 and spawns nothing; reduced guidance follows the tab
+    link, not a stale env key.
+  - `tests/test_ttyd_manager.py`: duplicate and fork of a subagent tab drop
+    the link and `CLAUDE_HUB_SUBAGENT_ID` but keep other env.
   - With a bare real `TTYDManager`: parent archive and delete notify the
     service through the real retirement path, and an unarchived subagent tab is
     detached and not re-archived by parent closure or restart reconciliation.
@@ -219,7 +265,8 @@ shutdown.
 - `tests/test_cli_subagents.py` covers CLI output, exit codes, options, stdin and
   file prompts, transport retries with the same call_id, Ctrl-C cancellation
   (while waiting and during the start POST, by turn id), `result --wait` Ctrl-C
-  without cancel, `--solo/--no-solo` and the companion commands.
+  without cancel, `--solo/--no-solo`, the companion commands, and caller
+  identity being sent with `--no-parent` and `--parent-tab-id`.
 - Manual smoke test on an isolated backend (port 18273, private
   `CLAUDE_HUB_HOME`, `tmux -L ar-test`):
   - A Codex `agent run` returned `PONG` and exited 0. Its tab was archived with
@@ -251,10 +298,15 @@ shutdown.
 - Records are not scoped per user, just like tabs. Any authenticated Hub user can
   list, read and close subagents.
 - Nested subagents work up to depth 2, and parent closure cascades through the
-  listener. A subagent that passes `--no-parent` escapes the chain and the
-  limit; its guidance no longer suggests `agent run`, which keeps this rare.
+  listener. Caller identity comes from the calling process's env and is
+  advisory, not a security boundary: a subagent that deliberately unsets
+  `CLAUDE_HUB_TAB_ID`/`CLAUDE_HUB_SUBAGENT_ID` or calls the API directly can
+  still start an unlinked subagent.
 - With more than 20 follow-ups, older turns (except the first) are dropped from
-  the record, so `agent result` and `call_id` replay no longer find them.
+  the record, so `agent result` no longer finds them and their `call_id` is no
+  longer idempotent: a retry of a trimmed follow-up's `call_id` starts a new
+  turn instead of returning the old result. The create `call_id` (first turn)
+  stays replayable until the record is pruned.
 - Records written before these follow-ups keep their stored final texts until
   they are pruned. A subagent tab unarchived before the detach change still
   carries its link and can be re-archived once by reconciliation.

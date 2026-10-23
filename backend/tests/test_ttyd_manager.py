@@ -5436,6 +5436,65 @@ async def test_fork_tab_copies_history_up_to_ordinal(
     assert await manager.fork_tab("nonexistent-tab", 0) is None
 
 
+@pytest.mark.asyncio
+async def test_duplicate_and_fork_of_subagent_tab_are_ordinary_chats(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """A copied subagent Chat must not inherit its subagent identity (env or link)."""
+    wm_module = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(wm_module, "STATE_ROOT", tmp_path / "state")
+
+    from claude_hub.models import AgentStreamEvent, AgentStreamEventType
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+
+    manager = TTYDManager.__new__(TTYDManager)
+    manager._next_port = 12040
+    manager.processes = {}
+    manager._tab_order = []
+
+    async def fake_start(self: TTYDProcess) -> None:
+        return None
+
+    async def fake_ensure_tmux_session(self: TTYDProcess) -> bool:
+        return False
+
+    monkeypatch.setattr(TTYDProcess, "start", fake_start)
+    monkeypatch.setattr(TTYDProcess, "ensure_tmux_session", fake_ensure_tmux_session)
+
+    parent = await manager.create_tab(
+        name="Parent", cwd=str(tmp_path), agent_type=AgentType.CODEX, session_kind=SessionKind.CHAT
+    )
+    source = await manager.create_tab(
+        name="Sub",
+        cwd=str(tmp_path),
+        agent_type=AgentType.CODEX,
+        session_kind=SessionKind.CHAT,
+        env={"CLAUDE_HUB_SUBAGENT_ID": "sa-1", "KEEP_ME": "1"},
+        parent_tab_id=parent.id,
+        subagent_id="sa-1",
+    )
+    await AgentStreamStore("terminal-tabs", f"terminal-tab-{source.id}").append(
+        AgentStreamEvent(
+            stream_sequence=0,
+            session_id=f"terminal-tab-{source.id}",
+            tab_id=source.id,
+            agent_type=AgentType.CODEX,
+            type=AgentStreamEventType.TURN_STARTED,
+            turn_id="turn-a",
+            payload={"summary": "hi"},
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    copies = [await manager.duplicate_tab(source.id), await manager.fork_tab(source.id, 0)]
+    for copy in copies:
+        assert copy is not None
+        assert copy.subagent_id is None and copy.parent_tab_id is None
+        assert "CLAUDE_HUB_SUBAGENT_ID" not in copy.env
+        assert copy.env.get("KEEP_ME") == "1"
+    original = manager.get_tab(source.id)
+    assert original is not None and original.env["CLAUDE_HUB_SUBAGENT_ID"] == "sa-1"
+
+
 async def test_compute_tab_unread_flags_completed_turn(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:

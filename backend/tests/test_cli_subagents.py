@@ -83,6 +83,7 @@ def hub(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Hub:
     monkeypatch.setattr(subagent_commands.time, "sleep", lambda seconds: None)
     monkeypatch.setenv("CLAUDE_HUB_CONFIG", str(tmp_path / "missing.toml"))
     monkeypatch.setenv("CLAUDE_HUB_TAB_ID", "parent-tab")
+    monkeypatch.delenv("CLAUDE_HUB_SUBAGENT_ID", raising=False)
     monkeypatch.chdir(tmp_path)
     return state
 
@@ -118,6 +119,23 @@ def test_run_exit_codes(hub: Hub, status: str, code: int) -> None:
     assert result.stdout == ""
     assert "went wrong" in result.stderr
     assert "parent_tab_id" not in hub.bodies()[0]
+    # The caller still identifies itself so the server can count nesting depth.
+    assert hub.bodies()[0]["caller_tab_id"] == "parent-tab"
+
+
+@pytest.mark.parametrize("parent_args", [[], ["--no-parent"], ["--parent-tab-id", "elsewhere"]])
+def test_run_always_sends_caller_identity(
+    hub: Hub, monkeypatch: pytest.MonkeyPatch, parent_args: List[str]
+) -> None:
+    monkeypatch.setenv("CLAUDE_HUB_SUBAGENT_ID", "sa-caller")
+    hub.poll_results = [_turn("completed", final_text="ok")]
+    result = _run(["agent", "run", "--provider", "codex", "--prompt", "x", *parent_args])
+    assert result.exit_code == 0, result.output
+    body = hub.bodies()[0]
+    assert body["caller_tab_id"] == "parent-tab"
+    assert body["caller_subagent_id"] == "sa-caller"
+    expected_parent = {0: "parent-tab", 1: None}.get(len(parent_args), "elsewhere")
+    assert body.get("parent_tab_id") == expected_parent
 
 
 def test_run_json_background_and_options(hub: Hub) -> None:
