@@ -5475,7 +5475,44 @@ def test_dispatch_rescues_task_persisted_behind_a_held_agent(
             }
         )
 
+    # Dispatch never waits for agent startup: it only schedules the rescue.
+    scheduled: list[str] = []
+    monkeypatch.setattr(workspace_manager, "_schedule_stranded_provisioning", scheduled.append)
     assert client.post(f"/api/workspaces/{workspace['id']}/dispatch").status_code == 204
+    assert scheduled == [workspace["id"]]
+    assert workspace_manager.tasks[stranded_task["id"]].status == WorkspaceTaskStatus.QUEUED
+    monkeypatch.undo()
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="queue-stranded-rescue-tab",
+        port=12398,
+        sent_messages=sent_messages,
+    )
+    monkeypatch.setattr(
+        workspace_module.ttyd_manager, "list_tab_agent_statuses", fake_list_statuses
+    )
+
+    provision_calls: list[str] = []
+    original_provision = workspace_manager._provision_dedicated_agent
+
+    async def slow_provision(workspace_obj: Workspace, task: WorkspaceTask) -> ManagedSession:
+        provision_calls.append(task.id)
+        await asyncio.sleep(0.05)
+        return await original_provision(workspace_obj, task)
+
+    monkeypatch.setattr(workspace_manager, "_provision_dedicated_agent", slow_provision)
+
+    async def run_rescue() -> None:
+        # Repeated dispatch passes while a slow spawn runs start only one job.
+        workspace_manager._schedule_stranded_provisioning(workspace["id"])
+        job = workspace_manager._stranded_provisioning_jobs[workspace["id"]]
+        workspace_manager._schedule_stranded_provisioning(workspace["id"])
+        assert workspace_manager._stranded_provisioning_jobs[workspace["id"]] is job
+        await job
+
+    asyncio.run(run_rescue())
+    assert provision_calls == [stranded_task["id"]]
 
     rescued = workspace_manager.tasks[stranded_task["id"]]
     assert rescued.status == WorkspaceTaskStatus.WORKING
@@ -5579,6 +5616,131 @@ def test_related_task_gets_dedicated_agent_when_related_agent_is_parked(
     assert workspace_manager.sessions[first_agent["id"]].current_task_id == parked_task["id"]
     assert workspace_manager.sessions[started["session_id"]].current_task_id == related_task["id"]
     assert "Continue from the related task" in sent_messages[-1][1]
+
+
+def test_failed_dedicated_agent_provisioning_is_throttled_per_task(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    stub_workspace_terminal(monkeypatch, repo, tab_id="throttle-tab", port=12399)
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Throttle Repo", "path": str(repo), "session_prefix": "throttle"},
+    ).json()
+    agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    held = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks", json={"title": "Held", "prompt": "hold"}
+    ).json()
+    client.post(
+        f"/api/workspaces/tasks/{held['id']}/start", json={"target_session_id": agent["id"]}
+    )
+    stranded = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks", json={"title": "Stranded", "prompt": "go"}
+    ).json()
+    workspace_manager.tasks[stranded["id"]] = workspace_manager.tasks[stranded["id"]].model_copy(
+        update={
+            "status": WorkspaceTaskStatus.QUEUED,
+            "session_id": agent["id"],
+            "dispatch_reason": "Queued behind existing workspace agent",
+            "queued_at": datetime.now(),
+        }
+    )
+    attempts: list[str] = []
+
+    async def failing_provision(_workspace: Workspace, task: WorkspaceTask) -> ManagedSession:
+        attempts.append(task.id)
+        raise RuntimeError("spawn failed")
+
+    monkeypatch.setattr(workspace_manager, "_provision_dedicated_agent", failing_provision)
+
+    async def two_passes() -> None:
+        assert (
+            await workspace_manager._provision_agents_for_stranded_tasks(workspace["id"]) is False
+        )
+        assert (
+            await workspace_manager._provision_agents_for_stranded_tasks(workspace["id"]) is False
+        )
+
+    asyncio.run(two_passes())
+    assert attempts == [stranded["id"]]
+    assert workspace_manager.tasks[stranded["id"]].session_id == agent["id"]
+
+
+def test_dedicated_agent_template_skips_task_owned_and_paused_agents(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    stub_workspace_terminal(monkeypatch, repo, tab_id="template-tab", port=12400)
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Template Repo", "path": str(repo), "session_prefix": "template"},
+    ).json()
+    shared = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    scheduled = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    paused = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    later = datetime.now() + timedelta(minutes=5)
+    workspace_manager.sessions[shared["id"]] = workspace_manager.sessions[shared["id"]].model_copy(
+        update={"env_preset": "team-preset"}
+    )
+    workspace_manager.sessions[scheduled["id"]] = workspace_manager.sessions[
+        scheduled["id"]
+    ].model_copy(
+        update={
+            "ephemeral": True,
+            "caller_owned_ephemeral": True,
+            "env_preset": "per-fire-preset",
+            "created_at": later,
+        }
+    )
+    workspace_manager.sessions[paused["id"]] = workspace_manager.sessions[paused["id"]].model_copy(
+        update={"chat_paused": True, "created_at": later}
+    )
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "T", "prompt": "p", "agent_type": shared["agent_type"]},
+    ).json()
+
+    template = workspace_manager._agent_launch_template(
+        workspace["id"], workspace_manager.tasks[task["id"]]
+    )
+    assert template is not None and template.id == shared["id"]
+    assert template.env_preset == "team-preset"
+
+
+def test_free_agent_of_another_provider_does_not_take_the_task(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch, repo, tab_id="provider-tab", port=12401, sent_messages=sent_messages
+    )
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Provider Repo", "path": str(repo), "session_prefix": "provider"},
+    ).json()
+    claude_agent = client.post(
+        f"/api/workspaces/{workspace['id']}/agent", json={"agent_type": "claude"}
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Codex work", "prompt": "Needs codex", "agent_type": "codex"},
+    ).json()
+
+    started = client.post(f"/api/workspaces/tasks/{task['id']}/start", json={}).json()
+
+    assert started["session_id"] != claude_agent["id"]
+    assert workspace_manager.sessions[started["session_id"]].agent_type == AgentType.CODEX
+    assert workspace_manager.sessions[claude_agent["id"]].current_task_id is None
 
 
 def test_user_pinned_task_never_migrates_off_review_parked_agent(

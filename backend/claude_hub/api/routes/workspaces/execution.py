@@ -37,7 +37,10 @@ from claude_hub.models.schemas import (
 )
 from claude_hub.services.task_dependencies import TaskHasDependentsError
 from claude_hub.services.task_graph import TaskHasDescendantsError
-from claude_hub.services.workspace_manager._constants import DeliveryUncertain
+from claude_hub.services.workspace_manager._constants import (
+    DeliveryUncertain,
+    WorkspaceAgentInitializationError,
+)
 from claude_hub.services.workspace_manager._reports import ReportCallIdConflict
 from claude_hub.services.workspace_manager._task_execution import (
     TaskExecutionConflict,
@@ -168,6 +171,10 @@ def register_execution_routes(
             return await bindings.workspace_manager().start_task(task_id, payload)
         except KeyError as e:
             raise HTTPException(status_code=404, detail="Task not found") from e
+        except WorkspaceAgentInitializationError as e:
+            # Starting may provision the Task's dedicated agent; keep the same
+            # contract as direct agent creation.
+            raise HTTPException(status_code=502, detail=str(e)) from e
         except (RuntimeError, ValueError) as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
 

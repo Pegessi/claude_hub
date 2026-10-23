@@ -285,7 +285,9 @@ class _TaskStartMixin(_WorkspaceManagerBase):
         free_agents = [
             agent
             for agent in agents
-            if agent.agent_type == task.agent_type and self._can_dispatch_to(agent)
+            if agent.agent_type == task.agent_type
+            and self._is_shared_workspace_agent(agent)
+            and self._can_dispatch_to(agent)
         ]
         if len(free_agents) == 1:
             target = free_agents[0]
@@ -314,7 +316,12 @@ class _TaskStartMixin(_WorkspaceManagerBase):
         workspace: Workspace,
         task: WorkspaceTask,
     ) -> ManagedSession:
-        """Create one agent for ``task``, launched like its existing siblings."""
+        """Create one agent for ``task``, launched like its existing siblings.
+
+        Inheritance mirrors auto-created reviewers: the env preset always, the
+        explicit env only for Chat (terminal env comes from the preset), and
+        the sibling's execution target. cwd stays the workspace default.
+        """
 
         template = self._agent_launch_template(workspace.id, task)
         is_chat = task.session_kind == SessionKind.CHAT
@@ -353,9 +360,23 @@ class _TaskStartMixin(_WorkspaceManagerBase):
         siblings = [
             agent
             for agent in self._workspace_agents(workspace_id, include_stopped=True)
-            if agent.agent_type == task.agent_type and agent.session_kind == task.session_kind
+            if agent.agent_type == task.agent_type
+            and agent.session_kind == task.session_kind
+            and self._is_shared_workspace_agent(agent)
         ]
-        return max(siblings, key=lambda agent: agent.created_at) if siblings else None
+        if not siblings:
+            return None
+        # Prefer a live agent's configuration over a stopped one's.
+        return max(
+            siblings,
+            key=lambda agent: (agent.status != ManagedSessionStatus.STOPPED, agent.created_at),
+        )
+
+    @staticmethod
+    def _is_shared_workspace_agent(agent: ManagedSession) -> bool:
+        """Not a task-owned throwaway (scheduled or ephemeral) and not paused."""
+
+        return not (agent.ephemeral or agent.caller_owned_ephemeral or agent.chat_paused)
 
     def _can_assign_or_queue_to(self, session: ManagedSession) -> bool:
         if (

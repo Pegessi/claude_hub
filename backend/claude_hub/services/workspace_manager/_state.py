@@ -66,6 +66,8 @@ class _StateMixin(_WorkspaceManagerBase):
         self._hubtask_orphan_locks: dict[str, asyncio.Lock] = {}
         # Last dedicated-agent provisioning attempt per stranded queued Task.
         self._dedicated_agent_attempts: dict[str, datetime] = {}
+        # One background job per workspace provisions agents for stranded Tasks.
+        self._stranded_provisioning_jobs: dict[str, asyncio.Task[None]] = {}
         self._scheduled_legacy_run_ids: set[str] = set()
         self._scheduled_chat_recovery_pending = False
         self._chat_delivery_getter: Callable[[], ChatMessageInbox] | None = None

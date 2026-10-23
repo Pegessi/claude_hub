@@ -102,7 +102,7 @@ Each layer is separately shippable and keeps legacy `status` consistent.
 |---|---|---|---|
 | **1. Projection** (done) | Pure `services/task_lifecycle.py` plus `models/schema_domains/lifecycle.py`; `WorkspaceBoard.task_lifecycles`. | None (additive field). | 31 unit tests; existing workspace/board/queue/review suites pass (815); dry run on live data classifies all 18 open Tasks correctly. |
 | **2. Consumers** | CLI `task list/get/status` show phase, reason and blocker plus `task list --attention/--phase` (done with Layer 1); board UI badges from `task_lifecycles` replace timestamp heuristics in `useWorkspaceTaskPresentation`; Dot watcher keys off phase transitions and pushes attention phases to Feishu deterministically (persisted `notified`, retry). | Visible and notification only. | A user sees "orphaned: Chat archived" and "queued behind cadb399d (needs your answer)" without polling. |
-| **3a. Dedicated agents** (done) | `_choose_dispatch_target` provisions a dedicated agent instead of "Queued behind existing workspace agent". It inherits the launch config of the newest same-provider agent: env preset, Chat env and remote target. Free-agent reuse now requires the Task's provider. After each dispatch pass, stranded queued Tasks get their own agent; provisioning is throttled to one attempt per Task per 60 s and runs outside the dispatch lock. | The cadb399d deadlock cannot recur, and already-stranded Tasks are rescued. | Policy tests rewritten to the 1:1 contract; legacy stranded-queue rescue test; full suite passes. |
+| **3a. Dedicated agents** (done) | `_choose_dispatch_target` provisions a dedicated agent instead of "Queued behind existing workspace agent". It inherits the launch config of the newest same-provider agent: env preset, Chat env and remote target. Free-agent reuse now requires the Task's provider. After each dispatch pass, one background job per workspace gives stranded queued Tasks their own agents; callers never wait for agent startup, and failed attempts are retried at most once per Task per 60 s. | The cadb399d deadlock cannot recur, and already-stranded Tasks are rescued. | Policy tests rewritten to the 1:1 contract; legacy stranded-queue rescue test; full suite passes. |
 | **3. Single writer** | `apply_task_transition(task, event, facts) → (patch, effects, TaskEvent)` reducer. The ~25 status write sites call it; it is the only place that sets `status`, the review timestamps and the session pointers. Monitor failure, timeout and owner loss become events. | Missing events now emitted. | Transition-table tests; the cadb399d scenario no longer starves the queue; characterization suites pass. |
 | **4. Owner lease and reconciler** | Persist `owner` and `phase`. A single 5 s reconciler replaces the subagent-only death check, the hub-task orphan converger, the review reaper's no-session gap and the initiator turn-only activity. Initiator owner = Chat tab (archive or delete = gone). | Orphans are resolved by policy instead of lingering. | No non-terminal Task with a gone owner survives longer than grace + 1 tick. |
 | **5. Subtraction** | Load-time migration derives `phase` for old records; delete redundant fields: `dispatch_pending` → queued reason, `execution_released` → orphaned reason, `review_delivery_*`/`review_skip_*`/`human_acceptance_requested_at` → event log; `autonomous_run.phase` maps 1:1. Collapse `execution_control × task_mode` (8 combinations) once `agent run` removes the need for `subagent` mode. | Schema shrink. | Task record roughly 70 → ~35 fields; frontend derives no lifecycle. |
@@ -141,3 +141,14 @@ checkpoints. Both consume Layer 2/3 events.
 - Starting a Task when the only agent is stopped now creates a new agent
   instead of returning 400. A stopped agent runs no Task, so the 1:1 rule
   applies.
+- Stranded means the assigned agent is held by another open Task, or is
+  archived, stopped, paused, or a terminal whose tmux is OFFLINE. Only
+  "User selected target agent" waits.
+- Ephemeral, scheduled and paused agents are never launch templates or
+  reusable free agents. A dedicated agent keeps its Task for a 120 s
+  bootstrap grace instead of losing it to another agent that frees up.
+- A Task's own first start still provisions inline, as the old no-agents
+  path did. Agent startup is bounded by the 25 s prompt wait, close to the
+  CLI's 30 s request timeout; Layer 2/`agent run` work should move this to
+  the background job as well. `WorkspaceAgentInitializationError` from start
+  maps to 502, like direct agent creation.

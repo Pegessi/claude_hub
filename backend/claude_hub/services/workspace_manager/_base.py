@@ -59,6 +59,7 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     _feedback_summary_locks: dict[str, asyncio.Lock]
     _hubtask_orphan_locks: dict[str, asyncio.Lock]
     _dedicated_agent_attempts: dict[str, datetime]
+    _stranded_provisioning_jobs: dict[str, asyncio.Task[None]]
     _monitor_task: asyncio.Task[None] | None
     _pump_locks: dict[str, asyncio.Lock]
     _report_intake_committed: set[str]
