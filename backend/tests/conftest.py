@@ -37,6 +37,9 @@ os.environ["CLAUDE_HUB_PROVIDER_NETWORK_MODE"] = "inherit"
 # initializes the services package, whose managers bind runtime paths eagerly.
 from claude_hub.services.runtime_isolation import tmux_command  # noqa: E402
 
+# Every Task status change must follow the transition table in tests.
+os.environ.setdefault("CLAUDE_HUB_STRICT_TASK_TRANSITIONS", "1")
+
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 

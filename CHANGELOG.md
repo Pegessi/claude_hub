@@ -7,6 +7,14 @@
 
 ## Released
 
+### refactor(task): write Task status through one checked transition table
+
+- Every Task status change goes through `apply_task_update` with a named
+  cause, and the allowed edges live in one table
+  (`services/task_transitions.py`). Unexpected edges are logged, and they
+  fail the test suite, which runs in strict mode. A structure test rejects
+  new direct status writes.
+
 ### feat(task): announce Task lifecycle changes deterministically
 
 - The Hub records each Task lifecycle change once. It emits a `lifecycle`

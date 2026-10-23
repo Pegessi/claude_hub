@@ -1,5 +1,7 @@
 """Report processing split from the compatibility mixin."""
 
+from claude_hub.services.task_transitions import apply_task_update
+
 from .._constants import *  # noqa: F401,F403
 from .events import _ReportEventsMixin
 from .identity import ReportCallIdConflict
@@ -490,7 +492,15 @@ class _ReportIntakeMixin(_ReportEventsMixin):
             elif task_update:
                 task_update["updated_at"] = now
             if task_update:
-                self.tasks[task_id] = self.tasks[task_id].model_copy(update=task_update)
+                self.tasks[task_id] = apply_task_update(
+                    self.tasks[task_id],
+                    task_update,
+                    cause=(
+                        "review_verdict"
+                        if session.role == WorkspaceSessionRole.REVIEWER
+                        else "report"
+                    ),
+                )
             if session.role == WorkspaceSessionRole.REVIEWER and payload.state in {
                 AgentReportState.REVIEW_PASSED,
                 AgentReportState.REVIEW_FAILED,

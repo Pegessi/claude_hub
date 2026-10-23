@@ -1,6 +1,6 @@
 # Task Lifecycle Refactor: one phase, one owner, one writer
 
-Status: Layers 1, 2 and 3a implemented on `codex/task-lifecycle`; the remaining layers are planned.
+Status: Layers 1, 2, 3a and 3 implemented on `codex/task-lifecycle`; Layers 4–5 in progress.
 Continues [the 2026-05-23 state machine assessment](2026-05-23-state-machine-assessment.md),
 which extracted pure policy helpers (its step 2) but never introduced the
 reducer, explicit sub-phases or a single transition owner (its steps 3–6).
@@ -184,3 +184,27 @@ checkpoints. Both consume Layer 2/3 events.
 - The board card shows a lifecycle note. Attention notes are highlighted,
   and queued Tasks name their blocker. Covered by the mocked browser
   scenario `browser_workspace_detail.py` at 390, 720 and 1280 px.
+
+## Layer 3 notes (single writer)
+
+- `services/task_transitions.py` defines `apply_task_update(task, update,
+  cause=...)` and the `(from, to) -> causes` table. All 26 status writers in
+  `workspace_manager` now call it. This covers literal updates and the
+  dynamic dicts from report intake, reviewer verdicts, start, initiator
+  progress/handoff and manual PATCH (`cause="manual"`, unrestricted like load
+  repair).
+- Unexpected edges log in production and raise under
+  `CLAUDE_HUB_STRICT_TASK_TRANSITIONS=1`, which `tests/conftest.py` sets.
+  The full suite passes in strict mode. The edges this surfaced are existing
+  behavior and are commented in the table:
+  - reports on never-started records;
+  - redispatch of a scheduled Task whose worker died;
+  - verdicts landing while the Task is marked working;
+  - Feedback Reaper abort closing as done;
+  - handoff reopening done.
+- `tests/test_task_transitions.py` fails if any service writes
+  `model_copy(update={"status": WorkspaceTaskStatus...})` directly, so the
+  single-writer property cannot erode silently.
+- The table makes the remaining complexity visible: about 15 causes write
+  status. Layer 4 adds the reconciler as one more named cause instead of
+  another ad-hoc writer.

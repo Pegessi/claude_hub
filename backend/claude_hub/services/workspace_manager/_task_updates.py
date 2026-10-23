@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Literal
 
+from claude_hub.services.task_transitions import apply_task_update
+
 from ..task_dependencies import require_task_dependencies, validate_task_dependencies
 from ..task_graph import reparent_task
 from ._attachments import _PreparedWorkspaceAttachment
@@ -264,7 +266,7 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
             try:
                 self._write_prepared_attachments(plan.prepared_attachments, created_paths)
                 staged = True
-                self.tasks[task.id] = task.model_copy(update=plan.update)
+                self.tasks[task.id] = apply_task_update(task, plan.update, cause="manual")
                 for descendant_id, fields in plan.descendants.items():
                     self.tasks[descendant_id] = self.tasks[descendant_id].model_copy(update=fields)
                 current = self.tasks[task.id]

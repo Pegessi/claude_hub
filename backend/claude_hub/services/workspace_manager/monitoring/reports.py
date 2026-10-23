@@ -1,5 +1,6 @@
 """Report/status reconciliation and task assignment release."""
 
+from claude_hub.services.task_transitions import apply_task_update
 from claude_hub.services.workspace_manager._base import _WorkspaceManagerBase
 from claude_hub.services.workspace_manager._constants import *  # noqa: F401,F403
 
@@ -111,12 +112,14 @@ class _ReportReconciliationMixin(_WorkspaceManagerBase):
             ):
                 continue
 
-            self.tasks[task_id] = task.model_copy(
-                update={
+            self.tasks[task_id] = apply_task_update(
+                task,
+                {
                     "status": WorkspaceTaskStatus.REVIEW,
                     "reviewed_at": report.created_at,
                     "updated_at": report.created_at,
-                }
+                },
+                cause="reconcile",
             )
             changed = True
 

@@ -23,6 +23,7 @@ from ...models.schemas import (
 )
 from ...models.task_mailbox import TaskActorRole, TaskEventType
 from ..request_fingerprint import request_fingerprint
+from ..task_transitions import apply_task_update
 
 
 class TaskExecutionConflict(RuntimeError):
@@ -180,6 +181,7 @@ class _TaskExecutionMixin(_WorkspaceManagerBase):
         actor_role: TaskActorRole,
         event_type: TaskEventType,
         event_payload: dict[str, Any],
+        cause: str,
     ) -> TaskExecutionMutationResult:
         snapshot = self._snapshot_report_intake_workspace(task.workspace_id)
         fingerprints = dict(task.execution_call_fingerprints)
@@ -187,7 +189,7 @@ class _TaskExecutionMixin(_WorkspaceManagerBase):
         while len(fingerprints) > 128:
             fingerprints.pop(next(iter(fingerprints)))
         changes = {**changes, "execution_call_fingerprints": fingerprints}
-        self.tasks[task.id] = task.model_copy(update=changes)
+        self.tasks[task.id] = apply_task_update(task, changes, cause=cause)
         try:
             event, _created = self.task_mailbox.append_event(
                 workspace_id=task.workspace_id,
@@ -322,6 +324,7 @@ class _TaskExecutionMixin(_WorkspaceManagerBase):
                 actor_role=TaskActorRole.HUMAN if manual else TaskActorRole.INITIATOR,
                 event_type=event_type,
                 event_payload=body,
+                cause="initiator_progress",
             )
 
     def _require_quiescent_workspace_task(self, task: WorkspaceTask) -> None:
@@ -432,6 +435,7 @@ class _TaskExecutionMixin(_WorkspaceManagerBase):
                     "previous_execution_control": task.execution_control.value,
                     "new_execution_epoch": task.execution_epoch + 1,
                 },
+                cause="handoff",
             )
 
     async def record_task_activity(

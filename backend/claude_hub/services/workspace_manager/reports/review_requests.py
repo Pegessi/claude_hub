@@ -1,5 +1,7 @@
 """Report processing split from the compatibility mixin."""
 
+from claude_hub.services.task_transitions import apply_task_update
+
 from .._constants import *  # noqa: F401,F403
 from .autonomous import _AutonomousReportMixin
 
@@ -22,13 +24,15 @@ class _ReportReviewRequestMixin(_AutonomousReportMixin):
         # supplement was requested, so report.review_cycle + 1 is the stable
         # target even when a post-send failure replays this method.
         next_cycle = max(task.review_cycle, report.review_cycle + 1)
-        self.tasks[task.id] = task.model_copy(
-            update={
+        self.tasks[task.id] = apply_task_update(
+            task,
+            {
                 "status": WorkspaceTaskStatus.WORKING,
                 "review_cycle": next_cycle,
                 "reviewed_at": None,
                 "updated_at": now,
-            }
+            },
+            cause="review_request",
         )
         self.sessions[session.id] = session.model_copy(
             update={
@@ -114,8 +118,9 @@ class _ReportReviewRequestMixin(_AutonomousReportMixin):
         task = self._require_workspace_execution(task)
         now = self._runtime_now()
         reason = report.review_reason or "Agent completed the task without requesting review."
-        self.tasks[task.id] = task.model_copy(
-            update={
+        self.tasks[task.id] = apply_task_update(
+            task,
+            {
                 "status": WorkspaceTaskStatus.REVIEW,
                 "review_session_id": None,
                 "review_requested_at": None,
@@ -127,7 +132,8 @@ class _ReportReviewRequestMixin(_AutonomousReportMixin):
                 "human_acceptance_requested_at": now,
                 "human_accepted_at": None,
                 "updated_at": now,
-            }
+            },
+            cause="review_request",
         )
         self._save_state()
 
@@ -163,8 +169,9 @@ class _ReportReviewRequestMixin(_AutonomousReportMixin):
                     "next_action": self._autonomous_next_action(phase),
                 }
             )
-        self.tasks[task.id] = task.model_copy(
-            update={
+        self.tasks[task.id] = apply_task_update(
+            task,
+            {
                 "status": WorkspaceTaskStatus.REVIEW,
                 "review_session_id": reviewer.id,
                 "review_attempts": task.review_attempts + 1,
@@ -177,7 +184,8 @@ class _ReportReviewRequestMixin(_AutonomousReportMixin):
                 "human_accepted_at": None,
                 "autonomous_run": autonomous_run,
                 "updated_at": now,
-            }
+            },
+            cause="review_request",
         )
         # Capture the reviewer's previously-reviewed task before we overwrite it
         # below. The cross-task /clear decision keys off this session-local value

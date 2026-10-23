@@ -2,6 +2,7 @@
 
 from claude_hub.models.schemas import validate_workspace_session_surface
 from claude_hub.services.task_dependencies import require_task_dependencies
+from claude_hub.services.task_transitions import apply_task_update
 from claude_hub.services.workspace_manager._base import _WorkspaceManagerBase
 from claude_hub.services.workspace_manager._constants import *  # noqa: F401,F403
 
@@ -108,7 +109,7 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                 raise KeyError(payload.related_task_id)
             base_update["related_task_id"] = payload.related_task_id
 
-        task = task.model_copy(update=base_update)
+        task = apply_task_update(task, base_update, cause="start")
         decision = await self._choose_dispatch_target(workspace, task, payload)
         # Choosing a target may provision an agent; a todo edit may have
         # changed the stored contract meanwhile. Never overwrite it.
@@ -124,7 +125,7 @@ class _TaskStartMixin(_WorkspaceManagerBase):
         provider_changed = not payload.agent_type and stored.agent_type != task.agent_type
         if stored.session_kind != task.session_kind or provider_changed:
             raise ValueError("The Task changed while selecting its agent; start it again")
-        task = stored.model_copy(update=base_update)
+        task = apply_task_update(stored, base_update, cause="start")
         if decision is None:
             task = task.model_copy(
                 update={

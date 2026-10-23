@@ -1,6 +1,7 @@
 """Dispatcher decisions, task continuation, and review requests."""
 
 from claude_hub.services.task_dependencies import require_task_dependencies
+from claude_hub.services.task_transitions import apply_task_update
 from claude_hub.services.workspace_manager._base import _WorkspaceManagerBase
 from claude_hub.services.workspace_manager._constants import *  # noqa: F401,F403
 
@@ -39,8 +40,9 @@ class _TaskContinuationMixin(_WorkspaceManagerBase):
         if target.session_kind != task.session_kind:
             raise ValueError("The selected agent does not match the Task execution surface")
 
-        self.tasks[task.id] = task.model_copy(
-            update={
+        self.tasks[task.id] = apply_task_update(
+            task,
+            {
                 "status": WorkspaceTaskStatus.QUEUED,
                 "session_id": target.id,
                 # A user opt-in ("Clear context" checkbox -> task.clear_context)
@@ -51,7 +53,8 @@ class _TaskContinuationMixin(_WorkspaceManagerBase):
                 "dispatch_pending": False,
                 "queued_at": task.queued_at or self._runtime_now(),
                 "updated_at": self._runtime_now(),
-            }
+            },
+            cause="dispatch_decision",
         )
         self._save_state()
         await self.dispatch_workspace(task.workspace_id)
@@ -132,8 +135,9 @@ class _TaskContinuationMixin(_WorkspaceManagerBase):
         # new reviewer is dispatched. Verdict timestamp fields are cleared too,
         # but cycle ordering — not timestamps — is what gates re-review.
         next_cycle = task.review_cycle + 1
-        self.tasks[task.id] = task.model_copy(
-            update={
+        self.tasks[task.id] = apply_task_update(
+            task,
+            {
                 "status": WorkspaceTaskStatus.WORKING,
                 "started_at": now,
                 "review_cycle": next_cycle,
@@ -149,7 +153,8 @@ class _TaskContinuationMixin(_WorkspaceManagerBase):
                 "review_requested_at": None,
                 "failure_reason": None,
                 "failed_at": None,
-            }
+            },
+            cause="continue",
         )
         logger.info(
             "continue_task set status=WORKING and cleared stale goal-packet verdict fields "
