@@ -122,11 +122,14 @@ async def get_subagent_turn(
 
 @router.post("/{subagent_id}/cancel", response_model=Dict[str, Any])
 async def cancel_subagent(
-    subagent_id: str, current_user: User = Depends(get_current_user)
+    subagent_id: str,
+    turn_id: Optional[str] = Query(default=None),
+    current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    """Cancel the running turn (if any). A non-kept subagent is then archived."""
+    """Cancel the running turn (only ``turn_id`` when given; a finished turn is
+    left as is). A non-kept subagent is then archived."""
     try:
-        record, turn = await get_subagent_service().cancel(subagent_id)
+        record, turn = await get_subagent_service().cancel(subagent_id, turn_id)
     except SubagentError as exc:
         raise _http(exc) from None
     return {

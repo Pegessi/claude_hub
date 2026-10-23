@@ -12,7 +12,7 @@ import re
 import sys
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import click
 
@@ -56,10 +56,21 @@ Use Workspace Tasks only for tracked, reviewed work.
 The subagent is a native Hub Chat (visible in the UI) linked to the calling
 Chat ($CLAUDE_HUB_TAB_ID); archiving or deleting that Chat closes it. By
 default it runs in the current directory, blocks until done and is archived
-afterwards. --keep leaves it open for `agent send`. --background prints ids
-immediately; collect with `agent result ID --wait`. Ctrl-C while waiting
-cancels the turn. Exit codes: 0 completed, 1 failed, 124 timeout,
-130 cancelled. Retries reuse --call-id so one call never starts twice.
+a few seconds afterwards. --keep leaves it open for `agent send`.
+--background prints ids immediately; collect with `agent result ID --wait`.
+
+\b
+Approvals: the subagent inherits the calling Chat's solo mode; without a
+parent it runs solo (no approvals). --solo/--no-solo overrides. Nobody can
+approve from here: a turn that stops for an approval or question fails with
+instructions (re-run with --solo, or --keep and answer in Web Chat).
+
+\b
+Ctrl-C in `run`/`send` cancels the turn that command started (also while it
+is still being created); in `agent result --wait` it only stops watching.
+Subagents nest at most 2 levels deep. Exit codes: 0 completed, 1 failed,
+124 timeout, 130 cancelled/interrupted. Retries reuse --call-id so one call
+never starts twice.
 """
 
 
@@ -150,9 +161,9 @@ def _wait_for_turn(
             _note(f"{subagent_id} still running ({int(now - started)}s)")
 
 
-def _cancel_quietly(client: HubClient, subagent_id: str) -> Optional[Dict[str, Any]]:
+def _cancel_quietly(client: HubClient, subagent_id: str, turn_id: str) -> Optional[Dict[str, Any]]:
     try:
-        data = client.cancel_subagent(subagent_id)
+        data = client.cancel_subagent(subagent_id, turn_id)
     except HubError as exc:
         _note(f"cancel failed: {exc}")
         return None
@@ -183,6 +194,46 @@ def _finish(result: Dict[str, Any], json_output: bool) -> None:
     click.get_current_context().exit(code)
 
 
+def _cancel_started(client: HubClient, started: Dict[str, Any], json_output: bool) -> None:
+    subagent_id = str(started["subagent_id"])
+    turn_id = str(started["turn_id"])
+    _note(f"interrupted; cancelling {subagent_id} turn {turn_id}")
+    cancelled = _cancel_quietly(client, subagent_id, turn_id)
+    result = cancelled or dict(started, status="cancelled", error="Interrupted")
+    if result.get("status") == "running":
+        result = dict(result, status="cancelled", error="Interrupted")
+    _finish(result, json_output)
+
+
+def _start(
+    client: HubClient, post: Callable[[], Any], *, call_id: str, json_output: bool
+) -> Dict[str, Any]:
+    """POST a create/send; Ctrl-C meanwhile cancels whatever that call started.
+
+    The interrupted POST may already have started a turn. Re-posting the same
+    body and call_id returns that turn without starting a second one (or
+    starts it now), so it can be cancelled by id.
+    """
+    try:
+        started: Dict[str, Any] = _post_with_retry(post)
+        return started
+    except KeyboardInterrupt:
+        _note(f"interrupted while starting; cancelling call {call_id}")
+    try:
+        started = post()
+    except (KeyboardInterrupt, HubError) as exc:
+        reason = str(exc) if isinstance(exc, HubError) else "interrupted again"
+        _note(
+            f"could not confirm the cancellation ({reason}). If call {call_id} started a "
+            "turn, find it with `claude-hub agent subagents` and stop it with "
+            "`claude-hub agent cancel SUBAGENT_ID`."
+        )
+        click.get_current_context().exit(EXIT_CANCELLED)
+    _cancel_started(client, started, json_output)
+    # The turn completed before the cancel landed; its answer is printed.
+    click.get_current_context().exit(0)
+
+
 def _block(
     ctx: click.Context,
     client: HubClient,
@@ -190,20 +241,26 @@ def _block(
     *,
     timeout_seconds: Optional[float],
     json_output: bool,
+    cancel_on_interrupt: bool,
 ) -> None:
+    """Wait for the turn. Ctrl-C cancels it only for the command that started it."""
     subagent_id = str(started["subagent_id"])
     turn_id = str(started["turn_id"])
-    if started.get("status") == "running":
-        try:
-            result = _wait_for_turn(client, subagent_id, turn_id, timeout_seconds=timeout_seconds)
-        except KeyboardInterrupt:
-            _note(f"interrupted; cancelling {subagent_id}")
-            cancelled = _cancel_quietly(client, subagent_id)
-            result = cancelled or dict(started, status="cancelled", error="Interrupted")
-            if result.get("status") == "running":
-                result = dict(result, status="cancelled", error="Interrupted")
-    else:
-        result = started
+    if started.get("status") != "running":
+        _finish(started, json_output)
+        return
+    try:
+        result = _wait_for_turn(client, subagent_id, turn_id, timeout_seconds=timeout_seconds)
+    except KeyboardInterrupt:
+        if cancel_on_interrupt:
+            _cancel_started(client, started, json_output)
+            return
+        _note(
+            f"stopped watching; {subagent_id} turn {turn_id} keeps running. Resume with "
+            f"`claude-hub agent result {subagent_id} {turn_id} --wait` or stop it with "
+            f"`claude-hub agent cancel {subagent_id}`."
+        )
+        ctx.exit(EXIT_CANCELLED)
     _finish(result, json_output)
 
 
@@ -262,6 +319,12 @@ def _common_turn_options(func: Any) -> Any:
     help="Calling Chat tab (default $CLAUDE_HUB_TAB_ID); its archive/delete closes the subagent.",
 )
 @click.option("--no-parent", is_flag=True, default=False, help="Do not link to a parent tab.")
+@click.option(
+    "--solo/--no-solo",
+    "solo",
+    default=None,
+    help="Run without/with approvals (default: the parent Chat's setting; solo without parent).",
+)
 @_common_turn_options
 @click.pass_context
 def agent_run(
@@ -275,6 +338,7 @@ def agent_run(
     name: Optional[str],
     parent_tab_id: Optional[str],
     no_parent: bool,
+    solo: Optional[bool],
     prompt: Optional[str],
     prompt_file: Optional[str],
     timeout: str,
@@ -298,6 +362,8 @@ def agent_run(
         "call_id": call_id or f"agent-run-{uuid.uuid4().hex}",
         "timeout_seconds": timeout_seconds,
     }
+    if solo is not None:
+        body["solo_mode"] = solo
     for key, value in (
         ("model", model),
         ("effort", effort),
@@ -310,7 +376,12 @@ def agent_run(
     json_output = json_flag or cli_main.as_json(ctx)
     try:
         with cli_main.get_client(ctx) as client:
-            started = _post_with_retry(lambda: client.create_subagent(body))
+            started = _start(
+                client,
+                lambda: client.create_subagent(body),
+                call_id=body["call_id"],
+                json_output=json_output,
+            )
             _note(
                 f"subagent {started['subagent_id']} ({provider}) started in tab "
                 f"{started.get('tab_id')}; turn {started['turn_id']}"
@@ -318,7 +389,14 @@ def agent_run(
             if background:
                 _print_started(started, json_output)
                 return
-            _block(ctx, client, started, timeout_seconds=timeout_seconds, json_output=json_output)
+            _block(
+                ctx,
+                client,
+                started,
+                timeout_seconds=timeout_seconds,
+                json_output=json_output,
+                cancel_on_interrupt=True,
+            )
     except HubError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -347,11 +425,23 @@ def agent_send(
     json_output = json_flag or cli_main.as_json(ctx)
     try:
         with cli_main.get_client(ctx) as client:
-            started = _post_with_retry(lambda: client.send_subagent_turn(subagent_id, body))
+            started = _start(
+                client,
+                lambda: client.send_subagent_turn(subagent_id, body),
+                call_id=str(body["call_id"]),
+                json_output=json_output,
+            )
             if background:
                 _print_started(started, json_output)
                 return
-            _block(ctx, client, started, timeout_seconds=timeout_seconds, json_output=json_output)
+            _block(
+                ctx,
+                client,
+                started,
+                timeout_seconds=timeout_seconds,
+                json_output=json_output,
+                cancel_on_interrupt=True,
+            )
     except HubError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -371,13 +461,21 @@ def agent_result(
 
     Prints the final answer when completed. Exit codes as for `agent run`;
     a still-running turn without --wait exits 124 after printing its status.
+    Ctrl-C during --wait only stops watching (exit 130); the turn keeps running.
     """
     json_output = json_flag or cli_main.as_json(ctx)
     try:
         with cli_main.get_client(ctx) as client:
             result = client.get_subagent_turn(subagent_id, turn_id)
             if wait and result.get("status") == "running":
-                _block(ctx, client, result, timeout_seconds=None, json_output=json_output)
+                _block(
+                    ctx,
+                    client,
+                    result,
+                    timeout_seconds=None,
+                    json_output=json_output,
+                    cancel_on_interrupt=False,
+                )
                 return
     except HubError as exc:
         raise click.ClickException(str(exc)) from exc

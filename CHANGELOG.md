@@ -25,6 +25,16 @@
 - Tabs record `parent_tab_id`/`subagent_id`. Archiving or deleting the parent
   Chat cancels and archives its subagents through a new tab-retirement
   listener. Chat guidance teaches the one-line recipe.
+- A subagent inherits the calling Chat's solo mode (solo without a parent);
+  `--solo/--no-solo` overrides. A turn that stops for an approval fails with
+  instructions to proceed. Nesting is limited to depth 2, and subagent Chats'
+  guidance omits the `agent run` recipe.
+- Ctrl-C in `agent run`/`agent send` cancels only the turn it started, even
+  during the start request; Ctrl-C in `agent result --wait` only stops
+  watching. Non-kept subagents are archived after a short grace period.
+- Unarchiving a subagent Chat detaches it into an ordinary Chat that is never
+  re-archived. Stored answers are capped at 64k characters and the last 20
+  turns, and state is written atomically off the event loop.
 
 ### feat(session): archive and restore managed Chat sessions
 

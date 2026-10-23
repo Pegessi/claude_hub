@@ -17,6 +17,10 @@ SUBAGENT_PROMPT_MAX_BYTES = 256 * 1024
 SUBAGENT_DEFAULT_TIMEOUT_SECONDS = 30 * 60
 SUBAGENT_MAX_TIMEOUT_SECONDS = 24 * 60 * 60
 SUBAGENT_MAX_WAIT_SECONDS = 60.0
+# A top-level Chat may start a subagent, and that subagent one more level.
+SUBAGENT_MAX_DEPTH = 2
+# Env key carried by a subagent Chat's tab; its guidance omits the `agent run` recipe.
+SUBAGENT_ID_ENV = "CLAUDE_HUB_SUBAGENT_ID"
 
 
 def utc_now() -> datetime:
@@ -90,9 +94,12 @@ class SubagentCreate(SubagentTurnCreate):
         default=False,
         description="Keep the Chat open for follow-up turns; default archives it after its turn.",
     )
-    solo_mode: bool = Field(
-        default=True,
-        description="Run without interactive approvals; nobody is watching to approve them.",
+    solo_mode: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Run without interactive approvals. Default: inherit the parent tab's setting; "
+            "true without a parent, because nobody is watching to approve."
+        ),
     )
 
     _fields = field_validator("model", "effort", "cwd", "env_preset", "parent_tab_id", "name")(
@@ -105,6 +112,7 @@ class SubagentTurn(BaseModel):
     call_id: Optional[str] = None
     status: SubagentTurnStatus
     final_text: Optional[str] = None
+    final_text_truncated: bool = False
     error: Optional[str] = None
     started_at: datetime
     completed_at: Optional[datetime] = None
@@ -123,6 +131,7 @@ class Subagent(BaseModel):
     env_preset: Optional[str] = None
     name: str
     keep: bool = False
+    solo_mode: bool = True
     created_at: datetime
     created_by: Optional[str] = None
     call_id: Optional[str] = None
@@ -141,6 +150,7 @@ class SubagentTurnResult(BaseModel):
     turn_id: str
     status: SubagentTurnStatus
     final_text: Optional[str] = None
+    final_text_truncated: bool = False
     error: Optional[str] = None
     started_at: datetime
     completed_at: Optional[datetime] = None
@@ -155,6 +165,7 @@ class SubagentTurnResult(BaseModel):
             turn_id=turn.turn_id,
             status=turn.status,
             final_text=turn.final_text,
+            final_text_truncated=turn.final_text_truncated,
             error=turn.error,
             started_at=turn.started_at,
             completed_at=turn.completed_at,

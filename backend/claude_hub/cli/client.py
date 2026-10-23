@@ -657,8 +657,13 @@ class HubClient:
     def list_subagents(self, params: Dict[str, Any]) -> Any:
         return self._request("GET", "/api/subagents", params=params)
 
-    def cancel_subagent(self, subagent_id: str) -> Any:
-        return self._request("POST", f"/api/subagents/{subagent_id}/cancel")
+    def cancel_subagent(self, subagent_id: str, turn_id: Optional[str] = None) -> Any:
+        """Cancel the running turn, or only ``turn_id`` when given."""
+        return self._request(
+            "POST",
+            f"/api/subagents/{subagent_id}/cancel",
+            params={"turn_id": turn_id} if turn_id else None,
+        )
 
     def close_subagent(self, subagent_id: str) -> Any:
         return self._request("POST", f"/api/subagents/{subagent_id}/close")
