@@ -481,6 +481,93 @@ async def test_nesting_depth_is_limited(env) -> None:
     assert len(chats.create_calls) == 1
 
 
+@pytest.mark.parametrize("identity", ["tab", "subagent-id"])
+async def test_subagent_caller_cannot_escape_depth_or_parent(env, identity: str) -> None:
+    chats, service, client, tmp_path = env
+    # A depth-1 subagent (record + tab) calling `agent run`.
+    record, _turn = await service.create(
+        subagents_service.SubagentCreate(
+            agent_type=AgentType.CODEX, prompt="p", parent_tab_id="parent", keep=True
+        )
+    )
+    assert record.tab_id
+    caller = (
+        {"caller_tab_id": record.tab_id} if identity == "tab" else {"caller_subagent_id": record.id}
+    )
+    unlinked = await client.post(
+        "/api/subagents", json=_body(tmp_path, parent_tab_id=None, cwd=str(tmp_path), **caller)
+    )
+    assert unlinked.status_code == 400 and "--no-parent" in unlinked.json()["detail"]
+    other = await client.post("/api/subagents", json=_body(tmp_path, keep=True, **caller))
+    assert other.status_code == 201, other.text
+    # Linked to the caller, whatever parent the request named.
+    assert chats.create_calls[-1]["parent_tab_id"] == record.tab_id
+    grandchild = service.get(other.json()["subagent_id"])
+    assert grandchild.parent_tab_id == record.tab_id
+    # The depth-2 subagent cannot go deeper, with or without a parent.
+    deep = {"caller_tab_id": grandchild.tab_id}
+    for extra in ({}, {"parent_tab_id": None, "cwd": str(tmp_path)}):
+        refused = await client.post("/api/subagents", json=_body(tmp_path, **extra, **deep))
+        assert refused.status_code == 400 and "nesting limit" in refused.json()["detail"]
+    # Closing the caller cascades to the subagent it started.
+    await service.close(record.id)
+    await _eventually(lambda: grandchild.closed)
+
+
+async def test_top_level_caller_may_run_unlinked_and_unknown_subagent_is_refused(env) -> None:
+    chats, service, client, tmp_path = env
+    body = _body(tmp_path, parent_tab_id=None, cwd=str(tmp_path), caller_tab_id="parent")
+    assert (await client.post("/api/subagents", json=body)).status_code == 201
+    assert chats.create_calls[-1]["parent_tab_id"] is None
+    ghost = await client.post("/api/subagents", json=_body(tmp_path, caller_subagent_id="sa-x"))
+    assert ghost.status_code == 409
+
+
+async def test_closed_is_reported_only_after_the_tab_is_archived(env) -> None:
+    chats, service, client, tmp_path = env
+    seen: List[bool] = []
+    real_archive = chats.archive_tab
+
+    async def archive(tab_id: str) -> None:
+        seen.extend(r.closed for r in service.list_subagents(include_closed=True))
+        await asyncio.sleep(0.02)
+        await real_archive(tab_id)
+
+    service.runtime.archive_tab = archive
+    started = (await client.post("/api/subagents", json=_body(tmp_path))).json()
+    record = service.get(started["subagent_id"])
+    await _eventually(lambda: record.closed)
+    assert chats.tabs[started["tab_id"]].archived is True
+    assert seen == [False]
+
+
+async def test_stop_persists_state_one_last_time(env) -> None:
+    chats, service, client, tmp_path = env
+    started = (await client.post("/api/subagents", json=_body(tmp_path, keep=True))).json()
+    await _wait(client, started)
+    record = service.get(started["subagent_id"])
+    record.name = "renamed in memory only"
+    await service.stop()
+    stored = json.loads((tmp_path / "subagents.json").read_text())
+    assert stored["subagents"][record.id]["name"] == "renamed in memory only"
+
+
+async def test_create_in_flight_during_shutdown_spawns_nothing(env) -> None:
+    chats, service, client, tmp_path = env
+    chats.create_delay = 0.1
+    pending = asyncio.ensure_future(client.post("/api/subagents", json=_body(tmp_path)))
+    await _eventually(lambda: bool(chats.create_calls))
+    await service.stop()
+    response = await pending
+    assert response.status_code == 503, response.text
+    assert "shutting down" in response.json()["detail"]
+    assert chats.tabs["sub-tab-1"].archived is True
+    assert chats.sent == [] and service._background == set()
+    assert service.list_subagents(include_closed=True) == []
+    stored = json.loads((tmp_path / "subagents.json").read_text())
+    assert stored["subagents"] == {}
+
+
 def test_subagent_chats_get_guidance_without_agent_run_recipe() -> None:
     from claude_hub.services.agent_stream.providers.guidance import (
         HUB_RUNTIME_GUIDANCE,
@@ -492,9 +579,11 @@ def test_subagent_chats_get_guidance_without_agent_run_recipe() -> None:
     assert "Task tools:" in SUBAGENT_HUB_RUNTIME_GUIDANCE
 
 
-@pytest.mark.parametrize("is_subagent", [False, True])
+@pytest.mark.parametrize(
+    ("link", "is_subagent"), [("none", False), ("tab", True), ("env_only", False)]
+)
 async def test_first_turn_guidance_omits_recipe_for_subagent_tabs(
-    monkeypatch: pytest.MonkeyPatch, is_subagent: bool
+    monkeypatch: pytest.MonkeyPatch, link: str, is_subagent: bool
 ) -> None:
     from unittest.mock import AsyncMock
 
@@ -502,7 +591,10 @@ async def test_first_turn_guidance_omits_recipe_for_subagent_tabs(
     from tests.test_native_goal_transport import _session
 
     session = _session()
-    if is_subagent:
+    if link == "tab":
+        session.subagent_id = "sa-1"
+    elif link == "env_only":
+        # A stale env key (e.g. an old copy) does not make an ordinary Chat a subagent.
         session.env = {**session.env, "CLAUDE_HUB_SUBAGENT_ID": "sa-1"}
     transport = CodexNativeSession(session)
     monkeypatch.setattr(transport, "_prepare_turn_context", AsyncMock(return_value=""))

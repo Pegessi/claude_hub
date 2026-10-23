@@ -27,8 +27,11 @@
   listener. Chat guidance teaches the one-line recipe.
 - A subagent inherits the calling Chat's solo mode (solo without a parent);
   `--solo/--no-solo` overrides. A turn that stops for an approval fails with
-  instructions to proceed. Nesting is limited to depth 2, and subagent Chats'
-  guidance omits the `agent run` recipe.
+  instructions to proceed. Nesting is limited to depth 2, counted from the
+  calling Chat: a subagent cannot escape it with `--no-parent` or another
+  `--parent-tab-id`, and its subagents always close with it. Subagent Chats'
+  guidance omits the `agent run` recipe; duplicates and forks of a subagent
+  Chat are ordinary Chats.
 - Ctrl-C in `agent run`/`agent send` cancels only the turn it started, even
   during the start request; Ctrl-C in `agent result --wait` only stops
   watching. Non-kept subagents are archived after a short grace period.

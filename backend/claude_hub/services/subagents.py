@@ -121,7 +121,10 @@ def _digest(payload: Dict[str, Any]) -> str:
 
 
 def _create_digest(req: SubagentCreate) -> str:
-    return _digest(req.model_dump(mode="json", exclude={"call_id"}))
+    # Caller identity is context, not request content: a retry is the same call.
+    return _digest(
+        req.model_dump(mode="json", exclude={"call_id", "caller_tab_id", "caller_subagent_id"})
+    )
 
 
 def _turn_digest(req: SubagentTurnCreate) -> str:
@@ -180,6 +183,8 @@ class SubagentService:
         self._locks: Dict[str, List[Any]] = {}  # key -> [lock, holders+waiters]
         # Every task this service spawns (turns, closes), so stop() can join them.
         self._background: set[asyncio.Task[Any]] = set()
+        # Records whose close is in progress (claimed before the tab is archived).
+        self._closing: set[str] = set()
         self._save_lock = asyncio.Lock()
         self._save_requested = 0
         self._save_written = 0
@@ -354,6 +359,12 @@ class SubagentService:
             _done, pending = await asyncio.wait(tasks, timeout=_CANCEL_JOIN_SECONDS)
             if pending:
                 logger.warning("%d subagent task(s) did not stop in time", len(pending))
+        # A turn cancelled mid-save re-raises before its result is known to be
+        # covered; one last save makes sure a just-finished result is on disk.
+        try:
+            await self._save()
+        except Exception:
+            logger.exception("Failed to persist subagent state on shutdown")
 
     # ── queries ──────────────────────────────────────────────────────────
 
@@ -447,7 +458,59 @@ class SubagentService:
             env[key] = effort
         return env
 
+    def _resolve_caller(self, req: SubagentCreate) -> Optional[TerminalTab]:
+        """The Chat tab asking for a subagent, as far as the server knows it.
+
+        The tab record wins over the caller-supplied subagent id: a tab the
+        user restored as an ordinary Chat is no longer a subagent.
+        """
+        if req.caller_tab_id:
+            tab = self.runtime.get_tab(req.caller_tab_id)
+            if tab is not None:
+                return tab
+        if req.caller_subagent_id:
+            record = self._subagents.get(req.caller_subagent_id)
+            tab = self.runtime.get_tab(record.tab_id) if record and record.tab_id else None
+            if record is None or record.closed or tab is None:
+                raise SubagentError(
+                    409,
+                    f"Calling subagent {req.caller_subagent_id} is closed or unknown; "
+                    "it cannot start another subagent.",
+                )
+            return tab
+        return None
+
+    def _check_depth(self, tab: TerminalTab) -> None:
+        depth = self._subagent_depth(tab)
+        if depth >= SUBAGENT_MAX_DEPTH:
+            raise SubagentError(
+                400,
+                f"Subagent nesting limit reached: tab {tab.id} is already a "
+                f"depth-{depth} subagent (max depth {SUBAGENT_MAX_DEPTH}). "
+                "Do this work yourself instead of starting another subagent.",
+            )
+
     def _resolve_parent(self, req: SubagentCreate) -> Optional[TerminalTab]:
+        caller = self._resolve_caller(req)
+        if caller is not None and caller.subagent_id:
+            # A subagent's subagents always hang off its own Chat, so depth is
+            # counted and its close cascades whatever the request names.
+            self._check_depth(caller)
+            if not req.parent_tab_id:
+                raise SubagentError(
+                    400,
+                    f"A subagent cannot start an unlinked subagent (--no-parent); its "
+                    f"subagents are linked to its own Chat (tab {caller.id}).",
+                )
+            if caller.archived:
+                raise SubagentError(409, f"Calling subagent tab {caller.id} is archived")
+            if req.parent_tab_id != caller.id:
+                logger.info(
+                    "Subagent tab %s asked for parent %s; linking to the caller instead",
+                    caller.id,
+                    req.parent_tab_id,
+                )
+            return caller
         if not req.parent_tab_id:
             return None
         parent = self.runtime.get_tab(req.parent_tab_id)
@@ -455,14 +518,7 @@ class SubagentService:
             raise SubagentError(404, f"Parent tab {req.parent_tab_id} not found")
         if parent.archived:
             raise SubagentError(409, f"Parent tab {req.parent_tab_id} is archived")
-        depth = self._subagent_depth(parent)
-        if depth >= SUBAGENT_MAX_DEPTH:
-            raise SubagentError(
-                400,
-                f"Subagent nesting limit reached: parent tab {parent.id} is already a "
-                f"depth-{depth} subagent (max depth {SUBAGENT_MAX_DEPTH}). "
-                "Do this work yourself instead of starting another subagent.",
-            )
+        self._check_depth(parent)
         return parent
 
     def _subagent_depth(self, tab: TerminalTab) -> int:
@@ -518,11 +574,12 @@ class SubagentService:
             solo_mode = parent.solo_mode if parent is not None else True
         subagent_id = f"sa-{uuid.uuid4().hex[:12]}"
         env[SUBAGENT_ID_ENV] = subagent_id
+        parent_id = parent.id if parent is not None else None
         first_line = req.prompt.strip().splitlines()[0][:60]
         name = req.name or f"{req.agent_type.value} subagent: {first_line}"
         record = Subagent(
             id=subagent_id,
-            parent_tab_id=req.parent_tab_id,
+            parent_tab_id=parent_id,
             agent_type=req.agent_type,
             model=req.model,
             effort=req.effort,
@@ -544,7 +601,7 @@ class SubagentService:
                 agent_type=req.agent_type,
                 session_kind=SessionKind.CHAT,
                 env=env,
-                parent_tab_id=req.parent_tab_id,
+                parent_tab_id=parent_id,
                 subagent_id=subagent_id,
             )
         except SubagentError:
@@ -554,9 +611,9 @@ class SubagentService:
         record.tab_id = tab.id
         try:
             # The parent may have been retired while the tab was starting.
-            current = req.parent_tab_id and self.runtime.get_tab(req.parent_tab_id)
-            if req.parent_tab_id and (not current or current.archived):
-                raise SubagentError(409, f"Parent tab {req.parent_tab_id} was closed")
+            current = parent_id and self.runtime.get_tab(parent_id)
+            if parent_id and (not current or current.archived):
+                raise SubagentError(409, f"Parent tab {parent_id} was closed")
             turn = self._new_turn(req.call_id, req.timeout_seconds, digest)
             record.turns.append(turn)
             # Durable first, then visible: a record that was never saved must
@@ -573,11 +630,23 @@ class SubagentService:
         except BaseException:
             await self._archive_quietly(tab.id)
             raise
+        if self._shutting_down:
+            # stop() already joined its tasks; spawning now would outlive it.
+            await self._archive_quietly(tab.id)
+            try:
+                await self._save()  # drop the never-published record from disk
+            except Exception:
+                logger.exception("Failed to drop unpublished subagent %s", record.id)
+            raise SubagentError(
+                503,
+                "Claude Hub is shutting down; the subagent's Chat tab was archived and "
+                "nothing ran. Retry with the same call_id after it restarts.",
+            )
         self._subagents[record.id] = record
         self._spawn(record, turn, wrap_first_prompt(req.prompt), req.prompt)
         # A parent retired during the save found no published record to close.
-        current = req.parent_tab_id and self.runtime.get_tab(req.parent_tab_id)
-        if req.parent_tab_id and (not current or current.archived):
+        current = parent_id and self.runtime.get_tab(parent_id)
+        if parent_id and (not current or current.archived):
             self._track(
                 self._close(record, "parent tab archived or deleted"),
                 f"subagent-close-{record.id}",
@@ -600,7 +669,7 @@ class SubagentService:
                                 f"call_id {req.call_id} was already used with a different request",
                             )
                         return record, turn
-            if record.closed:
+            if record.closed or record.id in self._closing:
                 raise SubagentError(409, f"Subagent {subagent_id} is closed")
             if not record.keep:
                 raise SubagentError(
@@ -710,7 +779,12 @@ class SubagentService:
             event = self._done.pop(turn.turn_id, None)
             if event is not None:
                 event.set()
-        if not record.keep and not record.closed and not self._shutting_down:
+        if (
+            not record.keep
+            and not record.closed
+            and record.id not in self._closing
+            and not self._shutting_down
+        ):
             self._track(
                 self._close_after_grace(record, f"turn {status.value}"),
                 f"subagent-close-{record.id}",
@@ -737,22 +811,29 @@ class SubagentService:
             await asyncio.wait(tasks, timeout=_CANCEL_JOIN_SECONDS)
 
     async def _close(self, record: Subagent, reason: str) -> None:
-        if record.closed:
+        if record.closed or record.id in self._closing:
             return
-        # Mark first: a cancelled turn task must not start its own close.
-        record.closed = True
-        record.closed_at = utc_now()
-        record.close_reason = reason
-        await self._cancel_running(record)
+        # Claim first: a cancelled turn task must not start its own close. The
+        # record reports closed only after its tab is archived, so no reader
+        # sees a closed subagent whose Chat is still live. An interrupted close
+        # (shutdown) leaves the record open for the next start to reconcile.
+        self._closing.add(record.id)
+        try:
+            await self._cancel_running(record)
+            if record.tab_id:
+                tab = self.runtime.get_tab(record.tab_id)
+                # A tab the user unarchived was detached from this record: keep it.
+                if tab is not None and tab.subagent_id == record.id:
+                    await self._archive_quietly(record.tab_id)
+            record.closed = True
+            record.closed_at = utc_now()
+            record.close_reason = reason
+        finally:
+            self._closing.discard(record.id)
         try:
             await self._save()
         except Exception:
             logger.exception("Failed to persist closing subagent %s", record.id)
-        if record.tab_id:
-            tab = self.runtime.get_tab(record.tab_id)
-            # A tab the user unarchived was detached from this record: keep it.
-            if tab is not None and tab.subagent_id == record.id:
-                await self._archive_quietly(record.tab_id)
 
     async def _archive_quietly(self, tab_id: str) -> None:
         tab = self.runtime.get_tab(tab_id)
@@ -767,7 +848,9 @@ class SubagentService:
         affected = [
             s
             for s in self._subagents.values()
-            if not s.closed and (s.parent_tab_id == tab_id or s.tab_id == tab_id)
+            if not s.closed
+            and s.id not in self._closing
+            and (s.parent_tab_id == tab_id or s.tab_id == tab_id)
         ]
         if not affected or self._shutting_down:
             return

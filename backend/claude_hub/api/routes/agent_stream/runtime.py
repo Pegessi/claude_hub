@@ -160,6 +160,7 @@ def terminal_tab_stream_session(
         cursor_cli_version=tab.cursor_cli_version,
         cursor_transcript_path=tab.cursor_transcript_path,
         cursor_transcript_schema=tab.cursor_transcript_schema,
+        subagent_id=getattr(tab, "subagent_id", None),
         created_at=tab.created_at,
         updated_at=now,
     )

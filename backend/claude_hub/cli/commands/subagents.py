@@ -21,6 +21,7 @@ from claude_hub.cli.client import HubClient, HubError
 from claude_hub.cli.commands.common import resolve_cli_local_path
 from claude_hub.cli.commands.workspaces import agent
 from claude_hub.cli.output import emit, print_rows
+from claude_hub.models.subagent import SUBAGENT_ID_ENV
 
 PROVIDERS = ["claude", "codex", "traex", "cursor", "maso"]
 EXIT_FAILED = 1
@@ -68,9 +69,10 @@ instructions (re-run with --solo, or --keep and answer in Web Chat).
 \b
 Ctrl-C in `run`/`send` cancels the turn that command started (also while it
 is still being created); in `agent result --wait` it only stops watching.
-Subagents nest at most 2 levels deep. Exit codes: 0 completed, 1 failed,
-124 timeout, 130 cancelled/interrupted. Retries reuse --call-id so one call
-never starts twice.
+Subagents nest at most 2 levels deep, counted from the calling Chat; a
+subagent's own subagents are always linked to it (--no-parent is refused).
+Exit codes: 0 completed, 1 failed, 124 timeout, 130 cancelled/interrupted.
+Retries reuse --call-id so one call never starts twice.
 """
 
 
@@ -318,7 +320,12 @@ def _common_turn_options(func: Any) -> Any:
     default=None,
     help="Calling Chat tab (default $CLAUDE_HUB_TAB_ID); its archive/delete closes the subagent.",
 )
-@click.option("--no-parent", is_flag=True, default=False, help="Do not link to a parent tab.")
+@click.option(
+    "--no-parent",
+    is_flag=True,
+    default=False,
+    help="Do not link to a parent tab (refused inside a subagent).",
+)
 @click.option(
     "--solo/--no-solo",
     "solo",
@@ -364,12 +371,17 @@ def agent_run(
     }
     if solo is not None:
         body["solo_mode"] = solo
+    # Caller identity always goes along, independent of --parent-tab-id and
+    # --no-parent: the server counts nesting depth from the caller and links a
+    # subagent caller's subagents to its own Chat.
     for key, value in (
         ("model", model),
         ("effort", effort),
         ("env_preset", preset),
         ("name", name),
         ("parent_tab_id", None if no_parent else (parent_tab_id or None)),
+        ("caller_tab_id", os.environ.get("CLAUDE_HUB_TAB_ID", "").strip()),
+        ("caller_subagent_id", os.environ.get(SUBAGENT_ID_ENV, "").strip()),
     ):
         if value:
             body[key] = value
