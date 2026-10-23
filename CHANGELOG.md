@@ -7,6 +7,25 @@
 
 ## Released
 
+### feat(agent): one-call cross-provider subagents (`claude-hub agent run`)
+
+- `claude-hub agent run --provider X --prompt-file -` starts a native Chat with
+  another provider, waits for its turn and prints only the final answer
+  (progress on stderr). Exit codes: 0 completed, 1 failed, 124 timeout,
+  130 cancelled. There is no Task, board, Goal Packet, review or acceptance;
+  Workspace Tasks remain the path for tracked, reviewed work.
+- New `/api/subagents` API: create a subagent with its first turn, send
+  follow-ups to a subagent created with `keep`, long-poll turn results, list,
+  cancel and close. Turns run server-side and their results persist under the
+  runtime home. A turn interrupted by a backend restart is reported as failed
+  and never left pending. `call_id` makes retries idempotent.
+- New companion commands: `agent result`, `agent send`, `agent subagents`,
+  `agent cancel` and `agent close`. Ctrl-C while waiting cancels the turn.
+  By default a subagent is archived after its turn completes.
+- Tabs record `parent_tab_id`/`subagent_id`. Archiving or deleting the parent
+  Chat cancels and archives its subagents through a new tab-retirement
+  listener. Chat guidance teaches the one-line recipe.
+
 ### feat(session): archive and restore managed Chat sessions
 
 - Archive idle managed Chat agents and reviewers through workspace session

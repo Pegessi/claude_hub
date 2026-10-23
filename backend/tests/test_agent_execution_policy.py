@@ -45,6 +45,11 @@ def test_native_guidance_uses_task_cli_without_implied_dispatch() -> None:
     assert "do not send commands to agent tmux" in HUB_RUNTIME_GUIDANCE
 
 
+def test_native_guidance_teaches_one_call_subagent_recipe() -> None:
+    assert "claude-hub agent run --provider X --prompt-file -" in HUB_RUNTIME_GUIDANCE
+    assert "Workspace Tasks only for tracked, reviewed work" in HUB_RUNTIME_GUIDANCE
+
+
 @pytest.mark.parametrize(
     "complexity",
     [WorkspaceTaskExecutionComplexity.SIMPLE, WorkspaceTaskExecutionComplexity.COMPLEX],
