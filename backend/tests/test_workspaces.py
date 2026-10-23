@@ -5131,7 +5131,7 @@ def test_start_task_dispatches_to_resident_agent(
     assert board_response.json()["tasks"][0]["status"] == "working"
 
 
-def test_review_task_keeps_agent_locked_until_done(
+def test_review_task_keeps_its_agent_and_new_task_gets_dedicated_agent(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -5221,32 +5221,34 @@ def test_review_task_keeps_agent_locked_until_done(
 
     # REVIEW status (even after review_passed) holds the agent so the
     # implementation context is preserved for revisions or human rejection.
-    # The new task gets queued onto the same agent without preempting it.
+    # One agent never carries two open Tasks: the new Task gets its own agent
+    # instead of queueing behind the held one.
     assert second_start.status_code == 201
     started_second = second_start.json()
-    assert started_second["status"] == "queued"
-    assert started_second["session_id"] == session_id
+    assert started_second["status"] == "working"
+    assert started_second["session_id"] != session_id
+    assert started_second["dispatch_reason"] == "Dedicated workspace agent for this task"
     assert workspace_manager.tasks[first_task["id"]].status == WorkspaceTaskStatus.REVIEW
     assert workspace_manager.sessions[session_id].current_task_id == first_task["id"]
+    second_session_id = started_second["session_id"]
+    assert workspace_manager.sessions[second_session_id].current_task_id == second_task["id"]
+    assert "Run after the reviewed task is human-accepted" in sent_messages[-1][1]
 
-    # Once the human accepts the first task it moves to DONE, releasing the
-    # agent and letting the queued second task start.
+    # Accepting the first Task frees its agent without disturbing the second.
     accept_response = client.patch(
         f"/api/workspaces/tasks/{first_task['id']}",
         json={"status": "done"},
     )
     assert accept_response.status_code == 200
     assert workspace_manager.tasks[first_task["id"]].status == WorkspaceTaskStatus.DONE
-    assert workspace_manager.tasks[second_task["id"]].status == WorkspaceTaskStatus.WORKING
-    assert workspace_manager.sessions[session_id].current_task_id == second_task["id"]
-    assert "Run after the reviewed task is human-accepted" in sent_messages[-1][1]
+    assert workspace_manager.tasks[second_task["id"]].session_id == second_session_id
 
 
-def test_reassigns_auto_queued_task_when_another_agent_becomes_free(
+def test_task_gets_dedicated_agent_when_every_agent_holds_a_review(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Auto-queued work should not stay stuck behind a held review if another agent frees up."""
+    """New work never queues behind agents that review-parked Tasks hold."""
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -5327,33 +5329,22 @@ def test_reassigns_auto_queued_task_when_another_agent_becomes_free(
     )
 
     assert queued_start.status_code == 201
-    queued = queued_start.json()
-    assert queued["status"] == "queued"
-    assert queued["session_id"] == first_agent["id"]
-    assert queued["dispatch_reason"] == "Queued behind existing workspace agent"
-
-    accept_second = client.patch(
-        f"/api/workspaces/tasks/{second_task['id']}",
-        json={"status": "done"},
-    )
-
-    assert accept_second.status_code == 200
-    rebalanced = workspace_manager.tasks[queued_task["id"]]
-    assert rebalanced.status == WorkspaceTaskStatus.WORKING
-    assert rebalanced.session_id == second_agent["id"]
-    assert rebalanced.dispatch_reason == "Reassigned to newly available workspace agent"
+    started = queued_start.json()
+    assert started["status"] == "working"
+    assert started["session_id"] not in {first_agent["id"], second_agent["id"]}
+    assert started["dispatch_reason"] == "Dedicated workspace agent for this task"
     assert workspace_manager.sessions[first_agent["id"]].current_task_id == first_task["id"]
-    assert workspace_manager.sessions[second_agent["id"]].current_task_id == queued_task["id"]
+    assert workspace_manager.sessions[second_agent["id"]].current_task_id == second_task["id"]
+    dedicated = workspace_manager.sessions[started["session_id"]]
+    assert dedicated.current_task_id == queued_task["id"]
     assert "Run on the next available agent" in sent_messages[-1][1]
 
 
-def test_reassigns_auto_queued_task_off_busy_working_agent(
+def test_task_gets_dedicated_agent_instead_of_queueing_behind_busy_agent(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A task auto-queued behind a genuinely WORKING agent should migrate to a
-    freshly available agent instead of starving until that one specific agent
-    goes idle."""
+    """A Task started while the only agent is WORKING gets its own agent."""
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -5411,40 +5402,103 @@ def test_reassigns_auto_queued_task_off_busy_working_agent(
     )
 
     assert queued_start.status_code == 201
-    queued = queued_start.json()
-    assert queued["status"] == "queued"
-    assert queued["session_id"] == first_agent["id"]
-    assert queued["dispatch_reason"] == "Queued behind existing workspace agent"
-
-    # A second agent comes online; a dispatch pass should migrate the queued
-    # task off the still-WORKING first agent onto the now-idle second agent.
-    second_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
-    dispatch_response = client.post(f"/api/workspaces/{workspace['id']}/dispatch")
-    assert dispatch_response.status_code == 204
-
-    rebalanced = workspace_manager.tasks[queued_task["id"]]
-    assert rebalanced.status == WorkspaceTaskStatus.WORKING
-    assert rebalanced.session_id == second_agent["id"]
-    assert rebalanced.dispatch_reason == "Reassigned to newly available workspace agent"
+    started = queued_start.json()
+    assert started["status"] == "working"
+    assert started["session_id"] != first_agent["id"]
+    assert started["dispatch_reason"] == "Dedicated workspace agent for this task"
     assert workspace_manager.sessions[first_agent["id"]].current_task_id == first_task["id"]
-    assert workspace_manager.sessions[second_agent["id"]].current_task_id == queued_task["id"]
     assert "Run on the next available agent" in sent_messages[-1][1]
 
 
-def test_reassigns_related_pinned_task_off_review_parked_agent(
+def test_dispatch_rescues_task_persisted_behind_a_held_agent(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A related-task-pinned queued task must not starve forever behind an agent
-    that is runtime-idle but still bound to a non-DONE review-parked task. When a
-    different agent is free, the pinned task migrates to it instead of waiting
-    indefinitely for a human to accept the parked review.
+    """Tasks queued behind a held agent by older builds get their own agent."""
 
-    This reproduces the live deadlock: the related-pinned task carried
-    dispatch_reason="Related to task ..." (not "Queued behind existing workspace
-    agent"), so the original rebalancer skipped it entirely; the assigned agent
-    was idle on paper yet locked by a review-parked task, while other agents sat
-    idle."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sent_messages: list[tuple[str, str]] = []
+    stub_workspace_terminal(
+        monkeypatch,
+        repo,
+        tab_id="queue-stranded-tab",
+        port=12397,
+        sent_messages=sent_messages,
+    )
+
+    async def fake_list_statuses(*_args, **_kwargs) -> list[TerminalAgentStatus]:
+        return []
+
+    monkeypatch.setattr(
+        workspace_module.ttyd_manager, "list_tab_agent_statuses", fake_list_statuses
+    )
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Queue Stranded Repo",
+            "path": str(repo),
+            "default_branch": "main",
+            "session_prefix": "queue-stranded",
+        },
+    ).json()
+    first_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    held_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Held", "prompt": "Hold the agent"},
+    ).json()
+    client.post(
+        f"/api/workspaces/tasks/{held_task['id']}/start",
+        json={"target_session_id": first_agent["id"]},
+    )
+    stranded_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Stranded", "prompt": "Run on my own agent"},
+    ).json()
+    pinned_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Pinned", "prompt": "Wait for the chosen agent"},
+    ).json()
+    now = datetime.now()
+    for task_id, reason in (
+        (stranded_task["id"], "Queued behind existing workspace agent"),
+        (pinned_task["id"], "User selected target agent"),
+    ):
+        workspace_manager.tasks[task_id] = workspace_manager.tasks[task_id].model_copy(
+            update={
+                "status": WorkspaceTaskStatus.QUEUED,
+                "session_id": first_agent["id"],
+                "dispatch_reason": reason,
+                "queued_at": now,
+            }
+        )
+
+    assert client.post(f"/api/workspaces/{workspace['id']}/dispatch").status_code == 204
+
+    rescued = workspace_manager.tasks[stranded_task["id"]]
+    assert rescued.status == WorkspaceTaskStatus.WORKING
+    assert rescued.session_id not in {None, first_agent["id"]}
+    assert rescued.dispatch_reason == "Dedicated workspace agent for this task"
+    assert rescued.session_id is not None
+    assert workspace_manager.sessions[rescued.session_id].current_task_id == rescued.id
+    assert "Run on my own agent" in sent_messages[-1][1]
+    pinned = workspace_manager.tasks[pinned_task["id"]]
+    assert pinned.status == WorkspaceTaskStatus.QUEUED
+    assert pinned.session_id == first_agent["id"]
+    assert workspace_manager.sessions[first_agent["id"]].current_task_id == held_task["id"]
+
+
+def test_related_task_gets_dedicated_agent_when_related_agent_is_parked(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A related Task must not starve behind an agent that a review-parked Task
+    holds. This reproduces the live deadlock: the related-pinned task carried
+    dispatch_reason="Related to task ...", the assigned agent was idle on paper
+    yet locked by the parked Task. Related continuity is a preference, so the
+    follow-up gets its own agent instead of waiting for human acceptance."""
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -5505,8 +5559,8 @@ def test_reassigns_related_pinned_task_off_review_parked_agent(
     assert workspace_manager.sessions[first_agent["id"]].current_task_id == parked_task["id"]
     assert not workspace_manager._can_dispatch_to(workspace_manager.sessions[first_agent["id"]])
 
-    # A follow-up task related to the parked one gets pinned to the same agent
-    # for context continuity (dispatch_reason "Related to task ...").
+    # A follow-up related to the parked Task prefers its agent only when that
+    # agent is free; the parked Task holds it, so the follow-up gets its own.
     related_task = client.post(
         f"/api/workspaces/{workspace['id']}/tasks",
         json={"title": "Follow-up fix", "prompt": "Continue from the related task"},
@@ -5517,25 +5571,13 @@ def test_reassigns_related_pinned_task_off_review_parked_agent(
     )
 
     assert related_start.status_code == 201
-    queued = related_start.json()
-    assert queued["status"] == "queued"
-    assert queued["session_id"] == first_agent["id"]
-    assert queued["dispatch_reason"] == f"Related to task {parked_task['id']}"
-
-    # A second idle agent comes online; a dispatch pass should migrate the
-    # related-pinned task off the review-parked first agent onto the free one.
-    second_agent = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
-    dispatch_response = client.post(f"/api/workspaces/{workspace['id']}/dispatch")
-    assert dispatch_response.status_code == 204
-
-    rebalanced = workspace_manager.tasks[related_task["id"]]
-    assert rebalanced.status == WorkspaceTaskStatus.WORKING
-    assert rebalanced.session_id == second_agent["id"]
-    assert rebalanced.dispatch_reason == "Reassigned to newly available workspace agent"
-    assert rebalanced.clear_context is True
+    started = related_start.json()
+    assert started["status"] == "working"
+    assert started["session_id"] != first_agent["id"]
+    assert started["dispatch_reason"] == "Dedicated workspace agent for this task"
     # The parked agent keeps holding its review task untouched.
     assert workspace_manager.sessions[first_agent["id"]].current_task_id == parked_task["id"]
-    assert workspace_manager.sessions[second_agent["id"]].current_task_id == related_task["id"]
+    assert workspace_manager.sessions[started["session_id"]].current_task_id == related_task["id"]
     assert "Continue from the related task" in sent_messages[-1][1]
 
 
@@ -10190,14 +10232,15 @@ def test_start_task_does_not_dispatch_to_stopped_resident_agent(
         json={},
     )
 
-    assert response.status_code == 400
-    assert "No idle or working workspace agent is available" in response.json()["detail"]
-    assert "restart-agent-2" not in workspace_manager.sessions
-    assert len(created_tabs) == 1
-    assert len(sent_messages) == 1
-    board = client.get(f"/api/workspaces/{workspace_id}/board").json()
-    assert board["tasks"][0]["status"] == "todo"
-    assert board["tasks"][0]["session_id"] is None
+    # The stopped agent never receives work; the Task gets its own agent.
+    assert response.status_code == 201
+    started = response.json()
+    assert started["status"] == "working"
+    assert started["session_id"] == "restart-agent-2"
+    assert workspace_manager.sessions[first_agent["id"]].status == ManagedSessionStatus.STOPPED
+    assert workspace_manager.sessions[first_agent["id"]].current_task_id is None
+    assert len(created_tabs) == 2
+    assert "Do not dispatch to offline agent" in sent_messages[-1][1]
 
 
 def test_delete_task_removes_reports_and_unlinks_session(

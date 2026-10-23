@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from importlib import import_module
 from pathlib import Path
-from typing import Generator
+from typing import Any, Generator
 
 import pytest
 from fastapi.testclient import TestClient
@@ -52,16 +52,18 @@ def isolated_hub(monkeypatch: MonkeyPatch, tmp_path: Path) -> Generator[Path, No
     _clear_manager()
 
 
-def _workspace(client: TestClient, repo: Path) -> dict:
-    return client.post(
+def _workspace(client: TestClient, repo: Path) -> dict[str, Any]:
+    workspace: dict[str, Any] = client.post(
         "/api/workspaces",
         json={"name": "Lifecycle", "path": str(repo), "session_prefix": "lc"},
     ).json()
+    return workspace
 
 
-def _lifecycle(client: TestClient, workspace_id: str, task_id: str) -> dict:
+def _lifecycle(client: TestClient, workspace_id: str, task_id: str) -> dict[str, Any]:
     board = client.get(f"/api/workspaces/{workspace_id}/board").json()
-    return board["task_lifecycles"][task_id]
+    lifecycle: dict[str, Any] = board["task_lifecycles"][task_id]
+    return lifecycle
 
 
 def test_board_reports_running_task_owned_by_its_agent(isolated_hub: Path) -> None:

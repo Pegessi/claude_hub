@@ -7,6 +7,21 @@
 
 ## Released
 
+### fix(task): give parallel Tasks their own agents
+
+- A Task started while every agent of its provider holds another open Task
+  now gets a dedicated agent, instead of queueing behind one. Queueing
+  behind an agent held by a Task in review or waiting on the user could
+  starve the queue indefinitely. An agent keeps its Task until the Task is
+  done, so the context stays consistent, and agents are never shared between
+  open Tasks.
+- The dedicated agent inherits the env preset, Chat env and remote target of
+  the newest agent of the same provider. Free agents are reused only for
+  their own provider.
+- Tasks already queued behind a held or stopped agent get their own agent on
+  the next dispatch pass. Only Tasks pinned to an agent by the user still
+  wait for that agent.
+
 ### feat(task): derive one explicit lifecycle phase per Task
 
 - Board responses add `task_lifecycles`: per Task one phase (`draft`,

@@ -73,34 +73,6 @@ class _TaskStartMixin(_WorkspaceManagerBase):
             if selected.session_kind != task.session_kind:
                 raise ValueError("The selected agent does not match the Task execution surface")
 
-        if not payload.target_session_id and not any(
-            agent.session_kind == selected_kind
-            for agent in self._workspace_agents(workspace.id, include_stopped=True)
-        ):
-            logger.info(
-                "No workspace agents found for workspace_id=%s; creating default agent for task id=%s",
-                workspace.id,
-                task.id,
-            )
-            await self.ensure_workspace_agent(
-                workspace.id,
-                EnsureWorkspaceAgentRequest(
-                    agent_type=payload.agent_type or task.agent_type,
-                    session_kind=selected_kind,
-                    reuse_existing=False,
-                ),
-            )
-
-        # Session preparation awaits external work; a todo edit may have changed
-        # prerequisites meanwhile. Never overwrite that newer task contract.
-        task = self.tasks[task_id]
-        if task.status == WorkspaceTaskStatus.DONE:
-            raise RuntimeError("Done tasks cannot be started")
-        if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
-            return task
-        validate_workspace_session_surface(payload.agent_type or task.agent_type, task.session_kind)
-        require_task_dependencies(self.tasks, task)
-
         base_update: dict[str, Any] = {
             "status": WorkspaceTaskStatus.QUEUED,
             "queued_at": task.queued_at or self._runtime_now(),
@@ -138,6 +110,21 @@ class _TaskStartMixin(_WorkspaceManagerBase):
 
         task = task.model_copy(update=base_update)
         decision = await self._choose_dispatch_target(workspace, task, payload)
+        # Choosing a target may provision an agent; a todo edit may have
+        # changed the stored contract meanwhile. Never overwrite it.
+        stored = self.tasks[task_id]
+        if stored.status == WorkspaceTaskStatus.DONE:
+            raise RuntimeError("Done tasks cannot be started")
+        if stored.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
+            return stored
+        validate_workspace_session_surface(
+            payload.agent_type or stored.agent_type, stored.session_kind
+        )
+        require_task_dependencies(self.tasks, stored)
+        provider_changed = not payload.agent_type and stored.agent_type != task.agent_type
+        if stored.session_kind != task.session_kind or provider_changed:
+            raise ValueError("The Task changed while selecting its agent; start it again")
+        task = stored.model_copy(update=base_update)
         if decision is None:
             task = task.model_copy(
                 update={
@@ -257,7 +244,7 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                 if (
                     target
                     and target.session_kind == task.session_kind
-                    and self._can_assign_or_queue_to(target)
+                    and self._can_dispatch_to(target)
                 ):
                     logger.info(
                         "Dispatch target selected from related task: task_id=%s related_task_id=%s "
@@ -287,7 +274,7 @@ class _TaskStartMixin(_WorkspaceManagerBase):
             if (
                 existing
                 and existing.session_kind == task.session_kind
-                and self._can_assign_or_queue_to(existing)
+                and self._can_dispatch_to(existing)
             ):
                 return (
                     existing,
@@ -295,7 +282,11 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                     "Continuing previous task assignment",
                 )
 
-        free_agents = [agent for agent in agents if self._can_dispatch_to(agent)]
+        free_agents = [
+            agent
+            for agent in agents
+            if agent.agent_type == task.agent_type and self._can_dispatch_to(agent)
+        ]
         if len(free_agents) == 1:
             target = free_agents[0]
             should_clear = self._has_prior_task_history(target.id)
@@ -313,28 +304,58 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                 "Selected least queued available workspace agent",
             )
 
-        queueable_agents = [
+        # One agent carries at most one open Task: never queue behind an agent
+        # that another Task holds. Parallel Tasks get parallel agents.
+        target = await self._provision_dedicated_agent(workspace, task)
+        return target, bool(requested_clear), DEDICATED_AGENT_DISPATCH_REASON
+
+    async def _provision_dedicated_agent(
+        self,
+        workspace: Workspace,
+        task: WorkspaceTask,
+    ) -> ManagedSession:
+        """Create one agent for ``task``, launched like its existing siblings."""
+
+        template = self._agent_launch_template(workspace.id, task)
+        is_chat = task.session_kind == SessionKind.CHAT
+        logger.info(
+            "Provisioning dedicated workspace agent workspace_id=%s task_id=%s "
+            "agent_type=%s session_kind=%s template_session_id=%s",
+            workspace.id,
+            task.id,
+            task.agent_type,
+            task.session_kind,
+            template.id if template else None,
+        )
+        return await self.ensure_workspace_agent(
+            workspace.id,
+            EnsureWorkspaceAgentRequest(
+                agent_type=task.agent_type,
+                session_kind=task.session_kind,
+                role=WorkspaceSessionRole.ORCHESTRATOR,
+                reuse_existing=False,
+                env=dict(template.env) if template and is_chat else {},
+                env_preset=template.env_preset if template else None,
+                target=None if template is None or is_chat else template.target,
+                remote_profile_id=None if template is None else template.remote_profile_id,
+                remote_cwd=None if template is None else template.remote_cwd,
+                remote_reconnect=None if template is None or is_chat else template.remote_reconnect,
+            ),
+        )
+
+    def _agent_launch_template(
+        self,
+        workspace_id: str,
+        task: WorkspaceTask,
+    ) -> Optional[ManagedSession]:
+        """Most recent agent of the Task's provider and surface, if any."""
+
+        siblings = [
             agent
-            for agent in agents
-            if agent.status != ManagedSessionStatus.STOPPED
-            and (
-                agent.runtime_status == AgentRuntimeStatus.WORKING
-                or self._is_holding_unresolved_review_task(agent)
-            )
+            for agent in self._workspace_agents(workspace_id, include_stopped=True)
+            if agent.agent_type == task.agent_type and agent.session_kind == task.session_kind
         ]
-        if queueable_agents:
-            target = self._least_queued_agent(queueable_agents)
-            should_clear = self._has_prior_task_history(target.id)
-            return (
-                target,
-                requested_clear if requested_clear is not None else should_clear,
-                "Queued behind existing workspace agent",
-            )
-
-        if agents:
-            raise RuntimeError("No idle or working workspace agent is available")
-
-        return None
+        return max(siblings, key=lambda agent: agent.created_at) if siblings else None
 
     def _can_assign_or_queue_to(self, session: ManagedSession) -> bool:
         if (

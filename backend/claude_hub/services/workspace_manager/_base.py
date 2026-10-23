@@ -58,6 +58,7 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     _feedback_started_at: datetime
     _feedback_summary_locks: dict[str, asyncio.Lock]
     _hubtask_orphan_locks: dict[str, asyncio.Lock]
+    _dedicated_agent_attempts: dict[str, datetime]
     _monitor_task: asyncio.Task[None] | None
     _pump_locks: dict[str, asyncio.Lock]
     _report_intake_committed: set[str]
@@ -535,6 +536,11 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     def _effective_agent_target(
         workspace: Workspace, payload: EnsureWorkspaceAgentRequest
     ) -> ExecutionTarget: ...
+
+    @abstractmethod
+    async def _provision_dedicated_agent(
+        self, workspace: Workspace, task: WorkspaceTask
+    ) -> ManagedSession: ...
 
     @abstractmethod
     async def ensure_workspace_agent(

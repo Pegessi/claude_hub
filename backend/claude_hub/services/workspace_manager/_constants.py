@@ -147,6 +147,10 @@ REVIEW_REAPER_DISPATCH_GRACE_SECONDS = 60
 HUBTASK_ORPHAN_GRACE_SECONDS = 60
 HUBTASK_ORPHAN_MAX_ATTEMPTS = 3
 PROMPT_STUCK_RISK_LEVEL = "prompt_dispatch_stalled"
+# A Task gets its own agent instead of queueing behind one another Task holds.
+DEDICATED_AGENT_DISPATCH_REASON = "Dedicated workspace agent for this task"
+# Minimum gap between dedicated-agent provisioning attempts for one queued Task.
+DEDICATED_AGENT_RETRY_SECONDS = 60
 WORKSPACE_MONITOR_INTERVAL_SECONDS = 5
 # Agent-facing examples call the Hub over localhost (or a loopback SSH
 # forward). Keep external traffic on the configured proxy while forcing these
@@ -375,6 +379,8 @@ __all__ = [
     "PROMPT_DISPATCH_RETRY_GRACE_SECONDS",
     "PROMPT_DISPATCH_STALL_GRACE_SECONDS",
     "PROMPT_STUCK_RISK_LEVEL",
+    "DEDICATED_AGENT_DISPATCH_REASON",
+    "DEDICATED_AGENT_RETRY_SECONDS",
     "Path",
     "REMOTE_FORWARD_PORT_BASE",
     "REMOTE_FORWARD_PORT_OFFSET",
