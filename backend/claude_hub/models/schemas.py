@@ -49,6 +49,7 @@ from claude_hub.models.schema_domains.lifecycle import (
     ATTENTION_PHASES,
     TERMINAL_PHASES,
     TaskLifecycle,
+    TaskLifecycleMark,
     TaskOwner,
     TaskOwnerKind,
     TaskOwnerState,

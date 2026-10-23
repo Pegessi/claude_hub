@@ -107,6 +107,14 @@ class _WorkspacesMixin(
                         logger.exception("Live pump failed for session %s", session_id)
                 for workspace_id in list(self.workspaces):
                     await self.dispatch_workspace(workspace_id, refresh_sessions=False)
+                    try:
+                        self._observe_task_lifecycles(workspace_id)
+                        await self._deliver_task_notices(workspace_id)
+                    except Exception:
+                        logger.exception(
+                            "Task lifecycle observation failed workspace_id=%s",
+                            workspace_id,
+                        )
                 await self._tick_resident_agents()
                 await self._tick_scheduled_tasks()
                 self._kick_feedback_automation()

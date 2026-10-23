@@ -7,6 +7,26 @@
 
 ## Released
 
+### feat(task): announce Task lifecycle changes deterministically
+
+- The Hub records each Task lifecycle change once. It emits a `lifecycle`
+  mailbox event for every change, including an agent disappearing without a
+  report.
+- Feishu notices go out without waiting for Dot's model to decide, and are
+  sent to the chat bound to the source Chat or to Dot. They cover:
+  - questions;
+  - acceptance requests;
+  - Tasks without an owner;
+  - failures;
+  - new plans, so long Tasks can be redirected early.
+
+  Delivery is retried with backoff, and dedupe survives restarts.
+- Dot:
+  - briefs ask for a plan first and milestone reports;
+  - Dot can steer running Tasks with `task followup`;
+  - the stall alarm fires after 1 h and says what the Task is waiting on.
+- Board cards show why a Task is waiting, highlighting Tasks that need you.
+
 ### fix(task): give parallel Tasks their own agents
 
 - A Task started while every agent of its provider holds another open Task

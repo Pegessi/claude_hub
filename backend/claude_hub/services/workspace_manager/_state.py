@@ -14,6 +14,7 @@ from ..legacy_state_migration import (
     migrate_raw_workspace_state,
     state_has_legacy_orchestration_keys,
 )
+from ..task_lifecycle import TaskNotifier
 from ..task_mailbox import TaskMailbox
 from ._base import _WorkspaceManagerBase
 from ._constants import (
@@ -68,6 +69,8 @@ class _StateMixin(_WorkspaceManagerBase):
         self._dedicated_agent_attempts: dict[str, datetime] = {}
         # One background job per workspace provisions agents for stranded Tasks.
         self._stranded_provisioning_jobs: dict[str, asyncio.Task[None]] = {}
+        # Injected by the API layer: delivers Task notices (e.g. to Feishu).
+        self._task_notifier: TaskNotifier | None = None
         self._scheduled_legacy_run_ids: set[str] = set()
         self._scheduled_chat_recovery_pending = False
         self._chat_delivery_getter: Callable[[], ChatMessageInbox] | None = None

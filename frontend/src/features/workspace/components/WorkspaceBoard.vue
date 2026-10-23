@@ -124,6 +124,16 @@
                 {{ task.prompt }}
               </p>
               <div
+                v-if="lifecycleNote(task.id)"
+                :class="[
+                  'lifecycle-note',
+                  { 'lifecycle-note--attention': lifecycleFor(task.id)?.attention },
+                ]"
+                :title="`Lifecycle: ${lifecycleFor(task.id)?.phase} (${lifecycleFor(task.id)?.reason})`"
+              >
+                {{ lifecycleNote(task.id) }}
+              </div>
+              <div
                 v-if="canUseManagedTaskActions(task) && task.dispatch_pending"
                 class="latest-report"
               >
@@ -322,6 +332,7 @@
 
 <script setup lang="ts">
 import LoadingButton from '@/components/LoadingButton.vue'
+import type { TaskLifecycle } from '@/types/workspaceBoard'
 import {
   progressStateLabel,
   taskSourceLabel,
@@ -354,7 +365,34 @@ const {
   boardLoadMoreLoading,
   handleLoadOlderTasks,
   boardLoadMoreError,
+  board,
 } = useWorkspaceRuntimeContext()
+
+// Phases whose meaning the column and status badge already convey.
+const QUIET_LIFECYCLE_REASONS = new Set([
+  'agent_working',
+  'initiator_working',
+  'ai_review_in_progress',
+  'accepted',
+  'completed',
+  'failed',
+  'not_started',
+])
+
+function lifecycleFor(taskId: string): TaskLifecycle | undefined {
+  return board.value?.task_lifecycles?.[taskId]
+}
+
+function lifecycleNote(taskId: string): string {
+  const lifecycle = lifecycleFor(taskId)
+  if (!lifecycle || QUIET_LIFECYCLE_REASONS.has(lifecycle.reason)) return ''
+  const text = lifecycle.reason_text || lifecycle.reason
+  if (lifecycle.blocked_by_task_id) {
+    const blocker = tasks.value.find(item => item.id === lifecycle.blocked_by_task_id)
+    return `${text} “${blocker?.title ?? lifecycle.blocked_by_task_id}”`
+  }
+  return lifecycle.attention ? `Needs you · ${text}` : text
+}
 const {
   selectTask,
   startOptionsFor,
@@ -400,6 +438,21 @@ const {
   color: var(--ch-color-text-muted);
   font-size: var(--ch-font-size-sm);
   font-weight: 500;
+}
+
+.lifecycle-note {
+  margin-top: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--ch-color-surface-soft, rgba(127, 127, 127, 0.08));
+  color: var(--ch-color-text-muted);
+  font-size: var(--ch-font-size-sm);
+}
+
+.lifecycle-note--attention {
+  background: var(--ch-color-warning-bg, #fef3c7);
+  color: var(--ch-color-warning-strong, #b45309);
+  font-weight: 600;
 }
 
 .advanced-start select {

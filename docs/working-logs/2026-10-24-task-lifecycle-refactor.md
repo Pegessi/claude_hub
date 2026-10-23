@@ -1,6 +1,6 @@
 # Task Lifecycle Refactor: one phase, one owner, one writer
 
-Status: Layers 1 and 3a implemented on `codex/task-lifecycle`; the remaining layers are planned.
+Status: Layers 1, 2 and 3a implemented on `codex/task-lifecycle`; the remaining layers are planned.
 Continues [the 2026-05-23 state machine assessment](2026-05-23-state-machine-assessment.md),
 which extracted pure policy helpers (its step 2) but never introduced the
 reducer, explicit sub-phases or a single transition owner (its steps 3–6).
@@ -152,3 +152,35 @@ checkpoints. Both consume Layer 2/3 events.
   CLI's 30 s request timeout; Layer 2/`agent run` work should move this to
   the background job as well. `WorkspaceAgentInitializationError` from start
   maps to 502, like direct agent creation.
+
+## Layer 2 notes
+
+- `monitoring/lifecycle.py` runs after each dispatch pass. It compares the
+  derived lifecycle with the persisted `WorkspaceTask.lifecycle_mark` and
+  records each change once. The change is emitted once as a `lifecycle` Task
+  mailbox event, so `task wait` and Dot wake on runtime loss too, not only on
+  reports.
+- Notices are deterministic and do not depend on an LLM choosing to notify:
+  - attention phases (`needs_user`, `awaiting_acceptance`, `orphaned`,
+    `failed`) are announced after a 30 s settle window;
+  - a new Goal Packet is announced as a plan checkpoint.
+- Delivery goes through an injected notifier (`api/task_notifications.py`).
+  It routes to the Feishu chat bound to the source Chat, or to Dot when Dot
+  tracks the Task.
+- Notification state lives in the mark itself (`notified_at`, attempts,
+  backoff up to 1 h, `plan_digest`), so it survives restarts. Conditions
+  already older than 24 h at first observation (upgrades) are recorded but
+  not pushed.
+- Dot:
+  - The wake prompt no longer repeats Hub notices.
+  - The brief asks for a plan first, milestone reports, and stopping to ask
+    on drift.
+  - The tool guide adds `task followup` for steering and
+    `task list --attention`.
+  - The stall alarm defaults to 1 h and names the reason, including the Task
+    it waits behind.
+- Product text (board, CLI) uses English `reason_text`. Feishu notices to the
+  user use `NOTICE_REASON_TEXT`.
+- The board card shows a lifecycle note. Attention notes are highlighted,
+  and queued Tasks name their blocker. Covered by the mocked browser
+  scenario `browser_workspace_detail.py` at 390, 720 and 1280 px.

@@ -19,6 +19,7 @@ from claude_hub.models.schema_domains.execution import (
     TaskSourceReference,
     validate_workspace_session_surface,
 )
+from claude_hub.models.schema_domains.lifecycle import TaskLifecycleMark
 from claude_hub.models.schema_domains.runtime import (
     AgentType,
     ReviewProfile,
@@ -152,6 +153,8 @@ class WorkspaceTask(BaseModel):
     execution_released: bool = False
     latest_progress: Optional[TaskProgressSnapshot] = None
     runtime_observation: Optional[TaskRuntimeObservation] = None
+    # Last observed lifecycle phase and its notification state (Hub-maintained).
+    lifecycle_mark: Optional[TaskLifecycleMark] = None
     # Explicitly included by the state codec, never by public model serialization.
     reporter_key_hash: Optional[str] = Field(default=None, exclude=True, repr=False)
     execution_call_fingerprints: Dict[str, str] = Field(

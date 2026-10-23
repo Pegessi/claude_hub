@@ -30,6 +30,25 @@ async def main(browser_run: BrowserRun) -> None:
     output.mkdir(parents=True, exist_ok=True)
     origin = (base.scheme, base.hostname, base.port)
     task = task_fixture("detail-task", "ws-1", "Workspace detail actions")
+    held = {
+        **task_fixture("held-task", "ws-1", "Held for a reviewer question"),
+        "status": "review",
+    }
+
+    def lifecycle(task_id: str, phase: str, reason: str, text: str, attention: bool) -> dict:
+        return {
+            "task_id": task_id,
+            "phase": phase,
+            "reason": reason,
+            "reason_text": text,
+            "owner": {"kind": "session", "id": "agent-1", "state": "idle"},
+            "attention": attention,
+            "blocked_by_task_id": None,
+            "holds_session": attention,
+            "since": "2026-10-24T09:00:00",
+            "legacy_status": "review" if attention else "todo",
+        }
+
     starts: list[dict] = []
     page_errors: list[str] = []
     console_errors: list[str] = []
@@ -40,7 +59,7 @@ async def main(browser_run: BrowserRun) -> None:
     def board() -> dict:
         return {
             "workspace": WORKSPACES[0],
-            "tasks": [task],
+            "tasks": [task, held],
             "sessions": [],
             "reports": [],
             "markdown_documents": [],
@@ -48,7 +67,19 @@ async def main(browser_run: BrowserRun) -> None:
             "tasks_pagination": {
                 "next_cursor": None,
                 "has_more": False,
-                "status_counts": {"todo": 1},
+                "status_counts": {"todo": 1, "review": 1},
+            },
+            "task_lifecycles": {
+                "detail-task": lifecycle(
+                    "detail-task", "draft", "not_started", "Not started", False
+                ),
+                "held-task": lifecycle(
+                    "held-task",
+                    "needs_user",
+                    "reviewer_needs_input",
+                    "AI reviewer has a question for you",
+                    True,
+                ),
             },
         }
 
@@ -129,6 +160,27 @@ async def main(browser_run: BrowserRun) -> None:
             task["status"] = "todo"
             await page.set_viewport_size({"width": width, "height": 844})
             await page.goto(url, wait_until="networkidle")
+            held_card = page.locator(".task-card--review").filter(has_text=held["title"])
+            note = held_card.locator(".lifecycle-note--attention")
+            await expect(note).to_have_text("Needs you · AI reviewer has a question for you")
+            note_box, card_box = (
+                await note.bounding_box(),
+                await held_card.bounding_box(),
+            )
+            assert note_box and card_box and note_box["width"] > 0
+            assert note_box["x"] + note_box["width"] <= card_box["x"] + card_box["width"] + 1
+            note_style = await note.evaluate(
+                "element => { const style = getComputedStyle(element);"
+                " return { background: style.backgroundColor, color: style.color,"
+                " weight: style.fontWeight } }"
+            )
+            assert note_style["background"] not in (
+                "rgba(0, 0, 0, 0)",
+                "transparent",
+            ), note_style
+            detail_card = page.locator(".task-card--todo").filter(has_text=task["title"])
+            await expect(detail_card.locator(".lifecycle-note")).to_have_count(0)
+            await page.screenshot(path=str(output / f"lifecycle-{width}.png"), full_page=True)
             await page.locator(".task-card h3").filter(has_text=task["title"]).click()
             panel = page.locator(".task-detail-panel")
             await expect(panel).to_be_visible()
@@ -154,7 +206,13 @@ async def main(browser_run: BrowserRun) -> None:
                 await expect(toggle).to_have_attribute("aria-expanded", "false")
                 await expect(drawer).to_be_hidden()
             observations.append(
-                {"width": width, "drawer_display": "block", "start_submitted": True}
+                {
+                    "width": width,
+                    "drawer_display": "block",
+                    "start_submitted": True,
+                    "lifecycle_note": "Needs you · AI reviewer has a question for you",
+                    "lifecycle_note_style": note_style,
+                }
             )
             await panel.get_by_role("button", name="Close task detail", exact=True).click()
             await expect(panel).to_be_hidden()

@@ -14,7 +14,9 @@ if TYPE_CHECKING:
     from contextvars import ContextVar
     from typing import Any
 
+    from ...models.schemas import TaskLifecycle
     from ..chat_message_inbox import ChatMessageInbox
+    from ..task_lifecycle import TaskNotifier
     from ..task_mailbox import TaskMailbox
     from ._attachments import _PreparedWorkspaceAttachment
     from ._constants import (
@@ -60,6 +62,7 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     _hubtask_orphan_locks: dict[str, asyncio.Lock]
     _dedicated_agent_attempts: dict[str, datetime]
     _stranded_provisioning_jobs: dict[str, asyncio.Task[None]]
+    _task_notifier: TaskNotifier | None
     _monitor_task: asyncio.Task[None] | None
     _pump_locks: dict[str, asyncio.Lock]
     _report_intake_committed: set[str]
@@ -537,6 +540,15 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     def _effective_agent_target(
         workspace: Workspace, payload: EnsureWorkspaceAgentRequest
     ) -> ExecutionTarget: ...
+
+    @abstractmethod
+    def _observe_task_lifecycles(self, workspace_id: str) -> int: ...
+
+    @abstractmethod
+    async def _deliver_task_notices(self, workspace_id: str) -> int: ...
+
+    @abstractmethod
+    def task_lifecycles(self, tasks: list[WorkspaceTask]) -> dict[str, TaskLifecycle]: ...
 
     @abstractmethod
     async def _provision_dedicated_agent(
