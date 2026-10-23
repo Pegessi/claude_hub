@@ -158,6 +158,8 @@ class ManagerHost(ABC):
         cursor_transcript_schema: Optional[str] = ...,
         session_kind: SessionKind = ...,
         chat_mode: ChatMode = ...,
+        parent_tab_id: Optional[str] = ...,
+        subagent_id: Optional[str] = ...,
     ) -> TerminalTab:
         raise NotImplementedError()
 

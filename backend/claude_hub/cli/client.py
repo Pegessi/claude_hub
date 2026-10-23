@@ -634,3 +634,31 @@ class HubClient:
 
     def get_tab_task_context(self, tab_id: str) -> Any:
         return self._request("GET", f"/api/workspaces/tabs/{tab_id}/task-context")
+
+    # -- Subagents (claude-hub agent run) ------------------------------------
+
+    def create_subagent(self, body: Dict[str, Any]) -> Any:
+        """POST /api/subagents: create a subagent Chat and start its first turn."""
+        return self._request("POST", "/api/subagents", json=body)
+
+    def send_subagent_turn(self, subagent_id: str, body: Dict[str, Any]) -> Any:
+        """POST a follow-up turn to a kept subagent."""
+        return self._request("POST", f"/api/subagents/{subagent_id}/turns", json=body)
+
+    def get_subagent_turn(
+        self, subagent_id: str, turn_id: Optional[str] = None, *, wait: float = 0.0
+    ) -> Any:
+        """Long-poll one turn result; the HTTP timeout covers the server wait."""
+        path = f"/api/subagents/{subagent_id}/turns/{turn_id or 'latest'}"
+        return self._request(
+            "GET", path, params={"wait": wait} if wait else None, timeout=wait + 30.0
+        )
+
+    def list_subagents(self, params: Dict[str, Any]) -> Any:
+        return self._request("GET", "/api/subagents", params=params)
+
+    def cancel_subagent(self, subagent_id: str) -> Any:
+        return self._request("POST", f"/api/subagents/{subagent_id}/cancel")
+
+    def close_subagent(self, subagent_id: str) -> Any:
+        return self._request("POST", f"/api/subagents/{subagent_id}/close")

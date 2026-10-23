@@ -11,6 +11,7 @@ from typing import AsyncIterator, List, Optional, Tuple
 
 from ....models import TerminalTab
 from ..records import TabCleanupPendingError, _PendingTabCleanup, _TabStateCommitError
+from ..retirement_listeners import notify_tab_retired
 from .host import ManagerHost
 
 logger = logging.getLogger("claude_hub.services.ttyd_manager")
@@ -96,6 +97,8 @@ class ManagerRetirementMixin(ManagerHost):
                         "tab retired; cleanup commit unconfirmed; retry DELETE"
                     ) from exc
                 self._save_order()
+            # The tab is durably retired even if artifact cleanup stays pending.
+            notify_tab_retired(tab_id)
             await self._finish_tab_cleanup(record)
             return True
 
@@ -242,6 +245,7 @@ class ManagerRetirementMixin(ManagerHost):
                 logger.exception("Failed to stop stream tailer for archived tab %s", tab_id)
             process.is_active = False
             self._save_state()
+            notify_tab_retired(tab_id)
             return process.to_schema()
 
     async def unarchive_tab(self, tab_id: str) -> Optional[TerminalTab]:

@@ -764,6 +764,7 @@ async def dispatch_tab_chat_and_wait(
     attachments: Optional[List[AgentStreamAttachment]] = None,
     timeout_seconds: float | None = None,
     admission_guard: Optional[_ChatAdmissionGuard] = None,
+    prefer_final_text: bool = False,
 ) -> str:
     return await dispatch.dispatch_tab_chat_and_wait(
         tab_id,
@@ -775,6 +776,7 @@ async def dispatch_tab_chat_and_wait(
         attachments=attachments,
         timeout_seconds=timeout_seconds,
         admission_guard=admission_guard,
+        prefer_final_text=prefer_final_text,
     )
 
 
