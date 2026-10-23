@@ -16,11 +16,6 @@ if TYPE_CHECKING:
 
 class _RuntimeHostContract(ABC):
     @abstractmethod
-    async def _request_dispatch_decision(
-        self, workspace: Workspace, task: WorkspaceTask
-    ) -> None: ...
-
-    @abstractmethod
     def _can_dispatch_to(self, session: ManagedSession) -> bool: ...
 
     @abstractmethod

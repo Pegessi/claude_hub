@@ -1,6 +1,6 @@
 # Task Lifecycle Refactor: one phase, one owner, one writer
 
-Status: Layers 1–4 implemented on `codex/task-lifecycle`; Layer 5 in progress.
+Status: Layers 1–5 implemented on `codex/task-lifecycle`; remaining debt listed under Layer 5.
 Continues [the 2026-05-23 state machine assessment](2026-05-23-state-machine-assessment.md),
 which extracted pure policy helpers (its step 2) but never introduced the
 reducer, explicit sub-phases or a single transition owner (its steps 3–6).
@@ -250,3 +250,37 @@ checkpoints. Both consume Layer 2/3 events.
     a gone agent (dedicated-agent rescue).
 - Quickly resolved owner loss is not pushed on its own; the person hears
   about the resolved failure once.
+
+## Layer 5 notes (subtraction) and remaining debt
+
+Removed, because the earlier layers made it unreachable or it was already
+broken:
+- The dispatcher-decision request in `start_task`: target selection always
+  returns an agent now. This removed `_request_dispatch_decision`,
+  `_build_dispatch_decision_prompt` and their abstract contracts. The
+  `dispatch-decision` endpoint stays for compatibility with Tasks persisted
+  as `dispatch_pending`.
+- The `claude-hub work` CLI group. Every command called
+  `/api/tabs/{tab}/work`, removed with ChatWork in 782d295, so it could only
+  404.
+- In total, about 240 lines of dead code.
+
+Documented in `docs/TASK_GRAPH.md` ("Task lifecycle") and the
+`ARCHITECTURE.md` ownership table.
+
+Deliberately not done yet. Each needs its own migration and review:
+- **Persisted fields.** The Task record still carries `dispatch_pending`,
+  `execution_released`, `review_delivery_*`, `review_skip_*` and the review
+  timestamps. Dropping them needs a load-time migration and a downgrade
+  story, because `extra=forbid` rejects unknown fields. The lifecycle
+  projection already gives a single answer, so the remaining value is
+  smaller records, not behavior.
+- **Frontend review badges.** `useWorkspaceTaskPresentation` still derives
+  review badges from timestamps. They could read `task_lifecycles` instead,
+  but that needs a browser pass over every review sub-state.
+- **`subagent` task mode.** Once `codex/agent-run` (`claude-hub agent run`)
+  is merged, the Task-board `subagent` mode can be deprecated, which shrinks
+  the execution_control × task_mode matrix.
+- **`_next_reassignable_queued_task`.** Under the 1:1 rule, only pinned or
+  legacy queued work reaches it. Remove it after one release.
+- **Mailbox retention.** Task mailbox events have no retention policy.

@@ -70,6 +70,40 @@ Lifecycle columns (`todo` / `working` / …) are human-facing board state.
 Agents driving automation should use TaskMailbox `wait`/`ack`, not poll board
 status as a control plane.
 
+### Task lifecycle (who must act)
+
+Every Task also has one derived **lifecycle**:
+- `phase`: `draft`, `queued`, `running`, `reviewing`, `needs_user`,
+  `awaiting_acceptance`, `orphaned`, `done` or `failed`;
+- a reason code;
+- the owner, with its liveness;
+- an attention flag;
+- for queued work, the Task blocking it.
+
+The lifecycle is exposed as `WorkspaceBoard.task_lifecycles` and in
+`task list/get/status`; `task list --attention` lists only what needs a
+person. A phase change emits one `lifecycle` mailbox event, which also wakes
+`wait`.
+
+Rules:
+- **One open Task per agent.** An agent keeps its Task until the Task is
+  done. A Task with no free agent of its provider gets a dedicated agent
+  instead of queueing behind one held by another Task. Only an explicit user
+  pin waits.
+- **One status writer.** Status changes go through
+  `services/task_transitions.apply_task_update` with a named cause. The
+  transition table is enforced in tests.
+- **Owner loss is resolved.** A Task whose agent stays gone fails after
+  5 min, and `continue` reassigns it. An initiator Task whose Chat is
+  archived or deleted is announced, then fails after 7 days, and `handoff`
+  revives it.
+- **Notices are deterministic.** Questions, acceptance requests, owner loss,
+  failures and new plans reach the Feishu chat bound to the source Chat or
+  to Dot, without waiting for a model to decide.
+
+Design and history:
+[2026-10-24 task lifecycle refactor](working-logs/2026-10-24-task-lifecycle-refactor.md).
+
 Report intake remains fail-closed: workers match `task.session_id`, reviewers
 match `task.review_session_id`; unassigned Tasks (`session_id is None`) cannot
 be claimed by the first report — assign via dispatch/start or set `session_id`

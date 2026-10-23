@@ -126,33 +126,6 @@ class _TaskStartMixin(_WorkspaceManagerBase):
         if stored.session_kind != task.session_kind or provider_changed:
             raise ValueError("The Task changed while selecting its agent; start it again")
         task = apply_task_update(stored, base_update, cause="start")
-        if decision is None:
-            task = task.model_copy(
-                update={
-                    "session_id": None,
-                    # Preserve the stored clear-context flag when the start call
-                    # does not override it, so the dispatcher decision later
-                    # still applies the user's "Clear context" choice.
-                    "clear_context": (
-                        payload.clear_context
-                        if payload.clear_context is not None
-                        else task.clear_context
-                    ),
-                    "dispatch_reason": "Waiting for dispatcher agent decision",
-                    "dispatch_pending": True,
-                    "updated_at": self._runtime_now(),
-                }
-            )
-            self.tasks[task.id] = task
-            self._save_state()
-            logger.info(
-                "Workspace task id=%s is waiting for dispatcher decision related_task_id=%s",
-                task.id,
-                task.related_task_id,
-            )
-            await self._request_dispatch_decision(workspace, task)
-            return self.tasks[task.id]
-
         target, clear_context, reason = decision
         autonomous_run = task.autonomous_run
         if task.task_mode == WorkspaceTaskMode.AUTONOMOUS and autonomous_run is not None:
@@ -197,7 +170,7 @@ class _TaskStartMixin(_WorkspaceManagerBase):
         workspace: Workspace,
         task: WorkspaceTask,
         payload: StartTaskRequest,
-    ) -> Optional[tuple[ManagedSession, bool, str]]:
+    ) -> tuple[ManagedSession, bool, str]:
         agents = [
             agent
             for agent in self._workspace_agents(workspace.id, include_stopped=True)
