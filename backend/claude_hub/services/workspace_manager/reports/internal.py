@@ -1,5 +1,7 @@
 """Report processing split from the compatibility mixin."""
 
+from claude_hub.services.task_transitions import apply_task_update
+
 from .._constants import *  # noqa: F401,F403
 from .review_requests import _ReportReviewRequestMixin
 
@@ -43,15 +45,17 @@ class _InternalReportHandlingMixin(_ReportReviewRequestMixin):
         }:
             return
         now = self._runtime_now()
-        updated = self.tasks[task.id].model_copy(
-            update={
+        updated = apply_task_update(
+            self.tasks[task.id],
+            {
                 "status": WorkspaceTaskStatus.DONE,
                 "review_skipped_at": now,
                 "review_skip_reason": "System-internal task completed without human review.",
                 "completed_at": now,
                 "human_accepted_at": None,
                 "updated_at": now,
-            }
+            },
+            cause="internal_report",
         )
         self.tasks[task.id] = updated
         summary_run = None

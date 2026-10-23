@@ -1,5 +1,7 @@
 """Reviewer selection and review-report handling."""
 
+from claude_hub.services.task_transitions import apply_task_update
+
 from ._base import _WorkspaceManagerBase
 from ._constants import *  # noqa: F401,F403
 
@@ -365,7 +367,7 @@ class _ReviewMixin(_WorkspaceManagerBase):
                     task_update["human_acceptance_requested_at"] = (
                         now if autonomous_next_phase == AutonomousRunPhase.PASSED else None
                     )
-            self.tasks[task.id] = task.model_copy(update=task_update)
+            self.tasks[task.id] = apply_task_update(task, task_update, cause="review_verdict")
             self._save_state()
             logger.info(
                 "Reviewer terminal decision applied in _handle_review_report "
@@ -492,8 +494,8 @@ class _ReviewMixin(_WorkspaceManagerBase):
                 preserve_existing_human_acceptance_requested_at=False,
                 human_acceptance_for_passed=False,
             )
-            self.tasks[task.id] = task.model_copy(
-                update={**task_update, "goal_packet": goal_packet}
+            self.tasks[task.id] = apply_task_update(
+                task, {**task_update, "goal_packet": goal_packet}, cause="review_verdict"
             )
             self._save_state()
             logger.info(

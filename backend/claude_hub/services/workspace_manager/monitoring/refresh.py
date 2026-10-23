@@ -1,5 +1,6 @@
 """Runtime status refresh and prompt-dispatch stall detection."""
 
+from claude_hub.services.task_transitions import apply_task_update
 from claude_hub.services.workspace_manager._base import _WorkspaceManagerBase
 from claude_hub.services.workspace_manager._constants import *  # noqa: F401,F403
 
@@ -198,14 +199,16 @@ class _StatusRefreshMixin(_WorkspaceManagerBase):
                         failure_reason = f"timeout after {task.timeout_seconds}s"
 
             if failure_reason is not None:
-                self.tasks[task.id] = task.model_copy(
-                    update={
+                self.tasks[task.id] = apply_task_update(
+                    task,
+                    {
                         "status": WorkspaceTaskStatus.FAILED,
                         "failure_reason": failure_reason,
                         "failed_at": now,
                         "human_acceptance_requested_at": now,
                         "updated_at": now,
-                    }
+                    },
+                    cause="runtime_failure",
                 )
                 changed = True
                 logger.warning(
@@ -468,12 +471,14 @@ class _StatusRefreshMixin(_WorkspaceManagerBase):
             created_at=sampled_at,
         )
         self.reports[report.id] = report
-        self.tasks[task.id] = task.model_copy(
-            update={
+        self.tasks[task.id] = apply_task_update(
+            task,
+            {
                 "status": updated_task_status,
                 "reviewed_at": task.reviewed_at or sampled_at if is_reviewer else task.reviewed_at,
                 "updated_at": sampled_at,
-            }
+            },
+            cause="prompt_stalled",
         )
         self.sessions[session.id] = session.model_copy(
             update={

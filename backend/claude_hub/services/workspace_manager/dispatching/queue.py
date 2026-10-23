@@ -1,6 +1,7 @@
 """Workspace queue draining and stranded ownership recovery."""
 
 from claude_hub.services.task_dependencies import task_dependency_blockers
+from claude_hub.services.task_transitions import apply_task_update
 from claude_hub.services.workspace_manager._base import _WorkspaceManagerBase
 from claude_hub.services.workspace_manager._constants import *  # noqa: F401,F403
 
@@ -399,12 +400,14 @@ class _DispatchQueueMixin(_WorkspaceManagerBase):
                 continue
             task = current
             now = self._runtime_now()
-            self.tasks[task.id] = task.model_copy(
-                update={
+            self.tasks[task.id] = apply_task_update(
+                task,
+                {
                     "status": WorkspaceTaskStatus.WORKING,
                     "session_id": task.session_id or session.id,
                     "started_at": task.started_at or now,
                     "updated_at": now,
-                }
+                },
+                cause="dispatch",
             )
             self._save_state()

@@ -1,5 +1,7 @@
 """Task domain implementation split from the compatibility mixin."""
 
+from claude_hub.services.task_transitions import apply_task_update
+
 from .._constants import *  # noqa: F401,F403
 from .core import _TaskCoreMixin
 
@@ -39,8 +41,9 @@ class _TaskFeedbackSummaryMixin(_TaskCoreMixin):
         current = self.tasks.get(task.id, task)
         self._release_task_session(current)
         now = self._runtime_now()
-        updated = current.model_copy(
-            update={
+        updated = apply_task_update(
+            current,
+            {
                 "status": WorkspaceTaskStatus.TODO,
                 "session_id": None,
                 "clear_context": None,
@@ -58,7 +61,8 @@ class _TaskFeedbackSummaryMixin(_TaskCoreMixin):
                 "queued_at": None,
                 "started_at": None,
                 "updated_at": now,
-            }
+            },
+            cause="feedback_reaper",
         )
         self.tasks[task.id] = updated
         self._record_system_task_audit(
@@ -118,14 +122,16 @@ class _TaskFeedbackSummaryMixin(_TaskCoreMixin):
             }
         )
         store.write_summary_run(task.workspace_id, completed_run)
-        completed_task = task.model_copy(
-            update={
+        completed_task = apply_task_update(
+            task,
+            {
                 "status": WorkspaceTaskStatus.DONE,
                 "review_skipped_at": now,
                 "review_skip_reason": "No feedback records remained when preparation retried.",
                 "completed_at": now,
                 "updated_at": now,
-            }
+            },
+            cause="feedback_reaper",
         )
         self.tasks[task.id] = completed_task
         self._record_system_task_audit(

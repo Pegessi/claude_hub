@@ -1,5 +1,7 @@
 """Task domain implementation split from the compatibility mixin."""
 
+from claude_hub.services.task_transitions import apply_task_update
+
 from ....models.task_mailbox import TaskActorRole, TaskEvent, TaskEventType
 from ...request_fingerprint import request_fingerprint
 from ...task_graph import task_inbox_consumer_key
@@ -146,8 +148,9 @@ class _TaskAbortMixin(_TaskFollowupMixin):
 
     def _stage_aborted_task(self, task: WorkspaceTask, reason: str, now: datetime) -> WorkspaceTask:
         is_feedback_summary = task.system_internal and task.internal_kind == "feedback_reaper"
-        updated = task.model_copy(
-            update={
+        updated = apply_task_update(
+            task,
+            {
                 "status": (
                     WorkspaceTaskStatus.DONE if is_feedback_summary else WorkspaceTaskStatus.TODO
                 ),
@@ -173,7 +176,8 @@ class _TaskAbortMixin(_TaskFollowupMixin):
                 "reviewed_at": None,
                 "completed_at": now if is_feedback_summary else None,
                 "updated_at": now,
-            }
+            },
+            cause="abort",
         )
         self.tasks[task.id] = updated
         return updated

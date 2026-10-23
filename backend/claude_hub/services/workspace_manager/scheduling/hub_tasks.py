@@ -1,5 +1,7 @@
 """Scheduled-task implementation split from the compatibility mixin."""
 
+from claude_hub.services.task_transitions import apply_task_update
+
 from ...task_dependencies import require_task_dependencies
 from .._constants import *  # noqa: F401,F403
 from ._contract import _SchedulingHost
@@ -167,8 +169,9 @@ class _ScheduledHubTasksMixin(_SchedulingHost):
         # marker, so the fail-closed uncertain contract on the dead session is
         # never violated — we never auto-resend to that session.
         reattempt = live.dispatch_attempt + 1
-        rebound = live.model_copy(
-            update={
+        rebound = apply_task_update(
+            live,
+            {
                 "session_id": new_session.id,
                 "status": WorkspaceTaskStatus.QUEUED,
                 "queued_at": now,
@@ -176,7 +179,8 @@ class _ScheduledHubTasksMixin(_SchedulingHost):
                 "dispatch_reason": "scheduled worker died; redispatch to fresh worker",
                 "dispatch_pending": False,
                 "updated_at": now,
-            }
+            },
+            cause="scheduled",
         )
         self.tasks[live.id] = rebound
         self._save_state()
@@ -202,13 +206,15 @@ class _ScheduledHubTasksMixin(_SchedulingHost):
                 and current.status == WorkspaceTaskStatus.QUEUED
                 and current.session_id == new_session.id
             ):
-                self.tasks[current.id] = current.model_copy(
-                    update={
+                self.tasks[current.id] = apply_task_update(
+                    current,
+                    {
                         "status": WorkspaceTaskStatus.FAILED,
                         "failure_reason": "scheduled task redispatch to a fresh worker failed",
                         "failed_at": self._runtime_now(),
                         "updated_at": self._runtime_now(),
-                    }
+                    },
+                    cause="scheduled",
                 )
                 self._save_state()
             await self._best_effort_delete_session(new_session.id)
@@ -234,14 +240,16 @@ class _ScheduledHubTasksMixin(_SchedulingHost):
         ):
             return
         task = current
-        failed = task.model_copy(
-            update={
+        failed = apply_task_update(
+            task,
+            {
                 "status": WorkspaceTaskStatus.FAILED,
                 "failure_reason": reason,
                 "failed_at": now,
                 "human_acceptance_requested_at": now,
                 "updated_at": now,
-            }
+            },
+            cause="runtime_failure",
         )
         self.tasks[task.id] = failed
         self._record_system_task_audit(

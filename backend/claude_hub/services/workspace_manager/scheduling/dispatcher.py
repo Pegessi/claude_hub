@@ -1,5 +1,7 @@
 """Scheduled-task implementation split from the compatibility mixin."""
 
+from claude_hub.services.task_transitions import apply_task_update
+
 from ...task_dependencies import require_task_dependencies
 from .._constants import *  # noqa: F401,F403
 from ._contract import _SchedulingHost
@@ -263,14 +265,16 @@ class _ScheduleDispatcherMixin(_SchedulingHost):
             if internal_task.status != WorkspaceTaskStatus.TODO:
                 raise RuntimeError("Scheduled task changed while its worker was being created")
             require_task_dependencies(self.tasks, internal_task)
-            internal_task = internal_task.model_copy(
-                update={
+            internal_task = apply_task_update(
+                internal_task,
+                {
                     "status": WorkspaceTaskStatus.QUEUED,
                     "queued_at": now,
                     "dispatch_attempt": internal_task.dispatch_attempt + 1,
                     "dispatch_reason": "scheduled",
                     "updated_at": now,
-                }
+                },
+                cause="scheduled",
             )
             self.tasks[internal_task.id] = internal_task
             await self._dispatch_task_to_session(internal_task, session)
@@ -284,13 +288,15 @@ class _ScheduleDispatcherMixin(_SchedulingHost):
                     and current.status in (WorkspaceTaskStatus.TODO, WorkspaceTaskStatus.QUEUED)
                     and current.session_id in (None, session.id)
                 ):
-                    self.tasks[current.id] = current.model_copy(
-                        update={
+                    self.tasks[current.id] = apply_task_update(
+                        current,
+                        {
                             "status": WorkspaceTaskStatus.FAILED,
                             "failure_reason": str(exc),
                             "failed_at": self._runtime_now(),
                             "updated_at": self._runtime_now(),
-                        }
+                        },
+                        cause="scheduled",
                     )
                     self._save_state()
             finally:

@@ -1,6 +1,7 @@
 """Assignment envelope delivery and public dispatch adapters."""
 
 from claude_hub.services.task_dependencies import require_task_dependencies
+from claude_hub.services.task_transitions import apply_task_update
 from claude_hub.services.workspace_manager._base import _WorkspaceManagerBase
 from claude_hub.services.workspace_manager._constants import *  # noqa: F401,F403
 
@@ -161,13 +162,15 @@ class _DispatchDeliveryMixin(_WorkspaceManagerBase):
         if current is None or current.status != task.status or current.session_id != session.id:
             return
         task = current
-        self.tasks[task.id] = task.model_copy(
-            update={
+        self.tasks[task.id] = apply_task_update(
+            task,
+            {
                 "status": WorkspaceTaskStatus.WORKING,
                 "session_id": session.id,
                 "started_at": now,
                 "updated_at": now,
-            }
+            },
+            cause="dispatch",
         )
         self._save_state()
         logger.info(
