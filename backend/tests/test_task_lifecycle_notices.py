@@ -54,6 +54,16 @@ def _running_task(client: TestClient, repo: Path) -> tuple[dict, dict, dict]:
     return workspace, worker, task
 
 
+def _fail_task(task_id: str) -> None:
+    workspace_manager.tasks[task_id] = workspace_manager.tasks[task_id].model_copy(
+        update={
+            "status": WorkspaceTaskStatus.FAILED,
+            "failed_at": datetime.now(),
+            "failure_reason": "worker reported failure",
+        }
+    )
+
+
 def _age_mark(task_id: str, seconds: int) -> None:
     task = workspace_manager.tasks[task_id]
     assert task.lifecycle_mark is not None
@@ -83,16 +93,16 @@ def test_phase_change_is_recorded_and_emitted_once(isolated_hub: Path) -> None: 
     assert events[-1]["payload"]["from_phase"] == "running"
     assert events[-1]["payload"]["reason"] == "agent_gone"
     assert events[-1]["payload"]["attention"] is True
+    # Agent loss is resolved by the reconciler; only its outcome is pushed.
     orphaned = workspace_manager.tasks[task["id"]].lifecycle_mark
-    assert orphaned is not None and orphaned.notified_at is None
+    assert orphaned is not None and orphaned.notified_at is not None
 
 
 def test_attention_notice_waits_to_settle_then_sends_once(isolated_hub: Path) -> None:  # noqa: F811
     client = TestClient(app)
     workspace, worker, task = _running_task(client, isolated_hub)
-    workspace_manager.sessions[worker["id"]] = workspace_manager.sessions[worker["id"]].model_copy(
-        update={"status": ManagedSessionStatus.STOPPED}
-    )
+    workspace_manager._observe_task_lifecycles(workspace["id"])
+    _fail_task(task["id"])
     workspace_manager._observe_task_lifecycles(workspace["id"])
     sent: list[TaskNotice] = []
 
@@ -110,16 +120,16 @@ def test_attention_notice_waits_to_settle_then_sends_once(isolated_hub: Path) ->
         workspace_manager.configure_task_notifier(None)
     assert len(sent) == 1
     assert sent[0].kind == "attention"
-    assert "負責的 agent 已不在" in sent[0].text
+    assert "執行失敗" in sent[0].text
+    assert "worker reported failure" in sent[0].text
     assert task["id"] in sent[0].text
 
 
 def test_failed_delivery_backs_off_and_unroutable_stops(isolated_hub: Path) -> None:  # noqa: F811
     client = TestClient(app)
     workspace, worker, task = _running_task(client, isolated_hub)
-    workspace_manager.sessions[worker["id"]] = workspace_manager.sessions[worker["id"]].model_copy(
-        update={"status": ManagedSessionStatus.STOPPED}
-    )
+    workspace_manager._observe_task_lifecycles(workspace["id"])
+    _fail_task(task["id"])
     workspace_manager._observe_task_lifecycles(workspace["id"])
     _age_mark(task["id"], 60)
     outcomes = ["failed", "unroutable"]
@@ -323,21 +333,24 @@ def test_flapping_condition_is_not_announced_again_within_cooldown(
         sent.append(notice)
         return "sent"
 
+    def set_worker(status: ManagedSessionStatus) -> None:
+        workspace_manager.sessions[worker["id"]] = workspace_manager.sessions[
+            worker["id"]
+        ].model_copy(update={"status": status})
+
     workspace_manager.configure_task_notifier(notifier)
     try:
         for _ in range(3):
-            _stop_worker(worker["id"])
+            set_worker(ManagedSessionStatus.NEEDS_INPUT)
             workspace_manager._observe_task_lifecycles(workspace["id"])
-            _age_mark(task["id"], 60)
+            _age_mark(task["id"], 200)
             asyncio.run(workspace_manager._deliver_task_notices(workspace["id"]))
-            # The agent comes back, then disappears again.
-            workspace_manager.sessions[worker["id"]] = workspace_manager.sessions[
-                worker["id"]
-            ].model_copy(update={"status": ManagedSessionStatus.WORKING})
+            set_worker(ManagedSessionStatus.WORKING)
             workspace_manager._observe_task_lifecycles(workspace["id"])
     finally:
         workspace_manager.configure_task_notifier(None)
     assert len(sent) == 1
+    assert "agent 停在等待輸入或確認" in sent[0].text
 
 
 def test_recent_failure_seen_first_as_failed_is_announced(isolated_hub: Path) -> None:  # noqa: F811
@@ -379,7 +392,9 @@ def test_self_reported_initiator_states_and_supervised_children_are_not_pushed(
     assert not workspace_manager._task_notice_wanted(
         workspace_manager.tasks[parent["id"]], "initiator_needs_input"
     )
-    assert workspace_manager._task_notice_wanted(
+    assert workspace_manager._task_notice_wanted(workspace_manager.tasks[parent["id"]], "failed")
+    # Workspace agent loss is pushed only once the reconciler resolves it.
+    assert not workspace_manager._task_notice_wanted(
         workspace_manager.tasks[parent["id"]], "agent_gone"
     )
 
@@ -392,7 +407,8 @@ def test_slow_notifier_times_out_without_blocking(
     monkeypatch.setattr(lifecycle_module, "NOTICE_SEND_TIMEOUT_SECONDS", 0.05)
     client = TestClient(app)
     workspace, worker, task = _running_task(client, isolated_hub)
-    _stop_worker(worker["id"])
+    workspace_manager._observe_task_lifecycles(workspace["id"])
+    _fail_task(task["id"])
     workspace_manager._observe_task_lifecycles(workspace["id"])
     _age_mark(task["id"], 60)
 
@@ -415,3 +431,87 @@ def test_working_task_next_step_uses_followup_not_continue() -> None:
     )
     assert "claude-hub task followup ws-1 task-1" in notice.text
     assert "task continue" not in notice.text
+
+
+def _age_mark_by(task_id: str, delta: timedelta) -> None:
+    task = workspace_manager.tasks[task_id]
+    assert task.lifecycle_mark is not None
+    mark = task.lifecycle_mark.model_copy(
+        update={"changed_at": task.lifecycle_mark.changed_at - delta}
+    )
+    workspace_manager.tasks[task_id] = task.model_copy(update={"lifecycle_mark": mark})
+
+
+def test_reconciler_fails_a_task_whose_agent_stays_gone_and_continue_reassigns(
+    isolated_hub: Path,  # noqa: F811
+) -> None:
+    client = TestClient(app)
+    workspace, worker, task = _running_task(client, isolated_hub)
+    _stop_worker(worker["id"])
+    workspace_manager._observe_task_lifecycles(workspace["id"])
+    # Within grace nothing is resolved, and agent loss is not pushed on its own.
+    assert workspace_manager._reconcile_orphaned_tasks(workspace["id"]) == 0
+    lost = workspace_manager.tasks[task["id"]].lifecycle_mark
+    assert lost is not None and lost.notified_at is not None
+
+    _age_mark_by(task["id"], timedelta(minutes=6))
+    assert workspace_manager._reconcile_orphaned_tasks(workspace["id"]) == 1
+    failed = workspace_manager.tasks[task["id"]]
+    assert failed.status == WorkspaceTaskStatus.FAILED
+    assert "task continue" in (failed.failure_reason or "")
+    workspace_manager._observe_task_lifecycles(workspace["id"])
+    mark = workspace_manager.tasks[task["id"]].lifecycle_mark
+    assert mark is not None and mark.phase == TaskPhase.FAILED and mark.notified_at is None
+
+    resumed = client.post(f"/api/workspaces/tasks/{task['id']}/continue", json={})
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["session_id"] not in (None, worker["id"])
+
+
+def test_reconciler_waits_a_week_before_failing_an_initiator_task_without_its_chat(
+    isolated_hub: Path, monkeypatch: MonkeyPatch  # noqa: F811
+) -> None:
+    from claude_hub.services.task_lifecycle import ChatTabFacts
+
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Init", "path": str(isolated_hub), "session_prefix": "in"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks", json={"title": "Chat work", "prompt": "x"}
+    ).json()
+    workspace_manager.tasks[task["id"]] = workspace_manager.tasks[task["id"]].model_copy(
+        update={
+            "execution_control": "initiator",
+            "status": WorkspaceTaskStatus.WORKING,
+            "source": TaskSourceReference(kind="chat", tab_id="gone-chat"),
+        }
+    )
+    monkeypatch.setattr(
+        workspace_manager, "_task_chat_tab_facts", lambda _task: ChatTabFacts(exists=False)
+    )
+    workspace_manager._observe_task_lifecycles(workspace["id"])
+    mark = workspace_manager.tasks[task["id"]].lifecycle_mark
+    assert mark is not None and mark.reason == "initiator_chat_gone"
+    assert mark.notified_at is None  # Chat loss is announced right away
+
+    _age_mark_by(task["id"], timedelta(days=6))
+    assert workspace_manager._reconcile_orphaned_tasks(workspace["id"]) == 0
+    _age_mark_by(task["id"], timedelta(days=2))
+    assert workspace_manager._reconcile_orphaned_tasks(workspace["id"]) == 1
+    assert workspace_manager.tasks[task["id"]].status == WorkspaceTaskStatus.FAILED
+
+
+def test_reconciler_leaves_subagent_tasks_to_their_own_handling(
+    isolated_hub: Path,  # noqa: F811
+) -> None:
+    client = TestClient(app)
+    workspace, worker, task = _running_task(client, isolated_hub)
+    workspace_manager.tasks[task["id"]] = workspace_manager.tasks[task["id"]].model_copy(
+        update={"task_mode": "subagent"}
+    )
+    _stop_worker(worker["id"])
+    workspace_manager._observe_task_lifecycles(workspace["id"])
+    _age_mark_by(task["id"], timedelta(hours=1))
+    assert workspace_manager._reconcile_orphaned_tasks(workspace["id"]) == 0

@@ -9,7 +9,12 @@ notifier never holds up the monitor. Nothing here depends on an LLM deciding
 to notify.
 """
 
-from claude_hub.models.schemas import TERMINAL_PHASES, TaskLifecycleMark, TaskPhase
+from claude_hub.models.schemas import (
+    TERMINAL_PHASES,
+    TaskExecutionControl,
+    TaskLifecycleMark,
+    TaskPhase,
+)
 from claude_hub.models.task_mailbox import TaskActorRole, TaskEvent, TaskEventType
 from claude_hub.services.task_lifecycle import (
     NOTIFY_PHASES,
@@ -19,6 +24,7 @@ from claude_hub.services.task_lifecycle import (
     plan_digest,
     plan_notice,
 )
+from claude_hub.services.task_transitions import apply_task_update
 from claude_hub.services.workspace_manager._base import _WorkspaceManagerBase
 from claude_hub.services.workspace_manager._constants import *  # noqa: F401,F403
 
@@ -43,6 +49,34 @@ NOTICE_BACKFILL_HORIZON = timedelta(hours=24)
 # Initiator Chats report these themselves, so their own reply already
 # reached the person; a second notice would be a duplicate.
 SELF_REPORTED_REASONS = frozenset({"initiator_needs_input", "initiator_blocked", "initiator_ready"})
+
+
+# How long an owner may stay gone before the reconciler resolves the Task, and
+# the reason recorded. Agent loss is resolved quickly because `task continue`
+# reassigns a failed Task to a fresh agent; a Chat loss waits for a week
+# because only a handoff can revive a failed initiator record.
+OWNER_LOSS_POLICY: dict[str, tuple[timedelta, str]] = {
+    "agent_gone": (
+        timedelta(minutes=5),
+        "Its agent is gone (stopped, archived or deleted). "
+        "`claude-hub task continue <id>` reassigns it to a new agent.",
+    ),
+    "working_without_agent": (
+        timedelta(minutes=5),
+        "Marked working without any agent. "
+        "`claude-hub task continue <id>` reassigns it to a new agent.",
+    ),
+    "initiator_chat_gone": (
+        timedelta(days=7),
+        "The originating Chat was archived or deleted and nobody took over. "
+        "`claude-hub task handoff` can give it to a new executor.",
+    ),
+}
+
+
+QUICKLY_RESOLVED_REASONS = frozenset(
+    reason for reason, (grace, _text) in OWNER_LOSS_POLICY.items() if grace <= timedelta(hours=1)
+)
 
 
 class _TaskLifecycleObserverMixin(_WorkspaceManagerBase):
@@ -116,10 +150,59 @@ class _TaskLifecycleObserverMixin(_WorkspaceManagerBase):
             self.task_mailbox.wake_events(events)
         return changes
 
+    def _reconcile_orphaned_tasks(self, workspace_id: str) -> int:
+        """Resolve Tasks whose owner has been gone past the policy grace."""
+
+        now = self._runtime_now()
+        resolved = 0
+        for task in [task for task in self.tasks.values() if task.workspace_id == workspace_id]:
+            mark = task.lifecycle_mark
+            if mark is None or mark.phase != TaskPhase.ORPHANED:
+                continue
+            policy = OWNER_LOSS_POLICY.get(mark.reason)
+            if policy is None or now - mark.changed_at < policy[0]:
+                continue
+            if task.execution_control == TaskExecutionControl.WORKSPACE:
+                # Subagent and scheduled Tasks keep their own loss handling.
+                if task.task_mode == WorkspaceTaskMode.SUBAGENT:
+                    continue
+                if task.system_internal and task.internal_kind == "scheduled":
+                    continue
+                if task.status != WorkspaceTaskStatus.WORKING:
+                    continue
+            elif task.status not in {WorkspaceTaskStatus.TODO, WorkspaceTaskStatus.WORKING}:
+                continue
+            self.tasks[task.id] = apply_task_update(
+                task,
+                {
+                    "status": WorkspaceTaskStatus.FAILED,
+                    "failure_reason": policy[1],
+                    "failed_at": now,
+                    "updated_at": now,
+                },
+                cause="reconcile",
+            )
+            logger.warning(
+                "Lifecycle reconciler failed orphaned task task_id=%s reason=%s",
+                task.id,
+                mark.reason,
+            )
+            resolved += 1
+        if resolved:
+            self._save_workspace_state(workspace_id)
+        return resolved
+
     def _task_notice_wanted(self, task: WorkspaceTask, reason: str) -> bool:
         """Whether a person outside the work should hear about this reason."""
 
         if reason in SELF_REPORTED_REASONS:
+            return False
+        if (
+            reason in QUICKLY_RESOLVED_REASONS
+            and task.execution_control == TaskExecutionControl.WORKSPACE
+        ):
+            # Owner loss is resolved within minutes (reconciler, subagent or
+            # scheduled handling); the person hears about the outcome once.
             return False
         parent = self.tasks.get(task.parent_task_id) if task.parent_task_id else None
         if parent is not None and parent.status not in {

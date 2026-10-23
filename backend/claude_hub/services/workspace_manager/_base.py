@@ -552,6 +552,9 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     def _schedule_task_notices(self, workspace_id: str) -> None: ...
 
     @abstractmethod
+    def _reconcile_orphaned_tasks(self, workspace_id: str) -> int: ...
+
+    @abstractmethod
     def task_lifecycles(self, tasks: list[WorkspaceTask]) -> dict[str, TaskLifecycle]: ...
 
     @abstractmethod

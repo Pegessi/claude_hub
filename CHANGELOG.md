@@ -7,6 +7,15 @@
 
 ## Released
 
+### feat(task): resolve Tasks whose owner is gone
+
+- A Task whose agent stopped, was archived or vanished now fails after
+  5 minutes, with a reason naming `task continue`, which reassigns it to a
+  new agent. Previously it stayed `working` with nobody executing it.
+- An initiator Task whose Chat was archived or deleted is announced right
+  away. If nobody takes it over, it fails after 7 days, and
+  `task handoff` can still revive it.
+
 ### refactor(task): write Task status through one checked transition table
 
 - Every Task status change goes through `apply_task_update` with a named
