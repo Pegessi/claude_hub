@@ -151,6 +151,8 @@ PROMPT_STUCK_RISK_LEVEL = "prompt_dispatch_stalled"
 DEDICATED_AGENT_DISPATCH_REASON = "Dedicated workspace agent for this task"
 # Minimum gap between dedicated-agent provisioning attempts for one queued Task.
 DEDICATED_AGENT_RETRY_SECONDS = 60
+# A just-provisioned dedicated agent keeps its Task while it bootstraps.
+DEDICATED_AGENT_BOOTSTRAP_GRACE_SECONDS = 120
 WORKSPACE_MONITOR_INTERVAL_SECONDS = 5
 # Agent-facing examples call the Hub over localhost (or a loopback SSH
 # forward). Keep external traffic on the configured proxy while forcing these
@@ -381,6 +383,7 @@ __all__ = [
     "PROMPT_STUCK_RISK_LEVEL",
     "DEDICATED_AGENT_DISPATCH_REASON",
     "DEDICATED_AGENT_RETRY_SECONDS",
+    "DEDICATED_AGENT_BOOTSTRAP_GRACE_SECONDS",
     "Path",
     "REMOTE_FORWARD_PORT_BASE",
     "REMOTE_FORWARD_PORT_OFFSET",
