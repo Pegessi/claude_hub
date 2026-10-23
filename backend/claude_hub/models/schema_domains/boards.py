@@ -4,6 +4,7 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from claude_hub.models.schema_domains.lifecycle import TaskLifecycle
 from claude_hub.models.schema_domains.reports import (
     AgentReport,
     WorkspaceMarkdownDocument,
@@ -36,6 +37,8 @@ class WorkspaceBoard(BaseModel):
     markdown_documents: List[WorkspaceMarkdownDocument] = Field(default_factory=list)
     snapshot_path: Optional[str] = None
     tasks_pagination: Optional[BoardTasksPagination] = None
+    # Derived per-Task lifecycle keyed by Task id; never persisted.
+    task_lifecycles: Dict[str, TaskLifecycle] = Field(default_factory=dict)
 
 
 def redact_workspace_board_for_public(board: WorkspaceBoard) -> WorkspaceBoard:

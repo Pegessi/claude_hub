@@ -20,7 +20,9 @@ from .goal_run import (
     GoalVerifiedProgress,
 )
 from .schemas import (
+    ATTENTION_PHASES,
     PUBLIC_REDACTED_ENV_VALUE,
+    TERMINAL_PHASES,
     AcceptanceCheck,
     AcceptanceCheckStatus,
     AgentReport,
@@ -106,7 +108,12 @@ from .schemas import (
     SwitchEnvRequest,
     TaskCleanupResult,
     TaskFollowupRequest,
+    TaskLifecycle,
     TaskMailboxAckRequest,
+    TaskOwner,
+    TaskOwnerKind,
+    TaskOwnerState,
+    TaskPhase,
     TerminalAgentStatus,
     TerminalTab,
     TerminalTabBase,
@@ -138,6 +145,13 @@ from .schemas import (
 )
 
 __all__ = [
+    "ATTENTION_PHASES",
+    "TERMINAL_PHASES",
+    "TaskLifecycle",
+    "TaskOwner",
+    "TaskOwnerKind",
+    "TaskOwnerState",
+    "TaskPhase",
     "GOAL_CHECKPOINT_HISTORY_LIMIT",
     "GOAL_OBJECTIVE_MAX_LENGTH",
     "GOAL_RECENT_TURN_IDS_LIMIT",

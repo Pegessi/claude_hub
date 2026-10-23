@@ -15,6 +15,9 @@ TASK_COLUMNS = [
     "id",
     "title",
     "status",
+    "phase",
+    "phase_reason",
+    "blocked_by",
     "agent_type",
     "task_mode",
     "execution_control",
@@ -30,6 +33,9 @@ TASK_STATUS_FIELDS = [
     "id",
     "title",
     "status",
+    "phase",
+    "phase_reason",
+    "blocked_by",
     "agent_type",
     "task_mode",
     "execution_complexity",
@@ -87,20 +93,59 @@ REVIEW_COLUMNS = [
 ]
 
 
+def _board_tasks(board: Any) -> List[dict]:
+    """Board tasks with the server-derived lifecycle attached to each task."""
+    if not isinstance(board, dict):
+        return []
+    lifecycles = board.get("task_lifecycles")
+    lifecycles = lifecycles if isinstance(lifecycles, dict) else {}
+    tasks: List[dict] = []
+    for task in board.get("tasks", []):
+        if not isinstance(task, dict):
+            continue
+        lifecycle = lifecycles.get(task.get("id"))
+        if isinstance(lifecycle, dict):
+            task = {
+                **task,
+                "lifecycle": lifecycle,
+                "phase": lifecycle.get("phase"),
+                "phase_reason": lifecycle.get("reason"),
+                "blocked_by": lifecycle.get("blocked_by_task_id"),
+            }
+        tasks.append(task)
+    return tasks
+
+
 @task.command("list")
 @click.argument("workspace_id")
 @click.option("--status", default=None, help="Client-side filter on task status.")
+@click.option("--phase", default=None, help="Client-side filter on lifecycle phase.")
+@click.option(
+    "--attention",
+    is_flag=True,
+    help="Only tasks that need a human: needs_user, awaiting_acceptance or orphaned.",
+)
 @click.pass_context
-def task_list(ctx: click.Context, workspace_id: str, status: Optional[str]) -> None:
-    """List tasks for a workspace."""
+def task_list(
+    ctx: click.Context,
+    workspace_id: str,
+    status: Optional[str],
+    phase: Optional[str],
+    attention: bool,
+) -> None:
+    """List tasks for a workspace with their lifecycle phase and owner."""
     try:
         with cli_main.get_client(ctx) as client:
             board = client.get_board(workspace_id)
     except HubError as e:
         raise click.ClickException(str(e)) from e
-    tasks: List[dict] = board.get("tasks", []) if isinstance(board, dict) else []
+    tasks = _board_tasks(board)
     if status is not None:
         tasks = [t for t in tasks if t.get("status") == status]
+    if phase is not None:
+        tasks = [t for t in tasks if t.get("phase") == phase]
+    if attention:
+        tasks = [t for t in tasks if (t.get("lifecycle") or {}).get("attention")]
     if cli_main.as_json(ctx):
         emit(tasks, True)
     else:
@@ -111,6 +156,9 @@ TASK_DETAIL_FIELDS = [
     "id",
     "title",
     "status",
+    "phase",
+    "phase_reason",
+    "blocked_by",
     "agent_type",
     "task_mode",
     "execution_complexity",
@@ -138,7 +186,7 @@ def _find_task_board(client: Any, task_id: str) -> tuple:
         if not ws_id:
             continue
         board = client.get_board(ws_id)
-        tasks: List[dict] = board.get("tasks", []) if isinstance(board, dict) else []
+        tasks = _board_tasks(board)
         match = next((t for t in tasks if t.get("id") == task_id), None)
         if match is not None:
             return ws_id, match
@@ -183,6 +231,7 @@ def _task_status_payload(
     return {
         "workspace_id": workspace_id,
         "task": task,
+        "lifecycle": task.get("lifecycle"),
         "goal_packet": task.get("goal_packet"),
         "latest_report": latest,
         "latest_report_message": _report_message(latest),
@@ -265,7 +314,7 @@ def task_get(
         with cli_main.get_client(ctx) as client:
             if workspace_id is not None:
                 board = client.get_board(workspace_id)
-                tasks: List[dict] = board.get("tasks", []) if isinstance(board, dict) else []
+                tasks = _board_tasks(board)
                 match = next((t for t in tasks if t.get("id") == task_id), None)
                 ws_id = workspace_id
             else:
@@ -317,7 +366,7 @@ def task_status(
         with cli_main.get_client(ctx) as client:
             if workspace_id is not None:
                 board = client.get_board(workspace_id)
-                tasks: List[dict] = board.get("tasks", []) if isinstance(board, dict) else []
+                tasks = _board_tasks(board)
                 match = next((t for t in tasks if t.get("id") == task_id), None)
                 ws_id = workspace_id
             else:

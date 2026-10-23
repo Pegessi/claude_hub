@@ -7,6 +7,22 @@
 
 ## Released
 
+### feat(task): derive one explicit lifecycle phase per Task
+
+- Board responses add `task_lifecycles`: per Task one phase (`draft`,
+  `queued`, `running`, `reviewing`, `needs_user`, `awaiting_acceptance`,
+  `orphaned`, `done`, `failed`), a reason code, the owner with liveness, an
+  attention flag and the Task blocking a queued one. Initiator Tasks whose
+  Chat is archived or deleted, and work queued behind an agent held by a
+  Task waiting on the user, are now named instead of appearing as `working`
+  or `queued`.
+- `claude-hub task list/get/status` show phase, reason and blocker;
+  `task list --attention` lists only Tasks that need a human, and `--phase`
+  filters by phase.
+- Read-only projection; Task status, dispatch and review behavior are
+  unchanged. Layer plan:
+  [Task lifecycle refactor](docs/working-logs/2026-10-24-task-lifecycle-refactor.md).
+
 ### feat(session): archive and restore managed Chat sessions
 
 - Archive idle managed Chat agents and reviewers through workspace session
