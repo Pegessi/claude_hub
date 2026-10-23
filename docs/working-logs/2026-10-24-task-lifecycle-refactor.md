@@ -1,6 +1,6 @@
 # Task Lifecycle Refactor: one phase, one owner, one writer
 
-Status: Layers 1, 2, 3a and 3 implemented on `codex/task-lifecycle`; Layers 4–5 in progress.
+Status: Layers 1–4 implemented on `codex/task-lifecycle`; Layer 5 in progress.
 Continues [the 2026-05-23 state machine assessment](2026-05-23-state-machine-assessment.md),
 which extracted pure policy helpers (its step 2) but never introduced the
 reducer, explicit sub-phases or a single transition owner (its steps 3–6).
@@ -227,3 +227,26 @@ checkpoints. Both consume Layer 2/3 events.
 - The table makes the remaining complexity visible: about 15 causes write
   status. Layer 4 adds the reconciler as one more named cause instead of
   another ad-hoc writer.
+
+## Layer 4 notes (owner loss is resolved, not left lingering)
+
+- The owner lease is the persisted `lifecycle_mark`: its `changed_at` is when
+  the Hub first saw the current owner state. Liveness comes from the facts
+  the Hub already observes, so agents do not have to send heartbeats:
+  - session status/archive, and runtime OFFLINE for terminals;
+  - Chat tab existence and archive.
+- `_reconcile_orphaned_tasks` runs after each observation and resolves
+  orphaned Tasks per `OWNER_LOSS_POLICY`, with cause `reconcile` in the
+  transition table:
+  - `agent_gone` / `working_without_agent` (workspace control, working)
+    fail after 5 min with a reason that names `task continue`. Continuing a
+    failed Task whose agent is gone already reassigns it to a fresh,
+    dedicated agent.
+  - `initiator_chat_gone` fails after 7 days. A failed initiator record
+    rejects further progress, so only `task handoff` revives it; the user is
+    notified immediately.
+  - Not handled here: subagent Tasks (existing death/timeout failure),
+    scheduled hub Tasks (existing redispatch converger), and queued Tasks on
+    a gone agent (dedicated-agent rescue).
+- Quickly resolved owner loss is not pushed on its own; the person hears
+  about the resolved failure once.

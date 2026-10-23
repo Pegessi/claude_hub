@@ -109,6 +109,8 @@ class _WorkspacesMixin(
                     await self.dispatch_workspace(workspace_id, refresh_sessions=False)
                     try:
                         self._observe_task_lifecycles(workspace_id)
+                        if self._reconcile_orphaned_tasks(workspace_id):
+                            self._observe_task_lifecycles(workspace_id)
                         self._schedule_task_notices(workspace_id)
                     except Exception:
                         logger.exception(

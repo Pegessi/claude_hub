@@ -65,9 +65,12 @@ TRANSITIONS: dict[tuple[WorkspaceTaskStatus, WorkspaceTaskStatus], frozenset[str
     (TODO, DONE): frozenset({"initiator_progress", "internal_report", "feedback_reaper"}),
     (QUEUED, DONE): frozenset({"internal_report", "feedback_reaper", "abort"}),
     # Failure.
-    (WORKING, FAILED): frozenset({"report", "initiator_progress", "runtime_failure", "scheduled"}),
+    # "reconcile": the lifecycle reconciler resolving a Task whose owner is gone.
+    (WORKING, FAILED): frozenset(
+        {"report", "initiator_progress", "runtime_failure", "scheduled", "reconcile"}
+    ),
     (QUEUED, FAILED): frozenset({"scheduled", "runtime_failure"}),
-    (TODO, FAILED): frozenset({"scheduled", "initiator_progress", "report"}),
+    (TODO, FAILED): frozenset({"scheduled", "initiator_progress", "report", "reconcile"}),
     (REVIEW, FAILED): frozenset({"report", "runtime_failure"}),
     # Back to an unowned record.
     (QUEUED, TODO): frozenset({"abort", "handoff", "feedback_reaper"}),
