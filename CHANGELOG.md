@@ -7,6 +7,37 @@
 
 ## Released
 
+### feat(agent): one-call cross-provider subagents (`claude-hub agent run`)
+
+- `claude-hub agent run --provider X --prompt-file -` starts a native Chat with
+  another provider, waits for its turn and prints only the final answer
+  (progress on stderr). Exit codes: 0 completed, 1 failed, 124 timeout,
+  130 cancelled. There is no Task, board, Goal Packet, review or acceptance;
+  Workspace Tasks remain the path for tracked, reviewed work.
+- New `/api/subagents` API: create a subagent with its first turn, send
+  follow-ups to a subagent created with `keep`, long-poll turn results, list,
+  cancel and close. Turns run server-side and their results persist under the
+  runtime home. A turn interrupted by a backend restart is reported as failed
+  and never left pending. `call_id` makes retries idempotent.
+- New companion commands: `agent result`, `agent send`, `agent subagents`,
+  `agent cancel` and `agent close`. Ctrl-C while waiting cancels the turn.
+  By default a subagent is archived after its turn completes.
+- Tabs record `parent_tab_id`/`subagent_id`. Archiving or deleting the parent
+  Chat cancels and archives its subagents through a new tab-retirement
+  listener. Chat guidance teaches the one-line recipe.
+- A subagent inherits the calling Chat's solo mode (solo without a parent);
+  `--solo/--no-solo` overrides. A turn that stops for an approval fails with
+  instructions to proceed. Nesting is limited to depth 2, counted from the
+  calling Chat: a subagent cannot escape it with `--no-parent` or another
+  `--parent-tab-id`, and its subagents always close with it. Subagent Chats'
+  guidance omits the `agent run` recipe; duplicates and forks of a subagent
+  Chat are ordinary Chats.
+- Ctrl-C in `agent run`/`agent send` cancels only the turn it started, even
+  during the start request; Ctrl-C in `agent result --wait` only stops
+  watching. Non-kept subagents are archived after a short grace period.
+- Unarchiving a subagent Chat detaches it into an ordinary Chat that is never
+  re-archived. Stored answers are capped at 64k characters and the last 20
+  turns, and state is written atomically off the event loop.
 ### refactor(task): remove dead dispatch and ChatWork CLI paths
 
 - Removed the unreachable dispatcher-decision request from Task start. The

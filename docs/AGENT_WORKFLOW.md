@@ -85,6 +85,13 @@ and output format. Research and review are read-only. Two writers must not own
 the same file. Worktrees do not isolate ports, databases, tmux, caches or cloud
 resources: name those resources per task and serialize shared mutations.
 
+For a one-off answer from another provider, use a Hub subagent instead of a
+Task: `claude-hub agent run --provider X --prompt-file -` blocks and returns the
+final answer. It creates no Task, review or acceptance. Use `--keep` with
+`agent send` for follow-ups. Archiving the calling Chat closes its subagents.
+Use Workspace Tasks only for tracked, reviewed work. See
+[agent run subagents](working-logs/2026-10-24-agent-run-subagents.md).
+
 A delegate returns result, changed files/artifacts and head SHA, reproducible
 commands with cwd/results, unverified criteria, risks and next action. The owner
 checks the evidence and records accepted/rejected/retried only for actual work.

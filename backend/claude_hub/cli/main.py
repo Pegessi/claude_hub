@@ -190,6 +190,8 @@ def cli(
 
 def _register() -> None:
     """Attach subcommand groups. Imported here to avoid circular imports."""
+    # Attaches `agent run/send/result/subagents/cancel/close` to the agent group.
+    from claude_hub.cli.commands import subagents as _subagents  # noqa: F401
     from claude_hub.cli.commands.dot import dot
     from claude_hub.cli.commands.feedback import feedback
     from claude_hub.cli.commands.feishu import feishu

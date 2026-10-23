@@ -326,6 +326,7 @@ async def dispatch_tab_chat_and_wait(
     attachments: Optional[List[AgentStreamAttachment]] = None,
     timeout_seconds: float | None = None,
     admission_guard: Optional[ChatAdmissionGuard] = None,
+    prefer_final_text: bool = False,
 ) -> str:
     """Send through an existing Chat tab and return its completed assistant text
     (for Dot, the text after the turn's last tool call).
@@ -446,7 +447,11 @@ async def dispatch_tab_chat_and_wait(
             # Dot writes its whole answer last (its turn rules say so): the chat app
             # gets that, not the notes between tool calls. Other Chats send it all.
             final_text = event.payload.get("final_text")
-            if isinstance(final_text, str) and final_text.strip() and _answers_last(tab_id):
+            if (
+                isinstance(final_text, str)
+                and final_text.strip()
+                and (prefer_final_text or _answers_last(tab_id))
+            ):
                 return final_text.strip()
             return assistant_text.strip()
     except asyncio.CancelledError:

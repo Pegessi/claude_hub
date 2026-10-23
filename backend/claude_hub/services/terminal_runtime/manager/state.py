@@ -156,6 +156,8 @@ class ManagerStateMixin(ManagerHost):
                             cursor_transcript_schema=tab_data.get("cursor_transcript_schema"),
                             forked_from_tab_id=tab_data.get("forked_from_tab_id"),
                             forked_from_ordinal=tab_data.get("forked_from_ordinal"),
+                            parent_tab_id=tab_data.get("parent_tab_id"),
+                            subagent_id=tab_data.get("subagent_id"),
                             archived=tab_data.get("archived", False),
                             archived_at=self._runtime._parse_optional_iso(
                                 tab_data.get("archived_at")

@@ -180,6 +180,17 @@ class TerminalTab(TerminalTabBase):
             "(inclusive); None for tabs started from scratch."
         ),
     )
+    parent_tab_id: Optional[str] = Field(
+        None,
+        description=(
+            "Tab that invoked this tab as a Hub subagent (claude-hub agent run); "
+            "None for ordinary tabs. Archiving/deleting the parent closes it."
+        ),
+    )
+    subagent_id: Optional[str] = Field(
+        None,
+        description="Subagent record id when this tab is owned by /api/subagents.",
+    )
     archived: bool = Field(
         False,
         description=(
