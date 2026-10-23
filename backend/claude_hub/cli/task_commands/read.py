@@ -140,6 +140,14 @@ def task_list(
     except HubError as e:
         raise click.ClickException(str(e)) from e
     tasks = _board_tasks(board)
+    if (phase is not None or attention) and not (
+        isinstance(board, dict) and "task_lifecycles" in board
+    ):
+        click.echo(
+            "warning: this Hub does not report task lifecycles; "
+            "--phase/--attention cannot filter.",
+            err=True,
+        )
     if status is not None:
         tasks = [t for t in tasks if t.get("status") == status]
     if phase is not None:

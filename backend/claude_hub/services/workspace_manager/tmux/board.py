@@ -9,6 +9,7 @@ from claude_hub.services.task_lifecycle import (
 )
 from claude_hub.services.workspace_manager._base import _WorkspaceManagerBase
 from claude_hub.services.workspace_manager._constants import *  # noqa: F401,F403
+from claude_hub.services.workspace_state_policy import TERMINAL_REVIEW_STATES
 
 
 class _WorkspaceBoardMixin(_WorkspaceManagerBase):
@@ -34,16 +35,27 @@ class _WorkspaceBoardMixin(_WorkspaceManagerBase):
     def task_lifecycles(self, tasks: list[WorkspaceTask]) -> dict[str, TaskLifecycle]:
         """Derive one lifecycle per Task from current records and owner liveness."""
 
-        task_ids = {task.id for task in tasks}
-        latest_review: dict[str, AgentReport] = {}
+        now = self._runtime_now()
+        open_tasks = {
+            task.id: task
+            for task in tasks
+            if task.status not in {WorkspaceTaskStatus.DONE, WorkspaceTaskStatus.FAILED}
+        }
+        current_verdicts: dict[str, AgentReport] = {}
         for report in self.reports.values():
-            if report.task_id not in task_ids or not report.state.value.startswith("review_"):
+            task = open_tasks.get(report.task_id or "")
+            if task is None or report.state not in TERMINAL_REVIEW_STATES:
                 continue
-            current = latest_review.get(report.task_id)
+            if report.review_cycle != task.review_cycle:
+                continue
+            current = current_verdicts.get(task.id)
             if current is None or report.created_at > current.created_at:
-                latest_review[report.task_id] = report
+                current_verdicts[task.id] = report
         lifecycles: dict[str, TaskLifecycle] = {}
         for task in tasks:
+            if task.id not in open_tasks:
+                lifecycles[task.id] = derive_task_lifecycle(LifecycleFacts(task=task, now=now))
+                continue
             worker = self.sessions.get(task.session_id) if task.session_id else None
             blocked_by = None
             if worker is not None and task.status == WorkspaceTaskStatus.QUEUED:
@@ -51,17 +63,20 @@ class _WorkspaceBoardMixin(_WorkspaceManagerBase):
                 holder = self.tasks.get(holder_id) if holder_id else None
                 if holder and holder.id != task.id and holder.status != WorkspaceTaskStatus.DONE:
                     blocked_by = holder.id
-            review = latest_review.get(task.id)
+            verdict = current_verdicts.get(task.id)
             facts = LifecycleFacts(
                 task=task,
-                latest_review_state=review.state if review else None,
+                latest_review_state=verdict.state if verdict else None,
                 worker_session=worker,
                 reviewer_session=(
                     self.sessions.get(task.review_session_id) if task.review_session_id else None
                 ),
                 chat_tab=self._task_chat_tab_facts(task),
-                dependencies_blocked=bool(task_dependency_blockers(self.tasks, task)),
+                dependencies_blocked=bool(
+                    task.depends_on_task_ids and task_dependency_blockers(self.tasks, task)
+                ),
                 blocked_by_task_id=blocked_by,
+                now=now,
             )
             lifecycles[task.id] = derive_task_lifecycle(facts)
         return lifecycles
