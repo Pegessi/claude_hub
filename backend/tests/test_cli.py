@@ -1494,3 +1494,61 @@ def test_session_unarchive_unknown_session(monkeypatch):
     result = CliRunner().invoke(cli, ["session", "unarchive", "missing"])
     assert result.exit_code != 0
     assert "Session missing not found" in result.output
+
+
+def _lifecycle_board() -> Dict[str, Any]:
+    def lifecycle(task_id: str, phase: str, reason: str, attention: bool, **extra: Any) -> dict:
+        return {
+            "task_id": task_id,
+            "phase": phase,
+            "reason": reason,
+            "attention": attention,
+            **extra,
+        }
+
+    return {
+        "tasks": [
+            {"id": "t-run", "title": "Running", "status": "working"},
+            {"id": "t-ask", "title": "Question", "status": "review"},
+            {"id": "t-wait", "title": "Behind", "status": "queued"},
+        ],
+        "task_lifecycles": {
+            "t-run": lifecycle("t-run", "running", "agent_working", False),
+            "t-ask": lifecycle("t-ask", "needs_user", "reviewer_needs_input", True),
+            "t-wait": lifecycle(
+                "t-wait",
+                "queued",
+                "agent_held_by_other_task",
+                False,
+                blocked_by_task_id="t-ask",
+            ),
+        },
+    }
+
+
+def test_task_list_shows_lifecycle_phase_reason_and_blocker(monkeypatch):
+    patch_get_client(monkeypatch, lambda request: httpx.Response(200, json=_lifecycle_board()))
+    result = CliRunner().invoke(cli, ["--json", "task", "list", "ws1"])
+    assert result.exit_code == 0, result.output
+    rows = {row["id"]: row for row in json.loads(result.output)}
+    assert rows["t-ask"]["phase"] == "needs_user"
+    assert rows["t-ask"]["phase_reason"] == "reviewer_needs_input"
+    assert rows["t-wait"]["blocked_by"] == "t-ask"
+    assert rows["t-run"]["status"] == "working"
+
+
+def test_task_list_attention_and_phase_filters(monkeypatch):
+    patch_get_client(monkeypatch, lambda request: httpx.Response(200, json=_lifecycle_board()))
+    runner = CliRunner()
+    attention = runner.invoke(cli, ["--json", "task", "list", "ws1", "--attention"])
+    assert [row["id"] for row in json.loads(attention.output)] == ["t-ask"]
+    queued = runner.invoke(cli, ["--json", "task", "list", "ws1", "--phase", "queued"])
+    assert [row["id"] for row in json.loads(queued.output)] == ["t-wait"]
+
+
+def test_task_list_tolerates_board_without_lifecycles(monkeypatch):
+    board = {"tasks": [{"id": "t1", "title": "Old", "status": "todo"}]}
+    patch_get_client(monkeypatch, lambda request: httpx.Response(200, json=board))
+    result = CliRunner().invoke(cli, ["--json", "task", "list", "ws1"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == board["tasks"]
