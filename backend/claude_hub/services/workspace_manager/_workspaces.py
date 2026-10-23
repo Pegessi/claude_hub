@@ -54,7 +54,22 @@ class _WorkspacesMixin(
             pass
         finally:
             self._monitor_task = None
+            await self._stop_monitor_jobs()
             await self._stop_feedback_automation()
+
+    async def _stop_monitor_jobs(self) -> None:
+        """Cancel notice delivery and stranded-Task provisioning started by the monitor."""
+
+        jobs = [*self._task_notice_jobs.values(), *self._stranded_provisioning_jobs.values()]
+        self._task_notice_jobs.clear()
+        self._stranded_provisioning_jobs.clear()
+        for job in jobs:
+            job.cancel()
+        for job in jobs:
+            try:
+                await job
+            except BaseException:
+                pass
 
     async def _background_monitor_loop(self) -> None:
         while True:
@@ -108,10 +123,7 @@ class _WorkspacesMixin(
                 for workspace_id in list(self.workspaces):
                     await self.dispatch_workspace(workspace_id, refresh_sessions=False)
                     try:
-                        self._observe_task_lifecycles(workspace_id)
-                        if self._reconcile_orphaned_tasks(workspace_id):
-                            self._observe_task_lifecycles(workspace_id)
-                        self._schedule_task_notices(workspace_id)
+                        await self._tick_task_lifecycles(workspace_id)
                     except Exception:
                         logger.exception(
                             "Task lifecycle observation failed workspace_id=%s",

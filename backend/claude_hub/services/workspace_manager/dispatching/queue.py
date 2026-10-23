@@ -67,11 +67,15 @@ class _DispatchQueueMixin(_WorkspaceManagerBase):
         for task in self.tasks.values():
             if task.workspace_id != workspace_id or not self._workspace_owns_task(task):
                 continue
-            if task.status != WorkspaceTaskStatus.QUEUED or task.dispatch_pending:
-                continue
-            if not task.session_id or task.dispatch_reason in _NON_MIGRATABLE_DISPATCH_REASONS:
+            if task.status != WorkspaceTaskStatus.QUEUED:
                 continue
             if task_dependency_blockers(self.tasks, task):
+                continue
+            if task.dispatch_pending:
+                # Waiting on a dispatcher decision that is no longer requested.
+                stranded.append(task)
+                continue
+            if not task.session_id or task.dispatch_reason in _NON_MIGRATABLE_DISPATCH_REASONS:
                 continue
             assigned = self.sessions.get(task.session_id)
             if assigned is None or self._agent_cannot_resume_work(assigned):
@@ -135,6 +139,7 @@ class _DispatchQueueMixin(_WorkspaceManagerBase):
                 update={
                     "session_id": agent.id,
                     "clear_context": True,
+                    "dispatch_pending": False,
                     "dispatch_reason": DEDICATED_AGENT_DISPATCH_REASON,
                     "updated_at": self._runtime_now(),
                 }

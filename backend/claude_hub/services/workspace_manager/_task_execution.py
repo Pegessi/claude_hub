@@ -324,7 +324,7 @@ class _TaskExecutionMixin(_WorkspaceManagerBase):
                 actor_role=TaskActorRole.HUMAN if manual else TaskActorRole.INITIATOR,
                 event_type=event_type,
                 event_payload=body,
-                cause="initiator_progress",
+                cause="manual" if manual else "initiator_progress",
             )
 
     def _require_quiescent_workspace_task(self, task: WorkspaceTask) -> None:

@@ -515,3 +515,148 @@ def test_reconciler_leaves_subagent_tasks_to_their_own_handling(
     workspace_manager._observe_task_lifecycles(workspace["id"])
     _age_mark_by(task["id"], timedelta(hours=1))
     assert workspace_manager._reconcile_orphaned_tasks(workspace["id"]) == 0
+
+
+def _notifier_into(sent: list[TaskNotice]):
+    async def notifier(_task: WorkspaceTask, notice: TaskNotice) -> str:
+        sent.append(notice)
+        return "sent"
+
+    return notifier
+
+
+def test_notice_in_flight_does_not_consume_a_newer_lifecycle_change(
+    isolated_hub: Path,  # noqa: F811
+) -> None:
+    client = TestClient(app)
+    workspace, worker, task = _running_task(client, isolated_hub)
+    workspace_manager.sessions[worker["id"]] = workspace_manager.sessions[worker["id"]].model_copy(
+        update={"status": ManagedSessionStatus.NEEDS_INPUT}
+    )
+    workspace_manager._observe_task_lifecycles(workspace["id"])
+    _age_mark(task["id"], 200)
+    sent: list[TaskNotice] = []
+
+    async def notifier(_task: WorkspaceTask, notice: TaskNotice) -> str:
+        sent.append(notice)
+        # While the question is being delivered, the Task fails.
+        _fail_task(task["id"])
+        workspace_manager._observe_task_lifecycles(workspace["id"])
+        return "sent"
+
+    workspace_manager.configure_task_notifier(notifier)
+    try:
+        asyncio.run(workspace_manager._deliver_task_notices(workspace["id"]))
+    finally:
+        workspace_manager.configure_task_notifier(None)
+    mark = workspace_manager.tasks[task["id"]].lifecycle_mark
+    assert mark is not None and mark.phase == TaskPhase.FAILED
+    assert mark.notified_at is None  # the failure is still to be announced
+    assert len(sent) == 1
+
+
+def test_a_second_real_failure_within_the_cooldown_is_announced(
+    isolated_hub: Path,  # noqa: F811
+) -> None:
+    client = TestClient(app)
+    workspace, _worker, task = _running_task(client, isolated_hub)
+    workspace_manager._observe_task_lifecycles(workspace["id"])
+    sent: list[TaskNotice] = []
+    workspace_manager.configure_task_notifier(_notifier_into(sent))
+    try:
+        for _ in range(2):
+            _fail_task(task["id"])
+            workspace_manager._observe_task_lifecycles(workspace["id"])
+            _age_mark(task["id"], 60)
+            asyncio.run(workspace_manager._deliver_task_notices(workspace["id"]))
+            # Continued after the failure.
+            workspace_manager.tasks[task["id"]] = workspace_manager.tasks[task["id"]].model_copy(
+                update={"status": WorkspaceTaskStatus.WORKING, "failed_at": None}
+            )
+            workspace_manager._observe_task_lifecycles(workspace["id"])
+    finally:
+        workspace_manager.configure_task_notifier(None)
+    assert len(sent) == 2
+
+
+def test_child_notice_waits_only_while_its_parent_is_working(
+    isolated_hub: Path,  # noqa: F811
+) -> None:
+    client = TestClient(app)
+    workspace, _worker, parent = _running_task(client, isolated_hub)
+    child = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks",
+        json={"title": "Child", "prompt": "sub", "parent_task_id": parent["id"]},
+    ).json()
+    workspace_manager._observe_task_lifecycles(workspace["id"])
+    _fail_task(child["id"])
+    workspace_manager._observe_task_lifecycles(workspace["id"])
+    _age_mark(child["id"], 60)
+    sent: list[TaskNotice] = []
+    workspace_manager.configure_task_notifier(_notifier_into(sent))
+    try:
+        asyncio.run(workspace_manager._deliver_task_notices(workspace["id"]))
+        assert sent == []
+        workspace_manager.tasks[parent["id"]] = workspace_manager.tasks[parent["id"]].model_copy(
+            update={"status": WorkspaceTaskStatus.REVIEW}
+        )
+        asyncio.run(workspace_manager._deliver_task_notices(workspace["id"]))
+    finally:
+        workspace_manager.configure_task_notifier(None)
+    assert [notice.kind for notice in sent] == ["attention"]
+
+
+def test_reconciler_skips_feedback_reaper_and_simultaneous_loss_of_every_agent(
+    isolated_hub: Path,  # noqa: F811
+) -> None:
+    client = TestClient(app)
+    workspace, worker, task = _running_task(client, isolated_hub)
+    other = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    _stop_worker(worker["id"])
+    _stop_worker(other["id"])
+    workspace_manager._observe_task_lifecycles(workspace["id"])
+    _age_mark_by(task["id"], timedelta(minutes=10))
+    # Every agent vanished at once: treated as an outage, not as agent loss.
+    assert workspace_manager._reconcile_orphaned_tasks(workspace["id"]) == 0
+
+    workspace_manager.sessions[other["id"]] = workspace_manager.sessions[other["id"]].model_copy(
+        update={"status": ManagedSessionStatus.IDLE}
+    )
+    workspace_manager.tasks[task["id"]] = workspace_manager.tasks[task["id"]].model_copy(
+        update={"system_internal": True, "internal_kind": "feedback_reaper"}
+    )
+    assert workspace_manager._reconcile_orphaned_tasks(workspace["id"]) == 0
+
+
+def test_legacy_dispatch_pending_task_is_stranded_for_a_dedicated_agent(
+    isolated_hub: Path,  # noqa: F811
+) -> None:
+    client = TestClient(app)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Pending", "path": str(isolated_hub), "session_prefix": "pd"},
+    ).json()
+    task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks", json={"title": "Old", "prompt": "x"}
+    ).json()
+    workspace_manager.tasks[task["id"]] = workspace_manager.tasks[task["id"]].model_copy(
+        update={
+            "status": WorkspaceTaskStatus.QUEUED,
+            "dispatch_pending": True,
+            "session_id": None,
+            "queued_at": datetime.now(),
+        }
+    )
+    assert [item.id for item in workspace_manager._stranded_queued_tasks(workspace["id"])] == [
+        task["id"]
+    ]
+
+
+def test_stopping_the_monitor_cancels_background_jobs() -> None:
+    async def scenario() -> bool:
+        job = asyncio.create_task(asyncio.sleep(30))
+        workspace_manager._task_notice_jobs["ws-x"] = job
+        await workspace_manager._stop_monitor_jobs()
+        return job.cancelled() and not workspace_manager._task_notice_jobs
+
+    assert asyncio.run(scenario())
