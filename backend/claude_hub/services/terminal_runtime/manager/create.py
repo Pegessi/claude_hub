@@ -77,6 +77,8 @@ class ManagerCreateMixin(ManagerHost):
         cursor_transcript_schema: Optional[str] = None,
         session_kind: SessionKind = SessionKind.TERMINAL,
         chat_mode: ChatMode = ChatMode.DEFAULT,
+        parent_tab_id: Optional[str] = None,
+        subagent_id: Optional[str] = None,
     ) -> TerminalTab:
         # Global backstop: bound the total number of live tabs so even
         # non-fork creation cannot grow without limit. The per-source fork
@@ -170,6 +172,8 @@ class ManagerCreateMixin(ManagerHost):
             cursor_cli_version=cursor_cli_version,
             cursor_transcript_path=cursor_transcript_path,
             cursor_transcript_schema=cursor_transcript_schema,
+            parent_tab_id=parent_tab_id,
+            subagent_id=subagent_id,
         )
         logger.info(
             f"Created TTYDProcess with solo_mode={process.solo_mode}, agent_type={process.agent_type}"

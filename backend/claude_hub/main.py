@@ -159,6 +159,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         # Start all saved tabs
         await ttyd_manager.start_all_tabs()
+        try:
+            from .services.subagents import get_subagent_service
+
+            # Before restart continuation: closing an interrupted non-kept
+            # subagent archives its tab and vetoes that tab's continuation.
+            await get_subagent_service().start()
+        except Exception:
+            logger.exception("Subagent service failed to start")
         from .services.restart_continuation import (
             capture_interrupted_chats,
             continue_interrupted_chats,
@@ -199,6 +207,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await stop_inbox()
             except Exception:
                 logger.exception("Chat inbox shutdown failed")
+            try:
+                from .services.subagents import get_subagent_service
+
+                await get_subagent_service().stop()
+            except Exception:
+                logger.exception("Subagent shutdown failed")
             continuation_task.cancel()
             await asyncio.gather(continuation_task, return_exceptions=True)
             try:

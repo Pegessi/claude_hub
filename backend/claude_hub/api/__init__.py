@@ -14,6 +14,7 @@ from .maso import router as maso_router
 from .quota import router as quota_router
 from .remote import router as remote_router
 from .scheduled_tasks import router as scheduled_tasks_router
+from .subagents import router as subagents_router
 from .system import router as system_router
 from .tabs import router as tabs_router
 from .terminal import router as terminal_router
@@ -35,6 +36,7 @@ api_router.include_router(workspaces_router)
 api_router.include_router(codex_router)
 api_router.include_router(env_presets_router)
 api_router.include_router(scheduled_tasks_router)
+api_router.include_router(subagents_router)
 api_router.include_router(agent_stream_router)
 api_router.include_router(dot_router)
 api_router.include_router(quota_router)
