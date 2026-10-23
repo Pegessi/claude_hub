@@ -10,6 +10,7 @@ from functools import partial
 from typing import AsyncIterator, List, Optional, Tuple
 
 from ....models import TerminalTab
+from ....models.subagent import SUBAGENT_ID_ENV
 from ..records import TabCleanupPendingError, _PendingTabCleanup, _TabStateCommitError
 from ..retirement_listeners import notify_tab_retired
 from .host import ManagerHost
@@ -257,6 +258,19 @@ class ManagerRetirementMixin(ManagerHost):
                 self._check_live_tab_capacity()
                 process.archived = False
                 process.archived_at = None
+                if process.subagent_id or process.parent_tab_id:
+                    # A user restoring a retired subagent Chat keeps it as an
+                    # ordinary Chat: detach it so subagent lifecycle (parent
+                    # closure, startup reconciliation) never re-archives it.
+                    logger.info(
+                        "Detaching unarchived tab %s from subagent %s (parent %s)",
+                        tab_id,
+                        process.subagent_id,
+                        process.parent_tab_id,
+                    )
+                    process.subagent_id = None
+                    process.parent_tab_id = None
+                    process.env.pop(SUBAGENT_ID_ENV, None)
             logger.info("Unarchiving tab %s (%s)", tab_id, process.name)
             self._save_state()
 

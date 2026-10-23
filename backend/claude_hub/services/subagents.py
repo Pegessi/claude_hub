@@ -8,8 +8,9 @@ result. Delivery reuses the external-conversation adapter
 
 Turns run in server-owned asyncio tasks, so a result survives the request or
 CLI process that started it. Records live in ``<runtime home>/subagents.json``
-(single backend owner via ``BackendInstanceLock``). A turn still ``running``
-when the backend starts again is marked failed, never left pending.
+(single backend owner via ``BackendInstanceLock``), written atomically off the
+event loop. A turn still ``running`` when the backend starts again is marked
+failed, never left pending.
 """
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterable, List
 
 from ..models import AgentType, SessionKind, TerminalTab
 from ..models.subagent import (
+    SUBAGENT_ID_ENV,
+    SUBAGENT_MAX_DEPTH,
     SUBAGENT_MAX_WAIT_SECONDS,
     TERMINAL_SUBAGENT_TURN_STATUSES,
     Subagent,
@@ -42,10 +45,15 @@ from ..models.subagent import (
 logger = logging.getLogger(__name__)
 
 _STATE_VERSION = 1
-_FINAL_TEXT_MAX_CHARS = 1_000_000
+# Bounds keep subagents.json small: the Chat tab holds the full history.
+_FINAL_TEXT_MAX_CHARS = 64_000
+_TURNS_KEPT = 20  # per record, plus the first turn (create idempotency)
 _CLOSED_RETENTION = timedelta(days=7)
 _CLOSED_RETENTION_MAX = 500
 _CANCEL_JOIN_SECONDS = 30.0
+# Trailing provider events (usage, transcript flush) can follow the completion
+# event; archiving at once would cut them off.
+_ARCHIVE_GRACE_SECONDS = 3.0
 
 # Model and reasoning-effort env keys the native Chat transports already read.
 _MODEL_ENV_KEYS = {
@@ -82,11 +90,16 @@ class SubagentError(Exception):
         self.detail = detail
 
 
+class SubagentInteractionRequired(RuntimeError):
+    """The provider turn stopped for an approval or question nobody can answer."""
+
+
 RunTurn = Callable[[str, str, str, str, float], Awaitable[str]]
 """``run_turn(tab_id, text, turn_id, visible_text, timeout_seconds) -> final text``.
 
-Must cancel the provider turn itself before raising ``TimeoutError`` and
-retire it when the awaiting task is cancelled.
+Must cancel the provider turn itself before raising ``TimeoutError``, retire
+it when the awaiting task is cancelled, and raise
+``SubagentInteractionRequired`` after retiring a turn that awaits input.
 """
 
 
@@ -122,24 +135,54 @@ def _error_text(exc: BaseException) -> str:
     return str(exc) or type(exc).__name__
 
 
-def _bounded_text(text: str) -> str:
+def _bounded_text(text: str) -> Tuple[str, bool]:
     if len(text) <= _FINAL_TEXT_MAX_CHARS:
-        return text
+        return text, False
     return (
         text[:_FINAL_TEXT_MAX_CHARS]
-        + "\n[... truncated by Claude Hub; open the Chat tab for the rest]"
+        + f"\n[... truncated by Claude Hub after {_FINAL_TEXT_MAX_CHARS} characters; "
+        "open the subagent's Chat tab for the rest]",
+        True,
+    )
+
+
+def _interaction_error(record: Subagent) -> str:
+    where = f"its Chat (tab {record.tab_id}) in Web Chat"
+    if record.solo_mode:
+        hint = "Make the prompt self-contained, or re-run with --keep and answer in " + where + "."
+    else:
+        hint = (
+            "Approvals are on (solo mode off, as inherited from the parent Chat or set with "
+            "--no-solo). Re-run with --solo to skip approvals, or with --keep and approve in "
+            + where
+            + "."
+        )
+    return (
+        "The subagent stopped for an approval or a question that `agent run` cannot answer; "
+        "the turn was retired. " + hint
     )
 
 
 class SubagentService:
-    def __init__(self, path: Path, runtime: SubagentRuntime) -> None:
+    def __init__(
+        self,
+        path: Path,
+        runtime: SubagentRuntime,
+        *,
+        archive_grace_seconds: float = _ARCHIVE_GRACE_SECONDS,
+    ) -> None:
         self.path = path
         self.runtime = runtime
+        self.archive_grace_seconds = archive_grace_seconds
         self._subagents: Dict[str, Subagent] = {}
-        self._tasks: Dict[str, asyncio.Task[None]] = {}  # turn_id -> task
+        self._tasks: Dict[str, asyncio.Task[None]] = {}  # running turn_id -> task
         self._done: Dict[str, asyncio.Event] = {}  # turn_id -> completion event
         self._locks: Dict[str, List[Any]] = {}  # key -> [lock, holders+waiters]
+        # Every task this service spawns (turns, closes), so stop() can join them.
         self._background: set[asyncio.Task[Any]] = set()
+        self._save_lock = asyncio.Lock()
+        self._save_requested = 0
+        self._save_written = 0
         self._shutting_down = False
         self._started = False
         self._remove_listener: Optional[Callable[[], None]] = None
@@ -171,15 +214,46 @@ class SubagentService:
                 continue
             self._subagents[record.id] = record
 
-    def _save(self) -> None:
-        self._prune()
+    async def _save(self, pending: Optional[Subagent] = None) -> None:
+        """Persist all records (plus ``pending``, not yet published) atomically.
+
+        Saves are serialized in call order and coalesced: a save whose state a
+        later write already covered returns at once. The JSON is built on the
+        loop (a consistent snapshot); the write and fsync run in a thread and
+        are never abandoned midway, so a cancelled caller cannot let an older
+        snapshot land after a newer one.
+        """
+        self._save_requested += 1
+        generation = self._save_requested
+        async with self._save_lock:
+            if pending is None and self._save_written >= generation:
+                return
+            self._prune()
+            covered = self._save_requested
+            records = dict(self._subagents)
+            if pending is not None:
+                records[pending.id] = pending
+            state = {
+                "version": _STATE_VERSION,
+                "subagents": {key: value.model_dump(mode="json") for key, value in records.items()},
+            }
+            write = asyncio.ensure_future(asyncio.to_thread(self._write_state, state))
+            cancellation: Optional[asyncio.CancelledError] = None
+            while not write.done():
+                try:
+                    await asyncio.shield(write)
+                except asyncio.CancelledError as exc:
+                    cancellation = cancellation or exc
+                except Exception:
+                    break
+            if cancellation is not None:
+                raise cancellation
+            write.result()
+            if pending is None:
+                self._save_written = max(self._save_written, covered)
+
+    def _write_state(self, state: Dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        state = {
-            "version": _STATE_VERSION,
-            "subagents": {
-                key: value.model_dump(mode="json") for key, value in self._subagents.items()
-            },
-        }
         fd, raw_tmp = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=self.path.parent)
         tmp = Path(raw_tmp)
         try:
@@ -192,6 +266,8 @@ class SubagentService:
             tmp.unlink(missing_ok=True)
 
     def _prune(self) -> None:
+        for record in self._subagents.values():
+            self._trim_turns(record)
         closed = sorted(
             (s for s in self._subagents.values() if s.closed),
             key=lambda s: s.closed_at or s.created_at,
@@ -202,13 +278,26 @@ class SubagentService:
             if index >= _CLOSED_RETENTION_MAX or (record.closed_at or record.created_at) < cutoff:
                 self._subagents.pop(record.id, None)
 
+    @staticmethod
+    def _trim_turns(record: Subagent) -> None:
+        """Keep the first turn, the last ``_TURNS_KEPT`` and any running turn."""
+        turns = record.turns
+        if len(turns) <= _TURNS_KEPT + 1:
+            return
+        recent = {id(t) for t in turns[-_TURNS_KEPT:]}
+        record.turns = [
+            t
+            for index, t in enumerate(turns)
+            if index == 0 or id(t) in recent or t.status == SubagentTurnStatus.RUNNING
+        ]
+
     # ── lifecycle ────────────────────────────────────────────────────────
 
     async def start(self) -> None:
         """Load records, fail interrupted turns and close what no caller can use."""
         from .terminal_runtime.retirement_listeners import add_tab_retired_listener
 
-        self._load()
+        await asyncio.to_thread(self._load)
         interrupted: set[str] = set()
         now = utc_now()
         for record in self._subagents.values():
@@ -219,7 +308,7 @@ class SubagentService:
                     turn.completed_at = now
                     interrupted.add(record.id)
         if interrupted:
-            self._save()
+            await self._save()
         self._remove_listener = add_tab_retired_listener(self._on_tab_retired)
         self._started = True
         known_tabs = {s.tab_id: s for s in self._subagents.values() if s.tab_id}
@@ -233,11 +322,15 @@ class SubagentService:
                 await self._close(record, "parent tab archived or deleted")
             elif not own or own.archived:
                 await self._close(record, "subagent tab archived or deleted")
+            elif own.subagent_id != record.id:
+                # Restored by the user as an ordinary Chat; _close keeps the tab.
+                await self._close(record, "subagent tab detached")
             elif not record.keep:
                 reason = "Claude Hub restarted" if record.id in interrupted else "turn finished"
                 await self._close(record, reason)
         # A crash between tab creation and record update can leave a tab that
-        # no record owns; archive it (history stays restorable).
+        # no record owns; archive it (history stays restorable). A subagent tab
+        # the user unarchived was detached (no subagent_id), so it is kept.
         for tab in list(self.runtime.list_tabs()):
             if tab.subagent_id and not tab.archived:
                 owner = known_tabs.get(tab.id) or self._subagents.get(tab.subagent_id)
@@ -245,15 +338,22 @@ class SubagentService:
                     await self._archive_quietly(tab.id)
 
     async def stop(self) -> None:
+        """Cancel and join every turn and pending close this service started.
+
+        A non-kept subagent whose close was still pending is closed by the next
+        start's reconciliation.
+        """
         self._shutting_down = True
         if self._remove_listener is not None:
             self._remove_listener()
             self._remove_listener = None
-        tasks = list(self._tasks.values()) + list(self._background)
+        tasks = list(self._background)
         for task in tasks:
             task.cancel()
         if tasks:
-            await asyncio.wait(tasks, timeout=_CANCEL_JOIN_SECONDS)
+            _done, pending = await asyncio.wait(tasks, timeout=_CANCEL_JOIN_SECONDS)
+            if pending:
+                logger.warning("%d subagent task(s) did not stop in time", len(pending))
 
     # ── queries ──────────────────────────────────────────────────────────
 
@@ -347,15 +447,39 @@ class SubagentService:
             env[key] = effort
         return env
 
-    def _resolve_cwd(self, req: SubagentCreate) -> str:
-        cwd = req.cwd
-        if req.parent_tab_id:
-            parent = self.runtime.get_tab(req.parent_tab_id)
-            if parent is None:
-                raise SubagentError(404, f"Parent tab {req.parent_tab_id} not found")
-            if parent.archived:
-                raise SubagentError(409, f"Parent tab {req.parent_tab_id} is archived")
-            cwd = cwd or parent.cwd
+    def _resolve_parent(self, req: SubagentCreate) -> Optional[TerminalTab]:
+        if not req.parent_tab_id:
+            return None
+        parent = self.runtime.get_tab(req.parent_tab_id)
+        if parent is None:
+            raise SubagentError(404, f"Parent tab {req.parent_tab_id} not found")
+        if parent.archived:
+            raise SubagentError(409, f"Parent tab {req.parent_tab_id} is archived")
+        depth = self._subagent_depth(parent)
+        if depth >= SUBAGENT_MAX_DEPTH:
+            raise SubagentError(
+                400,
+                f"Subagent nesting limit reached: parent tab {parent.id} is already a "
+                f"depth-{depth} subagent (max depth {SUBAGENT_MAX_DEPTH}). "
+                "Do this work yourself instead of starting another subagent.",
+            )
+        return parent
+
+    def _subagent_depth(self, tab: TerminalTab) -> int:
+        """How many subagent links lead from ``tab`` up to an ordinary Chat."""
+        depth = 0
+        seen: set[str] = set()
+        current: Optional[TerminalTab] = tab
+        while current is not None and current.subagent_id and current.id not in seen:
+            seen.add(current.id)
+            depth += 1
+            parent_id = current.parent_tab_id
+            current = self.runtime.get_tab(parent_id) if parent_id else None
+        return depth
+
+    @staticmethod
+    def _resolve_cwd(req: SubagentCreate, parent: Optional[TerminalTab]) -> str:
+        cwd = req.cwd or (parent.cwd if parent is not None else None)
         if not cwd:
             raise SubagentError(400, "cwd is required when no parent tab supplies one")
         cwd = os.path.expanduser(cwd)
@@ -384,8 +508,16 @@ class SubagentService:
         self, req: SubagentCreate, digest: str, created_by: Optional[str]
     ) -> Tuple[Subagent, SubagentTurn]:
         env = self._launch_env(req)
-        cwd = self._resolve_cwd(req)
+        parent = self._resolve_parent(req)
+        cwd = self._resolve_cwd(req, parent)
+        # Unless the caller chooses, a subagent follows its parent's approval
+        # policy; without a parent nobody could approve, so it runs solo.
+        if req.solo_mode is not None:
+            solo_mode = req.solo_mode
+        else:
+            solo_mode = parent.solo_mode if parent is not None else True
         subagent_id = f"sa-{uuid.uuid4().hex[:12]}"
+        env[SUBAGENT_ID_ENV] = subagent_id
         first_line = req.prompt.strip().splitlines()[0][:60]
         name = req.name or f"{req.agent_type.value} subagent: {first_line}"
         record = Subagent(
@@ -398,6 +530,7 @@ class SubagentService:
             env_preset=req.env_preset,
             name=name,
             keep=req.keep,
+            solo_mode=solo_mode,
             created_at=utc_now(),
             created_by=created_by,
             call_id=req.call_id,
@@ -407,7 +540,7 @@ class SubagentService:
             tab = await self.runtime.create_tab(
                 name=name,
                 cwd=cwd,
-                solo_mode=req.solo_mode,
+                solo_mode=solo_mode,
                 agent_type=req.agent_type,
                 session_kind=SessionKind.CHAT,
                 env=env,
@@ -419,16 +552,36 @@ class SubagentService:
         except ValueError as exc:
             raise SubagentError(400, str(exc)) from exc
         record.tab_id = tab.id
-        # The parent may have been retired while the tab was starting.
-        parent = req.parent_tab_id and self.runtime.get_tab(req.parent_tab_id)
-        if req.parent_tab_id and (not parent or parent.archived):
+        try:
+            # The parent may have been retired while the tab was starting.
+            current = req.parent_tab_id and self.runtime.get_tab(req.parent_tab_id)
+            if req.parent_tab_id and (not current or current.archived):
+                raise SubagentError(409, f"Parent tab {req.parent_tab_id} was closed")
+            turn = self._new_turn(req.call_id, req.timeout_seconds, digest)
+            record.turns.append(turn)
+            # Durable first, then visible: a record that was never saved must
+            # not look running in memory (nor be returned to a call_id retry).
+            try:
+                await self._save(pending=record)
+            except (OSError, ValueError, TypeError) as exc:
+                logger.exception("Failed to persist new subagent %s", record.id)
+                raise SubagentError(
+                    503,
+                    f"Could not record subagent state ({exc}); its Chat tab was archived and "
+                    "nothing ran. Retry with the same call_id.",
+                ) from exc
+        except BaseException:
             await self._archive_quietly(tab.id)
-            raise SubagentError(409, f"Parent tab {req.parent_tab_id} was closed")
-        turn = self._new_turn(req.call_id, req.timeout_seconds, digest)
-        record.turns.append(turn)
+            raise
         self._subagents[record.id] = record
-        self._save()
         self._spawn(record, turn, wrap_first_prompt(req.prompt), req.prompt)
+        # A parent retired during the save found no published record to close.
+        current = req.parent_tab_id and self.runtime.get_tab(req.parent_tab_id)
+        if req.parent_tab_id and (not current or current.archived):
+            self._track(
+                self._close(record, "parent tab archived or deleted"),
+                f"subagent-close-{record.id}",
+            )
         return record, turn
 
     async def send(
@@ -457,12 +610,30 @@ class SubagentService:
                 raise SubagentError(409, f"Subagent {subagent_id} is still running a turn")
             turn = self._new_turn(req.call_id, req.timeout_seconds, digest)
             record.turns.append(turn)
-            self._save()
+            try:
+                await self._save()
+            except BaseException as exc:
+                record.turns.remove(turn)
+                if isinstance(exc, (OSError, ValueError, TypeError)):
+                    logger.exception("Failed to persist subagent turn on %s", subagent_id)
+                    raise SubagentError(
+                        503,
+                        f"Could not record subagent state ({exc}); nothing was sent. "
+                        "Retry with the same call_id.",
+                    ) from exc
+                raise
             self._spawn(record, turn, req.prompt, req.prompt)
             return record, turn
 
-    async def cancel(self, subagent_id: str) -> Tuple[Subagent, Optional[SubagentTurn]]:
+    async def cancel(
+        self, subagent_id: str, turn_id: Optional[str] = None
+    ) -> Tuple[Subagent, Optional[SubagentTurn]]:
+        """Cancel the running turn, or only ``turn_id`` when given (no-op once it ended)."""
         record = self.get(subagent_id)
+        if turn_id is not None:
+            turn = self._turn(record, turn_id)
+            await self._cancel_running(record, turn_id=turn_id)
+            return record, turn
         await self._cancel_running(record)
         return record, (record.turns[-1] if record.turns else None)
 
@@ -484,23 +655,31 @@ class SubagentService:
             request_digest=digest,
         )
 
+    def _track(self, coro: Awaitable[Any], name: str) -> "asyncio.Task[Any]":
+        task: asyncio.Task[Any] = asyncio.ensure_future(coro)
+        task.set_name(name)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+        return task
+
     def _spawn(self, record: Subagent, turn: SubagentTurn, text: str, visible: str) -> None:
         self._done[turn.turn_id] = asyncio.Event()
-        task = asyncio.create_task(
-            self._execute(record, turn, text, visible), name=f"subagent-{record.id}-{turn.turn_id}"
+        self._tasks[turn.turn_id] = self._track(
+            self._execute(record, turn, text, visible), f"subagent-{record.id}-{turn.turn_id}"
         )
-        self._tasks[turn.turn_id] = task
 
     async def _execute(self, record: Subagent, turn: SubagentTurn, text: str, visible: str) -> None:
         status = SubagentTurnStatus.FAILED
         final_text: Optional[str] = None
+        truncated = False
         error: Optional[str] = None
         try:
             assert record.tab_id is not None
             answer = await self.runtime.run_turn(
                 record.tab_id, text, turn.turn_id, visible, turn.timeout_seconds
             )
-            status, final_text = SubagentTurnStatus.COMPLETED, _bounded_text(answer)
+            status = SubagentTurnStatus.COMPLETED
+            final_text, truncated = _bounded_text(answer)
         except asyncio.CancelledError:
             # Cancellation is this record's own decision (cancel/close/shutdown);
             # the adapter has already retired the provider turn.
@@ -513,29 +692,42 @@ class SubagentService:
             error = (
                 f"No final answer within {turn.timeout_seconds:g} seconds; the turn was cancelled"
             )
+        except SubagentInteractionRequired:
+            error = _interaction_error(record)
         except Exception as exc:
             error = _error_text(exc)
-        finally:
-            self._tasks.pop(turn.turn_id, None)
         turn.status = status
         turn.final_text = final_text
+        turn.final_text_truncated = truncated
         turn.error = error
         turn.completed_at = utc_now()
+        self._tasks.pop(turn.turn_id, None)
         try:
-            self._save()
+            await self._save()
         except Exception:
             logger.exception("Failed to persist subagent turn %s", turn.turn_id)
-        event = self._done.pop(turn.turn_id, None)
-        if event is not None:
-            event.set()
+        finally:
+            event = self._done.pop(turn.turn_id, None)
+            if event is not None:
+                event.set()
         if not record.keep and not record.closed and not self._shutting_down:
-            await self._close(record, f"turn {status.value}")
+            self._track(
+                self._close_after_grace(record, f"turn {status.value}"),
+                f"subagent-close-{record.id}",
+            )
 
-    async def _cancel_running(self, record: Subagent) -> None:
+    async def _close_after_grace(self, record: Subagent, reason: str) -> None:
+        if self.archive_grace_seconds > 0:
+            await asyncio.sleep(self.archive_grace_seconds)
+        await self._close(record, reason)
+
+    async def _cancel_running(self, record: Subagent, *, turn_id: Optional[str] = None) -> None:
         tasks = [
             self._tasks[t.turn_id]
             for t in record.turns
-            if t.status == SubagentTurnStatus.RUNNING and t.turn_id in self._tasks
+            if t.status == SubagentTurnStatus.RUNNING
+            and t.turn_id in self._tasks
+            and (turn_id is None or t.turn_id == turn_id)
         ]
         current = asyncio.current_task()
         tasks = [task for task in tasks if task is not current]
@@ -552,9 +744,15 @@ class SubagentService:
         record.closed_at = utc_now()
         record.close_reason = reason
         await self._cancel_running(record)
-        self._save()
+        try:
+            await self._save()
+        except Exception:
+            logger.exception("Failed to persist closing subagent %s", record.id)
         if record.tab_id:
-            await self._archive_quietly(record.tab_id)
+            tab = self.runtime.get_tab(record.tab_id)
+            # A tab the user unarchived was detached from this record: keep it.
+            if tab is not None and tab.subagent_id == record.id:
+                await self._archive_quietly(record.tab_id)
 
     async def _archive_quietly(self, tab_id: str) -> None:
         tab = self.runtime.get_tab(tab_id)
@@ -574,7 +772,7 @@ class SubagentService:
         if not affected or self._shutting_down:
             return
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
             return
         for record in affected:
@@ -583,9 +781,7 @@ class SubagentService:
                 if record.parent_tab_id == tab_id
                 else "subagent tab archived or deleted"
             )
-            task = loop.create_task(self._close(record, reason), name=f"subagent-close-{record.id}")
-            self._background.add(task)
-            task.add_done_callback(self._background.discard)
+            self._track(self._close(record, reason), f"subagent-close-{record.id}")
 
 
 def is_terminal(status: SubagentTurnStatus) -> bool:
@@ -606,16 +802,19 @@ def _default_runtime() -> SubagentRuntime:
         tab_id: str, text: str, turn_id: str, visible_text: str, timeout_seconds: float
     ) -> str:
         # Imported lazily: the API facade owns the bound tailer manager.
-        from ..api.agent_stream import dispatch_tab_chat_and_wait
+        from ..api.agent_stream import ExternalInteractionRequired, dispatch_tab_chat_and_wait
 
-        return await dispatch_tab_chat_and_wait(
-            tab_id,
-            text,
-            turn_id,
-            visible_text=visible_text,
-            timeout_seconds=timeout_seconds,
-            prefer_final_text=True,
-        )
+        try:
+            return await dispatch_tab_chat_and_wait(
+                tab_id,
+                text,
+                turn_id,
+                visible_text=visible_text,
+                timeout_seconds=timeout_seconds,
+                prefer_final_text=True,
+            )
+        except ExternalInteractionRequired as exc:
+            raise SubagentInteractionRequired(str(exc)) from exc
 
     def list_tabs() -> Iterable[TerminalTab]:
         return [process.to_schema() for process in list(ttyd_manager.processes.values())]

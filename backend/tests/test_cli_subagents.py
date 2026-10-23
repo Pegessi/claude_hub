@@ -38,6 +38,7 @@ class Hub:
     def __init__(self) -> None:
         self.requests: List[httpx.Request] = []
         self.create_failures = 0
+        self.create_interrupts = 0
         self.poll_results: List[Any] = []
         self.cancel_result: Dict[str, Any] = {"turn": _turn("cancelled", error="Cancelled")}
 
@@ -48,6 +49,9 @@ class Hub:
             if self.create_failures:
                 self.create_failures -= 1
                 raise httpx.ConnectError("connection refused", request=request)
+            if self.create_interrupts:
+                self.create_interrupts -= 1
+                raise KeyboardInterrupt()
             return httpx.Response(201, json=_turn("running"))
         if request.method == "GET" and path.startswith("/api/subagents/sa-1/turns/"):
             item = self.poll_results.pop(0)
@@ -174,6 +178,53 @@ def test_ctrl_c_cancels_the_turn(hub: Hub) -> None:
     result = _run(["agent", "run", "--provider", "codex", "--prompt", "x"])
     assert result.exit_code == 130
     assert hub.requests[-1].url.path == "/api/subagents/sa-1/cancel"
+    assert hub.requests[-1].url.params["turn_id"] == "turn-1"
+
+
+@pytest.mark.parametrize("command", ["run", "send"])
+def test_ctrl_c_during_start_cancels_by_call_id(hub: Hub, command: str) -> None:
+    hub.create_interrupts = 1
+    args = (
+        ["agent", "run", "--provider", "codex"] if command == "run" else ["agent", "send", "sa-1"]
+    )
+    result = _run([*args, "--prompt", "x", "--call-id", "call-9"])
+    assert result.exit_code == 130
+    posts = [r for r in hub.requests if r.method == "POST"]
+    # The interrupted POST is repeated with the same body (same call_id) to
+    # learn the turn it started, which is then cancelled by id.
+    assert len(posts) == 3
+    assert posts[0].content == posts[1].content
+    assert json.loads(posts[1].content)["call_id"] == "call-9"
+    assert posts[2].url.path == "/api/subagents/sa-1/cancel"
+    assert posts[2].url.params["turn_id"] == "turn-1"
+    assert "call-9" in result.stderr
+
+
+def test_second_ctrl_c_during_start_explains_how_to_cancel(hub: Hub) -> None:
+    hub.create_interrupts = 2
+    result = _run(["agent", "run", "--provider", "codex", "--prompt", "x", "--call-id", "c-2"])
+    assert result.exit_code == 130
+    assert "agent cancel" in result.stderr and "c-2" in result.stderr
+    assert all(r.url.path == "/api/subagents" for r in hub.requests)
+
+
+def test_result_wait_ctrl_c_only_stops_watching(hub: Hub) -> None:
+    hub.poll_results = [_turn("running"), KeyboardInterrupt()]
+    result = _run(["agent", "result", "sa-1", "--wait"])
+    assert result.exit_code == 130
+    assert all("/cancel" not in r.url.path for r in hub.requests)
+    assert "keeps running" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("flag", "expected"), [("--solo", True), ("--no-solo", False), (None, None)]
+)
+def test_run_solo_flag(hub: Hub, flag: Any, expected: Any) -> None:
+    hub.poll_results = [_turn("completed", final_text="ok")]
+    args = ["agent", "run", "--provider", "codex", "--prompt", "x"]
+    result = _run(args + ([flag] if flag else []))
+    assert result.exit_code == 0, result.output
+    assert hub.bodies()[0].get("solo_mode") == expected
 
 
 @pytest.mark.parametrize("mode", ["file", "stdin"])
