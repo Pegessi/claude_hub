@@ -1,6 +1,6 @@
 # Task Lifecycle Refactor: one phase, one owner, one writer
 
-Status: Layer 1 implemented on `codex/task-lifecycle`; Layers 2–5 planned.
+Status: Layers 1 and 3a implemented on `codex/task-lifecycle`; the remaining layers are planned.
 Continues [the 2026-05-23 state machine assessment](2026-05-23-state-machine-assessment.md),
 which extracted pure policy helpers (its step 2) but never introduced the
 reducer, explicit sub-phases or a single transition owner (its steps 3–6).
@@ -74,11 +74,18 @@ attention = phase ∈ {needs_user, awaiting_acceptance, orphaned}
 
 Rules this model makes explicit (Layers 2–3):
 
-- **Occupancy ≠ affinity.** Only `running` and `reviewing` occupy a session.
-  A Task in `needs_user` or `awaiting_acceptance` keeps a *preference* for
-  its agent but frees it. When resumed, it re-queues with affinity; if the
-  agent was reused meanwhile, it is resumed with its report history, as
-  migration already does.
+- **One open Task per agent; parallel Tasks get parallel agents** (decided by
+  the user on 2026-10-24). An agent stays bound to its Task until the Task is
+  done, so the implementation context remains consistent for revisions and
+  rejection; this was already intended. New work never queues behind an agent
+  that another open Task holds; it gets a dedicated agent instead. Agents are
+  neither over-provisioned nor shared between open Tasks: the agent count
+  follows the number of Tasks running in parallel, and an agent whose Task is
+  done is reused before a new one is created.
+  - Only an explicit user target ("User selected target agent") may wait
+    behind a held agent.
+  - Related-task and previous-assignment continuity are preferences: they
+    reuse that agent only while it is free.
 - **Owner loss is a transition, not a silent state.** When the owner is
   `gone` past a grace period, the reconciler moves the Task to `orphaned` and
   emits an event. Policy then redispatches (workspace control), notifies the
@@ -95,7 +102,8 @@ Each layer is separately shippable and keeps legacy `status` consistent.
 |---|---|---|---|
 | **1. Projection** (done) | Pure `services/task_lifecycle.py` plus `models/schema_domains/lifecycle.py`; `WorkspaceBoard.task_lifecycles`. | None (additive field). | 31 unit tests; existing workspace/board/queue/review suites pass (815); dry run on live data classifies all 18 open Tasks correctly. |
 | **2. Consumers** | CLI `task list/get/status` show phase, reason and blocker plus `task list --attention/--phase` (done with Layer 1); board UI badges from `task_lifecycles` replace timestamp heuristics in `useWorkspaceTaskPresentation`; Dot watcher keys off phase transitions and pushes attention phases to Feishu deterministically (persisted `notified`, retry). | Visible and notification only. | A user sees "orphaned: Chat archived" and "queued behind cadb399d (needs your answer)" without polling. |
-| **3. Single writer** | `apply_task_transition(task, event, facts) → (patch, effects, TaskEvent)` reducer. The ~25 status write sites call it; it is the only place that sets `status`, the review timestamps and the session pointers. Monitor failure, timeout and owner loss become events. | Occupancy rule (`needs_user` / `awaiting_acceptance` free the agent); missing events now emitted. | Transition-table tests; the cadb399d scenario no longer starves the queue; characterization suites pass. |
+| **3a. Dedicated agents** (done) | `_choose_dispatch_target` provisions a dedicated agent instead of "Queued behind existing workspace agent". It inherits the launch config of the newest same-provider agent: env preset, Chat env and remote target. Free-agent reuse now requires the Task's provider. After each dispatch pass, stranded queued Tasks get their own agent; provisioning is throttled to one attempt per Task per 60 s and runs outside the dispatch lock. | The cadb399d deadlock cannot recur, and already-stranded Tasks are rescued. | Policy tests rewritten to the 1:1 contract; legacy stranded-queue rescue test; full suite passes. |
+| **3. Single writer** | `apply_task_transition(task, event, facts) → (patch, effects, TaskEvent)` reducer. The ~25 status write sites call it; it is the only place that sets `status`, the review timestamps and the session pointers. Monitor failure, timeout and owner loss become events. | Missing events now emitted. | Transition-table tests; the cadb399d scenario no longer starves the queue; characterization suites pass. |
 | **4. Owner lease and reconciler** | Persist `owner` and `phase`. A single 5 s reconciler replaces the subagent-only death check, the hub-task orphan converger, the review reaper's no-session gap and the initiator turn-only activity. Initiator owner = Chat tab (archive or delete = gone). | Orphans are resolved by policy instead of lingering. | No non-terminal Task with a gone owner survives longer than grace + 1 tick. |
 | **5. Subtraction** | Load-time migration derives `phase` for old records; delete redundant fields: `dispatch_pending` → queued reason, `execution_released` → orphaned reason, `review_delivery_*`/`review_skip_*`/`human_acceptance_requested_at` → event log; `autonomous_run.phase` maps 1:1. Collapse `execution_control × task_mode` (8 combinations) once `agent run` removes the need for `subagent` mode. | Schema shrink. | Task record roughly 70 → ~35 fields; frontend derives no lifecycle. |
 
@@ -120,3 +128,16 @@ checkpoints. Both consume Layer 2/3 events.
 - `test_reviewer_question_still_holds_worker_until_policy_changes` pins
   today's occupancy, so the Layer 3 policy change is a deliberate, visible
   test edit.
+
+## Layer 3a notes
+
+- The `_request_dispatch_decision` branch in `_start_task_workspace` is now
+  unreachable, because target selection always returns an agent. Layer 5
+  deletes it together with `dispatch_pending`.
+- `_next_reassignable_queued_task` remains for pinned work and for moving
+  Tasks to agents that are already free. Under the 1:1 rule it should become
+  dead code once no Task can be persisted behind a held agent; remove it in
+  Layer 5 after one release.
+- Starting a Task when the only agent is stopped now creates a new agent
+  instead of returning 400. A stopped agent runs no Task, so the 1:1 rule
+  applies.

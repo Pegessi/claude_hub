@@ -33,6 +33,7 @@ from ._constants import (
     Workspace,
     WorkspaceTask,
     asyncio,
+    datetime,
     json,
     logger,
 )
@@ -63,6 +64,8 @@ class _StateMixin(_WorkspaceManagerBase):
         # scheduled hub_task whose worker session died. Keyed by the internal
         # WorkspaceTask id (distinct from the ScheduledTask fire lock above).
         self._hubtask_orphan_locks: dict[str, asyncio.Lock] = {}
+        # Last dedicated-agent provisioning attempt per stranded queued Task.
+        self._dedicated_agent_attempts: dict[str, datetime] = {}
         self._scheduled_legacy_run_ids: set[str] = set()
         self._scheduled_chat_recovery_pending = False
         self._chat_delivery_getter: Callable[[], ChatMessageInbox] | None = None
