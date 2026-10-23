@@ -7,6 +7,15 @@
 
 ## Released
 
+### refactor(task): remove dead dispatch and ChatWork CLI paths
+
+- Removed the unreachable dispatcher-decision request from Task start. The
+  `dispatch-decision` endpoint stays for previously pending Tasks.
+- Removed the `claude-hub work` command group, whose backend no longer
+  exists (every call returned 404).
+- `docs/TASK_GRAPH.md` documents the Task lifecycle, and `ARCHITECTURE.md`
+  names its owners.
+
 ### feat(task): resolve Tasks whose owner is gone
 
 - A Task whose agent stopped, was archived or vanished now fails after

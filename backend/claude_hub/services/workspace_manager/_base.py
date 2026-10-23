@@ -380,11 +380,6 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     ) -> str: ...
 
     @abstractmethod
-    def _build_dispatch_decision_prompt(
-        self, workspace: Workspace, task: WorkspaceTask, dispatcher: ManagedSession
-    ) -> str: ...
-
-    @abstractmethod
     def _build_task_assignment_prompt(
         self,
         workspace: Workspace,

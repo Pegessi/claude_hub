@@ -7,22 +7,6 @@ from claude_hub.services.workspace_manager._constants import *  # noqa: F401,F40
 
 
 class _TaskContinuationMixin(_WorkspaceManagerBase):
-    async def _request_dispatch_decision(self, workspace: Workspace, task: WorkspaceTask) -> None:
-        task = self._require_workspace_execution(task)
-        dispatcher = await self.ensure_workspace_agent(
-            workspace.id,
-            EnsureWorkspaceAgentRequest(
-                agent_type=task.agent_type,
-                session_kind=task.session_kind,
-                role=WorkspaceSessionRole.DISPATCHER,
-                reuse_existing=True,
-            ),
-        )
-        await self.send_session_message(
-            dispatcher.id,
-            self._build_dispatch_decision_prompt(workspace, task, dispatcher),
-        )
-
     async def _apply_dispatch_decision_workspace(
         self,
         task_id: str,
