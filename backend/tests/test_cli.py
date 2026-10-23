@@ -1552,3 +1552,11 @@ def test_task_list_tolerates_board_without_lifecycles(monkeypatch):
     result = CliRunner().invoke(cli, ["--json", "task", "list", "ws1"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == board["tasks"]
+
+
+def test_task_list_lifecycle_filters_warn_on_old_hub(monkeypatch):
+    board = {"tasks": [{"id": "t1", "title": "Old", "status": "todo"}]}
+    patch_get_client(monkeypatch, lambda request: httpx.Response(200, json=board))
+    result = CliRunner().invoke(cli, ["task", "list", "ws1", "--attention"])
+    assert result.exit_code == 0, result.output
+    assert "does not report task lifecycles" in result.stderr

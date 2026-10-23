@@ -7,7 +7,7 @@ answer to "what phase is this Task in, who owns it, and must a human act?".
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from ..models.schemas import (
@@ -17,6 +17,7 @@ from ..models.schemas import (
     AutonomousRunPhase,
     ManagedSession,
     ManagedSessionStatus,
+    SessionKind,
     TaskExecutionControl,
     TaskLifecycle,
     TaskOwner,
@@ -37,15 +38,23 @@ class ChatTabFacts:
     archived: bool = False
 
 
+# A worker report moves the Task to review before a reviewer is selected or
+# spawned; within this window an unrouted review is still being routed.
+REVIEW_ROUTING_GRACE = timedelta(minutes=10)
+
+
 @dataclass(frozen=True)
 class LifecycleFacts:
     task: WorkspaceTask
+    # Latest reviewer verdict for the Task's *current* review cycle only;
+    # verdicts from earlier rounds no longer govern it.
     latest_review_state: Optional[AgentReportState] = None
     worker_session: Optional[ManagedSession] = None
     reviewer_session: Optional[ManagedSession] = None
     chat_tab: Optional[ChatTabFacts] = None
     dependencies_blocked: bool = False
     blocked_by_task_id: Optional[str] = None
+    now: Optional[datetime] = None
 
 
 def session_owner_state(session: Optional[ManagedSession]) -> TaskOwnerState:
@@ -54,7 +63,11 @@ def session_owner_state(session: Optional[ManagedSession]) -> TaskOwnerState:
     if session.status == ManagedSessionStatus.STOPPED:
         return TaskOwnerState.GONE
     if session.runtime_status == AgentRuntimeStatus.OFFLINE:
-        return TaskOwnerState.GONE
+        # Terminal OFFLINE persists as STOPPED; a managed Chat reports OFFLINE
+        # for recoverable provider errors and keeps its session.
+        if session.session_kind != SessionKind.CHAT:
+            return TaskOwnerState.GONE
+        return TaskOwnerState.UNKNOWN
     if session.status == ManagedSessionStatus.SPAWNING:
         return TaskOwnerState.ACTIVE
     if session.runtime_status == AgentRuntimeStatus.WORKING:
@@ -86,9 +99,16 @@ def _session_needs_user(session: Optional[ManagedSession]) -> bool:
     if session is None:
         return False
     return (
-        session.status == ManagedSessionStatus.NEEDS_INPUT
+        session.status in {ManagedSessionStatus.NEEDS_INPUT, ManagedSessionStatus.ERROR}
         or session.runtime_status == AgentRuntimeStatus.ATTENTION
     )
+
+
+def _within(now: Optional[datetime], then: datetime, window: timedelta) -> bool:
+    """True when ``then`` is recent, or when the clock cannot be compared."""
+    if now is None or (now.tzinfo is None) != (then.tzinfo is None):
+        return True
+    return now - then < window
 
 
 def _holds(task: WorkspaceTask, session: Optional[ManagedSession]) -> bool:
@@ -223,10 +243,9 @@ def _derive_review(
             return TaskPhase.ORPHANED, "reviewer_gone", reviewer, task.review_requested_at
         return TaskPhase.REVIEWING, "ai_review_in_progress", reviewer, task.review_requested_at
     verdict_at = task.review_completed_at
-    if facts.latest_review_state == AgentReportState.REVIEW_NEEDS_INPUT:
-        return TaskPhase.NEEDS_USER, "reviewer_needs_input", worker, verdict_at
-    if facts.latest_review_state == AgentReportState.REVIEW_FAILED:
-        return TaskPhase.NEEDS_USER, "review_failed_not_resumed", worker, verdict_at
+    verdict = facts.latest_review_state
+    # Only a final pass or a review skip requests acceptance, so these win over
+    # any verdict text.
     if task.human_acceptance_requested_at:
         return (
             TaskPhase.AWAITING_ACCEPTANCE,
@@ -236,6 +255,14 @@ def _derive_review(
         )
     if task.review_skipped_at:
         return TaskPhase.AWAITING_ACCEPTANCE, "review_skipped", worker, task.review_skipped_at
-    if facts.latest_review_state == AgentReportState.REVIEW_PASSED:
-        return TaskPhase.AWAITING_ACCEPTANCE, "review_passed", worker, verdict_at
+    if verdict == AgentReportState.REVIEW_NEEDS_INPUT:
+        return TaskPhase.NEEDS_USER, "reviewer_needs_input", worker, verdict_at
+    if verdict == AgentReportState.REVIEW_FAILED:
+        return TaskPhase.NEEDS_USER, "review_failed_not_resumed", worker, verdict_at
+    if verdict == AgentReportState.REVIEW_PASSED:
+        # A Goal Packet approval never requests acceptance; the Hub resumes
+        # the worker (or its recovery retries), so nobody needs to accept yet.
+        return TaskPhase.QUEUED, "plan_approved_resuming", worker, verdict_at
+    if _within(facts.now, task.updated_at, REVIEW_ROUTING_GRACE):
+        return TaskPhase.REVIEWING, "review_pending", worker, task.updated_at
     return TaskPhase.NEEDS_USER, "review_unrouted", worker, None

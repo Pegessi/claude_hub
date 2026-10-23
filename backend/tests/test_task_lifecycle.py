@@ -13,6 +13,7 @@ from claude_hub.models import (
     AgentType,
     ManagedSession,
     ManagedSessionStatus,
+    SessionKind,
     WorkspaceSessionRole,
     WorkspaceTask,
     WorkspaceTaskStatus,
@@ -59,6 +60,7 @@ def _session(
     task_id: Optional[str] = "task-1",
     archived: bool = False,
     role: WorkspaceSessionRole = WorkspaceSessionRole.ORCHESTRATOR,
+    kind: SessionKind = SessionKind.TERMINAL,
 ) -> ManagedSession:
     return ManagedSession(
         id=session_id,
@@ -68,6 +70,7 @@ def _session(
         agent_type=AgentType.CLAUDE,
         status=status,
         runtime_status=runtime,
+        session_kind=kind,
         task_id=task_id,
         archived=archived,
         title=session_id,
@@ -175,7 +178,7 @@ def test_review_in_flight_with_dead_reviewer_is_orphaned() -> None:
     [
         (AgentReportState.REVIEW_NEEDS_INPUT, (TaskPhase.NEEDS_USER, "reviewer_needs_input")),
         (AgentReportState.REVIEW_FAILED, (TaskPhase.NEEDS_USER, "review_failed_not_resumed")),
-        (AgentReportState.REVIEW_PASSED, (TaskPhase.AWAITING_ACCEPTANCE, "review_passed")),
+        (AgentReportState.REVIEW_PASSED, (TaskPhase.QUEUED, "plan_approved_resuming")),
     ],
 )
 def test_review_verdicts_name_the_waiting_party(
@@ -318,3 +321,64 @@ def test_terminal_status_wins_over_owner_liveness(
     assert lifecycle.phase == phase
     assert lifecycle.attention is False
     assert lifecycle.holds_session is False
+
+
+def test_acceptance_request_wins_over_verdict_text() -> None:
+    task = _task(
+        status=WorkspaceTaskStatus.REVIEW,
+        review_completed_at=NOW - timedelta(minutes=2),
+        human_acceptance_requested_at=NOW - timedelta(minutes=1),
+    )
+    facts = LifecycleFacts(task=task, latest_review_state=AgentReportState.REVIEW_FAILED)
+    assert _phase(facts) == (TaskPhase.AWAITING_ACCEPTANCE, "awaiting_acceptance")
+
+
+def test_review_skip_awaits_acceptance() -> None:
+    task = _task(status=WorkspaceTaskStatus.REVIEW, review_skipped_at=NOW)
+    assert _phase(LifecycleFacts(task=task)) == (TaskPhase.AWAITING_ACCEPTANCE, "review_skipped")
+
+
+def test_goal_packet_approval_is_not_presented_for_acceptance() -> None:
+    task = _task(
+        status=WorkspaceTaskStatus.REVIEW,
+        review_requested_at=NOW - timedelta(minutes=5),
+        review_completed_at=NOW - timedelta(minutes=1),
+    )
+    facts = LifecycleFacts(task=task, latest_review_state=AgentReportState.REVIEW_PASSED)
+    lifecycle = derive_task_lifecycle(facts)
+    assert (lifecycle.phase, lifecycle.reason) == (TaskPhase.QUEUED, "plan_approved_resuming")
+    assert lifecycle.attention is False
+
+
+def test_review_before_reviewer_is_routed_is_pending_then_unrouted() -> None:
+    task = _task(status=WorkspaceTaskStatus.REVIEW, updated_at=NOW - timedelta(minutes=1))
+    assert _phase(LifecycleFacts(task=task, now=NOW)) == (TaskPhase.REVIEWING, "review_pending")
+    stale = task.model_copy(update={"updated_at": NOW - timedelta(hours=1)})
+    assert _phase(LifecycleFacts(task=stale, now=NOW)) == (TaskPhase.NEEDS_USER, "review_unrouted")
+
+
+def test_offline_chat_session_is_not_treated_as_gone() -> None:
+    session = _session(
+        kind=SessionKind.CHAT,
+        status=ManagedSessionStatus.NEEDS_INPUT,
+        runtime=AgentRuntimeStatus.OFFLINE,
+    )
+    lifecycle = derive_task_lifecycle(LifecycleFacts(task=_task(), worker_session=session))
+    assert (lifecycle.phase, lifecycle.reason) == (TaskPhase.NEEDS_USER, "agent_needs_input")
+    assert lifecycle.owner.state == TaskOwnerState.UNKNOWN
+
+
+def test_stopped_chat_session_is_gone() -> None:
+    session = _session(kind=SessionKind.CHAT, status=ManagedSessionStatus.STOPPED)
+    assert _phase(LifecycleFacts(task=_task(), worker_session=session)) == (
+        TaskPhase.ORPHANED,
+        "agent_gone",
+    )
+
+
+def test_errored_worker_needs_user() -> None:
+    session = _session(status=ManagedSessionStatus.ERROR, runtime=AgentRuntimeStatus.IDLE)
+    assert _phase(LifecycleFacts(task=_task(), worker_session=session)) == (
+        TaskPhase.NEEDS_USER,
+        "agent_needs_input",
+    )
