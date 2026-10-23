@@ -63,6 +63,7 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     _dedicated_agent_attempts: dict[str, datetime]
     _stranded_provisioning_jobs: dict[str, asyncio.Task[None]]
     _task_notifier: TaskNotifier | None
+    _task_notice_jobs: dict[str, asyncio.Task[None]]
     _monitor_task: asyncio.Task[None] | None
     _pump_locks: dict[str, asyncio.Lock]
     _report_intake_committed: set[str]
@@ -546,6 +547,9 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
 
     @abstractmethod
     async def _deliver_task_notices(self, workspace_id: str) -> int: ...
+
+    @abstractmethod
+    def _schedule_task_notices(self, workspace_id: str) -> None: ...
 
     @abstractmethod
     def task_lifecycles(self, tasks: list[WorkspaceTask]) -> dict[str, TaskLifecycle]: ...

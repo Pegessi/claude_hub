@@ -109,7 +109,7 @@ class _WorkspacesMixin(
                     await self.dispatch_workspace(workspace_id, refresh_sessions=False)
                     try:
                         self._observe_task_lifecycles(workspace_id)
-                        await self._deliver_task_notices(workspace_id)
+                        self._schedule_task_notices(workspace_id)
                     except Exception:
                         logger.exception(
                             "Task lifecycle observation failed workspace_id=%s",

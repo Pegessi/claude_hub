@@ -71,6 +71,8 @@ class _StateMixin(_WorkspaceManagerBase):
         self._stranded_provisioning_jobs: dict[str, asyncio.Task[None]] = {}
         # Injected by the API layer: delivers Task notices (e.g. to Feishu).
         self._task_notifier: TaskNotifier | None = None
+        # One background job per workspace delivers Task notices.
+        self._task_notice_jobs: dict[str, asyncio.Task[None]] = {}
         self._scheduled_legacy_run_ids: set[str] = set()
         self._scheduled_chat_recovery_pending = False
         self._chat_delivery_getter: Callable[[], ChatMessageInbox] | None = None

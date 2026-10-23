@@ -86,3 +86,7 @@ class TaskLifecycleMark(BaseModel):
     next_notify_at: Optional[datetime] = None
     # Digest of the last Goal Packet announced as a plan checkpoint.
     plan_digest: Optional[str] = None
+    # The last attention notice actually considered for delivery, carried across
+    # marks so a phase that flaps back within the cooldown is not re-announced.
+    last_notice_key: Optional[str] = None
+    last_notice_at: Optional[datetime] = None

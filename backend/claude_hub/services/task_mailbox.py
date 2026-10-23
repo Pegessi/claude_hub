@@ -483,6 +483,12 @@ class TaskMailbox:
             self._call_index.get(workspace_id, {}).pop(event.call_id, None)
             self._next_seq[workspace_id] = event.sequence
 
+    def wake_events(self, events: List[TaskEvent]) -> None:
+        """Wake waiters for events appended with ``persist=False`` once saved."""
+
+        for event in events:
+            self._wake_compat_waiters(event)
+
     def _wake_compat_waiters(self, event: TaskEvent) -> None:
         task = self._wm.tasks.get(event.task_id)
         if task is None:
