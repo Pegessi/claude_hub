@@ -41,7 +41,8 @@ WATCH_INTERVAL_SECONDS = 60.0
 YIELD_PAUSE_SECONDS = 180.0
 # A wake-up that ran again (stopped, failed) may send the same notice twice: skip it.
 NOTIFY_REPEAT_SECONDS = 1800.0
-DEFAULT_STALL_HOURS = 2.0
+# Long tasks should surface silence early; a brief can still raise it per task.
+DEFAULT_STALL_HOURS = 1.0
 _TERMINAL_TASK_STATES = {"done", "failed"}
 # Only running tasks can look stuck; review waits on a person, todo was never started.
 _STALL_TASK_STATES = {"queued", "working"}

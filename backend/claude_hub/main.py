@@ -165,6 +165,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
 
         continuation_task = asyncio.create_task(continue_interrupted_chats())
+        from .api.task_notifications import deliver_task_notice
+
+        # Task notices (questions, acceptance, owner loss, plans) go out from the
+        # monitor; Feishu routing lives in the API layer.
+        workspace_manager.configure_task_notifier(deliver_task_notice)
         workspace_manager.start_background_monitor()
         from .api.routes.agent_stream.messages import start_inbox
 

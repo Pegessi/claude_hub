@@ -71,6 +71,11 @@ export function applyBoardPayloadState(
           ? mergeBoardPollReports(currentBoard.reports, payload.reports, mergedTasks)
           : payload.reports,
       tasks_pagination: tasksPagination,
+      // Pages carry lifecycles only for their own tasks; keep the rest.
+      task_lifecycles: {
+        ...(currentBoard.task_lifecycles ?? {}),
+        ...(payload.task_lifecycles ?? {}),
+      },
     }
   }
   return payload

@@ -44,6 +44,8 @@ class TaskEventType(str, Enum):
     INTERRUPT = "interrupt"
     COMPLETED = "completed"
     FAILED = "failed"
+    # The Hub observed a lifecycle phase change (any writer, including runtime loss).
+    LIFECYCLE = "lifecycle"
 
 
 class TaskEvent(BaseModel):

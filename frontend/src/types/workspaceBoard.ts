@@ -9,6 +9,31 @@ export interface BoardTasksPagination {
   status_counts?: Record<string, number>
 }
 
+export type TaskPhase =
+  | 'draft'
+  | 'queued'
+  | 'running'
+  | 'reviewing'
+  | 'needs_user'
+  | 'awaiting_acceptance'
+  | 'orphaned'
+  | 'done'
+  | 'failed'
+
+/** Server-derived lifecycle of one Task: the single answer to "who must act". */
+export interface TaskLifecycle {
+  task_id: string
+  phase: TaskPhase
+  reason: string
+  reason_text: string
+  owner: { kind: 'session' | 'chat' | 'none'; id?: string | null; state: string }
+  attention: boolean
+  blocked_by_task_id?: string | null
+  holds_session: boolean
+  since: string
+  legacy_status: string
+}
+
 export interface WorkspaceBoard {
   workspace: Workspace
   tasks: WorkspaceTask[]
@@ -17,6 +42,7 @@ export interface WorkspaceBoard {
   markdown_documents?: WorkspaceMarkdownDocument[]
   snapshot_path?: string | null
   tasks_pagination?: BoardTasksPagination | null
+  task_lifecycles?: Record<string, TaskLifecycle>
 }
 
 export type FeedbackLessonScope = 'workspace' | 'family' | 'global'

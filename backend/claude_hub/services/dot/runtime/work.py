@@ -71,6 +71,34 @@ def _final_review_report(task: Any, reports: list[Any]) -> Any:
     return None
 
 
+def _lifecycle_hint(workspace_manager: Any, task: Any) -> str:
+    """Why a quiet task is quiet, from the Hub's lifecycle view (empty if unknown)."""
+    from ...task_lifecycle import reason_text
+
+    try:
+        lifecycle = workspace_manager.task_lifecycles([task])[task.id]
+        if lifecycle.blocked_by_task_id:
+            blocker = workspace_manager.tasks.get(lifecycle.blocked_by_task_id)
+            if blocker is None:
+                return "; waiting behind another task"
+            blocked_by = workspace_manager.task_lifecycles([blocker])[blocker.id]
+            return f"; waiting behind {blocker.title!r}: {reason_text(blocked_by.reason)}"
+        if lifecycle.reason in {
+            "agent_working",
+            "initiator_working",
+            "waiting_for_agent",
+        }:
+            return ""
+        return f"; {reason_text(lifecycle.reason)}"
+    except Exception:
+        logger.debug(
+            "dot: lifecycle hint failed for %s",
+            getattr(task, "id", None),
+            exc_info=True,
+        )
+        return ""
+
+
 class DotWorkService(DotSessionService, ABC):
     @abstractmethod
     async def wake(self) -> bool:
@@ -844,7 +872,8 @@ class DotWorkService(DotSessionService, ABC):
                     (
                         "task_stalled",
                         f"{title} — no progress for "
-                        f"{idle.total_seconds() / 3600:.1f}h (status {status})",
+                        f"{idle.total_seconds() / 3600:.1f}h (status {status}"
+                        f"{_lifecycle_hint(workspace_manager, task)})",
                         None,
                     )
                 )

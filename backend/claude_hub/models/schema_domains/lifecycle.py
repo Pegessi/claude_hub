@@ -57,6 +57,8 @@ class TaskLifecycle(BaseModel):
     phase: TaskPhase
     # Machine-readable cause for the phase, e.g. ``reviewer_needs_input``.
     reason: str
+    # Human-readable form of ``reason`` for UI and notices.
+    reason_text: str = ""
     owner: TaskOwner
     attention: bool
     # Queued work waiting behind a session that another Task still holds.
@@ -65,3 +67,22 @@ class TaskLifecycle(BaseModel):
     holds_session: bool = False
     since: datetime
     legacy_status: Literal["todo", "queued", "working", "review", "done", "failed"]
+
+
+class TaskLifecycleMark(BaseModel):
+    """Last lifecycle the Hub observed for a Task, plus its notification state.
+
+    Persisted so a phase change is announced exactly once across restarts.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    phase: TaskPhase
+    reason: str
+    changed_at: datetime
+    # Set once the change was delivered, had no recipient, or needs no notice.
+    notified_at: Optional[datetime] = None
+    notify_attempts: int = 0
+    next_notify_at: Optional[datetime] = None
+    # Digest of the last Goal Packet announced as a plan checkpoint.
+    plan_digest: Optional[str] = None

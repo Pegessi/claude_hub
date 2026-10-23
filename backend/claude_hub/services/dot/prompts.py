@@ -78,11 +78,16 @@ TOOL_GUIDE = """\
   or failed, or delegate a separate check.
 - `claude-hub dot lessons` — your brief lessons; `lessons edit|drop|merge` keep them tidy
 - `claude-hub dot watch <task-id> [--stall-hours N]` — watch an existing Hub task (default \
-stuck alarm: 2 hours without progress); `claude-hub dot unwatch <task-id>` stops it
+stuck alarm: 1 hour without progress); `claude-hub dot unwatch <task-id>` stops it
 - `claude-hub dot notify "<markdown>" [--title "..." --tone done|failed|decision|info]` —
   message the user's Feishu chat (the bot bound to this Chat); with a title it is a
   card with a coloured header. `Reach:` shows the reply destination and bot binding.
   Use it when an update should reach the user now but this turn's reply will not.
+- `claude-hub task followup <workspace-id> <task-id> --message "..."` — steer a running
+  task (new direction, answer, scope change) without waiting for its result. When the
+  user answers a plan or question notice about a task, pass it on with this.
+- `claude-hub task list <workspace-id> --attention` — tasks waiting on a person or
+  without an owner, with the reason
 - `claude-hub task accept <task-id>` — accept a finished task once the user agrees
 - `claude-hub workspace list` — find a workspace id
 - `claude-hub dot identity [--name "..."] [--avatar "<emoji>"]` — show or change your name/avatar
@@ -115,6 +120,10 @@ BRIEF_TEMPLATE = """\
 {constraints}
 
 ## How to work
+- Post your plan (Goal Packet) before substantial work; the user sees it and may
+  redirect you through a follow-up message.
+- Report progress at each milestone: what you learned and what comes next.
+- If findings point away from the Goal or the plan, stop and ask instead of widening scope.
 - Prefer independent progress; use sub-agents when they help.
 - Ask for clarification when a missing decision blocks useful progress.
 - Follow the repository rules (CLAUDE.md / AGENTS.md) when they exist.
@@ -130,16 +139,27 @@ QUIET_REPLY = "[quiet]"
 WAKE_MESSAGE = (
     "[Dot wake] New task events are in context. For delegated tasks, judge the result "
     "card against its done-when list and record it with `claude-hub dot review`; a "
-    "targeted check helps only when evidence is missing. When a task the user asked "
-    "for is done, failed or needs their decision, tell them in plain words: conclusion "
-    "first, a few bullets. With a Feishu bot bound, send it as a card with "
-    '`claude-hub dot notify "<markdown>" --title "..." --tone done|failed|decision`. '
-    "Focus and memory can be updated as needed. "
+    "targeted check helps only when evidence is missing. The Hub has already sent the "
+    "user a short Feishu notice for each question, acceptance request, failure, task "
+    "without an owner, and new plan; do not repeat those. Add only your judgment: what "
+    "you concluded, what you recommend, or what the user must decide, conclusion first. "
+    'With a Feishu bot bound, send it with `claude-hub dot notify "<markdown>" --title '
+    '"..." --tone done|failed|decision`. Focus and memory can be updated as needed. '
     f"If nothing needs reporting, replying exactly {QUIET_REPLY} keeps this turn hidden."
 )
 
 # Earlier wake-up words; a schedule still holding one gets the current words.
 RETIRED_WAKE_MESSAGES = (
+    (
+        "[Dot wake] New task events are in context. For delegated tasks, judge the result "
+        "card against its done-when list and record it with `claude-hub dot review`; a "
+        "targeted check helps only when evidence is missing. When a task the user asked "
+        "for is done, failed or needs their decision, tell them in plain words: conclusion "
+        "first, a few bullets. With a Feishu bot bound, send it as a card with "
+        '`claude-hub dot notify "<markdown>" --title "..." --tone done|failed|decision`. '
+        "Focus and memory can be updated as needed. "
+        f"If nothing needs reporting, replying exactly {QUIET_REPLY} keeps this turn hidden."
+    ),
     "[Dot wake] New task events are in context. Consider the result cards and any "
     "pending decisions; for delegated tasks, `claude-hub dot review` records your judgment. "
     "A brief update may help when there is a useful result, question or problem. "

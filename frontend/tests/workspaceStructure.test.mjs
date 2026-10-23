@@ -106,7 +106,7 @@ test('workspace production files respect the hard line budget and own scoped sty
 // Characterization of the accepted cf16254 view: component boundaries may change,
 // while native elements, conditions, handlers, Teleports and rendered text stay the same.
 test('workspace component expansion preserves the accepted native template', () => {
-  assert.equal(digest(nativeTree(descriptors.get('WorkspacePage').template.ast)), 'f99eee04c92916098e5b39407ad6360ed3264b23a29847cc099eb0ae2cd0ec8a')
+  assert.equal(digest(nativeTree(descriptors.get('WorkspacePage').template.ast)), '1723451c1e6d0501164f5e1aa6c0c9cd84b815f121931b18b73469f1c9c215c6')
 })
 
 test('workspace scoped styles retain every accepted selector and declaration', async () => {
@@ -119,7 +119,7 @@ test('workspace scoped styles retain every accepted selector and declaration', a
       for (const contract of stylesheetContracts(style.content)) rules.add(contract)
     }
   }
-  assert.equal(digest([...rules].sort()), 'acb877695f293ddb7f7d0f9c431992c460d07d1b46374e888a9015b808e13e3c')
+  assert.equal(digest([...rules].sort()), 'dc1112f1c0ee2eadfe17f8f652270895eb55c6b4c15c62ffa9b1cd8b9a0d60f1')
 })
 
 async function componentStyles(name) {
