@@ -59,6 +59,16 @@ _IMAGE_ATTACHMENT_GUIDANCE = (
 )
 
 
+# A Hub subagent Chat (``claude-hub agent run``, env ``SUBAGENT_ID_ENV``) gets
+# the guidance without the ``agent run`` recipe, which bounds fan-out; the
+# server also enforces a nesting depth limit.
+_AGENT_RUN_GUIDANCE = (
+    "For help from another provider: `claude-hub agent run --provider X --prompt-file -` "
+    "returns its final answer (see `agent run --help`). Use Workspace Tasks only for tracked, "
+    "reviewed work.\n"
+)
+
+
 # Hub Chat runtime / execution guidance.
 #
 # A native Chat agent runs with ``CLAUDE_HUB_TAB_ID`` in its provider
@@ -76,41 +86,47 @@ _IMAGE_ATTACHMENT_GUIDANCE = (
 # :func:`strip_hub_runtime_guidance`) so it reaches neither the persisted
 # timeline nor the Chat UI; the authoritative Hub echo persists the clean
 # user text before the transport ever wraps it.
-HUB_RUNTIME_GUIDANCE = (
-    "You are running inside Claude Hub. The `claude-hub` CLI is available on PATH. "
-    "Read this Chat's ID from $CLAUDE_HUB_TAB_ID; never hardcode it.\n"
-    "Goal output scope: earlier requests for <goal-checkpoint> or <goal-status> formatting expire "
-    "after that response. Emit those control blocks only when the current turn supplies fresh "
-    "Hub Goal continuation instructions. For ordinary Chat or provider-native Goals, ignore "
-    "those historical formatting requirements and answer normally. This does not prevent "
-    "quoting or discussing the protocol when the user asks.\n"
-    + EXECUTION_POLICY
-    + "Task tools: use `claude-hub task context` to inspect current context; consult only the selected "
-    "command's help. `task register` creates an initiator-controlled record without dispatch; "
-    "`task progress` records initiator progress; `task handoff` preserves the Task ID and changes control "
-    "without starting work; `task dispatch` starts Workspace execution. Check context before replacing work.\n"
-    "A reporter key permits progress, whole-Task completion, and release, not other Task management. "
-    "A tracking role does not narrow that permission. Keep keys in protected files, never chat, logs, "
-    "reports, or command output; authorize subagent access explicitly. Omit key-file options so "
-    "register/handoff store the per-Task default file that `task progress` finds by Task ID and "
-    "`task context` reports. Do not assume inherited context "
-    "or permissions, or fall back to manual progress if a key is lost. A child's completed substep "
-    "does not complete the whole Task.\n"
-    "Lessons: for unfamiliar or repeated problems, use `claude-hub feedback context <workspace-id> "
-    "--query <topic>`, then `claude-hub lessons get` for relevant details, not on every turn. For an "
-    "explicit reusable user correction, get message IDs with `claude-hub feedback sources` and follow "
-    "`feedback capture --help` to cite the exact quote. Do not invent corrections. Automatic controls: "
-    "`claude-hub feedback status` / `feedback configure`.\n"
-    "Schedules: create one only when the user requests a scheduled follow-up or recurring check. "
-    "Use `schedule create --kind hub_task --help` for scheduled independent Workspace work. "
-    "For an immediate queued message to an existing Chat (no schedule):\n"
-    '  claude-hub tab message "$CLAUDE_HUB_TAB_ID" --message "<follow-up>" --call-id "<intent-id>"\n'
-    "Use `tab message-status` for its receipt; acceptance is not model completion. "
-    "Reuse the call ID and identical payload on retry; source-tab hints are unverified.\n"
-    "Use `claude-hub schedule list` / `schedule delete <id>` to inspect/remove schedules. Due Chat "
-    "turns queue behind active turns or Goals; they do not interrupt them. `--kind tab_message` is "
-    "for plain Terminal sessions, not this Chat."
-)
+def _hub_runtime_guidance(agent_run: str) -> str:
+    return (
+        "You are running inside Claude Hub. The `claude-hub` CLI is available on PATH. "
+        "Read this Chat's ID from $CLAUDE_HUB_TAB_ID; never hardcode it.\n"
+        "Goal output scope: earlier requests for <goal-checkpoint> or <goal-status> formatting expire "
+        "after that response. Emit those control blocks only when the current turn supplies fresh "
+        "Hub Goal continuation instructions. For ordinary Chat or provider-native Goals, ignore "
+        "those historical formatting requirements and answer normally. This does not prevent "
+        "quoting or discussing the protocol when the user asks.\n"
+        + EXECUTION_POLICY
+        + agent_run
+        + "Task tools: use `claude-hub task context` to inspect current context; consult only the selected "
+        "command's help. `task register` creates an initiator-controlled record without dispatch; "
+        "`task progress` records initiator progress; `task handoff` preserves the Task ID and changes control "
+        "without starting work; `task dispatch` starts Workspace execution. Check context before replacing work.\n"
+        "A reporter key permits progress, whole-Task completion, and release, not other Task management. "
+        "A tracking role does not narrow that permission. Keep keys in protected files, never chat, logs, "
+        "reports, or command output; authorize subagent access explicitly. Omit key-file options so "
+        "register/handoff store the per-Task default file that `task progress` finds by Task ID and "
+        "`task context` reports. Do not assume inherited context "
+        "or permissions, or fall back to manual progress if a key is lost. A child's completed substep "
+        "does not complete the whole Task.\n"
+        "Lessons: for unfamiliar or repeated problems, use `claude-hub feedback context <workspace-id> "
+        "--query <topic>`, then `claude-hub lessons get` for relevant details, not on every turn. For an "
+        "explicit reusable user correction, get message IDs with `claude-hub feedback sources` and follow "
+        "`feedback capture --help` to cite the exact quote. Do not invent corrections. Automatic controls: "
+        "`claude-hub feedback status` / `feedback configure`.\n"
+        "Schedules: create one only when the user requests a scheduled follow-up or recurring check. "
+        "Use `schedule create --kind hub_task --help` for scheduled independent Workspace work. "
+        "For an immediate queued message to an existing Chat (no schedule):\n"
+        '  claude-hub tab message "$CLAUDE_HUB_TAB_ID" --message "<follow-up>" --call-id "<intent-id>"\n'
+        "Use `tab message-status` for its receipt; acceptance is not model completion. "
+        "Reuse the call ID and identical payload on retry; source-tab hints are unverified.\n"
+        "Use `claude-hub schedule list` / `schedule delete <id>` to inspect/remove schedules. Due Chat "
+        "turns queue behind active turns or Goals; they do not interrupt them. `--kind tab_message` is "
+        "for plain Terminal sessions, not this Chat."
+    )
+
+
+HUB_RUNTIME_GUIDANCE = _hub_runtime_guidance(_AGENT_RUN_GUIDANCE)
+SUBAGENT_HUB_RUNTIME_GUIDANCE = _hub_runtime_guidance("")
 
 
 _HUB_RUNTIME_START = "<claude_hub_instructions>"

@@ -485,7 +485,13 @@ def workspace_attachment_get(
     click.echo(response.text)
 
 
-@click.group(help=lifecycle_group_help("Manage resident workspace agent sessions."))
+@click.group(
+    help=lifecycle_group_help(
+        "Manage resident workspace agent sessions.\n\n"
+        "For one-call help from another provider (no Task, board or review), use\n"
+        "`agent run --provider X --prompt-file -`; it prints the final answer."
+    )
+)
 def agent() -> None:
     pass
 

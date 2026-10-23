@@ -59,6 +59,9 @@ class ManagedSession(BaseModel):
     # on a default/broken env. None means no preset was requested. Not
     # backfilled for sessions created before this field existed (loads as None).
     env_preset: Optional[str] = None
+    # Hub subagent this session's tab runs (``claude-hub agent run``); copied
+    # from the tab record for ephemeral terminal-tab stream sessions only.
+    subagent_id: Optional[str] = None
     remote_forward_port: Optional[int] = None
     auto_continue_task_id: Optional[str] = None
     auto_continue_attempts: int = 0

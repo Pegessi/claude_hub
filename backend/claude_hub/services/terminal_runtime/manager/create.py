@@ -19,10 +19,19 @@ from ....models import (
     WorkspaceSessionRole,
 )
 from ....models.schemas import CHAT_REMOTE_UNSUPPORTED
+from ....models.subagent import SUBAGENT_ID_ENV
 from ...remote_profiles import reject_unsupported_interactive, remote_profile_manager
 from ..defaults import _MAX_TCP_PORT, _MAX_TTYD_BIND_ATTEMPTS
 from ..records import TabLimitExceededError, TabStartupTimeoutError
 from .host import ManagerHost
+
+
+def _copied_launch_env(env: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    """Launch env for a duplicate/fork: an ordinary Chat, never the source's subagent."""
+    if env is None:
+        return None
+    return {key: value for key, value in env.items() if key != SUBAGENT_ID_ENV}
+
 
 if TYPE_CHECKING:
     from ...ttyd_manager import TTYDProcess
@@ -77,6 +86,8 @@ class ManagerCreateMixin(ManagerHost):
         cursor_transcript_schema: Optional[str] = None,
         session_kind: SessionKind = SessionKind.TERMINAL,
         chat_mode: ChatMode = ChatMode.DEFAULT,
+        parent_tab_id: Optional[str] = None,
+        subagent_id: Optional[str] = None,
     ) -> TerminalTab:
         # Global backstop: bound the total number of live tabs so even
         # non-fork creation cannot grow without limit. The per-source fork
@@ -170,6 +181,8 @@ class ManagerCreateMixin(ManagerHost):
             cursor_cli_version=cursor_cli_version,
             cursor_transcript_path=cursor_transcript_path,
             cursor_transcript_schema=cursor_transcript_schema,
+            parent_tab_id=parent_tab_id,
+            subagent_id=subagent_id,
         )
         logger.info(
             f"Created TTYDProcess with solo_mode={process.solo_mode}, agent_type={process.agent_type}"
@@ -331,7 +344,7 @@ class ManagerCreateMixin(ManagerHost):
             remote_cwd=source.remote_cwd,
             remote_reconnect=source.remote_reconnect,
             remote_forward_port=source.remote_forward_port,
-            env=source.env,
+            env=_copied_launch_env(source.env),
         )
 
     def _check_live_tab_capacity(self) -> None:
@@ -440,7 +453,7 @@ class ManagerCreateMixin(ManagerHost):
                 remote_cwd=source.remote_cwd,
                 remote_reconnect=source.remote_reconnect,
                 remote_forward_port=source.remote_forward_port,
-                env=source.env,
+                env=_copied_launch_env(source.env),
                 # Copy the Cursor launch mode so a forked Cursor tab streams the
                 # same way, but omit the transcript path/schema: those identify
                 # the source conversation, and the fork starts a fresh one.

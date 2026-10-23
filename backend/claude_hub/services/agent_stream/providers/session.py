@@ -18,6 +18,7 @@ from ....models import (
 )
 from ..provider_network import ProviderNetworkError
 from .contracts import ProviderGoal, ProviderGoalOrigin, ProviderGoalSnapshot, ProviderRuntime
+from .guidance import SUBAGENT_HUB_RUNTIME_GUIDANCE
 
 
 class SessionCore(ABC):
@@ -379,7 +380,14 @@ class SessionCore(ABC):
             return text, False
         if not self._hub_runtime_guidance_injected:
             self._hub_runtime_guidance_injected = True
-            text = self._runtime.wrap_runtime_guidance()(text, context=turn_context)
+            wrap = self._runtime.wrap_runtime_guidance()
+            if getattr(self.session, "subagent_id", None):
+                # Subagent Chats do not get the `agent run` recipe (bounded fan-out).
+                # The tab's link decides, not its env: a copied or restored tab
+                # is an ordinary Chat.
+                text = wrap(text, guidance=SUBAGENT_HUB_RUNTIME_GUIDANCE, context=turn_context)
+            else:
+                text = wrap(text, context=turn_context)
         elif turn_context:
             text = self._runtime.wrap_runtime_guidance()(text, guidance=None, context=turn_context)
         return prefix + text, seed_included

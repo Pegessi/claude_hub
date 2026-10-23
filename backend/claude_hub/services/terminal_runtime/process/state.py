@@ -58,6 +58,8 @@ class ProcessStateMixin(ProcessHost):
         chat_mode: ChatMode = ChatMode.DEFAULT,
         forked_from_tab_id: Optional[str] = None,
         forked_from_ordinal: Optional[int] = None,
+        parent_tab_id: Optional[str] = None,
+        subagent_id: Optional[str] = None,
         archived: bool = False,
         archived_at: Optional[datetime] = None,
         last_viewed_at: Optional[datetime] = None,
@@ -72,6 +74,11 @@ class ProcessStateMixin(ProcessHost):
         self.chat_mode = chat_mode
         self.forked_from_tab_id = forked_from_tab_id
         self.forked_from_ordinal = forked_from_ordinal
+        # Hub subagent link; legacy records lack both keys and normalize to None.
+        self.parent_tab_id = (
+            parent_tab_id if isinstance(parent_tab_id, str) and parent_tab_id else None
+        )
+        self.subagent_id = subagent_id if isinstance(subagent_id, str) and subagent_id else None
         self.target = target
         self.remote_profile_id = remote_profile_id
         self.remote_cwd = remote_cwd
@@ -304,6 +311,8 @@ class ProcessStateMixin(ProcessHost):
             "cursor_transcript_schema": self.cursor_transcript_schema,
             "forked_from_tab_id": self.forked_from_tab_id,
             "forked_from_ordinal": self.forked_from_ordinal,
+            "parent_tab_id": self.parent_tab_id,
+            "subagent_id": self.subagent_id,
             "archived": bool(self.archived),
             "archived_at": self.archived_at.isoformat() if self.archived_at else None,
             "last_viewed_at": self.last_viewed_at.isoformat() if self.last_viewed_at else None,
@@ -340,6 +349,8 @@ class ProcessStateMixin(ProcessHost):
             cursor_transcript_schema=self.cursor_transcript_schema,
             forked_from_tab_id=self.forked_from_tab_id,
             forked_from_ordinal=self.forked_from_ordinal,
+            parent_tab_id=self.parent_tab_id,
+            subagent_id=self.subagent_id,
             archived=self.archived,
             archived_at=self.archived_at,
             last_viewed_at=self.last_viewed_at,

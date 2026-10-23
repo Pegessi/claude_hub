@@ -37,6 +37,8 @@ class ProcessHost(ABC):
     chat_mode: ChatMode
     forked_from_tab_id: Optional[str]
     forked_from_ordinal: Optional[int]
+    parent_tab_id: Optional[str]
+    subagent_id: Optional[str]
     target: ExecutionTarget
     remote_profile_id: Optional[str]
     remote_cwd: Optional[str]
@@ -115,6 +117,8 @@ class ProcessHost(ABC):
         chat_mode: ChatMode = ...,
         forked_from_tab_id: Optional[str] = ...,
         forked_from_ordinal: Optional[int] = ...,
+        parent_tab_id: Optional[str] = ...,
+        subagent_id: Optional[str] = ...,
         archived: bool = ...,
         archived_at: Optional[datetime] = ...,
         last_viewed_at: Optional[datetime] = ...,
