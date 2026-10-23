@@ -108,7 +108,7 @@ class _TaskLifecycleObserverMixin(_WorkspaceManagerBase):
             needs_notice = (
                 lifecycle.phase in NOTIFY_PHASES
                 and not stale
-                and self._task_notice_wanted(task, lifecycle.reason)
+                and not self._notice_never_wanted(task, lifecycle.reason)
             )
             mark = TaskLifecycleMark(
                 phase=lifecycle.phase,
@@ -150,10 +150,32 @@ class _TaskLifecycleObserverMixin(_WorkspaceManagerBase):
             self.task_mailbox.wake_events(events)
         return changes
 
+    async def _tick_task_lifecycles(self, workspace_id: str) -> None:
+        """Observe, resolve owner loss, and start notice delivery for one workspace.
+
+        Runs under the workspace mutation lock so it never saves another
+        transaction's staged changes or races a rollback.
+        """
+
+        async with self.workspace_mutation_lock(workspace_id):
+            self._observe_task_lifecycles(workspace_id)
+            if self._reconcile_orphaned_tasks(workspace_id):
+                self._observe_task_lifecycles(workspace_id)
+        if self._has_pending_task_notices(workspace_id):
+            self._schedule_task_notices(workspace_id)
+
     def _reconcile_orphaned_tasks(self, workspace_id: str) -> int:
         """Resolve Tasks whose owner has been gone past the policy grace."""
 
         now = self._runtime_now()
+        if self._workspace_agents_all_lost(workspace_id):
+            # Every agent vanished at once: more likely the tmux server or
+            # sampling failed than each agent; never fail work on that alone.
+            logger.warning(
+                "Lifecycle reconciler skipped: every workspace agent looks gone " "workspace_id=%s",
+                workspace_id,
+            )
+            return 0
         resolved = 0
         for task in [task for task in self.tasks.values() if task.workspace_id == workspace_id]:
             mark = task.lifecycle_mark
@@ -163,10 +185,14 @@ class _TaskLifecycleObserverMixin(_WorkspaceManagerBase):
             if policy is None or now - mark.changed_at < policy[0]:
                 continue
             if task.execution_control == TaskExecutionControl.WORKSPACE:
-                # Subagent and scheduled Tasks keep their own loss handling.
+                # Subagent, scheduled and Feedback Reaper Tasks keep their own
+                # loss handling and retry paths.
                 if task.task_mode == WorkspaceTaskMode.SUBAGENT:
                     continue
-                if task.system_internal and task.internal_kind == "scheduled":
+                if task.system_internal and task.internal_kind in {
+                    "scheduled",
+                    "feedback_reaper",
+                }:
                     continue
                 if task.status != WorkspaceTaskStatus.WORKING:
                     continue
@@ -192,27 +218,55 @@ class _TaskLifecycleObserverMixin(_WorkspaceManagerBase):
             self._save_workspace_state(workspace_id)
         return resolved
 
-    def _task_notice_wanted(self, task: WorkspaceTask, reason: str) -> bool:
-        """Whether a person outside the work should hear about this reason."""
+    def _workspace_agents_all_lost(self, workspace_id: str) -> bool:
+        agents = [
+            session
+            for session in self._sessions_for_workspace_raw(workspace_id)
+            if session.role == WorkspaceSessionRole.ORCHESTRATOR
+            and session.session_kind == SessionKind.TERMINAL
+            and not session.archived
+        ]
+        return len(agents) >= 2 and all(
+            session.status == ManagedSessionStatus.STOPPED
+            or session.runtime_status == AgentRuntimeStatus.OFFLINE
+            for session in agents
+        )
+
+    def _notice_never_wanted(self, task: WorkspaceTask, reason: str) -> bool:
+        """Reasons nobody outside the work should be paged about."""
 
         if reason in SELF_REPORTED_REASONS:
-            return False
-        if (
+            return True
+        # Owner loss under workspace control is resolved within minutes
+        # (reconciler, subagent or scheduled handling); the person hears about
+        # the outcome once instead.
+        return (
             reason in QUICKLY_RESOLVED_REASONS
             and task.execution_control == TaskExecutionControl.WORKSPACE
-        ):
-            # Owner loss is resolved within minutes (reconciler, subagent or
-            # scheduled handling); the person hears about the outcome once.
-            return False
+        )
+
+    def _held_by_supervisor(self, task: WorkspaceTask) -> bool:
+        """A working parent Task's agent supervises this child for now."""
+
         parent = self.tasks.get(task.parent_task_id) if task.parent_task_id else None
-        if parent is not None and parent.status not in {
-            WorkspaceTaskStatus.DONE,
-            WorkspaceTaskStatus.FAILED,
-        }:
-            # The parent Task's agent supervises its children; it is told
-            # through the Task mailbox, not the person.
+        return parent is not None and parent.status == WorkspaceTaskStatus.WORKING
+
+    def _task_notice_wanted(self, task: WorkspaceTask, reason: str) -> bool:
+        return not self._notice_never_wanted(task, reason) and not self._held_by_supervisor(task)
+
+    def _has_pending_task_notices(self, workspace_id: str) -> bool:
+        if self._task_notifier is None:
             return False
-        return True
+        for task in self.tasks.values():
+            mark = task.lifecycle_mark
+            if task.workspace_id != workspace_id or mark is None:
+                continue
+            if mark.notified_at is None and mark.phase in NOTIFY_PHASES:
+                return True
+            digest = plan_digest(task)
+            if digest and digest != mark.plan_digest and mark.phase not in TERMINAL_PHASES:
+                return True
+        return False
 
     def _schedule_task_notices(self, workspace_id: str) -> None:
         """Deliver pending notices in one background job per workspace."""
@@ -238,63 +292,78 @@ class _TaskLifecycleObserverMixin(_WorkspaceManagerBase):
             logger.exception("Task notice delivery failed workspace_id=%s", workspace_id)
 
     async def _deliver_task_notices(self, workspace_id: str) -> int:
-        """Send settled attention notices and new plan checkpoints; returns sends."""
+        """Send settled attention notices and new plan checkpoints; returns sends.
+
+        Each notice is chosen from the Task's current mark under the workspace
+        lock, sent without it, and its outcome is recorded only if the mark is
+        still the one the notice was about.
+        """
 
         notifier = self._task_notifier
         if notifier is None:
             return 0
-        now = self._runtime_now()
         delivered = attempted = 0
-        changed = False
-        for task in [task for task in self.tasks.values() if task.workspace_id == workspace_id]:
+        task_ids = [task.id for task in self.tasks.values() if task.workspace_id == workspace_id]
+        for task_id in task_ids:
             if attempted >= NOTICES_PER_PASS:
                 break
-            mark = task.lifecycle_mark
-            if mark is None or (mark.next_notify_at and now < mark.next_notify_at):
+            async with self.workspace_mutation_lock(workspace_id):
+                choice = self._next_task_notice(task_id)
+            if choice is None:
                 continue
-            if mark.notified_at is None and mark.phase in NOTIFY_PHASES:
-                settle = (
-                    HEURISTIC_SETTLE_SECONDS
-                    if mark.reason in HEURISTIC_REASONS
-                    else NOTICE_SETTLE_SECONDS
-                )
-                if (now - mark.changed_at).total_seconds() < settle:
-                    continue
-                key = f"{mark.phase.value}:{mark.reason}"
-                if (
-                    mark.last_notice_key == key
-                    and mark.last_notice_at is not None
-                    and now - mark.last_notice_at < NOTICE_REPEAT_COOLDOWN
-                ):
-                    # The same condition flapped back; it was just announced.
-                    self._record_notice_outcome(task.id, "unroutable", now, attention=True)
-                    changed = True
-                    continue
-                notice = attention_notice(
-                    task, mark.phase, mark.reason, self._task_notice_detail(task, mark)
-                )
-                attempted += 1
-                outcome = await self._send_task_notice(notifier, task, notice)
-                delivered += outcome == "sent"
-                self._record_notice_outcome(task.id, outcome, now, attention=True, key=key)
-                changed = True
-                continue
-            digest = plan_digest(task)
-            if (
-                digest
-                and digest != mark.plan_digest
-                and mark.phase not in TERMINAL_PHASES
-                and self._task_notice_wanted(task, mark.reason)
-                and (plan := plan_notice(task)) is not None
-            ):
-                attempted += 1
-                outcome = await self._send_task_notice(notifier, task, plan)
-                delivered += outcome == "sent"
-                self._record_notice_outcome(task.id, outcome, now, plan=digest)
-                changed = True
-        if changed:
-            self._save_workspace_state(workspace_id)
+            task, notice, token, kind = choice
+            attempted += 1
+            outcome = await self._send_task_notice(notifier, task, notice)
+            delivered += outcome == "sent"
+            async with self.workspace_mutation_lock(workspace_id):
+                if self._record_notice_outcome(task_id, outcome, token, kind):
+                    self._save_workspace_state(workspace_id)
         return delivered
+
+    def _next_task_notice(
+        self, task_id: str
+    ) -> tuple[WorkspaceTask, TaskNotice, tuple[datetime, str], str] | None:
+        """The notice due for this Task now, or None; quiet repeats are settled here."""
+
+        task = self.tasks.get(task_id)
+        mark = task.lifecycle_mark if task else None
+        if task is None or mark is None:
+            return None
+        now = self._runtime_now()
+        if mark.next_notify_at and now < mark.next_notify_at:
+            return None
+        token = (mark.changed_at, f"{mark.phase.value}:{mark.reason}")
+        if mark.notified_at is None and mark.phase in NOTIFY_PHASES:
+            heuristic = mark.reason in HEURISTIC_REASONS
+            settle = HEURISTIC_SETTLE_SECONDS if heuristic else NOTICE_SETTLE_SECONDS
+            if (now - mark.changed_at).total_seconds() < settle:
+                return None
+            if self._held_by_supervisor(task):
+                return None
+            if (
+                heuristic
+                and mark.last_notice_key == token[1]
+                and mark.last_notice_at is not None
+                and now - mark.last_notice_at < NOTICE_REPEAT_COOLDOWN
+            ):
+                # A sampled condition flapped back; it was just announced.
+                self._record_notice_outcome(task_id, "unroutable", token, "attention")
+                self._save_workspace_state(task.workspace_id)
+                return None
+            notice = attention_notice(
+                task, mark.phase, mark.reason, self._task_notice_detail(task, mark)
+            )
+            return task, notice, token, "attention"
+        digest = plan_digest(task)
+        if (
+            digest
+            and digest != mark.plan_digest
+            and mark.phase not in TERMINAL_PHASES
+            and self._task_notice_wanted(task, mark.reason)
+            and (plan := plan_notice(task)) is not None
+        ):
+            return task, plan, token, f"plan:{digest}"
+        return None
 
     async def _send_task_notice(
         self, notifier: TaskNotifier, task: WorkspaceTask, notice: TaskNotice
@@ -309,19 +378,19 @@ class _TaskLifecycleObserverMixin(_WorkspaceManagerBase):
         return outcome if outcome in {"sent", "unroutable", "failed"} else "failed"
 
     def _record_notice_outcome(
-        self,
-        task_id: str,
-        outcome: str,
-        now: datetime,
-        *,
-        attention: bool = False,
-        plan: str | None = None,
-        key: str | None = None,
-    ) -> None:
+        self, task_id: str, outcome: str, token: tuple[datetime, str], kind: str
+    ) -> bool:
+        """Apply a send outcome to the mark it was about; False if that mark is gone."""
+
         task = self.tasks.get(task_id)
-        if task is None or task.lifecycle_mark is None:
-            return
-        mark = task.lifecycle_mark
+        mark = task.lifecycle_mark if task else None
+        if task is None or mark is None:
+            return False
+        if (mark.changed_at, f"{mark.phase.value}:{mark.reason}") != token:
+            # The lifecycle moved on while this notice was in flight; the new
+            # mark keeps its own pending notice.
+            return False
+        now = self._runtime_now()
         if outcome == "failed" and mark.notify_attempts + 1 < NOTICE_MAX_ATTEMPTS:
             attempts = mark.notify_attempts + 1
             backoff = min(NOTICE_SETTLE_SECONDS * 2**attempts, NOTICE_MAX_BACKOFF_SECONDS)
@@ -331,15 +400,14 @@ class _TaskLifecycleObserverMixin(_WorkspaceManagerBase):
             }
         else:
             update = {"notify_attempts": 0, "next_notify_at": None}
-            if attention:
-                update["notified_at"] = now
-            if key is not None:
-                update.update(last_notice_key=key, last_notice_at=now)
-            if plan is not None:
-                update["plan_digest"] = plan
+            if kind == "attention":
+                update.update(notified_at=now, last_notice_key=token[1], last_notice_at=now)
+            elif kind.startswith("plan:"):
+                update["plan_digest"] = kind.removeprefix("plan:")
         self.tasks[task_id] = task.model_copy(
             update={"lifecycle_mark": mark.model_copy(update=update)}
         )
+        return True
 
     def _task_notice_detail(self, task: WorkspaceTask, mark: TaskLifecycleMark) -> str:
         """The question or result the person needs, from the newest relevant record."""

@@ -284,3 +284,29 @@ Deliberately not done yet. Each needs its own migration and review:
 - **`_next_reassignable_queued_task`.** Under the 1:1 rule, only pinned or
   legacy queued work reaches it. Remove it after one release.
 - **Mailbox retention.** Task mailbox events have no retention policy.
+
+## Review fixes after Layers 3–5
+
+- The lifecycle tick (observe, reconcile, re-observe) runs under the
+  workspace mutation lock, so it cannot save another transaction's staged
+  changes or race its rollback. Notice delivery chooses each notice under the
+  lock, sends without it, and records the outcome only if the mark is still
+  the one the notice was about. A notice in flight can no longer consume a
+  newer change, such as a failure arriving while a question is delivered.
+- The 30 min repeat cooldown applies only to reasons inferred from sampled
+  runtime output. A real second failure after `continue` is announced.
+- Children are held back only while their parent Task is working. The check
+  runs at delivery time, so a child is announced once its parent stops
+  working.
+- The reconciler skips Feedback Reaper Tasks, which have their own retry. It
+  also skips a workspace where every terminal agent (two or more) looks gone
+  at once, since that is more likely a tmux or sampling outage than real
+  agent loss.
+- Shutdown cancels the notice and stranded-provisioning jobs. The notice job
+  is only scheduled when something is pending.
+- Tasks persisted as `dispatch_pending` (dispatcher decisions are no longer
+  requested) are rescued with a dedicated agent like other stranded queued
+  work. Manual progress records cause `manual`.
+- Known and accepted: a send cut off by its 20 s bound may already have been
+  delivered, so the retry can duplicate it. The DISPATCHER role can still be
+  created but is no longer used by start.
