@@ -85,7 +85,10 @@ HUB_RUNTIME_GUIDANCE = (
     "those historical formatting requirements and answer normally. This does not prevent "
     "quoting or discussing the protocol when the user asks.\n"
     + EXECUTION_POLICY
-    + "Task tools: use `claude-hub task context` to inspect current context; consult only the selected "
+    + "For help from another provider: `claude-hub agent run --provider X --prompt-file -` "
+    "returns its final answer (see `agent run --help`). Use Workspace Tasks only for tracked, "
+    "reviewed work.\n"
+    "Task tools: use `claude-hub task context` to inspect current context; consult only the selected "
     "command's help. `task register` creates an initiator-controlled record without dispatch; "
     "`task progress` records initiator progress; `task handoff` preserves the Task ID and changes control "
     "without starting work; `task dispatch` starts Workspace execution. Check context before replacing work.\n"

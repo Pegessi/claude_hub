@@ -136,7 +136,8 @@ async def _wait(client: httpx.AsyncClient, result: Dict[str, Any]) -> Dict[str, 
         f"/api/subagents/{result['subagent_id']}/turns/{result['turn_id']}", params={"wait": 5}
     )
     assert response.status_code == 200, response.text
-    return response.json()
+    data: Dict[str, Any] = response.json()
+    return data
 
 
 async def _settle() -> None:
@@ -329,7 +330,7 @@ async def test_parent_retirement_closes_subagents(env, retire: str) -> None:
 
 async def test_validation_errors(env) -> None:
     chats, service, client, tmp_path = env
-    cases = [
+    cases: List[tuple[Dict[str, Any], int]] = [
         ({"agent_type": "terminal"}, 400),
         ({"agent_type": "nope"}, 422),
         ({"prompt": "   "}, 422),
@@ -366,7 +367,9 @@ async def test_restart_fails_inflight_turns_and_closes(tmp_path: Path) -> None:
     first = SubagentService(path, chats.runtime())
     await first.start()
     record, turn = await first.create(
-        subagents_service.SubagentCreate(agent_type="codex", prompt="p", parent_tab_id="parent")
+        subagents_service.SubagentCreate(
+            agent_type=AgentType.CODEX, prompt="p", parent_tab_id="parent"
+        )
     )
     # Simulate a crash: the task dies without recording a result.
     first._tasks[turn.turn_id].cancel()

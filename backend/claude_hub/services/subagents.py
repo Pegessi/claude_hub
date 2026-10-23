@@ -209,7 +209,7 @@ class SubagentService:
         from .terminal_runtime.retirement_listeners import add_tab_retired_listener
 
         self._load()
-        changed = False
+        interrupted: set[str] = set()
         now = utc_now()
         for record in self._subagents.values():
             for turn in record.turns:
@@ -217,20 +217,25 @@ class SubagentService:
                     turn.status = SubagentTurnStatus.FAILED
                     turn.error = "Claude Hub restarted before this subagent turn finished"
                     turn.completed_at = now
-                    changed = True
-        if changed:
+                    interrupted.add(record.id)
+        if interrupted:
             self._save()
         self._remove_listener = add_tab_retired_listener(self._on_tab_retired)
         self._started = True
         known_tabs = {s.tab_id: s for s in self._subagents.values() if s.tab_id}
+        # Retirements while the backend was down produced no notification.
         for record in list(self._subagents.values()):
             if record.closed:
                 continue
             parent = record.parent_tab_id and self.runtime.get_tab(record.parent_tab_id)
+            own = record.tab_id and self.runtime.get_tab(record.tab_id)
             if record.parent_tab_id and (not parent or parent.archived):
                 await self._close(record, "parent tab archived or deleted")
-            elif not record.keep or record.tab_id is None:
-                await self._close(record, "turn finished")
+            elif not own or own.archived:
+                await self._close(record, "subagent tab archived or deleted")
+            elif not record.keep:
+                reason = "Claude Hub restarted" if record.id in interrupted else "turn finished"
+                await self._close(record, reason)
         # A crash between tab creation and record update can leave a tab that
         # no record owns; archive it (history stays restorable).
         for tab in list(self.runtime.list_tabs()):
