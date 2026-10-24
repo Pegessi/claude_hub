@@ -6,8 +6,10 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import time
 import types
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,7 +21,9 @@ import pytest
 _FAKE_TOOL = r"""#!/usr/bin/env python3
 import json
 import os
+import signal
 import sys
+import time
 from pathlib import Path
 
 name, args = Path(sys.argv[0]).name, sys.argv[1:]
@@ -102,6 +106,25 @@ elif name == "git":
     else:
         raise SystemExit(93)
     raise SystemExit(0)
+if operation == "pytest" and os.environ.get("VERIFY_WAIT_FOR_INTERRUPT"):
+    evidence = Path(os.environ["_CLAUDE_HUB_VERIFY_EVIDENCE"])
+    def finish_after_interrupt(signum, frame):
+        time.sleep(3.6)
+        (evidence / "pytest-finalized").write_text(str(signum))
+        print("fake cleanup complete", flush=True)
+        raise SystemExit(0)
+    signal.signal(signal.SIGINT, finish_after_interrupt)
+    (evidence / "pytest-ready").touch()
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        time.sleep(0.05)
+    raise SystemExit(88)
+if operation == "pytest" and os.environ.get("VERIFY_RUNTIME_BYTES"):
+    (Path(os.environ["TMPDIR"]) / "scratch.bin").write_bytes(
+        b"x" * int(os.environ["VERIFY_RUNTIME_BYTES"])
+    )
+if operation == "pytest" and os.environ.get("VERIFY_BLOCK_EXIT_REPORT"):
+    (Path(os.environ["_CLAUDE_HUB_VERIFY_EVIDENCE"]) / "pytest-exit-code").mkdir()
 if operation == "pytest" and os.environ.get("VERIFY_JUNIT_XML") not in (None, "missing"):
     report = next(value.split("=", 1)[1] for value in args if value.startswith("--junitxml="))
     Path(report).write_text(os.environ["VERIFY_JUNIT_XML"])
@@ -475,6 +498,11 @@ def test_runtime_isolation_and_failure_evidence(verify_fixture: VerifyFixture) -
         "--cov-report=term-missing",
     ]
     environment = calls[0]["env"]
+    runtime_report = json.loads((evidence / "runtime.json").read_text())
+    runtime = Path(runtime_report["runtime"])
+    assert runtime_report["cleanup"]["state"] == "removed"
+    assert not runtime.exists()
+    assert (evidence / "provenance.json").exists()
     for key, directory in (
         ("HOME", "home"),
         ("TMPDIR", "tmp"),
@@ -484,7 +512,7 @@ def test_runtime_isolation_and_failure_evidence(verify_fixture: VerifyFixture) -
         ("CLAUDE_HUB_HOME", "hub"),
         ("CLAUDE_HUB_STATE_ROOT", "state"),
     ):
-        assert Path(environment[key]) == evidence / directory
+        assert Path(environment[key]) == runtime / "pytest" / directory
     assert environment["CLAUDE_HUB_TMUX_SOCKET"].startswith("ch-verify-")
     # pytest's conftest owns the provider-network default, not the shell wrapper.
     assert environment["CLAUDE_HUB_PROVIDER_NETWORK_MODE"] == "caller-fixture-mode"
@@ -544,7 +572,9 @@ def test_focused_scope_preserves_selection_and_private_environment(
     evidence_dirs = list(verify_fixture.artifacts.iterdir())
     assert len(evidence_dirs) == 1
     evidence = evidence_dirs[0]
-    assert Path(calls[0]["env"]["HOME"]) == evidence / "home"
+    runtime = Path(json.loads((evidence / "runtime.json").read_text())["runtime"])
+    assert Path(calls[0]["env"]["HOME"]) == runtime / "pytest" / "home"
+    assert not runtime.exists()
     metadata = (evidence / "environment.txt").read_text()
     assert "scope=focused" in metadata
     assert "pytest_arg=tests/test_demo.py::test_one" in metadata
@@ -646,10 +676,10 @@ def test_terminal_hmr_requires_real_junit_success(
         assert "tests/test_terminal_hmr_recovery_e2e.py" in calls[0]["args"]
         assert not any(value.startswith("--ignore") for value in calls[0]["args"])
         temporary = Path(calls[0]["env"]["TMPDIR"])
-        assert temporary.parent == Path("/tmp") and temporary.name.startswith("ch-hmr-")
-        assert temporary.is_dir() and len(str(temporary)) < 60
+        assert temporary.parent == Path("/tmp") and temporary.name.startswith("ch-v-")
+        assert not temporary.exists() and len(str(temporary)) < 60
         evidence = next(verify_fixture.artifacts.iterdir())
-        assert Path(calls[0]["env"]["HOME"]) == evidence / "home"
+        assert Path(calls[0]["env"]["HOME"]) == temporary / "pytest" / "home"
         assert str(temporary) in (evidence / "environment.txt").read_text()
         assert "target=terminal-hmr" in (evidence / "environment.txt").read_text()
         assert (evidence / "pytest-exit-code").read_text().strip() == str(pytest_exit)
@@ -852,3 +882,154 @@ def test_new_checker_is_discovered_by_format_and_types(verify_fixture: VerifyFix
         calls = verify_fixture.calls(operation)
         assert len(calls) == 1
         assert str(extra) in calls[0]["args"]
+
+
+@pytest.mark.parametrize("exit_code", [0, 7])
+@pytest.mark.parametrize("keep", [False, True])
+def test_runtime_retention_is_explicit_and_does_not_change_test_status(
+    verify_fixture: VerifyFixture, exit_code: int, keep: bool
+) -> None:
+    result = verify_fixture.run(
+        "backend-tests",
+        "--",
+        "tests/test_demo.py",
+        "-q",
+        CLAUDE_HUB_VERIFY_KEEP_RUNTIME="1" if keep else "0",
+        VERIFY_RUNTIME_BYTES=str(2 * 1024 * 1024),
+        FAIL_CHECK="pytest" if exit_code else "",
+        FAIL_STATUS=str(exit_code),
+    )
+    evidence = next(verify_fixture.artifacts.iterdir())
+    report = json.loads((evidence / "runtime.json").read_text())
+    runtime = Path(report["runtime"])
+    try:
+        assert result.returncode == exit_code, result.stdout + result.stderr
+        assert report["exit_code"] == exit_code
+        assert (evidence / "pytest.log").read_text().strip() == "fake pytest output"
+        assert (evidence / "provenance.json").is_file()
+        assert report["cleanup"]["state"] == ("retained" if keep else "removed")
+        assert runtime.exists() is keep
+        if keep:
+            assert report["cleanup"]["reason"] == "explicit_keep"
+            assert (runtime / "pytest/tmp/scratch.bin").stat().st_size == 2 * 1024 * 1024
+    finally:
+        if runtime.is_dir():
+            shutil.rmtree(runtime)
+
+
+def test_all_reclaims_only_current_runtime_roots(verify_fixture: VerifyFixture) -> None:
+    historical = verify_fixture.artifacts / "claude-hub-verify.historical"
+    historical.mkdir()
+    sentinel = historical / "keep.bin"
+    sentinel.write_bytes(b"historical evidence")
+    result = verify_fixture.run("all")
+    assert result.returncode == 0, result.stdout + result.stderr
+    reports = [
+        json.loads(path.read_text()) for path in verify_fixture.artifacts.glob("*/runtime.json")
+    ]
+    assert len(reports) == 3
+    assert {report["target"] for report in reports} == {
+        "backend-format",
+        "backend-types",
+        "backend-tests",
+    }
+    assert all(report["cleanup"]["state"] == "removed" for report in reports)
+    assert all(not Path(report["runtime"]).exists() for report in reports)
+    assert sentinel.read_bytes() == b"historical evidence"
+
+
+@pytest.mark.parametrize("bad_value", ["yes", "true", "2"])
+def test_invalid_retention_option_fails_before_allocating_runtime(
+    verify_fixture: VerifyFixture, bad_value: str
+) -> None:
+    result = verify_fixture.run("backend-tests", CLAUDE_HUB_VERIFY_KEEP_RUNTIME=bad_value)
+    assert result.returncode != 0
+    assert "must be 0 or 1" in result.stderr
+    assert not list(verify_fixture.artifacts.iterdir())
+    assert not verify_fixture.calls()
+
+
+def test_inherited_partial_runtime_context_cannot_bypass_owner(
+    verify_fixture: VerifyFixture,
+) -> None:
+    caller = verify_fixture.root.parent / "old-runtime"
+    caller.mkdir()
+    (caller / "sentinel").write_text("keep")
+    result = verify_fixture.run(
+        "backend-types",
+        _CLAUDE_HUB_VERIFY_OWNER_PID=str(os.getpid()),
+        _CLAUDE_HUB_VERIFY_RUNTIME=str(caller),
+        _CLAUDE_HUB_VERIFY_EVIDENCE=str(verify_fixture.artifacts),
+    )
+    assert result.returncode == 0, result.stderr
+    evidence = next(verify_fixture.artifacts.iterdir())
+    report = json.loads((evidence / "runtime.json").read_text())
+    assert report["cleanup"]["state"] == "removed"
+    assert report["runtime"] != str(caller)
+    assert (caller / "sentinel").read_text() == "keep"
+
+
+@pytest.mark.parametrize("pytest_status", [0, 7])
+def test_logging_failure_does_not_overwrite_pytest_status(
+    verify_fixture: VerifyFixture, pytest_status: int
+) -> None:
+    fake_bin = Path(verify_fixture.env["PATH"].split(os.pathsep)[0])
+    _executable(fake_bin / "tee", "#!/bin/sh\ncat\nexit 11\n")
+    result = verify_fixture.run(
+        "backend-tests",
+        FAIL_CHECK="pytest" if pytest_status else "",
+        FAIL_STATUS=str(pytest_status),
+    )
+    evidence = next(verify_fixture.artifacts.iterdir())
+    assert result.returncode == (pytest_status or 11), result.stdout + result.stderr
+    assert (evidence / "pytest-exit-code").read_text().strip() == str(pytest_status)
+    assert (evidence / "log-exit-code").read_text().strip() == "11"
+    assert not Path(json.loads((evidence / "runtime.json").read_text())["runtime"]).exists()
+
+
+@pytest.mark.parametrize("pytest_status", [0, 7])
+def test_pytest_metadata_write_failure_keeps_original_failure(
+    verify_fixture: VerifyFixture, pytest_status: int
+) -> None:
+    result = verify_fixture.run(
+        "backend-tests",
+        VERIFY_BLOCK_EXIT_REPORT="1",
+        FAIL_CHECK="pytest" if pytest_status else "",
+        FAIL_STATUS=str(pytest_status),
+    )
+    assert result.returncode == (pytest_status or 1), result.stdout + result.stderr
+    evidence = next(verify_fixture.artifacts.iterdir())
+    assert json.loads((evidence / "runtime.json").read_text())["cleanup"]["state"] == "removed"
+    assert (evidence / "exit-code").read_text().strip() == str(pytest_status or 1)
+
+
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+def test_pytest_pipeline_keeps_log_reader_until_interrupt_finalizers_finish(
+    verify_fixture: VerifyFixture, signum: int
+) -> None:
+    process = subprocess.Popen(
+        ["bash", str(verify_fixture.root / "scripts/verify.sh"), "backend-tests"],
+        cwd=verify_fixture.root,
+        env={**verify_fixture.env, "VERIFY_WAIT_FOR_INTERRUPT": "1"},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not list(verify_fixture.artifacts.glob("*/pytest-ready")):
+            assert process.poll() is None, "verify exited before pytest startup"
+            assert time.monotonic() < deadline, "pytest startup deadline exceeded"
+            time.sleep(0.05)
+        process.send_signal(signum)
+        stdout, stderr = process.communicate(timeout=20)
+        assert process.returncode == 128 + signum, stdout + stderr
+        evidence = next(verify_fixture.artifacts.iterdir())
+        assert (evidence / "pytest-finalized").read_text() == str(signal.SIGINT)
+        assert "fake cleanup complete" in (evidence / "pytest.log").read_text()
+        assert json.loads((evidence / "runtime.json").read_text())["cleanup"]["state"] == "removed"
+    finally:
+        if process.poll() is None:
+            process.send_signal(signal.SIGTERM)
+            # The fake pytest has its own ten-second deadline even if forwarding breaks.
+            process.communicate(timeout=20)
