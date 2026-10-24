@@ -79,7 +79,9 @@ provider/OAuth/Bot test. Pytest must exit zero and produce a nonempty JUnit repo
 with no skipped, failed or errored cases. The target uses a short private TMPDIR
 and records its exact path with the other test evidence. The default removes
 that runtime after owned processes exit; set `CLAUDE_HUB_VERIFY_KEEP_RUNTIME=1`
-before the run when raw temporary state is needed.
+before the run when raw temporary state is needed. Backend/Vite helper logs are
+kept under `terminal-hmr/<case>/` in the evidence directory, with a unique log per
+launch so restarts cannot overwrite prior diagnostics.
 
 `backend-tests` records `scope=default` or `scope=focused`, never claims that all
 browser/diagnostic suites ran. The default excludes terminal replay, latency
@@ -129,9 +131,10 @@ SIGINT/SIGTERM request bounded cleanup; close failures, timeouts and forced
 termination cannot pass. The shell uses `exec` so INT/TERM reach the outer
 stdlib owner. It gives the browser owner up to 60 seconds for its own cleanup
 and summary, then terminates residual owned processes with bounded waits.
-Hard kills or machine loss can still prevent final reporting. Linux additionally
-checks visible same-user runtime references; other POSIX hosts cannot detect
-escaped sessions. `process_tree_exit: not_verified` deliberately
+Hard kills or machine loss can still prevent final reporting. CI allows 90 seconds
+before hard kill so the 60-second cooperative phase has residual-cleanup margin.
+Linux adopts surviving detached descendants and checks visible runtime references;
+other POSIX hosts cannot detect escaped sessions. `process_tree_exit: not_verified` deliberately
 limits the claim: completed API closes and owned process exits do not prove
 that every possible Chromium descendant has disappeared. Do not remove retained
 failure directories or signal processes without checking their ownership.

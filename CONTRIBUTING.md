@@ -133,13 +133,28 @@ CLAUDE_HUB_VERIFY_KEEP_RUNTIME=1 ./scripts/verify.sh backend-tests -- tests/test
 The default is `0`; only `0` and `1` are accepted. INT/TERM allow bounded
 cooperative shutdown before terminating residual owned processes. Pytest targets
 receive SIGINT so their finalizers can run; the outer exit remains 130/143 for the
-original signal. Unsafe/replaced paths or visible users retain the runtime with
-a warning. Linux checks same-user visible process environment/cwd/open-file
-references, including escaped sessions; other POSIX hosts check the owned process
-group only and cannot detect escaped sessions. This is not a security sandbox.
-SIGKILL, machine loss or inaccessible processes cannot provide complete cleanup
-or reporting guarantees. No historical runs, retained evidence, caller-supplied
-paths, shared services, virtual environments or dependency caches are swept.
+original signal. Linux temporarily makes the fresh owner a child subreaper, so
+surviving detached descendants remain identifiable even when they deny `/proc`
+inspection. Such live children prevent successful shutdown, including in keep
+mode. Other POSIX hosts check the owned group only. The Python 3.11+ owner
+observes the leader with `waitid(WNOWAIT)` and reaps it after the last group
+operation, preventing PID reuse from retargeting cleanup. Hosts without that API
+are rejected. Dead adopted children are reaped while tests run, so nested
+process-group shutdown does not wait on their zombies.
+
+Both runtime and evidence directory descriptors are held from creation. Recursive
+deletion and final report/status publication use those pinned descriptors.
+Replaced paths cannot redirect them into another tree. HMR helper
+logs live under the evidence directory's `terminal-hmr/` folder. Unsafe paths or
+live users retain runtime with a warning; a changed evidence path makes success
+nonzero and leaves reports in the pinned original directory.
+
+This is not a security sandbox. POSIX cannot condition the final empty-root
+`rmdir` on an inode: a concurrent replacement by another empty directory can still
+remove that empty name, but its tree is never recursively traversed. SIGKILL,
+machine loss and unsupported process inspection still limit guarantees. No
+historical runs, retained evidence, caller-supplied paths, shared services,
+virtual environments or dependency caches are swept.
 
 UI checks must state whether they inspected real rendering, mocked APIs, or live
 external integration. A screenshot is evidence of the inspected state, not proof

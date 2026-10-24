@@ -122,6 +122,10 @@ that evidence as an artifact or enforce an inner pytest deadline. Runtime-produc
 verify targets now separate retained evidence from disposable runtime directories.
 INT/TERM allow up to 60 seconds for the target's own finalizers before bounded
 residual process-group termination; this is a shutdown budget, not a test deadline.
+CI browser/HMR commands use `--kill-after=90s`, covering that 60s plus up to 9s
+for group termination/reaping and 21s reporting/scheduling margin. The outer hard
+kill must not coincide with the start of residual cleanup. HMR backend/Vite logs
+are written directly into retained `terminal-hmr/` evidence, not pytest tmp_path.
 Pytest targets receive group SIGINT so finalizers can run, while the command
 returns 130/143 for the original signal. Cleanup and log/report errors must not
 overwrite an existing nonzero test status. See

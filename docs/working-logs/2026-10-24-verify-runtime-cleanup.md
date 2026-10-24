@@ -1,5 +1,9 @@
 # Verification runtime cleanup
 
+> Historical initial-candidate record. Independent cross-validation later rejected
+> `303672d` despite the passing checks below. The repaired design and follow-up
+> evidence are in [the cross-validation record](2026-10-24-verify-runtime-cross-validation.md).
+
 ## Problem and scope
 
 `verify.sh` created private backend tool homes, pytest homes/state/tmp directories
