@@ -128,6 +128,10 @@ if operation == "pytest" and os.environ.get("VERIFY_BLOCK_EXIT_REPORT"):
 if operation == "pytest" and os.environ.get("VERIFY_JUNIT_XML") not in (None, "missing"):
     report = next(value.split("=", 1)[1] for value in args if value.startswith("--junitxml="))
     Path(report).write_text(os.environ["VERIFY_JUNIT_XML"])
+if operation == "pytest" and os.environ.get("VERIFY_SWAP_EVIDENCE"):
+    evidence = Path(os.environ["_CLAUDE_HUB_VERIFY_EVIDENCE"])
+    evidence.rename(evidence.with_name(evidence.name + ".original"))
+    evidence.symlink_to(Path(os.environ["VERIFY_SWAP_EVIDENCE"]), target_is_directory=True)
 print("fake " + operation + " output")
 if os.environ.get("FAIL_CHECK") == operation:
     raise SystemExit(int(os.environ.get("FAIL_STATUS", "1")))
@@ -1033,3 +1037,29 @@ def test_pytest_pipeline_keeps_log_reader_until_interrupt_finalizers_finish(
             process.send_signal(signal.SIGTERM)
             # The fake pytest has its own ten-second deadline even if forwarding breaks.
             process.communicate(timeout=20)
+
+
+@pytest.mark.parametrize("pytest_status", [0, 7])
+def test_replaced_evidence_parent_cannot_retarget_logs_or_status_receipts(
+    verify_fixture: VerifyFixture, pytest_status: int
+) -> None:
+    history = verify_fixture.root.parent / "unrelated-history"
+    history.mkdir()
+    names = ("pytest.log", "pytest-exit-code", "log-exit-code", "runtime.json", "exit-code")
+    for name in names:
+        (history / name).write_text("unrelated-" + name)
+    result = verify_fixture.run(
+        "backend-tests",
+        VERIFY_SWAP_EVIDENCE=str(history),
+        FAIL_CHECK="pytest" if pytest_status else "",
+        FAIL_STATUS=str(pytest_status),
+    )
+    assert result.returncode == (pytest_status or 1), result.stdout + result.stderr
+    for name in names:
+        assert (history / name).read_text() == "unrelated-" + name
+    evidence = next(verify_fixture.artifacts.glob("*.original"))
+    report = json.loads((evidence / "runtime.json").read_text())
+    assert report["evidence_path_changed"] is True
+    assert report["exit_code"] == (pytest_status or 1)
+    assert (evidence / "pytest-exit-code").read_text().strip() == str(pytest_status)
+    assert (evidence / "pytest.log").read_text().strip() == "fake pytest output"

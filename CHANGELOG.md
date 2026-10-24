@@ -17,9 +17,14 @@
   evidence. INT/TERM allow bounded cooperative finalization before terminating
   residual owned processes; logging or cleanup failures do not overwrite an
   existing test failure.
-- Refuse changed runtime directory identities and, on Linux, visible live runtime
-  references. Record cleanup in `runtime.json`; do not sweep historical runs,
-  retained evidence, shared services or dependency installations.
+- Pin directory descriptors for recursive cleanup and evidence publication so
+  a replaced pathname cannot redirect deletion or overwrite historical reports.
+  Retain the process leader until group cleanup completes and adopt detached Linux
+  descendants, including children that deny process-environment inspection.
+- Keep HMR backend/Vite logs with retained evidence and allow CI 90 seconds before
+  hard kill, covering cooperative shutdown, residual cleanup and final reporting.
+- Record cleanup in `runtime.json`; do not sweep historical runs, retained
+  evidence, shared services or dependency installations.
 
 ### feat(session): archive and restore managed Chat sessions
 

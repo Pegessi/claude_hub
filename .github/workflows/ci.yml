@@ -151,7 +151,9 @@ jobs:
       - name: Run isolated mocked browser acceptance
         run: |
           mkdir -p "$CLAUDE_HUB_VERIFY_ARTIFACT_ROOT"
-          timeout --signal=TERM --kill-after=60s 12m ./scripts/verify.sh browser-mocks
+          # Allow 60s cooperative cleanup, up to 9s group shutdown/reaping, and
+          # 21s reporting/scheduling margin before hard-killing the runtime owner.
+          timeout --signal=TERM --kill-after=90s 12m ./scripts/verify.sh browser-mocks
       - name: Retain browser reports, screenshots and cleanup evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -216,7 +218,8 @@ jobs:
       - name: Run isolated terminal HMR acceptance
         run: |
           mkdir -p "$CLAUDE_HUB_VERIFY_ARTIFACT_ROOT"
-          timeout --signal=TERM --kill-after=60s 15m ./scripts/verify.sh terminal-hmr
+          # Match the browser gate's complete owner shutdown budget and margin.
+          timeout --signal=TERM --kill-after=90s 15m ./scripts/verify.sh terminal-hmr
       - name: Retain browser reports, screenshots and cleanup evidence
         if: always()
         uses: actions/upload-artifact@v4

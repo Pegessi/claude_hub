@@ -372,6 +372,17 @@ def _assert_harness_matches_tmux(
     _assert_buffer_matches_tmux_truth(lines, tmux_truth, label=label)
 
 
+def _hmr_log_path(tmp_path: Path, filename: str) -> Path:
+    evidence = os.environ.get("_CLAUDE_HUB_VERIFY_EVIDENCE")
+    if not evidence:
+        return tmp_path / filename
+    # Helper diagnostics must outlive verify's disposable pytest tree. Give each
+    # launch its own file so restarts and parallel cases cannot replace evidence.
+    directory = Path(evidence) / "terminal-hmr" / tmp_path.name
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return directory / f"{Path(filename).stem}-{uuid.uuid4().hex}.log"
+
+
 def _start_isolated_backend(tmp_path: Path) -> dict[str, Any]:
     real_tmux = shutil.which("tmux")
     real_ttyd = shutil.which("ttyd")
@@ -419,7 +430,7 @@ def _start_isolated_backend(tmp_path: Path) -> dict[str, Any]:
     # wrapper used by test-side capture/send/cleanup helpers.
     env["CLAUDE_HUB_TMUX_SOCKET"] = server_name
 
-    log_path = tmp_path / "isolated-backend.log"
+    log_path = _hmr_log_path(tmp_path, "isolated-backend.log")
     log_file = log_path.open("wb")
     proc = subprocess.Popen(
         [
@@ -489,7 +500,7 @@ def _start_harness_vite(backend_url: str, tmp_path: Path) -> dict[str, Any]:
         pytest.skip("frontend node_modules missing; run: cd frontend && pnpm install")
 
     port = _free_port()
-    log_path = tmp_path / "harness-vite.log"
+    log_path = _hmr_log_path(tmp_path, "harness-vite.log")
     log_file = log_path.open("wb")
     env = _default_tmux_env()
     env["VITE_API_TARGET"] = backend_url

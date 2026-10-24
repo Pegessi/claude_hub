@@ -210,6 +210,7 @@ run_backend_pytest() {
   [[ -z "${CLAUDE_HUB_TEST_BACKEND_URL:-}" ]] || fail \
     "$target must not use an external backend"
   local evidence runtime status pytest_status log_status report_status=0 junit_status=0
+  local pytest_log_fd junit_log_fd
   local -a pipeline_status=() pytest_args=("$@")
   evidence="$_CLAUDE_HUB_VERIFY_EVIDENCE"
   runtime="$_CLAUDE_HUB_VERIFY_RUNTIME/pytest"
@@ -229,6 +230,12 @@ run_backend_pytest() {
     printf 'backend_provenance=%s\n' "$BACKEND_PROVENANCE_FILE"
     cat "$BACKEND_PROVENANCE_FILE"
   } > "$evidence/environment.txt"
+  # Pin log files before test code can rename directories or substitute links.
+  # Status receipts are published separately through the inherited directory fd.
+  exec {pytest_log_fd}> "$evidence/pytest.log"
+  if [[ "$require_junit" == 1 ]]; then
+    exec {junit_log_fd}> "$evidence/junit-validation.log"
+  fi
   status=0
   (
     export HOME="$runtime/home" TMPDIR="$runtime_tmp"
@@ -248,20 +255,21 @@ run_backend_pytest() {
     unset ANTHROPIC_API_KEY OPENAI_API_KEY CLAUDE_CODE_OAUTH_TOKEN
     cd "$ROOT/backend"
     backend_python -m pytest "${pytest_args[@]}"
-  ) 2>&1 | tee -i "$evidence/pytest.log" || pipeline_status=("${PIPESTATUS[@]}")
+  ) 2>&1 | tee -i "/dev/fd/$pytest_log_fd" || pipeline_status=("${PIPESTATUS[@]}")
+  exec {pytest_log_fd}>&-
   # A full disk can make tee/report writes fail too. Do not relabel that as
   # pytest's exit code or overwrite an existing test failure.
   pytest_status="${pipeline_status[0]:-0}"
   log_status="${pipeline_status[1]:-0}"
   status=$pytest_status
   if (( status == 0 && log_status != 0 )); then status=$log_status; fi
-  printf '%s\n' "$pytest_status" > "$evidence/pytest-exit-code" || report_status=$?
-  printf '%s\n' "$log_status" > "$evidence/log-exit-code" || report_status=$?
   if [[ "$require_junit" == 1 ]]; then
-    validate_junit_xml "$evidence/junit.xml" > "$evidence/junit-validation.log" 2>&1 || junit_status=$?
-    printf '%s\n' "$junit_status" > "$evidence/junit-validation-exit-code" || report_status=$?
+    validate_junit_xml "$evidence/junit.xml" >&"$junit_log_fd" 2>&1 || junit_status=$?
+    exec {junit_log_fd}>&-
     if (( status == 0 && junit_status != 0 )); then status=$junit_status; fi
   fi
+  python3 -I "$ROOT/scripts/check_verify_runtime.py" --record-pytest \
+    "$pytest_status" "$log_status" "$junit_status" "$require_junit" || report_status=$?
   if (( status == 0 && report_status != 0 )); then status=$report_status; fi
   printf 'Backend tests exit=%s (pytest=%s, junit=%s, log=%s); evidence retained at %s\n' \
     "$status" "$pytest_status" "$junit_status" "$log_status" "$evidence" || report_status=$?
