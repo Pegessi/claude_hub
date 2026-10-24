@@ -77,7 +77,9 @@ This target requires the declared frontend tools/dependencies plus `tmux` and
 own real backend, private tmux server and dedicated Vite instance. It is not a
 provider/OAuth/Bot test. Pytest must exit zero and produce a nonempty JUnit report
 with no skipped, failed or errored cases. The target uses a short private TMPDIR
-and retains its exact path with the other test evidence.
+and records its exact path with the other test evidence. The default removes
+that runtime after owned processes exit; set `CLAUDE_HUB_VERIFY_KEEP_RUNTIME=1`
+before the run when raw temporary state is needed.
 
 `backend-tests` records `scope=default` or `scope=focused`, never claims that all
 browser/diagnostic suites ran. The default excludes terminal replay, latency
@@ -107,10 +109,15 @@ Other deliberate boundaries:
 For `browser-mocks`, the owner starts only its own Vite and scenario processes. It uses private
 HOME/XDG paths, an environment allowlist, a nonce readiness endpoint and a
 bound refusal endpoint for otherwise-unmocked API traffic. It does not load
-the repository's `.env` or inherit provider credentials. Browser temporary
-paths use a short, private `/tmp/ch-ui-*` root; deep artifact paths can prevent
-Chromium startup. Only a fully passing run removes that root. Failures and
-interruptions retain it and record its exact path.
+the repository's `.env` or inherit provider credentials. Through `verify.sh`,
+HOME/XDG/browser temporary data uses the short private `/tmp/ch-v-*/browser`
+runtime, separate from evidence. The outer owner removes it after processes exit
+on success, failure and handled interruption, unless explicit retention or a
+safety check requires keeping it. `summary.json` reports `managed_by_verify` for
+this temporary data; the parent `runtime.json` and `exit-code` hold the final
+cleanup/verification outcome. Direct standalone use of `verify_browser_mocks.py`
+keeps its previous `/tmp/ch-ui-*` behavior: only fully passing runs remove that
+short temporary root.
 
 Retain `summary.json`, per-scenario `report.json` and `lifecycle.json`, logs and
 screenshots. Success requires matching runner identity, a zero process exit,
@@ -119,9 +126,12 @@ owned Vite port that no longer accepts connections. Missing evidence is not a
 pass. CI uploads the available evidence even on failure.
 
 SIGINT/SIGTERM request bounded cleanup; close failures, timeouts and forced
-termination cannot pass. The shell uses `exec` so the CI timeout reaches the
-Python owner directly. An additional interruption or hard kill may prevent the
-final report from being written. `process_tree_exit: not_verified` deliberately
+termination cannot pass. The shell uses `exec` so INT/TERM reach the outer
+stdlib owner. It gives the browser owner up to 60 seconds for its own cleanup
+and summary, then terminates residual owned processes with bounded waits.
+Hard kills or machine loss can still prevent final reporting. Linux additionally
+checks visible same-user runtime references; other POSIX hosts cannot detect
+escaped sessions. `process_tree_exit: not_verified` deliberately
 limits the claim: completed API closes and owned process exits do not prove
 that every possible Chromium descendant has disappeared. Do not remove retained
 failure directories or signal processes without checking their ownership.

@@ -41,8 +41,12 @@ CLAUDE_HUB_BROWSER_PORT and CLAUDE_HUB_BROWSER_TIMEOUT are optional.
 
 Install locked dependencies explicitly before running checks. Verification does
 not install dependencies or browsers. Backend tests use a private runtime and
-retain evidence, including on failure. Existing tests may start their own helper
-processes; their fixtures own cleanup. This script never restarts the main Hub.
+retain logs/reports, including on failure. Disposable runtime data is removed
+once owned processes exit; set CLAUDE_HUB_VERIFY_KEEP_RUNTIME=1 to retain it for
+debugging. Unsafe/in-use runtime paths are retained with a warning. Historical
+runs are never swept. INT/TERM request bounded cooperative shutdown; SIGKILL
+cannot run cleanup. Existing fixtures still own helper cleanup. No main Hub
+restart. Linux additionally checks visible processes for runtime references.
 Standard local targets warn on version mismatches and continue with noncanonical
 results. CI and CLAUDE_HUB_VERIFY_STRICT_VERSIONS=1 require exact versions.
 browser-mocks also retains exact Python/Node/Playwright requirements. Missing
@@ -67,6 +71,19 @@ check_tool_version() {
   fi
   printf 'WARNING: %s version mismatch (expected %s, found %s); continuing with a noncanonical toolchain. Results are not CI-equivalent.\n' \
     "$tool" "$expected" "$actual" >&2
+}
+
+own_runtime() {
+  if [[ "${_CLAUDE_HUB_VERIFY_OWNER_PID:-}" == "$PPID" &&
+    "${_CLAUDE_HUB_VERIFY_RUN_ID:-}" =~ ^[a-f0-9]{32}$ &&
+    "${_CLAUDE_HUB_VERIFY_RUNTIME:-}" == /tmp/ch-v-* &&
+    -d "$_CLAUDE_HUB_VERIFY_RUNTIME" && ! -L "$_CLAUDE_HUB_VERIFY_RUNTIME" &&
+    -O "$_CLAUDE_HUB_VERIFY_RUNTIME" && -d "${_CLAUDE_HUB_VERIFY_EVIDENCE:-}" ]]; then
+    return 0
+  fi
+  require_command python3
+  exec python3 -I "$ROOT/scripts/check_verify_runtime.py" --target "$1" -- \
+    bash "$ROOT/scripts/verify.sh" "$@"
 }
 
 backend_python() (
@@ -100,9 +117,10 @@ check_backend_tools() {
   # Settings reads .env relative to the backend cwd. Do not read or move that file.
   [[ ! -e "$ROOT/backend/.env" && ! -L "$ROOT/backend/.env" ]] || fail \
     "verification refuses backend/.env; use a clean feature checkout (file left untouched)"
-  BACKEND_TOOL_ROOT="$(mktemp -d /tmp/ch-verify-tools.XXXXXX)"
+  BACKEND_TOOL_ROOT="$_CLAUDE_HUB_VERIFY_RUNTIME/tools"
+  BACKEND_PROVENANCE_FILE="$_CLAUDE_HUB_VERIFY_EVIDENCE/provenance.json"
   mkdir -p "$BACKEND_TOOL_ROOT"/{home,tmp,config,state,cache,hub,hub-state,cwd}
-  printf 'Backend provenance evidence: %s\n' "$BACKEND_TOOL_ROOT"
+  printf 'Backend provenance evidence: %s\n' "$BACKEND_PROVENANCE_FILE"
   local expected_uv expected_python actual_uv actual_python
   local version_reader='import json, sys; value = json.load(sys.stdin)["python"]; print(value.strip() if isinstance(value, str) else "")'
   expected_uv="$(read_version .uv-version)"
@@ -112,11 +130,11 @@ check_backend_tools() {
   check_tool_version uv "$expected_uv" "$actual_uv"
   backend_tool_command "$BACKEND_TOOL_ROOT/cwd" backend_python \
     "$ROOT/scripts/check_backend_environment.py" --root "$ROOT" \
-    > "$BACKEND_TOOL_ROOT/provenance.json" || fail \
-    "backend environment provenance failed; see $BACKEND_TOOL_ROOT"
+    > "$BACKEND_PROVENANCE_FILE" || fail \
+    "backend environment provenance failed; see $BACKEND_PROVENANCE_FILE"
   expected_python="$(read_version .python-test-version)"
   actual_python="$(backend_tool_command "$BACKEND_TOOL_ROOT/cwd" backend_python \
-    -c "$version_reader" < "$BACKEND_TOOL_ROOT/provenance.json")" || fail \
+    -c "$version_reader" < "$BACKEND_PROVENANCE_FILE")" || fail \
     "could not read Python version"
   [[ -n "$actual_python" ]] || fail "could not read Python version"
   check_tool_version Python "$expected_python" "$actual_python"
@@ -191,13 +209,12 @@ run_backend_pytest() {
   shift 4
   [[ -z "${CLAUDE_HUB_TEST_BACKEND_URL:-}" ]] || fail \
     "$target must not use an external backend"
-  local parent evidence status pytest_status junit_status=0
-  local -a pytest_args=("$@")
-  parent="${CLAUDE_HUB_VERIFY_ARTIFACT_ROOT:-${TMPDIR:-/tmp}}"
-  [[ -d "$parent" ]] || fail "artifact parent does not exist: $parent"
-  evidence="$(mktemp -d "$parent/claude-hub-verify.XXXXXX")"
-  mkdir -p "$evidence"/{home,tmp,xdg-config,xdg-state,xdg-cache,hub,state}
-  runtime_tmp="${runtime_tmp:-$evidence/tmp}"
+  local evidence runtime status pytest_status log_status report_status=0 junit_status=0
+  local -a pipeline_status=() pytest_args=("$@")
+  evidence="$_CLAUDE_HUB_VERIFY_EVIDENCE"
+  runtime="$_CLAUDE_HUB_VERIFY_RUNTIME/pytest"
+  mkdir -p "$runtime"/{home,tmp,xdg-config,xdg-state,xdg-cache,hub,state}
+  runtime_tmp="${runtime_tmp:-$runtime/tmp}"
   [[ -d "$runtime_tmp" ]] || fail "runtime TMPDIR does not exist: $runtime_tmp"
   if [[ "$require_junit" == 1 ]]; then
     pytest_args+=(--junitxml="$evidence/junit.xml")
@@ -209,15 +226,15 @@ run_backend_pytest() {
     printf 'e2e_timeout_scale_input=%s\n' "${CLAUDE_HUB_E2E_TIMEOUT_SCALE:-1}"
     printf 'pytest_arg=%q\n' "${pytest_args[@]}"
     git -C "$ROOT" rev-parse HEAD
-    printf 'backend_provenance=%s\n' "$BACKEND_TOOL_ROOT/provenance.json"
-    cat "$BACKEND_TOOL_ROOT/provenance.json"
+    printf 'backend_provenance=%s\n' "$BACKEND_PROVENANCE_FILE"
+    cat "$BACKEND_PROVENANCE_FILE"
   } > "$evidence/environment.txt"
   status=0
   (
-    export HOME="$evidence/home" TMPDIR="$runtime_tmp"
-    export XDG_CONFIG_HOME="$evidence/xdg-config" XDG_STATE_HOME="$evidence/xdg-state"
-    export XDG_CACHE_HOME="$evidence/xdg-cache"
-    export CLAUDE_HUB_HOME="$evidence/hub" CLAUDE_HUB_STATE_ROOT="$evidence/state"
+    export HOME="$runtime/home" TMPDIR="$runtime_tmp"
+    export XDG_CONFIG_HOME="$runtime/xdg-config" XDG_STATE_HOME="$runtime/xdg-state"
+    export XDG_CACHE_HOME="$runtime/xdg-cache"
+    export CLAUDE_HUB_HOME="$runtime/hub" CLAUDE_HUB_STATE_ROOT="$runtime/state"
     export CLAUDE_HUB_TMUX_SOCKET="ch-verify-$$-${RANDOM}"
     export COVERAGE_FILE="$evidence/.coverage"
     # Test selection and plugin changes must be explicit, not inherited silently.
@@ -231,17 +248,24 @@ run_backend_pytest() {
     unset ANTHROPIC_API_KEY OPENAI_API_KEY CLAUDE_CODE_OAUTH_TOKEN
     cd "$ROOT/backend"
     backend_python -m pytest "${pytest_args[@]}"
-  ) 2>&1 | tee "$evidence/pytest.log" || status=$?
-  pytest_status=$status
-  printf '%s\n' "$pytest_status" > "$evidence/pytest-exit-code"
+  ) 2>&1 | tee -i "$evidence/pytest.log" || pipeline_status=("${PIPESTATUS[@]}")
+  # A full disk can make tee/report writes fail too. Do not relabel that as
+  # pytest's exit code or overwrite an existing test failure.
+  pytest_status="${pipeline_status[0]:-0}"
+  log_status="${pipeline_status[1]:-0}"
+  status=$pytest_status
+  if (( status == 0 && log_status != 0 )); then status=$log_status; fi
+  printf '%s\n' "$pytest_status" > "$evidence/pytest-exit-code" || report_status=$?
+  printf '%s\n' "$log_status" > "$evidence/log-exit-code" || report_status=$?
   if [[ "$require_junit" == 1 ]]; then
     validate_junit_xml "$evidence/junit.xml" > "$evidence/junit-validation.log" 2>&1 || junit_status=$?
-    printf '%s\n' "$junit_status" > "$evidence/junit-validation-exit-code"
+    printf '%s\n' "$junit_status" > "$evidence/junit-validation-exit-code" || report_status=$?
     if (( status == 0 && junit_status != 0 )); then status=$junit_status; fi
   fi
-  printf '%s\n' "$status" > "$evidence/exit-code"
-  printf 'Backend tests exit=%s (pytest=%s, junit=%s); evidence retained at %s\n' \
-    "$status" "$pytest_status" "$junit_status" "$evidence"
+  if (( status == 0 && report_status != 0 )); then status=$report_status; fi
+  printf 'Backend tests exit=%s (pytest=%s, junit=%s, log=%s); evidence retained at %s\n' \
+    "$status" "$pytest_status" "$junit_status" "$log_status" "$evidence" || report_status=$?
+  if (( status == 0 && report_status != 0 )); then status=$report_status; fi
   return "$status"
 }
 
@@ -255,8 +279,8 @@ run_terminal_hmr() {
   [[ -f "$CLAUDE_HUB_BROWSER_EXECUTABLE" && -x "$CLAUDE_HUB_BROWSER_EXECUTABLE" ]] || fail \
     "CLAUDE_HUB_BROWSER_EXECUTABLE must be an existing executable file"
   local runtime_tmp
-  runtime_tmp="$(mktemp -d /tmp/ch-hmr-XXXXXX)"
-  printf 'Terminal HMR short TMPDIR retained at %s\n' "$runtime_tmp"
+  runtime_tmp="$_CLAUDE_HUB_VERIFY_RUNTIME"
+  printf 'Terminal HMR short TMPDIR: %s\n' "$runtime_tmp"
   run_backend_pytest terminal-hmr focused "$runtime_tmp" 1 \
     -xvs tests/test_terminal_hmr_recovery_e2e.py
 }
@@ -269,10 +293,7 @@ run_browser_mocks() {
   CLAUDE_HUB_VERIFY_STRICT_VERSIONS=1 check_frontend_tools
   [[ -n "${CLAUDE_HUB_BROWSER_EXECUTABLE:-}" ]] || fail \
     "set CLAUDE_HUB_BROWSER_EXECUTABLE to an existing absolute browser executable"
-  local parent evidence
-  parent="${CLAUDE_HUB_VERIFY_ARTIFACT_ROOT:-${TMPDIR:-/tmp}}"
-  [[ -d "$parent" ]] || fail "artifact parent does not exist: $parent"
-  evidence="$(mktemp -d "$parent/claude-hub-browser-mocks.XXXXXX")"
+  local evidence="$_CLAUDE_HUB_VERIFY_EVIDENCE"
   printf 'Browser mocks evidence parent: %s\n' "$evidence"
   # The Python owner receives signals directly, without an intermediate shell trap.
   unset PYTHONPATH PYTHONHOME PYTHONUSERBASE
@@ -280,11 +301,15 @@ run_browser_mocks() {
     --node "$(command -v node)" \
     --browser "$CLAUDE_HUB_BROWSER_EXECUTABLE" \
     --output "$evidence/run" \
+    --runtime-root "$_CLAUDE_HUB_VERIFY_RUNTIME/browser" \
     --port "${CLAUDE_HUB_BROWSER_PORT:-5291}" \
     --runner-timeout "${CLAUDE_HUB_BROWSER_TIMEOUT:-120}"
 }
 
 run_one() {
+  case "$1" in
+    backend-format|backend-types|terminal-hmr|terminal-replay|browser-mocks) own_runtime "$1" ;;
+  esac
   local _scenario
   local -a browser_scenarios=()
   local -a python_tools=(
@@ -393,6 +418,11 @@ case "${1:-}" in
       [[ "$1" == "--" ]] || fail "focused pytest arguments require --"
       shift
       [[ $# -gt 0 ]] || fail "provide pytest arguments after --"
+    fi
+    if [[ $# -gt 0 ]]; then
+      own_runtime backend-tests -- "$@"
+    else
+      own_runtime backend-tests
     fi
     run_backend_tests "$@"
     ;;

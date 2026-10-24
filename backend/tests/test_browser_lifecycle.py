@@ -303,12 +303,14 @@ def launcher(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
 
 
 @pytest.mark.parametrize("business_fails", [False, True])
-def test_deep_evidence_uses_short_tmp_and_failed_run_retains_it(
+@pytest.mark.parametrize("managed", [False, True], ids=["standalone", "verify-owned"])
+def test_browser_evidence_and_runtime_ownership(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     lifecycle: ModuleType,
     launcher: ModuleType,
     business_fails: bool,
+    managed: bool,
 ) -> None:
     repository = tmp_path / "repository"
     frontend = repository / "frontend"
@@ -350,6 +352,9 @@ def test_deep_evidence_uses_short_tmp_and_failed_run_retains_it(
     launches: list[tuple[list[str], dict[str, str]]] = []
     processes: list[Any] = []
     real_mkdtemp, real_rmtree = tempfile.mkdtemp, shutil.rmtree
+    managed_parent = Path(real_mkdtemp(prefix="ch-v-test-", dir="/tmp")) if managed else None
+    if managed_parent is not None:
+        launcher.sys.argv += ["--runtime-root", str(managed_parent / "browser")]
 
     def make_owned_root(*, prefix: str, dir: str) -> str:
         assert prefix == "ch-ui-" and dir == "/tmp"
@@ -387,6 +392,8 @@ def test_deep_evidence_uses_short_tmp_and_failed_run_retains_it(
         index = len(launches)
         launches.append((command, env))
         assert kwargs["cwd"] == frontend
+        if managed_parent is not None and not roots:
+            roots.append(managed_parent / "browser" / "tmp")
         assert roots and Path(env["TMPDIR"]) == roots[0] / str(index)
         assert stat.S_IMODE(Path(env["TMPDIR"]).stat().st_mode) == 0o700
         failed = business_fails and index == 1
@@ -509,7 +516,7 @@ def test_deep_evidence_uses_short_tmp_and_failed_run_retains_it(
         report = json.loads((output / "summary.json").read_text())
         assert len(roots) == 1 and len(launches) == 1 + len(launcher.RUNNERS)
         root = roots[0]
-        assert root.parent == Path("/tmp")
+        assert root.parent == (managed_parent / "browser" if managed_parent else Path("/tmp"))
         assert report["temporary_root"] == str(root)
         assert report["vite_tmpdir"] == str(root / "0")
         assert report["vite_port_accepting_after_cleanup"] is False
@@ -518,14 +525,23 @@ def test_deep_evidence_uses_short_tmp_and_failed_run_retains_it(
             assert temporary == root / str(index)
             assert len(os.fsencode(str(temporary))) < 60
             assert not temporary.is_relative_to(output)
-            assert Path(env["HOME"]).is_relative_to(output)
+            assert Path(env["HOME"]).is_relative_to(managed_parent if managed_parent else output)
         assert [entry["tmpdir"] for entry in report["runners"]] == [
             str(root / str(index)) for index in range(1, 1 + len(launcher.RUNNERS))
         ]
         assert processes[0].signals == [signal.SIGTERM]
         assert all(process.returncode is not None for process in processes)
         assert report["result"] == ("FAIL" if business_fails else "PASS")
-        if business_fails:
+        if managed:
+            assert report["temporary_cleanup"] == "managed_by_verify"
+            assert root.is_dir() and removed == []
+            assert not (output / "homes").exists()
+            assert not (output / "tool-home").exists()
+            assert all(
+                (output / "runs" / Path(name).stem / "report.json").exists()
+                for name, _ in launcher.RUNNERS
+            )
+        elif business_fails:
             assert report["temporary_cleanup"] == "retained"
             assert root.is_dir() and removed == []
         else:
@@ -536,6 +552,8 @@ def test_deep_evidence_uses_short_tmp_and_failed_run_retains_it(
         for root in roots:
             if root.exists():
                 real_rmtree(root)
+        if managed_parent is not None:
+            real_rmtree(managed_parent)
 
 
 def test_every_browser_entrypoint_uses_the_lifecycle_owner(

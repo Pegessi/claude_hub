@@ -108,10 +108,38 @@ installed dependencies and failing checks still fail in every mode.
 
 Do not change the lockfiles or use a different interpreter merely to make a
 check pass. The verification script does not install dependencies, download a
-browser, or restart a service. Backend tests get private HOME/XDG/Hub paths and
-retain their evidence directory. Tests may start their own helper processes;
-inspect failed or interrupted runs before removing their runtime directories.
+browser, or restart a service. Backend tests get private HOME/XDG/Hub paths.
 Never point the default check at a running developer or production backend.
+
+#### Runtime cleanup and retained evidence
+
+Runtime-producing targets use one stdlib process owner per invocation. Logs,
+provenance, exit codes, emitted JUnit/`.coverage` data and browser reports/screenshots
+stay in the printed evidence directory under `CLAUDE_HUB_VERIFY_ARTIFACT_ROOT`
+(default: the caller's TMPDIR, then `/tmp`). The default coverage XML remains at
+`backend/coverage.xml`. Disposable HOME/XDG/tmp/Hub data uses
+a separate short `/tmp/ch-v-*` directory. Once owned processes exit, that runtime
+is removed on success, failure and handled interruption. `runtime.json` records
+the runtime path, cleanup result and final status; `exit-code` is the final
+verification status, while `pytest-exit-code` and `log-exit-code` separate test
+failure from a failed log write.
+
+To inspect raw temporary state after a run, opt in **before starting it**:
+
+```bash
+CLAUDE_HUB_VERIFY_KEEP_RUNTIME=1 ./scripts/verify.sh backend-tests -- tests/test_example.py -q
+```
+
+The default is `0`; only `0` and `1` are accepted. INT/TERM allow bounded
+cooperative shutdown before terminating residual owned processes. Pytest targets
+receive SIGINT so their finalizers can run; the outer exit remains 130/143 for the
+original signal. Unsafe/replaced paths or visible users retain the runtime with
+a warning. Linux checks same-user visible process environment/cwd/open-file
+references, including escaped sessions; other POSIX hosts check the owned process
+group only and cannot detect escaped sessions. This is not a security sandbox.
+SIGKILL, machine loss or inaccessible processes cannot provide complete cleanup
+or reporting guarantees. No historical runs, retained evidence, caller-supplied
+paths, shared services, virtual environments or dependency caches are swept.
 
 UI checks must state whether they inspected real rendering, mocked APIs, or live
 external integration. A screenshot is evidence of the inspected state, not proof

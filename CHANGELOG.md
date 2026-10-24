@@ -7,6 +7,20 @@
 
 ## Released
 
+### fix(verify): reclaim owned runtime data and retain diagnostic evidence
+
+- Separate temporary HOME/XDG/Hub/browser data from verification logs and reports.
+  Reclaim the current run's runtime after owned processes exit on success,
+  failure or handled interruption; `CLAUDE_HUB_VERIFY_KEEP_RUNTIME=1` opts into
+  retaining raw state for debugging.
+- Preserve provenance, test/log exit codes, emitted JUnit/coverage data and browser
+  evidence. INT/TERM allow bounded cooperative finalization before terminating
+  residual owned processes; logging or cleanup failures do not overwrite an
+  existing test failure.
+- Refuse changed runtime directory identities and, on Linux, visible live runtime
+  references. Record cleanup in `runtime.json`; do not sweep historical runs,
+  retained evidence, shared services or dependency installations.
+
 ### feat(session): archive and restore managed Chat sessions
 
 - Archive idle managed Chat agents and reviewers through workspace session

@@ -118,9 +118,15 @@ not merely check that the configuration contains a number.
 The current `faulthandler_timeout=60` emits thread stacks; it does not terminate
 a stuck test. The backend job has a job-level deadline, and `verify.sh` retains
 logs locally through `tee`. The default backend job does **not** currently upload
-that evidence as an artifact or enforce an inner pytest deadline. Browser gates
-have separate retention/timeout behavior. Do not claim the same protection for
-all targets.
+that evidence as an artifact or enforce an inner pytest deadline. Runtime-producing
+verify targets now separate retained evidence from disposable runtime directories.
+INT/TERM allow up to 60 seconds for the target's own finalizers before bounded
+residual process-group termination; this is a shutdown budget, not a test deadline.
+Pytest targets receive group SIGINT so finalizers can run, while the command
+returns 130/143 for the original signal. Cleanup and log/report errors must not
+overwrite an existing nonzero test status. See
+[runtime cleanup and retained evidence](../CONTRIBUTING.md#runtime-cleanup-and-retained-evidence)
+for explicit retention, Linux process inspection and hard-kill limitations.
 
 When implementing stronger timeout handling, terminate the test child while
 keeping the collector alive, preserve its nonzero exit and allow cleanup before
