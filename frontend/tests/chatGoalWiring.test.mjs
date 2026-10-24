@@ -118,6 +118,18 @@ test('expanded Goal details have a visible collapse control and stay above the s
   assert.match(statusBar, /\.goal-status-details \{[\s\S]*bottom: calc\(100% \+ 8px\)/)
 })
 
+test('phones get one tappable Goal row and a bottom sheet with pinned actions', () => {
+  // One action list feeds the desktop row and the phone sheet.
+  assert.match(statusBar, /v-for="action in actions"[\s\S]*v-for="action in actions"/)
+  assert.ok(statusBar.includes("const PHONE_QUERY = '(max-width: 640px)'"))
+  assert.ok(statusBar.includes('<Teleport'))
+  assert.ok(statusBar.includes(':disabled="!isPhone"'))
+  assert.match(statusBar, /\.goal-status-details-body \{[^}]*overflow-y: auto/)
+  assert.match(statusBar, /\.goal-sheet-actions \{[^}]*flex: 0 0 auto/)
+  assert.match(statusBar, /\.goal-sheet-actions button \{[^}]*min-height: 44px/)
+  assert.ok(statusBar.includes('env(safe-area-inset-bottom)'))
+})
+
 test('Goal status disclosure exposes accessible state and controls', () => {
   assert.ok(statusBar.includes('aria-live="polite"'))
   assert.ok(statusBar.includes(':aria-controls="detailsId"'))
