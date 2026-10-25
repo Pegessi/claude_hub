@@ -270,6 +270,11 @@ so Dot's own turns must not keep the user waiting:
   user's message at once. The stopped wake-up gives its events back and runs
   again about three minutes later (while events wait); a stopped tidy waits
   for the next night. A stopped Hub turn stays out of the journal.
+- A newer Feishu message stops Dot's answer to the previous one in the same
+  chat (other Chats queue it as a follow-up). The stopped answer is not sent
+  and gets no failure reply; the next turn carries the previous message and
+  the new ones, and Dot answers them together. If the answer ended before it
+  could be stopped, it is sent and the new message follows as usual.
 - Its turns carry `yields_to_user` in their start metadata, so the web
   composer sends (instead of queueing behind the turn) while one runs.
 - Keep Dot turns short by delegating long or many-step work to Hub Tasks.

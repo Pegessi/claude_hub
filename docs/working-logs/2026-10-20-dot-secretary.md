@@ -48,6 +48,34 @@ Design: [docs/DOT.md](../DOT.md) ("Delegation and wake-up").
 - Not fixed: a task started from the Dot Chat that ends between two watcher
   passes (under a minute) is not watched.
 
+## Follow-up: a newer Feishu message interrupts
+
+The user saw a Feishu message become a follow-up instead of interrupting. Only
+Dot's own wake/tidy turns gave way; a message during Dot's answer to an earlier
+Feishu message waited in the Feishu queue. Now, on the Dot Chat, a newer
+message in the same chat marks the active batch superseded and stops its turn
+(`manager.cancel_turn` with its turn id); the stopped batch ends as
+`superseded` without a failure reply, and the next batch's text carries the
+previous message and the new ones. If the stop fails (the answer ended first),
+the flags are undone and the message follows as before. Not covered: a Feishu
+message during a web turn on the Dot tab, and web messages (the web composer
+still queues behind a user turn).
+
+Review fixes: the reply is skipped only when the stop is confirmed (the
+batch awaits the stop task), so a turn that failed on its own still gets the
+failure reply; an answer that finished before the stop took is sent and the
+next batch is a plain follow-up (no "stopped" claim); the carried text is set
+by the stop task only when it stopped, so a late revert cannot wipe a newer
+interrupt; the carried text includes the omitted-image note. Not covered: if
+the newer message is withdrawn before it is sent (e.g. the binding changes),
+the stopped message gets no answer.
+
+Second review fixes: every exit of a batch (web-interaction reply, rejection,
+shutdown) settles a pending stop and drops its carried text, so a stop that
+lands late cannot make the next batch claim the earlier answer was stopped;
+the carried text is the user's own words (no nested intros) plus a note when
+the stopped message had images, which are not re-sent.
+
 ## Activation
 
 The live Dot keeps its session pack until the session rotates (`claude-hub dot
