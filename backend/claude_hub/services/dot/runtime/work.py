@@ -100,6 +100,18 @@ def _lifecycle_hint(workspace_manager: Any, task: Any) -> str:
 
 
 class DotWorkService(DotSessionService, ABC):
+    async def receive_hub_notice(self, task_id: str, kind: str, text: str, key: str) -> bool:
+        """Take a Hub lifecycle notice to judge; Dot decides whether the user hears it.
+
+        Returns False when Dot is not set up, so the Hub knows nobody received it.
+        """
+        if not self.is_set_up():
+            return False
+        self.store.add_inbox(kind, text, task_id=task_id, key=key)
+        await asyncio.to_thread(self.store.commit, f"dot: hub notice for {task_id}")
+        self._wake_pending = True
+        return True
+
     @abstractmethod
     async def wake(self) -> bool:
         """Wake the Dot chat after tracked work changes."""

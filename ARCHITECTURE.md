@@ -45,7 +45,7 @@ Task / report transaction using the existing mutation lock
 | `services/task_mailbox.py` | Owns event lists, sequence allocation and call indexes. `snapshot_workspace` / `restore_workspace` preserve missing entries and internal event references without loading, persisting or waking. `lookup_call` exposes a shallow read-only record; nested events remain mutable. |
 | Outer Task snapshot | Owns Task consumer cursors. Mailbox snapshots do not include runtime waiters; consumers are woken after the relevant commit. |
 | `services/task_transitions.py` | The only Task status writer: `apply_task_update(task, update, cause=...)` checks the (from, to) edge against one table; unexpected edges log, and raise under `CLAUDE_HUB_STRICT_TASK_TRANSITIONS=1` (tests). |
-| `services/task_lifecycle.py` + `workspace_manager/monitoring/lifecycle.py` | Derive one lifecycle per Task; the monitor records changes in `lifecycle_mark`, emits `lifecycle` events, resolves owner loss and delivers notices through the injected notifier (`api/task_notifications.py`). |
+| `services/task_lifecycle.py` + `workspace_manager/monitoring/lifecycle.py` | Derive one lifecycle per Task; the monitor records changes in `lifecycle_mark`, emits `lifecycle` events, resolves owner loss and hands notices to Dot through the injected notifier (`api/task_notifications.py`). |
 
 Scoped Task/report transactions and Mailbox append/replay/ACK pass the workspace
 explicitly; no ContextVar selects persistence scope. Existing review, dispatch and

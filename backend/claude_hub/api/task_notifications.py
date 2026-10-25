@@ -1,52 +1,40 @@
-"""Deliver Task notices to the people who can act on them.
+"""Hand Task notices to Dot, which decides whether the person hears them.
 
 The workspace monitor decides *when* a Task needs a person (see
-``services/workspace_manager/monitoring/lifecycle.py``); this module decides
-*where*: the Feishu chat bound to the Task's source Chat, or to Dot when Dot
-tracks the Task. It never depends on a model choosing to notify.
+``services/workspace_manager/monitoring/lifecycle.py``). Dot judges whether
+and how to tell the user; the Hub never messages the user on its own.
 """
 
+import hashlib
 import logging
-from typing import Optional
 
 from ..models import WorkspaceTask
 from ..services.agent_stream.redaction import mask_secrets
 from ..services.task_lifecycle import TaskNotice
-from .feishu_bot import feishu_bound_to_tab, push_to_tab
 
 logger = logging.getLogger(__name__)
 
+# Dot's own watcher already raises these for Tasks it tracks.
+_WATCHER_COVERED_PHASES = frozenset({"needs_user", "awaiting_acceptance", "failed"})
 
-def _dot_tab_tracking(task_id: str) -> Optional[str]:
+
+async def deliver_task_notice(task: WorkspaceTask, notice: TaskNotice) -> str:
     try:
         from ..services.dot import get_dot_service
 
         dot = get_dot_service()
-        if not dot.is_set_up() or dot.store.get_work(task_id) is None:
-            return None
-        return dot.tab_id()
+        if not dot.is_set_up():
+            return "unroutable"
+        tracked = dot.store.get_work(task.id) is not None
+        if tracked and notice.kind == "attention" and notice.phase in _WATCHER_COVERED_PHASES:
+            # Dot already hears about this from its own work watcher.
+            return "unroutable"
+        kind = "task_plan" if notice.kind == "plan" else "task_attention"
+        text = mask_secrets(f"{notice.title} — {notice.text}")
+        digest = hashlib.sha256(notice.text.encode("utf-8")).hexdigest()[:12]
+        key = f"{kind}:{task.id}:{notice.phase}:{notice.reason}:{digest}"
+        received = await dot.receive_hub_notice(task.id, kind, text, key)
     except Exception:
-        logger.debug("Dot lookup for task notice failed task_id=%s", task_id, exc_info=True)
-        return None
-
-
-def notice_recipient_tabs(task: WorkspaceTask) -> list[str]:
-    """Candidate tabs in priority order: the source Chat, then Dot."""
-
-    candidates = [task.source.tab_id if task.source else None, _dot_tab_tracking(task.id)]
-    return list(dict.fromkeys(tab for tab in candidates if tab))
-
-
-async def deliver_task_notice(task: WorkspaceTask, notice: TaskNotice) -> str:
-    bound = [tab for tab in notice_recipient_tabs(task) if feishu_bound_to_tab(tab)]
-    if not bound:
-        return "unroutable"
-    text = mask_secrets(notice.text)
-    title = mask_secrets(notice.title)
-    for tab_id in bound:
-        if await push_to_tab(tab_id, text, title=title, tone=notice.tone):
-            logger.info(
-                "Task notice sent task_id=%s kind=%s tab_id=%s", task.id, notice.kind, tab_id
-            )
-            return "sent"
-    return "failed"
+        logger.exception("Handing task notice to Dot failed task_id=%s", task.id)
+        return "failed"
+    return "sent" if received else "unroutable"
