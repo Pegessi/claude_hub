@@ -252,29 +252,36 @@ def test_plan_digest_tracks_objective_and_scope_only() -> None:
 
 
 @pytest.mark.parametrize(
-    ("set_up", "tracked", "kind", "phase", "expected", "handed"),
+    ("set_up", "item", "kind", "reason", "internal", "expected"),
     [
-        (False, False, "attention", "failed", "unroutable", False),
-        (True, False, "attention", "failed", "sent", True),
-        (True, True, "attention", "failed", "unroutable", False),  # Dot's watcher covers it
-        (True, True, "attention", "orphaned", "sent", True),
-        (True, True, "plan", "running", "sent", True),
+        (False, None, "attention", "failed", False, "unroutable"),
+        (True, None, "attention", "failed", False, "sent"),
+        # Dot's own watcher already raises failures for Tasks it tracks.
+        (True, {}, "attention", "failed", False, "unroutable"),
+        # ...but never an agent stuck on an approval prompt.
+        (True, {}, "attention", "agent_needs_input", False, "sent"),
+        (True, {}, "attention", "initiator_chat_gone", False, "sent"),
+        # An unwatched Task is no longer covered by the watcher.
+        (True, {"stopped": True}, "attention", "failed", False, "sent"),
+        (True, {}, "plan", "agent_working", False, "sent"),
+        # Hub housekeeping is not something the user asked for.
+        (True, None, "attention", "failed", True, "unroutable"),
     ],
 )
 def test_task_notice_is_handed_to_dot_to_decide(
     monkeypatch: MonkeyPatch,
     set_up: bool,
-    tracked: bool,
+    item: dict | None,
     kind: str,
-    phase: str,
+    reason: str,
+    internal: bool,
     expected: str,
-    handed: bool,
 ) -> None:
     received: list[tuple[str, str, str]] = []
 
     class FakeStore:
         def get_work(self, task_id: str) -> dict | None:
-            return {"task_id": task_id} if tracked else None
+            return None if item is None else {"task_id": task_id, **item}
 
     class FakeDot:
         store = FakeStore()
@@ -290,14 +297,29 @@ def test_task_notice_is_handed_to_dot_to_decide(
 
     monkeypatch.setattr(dot_module, "get_dot_service", lambda: FakeDot())
     notice = TaskNotice(
-        kind=kind, title="T", text="token sk-abcdefghijklmnopqrstuvwx", phase=phase, reason="r"
+        kind=kind, title="T", text="token sk-abcdefghijklmnopqrstuvwx", phase="x", reason=reason
     )
+    task = _task(system_internal=internal)
 
-    assert asyncio.run(task_notifications.deliver_task_notice(_task(), notice)) == expected
-    assert bool(received) == handed
+    assert asyncio.run(task_notifications.deliver_task_notice(task, notice)) == expected
+    assert bool(received) == (expected == "sent")
     if received:
         assert received[0][1] == ("task_plan" if kind == "plan" else "task_attention")
         assert "sk-abcdefghijklmnopqrstuvwx" not in received[0][2]
+
+
+def test_dot_receives_hub_notice_into_its_inbox_and_wakes(tmp_path: Path) -> None:
+    from claude_hub.services.dot import DotService, DotStore
+
+    dot = DotService(store=DotStore(tmp_path / "dot"))
+    assert asyncio.run(dot.receive_hub_notice("t1", "task_attention", "text", "k1")) is False
+
+    dot.is_set_up = lambda: True  # type: ignore[method-assign]
+    assert asyncio.run(dot.receive_hub_notice("t1", "task_attention", "needs you", "k1")) is True
+    assert asyncio.run(dot.receive_hub_notice("t1", "task_attention", "needs you", "k1")) is True
+    events = [event for event in dot.store.list_inbox() if event.get("key") == "k1"]
+    assert len(events) == 1 and events[0]["kind"] == "task_attention"
+    assert dot._wake_pending is True
 
 
 def test_dot_stall_hint_names_the_blocking_task() -> None:

@@ -317,7 +317,7 @@ REASON_TEXT = {
     "completed": "Completed",
 }
 
-# Feishu notices are messages to the user, in the user's language.
+# Notice text handed to Dot, in the user's language for Dot to relay.
 NOTICE_REASON_TEXT = {
     "reviewer_needs_input": "AI reviewer 有問題需要你回答",
     "review_failed_not_resumed": "review 未通過，且沒有自動送回 worker",
@@ -401,15 +401,15 @@ def attention_notice(
     task: WorkspaceTask, phase: TaskPhase, reason: str, detail: str = ""
 ) -> TaskNotice:
     lines = [f"**{notice_reason_text(reason)}**", f"Task `{task.id}`（{task.status.value}）"]
-    if detail.strip():
-        lines += ["", _clip(detail.strip(), 600)]
     step = (
         ORPHANED_STEP_TEXT
         if phase == TaskPhase.ORPHANED
         else NEXT_STEP_TEXT.get(task.status.value, "")
     )
     if step:
-        lines += ["", step.format(id=task.id, ws=task.workspace_id)]
+        lines += [step.format(id=task.id, ws=task.workspace_id)]
+    if detail.strip():
+        lines += ["", _clip(detail.strip(), 600)]
     return TaskNotice(
         kind="attention",
         title=f"{_clip(task.title, 60)}",
