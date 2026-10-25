@@ -252,28 +252,52 @@ def test_plan_digest_tracks_objective_and_scope_only() -> None:
 
 
 @pytest.mark.parametrize(
-    ("bound", "pushed", "expected"),
-    [(set(), True, "unroutable"), ({"chat-1"}, True, "sent"), ({"chat-1"}, False, "failed")],
+    ("set_up", "tracked", "kind", "phase", "expected", "handed"),
+    [
+        (False, False, "attention", "failed", "unroutable", False),
+        (True, False, "attention", "failed", "sent", True),
+        (True, True, "attention", "failed", "unroutable", False),  # Dot's watcher covers it
+        (True, True, "attention", "orphaned", "sent", True),
+        (True, True, "plan", "running", "sent", True),
+    ],
 )
-def test_task_notice_routing(
-    monkeypatch: MonkeyPatch, bound: set[str], pushed: bool, expected: str
+def test_task_notice_is_handed_to_dot_to_decide(
+    monkeypatch: MonkeyPatch,
+    set_up: bool,
+    tracked: bool,
+    kind: str,
+    phase: str,
+    expected: str,
+    handed: bool,
 ) -> None:
-    calls: list[tuple[str, str]] = []
+    received: list[tuple[str, str, str]] = []
 
-    async def push(tab_id: str, text: str, *, title: str | None = None, tone: str = "info"):
-        calls.append((tab_id, text))
-        return pushed
+    class FakeStore:
+        def get_work(self, task_id: str) -> dict | None:
+            return {"task_id": task_id} if tracked else None
 
-    monkeypatch.setattr(task_notifications, "feishu_bound_to_tab", lambda tab: tab in bound)
-    monkeypatch.setattr(task_notifications, "push_to_tab", push)
-    monkeypatch.setattr(task_notifications, "_dot_tab_tracking", lambda _task_id: None)
-    task = _task(source=TaskSourceReference(kind="chat", tab_id="chat-1"))
-    notice = TaskNotice(kind="attention", title="T", text="token sk-abcdefghijklmnopqrstuvwx")
+    class FakeDot:
+        store = FakeStore()
 
-    assert asyncio.run(task_notifications.deliver_task_notice(task, notice)) == expected
-    assert [tab for tab, _ in calls] == (["chat-1"] if bound else [])
-    if calls:
-        assert "sk-abcdefghijklmnopqrstuvwx" not in calls[0][1]
+        def is_set_up(self) -> bool:
+            return set_up
+
+        async def receive_hub_notice(self, task_id: str, kind: str, text: str, key: str) -> bool:
+            received.append((task_id, kind, text))
+            return True
+
+    import claude_hub.services.dot as dot_module
+
+    monkeypatch.setattr(dot_module, "get_dot_service", lambda: FakeDot())
+    notice = TaskNotice(
+        kind=kind, title="T", text="token sk-abcdefghijklmnopqrstuvwx", phase=phase, reason="r"
+    )
+
+    assert asyncio.run(task_notifications.deliver_task_notice(_task(), notice)) == expected
+    assert bool(received) == handed
+    if received:
+        assert received[0][1] == ("task_plan" if kind == "plan" else "task_attention")
+        assert "sk-abcdefghijklmnopqrstuvwx" not in received[0][2]
 
 
 def test_dot_stall_hint_names_the_blocking_task() -> None:
@@ -463,9 +487,10 @@ def test_reconciler_fails_a_task_whose_agent_stays_gone_and_continue_reassigns(
     mark = workspace_manager.tasks[task["id"]].lifecycle_mark
     assert mark is not None and mark.phase == TaskPhase.FAILED and mark.notified_at is None
 
+    spare = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
     resumed = client.post(f"/api/workspaces/tasks/{task['id']}/continue", json={})
     assert resumed.status_code == 200, resumed.text
-    assert resumed.json()["session_id"] not in (None, worker["id"])
+    assert resumed.json()["session_id"] == spare["id"]
 
 
 def test_reconciler_waits_a_week_before_failing_an_initiator_task_without_its_chat(
@@ -626,30 +651,6 @@ def test_reconciler_skips_feedback_reaper_and_simultaneous_loss_of_every_agent(
         update={"system_internal": True, "internal_kind": "feedback_reaper"}
     )
     assert workspace_manager._reconcile_orphaned_tasks(workspace["id"]) == 0
-
-
-def test_legacy_dispatch_pending_task_is_stranded_for_a_dedicated_agent(
-    isolated_hub: Path,  # noqa: F811
-) -> None:
-    client = TestClient(app)
-    workspace = client.post(
-        "/api/workspaces",
-        json={"name": "Pending", "path": str(isolated_hub), "session_prefix": "pd"},
-    ).json()
-    task = client.post(
-        f"/api/workspaces/{workspace['id']}/tasks", json={"title": "Old", "prompt": "x"}
-    ).json()
-    workspace_manager.tasks[task["id"]] = workspace_manager.tasks[task["id"]].model_copy(
-        update={
-            "status": WorkspaceTaskStatus.QUEUED,
-            "dispatch_pending": True,
-            "session_id": None,
-            "queued_at": datetime.now(),
-        }
-    )
-    assert [item.id for item in workspace_manager._stranded_queued_tasks(workspace["id"])] == [
-        task["id"]
-    ]
 
 
 def test_stopping_the_monitor_cancels_background_jobs() -> None:

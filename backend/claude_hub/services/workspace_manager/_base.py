@@ -60,8 +60,6 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     _feedback_started_at: datetime
     _feedback_summary_locks: dict[str, asyncio.Lock]
     _hubtask_orphan_locks: dict[str, asyncio.Lock]
-    _dedicated_agent_attempts: dict[str, datetime]
-    _stranded_provisioning_jobs: dict[str, asyncio.Task[None]]
     _task_notifier: TaskNotifier | None
     _task_notice_jobs: dict[str, asyncio.Task[None]]
     _monitor_task: asyncio.Task[None] | None
@@ -554,11 +552,6 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
 
     @abstractmethod
     def task_lifecycles(self, tasks: list[WorkspaceTask]) -> dict[str, TaskLifecycle]: ...
-
-    @abstractmethod
-    async def _provision_dedicated_agent(
-        self, workspace: Workspace, task: WorkspaceTask
-    ) -> ManagedSession: ...
 
     @abstractmethod
     async def ensure_workspace_agent(

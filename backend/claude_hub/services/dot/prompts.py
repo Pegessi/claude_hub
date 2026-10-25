@@ -139,17 +139,29 @@ QUIET_REPLY = "[quiet]"
 WAKE_MESSAGE = (
     "[Dot wake] New task events are in context. For delegated tasks, judge the result "
     "card against its done-when list and record it with `claude-hub dot review`; a "
-    "targeted check helps only when evidence is missing. The Hub has already sent the "
-    "user a short Feishu notice for each question, acceptance request, failure, task "
-    "without an owner, and new plan; do not repeat those. Add only your judgment: what "
-    "you concluded, what you recommend, or what the user must decide, conclusion first. "
-    'With a Feishu bot bound, send it with `claude-hub dot notify "<markdown>" --title '
-    '"..." --tone done|failed|decision`. Focus and memory can be updated as needed. '
+    "targeted check helps only when evidence is missing. `task_attention` events are "
+    "Hub tasks that need a person (a question, acceptance, an owner gone, a "
+    "failure); `task_plan` events are a worker's new plan. Decide whether the "
+    "user should hear about each: tell them what needs their decision or looks off "
+    "course, conclusion first, and skip what does not. With a Feishu bot bound, send it "
+    'with `claude-hub dot notify "<markdown>" --title "..." --tone done|failed|decision`. '
+    "Focus and memory can be updated as needed. "
     f"If nothing needs reporting, replying exactly {QUIET_REPLY} keeps this turn hidden."
 )
 
 # Earlier wake-up words; a schedule still holding one gets the current words.
 RETIRED_WAKE_MESSAGES = (
+    (
+        "[Dot wake] New task events are in context. For delegated tasks, judge the result "
+        "card against its done-when list and record it with `claude-hub dot review`; a "
+        "targeted check helps only when evidence is missing. The Hub has already sent the "
+        "user a short Feishu notice for each question, acceptance request, failure, task "
+        "without an owner, and new plan; do not repeat those. Add only your judgment: what "
+        "you concluded, what you recommend, or what the user must decide, conclusion first. "
+        'With a Feishu bot bound, send it with `claude-hub dot notify "<markdown>" --title '
+        '"..." --tone done|failed|decision`. Focus and memory can be updated as needed. '
+        f"If nothing needs reporting, replying exactly {QUIET_REPLY} keeps this turn hidden."
+    ),
     (
         "[Dot wake] New task events are in context. For delegated tasks, judge the result "
         "card against its done-when list and record it with `claude-hub dot review`; a "

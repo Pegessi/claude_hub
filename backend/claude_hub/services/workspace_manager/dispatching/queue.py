@@ -26,128 +26,6 @@ class _DispatchQueueMixin(_WorkspaceManagerBase):
                 workspace_id,
                 refresh_sessions=refresh_sessions,
             )
-        self._schedule_stranded_provisioning(workspace_id)
-
-    def _schedule_stranded_provisioning(self, workspace_id: str) -> None:
-        """Start at most one background job per workspace that gives stranded
-        queued Tasks their own agents.
-
-        Agent startup takes tens of seconds, so callers of ``dispatch_workspace``
-        (the monitor loop, report intake, aborts) never wait for it, and the
-        single job per workspace cannot provision twice for one Task.
-        """
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        current = self._stranded_provisioning_jobs.get(workspace_id)
-        if current is not None and not current.done() and current.get_loop() is loop:
-            return
-        if not self._stranded_queued_tasks(workspace_id):
-            return
-        self._stranded_provisioning_jobs[workspace_id] = loop.create_task(
-            self._run_stranded_provisioning(workspace_id),
-            name=f"workspace-stranded-provisioning-{workspace_id}",
-        )
-
-    async def _run_stranded_provisioning(self, workspace_id: str) -> None:
-        try:
-            if await self._provision_agents_for_stranded_tasks(workspace_id):
-                await self.dispatch_workspace(workspace_id, refresh_sessions=False)
-        except Exception:
-            logger.exception(
-                "Stranded queued task provisioning failed workspace_id=%s", workspace_id
-            )
-
-    def _stranded_queued_tasks(self, workspace_id: str) -> list[WorkspaceTask]:
-        """Queued Tasks whose assigned agent is held by another open Task or gone."""
-
-        stranded: list[WorkspaceTask] = []
-        for task in self.tasks.values():
-            if task.workspace_id != workspace_id or not self._workspace_owns_task(task):
-                continue
-            if task.status != WorkspaceTaskStatus.QUEUED:
-                continue
-            if task_dependency_blockers(self.tasks, task):
-                continue
-            if task.dispatch_pending:
-                # Waiting on a dispatcher decision that is no longer requested.
-                stranded.append(task)
-                continue
-            if not task.session_id or task.dispatch_reason in _NON_MIGRATABLE_DISPATCH_REASONS:
-                continue
-            assigned = self.sessions.get(task.session_id)
-            if assigned is None or self._agent_cannot_resume_work(assigned):
-                stranded.append(task)
-                continue
-            holder_id = assigned.task_id or assigned.current_task_id
-            holder = self.tasks.get(holder_id) if holder_id else None
-            if holder and holder.id != task.id and holder.status != WorkspaceTaskStatus.DONE:
-                stranded.append(task)
-        return sorted(stranded, key=_sort_time)
-
-    @staticmethod
-    def _agent_cannot_resume_work(session: ManagedSession) -> bool:
-        """Archived, stopped, paused, or a terminal whose tmux disappeared."""
-
-        if session.archived or session.chat_paused:
-            return True
-        if session.status == ManagedSessionStatus.STOPPED:
-            return True
-        return (
-            session.session_kind == SessionKind.TERMINAL
-            and session.runtime_status == AgentRuntimeStatus.OFFLINE
-        )
-
-    async def _provision_agents_for_stranded_tasks(self, workspace_id: str) -> bool:
-        workspace = self.workspaces.get(workspace_id)
-        if workspace is None:
-            return False
-        provisioned = False
-        now = self._runtime_now()
-        stranded = self._stranded_queued_tasks(workspace_id)
-        stranded_ids = {task.id for task in stranded}
-        for task_id in list(self._dedicated_agent_attempts):
-            owner = self.tasks.get(task_id)
-            if owner is None or (
-                owner.workspace_id == workspace_id and task_id not in stranded_ids
-            ):
-                self._dedicated_agent_attempts.pop(task_id, None)
-        for task in stranded:
-            last_attempt = self._dedicated_agent_attempts.get(task.id)
-            if last_attempt and (now - last_attempt).total_seconds() < (
-                DEDICATED_AGENT_RETRY_SECONDS
-            ):
-                continue
-            self._dedicated_agent_attempts[task.id] = now
-            try:
-                agent = await self._provision_dedicated_agent(workspace, task)
-            except Exception:
-                logger.exception(
-                    "Could not provision dedicated agent for stranded queued task "
-                    "task_id=%s workspace_id=%s",
-                    task.id,
-                    workspace_id,
-                )
-                continue
-            current = self.tasks.get(task.id)
-            if current is None or current.status != WorkspaceTaskStatus.QUEUED:
-                self._dedicated_agent_attempts.pop(task.id, None)
-                continue
-            self.tasks[task.id] = current.model_copy(
-                update={
-                    "session_id": agent.id,
-                    "clear_context": True,
-                    "dispatch_pending": False,
-                    "dispatch_reason": DEDICATED_AGENT_DISPATCH_REASON,
-                    "updated_at": self._runtime_now(),
-                }
-            )
-            self._dedicated_agent_attempts.pop(task.id, None)
-            self._save_state()
-            provisioned = True
-        return provisioned
 
     async def _dispatch_workspace_locked(
         self,
@@ -275,8 +153,6 @@ class _DispatchQueueMixin(_WorkspaceManagerBase):
         for task in self.tasks.values():
             if task.session_kind != free_session.session_kind:
                 continue
-            if task.agent_type != free_session.agent_type:
-                continue
             if not self._workspace_owns_task(task):
                 continue
             if task.workspace_id != workspace_id:
@@ -298,14 +174,6 @@ class _DispatchQueueMixin(_WorkspaceManagerBase):
             if task.dispatch_reason in _NON_MIGRATABLE_DISPATCH_REASONS:
                 continue
             assigned = self.sessions.get(task.session_id or "")
-            if (
-                assigned is not None
-                and task.dispatch_reason == DEDICATED_AGENT_DISPATCH_REASON
-                and (self._runtime_now() - assigned.created_at).total_seconds()
-                < DEDICATED_AGENT_BOOTSTRAP_GRACE_SECONDS
-            ):
-                # Its own agent is still starting; do not strand that agent.
-                continue
             # Migrate to the now-free agent whenever the currently-assigned
             # agent cannot take the task: genuinely busy WORKING, idle but
             # holding a non-DONE task parked in REVIEW (review_passed yet

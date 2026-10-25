@@ -65,10 +65,6 @@ class _StateMixin(_WorkspaceManagerBase):
         # scheduled hub_task whose worker session died. Keyed by the internal
         # WorkspaceTask id (distinct from the ScheduledTask fire lock above).
         self._hubtask_orphan_locks: dict[str, asyncio.Lock] = {}
-        # Last dedicated-agent provisioning attempt per stranded queued Task.
-        self._dedicated_agent_attempts: dict[str, datetime] = {}
-        # One background job per workspace provisions agents for stranded Tasks.
-        self._stranded_provisioning_jobs: dict[str, asyncio.Task[None]] = {}
         # Injected by the API layer: delivers Task notices (e.g. to Feishu).
         self._task_notifier: TaskNotifier | None = None
         # One background job per workspace delivers Task notices.
