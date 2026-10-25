@@ -1,6 +1,6 @@
 # Task Lifecycle Refactor: one phase, one owner, one writer
 
-Status: Layers 1–5 implemented on `codex/task-lifecycle`; remaining debt listed under Layer 5.
+Status: Layers 1, 2 (revised), 3, 4 and 5 implemented on `codex/task-lifecycle`; Layer 3a was reverted. See "Revision after user review (2026-10-25)".
 Continues [the 2026-05-23 state machine assessment](2026-05-23-state-machine-assessment.md),
 which extracted pure policy helpers (its step 2) but never introduced the
 reducer, explicit sub-phases or a single transition owner (its steps 3–6).
@@ -310,3 +310,25 @@ Deliberately not done yet. Each needs its own migration and review:
 - Known and accepted: a send cut off by its 20 s bound may already have been
   delivered, so the retry can duplicate it. The DISPATCHER role can still be
   created but is no longer used by start.
+
+## Revision after user review (2026-10-25)
+
+The user reviewed the implemented layers and decided two changes.
+
+**Layer 3a (dedicated agents) is reverted.** Tasks queue behind a busy agent
+exactly as on main, with no extra mechanism: no automatic agent creation, no
+stranded-Task rescue, no pairing refusal. `dispatching/start.py` and
+`queue.py` match main except for the single status writer and the removed,
+unreachable dispatcher-decision branch. The lifecycle still shows
+`queued / agent_held_by_other_task` with the blocking Task, so a queue stuck
+behind a Task waiting on the user is visible. Dot's stall alarm also names
+the blocker.
+
+**Layer 2 notices go to Dot, which decides.** The Hub no longer pushes to
+Feishu. The notifier (`api/task_notifications.py`) hands attention phases
+and new plans to Dot as `task_attention` / `task_plan` inbox events through
+`DotWorkService.receive_hub_notice`, and wakes it. Attention phases Dot's own
+watcher already raises for Tasks it tracks are not duplicated. Dot's wake
+prompt asks it to decide whether the user should hear about each. Phase
+derivation, settle times, cooldown, and dedupe and retry in the mark are
+unchanged; "sent" now means "handed to Dot".
