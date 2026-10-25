@@ -14,8 +14,10 @@
   is gone.
 - Tapping it opens a bottom sheet: the objective and checkpoint scroll, while
   every action stays pinned below in 44px buttons, however long the Goal is.
-  Tap outside, the close button or Escape closes it. Wider screens keep the
-  inline row.
+  Tap outside, the close button or Escape closes it; on phones it is modal
+  (Tab stays in it, the page behind does not scroll), an action closes it
+  first, and a failed Goal request turns the quick action into a reload.
+  Wider screens keep the inline row.
 - A mocked browser scenario checks the row, the sheet and its tap targets.
 
 ### feat(dot): a newer Feishu message stops Dot's answer in progress
