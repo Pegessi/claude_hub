@@ -50,10 +50,11 @@
 ### feat(task): resolve Tasks whose owner is gone
 
 - A Task whose agent stopped, was archived or vanished now fails after
-  5 minutes, with a reason naming `task continue`, which reassigns it to a
-  new agent. Previously it stayed `working` with nobody executing it.
-- An initiator Task whose Chat was archived or deleted is announced right
-  away. If nobody takes it over, it fails after 7 days, and
+  5 minutes, with a reason naming `task continue`, which puts it back to
+  work on an available agent. Previously it stayed `working` with nobody
+  executing it.
+- An initiator Task whose Chat was archived or deleted is handed to Dot
+  right away. If nobody takes it over, it fails after 7 days, and
   `task handoff` can still revive it.
 
 ### refactor(task): write Task status through one checked transition table
@@ -64,40 +65,25 @@
   fail the test suite, which runs in strict mode. A structure test rejects
   new direct status writes.
 
-### feat(task): announce Task lifecycle changes deterministically
+### feat(task): hand Task lifecycle changes to Dot to judge
 
 - The Hub records each Task lifecycle change once. It emits a `lifecycle`
   mailbox event for every change, including an agent disappearing without a
-  report.
-- Feishu notices go out without waiting for Dot's model to decide, and are
-  sent to the chat bound to the source Chat or to Dot. They cover:
-  - questions;
-  - acceptance requests;
-  - Tasks without an owner;
-  - failures;
-  - new plans, so long Tasks can be redirected early.
-
-  Delivery is retried with backoff, and dedupe survives restarts.
+  report, so `task wait` long-polls wake on it.
+- Tasks that need a person (a question, an acceptance request, an owner
+  gone, a failure) and new worker plans are handed to Dot as `task_attention`
+  and `task_plan` inbox events. Dot decides whether the user hears about
+  them; the Hub never messages the user itself.
+  - Hand-off is retried with backoff, and dedupe survives restarts.
+  - Sampled-runtime flapping is held back.
+  - Children of a working parent Task are not handed off.
 - Dot:
   - briefs ask for a plan first and milestone reports;
   - Dot can steer running Tasks with `task followup`;
-  - the stall alarm fires after 1 h and says what the Task is waiting on.
+  - the stall alarm fires after 1 h and says what the Task is waiting on,
+    including the Task it is queued behind.
 - Board cards show why a Task is waiting, highlighting Tasks that need you.
-
-### fix(task): give parallel Tasks their own agents
-
-- A Task started while every agent of its provider holds another open Task
-  now gets a dedicated agent, instead of queueing behind one. Queueing
-  behind an agent held by a Task in review or waiting on the user could
-  starve the queue indefinitely. An agent keeps its Task until the Task is
-  done, so the context stays consistent, and agents are never shared between
-  open Tasks.
-- The dedicated agent inherits the env preset, Chat env and remote target of
-  the newest agent of the same provider. Free agents are reused only for
-  their own provider.
-- Tasks already queued behind a held or stopped agent get their own agent on
-  the next dispatch pass. Only Tasks pinned to an agent by the user still
-  wait for that agent.
+  Queueing behind a busy agent is unchanged.
 
 ### feat(task): derive one explicit lifecycle phase per Task
 

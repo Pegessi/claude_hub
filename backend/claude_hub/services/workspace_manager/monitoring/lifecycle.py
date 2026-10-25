@@ -53,18 +53,18 @@ SELF_REPORTED_REASONS = frozenset({"initiator_needs_input", "initiator_blocked",
 
 # How long an owner may stay gone before the reconciler resolves the Task, and
 # the reason recorded. Agent loss is resolved quickly because `task continue`
-# reassigns a failed Task to a fresh agent; a Chat loss waits for a week
-# because only a handoff can revive a failed initiator record.
+# puts a failed Task back to work; a Chat loss waits for a week because only a
+# handoff can revive a failed initiator record.
 OWNER_LOSS_POLICY: dict[str, tuple[timedelta, str]] = {
     "agent_gone": (
         timedelta(minutes=5),
         "Its agent is gone (stopped, archived or deleted). "
-        "`claude-hub task continue <id>` reassigns it to a new agent.",
+        "`claude-hub task continue <id>` puts it back to work on an available agent.",
     ),
     "working_without_agent": (
         timedelta(minutes=5),
         "Marked working without any agent. "
-        "`claude-hub task continue <id>` reassigns it to a new agent.",
+        "`claude-hub task continue <id>` puts it back to work on an available agent.",
     ),
     "initiator_chat_gone": (
         timedelta(days=7),

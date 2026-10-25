@@ -380,6 +380,8 @@ class TaskNotice:
     title: str
     text: str
     tone: str = "info"
+    phase: str = ""
+    reason: str = ""
 
 
 # Delivers a notice for a Task and reports ``sent``; ``unroutable`` when
@@ -413,6 +415,8 @@ def attention_notice(
         title=f"{_clip(task.title, 60)}",
         text="\n".join(lines),
         tone=PHASE_TONE.get(phase, "info"),
+        phase=phase.value,
+        reason=reason,
     )
 
 

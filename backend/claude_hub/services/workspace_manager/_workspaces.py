@@ -58,11 +58,10 @@ class _WorkspacesMixin(
             await self._stop_feedback_automation()
 
     async def _stop_monitor_jobs(self) -> None:
-        """Cancel notice delivery and stranded-Task provisioning started by the monitor."""
+        """Cancel notice delivery started by the monitor."""
 
-        jobs = [*self._task_notice_jobs.values(), *self._stranded_provisioning_jobs.values()]
+        jobs = list(self._task_notice_jobs.values())
         self._task_notice_jobs.clear()
-        self._stranded_provisioning_jobs.clear()
         for job in jobs:
             job.cancel()
         for job in jobs:
