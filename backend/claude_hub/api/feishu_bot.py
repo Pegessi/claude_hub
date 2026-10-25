@@ -181,7 +181,62 @@ def _reserve_tab_dispatch(
     queue.pending.append(item)
     queue.changed.set()
     _promote_tab_dispatch(tab_id, queue)
+    _interrupt_dot_answer(tab_id, queue, item)
     return item
+
+
+def _interrupt_dot_answer(tab_id: str, queue: _TabDispatchQueue, item: _TabDispatchItem) -> None:
+    """On the Dot Chat a newer message stops the answer in progress: the next
+    batch answers both. Other Chats keep queueing it as a follow-up."""
+    active = list(queue.active)
+    if (
+        not active
+        or any(one.superseded or not one.native_bridge_started for one in active)
+        or not _message_dispatcher._batch_matches(active[0], item)
+    ):
+        return
+    try:
+        from claude_hub.services.dot import get_dot_service
+
+        if not get_dot_service().is_dot_tab(tab_id):
+            return
+    except Exception:
+        return
+    for one in active:
+        one.superseded = True
+    turn_id = turn_id_for(active[0].bot_id, active[0].event.message_id)
+    task = asyncio.create_task(
+        _stop_superseded_answer(tab_id, queue, active, turn_id, queue.active_text)
+    )
+    for one in active:
+        one.stop_task = task
+
+
+async def _stop_superseded_answer(
+    tab_id: str,
+    queue: _TabDispatchQueue,
+    active: list[_TabDispatchItem],
+    turn_id: str,
+    text: str,
+) -> bool:
+    """Stop the superseded turn; the next batch carries ``text`` only when it stopped."""
+    from claude_hub.api import agent_stream as stream_api
+
+    stopped = False
+    try:
+        session = stream_api._terminal_tab_session_or_404(tab_id)
+        manager = stream_api._get_tab_tailer_manager()
+        stopped = bool(await manager.cancel_turn(session, expected_turn_id=turn_id))
+    except Exception:
+        logger.exception("Feishu Bot could not stop the Dot answer on tab %s", tab_id)
+    if stopped:
+        queue.interrupted_text = text
+    else:
+        # It ended first (or could not be stopped): its answer or failure goes out
+        # as usual, and the newer message follows it.
+        for one in active:
+            one.superseded = False
+    return stopped
 
 
 def _cancel_tab_dispatch(tab_id: str, item: _TabDispatchItem) -> None:

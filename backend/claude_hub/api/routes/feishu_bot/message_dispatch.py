@@ -46,6 +46,10 @@ logger = logging.getLogger(__name__)
 _BIND_CODE_RE = re.compile(r"^(?:bind\s+)?(CH-[A-Z0-9]{10})$", re.IGNORECASE)
 
 
+# How long a finished batch waits for a stop a newer message asked for.
+_STOP_SETTLE_SECONDS = 15.0
+
+
 class FeishuMessageTimeRejected(HTTPException):
     """Only the local admission guard can prove this turn was never submitted."""
 
@@ -510,6 +514,35 @@ class FeishuMessageDispatcher:
         )
         return f"{intro}\n\n{messages}"
 
+    async def _stopped_for_newer(self, batch: list[_TabDispatchItem]) -> bool | None:
+        """None when no newer message asked to stop this batch; else whether it stopped."""
+        stop = next((item.stop_task for item in batch if item.stop_task is not None), None)
+        if stop is None:
+            return None
+        return await asyncio.shield(stop)
+
+    async def _settle_stop(self, queue: _TabDispatchQueue, batch: list[_TabDispatchItem]) -> None:
+        stop = next((item.stop_task for item in batch if item.stop_task is not None), None)
+        if stop is None:
+            return
+        if not stop.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(stop), timeout=_STOP_SETTLE_SECONDS)
+            except BaseException:
+                # Shutdown or a stop that hangs: give up on it, never on the batch.
+                stop.cancel()
+        queue.interrupted_text = ""
+
+    def _interrupted_text(self, earlier: str, items: list[_TabDispatchItem]) -> str:
+        messages = "\n\n".join(
+            f"[新消息 {index}]\n{item.event.text}" for index, item in enumerate(items, start=1)
+        )
+        return (
+            "你回复用户上一条消息时，用户又发来了新消息，上一次回复已停止、未发出。"
+            "请结合两者给出一个回复：\n\n"
+            f"[上一条]\n{earlier}\n\n{messages}"
+        )
+
     def _batch_matches(self, first: _TabDispatchItem, candidate: _TabDispatchItem) -> bool:
         return (
             candidate.bot_id == first.bot_id
@@ -616,6 +649,13 @@ class FeishuMessageDispatcher:
                     )
                 batch[0].reaction_dispatch_started.set()
                 visible_text = self._batch_visible_text(batch, followup=followup)
+                # The user's own words; a later stop carries these, without intros.
+                core_text = "\n\n".join(item.event.text for item in batch)
+                if queue.interrupted_text:
+                    # The answer in progress was stopped for these messages.
+                    visible_text = self._interrupted_text(queue.interrupted_text, batch)
+                    core_text = f"{queue.interrupted_text}\n\n{core_text}"
+                    queue.interrupted_text = ""
                 attachments: list[AgentStreamAttachment] = []
                 attachment_bytes = 0
                 omitted_images: list[str] = []
@@ -643,6 +683,13 @@ class FeishuMessageDispatcher:
                         + "、".join(omitted_images)
                         + "。请勿假设已经看到这些图片；如需分析，请提示用户重新发送。]"
                     )
+                images = sum(len(item.event.image_keys) for item in batch)
+                queue.active_text = core_text + (
+                    f"\n\n[系统提示：上一条消息附带的 {images} 张图片不会随本次重新发送；"
+                    "如需分析，请提示用户重新发送。]"
+                    if images
+                    else ""
+                )
                 for item in batch:
                     item.native_bridge_started = True
                 assistant_text = await self.bindings.dispatch_tab_chat_and_wait(
@@ -665,6 +712,10 @@ class FeishuMessageDispatcher:
                     attachments=attachments,
                     admission_guard=lambda: self._admit_batch_dispatch(queue, batch),
                 )
+                if await self._stopped_for_newer(batch) is not None:
+                    # It ended before the stop took: this answer is sent, so the
+                    # newer message follows it as usual.
+                    queue.interrupted_text = ""
                 status = (
                     "completed"
                     if await self.bindings.reply_if_current(
@@ -752,6 +803,10 @@ class FeishuMessageDispatcher:
                     return status
                 raise
             except Exception:
+                if await self._stopped_for_newer(batch):
+                    # Stopped for a newer message, which answers this one too.
+                    status = "superseded"
+                    return status
                 logger.exception("Feishu Bot message dispatch failed")
                 target = batch[-1] if batch else leader
                 await self.bindings.reply_if_current(
@@ -769,5 +824,9 @@ class FeishuMessageDispatcher:
             # This outer finally also runs when cancellation strikes while an error
             # reply is being posted from one of the handlers above. No path may
             # leave a claimed batch in ``queue.active`` with unresolved followers.
+            if status != "superseded":
+                # Answered, failed or retired here: a stop that lands late must not
+                # make the next batch claim this one was stopped.
+                await self._settle_stop(queue, batch)
             if batch:
                 self._finish_tab_dispatch_batch(tab_id, queue, batch, status)

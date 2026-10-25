@@ -7,6 +7,25 @@
 
 ## Released
 
+### fix(chat): phone Goal controls in one row and a bottom sheet
+
+- On phones the Goal bar is one tappable row with a single quick action
+  (Pause, Resume or Retry stop); the sideways-scrolling strip of small buttons
+  is gone.
+- Tapping it opens a bottom sheet: the objective and checkpoint scroll, while
+  every action stays pinned below in 44px buttons, however long the Goal is.
+  Tap outside, the close button or Escape closes it; on phones it is modal
+  (Tab stays in it, the page behind does not scroll), an action closes it
+  first, and a failed Goal request turns the quick action into a reload.
+  Wider screens keep the inline row.
+- A mocked browser scenario checks the row, the sheet and its tap targets.
+
+### feat(dot): a newer Feishu message stops Dot's answer in progress
+
+- On the Dot Chat, a Feishu message that arrives while Dot answers the previous
+  one stops that answer (no failure reply); the next turn answers both. Other
+  Chats keep queueing it as a follow-up.
+
 ### fix(verify): reclaim owned runtime data and retain diagnostic evidence
 
 - Separate temporary HOME/XDG/Hub/browser data from verification logs and reports.
