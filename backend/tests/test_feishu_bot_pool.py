@@ -3058,7 +3058,10 @@ def test_dot_on_feishu_gets_the_last_answer_of_the_turn(
     assert asyncio.run(scenario()) == answer
 
 
-@pytest.mark.parametrize("case", ["stopped", "ended_first", "answered_anyway", "failed"])
+@pytest.mark.parametrize(
+    "case",
+    ["stopped", "stopped_late", "ended_first", "answered_anyway", "failed", "approval_late"],
+)
 def test_on_the_dot_chat_a_newer_message_stops_the_answer_in_progress(
     api, clock: Clock, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
@@ -3070,7 +3073,9 @@ def test_on_the_dot_chat_a_newer_message_stops_the_answer_in_progress(
     from claude_hub.api import agent_stream as stream_api
     from claude_hub.services import dot as dot_module
 
-    stop_takes = case in {"stopped", "answered_anyway"}
+    stop_takes = case in {"stopped", "stopped_late", "answered_anyway", "approval_late"}
+    # The stop lands only after the turn ended: the batch must wait for its result.
+    late = case in {"stopped_late", "approval_late"}
 
     async def scenario() -> None:
         monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_QUIET_SECONDS", 0.02)
@@ -3089,6 +3094,8 @@ def test_on_the_dot_chat_a_newer_message_stops_the_answer_in_progress(
             async def cancel_turn(self, _session: Any, *, expected_turn_id: str) -> bool:
                 cancelled.append(expected_turn_id)
                 release_first.set()
+                if late:
+                    await asyncio.sleep(0.1)
                 return stop_takes
 
         monkeypatch.setattr(stream_api, "_terminal_tab_session_or_404", lambda _tab: object())
@@ -3100,10 +3107,12 @@ def test_on_the_dot_chat_a_newer_message_stops_the_answer_in_progress(
             if len(submitted) == 1:
                 first_started.set()
                 await release_first.wait()
-                if case == "stopped":
+                if case in {"stopped", "stopped_late"}:
                     raise RuntimeError("Chat turn ended with status cancelled")
                 if case == "failed":
                     raise RuntimeError("provider error")
+                if case == "approval_late":
+                    raise bot_api.ExternalInteractionRequired("approval required")
             return f"answer-{len(submitted)}"
 
         monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
@@ -3122,7 +3131,7 @@ def test_on_the_dot_chat_a_newer_message_stops_the_answer_in_progress(
 
         assert cancelled == [turn_id_for(bot_id, "om-first")]
         assert len(submitted) == 2
-        if case == "stopped":
+        if case in {"stopped", "stopped_late"}:
             assert "上一次回复已停止" in submitted[1]
             assert submitted[1].index("[上一条]\ninitial") < submitted[1].index(
                 "[新消息 1]\nactually, X"
@@ -3131,9 +3140,10 @@ def test_on_the_dot_chat_a_newer_message_stops_the_answer_in_progress(
         else:
             assert "上一次回复已停止" not in submitted[1]
             assert "处理上一条消息期间补充" in submitted[1]
-            first_reply = (
-                "Claude Hub 处理消息失败，请稍后重试。" if case == "failed" else "answer-1"
-            )
+            first_reply = {
+                "failed": "Claude Hub 处理消息失败，请稍后重试。",
+                "approval_late": "本次处理需要在 Claude Hub 网页确认或回答，已停止等待。请在网页处理后重试。",
+            }.get(case, "answer-1")
             assert api.wire.reply_texts() == [first_reply, "answer-2"]
         assert bot_api._tab_dispatch_queues == {}
 

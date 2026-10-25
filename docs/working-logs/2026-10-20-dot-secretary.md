@@ -70,6 +70,12 @@ interrupt; the carried text includes the omitted-image note. Not covered: if
 the newer message is withdrawn before it is sent (e.g. the binding changes),
 the stopped message gets no answer.
 
+Second review fixes: every exit of a batch (web-interaction reply, rejection,
+shutdown) settles a pending stop and drops its carried text, so a stop that
+lands late cannot make the next batch claim the earlier answer was stopped;
+the carried text is the user's own words (no nested intros) plus a note when
+the stopped message had images, which are not re-sent.
+
 ## Activation
 
 The live Dot keeps its session pack until the session rotates (`claude-hub dot
