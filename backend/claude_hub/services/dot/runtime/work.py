@@ -108,8 +108,8 @@ class DotWorkService(DotSessionService, ABC):
         if not self.is_set_up():
             return False
         self.store.add_inbox(kind, text, task_id=task_id, key=key)
-        await asyncio.to_thread(self.store.commit, f"dot: hub notice for {task_id}")
         self._wake_pending = True
+        await asyncio.to_thread(self.store.commit, f"dot: hub notice for {task_id}")
         return True
 
     @abstractmethod

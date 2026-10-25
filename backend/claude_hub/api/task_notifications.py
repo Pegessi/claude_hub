@@ -14,8 +14,18 @@ from ..services.task_lifecycle import TaskNotice
 
 logger = logging.getLogger(__name__)
 
-# Dot's own watcher already raises these for Tasks it tracks.
-_WATCHER_COVERED_PHASES = frozenset({"needs_user", "awaiting_acceptance", "failed"})
+# Reasons Dot's own work watcher already raises for Tasks it tracks (worker or
+# reviewer questions, results awaiting acceptance, failures). Everything else,
+# e.g. an agent stuck on an approval prompt, is forwarded.
+_WATCHER_COVERED_REASONS = frozenset(
+    {
+        "reviewer_needs_input",
+        "awaiting_acceptance",
+        "review_skipped",
+        "initiator_ready",
+        "failed",
+    }
+)
 
 
 async def deliver_task_notice(task: WorkspaceTask, notice: TaskNotice) -> str:
@@ -25,8 +35,12 @@ async def deliver_task_notice(task: WorkspaceTask, notice: TaskNotice) -> str:
         dot = get_dot_service()
         if not dot.is_set_up():
             return "unroutable"
-        tracked = dot.store.get_work(task.id) is not None
-        if tracked and notice.kind == "attention" and notice.phase in _WATCHER_COVERED_PHASES:
+        if task.system_internal:
+            # Hub housekeeping is not something the user asked for.
+            return "unroutable"
+        item = dot.store.get_work(task.id)
+        tracked = item is not None and not item.get("stopped")
+        if tracked and notice.kind == "attention" and notice.reason in _WATCHER_COVERED_REASONS:
             # Dot already hears about this from its own work watcher.
             return "unroutable"
         kind = "task_plan" if notice.kind == "plan" else "task_attention"
