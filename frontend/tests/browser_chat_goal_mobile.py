@@ -208,7 +208,7 @@ async def main(browser_run: BrowserRun) -> None:
             report["screenshots"].append("goal-mobile-bar.png")
 
             await summary.click()
-            sheet = page.get_by_role("region", name="Chat Goal details")
+            sheet = page.get_by_role("dialog", name="Chat Goal details")
             await expect(sheet).to_be_visible()
             sheet_box = await sheet.bounding_box()
             assert sheet_box and sheet_box["y"] + sheet_box["height"] <= PHONE["height"] + 1
@@ -245,6 +245,27 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(sheet).to_be_visible()
             await page.mouse.click(PHONE["width"] / 2, 20)
             await expect(sheet).not_to_be_visible()
+
+            # Escape closes it wherever focus is, and the page behind does not scroll.
+            await summary.click()
+            await expect(sheet).to_be_visible()
+            assert await page.evaluate("document.body.style.overflow") == "hidden"
+            await page.evaluate("document.activeElement.blur()")
+            await page.keyboard.press("Escape")
+            await expect(sheet).not_to_be_visible()
+            assert await page.evaluate("document.body.style.overflow") != "hidden"
+
+            # Edit Goal closes the sheet so the dialog is on top and usable.
+            await summary.click()
+            await sheet.get_by_role("button", name="Edit Goal", exact=True).click()
+            await expect(sheet).not_to_be_visible()
+            dialog = page.get_by_role("dialog", name="Edit Goal", exact=True)
+            await expect(dialog).to_be_visible()
+            await expect(
+                dialog.get_by_role("button", name="Save Goal", exact=True)
+            ).to_be_in_viewport()
+            await dialog.get_by_role("button", name="Cancel", exact=True).click()
+            await expect(dialog).not_to_be_visible()
 
             await quick.click()
             await expect(bar.get_by_role("button", name="Resume", exact=True)).to_be_visible()

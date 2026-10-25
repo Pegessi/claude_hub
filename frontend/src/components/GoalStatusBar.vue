@@ -4,6 +4,7 @@
     :data-status="goal.status"
     aria-label="Chat Goal status"
     :aria-busy="busy || undefined"
+    :data-error="error ? '' : undefined"
     @keydown.esc="expanded = false"
   >
     <span
@@ -36,6 +37,7 @@
       type="button"
       class="goal-status-quick"
       :class="quickAction.tone && `goal-action--${quickAction.tone}`"
+      :aria-describedby="error ? summaryErrorId : undefined"
       :disabled="quickAction.disabled"
       @click="quickAction.run"
     >
@@ -57,9 +59,11 @@
         class="goal-status-details"
         :class="{ 'goal-status-details--sheet': isPhone }"
         :data-status="goal.status"
-        role="region"
+        :role="isPhone ? 'dialog' : 'region'"
+        :aria-modal="isPhone || undefined"
         aria-label="Chat Goal details"
         @keydown.esc="expanded = false"
+        @keydown.tab="trapFocus"
       >
         <div class="goal-status-details-header">
           <span
@@ -140,7 +144,7 @@
             type="button"
             :class="action.tone && `goal-action--${action.tone}`"
             :disabled="action.disabled"
-            @click="action.run"
+            @click="runFromSheet(action)"
           >
             {{ action.label }}
           </button>
@@ -149,6 +153,7 @@
     </Teleport>
     <p
       v-if="error && !expanded"
+      :id="summaryErrorId"
       class="goal-status-error goal-status-error--summary"
       role="alert"
     >
@@ -198,7 +203,7 @@ const actions = computed<GoalAction[]>(() => {
   const goal = props.goal
   const busy = Boolean(props.busy)
   const list: GoalAction[] = []
-  if (props.error) list.push({ key: 'refresh', label: 'Reload Goal status', disabled: busy, run: () => emit('refresh') })
+  if (props.error) list.push({ key: 'refresh', label: 'Reload Goal status', disabled: busy, run: () => emit('refresh'), tone: 'danger' })
   if (needsReconciliation.value) list.push({ key: 'retry-stop', label: 'Retry stop', disabled: busy, run: retryStop, tone: 'primary' })
   if (goal.status === 'active') list.push({ key: 'pause', label: 'Pause', disabled: busy, run: () => emit('pause'), tone: 'primary' })
   if (!needsReconciliation.value && (goal.status === 'paused' || goal.status === 'blocked')) {
@@ -211,7 +216,16 @@ const actions = computed<GoalAction[]>(() => {
   list.push({ key: 'clear', label: 'Clear', disabled: busy, run: () => emit('clear'), tone: 'danger' })
   return list
 })
-const quickAction = computed(() => actions.value.find(action => action.tone === 'primary'))
+// A failed Goal request needs a reload first; otherwise the main next step.
+const quickAction = computed(() =>
+  actions.value.find(action => action.key === 'refresh')
+  ?? actions.value.find(action => action.tone === 'primary'))
+const summaryErrorId = computed(() => `goal-status-error-${props.goal.id}`)
+// The dialog opened by an action (Edit Goal) must not sit under the sheet.
+function runFromSheet(action: GoalAction) {
+  expanded.value = false
+  action.run()
+}
 
 // Phones get a bottom sheet with pinned actions instead of the inline row.
 const PHONE_QUERY = '(max-width: 640px)'
@@ -224,9 +238,50 @@ onMounted(() => {
   syncPhone()
   phoneQuery.addEventListener('change', syncPhone)
 })
-onBeforeUnmount(() => phoneQuery?.removeEventListener('change', syncPhone))
-watch(expanded, open => {
+// The sheet is modal on phones: Escape works wherever focus is, Tab stays in
+// it, and the page behind does not scroll.
+function onDocumentKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') expanded.value = false
+}
+function trapFocus(event: KeyboardEvent) {
   if (!isPhone.value) return
+  const sheet = closeEl.value?.closest<HTMLElement>('.goal-status-details')
+  const focusable = sheet ? [...sheet.querySelectorAll<HTMLElement>('button:not(:disabled)')] : []
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (!first || !last) return
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+let lockedOverflow: string | null = null
+function setSheetOpen(open: boolean) {
+  if (open && lockedOverflow === null) {
+    lockedOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    document.addEventListener('keydown', onDocumentKeydown)
+  } else if (!open && lockedOverflow !== null) {
+    document.body.style.overflow = lockedOverflow
+    lockedOverflow = null
+    document.removeEventListener('keydown', onDocumentKeydown)
+  }
+}
+onBeforeUnmount(() => {
+  phoneQuery?.removeEventListener('change', syncPhone)
+  setSheetOpen(false)
+})
+watch([expanded, isPhone], ([open, phone], [wasOpen, wasPhone]) => {
+  // Crossing the breakpoint moves the panel: close it rather than lose focus.
+  if (open && wasOpen && phone !== wasPhone) {
+    expanded.value = false
+    return
+  }
+  setSheetOpen(open && phone)
+  if (!phone) return
   void nextTick(() => (open ? closeEl.value : summaryEl.value)?.focus())
 })
 </script>
@@ -267,7 +322,8 @@ watch(expanded, open => {
   .goal-status { gap: 8px; padding: 4px 6px 4px 12px; font-size: 13px; }
   .goal-status-summary { flex: 1 1 auto; min-width: 0; min-height: 44px; }
   .goal-status-quick { flex: 0 0 auto; min-width: 72px; min-height: 40px; padding: 0 14px; font-size: 13px; font-weight: 600; }
-  .goal-status-error--summary { display: none; }
+  .goal-status-error--summary { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  .goal-status[data-error] .goal-status-summary .goal-status-dot { background: var(--ch-color-danger, #e5484d); }
   .goal-sheet-backdrop { position: fixed; inset: 0; z-index: 1000; background: rgb(0 0 0 / 45%); }
   .goal-status-details--sheet { position: fixed; top: auto; right: 0; bottom: 0; left: 0; z-index: 1001; display: flex; flex-direction: column; max-height: 85dvh; padding: 0; overflow: hidden; border-width: 1px 0 0; border-radius: 16px 16px 0 0; font-size: 14px; line-height: 1.5; box-shadow: 0 -12px 32px rgb(0 0 0 / 30%); }
   .goal-status-details--sheet .goal-status-details-header { flex: 0 0 auto; margin: 0; padding: 6px 6px 6px 16px; border-bottom: 1px solid var(--ch-color-border-muted); }
