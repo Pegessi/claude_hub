@@ -74,7 +74,8 @@ attention = phase ∈ {needs_user, awaiting_acceptance, orphaned}
 
 Rules this model makes explicit (Layers 2–3):
 
-- **One open Task per agent; parallel Tasks get parallel agents** (decided by
+- *(Superseded on 2026-10-25: queueing stays as on main; see the revision
+  section.)* **One open Task per agent; parallel Tasks get parallel agents** (decided by
   the user on 2026-10-24). An agent stays bound to its Task until the Task is
   done, so the implementation context remains consistent for revisions and
   rejection; this was already intended. New work never queues behind an agent
@@ -102,7 +103,7 @@ Each layer is separately shippable and keeps legacy `status` consistent.
 |---|---|---|---|
 | **1. Projection** (done) | Pure `services/task_lifecycle.py` plus `models/schema_domains/lifecycle.py`; `WorkspaceBoard.task_lifecycles`. | None (additive field). | 31 unit tests; existing workspace/board/queue/review suites pass (815); dry run on live data classifies all 18 open Tasks correctly. |
 | **2. Consumers** | CLI `task list/get/status` show phase, reason and blocker plus `task list --attention/--phase` (done with Layer 1); board UI badges from `task_lifecycles` replace timestamp heuristics in `useWorkspaceTaskPresentation`; Dot watcher keys off phase transitions and pushes attention phases to Feishu deterministically (persisted `notified`, retry). | Visible and notification only. | A user sees "orphaned: Chat archived" and "queued behind cadb399d (needs your answer)" without polling. |
-| **3a. Dedicated agents** (done) | `_choose_dispatch_target` provisions a dedicated agent instead of "Queued behind existing workspace agent". It inherits the launch config of the newest same-provider agent: env preset, Chat env and remote target. Free-agent reuse now requires the Task's provider. After each dispatch pass, one background job per workspace gives stranded queued Tasks their own agents; callers never wait for agent startup, and failed attempts are retried at most once per Task per 60 s. | The cadb399d deadlock cannot recur, and already-stranded Tasks are rescued. | Policy tests rewritten to the 1:1 contract; legacy stranded-queue rescue test; full suite passes. |
+| **3a. Dedicated agents** (reverted 2026-10-25) | `_choose_dispatch_target` provisions a dedicated agent instead of "Queued behind existing workspace agent". It inherits the launch config of the newest same-provider agent: env preset, Chat env and remote target. Free-agent reuse now requires the Task's provider. After each dispatch pass, one background job per workspace gives stranded queued Tasks their own agents; callers never wait for agent startup, and failed attempts are retried at most once per Task per 60 s. | The cadb399d deadlock cannot recur, and already-stranded Tasks are rescued. | Policy tests rewritten to the 1:1 contract; legacy stranded-queue rescue test; full suite passes. |
 | **3. Single writer** | `apply_task_transition(task, event, facts) → (patch, effects, TaskEvent)` reducer. The ~25 status write sites call it; it is the only place that sets `status`, the review timestamps and the session pointers. Monitor failure, timeout and owner loss become events. | Missing events now emitted. | Transition-table tests; the cadb399d scenario no longer starves the queue; characterization suites pass. |
 | **4. Owner lease and reconciler** | Persist `owner` and `phase`. A single 5 s reconciler replaces the subagent-only death check, the hub-task orphan converger, the review reaper's no-session gap and the initiator turn-only activity. Initiator owner = Chat tab (archive or delete = gone). | Orphans are resolved by policy instead of lingering. | No non-terminal Task with a gone owner survives longer than grace + 1 tick. |
 | **5. Subtraction** | Load-time migration derives `phase` for old records; delete redundant fields: `dispatch_pending` → queued reason, `execution_released` → orphaned reason, `review_delivery_*`/`review_skip_*`/`human_acceptance_requested_at` → event log; `autonomous_run.phase` maps 1:1. Collapse `execution_control × task_mode` (8 combinations) once `agent run` removes the need for `subagent` mode. | Schema shrink. | Task record roughly 70 → ~35 fields; frontend derives no lifecycle. |
@@ -129,10 +130,12 @@ checkpoints. Both consume Layer 2/3 events.
   today's occupancy, so the Layer 3 policy change is a deliberate, visible
   test edit.
 
-## Layer 3a notes
+## Layer 3a notes (superseded; Layer 3a was reverted on 2026-10-25)
 
 - The `_request_dispatch_decision` branch in `_start_task_workspace` is now
-  unreachable, because target selection always returns an agent. Layer 5
+  unreachable. (After the revision this is because start bootstraps the first
+  agent of the Task's kind; only a race can reach the old path, which now
+  returns 400 instead.) Layer 5
   deletes it together with `dispatch_pending`.
 - `_next_reassignable_queued_task` remains for pinned work and for moving
   Tasks to agents that are already free. Under the 1:1 rule it should become
@@ -171,9 +174,9 @@ checkpoints. Both consume Layer 2/3 events.
   - a new Goal Packet is announced as a submitted plan.
 - Delivery runs in one background job per workspace, never inline in the
   monitor loop. Each send is bounded at 20 s and a pass sends at most 5. It
-  goes through an injected notifier (`api/task_notifications.py`), which
-  routes to the Feishu chat bound to the source Chat, or to Dot when Dot
-  tracks the Task.
+  goes through an injected notifier (`api/task_notifications.py`). Since the
+  2026-10-25 revision, it hands notices to Dot, which decides what the user
+  hears.
 - Not pushed:
   - states an initiator Chat reported itself (its own reply already reached
     the person);
@@ -240,14 +243,14 @@ checkpoints. Both consume Layer 2/3 events.
   transition table:
   - `agent_gone` / `working_without_agent` (workspace control, working)
     fail after 5 min with a reason that names `task continue`. Continuing a
-    failed Task whose agent is gone already reassigns it to a fresh,
-    dedicated agent.
+    failed Task whose agent is gone starts it again on an available agent,
+    using main's selection and queueing.
   - `initiator_chat_gone` fails after 7 days. A failed initiator record
-    rejects further progress, so only `task handoff` revives it; the user is
-    notified immediately.
+    rejects further progress, so only `task handoff` revives it. Dot is told
+    immediately.
   - Not handled here: subagent Tasks (existing death/timeout failure),
     scheduled hub Tasks (existing redispatch converger), and queued Tasks on
-    a gone agent (dedicated-agent rescue).
+    a gone agent (they show `orphaned / assigned_agent_gone`).
 - Quickly resolved owner loss is not pushed on its own; the person hears
   about the resolved failure once.
 
@@ -302,11 +305,11 @@ Deliberately not done yet. Each needs its own migration and review:
   also skips a workspace where every terminal agent (two or more) looks gone
   at once, since that is more likely a tmux or sampling outage than real
   agent loss.
-- Shutdown cancels the notice and stranded-provisioning jobs. The notice job
-  is only scheduled when something is pending.
-- Tasks persisted as `dispatch_pending` (dispatcher decisions are no longer
-  requested) are rescued with a dedicated agent like other stranded queued
-  work. Manual progress records cause `manual`.
+- Shutdown cancels the notice jobs, which are only scheduled when something
+  is pending. Manual progress records cause `manual`.
+- *(Superseded on 2026-10-25: the stranded-provisioning job and the
+  `dispatch_pending` rescue were removed with Layer 3a. Legacy
+  `dispatch_pending` records are skipped by the queue, as on main.)*
 - Known and accepted: a send cut off by its 20 s bound may already have been
   delivered, so the retry can duplicate it. The DISPATCHER role can still be
   created but is no longer used by start.

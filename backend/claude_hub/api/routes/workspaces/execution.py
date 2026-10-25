@@ -172,7 +172,7 @@ def register_execution_routes(
         except KeyError as e:
             raise HTTPException(status_code=404, detail="Task not found") from e
         except WorkspaceAgentInitializationError as e:
-            # Starting may provision the Task's dedicated agent; keep the same
+            # Starting may create a workspace's first agent; keep the same
             # contract as direct agent creation.
             raise HTTPException(status_code=502, detail=str(e)) from e
         except (RuntimeError, ValueError) as e:

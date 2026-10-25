@@ -86,9 +86,9 @@ person. A phase change emits one `lifecycle` mailbox event, which also wakes
 `wait`.
 
 Rules:
-- **Queueing is unchanged.** An agent keeps its Task until the Task is
-  done. A Task with no free agent queues behind an existing one, and the
-  lifecycle shows the Task it waits behind.
+- **Queueing.** An agent keeps its Task until the Task is done. A Task with
+  no free agent queues behind an existing one, and the lifecycle shows the
+  Task it waits behind.
 - **One status writer.** Status changes go through
   `services/task_transitions.apply_task_update` with a named cause. The
   transition table is enforced in tests.
