@@ -100,6 +100,43 @@
 - Read-only projection; Task status, dispatch and review behavior are
   unchanged. Layer plan:
   [Task lifecycle refactor](docs/working-logs/2026-10-24-task-lifecycle-refactor.md).
+### fix(chat): phone Goal controls in one row and a bottom sheet
+
+- On phones the Goal bar is one tappable row with a single quick action
+  (Pause, Resume or Retry stop); the sideways-scrolling strip of small buttons
+  is gone.
+- Tapping it opens a bottom sheet: the objective and checkpoint scroll, while
+  every action stays pinned below in 44px buttons, however long the Goal is.
+  Tap outside, the close button or Escape closes it; on phones it is modal
+  (Tab stays in it, the page behind does not scroll), an action closes it
+  first, and a failed Goal request turns the quick action into a reload.
+  Wider screens keep the inline row.
+- A mocked browser scenario checks the row, the sheet and its tap targets.
+
+### feat(dot): a newer Feishu message stops Dot's answer in progress
+
+- On the Dot Chat, a Feishu message that arrives while Dot answers the previous
+  one stops that answer (no failure reply); the next turn answers both. Other
+  Chats keep queueing it as a follow-up.
+
+### fix(verify): reclaim owned runtime data and retain diagnostic evidence
+
+- Separate temporary HOME/XDG/Hub/browser data from verification logs and reports.
+  Reclaim the current run's runtime after owned processes exit on success,
+  failure or handled interruption; `CLAUDE_HUB_VERIFY_KEEP_RUNTIME=1` opts into
+  retaining raw state for debugging.
+- Preserve provenance, test/log exit codes, emitted JUnit/coverage data and browser
+  evidence. INT/TERM allow bounded cooperative finalization before terminating
+  residual owned processes; logging or cleanup failures do not overwrite an
+  existing test failure.
+- Pin directory descriptors for recursive cleanup and evidence publication so
+  a replaced pathname cannot redirect deletion or overwrite historical reports.
+  Retain the process leader until group cleanup completes and adopt detached Linux
+  descendants, including children that deny process-environment inspection.
+- Keep HMR backend/Vite logs with retained evidence and allow CI 90 seconds before
+  hard kill, covering cooperative shutdown, residual cleanup and final reporting.
+- Record cleanup in `runtime.json`; do not sweep historical runs, retained
+  evidence, shared services or dependency installations.
 
 ### feat(session): archive and restore managed Chat sessions
 
