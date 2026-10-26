@@ -319,3 +319,11 @@ that closes descendants never ran. Archive failure now leaves the record
 open and retryable, and `close` returns 503. Background closes (parent
 retirement, grace close) log the failure; the record stays open for an
 explicit retry or startup reconciliation.
+
+Follow-up from the Codex re-review: the terminal manager's archive sets the
+tab's `archived` flag before runtime shutdown and persistence. A failure
+after that leaves a flagged tab with no retirement callback, and a retry sees
+"already archived". Closing a subagent therefore closes its child subagents
+directly instead of relying only on that callback. The ordering inside the
+terminal manager predates this work, affects every archive, and is not
+changed here.
