@@ -168,14 +168,16 @@ class _TaskLifecycleObserverMixin(_WorkspaceManagerBase):
         """Resolve Tasks whose owner has been gone past the policy grace."""
 
         now = self._runtime_now()
-        if self._workspace_agents_all_lost(workspace_id):
-            # Every agent vanished at once: more likely the tmux server or
-            # sampling failed than each agent; never fail work on that alone.
+        # Every agent vanishing at once is more likely a tmux or sampling
+        # outage than real loss: never fail work on agent loss alone then.
+        # Chat loss is a different signal and is still resolved.
+        agent_outage = self._workspace_agents_all_lost(workspace_id)
+        if agent_outage:
             logger.warning(
-                "Lifecycle reconciler skipped: every workspace agent looks gone " "workspace_id=%s",
+                "Lifecycle reconciler holding agent-loss resolution: every workspace agent "
+                "looks gone workspace_id=%s",
                 workspace_id,
             )
-            return 0
         resolved = 0
         for task in [task for task in self.tasks.values() if task.workspace_id == workspace_id]:
             mark = task.lifecycle_mark
@@ -183,6 +185,8 @@ class _TaskLifecycleObserverMixin(_WorkspaceManagerBase):
                 continue
             policy = OWNER_LOSS_POLICY.get(mark.reason)
             if policy is None or now - mark.changed_at < policy[0]:
+                continue
+            if agent_outage and mark.reason in QUICKLY_RESOLVED_REASONS:
                 continue
             if task.execution_control == TaskExecutionControl.WORKSPACE:
                 # Subagent, scheduled and Feedback Reaper Tasks keep their own

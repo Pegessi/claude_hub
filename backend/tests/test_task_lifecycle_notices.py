@@ -683,3 +683,37 @@ def test_stopping_the_monitor_cancels_background_jobs() -> None:
         return job.cancelled() and not workspace_manager._task_notice_jobs
 
     assert asyncio.run(scenario())
+
+
+def test_agent_outage_guard_still_resolves_initiator_tasks_without_their_chat(
+    isolated_hub: Path, monkeypatch: MonkeyPatch  # noqa: F811
+) -> None:
+    from claude_hub.services.task_lifecycle import ChatTabFacts
+
+    client = TestClient(app)
+    workspace, worker, task = _running_task(client, isolated_hub)
+    other = client.post(f"/api/workspaces/{workspace['id']}/agent", json={}).json()
+    _stop_worker(worker["id"])
+    _stop_worker(other["id"])
+    chat_task = client.post(
+        f"/api/workspaces/{workspace['id']}/tasks", json={"title": "Chat work", "prompt": "x"}
+    ).json()
+    workspace_manager.tasks[chat_task["id"]] = workspace_manager.tasks[chat_task["id"]].model_copy(
+        update={
+            "execution_control": "initiator",
+            "status": WorkspaceTaskStatus.WORKING,
+            "source": TaskSourceReference(kind="chat", tab_id="gone-chat"),
+        }
+    )
+    monkeypatch.setattr(
+        workspace_manager,
+        "_task_chat_tab_facts",
+        lambda item: ChatTabFacts(exists=False) if item.id == chat_task["id"] else None,
+    )
+    workspace_manager._observe_task_lifecycles(workspace["id"])
+    _age_mark_by(task["id"], timedelta(days=8))
+    _age_mark_by(chat_task["id"], timedelta(days=8))
+
+    assert workspace_manager._reconcile_orphaned_tasks(workspace["id"]) == 1
+    assert workspace_manager.tasks[chat_task["id"]].status == WorkspaceTaskStatus.FAILED
+    assert workspace_manager.tasks[task["id"]].status == WorkspaceTaskStatus.WORKING
