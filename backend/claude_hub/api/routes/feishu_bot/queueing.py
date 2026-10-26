@@ -35,6 +35,10 @@ class TabDispatchItem:
     native_bridge_started: bool = False
     admission_time_rejection: FeishuMessageTimeStatus | None = None
     cancelled: bool = False
+    # Stopped by a newer message (Dot Chat): answered together with it, no reply.
+    superseded: bool = False
+    # The stop asked for by that newer message; its result says whether it took.
+    stop_task: asyncio.Task[bool] | None = None
 
 
 @dataclass
@@ -46,6 +50,10 @@ class TabDispatchQueue:
     dispatched_contexts: OrderedDict[tuple[str, str, str, str | None], None] = field(
         default_factory=OrderedDict
     )
+    # What the active batch sent, and what a stopped batch sent: the next batch
+    # answers that again together with the newer messages.
+    active_text: str = ""
+    interrupted_text: str = ""
 
     @property
     def waiters(self) -> list[asyncio.Future[None]]:

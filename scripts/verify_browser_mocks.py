@@ -35,6 +35,7 @@ RUNNERS = (
     ("browser_chat_queue_activation.py", ""),
     ("browser_chat_goal_steer.py", ""),
     ("browser_chat_native_goal.py", ""),
+    ("browser_chat_goal_mobile.py", ""),
     ("browser_chat_image_quality.py", ""),
     ("browser_markdown_reader.py", ""),
     ("browser_dot_panel.py", ""),
@@ -137,6 +138,7 @@ def main() -> int:
     parser.add_argument("--node", required=True, type=Path)
     parser.add_argument("--browser", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--runtime-root", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--port", type=int, default=5291)
     parser.add_argument("--runner-timeout", type=float, default=120.0)
     args = parser.parse_args()
@@ -161,7 +163,15 @@ def main() -> int:
     output.mkdir(mode=0o700, parents=False, exist_ok=False)
     (output / "runs").mkdir(mode=0o700)
     print(f"Browser mock evidence: {output}", flush=True)
-    env = child_environment(output / "tool-home", output / "tool-tmp")
+    # verify.sh's process owner reclaims profiles/caches on failure too. Logs,
+    # screenshots and reports stay in output, outside this disposable tree.
+    runtime_base = output
+    if args.runtime_root is not None:
+        if not args.runtime_root.is_absolute():
+            parser.error("runtime-root must be absolute")
+        runtime_base = args.runtime_root
+        runtime_base.mkdir(mode=0o700, exist_ok=False)
+    env = child_environment(runtime_base / "tool-home", runtime_base / "tool-tmp")
     actual_node = subprocess.run(
         [str(node), "--version"], env=env, capture_output=True, text=True, check=True, timeout=5
     ).stdout.strip()
@@ -191,8 +201,12 @@ def main() -> int:
     vite_log = (output / "vite.log").open("wb")
     try:
         # Keep browser socket paths short even when the evidence directory is deep.
-        temporary_root = Path(tempfile.mkdtemp(prefix="ch-ui-", dir="/tmp"))
-        env = child_environment(output / "vite-home", temporary_root / "0")
+        if args.runtime_root is None:
+            temporary_root = Path(tempfile.mkdtemp(prefix="ch-ui-", dir="/tmp"))
+        else:
+            temporary_root = runtime_base / "tmp"
+            temporary_root.mkdir(mode=0o700)
+        env = child_environment(runtime_base / "vite-home", temporary_root / "0")
         refusal.bind(("127.0.0.1", REFUSAL_PORT))
         target = f"http://127.0.0.1:{REFUSAL_PORT}"
         env.update(
@@ -270,7 +284,7 @@ def main() -> int:
             results.append(record)
             active_output, active_record = run_output, record
             run_env = child_environment(
-                output / "homes" / Path(script).stem, temporary_root / str(len(results))
+                runtime_base / "homes" / Path(script).stem, temporary_root / str(len(results))
             )
             record["tmpdir"] = run_env["TMPDIR"]
             with (output / f"{Path(script).stem}.log").open("wb") as log:
@@ -357,7 +371,9 @@ def main() -> int:
         and all(item["result"] == "PASS" for item in results)
     )
     temporary_cleanup = "not_created" if temporary_root is None else "retained"
-    if passed:
+    if args.runtime_root is not None:
+        temporary_cleanup = "managed_by_verify"
+    elif passed:
         assert temporary_root is not None
         try:
             shutil.rmtree(temporary_root)
