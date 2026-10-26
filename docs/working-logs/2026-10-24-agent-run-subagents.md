@@ -310,3 +310,12 @@ shutdown.
 - Records written before these follow-ups keep their stored final texts until
   they are pruned. A subagent tab unarchived before the detach change still
   carries its link and can be re-archived once by reconciliation.
+
+## Cross-review fix (Codex, 2026-10-26)
+
+`_close` used to swallow archive failures and still mark the record closed.
+The API then reported success, later closes did nothing, and the retirement
+that closes descendants never ran. Archive failure now leaves the record
+open and retryable, and `close` returns 503. Background closes (parent
+retirement, grace close) log the failure; the record stays open for an
+explicit retry or startup reconciliation.
