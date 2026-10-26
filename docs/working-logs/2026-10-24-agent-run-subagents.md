@@ -327,3 +327,7 @@ after that leaves a flagged tab with no retirement callback, and a retry sees
 directly instead of relying only on that callback. The ordering inside the
 terminal manager predates this work, affects every archive, and is not
 changed here.
+A parent is marked closed only after every child subagent has closed. If a
+child's close fails, the parent stays open, so retrying the parent reaches
+the child again. A child close already running elsewhere (for example the
+retirement callback) is waited for, up to 10 s.

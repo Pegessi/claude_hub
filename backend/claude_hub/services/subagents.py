@@ -83,6 +83,10 @@ def wrap_first_prompt(prompt: str) -> str:
     return f"{_PREAMBLE_OPEN}\n{SUBAGENT_PREAMBLE}\n{_PREAMBLE_CLOSE}\n\n{prompt}"
 
 
+# How long a parent close waits for a child close already in progress.
+_CHILD_CLOSE_WAIT_SECONDS = 10.0
+
+
 class SubagentError(Exception):
     def __init__(self, status: int, detail: str) -> None:
         super().__init__(detail)
@@ -843,7 +847,9 @@ class SubagentService:
                     for item in self._subagents.values()
                     if item.parent_tab_id == record.tab_id and not item.closed
                 ]:
-                    await self._close(child, "parent subagent closed")
+                    if not await self._close_child(child):
+                        # The parent stays open, so a retry reaches the child.
+                        return False
             record.closed = True
             record.closed_at = utc_now()
             record.close_reason = reason
@@ -854,6 +860,15 @@ class SubagentService:
         except Exception:
             logger.exception("Failed to persist closing subagent %s", record.id)
         return True
+
+    async def _close_child(self, child: Subagent) -> bool:
+        """Close a child subagent, waiting out a close already in progress."""
+        if await self._close(child, "parent subagent closed"):
+            return True
+        deadline = asyncio.get_running_loop().time() + _CHILD_CLOSE_WAIT_SECONDS
+        while child.id in self._closing and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.05)
+        return child.closed
 
     async def _archive_tab(self, tab_id: str) -> bool:
         """Archive a subagent tab; True when it is archived or already gone."""

@@ -1026,3 +1026,52 @@ async def test_close_retry_after_a_partial_archive_still_closes_children(env) ->
     assert retried.status_code == 200 and retried.json()["closed"] is True
     assert service.get(child["subagent_id"]).closed is True
     assert chats.tabs[child["tab_id"]].archived is True
+
+
+async def test_parent_stays_open_until_its_child_closes(env) -> None:
+    chats, service, client, tmp_path = env
+    parent = (await client.post("/api/subagents", json=_body(tmp_path, keep=True))).json()
+    assert (await _wait(client, parent))["status"] == "completed"
+    child_body = {**_body(tmp_path, keep=True), "parent_tab_id": parent["tab_id"]}
+    child = (await client.post("/api/subagents", json=child_body)).json()
+    assert (await _wait(client, child))["status"] == "completed"
+    await _settle()
+    working_archive = service.runtime.archive_tab
+
+    async def child_will_not_archive(tab_id: str) -> None:
+        if tab_id == child["tab_id"]:
+            raise RuntimeError("child runtime shutdown failed")
+        await working_archive(tab_id)
+
+    service.runtime = dataclasses.replace(service.runtime, archive_tab=child_will_not_archive)
+    failed = await client.post(f"/api/subagents/{parent['subagent_id']}/close")
+    assert failed.status_code == 503
+    assert service.get(parent["subagent_id"]).closed is False
+    assert service.get(child["subagent_id"]).closed is False
+
+    service.runtime = dataclasses.replace(service.runtime, archive_tab=working_archive)
+    retried = await client.post(f"/api/subagents/{parent['subagent_id']}/close")
+    assert retried.status_code == 200
+    assert service.get(child["subagent_id"]).closed is True
+
+
+async def test_parent_close_waits_for_a_child_close_in_progress(env) -> None:
+    chats, service, client, tmp_path = env
+    parent = (await client.post("/api/subagents", json=_body(tmp_path, keep=True))).json()
+    assert (await _wait(client, parent))["status"] == "completed"
+    child_body = {**_body(tmp_path, keep=True), "parent_tab_id": parent["tab_id"]}
+    child = (await client.post("/api/subagents", json=child_body)).json()
+    assert (await _wait(client, child))["status"] == "completed"
+    await _settle()
+    child_record = service.get(child["subagent_id"])
+    service._closing.add(child_record.id)  # another close owns the child
+
+    async def finish_other_close() -> None:
+        await asyncio.sleep(0.2)
+        child_record.closed = True
+        service._closing.discard(child_record.id)
+
+    other = asyncio.create_task(finish_other_close())
+    closed = await client.post(f"/api/subagents/{parent['subagent_id']}/close")
+    await other
+    assert closed.status_code == 200 and closed.json()["closed"] is True
