@@ -340,7 +340,7 @@ class SubagentService:
             if tab.subagent_id and not tab.archived:
                 owner = known_tabs.get(tab.id) or self._subagents.get(tab.subagent_id)
                 if owner is None or owner.closed or owner.tab_id != tab.id:
-                    await self._archive_quietly(tab.id)
+                    await self._archive_tab(tab.id)
 
     async def stop(self) -> None:
         """Cancel and join every turn and pending close this service started.
@@ -628,11 +628,11 @@ class SubagentService:
                     "nothing ran. Retry with the same call_id.",
                 ) from exc
         except BaseException:
-            await self._archive_quietly(tab.id)
+            await self._archive_tab(tab.id)
             raise
         if self._shutting_down:
             # stop() already joined its tasks; spawning now would outlive it.
-            await self._archive_quietly(tab.id)
+            await self._archive_tab(tab.id)
             try:
                 await self._save()  # drop the never-published record from disk
             except Exception:
@@ -708,7 +708,10 @@ class SubagentService:
 
     async def close(self, subagent_id: str, reason: str = "closed by caller") -> Subagent:
         record = self.get(subagent_id)
-        await self._close(record, reason)
+        if not await self._close(record, reason) and not record.closed:
+            raise SubagentError(
+                503, "Archiving the subagent's Chat tab failed; it stays open, retry close"
+            )
         return record
 
     # ── internals ────────────────────────────────────────────────────────
@@ -810,9 +813,12 @@ class SubagentService:
         if tasks:
             await asyncio.wait(tasks, timeout=_CANCEL_JOIN_SECONDS)
 
-    async def _close(self, record: Subagent, reason: str) -> None:
-        if record.closed or record.id in self._closing:
-            return
+    async def _close(self, record: Subagent, reason: str) -> bool:
+        """Close ``record``; False (and still open, so retryable) if its tab would not archive."""
+        if record.closed:
+            return True
+        if record.id in self._closing:
+            return False
         # Claim first: a cancelled turn task must not start its own close. The
         # record reports closed only after its tab is archived, so no reader
         # sees a closed subagent whose Chat is still live. An interrupted close
@@ -824,7 +830,10 @@ class SubagentService:
                 tab = self.runtime.get_tab(record.tab_id)
                 # A tab the user unarchived was detached from this record: keep it.
                 if tab is not None and tab.subagent_id == record.id:
-                    await self._archive_quietly(record.tab_id)
+                    if not await self._archive_tab(record.tab_id):
+                        # Not closed: its tab is live, and the retirement that
+                        # closes descendants has not happened. Retry later.
+                        return False
             record.closed = True
             record.closed_at = utc_now()
             record.close_reason = reason
@@ -834,15 +843,19 @@ class SubagentService:
             await self._save()
         except Exception:
             logger.exception("Failed to persist closing subagent %s", record.id)
+        return True
 
-    async def _archive_quietly(self, tab_id: str) -> None:
+    async def _archive_tab(self, tab_id: str) -> bool:
+        """Archive a subagent tab; True when it is archived or already gone."""
         tab = self.runtime.get_tab(tab_id)
         if tab is None or tab.archived:
-            return
+            return True
         try:
             await self.runtime.archive_tab(tab_id)
         except Exception:
             logger.exception("Failed to archive subagent tab %s", tab_id)
+            return False
+        return True
 
     def _on_tab_retired(self, tab_id: str) -> None:
         affected = [

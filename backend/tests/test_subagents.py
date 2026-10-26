@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -975,3 +976,25 @@ async def test_reconciliation_archives_orphans_but_keeps_detached_tabs(tmp_path:
     assert service.get("sa-real").close_reason == "subagent tab detached"
     assert chats.tabs["detached"].archived is False
     await service.stop()
+
+
+async def test_close_stays_open_and_retryable_when_the_tab_will_not_archive(env) -> None:
+    chats, service, client, tmp_path = env
+    started = (await client.post("/api/subagents", json=_body(tmp_path, keep=True))).json()
+    assert (await _wait(client, started))["status"] == "completed"
+    await _settle()
+    working_archive = service.runtime.archive_tab
+
+    async def broken_archive(tab_id: str) -> None:
+        raise RuntimeError("runtime shutdown failed")
+
+    service.runtime = dataclasses.replace(service.runtime, archive_tab=broken_archive)
+    failed = await client.post(f"/api/subagents/{started['subagent_id']}/close")
+    assert failed.status_code == 503
+    assert service.get(started["subagent_id"]).closed is False
+    assert chats.tabs[started["tab_id"]].archived is False
+
+    service.runtime = dataclasses.replace(service.runtime, archive_tab=working_archive)
+    closed = await client.post(f"/api/subagents/{started['subagent_id']}/close")
+    assert closed.status_code == 200 and closed.json()["closed"] is True
+    assert chats.tabs[started["tab_id"]].archived is True
