@@ -834,6 +834,16 @@ class SubagentService:
                         # Not closed: its tab is live, and the retirement that
                         # closes descendants has not happened. Retry later.
                         return False
+            # Close children directly rather than relying on the tab retirement
+            # callback alone: an archive that failed after flagging the tab
+            # archived never emitted it, and a retry finds the tab archived.
+            if record.tab_id:
+                for child in [
+                    item
+                    for item in self._subagents.values()
+                    if item.parent_tab_id == record.tab_id and not item.closed
+                ]:
+                    await self._close(child, "parent subagent closed")
             record.closed = True
             record.closed_at = utc_now()
             record.close_reason = reason
