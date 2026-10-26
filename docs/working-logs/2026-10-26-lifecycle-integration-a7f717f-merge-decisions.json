@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "a7f717fec763d23b73c53e59f695e1f70005be7c",
+  "parents": [
+    "5454124a665d810b2f846ba010061214563b5d50",
+    "91a3125864ebb96d115e8c762893ae5d7bf90d82"
+  ],
+  "base": "8991871b76b7b8976f7ab9ef64779fbba8f911e3",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "fbe74ee2c0ed9193fe6ed268c4b0fe54502e6acb",
+  "reconstructed_tree": "d6a33481579d6e19a5d59b27a559970ea52ecafa",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "55563219db5a63efc6c6fa83d93627a2429a3e7c"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a23249ccf8f91e9e8ace9e597a0484187c0374ff"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "16875288f6be4a54f7413623ee1a8d147dd13a1b"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "643fb09fd85e0afe03a29009af5fb9093a830205"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ff685b790cfbc5f0dc57f8eebb0ce59c3a55e1b6"
+      },
+      "reason": "Both branches added CHANGELOG entries at the top of Released; kept every entry from both sides, agent-run entry first, no wording changed.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

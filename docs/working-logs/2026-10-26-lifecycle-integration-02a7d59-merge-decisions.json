@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "02a7d5934ed358a764d6670a884fcb67967a62dd",
+  "parents": [
+    "64c7f6c6c8d64205dea7ade53c524620ec3f049b",
+    "c57ae416fe4af698332e1cb7bfc2780b78ed6914"
+  ],
+  "base": "8991871b76b7b8976f7ab9ef64779fbba8f911e3",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "c3bf7482483b2d93dbfa9d66eccdf84cf86598b3",
+  "reconstructed_tree": "5c2833bf88ce9e57472c07abe5542e1f2dbde813",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "55563219db5a63efc6c6fa83d93627a2429a3e7c"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "305fb68fb4441124670dfdbad2c251b0e5f3ab52"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "02cd62a2914230999e968e409e3a4dd9093de99f"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "7159d0acbed5aabb3ccf546d583dae0dfc1e703f"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "02c8540f8c1c6422867db72f0c0916560cbb74f8"
+      },
+      "reason": "main added Dot interrupt, phone Goal sheet and verify entries while the integration branch added task-lifecycle and agent-run entries at the top of Released; kept every entry from both sides, integration entries first, no wording changed.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
