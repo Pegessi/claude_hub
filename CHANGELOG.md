@@ -7,6 +7,43 @@
 
 ## Released
 
+### feat(provider): ProviderSpec capability registry
+
+- Add `backend/claude_hub/services/agent_stream/providers/spec.py`: one
+  immutable Pydantic v2 registry of static per-provider facts for claude,
+  codex, traex, cursor, maso and the terminal pseudo-provider — transport,
+  image/system-instruction/approval channels, resume, model catalog, model
+  and effort env keys, goals/completion tokens, quota/auth facts, solo
+  behavior and the surfaces each provider may run on. Runtime-probed state
+  (binary presence, login, reachability, catalogs, quota) is deliberately
+  not in the spec.
+- `get_spec()` returns the frozen record; unknown agent types get a
+  capability-empty shell record matching the existing fail-closed
+  `get_adapter(...) -> None -> structured=False` behavior. The per-surface
+  approval mapping is a frozen sub-model (`ApprovalChannels`) with
+  mapping-style mutation raising `TypeError`.
+- Replace duplicated provider chains with spec derivations: native binary
+  map/availability and session factory, `SessionCore` and transcript-adapter
+  capability flag defaults (two hierarchies can no longer silently diverge;
+  the cursor native approval override is retained with a comment),
+  `agent run` model/effort env-key maps, tab hot-update env keys, Dot
+  `PROVIDERS`, managed-executor capability lists/admission/model overrides,
+  workspace traex admission, managed-Chat create admission, transcript-fork
+  edit-resend predicate support and terminal probe-response filtering.
+  Wire enums, env names, launch argv and error messages are unchanged.
+- Add `tests/fixtures/provider_spec_matrix.json` (golden matrix, the
+  reviewable artifact) and `tests/test_provider_spec_registry.py` with 56
+  golden-matrix, deep-immutability, fail-closed and byte-for-byte
+  equivalence tests pinning every migrated constant and admission outcome.
+  Implements slice 1, all of slice 2, and the capability-hierarchy,
+  binary/factory, fork and probe-set portions of slice 3 of the
+  review-validated packet
+  `docs/design/2026-10-27-provider-spec-capability-registry-proposal.md`.
+  TUI launch-argv builders, the terminal conversation-id pin set and
+  cursor-transport gating need additional spec fields and remain on
+  literals; `/api/providers`, readiness unification and frontend migration
+  remain later slices.
+
 ### fix(maso): retain final responses without streamed tokens
 
 - Read authoritative text and reasoning from MASO's `post_llm_response` event.

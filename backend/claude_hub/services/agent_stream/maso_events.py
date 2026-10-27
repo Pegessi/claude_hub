@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from ...models import AgentStreamEvent, AgentStreamEventType, ManagedSession
+from ...models import AgentStreamEvent, AgentStreamEventType, AgentType, ManagedSession
 from .base import AgentStreamAdapter, NormalizeContext
 
 # Fields a provider failure frame uses for its human-readable description, most
@@ -95,9 +95,8 @@ def _describe_error(error: Any) -> Tuple[str, Optional[str]]:
 class MasoEventAdapter(AgentStreamAdapter):
     adapter_id = "maso_http"
     schema_version = 1
+    spec_agent_type = AgentType.MASO
     supports_transcript_discovery = False
-    supports_tool_timeline = True
-    supports_approval_ui = True
 
     def __init__(self) -> None:
         super().__init__()

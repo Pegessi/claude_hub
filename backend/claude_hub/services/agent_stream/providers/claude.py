@@ -34,12 +34,9 @@ class ClaudeSession(ProcessSession):
 
     adapter_id = "claude-native"
     schema_version = 1
-    supports_tool_timeline = True
-    # Image support uses the SDKUserMessage image content block. Marked True
-    # only after the envelope was validated against the installed CLI.
-    supports_images = True
-    supports_native_system_instructions = True
-    goal_usage_quality = "exact"
+    # Capability flags (tool timeline, SDKUserMessage base64 images, native
+    # system instructions, exact goal usage) come from the ProviderSpec
+    # registry via SessionCore property defaults.
 
     def __init__(
         self,

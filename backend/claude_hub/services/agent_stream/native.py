@@ -96,6 +96,7 @@ from .providers.process import ProcessSession
 # Preserve the legacy import and monkeypatch targets used by adapters/sessions.
 from .providers.questions import codex_normalize_questions as codex_normalize_questions
 from .providers.questions import parse_ask_question_response as parse_ask_question_response
+from .providers.spec import TransportKind, get_spec
 from .providers.traex import TraexSession
 
 logger = logging.getLogger(__name__)
@@ -201,21 +202,18 @@ _PLAN_MODE = StreamModeOption(
 def native_provider_binary(agent_type: AgentType) -> Optional[str]:
     """Return the native Chat executable for a provider, if supported."""
 
-    return {
-        AgentType.CLAUDE: "claude",
-        AgentType.CODEX: "codex",
-        AgentType.TRAEX: "traex",
-        AgentType.CURSOR: "agent",
-    }.get(agent_type)
+    return get_spec(agent_type).binary
 
 
 def native_provider_binary_available(agent_type: AgentType) -> bool:
     # HTTP providers need no local executable. Their capabilities probe verifies
     # connectivity; a cold tab can be opened before that asynchronous probe.
-    if agent_type == AgentType.MASO:
+    # The fail-closed unknown/terminal spec carries no binary, so this stays
+    # False for anything without an explicitly registered executable.
+    spec = get_spec(agent_type)
+    if spec.transport is TransportKind.HTTP_SSE:
         return True
-    binary = native_provider_binary(agent_type)
-    return binary is not None and shutil.which(binary) is not None
+    return spec.binary is not None and shutil.which(spec.binary) is not None
 
 
 @lru_cache(maxsize=8)
@@ -559,6 +557,16 @@ class CursorNativeSession(CursorSession, ProviderSession):
 
 # ── factory ──────────────────────────────────────────────────────────────────
 
+# Dispatch by registry-declared provider; MASO stays a lazy import because
+# maso_http imports symbols from this module at load time. Unknown transports
+# raise in create_native_session below.
+_NATIVE_SESSION_CLASSES: Dict[AgentType, type["ProviderSession"]] = {
+    AgentType.CLAUDE: ClaudeNativeSession,
+    AgentType.CODEX: CodexNativeSession,
+    AgentType.TRAEX: TraexNativeSession,
+    AgentType.CURSOR: CursorNativeSession,
+}
+
 
 def create_native_session(
     session: ManagedSession,
@@ -582,16 +590,12 @@ def create_native_session(
         "seed_history": seed_history,
         "on_seed_consumed": on_seed_consumed,
     }
-    if session.agent_type == AgentType.CLAUDE:
-        return ClaudeNativeSession(session, **kwargs)
-    if session.agent_type == AgentType.CODEX:
-        return CodexNativeSession(session, **kwargs)
-    if session.agent_type == AgentType.TRAEX:
-        return TraexNativeSession(session, **kwargs)
-    if session.agent_type == AgentType.CURSOR:
-        return CursorNativeSession(session, **kwargs)
-    if session.agent_type == AgentType.MASO:
-        from .maso_http import MasoHttpSession
+    session_cls = _NATIVE_SESSION_CLASSES.get(session.agent_type)
+    if session_cls is None:
+        if session.agent_type == AgentType.MASO:
+            from .maso_http import MasoHttpSession
 
-        return MasoHttpSession(session, **kwargs)
-    raise ValueError(f"no native transport for agent_type={session.agent_type}")
+            session_cls = MasoHttpSession
+        else:
+            raise ValueError(f"no native transport for agent_type={session.agent_type}")
+    return session_cls(session, **kwargs)

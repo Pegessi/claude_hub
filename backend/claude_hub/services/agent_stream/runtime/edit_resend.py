@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ....models import AgentType, ManagedSession
 from ..attachments import AgentStreamAttachmentStore
+from ..providers.spec import get_spec
 from ..transcript_fork import TranscriptForkError
 from .manager_state import ManagerState
 from .values import EditResendTurnInFlightError, StructuredSourceUnavailable
@@ -72,8 +73,14 @@ class EditResendMixin(ManagerState):
                 or the turn cannot be mapped to a provider user message.
             RuntimeError: If no structured adapter exists for the session.
         """
-        if session.agent_type == AgentType.MASO:
-            raise TranscriptForkError("Editing past turns is unavailable for MASO HTTP sessions")
+        if not get_spec(session.agent_type).edit_resend:
+            if session.agent_type == AgentType.MASO:
+                raise TranscriptForkError(
+                    "Editing past turns is unavailable for MASO HTTP sessions"
+                )
+            raise TranscriptForkError(
+                f"Editing past turns is unavailable for {session.agent_type.value} sessions"
+            )
         adapter = self._deps.get_adapter_for_session(session)
         if adapter is None:
             raise RuntimeError("no structured adapter for session")
