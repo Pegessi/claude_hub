@@ -51,6 +51,13 @@ class _ExplicitClickExit(Exception):
 class _MachineReadableGroup(click.Group):
     """Keep JSON-mode failures parseable without changing Click exit semantics."""
 
+    # Command names registered for backwards compatibility but hidden from
+    # --help and shell completion. Invocation still resolves them.
+    hidden_aliases = frozenset({"fs"})
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        return [name for name in super().list_commands(ctx) if name not in self.hidden_aliases]
+
     def _parse_root_json_output(
         self,
         args: Sequence[str],
@@ -146,7 +153,13 @@ class _MachineReadableGroup(click.Group):
     "--base-url",
     envvar="CLAUDE_HUB_URL",
     default=None,
-    help=f"Claude Hub base URL (default {DEFAULT_BASE_URL}).",
+    help=(
+        "Hub base URL. Falls back to CLAUDE_HUB_URL, then config "
+        "[default].base_url, then a URL derived from CLAUDE_HUB_HOST/"
+        "CLAUDE_HUB_PORT (IPv6 literals are bracketed). With none set, probes "
+        f"/health on 127.0.0.1 and [::1] (port from CLAUDE_HUB_PORT, default "
+        f"{DEFAULT_BASE_URL})."
+    ),
 )
 @click.option(
     "--token",
@@ -219,6 +232,7 @@ def _register() -> None:
     cli.add_command(tab)
     cli.add_command(terminal)
     cli.add_command(filesystem)
+    # Hidden alias kept for backwards compatibility (see hidden_aliases).
     cli.add_command(fs, name="fs")
     cli.add_command(remote)
     cli.add_command(clipboard)

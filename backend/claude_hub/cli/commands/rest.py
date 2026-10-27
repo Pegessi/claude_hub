@@ -649,5 +649,6 @@ def api_raw(
     emit(data, True if cli_main.as_json(ctx) else isinstance(data, (dict, list)))
 
 
-# Short alias for filesystem.
+# Short alias for `filesystem`; registered as a hidden command on the root
+# group (see _MachineReadableGroup.hidden_aliases in cli/main.py).
 fs = filesystem

@@ -181,7 +181,11 @@ class HubClient:
         try:
             resp = self._client.send(request)
         except httpx.HTTPError as e:
-            raise HubError(str(e)) from e
+            raise HubError(
+                f"Could not connect to Claude Hub at {request.url}: {e}. "
+                "Check that the Hub is running and the address is reachable; "
+                "on IPv6-only hosts try http://[::1]:8173 or set CLAUDE_HUB_URL."
+            ) from e
 
         if resp.status_code >= 400:
             detail: str
