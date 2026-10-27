@@ -41,6 +41,7 @@ from ..models.subagent import (
     SubagentTurnStatus,
     utc_now,
 )
+from .agent_stream.providers.spec import all_specs
 
 logger = logging.getLogger(__name__)
 
@@ -55,17 +56,18 @@ _CANCEL_JOIN_SECONDS = 30.0
 # event; archiving at once would cut them off.
 _ARCHIVE_GRACE_SECONDS = 3.0
 
-# Model and reasoning-effort env keys the native Chat transports already read.
+# Model and reasoning-effort env keys the native Chat transports read.
+# Derived from the ProviderSpec registry; the primary effort key (the one a
+# headless `agent run` writes) is each provider's first effort env key.
 _MODEL_ENV_KEYS = {
-    AgentType.CLAUDE: "ANTHROPIC_MODEL",
-    AgentType.CODEX: "CODEX_MODEL",
-    AgentType.TRAEX: "CODEX_MODEL",
-    AgentType.CURSOR: "CURSOR_MODEL",
-    AgentType.MASO: "MASO_MODEL",
+    agent_type: spec.model_env_key
+    for agent_type, spec in all_specs().items()
+    if spec.model_env_key is not None
 }
 _EFFORT_ENV_KEYS = {
-    AgentType.CODEX: "CODEX_REASONING_EFFORT",
-    AgentType.TRAEX: "CODEX_REASONING_EFFORT",
+    agent_type: spec.effort_env_keys[0]
+    for agent_type, spec in all_specs().items()
+    if spec.effort_env_keys
 }
 REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
 

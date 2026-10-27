@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Set
 from ...models import (
     AgentStreamEvent,
     AgentStreamEventType,
+    AgentType,
     ManagedSession,
     StreamCapabilities,
 )
@@ -108,3 +109,5 @@ class CodexJsonlAdapter(CodexTranscript):
 
 class TraexJsonlAdapter(TraexTranscript, CodexJsonlAdapter):
     """Live TraeX adapter preserving the Codex adapter relationship."""
+
+    spec_agent_type = AgentType.TRAEX

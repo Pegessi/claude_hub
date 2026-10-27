@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ...models import AgentStreamEvent, AgentStreamEventType, ManagedSession
+from ...models import AgentStreamEvent, AgentStreamEventType, AgentType, ManagedSession
 from ...models.agent_stream import normalize_provider_usage
 from ..ttyd_manager import (
     _claude_project_dir_for_cwd,
@@ -122,8 +122,7 @@ class ClaudeJsonlAdapter(AgentStreamAdapter):
 
     adapter_id = "claude-jsonl"
     schema_version = 1
-    supports_approval_ui = True
-    supports_tool_timeline = True
+    spec_agent_type = AgentType.CLAUDE
 
     # ── source discovery ─────────────────────────────────────────────────────
 

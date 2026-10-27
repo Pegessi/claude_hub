@@ -187,14 +187,9 @@ async def check_maso_service(
 
 class MasoHttpSession(ProviderSession):
     adapter_id = "maso_http"
-    supports_images = True
-    supports_tool_timeline = True
-    supports_approval_ui = True
-    supports_goals = True
-    goal_execution_owner = "hub_managed"
-    # MASO turn_end closes one model call. Only the root agent_end closes the
-    # provider run that Hub exposes as one Chat turn.
-    goal_completion_requires_provider_event = True
+    # Capability flags (HTTP-chunked images, tool timeline, HTTP confirm
+    # cards, Hub-managed goals, root-only agent_end completion) come from the
+    # ProviderSpec registry via SessionCore property defaults.
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)

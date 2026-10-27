@@ -21,6 +21,13 @@ from ...models import (
     ManagedSession,
     StreamCapabilities,
 )
+from .providers.spec import (
+    ApprovalChannel,
+    ProviderSpec,
+    Surface,
+    TransportKind,
+    get_spec,
+)
 
 # Negative-cache window for failed source discovery. Keeps the fail-closed
 # capabilities path cheap when an agent hasn't written its transcript yet.
@@ -189,18 +196,47 @@ class TranscriptSnapshot:
 class AgentStreamAdapter:
     """Abstract base for provider transcript adapters.
 
-    Subclasses set ``adapter_id``, ``schema_version``, ``supports_approval_ui``,
-    and ``supports_tool_timeline``; implement :meth:`discover_source` and
+    Subclasses set ``adapter_id``, ``schema_version`` and bind
+    :attr:`spec_agent_type`; implement :meth:`discover_source` and
     :meth:`normalize_line`; and may override :meth:`supports_snapshot` /
-    :meth:`read_snapshot` for snapshot-style sources (Cursor ACP).
+    :meth:`read_snapshot` for snapshot-style sources (Cursor ACP). The
+    approval/timeline flags default to ProviderSpec projections and only
+    need an explicit override for a genuine divergence.
     """
 
     adapter_id: str = "base"
     schema_version: int = 0
-    supports_approval_ui: bool = False
-    supports_tool_timeline: bool = False
+    # Bind in concrete adapters; None keeps the bare base fail-closed.
+    spec_agent_type: Optional[AgentType] = None
     # Allow transcript-backed Terminal views; native Chat uses its transport.
     supports_transcript_discovery: bool = True
+
+    @property
+    def _spec(self) -> Optional[ProviderSpec]:
+        return get_spec(self.spec_agent_type) if self.spec_agent_type is not None else None
+
+    @property
+    def supports_approval_ui(self) -> bool:
+        spec = self._spec
+        if spec is None:
+            return False
+        # Transcript adapters observe the terminal TUI surface for CLI
+        # providers; the MASO SSE adapter observes its direct-Chat channel.
+        surface = (
+            Surface.DIRECT_CHAT
+            if spec.transport is TransportKind.HTTP_SSE
+            else Surface.TERMINAL_TAB
+        )
+        return spec.approval_channels[surface] in (
+            ApprovalChannel.NATIVE_TUI,
+            ApprovalChannel.RPC_BLOCKING,
+            ApprovalChannel.HTTP_CONFIRM,
+        )
+
+    @property
+    def supports_tool_timeline(self) -> bool:
+        spec = self._spec
+        return spec.tool_timeline if spec is not None else False
 
     def __init__(self) -> None:
         # Per-turn accumulators keyed by (session_id, run_epoch). Used to
