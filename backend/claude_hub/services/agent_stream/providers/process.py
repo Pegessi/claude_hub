@@ -4,9 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 from typing import Any, Dict, List, Optional
 
 from .session import SessionCore
+
+# Provider CLIs spawn their own children (bash tool shells, MCP servers).
+# Starting each provider in a fresh session makes the direct child a process
+# group leader (pgid == its pid), so teardown can signal the whole tree with
+# killpg instead of orphaning the grandchildren. Unsupported on non-POSIX,
+# where teardown falls back to signalling the direct child only.
+_NEW_SESSION_KWARGS: Dict[str, Any] = {"start_new_session": True} if os.name == "posix" else {}
 
 
 class ProcessSession(SessionCore):
@@ -92,16 +101,83 @@ class ProcessSession(SessionCore):
                 pass
             self._stderr_task = None
         proc = self._process
+        pgid = self._process_group
         self._process = None
+        self._process_group = 0
         if proc is not None:
+            await self._terminate_subprocess(proc, pgid)
+
+    async def _terminate_subprocess(self, proc: asyncio.subprocess.Process, pgid: int) -> None:
+        """SIGTERM the provider, then SIGKILL after the five-second grace period.
+
+        When ``pgid`` is set the provider owns its process group, so the signal
+        reaches its child tool/MCP processes too; otherwise only the direct
+        child is signalled (non-POSIX, or a process not spawned by
+        :meth:`_spawn_subprocess`), matching the previous behavior.
+        """
+        if not self._signal_process_group(pgid, signal.SIGTERM):
             try:
                 proc.terminate()
-                await asyncio.wait_for(proc.wait(), timeout=5.0)
-            except (asyncio.TimeoutError, OSError):
+            except OSError:
+                pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except (asyncio.TimeoutError, OSError):
+            if not self._signal_process_group(pgid, signal.SIGKILL):
                 try:
                     proc.kill()
                 except OSError:
                     pass
+            # Reap the SIGKILLed child so it cannot linger as a zombie and
+            # ``returncode`` is settled before teardown returns.
+            try:
+                await proc.wait()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _signal_process_group(pgid: int, sig: int) -> bool:
+        """Signal every process in the provider's group.
+
+        Returns ``True`` when group signalling was attempted (including a
+        group that is already gone), ``False`` when it is unavailable and the
+        caller must target the direct child instead.
+        """
+        if pgid <= 0 or os.name != "posix":
+            return False
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            # The whole group has already exited; ``proc.wait()`` reaps it.
+            pass
+        except PermissionError:
+            return False
+        return True
+
+    async def _spawn_subprocess(
+        self, cmd: List[str], env: Optional[Dict[str, str]]
+    ) -> asyncio.subprocess.Process:
+        """Launch a provider subprocess and record its process group.
+
+        All provider spawn sites go through this so both the one-shot CLIs and
+        the persistent app-server share the same piping and group semantics.
+        """
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=self._cwd or None,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            **_NEW_SESSION_KWARGS,
+        )
+        # With ``start_new_session`` the child is the group leader, so its pid
+        # is the pgid. Leave this at zero on non-POSIX / pid-less transports
+        # (test doubles) so teardown targets the direct child instead.
+        if _NEW_SESSION_KWARGS:
+            pid = getattr(process, "pid", None)
+            self._process_group = pid if isinstance(pid, int) else 0
+        return process
 
     async def read_line(self) -> Optional[Dict[str, Any]]:
         """Await one parsed JSON record from stdout, or ``None`` on EOF."""
@@ -257,14 +333,7 @@ class ProcessSession(SessionCore):
         self._stderr_buffer = b""
         self._exit_error = None
         try:
-            self._process = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=self._cwd or None,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=provider_env,
-            )
+            self._process = await self._spawn_subprocess(cmd, provider_env)
         except FileNotFoundError:
             self._last_error = f"provider binary not found: {cmd[0]}"
             self._end_turn()
