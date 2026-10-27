@@ -278,6 +278,47 @@ SESSION_EXPIRE_DAYS=7
 AUTH_ALLOWED_EMAILS=user1@company.com,user2@company.com
 ```
 
+### 反向代理信任（重要）
+
+`X-Forwarded-For` / `X-Forwarded-Proto` 是普通 HTTP 头，任何直连客户端都可以
+伪造。后端只在**直连对端**（TCP 连接的 peer）属于可信代理名单时才解析这两个
+头；直连对端不可信时完全忽略它们，直接以直连 IP 判定客户端身份。因此未配置
+飞书鉴权时，外部客户端无法靠发送 `X-Forwarded-For: 127.0.0.1` 绕过本机/内网
+豁免。
+
+```env
+# 可信直连代理的 IP/CIDR 逗号分隔名单，默认只信任环回：
+CLAUDE_HUB_TRUSTED_PROXIES=127.0.0.0/8,::1
+```
+
+- ngrok、cloudflared、frpc、本机 nginx 等从环回地址连入的隧道/反代，使用默认值
+  即可，转发头会被正确识别。
+- 反向代理位于其它地址（如 `10.0.0.5` 的 nginx）时必须显式加入，例如
+  `CLAUDE_HUB_TRUSTED_PROXIES=127.0.0.0/8,::1,10.0.0.5`；只信任代理本身所在的
+  地址/网段，不要填 `0.0.0.0/0`。
+- 可信名单会参与 XFF 链解析：从右向左逐个剥掉可信代理跳，取最左侧的不可信地址
+  作为客户端；格式错误的条目会被忽略。Cookie 的 `Secure` 语义只在直连对端可信
+  时才接受 `X-Forwarded-Proto`（仅取第一个 token，且只接受 `http`/`https`）。
+- 终端 WebSocket 会校验浏览器握手的 `Origin`：缺省要求 Origin 的 host[:port] 与
+  请求 `Host` 一致。没有 Origin 头的原生客户端（ttyd、websocat、curl）不受影响。
+  若页面由其它源提供，用逗号分隔的完整 Origin 或 `host[:port]` 白名单放行：
+  `CLAUDE_HUB_ALLOWED_WS_ORIGINS=https://hub.example.com`。
+
+### 未启用鉴权时的监听保护
+
+未配置 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` 时，API 对本机与内网来源跳过登录。
+此时若把服务绑定到 `0.0.0.0`、`::` 或其它非环回/非链路本地地址，任何能访问该
+端口的人都能直接操作终端，因此启动器和后端都会拒绝启动，并提示以下三种修复方式：
+
+1. 配置飞书 OAuth（及可选白名单）；
+2. 绑定环回地址（如 `--host 127.0.0.1`，由隧道从本机回连）；
+3. 确认网络路径已自行隔离后，显式接受风险：
+   `CLAUDE_HUB_ALLOW_INSECURE_LISTEN=1`。
+
+环回（`127.0.0.1`、`::1`、`localhost`）与链路本地地址（`169.254.0.0/16`、
+`fe80::/10`）不告警、可直接启动；链路本地与既有的内网鉴权豁免保持一致（它不
+能跨网段路由）。
+
 ---
 
 ## 内网穿透部署
@@ -478,6 +519,12 @@ services:
 此 Docker Compose 示例及仓库的 `docker/docker-compose.yml` 通过 `env_file`
 读取根目录 `.env` 并注入容器进程；该路径由 Compose 配置管理。上面的
 `backend/.env` 路径适用于直接使用 `start.sh` 的本地服务启动。
+
+当 Nginx 与后端不在同一主机/环回上时，必须把 Nginx 的直连地址加入
+`CLAUDE_HUB_TRUSTED_PROXIES`，后端才会采纳它设置的 `X-Forwarded-For` 与
+`X-Forwarded-Proto`（详见上文“反向代理信任”）；否则会以 Nginx 地址当作客户端，
+HTTPS 的 Cookie `Secure` 判断也会失效。请确保 Nginx 自身覆写而非追加这两个
+转发头，避免客户端伪造值穿透到可信链路。
 
 ### SSL 证书配置（使用 Let's Encrypt）
 

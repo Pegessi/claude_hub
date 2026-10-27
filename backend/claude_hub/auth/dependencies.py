@@ -6,19 +6,17 @@ from fastapi import Cookie, Depends, HTTPException, Query, Request, WebSocket, s
 
 from ..config import settings
 from ..models.schemas import User
+from .proxy import client_ip_from_request
 from .session import get_session
 
 
 def get_client_ip(request: Request) -> str:
-    """Get client IP address from request."""
-    # Check X-Forwarded-For header first (for reverse proxies)
-    x_forwarded_for = request.headers.get("x-forwarded-for")
-    if x_forwarded_for:
-        # X-Forwarded-For format: client_ip, proxy1_ip, proxy2_ip, ...
-        return x_forwarded_for.split(",")[0].strip()
+    """Get client IP address from request.
 
-    # Fallback to direct client host
-    return request.client.host if request.client else "127.0.0.1"
+    Delegates to the shared trusted-proxy helper: X-Forwarded-For is parsed
+    only when the direct peer is in ``settings.trusted_proxies``.
+    """
+    return client_ip_from_request(request)
 
 
 def is_local_network_request(request: Request) -> bool:
@@ -121,14 +119,11 @@ async def optional_user(
 
 
 def get_client_ip_ws(websocket: WebSocket) -> str:
-    """Get client IP address from WebSocket."""
-    # Check X-Forwarded-For header first (for reverse proxies)
-    x_forwarded_for = websocket.headers.get("x-forwarded-for")
-    if x_forwarded_for:
-        return x_forwarded_for.split(",")[0].strip()
+    """Get client IP address from WebSocket.
 
-    # Fallback to direct client host
-    return websocket.client.host if websocket.client else "127.0.0.1"
+    Uses the same trusted-direct-peer rule as HTTP requests.
+    """
+    return client_ip_from_request(websocket)
 
 
 def is_local_network_request_ws(websocket: WebSocket) -> bool:
