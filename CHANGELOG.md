@@ -7,6 +7,28 @@
 
 ## Released
 
+### fix(agent_stream): reap the whole provider process group on teardown and cancellation
+
+- Provider teardown no longer declares success when only the direct child
+  dies. SIGTERM/SIGKILL escalation used to key off `await proc.wait()`, which
+  resolves as soon as the provider CLI exits — typically within milliseconds —
+  while TERM-trapping descendants (shutting-down MCP servers, trapped bash,
+  nohup-style children) survived reparented to init and were never SIGKILLed.
+  Teardown now polls the process group with `killpg(pgid, 0)` under one shared
+  five-second grace budget covering both leader exit and group drain; if the
+  group is still present at the deadline the WHOLE group is SIGKILLed and the
+  direct child is reaped.
+- Cancelling teardown during grace no longer strands the tree: the group is
+  SIGKILLed immediately (direct-child `kill()` when group signalling is
+  unavailable), followed by a bounded `asyncio.shield`-protected final reap
+  that survives further cancellation, before `CancelledError` propagates.
+- `PermissionError` from `killpg` falls back to direct-child terminate/kill;
+  `ProcessLookupError` means the group has already drained. Double `stop()` is
+  a no-op, and `_spawn_subprocess` clears the recorded pgid before awaiting
+  launch on every platform. Descendants that call `setsid`/`setpgid`
+  themselves escape the group and remain unreachable; a hard backend
+  SIGKILL likewise skips lifespan teardown.
+
 ### fix(maso): retain final responses without streamed tokens
 
 - Read authoritative text and reasoning from MASO's `post_llm_response` event.
