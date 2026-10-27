@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     )
     review_verdict_idle_timeout_seconds: int = Field(default=180, ge=45, le=1800)
     frontend_url: str = "http://localhost:5173"
+    # Optional externally visible base URL (e.g. https://hub.example.com) used
+    # to decide cookie security attributes behind a terminating reverse proxy.
+    public_url: Optional[str] = None
     ttyd_path: str = "ttyd"
     ttyd_base_port: int = 10000
     default_command: str = "claude"

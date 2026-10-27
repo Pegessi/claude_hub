@@ -1,6 +1,9 @@
 """Authentication API routes."""
 
+import hmac
 import logging
+import secrets
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
@@ -20,6 +23,30 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
+# Short-lived cookie carrying the OAuth login CSRF state. Scoped to the auth
+# routes so it is only sent back on /login and /callback.
+OAUTH_STATE_COOKIE_NAME = "claude_hub_oauth_state"
+OAUTH_STATE_MAX_AGE_SECONDS = 600
+OAUTH_COOKIE_PATH = "/api/auth"
+
+
+def _use_secure_cookie(request: Request) -> bool:
+    """Whether auth cookies should carry the Secure attribute.
+
+    HTTPS is detected from the request scheme, honoring ``X-Forwarded-Proto``
+    behind a terminating reverse proxy, or from a configured public/frontend
+    URL. Plain-HTTP localhost stays without Secure so local dev keeps working.
+    """
+    forwarded_proto = request.headers.get("x-forwarded-proto")
+    if forwarded_proto:
+        scheme = forwarded_proto.split(",")[0].strip().lower()
+    else:
+        scheme = request.url.scheme
+    if scheme == "https":
+        return True
+    configured_url = settings.public_url or settings.frontend_url
+    return urlsplit(configured_url).scheme == "https"
+
 
 @router.get("/login")
 async def login(request: Request) -> RedirectResponse:
@@ -27,10 +54,21 @@ async def login(request: Request) -> RedirectResponse:
     if not settings.auth_enabled:
         return RedirectResponse(url=settings.frontend_url)
 
-    # Generate state (optional, for CSRF protection)
-    state = ""
+    # Random state stored in an httponly cookie and verified on callback to
+    # protect the login flow against CSRF.
+    state = secrets.token_urlsafe(32)
     auth_url = get_feishu_auth_url(state)
-    return RedirectResponse(url=auth_url)
+    response = RedirectResponse(url=auth_url)
+    response.set_cookie(
+        key=OAUTH_STATE_COOKIE_NAME,
+        value=state,
+        max_age=OAUTH_STATE_MAX_AGE_SECONDS,
+        httponly=True,
+        samesite="lax",
+        secure=_use_secure_cookie(request),
+        path=OAUTH_COOKIE_PATH,
+    )
+    return response
 
 
 @router.get("/callback")
@@ -38,6 +76,16 @@ async def callback(request: Request, code: str, state: str = "") -> RedirectResp
     """Handle Feishu OAuth callback."""
     if not settings.auth_enabled:
         return RedirectResponse(url=settings.frontend_url)
+
+    # Verify the login CSRF state: the callback must carry the same random
+    # value issued by /login. Compare in constant time.
+    expected_state = request.cookies.get(OAUTH_STATE_COOKIE_NAME)
+    if not expected_state or not state or not hmac.compare_digest(expected_state, state):
+        logger.warning("OAuth callback rejected: missing or mismatched state")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid OAuth state",
+        )
 
     # Exchange code for access token
     access_token, refresh_token = await get_user_access_token(code)
@@ -103,8 +151,17 @@ async def callback(request: Request, code: str, state: str = "") -> RedirectResp
         value=session.session_id,
         httponly=True,
         samesite="lax",
+        secure=_use_secure_cookie(request),
         max_age=int(settings.session_expire_days * 24 * 60 * 60),
         path="/",
+    )
+    # Single-use state: drop the login CSRF cookie on success.
+    response.delete_cookie(
+        key=OAUTH_STATE_COOKIE_NAME,
+        path=OAUTH_COOKIE_PATH,
+        httponly=True,
+        samesite="lax",
+        secure=_use_secure_cookie(request),
     )
 
     logger.info(f"User logged in: {user.email}")
@@ -147,7 +204,13 @@ async def logout(
     if session_id:
         delete_session(session_id)
 
-    response.delete_cookie(key=settings.session_cookie_name, path="/")
+    response.delete_cookie(
+        key=settings.session_cookie_name,
+        path="/",
+        httponly=True,
+        samesite="lax",
+        secure=_use_secure_cookie(request),
+    )
 
     if current_user:
         logger.info(f"User logged out: {current_user.email}")
