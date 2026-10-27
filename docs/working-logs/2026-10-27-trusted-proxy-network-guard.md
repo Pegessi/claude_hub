@@ -34,7 +34,7 @@ env-validated):
 | Setting | Env name | Default | Meaning |
 | --- | --- | --- | --- |
 | `trusted_proxies` | `CLAUDE_HUB_TRUSTED_PROXIES` | `127.0.0.0/8,::1` | comma-separated IP/CIDR allowlist of *direct* peers whose forwarded headers are honored. Empty string trusts nobody. Invalid entries fail Settings validation. |
-| `allowed_ws_origins` | `CLAUDE_HUB_ALLOWED_WS_ORIGINS` | empty | extra allowed WS origins (full origin or bare `host[:port]`), comma-separated. |
+| `allowed_origins` | `CLAUDE_HUB_ALLOWED_ORIGINS` | empty | extra allowed browser origins (full origin or bare `host[:port]`), comma-separated; shared by WS handshakes and unsafe HTTP writes (renamed from `allowed_ws_origins` in round 2). |
 | `allow_insecure_listen` | `CLAUDE_HUB_ALLOW_INSECURE_LISTEN` | `false` | explicit opt-in for a non-local bind while auth is disabled. |
 | `bind_host` | `CLAUDE_HUB_BIND_HOST` | empty | effective uvicorn bind host seen by the in-process guard; exported by `service_launcher.main` and `start.sh` dev mode. |
 
@@ -75,7 +75,7 @@ WebSocket Origin behavior (`reject_bad_websocket_origin`):
   not send one; browsers always do).
 - Present `Origin`: parsed `scheme://host[:port]`; its host[:port] must equal
   the request `Host` (default ports 80/443 normalized on both sides, hostnames
-  case-folded, IPv6 literals supported) or match an `allowed_ws_origins`
+  case-folded, IPv6 literals supported) or match an `allowed_origins`
   entry. The literal sandboxed `null` origin and unparseable values are
   rejected.
 - Mismatch → `await websocket.close(code=1008)` *before* `accept()`. Verified
@@ -154,3 +154,56 @@ WebSocket Origin behavior (`reject_bad_websocket_origin`):
   policy before spawning uvicorn.
 - A network-level restart/upgrade of the existing primary Hub was intentionally
   not performed; existing processes, tmux sessions and ports were untouched.
+
+## Follow-up round 2 (same-day finalization review)
+
+Independent review of 7626d7b found four contract gaps; all fixed in the
+follow-up commit:
+
+1. **Dev mode was broken twice.** `start.sh --dev` still defaulted the backend
+   to `--host 0.0.0.0`, which the new guard refuses without auth/opt-in, and
+   Vite's proxy (`changeOrigin: true`) rewrote `Host` to `:8173` while
+   forwarding the browser's `Origin: http://localhost:5173`, so every terminal
+   WebSocket would have closed with 1008. Fixes: the dev backend and
+   `scripts/start-temp-tunnel.sh` now default to loopback (Vite stays on
+   `0.0.0.0`, so LAN/phone dev access is unchanged); `vite.config.ts` rewrites
+   `Origin` to the proxy target's own origin on all three proxy entries (HTTP +
+   WS), which is legitimate because Vite is a trusted loopback intermediary.
+   The production `start.sh` line deliberately keeps `${CLAUDE_HUB_HOST:-
+   0.0.0.0}`: `scripts/check_checkout_safety.py` structurally pins that
+   wildcard default, so production security there comes from the launcher
+   refusal plus explicit opt-in rather than a changed default.
+2. **Unsafe HTTP writes had no Origin policy.** CORS blocks reading
+   cross-origin responses but "simple" cross-site POSTs (form/text bodies) are
+   still delivered, so a malicious page could drive an unauthenticated local
+   Hub. Added pure-ASGI `BrowserOriginGuardMiddleware` (outermost layer):
+   `POST`/`PUT`/`PATCH`/`DELETE` with a browser `Origin` must be same-origin
+   or match `CLAUDE_HUB_ALLOWED_ORIGINS`; safe methods, preflight and
+   Origin-less native clients/server webhooks pass. Setting/env renamed from
+   `allowed_ws_origins` / `CLAUDE_HUB_ALLOWED_WS_ORIGINS` to
+   `allowed_origins` / `CLAUDE_HUB_ALLOWED_ORIGINS` (one list shared by WS and
+   HTTP); the pure helper is now `browser_origin_is_allowed`.
+3. **Docker bypassed the in-process guard.** The image runs uvicorn with
+   `--host 0.0.0.0` but never exported `CLAUDE_HUB_BIND_HOST`, so the lifespan
+   guard fell back to the loopback `settings.host` default and did not police
+   the real interface. The Dockerfile now sets `CLAUDE_HUB_BIND_HOST=0.0.0.0`
+   (fail-closed for `docker run` without auth), and compose explicitly opts in
+   with `CLAUDE_HUB_ALLOW_INSECURE_LISTEN=1` plus the cross-origin allowlist
+   entry for its separate `:5173` frontend container.
+4. **Docs/compose drift.** Compose healthcheck called a nonexistent
+   `/api/health` (real route is `/health`); backend README still documented an
+   unguarded `--host 0.0.0.0`. Both fixed (README now documents the loopback
+   dev invocation plus the opt-in for wildcard); `.env.example`, DEPLOYMENT.md
+   and CHANGELOG updated for the shared origin list and HTTP-write coverage.
+
+New tests: 6 unsafe-HTTP unit cases, one in-process ASGI middleware case
+(403 before routing for cross-site POST; same-origin and Origin-less requests
+reach the app) and one real-app TestClient case (cross-site POST 403,
+same-origin reaches routing, cross-origin GET 200). Live uvicorn verification
+on an isolated loopback port confirmed the same matrix over real sockets plus
+a wildcard-bind lifespan abort (`InsecureListenError`, port never bound).
+Suite totals: 48 passing in `test_proxy_trust.py`, 35 in
+`test_listen_guard.py`; full backend run 5542 passed / 21 skipped (the one
+environment-dependent MASO preflight test fails identically on untouched
+branches because a real service answers on 127.0.0.1:11004); frontend
+typecheck/lint/1136 unit tests/build all pass; `check-staged` passes.

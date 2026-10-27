@@ -1,4 +1,4 @@
-"""Trust boundaries for reverse-proxy headers and browser WebSockets.
+"""Trust boundaries for reverse-proxy headers and browser requests.
 
 Reverse proxies (nginx, ttyd front-ends, tunnels) append ``X-Forwarded-For``
 and ``X-Forwarded-Proto``. Those headers are fully attacker-controlled unless
@@ -7,10 +7,16 @@ keys off the direct connection peer (``connection.client.host``) and never
 off header contents alone. A client connected directly cannot make itself
 look like loopback by sending ``X-Forwarded-For: 127.0.0.1``.
 
-The WebSocket Origin check closes the cross-site WebSocket hijacking hole:
-browser pages always send ``Origin`` and it must match the destination
-``Host`` (or an explicitly allowed origin); native clients that send no
-``Origin`` (ttyd, websocat, curl) keep working.
+The browser Origin check closes two cross-site holes:
+
+- WebSocket hijacking (CSWSH): browser pages always send ``Origin`` on the
+  upgrade and it must match the destination ``Host`` (or an explicitly
+  allowed origin); native clients that send no ``Origin`` (ttyd, websocat,
+  curl) keep working.
+- State-changing HTTP requests: cross-site "simple" POSTs/PUTs/PATCHes/
+  DELETEs execute even though CORS blocks reading their responses, so unsafe
+  methods with a browser ``Origin`` are held to the same same-origin policy.
+  Safe methods (GET/HEAD/OPTIONS) and Origin-less native clients are exempt.
 """
 
 import ipaddress
@@ -32,6 +38,9 @@ _IPNetwork = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
 _ORIGIN_SCHEME_PORTS = {"http": 80, "https": 443}
 # Host headers without an explicit port are compared against default ports.
 _DEFAULT_HOST_PORTS = frozenset((80, 443))
+# Methods that can change state and therefore require a same-origin browser
+# request. CORS preflight (OPTIONS) and safe reads are verified by CORS alone.
+UNSAFE_HTTP_METHODS = frozenset(("POST", "PUT", "PATCH", "DELETE"))
 
 
 def _normalize_ip(ip: _IPAddress) -> _IPAddress:
@@ -176,13 +185,15 @@ def _host_target_matches(hostname: str, port: int, host_target: tuple[str, Optio
     return host_port == port
 
 
-def websocket_origin_is_allowed(
+def browser_origin_is_allowed(
     *,
     origin: Optional[str],
     host: Optional[str],
     allowed_origins: Sequence[str] = (),
 ) -> bool:
-    """Decide whether a WebSocket handshake ``Origin`` is acceptable.
+    """Decide whether a browser ``Origin`` is acceptable for this target.
+
+    Shared by the WebSocket handshake and the unsafe-HTTP-write guard.
 
     - No ``Origin`` header (native clients) is always allowed.
     - A parseable Origin whose host[:port] equals ``Host`` is allowed.
@@ -218,6 +229,41 @@ def websocket_origin_is_allowed(
     return False
 
 
+def _scope_header(headers: Sequence[tuple[bytes, bytes]], name: str) -> Optional[str]:
+    """Read a lowercase header name from raw ASGI scope headers."""
+    raw_name = name.encode()
+    for key, value in headers:
+        if key == raw_name:
+            return value.decode("latin-1")
+    return None
+
+
+def unsafe_http_request_is_allowed(
+    *,
+    method: str,
+    headers: Sequence[tuple[bytes, bytes]],
+    allowed_origins: Optional[Sequence[str]] = None,
+) -> bool:
+    """Same-origin policy for state-changing HTTP requests.
+
+    Safe methods and requests without an ``Origin`` (curl, the CLI,
+    server-to-server webhooks) pass; an unsafe method carrying a browser
+    ``Origin`` must satisfy the same Host/allowlist match as WebSockets.
+    """
+    if method.upper() not in UNSAFE_HTTP_METHODS:
+        return True
+    origin = _scope_header(headers, "origin")
+    if origin is None or not origin.strip():
+        return True
+    return browser_origin_is_allowed(
+        origin=origin,
+        host=_scope_header(headers, "host"),
+        allowed_origins=(
+            settings.allowed_origins_list if allowed_origins is None else allowed_origins
+        ),
+    )
+
+
 async def reject_bad_websocket_origin(connection: WebSocket) -> bool:
     """Deny a browser cross-site WebSocket handshake before it is accepted.
 
@@ -231,10 +277,10 @@ async def reject_bad_websocket_origin(connection: WebSocket) -> bool:
     if origin is None:
         return False
     host = connection.headers.get("host")
-    if websocket_origin_is_allowed(
+    if browser_origin_is_allowed(
         origin=origin,
         host=host,
-        allowed_origins=settings.allowed_ws_origins_list,
+        allowed_origins=settings.allowed_origins_list,
     ):
         return False
     logger.warning(

@@ -24,11 +24,25 @@
   with the existing local-network auth exemption. Enforced both in the
   supervised launcher and in the app lifespan.
 - Terminal WebSocket handshakes (`/api/terminal/ws/{tab_id}` and
-  `/api/terminal/proxy/{tab_id}/ws`) now reject a browser `Origin` whose
-  host[:port] differs from `Host` with a pre-accept close (1008), closing the
-  cross-site WebSocket hijacking path. Handshakes without `Origin` (ttyd,
-  websocat, curl) are unaffected; extra origins can be allowed via
-  `CLAUDE_HUB_ALLOWED_WS_ORIGINS`. Default loopback deployments are unchanged.
+  `/api/terminal/proxy/{tab_id}/ws`) and state-changing HTTP methods
+  (`POST`/`PUT`/`PATCH`/`DELETE`) now reject a browser `Origin` whose
+  host[:port] differs from `Host`: WS gets a pre-accept close (1008), HTTP a
+  403 before routing. This closes both the cross-site WebSocket hijacking and
+  "simple" cross-site form-write paths (CORS alone blocks reads, not writes).
+  Safe methods, CORS preflight and requests without `Origin` (ttyd, websocat,
+  curl, the CLI, server webhooks) are unaffected; extra origins can be allowed
+  via `CLAUDE_HUB_ALLOWED_ORIGINS`. The Vite dev proxy rewrites `Origin` to
+  the backend origin, so dev mode keeps working across ports.
+- The guarded launch paths now fail closed without breaking local workflows:
+  the pinned production entry (`start.sh`, wildcard default kept per the
+  checkout-safety contract) exits with a clear message until Feishu auth is
+  configured or `CLAUDE_HUB_ALLOW_INSECURE_LISTEN=1` is set; dev mode
+  (`start.sh --dev`) and `start-temp-tunnel.sh` now bind the backend to
+  loopback so they start warning-free, with LAN/phone access still going
+  through the Vite server on `0.0.0.0`. The Docker image exports its real
+  wildcard bind (`CLAUDE_HUB_BIND_HOST=0.0.0.0`) so the guard actually runs
+  in-container; compose explicitly opts in, whitelists the separate frontend
+  origin, and its healthcheck now hits the real `/health`.
 
 ### fix(maso): retain final responses without streamed tokens
 

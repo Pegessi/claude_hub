@@ -12,6 +12,16 @@ const sidebarPreferencesApiTarget =
 const devPort = Number(process.env.VITE_PORT || process.env.PORT || 5173)
 const buildOutDir = process.env.CLAUDE_HUB_FRONTEND_OUT_DIR || 'dist'
 
+// The backend rejects browser Origin values that do not match the target Host
+// (CSWSH / cross-site write protection). Vite is a trusted loopback proxy, so
+// present the backend's own origin: changeOrigin rewrites Host and this
+// rewrites Origin on both HTTP and WebSocket upgrade requests. Without it the
+// dev UI's origin (:5173) differs from the proxied target (:8173) and the
+// terminal WebSocket would be denied with close code 1008.
+const proxyHeaders = (target: string): Record<string, string> => ({
+  Origin: new URL(target).origin,
+})
+
 /**
  * SharedArrayBuffer (used by the terminal input fast path) requires the
  * top-level document to be cross-origin-isolated. That means COOP + COEP
@@ -60,15 +70,18 @@ export default defineConfig({
       '/api/tabs/sidebar-preferences': {
         target: sidebarPreferencesApiTarget,
         changeOrigin: true,
+        headers: proxyHeaders(sidebarPreferencesApiTarget),
       },
       '/api/system': {
         target: systemApiTarget,
         changeOrigin: true,
+        headers: proxyHeaders(systemApiTarget),
       },
       '/api': {
         target: apiTarget,
         changeOrigin: true,
         ws: true,
+        headers: proxyHeaders(apiTarget),
       },
     },
   },

@@ -299,10 +299,14 @@ CLAUDE_HUB_TRUSTED_PROXIES=127.0.0.0/8,::1
 - 可信名单会参与 XFF 链解析：从右向左逐个剥掉可信代理跳，取最左侧的不可信地址
   作为客户端；格式错误的条目会被忽略。Cookie 的 `Secure` 语义只在直连对端可信
   时才接受 `X-Forwarded-Proto`（仅取第一个 token，且只接受 `http`/`https`）。
-- 终端 WebSocket 会校验浏览器握手的 `Origin`：缺省要求 Origin 的 host[:port] 与
-  请求 `Host` 一致。没有 Origin 头的原生客户端（ttyd、websocat、curl）不受影响。
-  若页面由其它源提供，用逗号分隔的完整 Origin 或 `host[:port]` 白名单放行：
-  `CLAUDE_HUB_ALLOWED_WS_ORIGINS=https://hub.example.com`。
+- 终端 WebSocket 握手和会改变状态的 HTTP 请求（`POST`/`PUT`/`PATCH`/`DELETE`）
+  都会校验浏览器的 `Origin`：缺省要求 Origin 的 host[:port] 与请求 `Host` 一致。
+  没有 Origin 头的原生客户端（ttyd、websocat、curl、CLI、服务端回调）不受影响；
+  `GET`/`HEAD`/`OPTIONS` 与 CORS 预检也不受影响（跨站读取仍由 CORS 拦截）。若页面
+  由其它源提供（如分离部署的前端、Docker compose 的 5173 预览容器），用逗号分隔的
+  完整 Origin 或 `host[:port]` 白名单放行：
+  `CLAUDE_HUB_ALLOWED_ORIGINS=https://hub.example.com`。Vite 开发代理会把 Origin
+  改写为后端自身来源，开发模式无需配置该项。
 
 ### 未启用鉴权时的监听保护
 

@@ -41,5 +41,12 @@ COPY backend/claude_hub ./claude_hub
 # Backend HTTP + WebSocket API port (FastAPI/uvicorn).
 EXPOSE 8173
 
+# The container network namespace requires a wildcard bind; export the real
+# bind host so the in-process startup guard polices the same interface as
+# uvicorn. Unauthenticated wildcard binds still fail closed: compose sets the
+# explicit opt-in because publishing the port is the deliberate exposure
+# boundary; `docker run` without it (and without Feishu auth) refuses start.
+ENV CLAUDE_HUB_BIND_HOST=0.0.0.0
+
 # Run the application
 CMD ["uv", "run", "uvicorn", "claude_hub.main:app", "--host", "0.0.0.0", "--port", "8173"]
