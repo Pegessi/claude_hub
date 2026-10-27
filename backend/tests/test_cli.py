@@ -1103,6 +1103,53 @@ def test_transport_error_non_loopback_host_has_no_bracketed_hint():
     assert "same port" in message
 
 
+def test_transport_error_redacts_oauth_callback_query_secrets():
+    # The auth callback puts the OAuth code and CSRF state in the query
+    # string; a connection failure must never echo them back to the terminal.
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("[Errno 111] Connection refused", request=request)
+
+    client = HubClient(
+        base_url="http://127.0.0.1:9911",
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(HubError) as exc:
+        client.auth_callback_response(
+            code="oauth-authorization-code-SECRET",
+            state="oauth-csrf-state-SECRET",
+        )
+    message = str(exc.value)
+    # Scheme/host/port/path remain for diagnosis, and the IPv6 hint survives.
+    assert "http://127.0.0.1:9911/api/auth/callback" in message
+    assert "http://[::1]:9911" in message
+    # The secret query values and the query string itself are stripped.
+    assert "oauth-authorization-code-SECRET" not in message
+    assert "oauth-csrf-state-SECRET" not in message
+    assert "code=" not in message
+    assert "state=" not in message
+    assert "?" not in message
+
+
+def test_transport_error_redacts_url_userinfo_password():
+    # A base URL with embedded userinfo (user:password@host) must render the
+    # host endpoint only, never the credentials.
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("[Errno 111] Connection refused", request=request)
+
+    client = HubClient(
+        base_url="http://connector:userinfo-password-SECRET@127.0.0.1:9911",
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(HubError) as exc:
+        client.list_workspaces()
+    message = str(exc.value)
+    assert "http://127.0.0.1:9911/api/workspaces" in message
+    assert "http://[::1]:9911" in message  # same-port IPv6 hint retained
+    assert "userinfo-password-SECRET" not in message
+    assert "connector" not in message
+    assert "@" not in message
+
+
 def test_env_preset_for_agent_type_defaults_claude_to_day1(tmp_path, monkeypatch):
     from claude_hub.cli.config import resolve_settings
 

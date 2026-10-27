@@ -89,6 +89,17 @@ def _ipv6_loopback_hint(url: httpx.URL) -> Optional[str]:
     return None
 
 
+def _sanitize_attempted_url(url: httpx.URL) -> httpx.URL:
+    """Strip query and userinfo from ``url`` before showing it in an error.
+
+    Transport failures render the attempted endpoint for diagnosis, but the
+    query string can carry OAuth ``code``/``state`` values (e.g. the auth
+    callback) and URL userinfo can carry a password. Scheme, host, port and
+    path are retained because they identify the failing endpoint.
+    """
+    return url.copy_with(query=None, username="", password="")
+
+
 class HubClient:
     """Thin typed wrapper around the Claude Hub workspace API.
 
@@ -199,7 +210,10 @@ class HubClient:
         try:
             resp = self._client.send(request)
         except httpx.HTTPError as e:
-            loopback_hint = _ipv6_loopback_hint(request.url)
+            # Never render the raw URL here: the auth callback query carries
+            # OAuth code/state and base URLs may embed userinfo passwords.
+            sanitized_url = _sanitize_attempted_url(request.url)
+            loopback_hint = _ipv6_loopback_hint(sanitized_url)
             if loopback_hint is not None:
                 ipv6_suggestion = (
                     "on IPv6-only hosts try the IPv6 loopback at the same "
@@ -210,7 +224,7 @@ class HubClient:
                     "on IPv6-only hosts try the IPv6 loopback address at the same port"
                 )
             raise HubError(
-                f"Could not connect to Claude Hub at {request.url}: {e}. "
+                f"Could not connect to Claude Hub at {sanitized_url}: {e}. "
                 "Check that the Hub is running and the address is reachable; "
                 f"{ipv6_suggestion}, or set CLAUDE_HUB_URL."
             ) from e
