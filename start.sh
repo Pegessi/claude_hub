@@ -118,7 +118,12 @@ if [ "$DEV_MODE" = true ]; then
     uv run python -m claude_hub.maso_probe --startup
     echo -e "${YELLOW}Starting backend server (dev, --reload)...${NC}"
     cd "$PROJECT_ROOT/backend"
-    uv run uvicorn claude_hub.main:app --reload --host 0.0.0.0 --port 8173 &
+    # The bind host is exported so the in-process startup guard sees the real
+    # uvicorn interface. Without Feishu auth configured, a non-loopback bind
+    # is refused unless CLAUDE_HUB_ALLOW_INSECURE_LISTEN=1 is set.
+    DEV_HOST="${CLAUDE_HUB_HOST:-0.0.0.0}"
+    CLAUDE_HUB_BIND_HOST="$DEV_HOST" \
+        uv run uvicorn claude_hub.main:app --reload --host "$DEV_HOST" --port 8173 &
     BACKEND_PID=$!
     echo -e "${GREEN}✓ Backend started on http://localhost:8173 (PID: $BACKEND_PID)${NC}"
 

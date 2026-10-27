@@ -91,7 +91,18 @@ async def _backend_runtime_ownership() -> AsyncIterator[None]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Application lifespan - manage startup and shutdown."""
+    # Defense in depth for direct `uvicorn` invocations (the supervised
+    # launcher already enforces this before spawning us). Uvicorn runs
+    # lifespan startup before binding its listening sockets, so raising here
+    # prevents the port from ever being served.
+    from .services.listen_guard import InsecureListenError, enforce_settings_listen_policy
+
+    try:
+        enforce_settings_listen_policy()
+    except InsecureListenError:
+        logger.error("Unsafe listen configuration: startup aborted")
+        raise
+
     async with _backend_runtime_ownership():
         logger.info("Logging to file: %s", log_file)
         # Startup

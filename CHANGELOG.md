@@ -7,6 +7,29 @@
 
 ## Released
 
+### fix(security): trust forwarded headers only from trusted proxies; guard insecure listen and WS origins
+
+- `X-Forwarded-For` is parsed only when the direct TCP peer is in the new
+  `CLAUDE_HUB_TRUSTED_PROXIES` allowlist (comma-separated IPs/CIDRs, default
+  `127.0.0.0/8,::1`). The client is selected by walking the chain right-to-left
+  and stripping trusted hops; malformed entries are ignored. A direct client can
+  no longer send `X-Forwarded-For: 127.0.0.1` to claim the loopback auth
+  exemption. The same module exposes `scheme_from_request`, which honors the
+  first `X-Forwarded-Proto` token only from a trusted direct peer, for cookie
+  Secure decisions behind a terminating proxy.
+- An unauthenticated server (Feishu credentials absent) refuses to bind a
+  non-loopback, non-link-local host (`0.0.0.0`, `::`, concrete LAN/public IPs
+  or hostnames) unless `CLAUDE_HUB_ALLOW_INSECURE_LISTEN=1` is set. The pure
+  decision function treats loopback and link-local as local-only, consistent
+  with the existing local-network auth exemption. Enforced both in the
+  supervised launcher and in the app lifespan.
+- Terminal WebSocket handshakes (`/api/terminal/ws/{tab_id}` and
+  `/api/terminal/proxy/{tab_id}/ws`) now reject a browser `Origin` whose
+  host[:port] differs from `Host` with a pre-accept close (1008), closing the
+  cross-site WebSocket hijacking path. Handshakes without `Origin` (ttyd,
+  websocat, curl) are unaffected; extra origins can be allowed via
+  `CLAUDE_HUB_ALLOWED_WS_ORIGINS`. Default loopback deployments are unchanged.
+
 ### fix(maso): retain final responses without streamed tokens
 
 - Read authoritative text and reasoning from MASO's `post_llm_response` event.
