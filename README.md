@@ -133,11 +133,14 @@ uv sync                       # installs the `claude-hub` entry point
 uv run claude-hub --help      # or: uv run python -m claude_hub.cli --help
 ```
 
-Configuration precedence: flags > env > config file > defaults.
+Configuration precedence: flags > env > config file > derived/defaults.
 
 ```bash
-export CLAUDE_HUB_URL=http://127.0.0.1:8173   # default
+export CLAUDE_HUB_URL=http://127.0.0.1:8173   # explicit override
+export CLAUDE_HUB_HOST=::1                     # derive URL with CLAUDE_HUB_PORT
 export CLAUDE_HUB_TOKEN=...                    # only for remote/non-loopback backends
+# Without an explicit URL the CLI probes 127.0.0.1 and [::1] (port 8173 by
+# default) and uses whichever answers /health; IPv6 literals are bracketed.
 # or ~/.config/claude-hub/config.toml:  [default] \n base_url = "..." \n token = "..."
 ```
 

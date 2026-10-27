@@ -1,8 +1,15 @@
 """Resolved CLI configuration and precedence handling.
 
-Precedence for each setting: explicit flag > environment variable > config file
-> built-in default. The config file is TOML with keys under a ``[default]``
-table::
+Base URL precedence: explicit flag > ``CLAUDE_HUB_URL`` > config file
+``[default].base_url`` > a URL derived from ``CLAUDE_HUB_HOST`` /
+``CLAUDE_HUB_PORT`` > an automatic loopback probe > built-in default.
+
+When no URL is configured explicitly and ``CLAUDE_HUB_HOST`` is unset, the CLI
+probes ``http://127.0.0.1:<port>/health`` and ``http://[::1]:<port>/health``
+with a short timeout and uses the first healthy endpoint (the Hub commonly
+listens on IPv6 only). Nothing is cached on disk.
+
+The config file is TOML with keys under a ``[default]`` table::
 
     [default]
     base_url = "http://127.0.0.1:8173"
@@ -15,10 +22,23 @@ import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
-DEFAULT_BASE_URL = "http://127.0.0.1:8173"
+import httpx
+
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8173
+DEFAULT_BASE_URL = f"http://{DEFAULT_HOST}:{DEFAULT_PORT}"
 DEFAULT_CONFIG_PATH = "~/.config/claude-hub/config.toml"
+
+# Keep the auto-probe brief: a refused loopback connection fails immediately,
+# so this only bounds genuinely unreachable/black-holed addresses.
+HEALTH_PROBE_TIMEOUT = 0.5
+
+# Bind wildcards to their loopback counterparts: a Hub started on 0.0.0.0 / ::
+# is reachable via 127.0.0.1 / ::1, while the wildcard itself is not a valid
+# connect target (and bare ``::`` cannot be put in a URL unbracketed).
+_WILDCARD_HOSTS = {"0.0.0.0": "127.0.0.1", "::": "::1"}
 
 
 @dataclass
@@ -79,6 +99,66 @@ def _str_or_none(value: Any) -> Optional[str]:
     return value if isinstance(value, str) else None
 
 
+def _coerce_port(raw: Optional[str]) -> int:
+    """Parse ``CLAUDE_HUB_PORT``; missing/invalid values fall back to default."""
+    if raw:
+        try:
+            port = int(raw)
+        except ValueError:
+            return DEFAULT_PORT
+        if 1 <= port <= 65535:
+            return port
+    return DEFAULT_PORT
+
+
+def _normalize_host(host: str) -> str:
+    """Strip incidental brackets and map wildcard bind hosts to loopback."""
+    host = host.strip()
+    if len(host) >= 2 and host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    return _WILDCARD_HOSTS.get(host, host)
+
+
+def build_base_url(host: str, port: int) -> str:
+    """Assemble an HTTP base URL, bracketing bare IPv6 literals."""
+    host = _normalize_host(host)
+    if ":" in host:
+        host = f"[{host}]"
+    return f"http://{host}:{port}"
+
+
+def probe_health(base_url: str, *, timeout: float = HEALTH_PROBE_TIMEOUT) -> bool:
+    """Return whether ``GET {base_url}/health`` succeeds with a 2xx response.
+
+    Any transport error (refused, timeout, ...) or non-2xx response counts as
+    unhealthy. The result is never persisted.
+    """
+    try:
+        with httpx.Client(timeout=timeout, trust_env=False) as client:
+            response = client.get(f"{base_url.rstrip('/')}/health")
+    except httpx.HTTPError:
+        return False
+    return response.is_success
+
+
+def auto_detect_base_url(
+    port: int,
+    *,
+    probe: Callable[[str], bool] = probe_health,
+) -> str:
+    """Probe IPv4 then IPv6 loopback; fall back to the IPv4 default URL.
+
+    Tries 127.0.0.1 first to match the historical default, then ``[::1]`` for
+    IPv6-only hosts. Returns the first base URL whose ``/health`` endpoint
+    answers, or the default-form URL when neither does.
+    """
+    for host in (DEFAULT_HOST, "::1"):
+        candidate = build_base_url(host, port)
+        if probe(candidate):
+            return candidate
+    return build_base_url(DEFAULT_HOST, port)
+
+
 def resolve_settings(
     *,
     base_url: Optional[str],
@@ -87,20 +167,37 @@ def resolve_settings(
     json_output: bool,
     verbose: bool,
     config_path: Optional[str],
+    health_probe: Optional[Callable[[str], bool]] = None,
 ) -> Settings:
-    """Resolve settings honoring flag > env > config file > default."""
+    """Resolve settings honoring flag > env > config file > host/port > probe.
+
+    Explicit URL sources (flag, ``CLAUDE_HUB_URL``, config ``base_url``) and an
+    explicit ``CLAUDE_HUB_HOST`` are authoritative: no health probe runs. With
+    neither, the loopback probe picks between IPv4 and IPv6.
+    """
     raw_config_path = config_path or os.environ.get("CLAUDE_HUB_CONFIG") or DEFAULT_CONFIG_PATH
     file_config = _read_config_file(Path(raw_config_path).expanduser())
     default_section = file_config.get("default", {})
     if not isinstance(default_section, dict):
         default_section = {}
 
-    resolved_base_url = (
+    explicit_base_url = (
         base_url
         or os.environ.get("CLAUDE_HUB_URL")
         or _str_or_none(default_section.get("base_url"))
-        or DEFAULT_BASE_URL
     )
+    env_host = os.environ.get("CLAUDE_HUB_HOST")
+    if env_host is not None:
+        env_host = env_host.strip() or None
+    env_port = _coerce_port(os.environ.get("CLAUDE_HUB_PORT"))
+
+    if explicit_base_url is not None:
+        resolved_base_url = explicit_base_url
+    elif env_host is not None:
+        resolved_base_url = build_base_url(env_host, env_port)
+    else:
+        probe = health_probe if health_probe is not None else probe_health
+        resolved_base_url = auto_detect_base_url(env_port, probe=probe)
     resolved_token = (
         token or os.environ.get("CLAUDE_HUB_TOKEN") or _str_or_none(default_section.get("token"))
     )

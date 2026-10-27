@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import click
 import httpx
@@ -49,7 +49,6 @@ def test_help_lists_groups():
         "tab",
         "terminal",
         "filesystem",
-        "fs",
         "remote",
         "clipboard",
         "api",
@@ -61,6 +60,10 @@ def test_help_lists_groups():
         "quota",
     ):
         assert group in result.output
+    # `fs` is a hidden alias for `filesystem`: omitted from the help listing.
+    listed = cli.list_commands(click.Context(cli))
+    assert "filesystem" in listed
+    assert "fs" not in listed
 
 
 QUOTA_SAMPLE = {
@@ -824,6 +827,183 @@ def test_config_precedence(monkeypatch, tmp_path):
     assert s3.base_url == "http://from-file:9999"
 
 
+def _resolve_with_env(
+    tmp_path, monkeypatch, *, env: Optional[Dict[str, str]] = None, **overrides: Any
+) -> Any:
+    """Call resolve_settings against a missing config file with clean env."""
+    from claude_hub.cli.config import resolve_settings
+
+    for key in ("CLAUDE_HUB_URL", "CLAUDE_HUB_HOST", "CLAUDE_HUB_PORT"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in (env or {}).items():
+        monkeypatch.setenv(key, value)
+    kwargs: Dict[str, Any] = dict(
+        base_url=None,
+        token=None,
+        cookie=None,
+        json_output=False,
+        verbose=False,
+        config_path=str(tmp_path / "missing.toml"),
+    )
+    kwargs.update(overrides)
+    return resolve_settings(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("host", "port", "expected"),
+    [
+        ("::1", 8173, "http://[::1]:8173"),
+        ("[::1]", 8173, "http://[::1]:8173"),  # already bracketed: no doubling
+        ("::", 8173, "http://[::1]:8173"),  # wildcard -> loopback
+        ("0.0.0.0", 8173, "http://127.0.0.1:8173"),
+        ("127.0.0.1", 9000, "http://127.0.0.1:9000"),
+        ("localhost", 8173, "http://localhost:8173"),
+    ],
+)
+def test_base_url_derived_from_host_env(tmp_path, monkeypatch, host, port, expected):
+    def fail_probe(url: str) -> bool:
+        raise AssertionError(f"explicit CLAUDE_HUB_HOST must skip probing: {url}")
+
+    s = _resolve_with_env(
+        tmp_path,
+        monkeypatch,
+        env={"CLAUDE_HUB_HOST": host, "CLAUDE_HUB_PORT": str(port)},
+        health_probe=fail_probe,
+    )
+    assert s.base_url == expected
+
+
+def test_explicit_url_sources_skip_probe_and_beat_host_env(tmp_path, monkeypatch):
+    from claude_hub.cli.config import resolve_settings
+
+    config_file = tmp_path / "config.toml"
+    config_file.write_text('[default]\nbase_url = "http://from-file:9999"\n', encoding="utf-8")
+    monkeypatch.delenv("CLAUDE_HUB_URL", raising=False)
+    monkeypatch.setenv("CLAUDE_HUB_HOST", "::1")
+
+    def fail_probe(url: str) -> bool:
+        raise AssertionError(f"explicit URL sources must skip probing: {url}")
+
+    def resolve(**overrides: Any) -> Any:
+        kwargs: Dict[str, Any] = dict(
+            base_url=None,
+            token=None,
+            cookie=None,
+            json_output=False,
+            verbose=False,
+            config_path=str(config_file),
+            health_probe=fail_probe,
+        )
+        kwargs.update(overrides)
+        return resolve_settings(**kwargs)
+
+    # config file beats CLAUDE_HUB_HOST
+    assert resolve().base_url == "http://from-file:9999"
+
+    # CLAUDE_HUB_URL beats config file and host
+    monkeypatch.setenv("CLAUDE_HUB_URL", "http://from-env:8888")
+    assert resolve().base_url == "http://from-env:8888"
+
+    # flag beats everything
+    assert resolve(base_url="http://from-flag:7777").base_url == "http://from-flag:7777"
+
+
+def test_auto_probe_prefers_ipv4_when_healthy(tmp_path, monkeypatch):
+    seen: List[str] = []
+
+    def probe(url: str) -> bool:
+        seen.append(url)
+        return url == "http://127.0.0.1:8173"
+
+    s = _resolve_with_env(tmp_path, monkeypatch, health_probe=probe)
+    assert s.base_url == "http://127.0.0.1:8173"
+    assert seen == ["http://127.0.0.1:8173"]  # short-circuits, no IPv6 probe
+
+
+def test_auto_probe_falls_back_to_ipv6(tmp_path, monkeypatch):
+    seen: List[str] = []
+
+    def probe(url: str) -> bool:
+        seen.append(url)
+        return url == "http://[::1]:8173"
+
+    s = _resolve_with_env(tmp_path, monkeypatch, health_probe=probe)
+    assert s.base_url == "http://[::1]:8173"
+    assert seen == ["http://127.0.0.1:8173", "http://[::1]:8173"]
+
+
+def test_auto_probe_uses_env_port(tmp_path, monkeypatch):
+    seen: List[str] = []
+
+    def probe(url: str) -> bool:
+        seen.append(url)
+        return url == "http://[::1]:9000"
+
+    s = _resolve_with_env(
+        tmp_path, monkeypatch, env={"CLAUDE_HUB_PORT": "9000"}, health_probe=probe
+    )
+    assert s.base_url == "http://[::1]:9000"
+    assert seen == ["http://127.0.0.1:9000", "http://[::1]:9000"]
+
+
+def test_auto_probe_all_unhealthy_falls_back_to_default(tmp_path, monkeypatch):
+    from claude_hub.cli.config import DEFAULT_BASE_URL
+
+    s = _resolve_with_env(tmp_path, monkeypatch, health_probe=lambda url: False)
+    assert s.base_url == DEFAULT_BASE_URL
+
+
+def test_blank_host_env_triggers_probe(tmp_path, monkeypatch):
+    seen: List[str] = []
+
+    def probe(url: str) -> bool:
+        seen.append(url)
+        return True
+
+    s = _resolve_with_env(tmp_path, monkeypatch, env={"CLAUDE_HUB_HOST": "   "}, health_probe=probe)
+    assert s.base_url == "http://127.0.0.1:8173"
+    assert seen == ["http://127.0.0.1:8173"]
+
+
+def test_invalid_port_env_falls_back_to_default_port(tmp_path, monkeypatch):
+    seen: List[str] = []
+
+    def probe(url: str) -> bool:
+        seen.append(url)
+        return False
+
+    _resolve_with_env(
+        tmp_path,
+        monkeypatch,
+        env={"CLAUDE_HUB_PORT": "not-a-port"},
+        health_probe=probe,
+    )
+    assert seen == ["http://127.0.0.1:8173", "http://[::1]:8173"]
+
+
+def test_fs_alias_invokes_filesystem_endpoint(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"home": "/home/tester"})
+
+    captured = patch_get_client(monkeypatch, handler)
+    result = CliRunner().invoke(cli, ["fs", "home"])
+    assert result.exit_code == 0, result.output
+    assert captured[0].url.path == "/api/filesystem/home"
+
+
+def test_transport_error_names_url_and_suggests_ipv6():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("[Errno 111] Connection refused", request=request)
+
+    client = make_client(handler)
+    with pytest.raises(HubError) as exc:
+        client.list_workspaces()
+    message = str(exc.value)
+    assert "http://testserver/api/workspaces" in message
+    assert "http://[::1]:8173" in message
+    assert "CLAUDE_HUB_URL" in message
+
+
 def test_env_preset_for_agent_type_defaults_claude_to_day1(tmp_path, monkeypatch):
     from claude_hub.cli.config import resolve_settings
 
@@ -1164,6 +1344,8 @@ def test_config_ignores_non_string_base_url(tmp_path, monkeypatch):
     config_file = tmp_path / "config.toml"
     config_file.write_text("[default]\nbase_url = 8173\ntoken = 42\n", encoding="utf-8")
     monkeypatch.delenv("CLAUDE_HUB_URL", raising=False)
+    monkeypatch.delenv("CLAUDE_HUB_HOST", raising=False)
+    monkeypatch.delenv("CLAUDE_HUB_PORT", raising=False)
     monkeypatch.delenv("CLAUDE_HUB_TOKEN", raising=False)
 
     s = resolve_settings(
@@ -1173,8 +1355,9 @@ def test_config_ignores_non_string_base_url(tmp_path, monkeypatch):
         json_output=False,
         verbose=False,
         config_path=str(config_file),
+        health_probe=lambda url: False,
     )
-    # Non-string values are ignored; fall through to default / None.
+    # Non-string values are ignored; both probes fail so the default is used.
     assert s.base_url == DEFAULT_BASE_URL
     assert s.token is None
 
