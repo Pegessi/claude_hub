@@ -21,12 +21,27 @@ SESSIONS_FILE = Path.home() / ".claude_hub" / "sessions.json"
 # The file holds bearer session ids and Feishu tokens, so it must be
 # readable/writable by the owner only.
 _SESSIONS_FILE_MODE = 0o600
+# Its directory must be owner-only as well: it also holds any 0600 temp file
+# left behind by an interrupted atomic rewrite, and a group/world-searchable
+# directory would expose the file's existence and metadata.
+_SESSIONS_DIR_MODE = 0o700
 
 
 def _ensure_sessions_dir() -> None:
-    """Ensure the sessions directory exists."""
-    # mode only applies to a freshly created directory; umask still applies.
-    SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    """Ensure the sessions directory exists and is owner-only.
+
+    The directory is created (if missing) and then explicitly chmod-ed: the
+    ``mode`` argument to ``mkdir`` is still filtered by the process umask, and
+    a directory created by an older release may be looser than 0700.
+    """
+    sessions_dir = SESSIONS_FILE.parent
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        current_mode = sessions_dir.stat().st_mode & 0o777
+        if current_mode != _SESSIONS_DIR_MODE:
+            os.chmod(sessions_dir, _SESSIONS_DIR_MODE)
+    except OSError as e:
+        logger.warning(f"Failed to tighten sessions directory permissions: {e}")
 
 
 def _tighten_file_permissions() -> None:

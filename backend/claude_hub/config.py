@@ -1,10 +1,35 @@
 import ipaddress
 import math
-from typing import List, Optional
+from functools import lru_cache
+from typing import List, Optional, Union
 from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_IPNetwork = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
+
+
+@lru_cache(maxsize=32)
+def _parse_ip_networks(raw: str) -> tuple[_IPNetwork, ...]:
+    """Parse a comma-separated IP/CIDR list into network objects.
+
+    Bare IPs are accepted (as /32 or /128); empty tokens are ignored. Raises
+    ``ValueError`` on the first invalid entry. Cached because the value is
+    fixed per process and the helper runs on every forwarded request.
+    """
+    networks: list[_IPNetwork] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(token, strict=False))
+        except ValueError as exc:
+            raise ValueError(
+                f"invalid IP/CIDR entry {token!r}; expected e.g. 127.0.0.1 or 10.0.0.0/8"
+            ) from exc
+    return tuple(networks)
 
 
 class Settings(BaseSettings):
@@ -118,6 +143,26 @@ class Settings(BaseSettings):
     auth_allowed_emails: Optional[str] = None  # Comma-separated list
     auth_allowed_open_ids: Optional[str] = None  # Comma-separated list
 
+    # Network trust settings. Forwarded headers (X-Forwarded-For and
+    # X-Forwarded-Proto) are honored only when the direct TCP peer belongs to
+    # one of these networks. The default trusts loopback only; deployments
+    # behind a reverse proxy on another hop (e.g. nginx on 10.0.0.5) must add
+    # that peer explicitly. Empty string disables trust entirely.
+    #
+    # This is the stable surface shared with codex/rv-proxy-trust; that branch
+    # owns the browser Origin policy and its own CLAUDE_HUB_ALLOWED_ORIGINS
+    # setting, which is intentionally not duplicated here.
+    trusted_proxies: str = Field(
+        default="127.0.0.0/8,::1",
+        validation_alias="CLAUDE_HUB_TRUSTED_PROXIES",
+    )
+
+    @field_validator("trusted_proxies")
+    @classmethod
+    def _validate_trusted_proxies(cls, value: str) -> str:
+        _parse_ip_networks(value or "")
+        return value
+
     # Agent-stream Chat image cache limits, enforced least-recently-used first.
     # The composer stores the original image when it fits the per-image cap
     # (its own 8 MiB upload limit), so sent images keep their quality. The
@@ -208,6 +253,11 @@ class Settings(BaseSettings):
         return [
             open_id.strip() for open_id in self.auth_allowed_open_ids.split(",") if open_id.strip()
         ]
+
+    @property
+    def trusted_proxy_networks(self) -> tuple[_IPNetwork, ...]:
+        """Parsed trusted-proxy allowlist from ``trusted_proxies``."""
+        return _parse_ip_networks(self.trusted_proxies or "")
 
     @property
     def auth_enabled(self) -> bool:
