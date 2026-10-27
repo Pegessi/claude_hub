@@ -28,11 +28,12 @@ from claude_hub.auth.dependencies import (
     is_local_network_request_ws,
 )
 from claude_hub.auth.proxy import (
+    browser_origin_is_allowed,
     client_ip_from_request,
     direct_peer_is_trusted,
     reject_bad_websocket_origin,
     scheme_from_request,
-    websocket_origin_is_allowed,
+    unsafe_http_request_is_allowed,
 )
 from claude_hub.config import Settings, settings
 
@@ -374,72 +375,182 @@ def test_invalid_trusted_proxies_rejected() -> None:
         Settings(trusted_proxies="10.0.0.0/33")
 
 
-def test_allowed_ws_origins_list_parsing() -> None:
-    assert Settings().allowed_ws_origins_list == []
+def test_allowed_origins_list_parsing() -> None:
+    assert Settings().allowed_origins_list == []
     parsed = Settings(
-        allowed_ws_origins="https://a.example.com, b.example.com:8443 , "
-    ).allowed_ws_origins_list
+        allowed_origins="https://a.example.com, b.example.com:8443 , "
+    ).allowed_origins_list
     assert parsed == ["https://a.example.com", "b.example.com:8443"]
+
+
+# ── Unsafe HTTP write Origin policy ─────────────────────────────────────────
+
+
+def _http_headers(method: str, raw: dict[str, str]) -> list[tuple[bytes, bytes]]:
+    return _headers({"host": "hub.local:8173", **raw})
+
+
+def test_safe_methods_pass_regardless_of_origin() -> None:
+    for method in ("GET", "HEAD", "OPTIONS"):
+        headers = _http_headers(method, {"origin": "http://evil.example"})
+        assert unsafe_http_request_is_allowed(method=method, headers=headers, allowed_origins=())
+
+
+def test_unsafe_method_without_origin_passes() -> None:
+    # curl, the Python CLI and server-to-server webhooks send no Origin.
+    for method in ("POST", "PUT", "PATCH", "DELETE"):
+        headers = _http_headers(method, {})
+        assert unsafe_http_request_is_allowed(method=method, headers=headers, allowed_origins=())
+
+
+def test_unsafe_method_same_origin_passes() -> None:
+    headers = _http_headers("POST", {"origin": "http://hub.local:8173"})
+    assert unsafe_http_request_is_allowed(method="POST", headers=headers, allowed_origins=())
+
+
+def test_unsafe_method_cross_origin_denied() -> None:
+    # A "simple" cross-site form POST is delivered despite CORS; it must be
+    # stopped here, including the classic spoofing header pair.
+    headers = _http_headers("POST", {"origin": "http://evil.example"})
+    assert not unsafe_http_request_is_allowed(method="POST", headers=headers, allowed_origins=())
+    headers = _http_headers(
+        "DELETE",
+        {"origin": "http://evil.example", "x-forwarded-for": "127.0.0.1"},
+    )
+    assert not unsafe_http_request_is_allowed(method="DELETE", headers=headers, allowed_origins=())
+
+
+def test_unsafe_method_allowed_origin_list_passes() -> None:
+    headers = _http_headers("PUT", {"origin": "https://docs.example.com"})
+    allowed = ("https://docs.example.com",)
+    assert unsafe_http_request_is_allowed(method="PUT", headers=headers, allowed_origins=allowed)
+    assert not unsafe_http_request_is_allowed(method="PUT", headers=headers, allowed_origins=())
+
+
+def test_unsafe_method_malformed_origin_denied() -> None:
+    headers = _http_headers("POST", {"origin": "null"})
+    assert not unsafe_http_request_is_allowed(method="POST", headers=headers, allowed_origins=())
+
+
+@pytest.mark.asyncio
+async def test_origin_guard_middleware_rejects_cross_site_post() -> None:
+    """End-to-end ASGI check: cross-site POST 403s before the route runs."""
+    from claude_hub.main import BrowserOriginGuardMiddleware
+
+    seen: list[str] = []
+
+    async def inner_app(scope, receive, send) -> None:  # type: ignore[no-untyped-def]
+        seen.append(scope["method"])
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    sent: list[dict[str, object]] = []
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    base_scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "asgi": {"version": "3.0"},
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/tabs/x/restart",
+        "raw_path": b"/api/tabs/x/restart",
+        "query_string": b"",
+        "server": ("hub.local", 8173),
+        "root_path": "",
+    }
+    guarded = BrowserOriginGuardMiddleware(inner_app)
+
+    cross_scope = {
+        **base_scope,
+        "client": ("203.0.113.9", 4000),
+        "headers": _http_headers("POST", {"origin": "http://evil.example"}),
+    }
+    sent.clear()
+    await guarded(cross_scope, receive, send)
+    assert seen == []  # inner app never ran
+    assert sent[0]["status"] == 403
+
+    seen.clear()
+    same_scope = {
+        **base_scope,
+        "client": ("127.0.0.1", 4000),
+        "headers": _http_headers("POST", {"origin": "http://hub.local:8173"}),
+    }
+    await guarded(same_scope, receive, send)
+    assert seen == ["POST"]
+
+    seen.clear()
+    native_scope = {
+        **base_scope,
+        "client": ("127.0.0.1", 4000),
+        "headers": _http_headers("POST", {}),
+    }
+    await guarded(native_scope, receive, send)
+    assert seen == ["POST"]
 
 
 # ── WebSocket Origin policy ─────────────────────────────────────────────────
 
 
 def test_origin_missing_is_allowed() -> None:
-    assert websocket_origin_is_allowed(origin=None, host="hub.local:8173") is True
-    assert websocket_origin_is_allowed(origin="  ", host="hub.local:8173") is True
+    assert browser_origin_is_allowed(origin=None, host="hub.local:8173") is True
+    assert browser_origin_is_allowed(origin="  ", host="hub.local:8173") is True
 
 
 def test_origin_matching_same_host_is_allowed() -> None:
-    assert websocket_origin_is_allowed(origin="http://hub.local:8173", host="hub.local:8173")
-    assert websocket_origin_is_allowed(origin="https://hub.local:8173", host="hub.local:8173")
+    assert browser_origin_is_allowed(origin="http://hub.local:8173", host="hub.local:8173")
+    assert browser_origin_is_allowed(origin="https://hub.local:8173", host="hub.local:8173")
 
 
 def test_origin_mismatch_is_denied() -> None:
-    assert not websocket_origin_is_allowed(origin="http://evil.example:8173", host="hub.local:8173")
-    assert not websocket_origin_is_allowed(origin="http://hub.local:8443", host="hub.local:8173")
+    assert not browser_origin_is_allowed(origin="http://evil.example:8173", host="hub.local:8173")
+    assert not browser_origin_is_allowed(origin="http://hub.local:8443", host="hub.local:8173")
 
 
 def test_origin_port_normalization() -> None:
     # Browsers omit default ports; both sides must normalize 80/443.
-    assert websocket_origin_is_allowed(origin="http://hub.local", host="hub.local")
-    assert websocket_origin_is_allowed(origin="https://hub.local", host="hub.local")
-    assert websocket_origin_is_allowed(origin="http://hub.local:80", host="hub.local")
-    assert websocket_origin_is_allowed(origin="https://hub.local:443", host="hub.local")
-    assert websocket_origin_is_allowed(origin="http://hub.local", host="hub.local:80")
-    assert not websocket_origin_is_allowed(origin="http://hub.local:8080", host="hub.local")
+    assert browser_origin_is_allowed(origin="http://hub.local", host="hub.local")
+    assert browser_origin_is_allowed(origin="https://hub.local", host="hub.local")
+    assert browser_origin_is_allowed(origin="http://hub.local:80", host="hub.local")
+    assert browser_origin_is_allowed(origin="https://hub.local:443", host="hub.local")
+    assert browser_origin_is_allowed(origin="http://hub.local", host="hub.local:80")
+    assert not browser_origin_is_allowed(origin="http://hub.local:8080", host="hub.local")
     # Hostname comparison is case-insensitive.
-    assert websocket_origin_is_allowed(origin="http://HUB.local:8173", host="hub.local:8173")
+    assert browser_origin_is_allowed(origin="http://HUB.local:8173", host="hub.local:8173")
 
 
 def test_origin_ipv6_host() -> None:
-    assert websocket_origin_is_allowed(origin="http://[::1]:8173", host="[::1]:8173")
-    assert not websocket_origin_is_allowed(origin="http://[::1]:8173", host="[::2]:8173")
+    assert browser_origin_is_allowed(origin="http://[::1]:8173", host="[::1]:8173")
+    assert not browser_origin_is_allowed(origin="http://[::1]:8173", host="[::2]:8173")
 
 
 def test_origin_allowed_origins_setting_full_and_bare() -> None:
     allowed = ("https://docs.example.com", "api.example.com:9000")
-    assert websocket_origin_is_allowed(
+    assert browser_origin_is_allowed(
         origin="https://docs.example.com", host="hub.local:8173", allowed_origins=allowed
     )
-    assert websocket_origin_is_allowed(
+    assert browser_origin_is_allowed(
         origin="https://api.example.com:9000",
         host="hub.local:8173",
         allowed_origins=allowed,
     )
     # Full-origin entries also pin the scheme.
-    assert not websocket_origin_is_allowed(
+    assert not browser_origin_is_allowed(
         origin="http://docs.example.com", host="hub.local:8173", allowed_origins=allowed
     )
-    assert not websocket_origin_is_allowed(
+    assert not browser_origin_is_allowed(
         origin="https://other.example.com", host="hub.local:8173", allowed_origins=allowed
     )
 
 
 def test_malformed_origin_is_denied() -> None:
-    assert not websocket_origin_is_allowed(origin="not an origin", host="hub.local:8173")
+    assert not browser_origin_is_allowed(origin="not an origin", host="hub.local:8173")
     # Sandboxed browsers send the literal "null" origin.
-    assert not websocket_origin_is_allowed(origin="null", host="hub.local:8173")
+    assert not browser_origin_is_allowed(origin="null", host="hub.local:8173")
 
 
 @pytest.mark.asyncio
@@ -471,7 +582,7 @@ async def test_ws_guard_cross_origin_closes_before_accept() -> None:
 async def test_ws_guard_honors_allowed_origins_setting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(settings, "allowed_ws_origins", "https://docs.example.com")
+    monkeypatch.setattr(settings, "allowed_origins", "https://docs.example.com")
     ws, sent = _websocket(headers={"origin": "https://docs.example.com"})
     rejected = await reject_bad_websocket_origin(ws)
     assert rejected is False
@@ -507,3 +618,32 @@ def test_ws_handshake_is_denied_via_testclient() -> None:
     # Native client: no Origin header at all.
     with client.websocket_connect("/ws") as connection:
         assert connection.receive_text() == "ok"
+
+
+def test_origin_guard_on_real_app_via_testclient(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The full production app rejects cross-site writes before routing."""
+    from claude_hub.main import app
+
+    monkeypatch.setattr(settings, "allowed_origins", None)
+    client = TestClient(app)
+
+    # Rejected before routing: the path need not even exist.
+    rejected = client.post(
+        "/api/does-not-exist",
+        headers={"origin": "http://evil.example"},
+        json={},
+    )
+    assert rejected.status_code == 403
+
+    # Same-origin POST passes the guard (a route-level status, not 403,
+    # proves the request reached routing rather than the guard).
+    same_origin = client.post(
+        "/api/does-not-exist",
+        headers={"origin": "http://testserver"},
+        json={},
+    )
+    assert same_origin.status_code != 403
+
+    # A cross-origin GET is a read: CORS governs it, the guard must not 403.
+    cross_get = client.get("/health", headers={"origin": "http://evil.example"})
+    assert cross_get.status_code == 200

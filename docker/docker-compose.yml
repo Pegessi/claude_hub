@@ -9,6 +9,14 @@ services:
       - "8173:8173"
     environment:
       - FRONTEND_URL=http://localhost:5173
+      # The frontend preview container serves a DIFFERENT origin
+      # (http://localhost:5173) than the backend (:8173), so browser
+      # terminal WebSockets and unsafe HTTP writes must whitelist it.
+      - CLAUDE_HUB_ALLOWED_ORIGINS=http://localhost:5173
+      # Inside the container network uvicorn must bind 0.0.0.0; the real
+      # exposure boundary is the published host port below. Configure Feishu
+      # OAuth before exposing that port beyond the local Docker host.
+      - CLAUDE_HUB_ALLOW_INSECURE_LISTEN=1
     # Load Settings env vars (ANTHROPIC_API_KEY, DATABASE_URL, etc.)
     # from the repo root .env file (add vars locally; never commit secrets).
     env_file: ../.env
@@ -18,7 +26,7 @@ services:
       - claude_hub_state:/root/.claude_hub
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8173/api/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8173/health"]
       interval: 30s
       timeout: 10s
       retries: 5

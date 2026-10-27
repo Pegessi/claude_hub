@@ -28,8 +28,15 @@ uv sync --dev
 ### Running
 
 ```bash
-uv run uvicorn claude_hub.main:app --reload --host 0.0.0.0 --port 8173
+# Loopback bind by default (Vite proxies /api to here). Export the bind host
+# so the in-process startup guard sees the same interface as uvicorn.
+CLAUDE_HUB_BIND_HOST=127.0.0.1 \
+  uv run uvicorn claude_hub.main:app --reload --host 127.0.0.1 --port 8173
 ```
+
+A non-loopback bind while Feishu OAuth is unconfigured is refused unless
+`CLAUDE_HUB_ALLOW_INSECURE_LISTEN=1` is set (see
+[../docs/DEPLOYMENT.md](../docs/DEPLOYMENT.md)).
 
 ### API Docs
 

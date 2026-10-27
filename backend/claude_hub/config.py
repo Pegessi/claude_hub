@@ -149,12 +149,13 @@ class Settings(BaseSettings):
         default="127.0.0.0/8,::1",
         validation_alias="CLAUDE_HUB_TRUSTED_PROXIES",
     )
-    # Comma-separated extra browser Origin values accepted on terminal
-    # WebSocket handshakes in addition to same-origin requests. Entries may be
+    # Comma-separated extra browser Origin values accepted, in addition to
+    # same-origin requests, for terminal WebSocket handshakes and
+    # state-changing HTTP methods (POST/PUT/PATCH/DELETE). Entries may be
     # full origins (https://hub.example.com) or bare host[:port] values.
-    allowed_ws_origins: Optional[str] = Field(
+    allowed_origins: Optional[str] = Field(
         default=None,
-        validation_alias="CLAUDE_HUB_ALLOWED_WS_ORIGINS",
+        validation_alias="CLAUDE_HUB_ALLOWED_ORIGINS",
     )
     # Opt-in to listen on a non-loopback interface while authentication is
     # disabled. The startup guard refuses such a bind unless this is set.
@@ -274,11 +275,11 @@ class Settings(BaseSettings):
         return _parse_ip_networks(self.trusted_proxies or "")
 
     @property
-    def allowed_ws_origins_list(self) -> List[str]:
-        """Additional allowed WebSocket Origin values."""
-        if not self.allowed_ws_origins:
+    def allowed_origins_list(self) -> List[str]:
+        """Additional allowed browser Origin values."""
+        if not self.allowed_origins:
             return []
-        return [origin.strip() for origin in self.allowed_ws_origins.split(",") if origin.strip()]
+        return [origin.strip() for origin in self.allowed_origins.split(",") if origin.strip()]
 
     @property
     def auth_enabled(self) -> bool:
