@@ -1,10 +1,12 @@
 """Terminal tab and remote-profile schemas."""
 
+import ipaddress
+import re
 import uuid
 from datetime import datetime
 from typing import Dict, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from claude_hub.models.schema_domains.runtime import (
     CHAT_REMOTE_UNSUPPORTED,
@@ -229,6 +231,40 @@ class TerminalAgentStatus(BaseModel):
     sampled_at: datetime
 
 
+# SSH destinations are passed as an argv element, so a value beginning with
+# ``-`` (e.g. ``-oProxyCommand=...``) would be parsed by ssh as an option.
+# Constrain host/user to conservative, option-safe character sets.
+_SSH_USER_PATTERN = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._-]*$")
+# A single trailing dot (absolute FQDN, e.g. ``host.example.``) is allowed.
+_SSH_HOSTNAME_LABEL = r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?"
+_SSH_HOSTNAME_PATTERN = re.compile(rf"^{_SSH_HOSTNAME_LABEL}(?:\.{_SSH_HOSTNAME_LABEL})*\.?$")
+_SSH_HOST_MAX_LENGTH = 253
+
+
+def validate_ssh_host(value: str) -> str:
+    """Normalize/validate an SSH host: hostname/alias, IPv4, or bracketless IPv6."""
+
+    host = value.strip()
+    # ``%`` is the IPv6 scope/zone-id separator; ssh only accepts those in
+    # brackets, which are themselves rejected, so refuse them explicitly.
+    if not host or host.startswith("-") or "%" in host or len(host) > _SSH_HOST_MAX_LENGTH:
+        raise ValueError(
+            "ssh_host must be a hostname, SSH alias, or IPv4/IPv6 address and must not start with '-'"
+        )
+    # Accept literal IP addresses (IPv4 or bracketless, unscoped IPv6);
+    # bracketed forms are rejected as non-conservative.
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    if not _SSH_HOSTNAME_PATTERN.fullmatch(host):
+        raise ValueError(
+            "ssh_host must be a hostname, SSH alias, or IPv4/IPv6 address and must not start with '-'"
+        )
+    return host
+
+
 class RemoteProfile(BaseModel):
     """Configured SSH target for remote tabs."""
 
@@ -236,7 +272,7 @@ class RemoteProfile(BaseModel):
     name: str
     ssh_host: str
     user: Optional[str] = None
-    port: int = 22
+    port: int = Field(default=22, ge=1, le=65535)
     default_cwd: Optional[str] = None
     # Deprecated derived flag: True when ``ssh host 'cmd'`` is swallowed. Kept
     # so older API consumers keep working; new code should read ``transport``
@@ -249,6 +285,26 @@ class RemoteProfile(BaseModel):
     # remote agents are allowed (normal host or PTY gateway). Set False for a
     # truly browse-only target with no drivable PTY.
     interactive: Optional[bool] = None
+
+    @field_validator("ssh_host")
+    @classmethod
+    def _validate_ssh_host_field(cls, value: str) -> str:
+        return validate_ssh_host(value)
+
+    @field_validator("user")
+    @classmethod
+    def _validate_ssh_user_field(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        user = value.strip()
+        if not user:
+            return None
+        if user.startswith("-") or not _SSH_USER_PATTERN.fullmatch(user):
+            raise ValueError(
+                "user must contain only letters, digits, dots, underscores and hyphens "
+                "and must not start with '-'"
+            )
+        return user
 
 
 class ResidentPeriodicTask(BaseModel):

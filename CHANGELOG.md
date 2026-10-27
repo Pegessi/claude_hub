@@ -7,6 +7,19 @@
 
 ## Released
 
+### fix(security): validate SSH destinations and separate ssh argv
+
+- `RemoteProfile` now validates `ssh_host` (hostname/SSH alias, IPv4 or
+  bracketless IPv6; rejects option-looking and metacharacter-bearing values),
+  bounds `port` to 1-65535 and restricts `user` to a conservative charset. A
+  stored profile or `~/.ssh/config` alias that fails validation is skipped with
+  a warning instead of taking down profile discovery.
+- Every ssh invocation (`api/remote.py`, `services/pty_exec.py`,
+  `services/terminal_runtime/process/remote.py`, the PTY-gateway bridge) passes
+  `--` before the destination so an option-looking host can never be parsed as
+  an ssh option, even though argv is already separated. The bridge CLI exits
+  cleanly on an invalid `--target`.
+
 ### fix(maso): retain final responses without streamed tokens
 
 - Read authoritative text and reasoning from MASO's `post_llm_response` event.
