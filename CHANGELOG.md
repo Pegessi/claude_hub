@@ -7,6 +7,28 @@
 
 ## Released
 
+### fix(workspace): quarantine corrupt durable state and rotate backups
+
+- Durable JSON stores (`index.json`, per-workspace `state.json`,
+  `scheduled_tasks.json`) now load fail-closed: invalid JSON, structural
+  validation failure or read errors move the bad file aside as
+  `<store>.corrupt-<UTC>` (never overwriting prior evidence), append a
+  persistent `<store>.quarantined` event marker, and log an ERROR.
+- Every durable save maintains one rotating `<store>.bak` of the previous
+  complete payload (temp-file copy + replace, file fsync + directory fsync).
+  A torn last write is transparently restored from the backup; a missing
+  primary with an orphan backup is recovered the same way. A corrupt backup
+  is quarantined separately and the store starts empty.
+- A quarantined workspace keeps its index row but starts with empty
+  tasks/sessions/reports and stays isolated; unrelated workspaces continue
+  to load, and later saves never overwrite the quarantined evidence.
+  Startup health warnings remain visible via `state_recovery_warnings()` and
+  a `warnings` array on `/health` (status stays `healthy`).
+- Structural validators cover index rows, workspace tasks/sessions/reports/
+  TaskMailbox events (including legacy-payload migration) and scheduled
+  task/run records. Unknown future fields quarantine the store instead of
+  being silently dropped by an in-place rewrite.
+
 ### fix(maso): retain final responses without streamed tokens
 
 - Read authoritative text and reasoning from MASO's `post_llm_response` event.
