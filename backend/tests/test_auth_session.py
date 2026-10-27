@@ -141,3 +141,26 @@ def test_save_replaces_loose_file_with_owner_only_permissions() -> None:
 
     mode = stat.S_IMODE(session_store.SESSIONS_FILE.stat().st_mode)
     assert mode == 0o600
+
+
+def test_sessions_directory_is_created_owner_only(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    nested = tmp_path / "claude_hub" / "sessions.json"
+    assert not nested.parent.exists()
+    monkeypatch.setattr(session_store, "SESSIONS_FILE", nested)
+
+    session_store.create_session(_user(), "access", "refresh")
+
+    assert stat.S_IMODE(nested.parent.stat().st_mode) == 0o700
+
+
+def test_ensure_dir_tightens_loose_pre_existing_directory(
+    monkeypatch: MonkeyPatch, tmp_path
+) -> None:
+    loose_dir = tmp_path / "loose-auth"
+    loose_dir.mkdir(mode=0o755)
+    os.chmod(loose_dir, 0o755)  # mkdir honors umask; force the loose mode.
+    monkeypatch.setattr(session_store, "SESSIONS_FILE", loose_dir / "sessions.json")
+
+    session_store._ensure_sessions_dir()
+
+    assert stat.S_IMODE(loose_dir.stat().st_mode) == 0o700

@@ -64,6 +64,35 @@ def _stub_feishu(monkeypatch: MonkeyPatch, *, open_id: str, email: str) -> None:
     monkeypatch.setattr("claude_hub.api.auth.get_user_info", fake_user_info)
 
 
+def _stub_token_exchange_failure(monkeypatch: MonkeyPatch) -> None:
+    """Feishu refuses / cannot return a token for the authorization code."""
+
+    async def fake_token(code: str) -> tuple[str | None, str | None]:
+        return None, None
+
+    monkeypatch.setattr("claude_hub.api.auth.get_user_access_token", fake_token)
+
+
+def _stub_user_info_failure(monkeypatch: MonkeyPatch) -> None:
+    """Token exchange succeeds but the user-info call returns nothing."""
+
+    async def fake_token(code: str) -> tuple[str, str]:
+        return "access-token", "refresh-token"
+
+    async def fake_user_info(access_token: str) -> None:
+        return None
+
+    monkeypatch.setattr("claude_hub.api.auth.get_user_access_token", fake_token)
+    monkeypatch.setattr("claude_hub.api.auth.get_user_info", fake_user_info)
+
+
+def _assert_state_cookie_expired(resp: Any) -> None:
+    """The response must carry an expiry directive for the state cookie."""
+    cleared = _set_cookie_headers(resp, auth_api.OAUTH_STATE_COOKIE_NAME)
+    assert len(cleared) == 1
+    assert "max-age=0" in cleared[0].lower()
+
+
 async def _begin_login(client: AsyncClient) -> str:
     """Perform /login and return the state echoed in the Feishu redirect."""
     resp = await client.get("/api/auth/login", follow_redirects=False)
@@ -312,6 +341,78 @@ async def test_successful_callback_clears_state_cookie(
     assert client.cookies.get(auth_api.OAUTH_STATE_COOKIE_NAME) is None
 
 
+@pytest.mark.asyncio
+async def test_mismatched_state_clears_state_cookie(
+    client: AsyncClient, monkeypatch: MonkeyPatch
+) -> None:
+    _enable_auth(monkeypatch)
+    _stub_feishu(monkeypatch, open_id="ou_x", email="a@example.com")
+
+    await _begin_login(client)  # valid state cookie is now in the jar
+    resp = await client.get(
+        "/api/auth/callback",
+        params={"code": "x", "state": "tampered"},
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 400
+    _assert_state_cookie_expired(resp)
+    assert client.cookies.get(auth_api.OAUTH_STATE_COOKIE_NAME) is None
+
+
+@pytest.mark.asyncio
+async def test_token_exchange_failure_clears_state_cookie(
+    client: AsyncClient, monkeypatch: MonkeyPatch
+) -> None:
+    _enable_auth(monkeypatch)
+    _stub_token_exchange_failure(monkeypatch)
+
+    state = await _begin_login(client)
+    resp = await client.get(
+        "/api/auth/callback", params={"code": "x", "state": state}, follow_redirects=False
+    )
+
+    assert resp.status_code == 400
+    assert "access token" in resp.json()["detail"].lower()
+    _assert_state_cookie_expired(resp)
+    assert client.cookies.get(auth_api.OAUTH_STATE_COOKIE_NAME) is None
+
+
+@pytest.mark.asyncio
+async def test_user_info_failure_clears_state_cookie(
+    client: AsyncClient, monkeypatch: MonkeyPatch
+) -> None:
+    _enable_auth(monkeypatch)
+    _stub_user_info_failure(monkeypatch)
+
+    state = await _begin_login(client)
+    resp = await client.get(
+        "/api/auth/callback", params={"code": "x", "state": state}, follow_redirects=False
+    )
+
+    assert resp.status_code == 400
+    assert "user info" in resp.json()["detail"].lower()
+    _assert_state_cookie_expired(resp)
+    assert client.cookies.get(auth_api.OAUTH_STATE_COOKIE_NAME) is None
+
+
+@pytest.mark.asyncio
+async def test_whitelist_denial_clears_state_cookie(
+    client: AsyncClient, monkeypatch: MonkeyPatch
+) -> None:
+    _enable_auth(monkeypatch, open_ids="ou_allowed")
+    _stub_feishu(monkeypatch, open_id="ou_intruder", email="x@example.com")
+
+    state = await _begin_login(client)
+    resp = await client.get(
+        "/api/auth/callback", params={"code": "x", "state": state}, follow_redirects=False
+    )
+
+    assert resp.status_code == 403
+    _assert_state_cookie_expired(resp)
+    assert client.cookies.get(auth_api.OAUTH_STATE_COOKIE_NAME) is None
+
+
 # ── Secure cookie attribute ─────────────────────────────────────────────────
 
 
@@ -368,7 +469,12 @@ async def test_session_cookie_secure_over_https_transport(
     assert "secure" in session_cookie
 
 
-def _fake_request(*, scheme: str = "http", headers: dict[str, str] | None = None):
+def _fake_request(
+    *,
+    scheme: str = "http",
+    headers: dict[str, str] | None = None,
+    client_host: str = "127.0.0.1",
+):
     from starlette.requests import Request
 
     raw_headers = [
@@ -382,7 +488,7 @@ def _fake_request(*, scheme: str = "http", headers: dict[str, str] | None = None
         "path": "/api/auth/login",
         "query_string": b"",
         "headers": raw_headers,
-        "client": ("127.0.0.1", 12345),
+        "client": (client_host, 12345),
     }
     return Request(scope)
 
@@ -412,6 +518,36 @@ def test_secure_cookie_detection(monkeypatch: MonkeyPatch) -> None:
 
     monkeypatch.setattr(settings, "public_url", "http://localhost:8173")
     assert auth_api._use_secure_cookie(_fake_request()) is False
+
+
+def test_forwarded_proto_is_ignored_from_untrusted_direct_peer(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """A remote direct peer must not upgrade cookie security via XFP.
+
+    The shared trusted-proxy helper honors X-Forwarded-Proto only when the
+    direct TCP peer is in the configured trusted-proxy allowlist (loopback by
+    default). A request arriving from 203.0.113.9 over plain HTTP that claims
+    ``X-Forwarded-Proto: https`` must still be treated as HTTP.
+    """
+    _enable_auth(monkeypatch)
+
+    forged = _fake_request(
+        client_host="203.0.113.9",
+        headers={"X-Forwarded-Proto": "https"},
+    )
+    assert auth_api._use_secure_cookie(forged) is False
+
+    # Direct TLS from that same peer is still HTTPS without any header.
+    assert auth_api._use_secure_cookie(_fake_request(scheme="https", client_host="203.0.113.9"))
+
+    # Once the peer's network is explicitly trusted, the header is honored.
+    monkeypatch.setattr(settings, "trusted_proxies", "10.8.0.0/16")
+    trusted = _fake_request(
+        client_host="10.8.1.2",
+        headers={"X-Forwarded-Proto": "https"},
+    )
+    assert auth_api._use_secure_cookie(trusted) is True
 
 
 @pytest.mark.asyncio
