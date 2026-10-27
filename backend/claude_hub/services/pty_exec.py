@@ -181,7 +181,10 @@ def build_ssh_argv(profile: RemoteProfile, *, connect_timeout: int = 8) -> list[
     ]
     if profile.port and profile.port != 22:
         cmd.extend(["-p", str(profile.port)])
-    cmd.append(ssh_target(profile))
+    # `--` ends option parsing so the validated destination is never read as
+    # an ssh option. It is the final element: this connection carries no remote
+    # argv command; the command is typed into the driven PTY after the prompt.
+    cmd.extend(["--", ssh_target(profile)])
     return cmd
 
 

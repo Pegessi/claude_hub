@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from pydantic import ValidationError
+
 from ..models import RemoteProfile
 from ..models.schemas import NONINTERACTIVE_REMOTE_UNSUPPORTED, RemoteTransport
 
@@ -239,13 +241,18 @@ class RemoteProfileManager:
                 profile_id = _PROFILE_ID_RE.sub("_", host_alias).strip("_")
                 if not profile_id:
                     continue
-                profiles.append(
-                    RemoteProfile(
-                        id=profile_id,
-                        name=host_alias,
-                        ssh_host=host_alias,
+                try:
+                    profiles.append(
+                        RemoteProfile(
+                            id=profile_id,
+                            name=host_alias,
+                            ssh_host=host_alias,
+                        )
                     )
-                )
+                except ValidationError as e:
+                    # An option-looking or otherwise unsafe alias (e.g.
+                    # "-oProxyCommand=...") must not take down discovery.
+                    logger.warning("Skipping SSH config host %r: %s", host_alias, e)
 
         return profiles
 

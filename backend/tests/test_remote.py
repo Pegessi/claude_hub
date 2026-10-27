@@ -217,8 +217,15 @@ async def test_listing_with_motd_returns_payload(
     assert ssh_cmd[:2] == ["ssh", "-T"]
     assert "BatchMode=yes" in ssh_cmd
     assert "RequestTTY=no" in ssh_cmd
+    # `--` ends option parsing directly before the user@host destination so an
+    # option-looking host can never be interpreted as an ssh option.
+    dashdash = ssh_cmd.index("--")
+    assert ssh_cmd[dashdash + 1] == "deploy@example.invalid"
     assert ssh_cmd[-1] != "prod"
-    assert "python3 -c" in ssh_cmd[-1]
+    assert ssh_cmd[-1].startswith("python3 -c")
+    # Only the destination and the remote command follow `--`; no ssh options.
+    assert len(ssh_cmd) - dashdash == 3
+    assert "-T" not in ssh_cmd[dashdash + 1 :]
 
 
 def test_profile_uses_stdin_shell_for_merlin_and_seedjob() -> None:
