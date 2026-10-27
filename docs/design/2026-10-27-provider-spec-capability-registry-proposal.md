@@ -1,6 +1,6 @@
 # ProviderSpec: a capability registry and symmetric provider-approval model for `agent_stream`
 
-Date: 2026-10-27 · Status: **Proposal (docs only; review-validated 2026-10-27, see §9)** · Branch: `codex/rv-provider-spec`
+Date: 2026-10-27 · Status: **Proposal (docs only; review-validated 2026-10-27, independent review APPROVE-WITH-NITS resolved, see §9)** · Branch: `codex/rv-provider-spec`
 Base: `main` @ `0211661` · Scope: design, no product code changes
 
 This packet proposes one registry of provider facts (`ProviderSpec`) for the
@@ -41,11 +41,11 @@ provider.
   transport declares `supports_approval_ui = False`
   (`providers/claude.py:35-42`, inheriting the base default) while its terminal
   transcript adapter declares `supports_approval_ui = True`
-  (`claude_jsonl.py:123-126`). This is correct per surface (a one-shot
+  (`agent_stream/claude_jsonl.py:123-126`). This is correct per surface (a one-shot
   `--print` process cannot show an interactive approval TUI), but nothing in
   the code *says* that; it is two defaults in two files.
 - Cursor's structured support is additionally gated imperatively by session
-  state: `registry.py:55-62` fails closed unless `cursor_transport` is
+  state: `agent_stream/registry.py:55-62` fails closed unless `cursor_transport` is
   `acp` / `terminal_transcript` / `native`, and the native-vs-tailer transport
   choice is re-derived independently in
   `runtime/manager.py:96-100`, `api/agent_stream.py:336-342`,
@@ -55,24 +55,29 @@ provider.
 **Provider-name conditionals are pervasive.** 172 non-import `AgentType.*`
 references exist across backend non-test code (reproduced with
 `grep -rn "AgentType\\." claude_hub --include='*.py' | grep -v '/tests/' | grep -v import`);
-90 of them sit on `if/elif` lines that name an `AgentType`, and hand-listed
-`AgentType` sets/dicts/tuples occur at 11 literal sites (some feeding those
-same predicates). Representative branches and the capability they actually
-encode:
+90 of those lines are `if/elif` predicates comparing/membership-testing an
+`AgentType` (pipe the same result through
+`grep -E ':[0-9]+:\s*(if|elif) ' | grep -E '==|!=| in '`), and hand-listed
+`AgentType` sets/dicts/tuples appear at roughly a dozen inline literal sites
+plus several multi-line set literals inside admission predicates
+(`services/task_session_executor.py:18-33`, `services/terminal_runtime/manager/create.py:103-113`); the exact count
+depends on how wrapped literals are counted, so it is deliberately not
+stated precisely (see §9.3). Representative branches and the capability they
+actually encode:
 
 | Branch site | Real capability |
 | --- | --- |
 | `providers/session.py:246` (`agent_type == CLAUDE` in `prepare_capabilities`) | model-catalog source |
-| `native.py:201-218` (`native_provider_binary` map + MASO special case) | transport kind / binary presence |
-| `native.py:427` (`if agent_type == "cursor"` in `model_catalog_for`) | runtime catalog probing |
-| `native.py:585-597` (`create_native_session` if-chain) | transport factory |
+| `agent_stream/native.py:201-218` (`native_provider_binary` map + MASO special case) | transport kind / binary presence |
+| `agent_stream/native.py:427` (`if agent_type == "cursor"` in `model_catalog_for`) | runtime catalog probing |
+| `agent_stream/native.py:585-597` (`create_native_session` if-chain) | transport factory |
 | `providers/session.py:280-289` (`eof_is_fatal`, overridden at `codex.py:81-84`) | one-shot vs persistent lifecycle |
 | `terminal_runtime/process/launch.py:47-64, 131-162, 314-338` | TUI launch argv, solo flags, resume argv |
 | `terminal_runtime/process/state.py:147` (uuid pin set CLAUDE/CODEX/CURSOR) | conversation-id pinning |
 | `terminal_runtime/process/environment.py:56, 260, 286, 304, 319` | settings-file carrier; model flag |
 | `terminal_runtime/process/switch.py:36-45, 46, 108` | env hot-switch surface set |
 | `terminal_runtime/local_io.py:166-170` | TUI binary name |
-| `transcript_fork.py:120-126, 153-175` | edit-resend / fork support (claude, codex, cursor only) |
+| `agent_stream/transcript_fork.py:120-126, 153-175` | edit-resend / fork support (claude, codex, cursor only) |
 | `runtime/edit_resend.py:75` | MASO cannot edit past turns |
 | `runtime/publication.py:112, 405` and `runtime/retirement.py:110` | MASO confirmation card lifecycle |
 | `runtime/manager.py:97` | Cursor transcript-compat fallback |
@@ -139,7 +144,7 @@ There is no single answer to "is this provider usable?". Each surface
 implements a different gate against a different signal:
 
 - **Binary presence**: `native_provider_binary_available()`
-  (`native.py:212-218`) special-cases MASO (no binary); other providers pass if
+  (`agent_stream/native.py:212-218`) special-cases MASO (no binary); other providers pass if
   `shutil.which` finds the binary. `SessionCore.capabilities()`
   (`providers/session.py:636-643`) folds binary presence into `structured`.
 - **Codex login**: an in-memory, TTL-cached `codex login status` subprocess
@@ -153,7 +158,7 @@ implements a different gate against a different signal:
   (`frontend/src/composables/useMasoPreflight.ts:27-82`); Chat creation
   actively probes and persists the endpoint
   (`terminal_runtime/manager/create.py:118-134`), and managed MASO Chats
-  additionally require loopback (`create.py:127-132`). This is the only
+  additionally require loopback (`services/terminal_runtime/manager/create.py:127-132`). This is the only
   provider whose Create button is disabled before submission.
 - **Env preset/defaults**: CLI config defaults a preset only for claude
   (`cli/config.py:36-53`, `"day1"` fallback; mirrored in
@@ -165,13 +170,13 @@ implements a different gate against a different signal:
   `unavailable` at `models/schema_domains/quota.py:24-44`); it does not gate
   anything.
 - **Surface admission by name**: direct Chat allows five providers;
-  `agent run` allows five (`subagents.py:441-442` rejects only terminal, then
-  rejects `effort` for all but codex/traex at `subagents.py:451-457`);
+  `agent run` allows five (`services/subagents.py:441-442` rejects only terminal, then
+  rejects `effort` for all but codex/traex at `services/subagents.py:451-457`);
   managed executor admission is a name set
-  (`task_session_executor.py:18-33`); workspace provisioning rejects traex with
-  a prose message (`provisioning.py:40-48`); resident dialogs hide traex and
+  (`services/task_session_executor.py:18-33`); workspace provisioning rejects traex with
+  a prose message (`services/workspace_manager/sessions/provisioning.py:40-48`); resident dialogs hide traex and
   maso in the frontend only; scheduled tasks list four; Goals gate not on name
-  but on `supports_goals` (`useChatGoal.ts:123-125`) plus a direct-tab-only
+  but on `supports_goals` (`frontend/src/features/chat/controllers/useChatGoal.ts:123-125`) plus a direct-tab-only
   backend rule (`api/goal_runs.py:104-113`).
 
 Concrete consequences of the asymmetry, each visible in code:
@@ -185,7 +190,7 @@ Concrete consequences of the asymmetry, each visible in code:
   absent service at turn time.
 - Approval semantics differ even within Chat: codex/traex permission requests
   are blocking JSON-RPC answers (`providers/traex.py:157-258`); MASO uses HTTP
-  confirm cards (`maso_http.py:700-745`); claude/cursor one-shot questions
+  confirm cards (`agent_stream/maso_http.py:700-745`); claude/cursor one-shot questions
   cannot block and are answered as a later steer
   (`docs/working-logs/2026-09-05-claude-ask-user-question-approval.md`). A
   headless subagent therefore hard-fails when a turn stops for approval
@@ -197,17 +202,17 @@ Concrete consequences of the asymmetry, each visible in code:
 - **Adding a provider means hunting branches.** The TraeX postmortem
   (`docs/working-logs/2026-09-16-traex-agent.md`, "Adversarial-review follow-up"
   M1–M4) records: a `{claude, codex, cursor}` whitelist in `switch_env`
-  rejected traex (M1, compare today's `switch.py:36-69`); a busy classifier
+  rejected traex (M1, compare today's `terminal_runtime/process/switch.py:36-69`); a busy classifier
   gated `== CODEX` made traex read idle (M2); reusing `CodexJsonlAdapter` let
   terminal traex discover a `~/.codex` rollout (M3, fixed with
   `supports_transcript_discovery=False`); one shared form leaked traex into
   workspace surfaces (M4, compare today's `AgentConfigFields` exclude props).
   Launch argv was duplicated across three builders that had to change in
-  lockstep (compare today's `launch.py:47-64, 131-162, 314-338`).
+  lockstep (compare today's `terminal_runtime/process/launch.py:47-64, 131-162, 314-338`).
 - **Cursor promotion logic existed at only one of three tab lifecycle
   boundaries** (`CHANGELOG.md:3483-3497`), failing Cursor Chat tabs closed with
   "no structured adapter"; the same fail-closed rule had to be re-applied at
-  create, restore, and update sites — the shape of `registry.py:55-62`
+  create, restore, and update sites — the shape of `agent_stream/registry.py:55-62`
   repeated elsewhere.
 - **Assumed event shapes**: MASO 0.7.5 puts authoritative text in
   `post_llm_response` while `turn_end` is metadata-only; an adapter that
@@ -233,7 +238,8 @@ Concrete consequences of the asymmetry, each visible in code:
   declared in `frontend/src/types/agentSessions.ts:103-109` but never read in
   `src/` (approval cards render from stream events; the UI reads goal owner
   from `ChatGoal.execution_owner`). Note `supports_goals` itself **is**
-  consumed (`useChatGoal.ts:125`, `ChatComposer.vue:104`) — only the owner /
+  consumed (`frontend/src/features/chat/controllers/useChatGoal.ts:125`,
+  `frontend/src/features/chat/components/ChatComposer.vue:104`) — only the owner /
   quality fields are dead. An unowned capability vocabulary is itself a drift
   risk.
 - **Minor latent duplication found during this research**: the traex
@@ -263,8 +269,9 @@ from one endpoint.
    (binary presence, login, endpoint reachability, `collaborationMode/list`,
    `model/list`, `agent --list-models`, MASO readiness), because the code
    already depends on TTLs and fail-closed discovery
-   (`native.py:221-237, 415-437`; `network_types.py:53-65`;
-   `maso_http.py:131-185`).
+   (`agent_stream/native.py:221-237, 415-437`;
+   `providers/network_types.py:53-65`;
+   `agent_stream/maso_http.py:131-185`).
 2. The same provider can present different capabilities per **surface**
    (Claude approval UI: terminal yes, one-shot Chat no) and per
    **cursor_transport**. The spec therefore carries per-surface overrides
@@ -273,7 +280,8 @@ from one endpoint.
    contract for a *running* session; `ProviderSpec` is the per-provider
    *static* contract. They compose, they do not merge.
 4. Unknown providers must get a safe default (today's fail-closed behavior:
-   no adapter → `structured=False`, `registry.py:33-40, 52-54`).
+   no adapter → `structured=False`,
+   `agent_stream/registry.py:33-40, 52-54`).
 
 ### 2.2 Location and shape
 
@@ -295,7 +303,8 @@ registry immutable at runtime.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal, Optional, Tuple
+from types import MappingProxyType
+from typing import Literal, Mapping, Optional, Tuple
 from pydantic import BaseModel, Field, ConfigDict
 
 from ....models import AgentType
@@ -401,12 +410,15 @@ class GoalSpec(BaseModel):
     # codex flips this per session (providers/codex.py:438-445).
     default_owner: Literal["provider_native", "hub_managed"] = "hub_managed"
     usage_quality: Literal["exact", "estimated", "unavailable"] = "unavailable"
-    # Terminal event that closes one Hub turn on this transport.
-    # MASO's wire event is "agent_end"; root- vs child-scope is decided by a
-    # separate flag (only the root agent_end closes the turn,
-    # maso_events.py:316,337), so the enum keeps the wire name.
-    completion_event: Literal["result", "turn_completed",
-                              "turn_ended", "agent_end"] = "turn_completed"
+    # Terminal event that closes one Hub turn on this transport. Every value
+    # is the provider's VERBATIM wire token, not Hub-normalized vocabulary:
+    # claude stream-json "result", codex/traex JSON-RPC method
+    # "turn/completed" (providers/codex_rpc.py:187), cursor transcript row
+    # "turn_ended", maso SSE kind "agent_end".
+    # MASO root- vs child-scope is decided by a separate flag (only the root
+    # agent_end closes the turn, agent_stream/maso_events.py:316,337).
+    completion_event: Literal["result", "turn/completed",
+                              "turn_ended", "agent_end"] = "result"
     completion_event_scope: Literal["any", "root_only"] = "any"
     completion_requires_provider_event: bool = False
     # Goals are accepted only on direct top-level Chat tabs today
@@ -437,7 +449,7 @@ class ProviderSpec(BaseModel):
     binary: Optional[str] = None
     resume: ResumeSpec = ResumeSpec(kind="none")
     supports_conversation_rotation: bool = False
-    edit_resend: bool = False          # transcript_fork.py predicate support
+    edit_resend: bool = False          # agent_stream/transcript_fork.py predicate support
     fork_seed_via_prompt: bool = True  # all four CLI transports today
 
     # Capabilities
@@ -450,10 +462,19 @@ class ProviderSpec(BaseModel):
     # "prompt_sentinel" (cursor) wraps injected guidance in markers the
     # transcript adapter strips back out; "prompt_prefix" (maso) prepends
     # guidance to the first HTTP user message with no strip mechanism
-    # (maso_http.py:326-330). They are not the same channel.
+    # (agent_stream/maso_http.py:326-330). They are not the same channel.
     # Approval capability per surface (Section 1.1 divergence).
-    approval_channels: dict[Surface, ApprovalChannel] = Field(
-        default_factory=dict
+    # Immutability caveat: ConfigDict(frozen=True) blocks attribute
+    # reassignment but does NOT deep-freeze a plain dict — a default
+    # `dict[Surface, ApprovalChannel]` stays mutable after construction.
+    # Slice 1 must therefore expose this as a genuinely immutable mapping:
+    # either a frozen sub-model with explicit per-surface fields, or a
+    # model_validator that wraps the value in types.MappingProxyType behind
+    # a `Mapping[Surface, ApprovalChannel]` annotation (get_spec never hands
+    # out the mutable original). Add a test that mutating the returned
+    # mapping raises TypeError.
+    approval_channels: Mapping[Surface, ApprovalChannel] = Field(
+        default_factory=lambda: MappingProxyType({})
     )
 
     # Models / reasoning
@@ -495,31 +516,31 @@ the values verified in Section 1. Terse matrix (full field values in code):
 | --- | --- | --- | --- | --- | --- | --- |
 | transport | cli_oneshot | cli_persistent | cli_persistent | cli_oneshot | http_sse | shell |
 | stream source | stdout stream-json | RPC notifications | RPC notifications | stdout stream-json (+ transcript snapshot for `terminal_transcript`) | SSE | tmux |
-| binary | `claude` | `codex` | `traex` | `agent` | — (`native.py:215-216`) | shell |
-| eof fatal | no (`session.py:289`) | yes (`codex.py:81-84`) | yes | no | broken SSE fails turn (`maso_http.py:1-8`) | — |
-| resume | `--session-id` constructive → `--resume` verified (`claude.py:236-245`) | `thread/resume`, provider id | inherits codex | `--resume` always constructive (`cursor.py:93-100`) | persisted `session_id` + endpoint fence (`maso_http.py:199-236`) | none |
-| rotation | yes (`claude.py:233-234`) | yes (`codex.py:319`) | yes | yes (`cursor.py:90-91`) | yes (`maso_http.py:379`) | no |
+| binary | `claude` | `codex` | `traex` | `agent` | — (`agent_stream/native.py:215-216`) | shell |
+| eof fatal | no (`session.py:289`) | yes (`codex.py:81-84`) | yes | no | broken SSE fails turn (`agent_stream/maso_http.py:1-8`) | — |
+| resume | `--session-id` constructive → `--resume` verified (`claude.py:236-245`) | `thread/resume`, provider id | inherits codex | `--resume` always constructive (`cursor.py:93-100`) | persisted `session_id` + endpoint fence (`agent_stream/maso_http.py:199-236`) | none |
+| rotation | yes (`claude.py:233-234`) | yes (`codex.py:319`) | yes | yes (`cursor.py:90-91`) | yes (`agent_stream/maso_http.py:379`) | no |
 | edit-resend | yes | yes | **no** | yes | **no** (`runtime/edit_resend.py:75`) | no |
 | images | sdk_base64 (`claude.py:247-286`) | rpc_temp_file | inherits codex | prompt_file_ref (`cursor.py:23-37, 161-220`) | http_chunked (`CHANGELOG.md:814-822`) | no |
 | tool timeline | yes | yes | yes | yes | yes | no |
-| plan mode | cli_flag_probed (`claude.py:228-231`) | rpc_collaboration (`codex.py:504-530`) | rpc (kebab sandbox) | cli_flag_probed (`cursor.py:85-88`) | none (default only, `manager/create.py:123-125`) | no |
+| plan mode | cli_flag_probed (`claude.py:228-231`) | rpc_collaboration (`codex.py:504-530`) | rpc (kebab sandbox) | cli_flag_probed (`cursor.py:85-88`) | none (default only, `services/terminal_runtime/manager/create.py:123-125`) | no |
 | system instructions | cli_flag (`--append-system-prompt`) | rpc_config | rpc_config | prompt_sentinel (`cursor.py:104-109`) | prompt_prefix | none |
-| approval: terminal tab | native_tui (`claude_jsonl.py:125`) | native_tui | native_tui | native_tui (`cursor_cli_transcript.py:118`) | — | native |
-| approval: direct Chat | oneshot_steer (flag False, `claude.py:35-42`) | rpc_blocking (`codex.py:76`) | rpc_blocking (`traex.py:157-211`) | oneshot_steer | http_confirm (`maso_http.py:700-745`) | — |
+| approval: terminal tab | native_tui (`agent_stream/claude_jsonl.py:125`) | native_tui | native_tui | native_tui (`agent_stream/cursor_cli_transcript.py:118`) | — | native |
+| approval: direct Chat | oneshot_steer (flag False, `claude.py:35-42`) | rpc_blocking (`codex.py:76`) | rpc_blocking (`traex.py:157-211`) | oneshot_steer | http_confirm (`agent_stream/maso_http.py:700-745`) | — |
 | goals API | none | rpc_thread, negotiated owner (`codex.py:438-445`) | rpc_thread (inherited) | none | none (hub_managed) | none |
 | goal usage quality | `exact` (`claude.py:42`) | `exact` (`codex.py:79`) | `exact` (inherited) | `unavailable` | `unavailable` | unavailable |
-| turn terminal event | `result` | `turn/completed` | `turn/completed` | `turn_ended` | root `agent_end` only (`maso_http.py:195-197`) | — |
-| model catalog | tab_env + static fallback (`session.py:246-254`) | rpc_list + static fallback (`codex.py:532-560`) | rpc_list inherited + static fallback¹ | cli_list_models (`native.py:427-437`) | http_catalog (`maso_http.py:131-160`) | — |
-| model env key | `ANTHROPIC_MODEL` | `CODEX_MODEL` | `CODEX_MODEL` | `CURSOR_MODEL` | `MASO_MODEL` (`subagents.py:59-65`) | — |
-| reasoning effort | model_selection | env_key `CODEX_REASONING_EFFORT` | env_key (+ legacy `TRAEX_REASONING_EFFORT`, `codex.py:646-648`) | model_id_suffix (`providers/model_options.py:61-166`) | model_variants (`maso_http.py:82-124`) | — |
+| turn terminal event | `result` | `turn/completed` | `turn/completed` | `turn_ended` | root `agent_end` only (`agent_stream/maso_http.py:195-197`) | — |
+| model catalog | tab_env + static fallback (`session.py:246-254`) | rpc_list + static fallback (`codex.py:532-560`) | rpc_list inherited + static fallback¹ | cli_list_models (`agent_stream/native.py:427-437`) | http_catalog (`agent_stream/maso_http.py:131-160`) | — |
+| model env key | `ANTHROPIC_MODEL` | `CODEX_MODEL` | `CODEX_MODEL` | `CURSOR_MODEL` | `MASO_MODEL` (`services/subagents.py:59-65`) | — |
+| reasoning effort | model_selection | env_key `CODEX_REASONING_EFFORT` | env_key (+ legacy `TRAEX_REASONING_EFFORT`, `codex.py:646-648`) | model_id_suffix (`providers/model_options.py:61-166`) | model_variants (`agent_stream/maso_http.py:82-124`) | — |
 | solo | bypass_flag (`claude.py:212-215`) | sandbox_policy (`codex.py:447-497`) | sandbox_policy | always (`agent --yolo`, no-op toggle) | none | — |
 | auth | env_or_settings, Bedrock/Vertex/Foundry rejected (`network_types.py:25-29`) | login_status_probe + endpoint inference (`network_selector.py:136-145`) | env (`TRAE_API_BASE_URL`) | env default endpoint `api2.cursor.sh` (`network_types.py:32-44`) | http_service, managed requires loopback | — |
-| network route selection | yes | yes | yes | yes | no (`trust_env=False`, `maso_http.py:182-184`) | — |
+| network route selection | yes | yes | yes | yes | no (`trust_env=False`, `agent_stream/maso_http.py:182-184`) | — |
 | quota | none | local_rollout | none | none | http_accounting | — |
 | direct Chat | yes | yes | yes | yes | chat-only | — |
-| subagent (`agent run`) | yes | yes | yes | yes | yes (CLI list); effort rejected for all but codex/traex (`subagents.py:451-457`) | no |
+| subagent (`agent run`) | yes | yes | yes | yes | yes (CLI list); effort rejected for all but codex/traex (`services/subagents.py:451-457`) | no |
 | managed Chat | yes | yes | **no** | yes | yes, loopback only | no |
-| managed terminal | yes | yes | **no** (`provisioning.py:40-48`) | yes | no (`task_session_executor.py:20-21`) | no (also rejected `:18`) |
+| managed terminal | yes | yes | **no** (`services/workspace_manager/sessions/provisioning.py:40-48`) | yes | no (`services/task_session_executor.py:20-21`) | no (also rejected `:18`) |
 | resident | yes | yes | **no** (hidden UI) | yes | no (hidden UI) | yes |
 | scheduled | yes | yes | no (absent list) | yes | no | yes |
 | dot | yes | yes | yes | yes | yes + preflight (`dot/execution.py:18`) | no |
@@ -529,7 +550,7 @@ the values verified in Section 1. Terse matrix (full field values in code):
 ¹ TraeX does not override `prepare_capabilities`/`_discover_models`
 (`providers/traex.py` has no override), so `TraexNativeSession` inherits
 Codex's `model/list` RPC attempt with the curated static list as fallback
-(`codex.py:532-547`; static rows at `native.py:282-300`). Whether deployed
+(`codex.py:532-547`; static rows at `agent_stream/native.py:282-300`). Whether deployed
 TraeX app-servers actually answer `model/list` is empirically unverified —
 Slice 1's golden matrix should record the *code* path (rpc_list + fallback);
 if probing later shows the RPC is always unavailable, the spec can downgrade
@@ -539,7 +560,7 @@ this cell with evidence rather than assumption.
 **capability-empty** record for unknown types: `transport=SHELL`, empty surface
 set, all features `none` — identical in effect to today's
 `get_adapter(...) → None → structured=False` fail-closed path
-(`registry.py:33-40`). `terminal` is an explicit spec, not a fallback.
+(`agent_stream/registry.py:33-40`). `terminal` is an explicit spec, not a fallback.
 
 ### 2.4 Representative consumer rewrites
 
@@ -575,7 +596,7 @@ def validate_config_admission(config: ManagedExecutorConfig) -> None:
         raise ValueError(CHAT_REMOTE_UNSUPPORTED)
 ```
 
-**B. Binary/factory** — `native.py:201-218, 585-597`
+**B. Binary/factory** — `agent_stream/native.py:201-218, 585-597`
 
 Before: a dict literal for binaries, a MASO special case for availability, and
 a five-branch factory. After:
@@ -673,7 +694,7 @@ Each surface declares a `SurfaceRequirements` record; admission =
 | --- | --- | --- |
 | direct Chat | `DIRECT_CHAT` in surfaces; transport != shell | binary or HTTP readiness; mode supported (`session.py:640-643`) |
 | subagent | `SUBAGENT` in surfaces; `headless_safe` for solo runs (else hard-fail rule documented up front, as today) | same as Chat |
-| managed Chat | `MANAGED_CHAT`; local target; loopback when `auth.requires_loopback_for_managed` | full readiness at creation (today's MASO probe, `create.py:118-134`) |
+| managed Chat | `MANAGED_CHAT`; local target; loopback when `auth.requires_loopback_for_managed` | full readiness at creation (today's MASO probe, `services/terminal_runtime/manager/create.py:118-134`) |
 | managed terminal | `MANAGED_TERMINAL`; `remote_terminal` when remote | binary present |
 | resident | `RESIDENT` | binary present |
 | scheduled | `SCHEDULED` | at run time |
@@ -683,7 +704,7 @@ Each surface declares a `SurfaceRequirements` record; admission =
 This replaces the five+ name lists in Section 1.2 with one predicate and makes
 "why is traex missing here" answerable: its spec omits `MANAGED_CHAT`,
 `MANAGED_TERMINAL`, `RESIDENT`, and `SCHEDULED` (the postmortem M4 boundary,
-`provisioning.py:40-48`), while including `DIRECT_CHAT`, `SUBAGENT`, `DOT`, and
+`services/workspace_manager/sessions/provisioning.py:40-48`), while including `DIRECT_CHAT`, `SUBAGENT`, `DOT`, and
 `TERMINAL_TAB`.
 
 ### 3.3 Migration of existing flags and config
@@ -695,10 +716,10 @@ This replaces the five+ name lists in Section 1.2 with one predicate and makes
   longer silently disagree; a surface-keyed accessor
   (`spec.approval_channels[surface]`) replaces the divergent
   `supports_approval_ui` defaults.
-- `managed_executor_capabilities()` (`task_session_executor.py:153-177`) and
+- `managed_executor_capabilities()` (`services/task_session_executor.py:153-177`) and
   dot `PROVIDERS` (`dot/execution.py:18`) are generated by filtering the
   registry, not hand-listed.
-- Env-key maps (`subagents.py:59-68`, `api/tabs.py:37-44`,
+- Env-key maps (`services/subagents.py:59-68`, `api/tabs.py:37-44`,
   `chatModelPresentation.ts:5-17`) come from `spec.model_env_key`,
   `spec.effort_env_keys`, `spec.hot_env_keys`.
 - Config/env vars are unchanged (Section 4).
@@ -719,10 +740,10 @@ This replaces the five+ name lists in Section 1.2 with one predicate and makes
   renders).
 - CLI click `Choice(...)` lists move to a validated fetch with the current
   lists as offline fallback; the server stays the authority (it already
-  rejects bad names — `subagents.py:441-442`).
+  rejects bad names — `services/subagents.py:441-442`).
 - Per-surface readiness drives enable/disable + reason strings uniformly,
   replacing the MASO-only preflight panel
-  (`useMasoPreflight.ts`) with a shared composable.
+  (`frontend/src/composables/useMasoPreflight.ts`) with a shared composable.
 - Approval-blocked turns in headless subagents report the spec-declared
   reason (`headless_safe=False`) instead of provider-specific prose.
 
@@ -730,27 +751,27 @@ This replaces the five+ name lists in Section 1.2 with one predicate and makes
 
 ## 4. Compatibility
 
-- **Wire enum unchanged**: `AgentType` values (`runtime.py:31-39`) and all env
+- **Wire enum unchanged**: `AgentType` values (`models/schema_domains/runtime.py:31-39`) and all env
   var names (`ANTHROPIC_MODEL`, `CODEX_MODEL`, `CODEX_REASONING_EFFORT`,
   `CURSOR_MODEL`, `MASO_MODEL`, `TRAE_API_BASE_URL`, `ANTHROPIC_BASE_URL`,
   `CURSOR_API_ENDPOINT`, `MASO_BASE_URL`, `MASO_PORT`,
   `HUB_CHAT_ALLOW_NETWORK`, `CLAUDE_HUB_PROVIDER_NETWORK_MODE`, …) keep their
-  exact semantics and precedence (`maso_http.py:37-79`,
+  exact semantics and precedence (`agent_stream/maso_http.py:37-79`,
   `cli/config.py:36-53`).
 - **`StreamCapabilities` response unchanged** initially; the registry is a
   backend-internal source for its defaults. New fields are additive and only
   arrive later with `/api/providers`.
 - **Unknown providers fail closed exactly as today**: empty capability record,
-  no structured adapter (`registry.py:52-54`).
+  no structured adapter (`agent_stream/registry.py:52-54`).
 - **MasoS**: its HTTP/SSE differences are first-class dimensions
   (`HTTP_SSE`, `HTTP_CHUNKED`, `HTTP_CONFIRM`, `HTTP_CATALOG`,
-  `http_service` auth, `root_agent_end` completion, `trust_env=False`); its
-  delivery-tombstone and endpoint-fence behavior
-  (`maso_http.py:199-236, 774-779`) stays in the transport and is additionally
-  declared as "endpoint identity immutable per session" so switch-env UI need
-  not special-case it (`switch.py:46-55`).
+  `http_service` auth, root-scoped `agent_end` completion, `trust_env=False`);
+  its delivery-tombstone and endpoint-fence behavior
+  (`agent_stream/maso_http.py:199-236, 774-779`) stays in the transport and is
+  additionally declared as "endpoint identity immutable per session" so
+  switch-env UI need not special-case it (`terminal_runtime/process/switch.py:46-55`).
 - **Cursor transports** (`terminal` / `acp` / `terminal_transcript` /
-  `native`; `registry.py:55-62`, schema literal at
+  `native`; `agent_stream/registry.py:55-62`, schema literal at
   `models/schema_domains/terminal.py:45-50` — whose description lists only
   `terminal`/`acp`/`terminal_transcript`, while `native` is assigned
   internally —) modeled as a session-scoped transport variant over one spec,
@@ -780,25 +801,27 @@ Add `providers/spec.py` with the Section 2 matrix and `get_spec`. No production
 call site reads it. Add the golden-matrix test (Section 6) and *equivalence
 assertions* that derive, in tests, existing literal sets/maps from the spec and
 compare them to the current constants byte-for-byte (surface sets for each
-surface, binary map, env-key maps, resume flags, hot-key map). Rollback: delete
-the module.
+surface, binary map, env-key maps, resume flags, hot-key map). The registry
+and every value returned by `get_spec` must be runtime-immutable, including
+the per-surface approval mapping (MappingProxyType/frozen sub-model; a test
+asserts mutation raises). Rollback: delete the module.
 
 **Slice 2 — Non-admission backend consumers migrate.**
 Replace the low-risk, pure-data sites one PR at a time:
 `native_provider_binary`/availability (Section 2.4 B), the subagent env-key
-maps (`subagents.py:59-68`), `_DOT_MODEL_HOT_ENV_KEYS` (`api/tabs.py:37-44`),
+maps (`services/subagents.py:59-68`), `_DOT_MODEL_HOT_ENV_KEYS` (`api/tabs.py:37-44`),
 `managed_executor_capabilities`/dot `PROVIDERS`, then admission predicates
-(`task_session_executor.py:15-33`, `provisioning.py:40-48`,
-`create.py:103-134`) behind a helper returning the same errors. Existing
+(`services/task_session_executor.py:15-33`, `services/workspace_manager/sessions/provisioning.py:40-48`,
+`services/terminal_runtime/manager/create.py:103-134`) behind a helper returning the same errors. Existing
 behavioral tests pin outputs; rollback per PR.
 
 **Slice 3 — Transport/launch consumers migrate.**
 `create_native_session`, `eof_is_fatal`, launch builders
-(`launch.py:47-64, 131-162, 314-338`), resume argv
-(`state.py:147`, `claude.py:236-245`, `cursor.py:93-100`), fork predicate set
-(`transcript_fork.py:120-126`), terminal probe-filter set
+(`terminal_runtime/process/launch.py:47-64, 131-162, 314-338`), resume argv
+(`terminal_runtime/process/state.py:147`, `claude.py:236-245`, `cursor.py:93-100`), fork predicate set
+(`agent_stream/transcript_fork.py:120-126`), terminal probe-filter set
 (`api/terminal.py:274-280`), cursor-transport gating
-(`registry.py:55-62` + the three re-derivations). The two capability
+(`agent_stream/registry.py:55-62` + the three re-derivations). The two capability
 hierarchies take defaults from the spec while retaining overrides; a test
 asserts advertised `StreamCapabilities` are unchanged per provider/surface
 (record before/after snapshots).
@@ -875,7 +898,7 @@ implementations themselves, ttyd/tmux, and every probe's bounds and TTLs.
 ## 7. Risks and open decisions for the user
 
 1. **Strict vs permissive default for unknown providers.** Proposal:
-   capability-empty/fail-closed (matches `registry.py` today). Alternative: a
+   capability-empty/fail-closed (matches `agent_stream/registry.py` today). Alternative: a
    shell-only default. This determines whether a future seventh provider
    appears nowhere until registered (strict) or runs as raw terminal
    immediately (permissive). **Recommendation: strict.**
@@ -935,14 +958,16 @@ implementations themselves, ttyd/tmux, and every probe's bounds and TTLs.
 - Capability flags: `providers/session.py:32-45, 628-660`;
   `agent_stream/base.py:198-203`; `providers/claude.py:35-42`;
   `providers/codex.py:73-84, 438-445`; `providers/traex.py:12-24`;
-  `providers/cursor.py:30-37`; `maso_http.py:188-197, 306-324`.
+  `providers/cursor.py:30-37`;
+  `agent_stream/maso_http.py:188-197, 306-324`.
 - Transports: `providers/process.py`; `providers/codex_rpc.py`;
   `agent_stream/native.py:201-218, 563-597`;
-  `registry.py:24-62`; `maso_http.py:1-8`.
+  `agent_stream/registry.py:24-62`;
+  `agent_stream/maso_http.py:1-8`.
 - Lists/maps: `cli/commands/subagents.py:26`;
   `cli/task_commands/creation.py:27, 149`; `cli/commands/dot.py:21`;
   `services/dot/execution.py:18`;
-  `task_session_executor.py:15-33, 153-177`;
+  `services/task_session_executor.py:15-33, 153-177`;
   `services/subagents.py:59-68, 441-457`; `api/tabs.py:37-44`;
   frontend sites in Sections 1.2/3.4.
 - Readiness: `providers/network_probe.py:17-50, 64-100`;
@@ -975,25 +1000,29 @@ below**, which are already applied in this revision.
 - The 172 non-import `AgentType.*` references reproduce exactly
   (backend non-test `*.py`).
 - Session capability defaults/projection: `providers/session.py:34-45,
-  628-660`; parallel adapter flags at `base.py:198-203`; the
-  claude native-False (`claude.py:35-42`) vs terminal-adapter-True
-  (`claude_jsonl.py:125`) split is real and so is cursor's
-  (`cursor.py:33` True native / `cursor_cli_transcript.py:118` True
-  transcript — the native flag is in fact also True; only Claude shows the
-  cross-hierarchy divergence described in §1.1).
+  628-660`; parallel adapter flags at `agent_stream/base.py:198-203`; the
+  claude native-False (`providers/claude.py:35-42`) vs
+  terminal-adapter-True (`agent_stream/claude_jsonl.py:125`) split is real
+  and so is cursor's (`providers/cursor.py:33` True native /
+  `agent_stream/cursor_cli_transcript.py:118` True transcript — the native
+  flag is in fact also True; only Claude shows the cross-hierarchy
+  divergence described in §1.1).
 - Transport facts spot-checked and confirmed: binary map/availability
-  (`native.py:201-218`), five-branch factory (`native.py:585-597`),
-  cursor `model_catalog_for` probe (`native.py:427`), `eof_is_fatal`
-  (`session.py:280-289`, `codex.py:81-84`), resume/rotation for all four
-  CLIs (`claude.py:233-245`, `codex.py:292`, `cursor.py:90-100`),
-  MASO identity fence/delivery tombstone (`maso_http.py:199-236, 774-779`),
-  MASO chunk limits (`maso_http.py:28-29`: 512 KiB / 8 MiB),
-  root-only `agent_end` (`maso_events.py:316,337`).
+  (`agent_stream/native.py:201-218`), five-branch factory
+  (`agent_stream/native.py:585-597`), cursor `model_catalog_for` probe
+  (`agent_stream/native.py:427`), `eof_is_fatal`
+  (`providers/session.py:280-289`, `providers/codex.py:81-84`),
+  resume/rotation for all four CLIs (`providers/claude.py:233-245`,
+  `providers/codex.py:292`, `providers/cursor.py:90-100`),
+  MASO identity fence/delivery tombstone
+  (`agent_stream/maso_http.py:199-236, 774-779`),
+  MASO chunk limits (`agent_stream/maso_http.py:28-29`: 512 KiB / 8 MiB),
+  root-only `agent_end` (`agent_stream/maso_events.py:316,337`).
 - Surface admission lists all reproduce exactly: CLI lists
-  (`subagents.py:26`, task `creation.py:27,149`, `dot.py:21`),
+  (`cli/commands/subagents.py:26`, task `cli/task_commands/creation.py:27,149`, `cli/commands/dot.py:21`),
   dot backend tuple (`dot/execution.py:18`), managed admission
-  (`task_session_executor.py:18-33`, `provisioning.py:40-48`,
-  `manager/create.py:103-134` incl. the two loopback checks),
+  (`services/task_session_executor.py:18-33`, `services/workspace_manager/sessions/provisioning.py:40-48`,
+  `services/terminal_runtime/manager/create.py:103-134` incl. the two loopback checks),
   env-key maps (`services/subagents.py:59-68`, `api/tabs.py:37-44`),
   effort rejection (`services/subagents.py:441-457`).
 - Frontend lists/dead fields all reproduce: the three unions, the eight+
@@ -1007,13 +1036,16 @@ below**, which are already applied in this revision.
 1. **Branch statistic (§1.1).** "29 explicit equality/set-membership
    branches" was not reproducible. The audited counts are: 172 total
    non-import references; 90 on `if/elif` lines naming an `AgentType`;
-   11 additional hand-listed `AgentType` literal sets/dicts/tuples (some
-   feeding those same predicates). Wording now states those counts.
+   hand-listed `AgentType` literal sets/dicts/tuples at roughly a dozen
+   inline sites plus several multi-line admission literals (the exact
+   number depends on how wrapped literals are counted — deliberately not
+   stated precisely; see §9.3).
 2. **Wrong working-log path (§1.4).** Cited `2026-09-16-traex.md`, which
    does not exist; the postmortem is `2026-09-16-traex-agent.md`. Fixed
    (the appendix already had the right name).
 3. **Dead-fields claim too broad (§1.4).** `supports_goals` *is* read in
-   the frontend (`useChatGoal.ts:125`, `ChatComposer.vue:104`); only
+   the frontend (`frontend/src/features/chat/controllers/useChatGoal.ts:125`,
+   `frontend/src/features/chat/components/ChatComposer.vue:104`); only
    `supports_approval_ui`, `goal_execution_owner` and `goal_usage_quality`
    are unread. Claim narrowed and the exception stated.
 4. **TraeX model catalog (§2.3 matrix).** Marked "static_curated"; in
@@ -1028,7 +1060,8 @@ below**, which are already applied in this revision.
    `completion_event_scope: "any" | "root_only"`.
 6. **System-instruction channel (§2.2, §2.3).** Enum lacked MASO's
    channel; added `prompt_prefix` and distinguished it from cursor's
-   stripped `prompt_sentinel` (`maso_http.py:326-330`).
+   stripped `prompt_sentinel`
+   (`agent_stream/maso_http.py:326-330`).
 7. **`headless_safe` derivability (§2.2).** For the current matrix it
    equals `solo != "none"`; documented that Slice 1 should assert the
    derivation so the field can be dropped until a provider splits them.
@@ -1057,3 +1090,33 @@ below**, which are already applied in this revision.
   rather than hand-counted; the Slice 1 equivalence tests already do this
   for list constants — consider one grep-based assertion for the raw
   reference count too, or omit the number.
+
+### 9.4 Independent-review nits applied (APPROVE-WITH-NITS, cycle 2)
+
+1. **Codex completion literal is the verbatim wire token.**
+   `GoalSpec.completion_event` listed `"turn_completed"` while claiming to
+   keep wire names; the JSON-RPC method is `"turn/completed"`
+   (`providers/codex_rpc.py:187`). Enum value corrected
+   and the comment now states that every value is a verbatim provider wire
+   token (`result`, `turn/completed`, `turn_ended`, `agent_end`) — no
+   Hub-normalized vocabulary. Default changed to `"result"` because no
+   single default matches all four transports.
+2. **Frozen spec ≠ immutable approval mapping.** `ConfigDict(frozen=True)`
+   does not deep-freeze a plain `dict`. §2.2 now types
+   `approval_channels` as `Mapping[Surface, ApprovalChannel]` with a
+   `MappingProxyType` default (alternative: a frozen sub-model), and Slice
+   1 is required to return immutable mappings from `get_spec` with a test
+   asserting mutation raises `TypeError`.
+3. **Non-reproducible literal-site count.** "11 literal sites" is replaced
+   by "roughly a dozen inline sites plus several multi-line admission
+   literals", and §1.1 now gives the exact, re-runnable grep recipe for the
+   count that *is* reproducible (90 `if/elif` predicates; 172 total
+   references).
+4. **Repo-relative citation paths.** Citations outside the `providers/`
+   shorthand convention (`agent_stream/maso_http.py`,
+   `agent_stream/maso_events.py`, `agent_stream/claude_jsonl.py`,
+   `agent_stream/cursor_cli_transcript.py`, `agent_stream/registry.py`,
+   `agent_stream/native.py`, `agent_stream/base.py`,
+   `services/...`, `cli/...`, `terminal_runtime/...`,
+   `frontend/src/...`) now carry directory paths throughout, including the
+   §2.3 matrix, §4, §5, the appendix and §9.
