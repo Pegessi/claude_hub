@@ -201,6 +201,17 @@ class RemoteProfileManager:
             logger.error(f"Failed to load remote profiles from {self.path}: {e}")
             return []
 
+        # The store must be a JSON list. A non-list top level (object, scalar,
+        # null) would make the iteration below raise TypeError and 500 every
+        # profile listing; treat it as an unusable store instead.
+        if not isinstance(raw_profiles, list):
+            logger.error(
+                "Remote profiles store %s has top-level %s, expected a JSON list; ignoring it",
+                self.path,
+                type(raw_profiles).__name__,
+            )
+            return []
+
         profiles = []
         for raw_profile in raw_profiles:
             try:

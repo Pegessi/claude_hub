@@ -71,6 +71,12 @@ def test_ssh_host_rejects_overlong_value() -> None:
         "host name",
         "host;rm",
         "host$(id)",
+        "host\tname",
+        "host\nname",
+        "host\rname",
+        "host‐name",  # U+2010 HYPHEN, not the ASCII hyphen ssh/hostnames use
+        "host－name",  # U+FF0D FULLWIDTH HYPHEN-MINUS
+        "hＯst",  # U+FF2F FULLWIDTH LATIN CAPITAL LETTER O
         "[::1]",
         "[2001:db8::1]",
         "fe80::1%eth0",  # scoped IPv6: ssh needs brackets, which are rejected
@@ -95,7 +101,18 @@ def test_ssh_user_accepts_conservative_names(user: str) -> None:
     assert _profile(user=user).user == user
 
 
-@pytest.mark.parametrize("user", ["-oProxyCommand=evil", "-deploy", "bad user", "user;id", "us$er"])
+@pytest.mark.parametrize(
+    "user",
+    [
+        "-oProxyCommand=evil",
+        "-deploy",
+        "-",
+        "a@b",
+        "bad user",
+        "user;id",
+        "us$er",
+    ],
+)
 def test_ssh_user_rejects_option_looking_and_ill_formed_values(user: str) -> None:
     with pytest.raises(ValidationError):
         _profile(user=user)
@@ -171,3 +188,25 @@ def test_configured_json_skips_invalid_profile(tmp_path: Path) -> None:
     profiles = manager._load_configured_profiles()
 
     assert [profile.id for profile in profiles] == ["good"]
+
+
+@pytest.mark.parametrize("content", ["123", "true", "null", '"a single profile"', '{"id": "x"}'])
+def test_configured_json_non_list_top_level_is_ignored(
+    tmp_path: Path,
+    content: str,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # json.load succeeds for these, but the store must be a JSON list. A
+    # non-list top level must be logged and ignored rather than raising
+    # TypeError during iteration (which used to 500 the profiles API).
+    profiles_file = tmp_path / "remote_profiles.json"
+    profiles_file.write_text(content, encoding="utf-8")
+    manager = RemoteProfileManager(path=profiles_file)
+    monkeypatch.setattr(remote_profiles_module, "SSH_CONFIG_FILE", tmp_path / "no-ssh-config")
+
+    with caplog.at_level("ERROR"):
+        assert manager._load_configured_profiles() == []
+        assert manager.list_profiles() == []
+
+    assert "expected a JSON list" in caplog.text
