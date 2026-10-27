@@ -215,7 +215,8 @@ class MasoServer:
             self.streams.append(stream)
             # Old authoritative output and an in-flight snapshot are a
             # connection baseline, not fresh assistant output for the new turn.
-            stream.emit("turn_end", {"agent_id": "main", "content": "old answer"}, 9)
+            stream.emit("post_llm_response", {"agent_id": "main", "content": "old answer"}, 8)
+            stream.emit("turn_end", {"agent_id": "main", "turn": 0, "outcome": "completed"}, 9)
             stream.emit(
                 "in_flight_snapshot",
                 {"streams": [{"agent_id": "main", "content": "old"}]},
@@ -510,7 +511,8 @@ async def test_maso_tailer_retains_preview_and_sends_original_without_echo_dupli
         await tailer.stop()
 
 
-def test_offsets_snapshots_and_compression_are_not_new_turns() -> None:
+@pytest.mark.parametrize("response_event", ["post_llm_response", "turn_end"])
+def test_offsets_snapshots_and_compression_are_not_new_turns(response_event: str) -> None:
     adapter = MasoEventAdapter()
     ctx = NormalizeContext(
         session_id="s",
@@ -524,12 +526,12 @@ def test_offsets_snapshots_and_compression_are_not_new_turns() -> None:
         raw("llm_token", content="你😀", content_offset=0),
         raw("llm_token", content="😀好", content_offset=1),
         raw("llm_token", content="unseen gap", content_offset=9),
-        raw("turn_end", id="block-1", content="你😀好，完整"),
+        raw(response_event, id="block-1", content="你😀好，完整"),
         raw("context_condensing", estimated_tokens=100),
         raw("context_condensed", summary="do not display or replay this context"),
         raw("agent_end", agent_id="child", stop_reason="completed"),
         raw("turn_start", turn=1),
-        raw("turn_end", id="block-2", content="之后"),
+        raw(response_event, id="block-2", content="之后"),
     ]
     events = [event for record in records for event in adapter.normalize_line(record, ctx)]
     assert (
@@ -550,6 +552,104 @@ def test_offsets_snapshots_and_compression_are_not_new_turns() -> None:
     assert (
         adapter.normalize_line(raw("agent_end", stop_reason="completed"), ctx)[0].type
         == AgentStreamEventType.TURN_COMPLETED
+    )
+
+
+@pytest.mark.parametrize("prefix", ["", "Final", "Final answer."])
+@pytest.mark.asyncio
+async def test_authoritative_response_reaches_history_before_root_completion(
+    tmp_path, monkeypatch, prefix: str
+) -> None:
+    monkeypatch.setenv("CLAUDE_HUB_HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_HUB_STATE_ROOT", str(tmp_path / "state"))
+    server = MasoServer()
+    record = session()
+    provider = transport(server, record)
+    tailer = SessionTailer(
+        workspace_id=record.workspace_id,
+        session_id=record.id,
+        adapter=MasoEventAdapter(),
+        session_getter=lambda: record,
+        native_transport=provider,
+    )
+    queue = await tailer.subscribe_completion()
+    try:
+        await tailer.send_message("Review the change", [], "review")
+        stream = server.streams[-1]
+        stream.emit("post_llm_response", {"agent_id": "main", "has_tool_calls": True})
+        stream.emit("tool_use", {"agent_id": "main", "tool_call_id": "read", "tool": "Read"})
+        stream.emit(
+            "tool_result",
+            {"agent_id": "main", "tool_call_id": "read", "tool": "Read", "output": "source"},
+        )
+        stream.emit("turn_end", {"agent_id": "main", "turn": 1, "outcome": "tool_calls"})
+        stream.emit("agent_start", {"agent_id": "child"})
+        stream.emit("turn_start", {"agent_id": "child", "turn": 1})
+        stream.emit(
+            "post_llm_response", {"agent_id": "child", "content": "Child result.", "id": "c1"}
+        )
+        stream.emit("agent_end", {"agent_id": "child", "stop_reason": "completed"})
+        stream.emit("turn_start", {"agent_id": "main", "turn": 2})
+        if prefix:
+            stream.emit("llm_token", {"agent_id": "main", "content": prefix, "content_offset": 0})
+        response = {
+            "agent_id": "main",
+            "id": "answer",
+            "turn": 0,
+            "content": "Final answer.",
+            "reasoning_content": "Verified.",
+        }
+        stream.emit("post_llm_response", response)
+        stream.emit("post_llm_response", response)
+        stream.emit("turn_end", {"agent_id": "main", "turn": 2, "outcome": "completed"})
+        server.running = False
+        stream.emit("agent_end", {"agent_id": "main", "stop_reason": "completed"})
+        completed = await asyncio.wait_for(queue.get(), 2)
+        assert completed.payload["assistant_text"] == "Final answer."
+        page = await tailer._store.read_since(-1, 100)
+        roots = [event for event in page.events if not event.payload.get("subagent_thread")]
+        assert (
+            "".join(
+                event.payload["text"]
+                for event in roots
+                if event.type == AgentStreamEventType.TEXT_DELTA
+            )
+            == "Final answer."
+        )
+        assert [
+            event.payload["text"]
+            for event in roots
+            if event.type == AgentStreamEventType.THINKING_DELTA
+        ] == ["Verified."]
+        assert [event for event in roots if event.type == AgentStreamEventType.TURN_COMPLETED] == [
+            completed
+        ]
+        assert roots[-1] == completed
+        assert [
+            event.payload["text"]
+            for event in page.events
+            if event.type == AgentStreamEventType.TEXT_DELTA
+            and event.payload.get("subagent_thread") == "child"
+        ] == ["Child result."]
+        assert not any("/history" in path for _, path, _ in server.calls)
+    finally:
+        tailer.unsubscribe_completion(queue)
+        await tailer.stop()
+
+
+def test_dropped_response_does_not_publish_snapshot_text() -> None:
+    ctx = NormalizeContext(session_id="s", tab_id="t", agent_type=AgentType.MASO, run_epoch=1)
+    assert (
+        MasoEventAdapter().normalize_line(
+            raw(
+                "post_llm_response",
+                dropped=True,
+                content="Discarded",
+                reasoning_content="Discarded",
+            ),
+            ctx,
+        )
+        == []
     )
 
 
@@ -617,7 +717,8 @@ async def test_goal_waits_for_root_agent_end_and_hides_protocol(tmp_path, monkey
             turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
         )
         stream = server.streams[-1]
-        stream.emit("turn_end", {"agent_id": "main", "id": "answer", "content": response})
+        stream.emit("post_llm_response", {"agent_id": "main", "id": "answer", "content": response})
+        stream.emit("turn_end", {"agent_id": "main", "turn": 1, "outcome": "completed"})
         stream.emit("agent_start", {"agent_id": "child"})
         stream.emit("agent_end", {"agent_id": "child", "stop_reason": "completed"})
 

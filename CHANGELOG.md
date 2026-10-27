@@ -7,6 +7,15 @@
 
 ## Released
 
+### fix(maso): retain final responses without streamed tokens
+
+- Read authoritative text and reasoning from MASO's `post_llm_response` event.
+  A completed run no longer loses its answer when token streaming is absent or
+  incomplete. Existing streamed prefixes and duplicate snapshots are deduplicated.
+- Preserve root-only completion, child attribution, initial replay exclusion,
+  dropped-frame handling and content-bearing `turn_end` compatibility. Tests cover
+  the HTTP transport, persisted Chat history and Hub-managed Goal protocol.
+
 ### feat(agent): one-call cross-provider subagents (`claude-hub agent run`)
 
 - `claude-hub agent run --provider X --prompt-file -` starts a native Chat with

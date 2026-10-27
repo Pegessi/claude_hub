@@ -1,7 +1,8 @@
 """Normalize MASO's HTTP events without treating its mutable context as history.
 
-MASO's ``turn_end`` ends one LLM call, not the user run. Condensation archives
-and rewrites its trajectory; only root ``agent_end`` completes a Hub turn.
+MASO's ``post_llm_response`` carries the authoritative response snapshot.
+``turn_end`` ends one LLM call, not the user run. Condensation archives and
+rewrites its trajectory; only root ``agent_end`` completes a Hub turn.
 """
 
 from __future__ import annotations
@@ -152,7 +153,7 @@ class MasoEventAdapter(AgentStreamAdapter):
                 if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
                     return []
                 if offset > len(previous):
-                    return []  # await the authoritative turn_end snapshot
+                    return []  # await the authoritative response snapshot
                 overlap = min(len(text), len(previous) - offset)
                 if previous[offset : offset + overlap] != text[:overlap]:
                     return []
@@ -180,7 +181,12 @@ class MasoEventAdapter(AgentStreamAdapter):
             return text_delta(
                 "reasoning", data.get("reasoning"), data.get("reasoning_offset")
             ) + text_delta("content", data.get("content"), data.get("content_offset"))
-        if kind == "turn_end":
+        if kind in {"post_llm_response", "turn_end"}:
+            # Current MASO sends content in post_llm_response, even when no
+            # llm_token was emitted. Retain content-bearing turn_end support
+            # for older services; both snapshots share suffix deduplication.
+            if data.get("dropped") is True:
+                return []
             return text_delta("reasoning", data.get("reasoning_content")) + text_delta(
                 "content", data.get("content")
             )
