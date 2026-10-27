@@ -28,6 +28,12 @@
   launch on every platform. Descendants that call `setsid`/`setpgid`
   themselves escape the group and remain unreachable; a hard backend
   SIGKILL likewise skips lifespan teardown.
+- Teardown no longer busy-spins a core when the provider CLI exits promptly
+  while a TERM-surviving descendant that dropped the inherited stdio pipes
+  lingers in the group: the completed `proc.wait()` future used to be
+  re-awaited back-to-back (~500k–1M `killpg(pgid, 0)` calls per grace
+  window); liveness polling is now paced by the 0.1 s poll interval with no
+  change to the shared deadline or SIGKILL escalation.
 
 ### fix(maso): retain final responses without streamed tokens
 

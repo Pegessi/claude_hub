@@ -137,3 +137,46 @@ Pre-fix confirmation on this machine: the old code left the grandchild alive
 - The post-SIGKILL group drain is only observed for 1 s; a member that somehow
   survives SIGKILL (uninterruptible D-state) is not awaited forever, matching
   the requirement that teardown remain bounded.
+
+## Review follow-up: busy-spin after fast leader exit with a pipe-free group
+
+The independent adversarial review (APPROVE-WITH-NITS) found one real defect
+in the grace loop. When the direct child is reaped while a TERM-immune
+descendant lingers **without** holding the inherited stdio pipes (it
+redirected them at exec), `proc.wait()` resolves at once but
+`killpg(pgid, 0)` still reports the group alive. The loop re-awaited the
+already-completed `wait_task` future on every pass, which returns
+immediately instead of waiting the 0.1 s poll interval — a tight
+`os.killpg(pgid, 0)` busy-spin for the rest of the five-second grace window,
+pegging one core per such teardown. The existing M1 test could not see it:
+its `sleep` grandchild keeps the pipes open, so `wait_task` stays pending and
+`wait_for(..., 0.1)` paces the loop.
+
+Reproduction on this machine (`sh -c 'sh -c "trap \"\" TERM; exec sleep 30
+</dev/null >/dev/null 2>&1" & wait'`): pre-fix teardown took 5.24 s with
+**971,665** liveness polls; the standalone regression assertion against the
+pre-fix snapshot counted 488,499 polls (count varies with host load).
+
+Fix in `_terminate_subprocess`: when `wait_task` is already done and the
+group is still alive, `await asyncio.sleep(min(_GROUP_POLL_INTERVAL,
+remaining))` and re-check, instead of re-awaiting the completed future. The
+single shared deadline, SIGKILL escalation, cancellation path and direct-child
+fallback are unchanged; cancellation of the new sleep still routes through
+the existing `except CancelledError` escalation.
+
+Regression:
+`test_leader_exit_with_live_pipe_free_group_is_poll_paced` uses the
+pipe-dropping TERM-immune grandchild fixture, asserts the same 4.5–8 s shared
+budget, full grandchild reap, and fewer than 100 liveness polls (grace +
+post-kill drain budget; pre-fix produced hundreds of thousands).
+
+Evidence:
+
+- `tests/test_provider_process_group.py`: 11 passed (new test fails on the
+  pre-fix `170ff4c` snapshot: `busy-spin: 488499 ... polls`).
+- Focused suites (process-group + agent_stream/native/codex/traex/cursor/
+  provider/retirement/native goal transport): 560 passed on Python 3.11.16.
+- Wide sweep `-k 'agent_stream|provider|codex|traex|cursor|native'`
+  (browser replay deselected): 1580 passed, 2 skipped.
+- `black`/`isort` (605 files), full-backend `mypy` (589 files), `docs` and
+  `check-staged`: clean.

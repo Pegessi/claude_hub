@@ -290,6 +290,56 @@ async def test_cancelled_teardown_sigkills_and_reaps_group() -> None:
         await transport.stop()
 
 
+async def test_leader_exit_with_live_pipe_free_group_is_poll_paced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reaped leader plus a lingering pipe-free descendant must not busy-spin.
+
+    When the TERM-immune grandchild drops the inherited stdin/stdout/stderr
+    pipe fds at exec (``</dev/null >/dev/null 2>&1``), ``proc.wait()``
+    resolves as soon as the leader dies even though the group is still alive.
+    Re-awaiting that completed future returns immediately, which used to
+    busy-spin ``os.killpg(pgid, 0)`` for the rest of the grace window
+    (~970k polls / one pegged core). Teardown must instead sleep the poll
+    interval: at most ``grace / interval`` liveness checks plus the
+    post-kill drain observations, while still sharing the single deadline.
+    """
+    transport = _transport()
+    poll_count = 0
+    real_alive = ProcessSession._process_group_alive
+
+    def _counted_alive(pgid: int) -> bool:
+        nonlocal poll_count
+        poll_count += 1
+        return real_alive(pgid)
+
+    monkeypatch.setattr(ProcessSession, "_process_group_alive", staticmethod(_counted_alive))
+    try:
+        async with _spawned(
+            transport,
+            [
+                "sh",
+                "-c",
+                'sh -c "trap \\"\\" TERM; exec sleep 30 </dev/null >/dev/null 2>&1" & wait',
+            ],
+        ) as proc:
+            grandchild = await _wait_for_child_exec(proc.pid, "sleep")
+
+            start = asyncio.get_running_loop().time()
+            await transport._terminate_process()
+            elapsed = asyncio.get_running_loop().time() - start
+
+            assert proc.returncode is not None
+            assert await _wait_for(lambda: _dead_and_reaped(grandchild), timeout=3.0)
+            # Still one shared 5s grace budget, not a fast leader-exit return.
+            assert 4.5 <= elapsed <= 8.0, f"teardown took {elapsed:.2f}s"
+            # ~50 grace polls plus at most ~10 post-kill drain observations;
+            # the pre-fix busy-spin produced close to a million polls.
+            assert poll_count < 100, f"busy-spin: {poll_count} group liveness polls"
+    finally:
+        await transport.stop()
+
+
 async def test_double_teardown_is_idempotent() -> None:
     transport = _transport()
     try:
