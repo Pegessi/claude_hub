@@ -85,6 +85,15 @@ two corrections:
 
 ## Risks and follow-up
 
+Follow-up commit (same branch, independent security review APPROVE):
+
+- `_load_configured_profiles` now guards a non-list top-level JSON store
+  (object/scalar/string/null): logged at ERROR and treated as an empty store
+  instead of raising `TypeError` through the profiles API. Previously a
+  malformed operator-owned file 500'd `GET /api/remote/profiles`.
+- Locked additional reject tests: hosts containing tab/LF/CR, U+2010 and
+  U+FF0D/U+FF2F fullwidth lookalikes; `user="-"` and `user="a@b"`.
+
 - Stored profiles whose `ssh_host` uses characters outside the conservative
   set silently disappear from `GET /api/remote/profiles` (a warning is logged
   server-side). Bracketed/scoped IPv6 literals were never usable in the

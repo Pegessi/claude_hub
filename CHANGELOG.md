@@ -13,7 +13,9 @@
   bracketless IPv6; rejects option-looking and metacharacter-bearing values),
   bounds `port` to 1-65535 and restricts `user` to a conservative charset. A
   stored profile or `~/.ssh/config` alias that fails validation is skipped with
-  a warning instead of taking down profile discovery.
+  a warning instead of taking down profile discovery, and a malformed
+  `remote_profiles.json` whose top level is not a JSON list is logged and
+  ignored instead of erroring every profile listing.
 - Every ssh invocation (`api/remote.py`, `services/pty_exec.py`,
   `services/terminal_runtime/process/remote.py`, the PTY-gateway bridge) passes
   `--` before the destination so an option-looking host can never be parsed as
