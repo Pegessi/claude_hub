@@ -141,7 +141,10 @@ class ProcessSession(SessionCore):
         escalated to SIGKILL. ``proc.wait()`` is awaited concurrently only as
         a promptness optimization: asyncio does not resolve it until every
         inherited stdout/stderr/stdio pipe has disconnected, which a
-        surviving grandchild delays.
+        surviving pipe-holding grandchild delays. When the wait resolves
+        early while a pipe-free descendant lingers, group liveness polling
+        is paced by an explicit poll-interval sleep so a completed future
+        cannot busy-spin the loop back-to-back until the deadline.
 
         If teardown itself is cancelled during grace, the group is SIGKILLed
         immediately and the direct child gets a final bounded, shielded reap
@@ -168,6 +171,20 @@ class ProcessSession(SessionCore):
         wait_task: asyncio.Task[int] = asyncio.ensure_future(proc.wait())
         try:
             while loop.time() < deadline:
+                if wait_task.done():
+                    # The leader is already reaped. In fallback mode that is
+                    # the whole teardown condition. In group mode a descendant
+                    # may still be shutting down; if it dropped the inherited
+                    # stdio pipes at exec, the wait task resolves with the
+                    # group still alive and can no longer pace this loop, so
+                    # sleep the poll interval instead of re-awaiting the
+                    # completed future — re-awaiting it returns immediately
+                    # and busy-spins killpg(pgid, 0) until the deadline.
+                    if not group_mode or not self._process_group_alive(pgid):
+                        return
+                    remaining = max(0.0, deadline - loop.time())
+                    await asyncio.sleep(min(_GROUP_POLL_INTERVAL, remaining))
+                    continue
                 remaining = max(0.0, deadline - loop.time())
                 try:
                     await asyncio.wait_for(
@@ -180,9 +197,10 @@ class ProcessSession(SessionCore):
                     # signalling an already-dead pid is tolerated below.
                     pass
                 # The leader must be reaped AND (in group mode) every group
-                # member gone. The two converge within a tick in practice:
-                # once the last member dies the inherited pipe fds close and
-                # the wait task resolves.
+                # member gone. With pipe-holding descendants the two converge
+                # within a tick: once the last member dies the inherited pipe
+                # fds close and the wait task resolves. A descendant that
+                # dropped the pipes is handled by the paced branch above.
                 if wait_task.done() and (not group_mode or not self._process_group_alive(pgid)):
                     return
             # Grace elapsed with the leader or a descendant still alive:
