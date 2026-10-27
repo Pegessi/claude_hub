@@ -1,6 +1,6 @@
 # ProviderSpec: a capability registry and symmetric provider-approval model for `agent_stream`
 
-Date: 2026-10-27 · Status: **Proposal (docs only)** · Branch: `codex/rv-provider-spec`
+Date: 2026-10-27 · Status: **Proposal (docs only; review-validated 2026-10-27, see §9)** · Branch: `codex/rv-provider-spec`
 Base: `main` @ `0211661` · Scope: design, no product code changes
 
 This packet proposes one registry of provider facts (`ProviderSpec`) for the
@@ -53,9 +53,12 @@ provider.
   `runtime/edit_resend.py:75-76`.
 
 **Provider-name conditionals are pervasive.** 172 non-import `AgentType.*`
-references exist across backend non-test code; 29 are explicit
-equality/set-membership branches. Representative branches and the capability
-they actually encode:
+references exist across backend non-test code (reproduced with
+`grep -rn "AgentType\\." claude_hub --include='*.py' | grep -v '/tests/' | grep -v import`);
+90 of them sit on `if/elif` lines that name an `AgentType`, and hand-listed
+`AgentType` sets/dicts/tuples occur at 11 literal sites (some feeding those
+same predicates). Representative branches and the capability they actually
+encode:
 
 | Branch site | Real capability |
 | --- | --- |
@@ -192,7 +195,7 @@ Concrete consequences of the asymmetry, each visible in code:
 ### 1.4 Evidence from recent incidents
 
 - **Adding a provider means hunting branches.** The TraeX postmortem
-  (`docs/working-logs/2026-09-16-traex.md`, "Adversarial-review follow-up"
+  (`docs/working-logs/2026-09-16-traex-agent.md`, "Adversarial-review follow-up"
   M1–M4) records: a `{claude, codex, cursor}` whitelist in `switch_env`
   rejected traex (M1, compare today's `switch.py:36-69`); a busy classifier
   gated `== CODEX` made traex read idle (M2); reusing `CodexJsonlAdapter` let
@@ -226,11 +229,13 @@ Concrete consequences of the asymmetry, each visible in code:
   gateway rejected turns; inconclusive probes must not block
   (`docs/working-logs/2026-10-15-provider-preflight-resilience.md`).
 - **Dead capability contract fields already exist**:
-  `supports_approval_ui` and the capability-level goal fields are declared in
-  `frontend/src/types/agentSessions.ts:103-109` but never read in `src/`
-  (approval cards render from stream events; the UI reads goal owner from
-  `ChatGoal.execution_owner`). An unowned capability vocabulary is itself a
-  drift risk.
+  `supports_approval_ui`, `goal_execution_owner` and `goal_usage_quality` are
+  declared in `frontend/src/types/agentSessions.ts:103-109` but never read in
+  `src/` (approval cards render from stream events; the UI reads goal owner
+  from `ChatGoal.execution_owner`). Note `supports_goals` itself **is**
+  consumed (`useChatGoal.ts:125`, `ChatComposer.vue:104`) — only the owner /
+  quality fields are dead. An unowned capability vocabulary is itself a drift
+  risk.
 - **Minor latent duplication found during this research**: the traex
   reasoning-effort key is read in two spellings
   (`providers/codex.py:646-648` reads `CODEX_REASONING_EFFORT` then
@@ -397,8 +402,12 @@ class GoalSpec(BaseModel):
     default_owner: Literal["provider_native", "hub_managed"] = "hub_managed"
     usage_quality: Literal["exact", "estimated", "unavailable"] = "unavailable"
     # Terminal event that closes one Hub turn on this transport.
+    # MASO's wire event is "agent_end"; root- vs child-scope is decided by a
+    # separate flag (only the root agent_end closes the turn,
+    # maso_events.py:316,337), so the enum keeps the wire name.
     completion_event: Literal["result", "turn_completed",
-                              "turn_ended", "root_agent_end"] = "turn_completed"
+                              "turn_ended", "agent_end"] = "turn_completed"
+    completion_event_scope: Literal["any", "root_only"] = "any"
     completion_requires_provider_event: bool = False
     # Goals are accepted only on direct top-level Chat tabs today
     # (api/goal_runs.py:104-113); keep that a declared fact.
@@ -436,8 +445,12 @@ class ProviderSpec(BaseModel):
     tool_timeline: bool = False
     plan_mode: PlanMode = PlanMode.NONE
     system_instruction_channel: Literal[
-        "none", "cli_flag", "rpc_config", "prompt_sentinel"
+        "none", "cli_flag", "rpc_config", "prompt_sentinel", "prompt_prefix"
     ] = "none"
+    # "prompt_sentinel" (cursor) wraps injected guidance in markers the
+    # transcript adapter strips back out; "prompt_prefix" (maso) prepends
+    # guidance to the first HTTP user message with no strip mechanism
+    # (maso_http.py:326-330). They are not the same channel.
     # Approval capability per surface (Section 1.1 divergence).
     approval_channels: dict[Surface, ApprovalChannel] = Field(
         default_factory=dict
@@ -459,7 +472,13 @@ class ProviderSpec(BaseModel):
 
     # Solo/unattended execution
     solo: Literal["none", "bypass_flag", "sandbox_policy", "always"] = "none"
-    # Whether an approval-blocking turn can be answered headlessly.
+    # Whether an approval-blocking turn can be answered headlessly. This is
+    # derivable from ``solo``: any value other than "none" makes the provider
+    # suppress approvals under solo (claude bypass flag, codex/traex sandbox
+    # policy, cursor always-yolo); "none" (maso HTTP confirm cards today)
+    # means headless turns can block and must fail fast. Keep the field only
+    # if a provider later splits the two; Slice 1 should test
+    # ``headless_safe == (solo != "none")`` for the current matrix.
     headless_safe: bool = False
 
     # Surfaces this provider may run on; remote Chat is supported by none.
@@ -484,13 +503,13 @@ the values verified in Section 1. Terse matrix (full field values in code):
 | images | sdk_base64 (`claude.py:247-286`) | rpc_temp_file | inherits codex | prompt_file_ref (`cursor.py:23-37, 161-220`) | http_chunked (`CHANGELOG.md:814-822`) | no |
 | tool timeline | yes | yes | yes | yes | yes | no |
 | plan mode | cli_flag_probed (`claude.py:228-231`) | rpc_collaboration (`codex.py:504-530`) | rpc (kebab sandbox) | cli_flag_probed (`cursor.py:85-88`) | none (default only, `manager/create.py:123-125`) | no |
-| system instructions | cli_flag (`--append-system-prompt`) | rpc_config | rpc_config | prompt_sentinel (`cursor.py:104-109`) | prompt prefix | none |
+| system instructions | cli_flag (`--append-system-prompt`) | rpc_config | rpc_config | prompt_sentinel (`cursor.py:104-109`) | prompt_prefix | none |
 | approval: terminal tab | native_tui (`claude_jsonl.py:125`) | native_tui | native_tui | native_tui (`cursor_cli_transcript.py:118`) | — | native |
 | approval: direct Chat | oneshot_steer (flag False, `claude.py:35-42`) | rpc_blocking (`codex.py:76`) | rpc_blocking (`traex.py:157-211`) | oneshot_steer | http_confirm (`maso_http.py:700-745`) | — |
 | goals API | none | rpc_thread, negotiated owner (`codex.py:438-445`) | rpc_thread (inherited) | none | none (hub_managed) | none |
 | goal usage quality | `exact` (`claude.py:42`) | `exact` (`codex.py:79`) | `exact` (inherited) | `unavailable` | `unavailable` | unavailable |
 | turn terminal event | `result` | `turn/completed` | `turn/completed` | `turn_ended` | root `agent_end` only (`maso_http.py:195-197`) | — |
-| model catalog | tab_env + static fallback (`session.py:246-254`) | rpc_list + static fallback (`codex.py:532-560`) | static_curated (`native.py:282-300`) | cli_list_models (`native.py:427-437`) | http_catalog (`maso_http.py:131-160`) | — |
+| model catalog | tab_env + static fallback (`session.py:246-254`) | rpc_list + static fallback (`codex.py:532-560`) | rpc_list inherited + static fallback¹ | cli_list_models (`native.py:427-437`) | http_catalog (`maso_http.py:131-160`) | — |
 | model env key | `ANTHROPIC_MODEL` | `CODEX_MODEL` | `CODEX_MODEL` | `CURSOR_MODEL` | `MASO_MODEL` (`subagents.py:59-65`) | — |
 | reasoning effort | model_selection | env_key `CODEX_REASONING_EFFORT` | env_key (+ legacy `TRAEX_REASONING_EFFORT`, `codex.py:646-648`) | model_id_suffix (`providers/model_options.py:61-166`) | model_variants (`maso_http.py:82-124`) | — |
 | solo | bypass_flag (`claude.py:212-215`) | sandbox_policy (`codex.py:447-497`) | sandbox_policy | always (`agent --yolo`, no-op toggle) | none | — |
@@ -506,6 +525,15 @@ the values verified in Section 1. Terse matrix (full field values in code):
 | dot | yes | yes | yes | yes | yes + preflight (`dot/execution.py:18`) | no |
 | terminal tab (TUI) | yes | yes | yes | yes | no | yes |
 | remote target | TUI only | TUI only | TUI only | TUI only | no | yes |
+
+¹ TraeX does not override `prepare_capabilities`/`_discover_models`
+(`providers/traex.py` has no override), so `TraexNativeSession` inherits
+Codex's `model/list` RPC attempt with the curated static list as fallback
+(`codex.py:532-547`; static rows at `native.py:282-300`). Whether deployed
+TraeX app-servers actually answer `model/list` is empirically unverified —
+Slice 1's golden matrix should record the *code* path (rpc_list + fallback);
+if probing later shows the RPC is always unavailable, the spec can downgrade
+this cell with evidence rather than assumption.
 
 `get_spec(agent_type)` returns the record or a permissive-named but
 **capability-empty** record for unknown types: `transport=SHELL`, empty surface
@@ -722,8 +750,11 @@ This replaces the five+ name lists in Section 1.2 with one predicate and makes
   declared as "endpoint identity immutable per session" so switch-env UI need
   not special-case it (`switch.py:46-55`).
 - **Cursor transports** (`terminal` / `acp` / `terminal_transcript` /
-  `native`; `registry.py:55-62`, `runtime.py:45-55`) modeled as a
-  session-scoped transport variant over one spec, not as providers.
+  `native`; `registry.py:55-62`, schema literal at
+  `models/schema_domains/terminal.py:45-50` — whose description lists only
+  `terminal`/`acp`/`terminal_transcript`, while `native` is assigned
+  internally —) modeled as a session-scoped transport variant over one spec,
+  not as providers.
 - **Frontend rollout strategy**: backend-served capability endpoint is the
   single source (Section 3.4); duplicated constants are deleted per surface,
   never all at once. Until a surface migrates, both sources coexist and a
@@ -829,7 +860,7 @@ implementations themselves, ttyd/tmux, and every probe's bounds and TTLs.
   401/403→`needs_auth`, maso-down→`unavailable`, managed non-loopback→
   requirement failed; auth required on the route like other APIs.
 - **Slice 5 — frontend tests**: each migrated surface gets a test with mocked
-  provider payloads asserting visible options/gabels equal the old constants
+  provider payloads asserting visible options/labels equal the old constants
   (a shared fixture served by a TS copy of the golden matrix generated from
   backend to prevent re-drift); `frontend-tests` + `frontend-types`; no
   browser gate needed beyond existing Chat flows because behavior is
@@ -928,3 +959,101 @@ implementations themselves, ttyd/tmux, and every probe's bounds and TTLs.
   `2026-10-27-maso-final-response.md`;
   `2026-09-02-paseo-activity-and-plan-mode-contract.md`;
   `CHANGELOG.md:10-17, 19-49, 3483-3497`.
+
+---
+
+## 9. Review validation (2026-10-27, task 72fc298b)
+
+An independent line-by-line audit re-opened every code citation in this
+packet against the base tree (worktree `rv-provider-spec`, no product code
+touched). Verdict: **the design direction and the §2.3 matrix are sound; the
+packet is fit to use as the Slice 1 contract after the corrections recorded
+below**, which are already applied in this revision.
+
+### 9.1 Citations verified against code (representative, not exhaustive)
+
+- The 172 non-import `AgentType.*` references reproduce exactly
+  (backend non-test `*.py`).
+- Session capability defaults/projection: `providers/session.py:34-45,
+  628-660`; parallel adapter flags at `base.py:198-203`; the
+  claude native-False (`claude.py:35-42`) vs terminal-adapter-True
+  (`claude_jsonl.py:125`) split is real and so is cursor's
+  (`cursor.py:33` True native / `cursor_cli_transcript.py:118` True
+  transcript — the native flag is in fact also True; only Claude shows the
+  cross-hierarchy divergence described in §1.1).
+- Transport facts spot-checked and confirmed: binary map/availability
+  (`native.py:201-218`), five-branch factory (`native.py:585-597`),
+  cursor `model_catalog_for` probe (`native.py:427`), `eof_is_fatal`
+  (`session.py:280-289`, `codex.py:81-84`), resume/rotation for all four
+  CLIs (`claude.py:233-245`, `codex.py:292`, `cursor.py:90-100`),
+  MASO identity fence/delivery tombstone (`maso_http.py:199-236, 774-779`),
+  MASO chunk limits (`maso_http.py:28-29`: 512 KiB / 8 MiB),
+  root-only `agent_end` (`maso_events.py:316,337`).
+- Surface admission lists all reproduce exactly: CLI lists
+  (`subagents.py:26`, task `creation.py:27,149`, `dot.py:21`),
+  dot backend tuple (`dot/execution.py:18`), managed admission
+  (`task_session_executor.py:18-33`, `provisioning.py:40-48`,
+  `manager/create.py:103-134` incl. the two loopback checks),
+  env-key maps (`services/subagents.py:59-68`, `api/tabs.py:37-44`),
+  effort rejection (`services/subagents.py:441-457`).
+- Frontend lists/dead fields all reproduce: the three unions, the eight+
+  provider sets, both CSS palettes lacking a `maso` chip, and the dead
+  frontend fields (see 9.2 correction — narrower than first drafted).
+- All six named fixture tests in §6 exist; all other cited working logs
+  exist.
+
+### 9.2 Corrections applied in this revision
+
+1. **Branch statistic (§1.1).** "29 explicit equality/set-membership
+   branches" was not reproducible. The audited counts are: 172 total
+   non-import references; 90 on `if/elif` lines naming an `AgentType`;
+   11 additional hand-listed `AgentType` literal sets/dicts/tuples (some
+   feeding those same predicates). Wording now states those counts.
+2. **Wrong working-log path (§1.4).** Cited `2026-09-16-traex.md`, which
+   does not exist; the postmortem is `2026-09-16-traex-agent.md`. Fixed
+   (the appendix already had the right name).
+3. **Dead-fields claim too broad (§1.4).** `supports_goals` *is* read in
+   the frontend (`useChatGoal.ts:125`, `ChatComposer.vue:104`); only
+   `supports_approval_ui`, `goal_execution_owner` and `goal_usage_quality`
+   are unread. Claim narrowed and the exception stated.
+4. **TraeX model catalog (§2.3 matrix).** Marked "static_curated"; in
+   code `TraexSession` does not override `prepare_capabilities`/
+   `_discover_models`, so it inherits Codex's `model/list` RPC probe with
+   static fallback. Cell corrected to "rpc_list inherited + static
+   fallback" with footnote 1 recording that deployed-server behavior is
+   empirically unverified and must be pinned by the Slice 1 golden test.
+5. **MASO completion-event literal (§2.2 `GoalSpec`).** Enum had
+   `root_agent_end`; the wire event is `agent_end` with root-scope decided
+   separately. Renamed to `agent_end` and added
+   `completion_event_scope: "any" | "root_only"`.
+6. **System-instruction channel (§2.2, §2.3).** Enum lacked MASO's
+   channel; added `prompt_prefix` and distinguished it from cursor's
+   stripped `prompt_sentinel` (`maso_http.py:326-330`).
+7. **`headless_safe` derivability (§2.2).** For the current matrix it
+   equals `solo != "none"`; documented that Slice 1 should assert the
+   derivation so the field can be dropped until a provider splits them.
+8. **Cursor-transport schema citation (§4).** Pointed at
+   `runtime.py:45-55`, which contains no such definition; the
+   `cursor_transport` literal lives at
+   `models/schema_domains/terminal.py:45-50` (and its description omits
+   the internally assigned `native` value — itself a small doc gap worth
+   fixing when that schema is touched).
+
+### 9.3 Residual risks / things the audit could not close
+
+- **No product code exists yet**; §2.2 is a proposed Pydantic shape, not a
+  compiled contract. The matrix is evidence-backed, but Slice 1's
+  golden-matrix fixture (not prose) must be the reviewable artifact.
+- **TraeX `model/list` runtime behavior** (footnote 1) and the real
+  availability of its RPC modes/catalog on deployed app-servers remain
+  empirically open; the spec should describe the code path and let probes
+  downgrade with evidence, per open decision 7.2.
+- The approval surface matrix in §2.3 lists maso terminal-tab as "—";
+  MASO has no TUI and the terminal pseudo-row mixes "unsupported" with
+  "not applicable". Slice 1 should decide whether `approval_channels`
+  omits a key (unsupported) or maps it to `NONE` explicitly, and test
+  both conventions' effects on `get_spec` consumers.
+- The "29 branches" drift shows the packet's statistics must be generated
+  rather than hand-counted; the Slice 1 equivalence tests already do this
+  for list constants — consider one grep-based assertion for the raw
+  reference count too, or omit the number.
