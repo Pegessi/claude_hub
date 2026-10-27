@@ -99,6 +99,20 @@ def _str_or_none(value: Any) -> Optional[str]:
     return value if isinstance(value, str) else None
 
 
+def _strip_url_or_none(value: Optional[str]) -> Optional[str]:
+    """Strip an explicit URL value; whitespace-only becomes unset.
+
+    Surrounding whitespace in a copied URL is incidental, so a wholesale
+    ``.strip()`` is safe for http(s) URLs. A value containing only whitespace
+    is treated as if it were never provided, so resolution falls through to the
+    next source in the flag > env > config precedence chain.
+    """
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
 def _coerce_port(raw: Optional[str]) -> int:
     """Parse ``CLAUDE_HUB_PORT``; missing/invalid values fall back to default."""
     if raw:
@@ -127,18 +141,34 @@ def build_base_url(host: str, port: int) -> str:
     return f"http://{host}:{port}"
 
 
-def probe_health(base_url: str, *, timeout: float = HEALTH_PROBE_TIMEOUT) -> bool:
-    """Return whether ``GET {base_url}/health`` succeeds with a 2xx response.
+def probe_health(
+    base_url: str,
+    *,
+    timeout: float = HEALTH_PROBE_TIMEOUT,
+    transport: Optional[httpx.BaseTransport] = None,
+) -> bool:
+    """Return whether ``GET {base_url}/health`` identifies a healthy Hub.
 
-    Any transport error (refused, timeout, ...) or non-2xx response counts as
-    unhealthy. The result is never persisted.
+    The probe is a Hub-discovery mechanism, not a generic liveness check, so a
+    2xx status alone is not enough: the response must be JSON with
+    ``status == "healthy"``, the shape returned by the Hub's ``/health`` route.
+    A 2xx with a non-JSON (or unrecognized) body is deliberately treated as
+    unhealthy — another service answering on the port must not be mistaken for
+    the Hub. Any transport error (refused, timeout, ...) or non-2xx response
+    also counts as unhealthy. The result is never persisted.
     """
     try:
-        with httpx.Client(timeout=timeout, trust_env=False) as client:
+        with httpx.Client(timeout=timeout, trust_env=False, transport=transport) as client:
             response = client.get(f"{base_url.rstrip('/')}/health")
     except httpx.HTTPError:
         return False
-    return response.is_success
+    if not response.is_success:
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("status") == "healthy"
 
 
 def auto_detect_base_url(
@@ -182,9 +212,9 @@ def resolve_settings(
         default_section = {}
 
     explicit_base_url = (
-        base_url
-        or os.environ.get("CLAUDE_HUB_URL")
-        or _str_or_none(default_section.get("base_url"))
+        _strip_url_or_none(base_url)
+        or _strip_url_or_none(os.environ.get("CLAUDE_HUB_URL"))
+        or _strip_url_or_none(_str_or_none(default_section.get("base_url")))
     )
     env_host = os.environ.get("CLAUDE_HUB_HOST")
     if env_host is not None:

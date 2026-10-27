@@ -981,6 +981,82 @@ def test_invalid_port_env_falls_back_to_default_port(tmp_path, monkeypatch):
     assert seen == ["http://127.0.0.1:8173", "http://[::1]:8173"]
 
 
+def test_probe_health_requires_hub_identity():
+    from claude_hub.cli.config import probe_health
+
+    cases = [
+        (httpx.Response(200, json={"status": "healthy", "instance_id": "hub"}), True),
+        (httpx.Response(200, text="not json"), False),  # 2xx non-JSON body
+        (httpx.Response(200, json={"status": "degraded"}), False),
+        (httpx.Response(500, json={"status": "healthy"}), False),
+    ]
+    for response, expected in cases:
+        seen: List[httpx.Request] = []
+
+        def handler(request: httpx.Request, _response: httpx.Response = response) -> httpx.Response:
+            seen.append(request)
+            return _response
+
+        result = probe_health("http://127.0.0.1:8173", transport=httpx.MockTransport(handler))
+        assert result is expected
+        assert seen[0].url.path == "/health"
+
+    def raise_connect_error(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    assert (
+        probe_health("http://127.0.0.1:8173", transport=httpx.MockTransport(raise_connect_error))
+        is False
+    )
+
+
+def test_whitespace_only_explicit_urls_fall_through(tmp_path, monkeypatch):
+    from claude_hub.cli.config import DEFAULT_BASE_URL, resolve_settings
+
+    config_file = tmp_path / "config.toml"
+    for key in ("CLAUDE_HUB_URL", "CLAUDE_HUB_HOST", "CLAUDE_HUB_PORT"):
+        monkeypatch.delenv(key, raising=False)
+
+    def resolve(**overrides: Any) -> Any:
+        kwargs: Dict[str, Any] = dict(
+            base_url=None,
+            token=None,
+            cookie=None,
+            json_output=False,
+            verbose=False,
+            config_path=str(config_file),
+            health_probe=lambda url: False,
+        )
+        kwargs.update(overrides)
+        return resolve_settings(**kwargs)
+
+    # A padded-but-valid config URL is stripped and used verbatim otherwise.
+    config_file.write_text('[default]\nbase_url = "  http://from-file:9999  "\n', encoding="utf-8")
+    assert resolve().base_url == "http://from-file:9999"
+
+    # Whitespace-only / empty config value falls through to the probe chain.
+    for raw in ('[default]\nbase_url = "   "\n', '[default]\nbase_url = ""\n'):
+        config_file.write_text(raw, encoding="utf-8")
+        assert resolve().base_url == DEFAULT_BASE_URL
+
+    # Whitespace-only / empty env URL falls through to the config file.
+    config_file.write_text('[default]\nbase_url = "http://from-file:9999"\n', encoding="utf-8")
+    for raw_env in ("   ", ""):
+        monkeypatch.setenv("CLAUDE_HUB_URL", raw_env)
+        assert resolve().base_url == "http://from-file:9999"
+
+    # A padded env URL is stripped and used.
+    monkeypatch.setenv("CLAUDE_HUB_URL", "  http://from-env:8888  ")
+    assert resolve().base_url == "http://from-env:8888"
+
+    # Whitespace-only / empty flag falls through to the env value.
+    for raw_flag in ("   ", ""):
+        assert resolve(base_url=raw_flag).base_url == "http://from-env:8888"
+
+    # A padded flag URL is stripped and wins over env.
+    assert resolve(base_url="  http://from-flag:7777  ").base_url == "http://from-flag:7777"
+
+
 def test_fs_alias_invokes_filesystem_endpoint(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"home": "/home/tester"})
@@ -991,17 +1067,40 @@ def test_fs_alias_invokes_filesystem_endpoint(monkeypatch):
     assert captured[0].url.path == "/api/filesystem/home"
 
 
-def test_transport_error_names_url_and_suggests_ipv6():
+def test_transport_error_names_url_and_suggests_ipv6_loopback_same_port():
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("[Errno 111] Connection refused", request=request)
 
-    client = make_client(handler)
+    client = HubClient(
+        base_url="http://127.0.0.1:9911",
+        transport=httpx.MockTransport(handler),
+        token="secret-session-token",
+    )
+    with pytest.raises(HubError) as exc:
+        client.list_workspaces()
+    message = str(exc.value)
+    assert "http://127.0.0.1:9911/api/workspaces" in message
+    # The IPv6 suggestion keeps the REQUEST port instead of hardcoding 8173.
+    assert "http://[::1]:9911" in message
+    assert "8173" not in message
+    assert "CLAUDE_HUB_URL" in message
+    # Credentials live in the cookie header; they must never surface in the error.
+    assert "secret-session-token" not in message
+    assert "cookie" not in message.lower()
+
+
+def test_transport_error_non_loopback_host_has_no_bracketed_hint():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("[Errno 111] Connection refused", request=request)
+
+    client = HubClient(base_url="http://testserver", transport=httpx.MockTransport(handler))
     with pytest.raises(HubError) as exc:
         client.list_workspaces()
     message = str(exc.value)
     assert "http://testserver/api/workspaces" in message
-    assert "http://[::1]:8173" in message
-    assert "CLAUDE_HUB_URL" in message
+    assert "[::1]" not in message
+    assert "8173" not in message  # no hardcoded default port
+    assert "same port" in message
 
 
 def test_env_preset_for_agent_type_defaults_claude_to_day1(tmp_path, monkeypatch):
