@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, Request
@@ -313,9 +314,18 @@ app.include_router(api_router)
 
 
 @app.get("/health")
-async def health_check() -> dict[str, str]:
-    """Health check endpoint."""
-    return {"status": "healthy", "instance_id": INSTANCE_ID}
+async def health_check() -> dict[str, Any]:
+    """Health check endpoint.
+
+    Stays ``healthy`` (process is serving) but surfaces persistent
+    state-quarantine warnings so operators can see corrupted durable state
+    that was quarantined at startup.
+    """
+    body: dict[str, Any] = {"status": "healthy", "instance_id": INSTANCE_ID}
+    recovery_warnings = workspace_manager.state_recovery_warnings()
+    if recovery_warnings:
+        body["warnings"] = recovery_warnings
+    return body
 
 
 # Production frontend serving. When ``serve_frontend`` is enabled (start.sh

@@ -7,6 +7,7 @@ from typing import Callable
 
 from pydantic import ValidationError
 
+from ...models.task_mailbox import TaskEvent
 from ..chat_message_inbox import ChatMessageInbox
 from ..legacy_state_migration import (
     LEGACY_TASK_KEYS,
@@ -50,6 +51,10 @@ class _StateMixin(_WorkspaceManagerBase):
 
     def __init__(self) -> None:
         self._feedback_started_at = self._runtime_now()
+        # Fail-closed startup signals from quarantined durable state stores;
+        # surfaced through state_recovery_warnings() / /health while a marker
+        # remains on disk.
+        self._state_recovery_warnings: list[str] = []
         self.workspaces: dict[str, Workspace] = {}
         self.tasks: dict[str, WorkspaceTask] = {}
         self._task_activity_cursors: dict[str, tuple[int, int]] = {}
@@ -166,7 +171,9 @@ class _StateMixin(_WorkspaceManagerBase):
         return self._workspace_dir(workspace_id) / "snapshot.md"
 
     def _load_state(self) -> None:
-        if INDEX_FILE.exists():
+        if INDEX_FILE.exists() or self._backup_path_for(INDEX_FILE).exists():
+            # An orphan backup with no primary is an anomaly; the durable
+            # loader recovers/quarantines it instead of silently starting empty.
             self._load_nested_state()
         elif LEGACY_STATE_FILE.exists():
             self._load_legacy_state()
@@ -235,19 +242,73 @@ class _StateMixin(_WorkspaceManagerBase):
             if isinstance(item, dict) and item.keys() - known:
                 raise _UnknownTaskFieldsError("Workspace task record contains unknown fields")
 
-    def _maybe_migrate_workspace_state_file(
+    def _payload_needs_legacy_migration(
+        self, raw: dict[str, Any], index_item: dict[str, Any] | None
+    ) -> bool:
+        return state_has_legacy_orchestration_keys(raw) or (
+            index_item is not None and index_has_legacy_keys(index_item)
+        )
+
+    def _validate_index_payload(self, raw: Any) -> dict[str, Any]:
+        """Structural validation for index.json (run on primary and backup)."""
+
+        if not isinstance(raw, dict):
+            raise ValueError("index payload must be a JSON object")
+        items = raw.get("workspaces")
+        if not isinstance(items, list):
+            raise ValueError("index payload 'workspaces' must be a list")
+        for item in items:
+            if not isinstance(item, dict) or not item.get("id"):
+                raise ValueError("index workspace entries must be objects with an 'id'")
+            # Full structural parse; an entry this build cannot model means the
+            # file must not be loaded and later rewritten as-is.
+            Workspace(**self._normalize_workspace_item(item))
+        return raw
+
+    def _validate_workspace_state_payload(
+        self,
+        raw: Any,
+        workspace_id: str,
+        index_item: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Structural validation for one workspace state.json (primary/backup)."""
+
+        if not isinstance(raw, dict):
+            raise ValueError("workspace state payload must be a JSON object")
+        for key in ("tasks", "sessions", "reports"):
+            if not isinstance(raw.get(key, []), list):
+                raise ValueError(f"workspace state {key!r} must be a list")
+        needs_migration = self._payload_needs_legacy_migration(raw, index_item)
+        self._validate_task_record_fields(raw.get("tasks", []), allow_legacy=needs_migration)
+        # Legacy records contain keys this build's models reject (e.g.
+        # ``agent_run_id``); they are only valid after the migration mapping.
+        candidate = raw
+        if needs_migration:
+            candidate = migrate_raw_workspace_state(
+                workspace_id=workspace_id,
+                raw=raw,
+                index_item=dict(index_item) if index_item is not None else None,
+            ).state
+        for item in candidate.get("tasks", []):
+            WorkspaceTask(**self._normalize_task_item(item))
+        for item in candidate.get("sessions", []):
+            ManagedSession(**self._normalize_session_item(item))
+        for item in candidate.get("reports", []):
+            AgentReport(**self._normalize_report_item(item))
+        for item in candidate.get("task_events") or []:
+            if not isinstance(item, dict):
+                raise ValueError("workspace state 'task_events' entries must be objects")
+            TaskEvent(**item)
+        return raw
+
+    def _migrate_workspace_state_payload(
         self,
         workspace_id: str,
         state_file: Path,
+        raw: dict[str, Any],
         index_item: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        raw: dict[str, Any] = json.loads(state_file.read_text(encoding="utf-8"))
-        needs_migration = state_has_legacy_orchestration_keys(raw) or (
-            index_item is not None and index_has_legacy_keys(index_item)
-        )
-        self._validate_task_record_fields(raw.get("tasks", []), allow_legacy=needs_migration)
-        if not needs_migration:
-            return raw
+        """Rewrite a legacy payload in place (validated before calling)."""
 
         index_copy = dict(index_item) if index_item is not None else None
         result = migrate_raw_workspace_state(
@@ -256,9 +317,6 @@ class _StateMixin(_WorkspaceManagerBase):
             index_item=index_copy,
         )
         migrated = result.state
-        # Validate before either the backup or the migrated source is written.
-        for item in migrated.get("tasks", []):
-            WorkspaceTask(**self._normalize_task_item(item))
         backup = state_file.with_suffix(".json.pre-migration-backup")
         if not backup.exists():
             backup.write_text(json.dumps(raw, indent=2), encoding="utf-8")
@@ -277,67 +335,83 @@ class _StateMixin(_WorkspaceManagerBase):
             )
         return migrated
 
+    def _workspace_state_validator(
+        self, workspace_id: str, index_item: dict[str, Any] | None
+    ) -> Callable[[Any], dict[str, Any]]:
+        """Bind the index item to one workspace state validator."""
+
+        def validate(raw: Any) -> dict[str, Any]:
+            return self._validate_workspace_state_payload(raw, workspace_id, index_item)
+
+        return validate
+
     def _load_nested_state(self) -> None:
-        try:
-            index = json.loads(INDEX_FILE.read_text(encoding="utf-8"))
-            index_items: dict[str, dict[str, Any]] = {}
-            self.workspaces = {}
-            index_dirty = False
-            for item in index.get("workspaces", []):
-                if not isinstance(item, dict) or not item.get("id"):
-                    continue
-                workspace_id = str(item["id"])
-                index_items[workspace_id] = item
-                if index_has_legacy_keys(item):
-                    index_dirty = True
-                self.workspaces[workspace_id] = Workspace(**self._normalize_workspace_item(item))
+        index_result = self._load_durable_json(
+            INDEX_FILE,
+            label="workspace index",
+            validator=self._validate_index_payload,
+        )
+        index = index_result.data if isinstance(index_result.data, dict) else {}
+        index_items: dict[str, dict[str, Any]] = {}
+        self.workspaces = {}
+        index_dirty = False
+        for item in index.get("workspaces", []):
+            workspace_id = str(item["id"])
+            index_items[workspace_id] = item
+            if index_has_legacy_keys(item):
+                index_dirty = True
+            self.workspaces[workspace_id] = Workspace(**self._normalize_workspace_item(item))
 
-            migrated_any = False
-            for workspace_id in self.workspaces:
-                state_file = self._workspace_state_file(workspace_id)
-                if not state_file.exists():
-                    continue
-                index_item = index_items.get(workspace_id)
-                data = self._maybe_migrate_workspace_state_file(
-                    workspace_id,
-                    state_file,
-                    index_item,
+        migrated_any = False
+        for workspace_id in self.workspaces:
+            state_file = self._workspace_state_file(workspace_id)
+            index_item = index_items.get(workspace_id)
+            result = self._load_durable_json(
+                state_file,
+                label=f"workspace state ({workspace_id})",
+                validator=self._workspace_state_validator(workspace_id, index_item),
+            )
+            data = result.data
+            if not isinstance(data, dict):
+                # Quarantined without a usable backup: the workspace row stays
+                # indexed but its tasks/sessions/reports start empty; evidence
+                # and the marker prevent silent evidence loss.
+                continue
+            if self._payload_needs_legacy_migration(data, index_item):
+                data = self._migrate_workspace_state_payload(
+                    workspace_id, state_file, data, index_item
                 )
-                if state_has_legacy_orchestration_keys(data):
-                    raise ValueError(
-                        f"Legacy Agent Tree keys remain after migration workspace_id={workspace_id}"
-                    )
-                if index_item is not None and index_has_legacy_keys(index_item):
-                    index_dirty = True
-                if state_file.with_suffix(".json.pre-migration-backup").exists():
-                    migrated_any = True
-                for item in data.get("tasks", []):
-                    task = WorkspaceTask(**self._normalize_task_item(item))
-                    self.tasks[task.id] = task
-                for item in data.get("sessions", []):
-                    session = ManagedSession(**self._normalize_session_item(item))
-                    self.sessions[session.id] = session
-                for item in data.get("reports", []):
-                    report = AgentReport(**self._normalize_report_item(item))
-                    self.reports[report.id] = report
-                from ..task_graph import materialize_loaded_task_graph
+            if state_has_legacy_orchestration_keys(data):
+                raise ValueError(
+                    f"Legacy Agent Tree keys remain after migration workspace_id={workspace_id}"
+                )
+            if index_item is not None and index_has_legacy_keys(index_item):
+                index_dirty = True
+            if state_file.with_suffix(".json.pre-migration-backup").exists():
+                migrated_any = True
+            for item in data.get("tasks", []):
+                task = WorkspaceTask(**self._normalize_task_item(item))
+                self.tasks[task.id] = task
+            for item in data.get("sessions", []):
+                session = ManagedSession(**self._normalize_session_item(item))
+                self.sessions[session.id] = session
+            for item in data.get("reports", []):
+                report = AgentReport(**self._normalize_report_item(item))
+                self.reports[report.id] = report
+            from ..task_graph import materialize_loaded_task_graph
 
-                materialize_loaded_task_graph(self.tasks, workspace_id)
-                self.task_mailbox.load_from_dict(workspace_id, data)
+            materialize_loaded_task_graph(self.tasks, workspace_id)
+            self.task_mailbox.load_from_dict(workspace_id, data)
 
-            if index_dirty:
-                index_payload = {
-                    "workspaces": [
-                        self._workspace_index_item(item) for item in self.workspaces.values()
-                    ]
-                }
-                self._atomic_write_text(INDEX_FILE, json.dumps(index_payload, indent=2))
-            elif migrated_any:
-                pass
-        except ValueError:
-            raise
-        except Exception as e:
-            logger.error(f"Failed to load nested workspace state: {e}")
+        if index_dirty:
+            index_payload = {
+                "workspaces": [
+                    self._workspace_index_item(item) for item in self.workspaces.values()
+                ]
+            }
+            self._atomic_save_state_text(INDEX_FILE, json.dumps(index_payload, indent=2))
+        elif migrated_any:
+            pass
 
     def _load_legacy_state(self) -> None:
         try:
