@@ -1,5 +1,7 @@
 """Compatibility mixin and prompt exports for workspace lifecycle."""
 
+import time
+
 from claude_hub.services.workspace_manager._base import _WorkspaceManagerBase
 from claude_hub.services.workspace_manager._constants import *  # noqa: F401,F403
 from claude_hub.services.workspace_manager.workspaces.cleanup import _WorkspaceCleanupMixin
@@ -71,10 +73,67 @@ class _WorkspacesMixin(
                 pass
 
     async def _background_monitor_loop(self) -> None:
+        # (step, scope, failure_type) -> (last log monotonic, hidden repeats).
+        # Kept local to the loop so a persistently broken step cannot flood the
+        # log once per monitor interval; state dies with the monitor task.
+        error_log_state: dict[tuple[str, str, str], tuple[float, int]] = {}
+
+        def _log_step_error(step: str, scope: str, failure_type: str, *, timed_out: bool) -> None:
+            now = time.monotonic()
+            key = (step, scope, failure_type)
+            logged_at, suppressed = error_log_state.get(key, (0.0, 0))
+            if now - logged_at < WORKSPACE_MONITOR_ERROR_LOG_INTERVAL_SECONDS:
+                error_log_state[key] = (logged_at, suppressed + 1)
+                return
+            error_log_state[key] = (now, 0)
+            scope_suffix = f" {scope}" if scope else ""
+            detail = (
+                f" ({suppressed} prior identical failure log(s) suppressed)" if suppressed else ""
+            )
+            if timed_out:
+                logger.warning(
+                    "Workspace background monitor step %s%s timed out after %s seconds%s",
+                    step,
+                    scope_suffix,
+                    WORKSPACE_MONITOR_STEP_TIMEOUT_SECONDS,
+                    detail,
+                )
+            else:
+                logger.exception(
+                    "Workspace background monitor step %s%s failed%s",
+                    step,
+                    scope_suffix,
+                    detail,
+                )
+
+        async def _guard_awaitable(step: str, scope: str, awaitable: Any) -> None:
+            try:
+                await asyncio.wait_for(awaitable, timeout=WORKSPACE_MONITOR_STEP_TIMEOUT_SECONDS)
+            except asyncio.CancelledError:
+                raise
+            except asyncio.TimeoutError:
+                _log_step_error(step, scope, "timeout", timed_out=True)
+            except Exception as exc:
+                _log_step_error(step, scope, type(exc).__name__, timed_out=False)
+
+        def _guard_call(step: str, scope: str, func: Any, *args: Any) -> None:
+            try:
+                func(*args)
+            except Exception as exc:
+                _log_step_error(step, scope, type(exc).__name__, timed_out=False)
+
         while True:
             try:
-                ttyd_manager.schedule_pending_stream_cleanup()
-                await self._refresh_session_statuses(run_auto_continue=True)
+                _guard_call(
+                    "schedule_pending_stream_cleanup",
+                    "",
+                    ttyd_manager.schedule_pending_stream_cleanup,
+                )
+                await _guard_awaitable(
+                    "refresh_session_statuses",
+                    "",
+                    self._refresh_session_statuses(run_auto_continue=True),
+                )
                 # Expire stale processing call_ids for sessions whose tmux
                 # inbox is gone (STOPPED). A call_id in processing means the
                 # pump successfully sent it to tmux; for live sessions the
@@ -85,10 +144,12 @@ class _WorkspacesMixin(
                 # point expiry moves the stranded call_ids back to pending
                 # for re-delivery.
                 for session_id in list(self.sessions):
-                    try:
-                        self._expire_processing_leases(session_id)
-                    except Exception:
-                        logger.exception("Lease expiry failed for session %s", session_id)
+                    _guard_call(
+                        "expire_processing_leases",
+                        f"session_id={session_id}",
+                        self._expire_processing_leases,
+                        session_id,
+                    )
                 # Receipt-based cold recovery for live sessions: query the
                 # tmux-server receipt for each processing call_id. If the
                 # receipt is absent, the paste never ran and we can safely
@@ -100,13 +161,11 @@ class _WorkspacesMixin(
                         continue
                     if not sess.processing_call_ids:
                         continue
-                    try:
-                        await self._recover_processing_via_receipt(session_id)
-                    except Exception:
-                        logger.exception(
-                            "Receipt-based processing recovery failed for session %s",
-                            session_id,
-                        )
+                    await _guard_awaitable(
+                        "recover_processing_via_receipt",
+                        f"session_id={session_id}",
+                        self._recover_processing_via_receipt(session_id),
+                    )
                 # Pump any pending call_ids that were not yet delivered to
                 # tmux (e.g. the pump failed on a previous cycle, or a new
                 # message was enqueued). This is the live counterpart to the
@@ -115,22 +174,28 @@ class _WorkspacesMixin(
                     sess = self.sessions.get(session_id)
                     if sess is None or not sess.pending_call_ids:
                         continue
-                    try:
-                        await self._pump_session_messages(session_id)
-                    except Exception:
-                        logger.exception("Live pump failed for session %s", session_id)
+                    await _guard_awaitable(
+                        "pump_session_messages",
+                        f"session_id={session_id}",
+                        self._pump_session_messages(session_id),
+                    )
                 for workspace_id in list(self.workspaces):
-                    await self.dispatch_workspace(workspace_id, refresh_sessions=False)
-                    try:
-                        await self._tick_task_lifecycles(workspace_id)
-                    except Exception:
-                        logger.exception(
-                            "Task lifecycle observation failed workspace_id=%s",
-                            workspace_id,
-                        )
-                await self._tick_resident_agents()
-                await self._tick_scheduled_tasks()
-                self._kick_feedback_automation()
+                    # dispatch and lifecycle are guarded independently: a
+                    # failing dispatch for one workspace must skip neither its
+                    # lifecycle observation nor any other workspace.
+                    await _guard_awaitable(
+                        "dispatch_workspace",
+                        f"workspace_id={workspace_id}",
+                        self.dispatch_workspace(workspace_id, refresh_sessions=False),
+                    )
+                    await _guard_awaitable(
+                        "tick_task_lifecycles",
+                        f"workspace_id={workspace_id}",
+                        self._tick_task_lifecycles(workspace_id),
+                    )
+                await _guard_awaitable("tick_resident_agents", "", self._tick_resident_agents())
+                await _guard_awaitable("tick_scheduled_tasks", "", self._tick_scheduled_tasks())
+                _guard_call("kick_feedback_automation", "", self._kick_feedback_automation)
             except asyncio.CancelledError:
                 raise
             except Exception:

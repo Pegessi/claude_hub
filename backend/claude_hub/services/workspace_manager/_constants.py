@@ -148,6 +148,17 @@ HUBTASK_ORPHAN_GRACE_SECONDS = 60
 HUBTASK_ORPHAN_MAX_ATTEMPTS = 3
 PROMPT_STUCK_RISK_LEVEL = "prompt_dispatch_stalled"
 WORKSPACE_MONITOR_INTERVAL_SECONDS = 5
+# Each monitor step (session refresh, per-session recovery, per-workspace
+# dispatch/lifecycle, resident/scheduled ticks) is isolated: a failure or a
+# hung awaitable in one step must not skip the remaining steps of a round or
+# stall every workspace. An awaitable step that runs longer than this is
+# cancelled and logged. Generous by default because a step legitimately waits
+# on tmux/API I/O across many workspaces.
+WORKSPACE_MONITOR_STEP_TIMEOUT_SECONDS = 60.0
+# A persistently failing step would otherwise produce a traceback every monitor
+# interval. Identical failures (same step + scope + failure type) are logged at
+# most once per this window; the next log notes how many repeats were hidden.
+WORKSPACE_MONITOR_ERROR_LOG_INTERVAL_SECONDS = 60.0
 # Agent-facing examples call the Hub over localhost (or a loopback SSH
 # forward). Keep external traffic on the configured proxy while forcing these
 # internal control-plane requests to stay on the machine. --fail-with-body also
@@ -406,7 +417,9 @@ __all__ = [
     "TMUX_SUBMIT_ATTEMPTS",
     "TMUX_SUBMIT_SETTLE_SECONDS",
     "TerminalAgentStatus",
+    "WORKSPACE_MONITOR_ERROR_LOG_INTERVAL_SECONDS",
     "WORKSPACE_MONITOR_INTERVAL_SECONDS",
+    "WORKSPACE_MONITOR_STEP_TIMEOUT_SECONDS",
     "WORKTREE_LIST_TIMEOUT_SECONDS",
     "WORKTREE_ROOT_CACHE_TTL_SECONDS",
     "Workspace",
