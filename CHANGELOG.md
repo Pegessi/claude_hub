@@ -7,6 +7,17 @@
 
 ## Released
 
+### fix(cli): redact query secrets and userinfo from connection errors
+
+- CLI transport errors rendered the full attempted request URL, so a failed
+  `auth callback` call echoed the OAuth authorization `code` and CSRF
+  `state` query values to the terminal, and a base URL containing userinfo
+  leaked its embedded password. Connect errors now render a sanitized URL
+  that keeps scheme, host, port and path (the diagnosis-relevant parts) while
+  stripping the query string and URL username/password. The same-port IPv6
+  loopback hint is unchanged. Regression tests cover callback query secrets,
+  userinfo credentials and the existing connect-hint behavior.
+
 ### feat(cli): auto-detect loopback base URL over IPv4/IPv6 and derive from HOST/PORT
 
 - Base URL resolution is now `--base-url` > `CLAUDE_HUB_URL` > config file
