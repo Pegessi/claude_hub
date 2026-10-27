@@ -24,10 +24,15 @@
   in `CLAUDE_HUB_TRUSTED_PROXIES` (default loopback), so a remote client cannot
   forge the header; a configured HTTPS `public_url`/`frontend_url` still implies
   Secure. The trust primitives are shared with the trusted-proxy branch.
-- The uvicorn access logger (which prints the full request target including the
-  query string) now redacts `code`, `state` and `session_id` values, closing
-  the leak of OAuth codes and WebSocket bearer session ids into `backend.log`.
-  WebSocket auth log lines already emitted only a 6-character session prefix.
+- Uvicorn prints the full request target (including the query string) in two
+  places, both now redacted for `code`, `state` and `session_id` values: the
+  HTTP access record on the `uvicorn.access` logger (OAuth code/state) and the
+  WebSocket handshake on `uvicorn.error` (the bearer `session_id` terminal and
+  agent-stream sockets use in uvicorn 0.42, where the path is a different
+  positional arg). Redaction is template-aware, so ordinary `uvicorn.error`
+  startup/error records are untouched. This closes the leak of OAuth codes and
+  WebSocket bearer session ids into `backend.log`. WebSocket auth log lines
+  otherwise still emit only a 6-character session prefix.
 
 ### fix(maso): retain final responses without streamed tokens
 

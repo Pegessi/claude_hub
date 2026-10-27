@@ -91,3 +91,43 @@ order (logging configured in `Config.__init__`, before the app is imported).
   WebSocket auth log lines. Other code paths do not log OAuth codes or bearer
   session ids; Feishu token/userinfo logging is pre-existing and out of scope.
 - No merge, push, deployment or service restart; branch stays unmerged.
+
+## Independent-review revision (F1/F2) — log redaction
+
+Independent review (`VERDICT: REQUEST_CHANGES`) found the access-log fix did
+not actually cover WebSockets under real uvicorn 0.42:
+
+- **F1 (leak):** all three WS implementations log the handshake on
+  **`uvicorn.error`**, not `uvicorn.access`
+  (`websockets_impl.py`/`wsproto_impl.py`/`websockets_sansio_impl.py`
+  `[accepted]` / `403` / `%d`), and the WS template puts the full scope path
+  at positional arg **1** (`(client_addr, full_path[, status])`), whereas the
+  installer only instrumented `uvicorn.access` and masked arg 2. So
+  `?session_id=` reached persistent stdout-captured logs in cleartext. In the
+  default config `uvicorn.error` has no own handler and propagates to the
+  `uvicorn` parent.
+- **F2 (false test):** `test_auth_log_redaction.py` posted a WS-shaped record
+  to `uvicorn.access` — a logger/shape uvicorn never produces for WS — so the
+  test passed despite the production leak.
+
+Fix in `auth/log_security.py`:
+
+- `_mask_record_args(msg, args, *, websocket_only)` is now template-aware: it
+  detects uvicorn's WS templates (`'%s - "WebSocket %s" …'`) and masks path
+  arg 1, else the HTTP path arg 2.
+- `install_redacting_access_formatter()` attaches a logger-level filter to
+  **both** loggers: `uvicorn.access` masks HTTP + WS templates, `uvicorn.error`
+  masks WS templates only (`websocket_only=True`) so startup/lifespan/exception
+  records are untouched. The logger filter rewrites the record before handlers
+  and before propagation, covering both an installed `uvicorn.error` handler
+  and the real `uvicorn` parent handler. The AccessFormatter-class swap and
+  `uvicorn.access` handler reformatting are unchanged (HTTP only).
+
+Tests rewritten to emit uvicorn's exact templates on their real loggers:
+`[accepted]`, `403` and `%d` WS records on `uvicorn.error`, asserted through a
+production `DefaultFormatter` handler, through the `uvicorn` parent handler
+(real default topology, no own error handler), and that non-WS `uvicorn.error`
+records (including a query-shaped string at arg 1) pass through verbatim. A
+real-uvicorn `Config.configure_logging()` + app-import probe confirms HTTP
+`code`/`state` on `uvicorn.access` and WS `session_id` on `uvicorn.error` both
+render `[REDACTED]`, while benign error records stay intact.

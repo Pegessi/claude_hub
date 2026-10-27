@@ -46,10 +46,11 @@ console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-# The uvicorn access logger prints the full request target, including the
-# query string, which carries OAuth code/state and the WebSocket bearer
-# session_id. Swap its formatter for one that masks those values. This must
-# run at import time: uvicorn configures logging before importing the app.
+# Uvicorn prints the full request target, including the query string, which
+# carries OAuth code/state on the HTTP access logger and the WebSocket bearer
+# session_id on uvicorn.error (WS handshakes in uvicorn 0.42). Mask both
+# before they reach console/file logs. This must run at import time: uvicorn
+# configures logging before importing the app.
 install_redacting_access_formatter()
 
 # Get our logger
