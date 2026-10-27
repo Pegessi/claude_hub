@@ -5,6 +5,8 @@ redirects ``SESSIONS_FILE`` to a ``tmp_path`` so the real store is never touched
 and expiry/cleanup branches can be driven deterministically.
 """
 
+import os
+import stat
 from datetime import datetime, timedelta
 
 import pytest
@@ -108,3 +110,34 @@ def test_load_sessions_tolerates_corrupt_file() -> None:
 
     # A corrupt store degrades to empty rather than raising.
     assert session_store._load_sessions() == {}
+
+
+def test_saved_sessions_file_is_owner_only() -> None:
+    session_store.create_session(_user(), "access", "refresh")
+
+    mode = stat.S_IMODE(session_store.SESSIONS_FILE.stat().st_mode)
+    assert mode == 0o600
+
+
+def test_loading_tightens_loose_pre_existing_file() -> None:
+    session_store.SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    session_store.SESSIONS_FILE.write_text("{}")
+    os.chmod(session_store.SESSIONS_FILE, 0o664)
+
+    assert session_store._load_sessions() == {}
+
+    mode = stat.S_IMODE(session_store.SESSIONS_FILE.stat().st_mode)
+    assert mode == 0o600
+
+
+def test_save_replaces_loose_file_with_owner_only_permissions() -> None:
+    # A file left behind by an older release (group/world readable) must not
+    # keep those permissions after a rewrite.
+    session_store.SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    session_store.SESSIONS_FILE.write_text("{}")
+    os.chmod(session_store.SESSIONS_FILE, 0o664)
+
+    session_store.create_session(_user(), "access", "refresh")
+
+    mode = stat.S_IMODE(session_store.SESSIONS_FILE.stat().st_mode)
+    assert mode == 0o600
