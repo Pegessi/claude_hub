@@ -18,154 +18,21 @@ class _StatusRefreshMixin(_WorkspaceManagerBase):
         *,
         run_auto_continue: bool = False,
     ) -> None:
-        sessions = [
-            session
-            for session in self.sessions.values()
-            if not session.archived
-            and (workspace_id is None or session.workspace_id == workspace_id)
-        ]
-        tab_ids = [
-            session.tab_id for session in sessions if session.session_kind != SessionKind.CHAT
-        ]
-        statuses = (
-            {
-                status.tab_id: status
-                for status in await ttyd_manager.list_tab_agent_statuses(tab_ids=tab_ids)
-            }
-            if tab_ids
-            else {}
-        )
+        sessions = self._monitor_refresh_sessions(workspace_id)
+        # The status fetch is one batched I/O call shared by every session;
+        # the per-session refresh below is split out so the background monitor
+        # can bound each session independently.
+        statuses = await self._collect_session_agent_statuses(sessions)
         changed = False
         for session in sessions:
-            session_id = session.id
-            if session.status in {ManagedSessionStatus.DONE, ManagedSessionStatus.ERROR}:
-                continue
-            if session.session_kind == SessionKind.CHAT:
-                changed = self._refresh_chat_session_status(session) or changed
-                continue
-            status = statuses.get(session.tab_id)
-            if not status:
-                continue
-            live = self.sessions.get(session_id)
-            if (
-                live is None
-                or live.tab_id != session.tab_id
-                or live.created_at != session.created_at
-            ):
-                continue
-            session = live
-            next_status = self._map_runtime_status(status)
-            runtime_status = status.status
-            if next_status == ManagedSessionStatus.STOPPED and self._is_spawn_grace_period(session):
-                continue
-
-            current_task_id = session.current_task_id or session.task_id
-            update: dict[str, Any] = {
-                "status": next_status,
-                "runtime_status": runtime_status,
-                "current_task_id": current_task_id,
-                "updated_at": status.sampled_at,
-            }
-            if status.last_changed_at:
-                update["last_activity_at"] = status.last_changed_at
-
-            if current_task_id:
-                task = self.tasks.get(current_task_id)
-                if task is not None and not self._workspace_owns_task(task):
-                    task = None
-                if task and task.status in {
-                    WorkspaceTaskStatus.WORKING,
-                    WorkspaceTaskStatus.REVIEW,
-                }:
-                    stalled_update = await self._detect_prompt_dispatch_stall(
-                        session,
-                        task,
-                        status.sampled_at,
-                    )
-                    current = self._current_monitor_entities(session, task)
-                    if current is None:
-                        continue
-                    session, task = current
-                    if stalled_update:
-                        update.update(stalled_update)
-                        next_status = update["status"]
-                        runtime_status = update["runtime_status"]
-                        changed = True
-                if (
-                    run_auto_continue
-                    and runtime_status == AgentRuntimeStatus.IDLE
-                    and task
-                    and task.status in {WorkspaceTaskStatus.WORKING, WorkspaceTaskStatus.REVIEW}
-                ):
-                    auto_continue_update = await self._auto_continue_stopped_task(
-                        session,
-                        task,
-                        status.sampled_at,
-                    )
-                    current = self._current_monitor_entities(session, task)
-                    if current is None:
-                        continue
-                    session, task = current
-                    if auto_continue_update:
-                        update.update(auto_continue_update)
-                        next_status = update["status"]
-                        runtime_status = update["runtime_status"]
-                        changed = True
-                if (
-                    runtime_status == AgentRuntimeStatus.ATTENTION
-                    and task
-                    and task.status == WorkspaceTaskStatus.WORKING
-                ):
-                    # If the latest report is already a prompt-dispatch-stall
-                    # marker, the stall detector handled the state transition
-                    # (session NEEDS_INPUT, risk-level report recorded) and we
-                    # must NOT fire _request_task_review here — that would
-                    # incorrectly move the task to REVIEW when the worker never
-                    # finished implementation, losing the work phase. Prompt
-                    # stall is a delivery failure on the worker's own prompt,
-                    # not a worker request for review; nudge/auto-recovery
-                    # revives it, not a reviewer.
-                    if not self._latest_report_has_risk(
-                        task.id, PROMPT_STUCK_RISK_LEVEL
-                    ) and not state_policy.review_in_flight(
-                        task.review_requested_at, task.review_completed_at
-                    ):
-                        report = AgentReport(
-                            id=str(uuid.uuid4()),
-                            workspace_id=task.workspace_id,
-                            task_id=task.id,
-                            session_id=session.id,
-                            state=AgentReportState.NEEDS_INPUT,
-                            message=status.detail
-                            or "Agent runtime is waiting for input; reviewer diagnosis requested.",
-                            changed_files=[],
-                            validation=None,
-                            risks=None,
-                            review_cycle=task.review_cycle,
-                            created_at=status.sampled_at,
-                        )
-                        self.reports[report.id] = report
-                        await self._request_task_review(task, report)
-                    update["task_id"] = current_task_id
-                    changed = True
-
-            if current_task_id and task is not None:
-                current = self._current_monitor_entities(session, task)
-                if current is None:
-                    continue
-                live, task = current
-            else:
-                live = self.sessions.get(session_id)
-                if (
-                    live is None
-                    or self.workspaces.get(session.workspace_id) is None
-                    or live.workspace_id != session.workspace_id
-                    or live.tab_id != session.tab_id
-                    or live.created_at != session.created_at
-                ):
-                    continue
-            self.sessions[session_id] = live.model_copy(update=update)
-            changed = True
+            changed = (
+                await self._refresh_one_session_status(
+                    session,
+                    statuses,
+                    run_auto_continue=run_auto_continue,
+                )
+                or changed
+            )
 
         # --- Failure detection: session death and timeout ---
         # After refreshing session statuses, scan WORKING tasks for two
@@ -176,6 +43,183 @@ class _StatusRefreshMixin(_WorkspaceManagerBase):
         # Either moves the task to FAILED with a reason and requests human
         # acceptance so the caller can accept/continue.
         now = self._runtime_now()
+        if self._mark_runtime_task_failures(workspace_id, now):
+            changed = True
+
+        if changed:
+            self._save_state()
+
+    def _monitor_refresh_sessions(self, workspace_id: Optional[str]) -> list[ManagedSession]:
+        """Sessions a status refresh round covers, in stable iteration order."""
+        return [
+            session
+            for session in self.sessions.values()
+            if not session.archived
+            and (workspace_id is None or session.workspace_id == workspace_id)
+        ]
+
+    async def _collect_session_agent_statuses(
+        self, sessions: list[ManagedSession]
+    ) -> dict[str, Any]:
+        """Batch-fetch runtime agent statuses keyed by terminal tab id."""
+        tab_ids = [
+            session.tab_id for session in sessions if session.session_kind != SessionKind.CHAT
+        ]
+        if not tab_ids:
+            return {}
+        return {
+            status.tab_id: status
+            for status in await ttyd_manager.list_tab_agent_statuses(tab_ids=tab_ids)
+        }
+
+    async def _refresh_one_session_status(
+        self,
+        session: ManagedSession,
+        statuses: dict[str, Any],
+        *,
+        run_auto_continue: bool,
+    ) -> bool:
+        """Refresh one session. Returns whether persisted state changed.
+
+        This is the per-item body of ``_refresh_session_statuses`` (same
+        ordering and arguments). Keeping it a separate coroutine lets the
+        background monitor time out one hung session without cancelling the
+        rest of the round.
+        """
+        changed = False
+        session_id = session.id
+        if session.status in {ManagedSessionStatus.DONE, ManagedSessionStatus.ERROR}:
+            return changed
+        if session.session_kind == SessionKind.CHAT:
+            return self._refresh_chat_session_status(session) or changed
+        status = statuses.get(session.tab_id)
+        if not status:
+            return changed
+        live = self.sessions.get(session_id)
+        if live is None or live.tab_id != session.tab_id or live.created_at != session.created_at:
+            return changed
+        session = live
+        next_status = self._map_runtime_status(status)
+        runtime_status = status.status
+        if next_status == ManagedSessionStatus.STOPPED and self._is_spawn_grace_period(session):
+            return changed
+
+        current_task_id = session.current_task_id or session.task_id
+        update: dict[str, Any] = {
+            "status": next_status,
+            "runtime_status": runtime_status,
+            "current_task_id": current_task_id,
+            "updated_at": status.sampled_at,
+        }
+        if status.last_changed_at:
+            update["last_activity_at"] = status.last_changed_at
+
+        if current_task_id:
+            task = self.tasks.get(current_task_id)
+            if task is not None and not self._workspace_owns_task(task):
+                task = None
+            if task and task.status in {
+                WorkspaceTaskStatus.WORKING,
+                WorkspaceTaskStatus.REVIEW,
+            }:
+                stalled_update = await self._detect_prompt_dispatch_stall(
+                    session,
+                    task,
+                    status.sampled_at,
+                )
+                current = self._current_monitor_entities(session, task)
+                if current is None:
+                    return changed
+                session, task = current
+                if stalled_update:
+                    update.update(stalled_update)
+                    next_status = update["status"]
+                    runtime_status = update["runtime_status"]
+                    changed = True
+            if (
+                run_auto_continue
+                and runtime_status == AgentRuntimeStatus.IDLE
+                and task
+                and task.status in {WorkspaceTaskStatus.WORKING, WorkspaceTaskStatus.REVIEW}
+            ):
+                auto_continue_update = await self._auto_continue_stopped_task(
+                    session,
+                    task,
+                    status.sampled_at,
+                )
+                current = self._current_monitor_entities(session, task)
+                if current is None:
+                    return changed
+                session, task = current
+                if auto_continue_update:
+                    update.update(auto_continue_update)
+                    next_status = update["status"]
+                    runtime_status = update["runtime_status"]
+                    changed = True
+            if (
+                runtime_status == AgentRuntimeStatus.ATTENTION
+                and task
+                and task.status == WorkspaceTaskStatus.WORKING
+            ):
+                # If the latest report is already a prompt-dispatch-stall
+                # marker, the stall detector handled the state transition
+                # (session NEEDS_INPUT, risk-level report recorded) and we
+                # must NOT fire _request_task_review here — that would
+                # incorrectly move the task to REVIEW when the worker never
+                # finished implementation, losing the work phase. Prompt
+                # stall is a delivery failure on the worker's own prompt,
+                # not a worker request for review; nudge/auto-recovery
+                # revives it, not a reviewer.
+                if not self._latest_report_has_risk(
+                    task.id, PROMPT_STUCK_RISK_LEVEL
+                ) and not state_policy.review_in_flight(
+                    task.review_requested_at, task.review_completed_at
+                ):
+                    report = AgentReport(
+                        id=str(uuid.uuid4()),
+                        workspace_id=task.workspace_id,
+                        task_id=task.id,
+                        session_id=session.id,
+                        state=AgentReportState.NEEDS_INPUT,
+                        message=status.detail
+                        or "Agent runtime is waiting for input; reviewer diagnosis requested.",
+                        changed_files=[],
+                        validation=None,
+                        risks=None,
+                        review_cycle=task.review_cycle,
+                        created_at=status.sampled_at,
+                    )
+                    self.reports[report.id] = report
+                    await self._request_task_review(task, report)
+                update["task_id"] = current_task_id
+                changed = True
+
+        if current_task_id and task is not None:
+            current = self._current_monitor_entities(session, task)
+            if current is None:
+                return changed
+            live, task = current
+        else:
+            live = self.sessions.get(session_id)
+            if (
+                live is None
+                or self.workspaces.get(session.workspace_id) is None
+                or live.workspace_id != session.workspace_id
+                or live.tab_id != session.tab_id
+                or live.created_at != session.created_at
+            ):
+                return changed
+        self.sessions[session_id] = live.model_copy(update=update)
+        return True
+
+    def _mark_runtime_task_failures(self, workspace_id: Optional[str], now: datetime) -> bool:
+        """Scan WORKING tasks for session death and timeout; mark failures.
+
+        The post-refresh failure-detection phase of
+        ``_refresh_session_statuses``, split out so the monitor can guard it
+        independently of the per-session refresh items.
+        """
+        changed = False
         for task in list(self.tasks.values()):
             if not self._workspace_owns_task(task):
                 continue
@@ -216,9 +260,7 @@ class _StatusRefreshMixin(_WorkspaceManagerBase):
                     task.id,
                     failure_reason,
                 )
-
-        if changed:
-            self._save_state()
+        return changed
 
     def _current_monitor_entities(
         self,
