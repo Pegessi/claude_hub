@@ -122,10 +122,14 @@ attach past images to the new context.
 
 ## Condensation and streaming
 
-MASO's `turn_end` ends one model call; the root agent's `agent_end` completes the
-Hub turn. Child endings do not complete the parent. Text and reasoning use
-Python character offsets; the final model response supplies any missing suffix
-without duplicating already streamed output. Durable tool calls/results and tool
+MASO's `post_llm_response` supplies the authoritative text and reasoning snapshot,
+including responses with no streamed tokens. Hub appends only the missing suffix,
+so partial streams and repeated snapshots do not duplicate the answer. Dropped
+response frames are ignored; content-bearing `turn_end` frames remain supported.
+This suffix repair does not replace conflicting prefixes or retract already
+persisted token deltas when a later response is dropped.
+`turn_end` ends one model call; only the root agent's `agent_end` completes the Hub
+turn. Child endings do not complete the parent. Durable tool calls/results and tool
 confirmation cards use the same Hub timeline as other providers.
 
 MASO owns condensation. It can archive and rewrite its live trajectory, and its
