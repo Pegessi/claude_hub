@@ -491,3 +491,30 @@ async def test_corrupt_inbox_native_managed_web_keeps_owner_guard(runtime, monke
     result = await service.web(session.id, payload(), User(open_id="local", name="Local", email=""))
     assert result == {"ok": True, "answered_question": True}
     assert not guarded
+
+
+@pytest.mark.asyncio
+async def test_retiring_runtime_expires_question_without_stopping_other_mirrors(
+    runtime, monkeypatch
+):
+    from claude_hub.api.routes.feishu_bot import card_actions
+    from claude_hub.services.agent_stream.runtime.input import InputMixin
+    from claude_hub.services.agent_stream.runtime.values import StructuredSourceUnavailable
+
+    service, inbox, _, _, _ = runtime
+    question = await service.capture("terminal-tab-tab", "turn-A", "call-A")
+
+    def retiring():
+        raise StructuredSourceUnavailable("runtime teardown is in progress")
+
+    owner = SimpleNamespace(_require_startable_incarnation=retiring)
+    tailer = service.context(question.session_id)[2]
+    monkeypatch.setattr(
+        tailer,
+        "question_snapshot",
+        lambda turn, call: InputMixin.question_snapshot(owner, turn, call),
+    )
+    monkeypatch.setattr(card_actions, "mirror_question", AsyncMock())
+    await service.tick()
+    assert question.state == "stale"
+    assert not inbox._question_tasks
