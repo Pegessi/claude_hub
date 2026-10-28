@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "920a5dada390c731464a4bb8899d396369d2bbdb",
+  "parents": [
+    "1d760359cd33bfe76c6b49cba8dabbd9ffd5fc55",
+    "e9ccf5f42efc2a0051f998420d972fefc5d69a76"
+  ],
+  "base": "0211661a1e627349822b3857ecf74f33b81818ef",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "eac5726bc0c1daebc7bf5301037666cff1a48548",
+  "reconstructed_tree": "f3395de56b3d8b9321d710545248b48afec411a3",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a4bfbecaf1c6b1bd9e75e0139c91f70b7e3efbb4"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "038d78a2c1a076e1ccbc107b1af197c922f150ba"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9061a67185be46d638c5e122d9019d02a03b7ff1"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "23a91f863432945e2fa5770cdf97370919211add"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "da6458095083c06e8fb77ee8c8a09b25cedccb3f"
+      },
+      "reason": "Candidate (main Feishu; merges 1-4 CLI/SSH/process-group/ProviderSpec notes) and codex/rv-auth-hardening's OAuth/cookie/log-redaction note both insert at the top of Released. Manual union keeps the candidate entries then appends the auth entry before the shared tail; auth/proxy.py and log_security.py are added files and the remaining auth sources auto-merged.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
