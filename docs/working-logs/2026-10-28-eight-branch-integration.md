@@ -107,20 +107,32 @@ workspace-manager surfaces called out in the task.
   concrete `WorkspaceManager` implements both abstract families on one instance
   (a one-sided merge fails instantiation) and that clean-state recovery reporting
   coexists with the monitor loop.
+- `backend/tests/test_proxy_origin_uvicorn_e2e.py` (6 tests, reviewer-requested):
+  drives the **actual production** `BrowserOriginGuardMiddleware` and
+  trusted-peer helpers through a real task-owned uvicorn server (lifespan off,
+  no shared runtime) over real loopback TCP sockets on both IPv4 and IPv6 —
+  same-origin/foreign-Origin writes, cross-origin reads, Origin-less CLI/webhook
+  requests, trusted-loopback XFF/XFP, an allowlisted external `https` Origin
+  with a rewritten internal loopback `Host` (the Merlin relay shape), and a real
+  WebSocket handshake that accepts no-Origin/same-origin and returns 403 for a
+  foreign Origin. These complement rather than replace the constructed-scope
+  helper tests; the remote-peer (untrusted) XFP-forgery negative stays in the
+  helper suites because it cannot be produced from a loopback socket.
 
 No production source was changed beyond the conflict resolutions above; no
 checks were weakened and no broad rewrite was performed.
 
 ## Compatibility contract
 
-Production remains `--host ::1 --port 8173` with Hub OAuth disabled; the raw
+Production remains `--host ::1` `--port 8173` with Hub OAuth disabled; the raw
 IPv6 TCP relay and the separate HTTPS relay to the same loopback backend are
 unchanged, and no tracked private deployment origin was added (the controller
-adds the exact HTTPS allowed origin). Existing tests already encode the
-representative scenarios, all passing after integration:
+adds the exact HTTPS allowed origin). Existing tests plus the new real-uvicorn
+suite encode the representative scenarios, all passing after integration:
 
 - same-origin HTTP/WS accepted; IPv6 origin/peer (`[::1]`, IPv4-mapped v6)
-  handled (`test_proxy_trust.py`);
+  handled (`test_proxy_trust.py`, and real sockets in
+  `test_proxy_origin_uvicorn_e2e.py`);
 - HTTPS `Origin` with a rewritten internal loopback `Host` accepted **only**
   when listed in `CLAUDE_HUB_ALLOWED_ORIGINS`; foreign `Origin` rejected;
   malformed origins denied;
@@ -129,6 +141,12 @@ representative scenarios, all passing after integration:
   peer (loopback default); forged XFP from a remote peer cannot set a Secure
   cookie (`test_auth.py` secure-cookie cases, `test_proxy_trust.py`);
 - Secure-cookie consistency with `scheme_from_request` and `public_url`.
+
+Deployment boundary (per controller): the private HTTPS allowed-origin update
+is prepared with a protected backup and will be applied **only** alongside final
+main promotion, because the older deployed Settings may reject unknown `.env`
+keys. This integration does not edit live config; no relay, `start.sh`,
+listen contract or tracked deployment origin was changed.
 
 ## Validation matrix
 
@@ -154,6 +172,7 @@ venv was never symlinked or reused.
 | Merge 7 focused | quarantine/storage/execution-control tests | 117 passed |
 | Merge 8 overlap | monitor-isolation + cleanup-lifetime + state tests | 89 passed |
 | Merge 8 new regression | `tests/test_state_monitor_composition.py` | 1 passed |
+| Real-server compatibility | `tests/test_proxy_origin_uvicorn_e2e.py` (real uvicorn, IPv4+IPv6, WS) | 6 passed (stable across repeated runs) |
 | Merge decisions ×8 | `verify.sh merge-decisions --merge … --record …` | complete coverage |
 | **Canonical final** | `./scripts/verify.sh all` | docs, checkout-safety, backend-format, backend-types, backend-tests, frontend-lint, frontend-types, frontend-tests, frontend-build all PASS; **5851 passed, 9 skipped** |
 | Browser gate | `./scripts/verify.sh browser-mocks` (Chromium 1243) | 33 scenario PASS, 0 FAIL |

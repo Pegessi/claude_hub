@@ -18,7 +18,8 @@
   together with session/query log redaction and the Secure-cookie decision),
   ensure ProviderSpec factories still spawn through the group-aware teardown,
   and keep state-quarantine and monitor-isolation abstractions coexisting on one
-  workspace manager. Add composition regressions pinning those joins; see
+  workspace manager. Add composition regressions pinning those joins, including
+  real-uvicorn IPv4/IPv6 HTTP and WebSocket Origin compatibility checks; see
   `docs/working-logs/2026-10-28-eight-branch-integration.md`. No deployment or
   shared-service behavior changes are performed here.
 
