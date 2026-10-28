@@ -617,6 +617,7 @@ async def test_mirror_send_stores_only_digests_and_terminal_patch_has_no_actions
     q.mirror = None
     assert await card_actions.mirror_question(q)
     assert len(sent) == 1
+    assert q.mirror is not None
     assert q.mirror.message_id == "om-new-card"
     controls = [e for e in sent[0][2]["body"]["elements"] if e["tag"] == "button"]
     tokens = [e["behaviors"][0]["value"]["hub_token"] for e in controls]
@@ -649,6 +650,7 @@ async def test_uncertain_mirror_send_is_fenced_across_reload(harness: Harness, m
     q = harness.question
     q.mirror = None
     assert not await card_actions.mirror_question(q)
+    assert q.mirror is not None
     assert q.mirror.state == "uncertain"
     clone = ChatMessageInbox(
         harness.inbox.path, harness.inbox.target, harness.inbox.submit, harness.inbox.evidence
@@ -665,6 +667,7 @@ async def test_remirror_replacement_invalidates_action_before_admission(harness:
     from claude_hub.services.chat_message_inbox import InboxError
 
     q = harness.question
+    assert q.mirror is not None
     old_uuid = q.mirror.send_uuid
     q.mirror.send_uuid = "new-mirror-generation"
     with pytest.raises(InboxError, match="replaced"):

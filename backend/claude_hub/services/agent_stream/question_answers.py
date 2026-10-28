@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+from contextlib import AsyncExitStack
 from datetime import timedelta
 from typing import Any, Callable
 
@@ -146,43 +147,58 @@ class QuestionAnswers:
         mirror_send_uuid: str | None = None,
         action_digest: str | None = None,
     ) -> ChatMessageReceipt:
-        async with self.lock(q.session_id):
-            inbox = self.inbox()
-            # Recheck trusted external binding at the winner's admission boundary.
-            if source == "feishu":
-                from ...api.routes.feishu_bot.card_actions import current_binding
+        from ...api import agent_stream as stream
+        from ..goal_run import get_goal_admission_lock
 
-                current_binding(q)
-                if (
-                    q.mirror is None
-                    or q.mirror.send_uuid != mirror_send_uuid
-                    or (action_digest is not None and action_digest not in q.mirror.action_digests)
-                ):
-                    raise InboxError(409, "Question mirror was replaced")
-                if q.expires_at <= utc_now():
-                    raise InboxError(409, "Question mirror expired")
-            # Retry lookup must precede live checks: a resolved request is gone.
-            if q.state == "open":
-                session, _, _ = self.live(q)
-                if not q.session_id.startswith("terminal-tab-") and q.answer_id is None:
-                    owned = (
-                        set(getattr(session, "call_payload_fingerprints", {}))
-                        | set(getattr(session, "pending_call_ids", []))
-                        | set(getattr(session, "processing_call_ids", []))
-                        | set(getattr(session, "delivered_call_ids", []))
-                        | set(getattr(session, "uncertain_call_ids", []))
+        async with get_goal_admission_lock(q.tab_id):
+            async with AsyncExitStack() as owner:
+                if not q.session_id.startswith("terminal-tab-"):
+                    session, _, _ = self.context(q.session_id)
+                    await owner.enter_async_context(
+                        stream._agent_stream_bindings.managed_stream_interaction(
+                            session, require_chat=True
+                        )
                     )
-                    if payload.call_id in owned:
-                        raise InboxError(409, "Answer call_id already has a mailbox owner")
-            return await inbox.claim_answer(
-                q.question_ref,
-                user.open_id,
-                user.name,
-                payload,
-                callback=callback,
-                source=source,
-                email=user.email,
-            )
+                async with self.lock(q.session_id):
+                    inbox = self.inbox()
+                    # Recheck trusted external binding at the winner's admission boundary.
+                    if source == "feishu":
+                        from ...api.routes.feishu_bot.card_actions import current_binding
+
+                        current_binding(q)
+                        if (
+                            q.mirror is None
+                            or q.mirror.send_uuid != mirror_send_uuid
+                            or (
+                                action_digest is not None
+                                and action_digest not in q.mirror.action_digests
+                            )
+                        ):
+                            raise InboxError(409, "Question mirror was replaced")
+                        if q.expires_at <= utc_now():
+                            raise InboxError(409, "Question mirror expired")
+                    # Retry lookup must precede live checks: a resolved request is gone.
+                    if q.state == "open":
+                        session, _, _ = self.live(q)
+                        if not q.session_id.startswith("terminal-tab-") and q.answer_id is None:
+                            owned = (
+                                set(getattr(session, "call_payload_fingerprints", {}))
+                                | set(getattr(session, "pending_call_ids", []))
+                                | set(getattr(session, "processing_call_ids", []))
+                                | set(getattr(session, "delivered_call_ids", []))
+                                | set(getattr(session, "uncertain_call_ids", []))
+                            )
+                            if payload.call_id in owned:
+                                raise InboxError(409, "Answer call_id already has a mailbox owner")
+                    return await inbox.claim_answer(
+                        q.question_ref,
+                        user.open_id,
+                        user.name,
+                        payload,
+                        callback=callback,
+                        source=source,
+                        email=user.email,
+                    )
 
     async def runtime_web(self, session_id: str, payload: Any) -> dict[str, Any]:
         """Web-only exact path when persistence is unavailable or shape unsupported.
@@ -342,86 +358,95 @@ class QuestionAnswers:
         q = inbox.questions[item.question_ref or ""]
         async with get_goal_admission_lock(q.tab_id):
             async with self.lock(q.session_id):
-                session, manager, _ = self.live(q)
-                if q.mirror is not None and item.turn_metadata.get("answer_source") == "feishu":
-                    from ...api.routes.feishu_bot.card_actions import current_binding
+                async with AsyncExitStack() as admission:
+                    if item.turn_metadata.get("answer_source") == "feishu":
+                        from ...api import feishu_bot as bot
+                        from ...api.routes.feishu_bot.card_actions import current_binding
 
-                    current_binding(q)
-                if q.mode == "followup" and await manager.turn_in_flight(session):
-                    raise InboxError(409, "question_busy")
-                from ...api.routes.agent_stream.messages import _require_actor
+                        if q.mirror is None:
+                            raise InboxError(409, "Question mirror unavailable")
+                        await admission.enter_async_context(bot._gate(q.mirror.bot_id))
+                        current_binding(q)
+                    session, manager, _ = self.live(q)
+                    if q.mirror is not None and item.turn_metadata.get("answer_source") == "feishu":
+                        from ...api.routes.feishu_bot.card_actions import current_binding
 
-                _require_actor(item)
-                self.live(q)  # ownership may have changed during the busy probe
-                if q.session_id.startswith("terminal-tab-"):
-                    from ...api.routes.agent_stream.dispatch import (
-                        require_tab_input_available,
-                    )
+                        current_binding(q)
+                    if q.mode == "followup" and await manager.turn_in_flight(session):
+                        raise InboxError(409, "question_busy")
+                    from ...api.routes.agent_stream.messages import _require_actor
 
-                    require_tab_input_available(q.tab_id)
-                    if q.mode == "native":
-                        before()
-                        if not await manager.answer_pending_question(
-                            session, item.message, q.turn_id, expected_call_id=q.call_id
-                        ):
-                            raise InboxError(409, "Question no longer pending")
-                    else:
-                        # Existing Goal path owns resume/steer semantics; otherwise
-                        # use the same native sender with exact-card validation above.
-                        before()
+                    _require_actor(item)
+                    self.live(q)  # ownership may have changed during the busy probe
+                    if q.session_id.startswith("terminal-tab-"):
                         from ...api.routes.agent_stream.dispatch import (
-                            dispatch_tab_stream_input,
+                            require_tab_input_available,
                         )
 
-                        await dispatch_tab_stream_input(
-                            q.tab_id,
-                            AgentStreamSendRequest(
-                                text=item.message,
-                                client_turn_id=item.turn_id,
-                                question_turn_id=q.turn_id,
-                                question_call_id=q.call_id,
-                            ),
-                            stream._agent_stream_bindings,
-                            turn_metadata={"origin": "question_answer"},
-                            goal_locked=True,
-                        )
-                        await manager.resolve_answered_questions(
-                            session,
-                            item.message,
-                            expected_turn_id=q.turn_id,
-                            expected_call_id=q.call_id,
-                        )
-                else:
-                    # Managed interaction retains Workspace's lock/incarnation and
-                    # deterministic call fingerprint through the mailbox handoff.
-                    async with stream._agent_stream_bindings.managed_stream_interaction(
-                        session, require_chat=True
-                    ) as live:
-                        self.live(q)
-                        before()
+                        require_tab_input_available(q.tab_id)
                         if q.mode == "native":
+                            before()
                             if not await manager.answer_pending_question(
-                                live,
-                                item.message,
-                                q.turn_id,
-                                expected_call_id=q.call_id,
+                                session, item.message, q.turn_id, expected_call_id=q.call_id
                             ):
                                 raise InboxError(409, "Question no longer pending")
                         else:
-                            await stream.workspace_manager.send_chat_session_message_locked(
-                                live.id,
-                                item.message,
-                                call_id=item.call_id,
-                                question_key=json.dumps(
-                                    [q.turn_id, q.call_id], separators=(",", ":")
+                            # Existing Goal path owns resume/steer semantics; otherwise
+                            # use the same native sender with exact-card validation above.
+                            before()
+                            from ...api.routes.agent_stream.dispatch import (
+                                dispatch_tab_stream_input,
+                            )
+
+                            await dispatch_tab_stream_input(
+                                q.tab_id,
+                                AgentStreamSendRequest(
+                                    text=item.message,
+                                    client_turn_id=item.turn_id,
+                                    question_turn_id=q.turn_id,
+                                    question_call_id=q.call_id,
                                 ),
+                                stream._agent_stream_bindings,
+                                turn_metadata={"origin": "question_answer"},
+                                goal_locked=True,
                             )
                             await manager.resolve_answered_questions(
-                                live,
+                                session,
                                 item.message,
                                 expected_turn_id=q.turn_id,
                                 expected_call_id=q.call_id,
                             )
+                    else:
+                        # Managed interaction retains Workspace's lock/incarnation and
+                        # deterministic call fingerprint through the mailbox handoff.
+                        async with stream._agent_stream_bindings.managed_stream_interaction(
+                            session, require_chat=True
+                        ) as live:
+                            self.live(q)
+                            before()
+                            if q.mode == "native":
+                                if not await manager.answer_pending_question(
+                                    live,
+                                    item.message,
+                                    q.turn_id,
+                                    expected_call_id=q.call_id,
+                                ):
+                                    raise InboxError(409, "Question no longer pending")
+                            else:
+                                await stream.workspace_manager.send_chat_session_message_locked(
+                                    live.id,
+                                    item.message,
+                                    call_id=item.call_id,
+                                    question_key=json.dumps(
+                                        [q.turn_id, q.call_id], separators=(",", ":")
+                                    ),
+                                )
+                                await manager.resolve_answered_questions(
+                                    live,
+                                    item.message,
+                                    expected_turn_id=q.turn_id,
+                                    expected_call_id=q.call_id,
+                                )
 
     async def observe(self, event: AgentStreamEvent) -> None:
         thread = event.payload.get("thread_id")

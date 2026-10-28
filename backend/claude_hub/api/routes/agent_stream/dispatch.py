@@ -126,6 +126,12 @@ async def send_to_native(
                 status_code=400,
                 detail=f"{session.agent_type.value} does not support image attachments",
             )
+
+    async def question_admission() -> None:
+        from ....services.agent_stream.question_answers import answers
+
+        answers.guard_input(session.id, payload.client_turn_id)
+
     await manager.send_message(
         session,
         payload.text,
@@ -136,6 +142,7 @@ async def send_to_native(
         visible_text=visible_text,
         turn_metadata=turn_metadata,
         allow_question_answer=False,
+        before_send=question_admission,
     )
 
 
@@ -219,12 +226,13 @@ async def dispatch_tab_stream_input(
         from ....services.agent_stream.question_answers import answers
 
         answers.guard_input(f"terminal-tab-{tab_id}", payload.client_turn_id)
-        if goal is not None and allow_question_answer and payload.question_call_id is not None:
+        if goal is not None and allow_question_answer:
             active = goal.status.value == "active"
             if (
                 active
                 and not payload.attachments
                 and goal.current_turn_id
+                and payload.question_call_id is not None
                 and await manager.answer_pending_question(
                     session,
                     payload.text,
@@ -238,6 +246,7 @@ async def dispatch_tab_stream_input(
                 steer = payload.delivery == "steer" or bool(
                     not payload.attachments
                     and goal.current_turn_id
+                    and payload.question_call_id is not None
                     and await manager.accepts_question_followup(
                         session,
                         payload.text,
@@ -273,7 +282,7 @@ async def dispatch_tab_stream_input(
                 )
 
                 await validate_goal_images(tab_id, payload.attachments)
-                if not payload.attachments:
+                if not payload.attachments and payload.question_call_id is not None:
                     await manager.resolve_answered_questions(
                         session,
                         payload.text,

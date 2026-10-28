@@ -160,6 +160,7 @@ async def _submit(item: ChatMessageEnvelope, before_delivery: Callable[[], None]
         # Check incarnation again inside the native send lock, then durably
         # mark possible submission immediately before touching the provider.
         async def check_target() -> None:
+            answers.guard_input(f"terminal-tab-{item.tab_id}", item.turn_id)
             inbox = get_inbox()
             _require_actor(item)
             current = inbox._target(item.tab_id)

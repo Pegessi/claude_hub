@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -183,7 +184,40 @@ async def _return_true() -> bool:
     return True
 
 
-def test_active_goal_accepts_only_pending_question_answer(goal_client, monkeypatch):
+def _attach_exact_question_owner(monkeypatch, tmp_path, stream_manager, mode):
+    from claude_hub.services.agent_stream.question_answers import answers
+    from claude_hub.services.chat_message_inbox import ChatMessageInbox, InboxEvidence, InboxTarget
+
+    session = SimpleNamespace(id="terminal-tab-tab-1", tab_id="tab-1")
+    snapshot = {
+        "questions": [{"id": "q1", "prompt": "Pick", "options": [{"id": "A"}]}],
+        "kind": "ask_question",
+        "mode": mode,
+        "run_epoch": 1,
+        "incarnation": "goal-question",
+    }
+    tailer = SimpleNamespace(
+        question_snapshot=lambda turn, call: (
+            snapshot if (turn, call) == ("initial-turn", "call-q") else None
+        )
+    )
+    monkeypatch.setattr(answers, "context", lambda sid: (session, stream_manager, tailer))
+
+    async def no_submit(*args):
+        pass
+
+    async def evidence(item):
+        return InboxEvidence("absent")
+
+    inbox = ChatMessageInbox(
+        tmp_path / "question-inbox.json", lambda tab: InboxTarget("goal"), no_submit, evidence
+    )
+    inbox.answer_submit = answers.submit
+    monkeypatch.setattr(answers, "inbox", lambda: inbox)
+    return inbox, snapshot
+
+
+def test_active_goal_accepts_only_pending_question_answer(goal_client, monkeypatch, tmp_path):
     monkeypatch.setattr("claude_hub.services.goal_run.get_goal_manager", goal_api.get_goal_manager)
     goal_client.post(
         "/api/tabs/tab-1/goal",
@@ -191,7 +225,8 @@ def test_active_goal_accepts_only_pending_question_answer(goal_client, monkeypat
     )
     answered = []
 
-    async def answer(session, text, expected_turn_id):
+    async def answer(session, text, expected_turn_id, *, expected_call_id=None):
+        assert expected_call_id == "call-q"
         answered.append(expected_turn_id)
         return len(answered) == 1
 
@@ -200,17 +235,27 @@ def test_active_goal_accepts_only_pending_question_answer(goal_client, monkeypat
         "_get_tab_tailer_manager",
         lambda: SimpleNamespace(
             answer_pending_question=answer,
-            accepts_question_followup=lambda *args: _return_false(),
+            accepts_question_followup=lambda *args, **kwargs: _return_false(),
         ),
+    )
+    inbox, snapshot = _attach_exact_question_owner(
+        monkeypatch, tmp_path, stream_api._get_tab_tailer_manager(), "native"
     )
     payload = {
         "text": '{"type":"ask_question_response","answers":[{"questionId":"q1","selected":["A"]}]}',
         "client_turn_id": "answer",
+        "question_turn_id": "initial-turn",
+        "question_call_id": "call-q",
     }
     url = "/api/workspaces/tabs/tab-1/stream/send"
-    assert goal_client.post(url, json=payload).status_code == 200
+    receipt = goal_client.post(url, json=payload)
+    assert receipt.status_code == 200, receipt.text
+    asyncio.run(inbox.pump_answer(receipt.json()["receipt"]["message_id"]))
+    assert answered == ["initial-turn"]
+    assert goal_client.post(url, json=payload).status_code == 200  # same answer is idempotent
+    payload["question_call_id"] = "stale-call"
     assert goal_client.post(url, json=payload).status_code == 409
-    assert answered == ["initial-turn", "initial-turn"]
+    assert answered == ["initial-turn"]
 
 
 def test_goal_resume_rejects_plan_and_defers_while_chat_turn_runs(goal_client, monkeypatch):
@@ -299,13 +344,13 @@ def _steerable_goal(monkeypatch, tmp_path, **stream_methods):
     monkeypatch.setattr("claude_hub.services.goal_run.get_goal_manager", lambda: manager)
     resolved: list[str] = []
 
-    async def resolve(session, text):
+    async def resolve(session, text, **kwargs):
         resolved.append(text)
 
     stream_manager = SimpleNamespace(
         turn_in_flight=lambda session: _return_false(),
-        answer_pending_question=lambda *args: _return_false(),
-        accepts_question_followup=lambda *args: _return_false(),
+        answer_pending_question=lambda *args, **kwargs: _return_false(),
+        accepts_question_followup=lambda *args, **kwargs: _return_false(),
         resolve_answered_questions=resolve,
     )
     for name, value in stream_methods.items():
@@ -436,7 +481,7 @@ def test_interrupted_goal_images_require_reattachment_after_restart(
 
 def test_goal_question_followup_becomes_next_goal_turn(goal_client, monkeypatch, tmp_path):
     manager, sent, resolved = _steerable_goal(
-        monkeypatch, tmp_path, accepts_question_followup=lambda *args: _return_true()
+        monkeypatch, tmp_path, accepts_question_followup=lambda *args, **kwargs: _return_true()
     )
     goal = goal_client.post(
         "/api/tabs/tab-1/goal",
@@ -444,21 +489,30 @@ def test_goal_question_followup_becomes_next_goal_turn(goal_client, monkeypatch,
     ).json()
     answer = '{"type":"ask_question_response","answers":[{"questionId":"q1","selected":["A"]}]}'
     url = "/api/workspaces/tabs/tab-1/stream/send"
-    body = {"text": answer, "client_turn_id": "answer"}
-
+    body = {
+        "text": answer,
+        "client_turn_id": "answer",
+        "question_turn_id": "initial-turn",
+        "question_call_id": "call-q",
+    }
+    inbox, _ = _attach_exact_question_owner(
+        monkeypatch, tmp_path, stream_api._get_tab_tailer_manager(), "followup"
+    )
     result = goal_client.post(url, json=body)
-
     assert result.status_code == 200, result.text
+    asyncio.run(inbox.pump_answer(result.json()["receipt"]["message_id"]))
     payload, kwargs = sent[-1]
-    assert payload.client_turn_id == "answer"
+    assert payload.client_turn_id == result.json()["receipt"]["turn_id"]
     assert payload.delivery == "steer"
-    assert answer in payload.text
-    assert kwargs["visible_text"] == answer
+    canonical = inbox.messages[result.json()["receipt"]["message_id"]].message
+    assert json.loads(canonical) == json.loads(answer)
+    assert canonical in payload.text
+    assert kwargs["visible_text"] == canonical
     assert kwargs["turn_metadata"] == {"origin": "goal", "protocol": "goal-continuation-v1"}
-    assert resolved == [answer]
+    assert resolved and all(text == canonical for text in resolved)
     current = manager.get(goal["id"])
     assert current.status == GoalRunStatus.ACTIVE
-    assert current.current_turn_id == "answer"
+    assert current.current_turn_id == result.json()["receipt"]["turn_id"]
     assert current.pending_input is None
     # A retried POST replays the steer without delivering it twice.
     assert goal_client.post(url, json=body).status_code == 200

@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import uuid
 from dataclasses import dataclass
@@ -167,6 +168,8 @@ class ChatMessageInbox:
             raise RuntimeError("duplicate Chat question identity")
         by_id = {m.message_id: m for m in rows}
         for q in questions:
+            if q.state in {"claimed", "uncertain"} and q.answer_id is None:
+                raise RuntimeError("Question answer ownership is corrupt")
             if q.answer_id is not None and (
                 q.answer_id not in by_id or by_id[q.answer_id].question_ref != q.question_ref
             ):
@@ -174,9 +177,34 @@ class ChatMessageInbox:
         question_refs = {q.question_ref for q in questions}
         if any(m.kind == "question_answer" and m.question_ref not in question_refs for m in rows):
             raise RuntimeError("Question answer target is corrupt")
+        receipts = data.get("callback_receipts", {})
+        nonces = data.get("callback_nonces", {})
+        if not isinstance(receipts, dict) or not isinstance(nonces, dict):
+            raise RuntimeError("Invalid callback replay state")
+        for key, record in receipts.items():
+            if (
+                not isinstance(key, str)
+                or not isinstance(record, dict)
+                or not isinstance(record.get("fingerprint"), str)
+                or record.get("answer_id") not in by_id
+            ):
+                raise RuntimeError("Invalid callback receipt ownership")
+        for key, record in nonces.items():
+            if (
+                not isinstance(key, str)
+                or not isinstance(record, dict)
+                or not isinstance(record.get("fingerprint"), str)
+            ):
+                raise RuntimeError("Invalid callback nonce state")
+            try:
+                expiry = float(record["expires_at"])
+            except (KeyError, ValueError, TypeError):
+                raise RuntimeError("Invalid callback nonce expiry") from None
+            if not math.isfinite(expiry):
+                raise RuntimeError("Invalid callback nonce expiry")
         self.questions = {q.question_ref: q for q in questions}
-        self.callback_receipts = dict(data.get("callback_receipts", {}))
-        self.callback_nonces = dict(data.get("callback_nonces", {}))
+        self.callback_receipts = receipts
+        self.callback_nonces = nonces
         self.messages = {m.message_id: m for m in rows}
         self.conversations = dict(data["conversations"])
         self.epochs = dict(data.get("epochs", {}))
