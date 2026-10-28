@@ -13,11 +13,12 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.middleware.gzip import GZipMiddleware
-from starlette.responses import RedirectResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.types import Scope
 
 from .api import api_router
 from .auth.log_security import install_redacting_access_formatter
+from .auth.proxy import unsafe_http_request_is_allowed
 from .config import settings
 from .services import ttyd_manager, workspace_manager
 from .services.backend_instance_lock import BackendInstanceLock
@@ -99,7 +100,18 @@ async def _backend_runtime_ownership() -> AsyncIterator[None]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Application lifespan - manage startup and shutdown."""
+    # Defense in depth for direct `uvicorn` invocations (the supervised
+    # launcher already enforces this before spawning us). Uvicorn runs
+    # lifespan startup before binding its listening sockets, so raising here
+    # prevents the port from ever being served.
+    from .services.listen_guard import InsecureListenError, enforce_settings_listen_policy
+
+    try:
+        enforce_settings_listen_policy()
+    except InsecureListenError:
+        logger.error("Unsafe listen configuration: startup aborted")
+        raise
+
     async with _backend_runtime_ownership():
         logger.info("Logging to file: %s", log_file)
         # Startup
@@ -315,6 +327,61 @@ class CoopCoepMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(CoopCoepMiddleware)
+
+
+class BrowserOriginGuardMiddleware:
+    """Reject cross-site browser state-changing requests before routing.
+
+    CORS only stops a malicious page from *reading* cross-origin responses;
+    "simple" POSTs (form/``text/plain`` bodies) are still delivered and would
+    execute against an unauthenticated local/LAN Hub. This pure-ASGI
+    middleware applies the same Origin policy as the terminal WebSocket
+    guard: safe methods and Origin-less native clients (the CLI, curl,
+    server-to-server webhooks) pass; unsafe methods with a browser Origin
+    must be same-origin or listed in ``CLAUDE_HUB_ALLOWED_ORIGINS``. Added
+    last, so it is the outermost layer and rejects before any work happens.
+    """
+
+    def __init__(self, app) -> None:  # type: ignore[no-untyped-def]
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive, send) -> None:  # type: ignore[no-untyped-def]
+        if scope["type"] == "http" and not unsafe_http_request_is_allowed(
+            method=scope.get("method", ""),
+            headers=scope.get("headers", []),
+        ):
+            origin = next(
+                (
+                    value.decode("latin-1")
+                    for key, value in scope.get("headers", [])
+                    if key == b"origin"
+                ),
+                None,
+            )
+            host = next(
+                (
+                    value.decode("latin-1")
+                    for key, value in scope.get("headers", [])
+                    if key == b"host"
+                ),
+                None,
+            )
+            logger.warning(
+                "Rejecting cross-origin %s with Origin %r targeting Host %r",
+                scope.get("method"),
+                origin,
+                host,
+            )
+            response = JSONResponse(
+                {"detail": "Cross-origin request rejected"},
+                status_code=403,
+            )
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(BrowserOriginGuardMiddleware)
 
 # Include API routes
 app.include_router(api_router)

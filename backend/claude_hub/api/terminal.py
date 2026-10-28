@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from websockets.typing import Subprotocol
 
 from ..auth.dependencies import get_current_user, get_current_user_ws
+from ..auth.proxy import reject_bad_websocket_origin
 from ..models import AgentType, User
 from ..services.agent_stream.providers.spec import all_specs
 from ..services.ttyd_manager import ttyd_manager
@@ -264,6 +265,11 @@ async def websocket_endpoint(
     websocket: WebSocket, tab_id: str, session_id: Optional[str] = Query(None)
 ) -> None:
     """WebSocket endpoint for terminal connections (proxies to ttyd)."""
+    # Reject cross-site browser handshakes before accepting (CSWSH); native
+    # clients without an Origin header are unaffected.
+    if await reject_bad_websocket_origin(websocket):
+        return
+
     # Authenticate user
     user = await get_current_user_ws(websocket, session_id)
     if not user:
@@ -298,6 +304,11 @@ async def proxy_ttyd_websocket(
     websocket: WebSocket, tab_id: str, session_id: Optional[str] = Query(None)
 ) -> None:
     """Proxy WebSocket connections directly to ttyd's /ws endpoint."""
+    # Reject cross-site browser handshakes before accepting (CSWSH); native
+    # clients without an Origin header are unaffected.
+    if await reject_bad_websocket_origin(websocket):
+        return
+
     # Authenticate user
     user = await get_current_user_ws(websocket, session_id)
     if not user:

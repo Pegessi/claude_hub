@@ -1,35 +1,46 @@
-"""Trust boundary for reverse-proxy request headers.
+"""Trust boundaries for reverse-proxy headers and browser requests.
 
-This is the auth-hardening branch's self-contained copy of the *stable trust
-primitives* shared with the ``codex/rv-proxy-trust`` branch. That branch owns
-the full module — including the browser Origin / unsafe-HTTP policy and the
-``CLAUDE_HUB_ALLOWED_ORIGINS`` setting — and its file is the superset that
-wins when the two branches integrate. Everything here is intentionally
-limited to what cookie/security decisions need, and the function bodies are
-kept byte-identical so the union merge is trivial.
+Reverse proxies (nginx, ttyd front-ends, tunnels) append ``X-Forwarded-For``
+and ``X-Forwarded-Proto``. Those headers are fully attacker-controlled unless
+the *direct* TCP peer is a trusted proxy. Every trust decision here therefore
+keys off the direct connection peer (``connection.client.host``) and never
+off header contents alone. A client connected directly cannot make itself
+look like loopback by sending ``X-Forwarded-For: 127.0.0.1``.
 
-Reverse proxies (nginx, ttyd front-ends, tunnels) append
-``X-Forwarded-For`` and ``X-Forwarded-Proto``. Those headers are fully
-attacker-controlled unless the *direct* TCP peer is a trusted proxy. Every
-trust decision here therefore keys off the direct connection peer
-(``connection.client.host``) and never off header contents alone. A client
-connected directly cannot make itself look like loopback by sending
-``X-Forwarded-For: 127.0.0.1``, and a remote peer cannot flip the effective
-scheme to HTTPS with ``X-Forwarded-Proto``.
+The browser Origin check closes two cross-site holes:
+
+- WebSocket hijacking (CSWSH): browser pages always send ``Origin`` on the
+  upgrade and it must match the destination ``Host`` (or an explicitly
+  allowed origin); native clients that send no ``Origin`` (ttyd, websocat,
+  curl) keep working.
+- State-changing HTTP requests: cross-site "simple" POSTs/PUTs/PATCHes/
+  DELETEs execute even though CORS blocks reading their responses, so unsafe
+  methods with a browser ``Origin`` are held to the same same-origin policy.
+  Safe methods (GET/HEAD/OPTIONS) and Origin-less native clients are exempt.
 """
 
 import ipaddress
+import logging
 from typing import Optional, Sequence, Union
+from urllib.parse import urlsplit
 
 from starlette.requests import HTTPConnection
+from starlette.websockets import WebSocket
 
 from ..config import settings
+
+logger = logging.getLogger(__name__)
 
 _IPAddress = Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
 _IPNetwork = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
 
-# Origin/scheme values are http/https only.
+# Origin carries http/https only (browsers never send ws/wss in Origin).
 _ORIGIN_SCHEME_PORTS = {"http": 80, "https": 443}
+# Host headers without an explicit port are compared against default ports.
+_DEFAULT_HOST_PORTS = frozenset((80, 443))
+# Methods that can change state and therefore require a same-origin browser
+# request. CORS preflight (OPTIONS) and safe reads are verified by CORS alone.
+UNSAFE_HTTP_METHODS = frozenset(("POST", "PUT", "PATCH", "DELETE"))
 
 
 def _normalize_ip(ip: _IPAddress) -> _IPAddress:
@@ -133,3 +144,149 @@ def scheme_from_request(
             if candidate in _ORIGIN_SCHEME_PORTS:
                 return candidate
     return connection.url.scheme
+
+
+def _parse_origin(origin: str) -> Optional[tuple[str, str, int]]:
+    """Split an Origin/URL into (scheme, hostname, effective port)."""
+    try:
+        parts = urlsplit(origin.strip())
+    except ValueError:
+        return None
+    if parts.scheme not in _ORIGIN_SCHEME_PORTS or not parts.hostname:
+        return None
+    port = parts.port
+    if port is None:
+        port = _ORIGIN_SCHEME_PORTS[parts.scheme]
+    return parts.scheme, parts.hostname.lower(), port
+
+
+def _parse_host_target(host: str) -> Optional[tuple[str, Optional[int]]]:
+    """Split a Host header / bare allowed entry into (hostname, port|None).
+
+    Understands ``name``, ``name:port``, ``[::1]`` and ``[::1]:port``.
+    """
+    try:
+        parts = urlsplit("//" + host.strip())
+    except ValueError:
+        return None
+    if not parts.hostname:
+        return None
+    return parts.hostname.lower(), parts.port
+
+
+def _host_target_matches(hostname: str, port: int, host_target: tuple[str, Optional[int]]) -> bool:
+    host_name, host_port = host_target
+    if host_name != hostname:
+        return False
+    if host_port is None:
+        # Browsers omit the default port from Host even when Origin carries
+        # the scheme default explicitly.
+        return port in _DEFAULT_HOST_PORTS
+    return host_port == port
+
+
+def browser_origin_is_allowed(
+    *,
+    origin: Optional[str],
+    host: Optional[str],
+    allowed_origins: Sequence[str] = (),
+) -> bool:
+    """Decide whether a browser ``Origin`` is acceptable for this target.
+
+    Shared by the WebSocket handshake and the unsafe-HTTP-write guard.
+
+    - No ``Origin`` header (native clients) is always allowed.
+    - A parseable Origin whose host[:port] equals ``Host`` is allowed.
+    - An Origin listed in ``allowed_origins`` (full origin or bare
+      host[:port]) is allowed.
+    - Any other present/malformed Origin is rejected.
+    """
+    if origin is None or not origin.strip():
+        return True
+
+    target = _parse_origin(origin)
+    if target is None:
+        return False
+    scheme, hostname, port = target
+
+    if host:
+        host_target = _parse_host_target(host)
+        if host_target is not None and _host_target_matches(hostname, port, host_target):
+            return True
+
+    for entry in allowed_origins:
+        entry = entry.strip()
+        if not entry:
+            continue
+        if "://" in entry:
+            parsed = _parse_origin(entry)
+            if parsed is not None and parsed == (scheme, hostname, port):
+                return True
+        else:
+            host_entry = _parse_host_target(entry)
+            if host_entry is not None and _host_target_matches(hostname, port, host_entry):
+                return True
+    return False
+
+
+def _scope_header(headers: Sequence[tuple[bytes, bytes]], name: str) -> Optional[str]:
+    """Read a lowercase header name from raw ASGI scope headers."""
+    raw_name = name.encode()
+    for key, value in headers:
+        if key == raw_name:
+            return value.decode("latin-1")
+    return None
+
+
+def unsafe_http_request_is_allowed(
+    *,
+    method: str,
+    headers: Sequence[tuple[bytes, bytes]],
+    allowed_origins: Optional[Sequence[str]] = None,
+) -> bool:
+    """Same-origin policy for state-changing HTTP requests.
+
+    Safe methods and requests without an ``Origin`` (curl, the CLI,
+    server-to-server webhooks) pass; an unsafe method carrying a browser
+    ``Origin`` must satisfy the same Host/allowlist match as WebSockets.
+    """
+    if method.upper() not in UNSAFE_HTTP_METHODS:
+        return True
+    origin = _scope_header(headers, "origin")
+    if origin is None or not origin.strip():
+        return True
+    return browser_origin_is_allowed(
+        origin=origin,
+        host=_scope_header(headers, "host"),
+        allowed_origins=(
+            settings.allowed_origins_list if allowed_origins is None else allowed_origins
+        ),
+    )
+
+
+async def reject_bad_websocket_origin(connection: WebSocket) -> bool:
+    """Deny a browser cross-site WebSocket handshake before it is accepted.
+
+    Returns ``True`` after sending a pre-accept close (code 1008) when the
+    handshake must be rejected; callers ``return`` immediately in that case.
+    Starlette/uvicorn translate a pre-accept ``websocket.close`` into an
+    HTTP 403 handshake denial. Returns ``False`` when the handshake may
+    proceed.
+    """
+    origin = connection.headers.get("origin")
+    if origin is None:
+        return False
+    host = connection.headers.get("host")
+    if browser_origin_is_allowed(
+        origin=origin,
+        host=host,
+        allowed_origins=settings.allowed_origins_list,
+    ):
+        return False
+    logger.warning(
+        "Rejecting WebSocket handshake with Origin %r targeting Host %r",
+        origin,
+        host,
+    )
+    await connection.close(code=1008)
+    return True

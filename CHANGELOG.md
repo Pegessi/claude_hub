@@ -161,6 +161,43 @@
   WebSocket bearer session ids into `backend.log`. WebSocket auth log lines
   otherwise still emit only a 6-character session prefix.
 
+### fix(security): trust forwarded headers only from trusted proxies; guard insecure listen and WS origins
+
+- `X-Forwarded-For` is parsed only when the direct TCP peer is in the new
+  `CLAUDE_HUB_TRUSTED_PROXIES` allowlist (comma-separated IPs/CIDRs, default
+  `127.0.0.0/8,::1`). The client is selected by walking the chain right-to-left
+  and stripping trusted hops; malformed entries are ignored. A direct client can
+  no longer send `X-Forwarded-For: 127.0.0.1` to claim the loopback auth
+  exemption. The same module exposes `scheme_from_request`, which honors the
+  first `X-Forwarded-Proto` token only from a trusted direct peer, for cookie
+  Secure decisions behind a terminating proxy.
+- An unauthenticated server (Feishu credentials absent) refuses to bind a
+  non-loopback, non-link-local host (`0.0.0.0`, `::`, concrete LAN/public IPs
+  or hostnames) unless `CLAUDE_HUB_ALLOW_INSECURE_LISTEN=1` is set. The pure
+  decision function treats loopback and link-local as local-only, consistent
+  with the existing local-network auth exemption. Enforced both in the
+  supervised launcher and in the app lifespan.
+- Terminal WebSocket handshakes (`/api/terminal/ws/{tab_id}` and
+  `/api/terminal/proxy/{tab_id}/ws`) and state-changing HTTP methods
+  (`POST`/`PUT`/`PATCH`/`DELETE`) now reject a browser `Origin` whose
+  host[:port] differs from `Host`: WS gets a pre-accept close (1008), HTTP a
+  403 before routing. This closes both the cross-site WebSocket hijacking and
+  "simple" cross-site form-write paths (CORS alone blocks reads, not writes).
+  Safe methods, CORS preflight and requests without `Origin` (ttyd, websocat,
+  curl, the CLI, server webhooks) are unaffected; extra origins can be allowed
+  via `CLAUDE_HUB_ALLOWED_ORIGINS`. The Vite dev proxy rewrites `Origin` to
+  the backend origin, so dev mode keeps working across ports.
+- The guarded launch paths now fail closed without breaking local workflows:
+  the pinned production entry (`start.sh`, wildcard default kept per the
+  checkout-safety contract) exits with a clear message until Feishu auth is
+  configured or `CLAUDE_HUB_ALLOW_INSECURE_LISTEN=1` is set; dev mode
+  (`start.sh --dev`) and `start-temp-tunnel.sh` now bind the backend to
+  loopback so they start warning-free, with LAN/phone access still going
+  through the Vite server on `0.0.0.0`. The Docker image exports its real
+  wildcard bind (`CLAUDE_HUB_BIND_HOST=0.0.0.0`) so the guard actually runs
+  in-container; compose explicitly opts in, whitelists the separate frontend
+  origin, and its healthcheck now hits the real `/health`.
+
 ### fix(maso): retain final responses without streamed tokens
 
 - Read authoritative text and reasoning from MASO's `post_llm_response` event.
