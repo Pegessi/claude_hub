@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "387c20c848f0c22c9c0f9c774a88d7d56d8c2b0d",
+  "parents": [
+    "15f31c0dde3fb516033bcc85e6c420536e9b030a",
+    "0f5a13e59e0dc1c0fc8e6cd71d5de8cc3a44d6a9"
+  ],
+  "base": "0211661a1e627349822b3857ecf74f33b81818ef",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "24dcd5dc6a4c29066a8b6f9d76968abd65f8b8c4",
+  "reconstructed_tree": "4180910014de9301e80a55bf8dbdcef00d82e6af",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a4bfbecaf1c6b1bd9e75e0139c91f70b7e3efbb4"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ddf7c53a702c4858aeb09f918a16b615b143c4e0"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a220454031520f3e671e6552d6533301fe0632ed"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a03da713e6bfe0e54afb7480341f0c75737ece20"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2b2e1c31d9cd2f2d0a78b448519344743855ddf2"
+      },
+      "reason": "main added Feishu interactive-question release notes and codex/rv-cli-baseurl added base-URL/redaction release notes; both insert at the top of Released. Manual union retains main's two Feishu entries first, then both incoming CLI entries, then the shared tail, preserving every parent entry; a blank line separates the adjacent heading blocks.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
