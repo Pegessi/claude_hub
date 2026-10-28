@@ -156,3 +156,26 @@ Final independent Workspace candidate review and human acceptance are still
 pending. Console/public HTTPS integration was not attempted. Ports 5296/5297/5298
 were checked closed; task screenshots/logs and auxiliary snapshots are retained.
 No lessons needed.
+
+
+## Review round 2 corrections
+
+Reviewer F1 confirmed that the external completion bridge treated a supported
+question's mirror failure as unsupported interaction and retired the provider.
+Eligibility is now decided independently of outbound success. Valid enabled
+bindings retain the pending question and release only the external waiter even
+when send is uncertain or PATCH raises; unsupported/default-disabled paths retain
+the existing web-required retirement policy. Real mirror timeout, persisted
+uncertain send, and PATCH failure regressions assert no cancellation/retirement.
+
+Reviewer F2 confirmed that replacing the sole mirror lost old reply correlation.
+Remirror now atomically retains content-free old bot/app/chat/message identities
+alongside the new mirror. Those tombstones survive inbox reload and body expiry,
+are excluded from public projections, and consume stale parent replies before
+ordinary batching without answering the new card. Unrelated messages remain
+ordinary, while replies to the current card still admit one answer. Old opaque
+button digests are revoked by replacement as before.
+
+Focused callback/bridge verification: **81 passed**, including real loopback TLS;
+`feishu-choice-review-fixes.log`, evidence `/tmp/claude-hub-verify.dvlu6l5x`.
+No live app/proxy/state changes. Updated final strict verification follows.

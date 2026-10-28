@@ -438,19 +438,21 @@ async def dispatch_tab_chat_and_wait(
                 continue
             if event.type == AgentStreamEventType.APPROVAL_REQUIRED:
                 from ....services.agent_stream.question_answers import answers
-                from ..feishu_bot.card_actions import mirror_question
+                from ..feishu_bot.card_actions import mirror_question, question_mirror_eligible
 
+                eligible = False
                 try:
                     if event.call_id:
                         question = await answers.capture(
                             session.id, str(event.turn_id), event.call_id
                         )
-                        if await mirror_question(question):
-                            raise ExternalQuestionPending("Question is waiting for an answer")
-                except ExternalQuestionPending:
-                    raise
+                        eligible = question_mirror_eligible(question)
+                        if eligible:
+                            await mirror_question(question)
                 except Exception:
-                    pass
+                    pass  # outbound failure does not cancel an eligible waiting question
+                if eligible:
+                    raise ExternalQuestionPending("Question is waiting for an answer")
                 # Feishu cannot submit the structured answer required by this
                 # provider turn. Leaving the card open would permanently own
                 # the per-Chat FIFO, so stop the exact turn and direct the user

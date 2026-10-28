@@ -729,3 +729,113 @@ async def test_disabled_bot_question_is_not_exported_after_later_enable(harness:
     # an explicit remirror rather than being exported by a background sweep.
     assert not await card_actions.mirror_question(question)
     assert question.mirror is None
+
+
+@pytest.mark.parametrize("failure", ["send_timeout", "uncertain", "patch_failure"])
+@pytest.mark.asyncio
+async def test_external_supported_question_survives_mirror_failure(
+    harness: Harness, monkeypatch, failure
+):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from claude_hub.api import agent_stream as stream
+    from claude_hub.api.routes.agent_stream.dispatch import ExternalQuestionPending
+    from claude_hub.models import AgentStreamEvent, AgentStreamEventType, AgentType
+
+    q = harness.question
+    assert q.mirror is not None
+    if failure == "send_timeout":
+        q.mirror = None
+    elif failure == "uncertain":
+        q.mirror.state = "uncertain"
+    else:
+        q.state = "claimed"
+    calls = []
+
+    class Client:
+        def __init__(self, config):
+            pass
+
+        async def get_tenant_token(self):
+            return "test-token"
+
+        async def send_message_with_identity(self, *args, **kwargs):
+            calls.append("send")
+            raise TimeoutError("platform send outcome unknown")
+
+        async def patch_message_card(self, *args, **kwargs):
+            calls.append("patch")
+            raise RuntimeError("platform patch unavailable")
+
+    monkeypatch.setattr(card_actions, "FeishuBotClient", Client)
+    monkeypatch.setattr(card_actions.answers, "capture", AsyncMock(return_value=q))
+    session = SimpleNamespace(id=q.session_id, tab_id=q.tab_id)
+    queue: asyncio.Queue[AgentStreamEvent] = asyncio.Queue()
+    await queue.put(
+        AgentStreamEvent(
+            stream_sequence=1,
+            session_id=q.session_id,
+            tab_id=q.tab_id,
+            agent_type=AgentType.CODEX,
+            type=AgentStreamEventType.APPROVAL_REQUIRED,
+            turn_id=q.turn_id,
+            call_id=q.call_id,
+            payload={},
+            created_at=utc_now(),
+        )
+    )
+    manager = SimpleNamespace(
+        subscribe_completion=AsyncMock(return_value=queue),
+        unsubscribe_completion=lambda *_: None,
+        retire_external_turn=AsyncMock(),
+        cancel_turn=AsyncMock(),
+    )
+    monkeypatch.setattr(stream, "_terminal_tab_session_or_404", lambda _: session)
+    monkeypatch.setattr(stream, "_get_tab_tailer_manager", lambda: manager)
+    monkeypatch.setattr(stream, "_dispatch_tab_stream_input", AsyncMock(return_value=q.turn_id))
+    with pytest.raises(ExternalQuestionPending):
+        await stream.dispatch_tab_chat_and_wait(q.tab_id, "prompt", q.turn_id, timeout_seconds=1)
+    manager.retire_external_turn.assert_not_awaited()
+    manager.cancel_turn.assert_not_awaited()
+    assert q.state == ("claimed" if failure == "patch_failure" else "open")
+    if failure == "send_timeout":
+        assert q.mirror is not None and q.mirror.state == "uncertain"
+        assert calls == ["send"]
+    elif failure == "patch_failure":
+        assert calls == ["patch"]
+    else:
+        assert not calls
+
+
+@pytest.mark.asyncio
+async def test_remirror_retains_stale_reply_identity_across_restart(harness: Harness, monkeypatch):
+    class Client:
+        def __init__(self, config):
+            pass
+
+        async def get_tenant_token(self):
+            return "test-token"
+
+        async def send_message_with_identity(self, *args, **kwargs):
+            return "om-remirrored"
+
+    monkeypatch.setattr(card_actions, "FeishuBotClient", Client)
+    q = harness.question
+    assert await card_actions.mirror_question(q, remirror=True)
+    assert q.mirror is not None and q.mirror.message_id == "om-remirrored"
+    assert [card.message_id for card in q.retired_cards] == ["om-card"]
+    clone = ChatMessageInbox(
+        harness.inbox.path, harness.inbox.target, harness.inbox.submit, harness.inbox.evidence
+    )
+    harness.inbox = clone
+    restored = clone.questions[q.question_ref]
+    assert "retired_cards" not in restored.public()
+    assert await card_actions.intercept_reply(harness.bot, harness.reply(parent_id="om-card"))
+    assert restored.state == "open" and not clone.messages
+    assert not await card_actions.intercept_reply(
+        harness.bot, harness.reply(parent_id="om-unrelated")
+    )
+    assert not await card_actions.intercept_reply(harness.bot, harness.reply(parent_id=None))
+    assert await card_actions.intercept_reply(harness.bot, harness.reply(parent_id="om-remirrored"))
+    assert restored.state == "claimed" and len(clone.messages) == 1

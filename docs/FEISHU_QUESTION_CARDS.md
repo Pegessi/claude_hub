@@ -92,13 +92,17 @@ under an event identity conflicts.
   from durable receipts, including after reload. Remote token expiry does not
   disable an otherwise live web question.
 - Remote choices expire after 24 hours. Explicit remirror revalidates the live
-  question and issues new opaque actions; old actions are revoked. Rebinding,
+  question and issues new opaque actions; old actions are revoked. Superseded
+  card message IDs remain content-free correlation tombstones across restart,
+  so replies to old cards are consumed rather than sent as ordinary prompts. Rebinding,
   key/settings rotation, Stop, reset/deletion or runtime replacement invalidate
   old remote actions. Successful Claude/Cursor placeholder-turn completion alone
   does not invalidate its waiting follow-up question.
 - No binding or disabled callbacks preserves static notifications/web answering.
   Failed/uncertain outbound delivery is not evidence of a usable card. Unknown
-  native write outcomes remain fenced and never replay automatically. Inspect
+  native write outcomes remain fenced and never replay automatically. Mirror
+  send/update failures preserve eligible supported questions and release only
+  the external completion waiter; they do not retire the waiting provider turn. Inspect
   the conversation before taking any manual recovery action.
 
 Inspect questions with `claude-hub tab question list TAB_ID`. Answer with
