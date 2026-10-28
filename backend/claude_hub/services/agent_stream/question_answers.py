@@ -213,61 +213,67 @@ class QuestionAnswers:
 
         session, manager, _ = self.context(session_id)
         async with get_goal_admission_lock(session.tab_id):
-            async with self.lock(session_id):
-                _, _, tailer = self.context(session_id)
-                snap = tailer.question_snapshot(payload.question_turn_id, payload.question_call_id)
-                parsed = parse_ask_question_response(payload.text)
-                if snap is None or not parsed:
-                    raise HTTPException(409, "Question no longer pending")
-                expected = {q["id"] for q in snap["questions"]}
-                if (
-                    len(parsed) != len(expected)
-                    or {a.get("questionId") for a in parsed} != expected
-                    or any(
-                        not isinstance(a.get("selected"), list)
-                        or not a["selected"]
-                        or any(not isinstance(v, str) or not v.strip() for v in a["selected"])
-                        for a in parsed
+            async with AsyncExitStack() as ownership:
+                if not session_id.startswith("terminal-tab-"):
+                    session = await ownership.enter_async_context(
+                        stream._agent_stream_bindings.managed_stream_interaction(
+                            session, require_chat=True
+                        )
                     )
-                ):
-                    raise HTTPException(400, "Incomplete question answer")
-                mapped = {a["questionId"]: a["selected"] for a in parsed}
-                if sum(
-                    len(value.encode()) for a in parsed for value in a["selected"]
-                ) > 65536 or any(
-                    not q.get("allow_multiple") and len(mapped[q["id"]]) != 1
-                    for q in snap["questions"]
-                ):
-                    raise HTTPException(400, "Invalid question answer bounds")
-                if snap["mode"] == "native":
-                    if not await manager.answer_pending_question(
-                        session,
-                        payload.text,
-                        payload.question_turn_id,
-                        expected_call_id=payload.question_call_id,
-                    ):
+                async with self.lock(session_id):
+                    _, _, tailer = self.context(session_id)
+                    snap = tailer.question_snapshot(
+                        payload.question_turn_id, payload.question_call_id
+                    )
+                    parsed = parse_ask_question_response(payload.text)
+                    if snap is None or not parsed:
                         raise HTTPException(409, "Question no longer pending")
-                elif session_id.startswith("terminal-tab-"):
-                    await dispatch_tab_stream_input(
-                        session.tab_id,
-                        payload,
-                        stream._agent_stream_bindings,
-                        goal_locked=True,
-                    )
-                    await manager.resolve_answered_questions(
-                        session,
-                        payload.text,
-                        expected_turn_id=payload.question_turn_id,
-                        expected_call_id=payload.question_call_id,
-                    )
-                else:
-                    async with stream._agent_stream_bindings.managed_stream_interaction(
-                        session, require_chat=True
-                    ) as live:
-                        if await manager.turn_in_flight(live):
+                    expected = {q["id"] for q in snap["questions"]}
+                    if (
+                        len(parsed) != len(expected)
+                        or {a.get("questionId") for a in parsed} != expected
+                        or any(
+                            not isinstance(a.get("selected"), list)
+                            or not a["selected"]
+                            or any(not isinstance(v, str) or not v.strip() for v in a["selected"])
+                            for a in parsed
+                        )
+                    ):
+                        raise HTTPException(400, "Incomplete question answer")
+                    mapped = {a["questionId"]: a["selected"] for a in parsed}
+                    if sum(
+                        len(value.encode()) for a in parsed for value in a["selected"]
+                    ) > 65536 or any(
+                        not q.get("allow_multiple") and len(mapped[q["id"]]) != 1
+                        for q in snap["questions"]
+                    ):
+                        raise HTTPException(400, "Invalid question answer bounds")
+                    if snap["mode"] == "native":
+                        if not await manager.answer_pending_question(
+                            session,
+                            payload.text,
+                            payload.question_turn_id,
+                            expected_call_id=payload.question_call_id,
+                        ):
+                            raise HTTPException(409, "Question no longer pending")
+                    elif session_id.startswith("terminal-tab-"):
+                        await dispatch_tab_stream_input(
+                            session.tab_id,
+                            payload,
+                            stream._agent_stream_bindings,
+                            goal_locked=True,
+                        )
+                        await manager.resolve_answered_questions(
+                            session,
+                            payload.text,
+                            expected_turn_id=payload.question_turn_id,
+                            expected_call_id=payload.question_call_id,
+                        )
+                    else:
+                        if await manager.turn_in_flight(session):
                             raise HTTPException(409, "Wait for current provider turn")
                         await stream.workspace_manager.send_chat_session_message_locked(
-                            live.id,
+                            session.id,
                             payload.text,
                             call_id=payload.client_turn_id,
                             question_key=json.dumps(
@@ -276,7 +282,7 @@ class QuestionAnswers:
                             ),
                         )
                         await manager.resolve_answered_questions(
-                            live,
+                            session,
                             payload.text,
                             expected_turn_id=payload.question_turn_id,
                             expected_call_id=payload.question_call_id,

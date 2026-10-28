@@ -458,3 +458,36 @@ async def test_managed_handoff_requires_persisted_exact_fingerprint(runtime, tmp
     altered.call_payload_fingerprints[item.call_id] = "different-payload"
     path.write_text(json.dumps({"sessions": [altered.model_dump(mode="json")]}))
     assert not service.managed_handoff_persisted(q, item)
+
+
+@pytest.mark.asyncio
+async def test_corrupt_inbox_native_managed_web_keeps_owner_guard(runtime, monkeypatch):
+    service, _, session, manager, _ = runtime
+    session.id = "managed-corrupt-inbox"
+    guarded = False
+
+    @asynccontextmanager
+    async def ownership(value, **kwargs):
+        nonlocal guarded
+        assert value is session
+        guarded = True
+        try:
+            yield value
+        finally:
+            guarded = False
+
+    async def native(*args, **kwargs):
+        assert guarded
+        assert args[2] == "turn-A"
+        assert kwargs["expected_call_id"] == "call-A"
+        return True
+
+    def unavailable():
+        raise ValueError("corrupt optional inbox")
+
+    monkeypatch.setattr(service, "inbox", unavailable)
+    monkeypatch.setattr(stream._agent_stream_bindings, "managed_stream_interaction", ownership)
+    manager.answer_pending_question.side_effect = native
+    result = await service.web(session.id, payload(), User(open_id="local", name="Local", email=""))
+    assert result == {"ok": True, "answered_question": True}
+    assert not guarded
