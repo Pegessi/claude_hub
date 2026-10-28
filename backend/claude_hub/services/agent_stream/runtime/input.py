@@ -10,7 +10,7 @@ from ....models import AgentStreamEventType, AgentType
 from ..base import NativeInputNotSubmittedError, NormalizeContext
 from ..redaction import redact_event
 from .session_state import SessionState
-from .values import _PendingApproval
+from .values import StructuredSourceUnavailable, _PendingApproval
 
 logger = logging.getLogger("claude_hub.services.agent_stream.tailer")
 
@@ -20,7 +20,10 @@ class InputMixin(SessionState):
 
     def question_snapshot(self, turn_id: str, call_id: str) -> Optional[Dict[str, Any]]:
         """Exact live card, without spawning a provider or trusting a transcript."""
-        self._require_startable_incarnation()
+        try:
+            self._require_startable_incarnation()
+        except StructuredSourceUnavailable:
+            return None
         card = self._pending_approvals.get(call_id)
         session = self._session_getter()
         if card is None or card.turn_id != turn_id or session is None:
