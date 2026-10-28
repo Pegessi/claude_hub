@@ -24,7 +24,7 @@
 | 5 | `codex/rv-auth-hardening` | `e9ccf5f42efc2a0051f998420d972fefc5d69a76` | `920a5dada390c731464a4bb8899d396369d2bbdb` |
 | 6 | `codex/rv-proxy-trust` | `6141f253957028d7f024e7540711e11bf2a986bb` | `35a5ff1dafd9fa9a37719f4f8e52561467ada0c8` |
 | 7 | `codex/rv-state-safety` | `5c352d198827f488fa354107fb6263fd65eff7bc` | `dd024d5b0a01ab7152b5d60cdcf115f174005445` |
-| 8 | `codex/rv-monitor-isolation` | `4f630ce91e085c9d59b52fdc7cdd247994fd0d4e` | `6c11956dc49eb65c2619a1b97b933ac2a58b18b78c` |
+| 8 | `codex/rv-monitor-isolation` | `4f630ce91e085c9d59b52fdc7cdd247994fd0d4e` | `6c11956dc49eb65c2619a1b44d7a4f6e2618b78c` |
 
 Excluded as instructed: SQLite/WAL, Hooks, concept consolidation, workflow
 tooling, guidance and README branches. Source worktrees and their ignored files
