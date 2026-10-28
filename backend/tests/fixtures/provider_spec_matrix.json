@@ -1,0 +1,438 @@
+{
+  "claude": {
+    "approval_channels": {
+      "direct_chat": "oneshot_steer",
+      "dot": "oneshot_steer",
+      "managed_chat": "oneshot_steer",
+      "managed_terminal": "native_tui",
+      "resident": "native_tui",
+      "scheduled": "native_tui",
+      "subagent": "oneshot_steer",
+      "terminal_tab": "native_tui"
+    },
+    "auth": {
+      "default_endpoint": null,
+      "endpoint_env_names": [
+        "ANTHROPIC_BASE_URL"
+      ],
+      "kind": "env_or_settings",
+      "login_probe_argv": [],
+      "network_route_selection": true,
+      "requires_loopback_for_managed": false
+    },
+    "binary": "claude",
+    "display_name": "Claude Code",
+    "edit_resend": true,
+    "effort_env_keys": [],
+    "eof_is_fatal": false,
+    "fork_seed_via_prompt": true,
+    "goals": {
+      "api": "none",
+      "completion_event": "result",
+      "completion_event_scope": "any",
+      "completion_requires_provider_event": false,
+      "default_owner": "hub_managed",
+      "surfaces": [
+        "direct_chat"
+      ],
+      "usage_quality": "exact"
+    },
+    "headless_safe": true,
+    "hot_env_keys": [
+      "ANTHROPIC_MODEL"
+    ],
+    "id": "claude",
+    "images": "sdk_base64",
+    "model_catalog": "tab_env",
+    "model_configurable_in_managed": true,
+    "model_env_key": "ANTHROPIC_MODEL",
+    "plan_mode": "cli_flag_probed",
+    "quota": "none",
+    "reasoning_effort": "model_selection",
+    "remote_terminal": true,
+    "resume": {
+      "constructive_always": false,
+      "constructive_flag": "--session-id",
+      "kind": "verified_flag",
+      "verified_flag": "--resume"
+    },
+    "solo": "bypass_flag",
+    "stream_source": "stdout_stream_json",
+    "supports_conversation_rotation": true,
+    "surfaces": [
+      "direct_chat",
+      "dot",
+      "managed_chat",
+      "managed_terminal",
+      "resident",
+      "scheduled",
+      "subagent",
+      "terminal_tab"
+    ],
+    "system_instruction_channel": "cli_flag",
+    "tool_timeline": true,
+    "transport": "cli_oneshot"
+  },
+  "codex": {
+    "approval_channels": {
+      "direct_chat": "rpc_blocking",
+      "dot": "rpc_blocking",
+      "managed_chat": "rpc_blocking",
+      "managed_terminal": "native_tui",
+      "resident": "native_tui",
+      "scheduled": "native_tui",
+      "subagent": "rpc_blocking",
+      "terminal_tab": "native_tui"
+    },
+    "auth": {
+      "default_endpoint": null,
+      "endpoint_env_names": [],
+      "kind": "login_status_probe",
+      "login_probe_argv": [
+        "codex",
+        "login",
+        "status"
+      ],
+      "network_route_selection": true,
+      "requires_loopback_for_managed": false
+    },
+    "binary": "codex",
+    "display_name": "Codex",
+    "edit_resend": true,
+    "effort_env_keys": [
+      "CODEX_REASONING_EFFORT"
+    ],
+    "eof_is_fatal": true,
+    "fork_seed_via_prompt": true,
+    "goals": {
+      "api": "rpc_thread",
+      "completion_event": "turn/completed",
+      "completion_event_scope": "any",
+      "completion_requires_provider_event": false,
+      "default_owner": "hub_managed",
+      "surfaces": [
+        "direct_chat"
+      ],
+      "usage_quality": "exact"
+    },
+    "headless_safe": true,
+    "hot_env_keys": [
+      "CODEX_MODEL",
+      "CODEX_REASONING_EFFORT"
+    ],
+    "id": "codex",
+    "images": "rpc_temp_file",
+    "model_catalog": "rpc_list",
+    "model_configurable_in_managed": true,
+    "model_env_key": "CODEX_MODEL",
+    "plan_mode": "rpc_collaboration",
+    "quota": "local_rollout",
+    "reasoning_effort": "env_key",
+    "remote_terminal": true,
+    "resume": {
+      "constructive_always": false,
+      "constructive_flag": null,
+      "kind": "rpc_thread",
+      "verified_flag": null
+    },
+    "solo": "sandbox_policy",
+    "stream_source": "rpc_notifications",
+    "supports_conversation_rotation": true,
+    "surfaces": [
+      "direct_chat",
+      "dot",
+      "managed_chat",
+      "managed_terminal",
+      "resident",
+      "scheduled",
+      "subagent",
+      "terminal_tab"
+    ],
+    "system_instruction_channel": "rpc_config",
+    "tool_timeline": true,
+    "transport": "cli_persistent"
+  },
+  "cursor": {
+    "approval_channels": {
+      "direct_chat": "oneshot_steer",
+      "dot": "oneshot_steer",
+      "managed_chat": "oneshot_steer",
+      "managed_terminal": "native_tui",
+      "resident": "native_tui",
+      "scheduled": "native_tui",
+      "subagent": "oneshot_steer",
+      "terminal_tab": "native_tui"
+    },
+    "auth": {
+      "default_endpoint": "https://api2.cursor.sh",
+      "endpoint_env_names": [
+        "CURSOR_API_ENDPOINT"
+      ],
+      "kind": "env_or_settings",
+      "login_probe_argv": [],
+      "network_route_selection": true,
+      "requires_loopback_for_managed": false
+    },
+    "binary": "agent",
+    "display_name": "Cursor",
+    "edit_resend": true,
+    "effort_env_keys": [],
+    "eof_is_fatal": false,
+    "fork_seed_via_prompt": true,
+    "goals": {
+      "api": "none",
+      "completion_event": "turn_ended",
+      "completion_event_scope": "any",
+      "completion_requires_provider_event": false,
+      "default_owner": "hub_managed",
+      "surfaces": [
+        "direct_chat"
+      ],
+      "usage_quality": "unavailable"
+    },
+    "headless_safe": true,
+    "hot_env_keys": [
+      "CURSOR_MODEL"
+    ],
+    "id": "cursor",
+    "images": "prompt_file_ref",
+    "model_catalog": "cli_list_models",
+    "model_configurable_in_managed": false,
+    "model_env_key": "CURSOR_MODEL",
+    "plan_mode": "cli_flag_probed",
+    "quota": "none",
+    "reasoning_effort": "model_id_suffix",
+    "remote_terminal": true,
+    "resume": {
+      "constructive_always": true,
+      "constructive_flag": "--resume",
+      "kind": "constructive_flag",
+      "verified_flag": null
+    },
+    "solo": "always",
+    "stream_source": "stdout_stream_json",
+    "supports_conversation_rotation": true,
+    "surfaces": [
+      "direct_chat",
+      "dot",
+      "managed_chat",
+      "managed_terminal",
+      "resident",
+      "scheduled",
+      "subagent",
+      "terminal_tab"
+    ],
+    "system_instruction_channel": "prompt_sentinel",
+    "tool_timeline": true,
+    "transport": "cli_oneshot"
+  },
+  "maso": {
+    "approval_channels": {
+      "direct_chat": "http_confirm",
+      "dot": "http_confirm",
+      "managed_chat": "http_confirm",
+      "managed_terminal": "none",
+      "resident": "none",
+      "scheduled": "none",
+      "subagent": "http_confirm",
+      "terminal_tab": "none"
+    },
+    "auth": {
+      "default_endpoint": "http://127.0.0.1:9796",
+      "endpoint_env_names": [
+        "MASO_BASE_URL",
+        "MASO_PORT"
+      ],
+      "kind": "http_service",
+      "login_probe_argv": [],
+      "network_route_selection": false,
+      "requires_loopback_for_managed": true
+    },
+    "binary": null,
+    "display_name": "MASO",
+    "edit_resend": false,
+    "effort_env_keys": [],
+    "eof_is_fatal": false,
+    "fork_seed_via_prompt": true,
+    "goals": {
+      "api": "none",
+      "completion_event": "agent_end",
+      "completion_event_scope": "root_only",
+      "completion_requires_provider_event": true,
+      "default_owner": "hub_managed",
+      "surfaces": [
+        "direct_chat"
+      ],
+      "usage_quality": "unavailable"
+    },
+    "headless_safe": false,
+    "hot_env_keys": [
+      "MASO_MODEL"
+    ],
+    "id": "maso",
+    "images": "http_chunked",
+    "model_catalog": "http_catalog",
+    "model_configurable_in_managed": false,
+    "model_env_key": "MASO_MODEL",
+    "plan_mode": "none",
+    "quota": "http_accounting",
+    "reasoning_effort": "model_variants",
+    "remote_terminal": false,
+    "resume": {
+      "constructive_always": false,
+      "constructive_flag": null,
+      "kind": "http_session",
+      "verified_flag": null
+    },
+    "solo": "none",
+    "stream_source": "sse",
+    "supports_conversation_rotation": true,
+    "surfaces": [
+      "direct_chat",
+      "dot",
+      "managed_chat",
+      "subagent"
+    ],
+    "system_instruction_channel": "prompt_prefix",
+    "tool_timeline": true,
+    "transport": "http_sse"
+  },
+  "terminal": {
+    "approval_channels": {
+      "direct_chat": "none",
+      "dot": "none",
+      "managed_chat": "none",
+      "managed_terminal": "native_tui",
+      "resident": "native_tui",
+      "scheduled": "native_tui",
+      "subagent": "none",
+      "terminal_tab": "native_tui"
+    },
+    "auth": {
+      "default_endpoint": null,
+      "endpoint_env_names": [],
+      "kind": "none",
+      "login_probe_argv": [],
+      "network_route_selection": false,
+      "requires_loopback_for_managed": false
+    },
+    "binary": null,
+    "display_name": "Terminal",
+    "edit_resend": false,
+    "effort_env_keys": [],
+    "eof_is_fatal": false,
+    "fork_seed_via_prompt": false,
+    "goals": {
+      "api": "none",
+      "completion_event": "result",
+      "completion_event_scope": "any",
+      "completion_requires_provider_event": false,
+      "default_owner": "hub_managed",
+      "surfaces": [],
+      "usage_quality": "unavailable"
+    },
+    "headless_safe": false,
+    "hot_env_keys": [],
+    "id": "terminal",
+    "images": "none",
+    "model_catalog": "static_curated",
+    "model_configurable_in_managed": false,
+    "model_env_key": null,
+    "plan_mode": "none",
+    "quota": "none",
+    "reasoning_effort": "none",
+    "remote_terminal": true,
+    "resume": {
+      "constructive_always": false,
+      "constructive_flag": null,
+      "kind": "none",
+      "verified_flag": null
+    },
+    "solo": "none",
+    "stream_source": "transcript_jsonl",
+    "supports_conversation_rotation": false,
+    "surfaces": [
+      "resident",
+      "scheduled",
+      "terminal_tab"
+    ],
+    "system_instruction_channel": "none",
+    "tool_timeline": false,
+    "transport": "shell"
+  },
+  "traex": {
+    "approval_channels": {
+      "direct_chat": "rpc_blocking",
+      "dot": "rpc_blocking",
+      "managed_chat": "rpc_blocking",
+      "managed_terminal": "native_tui",
+      "resident": "native_tui",
+      "scheduled": "native_tui",
+      "subagent": "rpc_blocking",
+      "terminal_tab": "native_tui"
+    },
+    "auth": {
+      "default_endpoint": null,
+      "endpoint_env_names": [
+        "TRAE_API_BASE_URL"
+      ],
+      "kind": "env_or_settings",
+      "login_probe_argv": [],
+      "network_route_selection": true,
+      "requires_loopback_for_managed": false
+    },
+    "binary": "traex",
+    "display_name": "TraeX",
+    "edit_resend": false,
+    "effort_env_keys": [
+      "CODEX_REASONING_EFFORT",
+      "TRAEX_REASONING_EFFORT"
+    ],
+    "eof_is_fatal": true,
+    "fork_seed_via_prompt": true,
+    "goals": {
+      "api": "rpc_thread",
+      "completion_event": "turn/completed",
+      "completion_event_scope": "any",
+      "completion_requires_provider_event": false,
+      "default_owner": "hub_managed",
+      "surfaces": [
+        "direct_chat"
+      ],
+      "usage_quality": "exact"
+    },
+    "headless_safe": true,
+    "hot_env_keys": [
+      "CODEX_MODEL",
+      "CODEX_REASONING_EFFORT",
+      "TRAEX_REASONING_EFFORT"
+    ],
+    "id": "traex",
+    "images": "rpc_temp_file",
+    "model_catalog": "rpc_list",
+    "model_configurable_in_managed": false,
+    "model_env_key": "CODEX_MODEL",
+    "plan_mode": "rpc_collaboration",
+    "quota": "none",
+    "reasoning_effort": "env_key",
+    "remote_terminal": true,
+    "resume": {
+      "constructive_always": false,
+      "constructive_flag": null,
+      "kind": "rpc_thread",
+      "verified_flag": null
+    },
+    "solo": "sandbox_policy",
+    "stream_source": "rpc_notifications",
+    "supports_conversation_rotation": true,
+    "surfaces": [
+      "direct_chat",
+      "dot",
+      "subagent",
+      "terminal_tab"
+    ],
+    "system_instruction_channel": "rpc_config",
+    "tool_timeline": true,
+    "transport": "cli_persistent"
+  }
+}

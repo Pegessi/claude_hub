@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Set
 
-from ....models import AgentStreamEvent, AgentStreamEventType
+from ....models import AgentStreamEvent, AgentStreamEventType, AgentType
 from ..base import AgentStreamAdapter, NormalizeContext
 from .codex_values import (
     _CODE_MODE_NESTED_PREFIX,
@@ -21,8 +21,7 @@ class CodexOwnership(AgentStreamAdapter):
 
     adapter_id = "codex-jsonl"
     schema_version = 1
-    supports_approval_ui = True
-    supports_tool_timeline = True
+    spec_agent_type = AgentType.CODEX
 
     def __init__(self) -> None:
         super().__init__()

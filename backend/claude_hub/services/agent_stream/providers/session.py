@@ -19,30 +19,70 @@ from ....models import (
 from ..provider_network import ProviderNetworkError
 from .contracts import ProviderGoal, ProviderGoalOrigin, ProviderGoalSnapshot, ProviderRuntime
 from .guidance import SUBAGENT_HUB_RUNTIME_GUIDANCE
+from .spec import ApprovalChannel, ImageTransport, ProviderSpec, Surface, get_spec
 
 
 class SessionCore(ABC):
     """Base contract for a native provider transport.
 
-    Subclasses set :attr:`adapter_id`, :attr:`schema_version`, and the
-    capability flags; implement :meth:`_build_command` and
-    :meth:`_send_text`; and may override :meth:`start` / :meth:`stop`.
+    Subclasses set :attr:`adapter_id`, :attr:`schema_version`, and may
+    override the capability properties below for genuine per-transport
+    divergences; implement :meth:`_build_command` and :meth:`_send_text`; and
+    may override :meth:`start` / :meth:`stop`.
+
+    Capability defaults are projections of the static ProviderSpec registry
+    rather than parallel class constants, so the native Chat hierarchy cannot
+    silently disagree with the registry (see
+    ``docs/design/2026-10-27-provider-spec-capability-registry-proposal.md``).
     """
 
     adapter_id: str = "native"
     schema_version: int = 1
-    supports_approval_ui: bool = False
-    supports_tool_timeline: bool = False
-    supports_images: bool = False
-    supports_goals: bool = True
-    goal_execution_owner: Optional[Literal["provider_native", "hub_managed"]] = "hub_managed"
-    goal_usage_quality: Literal["exact", "estimated", "unavailable"] = "unavailable"
-    # Providers with a native system/developer instruction channel consume
-    # ``_dot_system_pack`` outside the user prompt.
-    supports_native_system_instructions: bool = False
-    # One-shot CLIs can leave stdout open after their final Goal response. Other
-    # transports own a larger provider run and must emit its terminal event.
-    goal_completion_requires_provider_event: bool = False
+
+    @property
+    def _spec(self) -> ProviderSpec:
+        return get_spec(self.session.agent_type)
+
+    @property
+    def supports_approval_ui(self) -> bool:
+        # One-shot question channels (claude --print, cursor --print) cannot
+        # block the turn for an answer; blocking RPC/HTTP channels can.
+        return self._spec.approval_channels[Surface.DIRECT_CHAT] in (
+            ApprovalChannel.RPC_BLOCKING,
+            ApprovalChannel.HTTP_CONFIRM,
+            ApprovalChannel.NATIVE_TUI,
+        )
+
+    @property
+    def supports_tool_timeline(self) -> bool:
+        return self._spec.tool_timeline
+
+    @property
+    def supports_images(self) -> bool:
+        return self._spec.images is not ImageTransport.NONE
+
+    @property
+    def supports_goals(self) -> bool:
+        return Surface.DIRECT_CHAT in self._spec.goals.surfaces
+
+    @property
+    def goal_execution_owner(self) -> Optional[Literal["provider_native", "hub_managed"]]:
+        return self._spec.goals.default_owner
+
+    @property
+    def goal_usage_quality(self) -> Literal["exact", "estimated", "unavailable"]:
+        return self._spec.goals.usage_quality
+
+    @property
+    def supports_native_system_instructions(self) -> bool:
+        # Providers with a real system/developer channel outside the user
+        # prompt consume ``_dot_system_pack`` there; prompt-prefix/sentinel
+        # channels are still user-prompt delivery.
+        return self._spec.system_instruction_channel in ("cli_flag", "rpc_config")
+
+    @property
+    def goal_completion_requires_provider_event(self) -> bool:
+        return self._spec.goals.completion_requires_provider_event
 
     def __init__(
         self,
@@ -288,10 +328,11 @@ class SessionCore(ABC):
 
         For one-shot providers (Claude/Cursor) EOF means the turn completed
         normally; the push consumer should keep waiting for the next turn.
-        For persistent providers (Codex app-server) EOF means the server
-        died and the session must fail closed.
+        For persistent providers (Codex/TraeX app-server) EOF means the
+        server died and the session must fail closed. Sourced from the
+        ProviderSpec registry.
         """
-        return False
+        return self._spec.eof_is_fatal
 
     def require_resumed_conversation(
         self,

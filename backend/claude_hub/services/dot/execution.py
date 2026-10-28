@@ -10,12 +10,13 @@ from contextlib import AsyncExitStack
 from typing import Any
 
 from claude_hub.models import AgentType, SessionKind
+from claude_hub.services.agent_stream.providers.spec import Surface, providers_for_surface
 from claude_hub.services.dot.runtime.session import DotSessionService
 from claude_hub.services.goal_run import get_goal_admission_lock, get_goal_manager
 from claude_hub.services.ttyd_manager import ttyd_manager
 from claude_hub.services.workspace_manager import workspace_manager
 
-PROVIDERS = (AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR, AgentType.TRAEX, AgentType.MASO)
+PROVIDERS = providers_for_surface(Surface.DOT)
 _SCHEDULE_KEYS = ("wake_schedule_id", "tidy_schedule_id")
 _ACTIVE_RUNS = {"queued", "waiting", "dispatching", "running", "uncertain"}
 

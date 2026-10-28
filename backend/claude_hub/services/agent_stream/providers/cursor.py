@@ -29,12 +29,13 @@ class CursorSession(ProcessSession):
 
     adapter_id = "cursor-native"
     schema_version = 1
-    supports_tool_timeline = True
+    # The native one-shot transport advertises approval UI even though its
+    # one-shot questions are delivered as a later steer; this deliberately
+    # diverges from the spec-derived ONESHOT_STEER default (the transcript
+    # adapter surfaces the same flag for terminal tabs).
     supports_approval_ui = True
-    # Images are delivered as file references in the prompt (Read tool), not
-    # via a structured CLI flag. Validated empirically against agent
-    # v2026.09.02: the model reads the referenced file and answers about it.
-    supports_images = True
+    # Tool timeline and prompt-file-reference images come from the
+    # ProviderSpec registry via SessionCore property defaults.
 
     def __init__(
         self,
