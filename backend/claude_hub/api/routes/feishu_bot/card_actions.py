@@ -14,6 +14,7 @@ import secrets
 import time
 import uuid
 from collections import deque
+from datetime import timedelta
 from typing import Any
 
 from Crypto.Cipher import AES
@@ -84,6 +85,10 @@ async def _mirror_question(q: ChatQuestion, *, remirror: bool = False) -> bool:
 
     inbox = answers.inbox()
     if q.mirror is None or remirror:
+        if not remirror and q.mirror_checked:
+            return False
+        q.mirror_checked = True
+        inbox._save()
         if q.state != "open":
             return False
         answers.live(q)
@@ -108,8 +113,6 @@ async def _mirror_question(q: ChatQuestion, *, remirror: bool = False) -> bool:
             send_uuid=str(uuid.uuid4()),
         )
         if remirror:
-            from datetime import timedelta
-
             q.expires_at = utc_now() + timedelta(hours=24)
         inbox._save()
     mirror = q.mirror
@@ -120,7 +123,19 @@ async def _mirror_question(q: ChatQuestion, *, remirror: bool = False) -> bool:
         mirror.action_digests.clear()
         inbox._save()
         return False
-    remote_state = q.state if q.expires_at > utc_now() else "expired"
+    remote_state = "expired" if q.state == "open" and q.expires_at <= utc_now() else q.state
+    if mirror.retry_at is not None and mirror.retry_at > utc_now():
+        return mirror.state == "sent"
+    if mirror.state in {"queued", "sent"} and (
+        mirror.state == "queued"
+        or mirror.displayed_state != remote_state
+        or q.reply_state in {"pending", "sending"}
+    ):
+        mirror.retry_at = utc_now() + timedelta(
+            seconds=min(3600, 3 * 2 ** min(mirror.attempts, 10))
+        )
+        mirror.attempts += 1
+        inbox._save()
     if mirror.state == "queued":
         if remote_state != "open":
             mirror.state = "disabled"
@@ -162,6 +177,7 @@ async def _mirror_question(q: ChatQuestion, *, remirror: bool = False) -> bool:
                 return False
             mirror.message_id, mirror.state = message_id, "sent"
             mirror.displayed_state = "open"
+            mirror.retry_at, mirror.attempts = None, 0
             inbox._save()
     elif mirror.state == "sending":
         # Persisted send fence after restart is ambiguous; no blind duplicate.
@@ -187,6 +203,7 @@ async def _mirror_question(q: ChatQuestion, *, remirror: bool = False) -> bool:
             async with asyncio.timeout(15):
                 await client.patch_message_card(str(mirror.message_id), card.content)
             mirror.displayed_state = remote_state
+            mirror.retry_at, mirror.attempts = None, 0
             inbox._save()
     if q.reply_state == "sending":
         q.reply_state = "uncertain"

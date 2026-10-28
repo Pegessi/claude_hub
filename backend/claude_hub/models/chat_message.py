@@ -94,6 +94,8 @@ class QuestionMirror(BaseModel):
     message_id: str | None = None
     state: Literal["queued", "sending", "sent", "uncertain", "disabled"] = "queued"
     displayed_state: str | None = None
+    retry_at: datetime | None = None
+    attempts: int = 0
     action_digests: dict[str, dict[str, str]] = Field(default_factory=dict)
 
 
@@ -118,6 +120,7 @@ class ChatQuestion(BaseModel):
     reply_state: Literal["pending", "sending", "sent", "uncertain"] | None = None
     reply_text: str = ""
     mirror: QuestionMirror | None = None
+    mirror_checked: bool = False
 
     def public(self) -> dict[str, Any]:
         return self.model_dump(mode="json", exclude={"mirror", "incarnation", "reply_text"})

@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 from fastapi import HTTPException
 
-from ...models import AgentStreamEvent, AgentStreamEventType, User
+from ...models import AgentStreamEvent, AgentStreamEventType, ManagedSession, User
 from ...models.chat_message import (
     ChatMessageEnvelope,
     ChatMessageReceipt,
@@ -30,6 +30,7 @@ from .providers.questions import parse_ask_question_response
 class QuestionAnswers:
     def __init__(self) -> None:
         self._locks: dict[str, asyncio.Lock] = {}
+        self._mirror_cursor = 0
 
     def lock(self, session_id: str) -> asyncio.Lock:
         return self._locks.setdefault(session_id, asyncio.Lock())
@@ -505,6 +506,35 @@ class QuestionAnswers:
             inbox._save()
             inbox.wake()
 
+    @staticmethod
+    def managed_handoff_persisted(q: ChatQuestion, item: ChatMessageEnvelope) -> bool:
+        """An in-memory mailbox claim after a failed save is not a handoff receipt."""
+        from ...api import agent_stream as stream
+
+        manager = stream.workspace_manager
+        try:
+            state = json.loads(manager._workspace_state_file(q.owner_workspace_id).read_text())
+            row = next(row for row in state["sessions"] if row["id"] == q.session_id)
+            owner = ManagedSession.model_validate(row)
+            key = json.dumps([q.turn_id, q.call_id], separators=(",", ":"))
+            return (
+                str(owner.created_at) == q.owner_created_at
+                and owner.workspace_id == q.owner_workspace_id
+                and owner.tab_id == q.tab_id
+                and owner.chat_question_answer_calls.get(key) == item.call_id
+                and owner.call_payload_fingerprints.get(item.call_id)
+                == manager._compute_payload_fingerprint(item.message, [])
+                and item.call_id
+                in (
+                    owner.pending_call_ids
+                    + owner.processing_call_ids
+                    + owner.delivered_call_ids
+                    + owner.uncertain_call_ids
+                )
+            )
+        except (OSError, ValueError, KeyError, TypeError, StopIteration):
+            return False
+
     async def tick(self) -> None:
         inbox = self.inbox()
         for q in list(inbox.questions.values()):
@@ -526,6 +556,7 @@ class QuestionAnswers:
                     and session.tab_id == q.tab_id
                     and session.chat_question_answer_calls.get(key) == item.call_id
                     and item.call_id in session.call_payload_fingerprints
+                    and self.managed_handoff_persisted(q, item)
                 ):
                     q.state = "resolved"
                     inbox._change(item.message_id, "completed")
@@ -535,11 +566,37 @@ class QuestionAnswers:
                 except (InboxError, HTTPException):
                     q.state = "stale"
                     inbox._save()
+
+        candidates = []
+        for q in inbox.questions.values():
+            mirror = q.mirror
+            remote_state = "expired" if q.state == "open" and q.expires_at <= utc_now() else q.state
+            if mirror is None:
+                eligible = q.state == "open" and not q.mirror_checked
+            else:
+                eligible = mirror.state in {"queued", "sending"} or (
+                    mirror.state == "sent"
+                    and (
+                        mirror.displayed_state != remote_state
+                        or q.reply_state in {"pending", "sending"}
+                    )
+                )
+                if mirror.retry_at and mirror.retry_at > utc_now():
+                    eligible = False
+            if eligible:
+                candidates.append(q)
+        if candidates:
+            offset = self._mirror_cursor % len(candidates)
+            ordered = candidates[offset:] + candidates[:offset]
+            self._mirror_cursor += min(8, len(candidates))
+        else:
+            ordered = []
+        for q in ordered:
             from ...api.routes.feishu_bot.card_actions import mirror_question
 
             if q.question_ref not in inbox._question_tasks and len(inbox._question_tasks) < 8:
 
-                async def mirror(one: ChatQuestion) -> None:
+                async def run_mirror(one: ChatQuestion) -> None:
                     try:
                         await mirror_question(one)
                     except Exception:
@@ -548,7 +605,7 @@ class QuestionAnswers:
                         inbox._question_tasks.pop(one.question_ref, None)
 
                 inbox._question_tasks[q.question_ref] = asyncio.create_task(
-                    mirror(q), name="feishu-question-mirror"
+                    run_mirror(q), name="feishu-question-mirror"
                 )
 
 

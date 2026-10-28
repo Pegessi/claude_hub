@@ -325,8 +325,8 @@ async def test_ordinary_admission_and_answer_claim_share_goal_lock(runtime):
 async def test_feishu_binding_gate_covers_awaited_probe_and_submit(runtime, monkeypatch):
     service, inbox, _, _, snapshot = runtime
     from claude_hub.api import feishu_bot as bot
-    from claude_hub.api.routes.feishu_bot import card_actions
     from claude_hub.api.routes.agent_stream import dispatch
+    from claude_hub.api.routes.feishu_bot import card_actions
     from claude_hub.models.chat_message import QuestionMirror
 
     snapshot["mode"] = "followup"
@@ -381,3 +381,80 @@ async def test_feishu_binding_gate_covers_awaited_probe_and_submit(runtime, monk
     await submit
     await rotation
     assert changed and inbox.messages[receipt.message_id].state == "completed"
+
+
+@pytest.mark.asyncio
+async def test_mirror_drain_does_not_starve_questions_after_eight(runtime, monkeypatch):
+    service, inbox, _, _, _ = runtime
+    from claude_hub.api.routes.feishu_bot import card_actions
+
+    original = await service.capture("terminal-tab-tab", "turn-A", "call-A")
+    inbox.questions.clear()
+    for index in range(20):
+        question = original.model_copy(update={"question_ref": f"question-{index}"}, deep=True)
+        # Already-checked unbound questions must not consume the worker budget.
+        question.mirror_checked = index < 8
+        inbox.questions[question.question_ref] = question
+    mirrored = set()
+
+    async def mirror(question):
+        mirrored.add(question.question_ref)
+        question.mirror_checked = True
+
+    monkeypatch.setattr(card_actions, "mirror_question", mirror)
+    for _ in range(3):
+        await service.tick()
+        await asyncio.gather(*tuple(inbox._question_tasks.values()))
+    assert mirrored == {f"question-{index}" for index in range(8, 20)}
+
+
+@pytest.mark.asyncio
+async def test_managed_handoff_requires_persisted_exact_fingerprint(runtime, tmp_path, monkeypatch):
+    from claude_hub.models import ManagedSession
+
+    service, inbox, _, _, _ = runtime
+    q = await service.capture("terminal-tab-tab", "turn-A", "call-A")
+    r = await service.admit(
+        q,
+        User(open_id="local", name="Local", email=""),
+        QuestionAnswerCreate(call_id="owned-answer", selected=["Skip"]),
+    )
+    item = inbox.messages[r.message_id]
+    now = utc_now()
+    owner = ManagedSession(
+        id="managed-owner",
+        workspace_id="workspace",
+        tab_id="tab",
+        role="orchestrator",
+        agent_type="claude",
+        session_kind="chat",
+        status="idle",
+        runtime_status="idle",
+        title="Chat",
+        workspace_path=str(tmp_path),
+        tmux_session="",
+        target="local",
+        created_at=now,
+        updated_at=now,
+        pending_call_ids=[item.call_id],
+        pending_messages={item.call_id: item.message},
+        chat_question_answer_calls={'["turn-A","call-A"]': item.call_id},
+        call_payload_fingerprints={
+            item.call_id: stream.workspace_manager._compute_payload_fingerprint(item.message, [])
+        },
+    )
+    q.session_id = owner.id
+    q.owner_created_at = str(owner.created_at)
+    q.owner_workspace_id = owner.workspace_id
+    path = tmp_path / "mailbox.json"
+    monkeypatch.setattr(stream.workspace_manager, "_workspace_state_file", lambda _: path)
+    # An in-memory owner, or an absent/truncated store, cannot prove transfer.
+    assert not service.managed_handoff_persisted(q, item)
+    path.write_text('{"sessions": [')
+    assert not service.managed_handoff_persisted(q, item)
+    path.write_text(json.dumps({"sessions": [owner.model_dump(mode="json")]}))
+    assert service.managed_handoff_persisted(q, item)
+    altered = owner.model_copy(deep=True)
+    altered.call_payload_fingerprints[item.call_id] = "different-payload"
+    path.write_text(json.dumps({"sessions": [altered.model_dump(mode="json")]}))
+    assert not service.managed_handoff_persisted(q, item)

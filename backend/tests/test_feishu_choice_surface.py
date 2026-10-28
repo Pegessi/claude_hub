@@ -251,3 +251,13 @@ def test_reply_parent_and_root_are_retained_and_malformed_parent_rejected() -> N
     message.parent_id = 42
     with pytest.raises(ValueError, match="reply message identity"):
         message_event_from_sdk(data, expected_app_id="app")
+
+
+def test_long_terminal_answer_does_not_prevent_disabling_card():
+    from claude_hub.services.feishu_message_format import build_feishu_question_card_payload
+
+    payload = build_feishu_question_card_payload(
+        "Pick", [], question_ref="question", other_token="", state="resolved", answer="界" * 21845
+    )
+    assert len(json.dumps(payload.content, ensure_ascii=False).encode()) < 30000
+    assert all("behaviors" not in e for e in payload.content["body"]["elements"])
