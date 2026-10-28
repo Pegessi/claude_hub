@@ -119,6 +119,51 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             self._touch(raw, now)
             self._save(state)
 
+    def configure_callbacks(
+        self,
+        bot_id: str,
+        *,
+        callback_enabled: bool,
+        expected_revision: int,
+        verification_token: str | None = None,
+        encrypt_key: str | None = None,
+        expected_tenant_key: str | None = None,
+        environ: Mapping[str, str] | None = None,
+    ) -> None:
+        """Provision protected card-callback settings; every update revokes old snapshots.
+
+        A revision bump invalidates action bindings while retaining the active p2p
+        pairing. Secret values are never returned by the public pool API.
+        """
+        if not isinstance(callback_enabled, bool):
+            raise ValueError("callback_enabled must be a boolean")
+        now = self._now()
+        with self._lock:
+            state = self._load()
+            self._prune(state, now)
+            self._sync_env_entry(state, environ, now)
+            raw = self._live_entry(state, bot_id)
+            self._check_revision(raw, expected_revision)
+            callbacks = dict(raw.get("callbacks", {}))
+            for key, value in (
+                ("verification_token", verification_token),
+                ("encrypt_key", encrypt_key),
+                ("expected_tenant_key", expected_tenant_key),
+            ):
+                if value is not None:
+                    callbacks[key] = _as_text(
+                        value, key, limit=_MAX_ID_CHARS if key == "expected_tenant_key" else 4096
+                    )
+            if callback_enabled and not all(
+                callbacks.get(key)
+                for key in ("verification_token", "encrypt_key", "expected_tenant_key")
+            ):
+                raise ValueError("Enabled callbacks require protected credentials and tenant")
+            callbacks["callback_enabled"] = callback_enabled
+            raw["callbacks"] = callbacks
+            self._touch(raw, now)
+            self._save(state)
+
     def update_profile(
         self,
         bot_id: str,

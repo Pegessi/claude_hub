@@ -334,6 +334,14 @@ def _strip_mention_key(text: str, key: str, mention_keys: tuple[str, ...]) -> st
     return stripped
 
 
+def _optional_message_id(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip() or len(value) > 256:
+        raise ValueError("Invalid Feishu reply message identity")
+    return value.strip()
+
+
 def message_event_from_sdk(
     data: Any,
     *,
@@ -401,6 +409,8 @@ def message_event_from_sdk(
         text=text,
         message_created_at_ms=created_at,
         image_keys=image_keys,
+        parent_id=_optional_message_id(getattr(message, "parent_id", None)),
+        root_id=_optional_message_id(getattr(message, "root_id", None)),
         chat_type=chat_type,
         thread_id=(
             getattr(message, "thread_id").strip()

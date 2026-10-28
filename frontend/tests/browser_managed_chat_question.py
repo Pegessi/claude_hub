@@ -114,6 +114,7 @@ async def main(browser_run: BrowserRun) -> None:
     external_requests: list[str] = []
     sends: list[dict] = []
     busy_sends: list[dict] = []
+    remote_state = "open"
 
     async with browser_run.context(viewport={"width": 1280, "height": 900}) as context:
         # Resolve dependency URLs from the implementations; the harness below
@@ -176,7 +177,18 @@ async def main(browser_run: BrowserRun) -> None:
             if not path.startswith("/api/"):
                 await route.fallback()
                 return
-            if method == "GET" and path == f"{STREAM_BASE}/capabilities":
+            if method == "GET" and path == f"/api/workspaces/sessions/{SESSION}/questions":
+                body = {
+                    "questions": [
+                        {
+                            "turn_id": TURN,
+                            "call_id": CALL,
+                            "state": remote_state,
+                            "expires_at": "2099-01-01T00:00:00Z",
+                        }
+                    ]
+                }
+            elif method == "GET" and path == f"{STREAM_BASE}/capabilities":
                 body: object = CAPABILITIES
             elif method == "GET" and path == f"{STREAM_BASE}/events":
                 body = {"events": EVENTS, "next_sequence": 1, "has_more": False}
@@ -185,6 +197,18 @@ async def main(browser_run: BrowserRun) -> None:
                 body = {"events": [], "next_sequence": 1, "has_more": False}
             elif method == "POST" and path == f"{STREAM_BASE}/send":
                 payload = json.loads(request.post_data or "{}")
+                if remote_state == "stale":
+                    if (
+                        payload.get("question_turn_id") != TURN
+                        or payload.get("question_call_id") != CALL
+                    ):
+                        raise AssertionError("stale click lost exact identity")
+                    await route.fulfill(
+                        status=409,
+                        content_type="application/json",
+                        body=json.dumps({"detail": "Question no longer pending"}),
+                    )
+                    return
                 if payload.get("text") == BUSY_TEXT:
                     busy_sends.append(payload)
                     body = {"ok": True}
@@ -265,6 +289,22 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(page.get_by_text("已提交", exact=True)).to_be_visible()
         await expect(page.get_by_role("alert")).to_have_count(0)
         await page.screenshot(path=output / "managed-question-recovered.png", full_page=True)
+        remote_state = "claimed"
+        await page.reload()
+        await expect(page.get_by_text("回答已接收，正在投递", exact=True)).to_be_visible()
+        await expect(page.get_by_role("button", name="提交选择", exact=True)).to_have_count(0)
+        remote_state = "resolved"
+        await expect(page.get_by_text("已回答", exact=True)).to_be_visible(timeout=6000)
+        await page.screenshot(path=output / "feishu-answer-after-reload.png", full_page=True)
+        remote_state = "stale"
+        await page.reload()
+        await expect(page.get_by_text("问题已失效", exact=True)).to_be_visible()
+        rejected = await page.evaluate(
+            """async ({url, body}) => (await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)})).status""",
+            {"url": f"{base}{STREAM_BASE}/send", "body": sends[0]},
+        )
+        if rejected != 409:
+            raise AssertionError("stale click was not rejected")
 
     if len(busy_sends) != 1:
         raise AssertionError(f"expected one durable busy Enter send, got {busy_sends!r}")
@@ -298,6 +338,8 @@ async def main(browser_run: BrowserRun) -> None:
             "lost answer response leaves the exact card unresolved",
             "explicit retry preserves client turn id and provider card identity",
             "managed surface hides Task-owned mode, Goal, and schedule controls",
+            "cross-channel claimed and resolved projection survives reload",
+            "stale card disabled and exact stale-click request rejected",
         ],
         "send_attempts": len(sends),
         "unknown_requests": unknown_requests,

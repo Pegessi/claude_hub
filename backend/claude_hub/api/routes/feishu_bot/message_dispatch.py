@@ -17,6 +17,7 @@ from claude_hub.api.agent_stream import (
     ExternalDispatchRetired,
     ExternalInteractionRequired,
 )
+from claude_hub.api.routes.agent_stream.dispatch import ExternalQuestionPending
 from claude_hub.api.routes.feishu_bot.bindings import FeishuBotRouteBindings
 from claude_hub.api.routes.feishu_bot.queueing import TabDispatchItem as _TabDispatchItem
 from claude_hub.api.routes.feishu_bot.queueing import TabDispatchQueue as _TabDispatchQueue
@@ -753,6 +754,8 @@ class FeishuMessageDispatcher:
                         ),
                     ):
                         status = "pre_dispatch_rejected"
+            except ExternalQuestionPending:
+                status = "completed"  # the durable question, not this waiter, owns continuation
             except ExternalInteractionRequired:
                 target = batch[-1] if batch else leader
                 await self.bindings.reply_if_current(

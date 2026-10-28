@@ -490,7 +490,7 @@ class CodexProtocolSession(CodexConfiguredSession):
         """Write a JSON-RPC response for a server→client request."""
         proc = self._process
         if proc is None or proc.stdin is None:
-            return
+            raise RuntimeError("question response transport is unavailable")
         response: Dict[str, Any] = {"jsonrpc": "2.0", "id": req_id}
         if error is not None:
             response["error"] = error
@@ -502,7 +502,7 @@ class CodexProtocolSession(CodexConfiguredSession):
             await proc.stdin.drain()
         except (BrokenPipeError, ConnectionResetError):
             # The app-server is gone; nothing to answer.
-            pass
+            raise RuntimeError("question response delivery is uncertain") from None
 
     async def answer_pending_question(
         self,

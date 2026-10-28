@@ -11,9 +11,9 @@
           {{ part.approval.title || '需要你的选择' }}
         </span>
         <span
-          v-if="isApprovalResolved(part.approval)"
+          v-if="receipt.label.value || isApprovalResolved(part.approval)"
           class="approval-card-badge"
-        >已提交</span>
+        >{{ receipt.label.value || '已提交' }}</span>
       </div>
       <div
         v-for="question in part.approval.questions"
@@ -40,7 +40,7 @@
                 option.id,
               ),
             }"
-            :disabled="isApprovalResolved(part.approval) || isSending"
+            :disabled="isApprovalResolved(part.approval) || receipt.blocked.value || isSending"
             @click="toggleQuestionOption(
               part.approval.key,
               question.id,
@@ -61,7 +61,7 @@
           :type="question.isSecret ? 'password' : 'text'"
           class="approval-custom-answer"
           :value="customAnswer(part.approval.key, question)"
-          :disabled="isApprovalResolved(part.approval) || isSending"
+          :disabled="isApprovalResolved(part.approval) || receipt.blocked.value || isSending"
           :placeholder="question.options.length === 0 ? '输入你的回答' : question.allowMultiple ? '其他（可多选，自己输入）' : '其他（自己输入）'"
           :aria-label="`${question.prompt} — 其他答案`"
           @input="setCustomAnswer(
@@ -72,7 +72,7 @@
         >
       </div>
       <button
-        v-if="!isApprovalResolved(part.approval)"
+        v-if="!isApprovalResolved(part.approval) && !receipt.blocked.value"
         type="button"
         class="approval-submit-btn"
         :disabled="!canSubmitQuestion(part.approval) || isSending"
@@ -85,15 +85,25 @@
 </template>
 
 <script setup lang="ts">
-import { requireChatOwner, chatComposerKey, chatDeliveryKey } from '../owners'
+import { requireChatOwner, chatComposerKey, chatDeliveryKey, chatIdentityKey } from '../owners'
+import { computed } from 'vue'
+import { useQuestionReceipt } from './useQuestionReceipt'
 import type { TimelineTurn } from '../timeline/types'
 import type { TimelinePart } from '../timeline/types'
 const { isApprovalResolved, isQuestionOptionSelected, toggleQuestionOption, customAnswer, setCustomAnswer, canSubmitQuestion, submitQuestionResponse } = requireChatOwner(chatComposerKey)
 const { isSending } = requireChatOwner(chatDeliveryKey)
-defineProps<{
+const props = defineProps<{
   turn: TimelineTurn
   part: Extract<TimelinePart, { kind: 'approval' }>
 }>()
+const identity = requireChatOwner(chatIdentityKey)
+const receipt = useQuestionReceipt(
+  computed(() => identity.isManagedChat.value
+    ? `/api/workspaces/sessions/${encodeURIComponent(identity.props.managedSessionId ?? '')}`
+    : `/api/workspaces/tabs/${encodeURIComponent(identity.props.tabId)}`),
+  computed(() => props.turn.turnId ?? null),
+  computed(() => props.part.approval.callId ?? null),
+)
 </script>
 
 <style scoped>
