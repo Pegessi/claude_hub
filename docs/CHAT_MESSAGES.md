@@ -118,5 +118,8 @@ ordinary/scheduled contracts and scheduled uncertainty policy remain unchanged.
 Version-1 stores migrate with a protected v1 backup and atomic/fsynced replacement;
 unknown versions or broken question ownership fail closed. Corruption does not
 stop browser runtime answering. Terminal body content expires at 30 days while
-call/question tombstones persist. See [Feishu setup and bounds](FEISHU_QUESTION_CARDS.md)
+call/question tombstones persist. Question records also retain content-free
+`retired_cards` identities (bot/app/chat/message) after remirror. They are excluded
+from public projections and prevent old-card replies falling through into ordinary
+message admission, including after restart. See [Feishu setup and bounds](FEISHU_QUESTION_CARDS.md)
 for default-off enablement, callback authentication, retention and deployment gates.

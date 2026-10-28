@@ -99,6 +99,15 @@ class QuestionMirror(BaseModel):
     action_digests: dict[str, dict[str, str]] = Field(default_factory=dict)
 
 
+class QuestionCardIdentity(BaseModel):
+    """Content-free correlation tombstone for a superseded remote card."""
+
+    bot_id: str
+    app_id: str
+    chat_id: str
+    message_id: str
+
+
 class ChatQuestion(BaseModel):
     question_ref: str
     tab_id: str
@@ -121,9 +130,12 @@ class ChatQuestion(BaseModel):
     reply_text: str = ""
     mirror: QuestionMirror | None = None
     mirror_checked: bool = False
+    retired_cards: list[QuestionCardIdentity] = Field(default_factory=list)
 
     def public(self) -> dict[str, Any]:
-        return self.model_dump(mode="json", exclude={"mirror", "incarnation", "reply_text"})
+        return self.model_dump(
+            mode="json", exclude={"mirror", "incarnation", "reply_text", "retired_cards"}
+        )
 
 
 class QuestionAnswerCreate(BaseModel):

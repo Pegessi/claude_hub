@@ -22,7 +22,13 @@ from Crypto.Util.Padding import unpad
 from fastapi import APIRouter, HTTPException, Request
 
 from ....models import User
-from ....models.chat_message import ChatQuestion, QuestionAnswerCreate, QuestionMirror, utc_now
+from ....models.chat_message import (
+    ChatQuestion,
+    QuestionAnswerCreate,
+    QuestionCardIdentity,
+    QuestionMirror,
+    utc_now,
+)
 from ....services.agent_stream.question_answers import answers
 from ....services.chat_message_inbox import InboxError
 from ....services.feishu_bot import FeishuBotClient, FeishuMessageEvent
@@ -75,6 +81,22 @@ def current_binding(q: ChatQuestion) -> tuple[Any, Any]:
         raise InboxError(409, "Question binding unavailable") from exc
 
 
+def question_mirror_eligible(q: ChatQuestion) -> bool:
+    """Delivery failure cannot revoke a supported waiting question's ownership."""
+    from ... import feishu_bot as bot
+
+    entry = bot._bot_bound_to_tab(q.tab_id)
+    if not entry or not entry.binding:
+        return False
+    effective = bot._pool.effective(entry.bot_id)
+    return bool(
+        effective.callback_enabled
+        and effective.expected_tenant_key
+        and bot._owner_is_authorized(entry.binding.owner)
+        and bot._binding_still_routes(effective, entry.binding)
+    )
+
+
 async def mirror_question(q: ChatQuestion, *, remirror: bool = False) -> bool:
     async with _mirror_locks.setdefault(q.question_ref, asyncio.Lock()):
         return await _mirror_question(q, remirror=remirror)
@@ -101,6 +123,15 @@ async def _mirror_question(q: ChatQuestion, *, remirror: bool = False) -> bool:
         binding = entry.binding
         if not bot._owner_is_authorized(binding.owner):
             return False
+        if q.mirror and q.mirror.message_id:
+            identity = QuestionCardIdentity(
+                bot_id=q.mirror.bot_id,
+                app_id=q.mirror.app_id,
+                chat_id=q.mirror.chat_id,
+                message_id=q.mirror.message_id,
+            )
+            if identity not in q.retired_cards:
+                q.retired_cards.append(identity)
         q.mirror = QuestionMirror(
             bot_id=entry.bot_id,
             app_id=effective.app_id,
@@ -390,6 +421,13 @@ async def intercept_reply(bot_id: str, event: FeishuMessageEvent) -> bool:
     from ... import feishu_bot as bot
 
     inbox = answers.inbox()
+    if event.parent_id and any(
+        (card.bot_id, card.app_id, card.chat_id, card.message_id)
+        == (bot_id, event.app_id, event.chat_id, event.parent_id)
+        for question in inbox.questions.values()
+        for card in question.retired_cards
+    ):
+        return True  # stale correlated reply must never enter ordinary batching
     explicit = event.text.strip().split(maxsplit=2)
     ref = explicit[1] if len(explicit) >= 2 and explicit[0] == "/answer" else None
     q = next(
