@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "6c11956dc49eb65c2619a1b44d7a4f6e2618b78c",
+  "parents": [
+    "40cd89971c12f3204536b54f6fc29b9af644b3c7",
+    "4f630ce91e085c9d59b52fdc7cdd247994fd0d4e"
+  ],
+  "base": "0211661a1e627349822b3857ecf74f33b81818ef",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "9749b75988b7ff8c98bdd0d9cc4b31694e1fcf38",
+  "reconstructed_tree": "c677a5b244208a00230e1b694ef579ad2e105d4c",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a4bfbecaf1c6b1bd9e75e0139c91f70b7e3efbb4"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "09f5f1210c8af814f9307e2800ad129454c7bc50"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3aa72df3668b7b9c879396c2de02b236e689ef57"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "f94356714e53310f799e5c867419e03b13dca52c"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "7d340819bd25913c59b3843446218b8f81da8c16"
+      },
+      "reason": "Candidate (main Feishu; merges 1-7 notes) and codex/rv-monitor-isolation's per-scope monitor note both insert at the top of Released. Manual union keeps all candidate entries then appends the monitor-isolation entry before the shared tail. _base.py auto-merged: monitor abstracts and merge-7 state-persistence abstracts occupy disjoint regions and both remain implemented by the concrete manager.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
