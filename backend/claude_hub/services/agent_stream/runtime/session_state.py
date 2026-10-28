@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -95,6 +96,7 @@ class SessionState(ABC):
         # answer is delivered as a steer that cancels that turn (Claude/Cursor).
         # Cleared when the turn completes.
         self._pending_approvals: Dict[str, _PendingApproval] = {}
+        self.question_incarnation = secrets.token_hex(24)
         # Whether the provider has emitted a terminal ``turn_completed`` event
         # for the active turn. Used at EOF to decide whether a failed
         # ``turn_completed`` must be synthesized (nonzero exit or early EOF

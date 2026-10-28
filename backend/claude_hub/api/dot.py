@@ -139,9 +139,10 @@ class WatchRequest(BaseModel):
 
 
 class NotifyRequest(BaseModel):
+    question_ref: Optional[str] = Field(default=None, min_length=1, max_length=64)
     model_config = {"extra": "forbid"}
 
-    text: str = Field(min_length=1, max_length=2000)
+    text: str = Field(default="", max_length=2000)
     title: Optional[str] = Field(default=None, max_length=80)
     tone: Literal["done", "failed", "decision", "info"] = "info"
 
@@ -313,6 +314,14 @@ async def dot_rotate(current_user: User = Depends(get_current_user)) -> dict[str
 async def dot_notify(
     payload: NotifyRequest, current_user: User = Depends(get_current_user)
 ) -> dict[str, Any]:
+    if payload.question_ref:
+        from ..services.agent_stream.question_answers import answers
+        from .routes.feishu_bot.card_actions import mirror_question
+
+        q = answers.inbox().questions.get(payload.question_ref)
+        if q is None or q.tab_id != _service().tab_id():
+            raise HTTPException(404, "Question not found in current Dot Chat")
+        return {"sent": await mirror_question(q, remirror=True), "question_ref": q.question_ref}
     if not payload.text.strip():
         raise HTTPException(status_code=422, detail="text is empty")
     result = await _service().notify(payload.text, title=payload.title, tone=payload.tone)

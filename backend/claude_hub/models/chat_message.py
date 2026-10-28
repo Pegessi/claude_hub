@@ -63,6 +63,8 @@ class ChatMessageEnvelope(ChatMessageReceipt):
     expired: bool = False
 
     # Trusted internal fields; absent from the strict public create contract.
+    kind: Literal["message", "question_answer"] = "message"
+    question_ref: str | None = None
     scheduled_run_id: str | None = None
     scheduled_task_id: str | None = None
     turn_metadata: dict[str, Any] = Field(default_factory=dict)
@@ -77,3 +79,80 @@ class ChatMessageEnvelope(ChatMessageReceipt):
 
     def receipt(self) -> ChatMessageReceipt:
         return ChatMessageReceipt.model_validate(self.model_dump())
+
+
+class QuestionMirror(BaseModel):
+    bot_id: str
+    app_id: str
+    tenant_key: str
+    pairing_id: str
+    generation: int
+    revision: int
+    chat_id: str
+    sender_open_id: str
+    send_uuid: str
+    message_id: str | None = None
+    state: Literal["queued", "sending", "sent", "uncertain", "disabled"] = "queued"
+    displayed_state: str | None = None
+    retry_at: datetime | None = None
+    attempts: int = 0
+    action_digests: dict[str, dict[str, str]] = Field(default_factory=dict)
+
+
+class QuestionCardIdentity(BaseModel):
+    """Content-free correlation tombstone for a superseded remote card."""
+
+    bot_id: str
+    app_id: str
+    chat_id: str
+    message_id: str
+
+
+class ChatQuestion(BaseModel):
+    question_ref: str
+    tab_id: str
+    session_id: str
+    incarnation: str
+    owner_created_at: str = ""
+    owner_workspace_id: str = ""
+    turn_id: str
+    call_id: str
+    run_epoch: int
+    question_id: str
+    prompt: str
+    options: list[str]
+    mode: Literal["native", "followup"]
+    created_at: datetime
+    expires_at: datetime
+    state: Literal["open", "claimed", "resolved", "stale", "uncertain"] = "open"
+    answer_id: str | None = None
+    reply_state: Literal["pending", "sending", "sent", "uncertain"] | None = None
+    reply_text: str = ""
+    mirror: QuestionMirror | None = None
+    mirror_checked: bool = False
+    retired_cards: list[QuestionCardIdentity] = Field(default_factory=list)
+
+    def public(self) -> dict[str, Any]:
+        return self.model_dump(
+            mode="json", exclude={"mirror", "incarnation", "reply_text", "retired_cards"}
+        )
+
+
+class QuestionAnswerCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    call_id: str = Field(min_length=1, max_length=256)
+    selected: list[str] = Field(min_length=1, max_length=1)
+
+    @field_validator("call_id")
+    @classmethod
+    def nonblank_call_id(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("call_id must be nonblank")
+        return value
+
+    @field_validator("selected")
+    @classmethod
+    def bounded_answer(cls, values: list[str]) -> list[str]:
+        if not values[0].strip() or len(values[0].encode("utf-8")) > 65536:
+            raise ValueError("answer must be nonblank and at most 64 KiB")
+        return values

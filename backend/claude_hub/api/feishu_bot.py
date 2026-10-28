@@ -189,6 +189,19 @@ def _interrupt_dot_answer(tab_id: str, queue: _TabDispatchQueue, item: _TabDispa
     """On the Dot Chat a newer message stops the answer in progress: the next
     batch answers both. Other Chats keep queueing it as a follow-up."""
     active = list(queue.active)
+    try:
+        from .routes.agent_stream.messages import get_inbox
+
+        if any(
+            q.tab_id == tab_id
+            and q.mirror is not None
+            and q.mirror.state != "disabled"
+            and q.state in {"open", "claimed", "uncertain"}
+            for q in get_inbox().questions.values()
+        ):
+            return
+    except Exception:
+        return  # unavailable question evidence cannot authorize interruption
     if (
         not active
         or any(one.superseded or not one.native_bridge_started for one in active)
@@ -747,6 +760,18 @@ async def _handle_message_event(
                 status_stage = "pre_dispatch"
                 status_reason = "binding_missing"
             return
+        from .routes.feishu_bot.card_actions import intercept_reply
+
+        try:
+            if await intercept_reply(bot_id, event):
+                status_value = "completed"
+                return
+        except Exception:
+            # If explicit answer admission is unavailable, fail closed rather
+            # than forwarding its text through the ordinary model path.
+            if event.text.strip().startswith("/answer ") or event.parent_id:
+                status_value = "pre_dispatch_rejected"
+                return
         retry_context = _dedup_retry_context(bot_id, event, binding)
         if not _claim_context_matches(claimed_retry_context, retry_context):
             status_value = "pre_dispatch_rejected"
@@ -956,3 +981,8 @@ __all__ = [
     "start_feishu_websockets",
     "stop_feishu_websockets",
 ]
+
+
+from .routes.feishu_bot.card_actions import register_card_routes
+
+register_card_routes(router)

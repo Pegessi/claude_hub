@@ -126,7 +126,10 @@ def dot_rotate(ctx: click.Context) -> None:
 
 
 @dot.command("notify")
-@click.argument("text")
+@click.argument("text", default="")
+@click.option(
+    "--question-ref", default=None, help="Mirror an existing live question in the Dot Chat."
+)
 @click.option("--title", default=None, help="Card title; without it a plain message is sent.")
 @click.option(
     "--tone",
@@ -136,9 +139,13 @@ def dot_rotate(ctx: click.Context) -> None:
     help="Card colour: done green, failed red, decision orange, info blue.",
 )
 @click.pass_context
-def dot_notify(ctx: click.Context, text: str, title: Optional[str], tone: str) -> None:
+def dot_notify(
+    ctx: click.Context, text: str, title: Optional[str], tone: str, question_ref: Optional[str]
+) -> None:
     """Send a short message to the user's Feishu chat (the bot bound to the Dot Chat)."""
     body: dict[str, Any] = {"text": text, "tone": tone}
+    if question_ref:
+        body["question_ref"] = question_ref
     if title:
         body["title"] = title
     emit(_call(ctx, "POST", "/notify", json=body), cli_main.as_json(ctx))

@@ -252,7 +252,10 @@ class _MessageDeliveryMixin(_WorkspaceManagerBase):
             pending_attachments[call_id] = persisted
             pending_call_ids = list(session.pending_call_ids)
             if call_id not in pending_call_ids:
-                pending_call_ids.append(call_id)
+                if question_key is not None and session.session_kind == SessionKind.CHAT:
+                    pending_call_ids.insert(0, call_id)
+                else:
+                    pending_call_ids.append(call_id)
             call_payload_fingerprints = dict(session.call_payload_fingerprints)
             call_payload_fingerprints[call_id] = new_fp
             question_answer_calls = dict(session.chat_question_answer_calls)
@@ -485,6 +488,7 @@ class _MessageDeliveryMixin(_WorkspaceManagerBase):
                 or session.chat_paused
                 or session.uncertain_call_ids
                 or managed_chat.is_turn_running(session)
+                or managed_chat.question_input_blocked(session, call_id)
             ):
                 # Leave the envelope pending. A busy turn is not an ambiguous
                 # delivery, and later input must not bypass an uncertain turn.

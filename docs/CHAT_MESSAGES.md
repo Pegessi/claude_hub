@@ -90,3 +90,36 @@ combined backlog with direct messages exceeds the shared new-intent cap; new
 admissions wait for space. Scheduled message sizes retain their existing contract;
 public direct-message byte limits remain unchanged. No deployment is performed
 by this implementation.
+
+## Question answers (inbox v2)
+
+Provider questions are recorded separately from ordinary messages. A trusted
+internal `kind=question_answer` envelope retains `question_ref`, original
+session/turn/call/run identity, actor, stable call ID, payload fingerprint and
+submission fence. Public `tab message` cannot request this kind or supply trusted
+routing metadata. Answers use a dedicated drain in the same coordinator so an
+answer can unblock its native request while ordinary FIFO is waiting.
+
+GET `/api/workspaces/tabs/{tab_id}/questions` lists safe question projections;
+POST `.../questions/{question_ref}/answers` accepts strict
+`{call_id,selected:[one_answer]}` and returns a durable 202 receipt. The receipt's
+status URL uses the existing message receipt API and actor checks. Managed Chat
+web answers share strict admission but retain Workspace mailbox execution
+ownership. Unsupported remote shapes and secret questions stay on web's exact
+runtime path; no question subset is exported.
+
+One atomic transaction reserves the question and creates its answer envelope.
+Possible provider submission is persisted before I/O; unknown outcomes remain
+uncertain rather than replaying. A restart before that fence can retry safely.
+Native answers resolve the original provider request, while Claude/Cursor answers
+are follow-up turns. Question claims are distinct from model completion. Existing
+ordinary/scheduled contracts and scheduled uncertainty policy remain unchanged.
+
+Version-1 stores migrate with a protected v1 backup and atomic/fsynced replacement;
+unknown versions or broken question ownership fail closed. Corruption does not
+stop browser runtime answering. Terminal body content expires at 30 days while
+call/question tombstones persist. Question records also retain content-free
+`retired_cards` identities (bot/app/chat/message) after remirror. They are excluded
+from public projections and prevent old-card replies falling through into ordinary
+message admission, including after restart. See [Feishu setup and bounds](FEISHU_QUESTION_CARDS.md)
+for default-off enablement, callback authentication, retention and deployment gates.

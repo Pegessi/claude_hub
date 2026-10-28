@@ -69,6 +69,9 @@ class FeishuBotSummary(BaseModel):
     revision: int
     generation: int
     configured: bool
+    callback_enabled: bool = False
+    callback_credentials_configured: bool = False
+    expected_tenant_key: str | None = None
     app_secret_configured: bool
     connection_status: str
     updated_at: datetime | None
@@ -188,6 +191,11 @@ def summary(
         generation=entry.generation,
         configured=entry.configured,
         app_secret_configured=bool(config and config.app_secret),
+        callback_enabled=entry.callback_enabled,
+        callback_credentials_configured=bool(
+            entry.verification_token and entry.encrypt_key and entry.expected_tenant_key
+        ),
+        expected_tenant_key=entry.expected_tenant_key,
         connection_status=bindings.websocket_supervisor().status(entry.bot_id),
         updated_at=utc(entry.updated_at),
         binding=binding,
@@ -439,6 +447,43 @@ def register_pool_routes(
                 )
             )
         await reconcile_ws(bindings)
+        return pool_response(user, bindings, focus_bot_id=bot_id)
+
+    @router.put("/bots/{bot_id}/callbacks", response_model=FeishuBotPoolResponse)
+    async def configure_feishu_callbacks(
+        bot_id: str, request: Request, user: User = Depends(require_hub_user)
+    ) -> FeishuBotPoolResponse:
+        value = await read_json(request)
+        if not set(value) <= {
+            "callback_enabled",
+            "verification_token",
+            "encrypt_key",
+            "expected_tenant_key",
+            "expected_revision",
+        } or not {"callback_enabled", "expected_revision"} <= set(value):
+            raise HTTPException(400, "invalid_bot_request")
+        if not isinstance(value["callback_enabled"], bool):
+            raise HTTPException(400, "invalid_bot_request")
+        secrets = {
+            key: parse_secret(value, key)
+            for key in ("verification_token", "encrypt_key", "expected_tenant_key")
+            if key in value
+        }
+        expected_revision = parse_revision(value)
+        async with bindings.gate(bot_id):
+            try:
+                await in_pool(
+                    lambda: bindings.pool().configure_callbacks(
+                        bot_id,
+                        callback_enabled=value["callback_enabled"],
+                        expected_revision=expected_revision,
+                        verification_token=secrets.get("verification_token"),
+                        encrypt_key=secrets.get("encrypt_key"),
+                        expected_tenant_key=secrets.get("expected_tenant_key"),
+                    )
+                )
+            except ValueError as exc:
+                raise HTTPException(400, "invalid_callback_settings") from exc
         return pool_response(user, bindings, focus_bot_id=bot_id)
 
     @router.patch("/bots/{bot_id}", response_model=FeishuBotPoolResponse)

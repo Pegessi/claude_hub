@@ -474,6 +474,18 @@ def runtime_status(session: ManagedSession) -> AgentRuntimeStatus:
     return session.runtime_status
 
 
+def question_input_blocked(session: ManagedSession, call_id: str) -> bool:
+    from fastapi import HTTPException
+
+    from .agent_stream.question_answers import answers
+
+    try:
+        answers.guard_input(session.id, call_id)
+    except HTTPException:
+        return True
+    return False
+
+
 async def send_message(
     session: ManagedSession,
     text: str,
@@ -521,6 +533,7 @@ async def send_message(
                 call_id,
                 previews=previews,
                 turn_metadata={"origin": "workspace"},
+                allow_question_answer=False,
             )
         except NativeInputNotSubmittedError:
             attempts.pop(call_id, None)

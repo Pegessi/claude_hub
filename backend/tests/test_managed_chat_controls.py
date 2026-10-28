@@ -17,6 +17,7 @@ from fastapi import HTTPException
 
 from claude_hub.api import agent_stream as stream_api
 from claude_hub.api import tabs as tabs_api
+from claude_hub.api.routes.agent_stream import messages as inbox_routes
 from claude_hub.models import (
     AgentRuntimeStatus,
     AgentStreamEvent,
@@ -34,8 +35,10 @@ from claude_hub.models import (
     WorkspaceTaskCreate,
 )
 from claude_hub.services.agent_stream.native import CodexNativeSession
+from claude_hub.services.agent_stream.question_answers import answers
 from claude_hub.services.agent_stream.store import AgentStreamStore
 from claude_hub.services.agent_stream.tailer import SessionTailer, TailerManager
+from claude_hub.services.chat_message_inbox import ChatMessageInbox
 from claude_hub.services.ttyd_manager import TTYDManager
 from claude_hub.services.workspace_manager import WorkspaceManager
 
@@ -58,6 +61,19 @@ def managed_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(WorkspaceManager, "_load_state", lambda self: None)
     monkeypatch.setattr(WorkspaceManager, "_load_scheduled_tasks", lambda self: None)
     manager = WorkspaceManager()
+    # Each scenario owns its durable intake file; production admission/pump code
+    # is retained, with no lifecycle runner to race explicit crash-boundary checks.
+    monkeypatch.setattr(
+        inbox_routes,
+        "_inbox",
+        ChatMessageInbox(
+            tmp_path / "question-inbox.json",
+            inbox_routes._target,
+            inbox_routes._submit,
+            inbox_routes._evidence,
+        ),
+    )
+    monkeypatch.setattr(answers, "_locks", {})
     now = datetime.now(timezone.utc)
     workspace = Workspace(
         id=f"workspace-{tmp_path.name}",
@@ -110,6 +126,10 @@ def _answer_text(value: str = "red") -> str:
 
 
 def _approval_event(session: ManagedSession, *, turn_id: str, call_id: str) -> AgentStreamEvent:
+    tailers = stream_api._tailer_manager
+    assert tailers is not None
+    tailer = tailers.get_tailer(session.id)
+    assert tailer is not None
     return AgentStreamEvent(
         stream_sequence=0,
         session_id=session.id,
@@ -118,6 +138,7 @@ def _approval_event(session: ManagedSession, *, turn_id: str, call_id: str) -> A
         type=AgentStreamEventType.APPROVAL_REQUIRED,
         turn_id=turn_id,
         call_id=call_id,
+        run_epoch=tailer._run_epoch,
         payload={
             "tool_call_id": call_id,
             "kind": "ask_question",
@@ -162,6 +183,19 @@ async def _simulate_managed_delete(
             await tailer.store.clear()
 
 
+def _accepted_receipt(result: dict[str, Any]) -> dict[str, Any]:
+    assert result["ok"] is True and result["answered_question"] is True
+    receipt = cast(dict[str, Any], result["receipt"])
+    assert receipt["state"] == "queued"
+    return receipt
+
+
+async def _pump_receipt(result: dict[str, Any]) -> Any:
+    inbox = answers.inbox()
+    await inbox.pump_answer(result["receipt"]["message_id"])
+    return inbox.messages[result["receipt"]["message_id"]]
+
+
 @pytest.mark.asyncio
 async def test_managed_blocking_question_uses_exact_provider_request(
     managed_workspace, monkeypatch: pytest.MonkeyPatch
@@ -173,6 +207,7 @@ async def test_managed_blocking_question_uses_exact_provider_request(
     assert transport is not None
     stdin = _FakeStdin()
     transport._process = SimpleNamespace(stdin=stdin)
+    transport._started = True
     transport._turn_in_flight = True
     transport._pending_questions[42] = {
         "itemId": "question-1",
@@ -192,7 +227,10 @@ async def test_managed_blocking_question_uses_exact_provider_request(
         User(open_id="user", name="User", email="user@example.com"),
     )
 
-    assert result == {"ok": True, "answered_question": True}
+    _accepted_receipt(result)
+    assert stdin.writes == []
+    item = await _pump_receipt(result)
+    assert item.state == "completed"
     response = json.loads(stdin.writes[-1])
     assert response == {
         "jsonrpc": "2.0",
@@ -234,6 +272,7 @@ async def test_exact_question_publish_is_serialized_before_managed_delete(
     transport = cast(Any, tailer.native_transport)
     assert transport is not None
     transport._process = SimpleNamespace(stdin=_FakeStdin())
+    transport._started = True
     transport._turn_in_flight = True
     transport._pending_questions[42] = {
         "itemId": "question-delete",
@@ -253,7 +292,7 @@ async def test_exact_question_publish_is_serialized_before_managed_delete(
         await original_publish(*args, **kwargs)
 
     monkeypatch.setattr(tailer, "_emit_approval_resolved", blocked_publish)
-    answer_task = asyncio.create_task(
+    admission_task = asyncio.create_task(
         stream_api.send_stream_input(
             session.id,
             stream_api.AgentStreamSendRequest(
@@ -265,16 +304,17 @@ async def test_exact_question_publish_is_serialized_before_managed_delete(
             User(open_id="user", name="User", email="user@example.com"),
         )
     )
+    accepted = await asyncio.wait_for(admission_task, timeout=2)
+    _accepted_receipt(accepted)
+    answer_task = asyncio.create_task(_pump_receipt(accepted))
     await asyncio.wait_for(publish_entered.wait(), timeout=2)
     delete_task = asyncio.create_task(_simulate_managed_delete(manager, session, tailer))
     await asyncio.sleep(0.02)
     assert not delete_task.done(), "delete must wait for exact-card publication"
 
     release_publish.set()
-    assert await asyncio.wait_for(answer_task, timeout=2) == {
-        "ok": True,
-        "answered_question": True,
-    }
+    delivered = await asyncio.wait_for(answer_task, timeout=2)
+    assert delivered.state == "completed"
     await asyncio.wait_for(delete_task, timeout=2)
     assert session.id not in manager.sessions
     assert not tailer.store.path.exists()
@@ -293,6 +333,7 @@ async def test_managed_question_rejects_wrong_turn_and_malformed_answer(
     transport = cast(Any, tailer.native_transport)
     assert transport is not None
     transport._process = SimpleNamespace(stdin=_FakeStdin())
+    transport._started = True
     transport._turn_in_flight = True
     transport._pending_questions[42] = {
         "itemId": "question-1",
@@ -302,7 +343,10 @@ async def test_managed_question_rejects_wrong_turn_and_malformed_answer(
     tailer._record_approval_card(_approval_event(session, turn_id="turn-1", call_id="question-1"))
     user = User(open_id="user", name="User", email="user@example.com")
 
-    for text, turn_id in ((_answer_text(), "turn-2"), ("not a structured answer", "turn-1")):
+    for text, turn_id, status in (
+        (_answer_text(), "turn-2", 409),
+        ("not a structured answer", "turn-1", 400),
+    ):
         with pytest.raises(HTTPException) as raised:
             await stream_api.send_stream_input(
                 session.id,
@@ -314,7 +358,7 @@ async def test_managed_question_rejects_wrong_turn_and_malformed_answer(
                 ),
                 user,
             )
-        assert raised.value.status_code == 409
+        assert raised.value.status_code == status
     assert 42 in transport._pending_questions
     assert "question-1" in tailer._pending_approvals
     await _stop_tailers(tailers, transport)
@@ -347,7 +391,10 @@ async def test_idle_managed_question_followup_uses_workspace_mailbox(
         User(open_id="user", name="User", email="user@example.com"),
     )
 
-    assert result == {"ok": True}
+    _accepted_receipt(result)
+    send_text.assert_not_awaited()
+    item = await _pump_receipt(result)
+    assert item.state == "completed"
     send_text.assert_awaited_once()
     assert "followup-call" in manager.sessions[session.id].processing_call_ids
     assert "claude-question" not in tailer._pending_approvals
@@ -382,7 +429,7 @@ async def test_idle_question_resolution_is_serialized_before_managed_delete(
         await original_publish(*args, **kwargs)
 
     monkeypatch.setattr(tailer, "_emit_approval_resolved", blocked_publish)
-    answer_task = asyncio.create_task(
+    admission_task = asyncio.create_task(
         stream_api.send_stream_input(
             session.id,
             stream_api.AgentStreamSendRequest(
@@ -394,13 +441,17 @@ async def test_idle_question_resolution_is_serialized_before_managed_delete(
             User(open_id="user", name="User", email="user@example.com"),
         )
     )
+    accepted = await asyncio.wait_for(admission_task, timeout=2)
+    _accepted_receipt(accepted)
+    answer_task = asyncio.create_task(_pump_receipt(accepted))
     await asyncio.wait_for(publish_entered.wait(), timeout=2)
     delete_task = asyncio.create_task(_simulate_managed_delete(manager, session, tailer))
     await asyncio.sleep(0.02)
     assert not delete_task.done(), "delete must wait for follow-up card resolution"
 
     release_publish.set()
-    assert await asyncio.wait_for(answer_task, timeout=2) == {"ok": True}
+    delivered = await asyncio.wait_for(answer_task, timeout=2)
+    assert delivered.state == "completed"
     await asyncio.wait_for(delete_task, timeout=2)
     assert session.id not in manager.sessions
     assert not tailer.store.path.exists()
@@ -434,25 +485,20 @@ async def test_idle_question_does_not_enqueue_into_recreated_session(
             "updated_at": session.updated_at + timedelta(seconds=1),
         }
     )
-    async with manager.workspace_mutation_lock(session.workspace_id):
-        answer_task = asyncio.create_task(
-            stream_api.send_stream_input(
-                session.id,
-                stream_api.AgentStreamSendRequest(
-                    text=_answer_text(),
-                    client_turn_id="followup-reuse-call",
-                    question_turn_id="question-turn-reuse",
-                    question_call_id="claude-question-reuse",
-                ),
-                User(open_id="user", name="User", email="user@example.com"),
-            )
-        )
-        await asyncio.sleep(0)
-        manager.sessions[session.id] = replacement
-
-    with pytest.raises(HTTPException) as stale:
-        await asyncio.wait_for(answer_task, timeout=2)
-    assert stale.value.status_code == 409
+    accepted = await stream_api.send_stream_input(
+        session.id,
+        stream_api.AgentStreamSendRequest(
+            text=_answer_text(),
+            client_turn_id="followup-reuse-call",
+            question_turn_id="question-turn-reuse",
+            question_call_id="claude-question-reuse",
+        ),
+        User(open_id="user", name="User", email="user@example.com"),
+    )
+    _accepted_receipt(accepted)
+    manager.sessions[session.id] = replacement
+    item = await _pump_receipt(accepted)
+    assert item.state == "failed" and not item.submission_started
     send_text.assert_not_awaited()
     assert manager.sessions[session.id].created_at == replacement.created_at
 
@@ -1029,6 +1075,26 @@ def _answer_request(session, call_id="answer-A", value="red", card="question-car
     )
 
 
+async def _reconcile_managed_handoff(result: dict[str, Any]) -> Any:
+    """Use the production persisted-mailbox proof; never manufacture delivery."""
+    await answers.tick()
+    inbox = answers.inbox()
+    await asyncio.gather(*list(inbox._question_tasks.values()))
+    return inbox.messages[result["receipt"]["message_id"]]
+
+
+async def _pump_failed_handoff(result: dict[str, Any], failure: BaseException) -> Any:
+    if isinstance(failure, asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError):
+            await _pump_receipt(result)
+        await answers.inbox().reconcile(restarting=True)
+    else:
+        await _pump_receipt(result)
+    item = answers.inbox().messages[result["receipt"]["message_id"]]
+    assert item.state == "uncertain" and item.submission_started
+    return item
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_type", [AgentType.CLAUDE, AgentType.CURSOR])
 @pytest.mark.parametrize("same_call", [False, True])
@@ -1040,30 +1106,31 @@ async def test_question_answers_are_serialized_with_mailbox_admission(
         manager, workspace, monkeypatch, agent_type
     )
     try:
-        # Both requests wait behind a real Workspace writer (e.g. report
-        # intake). Lock fairness exposed the old check -> enqueue gap without
-        # inserting artificial yields into either request implementation.
-        async with manager.workspace_mutation_lock(workspace.id):
-            first = asyncio.create_task(_answer_request(session))
-            second = asyncio.create_task(
-                _answer_request(session, "answer-A" if same_call else "answer-B")
-            )
-            await asyncio.sleep(0)
-        results = await asyncio.wait_for(
-            asyncio.gather(first, second, return_exceptions=True), timeout=2
+        results = await asyncio.gather(
+            _answer_request(session),
+            _answer_request(session, "answer-A" if same_call else "answer-B"),
+            return_exceptions=True,
         )
-        assert results[0] == {"ok": True}
+        first = results[0]
+        assert isinstance(first, dict)
+        receipt = _accepted_receipt(first)
         if same_call:
-            assert results[1] == {"ok": True}
+            assert isinstance(results[1], dict)
+            assert results[1]["receipt"]["message_id"] == receipt["message_id"]
         else:
-            assert isinstance(results[1], HTTPException)
-            assert results[1].status_code == 409
-            assert results[1].headers is not None
-            assert results[1].headers[stream_api.CHAT_ERROR_REASON_HEADER] == "stale_question"
+            assert isinstance(results[1], HTTPException) and results[1].status_code == 409
+        send_text.assert_not_awaited()
+        # Durable intake succeeds while a Workspace writer owns execution;
+        # only the separate worker waits for the real workspace mutation lock.
+        async with manager.workspace_mutation_lock(workspace.id):
+            pump = asyncio.create_task(_pump_receipt(first))
+            await asyncio.sleep(0)
+            assert not pump.done()
+        item = await asyncio.wait_for(pump, 2)
+        assert item.state == "completed"
         send_text.assert_awaited_once()
         live = manager.sessions[session.id]
-        assert live.processing_call_ids == ["answer-A"]
-        assert live.pending_call_ids == []
+        assert live.processing_call_ids == ["answer-A"] and not live.pending_call_ids
         assert live.chat_question_answer_calls == {'["question-turn","question-card"]': "answer-A"}
         assert "question-card" not in tailer._pending_approvals
     finally:
@@ -1083,9 +1150,9 @@ async def test_question_claim_survives_unsent_failure_and_reload(
         manager, "_ensure_session_ready_for_send", AsyncMock(side_effect=RuntimeError("not sent"))
     )
     try:
-        with pytest.raises(HTTPException) as unsent:
-            await _answer_request(session)
-        assert unsent.value.status_code == 503
+        accepted = await _answer_request(session)
+        _accepted_receipt(accepted)
+        item = await _pump_failed_handoff(accepted, RuntimeError())
         send_text.assert_not_awaited()
         assert "question-card" in tailer._pending_approvals
         assert manager.sessions[session.id].pending_call_ids == ["answer-A"]
@@ -1099,16 +1166,22 @@ async def test_question_claim_survives_unsent_failure_and_reload(
         with pytest.raises(HTTPException) as competing:
             await _answer_request(session, "answer-B", "blue")
         assert competing.value.status_code == 409
+        # The mailbox already owns the intent. Confirm its persisted handoff;
+        # a repeated web POST returns that receipt without resending anything.
+        assert (await _reconcile_managed_handoff(accepted)).state == "completed"
+        retry = await _answer_request(session)
+        assert retry["receipt"]["message_id"] == item.message_id
+        send_text.assert_not_awaited()
         monkeypatch.setattr(manager, "_ensure_session_ready_for_send", original_ready)
-        assert await _answer_request(session) == {"ok": True}
+        await manager.resume_existing_call(session.id, "answer-A")
         send_text.assert_awaited_once()
-        assert manager.sessions[session.id].pending_call_ids == []
+        assert not manager.sessions[session.id].pending_call_ids
     finally:
         await _stop_tailers(tailers, transport)
 
 
 @pytest.mark.asyncio
-async def test_question_failure_before_envelope_does_not_claim_card(
+async def test_question_failure_before_mailbox_envelope_keeps_durable_claim(
     managed_workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manager, workspace = managed_workspace
@@ -1118,15 +1191,22 @@ async def test_question_failure_before_envelope_does_not_claim_card(
     persist = manager._persist_attachments
     monkeypatch.setattr(manager, "_persist_attachments", Mock(side_effect=OSError("disk")))
     try:
-        with pytest.raises(HTTPException) as failure:
-            await _answer_request(session)
-        assert failure.value.status_code == 500
+        accepted = await _answer_request(session)
+        _accepted_receipt(accepted)
+        item = await _pump_failed_handoff(accepted, RuntimeError())
         assert not manager.sessions[session.id].chat_question_answer_calls
         assert not manager.sessions[session.id].call_payload_fingerprints
         assert "question-card" in tailer._pending_approvals
+        assert (await _reconcile_managed_handoff(accepted)).state == "uncertain"
+        # Intake owns the answer even when the downstream envelope fails; an
+        # HTTP retry must not silently reopen ownership for another answer.
         monkeypatch.setattr(manager, "_persist_attachments", persist)
-        assert await _answer_request(session, "answer-B", "blue") == {"ok": True}
-        send_text.assert_awaited_once()
+        retry = await _answer_request(session)
+        assert retry["receipt"]["message_id"] == item.message_id
+        assert retry["receipt"]["state"] == "uncertain"
+        with pytest.raises(HTTPException):
+            await _answer_request(session, "answer-B", "blue")
+        send_text.assert_not_awaited()
     finally:
         await _stop_tailers(tailers, transport)
 
@@ -1143,30 +1223,26 @@ async def test_question_retry_after_resolution_failure_keeps_exact_ownership(
     resolve = tailers.resolve_answered_questions
     monkeypatch.setattr(tailers, "resolve_answered_questions", AsyncMock(side_effect=failure))
     try:
-        with pytest.raises(
-            asyncio.CancelledError if isinstance(failure, asyncio.CancelledError) else HTTPException
-        ):
-            await _answer_request(session)
+        accepted = await _answer_request(session)
+        await _pump_failed_handoff(accepted, failure)
         live = manager.sessions[session.id]
         assert live.processing_call_ids == ["answer-A"]
         assert live.chat_question_answer_calls == {'["question-turn","question-card"]': "answer-A"}
-        # Losing the HTTP acknowledgement cannot authorize either a second
-        # answer or retargeting the accepted client call to a later card.
         tailer._record_approval_card(
-            _approval_event(session, turn_id="question-turn", call_id="newer-card")
+            _approval_event(live, turn_id="question-turn", call_id="newer-card")
         )
         for request in (
             _answer_request(session, "answer-B", "blue"),
             _answer_request(session, card="newer-card"),
+            _answer_request(session, value="blue"),
         ):
             with pytest.raises(HTTPException) as rejected:
                 await request
             assert rejected.value.status_code == 409
-        with pytest.raises(HTTPException) as changed:
-            await _answer_request(session, value="blue")
-        assert changed.value.status_code == 400
         monkeypatch.setattr(tailers, "resolve_answered_questions", resolve)
-        assert await _answer_request(session) == {"ok": True}
+        assert (await _reconcile_managed_handoff(accepted)).state == "completed"
+        retry = await _answer_request(session)
+        assert retry["receipt"]["message_id"] == accepted["receipt"]["message_id"]
         assert "newer-card" in tailer._pending_approvals
         send_text.assert_awaited_once()
     finally:
@@ -1183,8 +1259,9 @@ async def test_question_does_not_adopt_existing_ordinary_message_call(
     )
     try:
         await manager.send_chat_session_message(session.id, _answer_text(), call_id="ordinary")
+        live = manager.sessions[session.id]
         tailer._record_approval_card(
-            _approval_event(session, turn_id="question-turn", call_id="newer-card")
+            _approval_event(live, turn_id="question-turn", call_id="newer-card")
         )
         with pytest.raises(HTTPException) as rejected:
             await _answer_request(session, "ordinary", card="newer-card")
@@ -1215,10 +1292,9 @@ async def test_question_claim_and_envelope_remain_consistent_on_save_failure(
 
     monkeypatch.setattr(manager, "_atomic_write_text", fail_envelope_write)
     try:
-        with pytest.raises(HTTPException) as failed:
-            await _answer_request(session)
-        assert failed.value.status_code == 500
-        row = next(item for item in attempted[0]["sessions"] if item["id"] == session.id)
+        accepted = await _answer_request(session)
+        item = await _pump_failed_handoff(accepted, RuntimeError())
+        row = next(row for row in attempted[0]["sessions"] if row["id"] == session.id)
         assert row["pending_messages"]["answer-A"] == _answer_text()
         assert row["call_payload_fingerprints"]["answer-A"]
         assert row["chat_question_answer_calls"] == {
@@ -1227,13 +1303,20 @@ async def test_question_claim_and_envelope_remain_consistent_on_save_failure(
         live = manager.sessions[session.id]
         assert live.pending_call_ids == ["answer-A"]
         assert live.chat_question_answer_calls == row["chat_question_answer_calls"]
-        with pytest.raises(HTTPException) as competing:
+        assert (
+            await _reconcile_managed_handoff(accepted)
+        ).state == "uncertain", "in-memory ownership is not durable proof"
+        with pytest.raises(HTTPException):
             await _answer_request(session, "answer-B")
-        assert competing.value.status_code == 409
         send_text.assert_not_awaited()
         assert "question-card" in tailer._pending_approvals
         monkeypatch.setattr(manager, "_atomic_write_text", write)
-        assert await _answer_request(session) == {"ok": True}
+        # An explicit existing-envelope recovery must persist and send exactly
+        # the mailbox-owned call, not admit a fresh user answer.
+        await manager.resume_existing_call(session.id, "answer-A")
+        assert (await _reconcile_managed_handoff(accepted)).state == "completed"
+        retry = await _answer_request(session)
+        assert retry["receipt"]["message_id"] == item.message_id
         send_text.assert_awaited_once()
     finally:
         await _stop_tailers(tailers, transport)
@@ -1250,19 +1333,17 @@ async def test_uncertain_question_delivery_retains_claim_without_replay(
     )
     send_text.side_effect = failure
     try:
-        with pytest.raises(
-            asyncio.CancelledError if isinstance(failure, asyncio.CancelledError) else HTTPException
-        ):
-            await _answer_request(session)
+        accepted = await _answer_request(session)
+        await _pump_failed_handoff(accepted, failure)
         live = manager.sessions[session.id]
         assert live.uncertain_call_ids == ["answer-A"]
         assert live.chat_question_answer_calls == {'["question-turn","question-card"]': "answer-A"}
-        with pytest.raises(HTTPException) as retry:
-            await _answer_request(session)
-        assert retry.value.status_code == 503
+        retry = await _answer_request(session)
+        assert retry["receipt"]["message_id"] == accepted["receipt"]["message_id"]
         with pytest.raises(HTTPException) as competing:
             await _answer_request(session, "answer-B")
         assert competing.value.status_code == 409
+        await _pump_receipt(retry)
         send_text.assert_awaited_once()
         assert manager.sessions[session.id].uncertain_call_ids == ["answer-A"]
     finally:
@@ -1295,46 +1376,44 @@ async def test_question_processing_intent_save_failure_restores_pending_retry(
     def fail_processing_intent(path: Path, text: str) -> None:
         nonlocal failed, admitted_session
         if path == manager._workspace_state_file(workspace.id):
-            state = json.loads(text)
-            row = next(item for item in state["sessions"] if item["id"] == session.id)
+            row = next(row for row in json.loads(text)["sessions"] if row["id"] == session.id)
             if row["pending_call_ids"] == ["answer-A"]:
                 admitted_session = ManagedSession.model_validate(row)
             if row["processing_call_ids"] == ["answer-A"] and not failed:
                 failed = True
                 if committed_before_failure:
-                    # _save_state may replace this workspace before another
-                    # write fails. No provider submission has happened yet.
                     write(path, text)
                 raise OSError("processing-intent persistence failed")
         write(path, text)
 
     monkeypatch.setattr(manager, "_atomic_write_text", fail_processing_intent)
     try:
-        with pytest.raises(HTTPException) as failure:
-            await _answer_request(session)
-        assert failure.value.status_code == 500
+        accepted = await _answer_request(session)
+        await _pump_failed_handoff(accepted, RuntimeError())
         assert failed
         send_text.assert_not_awaited()
-        # Restore the complete pre-intent models, not just the state-list
-        # membership: the new processing lease must not survive either.
         assert admitted_session is not None
         live = manager.sessions[session.id]
-        assert live == admitted_session
-        assert live.pending_call_ids == ["answer-A"]
-        assert live.processing_call_ids == []
-        assert "answer-A" not in live.processing_call_ids_at
+        assert live == admitted_session and live.pending_call_ids == ["answer-A"]
+        assert not live.processing_call_ids and "answer-A" not in live.processing_call_ids_at
         assert live.chat_question_answer_calls == {'["question-turn","question-card"]': "answer-A"}
         assert manager.tasks[task.id] == task
         assert "question-card" in tailer._pending_approvals
-        durable = json.loads(manager._workspace_state_file(workspace.id).read_text())
-        row = next(item for item in durable["sessions"] if item["id"] == session.id)
+        row = next(
+            row
+            for row in json.loads(manager._workspace_state_file(workspace.id).read_text())[
+                "sessions"
+            ]
+            if row["id"] == session.id
+        )
         assert row["chat_question_answer_calls"] == live.chat_question_answer_calls
         assert row["processing_call_ids"] == (["answer-A"] if committed_before_failure else [])
-        assert await _answer_request(session) == {"ok": True}
+        monkeypatch.setattr(manager, "_atomic_write_text", write)
+        await manager.resume_existing_call(session.id, "answer-A")
+        assert (await _reconcile_managed_handoff(accepted)).state == "completed"
         send_text.assert_awaited_once()
         assert manager.sessions[session.id].processing_call_ids == ["answer-A"]
         assert manager.tasks[task.id].processing_call_ids == ["answer-A"]
-        assert "question-card" not in tailer._pending_approvals
     finally:
         await _stop_tailers(tailers, transport)
 
@@ -1347,8 +1426,6 @@ async def test_question_rejects_legacy_delivered_call_without_fingerprint(
     session, tailers, tailer, transport, send_text = await _idle_answer_card(
         manager, workspace, monkeypatch
     )
-    # Legacy mailbox recovery deliberately accepts delivered IDs without a
-    # fingerprint/envelope. Such an ordinary ID cannot answer an unrelated card.
     manager.sessions[session.id] = session.model_copy(
         update={"delivered_call_ids": ["legacy-ordinary"]}
     )
@@ -1359,13 +1436,14 @@ async def test_question_rejects_legacy_delivered_call_without_fingerprint(
         assert "question-card" in tailer._pending_approvals
         assert not manager.sessions[session.id].chat_question_answer_calls
         send_text.assert_not_awaited()
-        # Ordinary-message compatibility remains an idempotent no-op.
         await manager.send_chat_session_message(
             session.id, "earlier ordinary message", call_id="legacy-ordinary"
         )
         send_text.assert_not_awaited()
         assert manager.sessions[session.id].delivered_call_ids == ["legacy-ordinary"]
-        assert await _answer_request(session) == {"ok": True}
+        accepted = await _answer_request(session)
+        _accepted_receipt(accepted)
+        assert (await _pump_receipt(accepted)).state == "completed"
         send_text.assert_awaited_once()
         assert "question-card" not in tailer._pending_approvals
     finally:

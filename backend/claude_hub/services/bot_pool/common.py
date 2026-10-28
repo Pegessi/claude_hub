@@ -19,7 +19,7 @@ import secrets
 import string
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -203,6 +203,10 @@ class BotEntry:
     config: FeishuBotConfig | None
     claims: tuple[PairingClaim, ...]
     binding: BotBinding | None
+    callback_enabled: bool = False
+    verification_token: str | None = field(default=None, repr=False)
+    encrypt_key: str | None = field(default=None, repr=False)
+    expected_tenant_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -230,6 +234,10 @@ class EffectiveBot:
     feishu_name: str | None
     feishu_avatar_url: str | None
     feishu_open_id: str | None
+    callback_enabled: bool = False
+    verification_token: str | None = field(default=None, repr=False)
+    encrypt_key: str | None = field(default=None, repr=False)
+    expected_tenant_key: str | None = None
 
 
 def _state_error(name: str) -> FeishuBotPoolStateError:

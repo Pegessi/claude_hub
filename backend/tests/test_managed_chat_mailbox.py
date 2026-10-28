@@ -400,3 +400,20 @@ async def test_chat_readiness_checks_seat_without_terminal_probes(mailbox):
     await manager._ensure_session_ready_for_send(manager.sessions[session_id])
     await manager._wait_for_agent_prompt(manager.sessions[session_id])
     assert manager._assert_session_seat.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_exact_question_followup_bypasses_only_unsent_fifo(mailbox, monkeypatch):
+    manager, session_id, receipts, sender = mailbox
+    monkeypatch.setattr(managed_chat, "is_turn_running", lambda current: True)
+    await manager.send_chat_session_message(session_id, "earlier-one", call_id="one")
+    await manager.send_chat_session_message(session_id, "earlier-two", call_id="two")
+    assert manager.sessions[session_id].pending_call_ids == ["one", "two"]
+    sender.assert_not_called()
+    monkeypatch.setattr(managed_chat, "is_turn_running", lambda current: False)
+    await manager._send_session_message_locked(
+        session_id, "structured answer", call_id="answer", question_key='["turn","call"]'
+    )
+    assert sender.await_args_list[0].args[-1] == "answer"
+    assert manager.sessions[session_id].pending_call_ids == ["one", "two"]
+    assert manager.sessions[session_id].chat_question_answer_calls['["turn","call"]'] == "answer"
