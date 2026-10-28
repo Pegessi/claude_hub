@@ -18,6 +18,7 @@ from ..models import (
 )
 from ..services import chat_sidebar_preferences, ttyd_manager, workspace_manager
 from ..services.agent_stream.maso_http import MasoServiceUnavailable
+from ..services.agent_stream.providers.spec import all_specs
 from ..services.ttyd_manager import (
     TabCleanupPendingError,
     TabLimitExceededError,
@@ -35,12 +36,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/tabs", tags=["tabs"])
 
 _MANAGED_CODEX_HOT_ENV_KEYS = frozenset({"CODEX_MODEL", "CODEX_REASONING_EFFORT"})
+# Derived from the ProviderSpec registry: a running tab may hot-update its
+# model key plus every reasoning-effort key the transport reads.
 _DOT_MODEL_HOT_ENV_KEYS = {
-    "claude": frozenset({"ANTHROPIC_MODEL"}),
-    "codex": _MANAGED_CODEX_HOT_ENV_KEYS,
-    "cursor": frozenset({"CURSOR_MODEL"}),
-    "traex": _MANAGED_CODEX_HOT_ENV_KEYS | {"TRAEX_REASONING_EFFORT"},
-    "maso": frozenset({"MASO_MODEL"}),
+    spec.id.value: frozenset(
+        key for key in ((spec.model_env_key,) + spec.effort_env_keys) if key is not None
+    )
+    for spec in all_specs().values()
+    if spec.model_env_key is not None or spec.effort_env_keys
 }
 
 

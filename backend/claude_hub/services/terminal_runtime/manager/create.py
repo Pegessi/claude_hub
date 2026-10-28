@@ -99,16 +99,14 @@ class ManagerCreateMixin(ManagerHost):
         )
         if workspace_role is not None and chat_mode != ChatMode.DEFAULT:
             raise ValueError("managed workspace Chat mode must use default")
+        # Local import: this module loads during ttyd_manager initialization,
+        # before the agent_stream package has finished importing.
+        from ...agent_stream.providers.spec import Surface, providers_for_surface
+
         if (
             workspace_role is not None
             and session_kind == SessionKind.CHAT
-            and agent_type
-            not in {
-                AgentType.CLAUDE,
-                AgentType.CODEX,
-                AgentType.CURSOR,
-                AgentType.MASO,
-            }
+            and agent_type not in providers_for_surface(Surface.MANAGED_CHAT)
         ):
             raise ValueError(
                 "Managed Chat supports only local Claude, Codex, Cursor, or MASO agents"

@@ -11,26 +11,34 @@ from claude_hub.models.schemas import (
 )
 from claude_hub.models.task_session import ExecutorCapabilities, ManagedExecutorConfig
 
+from .agent_stream.providers.spec import (
+    Surface,
+    all_specs,
+    get_spec,
+    providers_for_surface,
+)
+
 
 def validate_config_admission(config: ManagedExecutorConfig) -> None:
     """Validate the provider, surface, and execution target combination."""
 
-    if config.agent_type in {AgentType.TERMINAL, AgentType.TRAEX}:
-        raise ValueError(f"Unsupported managed session agent_type: {config.agent_type.value}")
-    if config.agent_type == AgentType.MASO and config.session_kind != SessionKind.CHAT:
-        raise ValueError("MASO is an HTTP Chat provider; select a Chat session")
+    spec = get_spec(config.agent_type)
     if config.session_kind == SessionKind.CHAT:
-        if config.agent_type not in {
-            AgentType.CLAUDE,
-            AgentType.CODEX,
-            AgentType.CURSOR,
-            AgentType.MASO,
-        }:
+        if not spec.runs_on(Surface.MANAGED_CHAT):
+            # Preserve the historical terminal/traex-specific rejection text.
+            if config.agent_type in {AgentType.TERMINAL, AgentType.TRAEX}:
+                raise ValueError(
+                    f"Unsupported managed session agent_type: {config.agent_type.value}"
+                )
             raise ValueError(
                 "Managed Chat supports only local Claude, Codex, Cursor, or MASO agents"
             )
         if config.target == ExecutionTarget.REMOTE:
             raise ValueError(CHAT_REMOTE_UNSUPPORTED)
+    elif not spec.runs_on(Surface.MANAGED_TERMINAL):
+        if config.agent_type == AgentType.MASO:
+            raise ValueError("MASO is an HTTP Chat provider; select a Chat session")
+        raise ValueError(f"Unsupported managed session agent_type: {config.agent_type.value}")
 
 
 def launch_env(config: ManagedExecutorConfig) -> dict[str, str]:
@@ -45,14 +53,12 @@ def launch_env(config: ManagedExecutorConfig) -> dict[str, str]:
     if not model:
         return result
 
-    if config.agent_type == AgentType.CLAUDE:
-        key = "ANTHROPIC_MODEL"
-    elif config.agent_type == AgentType.CODEX:
-        key = "CODEX_MODEL"
-    else:
+    spec = get_spec(config.agent_type)
+    if not spec.model_configurable_in_managed or spec.model_env_key is None:
         raise ValueError(
             f"{config.agent_type.value.capitalize()} executor does not support an explicit model override"
         )
+    key = spec.model_env_key
     configured = result.get(key)
     if configured is not None and configured != model:
         raise ValueError(f"executor_config.model conflicts with executor_config.env[{key!r}]")
@@ -65,10 +71,9 @@ def config_from_session(session: ManagedSession) -> ManagedExecutorConfig:
 
     env = dict(session.env)
     model = None
-    if session.agent_type == AgentType.CLAUDE:
-        model = env.pop("ANTHROPIC_MODEL", None)
-    elif session.agent_type == AgentType.CODEX:
-        model = env.pop("CODEX_MODEL", None)
+    spec = get_spec(session.agent_type)
+    if spec.model_configurable_in_managed and spec.model_env_key is not None:
+        model = env.pop(spec.model_env_key, None)
     return ManagedExecutorConfig(
         agent_type=session.agent_type,
         session_kind=session.session_kind,
@@ -151,6 +156,7 @@ def validate_session_matches_config(
 
 
 def managed_executor_capabilities() -> ExecutorCapabilities:
+    chat_agents = providers_for_surface(Surface.MANAGED_CHAT)
     return ExecutorCapabilities(
         available=True,
         supports_spawn=True,
@@ -158,18 +164,14 @@ def managed_executor_capabilities() -> ExecutorCapabilities:
         supports_followup=True,
         supports_interrupt=True,
         durable_status=True,
-        supported_agent_types=[
-            AgentType.CLAUDE,
-            AgentType.CODEX,
-            AgentType.CURSOR,
-            AgentType.MASO,
-        ],
+        supported_agent_types=list(
+            dict.fromkeys([*chat_agents, *providers_for_surface(Surface.MANAGED_TERMINAL)])
+        ),
         supported_session_kinds=[SessionKind.TERMINAL, SessionKind.CHAT],
-        chat_supported_agent_types=[
-            AgentType.CLAUDE,
-            AgentType.CODEX,
-            AgentType.CURSOR,
-            AgentType.MASO,
+        chat_supported_agent_types=list(chat_agents),
+        model_configurable_agent_types=[
+            agent_type
+            for agent_type, spec in all_specs().items()
+            if spec.model_configurable_in_managed
         ],
-        model_configurable_agent_types=[AgentType.CLAUDE, AgentType.CODEX],
     )

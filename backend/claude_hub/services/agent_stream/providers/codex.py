@@ -72,16 +72,9 @@ class CodexConfiguredSession(ProcessSession):
 
     adapter_id = "codex-native"
     schema_version = 1
-    supports_tool_timeline = True
-    supports_approval_ui = True
-    supports_images = True
-    supports_native_system_instructions = True
-    goal_usage_quality = "exact"
-
-    @property
-    def eof_is_fatal(self) -> bool:
-        # Codex runs a persistent app-server; EOF means it died.
-        return True
+    # Capability flags (tool timeline, blocking approval UI, RPC-staged
+    # images, native system instructions, exact goal usage, fatal EOF) come
+    # from the ProviderSpec registry via SessionCore property defaults.
 
     def __init__(
         self,

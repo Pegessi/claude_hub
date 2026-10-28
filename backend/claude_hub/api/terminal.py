@@ -23,7 +23,14 @@ from websockets.typing import Subprotocol
 
 from ..auth.dependencies import get_current_user, get_current_user_ws
 from ..models import AgentType, User
+from ..services.agent_stream.providers.spec import all_specs
 from ..services.ttyd_manager import ttyd_manager
+
+# The four local CLI providers emit terminal probe responses the proxy must
+# filter; MASO has no TUI and the terminal pseudo-provider emits no probes.
+_PROBE_RESPONSE_FILTER_PROVIDERS = frozenset(
+    agent_type for agent_type, spec in all_specs().items() if spec.binary is not None
+)
 from ._terminal_injection import (
     FULL_HISTORY_LINES,
     INITIAL_AGENT_HISTORY_LINES,
@@ -271,12 +278,7 @@ async def websocket_endpoint(
     await websocket.accept(subprotocol="tty")
 
     ttyd_ws_uri = f"ws://127.0.0.1:{tab.port}/ws"
-    filter_probe_responses = tab.agent_type in {
-        AgentType.CLAUDE,
-        AgentType.CODEX,
-        AgentType.TRAEX,
-        AgentType.CURSOR,
-    }
+    filter_probe_responses = tab.agent_type in _PROBE_RESPONSE_FILTER_PROVIDERS
 
     try:
         await proxy_websocket(
@@ -310,12 +312,7 @@ async def proxy_ttyd_websocket(
     await websocket.accept(subprotocol="tty")
 
     ttyd_ws_uri = f"ws://127.0.0.1:{tab.port}/ws"
-    filter_probe_responses = tab.agent_type in {
-        AgentType.CLAUDE,
-        AgentType.CODEX,
-        AgentType.TRAEX,
-        AgentType.CURSOR,
-    }
+    filter_probe_responses = tab.agent_type in _PROBE_RESPONSE_FILTER_PROVIDERS
 
     try:
         await proxy_websocket(
