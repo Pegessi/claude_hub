@@ -69,6 +69,34 @@
   an ssh option, even though argv is already separated. The bridge CLI exits
   cleanly on an invalid `--target`.
 
+### fix(agent_stream): reap the whole provider process group on teardown and cancellation
+
+- Provider teardown no longer declares success when only the direct child
+  dies. SIGTERM/SIGKILL escalation used to key off `await proc.wait()`, which
+  resolves as soon as the provider CLI exits — typically within milliseconds —
+  while TERM-trapping descendants (shutting-down MCP servers, trapped bash,
+  nohup-style children) survived reparented to init and were never SIGKILLed.
+  Teardown now polls the process group with `killpg(pgid, 0)` under one shared
+  five-second grace budget covering both leader exit and group drain; if the
+  group is still present at the deadline the WHOLE group is SIGKILLed and the
+  direct child is reaped.
+- Cancelling teardown during grace no longer strands the tree: the group is
+  SIGKILLed immediately (direct-child `kill()` when group signalling is
+  unavailable), followed by a bounded `asyncio.shield`-protected final reap
+  that survives further cancellation, before `CancelledError` propagates.
+- `PermissionError` from `killpg` falls back to direct-child terminate/kill;
+  `ProcessLookupError` means the group has already drained. Double `stop()` is
+  a no-op, and `_spawn_subprocess` clears the recorded pgid before awaiting
+  launch on every platform. Descendants that call `setsid`/`setpgid`
+  themselves escape the group and remain unreachable; a hard backend
+  SIGKILL likewise skips lifespan teardown.
+- Teardown no longer busy-spins a core when the provider CLI exits promptly
+  while a TERM-surviving descendant that dropped the inherited stdio pipes
+  lingers in the group: the completed `proc.wait()` future used to be
+  re-awaited back-to-back (~500k–1M `killpg(pgid, 0)` calls per grace
+  window); liveness polling is now paced by the 0.1 s poll interval with no
+  change to the shared deadline or SIGKILL escalation.
+
 ### fix(maso): retain final responses without streamed tokens
 
 - Read authoritative text and reasoning from MASO's `post_llm_response` event.
