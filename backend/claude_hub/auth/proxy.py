@@ -150,14 +150,15 @@ def _parse_origin(origin: str) -> Optional[tuple[str, str, int]]:
     """Split an Origin/URL into (scheme, hostname, effective port)."""
     try:
         parts = urlsplit(origin.strip())
+        # urllib validates the port lazily, when the property is read.
+        hostname, port = parts.hostname, parts.port
     except ValueError:
         return None
-    if parts.scheme not in _ORIGIN_SCHEME_PORTS or not parts.hostname:
+    if parts.scheme not in _ORIGIN_SCHEME_PORTS or not hostname:
         return None
-    port = parts.port
     if port is None:
         port = _ORIGIN_SCHEME_PORTS[parts.scheme]
-    return parts.scheme, parts.hostname.lower(), port
+    return parts.scheme, hostname.lower(), port
 
 
 def _parse_host_target(host: str) -> Optional[tuple[str, Optional[int]]]:
@@ -167,11 +168,12 @@ def _parse_host_target(host: str) -> Optional[tuple[str, Optional[int]]]:
     """
     try:
         parts = urlsplit("//" + host.strip())
+        hostname, port = parts.hostname, parts.port
     except ValueError:
         return None
-    if not parts.hostname:
+    if not hostname:
         return None
-    return parts.hostname.lower(), parts.port
+    return hostname.lower(), port
 
 
 def _host_target_matches(hostname: str, port: int, host_target: tuple[str, Optional[int]]) -> bool:

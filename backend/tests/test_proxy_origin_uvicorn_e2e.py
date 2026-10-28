@@ -219,3 +219,31 @@ def test_real_uvicorn_websocket_origin_handshake() -> None:
         with pytest.raises(InvalidStatus) as exc:
             ws_client.connect(ws_url, origin=Origin("http://evil.example"), open_timeout=5)
         assert exc.value.response.status_code == 403
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
+@pytest.mark.parametrize("header", ["origin", "host"])
+@pytest.mark.parametrize("invalid_port", ["not-a-port", "65536", "-1"])
+def test_real_uvicorn_invalid_header_ports_return_403(
+    host: str, header: str, invalid_port: str
+) -> None:
+    with _serve(host) as base_url:
+        authority = f"[{host}]" if ":" in host else host
+        headers = {"origin": base_url, "host": base_url.removeprefix("http://")}
+        headers[header] = (
+            f"http://{authority}:{invalid_port}"
+            if header == "origin"
+            else f"{authority}:{invalid_port}"
+        )
+        with httpx.Client(base_url=base_url, trust_env=False, timeout=5) as client:
+            assert client.post("/server-webhook", headers=headers).status_code == 403
+            # Send a real upgrade with the same invalid Host/Origin. A URL-client
+            # constructor would otherwise reject the malformed port before I/O.
+            upgrade = {
+                **headers,
+                "connection": "Upgrade",
+                "upgrade": "websocket",
+                "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+                "sec-websocket-version": "13",
+            }
+            assert client.get("/ws", headers=upgrade).status_code == 403

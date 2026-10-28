@@ -432,6 +432,18 @@ def test_unsafe_method_malformed_origin_denied() -> None:
     assert not unsafe_http_request_is_allowed(method="POST", headers=headers, allowed_origins=())
 
 
+@pytest.mark.parametrize("authority", ["hub.local:not-a-port", "hub.local:65536", "[::1]:-1"])
+def test_invalid_port_is_rejected_without_raising(authority: str) -> None:
+    assert not browser_origin_is_allowed(origin=f"http://{authority}", host="hub.local:8173")
+    assert not browser_origin_is_allowed(origin="http://hub.local:8173", host=authority)
+    # A malformed optional allowlist entry must not break unrelated valid entries.
+    assert browser_origin_is_allowed(
+        origin="https://allowed.example",
+        host="hub.local:8173",
+        allowed_origins=(authority, f"http://{authority}", "https://allowed.example"),
+    )
+
+
 @pytest.mark.asyncio
 async def test_origin_guard_middleware_rejects_cross_site_post() -> None:
     """End-to-end ASGI check: cross-site POST 403s before the route runs."""

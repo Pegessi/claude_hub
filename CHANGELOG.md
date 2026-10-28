@@ -7,6 +7,16 @@
 
 ## Released
 
+### fix: reject malformed browser Origin and Host ports without server errors
+
+- Catch deferred URL port-validation errors in both Origin and Host parsing.
+  Invalid browser request authorities now follow the existing rejection path
+  instead of raising HTTP/WebSocket handshake errors. Malformed optional
+  allowlist entries cannot prevent later valid entries from matching.
+- Cover non-numeric, out-of-range and negative ports through real uvicorn HTTP
+  requests and WebSocket upgrades on IPv4 and IPv6, preserving normal relay,
+  same-origin and exact HTTPS allowlist behavior.
+
 ### chore: integrate eight reviewed hardening branches
 
 - Sequentially merge the reviewed CLI base-URL/redaction, SSH destination
