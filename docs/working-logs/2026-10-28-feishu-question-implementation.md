@@ -179,3 +179,15 @@ button digests are revoked by replacement as before.
 Focused callback/bridge verification: **81 passed**, including real loopback TLS;
 `feishu-choice-review-fixes.log`, evidence `/tmp/claude-hub-verify.dvlu6l5x`.
 No live app/proxy/state changes. Updated final strict verification follows.
+
+Round-2 fix candidate: `8f8b3fb`. Final required command
+`CLAUDE_HUB_VERIFY_STRICT_VERSIONS=1 ./scripts/verify.sh all` **PASS**, exit 0:
+**5,532 passed, 10 expected browser skips**, 334.75 seconds, plus all documentation,
+checkout-safety, backend format/types and frontend lint/types/tests/build targets.
+Evidence: `feishu-choice-review-all.log` and
+`/tmp/claude-hub-verify.5mksdhde`; disposable runtime was removed. The original
+complete browser/HMR evidence remains applicable because no UI code changed in
+this revision. Existing Uvicorn deprecation and Vite chunk advisories remain
+nonblocking. Final validation-only documentation update passes docs and staged
+checks. Both reviewer blockers are addressed; independent re-review and human
+acceptance remain pending. No lessons needed.
