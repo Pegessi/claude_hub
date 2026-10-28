@@ -223,14 +223,7 @@ class CodexConfiguredSession(ProcessSession):
                     )
                     raise ProviderNetworkError(self._last_error)
                 try:
-                    self._process = await asyncio.create_subprocess_exec(
-                        *cmd,
-                        cwd=self._cwd or None,
-                        stdin=asyncio.subprocess.PIPE,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                        env=provider_env,
-                    )
+                    self._process = await self._spawn_subprocess(cmd, provider_env)
                 except FileNotFoundError:
                     self._last_error = f"provider binary not found: {cmd[0]}"
                     raise

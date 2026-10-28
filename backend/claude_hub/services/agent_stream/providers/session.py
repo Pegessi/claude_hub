@@ -56,6 +56,11 @@ class SessionCore(ABC):
         # restart can resume the same conversation.
         self._conversation_id_persist = conversation_id_persist
         self._process: Optional[asyncio.subprocess.Process] = None
+        # Process group owned by the current subprocess (its pid when spawned
+        # with ``start_new_session`` on POSIX, 0 when group signalling is
+        # unavailable). Teardown signals the whole group so provider-spawned
+        # children (bash tool shells, MCP servers) are not orphaned.
+        self._process_group: int = 0
         # One-shot Claude/Cursor processes share a consumer across turns. Tag
         # every queued record (including EOF) with its process generation so a
         # cancelled or lingering reader cannot terminate or contaminate the
