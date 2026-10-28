@@ -97,8 +97,16 @@ Backend:
 ```bash
 cd backend
 uv sync --dev
-uv run uvicorn claude_hub.main:app --reload --host 0.0.0.0 --port 8173
+# Loopback bind: warning-free without Feishu auth (the Vite dev server proxies
+# /api to this port). The bind host is exported so the startup guard sees it.
+CLAUDE_HUB_BIND_HOST=127.0.0.1 \
+  uv run uvicorn claude_hub.main:app --reload --host 127.0.0.1 --port 8173
 ```
+
+Listening on a non-loopback interface (e.g. `--host 0.0.0.0` for LAN/phone
+access) while Feishu OAuth is unconfigured is refused unless you explicitly
+opt in with `CLAUDE_HUB_ALLOW_INSECURE_LISTEN=1` (see
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)).
 
 Frontend:
 

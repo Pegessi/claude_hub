@@ -148,13 +148,31 @@ class Settings(BaseSettings):
     # one of these networks. The default trusts loopback only; deployments
     # behind a reverse proxy on another hop (e.g. nginx on 10.0.0.5) must add
     # that peer explicitly. Empty string disables trust entirely.
-    #
-    # This is the stable surface shared with codex/rv-proxy-trust; that branch
-    # owns the browser Origin policy and its own CLAUDE_HUB_ALLOWED_ORIGINS
-    # setting, which is intentionally not duplicated here.
     trusted_proxies: str = Field(
         default="127.0.0.0/8,::1",
         validation_alias="CLAUDE_HUB_TRUSTED_PROXIES",
+    )
+    # Comma-separated extra browser Origin values accepted, in addition to
+    # same-origin requests, for terminal WebSocket handshakes and
+    # state-changing HTTP methods (POST/PUT/PATCH/DELETE). Entries may be
+    # full origins (https://hub.example.com) or bare host[:port] values.
+    allowed_origins: Optional[str] = Field(
+        default=None,
+        validation_alias="CLAUDE_HUB_ALLOWED_ORIGINS",
+    )
+    # Opt-in to listen on a non-loopback interface while authentication is
+    # disabled. The startup guard refuses such a bind unless this is set.
+    allow_insecure_listen: bool = Field(
+        default=False,
+        validation_alias="CLAUDE_HUB_ALLOW_INSECURE_LISTEN",
+    )
+    # The actual uvicorn bind host, exported by the launch scripts/launcher.
+    # ``host`` alone cannot be trusted to reflect the real interface (uvicorn
+    # receives --host separately), so the in-process startup guard prefers
+    # this value and falls back to ``host`` when it is unset.
+    bind_host: Optional[str] = Field(
+        default=None,
+        validation_alias="CLAUDE_HUB_BIND_HOST",
     )
 
     @field_validator("trusted_proxies")
@@ -258,6 +276,13 @@ class Settings(BaseSettings):
     def trusted_proxy_networks(self) -> tuple[_IPNetwork, ...]:
         """Parsed trusted-proxy allowlist from ``trusted_proxies``."""
         return _parse_ip_networks(self.trusted_proxies or "")
+
+    @property
+    def allowed_origins_list(self) -> List[str]:
+        """Additional allowed browser Origin values."""
+        if not self.allowed_origins:
+            return []
+        return [origin.strip() for origin in self.allowed_origins.split(",") if origin.strip()]
 
     @property
     def auth_enabled(self) -> bool:

@@ -59,12 +59,16 @@ def test_launcher_forwards_actual_bind_port_to_backend_environment(monkeypatch, 
     monkeypatch.setattr(launcher_module.signal, "signal", lambda *args: None)
     monkeypatch.setattr(maso_probe, "main", lambda argv: 0)
     monkeypatch.setattr(launcher_module.sys, "argv", ["launcher", "--port", str(port)])
+    # Wiring test: the listen guard is covered in test_service_restart.py.
+    monkeypatch.setattr(launcher_module.settings, "allow_insecure_listen", True)
 
     assert launcher_module.main() == 0
     assert captured["env"]["CLAUDE_HUB_PORT"] == str(port)
     assert captured["env"]["PORT"] == "11004"
     assert captured["args"][1][-2:] == ["--port", str(port)]
     assert captured["args"][2] == f"http://127.0.0.1:{port}/health"
+    # The real bind host is exported so the in-process lifespan guard sees it.
+    assert captured["env"]["CLAUDE_HUB_BIND_HOST"] == "0.0.0.0"
 
 
 @pytest.mark.parametrize("timeout", [45, 1800])
