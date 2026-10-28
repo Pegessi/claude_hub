@@ -220,6 +220,23 @@
   task/run records. Unknown future fields quarantine the store instead of
   being silently dropped by an in-place rewrite.
 
+### fix(workspace): per-scope monitor isolation and error-state pruning
+
+- The background workspace monitor isolates every step with a per-scope
+  timeout/exception guard and rate-limits identical failures (same step +
+  scope + type) to one log per 60s, noting suppressed repeats; one failing or
+  hung workspace/session/task no longer aborts the rest of a monitor round.
+- Session status refresh, resident-agent ticks and scheduled-task ticks now
+  apply the timeout budget per item (per session / per workspace / per
+  scheduled task), mirroring the per-workspace dispatch loop. The shared
+  batched status fetch and global scheduled-task sweep phases keep global
+  guards; ordering, arguments and save points are unchanged.
+- A guarded step that succeeds evicts its `(step, scope)` rate-limit bucket,
+  so a later failure logs a fresh traceback instead of staying suppressed.
+  Buckets whose failure stream has been inactive for eight error-log windows
+  are pruned every round, so identifiers of sessions/workspaces/tasks that
+  failed and then disappeared cannot accumulate in the map forever.
+
 ### fix(maso): retain final responses without streamed tokens
 
 - Read authoritative text and reasoning from MASO's `post_llm_response` event.

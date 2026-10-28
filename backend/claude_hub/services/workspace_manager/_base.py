@@ -240,6 +240,26 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     ) -> None: ...
 
     @abstractmethod
+    def _monitor_refresh_sessions(self, workspace_id: Optional[str]) -> list[ManagedSession]: ...
+
+    @abstractmethod
+    async def _collect_session_agent_statuses(
+        self, sessions: list[ManagedSession]
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    async def _refresh_one_session_status(
+        self,
+        session: ManagedSession,
+        statuses: dict[str, Any],
+        *,
+        run_auto_continue: bool,
+    ) -> bool: ...
+
+    @abstractmethod
+    def _mark_runtime_task_failures(self, workspace_id: Optional[str], now: datetime) -> bool: ...
+
+    @abstractmethod
     def _expected_pending_prompt_prefixes(
         self, session: ManagedSession, task: WorkspaceTask
     ) -> list[str]: ...
@@ -532,6 +552,26 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
 
     @abstractmethod
     async def _tick_scheduled_tasks(self) -> None: ...
+
+    @abstractmethod
+    async def _recover_scheduled_chat_runs(self) -> None: ...
+
+    @abstractmethod
+    def _disable_deleted_chat_targets(self, now: datetime) -> None: ...
+
+    @abstractmethod
+    async def _reap_stale_scheduled_chat_runs(self, now: datetime) -> None: ...
+
+    @abstractmethod
+    async def _fire_scheduled_task(
+        self, task: ScheduledTask, now: datetime, *, manual: bool = False
+    ) -> Optional[ScheduledTaskRun]: ...
+
+    @abstractmethod
+    async def _converge_orphaned_hub_tasks(self, now: datetime) -> None: ...
+
+    @abstractmethod
+    async def _drain_scheduled_chat_runs(self, tab_id: Optional[str] = None) -> None: ...
 
     @staticmethod
     @abstractmethod
