@@ -7,6 +7,13 @@
 
 ## Released
 
+### docs: design native Feishu question answers
+
+- Document exact Chat question routing, signed card callbacks, durable answer
+  claims and inbox reuse, with app setup and sandbox verification requirements.
+- Design only; no live Feishu or Hub behavior changes. See
+  `docs/working-logs/2026-10-28-feishu-interactive-choice-cards.md`.
+
 ### fix(maso): retain final responses without streamed tokens
 
 - Read authoritative text and reasoning from MASO's `post_llm_response` event.
