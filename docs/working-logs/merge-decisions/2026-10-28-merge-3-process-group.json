@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "e90dadf33851019a09f5a1ff0f21111698fa449e",
+  "parents": [
+    "10748682dc32786bc6c6fe83801642b39f586481",
+    "d850b99b9900cc1920e68ff5d2839392767248de"
+  ],
+  "base": "0211661a1e627349822b3857ecf74f33b81818ef",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "b202487ad1659accbf174317e3348066db6b94f1",
+  "reconstructed_tree": "fc9b7a47d6269585ef46ff5bf978fa9f23c049c4",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a4bfbecaf1c6b1bd9e75e0139c91f70b7e3efbb4"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "bc4f4f35155219cf4d9686132e9928951e50873b"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0a4bc68b7966af52bdaa40f14e129c2a8329847e"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "50e5acae204ee9aa5f7d2a9109b617d7ee96403a"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "512f986251c3bd90286c7df1cdf8aca36324d047"
+      },
+      "reason": "Candidate (main Feishu, merge-1 CLI and merge-2 SSH notes) and codex/rv-process-group's process-group teardown note both insert at the top of Released. Manual union keeps the candidate entries then appends the incoming process-group entry before the shared tail, with blank-line separation. Provider sources auto-merged (disjoint from prior merges).",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
