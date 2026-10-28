@@ -174,9 +174,10 @@ venv was never symlinked or reused.
 | Merge 8 new regression | `tests/test_state_monitor_composition.py` | 1 passed |
 | Real-server compatibility | `tests/test_proxy_origin_uvicorn_e2e.py` (real uvicorn, IPv4+IPv6, WS) | 6 passed (stable across repeated runs) |
 | Merge decisions ×8 | `verify.sh merge-decisions --merge … --record …` | complete coverage |
-| **Canonical final** | `./scripts/verify.sh all` | docs, checkout-safety, backend-format, backend-types, backend-tests, frontend-lint, frontend-types, frontend-tests, frontend-build all PASS; **5851 passed, 9 skipped** |
-| Browser gate | `./scripts/verify.sh browser-mocks` (Chromium 1243) | 33 scenario PASS, 0 FAIL |
-| Terminal gate | `./scripts/verify.sh terminal-replay` (ttyd/tmux/Chromium, isolated) | 29 passed |
+| Real-server compatibility (focused) | `tests/test_proxy_origin_uvicorn_e2e.py` | 6 passed (stable on repeat) |
+| **Canonical final** | `./scripts/verify.sh all` on `7f9e39c` | docs, checkout-safety, backend-format, backend-types, backend-tests, frontend-lint, frontend-types, frontend-tests, frontend-build all PASS; **5857 passed, 9 skipped** |
+| Browser gate | `./scripts/verify.sh browser-mocks` (Chromium 1243) on `7f9e39c` | 33 scenario PASS, 0 FAIL |
+| Terminal gate | `./scripts/verify.sh terminal-replay` (ttyd/tmux/Chromium, isolated) on `7f9e39c` | 29 passed |
 
 Notes:
 
@@ -196,6 +197,23 @@ Notes:
 - `terminal-hmr` was not separately required for this change set (none of the
   eight branches touch terminal HMR); the task's named terminal/origin gates are
   browser-mocks and terminal-replay, both green.
+
+### Final candidate and exact evidence
+
+The review-ready candidate is **`7f9e39cad4cdba4b654b38931e86fdd77cbc6280`**.
+All eight two-parent merges are preserved unchanged; the only commits added
+after them are the two composition regression tests, the real-uvicorn
+compatibility test, their records and these docs (Conventional Commit
+subjects). The first provisional `verify.sh all` was 5851 passed on `acb2c70`;
+the +6 real-server tests bring the final run to 5857 passed on `7f9e39c`.
+
+- `verify.sh all` backend default scope: `/tmp/claude-hub-verify.6p8jt4ej`
+  (pytest/coverage/provenance; 5857 passed, 9 skipped).
+- `browser-mocks`: `/tmp/claude-hub-browser-mocks.i4rcc27j` (33 scenario PASS,
+  0 FAIL).
+- `terminal-replay`: `/tmp/claude-hub-verify.wufmj1le` (29 passed, zero setup
+  errors; isolated HOME/XDG/Hub and task-owned tmux socket, read-only
+  `PLAYWRIGHT_BROWSERS_PATH=/home/tiger/.cache/ms-playwright`).
 
 ## Remaining real-domain checks (for the controller / human acceptance)
 
