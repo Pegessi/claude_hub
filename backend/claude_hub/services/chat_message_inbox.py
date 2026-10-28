@@ -24,6 +24,8 @@ from ..models.chat_message import (
     ChatMessageEnvelope,
     ChatMessageReceipt,
     ChatMessageState,
+    ChatQuestion,
+    QuestionAnswerCreate,
     utc_now,
 )
 
@@ -99,6 +101,15 @@ class ChatMessageInbox:
         self.path, self.target, self.submit, self.evidence = path, target, submit, evidence
         self.max_pending, self.max_bytes = max_pending, max_bytes
         self.messages: dict[str, ChatMessageEnvelope] = {}
+        self.questions: dict[str, ChatQuestion] = {}
+        self.callback_receipts: dict[str, dict[str, str]] = {}
+        self.callback_nonces: dict[str, dict[str, str]] = {}
+        self.answer_submit: (
+            Callable[[ChatMessageEnvelope, Callable[[], None]], Awaitable[None]] | None
+        ) = None
+        self.question_tick: Callable[[], Awaitable[None]] | None = None
+        self._answer_tasks: dict[str, asyncio.Task[None]] = {}
+        self._question_tasks: dict[str, asyncio.Task[None]] = {}
         self.conversations: dict[str, str] = {}
         self.epochs: dict[str, int] = {}
         self._lock = asyncio.Lock()
@@ -115,13 +126,28 @@ class ChatMessageInbox:
         self._closing = False
         self._committed = ""
         if path.exists():
-            self._restore(path.read_text(encoding="utf-8"))
+            original = path.read_text(encoding="utf-8")
+            self._restore(original)
+            if json.loads(original).get("version") == 1:
+                # Never overwrite the only pre-migration evidence.
+                backup = path.with_suffix(".v1-backup.json")
+                if not backup.exists():
+                    with backup.open("x", encoding="utf-8") as stream:
+                        os.chmod(backup, 0o600)
+                        stream.write(original)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                self._committed = self._dump()
+                self._save()
         self._committed = self._dump()
 
     def _dump(self) -> str:
         return json.dumps(
             {
-                "version": 1,
+                "version": 2,
+                "questions": [q.model_dump(mode="json") for q in self.questions.values()],
+                "callback_receipts": self.callback_receipts,
+                "callback_nonces": self.callback_nonces,
                 "messages": [m.model_dump(mode="json") for m in self.messages.values()],
                 "conversations": self.conversations,
                 "epochs": self.epochs,
@@ -131,11 +157,26 @@ class ChatMessageInbox:
 
     def _restore(self, payload: str) -> None:
         data = json.loads(payload)
-        if data.get("version") != 1:
+        if data.get("version") not in {1, 2}:
             raise RuntimeError("unsupported Chat inbox version")
         rows = [ChatMessageEnvelope.model_validate(m) for m in data["messages"]]
         if len({m.message_id for m in rows}) != len(rows):
             raise RuntimeError("duplicate Chat inbox identity")
+        questions = [ChatQuestion.model_validate(q) for q in data.get("questions", [])]
+        if len({q.question_ref for q in questions}) != len(questions):
+            raise RuntimeError("duplicate Chat question identity")
+        by_id = {m.message_id: m for m in rows}
+        for q in questions:
+            if q.answer_id is not None and (
+                q.answer_id not in by_id or by_id[q.answer_id].question_ref != q.question_ref
+            ):
+                raise RuntimeError("Question answer ownership is corrupt")
+        question_refs = {q.question_ref for q in questions}
+        if any(m.kind == "question_answer" and m.question_ref not in question_refs for m in rows):
+            raise RuntimeError("Question answer target is corrupt")
+        self.questions = {q.question_ref: q for q in questions}
+        self.callback_receipts = dict(data.get("callback_receipts", {}))
+        self.callback_nonces = dict(data.get("callback_nonces", {}))
         self.messages = {m.message_id: m for m in rows}
         self.conversations = dict(data["conversations"])
         self.epochs = dict(data.get("epochs", {}))
@@ -363,9 +404,10 @@ class ChatMessageInbox:
         item = self.messages[message_id]
         if item.state != "dispatching":
             raise InboxError(409, "Intent was cancelled before provider submission")
-        current = self._target(item.tab_id)
-        if current.incarnation != item.incarnation or current.waiting_reason:
-            raise InboxError(409, "Chat target changed before submission")
+        if item.kind != "question_answer":
+            current = self._target(item.tab_id)
+            if current.incarnation != item.incarnation or current.waiting_reason:
+                raise InboxError(409, "Chat target changed before submission")
         item.submission_started = True
         self._save()
 
@@ -385,6 +427,19 @@ class ChatMessageInbox:
             self._restart_recovery.update(scheduled_inflight)
         for old in list(self.messages.values()):
             recovering_startup = old.message_id in self._restart_recovery
+            if old.kind == "question_answer":
+                if restarting and old.state in {"dispatching", "accepted"}:
+                    # The exact RPC may have been written; never replay a popped request.
+                    if not old.submission_started:
+                        self._change(old.message_id, "queued", "Recovered before answer submission")
+                        continue
+                    self._change(
+                        old.message_id, "uncertain", "Answer delivery needs reconciliation"
+                    )
+                    if old.question_ref in self.questions:
+                        self.questions[old.question_ref].state = "uncertain"
+                        self._save()
+                continue
             if old.scheduled_run_id and old.state == "uncertain":
                 continue  # scheduler uncertainty is terminal history, not a direct-send fence
             if (
@@ -495,6 +550,20 @@ class ChatMessageInbox:
                     item.principal_email = None
                     item.actor = ""
                     changed = True
+            for q in self.questions.values():
+                answer = self.messages.get(q.answer_id or "")
+                stamp = answer.updated_at if answer is not None else q.created_at
+                if q.state in {"resolved", "stale"} and utc_now() - stamp > timedelta(days=30):
+                    if (
+                        q.prompt
+                        or q.options
+                        or q.reply_text
+                        or (q.mirror and q.mirror.action_digests)
+                    ):
+                        q.prompt, q.options, q.reply_text = "", [], ""
+                        if q.mirror:
+                            q.mirror.action_digests.clear()
+                        changed = True
             if changed:
                 self._save()
 
@@ -506,7 +575,7 @@ class ChatMessageInbox:
                         (
                             m
                             for m in self.messages.values()
-                            if m.tab_id == tab_id and m.blocks_queue
+                            if m.tab_id == tab_id and m.blocks_queue and m.kind == "message"
                         ),
                         key=lambda m: m.sequence,
                     )
@@ -596,6 +665,141 @@ class ChatMessageInbox:
                         self._change(item.message_id, "accepted")
                 return
 
+    async def claim_answer(
+        self,
+        question_ref: str,
+        principal: str,
+        actor: str,
+        payload: QuestionAnswerCreate,
+        *,
+        callback: tuple[str, str] | None = None,
+        source: str = "web",
+        email: str | None = None,
+    ) -> ChatMessageReceipt:
+        async with self._lock:
+            if self._closing:
+                raise InboxError(503, "Question inbox unavailable")
+            q = self.questions.get(question_ref)
+            if q is None:
+                raise InboxError(404, "Question not found")
+            fingerprint = hashlib.sha256(payload.model_dump_json().encode()).hexdigest()
+            if callback and callback[0] in self.callback_receipts:
+                prior = self.callback_receipts[callback[0]]
+                if prior["fingerprint"] != callback[1]:
+                    raise InboxError(409, "Callback event payload changed")
+                return self.messages[prior["answer_id"]].receipt()
+            for existing in self.messages.values():
+                if existing.kind == "question_answer" and existing.call_id == payload.call_id:
+                    if (existing.principal, existing.question_ref, existing.fingerprint) != (
+                        principal,
+                        question_ref,
+                        fingerprint,
+                    ):
+                        raise InboxError(409, "Answer call_id conflict")
+                    if existing.expired:
+                        raise InboxError(410, "Answer receipt expired")
+                    return existing.receipt()
+            if q.state != "open":
+                raise InboxError(409, "Question already answered or stale")
+            pending = [
+                m
+                for m in self.messages.values()
+                if m.kind == "question_answer" and m.blocks_queue and m.tab_id == q.tab_id
+            ]
+            if (
+                len(pending) >= 100
+                or sum(len(m.message.encode()) for m in pending) + len(payload.selected[0].encode())
+                > self.max_bytes
+            ):
+                raise InboxError(429, "Question answer backlog limit reached")
+            now, answer_id = utc_now(), str(uuid.uuid4())
+            item = ChatMessageEnvelope(
+                message_id=answer_id,
+                call_id=payload.call_id,
+                tab_id=q.tab_id,
+                turn_id=(
+                    q.turn_id
+                    if q.mode == "native"
+                    else (
+                        payload.call_id
+                        if not q.session_id.startswith("terminal-tab-")
+                        else f"question-answer-{answer_id}"
+                    )
+                ),
+                kind="question_answer",
+                question_ref=q.question_ref,
+                state="queued",
+                created_at=now,
+                updated_at=now,
+                status_url=f"/api/workspaces/tabs/{q.tab_id}/messages/{answer_id}",
+                principal=principal,
+                actor=actor,
+                principal_email=email,
+                turn_metadata={"answer_source": source},
+                incarnation=q.incarnation,
+                fingerprint=fingerprint,
+                message=json.dumps(
+                    {
+                        "type": "ask_question_response",
+                        "answers": [{"questionId": q.question_id, "selected": payload.selected}],
+                    },
+                    ensure_ascii=False,
+                ),
+                sequence=max((m.sequence for m in self.messages.values()), default=0) + 1,
+            )
+            if callback:
+                self.callback_receipts[callback[0]] = {
+                    "fingerprint": callback[1],
+                    "answer_id": answer_id,
+                }
+            q.state, q.answer_id = "claimed", answer_id
+            self.messages[answer_id] = item
+            self._save()
+            self.wake()
+            return item.receipt()
+
+    async def pump_answer(self, answer_id: str) -> None:
+        try:
+            item = self.messages[answer_id]
+            if item.state not in {"queued", "waiting"} or not self.answer_submit or self._closing:
+                return
+            self._change(answer_id, "dispatching")
+            try:
+                await self.answer_submit(
+                    item.model_copy(deep=True), lambda: self._before_delivery(answer_id)
+                )
+            except InboxError as exc:
+                if (
+                    not item.submission_started
+                    and exc.status == 409
+                    and exc.detail == "question_busy"
+                ):
+                    self._change(answer_id, "waiting", "question_busy")
+                    return
+                self._change(
+                    answer_id,
+                    "uncertain" if item.submission_started else "failed",
+                    "Question answer could not be confirmed",
+                )
+            except Exception:
+                self._change(
+                    answer_id,
+                    "uncertain" if item.submission_started else "failed",
+                    "Question answer could not be confirmed",
+                )
+            else:
+                self._change(answer_id, "completed")
+            q = self.questions.get(item.question_ref or "")
+            if q is not None:
+                q.state = (
+                    "resolved"
+                    if item.state == "completed"
+                    else "uncertain" if item.state == "uncertain" else "stale"
+                )
+                self._save()
+        finally:
+            self._answer_tasks.pop(answer_id, None)
+
     async def start(self) -> None:
         await self.reconcile(restarting=True)
         self._closing = False
@@ -627,6 +831,14 @@ class ChatMessageInbox:
             self._wakeup.clear()
             try:
                 await self.reconcile()
+                for item in list(self.messages.values()):
+                    if item.kind == "question_answer" and item.state in {"queued", "waiting"}:
+                        if item.message_id not in self._answer_tasks:
+                            self._answer_tasks[item.message_id] = asyncio.create_task(
+                                self.pump_answer(item.message_id), name="chat-question-answer"
+                            )
+                if self.question_tick:
+                    await self.question_tick()
                 for tab in {m.tab_id for m in self.messages.values() if m.blocks_queue}:
                     if self._closing:
                         break
@@ -655,4 +867,9 @@ class ChatMessageInbox:
             self._runner = None
         # Quiescing forbids new provider submissions. Join owned pumps without
         # cancelling possibly submitted native work or losing its evidence.
-        await asyncio.gather(*list(self._pump_tasks.values()), return_exceptions=True)
+        await asyncio.gather(
+            *list(self._pump_tasks.values()),
+            *list(self._answer_tasks.values()),
+            *list(self._question_tasks.values()),
+            return_exceptions=True,
+        )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from ....models import AgentRuntimeStatus, AgentStreamEvent
 
@@ -59,6 +59,8 @@ class _PendingApproval:
     turn_id: Optional[str]
     run_epoch: Optional[int]
     question_ids: frozenset[str] = frozenset()
+    questions: tuple[dict[str, Any], ...] = ()
+    kind: str = ""
 
 
 class StructuredSourceUnavailable(RuntimeError):

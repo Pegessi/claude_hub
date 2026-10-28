@@ -65,6 +65,10 @@ class ExternalDispatchRetired(asyncio.CancelledError):
     """Cancellation after the matching turn is stopped or never started."""
 
 
+class ExternalQuestionPending(RuntimeError):
+    """A supported mirrored question yielded the external completion waiter."""
+
+
 class ExternalInteractionRequired(RuntimeError):
     """The external turn was stopped because it needs Web Chat input."""
 
@@ -77,12 +81,14 @@ def require_tab_input_available(tab_id: str) -> None:
 
     if execution_pending_for(get_dot_service(), tab_id):
         raise HTTPException(
-            status_code=409, detail="Dot's backend change is being recovered. Retry shortly."
+            status_code=409,
+            detail="Dot's backend change is being recovered. Retry shortly.",
         )
     tab = ttyd_manager.get_tab(tab_id)
     if tab is not None and getattr(tab, "archived", False):
         raise HTTPException(
-            status_code=409, detail="Restore this archived chat before sending a message."
+            status_code=409,
+            detail="Restore this archived chat before sending a message.",
         )
 
 
@@ -129,6 +135,7 @@ async def send_to_native(
         delivery=payload.delivery,
         visible_text=visible_text,
         turn_metadata=turn_metadata,
+        allow_question_answer=False,
     )
 
 
@@ -189,6 +196,7 @@ async def dispatch_tab_stream_input(
     turn_metadata: Optional[Dict[str, Any]] = None,
     allow_question_answer: bool = True,
     admission_guard: Optional[ChatAdmissionGuard] = None,
+    goal_locked: bool = False,
 ) -> str:
     """Deliver one turn through the existing direct-Chat admission path.
 
@@ -202,20 +210,26 @@ async def dispatch_tab_stream_input(
         get_goal_manager,
     )
 
-    async with get_goal_admission_lock(tab_id):
+    async with nullcontext() if goal_locked else get_goal_admission_lock(tab_id):
         require_tab_input_available(tab_id)
         goal_manager = get_goal_manager()
         goal = await goal_manager.refresh_current(tab_id)
         session = bindings.terminal_tab_session_or_404(tab_id)
         manager = bindings.get_tab_tailer_manager()
-        if goal is not None and allow_question_answer:
+        from ....services.agent_stream.question_answers import answers
+
+        answers.guard_input(f"terminal-tab-{tab_id}", payload.client_turn_id)
+        if goal is not None and allow_question_answer and payload.question_call_id is not None:
             active = goal.status.value == "active"
             if (
                 active
                 and not payload.attachments
                 and goal.current_turn_id
                 and await manager.answer_pending_question(
-                    session, payload.text, goal.current_turn_id
+                    session,
+                    payload.text,
+                    goal.current_turn_id,
+                    expected_call_id=payload.question_call_id,
                 )
             ):
                 return str(goal.current_turn_id)
@@ -225,7 +239,10 @@ async def dispatch_tab_stream_input(
                     not payload.attachments
                     and goal.current_turn_id
                     and await manager.accepts_question_followup(
-                        session, payload.text, goal.current_turn_id
+                        session,
+                        payload.text,
+                        goal.current_turn_id,
+                        expected_call_id=payload.question_call_id,
                     )
                 )
             elif goal.status.value == "blocked" or (
@@ -250,11 +267,19 @@ async def dispatch_tab_stream_input(
                         ),
                     )
                 from claude_hub.api.goal_runs import validate_goal_images
-                from claude_hub.services.goal_run.images import goal_image_input, image_fingerprint
+                from claude_hub.services.goal_run.images import (
+                    goal_image_input,
+                    image_fingerprint,
+                )
 
                 await validate_goal_images(tab_id, payload.attachments)
                 if not payload.attachments:
-                    await manager.resolve_answered_questions(session, payload.text)
+                    await manager.resolve_answered_questions(
+                        session,
+                        payload.text,
+                        expected_turn_id=payload.question_turn_id,
+                        expected_call_id=payload.question_call_id,
+                    )
                 try:
                     with goal_image_input(tab_id, payload.attachments):
                         goal = await goal_manager.steer(
@@ -403,6 +428,20 @@ async def dispatch_tab_chat_and_wait(
             if event.turn_id != expected_turn_id:
                 continue
             if event.type == AgentStreamEventType.APPROVAL_REQUIRED:
+                from ....services.agent_stream.question_answers import answers
+                from ..feishu_bot.card_actions import mirror_question
+
+                try:
+                    if event.call_id:
+                        question = await answers.capture(
+                            session.id, str(event.turn_id), event.call_id
+                        )
+                        if await mirror_question(question):
+                            raise ExternalQuestionPending("Question is waiting for an answer")
+                except ExternalQuestionPending:
+                    raise
+                except Exception:
+                    pass
                 # Feishu cannot submit the structured answer required by this
                 # provider turn. Leaving the card open would permanently own
                 # the per-Chat FIFO, so stop the exact turn and direct the user
@@ -509,92 +548,10 @@ def register_dispatch_routes(
                 headers={CHAT_ERROR_REASON_HEADER: "chat_busy"},
             )
         manager = bindings.get_tailer_manager()
-        if payload.question_turn_id is not None and payload.question_call_id is not None:
-            if payload.attachments:
-                raise HTTPException(
-                    status_code=400, detail="question answers cannot include attachments"
-                )
-            try:
-                async with bindings.managed_stream_interaction(session, require_chat=True) as live:
-                    question_key = json.dumps(
-                        [payload.question_turn_id, payload.question_call_id], separators=(",", ":")
-                    )
-                    claimed_call = live.chat_question_answer_calls.get(question_key)
-                    retry = claimed_call == payload.client_turn_id
-                    # Legacy mailbox IDs may own a delivery without a fingerprint.
-                    if (claimed_call is not None and not retry) or (
-                        not retry
-                        and (
-                            payload.client_turn_id in live.call_payload_fingerprints
-                            or payload.client_turn_id in live.pending_call_ids
-                            or payload.client_turn_id in live.processing_call_ids
-                            or payload.client_turn_id in live.delivered_call_ids
-                            or payload.client_turn_id in live.uncertain_call_ids
-                            or payload.client_turn_id in live.chat_question_answer_calls.values()
-                        )
-                    ):
-                        raise HTTPException(
-                            status_code=409,
-                            detail="The provider question or answer call already has another owner",
-                            headers={CHAT_ERROR_REASON_HEADER: "stale_question"},
-                        )
-                    if retry and payload.client_turn_id not in live.call_payload_fingerprints:
-                        raise RuntimeError("The claimed question answer has no mailbox envelope")
-                    if not retry:
-                        consumed = await manager.answer_pending_question(
-                            live,
-                            payload.text,
-                            payload.question_turn_id,
-                            expected_call_id=payload.question_call_id,
-                        )
-                        if consumed:
-                            return {"ok": True, "answered_question": True}
-                        follows_card = await manager.accepts_question_followup(
-                            live,
-                            payload.text,
-                            payload.question_turn_id,
-                            expected_call_id=payload.question_call_id,
-                        )
-                        if not follows_card:
-                            raise HTTPException(
-                                status_code=409,
-                                detail="The referenced provider question is no longer pending",
-                                headers={CHAT_ERROR_REASON_HEADER: "stale_question"},
-                            )
-                        if await manager.turn_in_flight(live):
-                            raise HTTPException(
-                                status_code=409,
-                                detail="Wait for the current provider turn before submitting this answer",
-                                headers={CHAT_ERROR_REASON_HEADER: "chat_busy"},
-                            )
-                    # Keep exact-card admission and its durable handoff indivisible.
-                    # The public send method would reacquire our non-reentrant pump
-                    # lock; use its locked body while retaining incarnation ownership.
-                    await bindings.workspace_manager().send_chat_session_message_locked(
-                        live.id,
-                        payload.text,
-                        call_id=payload.client_turn_id,
-                        question_key=question_key,
-                    )
-                    await manager.resolve_answered_questions(
-                        live,
-                        payload.text,
-                        expected_turn_id=payload.question_turn_id,
-                        expected_call_id=payload.question_call_id,
-                    )
-                    return {"ok": True}
-            except KeyError as exc:
-                raise HTTPException(
-                    status_code=409,
-                    detail="The managed Chat session changed while answering the provider question",
-                    headers={CHAT_ERROR_REASON_HEADER: "stale_question"},
-                ) from exc
-            except StructuredSourceUnavailable as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-            except HTTPException:
-                raise
-            except Exception as exc:
-                raise map_send_exception(exc) from exc
+        if payload.question_turn_id is not None:
+            from ....services.agent_stream.question_answers import answers
+
+            return await answers.web(session.id, payload, current_user)
         try:
             await bindings.workspace_manager().send_chat_session_message(
                 managed_session_id,
@@ -630,6 +587,10 @@ def register_dispatch_routes(
         payload: AgentStreamSendRequest,
         current_user: User = Depends(get_current_user),
     ) -> Dict[str, Any]:
+        if payload.question_turn_id is not None:
+            from ....services.agent_stream.question_answers import answers
+
+            return await answers.web(f"terminal-tab-{tab_id}", payload, current_user)
         try:
             await bindings.dispatch_tab_stream_input(
                 tab_id,

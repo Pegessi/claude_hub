@@ -18,6 +18,32 @@ logger = logging.getLogger("claude_hub.services.agent_stream.tailer")
 class InputMixin(SessionState):
     """Input behavior on the sole session owner."""
 
+    def question_snapshot(self, turn_id: str, call_id: str) -> Optional[Dict[str, Any]]:
+        """Exact live card, without spawning a provider or trusting a transcript."""
+        self._require_startable_incarnation()
+        card = self._pending_approvals.get(call_id)
+        session = self._session_getter()
+        if card is None or card.turn_id != turn_id or session is None:
+            return None
+        mode = (
+            "followup" if session.agent_type in {AgentType.CLAUDE, AgentType.CURSOR} else "native"
+        )
+        if mode == "followup" and card.run_epoch != self._run_epoch:
+            return None
+        if mode == "native" and (
+            self._active_turn_id != turn_id
+            or not self._native_transport
+            or not self._native_transport.turn_in_flight
+        ):
+            return None
+        return {
+            "questions": list(card.questions),
+            "mode": mode,
+            "kind": card.kind,
+            "run_epoch": card.run_epoch or 0,
+            "incarnation": self.question_incarnation,
+        }
+
     async def answer_pending_question(
         self,
         text: str,
@@ -31,6 +57,7 @@ class InputMixin(SessionState):
         card call id so a delayed click can never answer a newer provider
         request that happens to reuse the same question ids.
         """
+        self._require_startable_incarnation()
         answers = self._deps.parse_ask_question_response(text)
         transport = self._native_transport
         if (
