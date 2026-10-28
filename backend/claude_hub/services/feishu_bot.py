@@ -8,7 +8,7 @@ import os
 import secrets
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from fractions import Fraction
 from pathlib import Path
@@ -78,7 +78,7 @@ class FeishuBotConfig:
     """Credentials for one Feishu Bot long connection."""
 
     app_id: str
-    app_secret: str
+    app_secret: str = field(repr=False)
     api_base_url: str = "https://open.feishu.cn"
 
     @classmethod
@@ -139,6 +139,8 @@ class FeishuMessageEvent:
     image_keys: tuple[str, ...] = ()
     chat_type: str = "p2p"
     thread_id: str | None = None
+    parent_id: str | None = None
+    root_id: str | None = None
 
 
 class FeishuBotClient:
@@ -215,11 +217,11 @@ class FeishuBotClient:
         except (TypeError, ValueError) as exc:
             raise FeishuBotError("Feishu Bot message content is not JSON serializable") from exc
 
-    async def send_message(
-        self, chat_id: str, msg_type: str, content: Mapping[str, object]
-    ) -> None:
-        """Send one Feishu message whose content follows ``msg_type``'s schema."""
-
+    async def _send_message_payload(
+        self, chat_id: str, msg_type: str, content: Mapping[str, object], *, uuid: str | None = None
+    ) -> dict[str, Any]:
+        if uuid is not None and (not uuid.strip() or len(uuid) > 50):
+            raise FeishuBotError("Feishu message UUID must contain 1–50 characters")
         token = await self.get_tenant_token()
         response = await self._request(
             "POST",
@@ -230,12 +232,50 @@ class FeishuBotClient:
                 "receive_id": chat_id,
                 "msg_type": msg_type,
                 "content": self._message_content(content),
+                **({"uuid": uuid} if uuid is not None else {}),
             },
         )
         response.raise_for_status()
         payload = response.json()
-        if payload.get("code") != 0:
+        if not isinstance(payload, dict) or payload.get("code") != 0:
             raise FeishuBotError("Feishu rejected the Bot message")
+        return payload
+
+    async def send_message(
+        self, chat_id: str, msg_type: str, content: Mapping[str, object]
+    ) -> None:
+        """Preserve existing one-way callers without requiring a returned identity."""
+        await self._send_message_payload(chat_id, msg_type, content)
+
+    async def send_message_with_identity(
+        self, chat_id: str, msg_type: str, content: Mapping[str, object], *, uuid: str | None = None
+    ) -> str:
+        """Send a mirror using stable Feishu dedupe UUID and return exact message ID."""
+        payload = await self._send_message_payload(chat_id, msg_type, content, uuid=uuid)
+        data = payload.get("data")
+        message_id = data.get("message_id") if isinstance(data, dict) else None
+        if not isinstance(message_id, str) or not message_id.strip():
+            raise FeishuBotError(
+                "Feishu message identity is unavailable; delivery may have occurred"
+            )
+        return message_id
+
+    async def patch_message_card(self, message_id: str, card: Mapping[str, object]) -> None:
+        """Update one shared card sent by this same bot identity."""
+        config = card.get("config")
+        if not isinstance(config, Mapping) or config.get("update_multi") is not True:
+            raise FeishuBotError("Updated Feishu card must be shared")
+        token = await self.get_tenant_token()
+        response = await self._request(
+            "PATCH",
+            f"/open-apis/im/v1/messages/{quote(message_id, safe='')}",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"content": self._message_content(card)},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get("code") != 0:
+            raise FeishuBotError("Feishu rejected the Bot card update")
 
     async def send_text(self, chat_id: str, text: str) -> None:
         bounded = text.strip() or "Claude Hub completed without a text response."

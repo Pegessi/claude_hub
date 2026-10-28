@@ -317,6 +317,21 @@ class FeishuBotPoolStateStore(object):
         source = "stored"
         if is_env:
             source = "invalid_environment" if env_seen and config is None else "environment"
+        callbacks = _as_mapping(raw.get("callbacks", {}), "callbacks")
+        callback_enabled = _as_bool(callbacks.get("callback_enabled", False), "callback_enabled")
+        verification_token = _as_optional_text(
+            callbacks.get("verification_token"), "verification_token", limit=_MAX_SECRET_CHARS
+        )
+        encrypt_key = _as_optional_text(
+            callbacks.get("encrypt_key"), "encrypt_key", limit=_MAX_SECRET_CHARS
+        )
+        expected_tenant_key = _as_optional_text(
+            callbacks.get("expected_tenant_key"), "expected_tenant_key", limit=_MAX_ID_CHARS
+        )
+        if callback_enabled and not (verification_token and encrypt_key and expected_tenant_key):
+            raise FeishuBotPoolStateError(
+                "Enabled callbacks require protected credentials and tenant"
+            )
         return BotEntry(
             bot_id=bot_id,
             name=_as_text(raw.get("name"), "name", limit=_MAX_NAME_CHARS),
@@ -352,6 +367,10 @@ class FeishuBotPoolStateStore(object):
             config=config,
             claims=tuple(claims),
             binding=binding,
+            callback_enabled=callback_enabled,
+            verification_token=verification_token,
+            encrypt_key=encrypt_key,
+            expected_tenant_key=expected_tenant_key,
         )
 
     def snapshot(self, environ: Mapping[str, str] | None = None) -> PoolSnapshot:
@@ -399,6 +418,10 @@ class FeishuBotPoolStateStore(object):
             feishu_name=entry.feishu_name,
             feishu_avatar_url=entry.feishu_avatar_url,
             feishu_open_id=entry.feishu_open_id,
+            callback_enabled=entry.callback_enabled,
+            verification_token=entry.verification_token,
+            encrypt_key=entry.encrypt_key,
+            expected_tenant_key=entry.expected_tenant_key,
         )
 
     def is_current(self, effective: EffectiveBot, environ: Mapping[str, str] | None = None) -> bool:
