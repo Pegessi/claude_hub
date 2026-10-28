@@ -740,19 +740,43 @@ required; branch delivery does not authorize integration or rollout.
 - Worktree: `/home/tiger/claude_hub_worktree/rv-feishu-interactive-cards`;
   branch `codex/rv-feishu-interactive-cards`, based on fetched/synced clean main
   `0211661a1e627349822b3857ecf74f33b81818ef`. Existing rv branches untouched.
-- `./scripts/verify.sh all`: exit 1. `docs` and `checkout-safety` passed;
-  backend-format/types/tests could not run because worktree `backend/.venv`
-  is absent; frontend-lint/types/tests/build could not run because locked
-  frontend dependencies are absent. No full-suite pass is claimed. This
-  documentation-only task did not install product dependency environments.
-- Backend verification evidence retained by the script at
-  `/tmp/claude-hub-verify.cr6qshdt`, `/tmp/claude-hub-verify.eqtk0hid`,
-  `/tmp/claude-hub-verify.d36q5_6w`; each owned disposable runtime was removed.
-- `./scripts/verify.sh docs`: passed independently after draft review.
-- `git diff --check`: passed; JSON parsing passed for the native card example;
-  all 14 checked key code/document evidence paths exist.
-- `./scripts/verify.sh check-staged`: passed for the explicitly staged design
-  document and changelog. Browser/live Feishu and callback simulation are
-  implementation gates, not executed feature tests.
-- No task-owned server was started. No live config/credentials inspected or
+- Independent candidate review accepted the design/source/scope checks and
+  requested completion of the repository's mandatory full validation. The first
+  run stopped seven targets at missing dependency prerequisites; this was fixed
+  by installing fresh locked environments in this worktree, without changing
+  product code or lockfiles:
+  `uv sync --frozen --extra dev --python 3.11.16` in `backend/`, and
+  `pnpm install --frozen-lockfile` in `frontend/` (both exit 0).
+- Declared toolchain: Python 3.11.16, uv 0.12.15, Node 24.21.0, pnpm 9.15.9.
+  `CLAUDE_HUB_VERIFY_STRICT_VERSIONS=1 ./scripts/verify.sh all` then **passed,
+  exit 0**, on design commit `6f5eb2e0ca4dde320431de6a263fc9846ff4e372`.
+  This follow-up changes only this validation record.
+
+| Target | Actual result |
+| --- | --- |
+| docs / checkout-safety | Passed |
+| backend-format | Passed; Black left 604 files unchanged and isort passed |
+| backend-types | Passed; no issues in 588 source files including tests |
+| backend-tests | 5,439 passed, 9 skipped (seven browser cases, two zsh cases), 345.07 seconds; pytest/JUnit/log status 0 |
+| frontend-lint / frontend-types | Both passed; ESLint check mode, no fixes |
+| frontend-tests | 1,136 passed, 0 failed, 0 skipped |
+| frontend-build | Passed; existing >500 kB chunk-size warning remains advisory |
+
+- Full log retained at worktree-local ignored `feishu-design-verify-all.log`.
+  Backend evidence/provenance: `/tmp/claude-hub-verify.y9qzjnqz` (format),
+  `/tmp/claude-hub-verify.cqbmqfck` (types),
+  `/tmp/claude-hub-verify.y362nia_` (tests). Each outer owned disposable runtime
+  was removed. The test runner's final `runtime.json` confirms exit 0, stopped
+  process group, no owned children and removed runtime; fault-injection tests'
+  internal retention warnings do not indicate a leaked outer runtime.
+- `./scripts/verify.sh docs` and `git diff --check` passed; JSON parsing passed
+  for the native card example; all 14 checked key evidence paths exist.
+- `./scripts/verify.sh check-staged` passed for the explicitly staged design
+  and changelog, and passed again for this validation-only follow-up.
+- Browser mocks, terminal HMR/replay, live Feishu callbacks and the proposed
+  feature's callback simulation were not run: there is no implementation in this
+  task. They remain the explicitly identified implementation acceptance gates;
+  a green existing suite does not validate a deployed interactive-card feature.
+- No task-owned application server was started. Verification owned and cleaned
+  its isolated test processes. No live configuration/credentials inspected or
   changed. No lessons needed.
