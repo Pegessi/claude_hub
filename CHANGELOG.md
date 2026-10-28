@@ -7,6 +7,21 @@
 
 ## Released
 
+### chore: integrate eight reviewed hardening branches
+
+- Sequentially merge the reviewed CLI base-URL/redaction, SSH destination
+  validation, provider process-group teardown, ProviderSpec registry, OAuth/auth
+  log-cookie hardening, trusted-proxy/Origin/listen guard, durable-state
+  quarantine and per-scope monitor isolation streams onto one candidate while
+  preserving the newer native Feishu question functionality.
+- Keep the auth/proxy superset (trusted-peer XFF/XFP and browser Origin policy
+  together with session/query log redaction and the Secure-cookie decision),
+  ensure ProviderSpec factories still spawn through the group-aware teardown,
+  and keep state-quarantine and monitor-isolation abstractions coexisting on one
+  workspace manager. Add composition regressions pinning those joins; see
+  `docs/working-logs/2026-10-28-eight-branch-integration.md`. No deployment or
+  shared-service behavior changes are performed here.
+
 ### feat: answer Chat questions from native Feishu cards (default off)
 
 - Add shared exact-question admission, durable inbox v2 answer claims and native
