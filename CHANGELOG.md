@@ -23,6 +23,37 @@
 - Design only; no live Feishu or Hub behavior changes. See
   `docs/working-logs/2026-10-28-feishu-interactive-choice-cards.md`.
 
+### fix(cli): redact query secrets and userinfo from connection errors
+
+- CLI transport errors rendered the full attempted request URL, so a failed
+  `auth callback` call echoed the OAuth authorization `code` and CSRF
+  `state` query values to the terminal, and a base URL containing userinfo
+  leaked its embedded password. Connect errors now render a sanitized URL
+  that keeps scheme, host, port and path (the diagnosis-relevant parts) while
+  stripping the query string and URL username/password. The same-port IPv6
+  loopback hint is unchanged. Regression tests cover callback query secrets,
+  userinfo credentials and the existing connect-hint behavior.
+
+### feat(cli): auto-detect loopback base URL over IPv4/IPv6 and derive from HOST/PORT
+
+- Base URL resolution is now `--base-url` > `CLAUDE_HUB_URL` > config file
+  `[default].base_url` > a URL derived from `CLAUDE_HUB_HOST`/`CLAUDE_HUB_PORT`
+  (bare IPv6 literals are bracketed; `0.0.0.0`/`::` map to loopback) > an
+  automatic `/health` probe of `127.0.0.1` then `[::1]` at the resolved port
+  (0.5s timeout, never cached) > the IPv4 default. Explicit settings remain
+  authoritative and skip the probe. This fixes the CLI on IPv6-only hosts where
+  the Hub listens on `[::1]` only.
+- The probe requires Hub identity: a 2xx response counts only when its JSON
+  body reports `status == "healthy"`; a 2xx non-JSON body is treated as
+  unhealthy so another service on the port is never mistaken for the Hub.
+  Whitespace-only explicit URLs (flag, env, config) are treated as unset and
+  fall through the precedence chain; surrounding whitespace on a valid URL is
+  stripped.
+- Connect errors name the URL actually tried and, when it was an IPv4 loopback
+  address, suggest the IPv6 loopback at the same port (no hardcoded 8173);
+  otherwise they point users at CLAUDE_HUB_URL. `fs` is a hidden alias of the
+  `filesystem` command group.
+
 ### fix(maso): retain final responses without streamed tokens
 
 - Read authoritative text and reasoning from MASO's `post_llm_response` event.
