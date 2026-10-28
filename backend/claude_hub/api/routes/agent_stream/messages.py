@@ -134,6 +134,12 @@ async def _submit(item: ChatMessageEnvelope, before_delivery: Callable[[], None]
             raise InboxError(409, target.waiting_reason)
         session = stream._terminal_tab_session_or_404(item.tab_id)
         manager = stream._get_tab_tailer_manager()
+        from ....services.agent_stream.question_answers import answers
+
+        try:
+            answers.guard_input(f"terminal-tab-{item.tab_id}", item.turn_id)
+        except HTTPException as exc:
+            raise InboxError(409, "Waiting for question answer reconciliation") from exc
         if await manager.turn_in_flight(session):
             raise InboxError(409, "Waiting for the current Chat turn")
         if not await ensure_chat_runtime(item.tab_id):
@@ -202,6 +208,10 @@ def get_inbox() -> ChatMessageInbox:
         _inbox = ChatMessageInbox(
             resolve_runtime_home() / "chat_messages.json", _target, _submit, _evidence
         )
+    from ....services.agent_stream.question_answers import answers
+
+    _inbox.answer_submit = answers.submit
+    _inbox.question_tick = answers.tick
     return _inbox
 
 

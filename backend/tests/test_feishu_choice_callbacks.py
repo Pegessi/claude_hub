@@ -7,6 +7,7 @@ import base64
 import copy
 import hashlib
 import json
+import secrets
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -110,8 +111,11 @@ class Harness:
                 state="sent",
                 displayed_state="open",
                 action_digests={
-                    hashlib.sha256(ACTION.encode()).hexdigest(): "Run",
-                    hashlib.sha256(OTHER.encode()).hexdigest(): "__other__",
+                    hashlib.sha256(ACTION.encode()).hexdigest(): {
+                        "operation": "question_answer",
+                        "selected": "Run",
+                    },
+                    hashlib.sha256(OTHER.encode()).hexdigest(): {"operation": "question_text_hint"},
                 },
             ),
         )
@@ -162,7 +166,7 @@ class Harness:
         )
         raw = json.dumps({"encrypt": base64.b64encode(iv + encrypted).decode()}).encode()
         stamp = timestamp or str(int(time.time()))
-        nonce = "test-nonce"
+        nonce = secrets.token_hex(12)
         signature = hashlib.sha256((stamp + nonce + key).encode() + raw).hexdigest()
         return raw, {
             "content-type": "application/json",
@@ -565,3 +569,110 @@ async def test_open_question_and_callback_receipt_survive_rehydration(harness: H
     assert harness.question.answer_id == answer_id
     assert (await harness.post(event)).status_code == 200
     assert len(harness.inbox.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_nonce_replay_allows_identical_body_and_rejects_changed_body(
+    harness: Harness,
+) -> None:
+    raw, headers = harness.signed(harness.event())
+    first = await harness.client.post(PATH.format(bot=harness.bot), content=raw, headers=headers)
+    assert first.status_code == 200
+    same = await harness.client.post(PATH.format(bot=harness.bot), content=raw, headers=headers)
+    assert same.status_code == 200
+    changed, _ = harness.signed(harness.event("another-event"))
+    headers["x-lark-signature"] = hashlib.sha256(
+        (headers["x-lark-request-timestamp"] + headers["x-lark-request-nonce"] + KEY).encode()
+        + changed
+    ).hexdigest()
+    rejected = await harness.client.post(
+        PATH.format(bot=harness.bot), content=changed, headers=headers
+    )
+    assert rejected.status_code == 409
+    assert len(harness.inbox.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_mirror_send_stores_only_digests_and_terminal_patch_has_no_actions(
+    harness: Harness, monkeypatch
+):
+    sent, patched = [], []
+
+    class Client:
+        def __init__(self, config):
+            pass
+
+        async def get_tenant_token(self):
+            return "test-token"
+
+        async def send_message_with_identity(self, chat_id, msg_type, content, **kwargs):
+            sent.append((chat_id, msg_type, content, kwargs))
+            return "om-new-card"
+
+        async def patch_message_card(self, message_id, card):
+            patched.append((message_id, card))
+
+    monkeypatch.setattr(card_actions, "FeishuBotClient", Client)
+    q = harness.question
+    q.mirror = None
+    assert await card_actions.mirror_question(q)
+    assert len(sent) == 1
+    assert q.mirror.message_id == "om-new-card"
+    controls = [e for e in sent[0][2]["body"]["elements"] if e["tag"] == "button"]
+    tokens = [e["behaviors"][0]["value"]["hub_token"] for e in controls]
+    assert len(set(tokens)) == 3
+    assert all(token not in harness.inbox.path.read_text() for token in tokens)
+    q.state = "resolved"
+    assert await card_actions.mirror_question(q)
+    assert patched[0][0] == "om-new-card"
+    assert all("behaviors" not in e for e in patched[0][1]["body"]["elements"])
+    await card_actions.mirror_question(q)
+    assert len(sent) == 1 and len(patched) == 1
+
+
+@pytest.mark.asyncio
+async def test_uncertain_mirror_send_is_fenced_across_reload(harness: Harness, monkeypatch):
+    calls = []
+
+    class Client:
+        def __init__(self, config):
+            pass
+
+        async def get_tenant_token(self):
+            return "test-token"
+
+        async def send_message_with_identity(self, *args, **kwargs):
+            calls.append(kwargs)
+            raise TimeoutError
+
+    monkeypatch.setattr(card_actions, "FeishuBotClient", Client)
+    q = harness.question
+    q.mirror = None
+    assert not await card_actions.mirror_question(q)
+    assert q.mirror.state == "uncertain"
+    clone = ChatMessageInbox(
+        harness.inbox.path, harness.inbox.target, harness.inbox.submit, harness.inbox.evidence
+    )
+    harness.inbox = clone
+    assert not await card_actions.mirror_question(clone.questions[q.question_ref])
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_remirror_replacement_invalidates_action_before_admission(harness: Harness):
+    from claude_hub.models import User
+    from claude_hub.models.chat_message import QuestionAnswerCreate
+    from claude_hub.services.chat_message_inbox import InboxError
+
+    q = harness.question
+    old_uuid = q.mirror.send_uuid
+    q.mirror.send_uuid = "new-mirror-generation"
+    with pytest.raises(InboxError, match="replaced"):
+        await card_actions.answers.admit(
+            q,
+            User(open_id="local", name="Feishu", email=""),
+            QuestionAnswerCreate(call_id="late-click", selected=["Run"]),
+            source="feishu",
+            mirror_send_uuid=old_uuid,
+        )
+    assert not harness.inbox.messages

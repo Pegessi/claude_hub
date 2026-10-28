@@ -651,3 +651,39 @@ def api_raw(
 
 # Short alias for filesystem.
 fs = filesystem
+
+
+@tab.group("question")
+def tab_question() -> None:
+    """Inspect and answer exact pending Chat questions."""
+
+
+@tab_question.command("list")
+@click.argument("tab_id")
+@click.pass_context
+def tab_question_list(ctx: click.Context, tab_id: str) -> None:
+    with cli_main.get_client(ctx) as client:
+        emit(client.request("GET", f"/api/workspaces/tabs/{tab_id}/questions"), True)
+
+
+@tab_question.command("answer")
+@click.argument("tab_id")
+@click.option("--question-ref", required=True)
+@click.option("--answers-file", required=True, type=click.File("r"))
+@click.option("--call-id", required=True)
+@click.pass_context
+def tab_question_answer(
+    ctx: click.Context, tab_id: str, question_ref: str, answers_file: TextIO, call_id: str
+) -> None:
+    import json
+
+    selected = json.load(answers_file)
+    with cli_main.get_client(ctx) as client:
+        emit(
+            client.request(
+                "POST",
+                f"/api/workspaces/tabs/{tab_id}/questions/{question_ref}/answers",
+                json={"call_id": call_id, "selected": selected},
+            ),
+            True,
+        )

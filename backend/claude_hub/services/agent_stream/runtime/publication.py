@@ -230,6 +230,8 @@ class PublicationMixin(SessionState):
                 call_id=event.call_id,
                 turn_id=event.turn_id,
                 run_epoch=event.run_epoch,
+                kind=str(event.payload.get("kind", "")),
+                questions=tuple(event.payload.get("questions", [])),
                 question_ids=frozenset(
                     question["id"]
                     for question in event.payload.get("questions", [])

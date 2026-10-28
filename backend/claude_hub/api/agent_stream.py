@@ -828,6 +828,12 @@ get_registered_html_preview = _media_endpoints.get_registered_html_preview
 
 
 async def _notify_task_activity(event: AgentStreamEvent) -> None:
+    from ..services.agent_stream.question_answers import answers
+
+    try:
+        await answers.observe(event)
+    except Exception:
+        logger.debug("Question projection unavailable", exc_info=False)
     await workspace_manager.record_task_stream_event(event)
 
 
@@ -848,3 +854,7 @@ __all__ = [
 
 # Ordinary Chat messages do not acquire Workspace Task ownership.
 messages.register_message_routes(router)
+
+from .routes.agent_stream.questions import register_question_routes
+
+register_question_routes(router)
