@@ -159,7 +159,9 @@ async def list_remote_directory(
     ]
     if profile.port != 22:
         cmd.extend(["-p", str(profile.port)])
-    cmd.append(_ssh_target(profile))
+    # `--` ends option parsing so an option-looking destination can never be
+    # interpreted as an ssh option (see RemoteProfile host validation).
+    cmd.extend(["--", _ssh_target(profile)])
     cmd.append(remote_command)
 
     try:
