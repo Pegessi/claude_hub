@@ -31,7 +31,9 @@ STREAM_BASE = f"/api/workspaces/sessions/{SESSION}/stream"
 HARNESS_PATH = "/managed-chat-question-harness"
 
 
-def event(sequence: int, event_type: str, payload: dict, *, call_id: str | None = None) -> dict:
+def event(
+    sequence: int, event_type: str, payload: dict, *, call_id: str | None = None
+) -> dict:
     return {
         "stream_sequence": sequence,
         "session_id": SESSION,
@@ -114,6 +116,7 @@ async def main(browser_run: BrowserRun) -> None:
     external_requests: list[str] = []
     sends: list[dict] = []
     busy_sends: list[dict] = []
+    remote_state = "open"
 
     async with browser_run.context(viewport={"width": 1280, "height": 900}) as context:
         # Resolve dependency URLs from the implementations; the harness below
@@ -122,7 +125,9 @@ async def main(browser_run: BrowserRun) -> None:
             f"{base}/src/features/chat/StructuredPane.vue"
         )
         component = await component_response.text()
-        store_response = await context.request.get(f"{base}/src/stores/terminal/index.ts")
+        store_response = await context.request.get(
+            f"{base}/src/stores/terminal/index.ts"
+        )
         store_source = await store_response.text()
         vue_match = re.search(r'from "([^"]*/vue.js[^"]*)"', component)
         pinia_match = re.search(r'from "([^"]*/pinia.js[^"]*)"', store_source)
@@ -176,7 +181,21 @@ async def main(browser_run: BrowserRun) -> None:
             if not path.startswith("/api/"):
                 await route.fallback()
                 return
-            if method == "GET" and path == f"{STREAM_BASE}/capabilities":
+            if (
+                method == "GET"
+                and path == f"/api/workspaces/sessions/{SESSION}/questions"
+            ):
+                body = {
+                    "questions": [
+                        {
+                            "turn_id": TURN,
+                            "call_id": CALL,
+                            "state": remote_state,
+                            "expires_at": "2099-01-01T00:00:00Z",
+                        }
+                    ]
+                }
+            elif method == "GET" and path == f"{STREAM_BASE}/capabilities":
                 body: object = CAPABILITIES
             elif method == "GET" and path == f"{STREAM_BASE}/events":
                 body = {"events": EVENTS, "next_sequence": 1, "has_more": False}
@@ -185,6 +204,18 @@ async def main(browser_run: BrowserRun) -> None:
                 body = {"events": [], "next_sequence": 1, "has_more": False}
             elif method == "POST" and path == f"{STREAM_BASE}/send":
                 payload = json.loads(request.post_data or "{}")
+                if remote_state == "stale":
+                    if (
+                        payload.get("question_turn_id") != TURN
+                        or payload.get("question_call_id") != CALL
+                    ):
+                        raise AssertionError("stale click lost exact identity")
+                    await route.fulfill(
+                        status=409,
+                        content_type="application/json",
+                        body=json.dumps({"detail": "Question no longer pending"}),
+                    )
+                    return
                 if payload.get("text") == BUSY_TEXT:
                     busy_sends.append(payload)
                     body = {"ok": True}
@@ -197,7 +228,9 @@ async def main(browser_run: BrowserRun) -> None:
                         await route.fulfill(
                             status=503,
                             content_type="application/json",
-                            body=json.dumps({"detail": "response lost after provider accepted"}),
+                            body=json.dumps(
+                                {"detail": "response lost after provider accepted"}
+                            ),
                         )
                         return
                     body = {"ok": True, "answered_question": True}
@@ -208,7 +241,9 @@ async def main(browser_run: BrowserRun) -> None:
                 await route.fulfill(
                     status=599,
                     content_type="application/json",
-                    body=json.dumps({"detail": f"unexpected mocked API request: {method} {path}"}),
+                    body=json.dumps(
+                        {"detail": f"unexpected mocked API request: {method} {path}"}
+                    ),
                 )
                 return
             await route.fulfill(
@@ -225,11 +260,17 @@ async def main(browser_run: BrowserRun) -> None:
         await page.goto(f"{base}{HARNESS_PATH}")
 
         await expect(page.get_by_text("Choose a color", exact=True)).to_be_visible()
-        await expect(page.get_by_role("button", name="Stop", exact=True)).to_be_visible()
-        await expect(page.get_by_role("button", name=re.compile(r"Chat mode:"))).to_have_count(0)
+        await expect(
+            page.get_by_role("button", name="Stop", exact=True)
+        ).to_be_visible()
+        await expect(
+            page.get_by_role("button", name=re.compile(r"Chat mode:"))
+        ).to_have_count(0)
 
         await page.get_by_role("button", name="Add to chat", exact=True).click()
-        await expect(page.get_by_role("menuitem", name="Set a Goal", exact=True)).to_have_count(0)
+        await expect(
+            page.get_by_role("menuitem", name="Set a Goal", exact=True)
+        ).to_have_count(0)
         await expect(
             page.get_by_role("menuitem", name="Create scheduled task", exact=True)
         ).to_have_count(0)
@@ -246,7 +287,9 @@ async def main(browser_run: BrowserRun) -> None:
         while not busy_sends and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.01)
         if len(busy_sends) != 1:
-            raise AssertionError(f"managed busy Enter was not durably posted: {busy_sends!r}")
+            raise AssertionError(
+                f"managed busy Enter was not durably posted: {busy_sends!r}"
+            )
         await expect(page.locator(".composer-queue")).to_have_count(0)
 
         choice = page.get_by_role("group", name="Pick one").get_by_role(
@@ -264,15 +307,43 @@ async def main(browser_run: BrowserRun) -> None:
         await submit.click()
         await expect(page.get_by_text("已提交", exact=True)).to_be_visible()
         await expect(page.get_by_role("alert")).to_have_count(0)
-        await page.screenshot(path=output / "managed-question-recovered.png", full_page=True)
+        await page.screenshot(
+            path=output / "managed-question-recovered.png", full_page=True
+        )
+        remote_state = "claimed"
+        await page.reload()
+        await expect(
+            page.get_by_text("回答已接收，正在投递", exact=True)
+        ).to_be_visible()
+        await expect(
+            page.get_by_role("button", name="提交选择", exact=True)
+        ).to_have_count(0)
+        remote_state = "resolved"
+        await expect(page.get_by_text("已回答", exact=True)).to_be_visible(timeout=6000)
+        await page.screenshot(
+            path=output / "feishu-answer-after-reload.png", full_page=True
+        )
+        remote_state = "stale"
+        await page.reload()
+        await expect(page.get_by_text("问题已失效", exact=True)).to_be_visible()
+        rejected = await page.evaluate(
+            """async ({url, body}) => (await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)})).status""",
+            {"url": f"{base}{STREAM_BASE}/send", "body": sends[0]},
+        )
+        if rejected != 409:
+            raise AssertionError("stale click was not rejected")
 
     if len(busy_sends) != 1:
-        raise AssertionError(f"expected one durable busy Enter send, got {busy_sends!r}")
+        raise AssertionError(
+            f"expected one durable busy Enter send, got {busy_sends!r}"
+        )
     busy = busy_sends[0]
     if busy.get("delivery") != "normal" or busy.get("text") != BUSY_TEXT:
         raise AssertionError(f"managed busy Enter used the wrong delivery: {busy!r}")
     if "question_turn_id" in busy or "question_call_id" in busy:
-        raise AssertionError(f"ordinary busy send was misclassified as a question answer: {busy!r}")
+        raise AssertionError(
+            f"ordinary busy send was misclassified as a question answer: {busy!r}"
+        )
     if len(sends) != 2:
         raise AssertionError(f"expected lost-response retry, got sends={sends!r}")
     first, second = sends
@@ -280,13 +351,22 @@ async def main(browser_run: BrowserRun) -> None:
         raise AssertionError("lost-response retry changed the stable client turn id")
     for payload in sends:
         if payload.get("delivery") != "normal":
-            raise AssertionError(f"managed question was not normal delivery: {payload!r}")
-        if payload.get("question_turn_id") != TURN or payload.get("question_call_id") != CALL:
-            raise AssertionError(f"managed question lost exact provider ownership: {payload!r}")
+            raise AssertionError(
+                f"managed question was not normal delivery: {payload!r}"
+            )
+        if (
+            payload.get("question_turn_id") != TURN
+            or payload.get("question_call_id") != CALL
+        ):
+            raise AssertionError(
+                f"managed question lost exact provider ownership: {payload!r}"
+            )
     if unknown_requests:
         raise AssertionError(f"unexpected mocked API requests: {unknown_requests!r}")
     if external_requests:
-        raise AssertionError(f"browser attempted external requests: {external_requests!r}")
+        raise AssertionError(
+            f"browser attempted external requests: {external_requests!r}"
+        )
     if errors:
         raise AssertionError(f"browser page errors: {errors!r}")
 
@@ -298,6 +378,8 @@ async def main(browser_run: BrowserRun) -> None:
             "lost answer response leaves the exact card unresolved",
             "explicit retry preserves client turn id and provider card identity",
             "managed surface hides Task-owned mode, Goal, and schedule controls",
+            "cross-channel claimed and resolved projection survives reload",
+            "stale card disabled and exact stale-click request rejected",
         ],
         "send_attempts": len(sends),
         "unknown_requests": unknown_requests,
