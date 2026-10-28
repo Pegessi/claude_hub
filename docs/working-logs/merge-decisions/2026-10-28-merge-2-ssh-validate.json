@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "ce14454d561cf09c948fa37b3d90c36136daff78",
+  "parents": [
+    "b6a7eb8ef5ff78bb5fdf9b2f3d2d031c9a662710",
+    "86221458b14d171fc3c437be001b67791c221211"
+  ],
+  "base": "0211661a1e627349822b3857ecf74f33b81818ef",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "3246ce311d3c67dbab10e63f45b1d274c13cca0b",
+  "reconstructed_tree": "996288838a20d07a70dc3a60ddc24ec88e7a0917",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a4bfbecaf1c6b1bd9e75e0139c91f70b7e3efbb4"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2b2e1c31d9cd2f2d0a78b448519344743855ddf2"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9101d0800a40c14f12b14c7642c932e649303a50"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d30db90289e8f348e6cd19a46b2756b910cd2f0d"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "bc4f4f35155219cf4d9686132e9928951e50873b"
+      },
+      "reason": "Accumulated candidate (main Feishu notes plus merge-1 CLI notes at the top of Released) and codex/rv-ssh-validate's SSH validation notes both anchor at the top of Released. Manual union retains the candidate's Feishu and CLI entries first, then appends the incoming SSH entry, then the shared tail; a blank line separates the adjacent heading blocks. All other paths auto-merged (disjoint from merge 1).",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
