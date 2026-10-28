@@ -679,3 +679,53 @@ async def test_remirror_replacement_invalidates_action_before_admission(harness:
             mirror_send_uuid=old_uuid,
         )
     assert not harness.inbox.messages
+
+
+@pytest.mark.asyncio
+async def test_failed_card_patch_backs_off_durably(harness: Harness, monkeypatch):
+    calls = []
+
+    class Client:
+        def __init__(self, config):
+            pass
+
+        async def get_tenant_token(self):
+            return "test-token"
+
+        async def patch_message_card(self, message_id, card):
+            calls.append(message_id)
+            raise TimeoutError("slow platform")
+
+    monkeypatch.setattr(card_actions, "FeishuBotClient", Client)
+    question = harness.question
+    question.state = "resolved"
+    with pytest.raises(TimeoutError):
+        await card_actions.mirror_question(question)
+    assert question.mirror is not None
+    assert question.mirror.retry_at is not None
+    clone = ChatMessageInbox(
+        harness.inbox.path, harness.inbox.target, harness.inbox.submit, harness.inbox.evidence
+    )
+    harness.inbox = clone
+    await card_actions.mirror_question(clone.questions[question.question_ref])
+    assert calls == ["om-card"]
+
+
+@pytest.mark.asyncio
+async def test_disabled_bot_question_is_not_exported_after_later_enable(harness: Harness):
+    question = harness.question
+    question.mirror = None
+    current = harness.pool.effective(harness.bot, {})
+    harness.pool.configure_callbacks(
+        harness.bot, callback_enabled=False, expected_revision=current.revision, environ={}
+    )
+    assert not await card_actions.mirror_question(question)
+    assert question.mirror_checked and question.mirror is None
+    current = harness.pool.effective(harness.bot, {})
+    harness.pool.configure_callbacks(
+        harness.bot, callback_enabled=True, expected_revision=current.revision, environ={}
+    )
+    # Enabling callbacks affects future questions; old web-only content needs
+    # an explicit remirror rather than being exported by a background sweep.
+    assert not await card_actions.mirror_question(question)
+    assert question.mirror is None

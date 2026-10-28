@@ -163,6 +163,19 @@ def build_feishu_question_card_payload(
         },
         "body": {"elements": elements},
     }
+    if disabled and answer is not None:
+        # A 64-KiB free-text answer must not prevent disabling a 30-KB card.
+        # Only the display summary is shortened; the provider answer is intact.
+        summary = _sanitize_plain_text(answer)
+        while len(json.dumps(card, ensure_ascii=False).encode("utf-8")) >= 30_000 and summary:
+            summary = summary[: len(summary) // 2]
+            elements[-1] = {
+                "tag": "div",
+                "text": {
+                    "tag": "plain_text",
+                    "content": f"Question {question_ref} · {state} · {summary}…",
+                },
+            }
     if len(json.dumps(card, ensure_ascii=False).encode("utf-8")) >= 30_000:
         raise ValueError("Question card exceeds the supported message size")
     return FeishuMessagePayload(msg_type="interactive", content=card)
