@@ -109,3 +109,50 @@ Setup, scopes and reverse-proxy exceptions are in
   validation update. Existing UI/Feishu sandbox tests do not establish public
   callback reachability or actual app-console configuration. Human acceptance
   and independent candidate review remain required. No lessons needed.
+
+## Final validation record
+
+Product candidate: `1a836009c8580a85bc53c4b9c461a3491ccf1c26`.
+Implementation range begins after accepted design `5654ae2`; no merge or push.
+The following final commit records validation only and changes no product code.
+
+`CLAUDE_HUB_VERIFY_STRICT_VERSIONS=1 ./scripts/verify.sh all` **PASS**, exit 0,
+retained as `feishu-choice-all-final-tree.log` in the feature worktree:
+
+- docs, checkout-safety, backend format (612 files), backend types (596 files),
+  backend tests, frontend lint, frontend types, frontend tests and production
+  build all passed. Backend: **5,528 passed, 10 skipped**, 333.58 seconds.
+  The ten browser-marked tests are intentionally skipped in the default scope;
+  the separate complete browser-mocks and HMR results above remain applicable.
+- Backend test evidence: `/tmp/claude-hub-verify.up359am9` (JUnit, pytest log,
+  provenance and coverage); disposable runtime `/tmp/ch-v-udh8ot0r` was removed.
+  Final format/type evidence: `/tmp/claude-hub-verify.471oqna1` and
+  `/tmp/claude-hub-verify.c3hdfbqu`.
+- One dependency deprecation warning came from Uvicorn's WebSocket protocol
+  import during the real loopback TLS test. Vite retained its existing large
+  chunk advisory. Neither gate failed.
+- The earlier `feishu-choice-all-candidate.log` also passed on `712a07d`; the
+  final run above additionally includes runtime-teardown invalidation. Other
+  failed/intermediate logs remain preserved and are not final pass evidence.
+  An exploratory explicit backend scope included terminal browser tests without
+  a browser executable and produced setup errors; the default strict scope and
+  explicit isolated UI gates are the authoritative results.
+
+Additional regressions cover fair mirror draining past eight workers, persisted
+retry backoff, no automatic export of old web-only content on later enablement,
+64-KiB answer display truncation without changing provider text, on-disk managed
+mailbox identity/fingerprint proof, and runtime teardown. Managed controls retain
+all 33 scenarios, now checking durable admission separately from delivery. They
+still exercise exact JSON-RPC responses, mailbox ownership, concurrent claims,
+publication/deletion ordering, recreated owners, save failures, cancellation,
+uncertain delivery and explicit recovery. Combined managed/runtime checks passed
+51 tests before the final teardown case; final strict coverage includes it.
+
+The runtime-only corrupt-inbox web fallback also holds the managed owner guard
+through native response publication. This preserves web availability without
+weakening deletion ownership. Independent bounded source review caught binding,
+ordinary-input and mailbox-proof issues; all actionable findings were fixed.
+Final independent Workspace candidate review and human acceptance are still
+pending. Console/public HTTPS integration was not attempted. Ports 5296/5297/5298
+were checked closed; task screenshots/logs and auxiliary snapshots are retained.
+No lessons needed.
