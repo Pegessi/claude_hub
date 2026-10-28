@@ -134,6 +134,33 @@
   literals; `/api/providers`, readiness unification and frontend migration
   remain later slices.
 
+### fix(auth): harden OAuth state, session files, cookies and access logs
+
+- The session store (`~/.claude_hub/sessions.json`) is written atomically
+  (temp file + `os.replace`, fsync) with `0600` permissions, pre-existing loose
+  files (e.g. `0664`) are tightened on load, and its directory is now created
+  and normalized to `0700` so bearer session ids and Feishu tokens are
+  owner-only at rest.
+- The Feishu OAuth login issues a random single-use CSRF `state` in an
+  `HttpOnly`, `SameSite=Lax`, path-scoped cookie, verified on callback with a
+  constant-time compare. The state cookie is now expired on **every** failed
+  callback (bad state, token-exchange failure, user-info failure, whitelist
+  denial) as well as on success, so a rejected state cannot linger.
+- Auth cookies gain `Secure` whenever the effective request scheme is HTTPS.
+  The scheme now honors `X-Forwarded-Proto` only when the *direct* TCP peer is
+  in `CLAUDE_HUB_TRUSTED_PROXIES` (default loopback), so a remote client cannot
+  forge the header; a configured HTTPS `public_url`/`frontend_url` still implies
+  Secure. The trust primitives are shared with the trusted-proxy branch.
+- Uvicorn prints the full request target (including the query string) in two
+  places, both now redacted for `code`, `state` and `session_id` values: the
+  HTTP access record on the `uvicorn.access` logger (OAuth code/state) and the
+  WebSocket handshake on `uvicorn.error` (the bearer `session_id` terminal and
+  agent-stream sockets use in uvicorn 0.42, where the path is a different
+  positional arg). Redaction is template-aware, so ordinary `uvicorn.error`
+  startup/error records are untouched. This closes the leak of OAuth codes and
+  WebSocket bearer session ids into `backend.log`. WebSocket auth log lines
+  otherwise still emit only a 6-character session prefix.
+
 ### fix(maso): retain final responses without streamed tokens
 
 - Read authoritative text and reasoning from MASO's `post_llm_response` event.

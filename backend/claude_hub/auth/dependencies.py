@@ -9,6 +9,13 @@ from ..models.schemas import User
 from .session import get_session
 
 
+def _mask_session_id(session_id: Optional[str]) -> str:
+    """Short, non-reversible session id prefix safe for log lines."""
+    if not session_id:
+        return "<none>"
+    return f"{session_id[:6]}…"
+
+
 def get_client_ip(request: Request) -> str:
     """Get client IP address from request."""
     # Check X-Forwarded-For header first (for reverse proxies)
@@ -175,7 +182,10 @@ async def get_current_user_ws(
                 effective_session_id = cookies[settings.session_cookie_name].value
 
     logger.info(
-        f"WebSocket auth attempt: session_id(query)={session_id}, session_id(cookie)={effective_session_id}, effective={effective_session_id}"
+        "WebSocket auth attempt: session_id(query)=%s, session_id(cookie)=%s, effective=%s",
+        _mask_session_id(session_id),
+        _mask_session_id(effective_session_id),
+        _mask_session_id(effective_session_id),
     )
 
     if not settings.auth_enabled:
@@ -192,7 +202,10 @@ async def get_current_user_ws(
 
     session = get_session(effective_session_id)
     if not session:
-        logger.warning(f"WebSocket auth failed: session not found for id={effective_session_id}")
+        logger.warning(
+            "WebSocket auth failed: session not found for id=%s",
+            _mask_session_id(effective_session_id),
+        )
         return None
 
     logger.info(f"Session found: user={session.user.open_id}, email={session.user.email}")
