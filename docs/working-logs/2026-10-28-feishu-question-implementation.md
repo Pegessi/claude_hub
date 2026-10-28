@@ -99,6 +99,12 @@ Setup, scopes and reverse-proxy exceptions are in
 - An initial strict `all` run found a browser-test formatting issue and an
   existing fake-session bridge incompatibility; both were fixed. That run is
   retained as `feishu-choice-all.log` and is not presented as a pass.
+- Bounded independent source review identified and verified fixes for two races:
+  stale binding during an awaited runtime probe (bot gate now spans submission),
+  and ordinary input overtaking a claim (shared admission locks plus native
+  before-send guards). Dedicated tests reproduce the ordering and block both
+  races. Goal API tests now exercise exact IDs/durable receipts rather than the
+  removed uncorrelated JSON interception; ordinary Goal steering is preserved.
 - Final strict all/check-staged/candidate review results follow in the final
   validation update. Existing UI/Feishu sandbox tests do not establish public
   callback reachability or actual app-console configuration. Human acceptance

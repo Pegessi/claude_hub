@@ -295,3 +295,89 @@ async def test_native_response_pipe_failure_is_not_reported_as_answered():
     owner = SimpleNamespace(_process=SimpleNamespace(stdin=BrokenWriter()))
     with pytest.raises(RuntimeError, match="uncertain"):
         await CodexProtocolSession._send_jsonrpc_response(owner, 42, result={"answers": {}})
+
+
+@pytest.mark.asyncio
+async def test_ordinary_admission_and_answer_claim_share_goal_lock(runtime):
+    service, inbox, _, _, snapshot = runtime
+    from claude_hub.services.goal_run import get_goal_admission_lock
+
+    q = await service.capture("terminal-tab-tab", "turn-A", "call-A")
+    async with get_goal_admission_lock("tab"):
+        claim = asyncio.create_task(
+            service.admit(
+                q,
+                User(open_id="local", name="local", email=""),
+                QuestionAnswerCreate(call_id="answer", selected=["Skip"]),
+            )
+        )
+        await asyncio.sleep(0)
+        assert not claim.done()
+        # The ordinary turn admitted first: it advances runtime ownership before
+        # releasing its existing admission lock. No answer may claim the old epoch.
+        snapshot["run_epoch"] += 1
+    with pytest.raises(InboxError, match="pending"):
+        await claim
+    assert not inbox.messages
+
+
+@pytest.mark.asyncio
+async def test_feishu_binding_gate_covers_awaited_probe_and_submit(runtime, monkeypatch):
+    service, inbox, _, _, snapshot = runtime
+    from claude_hub.api import feishu_bot as bot
+    from claude_hub.api.routes.feishu_bot import card_actions
+    from claude_hub.api.routes.agent_stream import dispatch
+    from claude_hub.models.chat_message import QuestionMirror
+
+    snapshot["mode"] = "followup"
+    q = await service.capture("terminal-tab-tab", "turn-A", "call-A")
+    q.mirror = QuestionMirror(
+        bot_id="owned-gate-test",
+        app_id="app",
+        tenant_key="tenant",
+        pairing_id="pair",
+        generation=1,
+        revision=1,
+        chat_id="chat",
+        sender_open_id="sender",
+        send_uuid="send",
+    )
+    changed = False
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def busy_probe(session):
+        entered.set()
+        await release.wait()
+        return False
+
+    _, _, _, manager, _ = runtime
+    manager.turn_in_flight.side_effect = busy_probe
+    monkeypatch.setattr(card_actions, "current_binding", lambda q: (None, None))
+
+    async def deliver(*args, **kwargs):
+        assert not changed
+        assert bot._bot_gates["owned-gate-test"].lock.locked()
+
+    monkeypatch.setattr(dispatch, "dispatch_tab_stream_input", deliver)
+    receipt = await service.admit(
+        q,
+        User(open_id="local", name="Feishu", email=""),
+        QuestionAnswerCreate(call_id="answer", selected=["Skip"]),
+        source="feishu",
+        mirror_send_uuid="send",
+    )
+    submit = asyncio.create_task(inbox.pump_answer(receipt.message_id))
+    await entered.wait()
+
+    async def rotate():
+        nonlocal changed
+        async with bot._gate("owned-gate-test"):
+            changed = True
+
+    rotation = asyncio.create_task(rotate())
+    await asyncio.sleep(0)
+    assert not changed
+    release.set()
+    await submit
+    await rotation
+    assert changed and inbox.messages[receipt.message_id].state == "completed"
