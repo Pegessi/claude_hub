@@ -392,11 +392,22 @@ async def test_receipts_are_bounded_and_expired_retries_do_not_mutate(manager, w
 async def test_restart_rejects_managed_assignment_on_record_task(manager, workspace):
     task = await register(manager, workspace)
     path = manager._workspace_state_file(workspace.id)
-    data = json.loads(path.read_text())
+    good_bytes = path.read_bytes()
+    data = json.loads(good_bytes)
     data["tasks"][0]["session_id"] = "forged-session"
-    path.write_text(json.dumps(data))
-    with pytest.raises(ValueError, match="managed execution"):
-        WorkspaceManager()
+    forged_text = json.dumps(data)
+    path.write_text(forged_text)
+    # The tampered record is quarantined and the last good backup is restored;
+    # the forged assignment must never enter in-memory state (the backup may be
+    # one generation older, i.e. not yet contain the task).
+    fresh = WorkspaceManager()
+    assert all(task.session_id != "forged-session" for task in fresh.tasks.values())
+    assert path.read_bytes() == path.with_name("state.json.bak").read_bytes()
+    quarantined = list(path.parent.glob("state.json.corrupt-*"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_text() == forged_text
+    marker = json.loads(path.with_name("state.json.quarantined").read_text())
+    assert "managed execution" in marker["events"][0]["reason"]
 
 
 @pytest.fixture()

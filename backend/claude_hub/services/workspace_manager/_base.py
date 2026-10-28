@@ -67,6 +67,7 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     _report_intake_committed: set[str]
     _report_intake_locks: dict[str, asyncio.Lock]
     _sched_fire_locks: dict[str, asyncio.Lock]
+    _state_recovery_warnings: list[str]
     _chat_delivery_getter: Callable[[], ChatMessageInbox] | None
     _chat_delivery_instance: ChatMessageInbox | None
     _scheduled_chat_dispatch: ScheduledChatDispatch | None
@@ -331,8 +332,27 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     @abstractmethod
     def _normalize_session_item(self, item: dict[str, Any]) -> dict[str, Any]: ...
 
+    @staticmethod
+    @abstractmethod
+    def _backup_path_for(path: Path) -> Path: ...
+
     @abstractmethod
     def _atomic_write_text(self, path: Path, text: str) -> None: ...
+
+    @abstractmethod
+    def _atomic_save_state_text(self, path: Path, text: str) -> None: ...
+
+    @abstractmethod
+    def _load_durable_json(
+        self,
+        path: Path,
+        *,
+        label: str,
+        validator: "Callable[[Any], Any] | None" = None,
+    ) -> Any: ...
+
+    @abstractmethod
+    def state_recovery_warnings(self) -> list[str]: ...
 
     @abstractmethod
     def _workspace_state_payload(self, workspace_id: str) -> dict[str, Any]: ...
