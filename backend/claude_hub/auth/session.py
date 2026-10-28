@@ -2,7 +2,10 @@
 
 import json
 import logging
+import os
 import secrets
+import tempfile
+from contextlib import suppress
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -15,10 +18,46 @@ logger = logging.getLogger(__name__)
 # Session storage file
 SESSIONS_FILE = Path.home() / ".claude_hub" / "sessions.json"
 
+# The file holds bearer session ids and Feishu tokens, so it must be
+# readable/writable by the owner only.
+_SESSIONS_FILE_MODE = 0o600
+# Its directory must be owner-only as well: it also holds any 0600 temp file
+# left behind by an interrupted atomic rewrite, and a group/world-searchable
+# directory would expose the file's existence and metadata.
+_SESSIONS_DIR_MODE = 0o700
+
 
 def _ensure_sessions_dir() -> None:
-    """Ensure the sessions directory exists."""
-    SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    """Ensure the sessions directory exists and is owner-only.
+
+    The directory is created (if missing) and then explicitly chmod-ed: the
+    ``mode`` argument to ``mkdir`` is still filtered by the process umask, and
+    a directory created by an older release may be looser than 0700.
+    """
+    sessions_dir = SESSIONS_FILE.parent
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        current_mode = sessions_dir.stat().st_mode & 0o777
+        if current_mode != _SESSIONS_DIR_MODE:
+            os.chmod(sessions_dir, _SESSIONS_DIR_MODE)
+    except OSError as e:
+        logger.warning(f"Failed to tighten sessions directory permissions: {e}")
+
+
+def _tighten_file_permissions() -> None:
+    """Restrict an existing sessions file to owner-only access.
+
+    Older releases wrote the file with the process umask (typically 0664);
+    tighten it back to 0600 whenever the store is read.
+    """
+    try:
+        current_mode = SESSIONS_FILE.stat().st_mode & 0o777
+        if current_mode != _SESSIONS_FILE_MODE:
+            os.chmod(SESSIONS_FILE, _SESSIONS_FILE_MODE)
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        logger.warning(f"Failed to tighten sessions file permissions: {e}")
 
 
 def _load_sessions() -> Dict[str, Any]:
@@ -26,6 +65,7 @@ def _load_sessions() -> Dict[str, Any]:
     _ensure_sessions_dir()
     if not SESSIONS_FILE.exists():
         return {}
+    _tighten_file_permissions()
     try:
         with open(SESSIONS_FILE, "r") as f:
             result: Dict[str, Any] = json.load(f)
@@ -36,13 +76,34 @@ def _load_sessions() -> Dict[str, Any]:
 
 
 def _save_sessions(sessions: Dict[str, Any]) -> None:
-    """Save sessions to file."""
+    """Save sessions to file atomically with owner-only permissions."""
     _ensure_sessions_dir()
     try:
-        with open(SESSIONS_FILE, "w") as f:
-            json.dump(sessions, f)
-    except IOError as e:
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{SESSIONS_FILE.name}.",
+            suffix=".tmp",
+            dir=str(SESSIONS_FILE.parent),
+        )
+    except OSError as e:
         logger.error(f"Failed to save sessions: {e}")
+        return
+
+    replaced = False
+    try:
+        # mkstemp already creates the file 0600, but enforce it explicitly.
+        os.fchmod(fd, _SESSIONS_FILE_MODE)
+        with os.fdopen(fd, "w") as f:
+            json.dump(sessions, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, SESSIONS_FILE)
+        replaced = True
+    except OSError as e:
+        logger.error(f"Failed to save sessions: {e}")
+    finally:
+        if not replaced:
+            with suppress(OSError):
+                os.unlink(tmp_name)
 
 
 def _session_to_dict(session: LoginSession) -> Dict[str, Any]:
