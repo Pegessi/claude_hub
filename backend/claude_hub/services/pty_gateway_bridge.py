@@ -42,6 +42,8 @@ import struct
 import termios
 from typing import Optional
 
+from pydantic import ValidationError
+
 from ..models import RemoteProfile
 from ..models.schemas import RemoteTransport
 from .pty_exec import (
@@ -465,7 +467,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         bootstrap_script = base64.b64decode(args.bootstrap_b64).decode("utf-8")
     except Exception as exc:
         raise SystemExit(f"invalid --bootstrap-b64: {exc}") from exc
-    profile = _profile_from_args(args)
+    try:
+        profile = _profile_from_args(args)
+    except ValidationError as exc:
+        raise SystemExit(f"invalid --target: {exc}") from exc
     forwards = _parse_forwards(args.remote_forward)
     bridge = _Bridge(
         profile,
