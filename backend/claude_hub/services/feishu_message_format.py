@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -88,6 +89,82 @@ def build_feishu_card_payload(
         },
         "body": {"elements": [{"tag": "markdown", "content": content}] if content else []},
     }
+    return FeishuMessagePayload(msg_type="interactive", content=card)
+
+
+def build_feishu_question_card_payload(
+    prompt: str,
+    options: list[tuple[str, str]],
+    *,
+    question_ref: str,
+    other_token: str,
+    title: str = "Hub needs your answer",
+    state: str = "open",
+    answer: str | None = None,
+) -> FeishuMessagePayload:
+    """Build a single-question schema-2 mirror; action tokens are caller-owned.
+
+    Reject unrepresentable content instead of truncating an option or silently
+    dropping a question. Terminal cards have no actionable token values.
+    """
+    if not prompt.strip() or not question_ref or len(question_ref) > 128:
+        raise ValueError("Question prompt and bounded reference are required")
+    if state not in {"open", "claimed", "resolved", "stale", "expired", "uncertain"}:
+        raise ValueError("Invalid question mirror state")
+    tokens = [token for _, token in options] + [other_token]
+    if state == "open" and (
+        len(tokens) != len(set(tokens)) or any(not token or len(token) > 512 for token in tokens)
+    ):
+        raise ValueError("Question actions require distinct opaque tokens")
+    if len(options) > 20 or any(not label.strip() for label, _ in options):
+        raise ValueError("Question options exceed the supported card shape")
+    if any(
+        _has_unsafe_control_character(text)
+        for text in [prompt, title, question_ref] + [label for label, _ in options]
+    ):
+        raise ValueError("Question contains unsafe control characters")
+    elements: list[dict[str, object]] = [
+        {"tag": "div", "text": {"tag": "plain_text", "content": _sanitize_plain_text(prompt)}}
+    ]
+    disabled = state != "open"
+    for label, token in options + [("Other / type a reply", other_token)]:
+        button: dict[str, object] = {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": _sanitize_plain_text(label)},
+            "type": "default",
+            "disabled": disabled,
+        }
+        if not disabled:
+            button["behaviors"] = [
+                {
+                    "type": "callback",
+                    "value": {
+                        "v": 1,
+                        "hub_action": (
+                            "question_text_hint" if token == other_token else "question_answer"
+                        ),
+                        "hub_token": token,
+                    },
+                }
+            ]
+        elements.append(button)
+    status = f"Question {question_ref} · {state}"
+    if answer is not None:
+        status += " · " + _sanitize_plain_text(answer)
+    if not disabled:
+        status += f". Other: reply to this card or send /answer {question_ref} your text. Remote choices expire in 24h."
+    elements.append({"tag": "div", "text": {"tag": "plain_text", "content": status}})
+    card: dict[str, object] = {
+        "schema": "2.0",
+        "config": {"update_multi": True, "enable_forward": False},
+        "header": {
+            "title": {"tag": "plain_text", "content": _sanitize_plain_text(title)},
+            "template": "orange",
+        },
+        "body": {"elements": elements},
+    }
+    if len(json.dumps(card, ensure_ascii=False).encode("utf-8")) >= 30_000:
+        raise ValueError("Question card exceeds the supported message size")
     return FeishuMessagePayload(msg_type="interactive", content=card)
 
 
