@@ -337,6 +337,32 @@ class NativeConsumerMixin(SessionState):
                                 self.session_id,
                             )
                         continue
+                if not self._turn_completed_seen and exit_error is None:
+                    # Ordinary (non-Goal) one-shot turn reached a CLEAN EOF after
+                    # streaming a complete, non-empty answer but never wrote a
+                    # completion record, with no outstanding tool call, blocking
+                    # approval, or capacity-queue wait. The streamed text is the
+                    # authoritative result: synthesize a completed turn (the
+                    # ordinary-turn counterpart of the Goal synthesis above) so
+                    # dispatch_tab_chat_and_wait returns the answer instead of
+                    # raising and making the external bridge (e.g. Feishu)
+                    # report failure after the reply was already delivered. A
+                    # nonzero exit is excluded up front; an empty answer or a
+                    # pending external wait makes the helper return False, so the
+                    # failure synthesis below still runs.
+                    try:
+                        async with self._send_lock:
+                            synthesized = await self._synthesize_clean_eof_completion_locked(
+                                transport
+                            )
+                    except Exception:
+                        synthesized = False
+                        logger.exception(
+                            "native clean-EOF completion synthesis failed for session %s",
+                            self.session_id,
+                        )
+                    if synthesized:
+                        continue
                 if not self._turn_completed_seen:
                     # A cancelled reader cannot reach this branch: the
                     # transport retires its generation before publishing the

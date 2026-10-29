@@ -212,6 +212,82 @@ class WatchdogMixin(SessionState):
         self._goal_protocol_sanitizer = None
         self._goal_protocol_turn = False
 
+    async def _synthesize_clean_eof_completion_locked(self, transport: ProviderSession) -> bool:
+        """Complete an ordinary one-shot turn that ended on a clean EOF.
+
+        The one-shot CLI (Claude/Cursor) streamed a non-empty final answer and
+        then closed stdout without ever writing a completion record, but it
+        exited cleanly (``exit_error is None``) with no outstanding tool call,
+        blocking approval, or capacity-queue wait. The streamed answer is the
+        authoritative result: publish exactly one ``status=completed``
+        turn_completed, filling ``assistant_text``/``final_text`` the same way
+        the normal provider-result finalizer does, then retire the spent
+        process. This is the ordinary-turn counterpart of
+        :meth:`_synthesize_goal_completion_locked`; it lets
+        ``dispatch_tab_chat_and_wait`` return the buffered answer instead of
+        raising "provider exited without a completion record" (which made the
+        Feishu bridge report failure even though the reply was already sent).
+
+        Returns ``False`` without publishing when the under-lock recheck no
+        longer qualifies, so the caller can fall back to the synthesized
+        failure path. Goal-protocol turns never reach this: their completion is
+        owned by the goal-terminal envelope / silence-reap path, and an
+        ordinary turn never installs the goal sanitizer
+        (``input.py`` only installs it for goal-continuation turns), so the
+        buffered text here is plain visible assistant output.
+        """
+        turn_id = self._active_turn_id
+        if (
+            turn_id is None
+            or self._turn_completed_seen
+            or transport.eof_is_fatal
+            or transport.goal_completion_requires_provider_event
+            or self._goal_protocol_turn
+            or self._waiting_for_external_activity()
+            or not self._assistant_text.strip()
+        ):
+            return False
+        session = self._session_getter()
+        if session is None:
+            raise RuntimeError("session no longer exists")
+        ctx = NormalizeContext(
+            session_id=self.session_id,
+            tab_id=session.tab_id,
+            agent_type=session.agent_type,
+            run_epoch=self._run_epoch,
+            turn_id=turn_id,
+        )
+        payload: Dict[str, Any] = {"status": "completed", "assistant_text": self._assistant_text}
+        # Mirror the normal turn_completed finalizer: expose only the answer
+        # emitted after the last tool call as final_text, and only when it
+        # differs from the whole-turn assistant text.
+        final = self._final_assistant_text.strip()
+        whole = payload["assistant_text"]
+        if isinstance(whole, str) and final and final != whole.strip():
+            payload["final_text"] = final
+        event = ctx.event(AgentStreamEventType.TURN_COMPLETED, payload)
+        await self._publish(redact_event(event))
+        self._turn_completed_seen = True
+        self._terminalize_native_runtime("completed")
+        self._active_turn_id = None
+        self._active_tool_call_ids.clear()
+        self._blocking_approval_call_ids.clear()
+        self._reset_queue_wait_state()
+        self._goal_terminal_at = None
+        # Retire the cleanly-exited one-shot reader generation and process so
+        # any lingering child cannot attribute stale records/EOF to the next
+        # turn; the next send_message spawns a fresh process. stop() also
+        # resolves the turn guard, exactly as in the Goal EOF precedent.
+        await transport.stop()
+        self._notify_post_persist(event)
+        self._assistant_text = ""
+        self._visible_assistant_text = ""
+        self._final_assistant_text = ""
+        self._final_text_after_tool = False
+        self._goal_protocol_sanitizer = None
+        self._goal_protocol_turn = False
+        return True
+
     def _record_watchdog_activity(self, event: AgentStreamEvent) -> None:
         """Track conditions that legitimately pause model streaming."""
         # Any model output or tool activity proves the turn left the capacity

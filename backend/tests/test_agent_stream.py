@@ -5846,11 +5846,12 @@ async def test_native_nonzero_exit_emits_error_and_failed_turn_completed_once() 
 
 
 @pytest.mark.asyncio
-async def test_native_clean_exit_without_completion_emits_failed_turn_completed() -> None:
+async def test_native_clean_exit_empty_answer_still_emits_failed_turn_completed() -> None:
     """A one-shot provider that exits cleanly (exit_error=None) but never
-    emitted a terminal ``turn_completed`` record must still get a failed
-    ``turn_completed`` synthesized so the frontend never leaves the turn
-    pending."""
+    emitted a terminal ``turn_completed`` record AND never produced any answer
+    text must still get a failed ``turn_completed`` synthesized so the turn is
+    never left pending. A clean EOF alone (without a complete answer) is not
+    treated as success."""
     from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
 
     transport = _FakeNativeTransport(eof_is_fatal=False)
@@ -5866,28 +5867,15 @@ async def test_native_clean_exit_without_completion_emits_failed_turn_completed(
     queue = await tailer.subscribe()
     await asyncio.sleep(0.05)
 
-    await tailer.send_message("hello", [], client_turn_id="turn-2")
+    await tailer.send_message("hello", [], client_turn_id="turn-empty")
     started = await asyncio.wait_for(queue.get(), timeout=0.5)
     assert started.type == AgentStreamEventType.TURN_STARTED
 
-    # Provider emits a text delta but no turn_completed, then EOF.
-    transport._records.put_nowait(
-        {
-            "type": "stream_event",
-            "event": {
-                "type": "content_block_delta",
-                "index": 1,
-                "delta": {"type": "text_delta", "text": "partial"},
-            },
-        }
-    )
+    # No text at all: just a clean EOF.
     transport._records.put_nowait(None)
 
-    delta = await asyncio.wait_for(queue.get(), timeout=0.5)
-    assert delta.type == AgentStreamEventType.TEXT_DELTA
-
-    # The tailer synthesizes an error + failed turn_completed because no
-    # terminal completion record was seen.
+    # The tailer synthesizes an error + failed turn_completed because there is
+    # no complete answer to complete with.
     error_evt = await asyncio.wait_for(queue.get(), timeout=0.5)
     assert error_evt.type == AgentStreamEventType.ERROR
     assert "without a completion record" in error_evt.payload["message"]
@@ -5895,7 +5883,154 @@ async def test_native_clean_exit_without_completion_emits_failed_turn_completed(
     completed = await asyncio.wait_for(queue.get(), timeout=0.5)
     assert completed.type == AgentStreamEventType.TURN_COMPLETED
     assert completed.payload["status"] == "failed"
-    assert completed.turn_id == "turn-2"
+    assert completed.turn_id == "turn-empty"
+
+    assert tailer._active_turn_id is None
+    assert transport.turn_in_flight is False
+    assert queue.empty()
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_clean_exit_full_answer_synthesizes_completed_once() -> None:
+    """Regression: a one-shot provider streams a complete non-empty answer and
+    then reaches a CLEAN EOF (exit_error=None) without writing a completion
+    record. The turn must be synthesized as exactly one ``status=completed``
+    turn_completed carrying the buffered answer (so dispatch_tab_chat_and_wait
+    returns the text), with NO error event and the process retired / guard
+    released. This is the ordinary-turn counterpart of the Goal EOF synthesis
+    and fixes the Feishu "处理消息失败" false failure after a delivered reply."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    transport.exit_error = None  # clean exit
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    queue = await tailer.subscribe()
+    completion_q = await tailer.subscribe_completion()
+    await asyncio.sleep(0.05)
+
+    await tailer.send_message("hello", [], client_turn_id="turn-clean-eof")
+    started = await asyncio.wait_for(queue.get(), timeout=0.5)
+    assert started.type == AgentStreamEventType.TURN_STARTED
+
+    full_answer = "Hello, " + "this is the full final answer."
+    for piece in ("Hello, ", "this is the full final answer."):
+        transport._records.put_nowait(
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 1,
+                    "delta": {"type": "text_delta", "text": piece},
+                },
+            }
+        )
+    transport._records.put_nowait(None)  # clean EOF, no result record
+
+    # Collect live events up to the terminal event; text deltas may coalesce.
+    seen_text = ""
+    terminal = None
+    while True:
+        event = await asyncio.wait_for(queue.get(), timeout=0.5)
+        if event.type == AgentStreamEventType.TEXT_DELTA:
+            seen_text += event.payload.get("text", "")
+        elif event.type == AgentStreamEventType.TURN_COMPLETED:
+            terminal = event
+            break
+        else:
+            raise AssertionError(f"unexpected event {event.type}")
+
+    assert seen_text == full_answer
+    assert terminal is not None
+    assert terminal.type == AgentStreamEventType.TURN_COMPLETED
+    assert terminal.payload["status"] == "completed"
+    assert terminal.turn_id == "turn-clean-eof"
+    assert terminal.payload["assistant_text"].strip() == full_answer
+    # With no intervening tool call the whole answer is the final answer; the
+    # normal finalizer only adds final_text when it differs, so it must match.
+    assert (
+        terminal.payload.get("final_text", terminal.payload["assistant_text"]).strip()
+        == full_answer
+    )
+
+    # The completion subscription (the bridge dispatch_tab_chat_and_wait awaits)
+    # receives exactly that one completed terminal event, never an error.
+    completion_event = await asyncio.wait_for(completion_q.get(), timeout=0.5)
+    assert completion_event.type == AgentStreamEventType.TURN_COMPLETED
+    assert completion_event.payload["status"] == "completed"
+    assert completion_event.payload["assistant_text"].strip() == full_answer
+    assert completion_q.empty()
+
+    # Process retired and turn guard released; exactly one terminal event.
+    assert transport.stop_called is True
+    assert tailer._active_turn_id is None
+    assert tailer._turn_completed_seen is True
+    assert transport.turn_in_flight is False
+    assert queue.empty()
+    await tailer.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("external_wait", ["blocking_approval", "active_tool_call"])
+async def test_native_clean_exit_full_answer_with_pending_external_wait_still_fails(
+    external_wait: str,
+) -> None:
+    """A clean EOF with a full answer but an outstanding blocking approval or
+    active tool call must still fail: the model was legitimately waiting on an
+    external action when the process ended without a completion record."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    transport.exit_error = None
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    queue = await tailer.subscribe()
+    await asyncio.sleep(0.05)
+
+    await tailer.send_message("hello", [], client_turn_id=f"turn-wait-{external_wait}")
+    started = await asyncio.wait_for(queue.get(), timeout=0.5)
+    assert started.type == AgentStreamEventType.TURN_STARTED
+
+    transport._records.put_nowait(
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "text_delta", "text": "answer but then I must wait"},
+            },
+        }
+    )
+    # Drain the streamed delta, then leave an external wait outstanding at EOF.
+    while True:
+        event = await asyncio.wait_for(queue.get(), timeout=0.5)
+        if event.type == AgentStreamEventType.TEXT_DELTA:
+            break
+    if external_wait == "blocking_approval":
+        tailer._blocking_approval_call_ids.add("call-approval")
+    else:
+        tailer._active_tool_call_ids.add("call-tool")
+
+    transport._records.put_nowait(None)
+
+    error_evt = await asyncio.wait_for(queue.get(), timeout=0.5)
+    assert error_evt.type == AgentStreamEventType.ERROR
+    completed = await asyncio.wait_for(queue.get(), timeout=0.5)
+    assert completed.type == AgentStreamEventType.TURN_COMPLETED
+    assert completed.payload["status"] == "failed"
 
     assert tailer._active_turn_id is None
     assert transport.turn_in_flight is False

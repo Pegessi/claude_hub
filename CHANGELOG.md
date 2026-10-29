@@ -7,6 +7,22 @@
 
 ## Released
 
+### fix(agent_stream): complete ordinary turns on a clean EOF with a full answer
+
+- A one-shot native provider (Claude/Cursor over relay) can stream a complete
+  answer and then close stdout without writing a completion record, exiting
+  cleanly. The EOF branch used to synthesize `turn_completed(status=failed)`
+  unconditionally, so `dispatch_tab_chat_and_wait` raised even though the reply
+  was already delivered — the Feishu bridge then sent a spurious
+  "Claude Hub 处理消息失败" red banner.
+- Add an ordinary-turn counterpart to the existing Goal clean-EOF synthesis:
+  when the exit is clean, non-empty final/visible text is buffered, and no tool
+  call, blocking approval, or capacity wait is outstanding on a non-fatal
+  one-shot transport, emit exactly one `status=completed` turn_completed using
+  the normal `assistant_text`/`final_text` fill. Nonzero exit, empty answer,
+  pending external waits, fatal transports and Goal-protocol turns keep the
+  prior failure behavior; a turn never gets two terminal events.
+
 ### feat: answer Chat questions from native Feishu cards (default off)
 
 - Add shared exact-question admission, durable inbox v2 answer claims and native
