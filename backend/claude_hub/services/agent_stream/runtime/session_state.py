@@ -363,6 +363,10 @@ class SessionState(ABC):
         raise NotImplementedError()
 
     @abstractmethod
+    async def _synthesize_clean_eof_completion_locked(self, transport: ProviderSession) -> bool:
+        raise NotImplementedError()
+
+    @abstractmethod
     def _record_watchdog_activity(self, event: AgentStreamEvent) -> None:
         raise NotImplementedError()
 
