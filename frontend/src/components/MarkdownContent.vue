@@ -1,6 +1,7 @@
 <!-- eslint-disable vue/no-v-html -->
 <template>
   <div
+    ref="contentRoot"
     class="markdown-content"
     :class="{ compact }"
     @click="handleClick"
@@ -48,7 +49,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, watchEffect } from 'vue'
+import { computed, ref, watch, watchEffect } from 'vue'
 import { MarkdownBlockCache } from '@/utils/markdownBlocks'
 import { ensureHighlighter, highlightReady } from '@/utils/codeHighlight'
 import { ensureMathRenderer, mathVersion } from '@/utils/mathRendering'
@@ -86,6 +87,7 @@ const emit = defineEmits<{
 // sanitized, and (optionally) link-wrapped exactly once; only the live
 // tail (the still-growing last block) is re-rendered on each delta.
 const blockCache = new MarkdownBlockCache()
+const contentRoot = ref<HTMLElement | null>(null)
 
 const blocks = computed(() => {
   // Depend on highlightReady so the computed re-evaluates when the
@@ -114,6 +116,41 @@ watchEffect(() => {
   if (blockCache.hasCode) ensureHighlighter().catch(() => {})
   if (blockCache.hasMath) ensureMathRenderer().catch(() => {})
 })
+
+// Render only after Vue has applied v-html. Cancellation discards async results
+// after streaming replacement/unmount; completed DOM nodes retain their diagrams.
+watch([blocks, contentRoot], (_, __, onCleanup) => {
+  const root = contentRoot.value
+  if (!root || !blockCache.hasMermaid) return
+  let current = true
+  let timer: ReturnType<typeof setTimeout>
+  const render = () => {
+    clearTimeout(timer)
+    timer = setTimeout(() => {
+      import('@/utils/mermaidRendering').then(module => {
+        if (current) return module.renderMermaidBlocks(root, () => current)
+      }).catch(() => {
+        if (!current) return
+        root.querySelectorAll('.markdown-code-block:has(code.language-mermaid)').forEach(block => {
+          if (block.querySelector('.markdown-mermaid-error')) return
+          const hint = document.createElement('div')
+          hint.className = 'markdown-mermaid-error'
+          hint.setAttribute('role', 'status')
+          hint.textContent = 'Diagram unavailable. Showing source.'
+          block.append(hint)
+        })
+      })
+    }, 120)
+  }
+  const observer = new MutationObserver(render)
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
+  render()
+  onCleanup(() => {
+    current = false
+    clearTimeout(timer)
+    observer.disconnect()
+  })
+}, { flush: 'post' })
 
 // A proxied image that fails to load (404 / expired temporary file) is
 // replaced in place by a restrained text placeholder — never a broken-image
@@ -555,5 +592,32 @@ async function handleClick(event: MouseEvent) {
   overflow-wrap: anywhere;
   font-family: var(--ch-font-mono);
   font-size: 0.92em;
+}
+
+.markdown-block :deep(.mermaid-rendered > pre) {
+  display: none;
+}
+
+.markdown-block :deep(.markdown-mermaid-diagram) {
+  overflow: auto;
+  max-height: 75vh;
+  padding: 16px;
+  background: var(--ch-color-canvas);
+}
+
+.markdown-block :deep(.markdown-mermaid-diagram > svg) {
+  display: block;
+  width: var(--mermaid-width, 100%);
+  max-width: none;
+  height: auto;
+  color: var(--ch-color-text);
+  font-family: var(--ch-font-sans, sans-serif);
+  font-size: 16px;
+}
+
+.markdown-block :deep(.markdown-mermaid-error) {
+  padding: 6px 12px;
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
 }
 </style>
