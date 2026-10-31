@@ -58,6 +58,27 @@ Follow-up validation: document invariants, nine guide/entry links and anchors,
 whitespace and staged-content checks passed. Independent read-only review found
 no blocking issues. No runtime checks were rerun for these prose-only changes.
 
+## Authorized local-main integration
+
+The user authorized merging after the two independent cross-reviews. The fixed
+merge candidate is `c893a5955d343a71c500956eece938aae0add891`, with target/main
+parent `b0d994953980ef8b18e1e691ce85db97f05cabb0` and reviewed documentation parent
+`59ff4105a21da74dba3027aca0f130adf52ca027`. It was prepared in
+`~/claude_hub_worktree/agent-cli-install-integration`.
+
+Only `CHANGELOG.md` conflicted. Its resolution keeps the documentation entry
+first, the main Antigravity recovery entry second, and the shared history
+unchanged. A byte comparison verified both entries and the history against the
+parents; the other four reviewed documents match the source commit exactly.
+The merge changes no runtime code relative to its main parent.
+
+Document invariants, whitespace and staged-content checks passed. The
+[fixed merge decision record](2026-10-31-agent-cli-install-merge-decisions.json)
+binds the conflict resolution to that immutable merge. Independent verification
+of the fixed merge and this record is required before fast-forwarding local main.
+The integration authorization does not include a remote push or service restart.
+No full runtime suite was rerun for this documentation-only merge.
+
 ## Remaining verification boundary
 
 No clean-machine installation, interactive login, provider network request or

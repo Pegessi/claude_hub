@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "c893a5955d343a71c500956eece938aae0add891",
+  "parents": [
+    "b0d994953980ef8b18e1e691ce85db97f05cabb0",
+    "59ff4105a21da74dba3027aca0f130adf52ca027"
+  ],
+  "base": "ec40d57bd2b1b36c1090796202a95e6dcb5a795c",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "2e5f07bfeefaeb7623f1ab07d8e2df6358ea8154",
+  "reconstructed_tree": "c57c53fa51b8a588e23eb05e10afe0cc1a90cfd2",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9431cc3797b4534d1ed225f8ea3bf23ad93d1262"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "5173dbb08de46f32f6fada1a80a14062f47ca18f"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "6e1e44dde3a9b4ef0d52b7bb48cd73707389fd8f"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c6fffe80bb58a99fd31871ce6a83ca923a3e6db6"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0253e17cc2c98de94f8484728d5635abca4e818c"
+      },
+      "reason": "Both parents added distinct entries at the top of Released. Keep the reviewed Agent CLI installation entry first and the main Antigravity recovery entry second, preserving both entries and all shared history byte-for-byte. No runtime code is changed.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
