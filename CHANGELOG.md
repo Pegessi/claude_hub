@@ -7,6 +7,20 @@
 
 ## Released
 
+### docs(antigravity): document region-restriction bypass and warm-pool proxy
+
+- Add `docs/ANTIGRAVITY.md`: the official `agy` client rejects this account
+  because `loadCodeAssist` returns an unrelated `free-tier` entry in
+  `ineligibleTiers` while `currentTier=standard-tier` is allowed; the local TLS
+  proxy removes only tiers other than the current one and passes auth, request
+  bodies, model streams and other endpoints through unchanged.
+- Record the operational contract for `agyx`: `setsid` lifecycle, CA/log paths,
+  the five warm-pool hosts and targets, the 240 s pool prime, and the 10 s
+  `keyringAuth` validation deadline that cold connections exceed.
+- Include verification, safe restart steps, troubleshooting and the
+  personal/local-use boundary; link the guide from `AGENTS.md`/`CLAUDE.md`, the
+  Agent CLI installation guide and the task navigation table.
+
 ### fix(agent_stream): isolate sub-agent accumulators and trim coalesced snapshot replays
 
 - Scope `AgentStreamAdapter._turn_state` by `(session_id, run_epoch, sub_thread_id)`
