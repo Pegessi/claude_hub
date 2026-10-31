@@ -9,6 +9,7 @@ const MODEL_ENV_VAR: Record<string, string> = {
   traex: 'CODEX_MODEL',
   cursor: 'CURSOR_MODEL',
   maso: 'MASO_MODEL',
+  antigravity: 'ANTIGRAVITY_MODEL',
 }
 const REASONING_EFFORT_ENV: Record<string, string> = {
   codex: 'CODEX_REASONING_EFFORT',

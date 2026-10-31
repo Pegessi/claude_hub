@@ -36,6 +36,7 @@ class AgentType(str, Enum):
     TRAEX = "traex"
     MASO = "maso"
     CURSOR = "cursor"
+    ANTIGRAVITY = "antigravity"
     TERMINAL = "terminal"
 
 

@@ -85,6 +85,7 @@ from .provider_network import (
     select_provider_subprocess_env,
 )
 from .providers import images as provider_images
+from .providers.antigravity import AntigravitySession
 from .providers.claude import ClaudeSession
 from .providers.codex_rpc import CodexProtocolSession
 from .providers.contracts import ModelCatalog
@@ -310,6 +311,23 @@ _STATIC_MODELS: Dict[str, List[str]] = {
         "gpt-5.3-codex",
         "gemini-3.7-flash-high",
         "cursor-grok-4.6-high",
+    ],
+    "antigravity": [
+        # Slugs as reported by ``agy models`` (1.4.x); the catalog is served
+        # by the signed-in Google account's Antigravity subscription.
+        "gemini-4-argon-high",
+        "gemini-4-argon-medium",
+        "gemini-4-argon-low",
+        "gemini-3.8-flash-high",
+        "gemini-3.8-flash-medium",
+        "gemini-3.8-flash-low",
+        "claude-opus-5-5-high",
+        "claude-opus-5-5-medium",
+        "claude-opus-5-5-low",
+        "claude-sonnet-5-5-high",
+        "claude-sonnet-5-5-medium",
+        "claude-sonnet-5-5-low",
+        "gpt-oss-120b-medium",
     ],
 }
 _CLAUDE_MODEL_ENV_KEYS = (
@@ -555,6 +573,10 @@ class CursorNativeSession(CursorSession, ProviderSession):
     """Cursor one-shot transport."""
 
 
+class AntigravityNativeSession(AntigravitySession, ProviderSession):
+    """Antigravity (agy) persistent stream-json transport."""
+
+
 # ── factory ──────────────────────────────────────────────────────────────────
 
 # Dispatch by registry-declared provider; MASO stays a lazy import because
@@ -565,6 +587,7 @@ _NATIVE_SESSION_CLASSES: Dict[AgentType, type["ProviderSession"]] = {
     AgentType.CODEX: CodexNativeSession,
     AgentType.TRAEX: TraexNativeSession,
     AgentType.CURSOR: CursorNativeSession,
+    AgentType.ANTIGRAVITY: AntigravityNativeSession,
 }
 
 

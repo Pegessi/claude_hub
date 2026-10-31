@@ -19,7 +19,7 @@ def render_bootstrap_prelude(
         const TAB_ID = {json.dumps(tab_id)};
         const AGENT_TYPE = {json.dumps(agent_type_value)};
         const EXECUTION_TARGET = {json.dumps(execution_target_value)};
-        const IS_AGENT_TUI = AGENT_TYPE === 'claude' || AGENT_TYPE === 'codex' || AGENT_TYPE === 'traex' || AGENT_TYPE === 'cursor';
+        const IS_AGENT_TUI = AGENT_TYPE === 'claude' || AGENT_TYPE === 'codex' || AGENT_TYPE === 'traex' || AGENT_TYPE === 'cursor' || AGENT_TYPE === 'antigravity';
         const IS_REMOTE_AGENT_TUI = EXECUTION_TARGET === 'remote' && IS_AGENT_TUI;
         const FULL_HISTORY_LINES = {full_history_lines};
         const INITIAL_AGENT_REPLAY_MIN_LINES = {initial_agent_replay_min_lines};

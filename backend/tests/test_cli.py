@@ -1604,6 +1604,85 @@ def test_api_raw_patch_with_query_and_payload(monkeypatch):
     assert json.loads(result.output) == {"ok": True}
 
 
+def test_tab_create_antigravity_chat_body(monkeypatch):
+    bodies: List[Dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/tabs"
+        bodies.append(json.loads(request.content))
+        return httpx.Response(201, json={"id": "antigravity-chat"})
+
+    patch_get_client(monkeypatch, handler)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "tab",
+            "create",
+            "--name",
+            "Antigravity",
+            "--agent-type",
+            "antigravity",
+            "--session-kind",
+            "chat",
+            "--env",
+            "ANTIGRAVITY_MODEL=gemini-4-argon-high",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert bodies[0]["agent_type"] == "antigravity"
+    assert bodies[0]["session_kind"] == "chat"
+    assert bodies[0]["target"] == "local"
+    assert bodies[0]["solo_mode"] is False
+    assert bodies[0]["env"] == {"ANTIGRAVITY_MODEL": "gemini-4-argon-high"}
+
+
+def test_tab_update_accepts_antigravity_type_and_preserves_model_id(monkeypatch):
+    captured = patch_get_client(
+        monkeypatch, lambda request: httpx.Response(200, json={"id": "tab1"})
+    )
+    result = CliRunner().invoke(
+        cli,
+        [
+            "tab",
+            "update",
+            "tab1",
+            "--agent-type",
+            "antigravity",
+            "--env",
+            "ANTIGRAVITY_MODEL=gemini-3.8-flash-medium",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(captured[0].content) == {
+        "agent_type": "antigravity",
+        "env": {"ANTIGRAVITY_MODEL": "gemini-3.8-flash-medium"},
+    }
+
+
+def test_task_create_does_not_offer_antigravity(monkeypatch):
+    captured = patch_get_client(
+        monkeypatch, lambda request: httpx.Response(201, json={"id": "task1"})
+    )
+    result = CliRunner().invoke(
+        cli,
+        [
+            "task",
+            "create",
+            "workspace1",
+            "--title",
+            "Unsupported managed provider",
+            "--prompt",
+            "Do nothing",
+            "--agent-type",
+            "antigravity",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "antigravity" in result.output
+    assert captured == []
+
+
 def test_tab_create_remote_body(monkeypatch):
     bodies: List[Dict[str, Any]] = []
 

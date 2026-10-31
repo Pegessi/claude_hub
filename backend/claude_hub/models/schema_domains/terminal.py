@@ -71,7 +71,7 @@ class TerminalTabBase(BaseModel):
             raise ValueError("MASO is an HTTP Chat provider; select a Chat session")
         if self.session_kind == SessionKind.CHAT and self.agent_type == AgentType.TERMINAL:
             raise ValueError(
-                "Chat sessions require a Claude, Codex, TraeX, Cursor, or MASO provider"
+                "Chat sessions require a Claude, Codex, TraeX, Cursor, Antigravity, or MASO provider"
             )
         if self.session_kind != SessionKind.CHAT and self.chat_mode != ChatMode.DEFAULT:
             raise ValueError("Chat modes are only available for Chat sessions")
@@ -106,6 +106,11 @@ class TerminalTabCreate(TerminalTabBase):
         # still running the model on the Hub host.
         if self.session_kind == SessionKind.CHAT and self.target == ExecutionTarget.REMOTE:
             raise ValueError(CHAT_REMOTE_UNSUPPORTED)
+        # Antigravity is the local agy/agyx installation (account login + local
+        # proxy/CA live on the Hub host); neither Chat nor a remote terminal can
+        # drive it over SSH.
+        if self.agent_type == AgentType.ANTIGRAVITY and self.target == ExecutionTarget.REMOTE:
+            raise ValueError("Antigravity runs on the Hub host; remote sessions are not supported")
         return self
 
 

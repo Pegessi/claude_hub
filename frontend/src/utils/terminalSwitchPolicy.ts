@@ -1,6 +1,6 @@
 import type { AgentType } from '@/types'
 
-// Agent TUI tabs (Claude/Codex/TraeX/Cursor) render their UI through
+// Agent TUI tabs (Claude/Codex/TraeX/Cursor/Antigravity) render their UI through
 // relative-cursor live writes. A full tmux snapshot replay while the agent is
 // actively writing corrupts xterm's screen state, so tab-switch history replay
 // is gated on the agent being idle/attention (stable screen). Plain `terminal`
@@ -10,7 +10,8 @@ export function isAgentTuiTab(agentType?: AgentType): boolean {
     agentType === 'claude' ||
     agentType === 'codex' ||
     agentType === 'traex' ||
-    agentType === 'cursor'
+    agentType === 'cursor' ||
+    agentType === 'antigravity'
   )
 }
 

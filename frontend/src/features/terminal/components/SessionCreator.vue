@@ -196,9 +196,17 @@
           variant="form"
           :allow-terminal="form.session_kind === 'terminal'"
           :allow-maso="form.session_kind === 'chat'"
+          :allow-antigravity="form.session_kind === 'chat' && form.target === 'local'"
           :type-label="form.session_kind === 'chat' ? 'Chat Provider' : 'Terminal Profile'"
           solo-label="Solo Mode"
         />
+        <p
+          v-if="form.agent_type === 'antigravity'"
+          class="form-hint"
+        >
+          Uses your Google account signed in through agy on this Hub host.
+          API-key billing and extra AI-credit usage are disabled.
+        </p>
         <div
           v-if="form.agent_type === 'maso'"
           class="maso-preflight"
@@ -428,7 +436,7 @@ const {
   () => parseLaunchEnv(form.env_text)?.MASO_BASE_URL,
 )
 const supportsSoloMode = computed(
-  () => form.agent_type === 'claude' || form.agent_type === 'codex' || form.agent_type === 'traex'
+  () => ['claude', 'codex', 'traex', 'antigravity'].includes(form.agent_type)
 )
 const browserCurrentPath = ref('')
 const browserPathInput = ref('')
@@ -520,7 +528,7 @@ function resetEnvForAgentType(agentType: AgentType) {
 }
 function setSessionKind(kind: SessionKind) {
   form.session_kind = kind
-  if (kind === 'terminal' && form.agent_type === 'maso') {
+  if (kind === 'terminal' && ['maso', 'antigravity'].includes(form.agent_type)) {
     form.agent_type = 'claude'
     resetEnvForAgentType(form.agent_type)
   }
@@ -542,6 +550,8 @@ function agentTypeLabel(agentType: AgentType): string {
       return 'MASO'
     case 'cursor':
       return 'Cursor'
+    case 'antigravity':
+      return 'Antigravity'
     case 'terminal':
       return 'Terminal'
     case 'claude':

@@ -111,6 +111,35 @@ def test_run_blocks_and_prints_only_final_text(hub: Hub, tmp_path: Path) -> None
     assert polls[0].url.params["wait"] == "20.0"
 
 
+@pytest.mark.parametrize(
+    ("flag", "expected_solo"), [(None, False), ("--solo", True), ("--no-solo", False)]
+)
+def test_antigravity_uses_full_model_id_and_explicit_solo(
+    hub: Hub, flag: str | None, expected_solo: bool
+) -> None:
+    hub.poll_results = [_turn("completed", final_text="Ready.")]
+    args = [
+        "agent",
+        "run",
+        "--provider",
+        "antigravity",
+        "--model",
+        "gemini-4-argon-high",
+        "--prompt",
+        "Reply briefly",
+    ]
+    if flag:
+        args.append(flag)
+    result = _run(args)
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "Ready.\n"
+    body = hub.bodies()[0]
+    assert body["agent_type"] == "antigravity"
+    assert body["model"] == "gemini-4-argon-high"
+    assert body["solo_mode"] is expected_solo
+    assert "effort" not in body
+
+
 @pytest.mark.parametrize(("status", "code"), [("failed", 1), ("timeout", 124), ("cancelled", 130)])
 def test_run_exit_codes(hub: Hub, status: str, code: int) -> None:
     hub.poll_results = [_turn(status, error="went wrong")]

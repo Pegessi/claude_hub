@@ -41,6 +41,7 @@ class ProcessSwitchMixin(ProcessHost):
                 AgentType.CURSOR,
                 AgentType.TRAEX,
                 AgentType.MASO,
+                AgentType.ANTIGRAVITY,
             }:
                 raise ValueError("switch_env is not supported for this chat provider")
             if self.agent_type == AgentType.MASO:
