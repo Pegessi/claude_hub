@@ -124,16 +124,34 @@ Validation completed:
   recalled the first turn's marker, and Stop produced one cancelled terminal
   event after 0.21 s. The cancellation request itself returned in about 6 ms.
 
-Remaining live-validation limitation:
+Live follow-up after the external network correction:
 
-The first HTTP recovery attempt reached the same verified CLI conversation but
-failed during automatic keyring sign-in. Its log loaded an unexpired token,
+The earlier HTTP recovery attempt reached the same verified CLI conversation
+but failed during automatic keyring sign-in. Its log loaded an unexpired token,
 then reported `keyringAuth: timed out after 10s` / `silent auth failed`, before
-any model request. A separate fresh Chat against the restored shared proxy
-also failed with `authentication failed or timed out`; this is not evidence of
-a cancellation-specific regression. No credentials or authentication settings
-were changed. Real post-Stop/model-change completion remains unverified until
-CLI sign-in is healthy; the corresponding transport/tailer tests pass.
+any model request. Fresh Chats also reproduced the failure. Those failed runs
+remain in the evidence; no credentials or authentication settings were changed
+by this branch.
+
+After the separate network task expanded the proxy's per-host warm connection
+pools, a new isolated HTTP Chat completed the remaining checks at **15:06 on
+2026-10-31**, using unchanged production code from `14a80cd`:
+
+| Check | Result | Completion time |
+| --- | --- | ---: |
+| first turn, Argon High | completed | 12.22 s |
+| next turn, same process | completed; recalled marker | 7.37 s |
+| Stop during generation | exactly one cancelled terminal event | 0.21 s |
+| next turn after Stop | completed; same verified conversation and marker | 11.85 s |
+| change High to Medium | completed; same verified conversation and marker | 16.36 s |
+
+The Stop request itself returned in about 5 ms. The two initial turns shared
+one CLI PID; Stop and the explicit model change each created one replacement.
+All four completed turns had no error events. The test Chat, isolated backend
+and its three CLI processes were removed and verified absent afterward.
+This closes the live post-Stop/model-change validation gap. The model change
+was a functional check only; the performance comparison above still uses High
+for both variants and does not include the network task's separate gains.
 
 Earlier live attempts interrupted by external restarts of the shared proxy
 are retained as failures, not included in the controlled improvement claim.
