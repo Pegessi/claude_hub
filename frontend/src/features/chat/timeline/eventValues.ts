@@ -162,3 +162,66 @@ export function isExactMultiChunkReplay(
   }
   return false
 }
+
+/**
+ * Strip a trailing full-snapshot replay from ``candidate``.
+ *
+ * Returns ``''`` when ``candidate`` is a multi-chunk replay of prior chunks,
+ * the un-duplicated leading tail ``T2`` when ``AgentStreamCoalescer`` merged a
+ * trailing delta ``T2`` with a replayed full snapshot ``T1 + T2`` into a
+ * single ``T2 + T1 + T2`` event, or ``candidate`` unchanged otherwise.
+ */
+export function trimSnapshotReplay(
+  accumulatedText: string,
+  priorChunks: { text: string; count: number }[],
+  candidate: string,
+  candidateChunkCount = 1,
+): string {
+  if (!candidate) return candidate
+  const normalizedCandidateCount =
+    typeof candidateChunkCount === 'number' && candidateChunkCount > 1
+      ? Math.floor(candidateChunkCount)
+      : 1
+  let working = candidate
+  if (
+    normalizedCandidateCount >= 2 &&
+    working.length >= 16 &&
+    working.length % 2 === 0
+  ) {
+    const halfLen = working.length / 2
+    if (working.slice(0, halfLen) === working.slice(halfLen)) {
+      working = working.slice(0, halfLen)
+    }
+  }
+  if (!accumulatedText) return working
+  if (isExactMultiChunkReplay(accumulatedText, priorChunks, working)) return ''
+
+  let prefixLen = 0
+  let matchedChunks = 0
+  for (let index = priorChunks.length - 1; index >= 0; index -= 1) {
+    prefixLen += priorChunks[index].text.length
+    matchedChunks += priorChunks[index].count
+    if (prefixLen >= working.length) break
+
+    const totalLen = prefixLen + working.length
+    if (
+      totalLen % 2 === 0 &&
+      (matchedChunks >= 2 ||
+        prefixLen >= 8 ||
+        (normalizedCandidateCount >= 2 && totalLen >= 16))
+    ) {
+      const fullLen = totalLen / 2
+      const tailLen = fullLen - prefixLen
+      if (tailLen <= 0) continue
+      const tail = working.slice(0, tailLen)
+      const replayed = working.slice(tailLen)
+      if (
+        replayed.endsWith(tail) &&
+        accumulatedText.endsWith(replayed.slice(0, prefixLen))
+      ) {
+        return tail
+      }
+    }
+  }
+  return working
+}

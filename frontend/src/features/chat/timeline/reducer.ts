@@ -4,7 +4,7 @@ import { parseStructuredQuestions } from '@/utils/chatQuestionResponse'
 import { parseSubagent, subagentResultText } from '@/utils/subagentTool'
 import type { TimelineTurn, TimelineTool, TimelineApproval, TimelineAttachment, TimelinePart } from './types'
 import { createReducerState, type ReducerState } from './state'
-import { createTurn, payloadString, payloadRecord, statusText, turnProvenance, appendTextPart, isExactMultiChunkReplay } from './eventValues'
+import { createTurn, payloadString, payloadRecord, statusText, turnProvenance, appendTextPart, trimSnapshotReplay } from './eventValues'
 import { subThreadIdOf, ensureSubthread, applySubthreadEvent, detachToolFromMainParts } from './subthreads'
 
 function resolveTurn(state: ReducerState, event: AgentStreamEvent): TimelineTurn {
@@ -195,21 +195,24 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
       }
       if (!text) break
       const chunks = state.textChunksByTurn.get(toolMapKey) ?? []
-      if (isExactMultiChunkReplay(turn.assistantText, chunks, text)) break
+      const historyChunkCount = event.payload._history_chunk_count
+      const chunkCount =
+        typeof historyChunkCount === 'number' && historyChunkCount > 1
+          ? Math.floor(historyChunkCount)
+          : 1
+      const nextText = trimSnapshotReplay(turn.assistantText, chunks, text, chunkCount)
+      if (!nextText) break
       appendTextPart(
         turn,
         'text',
-        text,
+        nextText,
         event.stream_sequence,
         event.created_at,
         event.payload.plan === true,
       )
-      const historyChunkCount = event.payload._history_chunk_count
       chunks.push({
-        text,
-        count: typeof historyChunkCount === 'number' && historyChunkCount > 1
-          ? Math.floor(historyChunkCount)
-          : 1,
+        text: nextText,
+        count: chunkCount,
       })
       state.textChunksByTurn.set(toolMapKey, chunks)
       mutated = true
@@ -218,7 +221,20 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
     case 'thinking_delta': {
       const text = payloadString(event, 'text')
       if (!text) break
-      appendTextPart(turn, 'thinking', text, event.stream_sequence, event.created_at)
+      const chunks = state.thinkingChunksByTurn.get(toolMapKey) ?? []
+      const historyChunkCount = event.payload._history_chunk_count
+      const chunkCount =
+        typeof historyChunkCount === 'number' && historyChunkCount > 1
+          ? Math.floor(historyChunkCount)
+          : 1
+      const nextText = trimSnapshotReplay(turn.thinkingText, chunks, text, chunkCount)
+      if (!nextText) break
+      appendTextPart(turn, 'thinking', nextText, event.stream_sequence, event.created_at)
+      chunks.push({
+        text: nextText,
+        count: chunkCount,
+      })
+      state.thinkingChunksByTurn.set(toolMapKey, chunks)
       mutated = true
       break
     }

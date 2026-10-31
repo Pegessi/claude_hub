@@ -7,6 +7,23 @@
 
 ## Released
 
+### fix(agent_stream): isolate sub-agent accumulators and trim coalesced snapshot replays
+
+- Scope `AgentStreamAdapter._turn_state` by `(session_id, run_epoch, sub_thread_id)`
+  and pass `parent_tool_use_id` into `NormalizeContext.sub_thread_id` in
+  `ClaudeJsonlAdapter.normalize_line` so concurrent sub-agent `message.id`
+  boundaries never reset the main thread's in-flight text/thinking accumulators
+  (which previously caused final `assistant` snapshots to re-emit the entire
+  streamed message or emit false-positive reconciliation errors).
+- Emit sub-agent reconciliation and result errors as sub-thread `STATUS` events
+  (`provider_status: "error"`) instead of parent-level `ERROR` / `TURN_COMPLETED`,
+  and suppress `TURN_STARTED` on sub-agent `message_start` and `user` records.
+- Teach the frontend timeline reducer (`trimSnapshotReplay`) to trim coalesced
+  `T2 + T1 + T2` tail-plus-snapshot replays and `compact=true` compacted `S + S`
+  replays across both `text_delta` and `thinking_delta`, repairing
+  already-persisted historical streams on load while preserving legitimate
+  single-delta repeats.
+
 ### feat: add Antigravity as a Dot execution backend
 
 - Offer `antigravity` in Dot's Execution backend editor alongside Claude,

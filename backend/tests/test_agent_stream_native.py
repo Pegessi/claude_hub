@@ -1159,6 +1159,201 @@ def test_claude_result_emits_turn_completed() -> None:
     assert events[0].type == AgentStreamEventType.TURN_COMPLETED
 
 
+def test_claude_interleaved_subagent_does_not_duplicate_main_text_or_thinking() -> None:
+    """Interleaved ``parent_tool_use_id`` sub-agent records must not clobber the
+    main thread's ``_TurnAccumulator`` or cause final ``assistant`` snapshots to
+    re-emit already-streamed main text/thinking (or fail reconciliation).
+    """
+    adapter = ClaudeJsonlAdapter()
+    ctx = _ctx()
+    emitted: List[AgentStreamEvent] = []
+
+    records: List[Dict[str, Any]] = [
+        {
+            "type": "stream_event",
+            "event": {"type": "message_start", "message": {"id": "m-main", "role": "assistant"}},
+        },
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "先给用户一个简短告知"},
+            },
+        },
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {
+                    "type": "text_delta",
+                    "text": "实现和针对性验证已完成，正在等待最后的完整后端回归与独立审查结果；随后会给出分支/S",
+                },
+            },
+        },
+        # Background sub-agent starts and emits its first block with its own message.id
+        {
+            "type": "stream_event",
+            "parent_tool_use_id": "call_sub_1",
+            "event": {"type": "message_start", "message": {"id": "m-sub", "role": "assistant"}},
+        },
+        {
+            "type": "assistant",
+            "parent_tool_use_id": "call_sub_1",
+            "message": {
+                "id": "m-sub",
+                "content": [{"type": "thinking", "thinking": "Subagent checking files."}],
+            },
+        },
+        # Main agent streams remaining deltas before its final snapshot arrives
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "进展。"},
+            },
+        },
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "text_delta", "text": "HA 与验证汇总。"},
+            },
+        },
+        # Sub-agent emits its second block sharing m-sub; must not collide with main text
+        {
+            "type": "assistant",
+            "parent_tool_use_id": "call_sub_1",
+            "message": {
+                "id": "m-sub",
+                "content": [{"type": "text", "text": "Subagent finished check."}],
+            },
+        },
+        # Main agent emits authoritative snapshots for m-main
+        {
+            "type": "assistant",
+            "message": {
+                "id": "m-main",
+                "content": [{"type": "thinking", "thinking": "先给用户一个简短告知进展。"}],
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "id": "m-main",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "实现和针对性验证已完成，正在等待最后的完整后端回归与独立审查结果；随后会给出分支/SHA 与验证汇总。",
+                    }
+                ],
+            },
+        },
+        {"type": "result", "subtype": "success"},
+    ]
+
+    for record in records:
+        emitted.extend(adapter.normalize_line(record, ctx))
+
+    main_text = "".join(
+        e.payload["text"]
+        for e in emitted
+        if e.type == AgentStreamEventType.TEXT_DELTA and not e.payload.get("subagent_thread")
+    )
+    main_thinking = "".join(
+        e.payload["text"]
+        for e in emitted
+        if e.type == AgentStreamEventType.THINKING_DELTA and not e.payload.get("subagent_thread")
+    )
+    sub_text = "".join(
+        e.payload["text"]
+        for e in emitted
+        if e.type == AgentStreamEventType.TEXT_DELTA
+        and e.payload.get("subagent_thread") == "call_sub_1"
+    )
+    errors = [e for e in emitted if e.type == AgentStreamEventType.ERROR]
+    turn_starts = [e for e in emitted if e.type == AgentStreamEventType.TURN_STARTED]
+
+    assert (
+        main_text
+        == "实现和针对性验证已完成，正在等待最后的完整后端回归与独立审查结果；随后会给出分支/SHA 与验证汇总。"
+    )
+    assert main_thinking == "先给用户一个简短告知进展。"
+    assert sub_text == "Subagent finished check."
+    assert errors == []
+    assert len(turn_starts) == 1
+    assert adapter._turn_state == {}
+
+
+def test_claude_subagent_reconcile_mismatch_and_lifecycle_stay_subthread_scoped() -> None:
+    """Sub-agent reconciliation errors and user/result records must stay inside
+    ``subagent_thread`` as STATUS (``provider_status="error"``) and never emit
+    parent-level ``TURN_STARTED``, ``TURN_COMPLETED``, or ``ERROR``.
+    """
+    adapter = ClaudeJsonlAdapter()
+    ctx = _ctx()
+    emitted: List[AgentStreamEvent] = []
+
+    records: List[Dict[str, Any]] = [
+        {
+            "type": "user",
+            "parent_tool_use_id": "call_sub_2",
+            "message": {"content": "Subagent prompt text"},
+        },
+        {
+            "type": "stream_event",
+            "parent_tool_use_id": "call_sub_2",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "streamed prefix"},
+            },
+        },
+        {
+            "type": "assistant",
+            "parent_tool_use_id": "call_sub_2",
+            "message": {
+                "id": "m-sub-mismatch",
+                "content": [{"type": "text", "text": "streamed prefix"}],
+            },
+        },
+        {
+            "type": "assistant",
+            "parent_tool_use_id": "call_sub_2",
+            "message": {
+                "id": "m-sub-mismatch",
+                "content": [{"type": "text", "text": "divergent snapshot"}],
+            },
+        },
+        {
+            "type": "result",
+            "parent_tool_use_id": "call_sub_2",
+            "is_error": True,
+            "result": "subagent failed",
+        },
+    ]
+
+    for record in records:
+        emitted.extend(adapter.normalize_line(record, ctx))
+
+    assert not any(
+        e.type
+        in {
+            AgentStreamEventType.TURN_STARTED,
+            AgentStreamEventType.TURN_COMPLETED,
+            AgentStreamEventType.ERROR,
+        }
+        for e in emitted
+    )
+    status_events = [e for e in emitted if e.type == AgentStreamEventType.STATUS]
+    assert len(status_events) == 2
+    assert all(e.payload.get("subagent_thread") == "call_sub_2" for e in status_events)
+    assert all(e.payload.get("provider_status") == "error" for e in status_events)
+
+
 @pytest.mark.parametrize(
     ("fields", "accepted"),
     [
