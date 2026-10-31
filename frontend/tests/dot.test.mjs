@@ -101,6 +101,8 @@ test('first-pass rate and review coverage read plainly', () => {
 test('Dot execution editor replaces provider env and preserves recoverable drafts', () => {
   const editor = read('../src/features/dot/DotExecutionEditor.vue')
   const panel = read('../src/features/dot/DotPanel.vue')
+  assert.ok(source.includes("'antigravity'"), 'Antigravity is a Dot backend')
+  assert.ok(editor.includes("antigravity: 'Antigravity'"))
   assert.match(panel, /<DotExecutionEditor[\s\S]*@busy-change="setExecutionBusy"[\s\S]*@updated="loadSection"/)
   assert.ok(editor.includes("draftPreset.value = defaultLaunchEnvPresetForAgent(provider)"))
   assert.ok(editor.includes("draftEnv.value = envFromText(defaultPresetTextForAgent(provider))"))

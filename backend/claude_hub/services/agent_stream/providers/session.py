@@ -787,11 +787,15 @@ class SessionCore(ABC):
             return ["--resume", sid]
         return []
 
-    def _persist_conversation_id(self, cid: str) -> None:
-        """Capture and persist the provider conversation id for resume."""
+    def _persist_conversation_id(self, cid: str, *, force: bool = False) -> None:
+        """Capture and persist the provider conversation id for resume.
+
+        ``force`` re-runs the persistence callback for an id already held in
+        memory; deferred rotations use it when adoption commits the candidate.
+        """
         if not cid:
             return
-        if cid == self._conversation_id and self._conversation_id_verified:
+        if not force and cid == self._conversation_id and self._conversation_id_verified:
             return
         self._conversation_id = cid
         self._conversation_id_verified = True

@@ -1,7 +1,7 @@
 // Thin client for /api/dot (Dot, the persistent personal agent; see docs/DOT.md).
 
 export type DotCardKind = 'user' | 'work' | 'knowledge' | 'concept'
-export type DotProvider = 'claude' | 'codex' | 'cursor' | 'traex' | 'maso'
+export type DotProvider = 'claude' | 'codex' | 'cursor' | 'antigravity' | 'traex' | 'maso'
 
 export interface DotExecution {
   tab_id: string | null

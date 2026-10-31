@@ -2,7 +2,7 @@
   "antigravity": {
     "approval_channels": {
       "direct_chat": "oneshot_steer",
-      "dot": "none",
+      "dot": "oneshot_steer",
       "managed_chat": "none",
       "managed_terminal": "none",
       "resident": "none",
@@ -54,9 +54,10 @@
     },
     "solo": "bypass_flag",
     "stream_source": "stdout_stream_json",
-    "supports_conversation_rotation": false,
+    "supports_conversation_rotation": true,
     "surfaces": [
       "direct_chat",
+      "dot",
       "subagent",
       "terminal_tab"
     ],
