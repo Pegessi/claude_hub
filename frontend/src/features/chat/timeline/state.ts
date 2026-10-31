@@ -10,6 +10,7 @@ export interface ReducerState {
   byTurnId: Map<string, TimelineTurn>
   toolsByTurn: Map<string, Map<string, TimelineTool>>
   textChunksByTurn: Map<string, { text: string; count: number }[]>
+  thinkingChunksByTurn: Map<string, { text: string; count: number }[]>
   legacyCurrent: TimelineTurn | null
   /** Tool/approval call ids already attributed to a turn with a real turn id.
    *  A later null-turn event carrying one of these ids is a provider replay. */
@@ -36,6 +37,7 @@ export function createReducerState(): ReducerState {
     byTurnId: new Map(),
     toolsByTurn: new Map(),
     textChunksByTurn: new Map(),
+    thinkingChunksByTurn: new Map(),
     legacyCurrent: null,
     attributedToolIds: new Set(),
     threadsByTurn: new Map(),

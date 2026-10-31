@@ -188,6 +188,58 @@ test('historical replay repair supports multiple assistant messages in one turn'
   assert.equal(turns[0].assistantText, 'poemexplain')
 })
 
+test('coalesced tail-plus-snapshot replay is trimmed to the non-duplicated tail for text and thinking', () => {
+  const events = [
+    makeEvent(1, 'turn_started', { summary: 'status' }, { turn_id: 'coalesced-replay' }),
+    makeEvent(2, 'thinking_delta', { text: '先给用户一个简短告知' }, { turn_id: 'coalesced-replay' }),
+    makeEvent(3, 'thinking_delta', {
+      text: '进展。先给用户一个简短告知进展。',
+    }, { turn_id: 'coalesced-replay' }),
+    makeEvent(4, 'text_delta', {
+      text: '实现和针对性验证已完成，正在等待最后的完整后端回归与独立审查结果；随后会给出分支/S',
+    }, { turn_id: 'coalesced-replay' }),
+    makeEvent(5, 'thinking_delta', {
+      text: 'Subagent checking files.',
+      subagent_thread: 'call_sub_1',
+    }, { turn_id: 'coalesced-replay' }),
+    makeEvent(6, 'text_delta', {
+      text: 'HA 与验证汇总。实现和针对性验证已完成，正在等待最后的完整后端回归与独立审查结果；随后会给出分支/SHA 与验证汇总。',
+    }, { turn_id: 'coalesced-replay' }),
+  ]
+  const turns = groupEventsIntoTurns(events)
+  assert.equal(
+    turns[0].assistantText,
+    '实现和针对性验证已完成，正在等待最后的完整后端回归与独立审查结果；随后会给出分支/SHA 与验证汇总。',
+  )
+  assert.equal(turns[0].thinkingText, '先给用户一个简短告知进展。')
+})
+
+test('compacted self-doubled and short-prefix snapshot replays are repaired under compact=true', () => {
+  const selfDoubledThinking =
+    'Subagent 已经跑完 pytest，正在做 git status 检查。由于 background task 还在跑，先简短告知进展。'
+  const events = [
+    makeEvent(1, 'turn_started', { summary: 'compact history' }, { turn_id: 'compact-replay' }),
+    // Case 1: adjacent chunks compacted into a single S + S event
+    makeEvent(2, 'thinking_delta', {
+      text: selfDoubledThinking + selfDoubledThinking,
+      _history_chunk_count: 19,
+    }, { turn_id: 'compact-replay' }),
+    // Case 2: 1-chunk short prefix (< 8 chars) before subagent event + compacted tail+replay
+    makeEvent(3, 'text_delta', { text: 'While' }, { turn_id: 'compact-replay' }),
+    makeEvent(4, 'thinking_delta', {
+      text: 'child step',
+      subagent_thread: 'call_sub_2',
+    }, { turn_id: 'compact-replay' }),
+    makeEvent(5, 'text_delta', {
+      text: ' waiting on the suite, I will check the logs.While waiting on the suite, I will check the logs.',
+      _history_chunk_count: 12,
+    }, { turn_id: 'compact-replay' }),
+  ]
+  const turns = groupEventsIntoTurns(events)
+  assert.equal(turns[0].thinkingText, selfDoubledThinking)
+  assert.equal(turns[0].assistantText, 'While waiting on the suite, I will check the logs.')
+})
+
 test('a legitimate repeated single delta remains visible', () => {
   const events = [
     makeEvent(1, 'turn_started', { summary: 'repeat' }, { turn_id: 'repeat' }),
@@ -196,6 +248,21 @@ test('a legitimate repeated single delta remains visible', () => {
   ]
   const turns = groupEventsIntoTurns(events)
   assert.equal(turns[0].assistantText, 'haha')
+})
+
+test('a legitimate repeated long single delta (>= 8 chars) remains visible for text and thinking', () => {
+  const longText = 'echo a long sentence\n'
+  const longThought = 'this is a long thought clause. '
+  const events = [
+    makeEvent(1, 'turn_started', { summary: 'long repeat' }, { turn_id: 'long-repeat' }),
+    makeEvent(2, 'text_delta', { text: longText }, { turn_id: 'long-repeat' }),
+    makeEvent(3, 'text_delta', { text: longText }, { turn_id: 'long-repeat' }),
+    makeEvent(4, 'thinking_delta', { text: longThought }, { turn_id: 'long-repeat' }),
+    makeEvent(5, 'thinking_delta', { text: longThought }, { turn_id: 'long-repeat' }),
+  ]
+  const turns = groupEventsIntoTurns(events)
+  assert.equal(turns[0].assistantText, longText + longText)
+  assert.equal(turns[0].thinkingText, longThought + longThought)
 })
 
 test('thinking_delta appends to thinking text within the current turn', () => {

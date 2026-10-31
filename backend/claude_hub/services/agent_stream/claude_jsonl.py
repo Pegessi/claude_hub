@@ -14,6 +14,7 @@ Defensive: ``normalize_line`` skips any line it cannot parse (never raises);
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -113,6 +114,7 @@ _SUBAGENT_EVENT_TYPES = frozenset(
         AgentStreamEventType.THINKING_DELTA,
         AgentStreamEventType.TOOL_CALL_STARTED,
         AgentStreamEventType.TOOL_CALL_COMPLETED,
+        AgentStreamEventType.STATUS,
     }
 )
 
@@ -165,19 +167,21 @@ class ClaudeJsonlAdapter(AgentStreamAdapter):
     # ── normalization ────────────────────────────────────────────────────────
 
     def normalize_line(self, raw: Dict[str, Any], ctx: NormalizeContext) -> List[AgentStreamEvent]:
-        events = self._normalize_record(raw, ctx)
         parent = raw.get("parent_tool_use_id") if isinstance(raw, dict) else None
-        if not isinstance(parent, str) or not parent:
+        sub_thread = parent if isinstance(parent, str) and parent else None
+        record_ctx = replace(ctx, sub_thread_id=sub_thread) if sub_thread else ctx
+        events = self._normalize_record(raw, record_ctx)
+        if not sub_thread:
             return events
         # A Task sub-agent's own messages: attribute them to its thread, so its
         # text never becomes the parent's answer (journal, chat apps).
         for event in events:
             if event.type not in _SUBAGENT_EVENT_TYPES or event.payload.get("subagent_thread"):
                 continue
-            event.payload = {**event.payload, "subagent_thread": parent}
+            event.payload = {**event.payload, "subagent_thread": sub_thread}
             for role in ("assistant", "thinking"):
                 if event.message_id == f"{ctx.turn_id}:{role}":
-                    event.message_id = ctx._sub_message_id(parent, role)
+                    event.message_id = ctx._sub_message_id(sub_thread, role)
         return events
 
     def _normalize_record(
@@ -211,6 +215,17 @@ class ClaudeJsonlAdapter(AgentStreamAdapter):
             self._clear_turn_state(ctx)
             is_error = bool(raw.get("is_error", False))
             subtype = raw.get("subtype")
+            if ctx.sub_thread_id:
+                if is_error or subtype == "error":
+                    err = raw.get("result") or raw.get("error") or "turn failed"
+                    if isinstance(err, str) and err:
+                        events.append(
+                            ctx.event(
+                                AgentStreamEventType.STATUS,
+                                {"text": err, "provider_status": "error"},
+                            )
+                        )
+                return events
             if is_error or subtype == "error":
                 err = raw.get("result") or raw.get("error") or "turn failed"
                 if isinstance(err, str) and err:
@@ -255,7 +270,8 @@ class ClaudeJsonlAdapter(AgentStreamAdapter):
             raw_message_id = msg.get("id") if isinstance(msg, dict) else None
             message_id = raw_message_id if isinstance(raw_message_id, str) else None
             self._begin_provider_message(ctx, message_id)
-            events.append(ctx.event(AgentStreamEventType.TURN_STARTED, {"summary": ""}))
+            if not ctx.sub_thread_id:
+                events.append(ctx.event(AgentStreamEventType.TURN_STARTED, {"summary": ""}))
         elif etype == "content_block_start":
             block = event.get("content_block")
             if isinstance(block, dict) and block.get("type") == "tool_use":
@@ -458,17 +474,21 @@ class ClaudeJsonlAdapter(AgentStreamAdapter):
                 if isinstance(text, str) and text:
                     suffix = self._reconcile_text(ctx, text)
                     if suffix is None:
-                        events.append(
-                            ctx.event(
-                                AgentStreamEventType.ERROR,
-                                {
-                                    "message": (
-                                        "assistant final text does not match streamed deltas; "
-                                        "cannot safely reconcile"
-                                    )
-                                },
-                            )
+                        msg_err = (
+                            "assistant final text does not match streamed deltas; "
+                            "cannot safely reconcile"
                         )
+                        if ctx.sub_thread_id:
+                            events.append(
+                                ctx.event(
+                                    AgentStreamEventType.STATUS,
+                                    {"text": msg_err, "provider_status": "error"},
+                                )
+                            )
+                        else:
+                            events.append(
+                                ctx.event(AgentStreamEventType.ERROR, {"message": msg_err})
+                            )
                     elif suffix:
                         events.append(ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": suffix}))
             elif btype == "thinking":
@@ -476,17 +496,21 @@ class ClaudeJsonlAdapter(AgentStreamAdapter):
                 if isinstance(thinking, str) and thinking:
                     suffix = self._reconcile_thinking(ctx, thinking)
                     if suffix is None:
-                        events.append(
-                            ctx.event(
-                                AgentStreamEventType.ERROR,
-                                {
-                                    "message": (
-                                        "assistant final thinking does not match streamed deltas; "
-                                        "cannot safely reconcile"
-                                    )
-                                },
-                            )
+                        msg_err = (
+                            "assistant final thinking does not match streamed deltas; "
+                            "cannot safely reconcile"
                         )
+                        if ctx.sub_thread_id:
+                            events.append(
+                                ctx.event(
+                                    AgentStreamEventType.STATUS,
+                                    {"text": msg_err, "provider_status": "error"},
+                                )
+                            )
+                        else:
+                            events.append(
+                                ctx.event(AgentStreamEventType.ERROR, {"message": msg_err})
+                            )
                     elif suffix:
                         events.append(
                             ctx.event(AgentStreamEventType.THINKING_DELTA, {"text": suffix})
@@ -537,7 +561,7 @@ class ClaudeJsonlAdapter(AgentStreamAdapter):
             # Strip the one-shot fork-seed history block the transport
             # prepends to a forked tab's first turn for the same reason.
             content = strip_fork_seed_history(content)
-            if content.strip():
+            if content.strip() and not ctx.sub_thread_id:
                 events.append(ctx.event(AgentStreamEventType.TURN_STARTED, {"summary": content}))
             return events
         if isinstance(content, list):

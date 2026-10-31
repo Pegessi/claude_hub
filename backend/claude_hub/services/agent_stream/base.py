@@ -108,6 +108,14 @@ class NormalizeContext:
     # on one-shot/transcript paths disables that distinction (safe fallback:
     # everything stays on the main stream, the pre-feature shape).
     main_thread_id: Optional[str] = None
+    # Child sub-agent thread id (e.g. Claude ``parent_tool_use_id``) when a
+    # record belongs to a background/nested sub-agent rather than the main
+    # turn. Scoping ``_TurnAccumulator`` by ``sub_thread_id`` prevents
+    # interleaved sub-agent ``message.id`` boundaries from resetting the main
+    # agent's in-flight text/thinking accumulators (which otherwise causes the
+    # main agent's final ``assistant`` snapshot to re-emit the full text a
+    # second time or fail reconciliation).
+    sub_thread_id: Optional[str] = None
     now: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def _sub_message_id(self, sub_thread_id: Optional[str], role: str) -> str:
@@ -239,14 +247,16 @@ class AgentStreamAdapter:
         return spec.tool_timeline if spec is not None else False
 
     def __init__(self) -> None:
-        # Per-turn accumulators keyed by (session_id, run_epoch). Used to
-        # reconcile final full-text snapshots against already-emitted deltas
-        # so the assistant text is never duplicated.
-        self._turn_state: Dict[Tuple[str, int], _TurnAccumulator] = {}
+        # Per-turn accumulators keyed by (session_id, run_epoch, sub_thread_id).
+        # Used to reconcile final full-text snapshots against already-emitted
+        # deltas so the assistant text is never duplicated, while isolating
+        # main-thread state from concurrent sub-agent threads.
+        self._turn_state: Dict[Tuple[str, int, str], _TurnAccumulator] = {}
 
-    def _turn_key(self, ctx: NormalizeContext) -> Tuple[str, int]:
+    def _turn_key(self, ctx: NormalizeContext) -> Tuple[str, int, str]:
         epoch = ctx.run_epoch if ctx.run_epoch is not None else 0
-        return (ctx.session_id, epoch)
+        sub_thread = ctx.sub_thread_id if isinstance(ctx.sub_thread_id, str) else ""
+        return (ctx.session_id, epoch, sub_thread)
 
     def _get_turn_state(self, ctx: NormalizeContext) -> _TurnAccumulator:
         key = self._turn_key(ctx)
@@ -257,7 +267,15 @@ class AgentStreamAdapter:
         return state
 
     def _clear_turn_state(self, ctx: NormalizeContext) -> None:
-        self._turn_state.pop(self._turn_key(ctx), None)
+        epoch = ctx.run_epoch if ctx.run_epoch is not None else 0
+        if isinstance(ctx.sub_thread_id, str) and ctx.sub_thread_id:
+            self._turn_state.pop((ctx.session_id, epoch, ctx.sub_thread_id), None)
+            return
+        stale_keys = [
+            key for key in self._turn_state if key[0] == ctx.session_id and key[1] == epoch
+        ]
+        for key in stale_keys:
+            self._turn_state.pop(key, None)
 
     def _reset_message_state(self, ctx: NormalizeContext) -> None:
         """Reset per-message text/thinking accumulators and tool buffers.
