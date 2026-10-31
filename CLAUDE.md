@@ -110,6 +110,7 @@ independent review and human-acceptance requirements.
 - [Removal of the unpublished ChatWork layer](docs/working-logs/2026-10-08-remove-chatwork.md)
 - [Recent behavior](CHANGELOG.md), [bug symptom history](WORKLOG.md)
 - [Terminal debugging](docs/terminal-debugging.md), [deployment](docs/DEPLOYMENT.md)
+- [Antigravity CLI region-restriction bypass and warm-pool proxy](docs/ANTIGRAVITY.md)
 - [Chat history loading, lazy execution details and performance checks](docs/working-logs/2026-10-18-chat-history-lazy-load.md)
 - [Feedback lessons](docs/working-logs/lessons-catalog.md)
 
