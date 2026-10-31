@@ -1,31 +1,30 @@
-"""AntigravitySession: native transport for the Antigravity CLI (``agy``).
+"""Persistent stream-json transport for the Antigravity CLI (``agy``).
 
-Each Chat turn spawns ``agyx --input-format stream-json
---output-format stream-json`` and writes one NDJSON user record on stdin::
+A Chat keeps one ``agyx --input-format stream-json --output-format stream-json``
+process and submits one newline-terminated user record per turn. ``result`` ends
+that turn, not the process; keeping stdin open avoids repeating CLI sign-in,
+model discovery and workspace initialization. ``--conversation`` is needed only
+when replacing the process after Stop or a launch-configuration change.
 
-    {"event": "user", "message": {"content": "<prompt>"}}
-
-stdout is agy's NDJSON event stream: ``init`` (carrying the conversation id),
-``step_update`` (tools and the assistant text) and a terminal ``result``.
-The conversation id from ``init`` is persisted so the next turn resumes with
-``--conversation <id>``.
-
-``agyx`` is a thin local wrapper (``~/.local/bin/agyx``) that provides the
-proxy/TLS environment the consumer sign-in needs; the binary name Hub spawns
-is therefore the wrapper, never ``agy`` directly.
+``agyx`` is the existing local proxy/TLS wrapper; Hub does not manage its shared
+proxy or read the CLI's credentials or private conversation database.
 """
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ....models import ChatMode, ManagedSession, StreamModeOption
 from .process import ProcessSession
 
+_IDLE_EXIT_GRACE_SECONDS = 2.0
+
 
 class AntigravitySession(ProcessSession):
-    """Antigravity CLI one-shot transport over stream-json stdout."""
+    """One serial stream-json conversation per live Chat transport."""
 
     adapter_id = "antigravity-native"
     schema_version = 1
@@ -43,11 +42,122 @@ class AntigravitySession(ProcessSession):
             seed_history=seed_history,
             on_seed_consumed=on_seed_consumed,
         )
+        # The push consumer and the first send may both start the transport.
+        self._start_lock = asyncio.Lock()
+        self._launch_fingerprint: Optional[str] = None
 
     def accepts_notification(self, record: Dict[str, Any]) -> bool:
-        # One-shot process: every stdout record belongs to the single turn in
-        # flight. agy has no background-task results like resumed Claude.
+        # The CLI runs one input line at a time and ends it with ``result``;
+        # SessionCore keeps the next line gated until that result is consumed.
         return True
+
+    def _configuration_fingerprint(self, provider_env: Dict[str, str]) -> str:
+        # A conversation id learned from init is not a launch-setting change.
+        # Hash env values rather than keeping another copy of credentials.
+        encoded = json.dumps(
+            {
+                "env": provider_env,
+                "mode": self._current_mode,
+                "solo": self.session.solo_mode,
+                "cwd": self._cwd,
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    async def start(self) -> None:
+        async with self._start_lock:
+            if (
+                self._started
+                and self._process is not None
+                and self._process.returncode is None
+                and self._reader_task is not None
+                and not self._reader_task.done()
+            ):
+                return
+            self._started = False
+            self._handshake_complete = False
+            if self._process is not None or self._reader_task is not None:
+                await self._terminate_process()
+            provider_env = await self._build_provider_env()
+            fingerprint = self._configuration_fingerprint(provider_env)
+            cmd = self._build_command(provider_env)
+            self._stderr_buffer = b""
+            self._exit_error = None
+            try:
+                self._process = await self._spawn_subprocess(cmd, provider_env)
+            except FileNotFoundError:
+                self._last_error = f"provider binary not found: {cmd[0]}"
+                raise
+            except OSError as exc:
+                self._last_error = f"failed to launch provider: {exc}"
+                raise
+            # The shared NDJSON reader also handles a persistent stream: its
+            # generation changes on process replacement, never at turn end.
+            self._reader_task = asyncio.create_task(
+                self._drain_oneshot_stdout(self._stdout_generation)
+            )
+            self._stderr_task = asyncio.create_task(self._drain_stderr())
+            self._launch_fingerprint = fingerprint
+            self._last_error = None
+            self._started = True
+            # agy has no independent RPC handshake. It may emit init only
+            # after input, so writable stdin is sufficient for send readiness.
+            self._handshake_complete = True
+            if not self._conversation_id_verified:
+                self._hub_runtime_guidance_injected = False
+            self._runtime.logger().info(
+                "Antigravity CLI started for session %s (pid=%s)",
+                self.session.id,
+                self._process.pid,
+            )
+
+    async def stop(self) -> None:
+        async with self._start_lock:
+            self._started = False
+            self._handshake_complete = False
+            self._launch_fingerprint = None
+            process = self._process
+            try:
+                if (
+                    not self.turn_in_flight
+                    and process is not None
+                    and process.returncode is None
+                    and process.stdin is not None
+                ):
+                    # Retire before EOF so the consumer cannot treat this
+                    # intentional idle shutdown as a provider crash.
+                    self._invalidate_stdout_stream()
+                    try:
+                        process.stdin.close()
+                        await asyncio.wait_for(process.wait(), timeout=_IDLE_EXIT_GRACE_SECONDS)
+                    except (asyncio.TimeoutError, OSError):
+                        pass
+            finally:
+                # Active cancellation skips EOF (which would wait for the
+                # turn). The shared teardown also reaps surviving children
+                # after a graceful exit or an expired idle grace period.
+                await super().stop()
+
+    async def _prepare_for_send(self) -> None:
+        if self.turn_in_flight:
+            return
+        await self.start()
+        provider_env = await self._build_provider_env()
+        if self._configuration_fingerprint(provider_env) != self._launch_fingerprint:
+            # Model/mode/permissions are process flags; stream-json does not
+            # support runtime control messages. Resume only between turns.
+            self._runtime.logger().info(
+                "Restarting Antigravity CLI after launch configuration changed for session %s",
+                self.session.id,
+            )
+            await self.restart_for_recovery()
+
+    async def cancel_active_turn(self) -> None:
+        if self.turn_in_flight:
+            # Closing stdin waits for the current turn rather than cancelling
+            # it. Reuse the shared bounded process-group teardown and resume.
+            await self.restart_for_recovery()
 
     def available_modes(self) -> List[StreamModeOption]:
         # The probe takes the binary name (agyx), not the provider id.
@@ -103,11 +213,23 @@ class AntigravitySession(ProcessSession):
         return self._build_env()
 
     async def _send_text(self, text: str) -> None:
-        provider_env = await self._build_provider_env()
+        await self.start()
         self.check_delivery_admission()
-        cmd = self._build_command(provider_env)
-        stdin_text = self._build_stdin(text)
-        await self._spawn_oneshot(cmd, stdin_text)
+        process = self._process
+        if process is None or process.stdin is None:
+            raise RuntimeError("Antigravity CLI stdin is unavailable")
+        try:
+            # EOF is reserved for shutdown; each complete NDJSON line starts
+            # one turn in the already initialized CLI conversation.
+            process.stdin.write((self._build_stdin(text) + "\n").encode("utf-8"))
+            await process.stdin.drain()
+        except OSError as exc:
+            # Delivery may have begun. Do not resend implicitly, and retire
+            # the stream so a partial submission cannot leak into a retry.
+            self._client_requested_stop = True
+            await self.stop()
+            self._last_error = "Antigravity CLI stdin closed while sending a message"
+            raise RuntimeError(self._last_error) from exc
 
     def maybe_capture_conversation_id(self, record: Dict[str, Any]) -> None:
         """Capture the conversation id from agy's ``init`` record."""

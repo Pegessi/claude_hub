@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
+import importlib
+import json
+from collections.abc import AsyncIterator
 from datetime import datetime, timezone
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import SecretStr
 
 from claude_hub.models import (
+    AgentStreamEvent,
+    AgentStreamEventType,
     AgentType,
     ChatMode,
     ExecutionTarget,
@@ -19,6 +28,9 @@ from claude_hub.services.agent_stream.antigravity_events import AntigravityEvent
 from claude_hub.services.agent_stream.base import NormalizeContext
 from claude_hub.services.agent_stream.native import AntigravityNativeSession
 from claude_hub.services.agent_stream.registry import get_adapter
+from claude_hub.services.agent_stream.store import AgentStreamStore
+from claude_hub.services.agent_stream.tailer import SessionTailer
+from tests.test_agent_stream_native import _FakeProcess, _FakeStream
 
 
 def _session(**overrides: Any) -> ManagedSession:
@@ -286,6 +298,7 @@ def test_adapter_usage_maps_agy_fields() -> None:
             "result": {
                 "status": "SUCCESS",
                 "response": "x",
+                "num_turns": 1,
                 "usage": {
                     "input_tokens": 100,
                     "output_tokens": 5,
@@ -298,8 +311,14 @@ def test_adapter_usage_maps_agy_fields() -> None:
         _ctx("usage"),
     )
     completed = next(e for e in out if e.type.value == "turn_completed").payload["usage"]
-    assert completed["reasoning"] == 7
-    assert completed["cached"] == 20
+    assert completed == {
+        "input": 120,
+        "cached": 20,
+        "output": 5,
+        "reasoning": 7,
+        "total": 105,
+        "source": "antigravity",
+    }
 
 
 def test_adapter_result_response_without_step_delta_emits_once() -> None:
@@ -362,6 +381,7 @@ def test_adapter_ignores_unknown_records() -> None:
 
 def test_remote_tab_rejected() -> None:
     import pytest
+
     from claude_hub.models import SessionKind, TerminalTabCreate
 
     with pytest.raises(ValueError, match="Hub host"):
@@ -371,3 +391,853 @@ def test_remote_tab_rejected() -> None:
             session_kind=SessionKind.TERMINAL,
             target=ExecutionTarget.REMOTE,
         )
+
+
+def _usage_result(
+    usage: dict[str, Any], num_turns: int | None, *, conversation_id: str = "conversation-1"
+) -> dict[str, Any]:
+    return {
+        "event": "result",
+        "result": {
+            "conversation_id": conversation_id,
+            "status": "SUCCESS",
+            "response": "answer",
+            "num_turns": num_turns,
+            "usage": usage,
+        },
+    }
+
+
+def _step_usage(
+    index: int, usage: dict[str, Any], *, state: str = "DONE", step_type: str = "agent_response"
+) -> dict[str, Any]:
+    return {
+        "event": "step_update",
+        "step_update": {
+            "step_index": index,
+            "state": state,
+            "step_type": step_type,
+            "usage": usage,
+        },
+    }
+
+
+def test_adapter_usage_uses_per_step_totals_across_persistent_turns() -> None:
+    adapter = AntigravityEventAdapter()
+    first = _ctx("first")
+    adapter.normalize_line(_step_usage(1, {"input_tokens": 8878, "output_tokens": 38}), first)
+    adapter.normalize_line(_usage_result({"input_tokens": 8878, "output_tokens": 38}, 1), first)
+    second = _ctx("second")
+    current = {
+        "input_tokens": 2184,
+        "cache_read_tokens": 6824,
+        "output_tokens": 163,
+        "thinking_tokens": 108,
+        "total_tokens": 2347,
+    }
+    adapter.normalize_line(_step_usage(3, current), second)
+    out = adapter.normalize_line(
+        _usage_result({"input_tokens": 11062, "cache_read_tokens": 6824, "output_tokens": 201}, 2),
+        second,
+    )
+    assert out[-1].payload["usage"] == {
+        "input": 9008,
+        "cached": 6824,
+        "output": 163,
+        "reasoning": 108,
+        "total": 2347,
+        "source": "antigravity",
+    }
+
+
+def test_adapter_usage_deduplicates_step_snapshots_and_sums_checkpoints() -> None:
+    adapter = AntigravityEventAdapter()
+    ctx = _ctx("snapshots")
+    adapter.normalize_line(
+        _step_usage(4, {"input_tokens": 500, "output_tokens": 1}, state="ACTIVE"), ctx
+    )
+    final = _step_usage(4, {"input_tokens": 10, "output_tokens": 3, "cache_read_tokens": 20})
+    adapter.normalize_line(final, ctx)
+    adapter.normalize_line(final, ctx)
+    adapter.normalize_line(
+        _step_usage(5, {"input_tokens": 2, "output_tokens": 1}, step_type="checkpoint"), ctx
+    )
+    out = adapter.normalize_line(
+        _usage_result({"input_tokens": 9999, "output_tokens": 999}, 9), ctx
+    )
+    assert out[-1].payload["usage"] == {
+        "input": 32,
+        "cached": 20,
+        "output": 4,
+        "reasoning": 0,
+        "total": 16,
+        "source": "antigravity",
+    }
+
+
+def test_adapter_usage_result_only_fallback_requires_contiguous_counter() -> None:
+    adapter = AntigravityEventAdapter()
+    first = adapter.normalize_line(
+        _usage_result({"input_tokens": 100, "output_tokens": 5}, 1), _ctx("first")
+    )
+    assert first[-1].payload["usage"]["total"] == 105
+    second = adapter.normalize_line(
+        _usage_result({"input_tokens": 110, "output_tokens": 8, "cache_read_tokens": 90}, 2),
+        _ctx("second"),
+    )
+    assert second[-1].payload["usage"] == {
+        "input": 100,
+        "cached": 90,
+        "output": 3,
+        "reasoning": 0,
+        "total": 13,
+        "source": "antigravity",
+    }
+    skipped = adapter.normalize_line(
+        _usage_result({"input_tokens": 200, "output_tokens": 20, "cache_read_tokens": 100}, 4),
+        _ctx("fourth"),
+    )
+    assert "usage" not in skipped[-1].payload
+
+
+@pytest.mark.parametrize("num_turns", [None, 0, True, 5])
+def test_adapter_usage_never_charges_unknown_result_baseline(num_turns: Any) -> None:
+    adapter = AntigravityEventAdapter()
+    out = adapter.normalize_line(
+        _usage_result({"input_tokens": 1000, "output_tokens": 500}, num_turns), _ctx()
+    )
+    assert "usage" not in out[-1].payload
+
+
+def test_adapter_usage_resume_init_discards_cumulative_baseline() -> None:
+    adapter = AntigravityEventAdapter()
+    adapter.normalize_line(_usage_result({"input_tokens": 10}, 1), _ctx("before"))
+    adapter.normalize_line({"event": "init", "conversation_id": "conversation-1"}, _ctx("resumed"))
+    resumed = adapter.normalize_line(_usage_result({"input_tokens": 20}, 2), _ctx("resumed"))
+    assert "usage" not in resumed[-1].payload
+    following = adapter.normalize_line(_usage_result({"input_tokens": 25}, 3), _ctx("following"))
+    assert following[-1].payload["usage"]["input"] == 5
+
+
+def test_adapter_usage_does_not_diff_across_conversations_or_counter_resets() -> None:
+    adapter = AntigravityEventAdapter()
+    adapter.normalize_line(_usage_result({"input_tokens": 100}, 1), _ctx("first"))
+    other = adapter.normalize_line(
+        _usage_result({"input_tokens": 200}, 2, conversation_id="other"), _ctx("other")
+    )
+    assert "usage" not in other[-1].payload
+    reset = adapter.normalize_line(
+        _usage_result({"input_tokens": 10}, 3, conversation_id="other"), _ctx("reset")
+    )
+    assert "usage" not in reset[-1].payload
+
+
+def test_adapter_usage_cancelled_turn_steps_do_not_leak() -> None:
+    adapter = AntigravityEventAdapter()
+    adapter.normalize_line(_step_usage(0, {"input_tokens": 1000}), _ctx("cancelled"))
+    adapter.normalize_line(_step_usage(0, {"input_tokens": 7}), _ctx("next"))
+    out = adapter.normalize_line(_usage_result({}, 3), _ctx("next"))
+    assert out[-1].payload["usage"]["input"] == 7
+
+
+@pytest.mark.parametrize("invalid", [-1, True, "10", 1.5, None])
+def test_adapter_usage_rejects_malformed_counter_without_poisoning_step(invalid: Any) -> None:
+    adapter = AntigravityEventAdapter()
+    ctx = _ctx()
+    adapter.normalize_line(_step_usage(0, {"input_tokens": 7}), ctx)
+    adapter.normalize_line(_step_usage(0, {"input_tokens": invalid}), ctx)
+    out = adapter.normalize_line(_usage_result({"input_tokens": invalid}, 1), ctx)
+    assert out[-1].payload["usage"]["input"] == 7
+
+
+def test_adapter_usage_zero_step_does_not_fall_back_to_history() -> None:
+    adapter = AntigravityEventAdapter()
+    ctx = _ctx()
+    adapter.normalize_line(_step_usage(0, {"input_tokens": 0}), ctx)
+    out = adapter.normalize_line(_usage_result({"input_tokens": 1000}, 5), ctx)
+    assert "usage" not in out[-1].payload
+
+
+def test_adapter_usage_sessions_and_tool_call_ids_remain_independent() -> None:
+    adapter = AntigravityEventAdapter()
+    first = _ctx("first")
+    second = _ctx("second")
+    other = NormalizeContext(
+        session_id="other-session",
+        tab_id="other-tab",
+        agent_type=AgentType.ANTIGRAVITY,
+        run_epoch=1,
+        turn_id="first",
+    )
+    adapter.normalize_line(_step_usage(0, {"input_tokens": 10}), first)
+    adapter.normalize_line(_step_usage(0, {"input_tokens": 20}), other)
+    assert adapter.normalize_line(_usage_result({}, 1), first)[-1].payload["usage"]["input"] == 10
+    assert adapter.normalize_line(_usage_result({}, 1), other)[-1].payload["usage"]["input"] == 20
+    call1 = adapter.normalize_line(_tool_step(0, "ACTIVE"), first)[0]
+    call2 = adapter.normalize_line(_tool_step(0, "ACTIVE"), second)[0]
+    assert call1.call_id != call2.call_id
+
+
+class _PersistentInput(_FakeStream):
+    def is_closing(self) -> bool:
+        return self._closed
+
+
+class _PersistentProcess(_FakeProcess):
+    """Add process liveness to the existing shared stream test double."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self.stdin = _PersistentInput()
+        self.pid = 0  # The test double must never address a real process group.
+        self.returncode: int | None = None
+
+    async def wait(self) -> int:
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
+
+    def terminate(self) -> None:
+        super().terminate()
+        self.returncode = -15
+
+    def kill(self) -> None:
+        super().kill()
+        self.returncode = -9
+
+
+@pytest.fixture
+async def persistent_native(
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[tuple[AntigravityNativeSession, AsyncMock, list[_PersistentProcess]]]:
+    processes: list[_PersistentProcess] = []
+
+    async def spawn(*_args: Any, **_kwargs: Any) -> _PersistentProcess:
+        process = _PersistentProcess()
+        processes.append(process)
+        await asyncio.sleep(0)
+        return process
+
+    spawn_mock = AsyncMock(side_effect=spawn)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn_mock)
+    native_module = importlib.import_module("claude_hub.services.agent_stream.native")
+    monkeypatch.setattr(native_module, "_help_confirms_plan_mode", lambda _binary, _flag: True)
+    native = AntigravityNativeSession(_session())
+    monkeypatch.setattr(native, "_prepare_turn_context", AsyncMock(return_value=""))
+    try:
+        yield native, spawn_mock, processes
+    finally:
+        await native.stop()
+
+
+def _emit(process: _PersistentProcess, record: dict[str, Any]) -> None:
+    process.stdout.push(json.dumps(record).encode("utf-8") + b"\n")
+
+
+def _make_tailer(
+    native: AntigravityNativeSession, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> SessionTailer:
+    workspace_module = importlib.import_module("claude_hub.services.workspace_manager")
+    native_module = importlib.import_module("claude_hub.services.agent_stream.native")
+    monkeypatch.setattr(workspace_module, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(native_module.shutil, "which", lambda _binary: "/fake/agyx")
+    return SessionTailer(
+        workspace_id=native.session.workspace_id,
+        session_id=native.session.id,
+        adapter=AntigravityEventAdapter(),
+        session_getter=lambda: native.session,
+        store=AgentStreamStore(native.session.workspace_id, native.session.id),
+        native_transport=native,
+    )
+
+
+async def _through_completion(queue: asyncio.Queue[AgentStreamEvent]) -> list[AgentStreamEvent]:
+    events: list[AgentStreamEvent] = []
+    async with asyncio.timeout(2):
+        while True:
+            event = await queue.get()
+            events.append(event)
+            if event.type == AgentStreamEventType.TURN_COMPLETED:
+                return events
+
+
+async def test_persistent_concurrent_start_and_send_share_one_process(persistent_native) -> None:
+    native, spawn, processes = persistent_native
+    await asyncio.gather(native.start(), native.start(), native.send_message("hello", []))
+    assert spawn.await_count == 1
+    assert native._process is processes[0]
+    assert native._reader_task is not None and not native._reader_task.done()
+    assert len(processes[0].stdin.written) == 1
+
+
+async def test_persistent_two_turns_preserve_reader_framing_and_guidance(persistent_native) -> None:
+    native, spawn, processes = persistent_native
+    await native.send_message("first\n行", [])
+    process = processes[0]
+    generation = native._stdout_generation
+    reader = native._reader_task
+    _emit(process, {"event": "init", "conversation_id": "resumable"})
+    init = await asyncio.wait_for(native.read_line(), 2)
+    native.maybe_capture_conversation_id(init)
+    _emit(process, _usage_result({"input_tokens": 10}, 1))
+    assert (await asyncio.wait_for(native.read_line(), 2))["event"] == "result"
+    native.acknowledge_turn_complete()
+    assert native._stdout_generation == generation
+    await native.send_message("second", [])
+    assert spawn.await_count == 1
+    assert native._reader_task is reader
+    assert not process.stdin.is_closing()
+    assert len(process.stdin.written) == 2
+    assert all(chunk.endswith(b"\n") and chunk.count(b"\n") == 1 for chunk in process.stdin.written)
+    first, second = [json.loads(chunk) for chunk in process.stdin.written]
+    assert "first\n行" in first["message"]["content"]
+    assert "<claude_hub_instructions>" in first["message"]["content"]
+    assert second["message"]["content"] == "second"
+    with pytest.raises(RuntimeError, match="already in flight"):
+        await native.send_message("overlap", [])
+    assert len(process.stdin.written) == 2
+    assert not process._terminated
+
+
+async def test_persistent_ready_before_init_and_stop_releases_process(
+    persistent_native, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    native, spawn, processes = persistent_native
+    tailer = _make_tailer(native, monkeypatch, tmp_path)
+    assert not tailer.native_ready
+    await native.start()
+    assert tailer.native_ready
+    assert native._conversation_id is None
+    await native.stop()
+    assert processes[0]._terminated or processes[0].stdin.is_closing()
+    assert not tailer.native_ready
+    await native.start()
+    assert spawn.await_count == 2
+    assert tailer.native_ready
+
+
+async def test_persistent_failed_spawn_is_not_ready_and_can_retry(
+    persistent_native, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    native, spawn, _processes = persistent_native
+    tailer = _make_tailer(native, monkeypatch, tmp_path)
+    normal_spawn = spawn.side_effect
+    spawn.side_effect = FileNotFoundError("agyx")
+    with pytest.raises(FileNotFoundError):
+        await native.start()
+    assert not tailer.native_ready
+    assert native._process is None
+    spawn.side_effect = normal_spawn
+    await native.start()
+    assert tailer.native_ready
+
+
+@pytest.mark.parametrize("changed", ["model", "environment", "solo", "mode"])
+async def test_persistent_launch_changes_restart_only_before_next_turn(
+    persistent_native, changed: str
+) -> None:
+    native, spawn, processes = persistent_native
+    native.update_env({"ANTIGRAVITY_MODEL": "gemini-4-argon-high"})
+    await native.send_message("first", [])
+    native.maybe_capture_conversation_id({"event": "init", "conversation_id": "same-history"})
+    native.acknowledge_turn_complete()
+    if changed == "model":
+        native.update_env({"ANTIGRAVITY_MODEL": "gemini-4-argon-low"})
+    elif changed == "environment":
+        native.update_env({**native.session.env, "SSL_CERT_FILE": "/new/test-ca.pem"})
+    elif changed == "solo":
+        native.session.solo_mode = True
+    else:
+        await native.set_mode("plan")
+    assert spawn.await_count == 1
+    await native.send_message("second", [])
+    assert spawn.await_count == 2
+    assert processes[0]._terminated or processes[0].stdin.is_closing()
+    args = list(spawn.await_args.args)
+    assert args[args.index("--conversation") + 1] == "same-history"
+    if changed == "model":
+        assert args[args.index("--model") + 1] == "gemini-4-argon-low"
+    elif changed == "environment":
+        assert spawn.await_args.kwargs["env"]["SSL_CERT_FILE"] == "/new/test-ca.pem"
+    elif changed == "solo":
+        assert "--dangerously-skip-permissions" in args
+    else:
+        assert args[args.index("--mode") + 1] == "plan"
+        assert "--disable-slash-commands" not in args
+    native.acknowledge_turn_complete()
+    native.update_env(dict(native.session.env))
+    await native.send_message("unchanged", [])
+    assert spawn.await_count == 2
+    if changed == "mode":
+        native.acknowledge_turn_complete()
+        await native.set_mode("default")
+        await native.send_message("default again", [])
+        assert spawn.await_count == 3
+        assert "--mode" not in spawn.await_args.args
+        assert "--disable-slash-commands" in spawn.await_args.args
+
+
+async def test_persistent_inflight_env_and_mode_change_do_not_replace_process(
+    persistent_native,
+) -> None:
+    native, spawn, processes = persistent_native
+    await native.send_message("working", [])
+    native.update_env({"ANTIGRAVITY_MODEL": "gemini-4-argon-low"})
+    with pytest.raises(RuntimeError, match="already in flight"):
+        await native.send_message("overlap", [])
+    with pytest.raises(RuntimeError, match="in flight"):
+        await native.set_mode("plan")
+    assert spawn.await_count == 1
+    assert not processes[0]._terminated
+
+
+async def test_persistent_cancel_resumes_and_discards_old_generation(persistent_native) -> None:
+    native, spawn, processes = persistent_native
+    await native.send_message("working", [])
+    native.maybe_capture_conversation_id({"event": "init", "conversation_id": "keep-history"})
+    old_generation = native._stdout_generation
+    await native._stdout_queue.put((old_generation, {"event": "result", "result": {}}))
+    await native._stdout_queue.put((old_generation, None))
+    await native.cancel_active_turn()
+    assert not native.turn_in_flight
+    assert spawn.await_count == 2
+    assert processes[0]._terminated
+    assert "keep-history" in spawn.await_args.args
+    await native.send_message("next", [])
+    fresh = {"event": "step_update", "step_update": {"step_index": 2, "state": "DONE"}}
+    _emit(processes[1], fresh)
+    assert await asyncio.wait_for(native.read_line(), 2) == fresh
+    assert spawn.await_count == 2
+    assert native.turn_in_flight
+
+
+async def test_persistent_large_fragmented_records_do_not_wait_for_eof(persistent_native) -> None:
+    native, _spawn, processes = persistent_native
+    await native.send_message("hello", [])
+    record = {"event": "step_update", "step_update": {"text_delta": "x" * 70000}}
+    wire = json.dumps(record).encode() + b"\n"
+    processes[0].stdout.push(b"not json\n")
+    processes[0].stdout.push(wire[:200])
+    processes[0].stdout.push(wire[200:65500])
+    processes[0].stdout.push(wire[65500:])
+    assert await asyncio.wait_for(native.read_line(), 2) == record
+    assert not processes[0]._terminated
+
+
+async def test_persistent_stdin_failure_does_not_resubmit(persistent_native, monkeypatch) -> None:
+    native, spawn, processes = persistent_native
+    await native.start()
+    monkeypatch.setattr(
+        processes[0].stdin, "drain", AsyncMock(side_effect=BrokenPipeError("closed"))
+    )
+    with pytest.raises(RuntimeError, match="stdin closed") as exc_info:
+        await native.send_message("once", [])
+    assert isinstance(exc_info.value.__cause__, BrokenPipeError)
+    assert spawn.await_count == 1
+    assert len(processes[0].stdin.written) == 1
+    assert not native.turn_in_flight
+
+
+async def test_persistent_stop_waits_for_concurrent_start(persistent_native) -> None:
+    native, spawn, processes = persistent_native
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    normal_spawn = spawn.side_effect
+
+    async def delayed_spawn(*args: Any, **kwargs: Any) -> _PersistentProcess:
+        process = await normal_spawn(*args, **kwargs)
+        entered.set()
+        await release.wait()
+        return cast(_PersistentProcess, process)
+
+    spawn.side_effect = delayed_spawn
+    started = asyncio.create_task(native.start())
+    stopped: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        stopped = asyncio.create_task(native.stop())
+        await asyncio.sleep(0)
+        assert not stopped.done()
+    finally:
+        release.set()
+        await asyncio.wait_for(started, 2)
+        if stopped is not None:
+            await asyncio.wait_for(stopped, 2)
+    assert processes[0]._terminated
+    assert not native._started
+    assert not native._handshake_complete
+
+
+async def test_persistent_cancel_before_init_reinjects_new_conversation_guidance(
+    persistent_native,
+) -> None:
+    native, spawn, processes = persistent_native
+    await native.send_message("first", [])
+    await native.cancel_active_turn()
+    await native.send_message("second", [])
+    assert spawn.await_count == 2
+    assert "--conversation" not in spawn.await_args.args
+    for process in processes:
+        message = json.loads(process.stdin.written[0])["message"]["content"]
+        assert "<claude_hub_instructions>" in message
+
+
+async def test_persistent_tailer_stop_fences_teardown_and_late_result(
+    persistent_native, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    native, spawn, processes = persistent_native
+    native._persist_conversation_id("keep-history")
+    tailer = _make_tailer(native, monkeypatch, tmp_path)
+    queue = await tailer.subscribe()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    terminate = native._terminate_subprocess
+
+    async def delayed_terminate(process: asyncio.subprocess.Process, pgid: int) -> None:
+        entered.set()
+        await release.wait()
+        await terminate(process, pgid)
+
+    monkeypatch.setattr(native, "_terminate_subprocess", delayed_terminate)
+    next_send: asyncio.Task[None] | None = None
+    try:
+        await tailer.send_message("working", [], client_turn_id="cancelled")
+        generation = native._stdout_generation
+        assert await tailer.cancel_turn()
+        cancelled = await _through_completion(queue)
+        assert cancelled[-1].payload["status"] == "cancelled"
+        assert cancelled[-1].turn_id == "cancelled"
+        await asyncio.wait_for(entered.wait(), 2)
+        next_send = asyncio.create_task(tailer.send_message("next", [], client_turn_id="next"))
+        await asyncio.sleep(0)
+        assert not next_send.done()
+        assert spawn.await_count == 1
+        await native._stdout_queue.put((generation, _usage_result({"input_tokens": 9999}, 1)))
+        release.set()
+        await asyncio.wait_for(next_send, 2)
+        assert spawn.await_count == 2
+        assert "keep-history" in spawn.await_args.args
+        _emit(processes[1], _step_usage(2, {"input_tokens": 7}))
+        _emit(processes[1], _usage_result({"input_tokens": 10006}, 2))
+        completed = await _through_completion(queue)
+        assert completed[-1].payload["status"] == "completed"
+        assert completed[-1].payload["usage"]["input"] == 7
+        assert completed[-1].turn_id == "next"
+        terminal = [
+            event
+            for event in (await tailer.store.read_since()).events
+            if event.type == AgentStreamEventType.TURN_COMPLETED
+        ]
+        assert [event.turn_id for event in terminal] == ["cancelled", "next"]
+        assert not tailer.hard_failed
+    finally:
+        release.set()
+        if next_send is not None:
+            await asyncio.wait_for(next_send, 2)
+        await tailer.stop()
+
+
+@pytest.mark.parametrize("active", [False, True])
+async def test_persistent_unexpected_eof_fails_closed_without_duplicate_completion(
+    persistent_native, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, active: bool
+) -> None:
+    native, _spawn, processes = persistent_native
+    tailer = _make_tailer(native, monkeypatch, tmp_path)
+    await tailer.subscribe()
+    try:
+        await native.start()
+        if active:
+            await tailer.send_message("work", [], client_turn_id="eof-turn")
+        processes[0].stdout.push(b"")
+        assert tailer._task is not None
+        await asyncio.wait_for(tailer._task, 2)
+        assert tailer.hard_failed
+        events = (await tailer.store.read_since()).events
+        completions = [
+            event for event in events if event.type == AgentStreamEventType.TURN_COMPLETED
+        ]
+        errors = [event for event in events if event.type == AgentStreamEventType.ERROR]
+        assert len(completions) == len(errors) == int(active)
+        if active:
+            assert completions[0].turn_id == "eof-turn"
+            assert completions[0].payload["status"] == "failed"
+    finally:
+        await tailer.stop()
+
+
+async def test_persistent_nonzero_eof_preserves_redacted_stderr_detail(
+    persistent_native, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    native, spawn, processes = persistent_native
+    normal_spawn = spawn.side_effect
+
+    async def with_open_stderr(*args: Any, **kwargs: Any) -> _PersistentProcess:
+        process = cast(_PersistentProcess, await normal_spawn(*args, **kwargs))
+        process.stderr = _FakeStream()
+        return process
+
+    spawn.side_effect = with_open_stderr
+    proxy_module = importlib.import_module("claude_hub.services.provider_proxy")
+    private_url = "http://test-user:private-password@private-proxy.example.test:8080"
+    monkeypatch.setattr(proxy_module.settings, "cursor_proxy_url", SecretStr(private_url))
+    tailer = _make_tailer(native, monkeypatch, tmp_path)
+    await tailer.subscribe()
+    try:
+        await tailer.send_message("work", [], client_turn_id="failed-turn")
+        processes[0].stderr.push(f"certificate verify failed via {private_url}\n".encode())
+        processes[0].stderr.push(b"")
+        processes[0].returncode = 23
+        processes[0].stdout.push(b"")
+        assert tailer._task is not None
+        await asyncio.wait_for(tailer._task, 2)
+        assert tailer.hard_failed
+        events = (await tailer.store.read_since()).events
+        errors = [event for event in events if event.type == AgentStreamEventType.ERROR]
+        failed = [event for event in events if event.type == AgentStreamEventType.TURN_COMPLETED]
+        assert len(errors) == len(failed) == 1
+        assert errors[0].turn_id == failed[0].turn_id == "failed-turn"
+        assert failed[0].payload["status"] == "failed"
+        detail = errors[0].payload["message"]
+        assert detail == tailer.last_error == native.exit_error
+        assert "provider exited with code 23" in detail
+        assert "certificate verify failed" in detail
+        assert "[REDACTED]" in detail
+        assert "test-user" not in detail
+        assert "private-password" not in detail
+        assert "private-proxy.example.test" not in detail
+        assert not native.turn_in_flight
+    finally:
+        await tailer.stop()
+
+
+async def test_persistent_idle_stop_closes_stdin_before_wait_and_signal(
+    persistent_native, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    native, _spawn, processes = persistent_native
+    await native.start()
+    process = processes[0]
+    generation = native._stdout_generation
+    order: list[str] = []
+    close = process.stdin.close
+    terminate = process.terminate
+
+    def close_stdin() -> None:
+        assert native._stdout_generation > generation
+        order.append("close")
+        close()
+
+    async def graceful_exit() -> int:
+        assert process.stdin.is_closing()
+        order.append("wait")
+        process.returncode = 0
+        return 0
+
+    def signal_process() -> None:
+        order.append("signal")
+        terminate()
+
+    monkeypatch.setattr(process.stdin, "close", close_stdin)
+    monkeypatch.setattr(process, "wait", graceful_exit)
+    monkeypatch.setattr(process, "terminate", signal_process)
+    await asyncio.wait_for(native.stop(), 1)
+    assert order[:2] == ["close", "wait"]
+    assert order.index("signal") > 1
+    assert native._process is None
+    assert native._reader_task is None
+    assert not native._started
+
+
+async def test_persistent_idle_stop_grace_timeout_falls_back_to_signal(
+    persistent_native, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    native, _spawn, processes = persistent_native
+    provider_module = importlib.import_module(
+        "claude_hub.services.agent_stream.providers.antigravity"
+    )
+    monkeypatch.setattr(provider_module, "_IDLE_EXIT_GRACE_SECONDS", 0.01)
+    await native.start()
+    process = processes[0]
+    terminated = asyncio.Event()
+    grace_cancelled = asyncio.Event()
+    terminate = process.terminate
+
+    async def wait_for_signal() -> int:
+        try:
+            await terminated.wait()
+        except asyncio.CancelledError:
+            grace_cancelled.set()
+            raise
+        return -15
+
+    def signal_process() -> None:
+        assert process.stdin.is_closing()
+        assert grace_cancelled.is_set()
+        terminate()
+        terminated.set()
+
+    monkeypatch.setattr(process, "wait", wait_for_signal)
+    monkeypatch.setattr(process, "terminate", signal_process)
+    await asyncio.wait_for(native.stop(), 1)
+    assert grace_cancelled.is_set()
+    assert terminated.is_set()
+    assert native._process is None
+    assert native._reader_task is None
+
+
+async def test_persistent_active_cancel_signals_without_closing_stdin_or_idle_wait(
+    persistent_native, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    native, spawn, processes = persistent_native
+    await native.send_message("working", [])
+    process = processes[0]
+    terminated = asyncio.Event()
+    terminate = process.terminate
+    order: list[str] = []
+
+    async def wait_after_signal() -> int:
+        assert terminated.is_set(), "active cancellation must not wait for an EOF grace period"
+        order.append("wait")
+        return -15
+
+    def signal_process() -> None:
+        assert not process.stdin.is_closing()
+        order.append("signal")
+        terminate()
+        terminated.set()
+
+    monkeypatch.setattr(process, "wait", wait_after_signal)
+    monkeypatch.setattr(process, "terminate", signal_process)
+    await asyncio.wait_for(native.cancel_active_turn(), 1)
+    assert order[0] == "signal"
+    assert not process.stdin.is_closing()
+    assert spawn.await_count == 2
+    assert native._process is processes[1]
+    assert not native.turn_in_flight
+
+
+def _retain_stop_flag_at_current_eof(
+    native: AntigravityNativeSession, monkeypatch: pytest.MonkeyPatch
+) -> list[bool]:
+    observed: list[bool] = []
+    get = native._stdout_queue.get
+
+    async def get_with_pending_restart() -> tuple[int, dict[str, Any] | None]:
+        generation, record = await get()
+        if generation == native._stdout_generation and record is None:
+            # Pin the race at read_line's generation check, after the consumer
+            # could clear the flag at its loop head. This EOF is the replacement's
+            # first record, not the deliberately terminated process's farewell.
+            native._client_requested_stop = True
+            observed.append(native._client_requested_stop)
+        return generation, record
+
+    monkeypatch.setattr(native._stdout_queue, "get", get_with_pending_restart)
+    return observed
+
+
+async def test_persistent_stop_replacement_eof_before_init_fails_idle_tailer(
+    persistent_native, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    native, spawn, processes = persistent_native
+    native._persist_conversation_id("keep-history")
+    observed = _retain_stop_flag_at_current_eof(native, monkeypatch)
+    tailer = _make_tailer(native, monkeypatch, tmp_path)
+    queue = await tailer.subscribe()
+    try:
+        await tailer.send_message("working", [], client_turn_id="stopped")
+        assert await tailer.cancel_turn()
+        stopped = await _through_completion(queue)
+        assert stopped[-1].payload["status"] == "cancelled"
+        await asyncio.wait_for(tailer._await_turn_teardown(), 2)
+        assert spawn.await_count == 2
+        assert processes[1].stdin.written == []
+        before = (await tailer.store.read_since()).events
+        processes[1].stdout.push(b"")
+        assert tailer._task is not None
+        await asyncio.wait_for(tailer._task, 2)
+        assert observed == [True]
+        assert not native._client_requested_stop
+        assert tailer.hard_failed
+        assert not native.turn_in_flight
+        assert (await tailer.store.read_since()).events == before
+    finally:
+        await tailer.stop()
+
+
+async def test_persistent_config_replacement_eof_before_init_fails_accepted_turn_once(
+    persistent_native, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    native, spawn, processes = persistent_native
+    native._persist_conversation_id("keep-history")
+    observed = _retain_stop_flag_at_current_eof(native, monkeypatch)
+    tailer = _make_tailer(native, monkeypatch, tmp_path)
+    queue = await tailer.subscribe()
+    try:
+        await tailer.send_message("first", [], client_turn_id="completed")
+        _emit(processes[0], _usage_result({"input_tokens": 10}, 1))
+        assert (await _through_completion(queue))[-1].payload["status"] == "completed"
+        native.update_env({"ANTIGRAVITY_MODEL": "gemini-4-argon-low"})
+        await tailer.send_message("next", [], client_turn_id="replacement-turn")
+        assert spawn.await_count == 2
+        assert len(processes[1].stdin.written) == 1
+        assert native.turn_in_flight
+        processes[1].stdout.push(b"")
+        assert tailer._task is not None
+        await asyncio.wait_for(tailer._task, 2)
+        assert observed == [True]
+        assert not native._client_requested_stop
+        assert tailer.hard_failed
+        assert not native.turn_in_flight
+        events = (await tailer.store.read_since()).events
+        failed = [
+            event
+            for event in events
+            if event.turn_id == "replacement-turn"
+            and event.type == AgentStreamEventType.TURN_COMPLETED
+        ]
+        errors = [
+            event
+            for event in events
+            if event.turn_id == "replacement-turn" and event.type == AgentStreamEventType.ERROR
+        ]
+        assert len(failed) == len(errors) == 1
+        assert failed[0].payload["status"] == "failed"
+    finally:
+        await tailer.stop()
+
+
+async def test_persistent_tailer_two_turns_share_process_and_correct_usage(
+    persistent_native, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    native, spawn, processes = persistent_native
+    tailer = _make_tailer(native, monkeypatch, tmp_path)
+    queue = await tailer.subscribe()
+    try:
+        await tailer.send_message("first", [], client_turn_id="first")
+        _emit(processes[0], {"event": "init", "conversation_id": "conversation-1"})
+        _emit(processes[0], _step_usage(1, {"input_tokens": 100, "output_tokens": 5}))
+        _emit(processes[0], _usage_result({"input_tokens": 100, "output_tokens": 5}, 1))
+        first = await _through_completion(queue)
+        assert first[-1].turn_id == "first"
+        await tailer.send_message("second", [], client_turn_id="second")
+        _emit(
+            processes[0],
+            _step_usage(3, {"input_tokens": 10, "cache_read_tokens": 90, "output_tokens": 3}),
+        )
+        _emit(
+            processes[0],
+            _usage_result({"input_tokens": 110, "cache_read_tokens": 90, "output_tokens": 8}, 2),
+        )
+        second = await _through_completion(queue)
+        assert second[-1].turn_id == "second"
+        assert second[-1].payload["usage"]["total"] == 13
+        assert [
+            event.payload["text"]
+            for event in second
+            if event.type == AgentStreamEventType.TEXT_DELTA
+        ] == ["answer"]
+        assert spawn.await_count == 1
+        assert tailer.native_ready
+        assert not tailer.hard_failed
+    finally:
+        await tailer.stop()

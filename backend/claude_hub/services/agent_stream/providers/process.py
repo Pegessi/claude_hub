@@ -340,6 +340,10 @@ class ProcessSession(SessionCore):
         while True:
             generation, record = await self._stdout_queue.get()
             if generation == self._stdout_generation:
+                # Retired streams cannot reach this branch. An EOF here is
+                # from the replacement itself, never the expected farewell
+                # of a process killed by restart_for_recovery().
+                self._client_requested_stop = False
                 return record
 
     async def _drain_oneshot_stdout(self, generation: int) -> None:

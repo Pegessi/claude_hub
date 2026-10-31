@@ -471,8 +471,9 @@ REGISTRY: Mapping[AgentType, ProviderSpec] = MappingProxyType(
         AgentType.ANTIGRAVITY: ProviderSpec(
             id=AgentType.ANTIGRAVITY,
             display_name="Antigravity",
-            transport=TransportKind.CLI_ONESHOT,
+            transport=TransportKind.CLI_PERSISTENT,
             stream_source=StreamEventSource.STDOUT_STREAM_JSON,
+            eof_is_fatal=True,
             binary="agyx",
             # agy resumes a stored conversation with the verified
             # ``--conversation <id>`` flag; an unverified id is not

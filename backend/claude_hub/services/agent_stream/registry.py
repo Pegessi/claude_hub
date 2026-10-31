@@ -15,8 +15,8 @@ from __future__ import annotations
 from typing import Dict, Optional, Type
 
 from ...models import AgentType, ManagedSession
-from .base import AgentStreamAdapter
 from .antigravity_events import AntigravityEventAdapter
+from .base import AgentStreamAdapter
 from .claude_jsonl import ClaudeJsonlAdapter
 from .codex_jsonl import CodexJsonlAdapter, TraexJsonlAdapter
 from .cursor_cli_transcript import CursorCliTranscriptAdapter
