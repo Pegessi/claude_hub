@@ -170,9 +170,10 @@ agyx --version
 本身还不可用，应先解决安装、账号或网络问题。自定义包装必须原样转发参数、
 标准输入输出及退出状态，不向 stdout 打印额外提示，因为 Hub 需要读取 JSON 流。
 
-当前支持范围为本机直接 Chat、一次性 subagent 调用（`claude-hub agent run`）、
-Dot 和普通 Terminal tab；不支持 Workspace 管理的 Agent/任务、Resident、通用
-定时任务或远程 SSH 执行。Dot 自身的唤醒和整理计划随其 Chat 一起运行。
+当前支持范围为本机直接 Chat（含 Hub 管理的 Goal）、一次性 subagent 调用
+（`claude-hub agent run`）、Dot、普通 Terminal tab，以及本地 Workspace 管理的
+Chat 和由它运行的定时任务；不支持 Resident、Workspace 管理的 Terminal 或
+远程 SSH 执行。Dot 自身的唤醒和整理计划随其 Chat 一起运行。
 安装成功不会改变这些限制。集成细节见
 [Antigravity 接入记录](working-logs/2026-10-31-antigravity-agy-provider.md) 和
 [Dot 后端接入记录](working-logs/2026-10-31-dot-antigravity-backend.md)。

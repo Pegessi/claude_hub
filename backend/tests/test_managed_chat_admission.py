@@ -79,7 +79,13 @@ def test_plain_terminal_workspace_agent_remains_supported() -> None:
 
 @pytest.mark.parametrize(
     "agent_type",
-    [AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR, AgentType.MASO],
+    [
+        AgentType.CLAUDE,
+        AgentType.CODEX,
+        AgentType.CURSOR,
+        AgentType.ANTIGRAVITY,
+        AgentType.MASO,
+    ],
 )
 def test_local_managed_chat_admits_supported_provider(agent_type: AgentType) -> None:
     request = EnsureWorkspaceAgentRequest(
@@ -100,6 +106,8 @@ def test_managed_chat_rejects_remote_and_maso_terminal() -> None:
         )
     with pytest.raises(ValidationError, match="select a Chat session"):
         EnsureWorkspaceAgentRequest(agent_type=AgentType.MASO)
+    with pytest.raises(ValidationError, match="select a Chat session"):
+        EnsureWorkspaceAgentRequest(agent_type=AgentType.ANTIGRAVITY)
 
     with pytest.raises(ValueError, match="Hub host"):
         resolve_config_for_workspace(
@@ -163,6 +171,7 @@ def test_executor_capabilities_advertise_chat_additively() -> None:
         AgentType.CLAUDE,
         AgentType.CODEX,
         AgentType.CURSOR,
+        AgentType.ANTIGRAVITY,
         AgentType.MASO,
     ]
 

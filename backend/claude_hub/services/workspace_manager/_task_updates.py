@@ -127,7 +127,10 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
             else:
                 update["session_id"] = None
         if payload.session_kind is not None:
-            if payload.session_kind == SessionKind.CHAT or task.agent_type == AgentType.MASO:
+            if payload.session_kind == SessionKind.CHAT or task.agent_type in {
+                AgentType.MASO,
+                AgentType.ANTIGRAVITY,
+            }:
                 EnsureWorkspaceAgentRequest(
                     agent_type=task.agent_type, session_kind=payload.session_kind
                 )

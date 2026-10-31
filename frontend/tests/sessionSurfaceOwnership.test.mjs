@@ -23,15 +23,15 @@ const residentAgentDialog = readSource('../src/features/workspace/components/Res
 const scheduledTasksPanel = readSource('../src/features/scheduled-tasks/ScheduledTasksPanel.vue')
 const agentAvatar = readSource('../src/components/AgentAvatar.vue')
 
-test('Antigravity is opt-in only for local direct Chat, not other launchers', () => {
+test('Antigravity is opt-in for local Chat surfaces and scheduled tasks, not Resident or Terminal', () => {
   assert.match(agentConfigFields, /v-if="allowAntigravity && !excludeTypes\.includes\('antigravity'\)"/)
   assert.match(agentConfigFields, /allowAntigravity: false/)
   assert.match(sessionCreator, /:allow-antigravity="form\.session_kind === 'chat' && form\.target === 'local'"/)
   assert.match(sessionCreator, /kind === 'terminal' && \['maso', 'antigravity'\]\.includes\(form\.agent_type\)/)
-  for (const source of [workspaceAgentDialog, residentAgentDialog, scheduledTasksPanel]) {
-    assert.doesNotMatch(source, /allow-antigravity|value="antigravity"/)
-  }
-  assert.match(chatComposer, /:show-schedule="!isManagedChat && currentTab\?\.agent_type !== 'antigravity'"/)
+  assert.match(workspaceAgentDialog, /:allow-antigravity="agentOptionsForm\.session_kind === 'chat' && agentOptionsForm\.target === 'local'"/)
+  assert.match(scheduledTasksPanel, /<option value="antigravity">\s*antigravity\s*<\/option>/)
+  assert.doesNotMatch(residentAgentDialog, /allow-antigravity|value="antigravity"/)
+  assert.match(chatComposer, /:show-schedule="!isManagedChat"/)
 })
 
 test('Antigravity solo is an explicit choice and its identity is not rendered as Terminal', () => {

@@ -17,13 +17,24 @@
   registry-driven, and label the provider correctly in the editor.
 - Implement Dot conversation rotation for Antigravity: start or reuse a fresh
   `agyx` process, capture the provider-issued `init` conversation id (bounded
-  at 120 s), and associate it before the turn so no invented id is ever passed
-  to `--conversation`.
+  at 120 s), keep it deferred until Dot adopts it, and restore the previous
+  identity on discard so no invented id is ever passed to `--conversation`.
 - Replace Antigravity's `A` monogram avatar with the official Google Gemini
   mark in Chat tabs and status surfaces.
 - Update the provider spec matrix, API/UI checks and installation notes.
-  Antigravity still does not run workspace-managed, resident, generic
-  scheduled or remote sessions; Dot's own wake/tidy schedules follow its Chat.
+  Dot's own wake/tidy schedules follow its Chat.
+
+### feat: enable Antigravity Goal mode, Chat schedule action, and managed Chat scheduled tasks
+
+- Enable Hub-managed Goal mode (`Surface.DIRECT_CHAT` in `GoalSpec.surfaces`)
+  for `antigravity` direct Chat tabs and short-circuit `resolve_goal_provider`
+  when `GoalSpec.api == NativeGoals.NONE`.
+- Expose the `Schedule message` action in the Chat composer `+` menu and the
+  `ChatMessageInbox` banner for `antigravity` direct Chat tabs.
+- Admit `antigravity` on local Workspace `MANAGED_CHAT` (`SessionKind.CHAT`)
+  and teach scheduled `new_session`, `hub_task`, and orphaned `hub_task`
+  redispatch to select `SessionKind.CHAT` automatically for Chat-only
+  workspace providers (`antigravity`, `maso`).
 
 ### fix(agent_stream): complete ordinary turns on a clean EOF with a full answer
 

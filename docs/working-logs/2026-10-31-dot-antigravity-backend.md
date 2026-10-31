@@ -1,12 +1,15 @@
 # Dot execution backend: Antigravity (agy) — 2026-10-31
 
-Branch: `codex/dot-antigravity-provider`. Base: `02ccdbc` (`origin/main`).
+Branch: `codex/dot-antigravity-provider`. Base: `02ccdbc`, merged with
+`origin/main` `3001f00` (Antigravity Goal mode, managed Chat and scheduled
+managed Chat tasks) before integration.
 
 ## Why
 
 Dot's **Execution backend** editor listed Claude, Codex, Cursor, TraeX and MASO.
-The `antigravity` provider existed only for direct Chat, `agent run` and
-terminal tabs. Dot's backend list is derived from the provider registry's
+At this branch's base the `antigravity` provider covered direct Chat, `agent run`
+and terminal tabs (main later added managed Chat); no surface included Dot.
+Dot's backend list is derived from the provider registry's
 `Surface.DOT`, and the `PUT /api/dot/execution` request model had its own
 hardcoded provider union, so both gates kept Antigravity out.
 
@@ -48,17 +51,24 @@ hardcoded provider union, so both gates kept Antigravity out.
   installation guide's supported-surface list now includes Dot, with Dot's own
   wake/tidy schedules called out separately from generic scheduled tasks.
 
+- Merge with latest main (Antigravity Goal mode, managed Chat and scheduled
+  managed Chat tasks): resolved the provider matrix/goal/changelog conflicts
+  and updated the now-obsolete CLI test that still expected `task create
+  --agent-type antigravity` to be rejected. The merged matrix keeps all of
+  main's surfaces and adds only DOT.
+
 ## Boundaries
 
-- Workspace-managed, resident, generic scheduled and remote surfaces remain off
-  for Antigravity. Dot's wake/tidy schedules are ordinary Chat turns targeting
-  the Dot tab, not generic scheduled sessions.
+- This change adds only `Surface.DOT` on top of the provider matrix it merged
+  with. Latest main already enables direct-Chat Goals, local managed Chat and
+  scheduled managed Chat tasks; resident, managed terminal and remote remain
+  off. Dot's wake/tidy schedules are ordinary Chat turns on its Chat.
 - Dot's first turn and each rotated turn wait for `agy`'s `init` before writing
   the prompt, so the provider id is real. This is the CLI's normal startup
   cost, not an extra turn; no model request is spent on rotation.
-- `GoalSpec.surfaces` stays empty, so `supports_goals` is false and Dot's Goal
-  control remains unavailable for Antigravity. Enabling Hub-managed goals needs
-  the goal protocol verified against `agy`; this change does not claim it.
+- Goals are not part of this change: main's `GoalSpec.surfaces` entry enables
+  `supports_goals` for direct Chat (and therefore Dot's composer); this branch
+  neither adds nor alters that capability.
 - No live Dot backend was switched during validation; the primary Hub's Dot
   configuration was not modified.
 
@@ -81,10 +91,12 @@ hardcoded provider union, so both gates kept Antigravity out.
 - A direct `agyx` probe confirmed that `init` (with a conversation id) is
   emitted on process startup before any user record, so rotation can wait for
   a real id instead of inventing one.
-- Full default backend suite: 5964 passed, 10 skipped.
-- Focused backend tests: `test_dot_execution.py`,
+- Full default backend suite (merged tree): 5970 passed, 10 skipped.
+- Focused merged backend set (`test_dot_execution.py`,
   `test_provider_spec_registry.py`, `test_antigravity_native.py`,
-  `test_managed_chat_admission.py` — 176 passed.
+  `test_managed_chat_admission.py`, `test_scheduled_tasks.py`,
+  `test_task_start_surface_admission.py`): 306 passed; the Dot four-file set
+  alone is 176 passed.
 - Frontend unit suite: 1152 passed; `vue-tsc`, lint and the production build
   pass.
 - Backend format (Black/isort), backend types (614 files), docs invariants:

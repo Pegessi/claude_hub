@@ -100,7 +100,7 @@
     />
 
     <ChatMessageInbox
-      v-if="!isManagedChat && currentTab && !currentTab.archived && ['claude', 'codex', 'cursor', 'maso'].includes(currentTab.agent_type ?? '')"
+      v-if="!isManagedChat && currentTab && !currentTab.archived && ['claude', 'codex', 'cursor', 'maso', 'antigravity'].includes(currentTab.agent_type ?? '')"
       :tab-id="props.tabId"
     />
 

@@ -15,6 +15,11 @@ Branch: `codex/antigravity-image-and-quota` (worktree `~/claude_hub_worktree/ant
 3. **Provider Quota Modal Dialog (`QuotaMenu.vue`)**:
    - Replaced the inline `<details>` expansion inside the extensions menu with a menu trigger button (`frontend/src/components/QuotaMenu.vue` and `frontend/src/components/AppExtensionActions.vue`) that emits `select` to close the parent dropdown and opens a teleported modal dialog (`.quota-modal-backdrop` / `.quota-modal`).
    - Supports responsive multi-column provider cards, manual refresh, backdrop click-to-close, `Close` button, `Escape` key dismissal, initial focus into the dialog (`closeButtonRef`), `Tab` / `Shift+Tab` focus containment (`trapFocus`), and focus restoration (`returnFocusEl`) on close while remaining compatible with custom test renderers in `frontend/tests/quotaMenu.test.mjs`.
+4. **Antigravity Goal Mode, Chat Schedule Button & Workspace Scheduled Tasks (`hub_task` / `new_session`)**:
+   - Enabled `Surface.DIRECT_CHAT` on `AgentType.ANTIGRAVITY.goals.surfaces` in `spec.py` (and `provider_spec_matrix.json`), activating Hub-managed Goal mode (`supports_goals = True`) and the composer Goal button for Antigravity Chat tabs. Short-circuited `resolve_goal_provider` when `GoalSpec.api == NativeGoals.NONE`.
+   - Enabled the composer `+ -> Schedule message` action (`ChatComposer.vue`) and `ChatMessageInbox` banner (`StructuredPane.vue`) for Antigravity Chat tabs.
+   - Admitted `AgentType.ANTIGRAVITY` on local `Surface.MANAGED_CHAT` (`SessionKind.CHAT`) across `spec.py`, `execution.py`, `task_session_executor.py`, `create.py`, `_task_updates.py`, `managedChatSurface.ts`, `WorkspaceAgentDialog.vue`, `useWorkspaceAgentManager.ts`, and `ScheduledTasksPanel.vue`.
+   - Updated `_fire_new_session`, `_fire_hub_task` (`dispatcher.py`), and `_converge_one_orphaned_hub_task` (`hub_tasks.py`) to select `SessionKind.CHAT` automatically when the scheduled provider runs on `Surface.MANAGED_CHAT` and not `Surface.MANAGED_TERMINAL` (`antigravity`, `maso`).
 
 ## Verification
 
