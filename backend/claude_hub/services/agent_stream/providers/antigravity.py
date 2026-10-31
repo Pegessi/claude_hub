@@ -64,19 +64,22 @@ class AntigravitySession(ProcessSession):
         return []
 
     def _build_command(self, provider_env: Optional[Dict[str, str]] = None) -> List[str]:
+        is_plan = self._current_mode == ChatMode.PLAN.value
         cmd = [
             "agyx",
             "--input-format",
             "stream-json",
             "--output-format",
             "stream-json",
-            # Hub drives approvals itself; agy's slash-command expansion only
-            # matters in its interactive TUI.
-            "--disable-slash-commands",
         ]
-        if self.session.solo_mode and self._current_mode == ChatMode.DEFAULT.value:
+        # Slash-command expansion is irrelevant to headless Hub turns, but agy
+        # explicitly makes ``--mode plan`` a no-op when it is disabled (it
+        # warns and runs unrestricted), so only suppress it outside plan mode.
+        if not is_plan:
+            cmd.append("--disable-slash-commands")
+        if self.session.solo_mode and not is_plan:
             cmd.append("--dangerously-skip-permissions")
-        if self._current_mode == ChatMode.PLAN.value:
+        if is_plan:
             cmd.extend(["--mode", "plan"])
         if provider_env:
             model = provider_env.get("ANTIGRAVITY_MODEL", "").strip()

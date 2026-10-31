@@ -95,10 +95,10 @@ class AntigravityEventAdapter(AgentStreamAdapter):
                 output = tool_info.get("output", "")
                 if not isinstance(output, str):
                     output = str(output)
-                # "Command failed to run" means the tool never executed; an
-                # exited-with-code result is a completed tool call whose
-                # output the model reacts to.
-                status = "failed" if output.startswith("Command failed") else "completed"
+                # agy's own phrase when the tool never executed. A normal
+                # command that merely prints this text reports
+                # "Command exited with code N" and stays completed.
+                status = "failed" if output.startswith("Command failed to run") else "completed"
                 events.append(
                     ctx.event(
                         AgentStreamEventType.TOOL_CALL_COMPLETED,
@@ -127,28 +127,99 @@ class AntigravityEventAdapter(AgentStreamAdapter):
         # was absent for this turn, reconcile against ``result.response`` here
         # so the Chat still shows the model's reply exactly once.
         response = result.get("response")
-        if isinstance(response, str) and response:
-            suffix = self._reconcile_text(ctx, response)
+        response_text = response if isinstance(response, str) else ""
+
+        # agy is headless in print mode: a tool whose permission it cannot
+        # prompt for is auto-denied and reported under ``denied_actions`` with
+        # an empty response. A bare SUCCESS would render an empty, successful
+        # turn; surface an actionable error pointing at Solo Mode instead.
+        denied_names: List[str] = []
+        denied = result.get("denied_actions")
+        if isinstance(denied, list):
+            for item in denied:
+                if isinstance(item, dict):
+                    label = item.get("display_name") or item.get("action")
+                    if label:
+                        denied_names.append(str(label))
+        headless_denied = bool(denied_names) and not response_text.strip()
+
+        if response_text:
+            suffix = self._reconcile_text(ctx, response_text)
             if suffix:
                 self._append_text_delta(ctx, suffix)
                 events.append(ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": suffix}))
 
         status_value = str(result.get("status", "")).upper()
-        if status_value == "ERROR":
-            message = result.get("error") or "Antigravity turn failed"
-            if not isinstance(message, str) or not message.strip():
-                message = "Antigravity turn failed"
+        if status_value == "ERROR" or headless_denied:
+            if headless_denied:
+                tools = ", ".join(dict.fromkeys(denied_names)) or "a tool"
+                message = (
+                    f"Antigravity could not run {tools}: headless Chat cannot prompt for "
+                    "permission. Enable Solo Mode for this Chat (auto-approves tools) and retry."
+                )
+            else:
+                message = result.get("error") or "Antigravity turn failed"
+                if not isinstance(message, str) or not message.strip():
+                    message = "Antigravity turn failed"
+                message = _actionable_headless_error(message)
             events.append(ctx.event(AgentStreamEventType.ERROR, {"message": message}))
             status = "failed"
         elif status_value in {"CANCELLED", "CANCELED", "INTERRUPTED"}:
             status = "cancelled"
-        else:
+        elif status_value == "SUCCESS":
             status = "completed"
+        else:
+            # Missing/unknown status with no terminal signal is a failure, not
+            # a success — never let a malformed result close a turn cleanly.
+            events.append(
+                ctx.event(
+                    AgentStreamEventType.ERROR,
+                    {
+                        "message": (
+                            "Antigravity returned an unrecognized result status: "
+                            f"{status_value or 'missing'!r}"
+                        )
+                    },
+                )
+            )
+            status = "failed"
 
         completed: Dict[str, Any] = {"status": status}
-        usage = normalize_provider_usage(result, "antigravity")
+        usage = normalize_provider_usage(_usage_for_normalizer(result), "antigravity")
         if usage is not None:
             completed["usage"] = usage
         events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, completed))
         self._clear_turn_state(ctx)
         return events
+
+
+def _usage_for_normalizer(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Map agy's usage key names onto the shared normalizer's vocabulary."""
+    usage = result.get("usage")
+    if not isinstance(usage, dict):
+        return result
+    mapped = dict(usage)
+    # agy reports cached prompt tokens as cache_read_tokens and reasoning as
+    # thinking_tokens; the shared helper keys off cache_read_input_tokens /
+    # reasoning_tokens. Only fill when absent so real canonical keys win.
+    if "cache_read_input_tokens" not in mapped and "cache_read_tokens" in mapped:
+        mapped["cache_read_input_tokens"] = mapped["cache_read_tokens"]
+    if "reasoning_tokens" not in mapped and "thinking_tokens" in mapped:
+        mapped["reasoning_tokens"] = mapped["thinking_tokens"]
+    return {**result, "usage": mapped}
+
+
+def _actionable_headless_error(message: str) -> str:
+    """Translate agy's headless permission/decode errors into Hub guidance."""
+    lowered = message.lower()
+    if (
+        "headless mode cannot prompt" in lowered
+        or "permission" in lowered
+        or "unexpected eof" in lowered
+        or "failed to decode stream input" in lowered
+    ):
+        return (
+            f"{message} — Antigravity could not prompt for tool permission in headless Chat. "
+            "Enable Solo Mode for this Chat (auto-approves tools) and retry."
+        )
+    return message

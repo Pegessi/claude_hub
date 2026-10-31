@@ -106,6 +106,11 @@ class TerminalTabCreate(TerminalTabBase):
         # still running the model on the Hub host.
         if self.session_kind == SessionKind.CHAT and self.target == ExecutionTarget.REMOTE:
             raise ValueError(CHAT_REMOTE_UNSUPPORTED)
+        # Antigravity is the local agy/agyx installation (account login + local
+        # proxy/CA live on the Hub host); neither Chat nor a remote terminal can
+        # drive it over SSH.
+        if self.agent_type == AgentType.ANTIGRAVITY and self.target == ExecutionTarget.REMOTE:
+            raise ValueError("Antigravity runs on the Hub host; remote sessions are not supported")
         return self
 
 

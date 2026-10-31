@@ -100,9 +100,15 @@ def test_command_solo_and_plan() -> None:
 
     plan = AntigravityNativeSession(_session(chat_mode=ChatMode.PLAN))
     plan._current_mode = ChatMode.PLAN.value
-    assert plan._build_command({})[-2:] == ["--mode", "plan"]
+    plan_cmd = plan._build_command({})
+    assert plan_cmd[-2:] == ["--mode", "plan"]
     # Plan mode does not combine with the permission bypass.
-    assert "--dangerously-skip-permissions" not in plan._build_command({})
+    assert "--dangerously-skip-permissions" not in plan_cmd
+    # agy makes --mode plan a no-op while slash expansion is disabled; the two
+    # flags must never be combined or the UI shows an empty "successful" turn.
+    assert "--disable-slash-commands" not in plan_cmd
+    # Default (incl. solo) keeps slash expansion disabled headless.
+    assert "--disable-slash-commands" in AntigravityNativeSession(_session())._build_command({})
 
 
 def test_available_modes_probes_agyx_binary(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -232,6 +238,70 @@ def test_adapter_result_error() -> None:
     assert out[1].payload["status"] == "failed"
 
 
+def test_adapter_headless_denied_action_is_actionable_failure() -> None:
+    # agy headless auto-denies a tool: SUCCESS + denied_actions + empty response.
+    ad = AntigravityEventAdapter()
+    out = ad.normalize_line(
+        {
+            "event": "result",
+            "result": {
+                "status": "SUCCESS",
+                "response": "",
+                "denied_actions": [{"action": "command", "display_name": "RunCommand"}],
+            },
+        },
+        _ctx("deny"),
+    )
+    assert [e.type.value for e in out] == ["error", "turn_completed"]
+    assert "RunCommand" in out[0].payload["message"]
+    assert "Solo Mode" in out[0].payload["message"]
+    assert out[1].payload["status"] == "failed"
+    # A denied action alongside a real answer does not fail the turn.
+    ok = ad.normalize_line(
+        {
+            "event": "result",
+            "result": {
+                "status": "SUCCESS",
+                "response": "partial answer",
+                "denied_actions": [{"action": "command", "display_name": "RunCommand"}],
+            },
+        },
+        _ctx("deny2"),
+    )
+    assert ok[-1].payload["status"] == "completed"
+
+
+def test_adapter_unknown_status_is_failure() -> None:
+    ad = AntigravityEventAdapter()
+    out = ad.normalize_line({"event": "result", "result": {}}, _ctx("weird"))
+    assert [e.type.value for e in out] == ["error", "turn_completed"]
+    assert out[1].payload["status"] == "failed"
+
+
+def test_adapter_usage_maps_agy_fields() -> None:
+    ad = AntigravityEventAdapter()
+    out = ad.normalize_line(
+        {
+            "event": "result",
+            "result": {
+                "status": "SUCCESS",
+                "response": "x",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 5,
+                    "thinking_tokens": 7,
+                    "cache_read_tokens": 20,
+                    "total_tokens": 85,
+                },
+            },
+        },
+        _ctx("usage"),
+    )
+    completed = next(e for e in out if e.type.value == "turn_completed").payload["usage"]
+    assert completed["reasoning"] == 7
+    assert completed["cached"] == 20
+
+
 def test_adapter_result_response_without_step_delta_emits_once() -> None:
     ad = AntigravityEventAdapter()
     ctx = _ctx("turn3")
@@ -288,3 +358,16 @@ def test_adapter_ignores_unknown_records() -> None:
     assert ad.normalize_line({"event": "something_else"}, _ctx()) == []
     assert ad.normalize_line({}, _ctx()) == []
     assert ad.discover_source(_session()) is None
+
+
+def test_remote_tab_rejected() -> None:
+    import pytest
+    from claude_hub.models import SessionKind, TerminalTabCreate
+
+    with pytest.raises(ValueError, match="Hub host"):
+        TerminalTabCreate(
+            name="r",
+            agent_type=AgentType.ANTIGRAVITY,
+            session_kind=SessionKind.TERMINAL,
+            target=ExecutionTarget.REMOTE,
+        )
