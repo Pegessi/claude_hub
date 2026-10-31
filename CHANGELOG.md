@@ -7,6 +7,17 @@
 
 ## Released
 
+### docs(agents): add third-party Agent CLI installation guide
+
+- Document separate installation, authentication and executable checks for
+  Claude Code, Codex, Cursor Agent and Antigravity, with official source links.
+- Link the guide from README requirements and deployment setup. Clarify the
+  service-user/PATH requirement, Cursor's `agent` executable, per-provider proxy
+  and certificate configuration, and Antigravity's deployment-owned `agyx`
+  wrapper and supported Hub surfaces.
+- Documentation only; no provider installation, login, service restart or
+  runtime behavior changes.
+
 ### feat: Antigravity (agy) Chat and Terminal provider
 
 - Register a new `antigravity` agent type backed by the locally installed

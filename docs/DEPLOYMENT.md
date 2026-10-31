@@ -4,14 +4,28 @@
 
 ## 目录
 
-1. [架构概述](#架构概述)
-2. [飞书应用配置](#飞书应用配置)
-3. [环境变量配置](#环境变量配置)
-4. [内网穿透部署](#内网穿透部署)
-5. [Nginx 反向代理](#nginx-反向代理)
-6. [Cloudflare Tunnel（推荐）](#cloudflare-tunnel推荐)
+1. [Agent CLI 安装准备](#agent-cli-安装准备)
+2. [架构概述](#架构概述)
+3. [飞书应用配置](#飞书应用配置)
+4. [环境变量配置](#环境变量配置)
+5. [内网穿透部署](#内网穿透部署)
+6. [Nginx 反向代理](#nginx-反向代理)
+7. [Cloudflare Tunnel（推荐）](#cloudflare-tunnel推荐)
 
 ---
+
+## Agent CLI 安装准备
+
+使用 Agent 或 Chat 前，需要在实际执行机器上，以运行 Agent 的系统用户安装并
+登录所选的第三方 CLI。Hub 不会自动安装 Claude Code、Codex、Cursor Agent 或
+Antigravity，也不会通过飞书登录替你完成这些 CLI 的认证。
+
+按 [Agent CLI 安装指引](AGENT_INSTALLATION.md) 完成安装、认证及 PATH 检查；
+有专用网络出口的环境，还应核对其中的[代理与证书提示](AGENT_INSTALLATION.md#代理与证书配置提示)。
+特别注意：Cursor 使用 `agent`；Antigravity 的官方 CLI 为 `agy`，当前 Hub 还
+要求部署提供 `agyx` 包装程序。只安装桌面应用，或只在浏览器所在电脑登录，不能
+代替服务运行环境中的 CLI 安装与认证。远程 SSH Terminal 的 CLI 要在远端准备；
+Antigravity 当前不支持远程执行。
 
 ## 架构概述
 
