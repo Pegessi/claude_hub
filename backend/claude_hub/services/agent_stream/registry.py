@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Dict, Optional, Type
 
 from ...models import AgentType, ManagedSession
+from .antigravity_events import AntigravityEventAdapter
 from .base import AgentStreamAdapter
 from .claude_jsonl import ClaudeJsonlAdapter
 from .codex_jsonl import CodexJsonlAdapter, TraexJsonlAdapter
@@ -27,6 +28,7 @@ _ADAPTERS: Dict[AgentType, Type[AgentStreamAdapter]] = {
     AgentType.TRAEX: TraexJsonlAdapter,
     AgentType.CURSOR: CursorCliTranscriptAdapter,
     AgentType.MASO: MasoEventAdapter,
+    AgentType.ANTIGRAVITY: AntigravityEventAdapter,
 }
 
 

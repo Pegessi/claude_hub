@@ -61,6 +61,12 @@
           Cursor
         </option>
         <option
+          v-if="allowAntigravity && !excludeTypes.includes('antigravity')"
+          value="antigravity"
+        >
+          Antigravity
+        </option>
+        <option
           v-if="allowTerminal && !excludeTypes.includes('terminal')"
           value="terminal"
         >
@@ -146,6 +152,7 @@ interface Props {
   variant?: 'modal' | 'form'
   allowTerminal?: boolean
   allowMaso?: boolean
+  allowAntigravity?: boolean
   // Workspace launchers exclude providers without managed-worker support.
   excludeTypes?: AgentType[]
   typeLabel?: string
@@ -157,6 +164,7 @@ const props = withDefaults(defineProps<Props>(), {
   variant: 'modal',
   allowTerminal: true,
   allowMaso: false,
+  allowAntigravity: false,
   excludeTypes: () => [],
   typeLabel: 'Agent Type',
   soloLabel: 'YOLO mode',
@@ -181,6 +189,9 @@ const supportsSoloMode = computed(
 )
 
 const yoloHint = computed(() => {
+  if (props.agentType === 'antigravity') {
+    return 'Runs Antigravity with --dangerously-skip-permissions. Enable only for trusted tasks.'
+  }
   if (props.agentType === 'codex' || props.agentType === 'traex') {
     const name = props.agentType === 'traex' ? 'TraeX' : 'Codex'
     return `Runs ${name} with --ask-for-approval never and --sandbox danger-full-access`
@@ -238,7 +249,8 @@ function onAgentTypeChange(value: string) {
   // User-driven type change: reset solo for unsupported types and re-apply the
   // type's default env preset/text. Programmatic prop updates (e.g. populating
   // an existing config) do NOT pass through here, so they are not clobbered.
-  if (agentType === 'cursor' || agentType === 'terminal' || agentType === 'maso') {
+  // Antigravity requires a fresh, explicit choice to bypass permissions.
+  if (['cursor', 'terminal', 'maso', 'antigravity'].includes(agentType)) {
     emit('update:soloMode', false)
   }
   emit('update:envPreset', defaultLaunchEnvPresetForAgent(agentType))

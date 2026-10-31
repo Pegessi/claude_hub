@@ -18,6 +18,29 @@ const chatComposerController = readSource('../src/features/chat/controllers/useC
 const chatDelivery = readSource('../src/features/chat/controllers/useChatDelivery.ts')
 const chatImages = readSource('../src/features/chat/controllers/useChatImages.ts')
 const taskDialog = readSource('../src/components/TaskCreateDialog.vue')
+const agentConfigFields = readSource('../src/components/AgentConfigFields.vue')
+const residentAgentDialog = readSource('../src/features/workspace/components/ResidentAgentDialog.vue')
+const scheduledTasksPanel = readSource('../src/features/scheduled-tasks/ScheduledTasksPanel.vue')
+const agentAvatar = readSource('../src/components/AgentAvatar.vue')
+
+test('Antigravity is opt-in only for local direct Chat, not other launchers', () => {
+  assert.match(agentConfigFields, /v-if="allowAntigravity && !excludeTypes\.includes\('antigravity'\)"/)
+  assert.match(agentConfigFields, /allowAntigravity: false/)
+  assert.match(sessionCreator, /:allow-antigravity="form\.session_kind === 'chat' && form\.target === 'local'"/)
+  assert.match(sessionCreator, /kind === 'terminal' && \['maso', 'antigravity'\]\.includes\(form\.agent_type\)/)
+  for (const source of [workspaceAgentDialog, residentAgentDialog, scheduledTasksPanel]) {
+    assert.doesNotMatch(source, /allow-antigravity|value="antigravity"/)
+  }
+  assert.match(chatComposer, /:show-schedule="!isManagedChat && currentTab\?\.agent_type !== 'antigravity'"/)
+})
+
+test('Antigravity solo is an explicit choice and its identity is not rendered as Terminal', () => {
+  assert.match(agentConfigFields, /'antigravity'\]\s*\.includes\(agentType\)\) \{\s*emit\('update:soloMode', false\)/)
+  assert.match(agentConfigFields, /Runs Antigravity with --dangerously-skip-permissions/)
+  assert.match(sessionCreator, /\['claude', 'codex', 'traex', 'antigravity'\]\.includes\(form\.agent_type\)/)
+  assert.match(agentAvatar, /v-else-if="kind === 'antigravity'"/)
+  assert.match(agentAvatar, /raw === 'antigravity'/)
+})
 
 test('top-level and Workspace launchers both expose an explicit execution surface', () => {
   assert.match(sessionCreator, /@click="setSessionKind\('chat'\)"/)

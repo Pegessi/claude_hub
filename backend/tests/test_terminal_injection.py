@@ -32,9 +32,9 @@ def test_terminal_injection_remains_byte_identical_after_fragment_split() -> Non
         execution_target_value="remote",
     )
 
-    assert len(rendered) == 104455
+    assert len(rendered) == 104487
     assert hashlib.sha256(rendered.encode("utf-8")).hexdigest() == (
-        "48f286cf570e082e4261af6858fc66eac6c8f760c2e57423136c01c3937c6bb1"
+        "85456748dd2678fc9087dcd74519ce08facb0d969ccda3b7ba6a0accc0194264"
     )
 
 

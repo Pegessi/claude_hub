@@ -7,6 +7,31 @@
 
 ## Released
 
+### feat: Antigravity (agy) Chat and Terminal provider
+
+- Register a new `antigravity` agent type backed by the locally installed
+  Antigravity CLI via the `agyx` wrapper (Google account sign-in; the wrapper
+  owns the local eligibility-bypass proxy, egress and TLS trust). Direct Chat
+  turns keep one `agyx --input-format stream-json --output-format stream-json`
+  process and write one NDJSON line per turn, avoiding repeated sign-in and
+  model/workspace initialization. Capture the conversation id from `init` and
+  resume with `--conversation` only after Stop or a model/mode/env change;
+  terminal tabs launch the interactive TUI through tmux/ttyd.
+- Add a stdout-only `AntigravityEventAdapter` mapping agy's `init` /
+  `step_update` / `result` NDJSON records (streaming assistant fragments,
+  tool timeline, usage, error/cancel) to the neutral agent-stream events, and
+  a curated static model catalog. Solo maps to `--dangerously-skip-permissions`;
+  plan mode maps to `--mode plan`; model selection uses `ANTIGRAVITY_MODEL`.
+  Count per-turn step usage rather than the CLI's cumulative result counters,
+  including cached input in the neutral input total without billing it twice.
+- The provider is local-host and direct-use only: surfaces are direct Chat,
+  `agent run` subagent and the terminal tab (no managed/resident/scheduled/Dot,
+  no remote, no API-key/ADC billing). Frontend gains the Antigravity option,
+  avatar, model channel and switch-policy entries.
+- Verified with unit tests (command construction, event normalization, golden
+  ProviderSpec matrix) and a live two-turn Chat over the real Google backend,
+  including `--conversation` memory continuation.
+
 ### fix: reject malformed browser Origin and Host ports without server errors
 
 - Catch deferred URL port-validation errors in both Origin and Host parsing.

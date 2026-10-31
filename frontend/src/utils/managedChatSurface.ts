@@ -40,5 +40,5 @@ export function providerSupportsManagedSurface(
   if (sessionKind === 'chat') {
     return target === 'local' && ['claude', 'codex', 'cursor', 'maso'].includes(agentType)
   }
-  return agentType !== 'maso'
+  return agentType !== 'maso' && agentType !== 'antigravity'
 }
