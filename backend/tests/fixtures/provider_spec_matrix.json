@@ -1,4 +1,69 @@
 {
+  "antigravity": {
+    "approval_channels": {
+      "direct_chat": "oneshot_steer",
+      "dot": "none",
+      "managed_chat": "none",
+      "managed_terminal": "none",
+      "resident": "none",
+      "scheduled": "none",
+      "subagent": "oneshot_steer",
+      "terminal_tab": "native_tui"
+    },
+    "auth": {
+      "default_endpoint": null,
+      "endpoint_env_names": [],
+      "kind": "none",
+      "login_probe_argv": [],
+      "network_route_selection": false,
+      "requires_loopback_for_managed": false
+    },
+    "binary": "agyx",
+    "display_name": "Antigravity",
+    "edit_resend": false,
+    "effort_env_keys": [],
+    "eof_is_fatal": false,
+    "fork_seed_via_prompt": true,
+    "goals": {
+      "api": "none",
+      "completion_event": "result",
+      "completion_event_scope": "any",
+      "completion_requires_provider_event": false,
+      "default_owner": "hub_managed",
+      "surfaces": [],
+      "usage_quality": "exact"
+    },
+    "headless_safe": true,
+    "hot_env_keys": [
+      "ANTIGRAVITY_MODEL"
+    ],
+    "id": "antigravity",
+    "images": "none",
+    "model_catalog": "static_curated",
+    "model_configurable_in_managed": false,
+    "model_env_key": "ANTIGRAVITY_MODEL",
+    "plan_mode": "cli_flag_probed",
+    "quota": "none",
+    "reasoning_effort": "none",
+    "remote_terminal": false,
+    "resume": {
+      "constructive_always": false,
+      "constructive_flag": null,
+      "kind": "verified_flag",
+      "verified_flag": "--conversation"
+    },
+    "solo": "bypass_flag",
+    "stream_source": "stdout_stream_json",
+    "supports_conversation_rotation": false,
+    "surfaces": [
+      "direct_chat",
+      "subagent",
+      "terminal_tab"
+    ],
+    "system_instruction_channel": "none",
+    "tool_timeline": true,
+    "transport": "cli_oneshot"
+  },
   "claude": {
     "approval_channels": {
       "direct_chat": "oneshot_steer",

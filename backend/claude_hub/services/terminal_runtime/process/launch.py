@@ -61,6 +61,8 @@ class ProcessLaunchMixin(ProcessHost):
         if self.agent_type == AgentType.CURSOR:
             # Cursor agent runs in yolo by default; solo_mode toggle is a no-op.
             return "agent"
+        if self.agent_type == AgentType.ANTIGRAVITY:
+            return self._antigravity_launch_command()
         return None
 
     def _tmux_shell_command(self, session_exists: bool) -> str:
@@ -76,6 +78,7 @@ class ProcessLaunchMixin(ProcessHost):
                 AgentType.CLAUDE,
                 AgentType.CODEX,
                 AgentType.TRAEX,
+                AgentType.ANTIGRAVITY,
             }
         ):
             user_shell = os.environ.get("SHELL", "/bin/bash")
@@ -139,7 +142,7 @@ class ProcessLaunchMixin(ProcessHost):
                     ]
                 )
             )
-        elif self.agent_type in {AgentType.CURSOR, AgentType.TRAEX}:
+        elif self.agent_type in {AgentType.CURSOR, AgentType.TRAEX, AgentType.ANTIGRAVITY}:
             user_shell = os.environ.get("SHELL", "/bin/bash")
             cmd.append(
                 shlex.join(
@@ -311,7 +314,10 @@ class ProcessLaunchMixin(ProcessHost):
                     f"{self._with_env(self._agent_start_command(recover=recover))}; exec {user_shell}",
                 ]
             )
-        elif self.agent_type in {AgentType.CURSOR, AgentType.TRAEX} and not session_exists:
+        elif (
+            self.agent_type in {AgentType.CURSOR, AgentType.TRAEX, AgentType.ANTIGRAVITY}
+            and not session_exists
+        ):
             user_shell = os.environ.get("SHELL", "/bin/bash")
             cmd.extend(
                 [
@@ -480,7 +486,20 @@ class ProcessLaunchMixin(ProcessHost):
         flags = " --ask-for-approval never --sandbox danger-full-access" if self.solo_mode else ""
         return f"traex{flags}"
 
+    def _antigravity_launch_command(self) -> str:
+        """Build the Antigravity CLI TUI launch command (fresh every time).
+
+        Conversation persistence in the terminal tab is handled by agy's own
+        ``--conversation`` resume on the Chat (native transport) surface; a
+        terminal tab simply starts the interactive TUI. The ``agyx`` wrapper
+        supplies the local proxy/TLS environment the Google sign-in needs.
+        """
+        flags = " --dangerously-skip-permissions" if self.solo_mode else ""
+        return f"agyx{flags}"
+
     def _agent_start_command(self, recover: bool = False) -> str:
+        if self.agent_type == AgentType.ANTIGRAVITY:
+            return self._antigravity_launch_command()
         if self.agent_type == AgentType.TRAEX:
             return self._traex_launch_command()
         if self.agent_type == AgentType.CODEX:

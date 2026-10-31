@@ -330,6 +330,14 @@ _TERMINAL_APPROVAL = {
     Surface.SCHEDULED: ApprovalChannel.NATIVE_TUI,
     Surface.TERMINAL_TAB: ApprovalChannel.NATIVE_TUI,
 }
+# agy (Antigravity CLI) is a consumer-account, local-host-only CLI: direct
+# Chat/subagent turns answer approvals as later turns, terminal tabs use the
+# native TUI. Managed/resident/scheduled/Dot surfaces stay off for now.
+_ANTIGRAVITY_APPROVAL = {
+    Surface.DIRECT_CHAT: ApprovalChannel.ONESHOT_STEER,
+    Surface.SUBAGENT: ApprovalChannel.ONESHOT_STEER,
+    Surface.TERMINAL_TAB: ApprovalChannel.NATIVE_TUI,
+}
 
 # Insertion order is the display ordering shared by the Dot backend list and
 # managed-executor capability lists (claude, codex, cursor, ...); surfaces
@@ -459,6 +467,50 @@ REGISTRY: Mapping[AgentType, ProviderSpec] = MappingProxyType(
             headless_safe=True,
             surfaces=_CHAT_SURFACES,
             remote_terminal=True,
+        ),
+        AgentType.ANTIGRAVITY: ProviderSpec(
+            id=AgentType.ANTIGRAVITY,
+            display_name="Antigravity",
+            transport=TransportKind.CLI_ONESHOT,
+            stream_source=StreamEventSource.STDOUT_STREAM_JSON,
+            binary="agyx",
+            # agy resumes a stored conversation with the verified
+            # ``--conversation <id>`` flag; an unverified id is not
+            # constructive, so a fresh first turn passes nothing.
+            resume=ResumeSpec(kind="verified_flag", verified_flag="--conversation"),
+            supports_conversation_rotation=False,
+            edit_resend=False,
+            images=ImageTransport.NONE,
+            tool_timeline=True,
+            plan_mode=PlanMode.CLI_FLAG_PROBED,
+            system_instruction_channel="none",
+            approval_channels=ApprovalChannels.for_surfaces(_ANTIGRAVITY_APPROVAL),
+            model_catalog=ModelCatalogSource.STATIC_CURATED,
+            model_env_key="ANTIGRAVITY_MODEL",
+            reasoning_effort=ReasoningEffortKind.NONE,
+            hot_env_keys=("ANTIGRAVITY_MODEL",),
+            goals=GoalSpec(
+                api=NativeGoals.NONE,
+                default_owner="hub_managed",
+                usage_quality="exact",
+                completion_event="result",
+                completion_event_scope="any",
+                surfaces=frozenset(),
+            ),
+            quota=QuotaSource.NONE,
+            # The agyx wrapper owns the Google sign-in, proxy and TLS setup;
+            # there is no API key, endpoint or login-status probe.
+            auth=AuthSpec(kind=AuthKind.NONE),
+            solo="bypass_flag",
+            headless_safe=True,
+            surfaces=frozenset(
+                {
+                    Surface.DIRECT_CHAT,
+                    Surface.SUBAGENT,
+                    Surface.TERMINAL_TAB,
+                }
+            ),
+            remote_terminal=False,
         ),
         AgentType.TRAEX: ProviderSpec(
             id=AgentType.TRAEX,

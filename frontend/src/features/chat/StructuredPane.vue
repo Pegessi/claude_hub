@@ -58,7 +58,9 @@
           ? 'Return to Workspace and refresh managed sessions.'
           : currentTab?.agent_type === 'maso'
             ? 'Start the MASO HTTP service, then retry.'
-            : 'Create a Terminal session for native TUI access.' }}</span>
+            : currentTab?.agent_type === 'antigravity'
+              ? 'Run agy in a local terminal to check your Google account sign-in, then retry.'
+              : 'Create a Terminal session for native TUI access.' }}</span>
       </template>
     </div>
 

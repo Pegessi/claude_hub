@@ -119,7 +119,7 @@ test('workspace scoped styles retain every accepted selector and declaration', a
       for (const contract of stylesheetContracts(style.content)) rules.add(contract)
     }
   }
-  assert.equal(digest([...rules].sort()), 'dc1112f1c0ee2eadfe17f8f652270895eb55c6b4c15c62ffa9b1cd8b9a0d60f1')
+  assert.equal(digest([...rules].sort()), '8b8ecefd86ee42e9bbaa27c3462088ef5c35e32555a0fda6f82788b4a6004956')
 })
 
 async function componentStyles(name) {

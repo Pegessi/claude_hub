@@ -70,6 +70,19 @@
       />
     </svg>
 
+    <!-- antigravity: A monogram, distinct from the plain terminal glyph -->
+    <svg
+      v-else-if="kind === 'antigravity'"
+      viewBox="0 0 24 24"
+      class="agent-avatar__glyph"
+      aria-hidden="true"
+    >
+      <path
+        d="M10.5 4h3L21 20h-3.2l-1.7-4H7.9l-1.7 4H3L10.5 4Zm1.5 3.5L9 13.5h6L12 7.5Z"
+        fill="currentColor"
+      />
+    </svg>
+
     <!-- terminal: prompt glyph -->
     <svg
       v-else
@@ -109,6 +122,7 @@ const kind = computed<AvatarKind>(() => {
     raw === 'traex' ||
     raw === 'maso' ||
     raw === 'cursor' ||
+    raw === 'antigravity' ||
     raw === 'terminal'
   )
     return raw
@@ -117,7 +131,8 @@ const kind = computed<AvatarKind>(() => {
 
 // Caller-provided title wins (used for both the tooltip and the accessible
 // name so they never diverge); otherwise fall back to a generic label.
-const resolvedTitle = computed(() => props.title?.trim() || `${kind.value} agent`)
+const resolvedTitle = computed(() => props.title?.trim()
+  || `${kind.value === 'antigravity' ? 'Antigravity' : kind.value} agent`)
 </script>
 
 <style scoped>
@@ -179,6 +194,11 @@ const resolvedTitle = computed(() => props.title?.trim() || `${kind.value} agent
 .agent-avatar--maso {
   background: #285b53;
   color: #fff;
+}
+
+.agent-avatar--antigravity {
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-accent);
 }
 
 .agent-avatar--terminal {
