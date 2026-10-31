@@ -130,10 +130,15 @@ def validate_workspace_session_surface(agent_type: AgentType, session_kind: Sess
         raise ValueError("TraeX is not supported for workspace agents")
     if agent_type == AgentType.MASO and session_kind != SessionKind.CHAT:
         raise ValueError("MASO is an HTTP Chat provider; select a Chat session")
+    if agent_type == AgentType.ANTIGRAVITY and session_kind != SessionKind.CHAT:
+        raise ValueError("Antigravity is a Chat provider in workspaces; select a Chat session")
     if session_kind == SessionKind.CHAT and agent_type not in {
         AgentType.CLAUDE,
         AgentType.CODEX,
         AgentType.CURSOR,
         AgentType.MASO,
+        AgentType.ANTIGRAVITY,
     }:
-        raise ValueError("Managed Chat supports only local Claude, Codex, Cursor, or MASO agents")
+        raise ValueError(
+            "Managed Chat supports only local Claude, Codex, Cursor, MASO, or Antigravity agents"
+        )

@@ -31,13 +31,15 @@ def validate_config_admission(config: ManagedExecutorConfig) -> None:
                     f"Unsupported managed session agent_type: {config.agent_type.value}"
                 )
             raise ValueError(
-                "Managed Chat supports only local Claude, Codex, Cursor, or MASO agents"
+                "Managed Chat supports only local Claude, Codex, Cursor, MASO, or Antigravity agents"
             )
         if config.target == ExecutionTarget.REMOTE:
             raise ValueError(CHAT_REMOTE_UNSUPPORTED)
     elif not spec.runs_on(Surface.MANAGED_TERMINAL):
         if config.agent_type == AgentType.MASO:
             raise ValueError("MASO is an HTTP Chat provider; select a Chat session")
+        if config.agent_type == AgentType.ANTIGRAVITY:
+            raise ValueError("Antigravity is a Chat provider in workspaces; select a Chat session")
         raise ValueError(f"Unsupported managed session agent_type: {config.agent_type.value}")
 
 
