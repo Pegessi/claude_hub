@@ -288,6 +288,7 @@ function providerLabel(agentType: string): string {
     claude: 'Claude',
     codex: 'Codex',
     cursor: 'Cursor',
+    antigravity: 'Antigravity',
     traex: 'TraeX',
     maso: 'MASO',
   } satisfies Record<DotProvider, string>)[agentType as DotProvider] ?? agentType

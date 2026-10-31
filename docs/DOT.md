@@ -1,9 +1,10 @@
 # Dot — the persistent personal agent
 
 Dot is a persistent personal agent with one current Chat tab, a stable role and
-file-based memory. Claude, Codex, Cursor, TraeX and MASO are supported execution
-backends. Dot handles small requests directly, uses memory when helpful, and hands
-long or many-step work to Hub Tasks while keeping track of the user's priorities.
+file-based memory. Claude, Codex, Cursor, Antigravity, TraeX and MASO are
+supported execution backends. Dot handles small requests directly, uses memory
+when helpful, and hands long or many-step work to Hub Tasks while keeping track
+of the user's priorities.
 
 Each turn receives a bounded context pack built from durable memory. The session
 pack stays fixed for a provider conversation; rotation limits accumulated history.
@@ -128,7 +129,9 @@ state are preserved. An unchanged configuration is a no-op.
 
 Backend changes reset the draft to the chosen backend's own default environment;
 the old backend's API keys, endpoint and model are not implicitly inherited.
-MASO must pass the existing service preflight. Models can be supplied through a
+MASO must pass the existing service preflight. Antigravity runs through the
+deployment's `agyx` wrapper, which owns sign-in, proxy and TLS setup; its launch
+environment is optional and normally empty. Models can be supplied through a
 preset/environment; the new Chat's composer retains the verified model picker.
 The composer can update only the current backend's model/reasoning keys in place.
 Provider, credential and endpoint changes must use the execution editor; generic

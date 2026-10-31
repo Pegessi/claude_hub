@@ -68,7 +68,7 @@ async def main(browser_run: BrowserRun) -> None:
             "LEGACY_PROVIDER_MODEL": "legacy-old",
         },
         "revision": REVISION_1,
-        "supported_agent_types": ["claude", "codex", "cursor", "traex", "maso"],
+        "supported_agent_types": ["claude", "codex", "cursor", "antigravity", "traex", "maso"],
     }
     execution_put_attempts = 0
     execution_apply_started = asyncio.Event()
@@ -431,7 +431,9 @@ async def main(browser_run: BrowserRun) -> None:
             ).input_value()
             assert initial_preset != "custom", initial_preset
             await expect(execution_editor).to_contain_text("Currently legacy-provider")
-            await execution_editor.get_by_label("Execution backend").select_option("codex")
+            backend_select = execution_editor.get_by_label("Execution backend")
+            await expect(backend_select.locator("option", has_text="Antigravity")).to_have_count(1)
+            await backend_select.select_option("antigravity")
             await expect(execution_editor.get_by_label("Dot environment preset")).to_have_value(
                 "none"
             )
@@ -443,7 +445,9 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(execution_editor).to_contain_text(
                 "Unbind the Feishu Bot before switching Dot's backend"
             )
-            await expect(execution_editor.get_by_label("Execution backend")).to_have_value("codex")
+            await expect(execution_editor.get_by_label("Execution backend")).to_have_value(
+                "antigravity"
+            )
             await expect(execution_editor.get_by_label("Dot environment preset")).to_have_value(
                 "none"
             )
@@ -465,14 +469,14 @@ async def main(browser_run: BrowserRun) -> None:
                 assert wrote("PATCH", "/api/dot/identity") == []
             finally:
                 allow_execution_apply.set()
-            await expect(execution_editor).to_contain_text("Dot now uses Codex")
+            await expect(execution_editor).to_contain_text("Dot now uses Antigravity")
             await expect(execution_editor).to_contain_text(
                 "Dot was updated, but the Chat list could not refresh."
             )
             switch_payloads = wrote("PUT", "/api/dot/execution")
             expected_switch = {
                 "expected_revision": REVISION_1,
-                "agent_type": "codex",
+                "agent_type": "antigravity",
                 "env": {},
             }
             assert switch_payloads == [expected_switch, expected_switch]
