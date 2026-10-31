@@ -574,7 +574,7 @@ class CursorNativeSession(CursorSession, ProviderSession):
 
 
 class AntigravityNativeSession(AntigravitySession, ProviderSession):
-    """Antigravity (agy) one-shot transport."""
+    """Antigravity (agy) persistent stream-json transport."""
 
 
 # ── factory ──────────────────────────────────────────────────────────────────

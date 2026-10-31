@@ -22,7 +22,7 @@
     "display_name": "Antigravity",
     "edit_resend": false,
     "effort_env_keys": [],
-    "eof_is_fatal": false,
+    "eof_is_fatal": true,
     "fork_seed_via_prompt": true,
     "goals": {
       "api": "none",
@@ -62,7 +62,7 @@
     ],
     "system_instruction_channel": "none",
     "tool_timeline": true,
-    "transport": "cli_oneshot"
+    "transport": "cli_persistent"
   },
   "claude": {
     "approval_channels": {

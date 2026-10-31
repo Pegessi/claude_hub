@@ -7,19 +7,21 @@ Branch: `codex/antigravity-cli-provider` (worktree `~/claude_hub_worktree/antigr
 A new `antigravity` agent type that drives the installed Antigravity CLI
 (`agy 1.4.x`) through the local `agyx` wrapper:
 
-- **Spec** (`services/agent_stream/providers/spec.py`): CLI_ONESHOT /
-  STDOUT_STREAM_JSON transport, binary `agyx`, resume
+- **Spec** (`services/agent_stream/providers/spec.py`): CLI_PERSISTENT /
+  STDOUT_STREAM_JSON transport with fatal EOF, binary `agyx`, resume
   `verified_flag=--conversation`, solo `bypass_flag`, static model catalog,
   no images/goals/quota/auth-endpoint (the wrapper owns network + login).
   Surfaces: direct Chat, subagent (`agent run`), terminal tab only —
   deliberately no managed/resident/scheduled/Dot and no remote.
-- **Transport** (`providers/antigravity.py`): per-turn
+- **Transport** (`providers/antigravity.py`): one live process per Chat using
   `agyx --input-format stream-json --output-format stream-json
   --disable-slash-commands [--dangerously-skip-permissions|--mode plan]
-  [--model M] [--conversation <id>]`, stdin one NDJSON
-  `{"event":"user","message":{"content":...}}`; conversation id captured from
-  the top-level `init` record. `_build_provider_env` skips Hub's direct/proxy
+  [--model M] [--conversation <id>]`. Each turn writes one newline-terminated
+  `{"event":"user","message":{"content":...}}` record; stdin stays open
+  after `result`. Capture the conversation id from `init` and resume only
+  when replacing the process. `_build_provider_env` skips Hub's direct/proxy
   endpoint selector (unknown to it; agyx pins its own proxy + SSL_CERT_FILE).
+  See [persistent stream optimization](2026-10-31-antigravity-persistent-stream.md).
 - **Adapter** (`antigravity_events.py`): stdout-only (no transcript file,
   like MASO SSE). `step_update.step_type=agent_response|tool`, state
   ACTIVE/DONE; assistant text fragments arrive on BOTH states and are appended
