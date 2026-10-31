@@ -105,6 +105,26 @@ def test_command_solo_and_plan() -> None:
     assert "--dangerously-skip-permissions" not in plan._build_command({})
 
 
+def test_available_modes_probes_agyx_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    import claude_hub.services.agent_stream.native as native_module
+
+    seen: list[tuple[str, str]] = []
+
+    def _probe(binary: str, flag: str) -> bool:
+        seen.append((binary, flag))
+        return True
+
+    monkeypatch.setattr(native_module, "_help_confirms_plan_mode", _probe)
+    s = AntigravityNativeSession(_session())
+    modes = s.available_modes()
+    assert seen == [("agyx", "--mode")]
+    assert [m.id for m in modes] == ["default", "plan"]
+
+    seen.clear()
+    monkeypatch.setattr(native_module, "_help_confirms_plan_mode", lambda binary, flag: False)
+    assert [m.id for m in s.available_modes()] == ["default"]
+
+
 def test_stdin_envelope() -> None:
     import json
 

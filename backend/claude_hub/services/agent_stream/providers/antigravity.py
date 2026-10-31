@@ -50,7 +50,8 @@ class AntigravitySession(ProcessSession):
         return True
 
     def available_modes(self) -> List[StreamModeOption]:
-        if self._runtime.help_confirms_plan_mode("antigravity", "--mode"):
+        # The probe takes the binary name (agyx), not the provider id.
+        if self._runtime.help_confirms_plan_mode("agyx", "--mode"):
             return [self._runtime.default_mode(), self._runtime.plan_mode()]
         return [self._runtime.default_mode()]
 
