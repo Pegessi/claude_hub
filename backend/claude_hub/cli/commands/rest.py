@@ -250,7 +250,7 @@ def _tab_body(
 @click.option("--solo-mode/--no-solo-mode", default=False, help="Run in agent solo mode.")
 @click.option(
     "--agent-type",
-    type=click.Choice(["claude", "codex", "traex", "cursor", "terminal"]),
+    type=click.Choice(["claude", "codex", "traex", "cursor", "antigravity", "terminal"]),
     default="claude",
     help="Agent type.",
 )
@@ -413,7 +413,7 @@ def tab_message_cancel(ctx: click.Context, tab_id: str, message_id: str) -> None
 @click.option("--solo-mode/--no-solo-mode", default=None, help="Run in agent solo mode.")
 @click.option(
     "--agent-type",
-    type=click.Choice(["claude", "codex", "traex", "cursor", "terminal"]),
+    type=click.Choice(["claude", "codex", "traex", "cursor", "antigravity", "terminal"]),
     default=None,
     help="Agent type.",
 )

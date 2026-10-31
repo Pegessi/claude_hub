@@ -32,6 +32,7 @@ test('model and effort environment keys remain provider-specific', () => {
     ['traex', 'CODEX_MODEL', 'CODEX_REASONING_EFFORT'],
     ['cursor', 'CURSOR_MODEL', null],
     ['maso', 'MASO_MODEL', null],
+    ['antigravity', 'ANTIGRAVITY_MODEL', null],
     ['shell', null, null],
   ]) {
     const result = presentChatModel(tab(provider), null)
@@ -39,6 +40,21 @@ test('model and effort environment keys remain provider-specific', () => {
     assert.equal(result.reasoningEffortEnvVar, effortKey)
   }
   assert.equal(presentChatModel(null, null).combinedModelLabel, 'default')
+})
+
+test('Antigravity preserves complete model ids without a separate effort channel', () => {
+  const entry = {
+    id: 'gemini-4-argon-high', label: 'Gemini 4 Argon (High)', supported_reasoning_efforts: [],
+  }
+  const result = presentChatModel(tab('antigravity', { ANTIGRAVITY_MODEL: entry.id }), caps({
+    available_models: [entry], current_model: 'gemini-3.8-flash-medium',
+  }))
+  assert.equal(result.currentModel, entry.id)
+  assert.equal(result.currentModelOption, entry)
+  assert.equal(result.combinedModelLabel, entry.label)
+  assert.equal(result.reasoningEffortEnvVar, null)
+  assert.equal(result.currentReasoningEffort, '')
+  assert.equal(isChatModelActive(entry, result), true)
 })
 
 test('effective provider model matches catalog ids, provider ids and effort aliases', () => {

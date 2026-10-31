@@ -23,7 +23,7 @@ from claude_hub.cli.commands.workspaces import agent
 from claude_hub.cli.output import emit, print_rows
 from claude_hub.models.subagent import SUBAGENT_ID_ENV
 
-PROVIDERS = ["claude", "codex", "traex", "cursor", "maso"]
+PROVIDERS = ["claude", "codex", "traex", "cursor", "maso", "antigravity"]
 EXIT_FAILED = 1
 EXIT_TIMEOUT = 124
 EXIT_CANCELLED = 130
@@ -330,7 +330,8 @@ def _common_turn_options(func: Any) -> Any:
     "--solo/--no-solo",
     "solo",
     default=None,
-    help="Run without/with approvals (default: the parent Chat's setting; solo without parent).",
+    help="Run without/with approvals (Antigravity defaults to no-solo; otherwise inherit "
+    "the parent Chat's setting, or solo without a parent).",
 )
 @_common_turn_options
 @click.pass_context
@@ -371,6 +372,9 @@ def agent_run(
     }
     if solo is not None:
         body["solo_mode"] = solo
+    elif provider == "antigravity":
+        # Account-login runs must not inherit an unrelated provider's permission bypass.
+        body["solo_mode"] = False
     # Caller identity always goes along, independent of --parent-tab-id and
     # --no-parent: the server counts nesting depth from the caller and links a
     # subagent caller's subagents to its own Chat.

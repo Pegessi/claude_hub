@@ -33,6 +33,7 @@ from claude_hub.models.task_session import ManagedExecutorConfig
 from claude_hub.services import task_session_executor as tse
 from claude_hub.services.agent_stream import native, registry, transcript_fork
 from claude_hub.services.agent_stream.native import (
+    AntigravityNativeSession,
     ClaudeNativeSession,
     CodexNativeSession,
     CursorNativeSession,
@@ -172,6 +173,7 @@ def test_native_binary_map_equivalence() -> None:
         AgentType.CODEX: "codex",
         AgentType.TRAEX: "traex",
         AgentType.CURSOR: "agent",
+        AgentType.ANTIGRAVITY: "agyx",
         AgentType.MASO: None,
         AgentType.TERMINAL: None,
     }
@@ -187,6 +189,7 @@ def test_native_binary_availability_matrix(monkeypatch: pytest.MonkeyPatch) -> N
         AgentType.CODEX: True,
         AgentType.TRAEX: True,
         AgentType.CURSOR: True,
+        AgentType.ANTIGRAVITY: True,
         AgentType.MASO: True,  # HTTP readiness proven by preflight, no binary
         AgentType.TERMINAL: False,
     }
@@ -201,6 +204,7 @@ def test_factory_keys_match_chat_transport_specs() -> None:
         AgentType.CODEX,
         AgentType.TRAEX,
         AgentType.CURSOR,
+        AgentType.ANTIGRAVITY,
     }
     session = _managed_session(AgentType.TERMINAL)
     with pytest.raises(ValueError, match="no native transport"):
@@ -213,6 +217,7 @@ def test_subagent_env_key_maps_equivalence() -> None:
         AgentType.CODEX: "CODEX_MODEL",
         AgentType.TRAEX: "CODEX_MODEL",
         AgentType.CURSOR: "CURSOR_MODEL",
+        AgentType.ANTIGRAVITY: "ANTIGRAVITY_MODEL",
         AgentType.MASO: "MASO_MODEL",
     }
     assert _EFFORT_ENV_KEYS == {
@@ -226,6 +231,7 @@ def test_dot_hot_env_keys_equivalence() -> None:
         "claude": frozenset({"ANTHROPIC_MODEL"}),
         "codex": frozenset({"CODEX_MODEL", "CODEX_REASONING_EFFORT"}),
         "cursor": frozenset({"CURSOR_MODEL"}),
+        "antigravity": frozenset({"ANTIGRAVITY_MODEL"}),
         "traex": frozenset({"CODEX_MODEL", "CODEX_REASONING_EFFORT", "TRAEX_REASONING_EFFORT"}),
         "maso": frozenset({"MASO_MODEL"}),
     }
@@ -266,6 +272,7 @@ def test_terminal_probe_filter_set_equivalence() -> None:
             AgentType.CODEX,
             AgentType.TRAEX,
             AgentType.CURSOR,
+            AgentType.ANTIGRAVITY,
         }
     )
     assert terminal_api._PROBE_RESPONSE_FILTER_PROVIDERS == frozenset(
@@ -321,12 +328,14 @@ def _config(
         (AgentType.CURSOR, SessionKind.CHAT, True),
         (AgentType.MASO, SessionKind.CHAT, True),
         (AgentType.TRAEX, SessionKind.CHAT, False),
+        (AgentType.ANTIGRAVITY, SessionKind.CHAT, False),
         (AgentType.TERMINAL, SessionKind.CHAT, False),
         (AgentType.CLAUDE, SessionKind.TERMINAL, True),
         (AgentType.CODEX, SessionKind.TERMINAL, True),
         (AgentType.CURSOR, SessionKind.TERMINAL, True),
         (AgentType.MASO, SessionKind.TERMINAL, False),
         (AgentType.TRAEX, SessionKind.TERMINAL, False),
+        (AgentType.ANTIGRAVITY, SessionKind.TERMINAL, False),
         (AgentType.TERMINAL, SessionKind.TERMINAL, False),
     ],
 )
@@ -380,7 +389,7 @@ def test_launch_env_model_override_only_claude_codex() -> None:
 def test_fork_predicate_support_matches_spec() -> None:
     for provider in (AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR):
         assert callable(transcript_fork._user_message_predicate(provider))
-    for provider in (AgentType.TRAEX, AgentType.MASO, AgentType.TERMINAL):
+    for provider in (AgentType.TRAEX, AgentType.MASO, AgentType.ANTIGRAVITY, AgentType.TERMINAL):
         with pytest.raises(transcript_fork.TranscriptForkError, match="edit-resend"):
             transcript_fork._user_message_predicate(provider)
     assert {agent for agent, spec in all_specs().items() if spec.edit_resend} == {
@@ -407,6 +416,7 @@ def _bare_transport(cls: Any, agent_type: AgentType) -> Any:
         (CodexNativeSession, AgentType.CODEX),
         (TraexNativeSession, AgentType.TRAEX),
         (CursorNativeSession, AgentType.CURSOR),
+        (AntigravityNativeSession, AgentType.ANTIGRAVITY),
     ],
 )
 def test_native_transport_flags_match_spec(cls: Any, agent_type: AgentType) -> None:
@@ -461,6 +471,7 @@ def test_transcript_adapter_flags_match_spec() -> None:
         AgentType.CODEX: True,
         AgentType.TRAEX: True,
         AgentType.CURSOR: True,
+        AgentType.ANTIGRAVITY: True,
         AgentType.MASO: True,
     }
     for agent_type, approval in expected_approval.items():

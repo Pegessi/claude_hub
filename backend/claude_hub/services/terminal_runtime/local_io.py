@@ -169,4 +169,6 @@ def get_agent_command(runtime: RuntimeBindings, agent_type: AgentType) -> str:
         return "traex"
     if agent_type == AgentType.CURSOR:
         return "agent"
+    if agent_type == AgentType.ANTIGRAVITY:
+        return "agyx"
     return runtime.get_default_command()
