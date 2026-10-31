@@ -1,5 +1,9 @@
 # Antigravity (agy) provider integration — 2026-10-31
 
+> Historical note: this log records the original integration, which kept the
+> Dot surface off. Dot support was added later; see
+> [Dot Antigravity backend](2026-10-31-dot-antigravity-backend.md).
+
 Branch: `codex/antigravity-cli-provider` (worktree `~/claude_hub_worktree/antigravity-cli-provider`).
 
 ## What was added

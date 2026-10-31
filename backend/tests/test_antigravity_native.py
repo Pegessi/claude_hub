@@ -8,6 +8,7 @@ import json
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -24,9 +25,11 @@ from claude_hub.models import (
     ManagedSessionStatus,
     WorkspaceSessionRole,
 )
+from claude_hub.services import dot as dot_module
 from claude_hub.services.agent_stream.antigravity_events import AntigravityEventAdapter
 from claude_hub.services.agent_stream.base import NormalizeContext
 from claude_hub.services.agent_stream.native import AntigravityNativeSession
+from claude_hub.services.agent_stream.providers import antigravity as antigravity_module
 from claude_hub.services.agent_stream.registry import get_adapter
 from claude_hub.services.agent_stream.store import AgentStreamStore
 from claude_hub.services.agent_stream.tailer import SessionTailer
@@ -659,6 +662,236 @@ async def _through_completion(queue: asyncio.Queue[AgentStreamEvent]) -> list[Ag
             events.append(event)
             if event.type == AgentStreamEventType.TURN_COMPLETED:
                 return events
+
+
+async def _wait_until(predicate, *, attempts: int = 200, delay: float = 0.01) -> None:
+    for _ in range(attempts):
+        if predicate():
+            return
+        # The shared fake stdout reader sleeps briefly per record; yield real
+        # time so a stdout-driven init can reach the consumer.
+        await asyncio.sleep(delay)
+    raise AssertionError("condition was not reached")
+
+
+def _start_native_consumer(native: AntigravityNativeSession) -> asyncio.Task[None]:
+    """Consume stdout records like NativeConsumerMixin does for a live tab."""
+
+    async def consume() -> None:
+        while True:
+            record = await native.read_line()
+            if record is not None:
+                native.maybe_capture_conversation_id(record)
+
+    return asyncio.create_task(consume())
+
+
+async def _stop_native_consumer(task: asyncio.Task[None]) -> None:
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+async def test_dot_rotation_reuses_a_fresh_process_before_its_first_turn(
+    persistent_native,
+) -> None:
+    native, spawn, processes = persistent_native
+    consumer = _start_native_consumer(native)
+    try:
+        await native.start()
+        _emit(processes[0], {"event": "init", "conversation_id": "fresh-1"})
+        await _wait_until(lambda: native._conversation_id_verified)
+
+        assert await native.rotate_conversation() == "fresh-1"
+        assert spawn.await_count == 1
+        assert native._process is processes[0]
+        native.adopt_rotated_conversation("fresh-1")
+        assert native._conversation_id == "fresh-1"
+        assert native._conversation_id_verified is True
+        assert native._resume_arg() == ["--conversation", "fresh-1"]
+    finally:
+        await _stop_native_consumer(consumer)
+
+
+async def test_dot_rotation_waits_for_init_on_a_fresh_process(persistent_native) -> None:
+    native, spawn, processes = persistent_native
+    persisted: list[str] = []
+    native._conversation_id_persist = persisted.append
+    consumer = _start_native_consumer(native)
+    try:
+        await native.start()
+        rotation = asyncio.create_task(native.rotate_conversation())
+        await _wait_until(lambda: native._rotation_init is not None)
+        _emit(processes[0], {"event": "init", "conversation_id": "fresh-2"})
+
+        assert await asyncio.wait_for(rotation, 1) == "fresh-2"
+        assert spawn.await_count == 1
+        # The candidate is not resumable until Dot adopts the association.
+        assert persisted == []
+        native.adopt_rotated_conversation("fresh-2")
+        assert persisted == ["fresh-2"]
+    finally:
+        await _stop_native_consumer(consumer)
+
+
+async def test_dot_rotation_fails_fast_when_the_provider_exits_before_init(
+    persistent_native,
+) -> None:
+    native, _spawn, processes = persistent_native
+    consumer = _start_native_consumer(native)
+    try:
+        await native.start()
+        rotation = asyncio.create_task(native.rotate_conversation())
+        await _wait_until(lambda: native._rotation_init is not None)
+        processes[0].returncode = 1
+
+        with pytest.raises(RuntimeError, match="exited before reporting"):
+            await asyncio.wait_for(rotation, 1)
+        assert native._started is False
+        assert processes[0]._terminated
+        assert native._client_requested_stop is True
+    finally:
+        await _stop_native_consumer(consumer)
+
+
+async def test_dot_rotation_replaces_a_used_process_and_keeps_the_new_id(
+    persistent_native,
+) -> None:
+    native, spawn, processes = persistent_native
+    consumer = _start_native_consumer(native)
+    try:
+        await native.start()
+        _emit(processes[0], {"event": "init", "conversation_id": "old-conv"})
+        await _wait_until(lambda: native._conversation_id_verified)
+        native._turns_on_process = 1
+        persisted: list[str] = []
+        native._conversation_id_persist = persisted.append
+        old = processes[0]
+        rotation = asyncio.create_task(native.rotate_conversation())
+        await _wait_until(lambda: len(processes) == 2 and native._rotation_init is not None)
+        # The replacement must not resume the conversation it is replacing.
+        assert "--conversation" not in spawn.call_args_list[1][0]
+
+        _emit(processes[1], {"event": "init", "conversation_id": "new-conv"})
+        assert await asyncio.wait_for(rotation, 1) == "new-conv"
+        assert old._terminated or old.stdin.is_closing()
+        assert spawn.await_count == 2
+        assert native._conversation_id == "new-conv"
+        assert persisted == []
+        native.adopt_rotated_conversation("new-conv")
+        assert native._conversation_id_verified is True
+        assert native._resume_arg() == ["--conversation", "new-conv"]
+        assert persisted == ["new-conv"]
+    finally:
+        await _stop_native_consumer(consumer)
+
+
+async def test_dot_rotation_discard_retires_the_deferred_candidate(
+    persistent_native,
+) -> None:
+    native, _spawn, processes = persistent_native
+    consumer = _start_native_consumer(native)
+    try:
+        await native.start()
+        rotation = asyncio.create_task(native.rotate_conversation())
+        await _wait_until(lambda: native._rotation_init is not None)
+        _emit(processes[0], {"event": "init", "conversation_id": "rejected"})
+        assert await asyncio.wait_for(rotation, 1) == "rejected"
+
+        await native.discard_rotated_conversation("rejected")
+        assert native._conversation_id is None
+        assert native._conversation_id_verified is False
+        assert processes[0]._terminated
+    finally:
+        await _stop_native_consumer(consumer)
+
+
+async def test_dot_rotation_discard_restores_the_previous_identity(
+    persistent_native,
+) -> None:
+    native, _spawn, processes = persistent_native
+    consumer = _start_native_consumer(native)
+    try:
+        await native.start()
+        _emit(processes[0], {"event": "init", "conversation_id": "old-conv"})
+        await _wait_until(lambda: native._conversation_id_verified)
+        native._turns_on_process = 1
+        rotation = asyncio.create_task(native.rotate_conversation())
+        await _wait_until(lambda: len(processes) == 2 and native._rotation_init is not None)
+        _emit(processes[1], {"event": "init", "conversation_id": "candidate"})
+        assert await asyncio.wait_for(rotation, 1) == "candidate"
+
+        await native.discard_rotated_conversation("candidate")
+        assert native._conversation_id == "old-conv"
+        assert native._conversation_id_verified is True
+        assert native._resume_arg() == ["--conversation", "old-conv"]
+        assert processes[1]._terminated
+    finally:
+        await _stop_native_consumer(consumer)
+
+
+async def test_dot_rotation_timeout_releases_the_unused_process(
+    persistent_native, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    native, _spawn, processes = persistent_native
+    monkeypatch.setattr(antigravity_module, "_ROTATION_INIT_TIMEOUT_SECONDS", 0.01)
+    await native.start()
+
+    with pytest.raises(RuntimeError, match="did not report a conversation id"):
+        await native.rotate_conversation()
+
+    assert native._conversation_id is None
+    assert native._conversation_id_verified is False
+    assert native._started is False
+    assert processes[0]._terminated
+    assert native._client_requested_stop is True
+
+
+async def test_dot_preparation_rotates_antigravity_before_the_first_turn(
+    persistent_native, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    native, spawn, processes = persistent_native
+    # Drop the fixture's no-op Dot preparation to exercise the real one.
+    monkeypatch.delattr(native, "_prepare_turn_context")
+    persisted: list[str] = []
+    native._conversation_id_persist = persisted.append
+    plan = SimpleNamespace(
+        prepared_generation="gen-1",
+        rotate=True,
+        new_session=True,
+        system_pack="PACK",
+        turn_pack="TURN",
+        delivered_event_ids=[],
+    )
+    associated: list[str] = []
+
+    def associate(cid: str, **_kwargs: Any) -> bool:
+        associated.append(cid)
+        return True
+
+    service = SimpleNamespace(
+        is_dot_tab=lambda _tab_id: True,
+        prepare_turn=lambda _text, _conversation_id: plan,
+        associate_conversation=associate,
+        clear_conversation_association=lambda _cid, **_kwargs: True,
+        request_rotation=lambda **_kwargs: True,
+    )
+    monkeypatch.setattr(dot_module, "get_dot_service", lambda: service)
+    consumer = _start_native_consumer(native)
+    try:
+        prepared = asyncio.create_task(native._prepare_turn_context("hello"))
+        await _wait_until(lambda: len(processes) == 1 and native._rotation_init is not None)
+        _emit(processes[0], {"event": "init", "conversation_id": "dot-conv"})
+
+        assert await asyncio.wait_for(prepared, 1) == "PACK\n\nTURN"
+        assert associated == ["dot-conv"]
+        assert spawn.await_count == 1
+        assert native._conversation_id == "dot-conv"
+        assert persisted == ["dot-conv"]
+    finally:
+        await _stop_native_consumer(consumer)
 
 
 async def test_persistent_concurrent_start_and_send_share_one_process(persistent_native) -> None:

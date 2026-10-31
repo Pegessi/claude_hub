@@ -55,7 +55,7 @@ class ExecutionUpdate(BaseModel):
     model_config = {"extra": "forbid"}
 
     expected_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
-    agent_type: Literal["claude", "codex", "cursor", "traex", "maso"]
+    agent_type: Literal["claude", "codex", "cursor", "antigravity", "traex", "maso"]
     # Full replacement is required: another provider never inherits old credentials.
     env: Dict[str, str]
 
