@@ -88,6 +88,7 @@ class AuthKind(str, Enum):
 class QuotaSource(str, Enum):
     NONE = "none"
     LOCAL_ROLLOUT = "local_rollout"  # codex
+    CLI_USAGE_COMMAND = "cli_usage_command"  # antigravity
     HTTP_ACCOUNTING = "http_accounting"  # maso
 
 
@@ -481,7 +482,7 @@ REGISTRY: Mapping[AgentType, ProviderSpec] = MappingProxyType(
             resume=ResumeSpec(kind="verified_flag", verified_flag="--conversation"),
             supports_conversation_rotation=False,
             edit_resend=False,
-            images=ImageTransport.NONE,
+            images=ImageTransport.PROMPT_FILE_REF,
             tool_timeline=True,
             plan_mode=PlanMode.CLI_FLAG_PROBED,
             system_instruction_channel="none",
@@ -498,7 +499,7 @@ REGISTRY: Mapping[AgentType, ProviderSpec] = MappingProxyType(
                 completion_event_scope="any",
                 surfaces=frozenset(),
             ),
-            quota=QuotaSource.NONE,
+            quota=QuotaSource.CLI_USAGE_COMMAND,
             # The agyx wrapper owns the Google sign-in, proxy and TLS setup;
             # there is no API key, endpoint or login-status probe.
             auth=AuthSpec(kind=AuthKind.NONE),

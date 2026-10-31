@@ -15,6 +15,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
+import tempfile
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ....models import ChatMode, ManagedSession, StreamModeOption
@@ -45,6 +48,8 @@ class AntigravitySession(ProcessSession):
         # The push consumer and the first send may both start the transport.
         self._start_lock = asyncio.Lock()
         self._launch_fingerprint: Optional[str] = None
+        self._staged_images: List[Path] = []
+        self._inflight_images: List[Path] = []
 
     def accepts_notification(self, record: Dict[str, Any]) -> bool:
         # The CLI runs one input line at a time and ends it with ``result``;
@@ -134,10 +139,17 @@ class AntigravitySession(ProcessSession):
                     except (asyncio.TimeoutError, OSError):
                         pass
             finally:
+                self._clear_staged_images()
                 # Active cancellation skips EOF (which would wait for the
                 # turn). The shared teardown also reaps surviving children
                 # after a graceful exit or an expired idle grace period.
                 await super().stop()
+
+    def _end_turn(self) -> None:
+        inflight = self._inflight_images
+        self._inflight_images = []
+        self._cleanup_images(inflight)
+        super()._end_turn()
 
     async def _prepare_for_send(self) -> None:
         if self.turn_in_flight:
@@ -213,23 +225,96 @@ class AntigravitySession(ProcessSession):
         return self._build_env()
 
     async def _send_text(self, text: str) -> None:
-        await self.start()
-        self.check_delivery_admission()
-        process = self._process
-        if process is None or process.stdin is None:
-            raise RuntimeError("Antigravity CLI stdin is unavailable")
         try:
-            # EOF is reserved for shutdown; each complete NDJSON line starts
-            # one turn in the already initialized CLI conversation.
-            process.stdin.write((self._build_stdin(text) + "\n").encode("utf-8"))
-            await process.stdin.drain()
-        except OSError as exc:
-            # Delivery may have begun. Do not resend implicitly, and retire
-            # the stream so a partial submission cannot leak into a retry.
-            self._client_requested_stop = True
-            await self.stop()
-            self._last_error = "Antigravity CLI stdin closed while sending a message"
-            raise RuntimeError(self._last_error) from exc
+            await self.start()
+            self.check_delivery_admission()
+            process = self._process
+            if process is None or process.stdin is None:
+                raise RuntimeError("Antigravity CLI stdin is unavailable")
+            image_paths = self._staged_images
+            self._staged_images = []
+            if image_paths:
+                text = self._runtime.wrap_image_guidance(text, image_paths)
+            self._inflight_images = image_paths
+            try:
+                # EOF is reserved for shutdown; each complete NDJSON line starts
+                # one turn in the already initialized CLI conversation.
+                process.stdin.write((self._build_stdin(text) + "\n").encode("utf-8"))
+                await process.stdin.drain()
+            except OSError as exc:
+                # Delivery may have begun. Do not resend implicitly, and retire
+                # the stream so a partial submission cannot leak into a retry.
+                self._client_requested_stop = True
+                await self.stop()
+                self._last_error = "Antigravity CLI stdin closed while sending a message"
+                raise RuntimeError(self._last_error) from exc
+        except asyncio.CancelledError:
+            self._clear_staged_images()
+            self._end_turn()
+            raise
+
+    def _stage_images(self, images: List[bytes]) -> None:
+        """Stage images to temp files referenced by path in the next prompt.
+
+        Antigravity's stream-json user message carries a string ``content``
+        field, so attached images are staged inside the app-owned 0700 image
+        temp directory and referenced by absolute path in a sentinel-wrapped
+        prompt block for the CLI's multimodal ``read_file`` tool. Temp files
+        are deleted when the turn ends (completion, cancellation, or error)
+        and on ``stop``.
+        """
+        if not images:
+            return
+        temp_dir = self._runtime.cursor_image_temp_dir()
+        for img in images:
+            media_type = self._runtime.detect_image_mime(img)
+            if media_type is None:
+                raise ValueError("unsupported image format or not an image")
+            fd, path = tempfile.mkstemp(
+                prefix="agy-img-",
+                suffix=self._runtime.mime_extension(media_type),
+                dir=str(temp_dir),
+            )
+            f = None
+            try:
+                f = os.fdopen(fd, "wb")
+                f.write(img)
+                f.flush()
+            except Exception:
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
+            finally:
+                if f is not None:
+                    try:
+                        f.close()
+                    except OSError:
+                        pass
+                else:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+            self._staged_images.append(Path(path))
+
+    def _clear_staged_images(self) -> None:
+        staged = self._staged_images
+        self._staged_images = []
+        self._cleanup_images(staged)
+
+    @staticmethod
+    def _cleanup_images(paths: List[Path]) -> None:
+        for p in paths:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def maybe_capture_conversation_id(self, record: Dict[str, Any]) -> None:
         """Capture the conversation id from agy's ``init`` record."""
