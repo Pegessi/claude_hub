@@ -249,6 +249,7 @@ def test_dot_providers_equivalence_and_order() -> None:
         AgentType.CLAUDE,
         AgentType.CODEX,
         AgentType.CURSOR,
+        AgentType.ANTIGRAVITY,
         AgentType.TRAEX,
         AgentType.MASO,
     )

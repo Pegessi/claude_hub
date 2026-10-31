@@ -40,6 +40,8 @@ test('Antigravity solo is an explicit choice and its identity is not rendered as
   assert.match(sessionCreator, /\['claude', 'codex', 'traex', 'antigravity'\]\.includes\(form\.agent_type\)/)
   assert.match(agentAvatar, /v-else-if="kind === 'antigravity'"/)
   assert.match(agentAvatar, /raw === 'antigravity'/)
+  assert.match(agentAvatar, /official Google Gemini mark/)
+  assert.match(agentAvatar, /M11\.04 19\.32Q12 21\.51/)
 })
 
 test('top-level and Workspace launchers both expose an explicit execution surface', () => {

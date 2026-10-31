@@ -149,9 +149,29 @@ def test_initial_config_is_read_only_and_secret_response_is_not_cached(
     assert result.status_code == 200
     assert result.headers["cache-control"] == "no-store"
     assert result.json()["tab_id"] is None
-    assert result.json()["supported_agent_types"] == ["claude", "codex", "cursor", "traex", "maso"]
+    assert result.json()["supported_agent_types"] == [
+        "claude",
+        "codex",
+        "cursor",
+        "antigravity",
+        "traex",
+        "maso",
+    ]
     assert setup.service.store.read_state() == before
     assert setup.created == []
+
+
+def test_antigravity_switches_with_its_own_env_and_never_inherits_old_credentials(
+    setup: SimpleNamespace,
+) -> None:
+    first = apply(setup, "claude", {"ANTHROPIC_API_KEY": "old-secret"})
+    assert first.status_code == 200, first.text
+    result = apply(setup, "antigravity", {"ANTIGRAVITY_MODEL": "gemini-3-pro"})
+    assert result.status_code == 200, result.text
+    assert result.json()["agent_type"] == "antigravity"
+    assert result.json()["env"] == {"ANTIGRAVITY_MODEL": "gemini-3-pro"}
+    assert setup.created[-1]["agent_type"] == AgentType.ANTIGRAVITY
+    assert setup.created[-1]["env"] == {"ANTIGRAVITY_MODEL": "gemini-3-pro"}
 
 
 def test_switch_archives_old_tab_and_preserves_memory_and_schedule_choices(
@@ -747,6 +767,7 @@ def test_generic_dot_execution_mutations_use_dedicated_api(setup: SimpleNamespac
         ("claude", {"ANTHROPIC_MODEL": "model-next"}),
         ("codex", {"CODEX_MODEL": "model-next", "CODEX_REASONING_EFFORT": "high"}),
         ("cursor", {"CURSOR_MODEL": "model-next"}),
+        ("antigravity", {"ANTIGRAVITY_MODEL": "model-next"}),
         ("traex", {"CODEX_MODEL": "model-next", "CODEX_REASONING_EFFORT": "high"}),
         ("maso", {"MASO_MODEL": "model-next"}),
     ],

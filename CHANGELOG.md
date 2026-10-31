@@ -7,6 +7,24 @@
 
 ## Released
 
+### feat: add Antigravity as a Dot execution backend
+
+- Offer `antigravity` in Dot's Execution backend editor alongside Claude,
+  Codex, Cursor, TraeX and MASO. Dot creates its Chat through the existing
+  direct-Chat transport; the deployment's `agyx` wrapper owns sign-in, proxy
+  and TLS, so the launch environment is normally empty.
+- Accept `antigravity` in `PUT /api/dot/execution`, keep the backend list
+  registry-driven, and label the provider correctly in the editor.
+- Implement Dot conversation rotation for Antigravity: start or reuse a fresh
+  `agyx` process, capture the provider-issued `init` conversation id (bounded
+  at 120 s), and associate it before the turn so no invented id is ever passed
+  to `--conversation`.
+- Replace Antigravity's `A` monogram avatar with the official Google Gemini
+  mark in Chat tabs and status surfaces.
+- Update the provider spec matrix, API/UI checks and installation notes.
+  Antigravity still does not run workspace-managed, resident, generic
+  scheduled or remote sessions; Dot's own wake/tidy schedules follow its Chat.
+
 ### fix(agent_stream): complete ordinary turns on a clean EOF with a full answer
 
 - A one-shot native provider (Claude/Cursor over relay) can stream a complete
