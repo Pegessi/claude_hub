@@ -3,7 +3,7 @@
     "approval_channels": {
       "direct_chat": "oneshot_steer",
       "dot": "none",
-      "managed_chat": "none",
+      "managed_chat": "oneshot_steer",
       "managed_terminal": "none",
       "resident": "none",
       "scheduled": "none",
@@ -30,7 +30,9 @@
       "completion_event_scope": "any",
       "completion_requires_provider_event": false,
       "default_owner": "hub_managed",
-      "surfaces": [],
+      "surfaces": [
+        "direct_chat"
+      ],
       "usage_quality": "exact"
     },
     "headless_safe": true,
@@ -57,6 +59,7 @@
     "supports_conversation_rotation": false,
     "surfaces": [
       "direct_chat",
+      "managed_chat",
       "subagent",
       "terminal_tab"
     ],

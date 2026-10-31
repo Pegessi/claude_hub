@@ -102,7 +102,7 @@
           <ComposerAddMenu
             v-model:open="isAddMenuOpen"
             :show-goal="!isManagedChat && !goal && Boolean(capabilities?.supports_goals)"
-            :show-schedule="!isManagedChat && currentTab?.agent_type !== 'antigravity'"
+            :show-schedule="!isManagedChat"
             :attachment-disabled-reason="attachmentDisabledReason"
             :goal-disabled-reason="goalSetupDisabledReason"
             @attachment="triggerFilePicker"
@@ -184,7 +184,7 @@ const { openImageLightbox } = requireChatOwner(chatImagesKey)
 const { isSending, composerError, isSubmissionReady, turnInFlight, composerTurnInFlight, draftMessage, stopArmed, isCancelling, cancelActiveTurn, canSend, submit } = requireChatOwner(chatDeliveryKey)
 const { draftQueue, isQueueSendInProgress, queuedChatState, setQueuedDraftEdit, updateQueuedDraft, cancelQueuedDraft, editQueuedDraft, sendQueuedDraft } = requireChatOwner(chatQueueKey)
 const { composerTextareaEl, isComposing, handleComposerEnter, syncComposerTextareaHeight, isMobileViewport } = requireChatOwner(chatComposerKey)
-const { isManagedChat, currentTab, connectionState, capabilities, appStore, props } = requireChatOwner(chatIdentityKey)
+const { isManagedChat, connectionState, capabilities, appStore, props } = requireChatOwner(chatIdentityKey)
 </script>
 
 <style scoped>

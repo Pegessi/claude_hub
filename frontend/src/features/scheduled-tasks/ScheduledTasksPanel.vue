@@ -388,6 +388,12 @@
             <option value="cursor">
               cursor
             </option>
+            <option value="maso">
+              maso
+            </option>
+            <option value="antigravity">
+              antigravity
+            </option>
             <option value="terminal">
               terminal
             </option>

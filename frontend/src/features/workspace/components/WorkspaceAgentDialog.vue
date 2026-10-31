@@ -186,6 +186,7 @@
           v-model:env-preset="agentOptionsForm.env_preset"
           v-model:env-text="agentOptionsForm.env_text"
           :allow-maso="agentOptionsForm.session_kind === 'chat'"
+          :allow-antigravity="agentOptionsForm.session_kind === 'chat' && agentOptionsForm.target === 'local'"
           :allow-terminal="agentOptionsForm.session_kind === 'terminal'"
           :exclude-types="['traex']"
           variant="modal"
