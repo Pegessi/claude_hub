@@ -64,6 +64,27 @@ resident agents, sending follow-up instructions, and reviewing progress reports.
 - ttyd
 - cloudflared, optional for public tunnel scripts
 
+### Agent CLIs (install separately)
+
+Install and authenticate only the providers you intend to use, on the machine
+and under the OS account that runs the agent:
+
+| Provider | Executable required by Hub |
+| --- | --- |
+| Claude Code | `claude` |
+| OpenAI Codex CLI | `codex` |
+| Cursor Agent CLI | `agent` (not the desktop editor's `cursor` command) |
+| Google Antigravity CLI | Official `agy` CLI plus the deployment's `agyx` wrapper |
+
+See the [Agent CLI installation guide](docs/AGENT_INSTALLATION.md) for official
+install commands, authentication, PATH checks, per-provider proxy/certificate
+notes, and Antigravity's current Hub limitations. These CLIs are not bundled
+with Hub: `setup.sh`, `uv sync`, and `pnpm install` do not install or sign in to
+them. The `claude-hub` CLI manages Hub itself; it does not replace any provider CLI.
+Proxy requirements vary by machine and provider: verify them during installation
+or migration, use direct access when it works and policy permits, and do not copy
+another deployment's proxy settings as universal prerequisites.
+
 ## Quick Start
 
 Install or verify local dependencies:
@@ -71,6 +92,9 @@ Install or verify local dependencies:
 ```bash
 ./setup.sh
 ```
+
+Before creating an Agent or Chat, complete the
+[installation and login steps](docs/AGENT_INSTALLATION.md) for its provider.
 
 Start backend and frontend together:
 
