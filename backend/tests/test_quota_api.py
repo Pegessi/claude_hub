@@ -63,9 +63,10 @@ def _write_codex_reading(home: Path, used_percent: float = 58.0) -> None:
 
 
 @pytest.fixture(autouse=True)
-def clear_quota_cache():
-    """Keep the module-level reading cache from leaking across tests."""
+def clear_quota_cache(tmp_path: Path, monkeypatch: MonkeyPatch):
+    """Keep the module-level reading cache and host Antigravity home isolated."""
     setattr(pq, "_QUOTA_CACHE", None)
+    monkeypatch.setenv("ANTIGRAVITY_HOME", str(tmp_path / "antigravity-empty"))
     yield
     setattr(pq, "_QUOTA_CACHE", None)
 
@@ -109,8 +110,12 @@ async def test_quota_returns_both_providers_in_order(
 
     assert response.status_code == 200
     providers = response.json()["providers"]
-    assert [provider["provider"] for provider in providers] == ["codex", "maso"]
-    codex, maso = providers
+    assert [provider["provider"] for provider in providers] == [
+        "codex",
+        "maso",
+        "antigravity",
+    ]
+    codex, maso, antigravity = providers
     assert codex["available"] is True
     assert codex["state"] == "within"
     assert codex["plan"] == "pro"
@@ -123,6 +128,8 @@ async def test_quota_returns_both_providers_in_order(
     assert maso["enforcing"] is True
     assert maso["plan"] is None and maso["credit_balance"] is None
     assert maso["limits"][0]["scope"] == "gpt-6-astra"
+    assert antigravity["available"] is False
+    assert antigravity["state"] == "not_configured"
 
 
 @pytest.mark.asyncio
@@ -151,12 +158,13 @@ async def test_quota_keeps_serving_when_maso_cannot_be_discovered(
     response = await client.get("/api/quota")
 
     assert response.status_code == 200
-    codex, maso = response.json()["providers"]
+    codex, maso, antigravity = response.json()["providers"]
     assert codex["available"] is True and codex["limits"]
     assert maso["available"] is False
     assert maso["state"] == "unavailable"
     assert maso["limits"] == []
     assert "MASO" in maso["message"]
+    assert antigravity["state"] == "not_configured"
 
 
 @pytest.mark.asyncio
@@ -181,13 +189,14 @@ async def test_quota_reports_an_absent_maso_as_not_configured(
     response = await client.get("/api/quota")
 
     assert response.status_code == 200
-    codex, maso = response.json()["providers"]
+    codex, maso, antigravity = response.json()["providers"]
     assert codex["available"] is True and codex["limits"]
     assert maso["available"] is False
     assert maso["state"] == "not_configured"
     assert maso["limits"] == [] and maso["as_of"] is None
     assert "No MASO service is configured" in maso["message"]
     assert "Start MASO" not in maso["message"]
+    assert antigravity["state"] == "not_configured"
 
 
 @pytest.mark.asyncio
@@ -197,11 +206,12 @@ async def test_quota_keeps_serving_when_codex_has_no_reading(
     response = await client.get("/api/quota")
 
     assert response.status_code == 200
-    codex, maso = response.json()["providers"]
+    codex, maso, antigravity = response.json()["providers"]
     assert codex["available"] is False
     assert codex["state"] == "no_data"
     assert codex["message"]
     assert maso["available"] is True and maso["limits"]
+    assert antigravity["state"] == "not_configured"
 
 
 @pytest.mark.asyncio

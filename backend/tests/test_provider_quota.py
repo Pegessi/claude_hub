@@ -1,7 +1,8 @@
-"""Provider quota readings: Codex rollout parsing and MASO HTTP mapping.
+"""Provider quota readings: Codex rollout parsing, MASO HTTP, and Antigravity CLI.
 
-No test may touch the developer's real ``~/.codex`` or a live MASO service:
-the Codex home is redirected per test and every MASO call is mocked.
+No test may touch the developer's real ``~/.codex``, ``~/.gemini/antigravity-cli``,
+or a live MASO/Antigravity service: homes are redirected per test and every
+external call is mocked.
 """
 
 import json
@@ -90,9 +91,10 @@ def _write_rollout(
 
 
 @pytest.fixture(autouse=True)
-def clear_quota_cache():
-    """Keep the module-level reading cache from leaking across tests."""
+def clear_quota_cache(tmp_path, monkeypatch):
+    """Keep the module-level reading cache and host Antigravity home isolated."""
     setattr(pq, "_QUOTA_CACHE", None)
+    monkeypatch.setenv("ANTIGRAVITY_HOME", str(tmp_path / "antigravity-empty"))
     yield
     setattr(pq, "_QUOTA_CACHE", None)
 
@@ -610,35 +612,232 @@ async def test_maso_discovery_failure_is_reported_not_raised(maso_deployment, mo
     assert "MASO_BASE_URL" in quota.message
 
 
+# -- Antigravity -----------------------------------------------------------
+
+
+ANTIGRAVITY_USAGE_PAYLOAD = {
+    "conversation_id": "",
+    "status": "SUCCESS",
+    "response": "Gemini Models\tWeekly Limit Remaining\t97%\t2100-01-01T00:00:00Z",
+    "command": {
+        "name": "usage",
+        "data": {
+            "description": "Within each group, models share a weekly limit and a 5-hour limit.",
+            "groups": [
+                {
+                    "name": "Gemini Models",
+                    "buckets": [
+                        {
+                            "id": "gemini-weekly",
+                            "name": "Weekly Limit Remaining",
+                            "window": "weekly",
+                            "remaining_fraction": 0.971,
+                            "reset_time": "2100-01-06T17:50:30Z",
+                        },
+                        {
+                            "id": "gemini-5h",
+                            "name": "Five Hour Limit Remaining",
+                            "window": "5h",
+                            "remaining_fraction": 0.939,
+                            "reset_time": "2100-01-01T12:56:36Z",
+                        },
+                    ],
+                },
+                {
+                    "name": "Claude and GPT models",
+                    "buckets": [
+                        {
+                            "id": "3p-weekly",
+                            "name": "Weekly Limit Remaining",
+                            "window": "weekly",
+                            "remaining_fraction": 0.998,
+                            "reset_time": "2100-01-07T07:16:52Z",
+                        },
+                        {
+                            "id": "3p-5h",
+                            "name": "Five Hour Limit Remaining",
+                            "window": "5h",
+                            "remaining_fraction": 0.85,
+                            "reset_time": "2100-01-01T12:16:52Z",
+                        },
+                    ],
+                },
+            ],
+        },
+    },
+}
+
+
+@pytest.fixture
+def antigravity_service(tmp_path, monkeypatch):
+    """Mock Antigravity login token, binary presence, and ``/usage`` output."""
+    home = tmp_path / "antigravity"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "antigravity-oauth-token").write_text("{}")
+    monkeypatch.setenv("ANTIGRAVITY_HOME", str(home))
+    monkeypatch.setattr(pq.shutil, "which", lambda binary: f"/fake/{binary}")
+    state = {"payload": ANTIGRAVITY_USAGE_PAYLOAD, "error": None}
+    calls: list[int] = []
+
+    async def fake_run():
+        calls.append(1)
+        if state["error"] is not None:
+            raise state["error"]
+        return state["payload"]
+
+    monkeypatch.setattr(pq, "_run_antigravity_usage", fake_run)
+    return state, calls
+
+
+@pytest.mark.asyncio
+async def test_antigravity_reading_maps_groups_and_buckets(antigravity_service) -> None:
+    _state, calls = antigravity_service
+
+    quota = await pq.read_antigravity_quota()
+
+    assert quota.provider == "antigravity"
+    assert quota.available is True
+    assert quota.state == "within"
+    assert quota.message == ""
+    assert quota.stale is False
+    assert quota.as_of is not None
+    assert [(limit.scope, limit.label) for limit in quota.limits] == [
+        ("gemini-weekly", "Gemini Models · Weekly limit"),
+        ("gemini-5h", "Gemini Models · 5-hour limit"),
+        ("3p-weekly", "Claude and GPT models · Weekly limit"),
+        ("3p-5h", "Claude and GPT models · 5-hour limit"),
+    ]
+    assert [limit.remaining_percent for limit in quota.limits] == [97, 94, 100, 85]
+    assert [limit.used_percent for limit in quota.limits] == [3, 6, 0, 15]
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_antigravity_derives_near_over_disabled_and_expired_windows(
+    antigravity_service,
+) -> None:
+    state, _calls = antigravity_service
+    state["payload"] = {
+        "status": "SUCCESS",
+        "command": {
+            "name": "usage",
+            "data": {
+                "groups": [
+                    {
+                        "name": "Gemini Models",
+                        "buckets": [
+                            {
+                                "id": "near-bucket",
+                                "window": "5h",
+                                "remaining_fraction": 0.15,
+                                "reset_time": "2100-01-01T00:00:00Z",
+                            },
+                            {
+                                "id": "disabled-bucket",
+                                "window": "weekly",
+                                "remaining_fraction": 0.50,
+                                "disabled": True,
+                                "reset_time": "2100-01-01T00:00:00Z",
+                            },
+                            {
+                                "id": "expired-bucket",
+                                "name": "Custom Window",
+                                "remaining_fraction": 0.40,
+                                "reset_time": "2020-01-01T00:00:00Z",
+                            },
+                        ],
+                    }
+                ]
+            },
+        },
+    }
+
+    quota = await pq.read_antigravity_quota()
+
+    assert quota.available is True
+    assert quota.stale is True
+    assert quota.state == "over"
+    near, disabled, expired = quota.limits
+    assert near.state == "near" and near.used_percent == 85 and near.remaining_percent == 15
+    assert disabled.state == "over" and disabled.used_percent == 50
+    assert (
+        expired.state == "unknown"
+        and expired.used_percent is None
+        and expired.remaining_percent is None
+    )
+    assert expired.resets_at == "2020-01-01T00:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_antigravity_absent_from_deployment_is_not_an_alert() -> None:
+    quota = await pq.read_antigravity_quota()
+
+    assert quota.provider == "antigravity"
+    assert quota.available is False
+    assert quota.state == "not_configured"
+    assert quota.limits == []
+    assert quota.as_of is None
+    assert "No Antigravity CLI is configured" in quota.message
+
+
+@pytest.mark.asyncio
+async def test_antigravity_configured_but_failing_reports_unavailable(
+    antigravity_service, monkeypatch
+) -> None:
+    state, _calls = antigravity_service
+    state["error"] = RuntimeError("proxy unreachable")
+
+    quota = await pq.read_antigravity_quota()
+    assert quota.available is False
+    assert quota.state == "unavailable"
+    assert "Antigravity quota is unavailable" in quota.message
+
+    monkeypatch.setattr(pq.shutil, "which", lambda _binary: None)
+    missing_bin = await pq.read_antigravity_quota()
+    assert missing_bin.available is False
+    assert missing_bin.state == "unavailable"
+
+
 # -- Combined reading ------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_providers_are_returned_in_a_fixed_order(codex_home, maso_service) -> None:
+async def test_providers_are_returned_in_a_fixed_order(
+    codex_home, maso_service, antigravity_service
+) -> None:
     _write_rollout(codex_home, "rollout-a.jsonl", [_token_count_line()], mtime=1000.0)
 
     response = await pq.read_provider_quota()
 
-    assert [provider.provider for provider in response.providers] == ["codex", "maso"]
+    assert [provider.provider for provider in response.providers] == [
+        "codex",
+        "maso",
+        "antigravity",
+    ]
     assert all(provider.available for provider in response.providers)
 
 
 @pytest.mark.asyncio
-async def test_reading_is_cached_until_refresh(codex_home, maso_service) -> None:
+async def test_reading_is_cached_until_refresh(
+    codex_home, maso_service, antigravity_service
+) -> None:
     _state, calls = maso_service
+    _agy_state, agy_calls = antigravity_service
     _write_rollout(codex_home, "rollout-a.jsonl", [_token_count_line()], mtime=1000.0)
 
     first = await pq.read_provider_quota()
     assert await pq.read_provider_quota() is first
     assert len(calls) == 1
+    assert len(agy_calls) == 1
 
     assert await pq.read_provider_quota(refresh=True) is not first
     assert len(calls) == 2
+    assert len(agy_calls) == 2
 
 
 @pytest.mark.asyncio
 async def test_unexpected_provider_failure_does_not_fail_the_reading(
-    monkeypatch, maso_service
+    monkeypatch, maso_service, antigravity_service
 ) -> None:
     def explode() -> pq.ProviderQuota:
         raise RuntimeError("unexpected")
@@ -647,6 +846,7 @@ async def test_unexpected_provider_failure_does_not_fail_the_reading(
 
     response = await pq.read_provider_quota()
 
-    codex, maso = response.providers
+    codex, maso, antigravity = response.providers
     assert codex.available is False and codex.state == "unavailable"
     assert maso.available is True
+    assert antigravity.available is True

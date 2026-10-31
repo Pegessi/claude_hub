@@ -151,7 +151,7 @@ def _echo_provider_quota(provider: Dict[str, Any]) -> None:
 @click.option("--refresh", is_flag=True, default=False, help="Bypass the cached reading.")
 @click.pass_context
 def quota(ctx: click.Context, refresh: bool) -> None:
-    """Show remaining provider quota (Codex and MASO)."""
+    """Show remaining provider quota (Codex, MASO, and Antigravity)."""
     try:
         with cli_main.get_client(ctx) as client:
             data = client.get_quota(refresh=refresh)

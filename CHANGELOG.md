@@ -7,6 +7,21 @@
 
 ## Released
 
+### feat: add Antigravity image attachments, provider quota, and modal quota dialog
+
+- Enable `ImageTransport.PROMPT_FILE_REF` for `antigravity` Chat turns: stage
+  validated image attachments to temporary files, inject `read_file` path
+  guidance into the prompt payload, and clean up staged files on turn
+  completion, cancellation, or session stop.
+- Add Antigravity support to Provider Quota (`QuotaSource.CLI_USAGE_COMMAND`)
+  via `agyx -p /usage --output-format json`, mapping Gemini and Claude/GPT
+  weekly and 5-hour buckets into `QuotaLimit` records with deployment presence
+  checks (`~/.gemini/antigravity-cli/antigravity-oauth-token` /
+  `$ANTIGRAVITY_HOME`).
+- Replace the inline `<details>` Provider Quota expansion in the extensions
+  menu with a trigger button that closes the dropdown and opens a centered
+  modal dialog displaying Codex, Maso, and Antigravity usage cards.
+
 ### docs(agents): add third-party Agent CLI installation guide
 
 - Document separate installation, authentication and executable checks for
