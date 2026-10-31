@@ -7,6 +7,19 @@
 
 ## Released
 
+### fix: preserve Chat stream failure details and Antigravity recovery guidance
+
+- Show the backend's string error detail alongside the stream-wait HTTP status,
+  rendered as plain text. Invalid JSON and non-string details retain the status
+  fallback; the existing retry policy is unchanged.
+- Point Antigravity diagnostics at the deployed `agyx` network/sign-in wrapper,
+  clarify that Retry does not resend a message, and keep long diagnostics and
+  Retry reachable in narrow Chat panes.
+- Cover response parsing and the rendered failure/Retry flow. The separate local
+  proxy investigation is recorded in
+  [the recovery log](docs/working-logs/2026-10-31-antigravity-auth-recovery.md);
+  deployment-specific proxy files are not part of the Hub package.
+
 ### feat: Antigravity (agy) Chat and Terminal provider
 
 - Register a new `antigravity` agent type backed by the locally installed

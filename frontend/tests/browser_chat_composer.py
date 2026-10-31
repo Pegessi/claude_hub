@@ -16,7 +16,7 @@ import re
 import sys
 import uuid
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from browser_lifecycle import BrowserRun, run_browser_main
 from playwright.async_api import expect
@@ -153,6 +153,7 @@ async def main(browser_run: BrowserRun) -> None:
         "capability_status": {},
         "retry_delays": {},
         "retry_status": {},
+        "wait_detail": None,
         "previews": {},
     }
 
@@ -278,7 +279,7 @@ async def main(browser_run: BrowserRun) -> None:
                 available = (
                     state["managed_available"] if is_managed else state["existing_maso_available"]
                 )
-                agent_type = "codex" if is_managed else "maso"
+                agent_type = "codex" if is_managed else tab["agent_type"]
                 model_key = "CODEX_MODEL" if is_managed else "MASO_MODEL"
                 body = {
                     "structured": available,
@@ -326,12 +327,21 @@ async def main(browser_run: BrowserRun) -> None:
                 f"{BASE}/events",
                 f"{MANAGED_BASE}/events",
             }:
+                since = int(parse_qs(parsed.query).get("since_sequence", ["-1"])[0])
+                fresh = [item for item in state["events"] if item["stream_sequence"] > since]
                 body = {
-                    "events": state["events"],
-                    "next_sequence": len(state["events"]),
+                    "events": fresh,
+                    "next_sequence": fresh[-1]["stream_sequence"] if fresh else since,
                     "has_more": False,
                 }
             elif method == "POST" and path in {f"{BASE}/wait", f"{MANAGED_BASE}/wait"}:
+                if state["wait_detail"] is not None:
+                    await route.fulfill(
+                        status=409,
+                        content_type="application/json",
+                        body=json.dumps({"detail": state["wait_detail"]}),
+                    )
+                    return
                 # Return authoritative edges without advancing past events
                 # the client has not received, including after a reload.
                 since = json.loads(request.post_data or "{}").get("since_sequence", -1)
@@ -1668,6 +1678,112 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(choices).to_have_count(10)
         await choices.last.click()
         await expect(cwd).to_have_value("/fixture/workspace")
+
+        # A failed provider remains diagnosable without treating its text as HTML
+        # or resending the old task when the user explicitly replaces the process.
+        await page.locator(".modal").get_by_role("button", name="Cancel", exact=True).click()
+        tab["agent_type"] = "antigravity"
+        state["events"] = list(EVENTS)
+        state["wait_detail"] = (
+            "provider exited with code 1: authentication failed or timed out; "
+            '<img src="x" onerror="window.errorDetailExecuted=true"> '
+            + "connection-diagnostic-" * 12
+        )
+        sends_before_auth_retry = len(sends)
+        await page.goto(base + f"/?tab={TAB}")
+        alert = page.locator(".structured-banner[role='alert']")
+        await expect(alert).to_contain_text("wait HTTP 409: provider exited with code 1")
+        await expect(alert).to_contain_text("authentication failed or timed out")
+        await expect(alert).to_contain_text("local agyx network and sign-in")
+        await expect(alert).to_contain_text("Retry does not resend your message.")
+        await expect(alert.locator("img")).to_have_count(0)
+        assert not await page.evaluate("Boolean(window.errorDetailExecuted)")
+        await expect(page.get_by_text("First answer.", exact=True)).to_have_count(1)
+        await expect(composer).to_be_disabled()
+        for width, height in ((1280, 900), (720, 900), (390, 844)):
+            await page.set_viewport_size({"width": width, "height": height})
+            for selector in (".banner-message", ".banner-guidance", ".banner-retry"):
+                bounds = await alert.locator(selector).bounding_box()
+                assert bounds and bounds["x"] >= 0
+                assert bounds["x"] + bounds["width"] <= width + 1, (selector, bounds)
+            for selector in (".banner-message", ".banner-guidance"):
+                assert await alert.locator(selector).evaluate("""element => {
+                  const chrome = element.closest('.terminal-pane').querySelector('.pane-chrome')
+                  const overlay = chrome.getBoundingClientRect()
+                  const range = document.createRange()
+                  range.selectNodeContents(element)
+                  return [...range.getClientRects()].every(rect =>
+                    rect.bottom <= overlay.top || rect.top >= overlay.bottom ||
+                    rect.right <= overlay.left || rect.left >= overlay.right,
+                  )
+                }"""), f"{selector} text is covered by the pane header"
+            assert await alert.locator(".banner-retry").evaluate("""button => {
+              const bounds = button.getBoundingClientRect()
+              const hit = document.elementFromPoint(
+                bounds.left + bounds.width / 2, bounds.top + bounds.height / 2,
+              )
+              return hit !== null && (hit === button || button.contains(hit))
+            }"""), "provider Retry is covered"
+            await page.screenshot(path=str(output / f"antigravity-error-{width}.png"))
+        state["wait_detail"] = None
+        retries_before = retry_requests.count(f"{BASE}/retry")
+        await alert.get_by_role("button", name="Retry", exact=True).click()
+        await expect(alert).to_have_count(0)
+        await expect(composer).to_be_enabled()
+        await expect(page.get_by_text("First answer.", exact=True)).to_have_count(1)
+        assert retry_requests.count(f"{BASE}/retry") == retries_before + 1
+        assert len(sends) == sends_before_auth_retry, "Retry resent the previous task"
+
+        # Provider stderr can fill the backend's 64 KiB tail. Keep every byte
+        # available without letting the diagnostic push Retry and history away.
+        detail_start = "provider exited with code 1: authentication failed; DETAILS-START\n"
+        detail_end = "\nDETAILS-END-65536"
+        long_detail = (
+            detail_start + "x" * (65536 - len(detail_start) - len(detail_end)) + detail_end
+        )
+        assert len(long_detail.encode()) == 65536
+        for width, height in ((1280, 900), (390, 844)):
+            await page.set_viewport_size({"width": width, "height": height})
+            state["wait_detail"] = long_detail
+            await page.reload()
+            details = alert.get_by_role("region", name="Stream error details", exact=True)
+            await expect(details).to_be_visible()
+            await expect(details).to_have_attribute("tabindex", "0")
+            assert await details.text_content() == f"wait HTTP 409: {long_detail}"
+            assert await details.evaluate("element => element.scrollHeight > element.clientHeight")
+            details_box = await details.bounding_box()
+            retry_button = alert.get_by_role("button", name="Retry", exact=True)
+            retry_box = await retry_button.bounding_box()
+            assert details_box and retry_box
+            assert details_box["height"] <= min(160, height * 0.25) + 1, details_box
+            assert retry_box["y"] <= details_box["y"] + 1, (retry_box, details_box)
+            await expect(retry_button).to_be_in_viewport(ratio=1)
+            await expect(page.get_by_text("First answer.", exact=True)).to_be_in_viewport(ratio=1)
+            await expect(composer).to_be_in_viewport(ratio=1)
+            await details.focus()
+            await details.press("Control+End")
+            await page.wait_for_function("""() => {
+              const details = document.querySelector('.banner-message')
+              return details.scrollTop + details.clientHeight >= details.scrollHeight - 2
+            }""")
+            assert await details.evaluate("""element => {
+              const node = element.lastChild
+              const range = document.createRange()
+              range.setStart(node, node.textContent.length - 'DETAILS-END-65536'.length)
+              range.setEnd(node, node.textContent.length)
+              const end = range.getBoundingClientRect()
+              const viewport = element.getBoundingClientRect()
+              return end.top >= viewport.top && end.bottom <= viewport.bottom + 1
+            }"""), "keyboard scrolling did not reveal the end of the full diagnostic"
+            await page.screenshot(path=str(output / f"antigravity-large-error-{width}.png"))
+            state["wait_detail"] = None
+            retries_before = retry_requests.count(f"{BASE}/retry")
+            await retry_button.click()
+            await expect(alert).to_have_count(0)
+            await expect(composer).to_be_enabled()
+            await expect(page.get_by_text("First answer.", exact=True)).to_have_count(1)
+            assert retry_requests.count(f"{BASE}/retry") == retries_before + 1
+            assert len(sends) == sends_before_auth_retry, "Retry resent the previous task"
 
         assert not errors, errors
         assert not unexpected_external, unexpected_external
