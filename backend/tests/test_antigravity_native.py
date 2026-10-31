@@ -1241,3 +1241,57 @@ async def test_persistent_tailer_two_turns_share_process_and_correct_usage(
         assert not tailer.hard_failed
     finally:
         await tailer.stop()
+
+
+_VALID_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+
+async def test_persistent_image_attachments_staged_and_cleaned_on_completion(
+    persistent_native, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    native, _spawn, processes = persistent_native
+    native_module = importlib.import_module("claude_hub.services.agent_stream.native")
+    image_dir = tmp_path / "cursor-images"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(native_module, "_cursor_image_temp_dir", lambda: image_dir)
+
+    assert native.supports_images is True
+    await native.send_message("describe this image", [_VALID_PNG])
+
+    staged_files = list(image_dir.glob("agy-img-*.png"))
+    assert len(staged_files) == 1
+    assert staged_files[0].read_bytes() == _VALID_PNG
+
+    payload = json.loads(processes[0].stdin.written[0])
+    content = payload["message"]["content"]
+    assert "<<<HUB_IMAGE_ATTACHMENT_V1>>>" in content
+    assert str(staged_files[0]) in content
+    assert "<<<END_HUB_IMAGE_ATTACHMENT_V1>>>" in content
+    assert "describe this image" in content
+
+    native.acknowledge_turn_complete()
+    assert not staged_files[0].exists()
+    assert list(image_dir.glob("agy-img-*")) == []
+
+
+async def test_persistent_image_attachments_cleaned_on_cancel_and_reject_invalid_bytes(
+    persistent_native, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    native, _spawn, processes = persistent_native
+    native_module = importlib.import_module("claude_hub.services.agent_stream.native")
+    image_dir = tmp_path / "cursor-images"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(native_module, "_cursor_image_temp_dir", lambda: image_dir)
+
+    with pytest.raises(ValueError, match="unsupported image format"):
+        await native.send_message("bad image", [_VALID_PNG, b"not-an-image"])
+    assert not native.turn_in_flight
+    assert list(image_dir.glob("agy-img-*")) == []
+
+    await native.send_message("cancel this", [_VALID_PNG])
+    staged_files = list(image_dir.glob("agy-img-*.png"))
+    assert len(staged_files) == 1
+    await native.cancel_active_turn()
+    assert not native.turn_in_flight
+    assert not staged_files[0].exists()
+    assert len(processes) == 2
