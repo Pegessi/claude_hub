@@ -14,7 +14,9 @@
 - Link the guide from README requirements and deployment setup. Clarify the
   service-user/PATH requirement, Cursor's `agent` executable, per-provider proxy
   and certificate configuration, and Antigravity's deployment-owned `agyx`
-  wrapper and supported Hub surfaces.
+  wrapper and supported Hub surfaces. Make proxy setup conditional on per-machine,
+  per-provider checks during installation or migration; verified direct access
+  needs no extra proxy, and another deployment's settings are not defaults.
 - Documentation only; no provider installation, login, service restart or
   runtime behavior changes.
 

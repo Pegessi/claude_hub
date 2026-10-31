@@ -46,6 +46,18 @@
 - Independent read-only review covered official sources, provider command/surface
   contracts, new documentation and the added proxy section: no blocking findings.
 
+## Follow-up: machine-specific proxy requirements
+
+The user clarified that proxy needs vary by machine and provider and must be
+checked during installation. The guide and README now make this explicit;
+Antigravity's `agyx` executable requirement is separate from optional proxy/TLS
+configuration. The deployment checklist now requires network verification while
+making proxy tests, file changes and service restarts conditional on actual need.
+Existing private configurations are not copied or changed by this documentation.
+Follow-up validation: document invariants, nine guide/entry links and anchors,
+whitespace and staged-content checks passed. Independent read-only review found
+no blocking issues. No runtime checks were rerun for these prose-only changes.
+
 ## Remaining verification boundary
 
 No clean-machine installation, interactive login, provider network request or

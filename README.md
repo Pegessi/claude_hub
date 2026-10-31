@@ -81,6 +81,9 @@ install commands, authentication, PATH checks, per-provider proxy/certificate
 notes, and Antigravity's current Hub limitations. These CLIs are not bundled
 with Hub: `setup.sh`, `uv sync`, and `pnpm install` do not install or sign in to
 them. The `claude-hub` CLI manages Hub itself; it does not replace any provider CLI.
+Proxy requirements vary by machine and provider: verify them during installation
+or migration, use direct access when it works and policy permits, and do not copy
+another deployment's proxy settings as universal prerequisites.
 
 ## Quick Start
 
