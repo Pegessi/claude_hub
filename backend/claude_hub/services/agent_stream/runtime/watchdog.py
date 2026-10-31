@@ -244,6 +244,8 @@ class WatchdogMixin(SessionState):
             or transport.goal_completion_requires_provider_event
             or self._goal_protocol_turn
             or self._waiting_for_external_activity()
+            or self._final_text_after_tool
+            or not self._final_assistant_text.strip()
             or not self._assistant_text.strip()
         ):
             return False

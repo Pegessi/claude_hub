@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "dd024d5b0a01ab7152b5d60cdcf115f174005445",
+  "parents": [
+    "e76229bbead059ed562e3ee3469bb11d2b9be73a",
+    "5c352d198827f488fa354107fb6263fd65eff7bc"
+  ],
+  "base": "0211661a1e627349822b3857ecf74f33b81818ef",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "b0c61d93fcb392c0d4a8115905ee43c60ccfc2df",
+  "reconstructed_tree": "32c7739008235a39c1018fa4d9f9b39e92ebde92",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a4bfbecaf1c6b1bd9e75e0139c91f70b7e3efbb4"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "03d1ebd3a4742b5451b335e48801da2097585019"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "dc0b1ae19bc05b69de5a0127e488608557ce2e15"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "31eccdac6a71b231e7b6f44fd4862bb96616b200"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "09f5f1210c8af814f9307e2800ad129454c7bc50"
+      },
+      "reason": "Candidate (main Feishu; merges 1-6 notes) and codex/rv-state-safety's quarantine note both insert at the top of Released. Manual union keeps the candidate entries then appends the state-safety entry before the shared tail. main.py and the workspace_manager sources auto-merged (state-persistence abstracts land in regions disjoint from prior and upcoming monitor changes).",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

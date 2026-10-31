@@ -724,6 +724,9 @@ def test_launcher_main_wires_backend_sync_and_frontend_build(monkeypatch):
     monkeypatch.setattr(launcher_module.signal, "signal", lambda *args: None)
     monkeypatch.setattr(maso_probe, "main", lambda argv: captured.update(maso_probe_args=argv))
     monkeypatch.setattr(sys, "argv", ["service-launcher"])
+    # This test wires launcher plumbing, not the listen guard; accept the
+    # default wildcard bind for the duration of the test.
+    monkeypatch.setattr(launcher_module.settings, "allow_insecure_listen", True)
 
     assert launcher_module.main() == 0
     assert captured["maso_probe_args"] == ["--startup"]
@@ -743,6 +746,51 @@ def test_launcher_main_wires_backend_sync_and_frontend_build(monkeypatch):
     assert captured["frontend_build_timeout"] == 90
     assert captured["frontend_build_cwd"] == frontend
     assert captured["frontend_dist_directory"] == frontend / "dist"
+
+
+def _patch_launcher_main_commons(monkeypatch, launcher_module, maso_probe, argv) -> None:
+    class FakeLauncher:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run(self):
+            return 0
+
+    monkeypatch.setattr(launcher_module, "ServiceLauncher", FakeLauncher)
+    monkeypatch.setattr(launcher_module.shutil, "which", lambda name: f"/mock/{name}")
+    monkeypatch.setattr(launcher_module.signal, "signal", lambda *args: None)
+    monkeypatch.setattr(maso_probe, "main", lambda argv_args: 0)
+    monkeypatch.setattr(launcher_module.sys, "argv", argv)
+
+
+def test_launcher_main_refuses_unauthenticated_wildcard(monkeypatch):
+    from claude_hub import maso_probe
+    from claude_hub import service_launcher as launcher_module
+
+    _patch_launcher_main_commons(monkeypatch, launcher_module, maso_probe, ["service-launcher"])
+    monkeypatch.setattr(launcher_module.settings, "feishu_app_id", None)
+    monkeypatch.setattr(launcher_module.settings, "feishu_app_secret", None)
+    monkeypatch.setattr(launcher_module.settings, "allow_insecure_listen", False)
+
+    assert launcher_module.main() == 2
+
+
+def test_launcher_main_allows_unauthenticated_loopback(monkeypatch):
+    from claude_hub import maso_probe
+    from claude_hub import service_launcher as launcher_module
+
+    _patch_launcher_main_commons(
+        monkeypatch,
+        launcher_module,
+        maso_probe,
+        ["service-launcher", "--host", "127.0.0.1"],
+    )
+    monkeypatch.setattr(launcher_module.settings, "feishu_app_id", None)
+    monkeypatch.setattr(launcher_module.settings, "feishu_app_secret", None)
+    monkeypatch.setattr(launcher_module.settings, "allow_insecure_listen", False)
+
+    assert launcher_module.main() == 0
+    assert launcher_module.os.environ["CLAUDE_HUB_BIND_HOST"] == "127.0.0.1"
 
 
 def test_new_launcher_marks_unfinished_operation_failed(tmp_path):

@@ -1905,7 +1905,7 @@ def test_remote_codex_solo_mode_uses_reconnect_launcher(monkeypatch: MonkeyPatch
     assert cmd[-2] == "-lc"
     launcher = cmd[-1]
     assert "while true; do" in launcher
-    assert "ssh -tt -o LogLevel=ERROR devbox" in launcher
+    assert "ssh -tt -o LogLevel=ERROR -- devbox" in launcher
     assert "$HOME/.nvm/versions/node" in launcher
     assert "cd ~/repo" in launcher
     assert "Remote cwd not found: %s; using home directory" in launcher
@@ -2009,7 +2009,7 @@ def test_remote_terminal_can_disable_reconnect(monkeypatch: MonkeyPatch) -> None
     launcher = process._build_ttyd_command(session_exists=False)[-1]
 
     assert launcher.startswith("exec ")
-    assert "ssh -tt -o LogLevel=ERROR -p 2222 tiger@devbox" in launcher
+    assert "ssh -tt -o LogLevel=ERROR -p 2222 -- tiger@devbox" in launcher
     assert "cd /opt/tiger/app" in launcher
     assert "${SHELL:-/bin/bash} -l" in launcher
 
@@ -2078,6 +2078,7 @@ def test_remote_capture_ssh_command_is_noninteractive(monkeypatch: MonkeyPatch) 
         "LogLevel=ERROR",
         "-p",
         "2222",
+        "--",
         "tiger@devbox",
         "tmux capture-pane",
     ]

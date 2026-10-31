@@ -4,9 +4,39 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 from typing import Any, Dict, List, Optional
 
 from .session import SessionCore
+
+# Provider CLIs spawn their own children (bash tool shells, MCP servers).
+# Starting each provider in a fresh session makes the direct child a process
+# group leader (pgid == its pid), so teardown can signal the whole tree with
+# killpg instead of orphaning the grandchildren. Unsupported on non-POSIX,
+# where teardown falls back to signalling the direct child only.
+#
+# Caveat: because providers own their own session, they no longer die
+# implicitly when the backend's own process group is signalled (e.g. a
+# terminal SIGINT). Clean shutdown depends on the lifespan handler awaiting
+# every transport's ``stop``; a hard ``SIGKILL`` of the backend leaves the
+# provider groups running.
+# Also note a descendant that itself calls setsid(2)/setpgid(2) leaves the
+# provider's group and can no longer be reached by these killpg calls.
+_NEW_SESSION_KWARGS: Dict[str, Any] = {"start_new_session": True} if os.name == "posix" else {}
+
+# One shared grace budget for teardown: counted from the group SIGTERM, it
+# covers BOTH the direct child's exit and the whole group draining. A fast
+# leader does not restart the clock for lazy descendants.
+_TERMINATE_GRACE_SECONDS = 5.0
+# How often to poll ``killpg(pgid, 0)`` while waiting for the group to drain.
+_GROUP_POLL_INTERVAL = 0.1
+# Bounded wait for the direct child after SIGKILL; teardown must never hang.
+_KILL_REAP_TIMEOUT = 2.0
+# Best-effort window for killed descendants to disappear after reaping the
+# direct child. A final ``killpg(pgid, 0)`` check is sufficient; an unrelated
+# process that somehow joined the pgid must not strand teardown forever.
+_POST_KILL_GROUP_DRAIN_SECONDS = 1.0
 
 
 class ProcessSession(SessionCore):
@@ -92,22 +122,228 @@ class ProcessSession(SessionCore):
                 pass
             self._stderr_task = None
         proc = self._process
+        pgid = self._process_group
         self._process = None
+        self._process_group = 0
         if proc is not None:
+            await self._terminate_subprocess(proc, pgid)
+
+    async def _terminate_subprocess(self, proc: asyncio.subprocess.Process, pgid: int) -> None:
+        """SIGTERM the provider's group, then SIGKILL whatever survives grace.
+
+        The five-second grace budget is shared: it starts at the SIGTERM and
+        covers both the direct child's exit and the group draining. Provider
+        CLIs normally exit on SIGTERM while TERM-trapping descendants (MCP
+        servers shutting down, trapped shells, nohup-style children) stay
+        alive reparented to init; leader death alone is therefore not treated
+        as group death. The group is polled with ``killpg(pgid, 0)`` until it
+        disappears or the deadline expires, and then the WHOLE group is
+        escalated to SIGKILL. ``proc.wait()`` is awaited concurrently only as
+        a promptness optimization: asyncio does not resolve it until every
+        inherited stdout/stderr/stdio pipe has disconnected, which a
+        surviving pipe-holding grandchild delays. When the wait resolves
+        early while a pipe-free descendant lingers, group liveness polling
+        is paced by an explicit poll-interval sleep so a completed future
+        cannot busy-spin the loop back-to-back until the deadline.
+
+        If teardown itself is cancelled during grace, the group is SIGKILLed
+        immediately and the direct child gets a final bounded, shielded reap
+        before ``CancelledError`` propagates, so cancellation never leaves a
+        live tree or a zombie. When ``pgid`` is unset (non-POSIX, a process
+        not spawned by :meth:`_spawn_subprocess`, or group signalling denied
+        by ``PermissionError``) only the direct child is signalled, matching
+        the previous behavior. Descendants that called ``setsid``/``setpgid``
+        themselves escaped the group and cannot be reached here.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _TERMINATE_GRACE_SECONDS
+        # ``_signal_process_group`` returns False when group signalling is
+        # unavailable; fall back to direct-child semantics for the whole
+        # teardown (signals, liveness checks and escalation), rather than
+        # polling a group we demonstrably cannot reach.
+        group_mode = self._signal_process_group(pgid, signal.SIGTERM)
+        if not group_mode:
             try:
                 proc.terminate()
-                await asyncio.wait_for(proc.wait(), timeout=5.0)
-            except (asyncio.TimeoutError, OSError):
+            except OSError:
+                pass
+
+        wait_task: asyncio.Task[int] = asyncio.ensure_future(proc.wait())
+        try:
+            while loop.time() < deadline:
+                if wait_task.done():
+                    # The leader is already reaped. In fallback mode that is
+                    # the whole teardown condition. In group mode a descendant
+                    # may still be shutting down; if it dropped the inherited
+                    # stdio pipes at exec, the wait task resolves with the
+                    # group still alive and can no longer pace this loop, so
+                    # sleep the poll interval instead of re-awaiting the
+                    # completed future — re-awaiting it returns immediately
+                    # and busy-spins killpg(pgid, 0) until the deadline.
+                    if not group_mode or not self._process_group_alive(pgid):
+                        return
+                    remaining = max(0.0, deadline - loop.time())
+                    await asyncio.sleep(min(_GROUP_POLL_INTERVAL, remaining))
+                    continue
+                remaining = max(0.0, deadline - loop.time())
                 try:
-                    proc.kill()
-                except OSError:
+                    await asyncio.wait_for(
+                        asyncio.shield(wait_task),
+                        timeout=min(_GROUP_POLL_INTERVAL, remaining),
+                    )
+                except (asyncio.TimeoutError, OSError):
+                    # Poll interval elapsed, or the reap itself errored; in
+                    # the latter case the deadline path still SIGKILLs, and
+                    # signalling an already-dead pid is tolerated below.
                     pass
+                # The leader must be reaped AND (in group mode) every group
+                # member gone. With pipe-holding descendants the two converge
+                # within a tick: once the last member dies the inherited pipe
+                # fds close and the wait task resolves. A descendant that
+                # dropped the pipes is handled by the paced branch above.
+                if wait_task.done() and (not group_mode or not self._process_group_alive(pgid)):
+                    return
+            # Grace elapsed with the leader or a descendant still alive:
+            # escalate the WHOLE group (or the direct child in fallback).
+            self._escalate_to_sigkill(pgid, group_mode, proc)
+            await self._settle_after_kill(loop, pgid, group_mode, wait_task)
+        except asyncio.CancelledError:
+            # Teardown was cancelled mid-grace: no more waiting. SIGKILL the
+            # tree immediately; the final reap runs in ``finally``.
+            self._escalate_to_sigkill(pgid, group_mode, proc)
+            raise
+        finally:
+            await self._reap_subprocess(wait_task)
+
+    @staticmethod
+    def _escalate_to_sigkill(pgid: int, group_mode: bool, proc: asyncio.subprocess.Process) -> None:
+        """SIGKILL the group, or the direct child when groups are unusable."""
+        if group_mode and ProcessSession._signal_process_group(pgid, signal.SIGKILL):
+            return
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+    @staticmethod
+    async def _settle_after_kill(
+        loop: asyncio.AbstractEventLoop,
+        pgid: int,
+        group_mode: bool,
+        wait_task: "asyncio.Task[int]",
+    ) -> None:
+        """Reap the SIGKILLed leader and briefly observe the group draining."""
+        if not wait_task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(wait_task), timeout=_KILL_REAP_TIMEOUT)
+            except (asyncio.TimeoutError, OSError):
+                pass
+        if group_mode:
+            drain_deadline = loop.time() + _POST_KILL_GROUP_DRAIN_SECONDS
+            while loop.time() < drain_deadline:
+                if not ProcessSession._process_group_alive(pgid):
+                    break
+                await asyncio.sleep(_GROUP_POLL_INTERVAL)
+
+    @staticmethod
+    async def _reap_subprocess(wait_task: "asyncio.Task[int]") -> None:
+        """Final bounded, shielded reap of the direct child.
+
+        Runs on every teardown path (success, deadline escalation and
+        cancellation) so the child can never linger as a zombie. Swallowing
+        ``CancelledError`` here means a second cancellation while reaping
+        cannot abort the best-effort wait: the original cancellation still
+        propagates from the caller.
+        """
+        if not wait_task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(wait_task), timeout=_KILL_REAP_TIMEOUT)
+            except (asyncio.CancelledError, asyncio.TimeoutError, OSError):
+                pass
+        if wait_task.done() and not wait_task.cancelled():
+            try:
+                wait_task.result()
+            except (asyncio.CancelledError, OSError):
+                pass
+
+    @staticmethod
+    def _process_group_alive(pgid: int) -> bool:
+        """Whether any process still exists in ``pgid``.
+
+        A signal-0 check: ``ProcessLookupError`` means the group is empty,
+        ``PermissionError`` means a member exists under another uid (treat it
+        as alive so teardown keeps waiting / escalates).
+        """
+        if pgid <= 0 or os.name != "posix":
+            return False
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    @staticmethod
+    def _signal_process_group(pgid: int, sig: int) -> bool:
+        """Signal every process in the provider's group.
+
+        Returns ``True`` when group signalling was attempted (including a
+        group that is already gone), ``False`` when it is unavailable and the
+        caller must target the direct child instead.
+        """
+        if pgid <= 0 or os.name != "posix":
+            return False
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            # The whole group has already exited; ``proc.wait()`` reaps it.
+            pass
+        except PermissionError:
+            return False
+        return True
+
+    async def _spawn_subprocess(
+        self, cmd: List[str], env: Optional[Dict[str, str]]
+    ) -> asyncio.subprocess.Process:
+        """Launch a provider subprocess and record its process group.
+
+        All provider spawn sites go through this so both the one-shot CLIs and
+        the persistent app-server share the same piping and group semantics.
+
+        Caveat: a descendant that itself calls ``setsid``/``setpgid`` leaves
+        this group and cannot be signalled or reaped by teardown's killpg.
+        """
+        # Reset BEFORE the await on every platform: if a stop()/restart races
+        # the spawn, teardown must not see the previous process's pgid, and
+        # non-POSIX no longer relies on a prior teardown having cleared this.
+        self._process_group = 0
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=self._cwd or None,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            **_NEW_SESSION_KWARGS,
+        )
+        # With ``start_new_session`` the child is the group leader, so its pid
+        # is the pgid. Leave this at zero on non-POSIX / pid-less transports
+        # (test doubles) so teardown targets the direct child instead.
+        if _NEW_SESSION_KWARGS:
+            pid = getattr(process, "pid", None)
+            self._process_group = pid if isinstance(pid, int) else 0
+        return process
 
     async def read_line(self) -> Optional[Dict[str, Any]]:
         """Await one parsed JSON record from stdout, or ``None`` on EOF."""
         while True:
             generation, record = await self._stdout_queue.get()
             if generation == self._stdout_generation:
+                # Retired streams cannot reach this branch. An EOF here is
+                # from the replacement itself, never the expected farewell
+                # of a process killed by restart_for_recovery().
+                self._client_requested_stop = False
                 return record
 
     async def _drain_oneshot_stdout(self, generation: int) -> None:
@@ -257,14 +493,7 @@ class ProcessSession(SessionCore):
         self._stderr_buffer = b""
         self._exit_error = None
         try:
-            self._process = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=self._cwd or None,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=provider_env,
-            )
+            self._process = await self._spawn_subprocess(cmd, provider_env)
         except FileNotFoundError:
             self._last_error = f"provider binary not found: {cmd[0]}"
             self._end_turn()

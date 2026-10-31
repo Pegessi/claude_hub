@@ -5978,6 +5978,91 @@ async def test_native_clean_exit_full_answer_synthesizes_completed_once() -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("final_answer", ["", " \n ", "The file confirms the answer is 42."])
+async def test_native_clean_exit_after_completed_tool_requires_final_answer(
+    final_answer: str,
+) -> None:
+    """Pre-tool commentary alone cannot certify a completed answer at EOF."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    queue = await tailer.subscribe()
+    completion_q = await tailer.subscribe_completion()
+    try:
+        await tailer.send_message("inspect the file", [], client_turn_id="turn-tool-eof")
+        started = await asyncio.wait_for(queue.get(), timeout=0.5)
+        assert started.type == AgentStreamEventType.TURN_STARTED
+        commentary = "I will inspect the file."
+        transport._records.put_nowait(
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg-before-tool",
+                    "content": [
+                        {"type": "text", "text": commentary},
+                        {"type": "tool_use", "id": "read-1", "name": "Read", "input": {}},
+                    ],
+                },
+            }
+        )
+        transport._records.put_nowait(
+            {
+                "type": "user",
+                "message": {
+                    "content": [{"type": "tool_result", "tool_use_id": "read-1", "content": "42"}]
+                },
+            }
+        )
+        if final_answer:
+            transport._records.put_nowait(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "id": "msg-after-tool",
+                        "content": [{"type": "text", "text": final_answer}],
+                    },
+                }
+            )
+        transport._records.put_nowait(None)
+        events = []
+        while True:
+            event = await asyncio.wait_for(queue.get(), timeout=0.5)
+            events.append(event)
+            if event.type == AgentStreamEventType.TURN_COMPLETED:
+                break
+        assert any(e.type == AgentStreamEventType.TOOL_CALL_COMPLETED for e in events)
+        terminal = events[-1]
+        has_final_answer = bool(final_answer.strip())
+        assert terminal.payload["status"] == ("completed" if has_final_answer else "failed")
+        if has_final_answer:
+            assert terminal.payload["assistant_text"] == commentary + final_answer
+            assert terminal.payload["final_text"] == final_answer
+            assert not any(e.type == AgentStreamEventType.ERROR for e in events)
+        else:
+            assert any(e.type == AgentStreamEventType.ERROR for e in events)
+        completion = await asyncio.wait_for(completion_q.get(), timeout=0.5)
+        if completion.type == AgentStreamEventType.ERROR:
+            assert not has_final_answer
+            completion = await asyncio.wait_for(completion_q.get(), timeout=0.5)
+        assert completion.type == AgentStreamEventType.TURN_COMPLETED
+        assert completion.payload["status"] == terminal.payload["status"]
+        assert completion_q.empty()
+        assert queue.empty()
+        assert tailer._active_turn_id is None
+        assert not transport.turn_in_flight
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("external_wait", ["blocking_approval", "active_tool_call"])
 async def test_native_clean_exit_full_answer_with_pending_external_wait_still_fails(
     external_wait: str,

@@ -1,6 +1,6 @@
 import type { WorkspaceTask } from './workspace'
 
-export type AgentType = 'claude' | 'codex' | 'traex' | 'maso' | 'cursor' | 'terminal'
+export type AgentType = 'claude' | 'codex' | 'traex' | 'maso' | 'cursor' | 'antigravity' | 'terminal'
 export type SessionKind = 'chat' | 'terminal'
 export type ExecutionTarget = 'local' | 'remote'
 export type AgentRuntimeStatus = 'idle' | 'working' | 'attention' | 'offline'

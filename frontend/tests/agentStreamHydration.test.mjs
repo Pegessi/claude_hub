@@ -53,6 +53,78 @@ test('a permanent observation denial fails promptly without retrying or replacin
   assert.ok(!requests.some(url => url.endsWith('/retry')))
 })
 
+test('a provider failure displays its detail without retrying or losing history', async t => {
+  const event = { stream_sequence: 0, type: 'text_delta', payload: { text: 'Saved answer' } }
+  const detail = 'provider exited with code 1: authentication failed or timed out'
+  const requests = []
+  t.mock.method(globalThis, 'fetch', async url => {
+    requests.push(url)
+    if (url.endsWith('/capabilities')) return Response.json({ structured: true })
+    if (url.includes('/events?')) return Response.json({ events: [event], next_sequence: 0, has_more: false })
+    return Response.json({ detail: `  ${detail}\n` }, { status: 409 })
+  })
+  const { stream, unmount } = mountStream()
+  t.after(unmount)
+  await stream.start('provider-auth-failure', 'terminal-tab')
+  await nextImmediate()
+  assert.equal(stream.connectionState.value, 'failed')
+  assert.equal(stream.errorMessage.value, `wait HTTP 409: ${detail}`)
+  assert.deepEqual(stream.events.value, [event])
+  assert.equal(requests.filter(url => url.endsWith('/wait')).length, 1)
+  assert.ok(!requests.some(url => /\/(retry|send)$/.test(url)))
+})
+
+for (const [name, body] of [
+  ['missing', '{}'],
+  ['empty', '{"detail":" "}'],
+  ['null', 'null'],
+  ['object', '{"detail":{"message":"do not stringify"}}'],
+  ['array', '{"detail":[{"msg":"validation issue"}]}'],
+  ['number', '{"detail":401}'],
+  ['HTML response', '<html>upstream failure</html>'],
+]) {
+  test(`a ${name} error detail keeps the HTTP fallback`, async t => {
+    t.mock.method(globalThis, 'fetch', async url => {
+      if (url.endsWith('/capabilities')) return Response.json({ structured: true })
+      if (url.includes('/events?')) return Response.json({ events: [], next_sequence: -1, has_more: false })
+      return new Response(body, { status: 409 })
+    })
+    const { stream, unmount } = mountStream()
+    t.after(unmount)
+    await stream.start(`malformed-detail-${name}`, 'terminal-tab')
+    await nextImmediate()
+    assert.equal(stream.connectionState.value, 'failed')
+    assert.equal(stream.errorMessage.value, 'wait HTTP 409')
+  })
+}
+
+for (const status of [408, 429, 503]) {
+  test(`a ${status} detail preserves observation retry without replacing the provider`, async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const requests = []
+    let waitCalls = 0
+    t.mock.method(globalThis, 'fetch', async (url, options) => {
+      requests.push(url)
+      if (url.endsWith('/capabilities')) return Response.json({ structured: true })
+      if (url.includes('/events?')) return Response.json({ events: [], next_sequence: -1, has_more: false })
+      waitCalls += 1
+      if (waitCalls === 1) return Response.json({ detail: 'temporary upstream failure' }, { status })
+      return new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted'))))
+    })
+    const { stream, unmount } = mountStream()
+    t.after(unmount)
+    await stream.start(`retryable-detail-${status}`, 'terminal-tab')
+    await nextImmediate()
+    assert.equal(stream.connectionState.value, 'live')
+    t.mock.timers.tick(1_000)
+    await nextImmediate()
+    assert.equal(waitCalls, 2)
+    assert.equal(stream.connectionState.value, 'live')
+    assert.equal(stream.errorMessage.value, null)
+    assert.ok(!requests.some(url => /\/(retry|send)$/.test(url)))
+  })
+}
+
 test('the final delta-only hydration page is committed before live, without deep proxies', async t => {
   const event = { stream_sequence: 0, type: 'text_delta', payload: { text: 'Latest message' } }
   const requests = []

@@ -36,7 +36,14 @@
           class="banner-icon"
           aria-hidden="true"
         >⚠</span>
-        <span>{{ errorMessage || 'Structured view unavailable.' }}</span>
+        <div
+          class="banner-message"
+          role="region"
+          aria-label="Stream error details"
+          tabindex="0"
+        >
+          {{ errorMessage || 'Structured view unavailable.' }}
+        </div>
         <button
           v-if="stopArmed"
           type="button"
@@ -58,7 +65,9 @@
           ? 'Return to Workspace and refresh managed sessions.'
           : currentTab?.agent_type === 'maso'
             ? 'Start the MASO HTTP service, then retry.'
-            : 'Create a Terminal session for native TUI access.' }}</span>
+            : currentTab?.agent_type === 'antigravity'
+              ? 'Check the local agyx network and sign-in, then retry. Retry does not resend your message.'
+              : 'Create a Terminal session for native TUI access.' }}</span>
       </template>
     </div>
 
@@ -430,6 +439,7 @@ provide(chatComposerKey, composer)
 
 .structured-banner {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
@@ -440,8 +450,30 @@ provide(chatComposerKey, composer)
   flex-shrink: 0;
 }
 
+.structured-banner[role='alert'] {
+  /* Keep diagnostics below the floating session name and binding control. */
+  padding-top: 38px;
+  align-items: flex-start;
+}
+
+.banner-message {
+  flex: 1 1 240px;
+  min-width: 0;
+  max-height: min(160px, 25vh);
+  overflow: auto;
+  overflow-wrap: anywhere;
+  overscroll-behavior: contain;
+  white-space: pre-wrap;
+}
+
+.banner-message:focus-visible {
+  outline: 2px solid var(--ch-color-accent);
+  outline-offset: 2px;
+}
+
 .banner-guidance {
   margin-left: auto;
+  overflow-wrap: anywhere;
   color: var(--ch-color-text-subtle);
 }
 
@@ -465,6 +497,7 @@ provide(chatComposerKey, composer)
 }
 
 .banner-retry {
+  flex-shrink: 0;
   margin-left: auto;
   padding: 2px 10px;
   font-size: 12px;

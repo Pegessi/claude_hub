@@ -1,13 +1,17 @@
 <template>
-  <details
-    ref="detailsRef"
+  <div
+    ref="rootRef"
     class="quota-menu"
-    @toggle="handleToggle"
   >
-    <summary
+    <button
+      ref="triggerRef"
+      type="button"
       class="quota-menu-summary"
       title="Provider quota"
       aria-label="Provider quota"
+      aria-haspopup="dialog"
+      :aria-expanded="isOpen"
+      @click="openModal"
     >
       <svg
         class="quota-menu-icon"
@@ -27,156 +31,191 @@
         <span>Provider quota</span>
         <strong>{{ summaryText }}</strong>
       </div>
-      <span
-        class="quota-menu-chevron"
-        aria-hidden="true"
-      />
-    </summary>
-    <div class="quota-submenu-panel">
-      <div class="quota-menu-heading">
-        <span>Codex and MASO</span>
-        <button
-          type="button"
-          class="quota-refresh"
-          :disabled="isLoading"
-          aria-label="Refresh provider quota"
-          @click="refreshQuota"
-        >
-          Refresh
-        </button>
-      </div>
+    </button>
 
-      <section
-        v-for="view in providerViews"
-        :key="view.key"
-        class="quota-provider"
+    <Teleport
+      :to="teleportTarget"
+      :disabled="!teleportTarget"
+    >
+      <div
+        v-if="isOpen"
+        class="quota-modal-backdrop"
+        @click.self="closeModal"
+        @keydown.esc.stop.prevent="closeModal"
+        @keydown.tab="trapFocus"
       >
-        <div class="quota-provider-head">
-          <strong>{{ view.title }}</strong>
-          <span
-            class="quota-badge"
-            :class="`quota-badge--${view.state}`"
-          >{{ view.statusText }}</span>
-        </div>
-        <p
-          v-if="view.asOfText"
-          class="quota-reading"
-          :class="{ 'quota-reading--aging': view.aging }"
-          :title="view.asOfTitle"
+        <div
+          ref="modalRef"
+          class="quota-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="quota-modal-title"
+          tabindex="-1"
         >
-          {{ view.asOfText }}
-        </p>
-        <p
-          v-if="view.staleNote"
-          class="quota-note quota-note--warning"
-        >
-          {{ view.staleNote }}
-        </p>
-        <p
-          v-if="view.agingNote"
-          class="quota-note quota-note--aging"
-        >
-          {{ view.agingNote }}
-        </p>
-        <p
-          v-if="view.unchangedNote"
-          class="quota-note quota-note--unchanged"
-          role="status"
-        >
-          {{ view.unchangedNote }}
-        </p>
-        <p
-          v-if="view.message"
-          class="quota-note"
-          :class="`quota-note--${view.messageTone}`"
-        >
-          {{ view.message }}
-        </p>
-        <ul
-          v-if="view.rows.length"
-          class="quota-rows"
-        >
-          <li
-            v-for="row in view.rows"
-            :key="row.key"
-            class="quota-row"
-            :class="[`quota-row--${row.state}`, `quota-row--${row.tone}`]"
-          >
-            <div class="quota-row-head">
-              <span
-                class="quota-row-label"
-                :title="row.label"
-              >{{ row.label }}</span>
-              <strong class="quota-row-value">{{ row.value }}</strong>
+          <div class="quota-modal-header">
+            <div class="quota-modal-title-group">
+              <h3 id="quota-modal-title">
+                Provider quota
+              </h3>
+              <span>Codex, MASO, and Antigravity</span>
             </div>
-            <div
-              v-if="row.barPercent !== null"
-              class="quota-bar"
-              aria-hidden="true"
+            <div class="quota-modal-actions">
+              <button
+                type="button"
+                class="quota-refresh"
+                :disabled="isLoading"
+                aria-label="Refresh provider quota"
+                @click="refreshQuota"
+              >
+                Refresh
+              </button>
+              <button
+                ref="closeButtonRef"
+                type="button"
+                class="quota-modal-close"
+                aria-label="Close provider quota"
+                @click="closeModal"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+
+          <div class="quota-modal-body">
+            <section
+              v-for="view in providerViews"
+              :key="view.key"
+              class="quota-provider"
             >
-              <span :style="{ width: `${row.barPercent}%` }" />
+              <div class="quota-provider-head">
+                <strong>{{ view.title }}</strong>
+                <span
+                  class="quota-badge"
+                  :class="`quota-badge--${view.state}`"
+                >{{ view.statusText }}</span>
+              </div>
+              <p
+                v-if="view.asOfText"
+                class="quota-reading"
+                :class="{ 'quota-reading--aging': view.aging }"
+                :title="view.asOfTitle"
+              >
+                {{ view.asOfText }}
+              </p>
+              <p
+                v-if="view.staleNote"
+                class="quota-note quota-note--warning"
+              >
+                {{ view.staleNote }}
+              </p>
+              <p
+                v-if="view.agingNote"
+                class="quota-note quota-note--aging"
+              >
+                {{ view.agingNote }}
+              </p>
+              <p
+                v-if="view.unchangedNote"
+                class="quota-note quota-note--unchanged"
+                role="status"
+              >
+                {{ view.unchangedNote }}
+              </p>
+              <p
+                v-if="view.message"
+                class="quota-note"
+                :class="`quota-note--${view.messageTone}`"
+              >
+                {{ view.message }}
+              </p>
+              <ul
+                v-if="view.rows.length"
+                class="quota-rows"
+              >
+                <li
+                  v-for="row in view.rows"
+                  :key="row.key"
+                  class="quota-row"
+                  :class="[`quota-row--${row.state}`, `quota-row--${row.tone}`]"
+                >
+                  <div class="quota-row-head">
+                    <span
+                      class="quota-row-label"
+                      :title="row.label"
+                    >{{ row.label }}</span>
+                    <strong class="quota-row-value">{{ row.value }}</strong>
+                  </div>
+                  <div
+                    v-if="row.barPercent !== null"
+                    class="quota-bar"
+                    aria-hidden="true"
+                  >
+                    <span :style="{ width: `${row.barPercent}%` }" />
+                  </div>
+                  <p
+                    v-if="row.usedText || row.resetText"
+                    class="quota-row-meta"
+                  >
+                    <span v-if="row.usedText">{{ row.usedText }}</span>
+                    <span
+                      v-if="row.resetText"
+                      :title="row.resetTitle"
+                    >{{ row.resetText }}</span>
+                  </p>
+                </li>
+              </ul>
+              <p
+                v-else-if="view.emptyText"
+                class="quota-status"
+              >
+                {{ view.emptyText }}
+              </p>
+              <p
+                v-for="note in view.notes"
+                :key="note"
+                class="quota-note"
+              >
+                {{ note }}
+              </p>
+            </section>
+
+            <p
+              v-if="isLoading"
+              class="quota-status"
+            >
+              Loading quota...
+            </p>
+            <div
+              v-else-if="loadError"
+              class="quota-failure"
+              role="alert"
+            >
+              <p class="quota-status quota-status--error">
+                {{ loadError }}
+              </p>
+              <button
+                type="button"
+                class="quota-refresh"
+                @click="retryQuota"
+              >
+                Retry
+              </button>
             </div>
             <p
-              v-if="row.usedText || row.resetText"
-              class="quota-row-meta"
+              v-else-if="!providerViews.length"
+              class="quota-status"
             >
-              <span v-if="row.usedText">{{ row.usedText }}</span>
-              <span
-                v-if="row.resetText"
-                :title="row.resetTitle"
-              >{{ row.resetText }}</span>
+              No provider reported quota.
             </p>
-          </li>
-        </ul>
-        <p
-          v-else-if="view.emptyText"
-          class="quota-status"
-        >
-          {{ view.emptyText }}
-        </p>
-        <p
-          v-for="note in view.notes"
-          :key="note"
-          class="quota-note"
-        >
-          {{ note }}
-        </p>
-      </section>
-
-      <p
-        v-if="isLoading"
-        class="quota-status"
-      >
-        Loading quota...
-      </p>
-      <div
-        v-else-if="loadError"
-        class="quota-failure"
-        role="alert"
-      >
-        <p class="quota-status quota-status--error">
-          {{ loadError }}
-        </p>
-        <button
-          type="button"
-          class="quota-refresh"
-          @click="retryQuota"
-        >
-          Retry
-        </button>
+          </div>
+        </div>
       </div>
-      <p
-        v-else-if="!providerViews.length"
-        class="quota-status"
-      >
-        No provider reported quota.
-      </p>
-    </div>
-  </details>
+    </Teleport>
+  </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import type { QuotaResponse } from '@/types'
 import {
   buildQuotaView,
@@ -185,11 +224,18 @@ import {
   summarizeQuota,
 } from '@/utils/quotaDisplay'
 
-// Readings age while the panel stays open, so recompute the "updated x ago"
+const emit = defineEmits<{ select: [] }>()
+
+// Readings age while the modal stays open, so recompute the "updated x ago"
 // text on a slow tick instead of freezing it at load time.
 const AGE_TICK_MS = 30_000
+const teleportTarget = typeof document !== 'undefined' ? document.body : null
 
-const detailsRef = ref<HTMLDetailsElement | null>(null)
+const rootRef = ref<HTMLElement | null>(null)
+const triggerRef = ref<HTMLElement | null>(null)
+const modalRef = ref<HTMLElement | null>(null)
+const closeButtonRef = ref<HTMLElement | null>(null)
+const isOpen = ref(false)
 const quota = ref<QuotaResponse | null>(null)
 const isLoading = ref(false)
 const loadError = ref<string | null>(null)
@@ -203,7 +249,7 @@ let inFlight: AbortController | null = null
 // Retry must repeat the request that failed, not silently change it.
 let lastRefreshRequested = false
 let ageTimer: ReturnType<typeof setInterval> | null = null
-let parentMenuDetails: HTMLDetailsElement | null = null
+let returnFocusEl: HTMLElement | null = null
 
 const providerViews = computed(() => buildQuotaView(quota.value, now.value, {
   unchangedProviders: unchangedSinceRefresh.value,
@@ -241,7 +287,7 @@ async function fetchQuota(refresh: boolean): Promise<void> {
       throw new Error(await readError(response))
     }
     const payload = await response.json() as QuotaResponse
-    // A superseded or unmounted request must never overwrite the panel.
+    // A superseded or unmounted request must never overwrite the modal.
     if (seq !== requestSeq) return
     // Compare against the reading this request replaces, so a refresh that
     // changed nothing can say so instead of looking like a dead button.
@@ -281,34 +327,93 @@ function stopAgeTicker(): void {
   ageTimer = null
 }
 
-function handleToggle(event: Event): void {
-  const target = event.currentTarget as HTMLDetailsElement
-  if (!target.open) {
-    stopAgeTicker()
-    return
-  }
+function openModal(): void {
+  const parentMenu = rootRef.value?.closest?.('details') as HTMLDetailsElement | null
+  const parentSummary = parentMenu?.querySelector?.('summary') as HTMLElement | null
+  isOpen.value = true
   now.value = Date.now()
   startAgeTicker()
+  if (parentMenu) parentMenu.open = false
+  emit('select')
+  const activeEl = typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
+    ? document.activeElement
+    : null
+  returnFocusEl = parentSummary ?? activeEl ?? triggerRef.value
+  void nextTick(() => {
+    if (typeof closeButtonRef.value?.focus === 'function') {
+      closeButtonRef.value.focus()
+    } else if (typeof modalRef.value?.focus === 'function') {
+      modalRef.value.focus()
+    }
+  })
   if (!quota.value && !isLoading.value) {
     void fetchQuota(false)
   }
 }
 
-function handleParentMenuToggle(): void {
-  if (!parentMenuDetails?.open && detailsRef.value?.open) {
-    detailsRef.value.open = false
+function closeModal(): void {
+  if (!isOpen.value) return
+  isOpen.value = false
+  stopAgeTicker()
+  const target = returnFocusEl
+  returnFocusEl = null
+  if (target && typeof target.focus === 'function') {
+    void nextTick(() => target.focus())
+  }
+}
+
+function trapFocus(event: KeyboardEvent): void {
+  if (event.defaultPrevented) return
+  const dialog = modalRef.value
+  if (!dialog || typeof dialog.querySelectorAll !== 'function') return
+  const focusable = [
+    ...dialog.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+    ),
+  ]
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (!first || !last) {
+    event.preventDefault()
+    dialog.focus?.()
+    return
+  }
+  const active = typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null
+  if (!active || !focusable.includes(active)) {
+    event.preventDefault()
+    ;(event.shiftKey ? last : first).focus?.()
+  } else if (event.shiftKey && active === first) {
+    event.preventDefault()
+    last.focus?.()
+  } else if (!event.shiftKey && active === last) {
+    event.preventDefault()
+    first.focus?.()
+  }
+}
+
+function handleKeydown(event: KeyboardEvent): void {
+  if (!isOpen.value) return
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    closeModal()
+  } else if (event.key === 'Tab') {
+    trapFocus(event)
   }
 }
 
 onMounted(() => {
-  parentMenuDetails = detailsRef.value?.parentElement?.closest('details') || null
-  parentMenuDetails?.addEventListener('toggle', handleParentMenuToggle)
+  if (typeof window !== 'undefined') {
+    window.addEventListener('keydown', handleKeydown, true)
+  }
 })
 
 onUnmounted(() => {
-  parentMenuDetails?.removeEventListener('toggle', handleParentMenuToggle)
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('keydown', handleKeydown, true)
+  }
   stopAgeTicker()
-  // Retire anything in flight so a late response cannot touch a dead panel.
+  // Retire anything in flight so a late response cannot touch a dead modal.
   requestSeq += 1
   inFlight?.abort()
   inFlight = null
@@ -323,14 +428,6 @@ onUnmounted(() => {
   color: var(--ch-color-text);
 }
 
-.quota-menu summary {
-  list-style: none;
-}
-
-.quota-menu summary::-webkit-details-marker {
-  display: none;
-}
-
 .quota-menu-summary {
   width: 100%;
   min-height: 36px;
@@ -342,13 +439,14 @@ onUnmounted(() => {
   border-radius: var(--ch-radius-md);
   background: transparent;
   color: var(--ch-color-text);
+  font: inherit;
+  text-align: left;
   padding: 8px 10px;
   cursor: pointer;
   transition: var(--ch-motion-fast);
 }
 
-.quota-menu-summary:hover,
-.quota-menu[open] > .quota-menu-summary {
+.quota-menu-summary:hover {
   background: var(--ch-color-surface-control-hover);
 }
 
@@ -390,62 +488,96 @@ onUnmounted(() => {
   overflow-wrap: anywhere;
 }
 
-.quota-menu-chevron {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 auto;
-  border-right: 2px solid currentColor;
-  border-bottom: 2px solid currentColor;
-  color: var(--ch-color-text-muted);
-  transform: rotate(-45deg);
-  transition: transform var(--ch-motion-fast);
+.quota-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(15, 23, 42, 0.48);
+  backdrop-filter: blur(2px);
 }
 
-.quota-menu[open] .quota-menu-chevron {
-  transform: rotate(45deg);
+.quota-modal {
+  width: min(560px, 100%);
+  max-height: min(82dvh, 720px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-lg);
+  background: var(--ch-color-surface);
+  color: var(--ch-color-text);
+  box-shadow: var(--ch-shadow-popover);
+  overflow: hidden;
 }
 
-.quota-submenu-panel {
-  padding: 4px 2px 2px;
-}
-
-.quota-menu-heading {
+.quota-modal-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--ch-color-border);
+}
+
+.quota-modal-title-group {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.quota-modal-title-group h3 {
+  margin: 0;
+  color: var(--ch-color-text);
+  font-size: var(--ch-font-size-md, 15px);
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.quota-modal-title-group span {
+  color: var(--ch-color-text-muted);
+  font-size: var(--ch-font-size-xs);
+}
+
+.quota-modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.quota-modal-body {
+  padding: 14px 16px 16px;
+  overflow-y: auto;
+  display: grid;
   gap: 10px;
 }
 
-.quota-menu-heading > span {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--ch-color-text);
-  font-size: var(--ch-font-size-sm);
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.quota-refresh {
-  height: 28px;
+.quota-refresh,
+.quota-modal-close {
+  height: 30px;
   flex: 0 0 auto;
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
-  padding: 0 10px;
+  padding: 0 12px;
   font-size: var(--ch-font-size-xs);
   font-weight: 600;
   cursor: pointer;
   transition: var(--ch-motion-fast);
 }
 
-.quota-refresh:hover {
+.quota-refresh:hover,
+.quota-modal-close:hover {
   border-color: var(--ch-color-accent-ring-strong);
   background: var(--ch-color-surface-control-hover);
 }
 
-.quota-refresh:focus-visible {
+.quota-refresh:focus-visible,
+.quota-modal-close:focus-visible {
   outline: none;
   box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
@@ -456,8 +588,7 @@ onUnmounted(() => {
 }
 
 .quota-provider {
-  margin-top: 8px;
-  padding: 8px;
+  padding: 10px 12px;
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-md);
   background: var(--ch-color-surface);

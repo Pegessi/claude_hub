@@ -1,10 +1,35 @@
 import ipaddress
 import math
-from typing import List, Optional
+from functools import lru_cache
+from typing import List, Optional, Union
 from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_IPNetwork = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
+
+
+@lru_cache(maxsize=32)
+def _parse_ip_networks(raw: str) -> tuple[_IPNetwork, ...]:
+    """Parse a comma-separated IP/CIDR list into network objects.
+
+    Bare IPs are accepted (as /32 or /128); empty tokens are ignored. Raises
+    ``ValueError`` on the first invalid entry. Cached because the value is
+    fixed per process and the helper runs on every forwarded request.
+    """
+    networks: list[_IPNetwork] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(token, strict=False))
+        except ValueError as exc:
+            raise ValueError(
+                f"invalid IP/CIDR entry {token!r}; expected e.g. 127.0.0.1 or 10.0.0.0/8"
+            ) from exc
+    return tuple(networks)
 
 
 class Settings(BaseSettings):
@@ -21,6 +46,9 @@ class Settings(BaseSettings):
     )
     review_verdict_idle_timeout_seconds: int = Field(default=180, ge=45, le=1800)
     frontend_url: str = "http://localhost:5173"
+    # Optional externally visible base URL (e.g. https://hub.example.com) used
+    # to decide cookie security attributes behind a terminating reverse proxy.
+    public_url: Optional[str] = None
     ttyd_path: str = "ttyd"
     ttyd_base_port: int = 10000
     default_command: str = "claude"
@@ -115,6 +143,44 @@ class Settings(BaseSettings):
     auth_allowed_emails: Optional[str] = None  # Comma-separated list
     auth_allowed_open_ids: Optional[str] = None  # Comma-separated list
 
+    # Network trust settings. Forwarded headers (X-Forwarded-For and
+    # X-Forwarded-Proto) are honored only when the direct TCP peer belongs to
+    # one of these networks. The default trusts loopback only; deployments
+    # behind a reverse proxy on another hop (e.g. nginx on 10.0.0.5) must add
+    # that peer explicitly. Empty string disables trust entirely.
+    trusted_proxies: str = Field(
+        default="127.0.0.0/8,::1",
+        validation_alias="CLAUDE_HUB_TRUSTED_PROXIES",
+    )
+    # Comma-separated extra browser Origin values accepted, in addition to
+    # same-origin requests, for terminal WebSocket handshakes and
+    # state-changing HTTP methods (POST/PUT/PATCH/DELETE). Entries may be
+    # full origins (https://hub.example.com) or bare host[:port] values.
+    allowed_origins: Optional[str] = Field(
+        default=None,
+        validation_alias="CLAUDE_HUB_ALLOWED_ORIGINS",
+    )
+    # Opt-in to listen on a non-loopback interface while authentication is
+    # disabled. The startup guard refuses such a bind unless this is set.
+    allow_insecure_listen: bool = Field(
+        default=False,
+        validation_alias="CLAUDE_HUB_ALLOW_INSECURE_LISTEN",
+    )
+    # The actual uvicorn bind host, exported by the launch scripts/launcher.
+    # ``host`` alone cannot be trusted to reflect the real interface (uvicorn
+    # receives --host separately), so the in-process startup guard prefers
+    # this value and falls back to ``host`` when it is unset.
+    bind_host: Optional[str] = Field(
+        default=None,
+        validation_alias="CLAUDE_HUB_BIND_HOST",
+    )
+
+    @field_validator("trusted_proxies")
+    @classmethod
+    def _validate_trusted_proxies(cls, value: str) -> str:
+        _parse_ip_networks(value or "")
+        return value
+
     # Agent-stream Chat image cache limits, enforced least-recently-used first.
     # The composer stores the original image when it fits the per-image cap
     # (its own 8 MiB upload limit), so sent images keep their quality. The
@@ -205,6 +271,18 @@ class Settings(BaseSettings):
         return [
             open_id.strip() for open_id in self.auth_allowed_open_ids.split(",") if open_id.strip()
         ]
+
+    @property
+    def trusted_proxy_networks(self) -> tuple[_IPNetwork, ...]:
+        """Parsed trusted-proxy allowlist from ``trusted_proxies``."""
+        return _parse_ip_networks(self.trusted_proxies or "")
+
+    @property
+    def allowed_origins_list(self) -> List[str]:
+        """Additional allowed browser Origin values."""
+        if not self.allowed_origins:
+            return []
+        return [origin.strip() for origin in self.allowed_origins.split(",") if origin.strip()]
 
     @property
     def auth_enabled(self) -> bool:

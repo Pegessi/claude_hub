@@ -294,11 +294,10 @@ class NativeConsumerMixin(SessionState):
                     # identity recheck under the send lock prevents a race
                     # with a manual Stop that already terminalized this turn:
                     # only one of the two edges is ever persisted.
+                    failure_message = transport.exit_error or "native transport process exited"
                     async with self._send_lock:
                         if self._active_turn_id is not None:
-                            fatal_failure = await self._fail_active_turn(
-                                "native transport process exited", transport
-                            )
+                            fatal_failure = await self._fail_active_turn(failure_message, transport)
                         else:
                             fatal_failure = None
                         self._active_turn_id = None
@@ -306,7 +305,7 @@ class NativeConsumerMixin(SessionState):
                     if fatal_failure is not None:
                         self._notify_post_persist(fatal_failure)
                     self._hard_failed = True
-                    self._last_error = "native transport process exited"
+                    self._last_error = failure_message
                     self._deps._HARD_FAILED_SESSION_IDS.add(self.session_id)
                     break
                 # One-shot turn complete. If the provider exited nonzero AND

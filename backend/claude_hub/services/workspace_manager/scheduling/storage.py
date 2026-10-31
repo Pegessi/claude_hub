@@ -3,6 +3,7 @@
 from pydantic import ValidationError
 
 from .._constants import (
+    Any,
     ScheduledTask,
     ScheduledTaskRun,
     ScheduledTaskRunStatus,
@@ -15,25 +16,48 @@ from ._contract import _SchedulingHost
 class _ScheduleStorageMixin(_SchedulingHost):
     _SCHEDULED_RUN_HISTORY_LIMIT = 100
 
-    def _load_scheduled_tasks(self) -> None:
-        if not self._runtime_scheduled_tasks_file.exists():
-            return
-        try:
-            raw = json.loads(self._runtime_scheduled_tasks_file.read_text(encoding="utf-8"))
-        except Exception as exc:
-            logger.error(
-                "Failed to load scheduled tasks from %s: %s",
-                self._runtime_scheduled_tasks_file,
-                exc,
-            )
-            return
+    @staticmethod
+    def _validate_scheduled_tasks_payload(raw: Any) -> dict[str, Any]:
+        """Structural validation for scheduled_tasks.json (primary and backup)."""
+
+        if not isinstance(raw, dict):
+            raise ValueError("scheduled tasks payload must be a JSON object")
         items = raw.get("scheduled_tasks", [])
         if not isinstance(items, list):
-            logger.warning(
-                "Invalid scheduled tasks file: scheduled_tasks is not a list in %s",
-                self._runtime_scheduled_tasks_file,
-            )
+            raise ValueError("scheduled tasks payload 'scheduled_tasks' must be a list")
+        runs = raw.get("scheduled_task_runs", [])
+        if not isinstance(runs, list):
+            raise ValueError("scheduled tasks payload 'scheduled_task_runs' must be a list")
+        for item in items:
+            try:
+                ScheduledTask(**item)
+            except TypeError as exc:
+                raise ValueError("scheduled task entries must be objects") from exc
+            except ValidationError as exc:
+                if any(error["type"] == "extra_forbidden" for error in exc.errors()):
+                    raise
+        for item in runs:
+            try:
+                ScheduledTaskRun(**item)
+            except TypeError as exc:
+                raise ValueError("scheduled task run entries must be objects") from exc
+            except ValidationError as exc:
+                if any(error["type"] == "extra_forbidden" for error in exc.errors()):
+                    raise
+        return raw
+
+    def _load_scheduled_tasks(self) -> None:
+        path = self._runtime_scheduled_tasks_file
+        result = self._load_durable_json(
+            path,
+            label="scheduled tasks",
+            validator=self._validate_scheduled_tasks_payload,
+        )
+        raw = result.data
+        if not isinstance(raw, dict):
+            # Missing file (normal empty) or quarantined without a good backup.
             return
+        items = raw.get("scheduled_tasks", [])
         for item in items:
             try:
                 task = ScheduledTask(**item)
@@ -45,13 +69,12 @@ class _ScheduleStorageMixin(_SchedulingHost):
                     raise
                 logger.warning("Skipping invalid scheduled task entry: %s", exc)
         runs = raw.get("scheduled_task_runs", [])
-        if isinstance(runs, list):
-            for item in runs:
-                try:
-                    run = ScheduledTaskRun(**item)
-                    self.scheduled_task_runs[run.id] = run
-                except Exception as exc:
-                    logger.warning("Skipping invalid scheduled task run entry: %s", exc)
+        for item in runs:
+            try:
+                run = ScheduledTaskRun(**item)
+                self.scheduled_task_runs[run.id] = run
+            except Exception as exc:
+                logger.warning("Skipping invalid scheduled task run entry: %s", exc)
         self._scheduled_legacy_run_ids = {
             run.id for run in self.scheduled_task_runs.values() if self._chat_run_active(run)
         }
@@ -78,7 +101,7 @@ class _ScheduleStorageMixin(_SchedulingHost):
                 run.model_dump(mode="json") for run in self.scheduled_task_runs.values()
             ],
         }
-        self._atomic_write_text(
+        self._atomic_save_state_text(
             self._runtime_scheduled_tasks_file, json.dumps(payload, ensure_ascii=False, indent=2)
         )
 

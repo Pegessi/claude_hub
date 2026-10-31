@@ -135,6 +135,7 @@ const MISSING_VALUE_TEXT: Record<QuotaDisplayState, string> = {
 const PROVIDER_TITLES: Record<string, string> = {
   codex: 'Codex',
   maso: 'MASO',
+  antigravity: 'Antigravity',
 }
 
 /**

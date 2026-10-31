@@ -1,4 +1,9 @@
-"""Reject unknown execution fields without rewriting durable source records."""
+"""Preserve unknown execution fields: quarantine instead of rewriting sources.
+
+Durable stores containing fields this build cannot model are quarantined
+(moved aside with a marker) rather than rewritten in place; the legacy
+flat-file migration still rejects unknown fields outright.
+"""
 
 from __future__ import annotations
 
@@ -186,17 +191,26 @@ def test_main_task_and_all_schedule_shapes_load(manager, workspace):
 
 @pytest.mark.parametrize("field", TASK_UNKNOWN_FIELDS)
 @pytest.mark.parametrize("migrate", [False, True])
-def test_unknown_task_field_preserves_source(manager, workspace, monkeypatch, field, migrate):
+def test_unknown_task_field_is_quarantined_and_source_preserved(
+    manager, workspace, monkeypatch, field, migrate
+):
     path = write_tasks(
         manager, workspace, [{**main_task(workspace.id), field: None}], migrate=migrate
     )
     before = path.read_bytes()
     backup = path.with_suffix(".json.pre-migration-backup")
     assert not backup.exists()
-    monkeypatch.setattr(WorkspaceManager, "_atomic_write_text", Mock(side_effect=forbidden))
-    with pytest.raises(ValueError):
-        WorkspaceManager()
-    assert path.read_bytes() == before
+    # The store must not be rewritten in place; quarantine/marker writes are
+    # the only durable mutations allowed during load.
+    monkeypatch.setattr(WorkspaceManager, "_atomic_save_state_text", Mock(side_effect=forbidden))
+    fresh = WorkspaceManager()
+    assert fresh.tasks == {}
+    assert not path.exists()
+    quarantined = sorted(path.parent.glob("state.json.corrupt-*"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_bytes() == before
+    marker = json.loads(path.with_name("state.json.quarantined").read_text())
+    assert marker["events"][0]["reason"].startswith("structural validation failed")
     assert not backup.exists()
 
 
@@ -205,10 +219,12 @@ def test_migration_cannot_discard_unknown_task_row(manager, workspace, monkeypat
     row = {**main_task(workspace.id), **bad_identity, "unknown_future_field": None}
     path = write_tasks(manager, workspace, [row], migrate=True)
     before = path.read_bytes()
-    monkeypatch.setattr(WorkspaceManager, "_atomic_write_text", Mock(side_effect=forbidden))
-    with pytest.raises(ValueError):
-        WorkspaceManager()
-    assert path.read_bytes() == before
+    monkeypatch.setattr(WorkspaceManager, "_atomic_save_state_text", Mock(side_effect=forbidden))
+    fresh = WorkspaceManager()
+    assert fresh.tasks == {}
+    quarantined = sorted(path.parent.glob("state.json.corrupt-*"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_bytes() == before
     assert not path.with_suffix(".json.pre-migration-backup").exists()
 
 
@@ -244,18 +260,23 @@ def test_unknown_flat_legacy_task_is_not_swallowed(manager, workspace, monkeypat
 
 
 @pytest.mark.parametrize("field", SCHEDULE_UNKNOWN_FIELDS)
-def test_unknown_schedule_field_fails_before_core_load(manager, workspace, monkeypatch, field):
+def test_unknown_schedule_field_quarantines_before_core_load(
+    manager, workspace, monkeypatch, field
+):
     valid = main_schedule("tab_message", workspace.id)
     invalid = {**main_schedule("hub_task", workspace.id), field: None}
     path = write_schedules([valid, invalid])
     before = path.read_bytes()
-    monkeypatch.setattr(WorkspaceManager, "_load_state", Mock(side_effect=forbidden))
     monkeypatch.setattr(WorkspaceManager, "_save_scheduled_tasks", Mock(side_effect=forbidden))
-    monkeypatch.setattr(WorkspaceManager, "_atomic_write_text", Mock(side_effect=forbidden))
-    with pytest.raises(ValidationError) as caught:
-        WorkspaceManager()
-    assert any(error["type"] == "extra_forbidden" for error in caught.value.errors())
-    assert path.read_bytes() == before
+    monkeypatch.setattr(WorkspaceManager, "_atomic_save_state_text", Mock(side_effect=forbidden))
+    fresh = WorkspaceManager()
+    assert fresh.scheduled_tasks == {}
+    assert not path.exists()
+    quarantined = sorted(path.parent.glob(path.name + ".corrupt-*"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_bytes() == before
+    marker = json.loads(path.with_name(path.name + ".quarantined").read_text())
+    assert marker["events"][0]["reason"].startswith("structural validation failed")
 
 
 def test_non_extra_invalid_schedule_still_skips(manager, workspace):

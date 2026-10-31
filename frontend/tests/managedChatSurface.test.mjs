@@ -58,4 +58,9 @@ test('surface support permits local managed Chat and rejects unsupported combina
   assert.equal(providerSupportsManagedSurface('maso', 'terminal', 'local'), false)
   assert.equal(providerSupportsManagedSurface('codex', 'terminal', 'remote'), true)
   assert.equal(providerSupportsManagedSurface('terminal', 'terminal', 'local'), true)
+  for (const surface of ['chat', 'terminal']) {
+    for (const target of ['local', 'remote']) {
+      assert.equal(providerSupportsManagedSurface('antigravity', surface, target), false)
+    }
+  }
 })

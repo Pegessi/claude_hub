@@ -40,6 +40,12 @@ from claude_hub.services.runtime_isolation import tmux_command  # noqa: E402
 # Every Task status change must follow the transition table in tests.
 os.environ.setdefault("CLAUDE_HUB_STRICT_TASK_TRANSITIONS", "1")
 
+# Keep CLI base-URL resolution hermetic: otherwise every in-process CLI
+# invocation without an explicit --base-url would health-probe real
+# 127.0.0.1/[::1] loopback addresses (up to a second each when black-holed).
+# Tests for the probe behavior clear/override this themselves.
+os.environ.setdefault("CLAUDE_HUB_HOST", "127.0.0.1")
+
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 

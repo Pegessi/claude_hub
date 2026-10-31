@@ -67,6 +67,7 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     _report_intake_committed: set[str]
     _report_intake_locks: dict[str, asyncio.Lock]
     _sched_fire_locks: dict[str, asyncio.Lock]
+    _state_recovery_warnings: list[str]
     _chat_delivery_getter: Callable[[], ChatMessageInbox] | None
     _chat_delivery_instance: ChatMessageInbox | None
     _scheduled_chat_dispatch: ScheduledChatDispatch | None
@@ -239,6 +240,26 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     ) -> None: ...
 
     @abstractmethod
+    def _monitor_refresh_sessions(self, workspace_id: Optional[str]) -> list[ManagedSession]: ...
+
+    @abstractmethod
+    async def _collect_session_agent_statuses(
+        self, sessions: list[ManagedSession]
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    async def _refresh_one_session_status(
+        self,
+        session: ManagedSession,
+        statuses: dict[str, Any],
+        *,
+        run_auto_continue: bool,
+    ) -> bool: ...
+
+    @abstractmethod
+    def _mark_runtime_task_failures(self, workspace_id: Optional[str], now: datetime) -> bool: ...
+
+    @abstractmethod
     def _expected_pending_prompt_prefixes(
         self, session: ManagedSession, task: WorkspaceTask
     ) -> list[str]: ...
@@ -331,8 +352,27 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     @abstractmethod
     def _normalize_session_item(self, item: dict[str, Any]) -> dict[str, Any]: ...
 
+    @staticmethod
+    @abstractmethod
+    def _backup_path_for(path: Path) -> Path: ...
+
     @abstractmethod
     def _atomic_write_text(self, path: Path, text: str) -> None: ...
+
+    @abstractmethod
+    def _atomic_save_state_text(self, path: Path, text: str) -> None: ...
+
+    @abstractmethod
+    def _load_durable_json(
+        self,
+        path: Path,
+        *,
+        label: str,
+        validator: "Callable[[Any], Any] | None" = None,
+    ) -> Any: ...
+
+    @abstractmethod
+    def state_recovery_warnings(self) -> list[str]: ...
 
     @abstractmethod
     def _workspace_state_payload(self, workspace_id: str) -> dict[str, Any]: ...
@@ -512,6 +552,26 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
 
     @abstractmethod
     async def _tick_scheduled_tasks(self) -> None: ...
+
+    @abstractmethod
+    async def _recover_scheduled_chat_runs(self) -> None: ...
+
+    @abstractmethod
+    def _disable_deleted_chat_targets(self, now: datetime) -> None: ...
+
+    @abstractmethod
+    async def _reap_stale_scheduled_chat_runs(self, now: datetime) -> None: ...
+
+    @abstractmethod
+    async def _fire_scheduled_task(
+        self, task: ScheduledTask, now: datetime, *, manual: bool = False
+    ) -> Optional[ScheduledTaskRun]: ...
+
+    @abstractmethod
+    async def _converge_orphaned_hub_tasks(self, now: datetime) -> None: ...
+
+    @abstractmethod
+    async def _drain_scheduled_chat_runs(self, tab_id: Optional[str] = None) -> None: ...
 
     @staticmethod
     @abstractmethod

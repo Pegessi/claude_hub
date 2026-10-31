@@ -249,6 +249,48 @@ async def main(browser_run: BrowserRun) -> None:
                 elif path == "/api/dot/identity" and request.method == "GET":
                     # The Dot launcher in the tab bar reads Dot's name and avatar.
                     body = {"name": "Dot", "avatar": "", "avatar_image": None}
+                elif path == "/api/quota" and request.method == "GET":
+                    body = {
+                        "providers": [
+                            {
+                                "provider": "codex",
+                                "available": True,
+                                "state": "within",
+                                "message": "",
+                                "as_of": NOW,
+                                "stale": False,
+                                "limits": [
+                                    {
+                                        "scope": "five_hour",
+                                        "label": "5-hour limit",
+                                        "state": "within",
+                                        "used_percent": 15,
+                                        "remaining_percent": 85,
+                                        "resets_at": "2026-10-15T12:00:00Z",
+                                    }
+                                ],
+                                "plan": "pro",
+                            },
+                            {
+                                "provider": "antigravity",
+                                "available": True,
+                                "state": "within",
+                                "message": "",
+                                "as_of": NOW,
+                                "stale": False,
+                                "limits": [
+                                    {
+                                        "scope": "gemini-weekly",
+                                        "label": "Gemini Models · Weekly limit",
+                                        "state": "within",
+                                        "used_percent": 4,
+                                        "remaining_percent": 96,
+                                        "resets_at": "2026-10-22T08:00:00Z",
+                                    }
+                                ],
+                            },
+                        ]
+                    }
                 else:
                     report["unknown_requests"].append([request.method, path])
                     await route.fulfill(status=501, body="unknown fixture route")
@@ -266,6 +308,28 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(page.get_by_text("Working before restart", exact=True)).to_be_visible()
             composer = page.locator(".composer-textarea:visible").first
             await composer.fill("Keep this unsent draft")
+
+            extensions_trigger = page.get_by_label("Extensions", exact=True)
+            await extensions_trigger.click()
+            await page.get_by_role("button", name="Provider quota", exact=True).click()
+            quota_dialog = page.get_by_role("dialog", name="Provider quota", exact=True)
+            await expect(quota_dialog).to_be_visible()
+            await expect(quota_dialog).to_contain_text("Antigravity")
+            await expect(quota_dialog).to_contain_text("Gemini Models · Weekly limit")
+            close_quota_btn = quota_dialog.get_by_role(
+                "button", name="Close provider quota", exact=True
+            )
+            refresh_quota_btn = quota_dialog.get_by_role(
+                "button", name="Refresh provider quota", exact=True
+            )
+            await expect(close_quota_btn).to_be_focused()
+            await page.keyboard.press("Tab")
+            await expect(refresh_quota_btn).to_be_focused()
+            await page.keyboard.press("Shift+Tab")
+            await expect(close_quota_btn).to_be_focused()
+            await page.keyboard.press("Escape")
+            await expect(quota_dialog).not_to_be_visible()
+            await expect(extensions_trigger).to_be_focused()
 
             async def open_dialog():
                 await page.get_by_label("Extensions", exact=True).click()

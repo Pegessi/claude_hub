@@ -62,7 +62,9 @@ class ProcessRemoteMixin(ProcessHost):
         ]
         if port != 22:
             cmd.extend(["-p", str(port)])
-        cmd.extend([host, remote_command])
+        # `--` ends option parsing so the validated destination is never read
+        # as an ssh option even if it begins with '-'.
+        cmd.extend(["--", host, remote_command])
         return cmd
 
     def _build_remote_attach_script(self, *, bootstrap_file: Optional[str] = None) -> str:
@@ -215,7 +217,9 @@ class ProcessRemoteMixin(ProcessHost):
             )
         if port != 22:
             ssh_parts.extend(["-p", str(port)])
-        ssh_parts.extend([host, self._build_remote_attach_command()])
+        # `--` keeps ssh options (above) separate from the destination so a
+        # destination beginning with '-' cannot be parsed as an option.
+        ssh_parts.extend(["--", host, self._build_remote_attach_command()])
         ssh_command = " ".join(shlex.quote(part) for part in ssh_parts)
 
         if self.remote_reconnect:

@@ -1,0 +1,143 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "35a5ff1dafd9fa9a37719f4f8e52561467ada0c8",
+  "parents": [
+    "f565f9557cdce0d9da1b4892d5fc04abd1fe5937",
+    "6141f253957028d7f024e7540711e11bf2a986bb"
+  ],
+  "base": "0211661a1e627349822b3857ecf74f33b81818ef",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "40329d07a395bcc25e5b115f30e67ad2b3bbbcae",
+  "reconstructed_tree": "2a642eebfaa0d64ec8bb7ae0df9582e459d5fad2",
+  "conflicts": [
+    "CHANGELOG.md",
+    "backend/claude_hub/auth/proxy.py",
+    "backend/claude_hub/config.py",
+    "backend/claude_hub/main.py"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a4bfbecaf1c6b1bd9e75e0139c91f70b7e3efbb4"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "da6458095083c06e8fb77ee8c8a09b25cedccb3f"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2a2efb1a9b0f78bd5d2ffa6cf98eb5d8bdc3f57c"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "de441592302c38d0b5d1c32426ca19c295b546d7"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "03d1ebd3a4742b5451b335e48801da2097585019"
+      },
+      "reason": "Candidate (main Feishu; merges 1-5 CLI/SSH/process-group/ProviderSpec/auth notes) and codex/rv-proxy-trust's trusted-proxy/listen/Origin note both insert at the top of Released. Manual union keeps all candidate entries then appends the proxy-trust entry before the shared tail, with blank-line separation between heading blocks.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/auth/proxy.py",
+      "base": null,
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "83f8d5cef87efc65899588b1aba7b3f41047d957"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "942598a8acfdc8e20be41553a72112137eaf309c"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "48cf526a6727b8da343d5425b5b8e41334e712e5"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "942598a8acfdc8e20be41553a72112137eaf309c"
+      },
+      "reason": "Add/add: merge 5 (auth-hardening) and proxy-trust each added this new module. Retain parent2 (proxy-trust) wholesale. By design that branch owns the full module: its six shared primitives (_normalize_ip, _ip_matches_networks, _resolve_networks, direct_peer_is_trusted, client_ip_from_request, scheme_from_request) are byte-identical to the auth copy, and it additionally provides browser_origin_is_allowed, unsafe_http_request_is_allowed and reject_bad_websocket_origin. Git's add/add reconstruction (48cf526) is discarded in favor of the reviewed proxy-trust blob.",
+      "disposition": "retain-parent",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/config.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2c657909e94ce0e377fd55a72cef57300b0b64bb"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "83f0e8eca5c32537ea01907a8e9d8d90ae889cff"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "25fb6d62e881bed160f8800f65d633d42b8bd3d5"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "261cb5ef5bc51e690436c10ba27ba66a9a443790"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8446c8cdfb62c2308b9534c00bf71fd1e7d9d277"
+      },
+      "reason": "Union of both parents. Retain auth-hardening's public_url field (used by the Secure-cookie decision in api/auth.py) and the shared trusted_proxies/trusted_proxy_networks; add proxy-trust's allowed_origins, allow_insecure_listen, bind_host fields and allowed_origins_list property. Drop only the auth-side comment that said the Origin setting was 'intentionally not duplicated here', which is obsolete once proxy-trust is integrated.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/main.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "565db8a4d12fbba7bebf91b3a5ad4b787accee12"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b1f2b307d243107b59693d4c6ecbd929a35dcd18"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "44637199acf4cb8c739be01806380bcde0de67d8"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "7d0a1223984b6df0de0aa57d72fe27b68708ab1d"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2a9cd30d721714eac2a7e3bb9852f0d4bd8860ba"
+      },
+      "reason": "Union of both parents. Keep the auth-hardening import and the import-time install_redacting_access_formatter() call that masks uvicorn access/WS logs, and add proxy-trust's unsafe_http_request_is_allowed import, the JSONResponse import, the lifespan listen-guard call, and the BrowserOriginGuardMiddleware class registered last so it is the outermost layer. The remaining auto-merged regions already place all of these without duplication.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

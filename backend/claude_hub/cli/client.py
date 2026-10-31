@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import sys
 from pathlib import Path
 from types import TracebackType
@@ -69,6 +70,34 @@ def _parse_cookie_string(cookie: str) -> Dict[str, str]:
             continue
         jar[key] = value.strip()
     return jar
+
+
+def _ipv6_loopback_hint(url: httpx.URL) -> Optional[str]:
+    """Return ``http://[::1]:<port>`` when ``url`` targets IPv4 loopback.
+
+    A failure against an IPv4 loopback address on an IPv6-only host can be
+    fixed by switching to the IPv6 loopback at the SAME port. For other hosts
+    (including non-loopback names that resolve to IPv6 elsewhere) there is no
+    equivalent address to derive, so ``None`` is returned.
+    """
+    try:
+        host = ipaddress.ip_address(url.host)
+    except ValueError:
+        return None
+    if isinstance(host, ipaddress.IPv4Address) and host.is_loopback:
+        return f"http://[::1]:{url.port}"
+    return None
+
+
+def _sanitize_attempted_url(url: httpx.URL) -> httpx.URL:
+    """Strip query and userinfo from ``url`` before showing it in an error.
+
+    Transport failures render the attempted endpoint for diagnosis, but the
+    query string can carry OAuth ``code``/``state`` values (e.g. the auth
+    callback) and URL userinfo can carry a password. Scheme, host, port and
+    path are retained because they identify the failing endpoint.
+    """
+    return url.copy_with(query=None, username="", password="")
 
 
 class HubClient:
@@ -181,7 +210,24 @@ class HubClient:
         try:
             resp = self._client.send(request)
         except httpx.HTTPError as e:
-            raise HubError(str(e)) from e
+            # Never render the raw URL here: the auth callback query carries
+            # OAuth code/state and base URLs may embed userinfo passwords.
+            sanitized_url = _sanitize_attempted_url(request.url)
+            loopback_hint = _ipv6_loopback_hint(sanitized_url)
+            if loopback_hint is not None:
+                ipv6_suggestion = (
+                    "on IPv6-only hosts try the IPv6 loopback at the same "
+                    f"port ({loopback_hint})"
+                )
+            else:
+                ipv6_suggestion = (
+                    "on IPv6-only hosts try the IPv6 loopback address at the same port"
+                )
+            raise HubError(
+                f"Could not connect to Claude Hub at {sanitized_url}: {e}. "
+                "Check that the Hub is running and the address is reachable; "
+                f"{ipv6_suggestion}, or set CLAUDE_HUB_URL."
+            ) from e
 
         if resp.status_code >= 400:
             detail: str

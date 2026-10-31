@@ -19,7 +19,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .config import settings
 from .services.backend_instance_lock import BackendInstanceLock
+from .services.listen_guard import InsecureListenError, enforce_listen_policy
 from .services.runtime_isolation import resolve_runtime_home
 from .services.service_restart import ACTIVE_STATUSES, RestartStore
 
@@ -366,6 +368,22 @@ def main() -> int:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8173)
     args = parser.parse_args()
+
+    # Refuse to expose an unauthenticated Hub before any child or build runs.
+    try:
+        enforce_listen_policy(
+            args.host,
+            auth_enabled=settings.auth_enabled,
+            allow_insecure=settings.allow_insecure_listen,
+        )
+    except InsecureListenError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+
+    # Let the in-process lifespan guard see the real uvicorn bind host; the
+    # --host CLI argument is not otherwise visible to the application.
+    os.environ["CLAUDE_HUB_BIND_HOST"] = args.host
+
     backend_directory = Path(__file__).resolve().parents[1]
     uv = shutil.which("uv")
     if uv is None:

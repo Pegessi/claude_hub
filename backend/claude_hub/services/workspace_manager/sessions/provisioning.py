@@ -1,6 +1,7 @@
 """Managed-agent reuse, validation, and provider provisioning."""
 
 import claude_hub.services.managed_chat as managed_chat
+from claude_hub.services.agent_stream.providers.spec import Surface, get_spec
 from claude_hub.services.remote_profiles import reject_unsupported_interactive
 from claude_hub.services.workspace_manager._base import _WorkspaceManagerBase
 from claude_hub.services.workspace_manager._constants import *  # noqa: F401,F403
@@ -37,11 +38,17 @@ class _SessionProvisioningMixin(_WorkspaceManagerBase):
         if payload.ephemeral and payload.reuse_existing:
             raise ValueError("Cannot combine ephemeral with reuse_existing")
 
-        if payload.agent_type == AgentType.TRAEX:
-            # TraeX is supported as a top-level terminal/Chat tab but not as a
-            # managed workspace worker this wave (goal-packet / autonomous
-            # prompt / native sub-agent contracts are not wired for it). Fail
-            # fast instead of creating a half-supported, terminal-degraded agent.
+        # A direct-Chat provider absent from both managed surfaces is the
+        # TraeX boundary (goal-packet / autonomous prompt / native sub-agent
+        # contracts are not wired for it). Plain terminal workspace agents
+        # remain allowed, and MASO is admitted for managed Chat. Fail fast
+        # instead of creating a half-supported, terminal-degraded agent.
+        provider_spec = get_spec(payload.agent_type)
+        if (
+            provider_spec.runs_on(Surface.DIRECT_CHAT)
+            and not provider_spec.runs_on(Surface.MANAGED_CHAT)
+            and not provider_spec.runs_on(Surface.MANAGED_TERMINAL)
+        ):
             raise ValueError(
                 "agent_type 'traex' is not supported for workspace agents; "
                 "use claude, codex, or cursor (or open traex as a standalone tab)"

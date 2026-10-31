@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "0eda8d780077f8a6d1c5156c21ea455a34e3e387",
+  "parents": [
+    "cf8f76e7f6dab5e8b8cb60c2501e7663e5673542",
+    "99ad899d4a1b99aacbf332d1c12b97b933ac2a1e"
+  ],
+  "base": "0211661a1e627349822b3857ecf74f33b81818ef",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "08124b08ace3ffc65901cf801bbf3884eae334b0",
+  "reconstructed_tree": "d5d5706076dbd13f136589a31704d3e2980e16fe",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a4bfbecaf1c6b1bd9e75e0139c91f70b7e3efbb4"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "512f986251c3bd90286c7df1cdf8aca36324d047"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "e3c5daa79668057a90d326db4c462d1e86d62631"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "598934dc7039fb33a2abb0bb472d1d5aba559ea0"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "038d78a2c1a076e1ccbc107b1af197c922f150ba"
+      },
+      "reason": "Candidate (main Feishu; merge-1 CLI, merge-2 SSH, merge-3 process-group notes) and codex/rv-provider-spec's ProviderSpec release note both insert at the top of Released. Manual union keeps the candidate entries then appends the ProviderSpec entry before the shared tail. The overlapping provider files (codex.py, session.py) auto-merged and were independently cross-verified: ProviderSpec factories still spawn through the merge-3 group-aware _spawn_subprocess with _process_group retained.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

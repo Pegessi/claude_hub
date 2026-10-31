@@ -74,6 +74,7 @@ MARKDOWN_SOURCE = (
     "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
     "| Sample | alpha | beta | gamma | delta | epsilon | zeta | eta |\n\n"
     '```python\nprint("preview")\n```\n\n'
+    "```mermaid\nflowchart LR\nPreview-->Diagram\n```\n\n"
     "[Details](details.md#evidence)\n\n[Missing document](missing.md)\n\n"
     "[Python source](../code.py)\n\n[JSON data](../data.json)\n\n[Long document](long.md)\n\n"
     "[Scoped preview](/?markdown=%2Ffixture%2Fproject%2Freports%2Fdetails.md&scope=other-tab#evidence)\n\n"
@@ -1215,7 +1216,8 @@ async def check_markdown_preview(page, context, output: Path, report: dict) -> N
         await expect(reader.locator(".markdown-reader-path")).to_have_text(MARKDOWN_PATH)
         await expect(article.locator("strong")).to_have_text("decoded output")
         await expect(article.locator("table")).to_have_count(1)
-        await expect(article.locator("pre code")).to_have_text('print("preview")')
+        await expect(article.locator("pre code.language-python")).to_have_text('print("preview")')
+        await expect(article.locator(".markdown-mermaid-diagram svg")).to_be_visible()
         await expect(reader.locator(".structured-pane")).to_have_count(0)
         assert reader.url != page.url
         assert await page.get_by_role("link", name="排查记录", exact=True).count() == 1
@@ -1483,6 +1485,143 @@ async def html_ids_browser_main(browser_run: BrowserRun) -> None:
         raise failure
 
 
+MERMAID_FLOWCHART = """flowchart TD
+A["Image -> Patch Embedding 4096 x 1280"] --> B["L0~L22 full grid"]
+B --> S["Selector keep spatial groups, demo quota 64"]
+S --> C["gather -> L23 video layer selected tokens"]
+C --> D["scatter write back full grid"]
+D --> E["L24 spatial layer"]
+E --> F["gather -> L25 same selection"]
+F --> G["scatter"]
+G --> H["L26 spatial layer"]
+H --> I["4x4 merge -> selected groups -> LayerNorm -> Projector"]
+I --> J["frame visual embeddings"]
+"""
+
+
+async def check_mermaid(page, output: Path, report: dict) -> None:
+    # Exercise the actual Chat stream path rather than a standalone renderer.
+    assert not report["mermaid_requests"], report["mermaid_requests"]
+    turn = "mermaid-diagram-turn"
+    source = "Mermaid verification\n\n```mermaid\n" + MERMAID_FLOWCHART + "```\n\n"
+    bad = [
+        "flowchart TD\nA[broken",
+        '%%{init: {"securityLevel": "loose"}}%%\nflowchart TD\nA-->B',
+        'flowchart TD\nA@{ img: "https://mermaid-probe.invalid/a.png" }',
+        'flowchart TD\nA@{ "img": "/api/mermaid-probe" }',
+        'flowchart TD\nA["<img src=https://mermaid-probe.invalid/html.png>"]',
+        "flowchart TD\nA-->B\nclassDef default fill:url(https://mermaid-probe.invalid/css)",
+    ]
+    source += "\n\n".join("```mermaid\n" + item + "\n```" for item in bad)
+    source += (
+        '\n\n```mermaid\nflowchart LR\nX-->Y\nclick X "https://mermaid-probe.invalid/click"\n```'
+    )
+    source += "\n\n```mermaid\nsequenceDiagram\nAlice->>Bob: Hello\n```"
+    source += '\n\n```mermaid\npie title Sample\n"One" : 60\n"Two" : 40\n```'
+    source += "\n\n```mermaid\nflowchart TD\nStream"
+    EVENTS.extend(
+        [
+            event(len(EVENTS), "turn_started", {"summary": "Mermaid"}, turn, turn),
+            event(
+                len(EVENTS) + 1,
+                "text_delta",
+                {"text": source},
+                turn + ":assistant",
+                turn,
+            ),
+        ]
+    )
+    rich = page.locator(".markdown-content:visible").filter(has_text="Mermaid verification")
+    await expect(rich.locator(".mermaid-rendered")).to_have_count(5, timeout=30000)
+    await expect(rich.locator(".markdown-mermaid-error")).to_have_count(len(bad))
+    first = rich.locator(".markdown-code-block").first
+    await expect(first.locator("svg")).to_be_visible()
+    await expect(first.locator("pre")).to_be_hidden()
+    await expect(first.locator(".markdown-code-header")).to_contain_text("mermaid")
+    await expect(first.locator("svg .node")).to_have_count(11)
+    label_bounds = await first.locator("svg .node").evaluate_all("""nodes => nodes.map(node => {
+        const text = node.querySelector('text').getBoundingClientRect();
+        const shape = node.querySelector('rect.basic').getBoundingClientRect();
+        return {left: text.left - shape.left, right: shape.right - text.right};
+    })""")
+    assert all(row["left"] >= -2 and row["right"] >= -2 for row in label_bounds), label_bounds
+    await expect(first.locator("svg")).to_contain_text("frame visual embeddings")
+    copy = first.get_by_role("button", name="Copy code", exact=True)
+    await copy.scroll_into_view_if_needed()
+    await copy.click()
+    assert await page.evaluate("window.__copiedCode.at(-1)") == MERMAID_FLOWCHART
+    await expect(
+        rich.locator(".markdown-mermaid-error").first.locator("..").locator("pre")
+    ).to_be_visible()
+    # Complete the same streamed fence and ensure the replaced tail is enhanced.
+    tail = " --> Finished\n```"
+    EVENTS.extend(
+        [
+            event(len(EVENTS), "text_delta", {"text": tail}, turn + ":assistant", turn),
+            event(
+                len(EVENTS) + 1,
+                "turn_completed",
+                {"status": "completed", "assistant_text": source + tail},
+                turn,
+                turn,
+            ),
+        ]
+    )
+    await expect(rich.locator("svg").last).to_contain_text("Finished")
+    await expect(rich.locator(".mermaid-rendered")).to_have_count(5)
+    assert (
+        await rich.locator("svg a, svg image, svg foreignObject, svg script, svg [onclick]").count()
+        == 0
+    )
+    await expect(rich.locator('svg[aria-roledescription="sequence"]')).to_be_visible()
+    pie = rich.locator('svg[aria-roledescription="pie"]')
+    await expect(pie).to_be_visible()
+    assert await pie.locator("path.pieCircle").count() == 2
+    ids = await rich.locator("svg [id], svg[id]").evaluate_all("els => els.map(el => el.id)")
+    assert len(ids) == len(set(ids)), ids
+    # Theme switches and narrow layouts keep SVG text legible and scrolling local.
+    for scheme, width in [
+        ("dark", 1280),
+        ("light", 1280),
+        ("light", 390),
+        ("dark", 280),
+    ]:
+        await page.evaluate("scheme => document.documentElement.dataset.theme = scheme", scheme)
+        await page.set_viewport_size({"width": width, "height": 1600})
+        await first.scroll_into_view_if_needed()
+        diagram = first.locator(".markdown-mermaid-diagram")
+        await expect(diagram).to_be_visible()
+        await expect(diagram).to_have_attribute("data-theme", scheme)
+        geometry = await diagram.evaluate(
+            "el => ({client: el.clientWidth, scroll: el.scrollWidth, text: getComputedStyle(el.querySelector('text')).fill, background: getComputedStyle(el).backgroundColor})"
+        )
+        assert geometry["text"] != geometry["background"], geometry
+        assert geometry["client"] <= width, geometry
+        if geometry["scroll"] > geometry["client"]:
+            await diagram.focus()
+            await page.keyboard.press("ArrowRight")
+            await page.wait_for_function(
+                "el => el.scrollLeft > 0", arg=await diagram.element_handle()
+            )
+        name = f"mermaid-{scheme}-{width}.png"
+        await first.screenshot(path=str(output / name))
+        report["screenshots"].append(name)
+    assert not any("mermaid-probe" in url for url in report["blocked_external_requests"])
+    assert not any("mermaid-probe" in row[1] for row in report["api_requests"])
+    report["mermaid"] = {
+        "flowchart_nodes": 11,
+        "copy_exact": True,
+        "invalid_and_resource_fallbacks": len(bad),
+        "streaming": True,
+        "unique_ids": True,
+        "themes_and_widths": [1280, 390, 280],
+        "no_resource_requests": True,
+        "lazy_load": bool(report["mermaid_requests"]),
+    }
+    await page.set_viewport_size({"width": 1280, "height": 900})
+    await page.evaluate("document.documentElement.dataset.theme = 'dark'")
+
+
 async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None:
     if len(sys.argv) != 4:
         raise SystemExit(__doc__)
@@ -1568,6 +1707,7 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
         "sends": [],
         "screenshots": [],
         "renderer_requests": [],
+        "mermaid_requests": [],
         "html_probe_requests": [],
         "html_explicit_external_requests": [],
         "service_worker_registration_requests": [],
@@ -1617,6 +1757,8 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
                     return
                 path = parsed.path
                 if not path.startswith("/api/"):
+                    if "mermaid" in path.lower():
+                        report["mermaid_requests"].append(path)
                     if "/katex" in path or "highlight__js" in path or "highlight.js" in path:
                         report["renderer_requests"].append(path)
                     await route.continue_()
@@ -2191,6 +2333,7 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
                 "lazy_renderers": True,
             }
             await page.set_viewport_size({"width": 1280, "height": 900})
+            await check_mermaid(page, output, report)
             await check_attachment_preview(page, context, output, report)
             await check_markdown_preview(page, context, output, report)
             await check_preview_routing(page, context, output, report)

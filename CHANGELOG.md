@@ -22,6 +22,101 @@
   the normal `assistant_text`/`final_text` fill. Nonzero exit, empty answer,
   pending external waits, fatal transports and Goal-protocol turns keep the
   prior failure behavior; a turn never gets two terminal events.
+- A completed tool must be followed by a non-empty answer before clean EOF
+  can count as success; pre-tool commentary or a whitespace-only final message
+  remains a failed incomplete turn.
+
+### feat: add Antigravity image attachments, provider quota, and modal quota dialog
+
+- Enable `ImageTransport.PROMPT_FILE_REF` for `antigravity` Chat turns: stage
+  validated image attachments to temporary files, inject `read_file` path
+  guidance into the prompt payload, and clean up staged files on turn
+  completion, cancellation, or session stop.
+- Add Antigravity support to Provider Quota (`QuotaSource.CLI_USAGE_COMMAND`)
+  via `agyx -p /usage --output-format json`, mapping Gemini and Claude/GPT
+  weekly and 5-hour buckets into `QuotaLimit` records with deployment presence
+  checks (`~/.gemini/antigravity-cli/antigravity-oauth-token` /
+  `$ANTIGRAVITY_HOME`).
+- Replace the inline `<details>` Provider Quota expansion in the extensions
+  menu with a trigger button that closes the dropdown and opens a centered
+  modal dialog displaying Codex, Maso, and Antigravity usage cards.
+
+### docs(agents): add third-party Agent CLI installation guide
+
+- Document separate installation, authentication and executable checks for
+  Claude Code, Codex, Cursor Agent and Antigravity, with official source links.
+- Link the guide from README requirements and deployment setup. Clarify the
+  service-user/PATH requirement, Cursor's `agent` executable, per-provider proxy
+  and certificate configuration, and Antigravity's deployment-owned `agyx`
+  wrapper and supported Hub surfaces. Make proxy setup conditional on per-machine,
+  per-provider checks during installation or migration; verified direct access
+  needs no extra proxy, and another deployment's settings are not defaults.
+- Documentation only; no provider installation, login, service restart or
+  runtime behavior changes.
+
+### fix: preserve Chat stream failure details and Antigravity recovery guidance
+
+- Show the backend's string error detail alongside the stream-wait HTTP status,
+  rendered as plain text. Invalid JSON and non-string details retain the status
+  fallback; the existing retry policy is unchanged.
+- Point Antigravity diagnostics at the deployed `agyx` network/sign-in wrapper,
+  clarify that Retry does not resend a message, and keep long diagnostics and
+  Retry reachable in narrow Chat panes.
+- Cover response parsing and the rendered failure/Retry flow. The separate local
+  proxy investigation is recorded in
+  [the recovery log](docs/working-logs/2026-10-31-antigravity-auth-recovery.md);
+  deployment-specific proxy files are not part of the Hub package.
+
+### feat: Antigravity (agy) Chat and Terminal provider
+
+- Register a new `antigravity` agent type backed by the locally installed
+  Antigravity CLI via the `agyx` wrapper (Google account sign-in; the wrapper
+  owns the local eligibility-bypass proxy, egress and TLS trust). Direct Chat
+  turns keep one `agyx --input-format stream-json --output-format stream-json`
+  process and write one NDJSON line per turn, avoiding repeated sign-in and
+  model/workspace initialization. Capture the conversation id from `init` and
+  resume with `--conversation` only after Stop or a model/mode/env change;
+  terminal tabs launch the interactive TUI through tmux/ttyd.
+- Add a stdout-only `AntigravityEventAdapter` mapping agy's `init` /
+  `step_update` / `result` NDJSON records (streaming assistant fragments,
+  tool timeline, usage, error/cancel) to the neutral agent-stream events, and
+  a curated static model catalog. Solo maps to `--dangerously-skip-permissions`;
+  plan mode maps to `--mode plan`; model selection uses `ANTIGRAVITY_MODEL`.
+  Count per-turn step usage rather than the CLI's cumulative result counters,
+  including cached input in the neutral input total without billing it twice.
+- The provider is local-host and direct-use only: surfaces are direct Chat,
+  `agent run` subagent and the terminal tab (no managed/resident/scheduled/Dot,
+  no remote, no API-key/ADC billing). Frontend gains the Antigravity option,
+  avatar, model channel and switch-policy entries.
+- Verified with unit tests (command construction, event normalization, golden
+  ProviderSpec matrix) and a live two-turn Chat over the real Google backend,
+  including `--conversation` memory continuation.
+
+### fix: reject malformed browser Origin and Host ports without server errors
+
+- Catch deferred URL port-validation errors in both Origin and Host parsing.
+  Invalid browser request authorities now follow the existing rejection path
+  instead of raising HTTP/WebSocket handshake errors. Malformed optional
+  allowlist entries cannot prevent later valid entries from matching.
+- Cover non-numeric, out-of-range and negative ports through real uvicorn HTTP
+  requests and WebSocket upgrades on IPv4 and IPv6, preserving normal relay,
+  same-origin and exact HTTPS allowlist behavior.
+
+### chore: integrate eight reviewed hardening branches
+
+- Sequentially merge the reviewed CLI base-URL/redaction, SSH destination
+  validation, provider process-group teardown, ProviderSpec registry, OAuth/auth
+  log-cookie hardening, trusted-proxy/Origin/listen guard, durable-state
+  quarantine and per-scope monitor isolation streams onto one candidate while
+  preserving the newer native Feishu question functionality.
+- Keep the auth/proxy superset (trusted-peer XFF/XFP and browser Origin policy
+  together with session/query log redaction and the Secure-cookie decision),
+  ensure ProviderSpec factories still spawn through the group-aware teardown,
+  and keep state-quarantine and monitor-isolation abstractions coexisting on one
+  workspace manager. Add composition regressions pinning those joins, including
+  real-uvicorn IPv4/IPv6 HTTP and WebSocket Origin compatibility checks; see
+  `docs/working-logs/2026-10-28-eight-branch-integration.md`. No deployment or
+  shared-service behavior changes are performed here.
 
 ### feat: answer Chat questions from native Feishu cards (default off)
 
@@ -38,6 +133,220 @@
   claims and inbox reuse, with app setup and sandbox verification requirements.
 - Design only; no live Feishu or Hub behavior changes. See
   `docs/working-logs/2026-10-28-feishu-interactive-choice-cards.md`.
+
+### fix(cli): redact query secrets and userinfo from connection errors
+
+- CLI transport errors rendered the full attempted request URL, so a failed
+  `auth callback` call echoed the OAuth authorization `code` and CSRF
+  `state` query values to the terminal, and a base URL containing userinfo
+  leaked its embedded password. Connect errors now render a sanitized URL
+  that keeps scheme, host, port and path (the diagnosis-relevant parts) while
+  stripping the query string and URL username/password. The same-port IPv6
+  loopback hint is unchanged. Regression tests cover callback query secrets,
+  userinfo credentials and the existing connect-hint behavior.
+
+### feat(cli): auto-detect loopback base URL over IPv4/IPv6 and derive from HOST/PORT
+
+- Base URL resolution is now `--base-url` > `CLAUDE_HUB_URL` > config file
+  `[default].base_url` > a URL derived from `CLAUDE_HUB_HOST`/`CLAUDE_HUB_PORT`
+  (bare IPv6 literals are bracketed; `0.0.0.0`/`::` map to loopback) > an
+  automatic `/health` probe of `127.0.0.1` then `[::1]` at the resolved port
+  (0.5s timeout, never cached) > the IPv4 default. Explicit settings remain
+  authoritative and skip the probe. This fixes the CLI on IPv6-only hosts where
+  the Hub listens on `[::1]` only.
+- The probe requires Hub identity: a 2xx response counts only when its JSON
+  body reports `status == "healthy"`; a 2xx non-JSON body is treated as
+  unhealthy so another service on the port is never mistaken for the Hub.
+  Whitespace-only explicit URLs (flag, env, config) are treated as unset and
+  fall through the precedence chain; surrounding whitespace on a valid URL is
+  stripped.
+- Connect errors name the URL actually tried and, when it was an IPv4 loopback
+  address, suggest the IPv6 loopback at the same port (no hardcoded 8173);
+  otherwise they point users at CLAUDE_HUB_URL. `fs` is a hidden alias of the
+  `filesystem` command group.
+
+### fix(security): validate SSH destinations and separate ssh argv
+
+- `RemoteProfile` now validates `ssh_host` (hostname/SSH alias, IPv4 or
+  bracketless IPv6; rejects option-looking and metacharacter-bearing values),
+  bounds `port` to 1-65535 and restricts `user` to a conservative charset. A
+  stored profile or `~/.ssh/config` alias that fails validation is skipped with
+  a warning instead of taking down profile discovery, and a malformed
+  `remote_profiles.json` whose top level is not a JSON list is logged and
+  ignored instead of erroring every profile listing.
+- Every ssh invocation (`api/remote.py`, `services/pty_exec.py`,
+  `services/terminal_runtime/process/remote.py`, the PTY-gateway bridge) passes
+  `--` before the destination so an option-looking host can never be parsed as
+  an ssh option, even though argv is already separated. The bridge CLI exits
+  cleanly on an invalid `--target`.
+
+### fix(agent_stream): reap the whole provider process group on teardown and cancellation
+
+- Provider teardown no longer declares success when only the direct child
+  dies. SIGTERM/SIGKILL escalation used to key off `await proc.wait()`, which
+  resolves as soon as the provider CLI exits — typically within milliseconds —
+  while TERM-trapping descendants (shutting-down MCP servers, trapped bash,
+  nohup-style children) survived reparented to init and were never SIGKILLed.
+  Teardown now polls the process group with `killpg(pgid, 0)` under one shared
+  five-second grace budget covering both leader exit and group drain; if the
+  group is still present at the deadline the WHOLE group is SIGKILLed and the
+  direct child is reaped.
+- Cancelling teardown during grace no longer strands the tree: the group is
+  SIGKILLed immediately (direct-child `kill()` when group signalling is
+  unavailable), followed by a bounded `asyncio.shield`-protected final reap
+  that survives further cancellation, before `CancelledError` propagates.
+- `PermissionError` from `killpg` falls back to direct-child terminate/kill;
+  `ProcessLookupError` means the group has already drained. Double `stop()` is
+  a no-op, and `_spawn_subprocess` clears the recorded pgid before awaiting
+  launch on every platform. Descendants that call `setsid`/`setpgid`
+  themselves escape the group and remain unreachable; a hard backend
+  SIGKILL likewise skips lifespan teardown.
+- Teardown no longer busy-spins a core when the provider CLI exits promptly
+  while a TERM-surviving descendant that dropped the inherited stdio pipes
+  lingers in the group: the completed `proc.wait()` future used to be
+  re-awaited back-to-back (~500k–1M `killpg(pgid, 0)` calls per grace
+  window); liveness polling is now paced by the 0.1 s poll interval with no
+  change to the shared deadline or SIGKILL escalation.
+
+### feat(provider): ProviderSpec capability registry
+
+- Add `backend/claude_hub/services/agent_stream/providers/spec.py`: one
+  immutable Pydantic v2 registry of static per-provider facts for claude,
+  codex, traex, cursor, maso and the terminal pseudo-provider — transport,
+  image/system-instruction/approval channels, resume, model catalog, model
+  and effort env keys, goals/completion tokens, quota/auth facts, solo
+  behavior and the surfaces each provider may run on. Runtime-probed state
+  (binary presence, login, reachability, catalogs, quota) is deliberately
+  not in the spec.
+- `get_spec()` returns the frozen record; unknown agent types get a
+  capability-empty shell record matching the existing fail-closed
+  `get_adapter(...) -> None -> structured=False` behavior. The per-surface
+  approval mapping is a frozen sub-model (`ApprovalChannels`) with
+  mapping-style mutation raising `TypeError`.
+- Replace duplicated provider chains with spec derivations: native binary
+  map/availability and session factory, `SessionCore` and transcript-adapter
+  capability flag defaults (two hierarchies can no longer silently diverge;
+  the cursor native approval override is retained with a comment),
+  `agent run` model/effort env-key maps, tab hot-update env keys, Dot
+  `PROVIDERS`, managed-executor capability lists/admission/model overrides,
+  workspace traex admission, managed-Chat create admission, transcript-fork
+  edit-resend predicate support and terminal probe-response filtering.
+  Wire enums, env names, launch argv and error messages are unchanged.
+- Add `tests/fixtures/provider_spec_matrix.json` (golden matrix, the
+  reviewable artifact) and `tests/test_provider_spec_registry.py` with 56
+  golden-matrix, deep-immutability, fail-closed and byte-for-byte
+  equivalence tests pinning every migrated constant and admission outcome.
+  Implements slice 1, all of slice 2, and the capability-hierarchy,
+  binary/factory, fork and probe-set portions of slice 3 of the
+  review-validated packet
+  `docs/design/2026-10-27-provider-spec-capability-registry-proposal.md`.
+  TUI launch-argv builders, the terminal conversation-id pin set and
+  cursor-transport gating need additional spec fields and remain on
+  literals; `/api/providers`, readiness unification and frontend migration
+  remain later slices.
+
+### fix(auth): harden OAuth state, session files, cookies and access logs
+
+- The session store (`~/.claude_hub/sessions.json`) is written atomically
+  (temp file + `os.replace`, fsync) with `0600` permissions, pre-existing loose
+  files (e.g. `0664`) are tightened on load, and its directory is now created
+  and normalized to `0700` so bearer session ids and Feishu tokens are
+  owner-only at rest.
+- The Feishu OAuth login issues a random single-use CSRF `state` in an
+  `HttpOnly`, `SameSite=Lax`, path-scoped cookie, verified on callback with a
+  constant-time compare. The state cookie is now expired on **every** failed
+  callback (bad state, token-exchange failure, user-info failure, whitelist
+  denial) as well as on success, so a rejected state cannot linger.
+- Auth cookies gain `Secure` whenever the effective request scheme is HTTPS.
+  The scheme now honors `X-Forwarded-Proto` only when the *direct* TCP peer is
+  in `CLAUDE_HUB_TRUSTED_PROXIES` (default loopback), so a remote client cannot
+  forge the header; a configured HTTPS `public_url`/`frontend_url` still implies
+  Secure. The trust primitives are shared with the trusted-proxy branch.
+- Uvicorn prints the full request target (including the query string) in two
+  places, both now redacted for `code`, `state` and `session_id` values: the
+  HTTP access record on the `uvicorn.access` logger (OAuth code/state) and the
+  WebSocket handshake on `uvicorn.error` (the bearer `session_id` terminal and
+  agent-stream sockets use in uvicorn 0.42, where the path is a different
+  positional arg). Redaction is template-aware, so ordinary `uvicorn.error`
+  startup/error records are untouched. This closes the leak of OAuth codes and
+  WebSocket bearer session ids into `backend.log`. WebSocket auth log lines
+  otherwise still emit only a 6-character session prefix.
+
+### fix(security): trust forwarded headers only from trusted proxies; guard insecure listen and WS origins
+
+- `X-Forwarded-For` is parsed only when the direct TCP peer is in the new
+  `CLAUDE_HUB_TRUSTED_PROXIES` allowlist (comma-separated IPs/CIDRs, default
+  `127.0.0.0/8,::1`). The client is selected by walking the chain right-to-left
+  and stripping trusted hops; malformed entries are ignored. A direct client can
+  no longer send `X-Forwarded-For: 127.0.0.1` to claim the loopback auth
+  exemption. The same module exposes `scheme_from_request`, which honors the
+  first `X-Forwarded-Proto` token only from a trusted direct peer, for cookie
+  Secure decisions behind a terminating proxy.
+- An unauthenticated server (Feishu credentials absent) refuses to bind a
+  non-loopback, non-link-local host (`0.0.0.0`, `::`, concrete LAN/public IPs
+  or hostnames) unless `CLAUDE_HUB_ALLOW_INSECURE_LISTEN=1` is set. The pure
+  decision function treats loopback and link-local as local-only, consistent
+  with the existing local-network auth exemption. Enforced both in the
+  supervised launcher and in the app lifespan.
+- Terminal WebSocket handshakes (`/api/terminal/ws/{tab_id}` and
+  `/api/terminal/proxy/{tab_id}/ws`) and state-changing HTTP methods
+  (`POST`/`PUT`/`PATCH`/`DELETE`) now reject a browser `Origin` whose
+  host[:port] differs from `Host`: WS gets a pre-accept close (1008), HTTP a
+  403 before routing. This closes both the cross-site WebSocket hijacking and
+  "simple" cross-site form-write paths (CORS alone blocks reads, not writes).
+  Safe methods, CORS preflight and requests without `Origin` (ttyd, websocat,
+  curl, the CLI, server webhooks) are unaffected; extra origins can be allowed
+  via `CLAUDE_HUB_ALLOWED_ORIGINS`. The Vite dev proxy rewrites `Origin` to
+  the backend origin, so dev mode keeps working across ports.
+- The guarded launch paths now fail closed without breaking local workflows:
+  the pinned production entry (`start.sh`, wildcard default kept per the
+  checkout-safety contract) exits with a clear message until Feishu auth is
+  configured or `CLAUDE_HUB_ALLOW_INSECURE_LISTEN=1` is set; dev mode
+  (`start.sh --dev`) and `start-temp-tunnel.sh` now bind the backend to
+  loopback so they start warning-free, with LAN/phone access still going
+  through the Vite server on `0.0.0.0`. The Docker image exports its real
+  wildcard bind (`CLAUDE_HUB_BIND_HOST=0.0.0.0`) so the guard actually runs
+  in-container; compose explicitly opts in, whitelists the separate frontend
+  origin, and its healthcheck now hits the real `/health`.
+
+### fix(workspace): quarantine corrupt durable state and rotate backups
+
+- Durable JSON stores (`index.json`, per-workspace `state.json`,
+  `scheduled_tasks.json`) now load fail-closed: invalid JSON, structural
+  validation failure or read errors move the bad file aside as
+  `<store>.corrupt-<UTC>` (never overwriting prior evidence), append a
+  persistent `<store>.quarantined` event marker, and log an ERROR.
+- Every durable save maintains one rotating `<store>.bak` of the previous
+  complete payload (temp-file copy + replace, file fsync + directory fsync).
+  A torn last write is transparently restored from the backup; a missing
+  primary with an orphan backup is recovered the same way. A corrupt backup
+  is quarantined separately and the store starts empty.
+- A quarantined workspace keeps its index row but starts with empty
+  tasks/sessions/reports and stays isolated; unrelated workspaces continue
+  to load, and later saves never overwrite the quarantined evidence.
+  Startup health warnings remain visible via `state_recovery_warnings()` and
+  a `warnings` array on `/health` (status stays `healthy`).
+- Structural validators cover index rows, workspace tasks/sessions/reports/
+  TaskMailbox events (including legacy-payload migration) and scheduled
+  task/run records. Unknown future fields quarantine the store instead of
+  being silently dropped by an in-place rewrite.
+
+### fix(workspace): per-scope monitor isolation and error-state pruning
+
+- The background workspace monitor isolates every step with a per-scope
+  timeout/exception guard and rate-limits identical failures (same step +
+  scope + type) to one log per 60s, noting suppressed repeats; one failing or
+  hung workspace/session/task no longer aborts the rest of a monitor round.
+- Session status refresh, resident-agent ticks and scheduled-task ticks now
+  apply the timeout budget per item (per session / per workspace / per
+  scheduled task), mirroring the per-workspace dispatch loop. The shared
+  batched status fetch and global scheduled-task sweep phases keep global
+  guards; ordering, arguments and save points are unchanged.
+- A guarded step that succeeds evicts its `(step, scope)` rate-limit bucket,
+  so a later failure logs a fresh traceback instead of staying suppressed.
+  Buckets whose failure stream has been inactive for eight error-log windows
+  are pruned every round, so identifiers of sessions/workspaces/tasks that
+  failed and then disappeared cannot accumulate in the map forever.
 
 ### fix(maso): retain final responses without streamed tokens
 

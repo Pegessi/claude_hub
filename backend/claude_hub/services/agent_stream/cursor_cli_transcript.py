@@ -115,8 +115,7 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
 
     adapter_id = "cursor-cli-transcript"
     schema_version = 1
-    supports_approval_ui = True
-    supports_tool_timeline = True
+    spec_agent_type = AgentType.CURSOR
 
     # ── provenance / binding validation ──────────────────────────────────────
 
