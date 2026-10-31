@@ -24,7 +24,7 @@ from claude_hub.cli.task_commands.group import task
 @click.option("--prompt", required=True, help="Task prompt.")
 @click.option(
     "--agent-type",
-    type=click.Choice(["claude", "codex", "cursor", "maso", "terminal"]),
+    type=click.Choice(["claude", "codex", "cursor", "maso", "antigravity", "terminal"]),
     default="codex",
     help="Agent type.",
 )
@@ -146,7 +146,7 @@ def task_create(
 @click.option("--prompt", required=True, help="Task prompt.")
 @click.option(
     "--agent-type",
-    type=click.Choice(["claude", "codex", "cursor", "maso", "terminal"]),
+    type=click.Choice(["claude", "codex", "cursor", "maso", "antigravity", "terminal"]),
     default="claude",
     help="Agent type (default: claude).",
 )

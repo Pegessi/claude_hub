@@ -332,11 +332,12 @@ _TERMINAL_APPROVAL = {
     Surface.TERMINAL_TAB: ApprovalChannel.NATIVE_TUI,
 }
 # agy (Antigravity CLI) is a consumer-account, local-host-only CLI: direct
-# Chat, subagent and Dot turns answer approvals as later turns, terminal tabs
-# use the native TUI. Managed/resident/scheduled surfaces stay off for now.
+# Chat, subagent, managed Chat and Dot turns answer approvals as later turns;
+# terminal tabs use the native TUI. Resident surfaces stay off for now.
 _ANTIGRAVITY_APPROVAL = {
     Surface.DIRECT_CHAT: ApprovalChannel.ONESHOT_STEER,
     Surface.SUBAGENT: ApprovalChannel.ONESHOT_STEER,
+    Surface.MANAGED_CHAT: ApprovalChannel.ONESHOT_STEER,
     Surface.DOT: ApprovalChannel.ONESHOT_STEER,
     Surface.TERMINAL_TAB: ApprovalChannel.NATIVE_TUI,
 }
@@ -498,7 +499,7 @@ REGISTRY: Mapping[AgentType, ProviderSpec] = MappingProxyType(
                 usage_quality="exact",
                 completion_event="result",
                 completion_event_scope="any",
-                surfaces=frozenset(),
+                surfaces=frozenset({Surface.DIRECT_CHAT}),
             ),
             quota=QuotaSource.CLI_USAGE_COMMAND,
             # The agyx wrapper owns the Google sign-in, proxy and TLS setup;
@@ -510,6 +511,7 @@ REGISTRY: Mapping[AgentType, ProviderSpec] = MappingProxyType(
                 {
                     Surface.DIRECT_CHAT,
                     Surface.SUBAGENT,
+                    Surface.MANAGED_CHAT,
                     Surface.DOT,
                     Surface.TERMINAL_TAB,
                 }

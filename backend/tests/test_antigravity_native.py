@@ -1489,6 +1489,9 @@ async def test_persistent_image_attachments_staged_and_cleaned_on_completion(
     monkeypatch.setattr(native_module, "_cursor_image_temp_dir", lambda: image_dir)
 
     assert native.supports_images is True
+    assert native.supports_goals is True
+    assert native.goal_execution_owner == "hub_managed"
+    assert native.goal_usage_quality == "exact"
     await native.send_message("describe this image", [_VALID_PNG])
 
     staged_files = list(image_dir.glob("agy-img-*.png"))

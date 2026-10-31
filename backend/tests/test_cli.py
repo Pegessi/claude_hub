@@ -1660,10 +1660,14 @@ def test_tab_update_accepts_antigravity_type_and_preserves_model_id(monkeypatch)
     }
 
 
-def test_task_create_does_not_offer_antigravity(monkeypatch):
-    captured = patch_get_client(
-        monkeypatch, lambda request: httpx.Response(201, json={"id": "task1"})
-    )
+def test_task_create_offers_antigravity_managed_chat(monkeypatch):
+    bodies: List[Dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(201, json={"id": "task1"})
+
+    patch_get_client(monkeypatch, handler)
     result = CliRunner().invoke(
         cli,
         [
@@ -1671,16 +1675,17 @@ def test_task_create_does_not_offer_antigravity(monkeypatch):
             "create",
             "workspace1",
             "--title",
-            "Unsupported managed provider",
+            "Antigravity managed Chat",
             "--prompt",
             "Do nothing",
             "--agent-type",
             "antigravity",
         ],
     )
-    assert result.exit_code == 2
-    assert "antigravity" in result.output
-    assert captured == []
+    assert result.exit_code == 0, result.output
+    assert bodies[0]["agent_type"] == "antigravity"
+    # Chat-only providers omit the surface and let the backend resolve Chat.
+    assert "session_kind" not in bodies[0]
 
 
 def test_tab_create_remote_body(monkeypatch):

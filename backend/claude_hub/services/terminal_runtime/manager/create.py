@@ -109,10 +109,16 @@ class ManagerCreateMixin(ManagerHost):
             and agent_type not in providers_for_surface(Surface.MANAGED_CHAT)
         ):
             raise ValueError(
-                "Managed Chat supports only local Claude, Codex, Cursor, or MASO agents"
+                "Managed Chat supports only local Claude, Codex, Cursor, MASO, or Antigravity agents"
             )
         if agent_type == AgentType.MASO and session_kind != SessionKind.CHAT:
             raise ValueError("MASO is an HTTP Chat provider; select a Chat session")
+        if (
+            workspace_role is not None
+            and agent_type == AgentType.ANTIGRAVITY
+            and session_kind != SessionKind.CHAT
+        ):
+            raise ValueError("Antigravity is a Chat provider in workspaces; select a Chat session")
         if agent_type == AgentType.MASO:
             from ...maso_discovery import discover_maso_service
 

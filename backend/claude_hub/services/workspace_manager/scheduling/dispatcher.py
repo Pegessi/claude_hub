@@ -196,15 +196,27 @@ class _ScheduleDispatcherMixin(_SchedulingHost):
             ) from None
         return task.env_preset
 
+    @staticmethod
+    def _scheduled_session_kind(agent_type: AgentType) -> SessionKind:
+        """Select Chat for Chat-only workspace providers; keep Terminal default."""
+        from claude_hub.services.agent_stream.providers.spec import Surface, get_spec
+
+        spec = get_spec(agent_type)
+        if spec.runs_on(Surface.MANAGED_CHAT) and not spec.runs_on(Surface.MANAGED_TERMINAL):
+            return SessionKind.CHAT
+        return SessionKind.TERMINAL
+
     async def _fire_new_session(self, task: ScheduledTask) -> None:
         """Create a new session in the workspace and send it the message."""
         env_preset = self._resolve_fire_env_preset(task)
         assert task.workspace_id is not None
         assert task.message is not None
+        session_kind = self._scheduled_session_kind(task.agent_type)
         session = await self.ensure_workspace_agent(
             task.workspace_id,
             EnsureWorkspaceAgentRequest(
                 agent_type=task.agent_type,
+                session_kind=session_kind,
                 ephemeral=True,
                 caller_owned_ephemeral=True,
                 role=WorkspaceSessionRole.ORCHESTRATOR,
@@ -235,6 +247,7 @@ class _ScheduleDispatcherMixin(_SchedulingHost):
         assert task.workspace_id is not None
         assert task.task_title is not None
         assert task.message is not None
+        session_kind = self._scheduled_session_kind(task.agent_type)
         internal_task = self._create_task(
             task.workspace_id,
             WorkspaceTaskCreate(
@@ -243,6 +256,7 @@ class _ScheduleDispatcherMixin(_SchedulingHost):
                 task_mode=WorkspaceTaskMode.REVIEWED,
                 execution_complexity=WorkspaceTaskExecutionComplexity.AUTO,
                 agent_type=task.agent_type,
+                session_kind=session_kind,
             ),
             system_internal=True,
             internal_kind="scheduled",
@@ -251,6 +265,7 @@ class _ScheduleDispatcherMixin(_SchedulingHost):
             task.workspace_id,
             EnsureWorkspaceAgentRequest(
                 agent_type=task.agent_type,
+                session_kind=session_kind,
                 ephemeral=True,
                 caller_owned_ephemeral=True,
                 role=WorkspaceSessionRole.ORCHESTRATOR,
