@@ -1723,6 +1723,89 @@ async def test_fire_hub_task_publishes_internal_task_and_dispatches(
     assert internal.title == "Nightly lint"
     assert internal.prompt == "Run the lint sweep"
     assert internal.agent_type == AgentType.CLAUDE
+    assert internal.session_kind == SessionKind.TERMINAL
+
+
+@pytest.mark.parametrize("agent_type", [AgentType.ANTIGRAVITY, AgentType.MASO])
+async def test_fire_hub_task_and_new_session_use_chat_surface_for_chat_only_providers(
+    manager: WorkspaceManager,
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    agent_type: AgentType,
+) -> None:
+    workspace = _make_workspace(manager, tmp_path)
+    captured_requests: List[EnsureWorkspaceAgentRequest] = []
+    dispatched: List[tuple[str, str]] = []
+    sent: List[tuple[str, str]] = []
+
+    async def fake_ensure(
+        workspace_id: str, payload: EnsureWorkspaceAgentRequest
+    ) -> ManagedSession:
+        captured_requests.append(payload)
+        session = _make_session(
+            workspace,
+            session_id=f"chat-{len(captured_requests)}",
+            caller_owned_ephemeral=True,
+        ).model_copy(
+            update={
+                "agent_type": payload.agent_type,
+                "session_kind": payload.session_kind,
+                "tmux_session": "",
+            }
+        )
+        manager.sessions[session.id] = session
+        return session
+
+    async def fake_dispatch(task: Any, session: ManagedSession) -> None:
+        assert task.session_kind == session.session_kind == SessionKind.CHAT
+        dispatched.append((task.id, session.id))
+
+    async def fake_send(
+        session_id: str, message: str, attachments: list | None = None, call_id: str | None = None
+    ) -> None:
+        sent.append((session_id, message))
+
+    monkeypatch.setattr(manager, "ensure_workspace_agent", fake_ensure)
+    monkeypatch.setattr(manager, "_dispatch_task_to_session", fake_dispatch)
+    monkeypatch.setattr(manager, "send_session_message", fake_send)
+
+    hub_sched = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="chat hub task",
+            kind=ScheduledTaskKind.HUB_TASK,
+            cron="0 3 * * *",
+            workspace_id=workspace.id,
+            agent_type=agent_type,
+            task_title="Nightly chat sweep",
+            message="Run the sweep",
+        )
+    )
+    await manager._fire_scheduled_task(hub_sched, datetime.now(), manual=True)
+    assert hub_sched.last_status == "ok"
+    assert len(captured_requests) == 1
+    assert captured_requests[0].agent_type == agent_type
+    assert captured_requests[0].session_kind == SessionKind.CHAT
+    assert len(dispatched) == 1
+    internal_task = manager.tasks[dispatched[0][0]]
+    assert internal_task.agent_type == agent_type
+    assert internal_task.session_kind == SessionKind.CHAT
+
+    session_sched = manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="chat new session",
+            kind=ScheduledTaskKind.NEW_SESSION,
+            run_at=datetime.now() + timedelta(hours=1),
+            workspace_id=workspace.id,
+            agent_type=agent_type,
+            message="Say hi",
+        )
+    )
+    await manager._fire_scheduled_task(session_sched, datetime.now(), manual=True)
+    assert session_sched.last_status == "ok"
+    assert len(captured_requests) == 2
+    assert captured_requests[1].agent_type == agent_type
+    assert captured_requests[1].session_kind == SessionKind.CHAT
+    assert sent == [("chat-2", "Say hi")]
 
 
 async def test_fire_hub_task_passes_env_preset_to_worker(

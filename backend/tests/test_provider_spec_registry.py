@@ -286,6 +286,7 @@ def test_managed_executor_capabilities_equivalence() -> None:
         AgentType.CLAUDE,
         AgentType.CODEX,
         AgentType.CURSOR,
+        AgentType.ANTIGRAVITY,
         AgentType.MASO,
     ]
     assert list(caps.chat_supported_agent_types) == list(
@@ -328,7 +329,7 @@ def _config(
         (AgentType.CURSOR, SessionKind.CHAT, True),
         (AgentType.MASO, SessionKind.CHAT, True),
         (AgentType.TRAEX, SessionKind.CHAT, False),
-        (AgentType.ANTIGRAVITY, SessionKind.CHAT, False),
+        (AgentType.ANTIGRAVITY, SessionKind.CHAT, True),
         (AgentType.TERMINAL, SessionKind.CHAT, False),
         (AgentType.CLAUDE, SessionKind.TERMINAL, True),
         (AgentType.CODEX, SessionKind.TERMINAL, True),
@@ -356,6 +357,8 @@ def test_managed_admission_preserves_historical_messages() -> None:
         tse.validate_config_admission(_config(AgentType.TRAEX, SessionKind.TERMINAL))
     with pytest.raises(ValueError, match="select a Chat session"):
         tse.validate_config_admission(_config(AgentType.MASO, SessionKind.TERMINAL))
+    with pytest.raises(ValueError, match="select a Chat session"):
+        tse.validate_config_admission(_config(AgentType.ANTIGRAVITY, SessionKind.TERMINAL))
     with pytest.raises(ValueError, match=CHAT_REMOTE_UNSUPPORTED):
         tse.validate_config_admission(
             _config(AgentType.CLAUDE, SessionKind.CHAT, ExecutionTarget.REMOTE)
@@ -372,6 +375,7 @@ def test_launch_env_model_override_only_claude_codex() -> None:
     for provider, kind in (
         (AgentType.CURSOR, SessionKind.TERMINAL),
         (AgentType.MASO, SessionKind.CHAT),
+        (AgentType.ANTIGRAVITY, SessionKind.CHAT),
     ):
         with pytest.raises(ValueError, match="does not support an explicit model override"):
             tse.launch_env(

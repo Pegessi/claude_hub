@@ -51,16 +51,13 @@ test('managed Chat fails closed without its managed session id', () => {
 })
 
 test('surface support permits local managed Chat and rejects unsupported combinations', () => {
-  for (const provider of ['claude', 'codex', 'cursor', 'maso']) {
+  for (const provider of ['claude', 'codex', 'cursor', 'maso', 'antigravity']) {
     assert.equal(providerSupportsManagedSurface(provider, 'chat', 'local'), true)
     assert.equal(providerSupportsManagedSurface(provider, 'chat', 'remote'), false)
   }
   assert.equal(providerSupportsManagedSurface('maso', 'terminal', 'local'), false)
+  assert.equal(providerSupportsManagedSurface('antigravity', 'terminal', 'local'), false)
+  assert.equal(providerSupportsManagedSurface('antigravity', 'terminal', 'remote'), false)
   assert.equal(providerSupportsManagedSurface('codex', 'terminal', 'remote'), true)
   assert.equal(providerSupportsManagedSurface('terminal', 'terminal', 'local'), true)
-  for (const surface of ['chat', 'terminal']) {
-    for (const target of ['local', 'remote']) {
-      assert.equal(providerSupportsManagedSurface('antigravity', surface, target), false)
-    }
-  }
 })

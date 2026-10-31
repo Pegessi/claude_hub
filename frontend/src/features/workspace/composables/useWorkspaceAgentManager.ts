@@ -238,7 +238,7 @@ export function useWorkspaceAgentManager(inputs: WorkspaceAgentManagerInputs) {
     agentOptionsForm.session_kind = sessionKind
     if (
       (sessionKind === 'chat' && agentOptionsForm.agent_type === 'terminal') ||
-      (sessionKind === 'terminal' && agentOptionsForm.agent_type === 'maso')
+      (sessionKind === 'terminal' && ['maso', 'antigravity'].includes(agentOptionsForm.agent_type))
     ) {
       agentOptionsForm.agent_type = 'codex'
       agentOptionsForm.solo_mode = true

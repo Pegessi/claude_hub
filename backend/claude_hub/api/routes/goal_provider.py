@@ -9,6 +9,7 @@ from ...services.goal_run.native import NativeGoalConnection, NativeGoalError
 
 
 async def resolve_goal_provider(tab_id: str) -> NativeGoalConnection | None:
+    from ...services.agent_stream.providers.spec import NativeGoals, get_spec
     from ..agent_stream import (
         _get_tab_tailer_manager,
         _is_chat_native,
@@ -16,7 +17,7 @@ async def resolve_goal_provider(tab_id: str) -> NativeGoalConnection | None:
     )
 
     session = _terminal_tab_session_or_404(tab_id)
-    if not _is_chat_native(session):
+    if not _is_chat_native(session) or get_spec(session.agent_type).goals.api == NativeGoals.NONE:
         return None
     manager = _get_tab_tailer_manager()
     tailer = await manager.ensure_started(session)
