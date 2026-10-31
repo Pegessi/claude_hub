@@ -127,6 +127,7 @@ class _ScheduledHubTasksMixin(_SchedulingHost):
                 live.workspace_id,
                 EnsureWorkspaceAgentRequest(
                     agent_type=live.agent_type,
+                    session_kind=live.session_kind,
                     ephemeral=True,
                     caller_owned_ephemeral=True,
                     role=WorkspaceSessionRole.ORCHESTRATOR,

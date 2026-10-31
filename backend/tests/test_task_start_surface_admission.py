@@ -89,6 +89,7 @@ def _select_surface(manager: WorkspaceManager, kind: SessionKind) -> None:
     ("kind", "provider", "error"),
     [
         (SessionKind.TERMINAL, AgentType.MASO, "select a Chat session"),
+        (SessionKind.TERMINAL, AgentType.ANTIGRAVITY, "select a Chat session"),
         (SessionKind.CHAT, AgentType.TERMINAL, "Managed Chat supports only"),
         (SessionKind.CHAT, AgentType.TRAEX, "TraeX is not supported"),
         (SessionKind.TERMINAL, AgentType.TRAEX, "TraeX is not supported"),
@@ -131,6 +132,7 @@ async def test_start_rejects_invalid_override_before_any_side_effect(
         (SessionKind.TERMINAL, AgentType.CODEX),
         (SessionKind.CHAT, AgentType.CODEX),
         (SessionKind.CHAT, AgentType.MASO),
+        (SessionKind.CHAT, AgentType.ANTIGRAVITY),
     ],
 )
 async def test_start_materializes_a_supported_override(
