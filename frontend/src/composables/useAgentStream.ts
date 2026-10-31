@@ -55,8 +55,8 @@ const LONG_POLL_RETRY_BASE_MS = 1_000
 const LONG_POLL_RETRY_MAX_MS = 5_000
 
 class StreamWaitError extends Error {
-  constructor(readonly status: number) {
-    super(`wait HTTP ${status}`)
+  constructor(readonly status: number, detail?: string) {
+    super(`wait HTTP ${status}${detail ? `: ${detail}` : ''}`)
   }
 }
 
@@ -479,7 +479,18 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
       body: JSON.stringify({ since_sequence: since, timeout_seconds: 30 }),
       signal: signal ?? longPollAbort?.signal,
     })
-    if (!res.ok) throw new StreamWaitError(res.status)
+    if (!res.ok) {
+      let detail: string | undefined
+      try {
+        const body: unknown = await res.json()
+        if (body && typeof body === 'object' && 'detail' in body && typeof body.detail === 'string') {
+          detail = body.detail.trim()
+        }
+      } catch {
+        // Proxy error pages are not provider diagnostics; keep the HTTP status.
+      }
+      throw new StreamWaitError(res.status, detail)
+    }
     return (await res.json()) as AgentStreamEventPage
   }
 
