@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.50.1 (Apple Git-155)",
+  "merge": "b7b9e23623daca2118725d9bad6449cc5680bbfa",
+  "parents": [
+    "0c18ffa71c09e5156b88ec6c8a81c548d1802c99",
+    "d337781859bb05278857a35ad5e8223af72bc4ca"
+  ],
+  "base": "15f31c0dde3fb516033bcc85e6c420536e9b030a",
+  "shallow_boundaries": [],
+  "tree": "28f8253b57af2a3829007999e785833cae11f876",
+  "reconstructed_tree": "2c474c7a1c25553ca822f1ec9f4daca2797e927c",
+  "conflicts": ["CHANGELOG.md"],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {"mode": "100644", "type": "blob", "oid": "ddf7c53a702c4858aeb09f918a16b615b143c4e0"},
+      "parent1": {"mode": "100644", "type": "blob", "oid": "5e9b3fcddaebc9a332971d6e34b22dca1b7a2ecc"},
+      "parent2": {"mode": "100644", "type": "blob", "oid": "a3b94f1824f3a8ec6bc50e4314cab14eb98aa48c"},
+      "reconstructed": {"mode": "100644", "type": "blob", "oid": "1c6bff80c378d59f37a836c3d0115701b002ff0a"},
+      "merged": {"mode": "100644", "type": "blob", "oid": "723cfb564b6d58720aeb0c74e33766b5fe26ee5e"},
+      "reason": "Preserve the local clean-EOF release entry and every incoming main release entry; document the reviewed post-tool final-answer guard.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/services/agent_stream/runtime/watchdog.py",
+      "base": {"mode": "100644", "type": "blob", "oid": "a9f7b8bd896bb11ca5cf3430fca659d359110bae"},
+      "parent1": {"mode": "100644", "type": "blob", "oid": "ea7a393e039c45a376bed3d514574b28947e3fd4"},
+      "parent2": {"mode": "100644", "type": "blob", "oid": "a9f7b8bd896bb11ca5cf3430fca659d359110bae"},
+      "reconstructed": {"mode": "100644", "type": "blob", "oid": "ea7a393e039c45a376bed3d514574b28947e3fd4"},
+      "merged": {"mode": "100644", "type": "blob", "oid": "b43660674ec49a2e5ca0ada8176dd3d0aa54c955"},
+      "reason": "Independent review found pre-tool commentary could falsely complete a turn. Require a nonblank final answer after the last tool before synthesizing success; preserve all existing fatal, Goal, external-wait and duplicate-terminal guards.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/tests/test_agent_stream.py",
+      "base": {"mode": "100644", "type": "blob", "oid": "0e3ac05f9b7eca2622f8c0876275f1bd082e408a"},
+      "parent1": {"mode": "100644", "type": "blob", "oid": "7c5f5e0b607070f380e52b81522df04490b7ea9f"},
+      "parent2": {"mode": "100644", "type": "blob", "oid": "0e3ac05f9b7eca2622f8c0876275f1bd082e408a"},
+      "reconstructed": {"mode": "100644", "type": "blob", "oid": "7c5f5e0b607070f380e52b81522df04490b7ea9f"},
+      "merged": {"mode": "100644", "type": "blob", "oid": "6d08f8de32f491758b1fe28aaba030e7c2198d40"},
+      "reason": "Retain the original EOF tests and add real Claude-record regressions for a completed tool followed by absent, whitespace-only or valid final text, including completion subscriptions and final_text. The absent-answer case failed before the guard.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
