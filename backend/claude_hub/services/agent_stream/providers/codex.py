@@ -72,16 +72,9 @@ class CodexConfiguredSession(ProcessSession):
 
     adapter_id = "codex-native"
     schema_version = 1
-    supports_tool_timeline = True
-    supports_approval_ui = True
-    supports_images = True
-    supports_native_system_instructions = True
-    goal_usage_quality = "exact"
-
-    @property
-    def eof_is_fatal(self) -> bool:
-        # Codex runs a persistent app-server; EOF means it died.
-        return True
+    # Capability flags (tool timeline, blocking approval UI, RPC-staged
+    # images, native system instructions, exact goal usage, fatal EOF) come
+    # from the ProviderSpec registry via SessionCore property defaults.
 
     def __init__(
         self,
@@ -223,14 +216,7 @@ class CodexConfiguredSession(ProcessSession):
                     )
                     raise ProviderNetworkError(self._last_error)
                 try:
-                    self._process = await asyncio.create_subprocess_exec(
-                        *cmd,
-                        cwd=self._cwd or None,
-                        stdin=asyncio.subprocess.PIPE,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                        env=provider_env,
-                    )
+                    self._process = await self._spawn_subprocess(cmd, provider_env)
                 except FileNotFoundError:
                     self._last_error = f"provider binary not found: {cmd[0]}"
                     raise

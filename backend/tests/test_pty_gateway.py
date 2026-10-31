@@ -150,8 +150,25 @@ def test_build_ssh_argv_is_tty_and_has_no_command() -> None:
     argv = pty_exec.build_ssh_argv(profile)
     assert argv[0] == "ssh"
     assert "-tt" in argv
+    assert argv[-2] == "--"  # option parsing ends before the destination
     assert argv[-1] == "u@merlin-ssh-proxy-cn.byted.org"  # host is last, no argv command
     assert "-p" in argv and "22222" in argv
+    # All ssh options and the port precede `--`; only the destination follows it.
+    dashdash = argv.index("--")
+    assert argv[1:dashdash] == [
+        "-tt",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "NumberOfPasswordPrompts=0",
+        "-o",
+        "ConnectTimeout=8",
+        "-o",
+        "LogLevel=ERROR",
+        "-p",
+        "22222",
+    ]
+    assert argv[dashdash + 1 :] == ["u@merlin-ssh-proxy-cn.byted.org"]
 
 
 # --------------------------------------------------------------------------- #
@@ -381,6 +398,80 @@ def test_normal_launcher_uses_argv_ssh(monkeypatch: pytest.MonkeyPatch) -> None:
     command = proc._build_remote_launcher()[-1]
     assert "ssh -tt" in command
     assert "pty_gateway_bridge" not in command
+
+
+_NORMAL_USERPORT = RemoteProfile(
+    id="prod",
+    name="prod",
+    ssh_host="plain.example",
+    user="deploy",
+    port=2222,
+    transport=RemoteTransport.NORMAL,
+)
+
+
+def test_capture_ssh_command_separates_options_from_destination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tmod.remote_profile_manager,
+        "get_profile",
+        lambda pid: _NORMAL_USERPORT,
+    )
+    proc = _process("prod")
+    argv = proc._build_remote_ssh_command("echo hi")
+    assert argv[0] == "ssh"
+    assert argv[1] == "-T"
+    dashdash = argv.index("--")
+    # Options/port stay before `--`; destination and remote command follow it.
+    assert argv[:dashdash] == [
+        "ssh",
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "NumberOfPasswordPrompts=0",
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "LogLevel=ERROR",
+        "-p",
+        "2222",
+    ]
+    assert argv[dashdash + 1 :] == ["deploy@plain.example", "echo hi"]
+
+
+def test_interactive_launcher_separates_options_from_destination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tmod.remote_profile_manager,
+        "get_profile",
+        lambda pid: _NORMAL_USERPORT,
+    )
+    proc = _process("prod", reconnect=False)
+    command = proc._build_remote_launcher()[-1]
+    assert "ssh -tt" in command
+    assert "-p 2222" in command
+    assert " -- deploy@plain.example " in command
+    # No ssh option may appear after the destination.
+    target_idx = command.index(" -- deploy@plain.example ")
+    assert " -o " not in command[target_idx:]
+
+
+def test_bridge_main_rejects_option_looking_target() -> None:
+    from claude_hub.services import pty_gateway_bridge as bridge
+
+    bootstrap_b64 = base64.b64encode(b"echo hi").decode()
+    with pytest.raises(SystemExit, match="invalid --target"):
+        bridge.main(
+            [
+                "--target=-oProxyCommand=evil",
+                "--bootstrap-b64",
+                bootstrap_b64,
+                "--no-reconnect",
+            ]
+        )
 
 
 # --------------------------------------------------------------------------- #

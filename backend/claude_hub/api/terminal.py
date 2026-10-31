@@ -22,8 +22,16 @@ from pydantic import BaseModel
 from websockets.typing import Subprotocol
 
 from ..auth.dependencies import get_current_user, get_current_user_ws
+from ..auth.proxy import reject_bad_websocket_origin
 from ..models import AgentType, User
+from ..services.agent_stream.providers.spec import all_specs
 from ..services.ttyd_manager import ttyd_manager
+
+# The four local CLI providers emit terminal probe responses the proxy must
+# filter; MASO has no TUI and the terminal pseudo-provider emits no probes.
+_PROBE_RESPONSE_FILTER_PROVIDERS = frozenset(
+    agent_type for agent_type, spec in all_specs().items() if spec.binary is not None
+)
 from ._terminal_injection import (
     FULL_HISTORY_LINES,
     INITIAL_AGENT_HISTORY_LINES,
@@ -257,6 +265,11 @@ async def websocket_endpoint(
     websocket: WebSocket, tab_id: str, session_id: Optional[str] = Query(None)
 ) -> None:
     """WebSocket endpoint for terminal connections (proxies to ttyd)."""
+    # Reject cross-site browser handshakes before accepting (CSWSH); native
+    # clients without an Origin header are unaffected.
+    if await reject_bad_websocket_origin(websocket):
+        return
+
     # Authenticate user
     user = await get_current_user_ws(websocket, session_id)
     if not user:
@@ -271,12 +284,7 @@ async def websocket_endpoint(
     await websocket.accept(subprotocol="tty")
 
     ttyd_ws_uri = f"ws://127.0.0.1:{tab.port}/ws"
-    filter_probe_responses = tab.agent_type in {
-        AgentType.CLAUDE,
-        AgentType.CODEX,
-        AgentType.TRAEX,
-        AgentType.CURSOR,
-    }
+    filter_probe_responses = tab.agent_type in _PROBE_RESPONSE_FILTER_PROVIDERS
 
     try:
         await proxy_websocket(
@@ -296,6 +304,11 @@ async def proxy_ttyd_websocket(
     websocket: WebSocket, tab_id: str, session_id: Optional[str] = Query(None)
 ) -> None:
     """Proxy WebSocket connections directly to ttyd's /ws endpoint."""
+    # Reject cross-site browser handshakes before accepting (CSWSH); native
+    # clients without an Origin header are unaffected.
+    if await reject_bad_websocket_origin(websocket):
+        return
+
     # Authenticate user
     user = await get_current_user_ws(websocket, session_id)
     if not user:
@@ -310,12 +323,7 @@ async def proxy_ttyd_websocket(
     await websocket.accept(subprotocol="tty")
 
     ttyd_ws_uri = f"ws://127.0.0.1:{tab.port}/ws"
-    filter_probe_responses = tab.agent_type in {
-        AgentType.CLAUDE,
-        AgentType.CODEX,
-        AgentType.TRAEX,
-        AgentType.CURSOR,
-    }
+    filter_probe_responses = tab.agent_type in _PROBE_RESPONSE_FILTER_PROVIDERS
 
     try:
         await proxy_websocket(

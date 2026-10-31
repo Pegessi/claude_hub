@@ -535,8 +535,8 @@ function fetchHarness(t, initial = livePayload()) {
   return { calls, set(next) { handler = next } }
 }
 
-const open = state => state.handleToggle({ currentTarget: { open: true } })
-const close = state => state.handleToggle({ currentTarget: { open: false } })
+const open = state => state.openModal()
+const close = state => state.closeModal()
 
 test('the panel loads once when it is opened and renders both providers', async t => {
   const http = fetchHarness(t)
@@ -818,10 +818,50 @@ test('the rendered panel keeps a genuinely failed provider loud', async t => {
   assert.equal(state.summaryText, 'Lowest 42% left · 1 provider unavailable')
 })
 
-test('the quota entry is mounted in the extensions menu', () => {
+test('the quota entry is mounted in the extensions menu and closes it when opened', () => {
   const actions = readSource('components/AppExtensionActions.vue')
   assert.match(actions, /import QuotaMenu from '@\/components\/QuotaMenu\.vue'/)
-  assert.match(actions, /<QuotaMenu\s*\/>/)
+  assert.match(actions, /<QuotaMenu\s+@select="emit\('select'\)"\s*\/>/)
+})
+
+test('the quota display maps antigravity provider title and opens as a modal dialog', async t => {
+  const antigravityProvider = provider({
+    provider: 'antigravity',
+    as_of: new Date(Date.now() - MINUTE).toISOString(),
+    limits: [
+      limit({
+        scope: 'gemini-weekly',
+        label: 'Gemini Models · Weekly limit',
+        used_percent: 3,
+        remaining_percent: 97,
+        resets_at: new Date(Date.now() + 6 * DAY).toISOString(),
+      }),
+    ],
+  })
+  fetchHarness(t, { providers: [aged(codexProvider, MINUTE), aged(masoProvider, MINUTE), antigravityProvider] })
+  const { state, tree } = mountMenu(t, { withTemplate: true })
+
+  assert.equal(state.isOpen, false)
+  assert.ok(!renderedClasses(tree).includes('quota-modal'), 'modal is hidden while closed')
+
+  state.openModal()
+  await flush()
+  await vue.nextTick()
+
+  assert.equal(state.isOpen, true)
+  const classes = renderedClasses(tree)
+  const text = renderedText(tree)
+  assert.ok(classes.includes('quota-modal-backdrop'))
+  assert.ok(classes.includes('quota-modal'))
+  assert.ok(text.includes('Antigravity'))
+  assert.ok(text.includes('Gemini Models · Weekly limit'))
+  assert.ok(text.includes('97% left'))
+  assert.ok(text.includes('Close'))
+
+  state.closeModal()
+  await vue.nextTick()
+  assert.equal(state.isOpen, false)
+  assert.ok(!renderedClasses(tree).includes('quota-modal'), 'closing the modal removes the dialog from view')
 })
 
 test('every quota string the user can read is English', () => {

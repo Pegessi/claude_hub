@@ -151,7 +151,7 @@ def _echo_provider_quota(provider: Dict[str, Any]) -> None:
 @click.option("--refresh", is_flag=True, default=False, help="Bypass the cached reading.")
 @click.pass_context
 def quota(ctx: click.Context, refresh: bool) -> None:
-    """Show remaining provider quota (Codex and MASO)."""
+    """Show remaining provider quota (Codex, MASO, and Antigravity)."""
     try:
         with cli_main.get_client(ctx) as client:
             data = client.get_quota(refresh=refresh)
@@ -250,7 +250,7 @@ def _tab_body(
 @click.option("--solo-mode/--no-solo-mode", default=False, help="Run in agent solo mode.")
 @click.option(
     "--agent-type",
-    type=click.Choice(["claude", "codex", "traex", "cursor", "terminal"]),
+    type=click.Choice(["claude", "codex", "traex", "cursor", "antigravity", "terminal"]),
     default="claude",
     help="Agent type.",
 )
@@ -413,7 +413,7 @@ def tab_message_cancel(ctx: click.Context, tab_id: str, message_id: str) -> None
 @click.option("--solo-mode/--no-solo-mode", default=None, help="Run in agent solo mode.")
 @click.option(
     "--agent-type",
-    type=click.Choice(["claude", "codex", "traex", "cursor", "terminal"]),
+    type=click.Choice(["claude", "codex", "traex", "cursor", "antigravity", "terminal"]),
     default=None,
     help="Agent type.",
 )
@@ -649,7 +649,8 @@ def api_raw(
     emit(data, True if cli_main.as_json(ctx) else isinstance(data, (dict, list)))
 
 
-# Short alias for filesystem.
+# Short alias for `filesystem`; registered as a hidden command on the root
+# group (see _MachineReadableGroup.hidden_aliases in cli/main.py).
 fs = filesystem
 
 

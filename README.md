@@ -64,6 +64,27 @@ resident agents, sending follow-up instructions, and reviewing progress reports.
 - ttyd
 - cloudflared, optional for public tunnel scripts
 
+### Agent CLIs (install separately)
+
+Install and authenticate only the providers you intend to use, on the machine
+and under the OS account that runs the agent:
+
+| Provider | Executable required by Hub |
+| --- | --- |
+| Claude Code | `claude` |
+| OpenAI Codex CLI | `codex` |
+| Cursor Agent CLI | `agent` (not the desktop editor's `cursor` command) |
+| Google Antigravity CLI | Official `agy` CLI plus the deployment's `agyx` wrapper |
+
+See the [Agent CLI installation guide](docs/AGENT_INSTALLATION.md) for official
+install commands, authentication, PATH checks, per-provider proxy/certificate
+notes, and Antigravity's current Hub limitations. These CLIs are not bundled
+with Hub: `setup.sh`, `uv sync`, and `pnpm install` do not install or sign in to
+them. The `claude-hub` CLI manages Hub itself; it does not replace any provider CLI.
+Proxy requirements vary by machine and provider: verify them during installation
+or migration, use direct access when it works and policy permits, and do not copy
+another deployment's proxy settings as universal prerequisites.
+
 ## Quick Start
 
 Install or verify local dependencies:
@@ -71,6 +92,9 @@ Install or verify local dependencies:
 ```bash
 ./setup.sh
 ```
+
+Before creating an Agent or Chat, complete the
+[installation and login steps](docs/AGENT_INSTALLATION.md) for its provider.
 
 Start backend and frontend together:
 
@@ -97,8 +121,16 @@ Backend:
 ```bash
 cd backend
 uv sync --dev
-uv run uvicorn claude_hub.main:app --reload --host 0.0.0.0 --port 8173
+# Loopback bind: warning-free without Feishu auth (the Vite dev server proxies
+# /api to this port). The bind host is exported so the startup guard sees it.
+CLAUDE_HUB_BIND_HOST=127.0.0.1 \
+  uv run uvicorn claude_hub.main:app --reload --host 127.0.0.1 --port 8173
 ```
+
+Listening on a non-loopback interface (e.g. `--host 0.0.0.0` for LAN/phone
+access) while Feishu OAuth is unconfigured is refused unless you explicitly
+opt in with `CLAUDE_HUB_ALLOW_INSECURE_LISTEN=1` (see
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)).
 
 Frontend:
 
@@ -133,11 +165,14 @@ uv sync                       # installs the `claude-hub` entry point
 uv run claude-hub --help      # or: uv run python -m claude_hub.cli --help
 ```
 
-Configuration precedence: flags > env > config file > defaults.
+Configuration precedence: flags > env > config file > derived/defaults.
 
 ```bash
-export CLAUDE_HUB_URL=http://127.0.0.1:8173   # default
+export CLAUDE_HUB_URL=http://127.0.0.1:8173   # explicit override
+export CLAUDE_HUB_HOST=::1                     # derive URL with CLAUDE_HUB_PORT
 export CLAUDE_HUB_TOKEN=...                    # only for remote/non-loopback backends
+# Without an explicit URL the CLI probes 127.0.0.1 and [::1] (port 8173 by
+# default) and uses whichever answers /health; IPv6 literals are bracketed.
 # or ~/.config/claude-hub/config.toml:  [default] \n base_url = "..." \n token = "..."
 ```
 

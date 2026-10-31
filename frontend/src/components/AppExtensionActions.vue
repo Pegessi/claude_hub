@@ -52,7 +52,7 @@
     <span>Feishu Bot settings</span>
   </button>
   <NetworkAccessMenu variant="menu" />
-  <QuotaMenu />
+  <QuotaMenu @select="emit('select')" />
   <button
     type="button"
     class="extension-action"

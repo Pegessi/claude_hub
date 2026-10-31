@@ -43,6 +43,7 @@ from .native import (
     strip_image_attachment_guidance,
     strip_question_protocol_guidance,
 )
+from .providers.spec import get_spec
 
 logger = logging.getLogger(__name__)
 
@@ -115,15 +116,21 @@ def _is_cursor_user_message(obj: Dict[str, Any]) -> bool:
     return isinstance(obj.get("message"), dict)
 
 
+_USER_MESSAGE_PREDICATES: Dict[AgentType, Callable[[Dict[str, Any]], bool]] = {
+    AgentType.CLAUDE: _is_claude_user_message,
+    AgentType.CODEX: _is_codex_user_message,
+    AgentType.CURSOR: _is_cursor_user_message,
+}
+
+
 def _user_message_predicate(agent_type: AgentType) -> Callable[[Dict[str, Any]], bool]:
     """Return the genuine-user-message predicate for ``agent_type``."""
-    if agent_type == AgentType.CLAUDE:
-        return _is_claude_user_message
-    if agent_type == AgentType.CODEX:
-        return _is_codex_user_message
-    if agent_type == AgentType.CURSOR:
-        return _is_cursor_user_message
-    raise TranscriptForkError(f"edit-resend is not supported for agent_type={agent_type}")
+    if not get_spec(agent_type).edit_resend:
+        raise TranscriptForkError(f"edit-resend is not supported for agent_type={agent_type}")
+    predicate = _USER_MESSAGE_PREDICATES.get(agent_type)
+    if predicate is None:
+        raise TranscriptForkError(f"edit-resend is not supported for agent_type={agent_type}")
+    return predicate
 
 
 def _extract_user_text(obj: Dict[str, Any], agent_type: AgentType) -> str:

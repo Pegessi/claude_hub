@@ -163,6 +163,9 @@ class ManagerStatusMixin(ManagerHost):
             "codex",
             "traex",
             "agent",
+            # agyx execs the real agy binary, so the foreground process is agy.
+            "agyx",
+            "agy",
         }:
             return (
                 AgentRuntimeStatus.IDLE,

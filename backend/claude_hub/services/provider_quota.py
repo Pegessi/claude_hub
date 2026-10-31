@@ -1,9 +1,10 @@
-"""Read-only remaining-quota readings for the Codex and MASO providers.
+"""Read-only remaining-quota readings for Codex, MASO, and Antigravity.
 
-Two independent sources, one shared vocabulary. Codex publishes no API, so its
+Three independent sources, one shared vocabulary. Codex publishes no API, so its
 reading is salvaged from the newest ``token_count`` record in the local rollout
 files it writes per turn; MASO owns its own quota accounting and is asked over
-HTTP. Neither path creates a session, mutates provider state, or decides
+HTTP; Antigravity is queried via its built-in ``agyx -p /usage`` command. None
+of these paths creates a chat session, mutates provider state, or decides
 anything: this module only reports what each provider last said, plus why a
 reading is missing. A provider that cannot be read degrades to an unavailable
 reading with an actionable message; it never raises at the caller.
@@ -11,11 +12,13 @@ reading with an actionable message; it never raises at the caller.
 
 from __future__ import annotations
 
+import asyncio
 import glob
 import heapq
 import json
 import logging
 import os
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,6 +62,7 @@ _CODEX_MAX_FILES_VISITED = 20000
 # keeps a shared panel from re-running service discovery on every poll.
 _QUOTA_CACHE_TTL = 30.0
 _MASO_TIMEOUT_S = 3.0
+_ANTIGRAVITY_TIMEOUT_S = 10.0
 
 _CODEX_NO_DATA_MESSAGE = (
     "No Codex rate-limit reading was found on this host. "
@@ -73,6 +77,12 @@ _MASO_UNAVAILABLE_MESSAGE = "MASO quota is unavailable. Check the MASO service, 
 # text states a fact and asks for no repair.
 _MASO_NOT_CONFIGURED_MESSAGE = (
     "No MASO service is configured for this Hub, so there is no MASO quota to report."
+)
+_ANTIGRAVITY_UNAVAILABLE_MESSAGE = (
+    "Antigravity quota is unavailable. Check the Antigravity CLI login or proxy, then refresh."
+)
+_ANTIGRAVITY_NOT_CONFIGURED_MESSAGE = (
+    "No Antigravity CLI is configured for this Hub, so there is no Antigravity quota to report."
 )
 
 # Cached full response: (expires_at_monotonic, response).
@@ -443,16 +453,233 @@ async def read_maso_quota(refresh: bool = False) -> ProviderQuota:
     )
 
 
+# -- Antigravity -----------------------------------------------------------
+
+
+def _antigravity_home_dir() -> Path:
+    """Antigravity CLI state directory (respects $ANTIGRAVITY_HOME if set)."""
+    override = os.environ.get("ANTIGRAVITY_HOME")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".gemini" / "antigravity-cli"
+
+
+def _antigravity_oauth_token_path() -> Path:
+    return _antigravity_home_dir() / "antigravity-oauth-token"
+
+
+def _antigravity_absent_from_deployment() -> bool:
+    """Whether no Antigravity CLI sign-in state exists on this host."""
+    return not _antigravity_oauth_token_path().exists()
+
+
+def _antigravity_unavailable(
+    message: str = _ANTIGRAVITY_UNAVAILABLE_MESSAGE,
+) -> ProviderQuota:
+    return ProviderQuota(
+        provider="antigravity",
+        available=False,
+        state="unavailable",
+        message=message,
+    )
+
+
+def _antigravity_not_configured() -> ProviderQuota:
+    return ProviderQuota(
+        provider="antigravity",
+        available=False,
+        state="not_configured",
+        message=_ANTIGRAVITY_NOT_CONFIGURED_MESSAGE,
+    )
+
+
+def _antigravity_window_label(group_name: str, bucket: Dict[str, Any], scope: str) -> str:
+    window = bucket.get("window")
+    bucket_name = bucket.get("name")
+    if window == "5h":
+        suffix = "5-hour limit"
+    elif window == "weekly":
+        suffix = "Weekly limit"
+    elif isinstance(bucket_name, str) and bucket_name:
+        suffix = bucket_name
+    else:
+        suffix = scope
+    return f"{group_name} · {suffix}" if group_name else suffix
+
+
+def _antigravity_limit(
+    group_name: str, bucket: Any, now: float
+) -> Optional[Tuple[QuotaLimit, bool]]:
+    """Build one limit from an Antigravity ``/usage`` quota bucket."""
+    if not isinstance(bucket, dict):
+        return None
+    raw_id = bucket.get("id")
+    raw_window = bucket.get("window")
+    raw_name = bucket.get("name")
+    if isinstance(raw_id, str) and raw_id:
+        scope = raw_id
+    elif isinstance(raw_window, str) and raw_window:
+        scope = f"{group_name}:{raw_window}" if group_name else raw_window
+    elif isinstance(raw_name, str) and raw_name:
+        scope = f"{group_name}:{raw_name}" if group_name else raw_name
+    else:
+        return None
+
+    label = _antigravity_window_label(group_name, bucket, scope)
+    resets_at = _valid_iso(bucket.get("reset_time"))
+    resets_epoch: Optional[float] = None
+    if resets_at is not None:
+        try:
+            resets_epoch = datetime.fromisoformat(resets_at.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            resets_epoch = None
+    expired = resets_epoch is not None and now > resets_epoch
+
+    raw_fraction = bucket.get("remaining_fraction")
+    if (
+        not expired
+        and isinstance(raw_fraction, (int, float))
+        and not isinstance(raw_fraction, bool)
+    ):
+        remaining = _percent(float(raw_fraction) * 100.0)
+    else:
+        remaining = None
+    used = None if remaining is None else 100 - remaining
+
+    if not expired and bucket.get("disabled") is True:
+        state = "over"
+    elif used is None:
+        state = "unknown"
+    elif used >= CODEX_OVER_PERCENT:
+        state = "over"
+    elif used >= CODEX_NEAR_PERCENT:
+        state = "near"
+    else:
+        state = "within"
+
+    return (
+        QuotaLimit(
+            scope=scope,
+            label=label,
+            state=state,
+            used_percent=used,
+            remaining_percent=remaining,
+            resets_at=resets_at,
+        ),
+        expired,
+    )
+
+
+async def _run_antigravity_usage() -> Dict[str, Any]:
+    """Run ``agyx -p /usage --output-format json`` and return the parsed payload."""
+    proc = await asyncio.create_subprocess_exec(
+        "agyx",
+        "-p",
+        "/usage",
+        "--output-format",
+        "json",
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=_ANTIGRAVITY_TIMEOUT_S)
+    except asyncio.CancelledError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        raise
+    except Exception as exc:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        raise RuntimeError("antigravity usage command timed out or failed") from exc
+    if proc.returncode != 0:
+        raise RuntimeError(f"antigravity usage exited with code {proc.returncode}")
+    payload = json.loads(stdout.decode("utf-8", errors="replace"))
+    if not isinstance(payload, dict):
+        raise ValueError("antigravity usage output is not a JSON object")
+    return payload
+
+
+async def read_antigravity_quota(refresh: bool = False) -> ProviderQuota:
+    """Ask the local Antigravity CLI for its ``/usage`` quota snapshot."""
+    del refresh
+    if _antigravity_absent_from_deployment():
+        return _antigravity_not_configured()
+    if shutil.which("agyx") is None:
+        return _antigravity_unavailable()
+    try:
+        payload = await _run_antigravity_usage()
+    except (OSError, RuntimeError, TimeoutError, ValueError):
+        logger.warning("antigravity quota: command failed", exc_info=True)
+        return _antigravity_unavailable()
+    if payload.get("status") != "SUCCESS":
+        return _antigravity_unavailable()
+    command = payload.get("command")
+    data = command.get("data") if isinstance(command, dict) else None
+    groups = data.get("groups") if isinstance(data, dict) else None
+    if not isinstance(groups, list):
+        return _antigravity_unavailable()
+    now = time.time()
+    limits: List[QuotaLimit] = []
+    stale = False
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        raw_group_name = group.get("name")
+        group_name = raw_group_name.strip() if isinstance(raw_group_name, str) else ""
+        buckets = group.get("buckets")
+        if not isinstance(buckets, list):
+            continue
+        for bucket in buckets:
+            built = _antigravity_limit(group_name, bucket, now)
+            if built is None:
+                continue
+            limit, expired = built
+            limits.append(limit)
+            stale = stale or expired
+    if not limits:
+        return _antigravity_unavailable()
+    return ProviderQuota(
+        provider="antigravity",
+        available=True,
+        state=_worst_state([limit.state for limit in limits]),
+        message="",
+        as_of=_iso_utc(now),
+        stale=stale,
+        limits=limits,
+    )
+
+
 # -- Combined reading ------------------------------------------------------
 
 
+async def _safe_read_maso_quota(refresh: bool) -> ProviderQuota:
+    try:
+        return await read_maso_quota(refresh=refresh)
+    except Exception:
+        logger.exception("maso quota: unexpected read failure")
+        return _maso_unavailable(_MASO_UNAVAILABLE_MESSAGE)
+
+
+async def _safe_read_antigravity_quota(refresh: bool) -> ProviderQuota:
+    try:
+        return await read_antigravity_quota(refresh=refresh)
+    except Exception:
+        logger.exception("antigravity quota: unexpected read failure")
+        return _antigravity_unavailable(_ANTIGRAVITY_UNAVAILABLE_MESSAGE)
+
+
 async def read_provider_quota(refresh: bool = False) -> QuotaResponse:
-    """Read every provider, newest Codex record first, then MASO.
+    """Read every provider: Codex first, then MASO and Antigravity.
 
     One unreadable provider is reported as unavailable instead of failing the
     whole panel, so the broad guards below are deliberate. Results are cached
-    briefly so a shared panel cannot turn each poll into a MASO discovery
-    round; ``refresh`` bypasses both this cache and MASO's own.
+    briefly so a shared panel cannot turn each poll into repeated provider
+    queries; ``refresh`` bypasses both this cache and MASO's own.
     """
     global _QUOTA_CACHE
 
@@ -471,11 +698,10 @@ async def read_provider_quota(refresh: bool = False) -> QuotaResponse:
             state="unavailable",
             message=_CODEX_UNREADABLE_MESSAGE,
         )
-    try:
-        maso = await read_maso_quota(refresh=refresh)
-    except Exception:
-        logger.exception("maso quota: unexpected read failure")
-        maso = _maso_unavailable(_MASO_UNAVAILABLE_MESSAGE)
-    response = QuotaResponse(providers=[codex, maso])
+    maso, antigravity = await asyncio.gather(
+        _safe_read_maso_quota(refresh=refresh),
+        _safe_read_antigravity_quota(refresh=refresh),
+    )
+    response = QuotaResponse(providers=[codex, maso, antigravity])
     _QUOTA_CACHE = (time.monotonic() + _QUOTA_CACHE_TTL, response)
     return response

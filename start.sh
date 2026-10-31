@@ -118,7 +118,14 @@ if [ "$DEV_MODE" = true ]; then
     uv run python -m claude_hub.maso_probe --startup
     echo -e "${YELLOW}Starting backend server (dev, --reload)...${NC}"
     cd "$PROJECT_ROOT/backend"
-    uv run uvicorn claude_hub.main:app --reload --host 0.0.0.0 --port 8173 &
+    # The bind host is exported so the in-process startup guard sees the real
+    # uvicorn interface. Default to loopback: the Vite dev server already
+    # fronts /api (it stays on 0.0.0.0 for phone/LAN testing) and proxies
+    # from loopback. A non-loopback bind without Feishu auth is refused
+    # unless CLAUDE_HUB_ALLOW_INSECURE_LISTEN=1 is set.
+    DEV_HOST="${CLAUDE_HUB_HOST:-127.0.0.1}"
+    CLAUDE_HUB_BIND_HOST="$DEV_HOST" \
+        uv run uvicorn claude_hub.main:app --reload --host "$DEV_HOST" --port 8173 &
     BACKEND_PID=$!
     echo -e "${GREEN}✓ Backend started on http://localhost:8173 (PID: $BACKEND_PID)${NC}"
 
@@ -152,6 +159,11 @@ else
     # as the API, so a single uvicorn process serves everything on :8173.
     # The launcher survives a backend restart requested from the UI. Exec
     # preserves Ctrl+C / service-manager ownership instead of leaving orphans.
+    # Production keeps the historical wildcard default (a checkout-safety
+    # guard pins this --host line); the launcher now refuses an
+    # unauthenticated non-local bind unless Feishu auth is configured or
+    # CLAUDE_HUB_ALLOW_INSECURE_LISTEN=1 is set, and exports the bind host
+    # for the in-process lifespan guard.
     exec env SERVE_FRONTEND=true uv run python -m claude_hub.service_launcher \
         --host "${CLAUDE_HUB_HOST:-0.0.0.0}" --port "${CLAUDE_HUB_PORT:-8173}"
 fi

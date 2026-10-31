@@ -278,6 +278,7 @@ export function linkPathMentions(html: string): string {
 export class MarkdownBlockCache {
   hasMath = false
   hasCode = false
+  hasMermaid = false
   private cache = new Map<string, string>()
   /** The linkMarkdownPaths mode the cache was populated for. If the mode
    *  changes, the cache is invalidated. */
@@ -383,6 +384,7 @@ export class MarkdownBlockCache {
     }
     this.hasMath = false
     this.hasCode = false
+    this.hasMermaid = false
     visitTokens(tokens, (token) => {
       // Marked invokes extension renderers even when flattening image alt text.
       // Keep TeX literal there instead of placing rendered HTML in an attribute.
@@ -394,7 +396,10 @@ export class MarkdownBlockCache {
         })
       }
       if (token.type === 'mathBlock' || token.type === 'mathInline') this.hasMath = true
-      if (token.type === 'code') this.hasCode = true
+      if (token.type === 'code') {
+        this.hasCode = true
+        if ((token.lang || '').split(/\s/)[0] === 'mermaid') this.hasMermaid = true
+      }
     })
     if (tokens.length === 0) return []
 
@@ -572,6 +577,7 @@ export class MarkdownBlockCache {
     this.mathRenderVersion = null
     this.hasMath = false
     this.hasCode = false
+    this.hasMermaid = false
   }
 
   /** Check whether a block's raw text is cached. */

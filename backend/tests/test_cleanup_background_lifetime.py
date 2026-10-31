@@ -56,13 +56,19 @@ async def test_monitor_and_other_cleanup_progress_while_submitted_unlink_is_bloc
     class ReachedRefresh(BaseException):
         pass
 
-    async def refresh(**_kwargs: Any) -> None:
+    async def collect_statuses(_sessions: Any) -> Any:
+        # The monitor's first awaited refresh step (the shared status fetch);
+        # raising a BaseException here escapes the per-step guard, exactly like
+        # the old ``_refresh_session_statuses`` seam did.
         refreshed.set()
         raise ReachedRefresh()
 
     from types import SimpleNamespace
 
-    fake_workspace = SimpleNamespace(_refresh_session_statuses=refresh)
+    fake_workspace = SimpleNamespace(
+        _monitor_refresh_sessions=lambda _workspace_id=None: [],
+        _collect_session_agent_statuses=collect_statuses,
+    )
     async with manager.cleanup_task_lifetime():
         monitoring = asyncio.create_task(
             workspace_module._WorkspacesMixin._background_monitor_loop(fake_workspace)

@@ -47,7 +47,11 @@ rm -f "$BACKEND_LOG" "$FRONTEND_LOG" "$TUNNEL_LOG"
 echo "🚀 启动后端..."
 cd "$PROJECT_ROOT/backend"
 if command -v uv &> /dev/null; then
-    uv run uvicorn claude_hub.main:app --reload --host 0.0.0.0 --port 8173 > "$BACKEND_LOG" 2>&1 &
+    # Loopback bind: cloudflared and Vite both connect from this host, so
+    # wildcard exposure is unnecessary. CLAUDE_HUB_BIND_HOST lets the
+    # startup guard see the real interface.
+    CLAUDE_HUB_BIND_HOST=127.0.0.1 \
+        uv run uvicorn claude_hub.main:app --reload --host 127.0.0.1 --port 8173 > "$BACKEND_LOG" 2>&1 &
     BACKEND_PID=$!
 else
     echo "❌ uv 未安装，请先安装 uv"

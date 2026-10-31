@@ -464,6 +464,11 @@ const {
   color: var(--ch-color-text);
 }
 
+.agent-status-cli[data-kind='antigravity'] {
+  background: rgba(138, 180, 248, 0.18);
+  color: #8ab4f8;
+}
+
 .agent-status-cli[data-kind='terminal'] {
   background: rgba(126, 231, 135, 0.16);
   color: #7ee787;
