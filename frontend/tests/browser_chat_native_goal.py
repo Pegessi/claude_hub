@@ -7,6 +7,7 @@ No Hub backend or provider is contacted.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import sys
 from pathlib import Path
@@ -20,6 +21,13 @@ from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
 TAB = "native-goal-tab"
 THREAD = "native-thread"
 NOW = "2026-10-20T00:00:00Z"
+IMAGE = {
+    "name": "recovery.png",
+    "mimeType": "image/png",
+    "buffer": base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3foAAAAASUVORK5CYII="
+    ),
+}
 GOAL_LIKE_ASSISTANT_TEXT = "\n".join(
     [
         "Provider-native answer preserves a trailing Goal-like block:",
@@ -154,6 +162,9 @@ async def main(browser_run: BrowserRun) -> None:
     stale: list[dict | None] = []
     events: list[dict] = transcript_events()
     supports_goals = True
+    goal_read_error: str | None = None
+    inbox_failure: int | str | None = None
+    inbox_messages: list[dict] = []
     page = None
 
     async with browser_run.context(
@@ -219,7 +230,16 @@ async def main(browser_run: BrowserRun) -> None:
                         "supports_mode_switch": False,
                     }
                 elif request.method == "GET" and path == f"/api/workspaces/tabs/{TAB}/messages":
-                    body = {"messages": []}
+                    if inbox_failure == "network":
+                        await route.abort("failed")
+                        return
+                    if isinstance(inbox_failure, int):
+                        await route.fulfill(
+                            status=inbox_failure,
+                            json={"detail": "Fixture inbox unavailable"},
+                        )
+                        return
+                    body = {"messages": inbox_messages}
                 elif path.endswith("/events") or path.endswith("/wait"):
                     if path.endswith("/wait"):
                         await asyncio.sleep(0.1)
@@ -236,7 +256,16 @@ async def main(browser_run: BrowserRun) -> None:
                     )
                     return
                 elif path.endswith("/goal/current"):
+                    if goal_read_error:
+                        await route.fulfill(status=503, json={"detail": goal_read_error})
+                        return
                     body = stale.pop(0) if stale else current
+                elif path == f"/api/tabs/{TAB}/goal" and request.method == "POST":
+                    await route.fulfill(
+                        status=503,
+                        json={"detail": "Could not read provider Goal: startup timed out"},
+                    )
+                    return
                 elif path == "/api/goals/native-goal/pause" and request.method == "POST":
                     assert current is not None and current.get("provider_stop_pending")
                     assert current["status"] == "complete"
@@ -336,6 +365,132 @@ async def main(browser_run: BrowserRun) -> None:
             ).to_have_attribute("aria-disabled", "false")
             report["checks"].append("confirmed clear preserves Goal support")
             await page.screenshot(path=str(output / "native-goal-cleared.png"), full_page=True)
+
+            def non_observation_writes() -> list[list[str]]:
+                return [
+                    row
+                    for row in report["api_requests"]
+                    if row[0] != "GET" and not row[1].endswith(("/wait", "/view"))
+                ]
+
+            for width in (1280, 720, 390):
+                await page.set_viewport_size({"width": width, "height": 900})
+                goal_read_error = (
+                    "Could not read provider Goal: structured runtime teardown is in progress"
+                )
+                await page.reload(wait_until="domcontentloaded")
+                warning = page.locator(".composer-goal-error")
+                await expect(warning).to_contain_text("Goal status is unavailable")
+                await expect(warning).to_contain_text("save any unsent text and attachments")
+                await expect(warning).to_contain_text("refresh the page")
+                await expect(warning).to_contain_text("does not restart the provider")
+                await warning.locator("summary").click()
+                await expect(warning).to_contain_text(goal_read_error)
+                composer = page.get_by_placeholder("Send a message…")
+                await expect(composer).to_be_enabled()
+                await composer.fill("Keep this unsent draft during status retry")
+                await page.locator('input[type="file"]').set_input_files(IMAGE)
+                await expect(page.locator(".composer-attachments img")).to_have_count(1)
+                assert await warning.evaluate("el => el.scrollWidth <= el.clientWidth")
+                await page.screenshot(
+                    path=str(output / f"goal-recovery-{width}.png"), full_page=True
+                )
+                writes_before = non_observation_writes()
+                goal_read_error = None
+                await warning.get_by_role("button", name="Retry Goal status").click()
+                await expect(warning).to_have_count(0)
+                await expect(composer).to_have_value("Keep this unsent draft during status retry")
+                await expect(page.locator(".composer-attachments img")).to_have_count(1)
+                assert non_observation_writes() == writes_before
+                report["checks"].append(
+                    f"Goal recovery guidance and read-only retry preserve draft at {width}px"
+                )
+
+            inbox_messages = [
+                {
+                    "message_id": "pending-receipt",
+                    "state": "waiting",
+                    "waiting_reason": "Chat busy",
+                }
+            ]
+            for width in (1280, 720, 390):
+                await page.set_viewport_size({"width": width, "height": 900})
+                await page.reload(wait_until="domcontentloaded")
+                inbox = page.get_by_role("complementary", name="Hub message inbox")
+                await expect(inbox).to_contain_text("Chat busy")
+                composer = page.get_by_placeholder("Send a message…")
+                await expect(composer).to_be_enabled()
+                await composer.fill("Keep this draft while message status is unavailable")
+                await page.locator('input[type="file"]').set_input_files(IMAGE)
+                await expect(page.locator(".composer-attachments img")).to_have_count(1)
+                writes_before = non_observation_writes()
+                inbox_failure = 503
+                await expect(inbox.get_by_role("status")).to_contain_text(
+                    "Retrying automatically", timeout=10000
+                )
+                await expect(inbox).to_contain_text("Check status before resending")
+                await expect(inbox).to_contain_text("Last known status (may be out of date)")
+                await expect(inbox).to_contain_text("Chat busy")
+                await inbox.locator("summary").click()
+                await expect(inbox).to_contain_text("HTTP 503")
+                await expect(inbox.get_by_role("status")).to_be_in_viewport(ratio=1)
+                await expect(inbox.get_by_role("button", name="Retry status")).to_be_in_viewport(
+                    ratio=1
+                )
+                assert await inbox.evaluate("el => el.scrollWidth <= el.clientWidth")
+                await page.screenshot(
+                    path=str(output / f"inbox-recovery-{width}.png"), full_page=True
+                )
+                inbox_failure = None
+                await inbox.get_by_role("button", name="Retry status", exact=True).click()
+                await expect(inbox.get_by_role("status")).to_have_count(0)
+                await expect(inbox).to_contain_text("Chat busy")
+                await expect(composer).to_have_value(
+                    "Keep this draft while message status is unavailable"
+                )
+                inbox_failure = "network"
+                await expect(inbox.get_by_role("status")).to_be_visible(timeout=10000)
+                await inbox.locator("summary").click()
+                await expect(inbox).to_contain_text("Check your network connection")
+                inbox_failure = None
+                await expect(inbox.get_by_role("status")).to_have_count(0, timeout=10000)
+                await expect(inbox).to_contain_text("Chat busy")
+                await expect(page.locator(".composer-attachments img")).to_have_count(1)
+                assert non_observation_writes() == writes_before
+                report["checks"].append(
+                    f"Inbox HTTP/network recovery preserves receipts and sends nothing at {width}px"
+                )
+
+            for width in (1280, 390):
+                await page.set_viewport_size({"width": width, "height": 900})
+                await page.reload(wait_until="domcontentloaded")
+                await expect(page.get_by_placeholder("Send a message…")).to_be_enabled()
+                await page.locator('input[type="file"]').set_input_files(IMAGE)
+                await expect(page.locator(".composer-attachments img")).to_have_count(1)
+                await page.get_by_role("button", name="Add to chat", exact=True).click()
+                await page.get_by_role("menuitem", name="Set a Goal", exact=True).click()
+                dialog = page.get_by_role("dialog", name="Set a Goal")
+                objective = dialog.get_by_placeholder("Describe the outcome to achieve…")
+                await objective.fill("Keep this objective after a failed Goal start")
+                await dialog.get_by_role("button", name="Start Goal", exact=True).click()
+                await expect(dialog).to_contain_text("Check Goal status before submitting again")
+                await expect(dialog).to_contain_text("Refreshing does not restart the provider")
+                await expect(objective).to_have_value(
+                    "Keep this objective after a failed Goal start"
+                )
+                await expect(dialog.locator(".attachment-chip img")).to_have_count(1)
+                writes_before = non_observation_writes()
+                await dialog.get_by_role("button", name="Check Goal status", exact=True).click()
+                await expect(dialog.get_by_role("alert")).to_have_count(0)
+                await expect(objective).to_have_value(
+                    "Keep this objective after a failed Goal start"
+                )
+                await expect(dialog.locator(".attachment-chip img")).to_have_count(1)
+                assert non_observation_writes() == writes_before
+                await dialog.get_by_role("button", name="Cancel", exact=True).click()
+                report["checks"].append(
+                    f"Failed Goal start offers read-only recovery and retains objective/images at {width}px"
+                )
 
             supports_goals = False
             await page.reload(wait_until="domcontentloaded")

@@ -5,7 +5,7 @@ import { loadChatFeature, loadChatUtility } from './chatPresentationTestHarness.
 
 const { groupEventsIntoTurns } = await loadChatUtility('agentStreamTimeline')
 const { messageSourceLabel } = await loadChatFeature('timeline/eventValues')
-const { pendingMessageReceipts } = await loadChatFeature('presentation/chatMessageInbox')
+const { pendingMessageReceipts, messageInboxReadError } = await loadChatFeature('presentation/chatMessageInbox')
 const event = metadata => ({ stream_sequence: 1, session_id: 's', tab_id: 't', agent_type: 'codex',
   type: 'turn_started', payload: { summary: 'hello', metadata }, created_at: '2026-10-20T00:00:00Z',
   run_epoch: 1, turn_id: 'turn', message_id: null, call_id: null })
@@ -38,6 +38,18 @@ test('pending receipt list excludes submitted and terminal turns and bounds malf
   assert.deepEqual(pendingMessageReceipts({ messages }).map(row => row.state), ['queued', 'waiting', 'dispatching', 'uncertain'])
   assert.deepEqual(pendingMessageReceipts({ messages: [null, {}, { state: 'queued', message_id: 42 }] }), [])
   assert.equal(pendingMessageReceipts({ messages: Array(200).fill(messages[0]) }).length, 100)
+})
+
+test('message status errors distinguish timeout, network, authentication and HTTP failures', () => {
+  assert.match(messageInboxReadError(undefined, true), /timed out after 10 seconds/)
+  assert.match(messageInboxReadError(200, true), /timed out/)
+  assert.match(messageInboxReadError(undefined, false), /network connection/)
+  assert.match(messageInboxReadError(401, false), /Sign-in.*HTTP 401/)
+  assert.match(messageInboxReadError(403, false), /Access was denied.*HTTP 403/)
+  for (const status of [404, 429, 500, 502, 503]) {
+    assert.match(messageInboxReadError(status, false), new RegExp(`HTTP ${status}`))
+  }
+  assert.match(messageInboxReadError(200, false), /unreadable.*response/)
 })
 
 test('user bubble separates Hub badge from Feishu avatar and inbox lifecycle clears polling', async () => {
