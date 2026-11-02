@@ -49,6 +49,10 @@
         >
           {{ validationError || error }}
         </p>
+        <slot
+          v-if="error && !validationError"
+          name="recovery"
+        />
         <div class="goal-dialog-actions">
           <button
             type="button"

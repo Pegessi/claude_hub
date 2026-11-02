@@ -8,6 +8,25 @@
     @close="isGoalSetupOpen = false"
     @submit="startGoal"
   >
+    <template #recovery>
+      <div
+        v-if="goalError"
+        class="goal-status-recovery"
+      >
+        <p>
+          Check Goal status before submitting again. If this continues, save your
+          objective and attachments, then refresh the page. Refreshing does not
+          restart the provider.
+        </p>
+        <button
+          type="button"
+          :disabled="isGoalMutating || isGoalHydrating"
+          @click="hydrateGoal"
+        >
+          Check Goal status
+        </button>
+      </div>
+    </template>
     <template #images>
       <p v-if="isGoalEditing">
         Send new images using Steer in the Chat composer.
@@ -59,13 +78,26 @@
 <script setup lang="ts">
 import { requireChatOwner, chatGoalKey, chatAttachmentsKey, chatDeliveryKey, chatImagesKey } from '../owners'
 import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
-const { isGoalSetupOpen, isGoalMutating, goalError, isGoalEditing, goal, startGoal } = requireChatOwner(chatGoalKey)
+const { isGoalSetupOpen, isGoalMutating, isGoalHydrating, hydrateGoal, goalError, isGoalEditing, goal, startGoal } = requireChatOwner(chatGoalKey)
 const { isPreparingAttachments, attachmentDisabledReason, triggerFilePicker, attachments, removeAttachment } = requireChatOwner(chatAttachmentsKey)
 const { composerError } = requireChatOwner(chatDeliveryKey)
 const { openImageLightbox } = requireChatOwner(chatImagesKey)
 </script>
 
 <style scoped>
+.goal-status-recovery { display: grid; gap: 8px; font-size: 12px; line-height: 1.5; }
+.goal-status-recovery p { margin: 0; }
+.goal-status-recovery button {
+  justify-self: start;
+  min-height: 44px;
+  padding: 8px 12px;
+  color: var(--ch-color-text);
+  background: var(--ch-color-surface);
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-sm);
+  cursor: pointer;
+}
+.goal-status-recovery button:disabled { opacity: 0.55; cursor: default; }
 .attachment-chip {
   position: relative;
   width: 48px;

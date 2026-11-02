@@ -10,16 +10,25 @@
       </div>
       <div
         v-if="goalError && !goal && !isGoalSetupOpen && !isManagedChat"
-        class="composer-mode-error"
+        class="composer-mode-error composer-goal-error"
         role="alert"
       >
-        Goal: {{ goalError }}
+        <p>Goal status is unavailable.</p>
+        <p>
+          Wait a few seconds, then retry. If this continues, save any unsent text
+          and attachments, then refresh the page. Refreshing reconnects this page;
+          it does not restart the provider.
+        </p>
         <button
           type="button"
           @click="hydrateGoal"
         >
-          Retry
+          Retry Goal status
         </button>
+        <details>
+          <summary>Error details</summary>
+          <p>{{ goalError }}</p>
+        </details>
       </div>
 
       <!-- Attachment previews -->
@@ -208,6 +217,26 @@ const { isManagedChat, connectionState, capabilities, appStore, props } = requir
   font-size: 11px;
   line-height: 1.35;
 }
+
+.composer-goal-error {
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.composer-goal-error p { margin: 0 0 6px; }
+.composer-goal-error button,
+.composer-goal-error summary {
+  min-height: 44px;
+  padding: 8px;
+  cursor: pointer;
+}
+.composer-goal-error button {
+  color: var(--ch-color-text);
+  background: var(--ch-color-surface);
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-sm);
+}
+.composer-goal-error summary { align-content: center; }
 
 .composer-attachments {
   display: flex;

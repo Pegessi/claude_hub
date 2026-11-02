@@ -7,6 +7,17 @@
 
 ## Released
 
+### fix(chat): explain Goal and message-status recovery
+
+- Add Goal read-error guidance, a read-only status retry and expandable original
+  diagnostics. Explain that page refresh reconnects the UI without restarting
+  the provider, and advise saving unsent text and attachments first.
+- Distinguish message-inbox HTTP, authentication, timeout, network and unreadable
+  response failures. Retain and label last-known receipts, keep automatic
+  polling, and offer a read-only retry without resending messages.
+- Verify recovery, preserved drafts and receipts, and non-mutating retries in
+  mocked browser checks at desktop, narrow-pane and mobile widths.
+
 ### docs(antigravity): document region-restriction bypass and warm-pool proxy
 
 - Add `docs/ANTIGRAVITY.md`: the official `agy` client rejects this account
