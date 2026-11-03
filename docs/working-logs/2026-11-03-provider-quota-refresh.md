@@ -51,7 +51,7 @@ those alternatives.
   `available=false`, `state=unavailable`, `stale=true` and an explicit message.
   Clear values whose reset passed. An unconfigured provider clears old values.
 
-## Verification
+## Feature verification before cross-review
 
 - `./scripts/verify.sh all`: backend default suite **5986 passed, 10 skipped**;
   frontend **1157 passed**; backend types (614 source files), frontend types,
@@ -116,3 +116,63 @@ Three added unit cases cover that distinction and another pending provider;
 quota unit tests now pass **58/58**. The browser scenario now exercises the real
 HTTP 200 unavailable envelope as well as the existing HTTP 503 path. Final
 integration/browser results are recorded with the merge verification evidence.
+
+## Final cross-review and local integration
+
+- Backend/API/CLI cross-review found no quota correctness blocker. Frontend
+  cross-review closed the P2 after independently reviewing `0c95e2e` and rerunning
+  all 58 quota unit tests, types, lint and scenario formatting.
+- While review ran, another task advanced `main` to `d0977f6` with Chat Goal/inbox
+  recovery guidance. Merge `7eb3b6a915dc35e2be2f5e3a12505b9ec36103b7` combines
+  that parent with `0c95e2ebddb5b9528c83ae19bfe845079d0f6bc0`. Its source tree is
+  `193a236a1f0e465f5dde947ae1f3880b7aa9a4c5`.
+- The only conflict was two new `CHANGELOG.md` entries. Both are preserved in
+  full; no source conflict required a manual edit. The adjacent
+  `2026-11-03-provider-quota-merge-decisions.json` binds this resolution to the
+  immutable merge, parents and blobs.
+- On that exact staged tree, frontend **1163/1163**, browser-mocks **16/16**, both
+  type checks, lint, formatting and build passed. Browser assertions include
+  real-contract HTTP 200 unavailable, retry with `refresh=true` while Antigravity
+  remains pending, old-reading preservation, HTTP-error retry identity and
+  desktop/narrow/mobile layouts. The staged tree was unchanged after verification
+  and equals the merge tree. All browser/Vite processes exited normally.
+
+### Backend validation limits and reused evidence
+
+**This integration's default backend full-suite attempts did not finish green.**
+They exposed two unchanged, independently diagnosed timing problems:
+
+1. The first final attempt reached 5574 passing tests, then
+   `test_suppressed_count_flushes_after_window` hung. Python 3.11
+   `asyncio.wait_for` can swallow external cancellation when its inner future
+   has already finished; the monitor catches the resulting inner exception and
+   continues. A deterministic probe reproduced this cancellation race. The
+   existing helper cancels once and waits without a deadline. Production monitor
+   stopping has a related pre-existing risk; it is not changed by quota work.
+2. A bounded full rerun reached 2156 passing tests, then
+   `test_continuous_message_burst_is_dispatched_at_the_max_wait` observed two
+   batches rather than one. It assumes three real 35 ms sleeps fit 50 ms quiet /
+   120 ms maximum windows. Scheduler delay can legitimately cross either window;
+   the production coalescer uses actual arrival times correctly.
+
+The final staged `backend/` Git tree and verification script/interpreter pins
+are identical to the previously reviewed `f8e4c75` backend candidate carrying the
+5986-pass result above. The integration reviewer also ran the failing Feishu
+case plus the complete monitor test file through the isolated verify entry with
+an OS deadline: **13 passed**, exit 0, in `/tmp/claude-hub-verify.paoiqu7k`.
+These focused results do not convert the failed full runs into a full-suite pass.
+The reviewer accepted quota integration with this explicit baseline limitation;
+unrelated monitor/test-stability fixes remain separate follow-up work.
+
+Final evidence root: `~/claude_hub_workspace/provider-quota-integration/`.
+`candidate.json` records the tested tree; `verify-all-final.log` preserves the
+interrupted backend run and passing frontend targets; `backend-bounded-rerun.log`
+preserves the second baseline failure; `verification-equivalence.json` records
+Git object equality. Browser evidence is
+`claude-hub-browser-mocks.hipzsj_p/run/summary.json`, with the new assertion
+`quota_200_unavailable_retry_while_pending=true` in the quota scenario report.
+The earlier pre-fix attempt was interrupted when P2 was found, is not counted as
+a pass, and retains its disposable runtime `/tmp/ch-v-q1zit6u9` for diagnostics.
+
+User authorization covers local `main` integration only. No push, deployment,
+proxy/login change or shared-service restart is part of this delivery.
