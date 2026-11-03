@@ -63,6 +63,12 @@ class _ReviewReaperMixin(_ReviewDeliveryMixin):
                 continue
             if tab.id in live_tab_ids:
                 continue
+            # A direct Chat may carry workspace_id purely as display/grouping
+            # metadata (Hub subagents inherit their parent's workspace). It has
+            # no ManagedSession by design, so "no backing session" is not an
+            # orphan condition; only role-bearing managed tabs are reaped.
+            if tab.workspace_role is None and not tab.managed_session_id:
+                continue
             created_at = tab.created_at
             if created_at is not None:
                 # Tab timestamps and _now() are both naive local datetimes.

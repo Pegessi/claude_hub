@@ -333,6 +333,9 @@ async def main(browser_run: BrowserRun) -> None:
                 elif path == "/api/dot/work/task-7/unwatch":
                     work.clear()
                     body = {"task_id": "task-7", "closed": True}
+                elif request.method == "GET" and path == "/api/subagents":
+                    # Every Chat polls Hub sub-agent links; this fixture has none.
+                    body = []
                 else:
                     report["unknown_requests"].append([method, path])
                     await route.fulfill(

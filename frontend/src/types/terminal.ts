@@ -27,6 +27,9 @@ export interface TerminalTab {
   workspace_name?: string | null
   workspace_role?: WorkspaceSessionRole | null
   managed_session_id?: string | null
+  /** Tab that invoked this one as a Hub subagent (`claude-hub agent run`). */
+  parent_tab_id?: string | null
+  subagent_id?: string | null
   agent_session_id?: string | null
   cursor_transport?: string
   cursor_data_dir?: string | null

@@ -348,6 +348,20 @@
   color: var(--ch-color-text);
 }
 
+.agent-sub-tag {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: var(--ch-color-chip-bg);
+  color: var(--ch-color-text-muted);
+}
+
 .agent-cli[data-kind='claude'] {
   background: rgba(217, 119, 87, 0.18);
   color: #d97757;
