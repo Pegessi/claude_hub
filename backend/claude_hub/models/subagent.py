@@ -21,6 +21,20 @@ SUBAGENT_MAX_WAIT_SECONDS = 60.0
 SUBAGENT_MAX_DEPTH = 2
 # Env key carried by a subagent Chat's tab; its guidance omits the `agent run` recipe.
 SUBAGENT_ID_ENV = "CLAUDE_HUB_SUBAGENT_ID"
+# One-line answer preview shown on the parent Chat jump card.
+SUBAGENT_SUMMARY_MAX_CHARS = 280
+
+
+def subagent_summary_text(final_text: Optional[str]) -> Optional[str]:
+    """Collapse the last turn's answer into a bounded one-line preview."""
+    if not final_text:
+        return None
+    text = " ".join(final_text.split())
+    if not text:
+        return None
+    if len(text) <= SUBAGENT_SUMMARY_MAX_CHARS:
+        return text
+    return text[:SUBAGENT_SUMMARY_MAX_CHARS].rstrip() + "…"
 
 
 def utc_now() -> datetime:
@@ -201,6 +215,7 @@ class SubagentSummary(BaseModel):
     turn_count: int
     last_turn_id: Optional[str]
     last_status: Optional[SubagentTurnStatus]
+    last_summary: Optional[str] = None
 
     @classmethod
     def of(cls, subagent: Subagent) -> "SubagentSummary":
@@ -219,4 +234,5 @@ class SubagentSummary(BaseModel):
             turn_count=len(subagent.turns),
             last_turn_id=last.turn_id if last else None,
             last_status=last.status if last else None,
+            last_summary=subagent_summary_text(last.final_text) if last else None,
         )

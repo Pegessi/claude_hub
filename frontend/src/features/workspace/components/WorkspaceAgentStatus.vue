@@ -11,19 +11,28 @@
       >
         <button
           type="button"
-          :data-active="workspaceSessionView === 'agents'"
-          @click="workspaceSessionView = 'agents'"
+          :data-active="!workspaceSubagentView && workspaceSessionView === 'agents'"
+          @click="showManagedView('agents')"
         >
           <span>Agents</span>
           <strong>{{ workspaceAgents.length }}</strong>
         </button>
         <button
           type="button"
-          :data-active="workspaceSessionView === 'reviewers'"
-          @click="workspaceSessionView = 'reviewers'"
+          :data-active="!workspaceSubagentView && workspaceSessionView === 'reviewers'"
+          @click="showManagedView('reviewers')"
         >
           <span>Reviewers</span>
           <strong>{{ reviewerSessions.length }}</strong>
+        </button>
+        <button
+          type="button"
+          data-testid="workspace-subagents-toggle"
+          :data-active="workspaceSubagentView"
+          @click="toggleWorkspaceSubagentView"
+        >
+          <span>Subagents</span>
+          <strong>{{ workspaceSubagentTabs.length }}</strong>
         </button>
       </div>
       <div class="agent-status-toolbar">
@@ -40,7 +49,10 @@
         </LoadingButton>
       </div>
     </div>
-    <div class="agent-status-grid">
+    <div
+      v-if="!workspaceSubagentView"
+      class="agent-status-grid"
+    >
       <article
         v-for="agent in visibleWorkspaceSessions"
         :key="agent.id"
@@ -169,6 +181,43 @@
         {{ visibleWorkspaceSessionsEmptyText }}
       </div>
     </div>
+    <div
+      v-else
+      class="workspace-subagent-list"
+      data-testid="workspace-subagent-list"
+    >
+      <button
+        v-for="tab in workspaceSubagentTabs"
+        :key="tab.id"
+        type="button"
+        class="workspace-subagent-row"
+        @click="openSubagentTab(tab.id)"
+      >
+        <span class="agent-status-avatar-wrap">
+          <AgentAvatar
+            :agent-type="tab.agent_type"
+            size="sm"
+          />
+          <span
+            class="agent-status-dot"
+            :data-status="subagentRuntimeStatus(tab)"
+          />
+        </span>
+        <span class="agent-status-main">
+          <span class="agent-status-line">
+            <span class="agent-status-name">{{ tab.name }}</span>
+            <span class="agent-status-kind">Sub-agent</span>
+          </span>
+          <span class="agent-status-detail">{{ subagentStatusText(tab) }}</span>
+        </span>
+      </button>
+      <div
+        v-if="workspaceSubagentTabs.length === 0"
+        class="agent-status-empty"
+      >
+        No sub-agents in this workspace.
+      </div>
+    </div>
   </section>
 </template>
 
@@ -183,6 +232,13 @@ import {
 const {
   activeWorkspaceId,
   workspaceSessionView,
+  workspaceSubagentView,
+  workspaceSubagentTabs,
+  showManagedView,
+  toggleWorkspaceSubagentView,
+  openSubagentTab,
+  subagentRuntimeStatus,
+  subagentStatusText,
   workspaceAgents,
   reviewerSessions,
   isPending,
@@ -670,6 +726,31 @@ const {
   color: var(--ch-color-text-subtle);
   font-size: 12px;
   padding: 8px 0;
+}
+
+.workspace-subagent-list {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.workspace-subagent-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-canvas);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.workspace-subagent-row:hover {
+  background: var(--ch-color-surface-hover, rgba(139, 148, 158, 0.08));
 }
 </style>
 

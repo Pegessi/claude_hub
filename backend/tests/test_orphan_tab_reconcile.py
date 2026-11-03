@@ -140,6 +140,21 @@ async def test_preserves_manual_tab(monkeypatch: MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_preserves_display_attributed_direct_chat(monkeypatch: MonkeyPatch) -> None:
+    deleted: list[str] = []
+    # A Hub subagent tab carries the parent workspace purely for grouping:
+    # workspace_id set, no role and no managed session. It must survive past
+    # the grace window and repeated board loads.
+    tabs = [_tab("subagent-1", workspace_id="ws-1", role=None, age_seconds=3600.0)]
+    _patch_tabs(monkeypatch, tabs, deleted)
+
+    for _ in range(2):
+        pruned = await workspace_manager._prune_orphan_workspace_tabs("ws-1")
+        assert pruned == 0
+    assert deleted == []
+
+
+@pytest.mark.asyncio
 async def test_preserves_tab_with_live_session(monkeypatch: MonkeyPatch) -> None:
     deleted: list[str] = []
     _session("cb-reviewer-1", "ws-1", "tab-live")

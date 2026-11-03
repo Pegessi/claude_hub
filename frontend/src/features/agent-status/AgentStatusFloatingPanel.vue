@@ -114,6 +114,11 @@
               <span class="agent-line">
                 <span class="agent-name">{{ row.tab.name }}</span>
                 <span
+                  v-if="row.tab.parent_tab_id"
+                  class="agent-sub-tag"
+                  title="Hub sub-agent started from another Chat"
+                >sub</span>
+                <span
                   class="agent-cli"
                   :data-kind="row.tab.agent_type || 'terminal'"
                 >{{ row.tab.agent_type || 'terminal' }}</span>

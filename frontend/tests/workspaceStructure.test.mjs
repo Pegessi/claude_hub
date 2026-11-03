@@ -104,9 +104,11 @@ test('workspace production files respect the hard line budget and own scoped sty
 })
 
 // Characterization of the accepted cf16254 view: component boundaries may change,
-// while native elements, conditions, handlers, Teleports and rendered text stay the same.
+// while native elements, conditions, handlers, Teleports and rendered text stay the
+// same. Re-baselined for InfoWall d2627d2f (workspace Subagents view): the only
+// delta is the third view toggle, the managed-grid gate and the sub-agent list.
 test('workspace component expansion preserves the accepted native template', () => {
-  assert.equal(digest(nativeTree(descriptors.get('WorkspacePage').template.ast)), '5c73bef2909e14db4b92b0133a2a548373e26496da0e29f4db282c5db713c73b')
+  assert.equal(digest(nativeTree(descriptors.get('WorkspacePage').template.ast)), 'c244b006947ef3c3b86931a4393a69001bb0781758332235b2294d737cea2232')
 })
 
 test('workspace scoped styles retain every accepted selector and declaration', async () => {
@@ -119,7 +121,7 @@ test('workspace scoped styles retain every accepted selector and declaration', a
       for (const contract of stylesheetContracts(style.content)) rules.add(contract)
     }
   }
-  assert.equal(digest([...rules].sort()), '8b8ecefd86ee42e9bbaa27c3462088ef5c35e32555a0fda6f82788b4a6004956')
+  assert.equal(digest([...rules].sort()), 'cf3b499cee97949306b7f5cde1e8424a3bc14eb9286b5011db88ef7c8e54f02f')
 })
 
 async function componentStyles(name) {

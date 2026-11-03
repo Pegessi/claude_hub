@@ -347,6 +347,14 @@ async def main(browser_run: BrowserRun) -> None:
                             body=": mock\n\n",
                         )
                         return
+                    elif method == "GET" and path == "/api/subagents":
+                        # Every Chat polls Hub sub-agent links; this fixture has none.
+                        await route.fulfill(
+                            status=200,
+                            content_type="application/json",
+                            body="[]",
+                        )
+                        return
                     else:
                         report["unknown_api_requests"].append([method, request.url])
                         await route.fulfill(

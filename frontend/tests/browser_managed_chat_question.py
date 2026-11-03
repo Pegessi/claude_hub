@@ -227,6 +227,8 @@ async def main(browser_run: BrowserRun) -> None:
                     body = {"ok": True, "answered_question": True}
             elif method == "GET" and path == "/api/tabs/status":
                 body = []
+            elif method == "GET" and path == "/api/subagents":
+                body = []
             else:
                 unknown_requests.append((method, path))
                 await route.fulfill(
