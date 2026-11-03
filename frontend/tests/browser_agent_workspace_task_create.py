@@ -534,8 +534,8 @@ async def main(browser_run: BrowserRun) -> None:
             )
 
         await page.goto(url)
-        workspace_select = page.locator("select.workspace-select")
-        await expect(workspace_select).to_have_value("ws-1")
+        workspace_picker = page.get_by_role("button", name="Select workspace")
+        await expect(workspace_picker).to_contain_text("Workspace One")
         await expect(page.get_by_role("button", name="Add Task", exact=True)).to_be_enabled()
 
         # Workspace workers and reviewers choose their execution surface before
@@ -629,9 +629,11 @@ async def main(browser_run: BrowserRun) -> None:
             return row
 
         async def switch_workspace(workspace_id: str) -> None:
-            await workspace_select.select_option(workspace_id)
-            await expect(workspace_select).to_have_value(workspace_id)
             expected_name = "Workspace One" if workspace_id == "ws-1" else "Workspace Two"
+            await workspace_picker.click()
+            panel = page.get_by_role("menu", name="Workspaces")
+            await panel.locator(".workspace-picker__option").filter(has_text=expected_name).click()
+            await expect(workspace_picker).to_contain_text(expected_name)
             await expect(page.locator(".workspace-mobile-identity strong")).to_have_text(
                 expected_name
             )

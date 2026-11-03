@@ -12,24 +12,18 @@
     <div class="workspace-actions">
       <div
         class="workspace-select-shell"
-        :data-loading="isPending('workspace:switch')"
+        :data-loading="isPending('workspace:switch') || isPending('workspace:delete')"
       >
-        <select
-          v-model="selectedWorkspaceId"
-          class="workspace-select"
+        <WorkspacePicker
+          :items="workspaces"
+          :selected-id="selectedWorkspaceId || null"
           :disabled="isPending('workspace:switch')"
-          @change="handleWorkspaceChange"
-        >
-          <option
-            v-for="workspace in workspaces"
-            :key="workspace.id"
-            :value="workspace.id"
-          >
-            {{ workspace.name }}
-          </option>
-        </select>
+          :deleting="isPending('workspace:delete')"
+          @select="handlePickerSelect"
+          @delete="confirmDeleteWorkspace"
+        />
         <span
-          v-if="isPending('workspace:switch')"
+          v-if="isPending('workspace:switch') || isPending('workspace:delete')"
           class="workspace-select-spinner"
           aria-hidden="true"
         />
@@ -158,6 +152,7 @@
 <script setup lang="ts">
 import LoadingButton from '@/components/LoadingButton.vue'
 import AppExtensionActions from '@/components/AppExtensionActions.vue'
+import WorkspacePicker from './WorkspacePicker.vue'
 import {
   useWorkspaceRuntimeContext,
   useWorkspaceEditorContext,
@@ -171,6 +166,7 @@ const {
   isPending,
   selectedWorkspaceId,
   handleWorkspaceChange,
+  confirmDeleteWorkspace,
   workspaces,
   activeWorkspaceId,
   openTaskModal,
@@ -197,6 +193,13 @@ const {
   toggleThemeFromMenu,
   workspaceMobileMenuRef,
 } = useWorkspaceNavigationContext()
+
+// The picker reports intent only; mirror the former native <select> by
+// updating the single selectedWorkspaceId owner before switching boards.
+async function handlePickerSelect(workspaceId: string) {
+  selectedWorkspaceId.value = workspaceId
+  await handleWorkspaceChange()
+}
 </script>
 
 <style scoped src="../styles/shared-workspace-layout.css"></style>
@@ -388,23 +391,11 @@ const {
   min-width: 220px;
 }
 
-.workspace-select {
-  width: 100%;
-  min-width: 160px;
-  padding-right: 32px;
-  height: 30px;
-  font-size: 12px;
-}
-
-.workspace-select-shell[data-loading='true'] .workspace-select {
-  cursor: wait;
-  opacity: 0.75;
-}
-
 .workspace-select-spinner {
   position: absolute;
   right: 10px;
   top: 50%;
+  z-index: 1;
   width: 14px;
   height: 14px;
   margin-top: -7px;
@@ -499,11 +490,6 @@ const {
     min-width: 0;
   }
 
-  .workspace-select {
-    min-width: 0;
-  }
-
-  .workspace-select,
   .workspace-actions .tool-button,
   .workspace-actions .primary-button {
     height: 32px;

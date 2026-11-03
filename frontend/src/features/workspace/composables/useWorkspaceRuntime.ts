@@ -29,12 +29,14 @@ import {
   type ManagedSession,
   type TerminalAgentStatus,
   type WorkspaceTask,
+  type Workspace,
   type WorkspaceAttachment,
   type AgentRuntimeStatus,
 } from '@/types'
 import {
   formatAttachmentSize,
 } from '@/utils/draftAttachments'
+import { workspaceDeleteConfirmMessage } from '../presentation/workspaceDeletion'
 import type { WorkspaceSessionView } from '../types'
 
 export function useWorkspaceRuntime() {
@@ -417,6 +419,25 @@ export function useWorkspaceRuntime() {
     })
   }
 
+  // Delete a workspace straight from the New-Agent workspace picker. Reuses the
+  // editor flow's pending key and confirmation wording; the store owns the
+  // DELETE request, list removal and active-workspace fallback (which the
+  // activeWorkspaceId -> selectedWorkspaceId watcher reflects in the picker).
+  async function confirmDeleteWorkspace(workspace: Pick<Workspace, 'id' | 'name'>) {
+    if (isPending('workspace:delete')) return
+    const confirmed = window.confirm(workspaceDeleteConfirmMessage(workspace, {
+      isActive: workspace.id === activeWorkspaceId.value,
+      openTasks: tasks.value,
+      sessions: managedWorkspaceSessions.value,
+    }))
+    if (!confirmed) return
+    try {
+      await runPending('workspace:delete', () => workspaceStore.deleteWorkspace(workspace.id))
+    } catch {
+      // The store already pushed the error notification; the row stays visible.
+    }
+  }
+
   function openTaskModal(): void {
     const workspaceId = activeWorkspaceId.value
     if (workspaceId) taskCreateFlow.open(workspaceId)
@@ -457,6 +478,7 @@ export function useWorkspaceRuntime() {
     agentDeleteTitle,
     agentActionKey,
     deleteAgent,
+    confirmDeleteWorkspace,
     visibleWorkspaceSessionsEmptyText,
     boardLoading,
     isMobileColumnCollapsed,

@@ -216,6 +216,7 @@ provideWorkspaceRuntimeContext({
   agentDeleteTitle: runtime.agentDeleteTitle,
   agentActionKey: runtime.agentActionKey,
   deleteAgent: runtime.deleteAgent,
+  confirmDeleteWorkspace: runtime.confirmDeleteWorkspace,
   visibleWorkspaceSessionsEmptyText: runtime.visibleWorkspaceSessionsEmptyText,
   boardLoading: runtime.boardLoading,
   isMobileColumnCollapsed: runtime.isMobileColumnCollapsed,

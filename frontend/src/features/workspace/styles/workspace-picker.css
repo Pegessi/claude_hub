@@ -1,0 +1,176 @@
+/* Workspace picker popover used in the workspace header (New Agent flow).
+   Geometry matches the former native select: 30px trigger on desktop,
+   32px on mobile, same control colors as the shared form controls. */
+
+.workspace-picker {
+  position: relative;
+  width: 100%;
+}
+
+.workspace-picker__trigger {
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  font-family: var(--ch-font-sans);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color var(--ch-motion-fast), background var(--ch-motion-fast);
+}
+
+.workspace-picker__trigger:hover:not(:disabled) {
+  border-color: var(--ch-color-border-hover);
+  background: var(--ch-color-surface-control-hover);
+}
+
+.workspace-picker__trigger:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  border-color: var(--ch-color-accent);
+}
+
+.workspace-picker__trigger:disabled {
+  cursor: wait;
+  opacity: 0.75;
+}
+
+.workspace-picker__value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.workspace-picker__chevron {
+  flex: none;
+  color: var(--ch-color-text-muted);
+}
+
+.workspace-picker__panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 50;
+  width: max-content;
+  min-width: 100%;
+  max-width: min(320px, calc(100dvw - 16px));
+  max-height: min(360px, calc(100dvh - 96px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px;
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-glass);
+  box-shadow: var(--ch-shadow-soft);
+  scrollbar-width: thin;
+}
+
+.workspace-picker__empty {
+  margin: 0;
+  padding: 8px 10px;
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.workspace-picker__row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: var(--ch-radius-sm);
+}
+
+.workspace-picker__row:hover {
+  background: var(--ch-color-surface-control-hover);
+}
+
+.workspace-picker__option {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--ch-radius-sm);
+  background: transparent;
+  color: var(--ch-color-text);
+  font-family: var(--ch-font-sans);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.workspace-picker__option:focus-visible,
+.workspace-picker__delete:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+}
+
+.workspace-picker__check {
+  flex: none;
+  width: 14px;
+  color: var(--ch-color-accent-strong);
+}
+
+.workspace-picker__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-picker__delete {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  margin-right: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--ch-radius-sm);
+  background: transparent;
+  color: var(--ch-color-text-muted);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.workspace-picker__delete:hover:not(:disabled) {
+  background: var(--ch-color-danger-bg);
+  color: var(--ch-color-danger-text);
+}
+
+.workspace-picker__delete:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+@media (max-width: 760px) {
+  .workspace-picker__trigger {
+    height: 32px;
+  }
+
+  /* The header grid column is narrower than a readable popover, so anchor a
+     full-width panel under the sticky header instead of letting it clip. */
+  .workspace-picker__panel {
+    position: fixed;
+    top: 44px;
+    left: 8px;
+    right: 8px;
+    width: auto;
+    min-width: 0;
+    max-width: none;
+  }
+}
