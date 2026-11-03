@@ -117,8 +117,9 @@ export interface QuotaLimit {
 
 /**
  * One provider's quota reading. `available: false` means the Hub could not read
- * the provider at all and `message` carries the reason; the request still
- * succeeds so one broken provider never hides the other.
+ * the provider on this attempt and `message` carries the reason; the request
+ * still succeeds so one broken provider never hides another. Failed refreshes
+ * may retain historical limits and the original `as_of`, marked `stale: true`.
  */
 export interface ProviderQuota {
   provider: string

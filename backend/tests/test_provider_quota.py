@@ -5,8 +5,11 @@ or a live MASO/Antigravity service: homes are redirected per test and every
 external call is mocked.
 """
 
+import asyncio
 import json
 import os
+import sys
+import threading
 from pathlib import Path
 
 import httpx
@@ -93,10 +96,12 @@ def _write_rollout(
 @pytest.fixture(autouse=True)
 def clear_quota_cache(tmp_path, monkeypatch):
     """Keep the module-level reading cache and host Antigravity home isolated."""
-    setattr(pq, "_QUOTA_CACHE", None)
+    pq._QUOTA_CACHE.clear()
+    pq._QUOTA_IN_FLIGHT.clear()
     monkeypatch.setenv("ANTIGRAVITY_HOME", str(tmp_path / "antigravity-empty"))
     yield
-    setattr(pq, "_QUOTA_CACHE", None)
+    pq._QUOTA_CACHE.clear()
+    pq._QUOTA_IN_FLIGHT.clear()
 
 
 @pytest.fixture
@@ -826,11 +831,11 @@ async def test_reading_is_cached_until_refresh(
     _write_rollout(codex_home, "rollout-a.jsonl", [_token_count_line()], mtime=1000.0)
 
     first = await pq.read_provider_quota()
-    assert await pq.read_provider_quota() is first
+    assert await pq.read_provider_quota() == first
     assert len(calls) == 1
     assert len(agy_calls) == 1
 
-    assert await pq.read_provider_quota(refresh=True) is not first
+    await pq.read_provider_quota(refresh=True)
     assert len(calls) == 2
     assert len(agy_calls) == 2
 
@@ -850,3 +855,201 @@ async def test_unexpected_provider_failure_does_not_fail_the_reading(
     assert codex.available is False and codex.state == "unavailable"
     assert maso.available is True
     assert antigravity.available is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_refresh", [False, True], ids=["join-passive", "join-forced"])
+async def test_concurrent_refreshes_share_one_query_and_survive_a_cancel(
+    monkeypatch, first_refresh
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def read(refresh=False):
+        calls.append(refresh)
+        started.set()
+        await release.wait()
+        return pq.ProviderQuota(provider="antigravity", available=True, state="within")
+
+    monkeypatch.setattr(pq, "read_antigravity_quota", read)
+    first = asyncio.create_task(pq.read_provider_quota(first_refresh, "antigravity"))
+    await asyncio.wait_for(started.wait(), 1)
+    followers = [asyncio.create_task(pq.read_provider_quota(True, "antigravity")) for _ in range(5)]
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    # Let all followers attach before the provider finishes.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert calls == [first_refresh]
+    release.set()
+    results = await asyncio.wait_for(asyncio.gather(*followers), 1)
+    assert all(result.providers[0].available for result in results)
+    assert calls == [first_refresh]
+    assert not pq._QUOTA_IN_FLIGHT
+    assert await pq.read_provider_quota(provider="antigravity") == results[0]
+    assert calls == [first_refresh]
+
+
+@pytest.mark.asyncio
+async def test_force_refresh_waits_for_cached_query_then_refreshes_once(monkeypatch) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    force_started = asyncio.Event()
+    force_release = asyncio.Event()
+    calls = []
+
+    async def read(refresh=False):
+        calls.append(refresh)
+        if refresh:
+            force_started.set()
+            await force_release.wait()
+        else:
+            started.set()
+            await release.wait()
+        return pq.ProviderQuota(provider="maso", available=True, state="within", as_of=str(refresh))
+
+    monkeypatch.setattr(pq, "read_maso_quota", read)
+    normal = asyncio.create_task(pq.read_provider_quota(provider="maso"))
+    await asyncio.wait_for(started.wait(), 1)
+    forced = [asyncio.create_task(pq.read_provider_quota(True, "maso")) for _ in range(3)]
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert calls == [False]
+    release.set()
+    await asyncio.wait_for(force_started.wait(), 1)
+    assert calls == [False, True]
+    force_release.set()
+    assert (await normal).providers[0].as_of == "False"
+    results = await asyncio.wait_for(asyncio.gather(*forced), 1)
+    assert all(result.providers[0].as_of == "True" for result in results)
+    assert calls == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_codex_filesystem_scan_does_not_block_other_providers(monkeypatch) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def scan():
+        started.set()
+        assert release.wait(3)
+        return pq.ProviderQuota(provider="codex", available=True, state="within")
+
+    async def read(refresh=False):
+        return pq.ProviderQuota(provider="maso", available=True, state="within")
+
+    monkeypatch.setattr(pq, "read_codex_quota", scan)
+    monkeypatch.setattr(pq, "read_maso_quota", read)
+    codex = asyncio.create_task(pq.read_provider_quota(provider="codex"))
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        maso = await asyncio.wait_for(pq.read_provider_quota(provider="maso"), 1)
+        assert maso.providers[0].available
+        assert not codex.done()
+    finally:
+        release.set()
+        await codex
+
+
+@pytest.mark.asyncio
+async def test_provider_cache_expires_independently(antigravity_service) -> None:
+    _state, calls = antigravity_service
+    await pq.read_provider_quota(provider="antigravity")
+    _, reading = pq._QUOTA_CACHE["antigravity"]
+    pq._QUOTA_CACHE["antigravity"] = (0, reading)
+    await pq.read_provider_quota(provider="antigravity")
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_refresh_retains_last_success_without_claiming_freshness(
+    antigravity_service,
+) -> None:
+    state, _calls = antigravity_service
+    first = (await pq.read_provider_quota(provider="antigravity")).providers[0]
+    state["error"] = TimeoutError()
+    for _ in range(2):
+        failed = (await pq.read_provider_quota(True, "antigravity")).providers[0]
+        assert failed.available is False and failed.state == "unavailable"
+        assert failed.stale is True
+        assert failed.as_of == first.as_of
+        assert failed.limits == first.limits
+        assert "timed out" in failed.message
+        assert "last successful reading" in failed.message
+    state["error"] = None
+    recovered = (await pq.read_provider_quota(True, "antigravity")).providers[0]
+    assert recovered.available is True and recovered.stale is False
+    assert recovered.message == ""
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_provider_does_not_retain_previous_account_reading(
+    antigravity_service, monkeypatch
+) -> None:
+    await pq.read_provider_quota(provider="antigravity")
+    monkeypatch.setattr(pq, "_antigravity_absent_from_deployment", lambda: True)
+    missing = (await pq.read_provider_quota(True, "antigravity")).providers[0]
+    assert missing.state == "not_configured"
+    assert missing.limits == [] and missing.as_of is None
+
+
+def test_retained_values_are_cleared_when_reset_has_passed() -> None:
+    old = pq.ProviderQuota(
+        provider="antigravity",
+        available=True,
+        state="over",
+        limits=[
+            pq.QuotaLimit(
+                scope="weekly",
+                label="Weekly",
+                state="over",
+                remaining_percent=0,
+                used_percent=100,
+                resets_at="2020-01-01T00:00:00Z",
+            )
+        ],
+    )
+    retained = pq._retain_last_reading(pq._antigravity_unavailable(), old)
+    assert retained.limits[0].state == "unknown"
+    assert retained.limits[0].remaining_percent is None
+    assert retained.limits[0].used_percent is None
+    assert old.limits[0].used_percent == 100
+
+
+@pytest.mark.asyncio
+async def test_antigravity_timeout_is_not_reported_as_a_login_failure(antigravity_service) -> None:
+    state, _calls = antigravity_service
+    state["error"] = TimeoutError()
+    reading = await pq.read_antigravity_quota()
+    assert reading.state == "unavailable" and not reading.available
+    assert "timed out" in reading.message
+    assert "login" not in reading.message
+    assert pq._ANTIGRAVITY_TIMEOUT_S > 12  # A successful live /usage took 12.001s.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True], ids=["timeout", "cancel"])
+async def test_antigravity_query_reaps_its_process_on_timeout_or_cancel(
+    monkeypatch, cancel
+) -> None:
+    create = asyncio.create_subprocess_exec
+    started = asyncio.Event()
+    processes = []
+
+    async def spawn(*args, **kwargs):
+        proc = await create(sys.executable, "-c", "import time; time.sleep(60)", **kwargs)
+        processes.append(proc)
+        started.set()
+        return proc
+
+    monkeypatch.setattr(pq.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(pq, "_ANTIGRAVITY_TIMEOUT_S", 5 if cancel else 0.01)
+    task = asyncio.create_task(pq._run_antigravity_usage())
+    await asyncio.wait_for(started.wait(), 1)
+    if cancel:
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError if cancel else TimeoutError):
+        await asyncio.wait_for(task, 2)
+    assert processes[0].returncode is not None
