@@ -109,7 +109,7 @@ test('workspace production files respect the hard line budget and own scoped sty
 // became the WorkspacePicker popover so each row can host a delete action; the
 // expanded tree otherwise keeps every accepted element/handler.
 test('workspace component expansion preserves the accepted native template', () => {
-  assert.equal(digest(nativeTree(descriptors.get('WorkspacePage').template.ast)), '471529652ae4619a4bd401cd83a34d16d0cff21ef671ef6035db379ae9008217')
+  assert.equal(digest(nativeTree(descriptors.get('WorkspacePage').template.ast)), '3a551f4e93372b2aeb85c132340df077dfd6586e9881d13e6bb32da442b66c48')
 })
 
 // 2026-11-03 (InfoWall 16ef41f6): adds styles/workspace-picker.css and removes
@@ -124,7 +124,7 @@ test('workspace scoped styles retain every accepted selector and declaration', a
       for (const contract of stylesheetContracts(style.content)) rules.add(contract)
     }
   }
-  assert.equal(digest([...rules].sort()), 'b2de597b1159f2ce0a9418ec2fbe63ed585e639468b51958071fbc5c058d9408')
+  assert.equal(digest([...rules].sort()), 'e6fee9eeadc2e4db909098032a0960b8d44a9cbd11ef636b9c14bcfd9a148fc2')
 })
 
 async function componentStyles(name) {

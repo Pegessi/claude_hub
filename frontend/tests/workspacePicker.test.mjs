@@ -79,6 +79,7 @@ test('renders the selected workspace on the closed trigger', (t) => {
   const view = mountPicker(t)
   assert.equal(view.trigger().props['aria-expanded'], false)
   assert.equal(view.trigger().props['aria-haspopup'], 'menu')
+  assert.equal(view.trigger().props['aria-label'], 'Select workspace: Workspace One')
   assert.equal(textOf(view.trigger()), 'Workspace One▾')
   assert.equal(view.panel(), null)
 })
@@ -87,16 +88,55 @@ test('opening lists every workspace with select and delete controls', async (t) 
   const view = mountPicker(t)
   view.trigger().props.onClick({})
   await vue.nextTick()
+  await vue.nextTick()
   assert.equal(view.trigger().props['aria-expanded'], true)
   const panel = view.panel()
   assert.equal(panel.props.role, 'menu')
   assert.equal(panel.props['aria-label'], 'Workspaces')
+  assert.equal(view.trigger().props['aria-controls'], panel.props.id)
   assert.equal(view.options().length, 2)
   assert.deepEqual(view.options().map(option => option.props['aria-checked']), [true, false])
   assert.deepEqual(
     view.deleteButtons().map(button => button.props['aria-label']),
     ['Delete workspace "Workspace One"', 'Delete workspace "Workspace Two"']
   )
+  // Roving tabindex opens on the current workspace's row.
+  assert.deepEqual(view.options().map(option => option.props.tabindex), [0, -1])
+  assert.deepEqual(
+    view.deleteButtons().map(button => button.props.tabindex),
+    [-1, -1]
+  )
+})
+
+test('arrow keys move the roving index and escape closes via the panel handler', async (t) => {
+  const view = mountPicker(t)
+  view.trigger().props.onClick({})
+  await vue.nextTick()
+  await vue.nextTick()
+  const panel = view.panel()
+  panel.props.onKeydown({ key: 'ArrowDown', preventDefault() {} })
+  await vue.nextTick()
+  // DOM order is select/delete per row: selected option(0) -> its delete(1).
+  assert.deepEqual(view.options().map(option => option.props.tabindex), [-1, -1])
+  assert.equal(view.deleteButtons()[0].props.tabindex, 0)
+  panel.props.onKeydown({ key: 'ArrowDown', preventDefault() {} })
+  await vue.nextTick()
+  assert.equal(view.options()[1].props.tabindex, 0)
+  panel.props.onKeydown({ key: 'End', preventDefault() {} })
+  await vue.nextTick()
+  assert.equal(view.deleteButtons()[1].props.tabindex, 0)
+  panel.props.onKeydown({
+    key: 'ArrowUp', preventDefault() {},
+  })
+  await vue.nextTick()
+  assert.equal(view.options()[1].props.tabindex, 0)
+  assert.equal(view.deleteButtons()[1].props.tabindex, -1)
+  panel.props.onKeydown({
+    key: 'Escape', preventDefault() {}, stopPropagation() {},
+  })
+  await vue.nextTick()
+  assert.equal(view.panel(), null)
+  assert.deepEqual(view.calls, [])
 })
 
 test('selecting another workspace emits select once and closes; current row is a no-op', async (t) => {
@@ -153,18 +193,21 @@ test('Escape and outside pointerdown dismiss without emitting; inside clicks sta
   assert.deepEqual(view.calls, [])
 })
 
-test('a disabled trigger cannot open while switching', async (t) => {
+test('a disabled trigger cannot open while switching and hides the chevron', (t) => {
   const view = mountPicker(t, { disabled: true })
+  assert.equal(textOf(view.trigger()), 'Workspace One')
   view.trigger().props.onClick({})
-  await vue.nextTick()
+  // Listener binding happens via the open watcher, which never flips.
+  assert.deepEqual([...listeners.keys()], [])
   assert.equal(view.panel(), null)
 })
 
-test('deleting state disables the per-row delete buttons', async (t) => {
+test('deleting state disables every row action', async (t) => {
   const view = mountPicker(t, { deleting: true })
   view.trigger().props.onClick({})
   await vue.nextTick()
   assert.ok(view.deleteButtons().every(button => button.props.disabled === true))
+  assert.ok(view.options().every(option => option.props.disabled === true))
 })
 
 test('zero workspaces shows the empty-state message and no rows', async (t) => {

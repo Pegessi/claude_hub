@@ -18,9 +18,9 @@
   `workspace:delete` pending state. Confirmation keeps the established wording
   and additionally names the active workspace's open tasks and live sessions.
 - After deletion the row disappears immediately; deleting the active workspace
-  falls back to the next workspace and its board, and the last deletion leaves
-  an explicit empty state. Failed deletes keep the row and surface the existing
-  error notification.
+  falls back to the first remaining workspace and its board, and the last
+  deletion leaves an explicit empty state. Failed deletes keep the row and
+  surface the existing error notification.
 - Cover the picker behavior, confirmation wording, store state cleanup, and the
   real click/confirm/refresh sequence at desktop (1280px) and mobile (390px)
   with unit and mocked browser checks.
