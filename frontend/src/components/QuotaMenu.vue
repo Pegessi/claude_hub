@@ -194,15 +194,18 @@
                 {{ panel.view ? 'Refreshing quota...' : 'Loading quota...' }}
               </p>
               <div
-                v-else-if="panel.error"
+                v-else-if="panel.error || panel.view?.state === 'unavailable'"
                 class="quota-failure"
                 role="alert"
               >
-                <p class="quota-status quota-status--error">
+                <p
+                  v-if="panel.error"
+                  class="quota-status quota-status--error"
+                >
                   {{ panel.error }}
                 </p>
                 <p
-                  v-if="panel.view"
+                  v-if="panel.error && panel.view"
                   class="quota-note quota-note--warning"
                 >
                   Showing the previous reading; this refresh failed.
@@ -357,10 +360,15 @@ function refreshQuota(): void {
 
 function retryQuota(provider: QuotaProviderKey): void {
   const request = providerRequests.value[provider]
-  if (request.loading || !request.error) return
-  // A failed provider can retry while another is still loading, without
-  // restarting successful providers or changing the original refresh intent.
-  void fetchProviderQuota(provider, request.refresh)
+  if (request.loading) return
+  if (request.error) {
+    // HTTP/schema failures retry the same request, including its cache intent.
+    void fetchProviderQuota(provider, request.refresh)
+  } else if (providerViews.value.some(view => view.key === provider && view.state === 'unavailable')) {
+    // A valid unavailable reading may be cached. An explicit retry must query
+    // this provider again without waiting for other providers to finish.
+    void fetchProviderQuota(provider, true)
+  }
 }
 
 function startAgeTicker(): void {

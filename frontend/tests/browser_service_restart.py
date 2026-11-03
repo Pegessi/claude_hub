@@ -305,6 +305,18 @@ async def main(browser_run: BrowserRun) -> None:
                             }
                         ]
                     }
+                    if (
+                        provider == "maso"
+                        and len([row for row in quota_requests if row["provider"] == "maso"]) == 1
+                    ):
+                        # Real quota failures use HTTP 200 with a provider-level
+                        # unavailable state, optionally retaining successful limits.
+                        body["providers"][0].update(
+                            available=False,
+                            state="unavailable",
+                            stale=True,
+                            message="MASO quota is unavailable. Showing the last successful reading.",
+                        )
                 else:
                     report["unknown_requests"].append([request.method, path])
                     await route.fulfill(status=501, body="unknown fixture route")
@@ -351,6 +363,19 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(antigravity_quota).to_contain_text("Loading quota...")
             await expect(antigravity_quota).to_have_attribute("aria-busy", "true")
             await expect(refresh_quota_btn).to_be_disabled()
+            await expect(maso_quota).to_contain_text("MASO quota is unavailable")
+            await maso_quota.get_by_role("button", name="Retry MASO quota", exact=True).click()
+            await expect(maso_quota).to_contain_text("60% left")
+            await expect(maso_quota.get_by_role("button", name="Retry MASO quota")).to_have_count(0)
+            await expect(antigravity_quota).to_have_attribute("aria-busy", "true")
+            await expect(refresh_quota_btn).to_be_disabled()
+            assert quota_requests[-1] == {"provider": "maso", "refresh": True}
+            assert len(quota_requests) == 4, "retry must not wait for or restart another provider"
+            report["quota_200_unavailable_retry_while_pending"] = True
+            # The retry button disappears after recovery. Keyboard navigation
+            # must still reach the only enabled dialog action while loading.
+            await page.keyboard.press("Tab")
+            await expect(close_quota_btn).to_be_focused()
             assert not quota_release.is_set()
             assert await quota_dialog.locator(".quota-provider").evaluate_all(
                 "nodes => nodes.map(node => node.dataset.provider)"
@@ -388,14 +413,14 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(antigravity_quota.get_by_role("alert")).to_have_count(0)
             assert quota_requests[-1] == {"provider": "antigravity", "refresh": True}
             assert [row["provider"] for row in quota_requests].count("codex") == 2
-            assert [row["provider"] for row in quota_requests].count("maso") == 2
+            assert [row["provider"] for row in quota_requests].count("maso") == 3
             assert [row["provider"] for row in quota_requests].count("antigravity") == 3
             await close_quota_btn.click()
             await expect(quota_dialog).not_to_be_visible()
             await extensions_trigger.click()
             await page.get_by_role("button", name="Provider quota", exact=True).click()
             await expect(antigravity_quota).to_contain_text("94% left")
-            assert len(quota_requests) == 7, "reopening must reuse the existing readings"
+            assert len(quota_requests) == 8, "reopening must reuse the existing readings"
             await page.keyboard.press("Escape")
             await expect(quota_dialog).not_to_be_visible()
             await expect(extensions_trigger).to_be_focused()
