@@ -74,6 +74,9 @@ async def main(browser_run: BrowserRun) -> None:
     outage = False
     failures = 0
     posts: list[dict] = []
+    quota_release = asyncio.Event()
+    quota_requests: list[dict] = []
+    antigravity_refreshes = 0
     report: dict = {
         "result": "FAIL",
         "api_requests": [],
@@ -82,6 +85,7 @@ async def main(browser_run: BrowserRun) -> None:
         "blocked_websockets": [],
         "page_errors": [],
         "restart_posts": posts,
+        "quota_requests": quota_requests,
         "screenshots": [],
         "boundary": "Actual Vue/Pinia/Chat observer with mocked APIs; no backend/provider/restart executes.",
     }
@@ -98,7 +102,7 @@ async def main(browser_run: BrowserRun) -> None:
                 await socket.close(code=1000, reason="restart UI fixtures")
 
             async def route_all(route):
-                nonlocal operation, instance, polls, outage, failures
+                nonlocal operation, instance, polls, outage, failures, antigravity_refreshes
                 request = route.request
                 parsed = urlparse(request.url)
                 if (parsed.scheme, parsed.netloc) != (
@@ -250,10 +254,39 @@ async def main(browser_run: BrowserRun) -> None:
                     # The Dot launcher in the tab bar reads Dot's name and avatar.
                     body = {"name": "Dot", "avatar": "", "avatar_image": None}
                 elif path == "/api/quota" and request.method == "GET":
+                    query = parse_qs(parsed.query)
+                    provider = query.get("provider", [None])[0]
+                    refresh = query.get("refresh") == ["true"]
+                    quota_requests.append({"provider": provider, "refresh": refresh})
+                    if provider not in {"codex", "maso", "antigravity"}:
+                        report["unknown_requests"].append([request.method, request.url])
+                        await route.fulfill(status=501, body="expected a single quota provider")
+                        return
+                    if provider == "antigravity":
+                        if refresh:
+                            antigravity_refreshes += 1
+                        await asyncio.wait_for(quota_release.wait(), timeout=30)
+                        if antigravity_refreshes == 1:
+                            await route.fulfill(
+                                status=503,
+                                content_type="application/json",
+                                body=json.dumps({"detail": "Temporary quota connection failure"}),
+                            )
+                            return
+                    remaining = {
+                        "codex": 75 if refresh else 85,
+                        "maso": 60 if refresh else 80,
+                        "antigravity": 94 if refresh else 96,
+                    }[provider]
+                    labels = {
+                        "codex": "5-hour limit",
+                        "maso": "gpt-6-astra",
+                        "antigravity": "Gemini Models · Weekly limit",
+                    }
                     body = {
                         "providers": [
                             {
-                                "provider": "codex",
+                                "provider": provider,
                                 "available": True,
                                 "state": "within",
                                 "message": "",
@@ -261,34 +294,15 @@ async def main(browser_run: BrowserRun) -> None:
                                 "stale": False,
                                 "limits": [
                                     {
-                                        "scope": "five_hour",
-                                        "label": "5-hour limit",
+                                        "scope": f"{provider}-window",
+                                        "label": labels[provider],
                                         "state": "within",
-                                        "used_percent": 15,
-                                        "remaining_percent": 85,
-                                        "resets_at": "2026-10-15T12:00:00Z",
+                                        "used_percent": 100 - remaining,
+                                        "remaining_percent": remaining,
+                                        "resets_at": "2100-01-01T08:00:00Z",
                                     }
                                 ],
-                                "plan": "pro",
-                            },
-                            {
-                                "provider": "antigravity",
-                                "available": True,
-                                "state": "within",
-                                "message": "",
-                                "as_of": NOW,
-                                "stale": False,
-                                "limits": [
-                                    {
-                                        "scope": "gemini-weekly",
-                                        "label": "Gemini Models · Weekly limit",
-                                        "state": "within",
-                                        "used_percent": 4,
-                                        "remaining_percent": 96,
-                                        "resets_at": "2026-10-22T08:00:00Z",
-                                    }
-                                ],
-                            },
+                            }
                         ]
                     }
                 else:
@@ -311,25 +325,100 @@ async def main(browser_run: BrowserRun) -> None:
 
             extensions_trigger = page.get_by_label("Extensions", exact=True)
             await extensions_trigger.click()
+            quota_started = asyncio.get_running_loop().time()
             await page.get_by_role("button", name="Provider quota", exact=True).click()
             quota_dialog = page.get_by_role("dialog", name="Provider quota", exact=True)
             await expect(quota_dialog).to_be_visible()
-            await expect(quota_dialog).to_contain_text("Antigravity")
-            await expect(quota_dialog).to_contain_text("Gemini Models · Weekly limit")
+            codex_quota = quota_dialog.locator('[data-provider="codex"]')
+            maso_quota = quota_dialog.locator('[data-provider="maso"]')
+            antigravity_quota = quota_dialog.locator('[data-provider="antigravity"]')
             close_quota_btn = quota_dialog.get_by_role(
                 "button", name="Close provider quota", exact=True
             )
             refresh_quota_btn = quota_dialog.get_by_role(
                 "button", name="Refresh provider quota", exact=True
             )
+            # Antigravity remains blocked until the browser has observed both
+            # fast providers. The test cannot pass by waiting for all three.
+            await expect(codex_quota).to_contain_text("85% left")
+            report["quota_mock_visible_ms"] = {
+                "codex": round((asyncio.get_running_loop().time() - quota_started) * 1000)
+            }
+            await expect(maso_quota).to_contain_text("80% left")
+            report["quota_mock_visible_ms"]["maso"] = round(
+                (asyncio.get_running_loop().time() - quota_started) * 1000
+            )
+            await expect(antigravity_quota).to_contain_text("Loading quota...")
+            await expect(antigravity_quota).to_have_attribute("aria-busy", "true")
+            await expect(refresh_quota_btn).to_be_disabled()
+            assert not quota_release.is_set()
+            assert await quota_dialog.locator(".quota-provider").evaluate_all(
+                "nodes => nodes.map(node => node.dataset.provider)"
+            ) == ["codex", "maso", "antigravity"]
+            await expect(close_quota_btn).to_be_in_viewport()
+            await expect(refresh_quota_btn).to_be_in_viewport()
+            await page.screenshot(path=str(output / "quota-progressive-1280.png"))
+            report["screenshots"].append("quota-progressive-1280.png")
+            quota_release.set()
+            await expect(antigravity_quota).to_contain_text("96% left")
+            report["quota_mock_visible_ms"]["antigravity_after_test_release"] = round(
+                (asyncio.get_running_loop().time() - quota_started) * 1000
+            )
+            await expect(refresh_quota_btn).to_be_enabled()
             await expect(close_quota_btn).to_be_focused()
             await page.keyboard.press("Tab")
             await expect(refresh_quota_btn).to_be_focused()
             await page.keyboard.press("Shift+Tab")
             await expect(close_quota_btn).to_be_focused()
+
+            quota_release.clear()
+            await refresh_quota_btn.click()
+            await expect(codex_quota).to_contain_text("75% left")
+            await expect(maso_quota).to_contain_text("60% left")
+            await expect(antigravity_quota).to_contain_text("96% left")
+            await expect(antigravity_quota).to_contain_text("Refreshing quota...")
+            quota_release.set()
+            await expect(antigravity_quota).to_contain_text("Temporary quota connection failure")
+            await expect(antigravity_quota).to_contain_text("Showing the previous reading")
+            await expect(antigravity_quota).to_contain_text("96% left")
+            await antigravity_quota.get_by_role(
+                "button", name="Retry Antigravity quota", exact=True
+            ).click()
+            await expect(antigravity_quota).to_contain_text("94% left")
+            await expect(antigravity_quota.get_by_role("alert")).to_have_count(0)
+            assert quota_requests[-1] == {"provider": "antigravity", "refresh": True}
+            assert [row["provider"] for row in quota_requests].count("codex") == 2
+            assert [row["provider"] for row in quota_requests].count("maso") == 2
+            assert [row["provider"] for row in quota_requests].count("antigravity") == 3
+            await close_quota_btn.click()
+            await expect(quota_dialog).not_to_be_visible()
+            await extensions_trigger.click()
+            await page.get_by_role("button", name="Provider quota", exact=True).click()
+            await expect(antigravity_quota).to_contain_text("94% left")
+            assert len(quota_requests) == 7, "reopening must reuse the existing readings"
             await page.keyboard.press("Escape")
             await expect(quota_dialog).not_to_be_visible()
             await expect(extensions_trigger).to_be_focused()
+            report["quota_progressive_refresh"] = True
+            report["quota_failed_refresh_preserves_reading"] = True
+            report["quota_retry_is_provider_scoped"] = True
+
+            # The app replaces its toolbar at the mobile breakpoint. Open the
+            # quota control in each layout, rather than expecting a dialog on an
+            # unmounted desktop toolbar to survive the layout switch.
+            for width in (720, 390, 1280):
+                await page.set_viewport_size({"width": width, "height": 900})
+                menu_label = "App menu" if width <= 768 else "Extensions"
+                await page.get_by_label(menu_label, exact=True).click()
+                await page.get_by_role("button", name="Provider quota", exact=True).click()
+                await expect(refresh_quota_btn).to_be_enabled()
+                await expect(antigravity_quota).to_contain_text("Gemini Models · Weekly limit")
+                await expect(close_quota_btn).to_be_in_viewport()
+                await expect(refresh_quota_btn).to_be_in_viewport()
+                await page.screenshot(path=str(output / f"quota-layout-{width}.png"))
+                report["screenshots"].append(f"quota-layout-{width}.png")
+                await close_quota_btn.click()
+                await expect(quota_dialog).not_to_be_visible()
 
             async def open_dialog():
                 await page.get_by_label("Extensions", exact=True).click()
@@ -351,7 +440,7 @@ async def main(browser_run: BrowserRun) -> None:
                 dialog.get_by_role("button", name="Build and restart", exact=True)
             ).to_be_in_viewport()
             await page.screenshot(path=str(output / "restart-mobile.png"), full_page=True)
-            report["screenshots"] = ["restart-desktop.png", "restart-mobile.png"]
+            report["screenshots"].extend(["restart-desktop.png", "restart-mobile.png"])
             await page.set_viewport_size({"width": 1280, "height": 900})
             await dialog.get_by_role("button", name="Build and restart", exact=True).click()
             for _ in range(30):
@@ -393,6 +482,7 @@ async def main(browser_run: BrowserRun) -> None:
                 provider_replacements=0,
             )
         except BaseException as exc:
+            quota_release.set()
             failure = exc
             report["error_type"] = type(exc).__name__
             if page is not None:

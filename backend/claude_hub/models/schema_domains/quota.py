@@ -30,7 +30,9 @@ class ProviderQuota(BaseModel):
     a statement of fact rather than a fault). ``available`` is False for both
     and ``message`` then says which case applies; an actionable English
     explanation for a fault, a neutral one otherwise. ``stale`` marks a reading
-    that was parsed successfully but no longer describes the current window.
+    that no longer describes the current window or could not be refreshed.
+    An unavailable provider may retain its last successful limits and original
+    ``as_of`` with ``stale=True``; those are historical, not a fresh reading.
     """
 
     provider: str
@@ -46,6 +48,6 @@ class ProviderQuota(BaseModel):
 
 
 class QuotaResponse(BaseModel):
-    """Remaining-quota readings for every provider Hub can observe."""
+    """Remaining-quota readings for all providers, or the requested provider."""
 
     providers: List[ProviderQuota] = Field(default_factory=list)

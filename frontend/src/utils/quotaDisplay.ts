@@ -87,6 +87,8 @@ export interface QuotaViewOptions {
 }
 
 export const QUOTA_ENDPOINT = '/api/quota'
+export const QUOTA_PROVIDERS = ['codex', 'maso', 'antigravity'] as const
+export type QuotaProviderKey = typeof QUOTA_PROVIDERS[number]
 
 const MINUTE_MS = 60_000
 const HOUR_MS = 3_600_000
@@ -132,7 +134,7 @@ const MISSING_VALUE_TEXT: Record<QuotaDisplayState, string> = {
   not_configured: 'Not configured',
 }
 
-const PROVIDER_TITLES: Record<string, string> = {
+export const PROVIDER_TITLES: Record<string, string> = {
   codex: 'Codex',
   maso: 'MASO',
   antigravity: 'Antigravity',
@@ -391,6 +393,10 @@ export function summarizeQuota(views: QuotaProviderView[]): string {
 }
 
 /** `refresh=true` asks the backend for a new reading instead of a cached one. */
-export function quotaRequestUrl(refresh: boolean): string {
-  return refresh ? `${QUOTA_ENDPOINT}?refresh=true` : QUOTA_ENDPOINT
+export function quotaRequestUrl(refresh: boolean, provider?: QuotaProviderKey): string {
+  const params = new URLSearchParams()
+  if (provider) params.set('provider', provider)
+  if (refresh) params.set('refresh', 'true')
+  const query = params.toString()
+  return query ? `${QUOTA_ENDPOINT}?${query}` : QUOTA_ENDPOINT
 }
