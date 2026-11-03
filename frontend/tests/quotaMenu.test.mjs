@@ -701,6 +701,70 @@ test('one failed provider retries independently while another is still loading',
   assert.equal(state.isLoading, false)
 })
 
+test('an HTTP 200 unavailable reading retries with refresh while another provider remains pending', async t => {
+  const http = fetchHarness(t)
+  const reads = deferredReads(http)
+  const { state, tree } = mountMenu(t, { withTemplate: true })
+  open(state)
+  reads.resolve('codex')
+  reads.resolve('maso', { providers: [provider({
+    ...masoProvider,
+    available: false,
+    state: 'unavailable',
+    stale: true,
+    message: 'MASO quota is unavailable. Showing the last successful reading.',
+  })] })
+  await flush()
+  assert.equal(state.providerRequests.maso.error, null, 'a provider failure is a valid HTTP response')
+  assert.equal(state.providerRequests.maso.refresh, false)
+  assert.equal(state.providerRequests.antigravity.loading, true)
+  assert.ok(renderedText(tree).includes('Retry'), 'the unavailable provider must expose its own retry')
+  assert.ok(renderedText(tree).includes('86% left'), 'retained last-successful limits remain visible')
+  assert.ok(!renderedText(tree).includes('Showing the previous reading; this refresh failed.'),
+    'a valid backend failure keeps its own message instead of an HTTP failure message')
+
+  state.retryQuota('maso')
+  state.retryQuota('maso')
+  assert.equal(http.calls.length, 4)
+  assert.equal(http.calls.at(-1).url, '/api/quota?provider=maso&refresh=true',
+    'provider-level retry must bypass the cached unavailable reading')
+  reads.resolve('maso')
+  await flush()
+  assert.equal(state.providerViews.find(view => view.key === 'maso').state, 'within')
+  assert.equal(state.providerRequests.antigravity.loading, true)
+  assert.ok(!renderedText(tree).includes('Retry'))
+  reads.resolve('antigravity')
+  await flush()
+})
+
+test('not configured and healthy providers do not offer or execute a retry', async t => {
+  const http = fetchHarness(t, { providers: [aged(codexProvider, MINUTE), notConfigured('maso')] })
+  const { state, tree } = mountMenu(t, { withTemplate: true })
+  open(state)
+  await flush()
+  assert.ok(!renderedText(tree).includes('Retry'))
+  for (const key of display.QUOTA_PROVIDERS) state.retryQuota(key)
+  await flush()
+  assert.equal(http.calls.length, 3)
+})
+
+test('a schema failure takes retry precedence over a previously unavailable reading', async t => {
+  const http = fetchHarness(t, { providers: [provider({
+    provider: 'maso', available: false, state: 'unavailable', message: 'Unavailable.',
+  })] })
+  const { state } = mountMenu(t)
+  open(state)
+  await flush()
+  http.set(async () => new Response(JSON.stringify({ providers: [] }), { status: 200 }))
+  await state.fetchProviderQuota('maso', false)
+  assert.match(state.providerRequests.maso.error, /unexpected provider reading/)
+  assert.equal(state.providerViews.find(view => view.key === 'maso').state, 'unavailable')
+  state.retryQuota('maso')
+  await flush()
+  assert.equal(http.calls.at(-1).url, '/api/quota?provider=maso',
+    'a schema retry repeats its failed cache intent even when older data was unavailable')
+})
+
 test('all first-load failures remain distinct and reopening does not silently retry', async t => {
   const http = fetchHarness(t)
   http.set(async () => { throw new TypeError('Failed to fetch') })

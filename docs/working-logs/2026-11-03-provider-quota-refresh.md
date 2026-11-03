@@ -99,3 +99,20 @@ prove live provider availability. The CLI still needs upstream authentication
 and network initialization, so Antigravity itself can take several seconds.
 The optimization removes that wait from other providers and prevents the
 observed premature timeout; it does not promise an instantaneous upstream read.
+
+## Cross-review follow-up before integration
+
+The user requested a second independent cross-review and local merge. Backend,
+API and CLI review passed. Frontend review identified a reachable P2 gap in
+`f8e4c75`: real provider failures return HTTP 200 with `state=unavailable`, while
+the new Retry control only handled HTTP/schema errors. With another provider
+still loading, even retrying a completed failed provider required waiting for
+the global Refresh button.
+
+The follow-up adds independent Retry for unavailable readings (excluding
+`not_configured`) and always sets `refresh=true` to bypass the cached failure.
+HTTP/schema errors still repeat the failed request's original cache intent.
+Three added unit cases cover that distinction and another pending provider;
+quota unit tests now pass **58/58**. The browser scenario now exercises the real
+HTTP 200 unavailable envelope as well as the existing HTTP 503 path. Final
+integration/browser results are recorded with the merge verification evidence.
