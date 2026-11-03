@@ -7,6 +7,23 @@
 
 ## Released
 
+### feat(terminal): remove working-directory entries from the New Session dropdown
+
+- Each Working Directory row in the New Session modal offers a labeled remove
+  button that drops the path from the persisted per-scope recent-directories
+  list (`localStorage`) and additionally hides it while it is only contributed
+  by an open tab, for the rest of the page session. Launching that path again
+  (or picking it from the file browser) restores the entry immediately.
+- Removing the currently selected value clears the input; removing any other
+  row leaves custom typed text intact. The dropdown stays open, never selects
+  the removed row, and Delete/Backspace on a highlighted option performs the
+  same removal without editing the input; plain Backspace while typing is
+  unaffected.
+- Cover the composable's removal/dismissal/scope behavior with runtime unit
+  tests, the row contract with wiring tests, and the clicks, keyboard path,
+  persistence and re-add flow with a real-Chromium mocked scenario at 1280px
+  and 390px.
+
 ### feat(workspace): delete workspaces from the New Agent workspace picker
 
 - Replace the Workspace header's native `<select>` with a popover picker so each

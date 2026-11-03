@@ -164,21 +164,37 @@
               role="listbox"
               aria-label="Working directories"
             >
-              <button
+              <div
                 v-for="(cwd, index) in visibleCwdChoices"
-                :id="`tab-cwd-choice-${index}`"
                 :key="cwd"
-                type="button"
-                role="option"
-                class="cwd-choice"
-                :class="{ 'is-active': activeCwdChoice === index }"
-                :aria-selected="form.cwd === cwd"
-                tabindex="-1"
-                @mousedown.prevent
-                @click="selectCwdChoice(cwd)"
+                role="presentation"
+                class="cwd-choice-row"
               >
-                {{ cwd }}
-              </button>
+                <button
+                  :id="`tab-cwd-choice-${index}`"
+                  type="button"
+                  role="option"
+                  class="cwd-choice"
+                  :class="{ 'is-active': activeCwdChoice === index }"
+                  :aria-selected="form.cwd === cwd"
+                  tabindex="-1"
+                  @mousedown.prevent
+                  @click="selectCwdChoice(cwd)"
+                >
+                  {{ cwd }}
+                </button>
+                <button
+                  type="button"
+                  class="cwd-choice-remove"
+                  tabindex="-1"
+                  :aria-label="`Remove ${cwd}`"
+                  :title="`Remove ${cwd}`"
+                  @mousedown.prevent
+                  @click.stop="removeCwdChoice(cwd)"
+                >
+                  <span aria-hidden="true">✕</span>
+                </button>
+              </div>
             </div>
           </div>
           <p
@@ -453,14 +469,17 @@ const selectedRemoteProfile = computed(() =>
 const cwdHistoryScope = computed(() =>
   form.target === 'remote' ? `remote:${form.remote_profile_id || 'none'}` : 'local'
 )
-const { recentCwds, mostRecentCwd, addCwd } = useCwdHistory(cwdHistoryScope)
+const { recentCwds, dismissedCwds, mostRecentCwd, addCwd, removeCwd } = useCwdHistory(cwdHistoryScope)
 const cwdChoices = computed(() => {
   const openPaths = tabs.value
     .filter(tab => !tab.archived && (form.target === 'remote'
       ? tab.target === 'remote' && tab.remote_profile_id === form.remote_profile_id
       : tab.target !== 'remote'))
     .map(tab => form.target === 'remote' ? tab.remote_cwd || tab.cwd : tab.cwd)
-  return [...new Set([...recentCwds.value, ...openPaths].filter((path): path is string => Boolean(path?.trim())))]
+  const dismissed = new Set(dismissedCwds.value)
+  return [...new Set([...recentCwds.value, ...openPaths]
+    .filter((path): path is string => Boolean(path?.trim()))
+    .filter(path => !dismissed.has(path)))]
 })
 const visibleCwdChoices = computed(() => {
   if (!cwdFilterActive.value) return cwdChoices.value
@@ -491,6 +510,21 @@ function selectCwdChoice(path: string) {
   cwdFilterActive.value = false
   activeCwdChoice.value = -1
 }
+function removeCwdChoice(path: string) {
+  // Capture the currently visible rows before removal for index clamping.
+  const shown = visibleCwdChoices.value
+  const wasActive = activeCwdChoice.value
+  removeCwd(path)
+  if (form.cwd.trim() === path) {
+    form.cwd = ''
+    cwdFilterActive.value = false
+  }
+  // Deleting a row must never select it or close the listbox.
+  const remaining = shown.filter(item => item !== path).length
+  activeCwdChoice.value = remaining && wasActive >= 0
+    ? Math.min(wasActive, remaining - 1)
+    : -1
+}
 function handleCwdKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
     cwdDropdownOpen.value = false
@@ -508,13 +542,21 @@ function handleCwdKeydown(event: KeyboardEvent) {
       }
       const index = activeCwdChoice.value
       void nextTick(() => {
-        const choice = cwdChoicesRef.value?.children.item(index)
+        const row = cwdChoicesRef.value?.children.item(index)
+        const choice = row instanceof HTMLElement ? row.querySelector('.cwd-choice') : null
         if (choice instanceof HTMLElement) choice.scrollIntoView({ block: 'nearest' })
       })
     }
   } else if (event.key === 'Enter' && cwdDropdownOpen.value && activeCwdChoice.value >= 0) {
     event.preventDefault()
     selectCwdChoice(visibleCwdChoices.value[activeCwdChoice.value])
+  } else if (
+    (event.key === 'Delete' || event.key === 'Backspace')
+    && cwdDropdownOpen.value && activeCwdChoice.value >= 0
+  ) {
+    // A highlighted option owns the key; preventDefault keeps the input text.
+    event.preventDefault()
+    removeCwdChoice(visibleCwdChoices.value[activeCwdChoice.value])
   }
 }
 function handleCwdFocusOut(event: FocusEvent) {
