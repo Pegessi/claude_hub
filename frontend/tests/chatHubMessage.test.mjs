@@ -40,6 +40,13 @@ test('pending receipt list excludes submitted and terminal turns and bounds malf
   assert.equal(pendingMessageReceipts({ messages: Array(200).fill(messages[0]) }).length, 100)
 })
 
+test('invalid inbox envelopes fail instead of replacing receipts with an empty list', () => {
+  for (const value of [null, [], {}, { messages: null }, { messages: {} }, { messages: 'unavailable' }]) {
+    assert.throws(() => pendingMessageReceipts(value), /Invalid message inbox response/)
+  }
+  assert.deepEqual(pendingMessageReceipts({ messages: [] }), [])
+})
+
 test('message status errors distinguish timeout, network, authentication and HTTP failures', () => {
   assert.match(messageInboxReadError(undefined, true), /timed out after 10 seconds/)
   assert.match(messageInboxReadError(200, true), /timed out/)

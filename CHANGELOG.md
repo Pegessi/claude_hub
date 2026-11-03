@@ -10,8 +10,10 @@
 ### fix(chat): explain Goal and message-status recovery
 
 - Add Goal read-error guidance, a read-only status retry and expandable original
-  diagnostics. Explain that page refresh reconnects the UI without restarting
-  the provider, and advise saving unsent text and attachments first.
+  diagnostics. Explain that page refresh may retry provider startup, and advise
+  saving unsent text and attachments first, including when a Goal already exists.
+- Disable Goal submission while checking its status, without blocking Cancel.
+  Preserve prior receipts when a successful HTTP response has an invalid schema.
 - Distinguish message-inbox HTTP, authentication, timeout, network and unreadable
   response failures. Retain and label last-known receipts, keep automatic
   polling, and offer a read-only retry without resending messages.

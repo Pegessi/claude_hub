@@ -17,7 +17,9 @@ export function messageInboxReadError(status: number | undefined, timedOut: bool
 
 /** Receipts are operational status, never synthetic transcript turns. */
 export function pendingMessageReceipts(value: unknown): PendingMessageReceipt[] {
-  if (!value || typeof value !== 'object' || !('messages' in value) || !Array.isArray(value.messages)) return []
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !('messages' in value) || !Array.isArray(value.messages)) {
+    throw new Error('Invalid message inbox response')
+  }
   return value.messages.flatMap((row: unknown): PendingMessageReceipt[] => {
     if (!row || typeof row !== 'object' || Array.isArray(row)) return []
     const receipt = row as Record<string, unknown>

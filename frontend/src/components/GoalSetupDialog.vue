@@ -64,7 +64,7 @@
           <button
             type="submit"
             class="primary"
-            :disabled="busy"
+            :disabled="busy || submitDisabled"
           >
             {{ busy ? (editing ? 'Saving…' : 'Starting…') : (editing ? 'Save Goal' : 'Start Goal') }}
           </button>
@@ -77,7 +77,7 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from 'vue'
 
-const props = defineProps<{ open: boolean; busy?: boolean; error?: string | null; editing?: boolean; initialObjective?: string }>()
+const props = defineProps<{ open: boolean; busy?: boolean; submitDisabled?: boolean; error?: string | null; editing?: boolean; initialObjective?: string }>()
 const emit = defineEmits<{
   close: []
   submit: [value: { objective: string }]
@@ -124,7 +124,7 @@ watch(() => props.open, open => {
 
 function submit() {
   const trimmed = objective.value.trim()
-  if (props.busy) return
+  if (props.busy || props.submitDisabled) return
   if (!trimmed) { validationError.value = 'Objective is required.'; return }
   validationError.value = null
   emit('submit', { objective: trimmed })
