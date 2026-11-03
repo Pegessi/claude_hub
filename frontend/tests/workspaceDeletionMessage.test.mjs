@@ -2,9 +2,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { loadWorkspaceFeature } from './workspaceFeatureTestHarness.mjs'
 
-const { workspaceDeleteConfirmMessage } = await loadWorkspaceFeature(
-  'presentation/workspaceDeletion.ts'
-)
+const {
+  workspaceDeleteConfirmMessage,
+  boardHasOpenTasks,
+  boardHasLiveSessions,
+} = await loadWorkspaceFeature('presentation/workspaceDeletion.ts')
 
 function task(id, status) {
   return { id, status }
@@ -17,7 +19,7 @@ function session(id, runtime_status) {
 test('non-active workspaces get the generic irreversible wording', () => {
   const message = workspaceDeleteConfirmMessage(
     { id: 'ws-2', name: 'Stale worktrees' },
-    { isActive: false, openTasks: [task('t1', 'working')], sessions: [session('s1', 'working')] }
+    { isActive: false, hasOpenTasks: true, hasLiveSessions: true }
   )
   assert.equal(message, 'Delete workspace "Stale worktrees"? This cannot be undone.')
 })
@@ -25,62 +27,46 @@ test('non-active workspaces get the generic irreversible wording', () => {
 test('the active workspace without open resources uses the same base wording', () => {
   const message = workspaceDeleteConfirmMessage(
     { id: 'ws-1', name: 'Main' },
-    {
-      isActive: true,
-      openTasks: [task('d1', 'done'), task('f1', 'failed')],
-      sessions: [session('o1', 'offline')],
-    }
+    { isActive: true, hasOpenTasks: false, hasLiveSessions: false }
   )
   assert.equal(message, 'Delete workspace "Main"? This cannot be undone.')
 })
 
-test('done and failed tasks plus offline sessions do not inflate the warning', () => {
+test('only open tasks produce a qualitative task warning with no count', () => {
   const message = workspaceDeleteConfirmMessage(
     { id: 'ws-1', name: 'Main' },
-    { isActive: true, openTasks: [task('d1', 'done')], sessions: [session('o1', 'offline')] }
-  )
-  assert.doesNotMatch(message, /still has/)
-})
-
-test('open tasks produce singular and plural wording', () => {
-  const one = workspaceDeleteConfirmMessage(
-    { id: 'ws-1', name: 'Main' },
-    { isActive: true, openTasks: [task('a', 'review')] }
-  )
-  assert.equal(
-    one,
-    'Delete workspace "Main"? This cannot be undone. This workspace still has 1 open task; its sessions will be stopped and everything will be permanently deleted.'
-  )
-  const many = workspaceDeleteConfirmMessage(
-    { id: 'ws-1', name: 'Main' },
-    {
-      isActive: true,
-      openTasks: [task('a', 'todo'), task('b', 'queued'), task('c', 'working')],
-    }
-  )
-  assert.match(many, /3 open tasks/)
-})
-
-test('live sessions combine with open tasks in one factual warning', () => {
-  const message = workspaceDeleteConfirmMessage(
-    { id: 'ws-1', name: 'Main' },
-    {
-      isActive: true,
-      openTasks: [task('a', 'working'), task('z', 'done')],
-      sessions: [
-        session('s1', 'working'),
-        session('s2', 'idle'),
-        session('o1', 'offline'),
-      ],
-    }
+    { isActive: true, hasOpenTasks: true, hasLiveSessions: false }
   )
   assert.equal(
     message,
-    'Delete workspace "Main"? This cannot be undone. This workspace still has 1 open task and 2 live sessions; its sessions will be stopped and everything will be permanently deleted.'
+    'Delete workspace "Main"? This cannot be undone. This workspace still has open tasks; its sessions will be stopped and everything will be permanently deleted.'
+  )
+  assert.doesNotMatch(message, /\d+ open tasks?/)
+})
+
+test('only live sessions produce a qualitative session warning with no count', () => {
+  const message = workspaceDeleteConfirmMessage(
+    { id: 'ws-1', name: 'Main' },
+    { isActive: true, hasOpenTasks: false, hasLiveSessions: true }
+  )
+  assert.equal(
+    message,
+    'Delete workspace "Main"? This cannot be undone. This workspace still has live sessions; its sessions will be stopped and everything will be permanently deleted.'
   )
 })
 
-test('blank names fall back to "this workspace" and missing collections are safe', () => {
+test('open tasks and live sessions are both named, still without exact counts', () => {
+  const message = workspaceDeleteConfirmMessage(
+    { id: 'ws-1', name: 'Main' },
+    { isActive: true, hasOpenTasks: true, hasLiveSessions: true }
+  )
+  assert.equal(
+    message,
+    'Delete workspace "Main"? This cannot be undone. This workspace still has open tasks and live sessions; its sessions will be stopped and everything will be permanently deleted.'
+  )
+})
+
+test('blank names fall back to "this workspace" and default context is safe', () => {
   assert.equal(
     workspaceDeleteConfirmMessage({ id: 'ws-9', name: '   ' }, { isActive: true }),
     'Delete workspace "this workspace"? This cannot be undone.'
@@ -89,4 +75,20 @@ test('blank names fall back to "this workspace" and missing collections are safe
     workspaceDeleteConfirmMessage({ id: 'ws-9', name: '' }),
     'Delete workspace "this workspace"? This cannot be undone.'
   )
+})
+
+test('boardHasOpenTasks treats done/failed as closed and all other statuses as open', () => {
+  assert.equal(boardHasOpenTasks([task('a', 'done'), task('b', 'failed')]), false)
+  assert.equal(boardHasOpenTasks([]), false)
+  for (const status of ['todo', 'queued', 'working', 'review']) {
+    assert.equal(boardHasOpenTasks([task('a', 'done'), task('b', status)]), true, status)
+  }
+})
+
+test('boardHasLiveSessions treats only offline as stopped', () => {
+  assert.equal(boardHasLiveSessions([session('o1', 'offline')]), false)
+  assert.equal(boardHasLiveSessions([]), false)
+  for (const status of ['working', 'idle', 'starting']) {
+    assert.equal(boardHasLiveSessions([session('o1', 'offline'), session('l1', status)]), true, status)
+  }
 })

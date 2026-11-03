@@ -36,7 +36,11 @@ import {
 import {
   formatAttachmentSize,
 } from '@/utils/draftAttachments'
-import { workspaceDeleteConfirmMessage } from '../presentation/workspaceDeletion'
+import {
+  boardHasLiveSessions,
+  boardHasOpenTasks,
+  workspaceDeleteConfirmMessage,
+} from '../presentation/workspaceDeletion'
 import type { WorkspaceSessionView } from '../types'
 
 export function useWorkspaceRuntime() {
@@ -427,8 +431,8 @@ export function useWorkspaceRuntime() {
     if (isPending('workspace:delete')) return
     const confirmed = window.confirm(workspaceDeleteConfirmMessage(workspace, {
       isActive: workspace.id === activeWorkspaceId.value,
-      openTasks: tasks.value,
-      sessions: managedWorkspaceSessions.value,
+      hasOpenTasks: boardHasOpenTasks(tasks.value),
+      hasLiveSessions: boardHasLiveSessions(managedWorkspaceSessions.value),
     }))
     if (!confirmed) return
     try {

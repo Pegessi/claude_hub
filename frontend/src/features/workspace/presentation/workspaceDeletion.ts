@@ -5,18 +5,21 @@ import type {
 } from '@/types'
 
 export interface WorkspaceDeletionContext {
-  // Only the active workspace's board is loaded, so live task/session counts
-  // are factual for it; other workspaces get the generic wording.
+  // Only the active workspace's board is loaded, so resource signals are
+  // available for it; other workspaces get the generic wording.
   isActive: boolean
-  openTasks?: Iterable<WorkspaceTask>
-  sessions?: Iterable<ManagedSession>
+  // Qualitative, never an exact count: the board's task list is paginated and
+  // its session set can change between render and confirmation, so a number
+  // could understate what the backend force-teardown will stop.
+  hasOpenTasks?: boolean
+  hasLiveSessions?: boolean
 }
 
 // Single source of truth for the delete confirmation wording used by every
 // workspace delete entry point. Mirrors the workspace editor dialog
 // ("Delete workspace \"<name>\"? This cannot be undone.") and, for the
-// currently selected workspace, adds the concrete resources the backend
-// force-teardown will stop and remove.
+// currently selected workspace, warns qualitatively about the open tasks and
+// live sessions the existing backend deletion flow will stop and remove.
 export function workspaceDeleteConfirmMessage(
   workspace: Pick<Workspace, 'id' | 'name'>,
   context: WorkspaceDeletionContext = { isActive: false },
@@ -24,23 +27,30 @@ export function workspaceDeleteConfirmMessage(
   const name = workspace.name.trim() || 'this workspace'
   const base = `Delete workspace "${name}"? This cannot be undone.`
   if (!context.isActive) return base
+  if (!context.hasOpenTasks && !context.hasLiveSessions) return base
 
-  let openTaskCount = 0
-  for (const task of context.openTasks ?? []) {
-    if (task.status !== 'done' && task.status !== 'failed') openTaskCount += 1
-  }
-  let liveSessionCount = 0
-  for (const session of context.sessions ?? []) {
-    if (session.runtime_status !== 'offline') liveSessionCount += 1
-  }
+  const resources = [
+    context.hasOpenTasks ? 'open tasks' : null,
+    context.hasLiveSessions ? 'live sessions' : null,
+  ].filter((value): value is string => value !== null)
 
-  const fragments: string[] = []
-  if (openTaskCount > 0) {
-    fragments.push(`${openTaskCount} open ${openTaskCount === 1 ? 'task' : 'tasks'}`)
+  return `${base} This workspace still has ${resources.join(' and ')}; its sessions will be stopped and everything will be permanently deleted.`
+}
+
+// Whether any board task is still actionable. Mirrors the board column
+// semantics (failed rides with Working) without claiming an exact count: the
+// board payload is paginated, so the result is "at least one".
+export function boardHasOpenTasks(tasks: Iterable<WorkspaceTask>): boolean {
+  for (const task of tasks) {
+    if (task.status !== 'done' && task.status !== 'failed') return true
   }
-  if (liveSessionCount > 0) {
-    fragments.push(`${liveSessionCount} live ${liveSessionCount === 1 ? 'session' : 'sessions'}`)
+  return false
+}
+
+// Whether any managed session bound to the workspace is currently live.
+export function boardHasLiveSessions(sessions: Iterable<ManagedSession>): boolean {
+  for (const session of sessions) {
+    if (session.runtime_status !== 'offline') return true
   }
-  if (fragments.length === 0) return base
-  return `${base} This workspace still has ${fragments.join(' and ')}; its sessions will be stopped and everything will be permanently deleted.`
+  return false
 }
