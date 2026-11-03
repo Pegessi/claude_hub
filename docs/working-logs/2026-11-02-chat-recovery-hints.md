@@ -83,10 +83,18 @@ request deployment or a shared-service restart.
 - Reject malformed inbox envelopes before replacing receipts. HTTP 200 with
   missing/non-array `messages` now preserves prior receipts and reports an
   unreadable response, just like malformed JSON.
-- Browser coverage now waits for successful GET responses, pauses automatic
-  timers when checking manual inbox retry, holds Goal hydration to inspect
-  submit/Cancel availability, and covers persisted Goal startup failure and
-  malformed HTTP 200 inbox responses. Existing valid row filtering is retained.
+- Browser coverage now waits for successful GET responses, holds Goal hydration
+  to inspect submit/Cancel availability, and covers persisted Goal startup
+  failure and malformed HTTP 200 inbox responses. A compiled Vue component unit
+  test leaves automatic timers frozen while invoking the rendered retry handler
+  and checking its own GET and receipt update. Existing row filtering is retained.
+- The first revised full run inherited `FORCE_COLOR=3`; an unrelated CI-health
+  test expects a plain `ERROR: ` prefix and failed on ANSI output. Its eleven
+  tests pass with `FORCE_COLOR` unset and `NO_COLOR=1`, without source changes.
+- An initial browser attempt to pause the page clock could allow an in-flight
+  poll to clear the error before the click. Removed that test-only clock control;
+  browser checks retain normal user clicks, while the deterministic component
+  test establishes that automatic polling cannot satisfy the manual-retry check.
 
 Focused and full validation of the revised candidate, followed by both reviewers'
 rechecks, are required before integration. Previously recorded backend/HMR

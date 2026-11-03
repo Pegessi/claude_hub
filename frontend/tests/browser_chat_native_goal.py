@@ -300,7 +300,6 @@ async def main(browser_run: BrowserRun) -> None:
             await context.route_web_socket("**/*", block_socket)
             await context.route("**/*", route_all)
             page = await context.new_page()
-            await page.clock.install()
             await page.add_init_script("""window.__copiedTurns = [];
                 Object.defineProperty(navigator, 'clipboard', { configurable: true,
                   value: { writeText: async text => window.__copiedTurns.push(text) } });""")
@@ -455,8 +454,6 @@ async def main(browser_run: BrowserRun) -> None:
                 await page.screenshot(
                     path=str(output / f"inbox-recovery-{width}.png"), full_page=True
                 )
-                # Pause automatic polls so only the button can issue the successful GET.
-                await page.clock.pause_at(await page.evaluate("Date.now() + 500"))
                 inbox_failure = None
                 async with page.expect_response(
                     lambda response: response.request.method == "GET"
@@ -465,7 +462,6 @@ async def main(browser_run: BrowserRun) -> None:
                 ):
                     await inbox.get_by_role("button", name="Retry status", exact=True).click()
                 await expect(inbox.get_by_role("status")).to_have_count(0)
-                await page.clock.resume()
                 await expect(inbox).to_contain_text("Chat busy")
                 await expect(composer).to_have_value(
                     "Keep this draft while message status is unavailable"
