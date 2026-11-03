@@ -16,8 +16,8 @@
         <p>Goal status is unavailable.</p>
         <p>
           Wait a few seconds, then retry. If this continues, save any unsent text
-          and attachments, then refresh the page. Refreshing reconnects this page;
-          it does not restart the provider.
+          and attachments, then refresh the page. Refreshing reloads this page
+          and may retry provider startup.
         </p>
         <button
           type="button"

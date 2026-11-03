@@ -2,6 +2,7 @@
   <GoalSetupDialog
     :open="isGoalSetupOpen"
     :busy="isGoalMutating || isPreparingAttachments"
+    :submit-disabled="isGoalHydrating"
     :error="goalError || (!isGoalEditing ? composerError : null)"
     :editing="isGoalEditing"
     :initial-objective="goal?.objective"
@@ -15,8 +16,8 @@
       >
         <p>
           Check Goal status before submitting again. If this continues, save your
-          objective and attachments, then refresh the page. Refreshing does not
-          restart the provider.
+          objective and attachments, then refresh the page. Refreshing reloads
+          this page and may retry provider startup.
         </p>
         <button
           type="button"

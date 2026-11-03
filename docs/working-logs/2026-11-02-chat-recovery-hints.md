@@ -25,8 +25,8 @@ This branch is a code-only candidate; deployment is not authorized.
 
 ## Changes
 
-- Goal errors retain original diagnostics under Error details, explain the
-  limited effect of refreshing the page, and advise saving unsent text and
+- Goal errors retain original diagnostics under Error details, explain that
+  refreshing may retry provider startup, and advise saving unsent text and
   attachments. Retry Goal status continues to perform only the existing read.
 - Inbox errors distinguish timeout, transport, HTTP 401/403, other HTTP status
   and unreadable-response failures. Automatic polling is unchanged. Manual
@@ -65,3 +65,30 @@ No live provider or browser-to-Merlin integration is claimed. No production
 configuration, service, session, provider version or delivery behavior changed.
 The specific screenshot's network/HTTP failure remains unconfirmed; the new
 error details make the next occurrence distinguishable.
+
+## Cross-review — 2026-11-03
+
+Two independent reviewers inspected the cumulative `5a14598..2c3a210` diff.
+The user authorized integration after resolving review findings, but did not
+request deployment or a shared-service restart.
+
+- Corrected the absolute claim that refreshing never restarts a provider.
+  Native Goal GET calls `transport.start()`: it reuses a healthy Codex process
+  but can terminate/relaunch a half-started process. Guidance now says a refresh
+  may retry provider startup; no provider version or configuration is changed.
+- Added guidance to the existing Goal details surface, including the reachable
+  case where Goal creation is persisted before the startup response fails.
+- Disabled only Goal submission during status hydration; Cancel stays available.
+  This prevents a concurrent Start from leaving a spurious loading error.
+- Reject malformed inbox envelopes before replacing receipts. HTTP 200 with
+  missing/non-array `messages` now preserves prior receipts and reports an
+  unreadable response, just like malformed JSON.
+- Browser coverage now waits for successful GET responses, pauses automatic
+  timers when checking manual inbox retry, holds Goal hydration to inspect
+  submit/Cancel availability, and covers persisted Goal startup failure and
+  malformed HTTP 200 inbox responses. Existing valid row filtering is retained.
+
+Focused and full validation of the revised candidate, followed by both reviewers'
+rechecks, are required before integration. Previously recorded backend/HMR
+results remain historical evidence, not a claim that the revised candidate has
+already passed its final checks.
