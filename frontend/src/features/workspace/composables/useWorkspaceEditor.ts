@@ -27,6 +27,11 @@ import {
   latestResidentReport as projectLatestResidentReport,
 } from '@/features/workspace/presentation/resident'
 import type { useWorkspaceRuntime } from './useWorkspaceRuntime'
+import {
+  boardHasLiveSessions,
+  boardHasOpenTasks,
+  workspaceDeleteConfirmMessage,
+} from '../presentation/workspaceDeletion'
 
 type WorkspaceEditorInputs = Pick<ReturnType<typeof useWorkspaceRuntime>,
   'defaultPresetTextForAgent'
@@ -435,10 +440,27 @@ export function useWorkspaceEditor(inputs: WorkspaceEditorInputs) {
   async function handleDeleteWorkspace() {
     const workspaceId = editingWorkspaceId.value
     if (!workspaceId) return
-    const name = workspaceForm.name.trim() || 'this workspace'
-    const confirmed = window.confirm(
-      `Delete workspace "${name}"? This cannot be undone.`,
-    )
+    const workspace = activeWorkspace.value ?? {
+      id: workspaceId,
+      name: workspaceForm.name.trim(),
+    }
+    // One wording owner with the picker: the editor only deletes the active
+    // workspace, so pass its loaded board signals.
+    const hasLiveSessions = boardHasLiveSessions([
+      ...workspaceStore.workspaceAgents,
+      ...workspaceStore.reviewerAgents,
+      ...workspaceStore.temporaryReviewers,
+      ...(workspaceStore.dispatcherAgent ? [workspaceStore.dispatcherAgent] : []),
+      ...(workspaceStore.residentAgent ? [workspaceStore.residentAgent] : []),
+    ])
+    const confirmed = window.confirm(workspaceDeleteConfirmMessage(workspace, {
+      isActive: true,
+      hasOpenTasks: boardHasOpenTasks(
+        workspaceStore.tasks,
+        workspaceStore.boardTasksPagination?.status_counts,
+      ),
+      hasLiveSessions,
+    }))
     if (!confirmed) return
     try {
       await runPending('workspace:delete', () => workspaceStore.deleteWorkspace(workspaceId))

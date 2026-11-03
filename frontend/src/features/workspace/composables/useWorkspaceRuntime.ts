@@ -431,7 +431,7 @@ export function useWorkspaceRuntime() {
     if (isPending('workspace:delete')) return
     const confirmed = window.confirm(workspaceDeleteConfirmMessage(workspace, {
       isActive: workspace.id === activeWorkspaceId.value,
-      hasOpenTasks: boardHasOpenTasks(tasks.value),
+      hasOpenTasks: boardHasOpenTasks(tasks.value, boardTasksPagination.value?.status_counts),
       hasLiveSessions: boardHasLiveSessions(managedWorkspaceSessions.value),
     }))
     if (!confirmed) return

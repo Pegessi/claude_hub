@@ -17,7 +17,7 @@
         <WorkspacePicker
           :items="workspaces"
           :selected-id="selectedWorkspaceId || null"
-          :disabled="isPending('workspace:switch')"
+          :disabled="isPending('workspace:switch') || isPending('workspace:delete')"
           :deleting="isPending('workspace:delete')"
           @select="handlePickerSelect"
           @delete="confirmDeleteWorkspace"

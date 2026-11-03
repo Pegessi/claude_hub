@@ -187,12 +187,28 @@ async def main(browser_run: BrowserRun) -> None:
             )
             await expect(delete_two).to_be_visible()
 
+            # Menu keyboard contract: opening focuses the current row, arrows
+            # move through the items, and Escape closes and returns focus.
+            await expect(options.nth(0)).to_be_focused()
+            await page.keyboard.press("ArrowDown")
+            await expect(panel.locator(".workspace-picker__delete").nth(0)).to_be_focused()
+            await page.keyboard.press("ArrowDown")
+            await expect(options.nth(1)).to_be_focused()
+            await page.keyboard.press("Escape")
+            await expect(panel).to_be_hidden()
+            await expect(trigger).to_be_focused()
+
+            # Reopen for the pointer-driven cancel/delete sequence.
+            await trigger.click()
+            await expect(panel).to_be_visible()
+
             # Dismissing the native confirm must not delete anything.
             policy["accept"] = False
             await delete_two.click()
             assert deletes == [], deletes
             assert dialog_messages[-1] == (
-                'Delete workspace "Workspace Two"? This cannot be undone.'
+                'Delete workspace "Workspace Two"? Any sessions running in this '
+                "workspace will be stopped. This cannot be undone."
             ), dialog_messages[-1]
             await trigger.click()
             await expect(options.nth(1)).to_be_visible()
