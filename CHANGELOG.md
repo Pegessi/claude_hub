@@ -7,6 +7,24 @@
 
 ## Released
 
+### feat(workspace): delete workspaces from the New Agent workspace picker
+
+- Replace the Workspace header's native `<select>` with a popover picker so each
+  workspace row offers a direct delete action in the New Agent flow
+  (InfoWall 16ef41f6). The single selection owner and board switching are
+  unchanged.
+- Deletion reuses the existing DELETE `/api/workspaces/{id}` flow and its backend
+  stream-fencing and resource-retirement guarantees, plus the shared
+  `workspace:delete` pending state. Confirmation keeps the established wording
+  and additionally names the active workspace's open tasks and live sessions.
+- After deletion the row disappears immediately; deleting the active workspace
+  falls back to the next workspace and its board, and the last deletion leaves
+  an explicit empty state. Failed deletes keep the row and surface the existing
+  error notification.
+- Cover the picker behavior, confirmation wording, store state cleanup, and the
+  real click/confirm/refresh sequence at desktop (1280px) and mobile (390px)
+  with unit and mocked browser checks.
+
 ### fix(quota): refresh providers independently and tolerate slow Antigravity startup
 
 - Let the quota panel query Codex, MASO and Antigravity independently, showing

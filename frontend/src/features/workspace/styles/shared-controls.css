@@ -1,4 +1,3 @@
-.workspace-select,
 .tool-button,
 .primary-button,
 .abort-button,
@@ -11,7 +10,6 @@
   color: var(--ch-color-text);
 }
 
-.workspace-select,
 .tool-button,
 .primary-button,
 .abort-button,
@@ -50,7 +48,6 @@
 .abort-button:focus-visible,
 .danger-button:focus-visible,
 .secondary-button:focus-visible,
-.workspace-select:focus-visible,
 .path-nav-button:focus-visible {
   outline: none;
   box-shadow: 0 0 0 3px var(--ch-color-accent-ring);

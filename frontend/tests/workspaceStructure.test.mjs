@@ -103,12 +103,17 @@ test('workspace production files respect the hard line budget and own scoped sty
   }
 })
 
-// Characterization of the accepted cf16254 view: component boundaries may change,
+// Characterization of the accepted view: component boundaries may change,
 // while native elements, conditions, handlers, Teleports and rendered text stay the same.
+// 2026-11-03 (InfoWall 16ef41f6): the header workspace <select> deliberately
+// became the WorkspacePicker popover so each row can host a delete action; the
+// expanded tree otherwise keeps every accepted element/handler.
 test('workspace component expansion preserves the accepted native template', () => {
-  assert.equal(digest(nativeTree(descriptors.get('WorkspacePage').template.ast)), '5c73bef2909e14db4b92b0133a2a548373e26496da0e29f4db282c5db713c73b')
+  assert.equal(digest(nativeTree(descriptors.get('WorkspacePage').template.ast)), '471529652ae4619a4bd401cd83a34d16d0cff21ef671ef6035db379ae9008217')
 })
 
+// 2026-11-03 (InfoWall 16ef41f6): adds styles/workspace-picker.css and removes
+// the retired native .workspace-select rules from shared-controls.css.
 test('workspace scoped styles retain every accepted selector and declaration', async () => {
   const rules = new Set()
   for (const file of files.filter(file => file.pathname.endsWith('.css'))) {
@@ -119,7 +124,7 @@ test('workspace scoped styles retain every accepted selector and declaration', a
       for (const contract of stylesheetContracts(style.content)) rules.add(contract)
     }
   }
-  assert.equal(digest([...rules].sort()), '8b8ecefd86ee42e9bbaa27c3462088ef5c35e32555a0fda6f82788b4a6004956')
+  assert.equal(digest([...rules].sort()), 'b2de597b1159f2ce0a9418ec2fbe63ed585e639468b51958071fbc5c058d9408')
 })
 
 async function componentStyles(name) {

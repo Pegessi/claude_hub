@@ -48,6 +48,7 @@ type WorkspaceRuntimeContext = Pick<ReturnType<typeof useWorkspaceRuntime>,
   | 'agentDeleteTitle'
   | 'agentActionKey'
   | 'deleteAgent'
+  | 'confirmDeleteWorkspace'
   | 'visibleWorkspaceSessionsEmptyText'
   | 'boardLoading'
   | 'isMobileColumnCollapsed'

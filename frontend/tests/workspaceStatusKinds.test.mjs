@@ -23,6 +23,7 @@ const replacements = {
   '@/composables/usePendingActions': asModule(`export const usePendingActions = () => ({isPending: () => false,runPending: (_k, cb) => cb()})`),
   '@/composables/useTaskCreateFlow': asModule('export const useTaskCreateFlow = () => ({})'),
   '@/utils/draftAttachments': asModule("export const formatAttachmentSize = () => ''"),
+  '../presentation/workspaceDeletion': asModule("export const workspaceDeleteConfirmMessage = () => ''"),
   vue: import.meta.resolve('vue'),
   pinia: import.meta.resolve('pinia'),
 }
