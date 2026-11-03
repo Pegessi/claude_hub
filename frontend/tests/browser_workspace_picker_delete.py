@@ -224,8 +224,10 @@ async def main(browser_run: BrowserRun) -> None:
                 "menuitem", name='Delete workspace "Workspace One"', exact=True
             ).click()
             active_confirm = dialog_messages[-1]
+            # Qualitative only: the board task list is paginated, so the UI
+            # must never claim an exact resource count.
             assert (
-                "1 open task" in active_confirm and "1 live session" in active_confirm
+                "open tasks" in active_confirm and "live sessions" in active_confirm
             ), active_confirm
             assert deletes == ["ws-2"], deletes
 
