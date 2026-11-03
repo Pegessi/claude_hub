@@ -96,7 +96,26 @@ request deployment or a shared-service restart.
   browser checks retain normal user clicks, while the deterministic component
   test establishes that automatic polling cannot satisfy the manual-retry check.
 
-Focused and full validation of the revised candidate, followed by both reviewers'
-rechecks, are required before integration. Previously recorded backend/HMR
-results remain historical evidence, not a claim that the revised candidate has
-already passed its final checks.
+### Final verification and review
+
+The revised product/test candidate is
+`eca972be9258e53ce6fdeda7ad5a7de588834e65`. Both independent reviewers accepted
+its code and test design after rechecking all four findings. The final commands
+record that exact SHA at the start of their logs:
+
+- `env -u FORCE_COLOR NO_COLOR=1 COREPACK_HOME=... ./scripts/verify.sh all`:
+  all nine targets passed; backend 5,973 passed / 9 skipped, frontend 1,158
+  passed. Log `/tmp/ch-recovery-cross-review-all-final-20261103.log`; backend
+  evidence `/tmp/claude-hub-verify.bkj_d8qv`.
+- `browser-mocks`: all 16 scenarios passed, including the formerly failing
+  manual retry and new persisted-Goal recovery cases. Log
+  `/tmp/ch-recovery-cross-review-browser-final-20261103.log`; reports/screenshots
+  `/tmp/claude-hub-browser-mocks.gq4_w7ax/run`. Owned Vite port closed afterwards.
+- `terminal-hmr`: 12 passed. Log
+  `/tmp/ch-recovery-cross-review-hmr-final-20261103.log`; evidence
+  `/tmp/claude-hub-verify.0ptjv6y6`. Owned runtime and processes cleaned up.
+
+The final record update is documentation-only. Real provider connectivity,
+short-height/soft-keyboard layouts and actual multi-pane grid layouts are not
+claimed by the mocked full-page checks. Integration does not deploy the built
+frontend or restart the shared Hub. No remote push was requested.
