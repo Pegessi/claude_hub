@@ -134,6 +134,11 @@
           >
             {{ error }}
           </p>
+          <p v-if="error">
+            Check Goal status before trying again. If this continues, save unsent
+            text and attachments, then refresh the page. Refreshing reloads this
+            page and may retry provider startup.
+          </p>
         </div>
         <!-- The sheet's actions stay pinned below the scrolling details. -->
         <div
@@ -159,7 +164,7 @@
       class="goal-status-error goal-status-error--summary"
       role="alert"
     >
-      {{ error }}
+      Goal error. Open Goal details for recovery steps.
     </p>
     <div
       v-if="!isPhone"
