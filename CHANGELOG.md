@@ -7,6 +7,21 @@
 
 ## Released
 
+### fix(quota): refresh providers independently and tolerate slow Antigravity startup
+
+- Let the quota panel query Codex, MASO and Antigravity independently, showing
+  completed readings immediately with per-provider loading, error and retry
+  controls. Keep previous readings visible during refresh and failed requests.
+- Share per-provider caches and concurrent queries between the panel and the
+  existing aggregate CLI/API. Move Codex file scanning off the async event loop;
+  preserve MASO's force-refresh semantics without overlapping duplicate queries.
+- Allow Antigravity's CLI initialization up to 30 seconds rather than killing
+  successful queries after 10 seconds. Report timeout separately from other
+  errors, reap query processes, retain explicitly stale last-known readings on
+  failures, and leave enough time for the CLI client to receive the result.
+- Cover delayed-provider rendering, retry identity, shared-query cancellation,
+  stale values and desktop/narrow/mobile controls with regression checks.
+
 ### fix(chat): explain Goal and message-status recovery
 
 - Add Goal read-error guidance, a read-only status retry and expandable original

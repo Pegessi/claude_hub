@@ -116,6 +116,7 @@ def test_quota_json(monkeypatch):
     assert json.loads(result.output) == QUOTA_SAMPLE
     assert captured[0].url.path == "/api/quota"
     assert captured[0].url.params["refresh"] == "true"
+    assert captured[0].extensions["timeout"]["read"] == 35.0
 
 
 def test_quota_table_shows_limits_and_unavailable_reason(monkeypatch):

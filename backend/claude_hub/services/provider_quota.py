@@ -22,7 +22,7 @@ import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import httpx
 
@@ -62,7 +62,10 @@ _CODEX_MAX_FILES_VISITED = 20000
 # keeps a shared panel from re-running service discovery on every poll.
 _QUOTA_CACHE_TTL = 30.0
 _MASO_TIMEOUT_S = 3.0
-_ANTIGRAVITY_TIMEOUT_S = 10.0
+# agyx performs auth/network initialization even for /usage; successful warm
+# calls can exceed 10s. Independent provider requests keep this budget off the
+# fast providers' critical path.
+_ANTIGRAVITY_TIMEOUT_S = 30.0
 
 _CODEX_NO_DATA_MESSAGE = (
     "No Codex rate-limit reading was found on this host. "
@@ -78,15 +81,19 @@ _MASO_UNAVAILABLE_MESSAGE = "MASO quota is unavailable. Check the MASO service, 
 _MASO_NOT_CONFIGURED_MESSAGE = (
     "No MASO service is configured for this Hub, so there is no MASO quota to report."
 )
-_ANTIGRAVITY_UNAVAILABLE_MESSAGE = (
-    "Antigravity quota is unavailable. Check the Antigravity CLI login or proxy, then refresh."
-)
+_ANTIGRAVITY_UNAVAILABLE_MESSAGE = "Antigravity quota is unavailable. Check the Antigravity CLI /usage command or proxy, then refresh."
+_ANTIGRAVITY_TIMEOUT_MESSAGE = "Antigravity quota query timed out. The CLI or its upstream connection may be slow; try refreshing again."
 _ANTIGRAVITY_NOT_CONFIGURED_MESSAGE = (
     "No Antigravity CLI is configured for this Hub, so there is no Antigravity quota to report."
 )
 
-# Cached full response: (expires_at_monotonic, response).
-_QUOTA_CACHE: Optional[Tuple[float, QuotaResponse]] = None
+QuotaProviderName = Literal["codex", "maso", "antigravity"]
+_QUOTA_PROVIDERS: Tuple[QuotaProviderName, ...] = ("codex", "maso", "antigravity")
+
+# Process-local, bounded to the three providers. Aggregate and single-provider
+# requests share readings and work; a slow provider never delays another's cache.
+_QUOTA_CACHE: Dict[QuotaProviderName, Tuple[float, ProviderQuota]] = {}
+_QUOTA_IN_FLIGHT: Dict[QuotaProviderName, Tuple[bool, asyncio.Task[ProviderQuota]]] = {}
 
 
 def _iso_utc(epoch: float) -> Optional[str]:
@@ -584,18 +591,15 @@ async def _run_antigravity_usage() -> Dict[str, Any]:
     )
     try:
         stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=_ANTIGRAVITY_TIMEOUT_S)
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, Exception):
         try:
             proc.kill()
         except ProcessLookupError:
             pass
+        # Reap the task-owned CLI even when its caller disappears. Preserve
+        # TimeoutError so the panel never mistakes a slow query for lost login.
+        await proc.communicate()
         raise
-    except Exception as exc:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        raise RuntimeError("antigravity usage command timed out or failed") from exc
     if proc.returncode != 0:
         raise RuntimeError(f"antigravity usage exited with code {proc.returncode}")
     payload = json.loads(stdout.decode("utf-8", errors="replace"))
@@ -613,7 +617,10 @@ async def read_antigravity_quota(refresh: bool = False) -> ProviderQuota:
         return _antigravity_unavailable()
     try:
         payload = await _run_antigravity_usage()
-    except (OSError, RuntimeError, TimeoutError, ValueError):
+    except TimeoutError:
+        logger.warning("antigravity quota: command timed out after %.1fs", _ANTIGRAVITY_TIMEOUT_S)
+        return _antigravity_unavailable(_ANTIGRAVITY_TIMEOUT_MESSAGE)
+    except (OSError, RuntimeError, ValueError):
         logger.warning("antigravity quota: command failed", exc_info=True)
         return _antigravity_unavailable()
     if payload.get("status") != "SUCCESS":
@@ -673,35 +680,90 @@ async def _safe_read_antigravity_quota(refresh: bool) -> ProviderQuota:
         return _antigravity_unavailable(_ANTIGRAVITY_UNAVAILABLE_MESSAGE)
 
 
-async def read_provider_quota(refresh: bool = False) -> QuotaResponse:
-    """Read every provider: Codex first, then MASO and Antigravity.
-
-    One unreadable provider is reported as unavailable instead of failing the
-    whole panel, so the broad guards below are deliberate. Results are cached
-    briefly so a shared panel cannot turn each poll into repeated provider
-    queries; ``refresh`` bypasses both this cache and MASO's own.
-    """
-    global _QUOTA_CACHE
-
-    now = time.monotonic()
-    if not refresh and _QUOTA_CACHE is not None:
-        expires_at, cached = _QUOTA_CACHE
-        if now < expires_at:
-            return cached
+async def _safe_read_codex_quota() -> ProviderQuota:
     try:
-        codex = read_codex_quota()
+        # Filesystem traversal must not block the event loop serving MASO/agyx.
+        return await asyncio.to_thread(read_codex_quota)
     except Exception:
         logger.exception("codex quota: unexpected read failure")
-        codex = ProviderQuota(
+        return ProviderQuota(
             provider="codex",
             available=False,
             state="unavailable",
             message=_CODEX_UNREADABLE_MESSAGE,
         )
-    maso, antigravity = await asyncio.gather(
-        _safe_read_maso_quota(refresh=refresh),
-        _safe_read_antigravity_quota(refresh=refresh),
+
+
+def _retain_last_reading(reading: ProviderQuota, previous: ProviderQuota) -> ProviderQuota:
+    """Preserve historical values on a transient outage, never their freshness."""
+    if reading.state != "unavailable" or not previous.limits:
+        return reading
+    limits = []
+    now = datetime.now(timezone.utc).timestamp()
+    for limit in previous.limits:
+        reset = _valid_iso(limit.resets_at)
+        expired = (
+            reset is not None
+            and datetime.fromisoformat(reset.replace("Z", "+00:00")).timestamp() <= now
+        )
+        limits.append(
+            limit.model_copy(
+                update={"state": "unknown", "used_percent": None, "remaining_percent": None}
+            )
+            if expired
+            else limit
+        )
+    return previous.model_copy(
+        update={
+            "available": False,
+            "state": "unavailable",
+            "stale": True,
+            "limits": limits,
+            "message": f"{reading.message} Showing the last successful reading.",
+        }
     )
-    response = QuotaResponse(providers=[codex, maso, antigravity])
-    _QUOTA_CACHE = (time.monotonic() + _QUOTA_CACHE_TTL, response)
-    return response
+
+
+async def _fetch_and_cache_quota(provider: QuotaProviderName, refresh: bool) -> ProviderQuota:
+    try:
+        if provider == "codex":
+            reading = await _safe_read_codex_quota()
+        elif provider == "maso":
+            reading = await _safe_read_maso_quota(refresh)
+        else:
+            reading = await _safe_read_antigravity_quota(refresh)
+        previous = _QUOTA_CACHE.get(provider)
+        if previous is not None:
+            reading = _retain_last_reading(reading, previous[1])
+        _QUOTA_CACHE[provider] = (time.monotonic() + _QUOTA_CACHE_TTL, reading)
+        return reading
+    finally:
+        _QUOTA_IN_FLIGHT.pop(provider, None)
+
+
+async def _read_one_provider(provider: QuotaProviderName, refresh: bool) -> ProviderQuota:
+    cached = _QUOTA_CACHE.get(provider)
+    if not refresh and cached is not None and time.monotonic() < cached[0]:
+        return cached[1]
+
+    while (active := _QUOTA_IN_FLIGHT.get(provider)) is not None:
+        forced, task = active
+        # A disconnected panel must not cancel another panel's shared query.
+        reading = await asyncio.shield(task)
+        if not refresh or forced or provider != "maso":
+            return reading
+        # MASO's cached query cannot satisfy a force-refresh. Wait for it, then
+        # coalesce forced callers into one fresh query instead of overlapping.
+
+    task = asyncio.create_task(_fetch_and_cache_quota(provider, refresh))
+    _QUOTA_IN_FLIGHT[provider] = (refresh, task)
+    return await asyncio.shield(task)
+
+
+async def read_provider_quota(
+    refresh: bool = False, provider: Optional[QuotaProviderName] = None
+) -> QuotaResponse:
+    """Read one provider independently, or all providers for existing CLI clients."""
+    providers = (provider,) if provider is not None else _QUOTA_PROVIDERS
+    readings = await asyncio.gather(*(_read_one_provider(name, refresh) for name in providers))
+    return QuotaResponse(providers=list(readings))

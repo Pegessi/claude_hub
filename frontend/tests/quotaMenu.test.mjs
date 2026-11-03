@@ -467,6 +467,8 @@ test('an empty or missing payload renders no provider blocks', () => {
 test('the quota endpoint only asks for a fresh reading when requested', () => {
   assert.equal(display.quotaRequestUrl(false), '/api/quota')
   assert.equal(display.quotaRequestUrl(true), '/api/quota?refresh=true')
+  assert.equal(display.quotaRequestUrl(false, 'maso'), '/api/quota?provider=maso')
+  assert.equal(display.quotaRequestUrl(true, 'antigravity'), '/api/quota?provider=antigravity&refresh=true')
 })
 
 function mountMenu(t, { withTemplate = false } = {}) {
@@ -523,22 +525,50 @@ const livePayload = () => ({
   providers: [aged(codexProvider, 4 * MINUTE), aged(masoProvider, MINUTE)],
 })
 
-function fetchHarness(t, initial = livePayload()) {
-  const calls = []
-  let handler = async () => new Response(JSON.stringify(initial), {
+function quotaResponse(payload, url) {
+  const key = new URL(url, 'http://test').searchParams.get('provider')
+  const reading = payload.providers.find(item => item.provider === key) ?? notConfigured(key)
+  return new Response(JSON.stringify({ providers: [reading] }), {
     status: 200, headers: { 'Content-Type': 'application/json' },
   })
+}
+
+function fetchHarness(t, initial = livePayload()) {
+  const calls = []
+  let handler = async url => quotaResponse(initial, url)
   t.mock.method(globalThis, 'fetch', async (url, init = {}) => {
     calls.push({ url, init })
     return handler(url, init)
   })
-  return { calls, set(next) { handler = next } }
+  return {
+    calls,
+    set(next) { handler = next },
+    setPayload(next) { handler = async url => quotaResponse(next, url) },
+  }
+}
+
+function deferredReads(http) {
+  const pending = new Map()
+  http.set((url, init) => new Promise(resolve => {
+    const provider = new URL(url, 'http://test').searchParams.get('provider')
+    pending.set(provider, { url, init, resolve })
+  }))
+  return {
+    pending,
+    resolve(key, payload = livePayload()) {
+      const request = pending.get(key)
+      request.resolve(quotaResponse(payload, request.url))
+    },
+    fail(key, detail = 'Quota service is unavailable') {
+      pending.get(key).resolve(new Response(JSON.stringify({ detail }), { status: 503 }))
+    },
+  }
 }
 
 const open = state => state.openModal()
 const close = state => state.closeModal()
 
-test('the panel loads once when it is opened and renders both providers', async t => {
+test('the panel starts three requests on first open and reuses them on reopen', async t => {
   const http = fetchHarness(t)
   const { state } = mountMenu(t)
   assert.equal(http.calls.length, 0, 'a closed panel must not call the provider API')
@@ -548,33 +578,68 @@ test('the panel loads once when it is opened and renders both providers', async 
   assert.equal(state.isLoading, true)
   await flush()
 
-  assert.deepEqual(http.calls.map(call => call.url), ['/api/quota'])
+  assert.deepEqual(http.calls.map(call => call.url), [
+    '/api/quota?provider=codex', '/api/quota?provider=maso', '/api/quota?provider=antigravity',
+  ])
   assert.equal(state.isLoading, false)
-  assert.equal(state.loadError, null)
-  assert.deepEqual(state.providerViews.map(view => view.title), ['Codex', 'MASO'])
+  assert.equal(state.hasLoadError, false)
+  assert.deepEqual(state.providerPanels.map(panel => panel.title), ['Codex', 'MASO', 'Antigravity'])
   assert.equal(state.providerViews[0].rows[0].value, '42% left')
   assert.equal(state.summaryText, 'Lowest 42% left')
 
   close(state)
   open(state)
   await flush()
-  assert.equal(http.calls.length, 1, 'reopening must reuse the reading already loaded')
+  assert.equal(http.calls.length, 3, 'reopening must reuse readings already loaded')
 })
 
-test('Refresh asks the backend for a new reading', async t => {
+test('Refresh bypasses each provider cache and does not launch duplicates while loading', async t => {
   const http = fetchHarness(t)
   const { state } = mountMenu(t)
   open(state)
   await flush()
+  const reads = deferredReads(http)
   state.refreshQuota()
+  state.refreshQuota()
+  assert.deepEqual(http.calls.slice(3).map(call => call.url), [
+    '/api/quota?provider=codex&refresh=true', '/api/quota?provider=maso&refresh=true',
+    '/api/quota?provider=antigravity&refresh=true',
+  ])
+  assert.equal(state.providerViews[0].rows[0].value, '42% left', 'refresh must retain existing rows')
+  for (const key of display.QUOTA_PROVIDERS) reads.resolve(key)
   await flush()
-  assert.deepEqual(http.calls.map(call => call.url), ['/api/quota', '/api/quota?refresh=true'])
-  assert.equal(state.loadError, null)
+  assert.equal(state.hasLoadError, false)
 })
 
-test('a refresh that returns the identical reading says so, per provider', async t => {
-  // Codex republishes only when a turn finishes, so its timestamp stays put
-  // while MASO's advances on the very same refresh.
+test('fast providers render before Antigravity returns and keep fixed panel order', async t => {
+  const http = fetchHarness(t)
+  const reads = deferredReads(http)
+  const { state, tree } = mountMenu(t, { withTemplate: true })
+  open(state)
+  assert.equal(reads.pending.size, 3, 'requests must start in parallel')
+  await vue.nextTick()
+  assert.deepEqual(state.providerPanels.map(panel => panel.key), ['codex', 'maso', 'antigravity'])
+  assert.equal(renderedText(tree).filter(text => text === 'Loading quota...').length, 3)
+
+  reads.resolve('maso')
+  await flush()
+  assert.ok(renderedText(tree).includes('86% left'))
+  assert.equal(state.providerRequests.maso.loading, false)
+  assert.equal(state.providerRequests.antigravity.loading, true)
+  assert.match(state.summaryText, /Loading/)
+  reads.resolve('codex')
+  await flush()
+  assert.ok(renderedText(tree).includes('42% left'))
+  assert.deepEqual(state.providerViews.map(view => view.key), ['codex', 'maso'])
+  assert.equal(renderedText(tree).filter(text => text === 'Loading quota...').length, 1)
+
+  reads.resolve('antigravity')
+  await flush()
+  assert.equal(state.isLoading, false)
+  assert.deepEqual(state.providerViews.map(view => view.key), ['codex', 'maso', 'antigravity'])
+})
+
+test('an unchanged reading notice updates independently and survives a failed refresh', async t => {
   const frozen = '2026-05-20T09:47:05Z'
   const payload = moved => ({ providers: [
     { ...codexProvider, as_of: frozen },
@@ -584,104 +649,189 @@ test('a refresh that returns the identical reading says so, per provider', async
   const { state } = mountMenu(t)
   open(state)
   await flush()
-  assert.deepEqual(state.providerViews.map(view => view.unchangedNote), ['', ''],
-    'a first load has nothing to compare against')
+  assert.ok(state.providerViews.every(view => !view.unchangedNote))
 
-  http.set(async () => new Response(JSON.stringify(payload(MINUTE)), { status: 200 }))
+  http.setPayload(payload(MINUTE))
   state.refreshQuota()
   await flush()
   assert.match(state.providerViews[0].unchangedNote, /Codex only publishes usage after a conversation turn/)
-  assert.equal(state.providerViews[1].unchangedNote, '', 'MASO moved, so it must not be marked')
+  assert.equal(state.providerViews[1].unchangedNote, '')
 
-  // The notice is transient: a reading that finally moves clears it.
-  http.set(async () => new Response(JSON.stringify({ providers: [
-    { ...codexProvider, as_of: new Date(NOW).toISOString() },
-    { ...masoProvider, as_of: new Date(NOW).toISOString() },
-  ] }), { status: 200 }))
+  http.set(async url => url.includes('provider=codex')
+    ? new Response(JSON.stringify({ detail: 'Quota service is unavailable' }), { status: 503 })
+    : quotaResponse(payload(MINUTE), url))
   state.refreshQuota()
   await flush()
-  assert.deepEqual(state.providerViews.map(view => view.unchangedNote), ['', ''])
-})
-
-test('a failed refresh keeps the explanation the previous one produced', async t => {
-  const frozen = '2026-05-20T09:47:05Z'
-  const payload = { providers: [{ ...codexProvider, as_of: frozen }] }
-  const http = fetchHarness(t, payload)
-  const { state } = mountMenu(t)
-  open(state)
-  await flush()
-  state.refreshQuota()
-  await flush()
+  assert.equal(state.providerRequests.codex.error, 'Could not load quota: Quota service is unavailable')
   assert.match(state.providerViews[0].unchangedNote, /same reading/)
+  assert.equal(state.providerViews[0].rows[0].value, '42% left')
+  assert.match(state.summaryText, /Refresh failed/)
 
-  http.set(async () => new Response(JSON.stringify({ detail: 'Quota service is unavailable' }), { status: 503 }))
-  state.refreshQuota()
+  http.setPayload({ providers: [{ ...codexProvider, as_of: new Date(NOW).toISOString() }] })
+  state.retryQuota('codex')
   await flush()
-  assert.equal(state.loadError, 'Could not load quota: Quota service is unavailable')
-  assert.match(state.providerViews[0].unchangedNote, /same reading/,
-    'a failed refresh does not make the previous reading newer')
+  assert.equal(http.calls.at(-1).url, '/api/quota?provider=codex&refresh=true')
+  assert.equal(state.providerRequests.codex.error, null)
+  assert.equal(state.providerViews[0].unchangedNote, '')
 })
 
-test('a failed refresh keeps the previous reading, explains itself, and Retry repeats it', async t => {
+test('one failed provider retries independently while another is still loading', async t => {
   const http = fetchHarness(t)
+  const reads = deferredReads(http)
+  const { state, tree } = mountMenu(t, { withTemplate: true })
+  open(state)
+  reads.fail('codex')
+  reads.resolve('maso')
+  await flush()
+  assert.ok(renderedText(tree).includes('Could not load quota: Quota service is unavailable'))
+  assert.ok(renderedText(tree).includes('Retry'))
+  assert.ok(renderedText(tree).includes('86% left'))
+  assert.equal(state.providerRequests.antigravity.loading, true)
+
+  state.retryQuota('codex')
+  state.retryQuota('codex')
+  assert.equal(http.calls.length, 4, 'retry must not restart pending or successful providers')
+  assert.equal(http.calls.at(-1).url, '/api/quota?provider=codex', 'retry keeps the initial cache intent')
+  reads.resolve('codex')
+  await flush()
+  assert.equal(state.providerRequests.codex.error, null)
+  assert.equal(state.providerRequests.antigravity.loading, true)
+  reads.resolve('antigravity')
+  await flush()
+  assert.equal(state.isLoading, false)
+})
+
+test('an HTTP 200 unavailable reading retries with refresh while another provider remains pending', async t => {
+  const http = fetchHarness(t)
+  const reads = deferredReads(http)
+  const { state, tree } = mountMenu(t, { withTemplate: true })
+  open(state)
+  reads.resolve('codex')
+  reads.resolve('maso', { providers: [provider({
+    ...masoProvider,
+    available: false,
+    state: 'unavailable',
+    stale: true,
+    message: 'MASO quota is unavailable. Showing the last successful reading.',
+  })] })
+  await flush()
+  assert.equal(state.providerRequests.maso.error, null, 'a provider failure is a valid HTTP response')
+  assert.equal(state.providerRequests.maso.refresh, false)
+  assert.equal(state.providerRequests.antigravity.loading, true)
+  assert.ok(renderedText(tree).includes('Retry'), 'the unavailable provider must expose its own retry')
+  assert.ok(renderedText(tree).includes('86% left'), 'retained last-successful limits remain visible')
+  assert.ok(!renderedText(tree).includes('Showing the previous reading; this refresh failed.'),
+    'a valid backend failure keeps its own message instead of an HTTP failure message')
+
+  state.retryQuota('maso')
+  state.retryQuota('maso')
+  assert.equal(http.calls.length, 4)
+  assert.equal(http.calls.at(-1).url, '/api/quota?provider=maso&refresh=true',
+    'provider-level retry must bypass the cached unavailable reading')
+  reads.resolve('maso')
+  await flush()
+  assert.equal(state.providerViews.find(view => view.key === 'maso').state, 'within')
+  assert.equal(state.providerRequests.antigravity.loading, true)
+  assert.ok(!renderedText(tree).includes('Retry'))
+  reads.resolve('antigravity')
+  await flush()
+})
+
+test('not configured and healthy providers do not offer or execute a retry', async t => {
+  const http = fetchHarness(t, { providers: [aged(codexProvider, MINUTE), notConfigured('maso')] })
+  const { state, tree } = mountMenu(t, { withTemplate: true })
+  open(state)
+  await flush()
+  assert.ok(!renderedText(tree).includes('Retry'))
+  for (const key of display.QUOTA_PROVIDERS) state.retryQuota(key)
+  await flush()
+  assert.equal(http.calls.length, 3)
+})
+
+test('a schema failure takes retry precedence over a previously unavailable reading', async t => {
+  const http = fetchHarness(t, { providers: [provider({
+    provider: 'maso', available: false, state: 'unavailable', message: 'Unavailable.',
+  })] })
   const { state } = mountMenu(t)
   open(state)
   await flush()
-
-  http.set(async () => new Response(JSON.stringify({ detail: 'Quota service is unavailable' }), {
-    status: 503, headers: { 'Content-Type': 'application/json' },
-  }))
-  state.refreshQuota()
+  http.set(async () => new Response(JSON.stringify({ providers: [] }), { status: 200 }))
+  await state.fetchProviderQuota('maso', false)
+  assert.match(state.providerRequests.maso.error, /unexpected provider reading/)
+  assert.equal(state.providerViews.find(view => view.key === 'maso').state, 'unavailable')
+  state.retryQuota('maso')
   await flush()
-  assert.equal(state.isLoading, false)
-  assert.equal(state.loadError, 'Could not load quota: Quota service is unavailable')
-  assert.equal(state.providerViews[0].rows[0].value, '42% left', 'a failure must not erase the panel')
-  assert.equal(state.summaryText, 'Lowest 42% left')
-
-  state.retryQuota()
-  await flush()
-  assert.equal(http.calls.at(-1).url, '/api/quota?refresh=true', 'Retry must repeat the request that failed')
-  assert.equal(state.loadError, 'Could not load quota: Quota service is unavailable')
-
-  http.set(async () => new Response(JSON.stringify(livePayload()), { status: 200 }))
-  state.retryQuota()
-  await flush()
-  assert.equal(state.loadError, null)
-  assert.equal(state.isLoading, false)
+  assert.equal(http.calls.at(-1).url, '/api/quota?provider=maso',
+    'a schema retry repeats its failed cache intent even when older data was unavailable')
 })
 
-test('a first load that fails reports an English error and offers the same retry', async t => {
+test('all first-load failures remain distinct and reopening does not silently retry', async t => {
   const http = fetchHarness(t)
   http.set(async () => { throw new TypeError('Failed to fetch') })
   const { state } = mountMenu(t)
   open(state)
   await flush()
-  assert.equal(state.loadError, 'Could not load quota: Failed to fetch')
   assert.equal(state.summaryText, 'Load failed')
   assert.deepEqual(state.providerViews, [])
-
-  http.set(async () => new Response(JSON.stringify(livePayload()), { status: 200 }))
-  state.retryQuota()
+  assert.ok(state.providerPanels.every(panel => panel.error === 'Could not load quota: Failed to fetch'))
+  close(state)
+  open(state)
   await flush()
-  assert.equal(http.calls.at(-1).url, '/api/quota')
-  assert.equal(state.loadError, null)
-  assert.equal(state.providerViews.length, 2)
+  assert.equal(http.calls.length, 3)
+
+  http.setPayload(livePayload())
+  for (const key of display.QUOTA_PROVIDERS) state.retryQuota(key)
+  await flush()
+  assert.equal(state.hasLoadError, false)
+  assert.equal(state.providerViews.length, 3)
 })
 
-test('a response that arrives after the panel is gone cannot write to it', async t => {
+test('a mismatched provider response is rejected without replacing another provider', async t => {
   const http = fetchHarness(t)
-  let release
-  http.set(() => new Promise(resolve => { release = resolve }))
+  http.set(async url => url.includes('provider=maso')
+    ? new Response(JSON.stringify({ providers: [codexProvider] }), { status: 200 })
+    : quotaResponse(livePayload(), url))
+  const { state } = mountMenu(t)
+  open(state)
+  await flush()
+  assert.match(state.providerRequests.maso.error, /unexpected provider reading/)
+  assert.equal(state.providerViews.find(view => view.key === 'codex').rows[0].value, '42% left')
+  assert.equal(state.providerViews.find(view => view.key === 'maso'), undefined)
+})
+
+test('a superseded response cannot overwrite the newer reading or clear its loading state', async t => {
+  const http = fetchHarness(t)
+  const reads = deferredReads(http)
+  const { state } = mountMenu(t)
+  open(state)
+  const oldCodex = reads.pending.get('codex')
+  void state.fetchProviderQuota('codex', true)
+  assert.equal(oldCodex.init.signal.aborted, true)
+  oldCodex.resolve(quotaResponse(livePayload(), oldCodex.url))
+  await flush()
+  assert.equal(state.providerRequests.codex.loading, true)
+  assert.equal(state.quota, null)
+  reads.resolve('codex', { providers: [provider({ limits: [limit({ remaining_percent: 20 })] })] })
+  reads.resolve('maso')
+  reads.resolve('antigravity')
+  await flush()
+  assert.equal(state.providerViews[0].rows[0].value, '20% left')
+})
+
+test('unmount aborts all outstanding requests and ignores their late responses', async t => {
+  const http = fetchHarness(t)
+  const reads = deferredReads(http)
   const { state, unmount } = mountMenu(t)
   open(state)
   assert.equal(state.isLoading, true)
-
   unmount()
-  release(new Response(JSON.stringify(fullPayload), { status: 200 }))
+  for (const key of display.QUOTA_PROVIDERS) {
+    assert.equal(reads.pending.get(key).init.signal.aborted, true)
+    reads.resolve(key)
+  }
   await flush()
-
   assert.equal(state.quota, null)
-  assert.equal(state.loadError, null)
+  assert.equal(state.hasLoadError, false)
   assert.deepEqual(state.providerViews, [])
 })
 
@@ -754,10 +904,10 @@ test('the rendered panel tells the user a refresh produced no newer reading', as
     'an hours-old reading must already be marked as not live')
   assert.ok(!beforeRefresh.some(entry => /same reading/.test(entry)))
 
-  http.set(async () => new Response(JSON.stringify({ providers: [
+  http.setPayload({ providers: [
     { ...codexProvider, as_of: frozen },
     { ...masoProvider, stale: false, as_of: new Date().toISOString() },
-  ] }), { status: 200 }))
+  ] })
   state.refreshQuota()
   await flush()
   await vue.nextTick()
@@ -813,8 +963,6 @@ test('the rendered panel keeps a genuinely failed provider loud', async t => {
   assert.ok(classes.includes('quota-note--error'), 'a real outage keeps its alarm styling')
   assert.ok(renderedText(tree).includes('Reading time unknown'),
     'a provider that was tried and failed still reports that it has no timestamp')
-  assert.ok(!classes.includes('quota-note--neutral'))
-  assert.ok(!classes.includes('quota-badge--not_configured'))
   assert.equal(state.summaryText, 'Lowest 42% left · 1 provider unavailable')
 })
 

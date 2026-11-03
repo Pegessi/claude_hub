@@ -284,7 +284,11 @@ class HubClient:
 
     def get_quota(self, refresh: bool = False) -> Any:
         """GET /api/quota."""
-        return self._request("GET", "/api/quota", params={"refresh": "true"} if refresh else None)
+        # Allow the server's 30s Antigravity budget to return its own timeout
+        # reading instead of losing all providers to the HTTP client's deadline.
+        return self._request(
+            "GET", "/api/quota", params={"refresh": "true"} if refresh else None, timeout=35.0
+        )
 
     # -- Workspaces ---------------------------------------------------------
 
