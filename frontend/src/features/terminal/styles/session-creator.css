@@ -345,9 +345,15 @@
   box-shadow: 0 10px 24px var(--ch-color-overlay-soft);
 }
 
+.cwd-choice-row {
+  display: flex;
+  align-items: stretch;
+  border-radius: var(--ch-radius-md);
+}
+
 .cwd-choice {
-  display: block;
-  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
   padding: 8px 10px;
   overflow: hidden;
   border: none;
@@ -365,6 +371,26 @@
 .cwd-choice:hover,
 .cwd-choice.is-active {
   background-color: var(--ch-color-surface-control-hover);
+}
+
+.cwd-choice-remove {
+  flex: 0 0 auto;
+  width: 28px;
+  margin: 2px 2px 2px 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--ch-radius-md);
+  background: transparent;
+  color: var(--ch-color-text-muted);
+  font-size: var(--ch-font-size-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.cwd-choice-remove:hover,
+.cwd-choice-remove:focus-visible {
+  background-color: var(--ch-color-surface-control-hover);
+  color: var(--ch-color-text);
 }
 
 .cwd-dropdown-btn {

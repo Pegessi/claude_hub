@@ -124,6 +124,9 @@ async def main(browser_run: BrowserRun) -> None:
     codex_session_requests = 0
     model_changes: list[dict] = []
     preflight_requests: list[dict] = []
+    # cwds submitted through the real Create Session flow; the cwd removal
+    # scenario uses this to prove addCwd re-add restores a dismissed entry.
+    created_cwds: list[str] = []
     tab = {
         "id": TAB,
         "name": "MASO composer fixture",
@@ -211,6 +214,14 @@ async def main(browser_run: BrowserRun) -> None:
                 and path.endswith("/messages")
             ):
                 body = {"messages": []}
+            elif method == "POST" and path == "/api/tabs":
+                # The cwd removal scenario drives the real Create flow to prove
+                # addCwd restores a dismissed entry. Returning the already-open
+                # fixture tab keeps the pane mounted, so no stream id or other
+                # follow-up request is introduced into the strict mock surface.
+                payload = json.loads(request.post_data or "{}")
+                created_cwds.append(payload.get("cwd"))
+                body = tab
             elif method == "GET" and path == "/api/tabs":
                 body = [
                     tab,
@@ -1785,6 +1796,130 @@ async def main(browser_run: BrowserRun) -> None:
             assert retry_requests.count(f"{BASE}/retry") == retries_before + 1
             assert len(sends) == sends_before_auth_retry, "Retry resent the previous task"
 
+        # Working-directory dropdown: per-row removal against the real DOM.
+        # Eight history entries plus the two open-tab cwds give ten rows, the
+        # same fixture shape as the earlier create-dialog block.
+        seeded_history = [
+            "/fixture/recent",
+            "/fixture/other",
+            "/fixture/three",
+            "/fixture/four",
+            "/fixture/five",
+            "/fixture/six",
+            "/fixture/seven",
+            "/fixture/eight",
+        ]
+        for width, height in ((1280, 900), (390, 844)):
+            await page.set_viewport_size({"width": width, "height": height})
+            await page.evaluate(
+                "localStorage.setItem('claude-hub:cwd-history:local', "
+                f"{json.dumps(json.dumps(seeded_history))})"
+            )
+            await page.goto(base + f"/?tab={TAB}")
+            await page.locator(".add-tab").click()
+            cwd = page.locator("#tabCwd")
+            await expect(cwd).to_have_value("/fixture/recent")
+            await cwd.click()
+            choices = page.locator(".cwd-choice")
+            listbox = page.locator("#tab-cwd-choices")
+            await expect(choices).to_have_count(10)
+            await expect(listbox).to_be_visible()
+
+            def remove_button(path_text: str):
+                return page.get_by_role("button", name=f"Remove {path_text}", exact=True)
+
+            # 1. Deleting a history row neither selects it nor closes the list,
+            #    and the persisted list is rewritten immediately.
+            await remove_button("/fixture/other").click()
+            await expect(choices).to_have_count(9)
+            await expect(listbox).to_be_visible()
+            await expect(cwd).to_have_value("/fixture/recent")
+            stored = json.loads(
+                await page.evaluate("localStorage.getItem('claude-hub:cwd-history:local')")
+            )
+            assert "/fixture/other" not in stored, stored
+
+            # 2. A path contributed only by an open tab is dismissed for the
+            #    page session and stays hidden across modal reopen.
+            await remove_button("/fixture/current").click()
+            await expect(choices).to_have_count(8)
+            visible_texts = await choices.all_inner_texts()
+            assert "/fixture/current" not in visible_texts
+            assert "/fixture/workspace" in visible_texts
+            await page.locator(".modal").get_by_role("button", name="Cancel", exact=True).click()
+            await expect(listbox).to_have_count(0)
+            await page.locator(".add-tab").click()
+            await cwd.click()
+            await expect(choices).to_have_count(8)
+            assert "/fixture/current" not in await choices.all_inner_texts()
+
+            # A reload restores the live open-tab path; the persisted history
+            # deletion survives it.
+            await page.reload()
+            await expect(composer).to_be_visible()
+            await page.locator(".add-tab").click()
+            await page.locator("#tabCwd").click()
+            reopened_texts = await page.locator(".cwd-choice").all_inner_texts()
+            assert "/fixture/current" in reopened_texts, reopened_texts
+            assert "/fixture/other" not in reopened_texts, reopened_texts
+
+            # 3. Re-add through the real Create flow: addCwd clears dismissal
+            #    and prepends the path. Reload reset dismissals, so the list is
+            #    7 history + 2 open tabs; removing five leaves 6 history.
+            await expect(choices).to_have_count(9)
+            await remove_button("/fixture/five").click()
+            await expect(choices).to_have_count(8)
+            await cwd.fill("/fixture/five")
+            await page.locator(".modal").get_by_role("button", name="Create", exact=True).click()
+            await expect(page.locator(".modal-overlay")).to_have_count(0)
+            await page.locator(".add-tab").click()
+            await expect(cwd).to_have_value("/fixture/five")
+            await cwd.click()
+            await expect(choices).to_have_count(9)
+            await expect(choices.nth(0)).to_have_text("/fixture/five")
+            stored = json.loads(
+                await page.evaluate("localStorage.getItem('claude-hub:cwd-history:local')")
+            )
+            assert stored[0] == "/fixture/five", stored
+
+            # 4a. Deleting the selected row clears the input; the other open-tab
+            #     path keeps the list at 6 history + 2 open tabs, still open.
+            await remove_button("/fixture/five").click()
+            await expect(cwd).to_have_value("")
+            await expect(choices).to_have_count(8)
+            await expect(listbox).to_be_visible()
+
+            # 4b. Unrelated typed text survives deleting a different row.
+            await cwd.fill("work")
+            await expect(choices).to_have_count(1)
+            await remove_button("/fixture/workspace").click()
+            await expect(cwd).to_have_value("work")
+            await expect(listbox).to_have_count(0)
+
+            # 5. Delete key removes the active option without editing the text:
+            #    six history entries plus the one surviving open-tab path.
+            await cwd.fill("")
+            await cwd.click()
+            await expect(choices).to_have_count(7)
+            await cwd.press("ArrowDown")
+            active = page.locator(".cwd-choice.is-active")
+            await expect(active).to_have_text("/fixture/recent")
+            await cwd.press("Delete")
+            await expect(cwd).to_have_value("")
+            await expect(choices).to_have_count(6)
+            assert "/fixture/recent" not in await choices.all_inner_texts()
+
+            # 6. Negative case: with no active option, Backspace edits text.
+            await cwd.fill("CURRENT")
+            await expect(choices).to_have_count(1)
+            await cwd.press("Backspace")
+            await expect(cwd).to_have_value("CURREN")
+            await expect(choices).to_have_count(1)
+            await page.screenshot(path=str(output / f"cwd-remove-{width}.png"))
+            assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+
+        assert created_cwds == ["/fixture/five", "/fixture/five"], created_cwds
+
         assert not errors, errors
         assert not unexpected_external, unexpected_external
         assert not unknown_requests, unknown_requests
@@ -1801,6 +1936,7 @@ async def main(browser_run: BrowserRun) -> None:
                     "capability_requests": capability_requests,
                     "retry_requests": retry_requests,
                     "image_turns": sum(bool(item.get("attachments")) for item in sends),
+                    "cwd_removal_readd_cwds": created_cwds,
                     "unknown_requests": unknown_requests,
                     "blocked_external_requests": len(blocked),
                     "unexpected_external_requests": unexpected_external,
