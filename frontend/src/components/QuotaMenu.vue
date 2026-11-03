@@ -83,130 +83,140 @@
 
           <div class="quota-modal-body">
             <section
-              v-for="view in providerViews"
-              :key="view.key"
+              v-for="panel in providerPanels"
+              :key="panel.key"
               class="quota-provider"
+              :data-provider="panel.key"
+              :aria-busy="panel.loading"
             >
               <div class="quota-provider-head">
-                <strong>{{ view.title }}</strong>
+                <strong>{{ panel.title }}</strong>
                 <span
+                  v-if="panel.view"
                   class="quota-badge"
-                  :class="`quota-badge--${view.state}`"
-                >{{ view.statusText }}</span>
+                  :class="`quota-badge--${panel.view.state}`"
+                >{{ panel.view.statusText }}</span>
+                <span
+                  v-else
+                  class="quota-badge quota-badge--unknown"
+                >{{ panel.loading ? 'Loading' : panel.error ? 'Load failed' : 'Not loaded' }}</span>
               </div>
+              <template v-if="panel.view">
+                <p
+                  v-if="panel.view.asOfText"
+                  class="quota-reading"
+                  :class="{ 'quota-reading--aging': panel.view.aging }"
+                  :title="panel.view.asOfTitle"
+                >
+                  {{ panel.view.asOfText }}
+                </p>
+                <p
+                  v-if="panel.view.staleNote"
+                  class="quota-note quota-note--warning"
+                >
+                  {{ panel.view.staleNote }}
+                </p>
+                <p
+                  v-if="panel.view.agingNote"
+                  class="quota-note quota-note--aging"
+                >
+                  {{ panel.view.agingNote }}
+                </p>
+                <p
+                  v-if="panel.view.unchangedNote"
+                  class="quota-note quota-note--unchanged"
+                  role="status"
+                >
+                  {{ panel.view.unchangedNote }}
+                </p>
+                <p
+                  v-if="panel.view.message"
+                  class="quota-note"
+                  :class="`quota-note--${panel.view.messageTone}`"
+                >
+                  {{ panel.view.message }}
+                </p>
+                <ul
+                  v-if="panel.view.rows.length"
+                  class="quota-rows"
+                >
+                  <li
+                    v-for="row in panel.view.rows"
+                    :key="row.key"
+                    class="quota-row"
+                    :class="[`quota-row--${row.state}`, `quota-row--${row.tone}`]"
+                  >
+                    <div class="quota-row-head">
+                      <span
+                        class="quota-row-label"
+                        :title="row.label"
+                      >{{ row.label }}</span>
+                      <strong class="quota-row-value">{{ row.value }}</strong>
+                    </div>
+                    <div
+                      v-if="row.barPercent !== null"
+                      class="quota-bar"
+                      aria-hidden="true"
+                    >
+                      <span :style="{ width: `${row.barPercent}%` }" />
+                    </div>
+                    <p
+                      v-if="row.usedText || row.resetText"
+                      class="quota-row-meta"
+                    >
+                      <span v-if="row.usedText">{{ row.usedText }}</span>
+                      <span
+                        v-if="row.resetText"
+                        :title="row.resetTitle"
+                      >{{ row.resetText }}</span>
+                    </p>
+                  </li>
+                </ul>
+                <p
+                  v-else-if="panel.view.emptyText"
+                  class="quota-status"
+                >
+                  {{ panel.view.emptyText }}
+                </p>
+                <p
+                  v-for="note in panel.view.notes"
+                  :key="note"
+                  class="quota-note"
+                >
+                  {{ note }}
+                </p>
+              </template>
               <p
-                v-if="view.asOfText"
-                class="quota-reading"
-                :class="{ 'quota-reading--aging': view.aging }"
-                :title="view.asOfTitle"
-              >
-                {{ view.asOfText }}
-              </p>
-              <p
-                v-if="view.staleNote"
-                class="quota-note quota-note--warning"
-              >
-                {{ view.staleNote }}
-              </p>
-              <p
-                v-if="view.agingNote"
-                class="quota-note quota-note--aging"
-              >
-                {{ view.agingNote }}
-              </p>
-              <p
-                v-if="view.unchangedNote"
-                class="quota-note quota-note--unchanged"
+                v-if="panel.loading"
+                class="quota-status"
                 role="status"
               >
-                {{ view.unchangedNote }}
+                {{ panel.view ? 'Refreshing quota...' : 'Loading quota...' }}
               </p>
-              <p
-                v-if="view.message"
-                class="quota-note"
-                :class="`quota-note--${view.messageTone}`"
+              <div
+                v-else-if="panel.error"
+                class="quota-failure"
+                role="alert"
               >
-                {{ view.message }}
-              </p>
-              <ul
-                v-if="view.rows.length"
-                class="quota-rows"
-              >
-                <li
-                  v-for="row in view.rows"
-                  :key="row.key"
-                  class="quota-row"
-                  :class="[`quota-row--${row.state}`, `quota-row--${row.tone}`]"
+                <p class="quota-status quota-status--error">
+                  {{ panel.error }}
+                </p>
+                <p
+                  v-if="panel.view"
+                  class="quota-note quota-note--warning"
                 >
-                  <div class="quota-row-head">
-                    <span
-                      class="quota-row-label"
-                      :title="row.label"
-                    >{{ row.label }}</span>
-                    <strong class="quota-row-value">{{ row.value }}</strong>
-                  </div>
-                  <div
-                    v-if="row.barPercent !== null"
-                    class="quota-bar"
-                    aria-hidden="true"
-                  >
-                    <span :style="{ width: `${row.barPercent}%` }" />
-                  </div>
-                  <p
-                    v-if="row.usedText || row.resetText"
-                    class="quota-row-meta"
-                  >
-                    <span v-if="row.usedText">{{ row.usedText }}</span>
-                    <span
-                      v-if="row.resetText"
-                      :title="row.resetTitle"
-                    >{{ row.resetText }}</span>
-                  </p>
-                </li>
-              </ul>
-              <p
-                v-else-if="view.emptyText"
-                class="quota-status"
-              >
-                {{ view.emptyText }}
-              </p>
-              <p
-                v-for="note in view.notes"
-                :key="note"
-                class="quota-note"
-              >
-                {{ note }}
-              </p>
+                  Showing the previous reading; this refresh failed.
+                </p>
+                <button
+                  type="button"
+                  class="quota-refresh"
+                  :aria-label="`Retry ${panel.title} quota`"
+                  @click="retryQuota(panel.key)"
+                >
+                  Retry
+                </button>
+              </div>
             </section>
-
-            <p
-              v-if="isLoading"
-              class="quota-status"
-            >
-              Loading quota...
-            </p>
-            <div
-              v-else-if="loadError"
-              class="quota-failure"
-              role="alert"
-            >
-              <p class="quota-status quota-status--error">
-                {{ loadError }}
-              </p>
-              <button
-                type="button"
-                class="quota-refresh"
-                @click="retryQuota"
-              >
-                Retry
-              </button>
-            </div>
-            <p
-              v-else-if="!providerViews.length"
-              class="quota-status"
-            >
-              No provider reported quota.
-            </p>
           </div>
         </div>
       </div>
@@ -220,9 +230,12 @@ import type { QuotaResponse } from '@/types'
 import {
   buildQuotaView,
   findUnchangedProviders,
+  PROVIDER_TITLES,
+  QUOTA_PROVIDERS,
   quotaRequestUrl,
   summarizeQuota,
 } from '@/utils/quotaDisplay'
+import type { QuotaProviderKey } from '@/utils/quotaDisplay'
 
 const emit = defineEmits<{ select: [] }>()
 
@@ -237,30 +250,46 @@ const modalRef = ref<HTMLElement | null>(null)
 const closeButtonRef = ref<HTMLElement | null>(null)
 const isOpen = ref(false)
 const quota = ref<QuotaResponse | null>(null)
-const isLoading = ref(false)
-const loadError = ref<string | null>(null)
+interface ProviderRequestState {
+  loading: boolean
+  error: string | null
+  refresh: boolean
+}
+const providerRequests = ref<Record<QuotaProviderKey, ProviderRequestState>>({
+  codex: { loading: false, error: null, refresh: false },
+  maso: { loading: false, error: null, refresh: false },
+  antigravity: { loading: false, error: null, refresh: false },
+})
+const isLoading = computed(() => QUOTA_PROVIDERS.some(key => providerRequests.value[key].loading))
+const hasLoadError = computed(() => QUOTA_PROVIDERS.some(key => providerRequests.value[key].error))
 const now = ref(Date.now())
 // Providers that answered the last refresh with the same reading. Recomputed
 // on every successful load, so it clears as soon as one really moves.
 const unchangedSinceRefresh = ref<string[]>([])
 
-let requestSeq = 0
-let inFlight: AbortController | null = null
-// Retry must repeat the request that failed, not silently change it.
-let lastRefreshRequested = false
+const inFlight = new Map<QuotaProviderKey, AbortController>()
+let hasRequested = false
 let ageTimer: ReturnType<typeof setInterval> | null = null
 let returnFocusEl: HTMLElement | null = null
 
 const providerViews = computed(() => buildQuotaView(quota.value, now.value, {
   unchangedProviders: unchangedSinceRefresh.value,
 }))
+const providerPanels = computed(() => QUOTA_PROVIDERS.map(key => ({
+  key,
+  title: PROVIDER_TITLES[key],
+  view: providerViews.value.find(view => view.key === key),
+  ...providerRequests.value[key],
+})))
 
 const summaryText = computed(() => {
   if (!quota.value) {
     if (isLoading.value) return 'Loading'
-    return loadError.value ? 'Load failed' : 'Not loaded'
+    return hasLoadError.value ? 'Load failed' : 'Not loaded'
   }
-  return summarizeQuota(providerViews.value)
+  const summary = summarizeQuota(providerViews.value)
+  if (isLoading.value) return `${summary} · Loading`
+  return hasLoadError.value ? `${summary} · Refresh failed` : summary
 })
 
 async function readError(response: Response): Promise<string> {
@@ -272,38 +301,53 @@ async function readError(response: Response): Promise<string> {
   }
 }
 
-async function fetchQuota(refresh: boolean): Promise<void> {
-  lastRefreshRequested = refresh
-  inFlight?.abort()
+async function fetchProviderQuota(provider: QuotaProviderKey, refresh: boolean): Promise<void> {
+  inFlight.get(provider)?.abort()
   const controller = new AbortController()
-  const seq = ++requestSeq
-  inFlight = controller
-  isLoading.value = true
-  loadError.value = null
+  inFlight.set(provider, controller)
+  const request = providerRequests.value[provider]
+  request.loading = true
+  request.error = null
+  request.refresh = refresh
 
   try {
-    const response = await fetch(quotaRequestUrl(refresh), { signal: controller.signal })
-    if (!response.ok) {
-      throw new Error(await readError(response))
-    }
+    const response = await fetch(quotaRequestUrl(refresh, provider), { signal: controller.signal })
+    if (!response.ok) throw new Error(await readError(response))
     const payload = await response.json() as QuotaResponse
-    // A superseded or unmounted request must never overwrite the modal.
-    if (seq !== requestSeq) return
-    // Compare against the reading this request replaces, so a refresh that
-    // changed nothing can say so instead of looking like a dead button.
-    unchangedSinceRefresh.value = findUnchangedProviders(quota.value, payload)
-    quota.value = payload
+    if (!Array.isArray(payload?.providers) || payload.providers.length !== 1
+      || payload.providers[0]?.provider !== provider) {
+      throw new Error('The server returned an unexpected provider reading.')
+    }
+    // Each request may update only its own provider, even when it finishes last.
+    // The controller identity also retires responses after supersession/unmount.
+    if (inFlight.get(provider) !== controller) return
+    const unchanged = findUnchangedProviders(quota.value, payload)
+    unchangedSinceRefresh.value = [
+      ...unchangedSinceRefresh.value.filter(key => key !== provider),
+      ...unchanged,
+    ]
+    const readings = new Map((quota.value?.providers ?? []).map(reading => [reading.provider, reading]))
+    readings.set(provider, payload.providers[0]!)
+    quota.value = { providers: QUOTA_PROVIDERS.flatMap(key => {
+      const reading = readings.get(key)
+      return reading ? [reading] : []
+    }) }
     now.value = Date.now()
   } catch (error) {
-    if (seq !== requestSeq) return
+    if (inFlight.get(provider) !== controller) return
     const reason = error instanceof Error ? error.message : ''
-    loadError.value = reason ? `Could not load quota: ${reason}` : 'Could not load quota.'
+    request.error = reason ? `Could not load quota: ${reason}` : 'Could not load quota.'
   } finally {
-    if (seq === requestSeq) {
-      isLoading.value = false
-      inFlight = null
+    if (inFlight.get(provider) === controller) {
+      request.loading = false
+      inFlight.delete(provider)
     }
   }
+}
+
+async function fetchQuota(refresh: boolean): Promise<void> {
+  hasRequested = true
+  await Promise.all(QUOTA_PROVIDERS.map(provider => fetchProviderQuota(provider, refresh)))
 }
 
 function refreshQuota(): void {
@@ -311,9 +355,12 @@ function refreshQuota(): void {
   void fetchQuota(true)
 }
 
-function retryQuota(): void {
-  if (isLoading.value) return
-  void fetchQuota(lastRefreshRequested)
+function retryQuota(provider: QuotaProviderKey): void {
+  const request = providerRequests.value[provider]
+  if (request.loading || !request.error) return
+  // A failed provider can retry while another is still loading, without
+  // restarting successful providers or changing the original refresh intent.
+  void fetchProviderQuota(provider, request.refresh)
 }
 
 function startAgeTicker(): void {
@@ -346,7 +393,7 @@ function openModal(): void {
       modalRef.value.focus()
     }
   })
-  if (!quota.value && !isLoading.value) {
+  if (!hasRequested) {
     void fetchQuota(false)
   }
 }
@@ -414,9 +461,9 @@ onUnmounted(() => {
   }
   stopAgeTicker()
   // Retire anything in flight so a late response cannot touch a dead modal.
-  requestSeq += 1
-  inFlight?.abort()
-  inFlight = null
+  const controllers = [...inFlight.values()]
+  inFlight.clear()
+  for (const controller of controllers) controller.abort()
 })
 </script>
 

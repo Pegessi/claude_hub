@@ -4,6 +4,7 @@ A passive panel must keep reporting the providers it can read, so a failing
 provider appears as an explained unavailable entry rather than an error status.
 """
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -65,10 +66,12 @@ def _write_codex_reading(home: Path, used_percent: float = 58.0) -> None:
 @pytest.fixture(autouse=True)
 def clear_quota_cache(tmp_path: Path, monkeypatch: MonkeyPatch):
     """Keep the module-level reading cache and host Antigravity home isolated."""
-    setattr(pq, "_QUOTA_CACHE", None)
+    pq._QUOTA_CACHE.clear()
+    pq._QUOTA_IN_FLIGHT.clear()
     monkeypatch.setenv("ANTIGRAVITY_HOME", str(tmp_path / "antigravity-empty"))
     yield
-    setattr(pq, "_QUOTA_CACHE", None)
+    pq._QUOTA_CACHE.clear()
+    pq._QUOTA_IN_FLIGHT.clear()
 
 
 @pytest.fixture
@@ -230,3 +233,56 @@ async def test_quota_refresh_bypasses_the_cached_reading(
     refreshed = await client.get("/api/quota", params={"refresh": "true"})
     assert refreshed.status_code == 200
     assert refreshed.json()["providers"][0]["limits"][0]["used_percent"] == 70
+
+
+@pytest.mark.asyncio
+async def test_single_provider_does_not_wait_for_slow_antigravity(
+    client: AsyncClient, codex_home: Path, maso_service, monkeypatch: MonkeyPatch
+) -> None:
+    _write_codex_reading(codex_home)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def slow(refresh=False):
+        calls.append(refresh)
+        started.set()
+        await release.wait()
+        return pq.ProviderQuota(provider="antigravity", available=True, state="within")
+
+    monkeypatch.setattr(pq, "read_antigravity_quota", slow)
+    all_providers = asyncio.create_task(client.get("/api/quota?refresh=true"))
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        for provider in ("codex", "maso"):
+            response = await asyncio.wait_for(client.get(f"/api/quota?provider={provider}"), 1)
+            assert response.status_code == 200
+            assert [row["provider"] for row in response.json()["providers"]] == [provider]
+        assert not all_providers.done()
+        assert calls == [True]
+    finally:
+        release.set()
+        response = await asyncio.wait_for(all_providers, 1)
+    assert len(response.json()["providers"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_single_provider_refresh_does_not_query_others(
+    client: AsyncClient, codex_home: Path, monkeypatch: MonkeyPatch
+) -> None:
+    _write_codex_reading(codex_home, used_percent=10.0)
+
+    async def unrelated(refresh=False):
+        pytest.fail("A Codex-only request queried a different provider")
+
+    monkeypatch.setattr(pq, "read_maso_quota", unrelated)
+    monkeypatch.setattr(pq, "read_antigravity_quota", unrelated)
+    await client.get("/api/quota?provider=codex")
+    _write_codex_reading(codex_home, used_percent=70.0)
+    result = await client.get("/api/quota?provider=codex&refresh=true")
+    assert result.json()["providers"][0]["limits"][0]["used_percent"] == 70
+
+
+@pytest.mark.asyncio
+async def test_unknown_quota_provider_is_rejected(client: AsyncClient) -> None:
+    assert (await client.get("/api/quota?provider=unexpected")).status_code == 422
