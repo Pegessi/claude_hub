@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "7eb3b6a915dc35e2be2f5e3a12505b9ec36103b7",
+  "parents": [
+    "d0977f670f41e18cb5bc96bd2006bd89f7685828",
+    "0c95e2ebddb5b9528c83ae19bfe845079d0f6bc0"
+  ],
+  "base": "5a14598ddc75d80630dc70818630335c6fdfdb82",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "193a236a1f0e465f5dde947ae1f3880b7aa9a4c5",
+  "reconstructed_tree": "01be3d73b1674b6b3eddaae333131f24ac61d4b8",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a26e47807cf0fcb3bf051ac910ef7c9311141155"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "24fce68721cbb648e7928ba5d156a53d407a2a1b"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "332c41425163e31ed911ee3cd1eea4ec5cae8361"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "dae957e9f751e4822fa600997018aac4abc075dd"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9dd2456776694f2ea61c6fef4f790a3b7348ae4e"
+      },
+      "reason": "Both parents added independent release entries at the same position. Preserve both entries in full, placing the quota entry above the existing Chat recovery entry; retain all older entries unchanged.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
