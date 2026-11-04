@@ -17,7 +17,11 @@ class WatchdogMixin(SessionState):
     """Watchdog behavior on the sole session owner."""
 
     def _reset_turn_watchdog_state(self) -> None:
-        """Clear per-turn output buffers and external-wait tracking."""
+        """Initialize this turn's clocks, output buffers and external-wait tracking."""
+        # Idle provider notifications can leave an old activity stamp behind.
+        # A new turn must start its own budget, before its first provider event.
+        self._last_event_at = time.monotonic()
+        self._turn_in_flight_since = None
         self._assistant_text = ""
         self._visible_assistant_text = ""
         self._final_assistant_text = ""
