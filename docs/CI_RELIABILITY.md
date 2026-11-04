@@ -56,7 +56,17 @@ that prove the boundary. Never embed credentials or user content in case names.
 The guard covers collected IDs, **not arbitrary stdout, log messages, assertion
 representations or import-time output**. Summarize large payloads before logging:
 report type, length and relevant safe metadata. Keep detailed, sanitized evidence
-in a task-owned file when necessary. `tail -n` and `rg -m` limit lines, not their
+in a task-owned file when necessary. For Vue custom-renderer host nodes, VNodes,
+component instances and reactive owner objects, assert primitive projections
+(length, ID, text) or a boolean identity check such as
+`assert.ok(actualNode === expectedNode, 'must retain the node')`. Do not pass
+these graphs directly to `deepEqual` or `strictEqual`: even an identity failure
+can make Node deeply inspect the entire graph while formatting the error.
+A short custom message or truncating the resulting log does not prevent those
+allocations. When changing such assertions, verify an intentional failure in a
+resource-limited child process as well as the successful behavior.
+
+`tail -n` and `rg -m` limit lines, not their
 length; do not stream an unknown log into the conversation. A safe first probe is:
 
 ```bash

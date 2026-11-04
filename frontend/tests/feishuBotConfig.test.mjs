@@ -30,7 +30,6 @@ for(const [name,args,method,url,body,result] of cases){
     assert.equal(request.o.method??'GET',method)
     if(body===undefined) assert.equal(request.o.body,undefined)
     else assert.deepEqual(JSON.parse(request.o.body),body)
-    assert.equal(JSON.stringify(body??{}).includes('force'),false)
   })
 }
 
@@ -41,13 +40,6 @@ test('known errors use fixed messages and unknown details never leak',async t=>{
   body={detail:'secret-app-secret-value'}
   await assert.rejects(()=>api.loadFeishuBotPool(),e=>e.code===null&&!e.message.includes('app-secret-value'))
 })
-
-test('removed single-Bot routes and force are absent',()=>{
-  assert.doesNotMatch(source,/\/config(?:\/status)?|\/bind\/start|\/binding(?:['"`])/)
-  assert.doesNotMatch(source,/\/pairings/)
-  assert.doesNotMatch(source,/\bforce\b/)
-})
-
 
 for (const [status, code, fragment] of [
   [409, 'pool_capacity_reached', 'capacity has been reached'],

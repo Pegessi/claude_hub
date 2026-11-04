@@ -56,7 +56,7 @@ test('switching public and feature imports under KeepAlive keeps one state and g
   assert.equal(drawerCalls.length, starts + 1)
   useCompatibility.value = false
   await nextTick()
-  assert.equal(find(root, node => node.tag === 'aside'), original)
+  assert.ok(find(root, node => node.tag === 'aside') === original, 'KeepAlive must retain the sidebar host node')
   assert.equal(drawerCalls.length, starts + 1)
   app.unmount()
 })
@@ -78,7 +78,7 @@ test('rename input keeps the native v-model composition guard and one parent-own
   })
   app.mount(root)
   const input = find(root, hasClass('chat-sidebar__rename-input'))
-  assert.equal(inputRef, input)
+  assert.ok(inputRef === input, 'The rename owner must reference the rendered input')
   assert.equal(input.value, 'Chat A')
   input.dispatchEvent({ type: 'compositionstart', target: input })
   input.value = 'new name'
@@ -90,7 +90,7 @@ test('rename input keeps the native v-model composition guard and one parent-own
   assert.deepEqual(saved, ['a'])
   await nextTick()
   app.unmount()
-  assert.equal(inputRef, null)
+  assert.ok(inputRef === null, 'Unmount must release the rename input reference')
 })
 
 test('group slots and row components preserve the original DOM hierarchy and accessible events', async t => {
@@ -112,10 +112,12 @@ test('group slots and row components preserve the original DOM hierarchy and acc
   const items = find(root, hasClass('chat-sidebar__group-items'))
   const row = find(root, hasClass('chat-sidebar__item'))
   const button = find(root, hasClass('chat-sidebar__item-main'))
-  assert.equal(items.parent, groupNode)
-  assert.equal(row.parent, items, 'component extraction must not introduce wrapper elements')
-  assert.equal(button.parent, row)
+  assert.ok(items.parent === groupNode, 'The items container must remain inside its group')
+  assert.ok(row.parent === items, 'component extraction must not introduce wrapper elements')
+  assert.ok(button.parent === row, 'The row action must remain a direct child of its row')
   assert.equal(row.attributes['data-tab-id'], 'a')
+  assert.equal(row.attributes.role, undefined)
+  assert.equal(button.tag, 'button')
   assert.equal(button.attributes['aria-current'], 'page')
   assert.equal(find(root, hasClass('chat-sidebar__item-status')).attributes['aria-label'], 'Completed, unread')
   const click = { stopPropagation() { this.stopped = true } }

@@ -33,11 +33,13 @@ test('pool binding retains accessible status and explicit pairing controls', () 
     assert.ok(panel.includes(marker), marker)
   }
   assert.ok(panel.includes('href="/api/auth/login"'))
+  assert.ok(panel.includes('v-model="confirmWord"'))
+  assert.ok(panel.includes('status-dot'))
   assert.doesNotMatch(binding, /owner_open_id/)
 })
 
 test('the Feishu status trigger matches the pane chrome control geometry', () => {
-  assert.match(panel, /--pane-chrome-control-size, 24px/)
+  assert.match(panel, /\.feishu-binding\s*\{[\s\S]*position:\s*relative;[\s\S]*--pane-chrome-control-size, 24px/)
   assert.match(panel, /border-radius: 999px/)
   assert.match(panel, /background: var\(--ch-color-surface-raised\)/)
   assert.match(panel, /box-shadow: 0 1px 4px var\(--ch-shadow-color-soft\)/)

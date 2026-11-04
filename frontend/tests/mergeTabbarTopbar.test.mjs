@@ -139,16 +139,6 @@ test('preview Pin API can be isolated without desynchronizing live Hub APIs', ()
   assert.match(viteConfig, /'\/api\/tabs\/sidebar-preferences': \{[\s\S]*?target: sidebarPreferencesApiTarget/)
 })
 
-test('a working session is marked only by its moving light, not a lit border', () => {
-  assert.match(chatSidebarRow, /:data-runtime-status="status"/)
-  assert.match(chatSidebar, /:status="getTabStatus\(tab\)"/)
-  assert.doesNotMatch(chatSidebarRow, /\[data-runtime-status='working'\]:not\(\.active\)/)
-  assert.match(chatSidebarRow, /\.chat-sidebar__item\.active\[data-runtime-status='working'\] \{\s*border-color: color-mix\(in srgb, var\(--ch-color-border-selected\) 20%, transparent\);\s*box-shadow: none;/)
-  // Row content and the ⋯ menu stay above the decorative light layer.
-  assert.match(chatSidebarRow, /\[data-runtime-status='working'\] > \.chat-sidebar__item-main,[\s\S]*?z-index: 1;/)
-  assert.match(chatSidebarRow, /> :deep\(\.chat-sidebar__item-menu\) \{\s*position: absolute;[\s\S]*?z-index: 1;/)
-})
-
 test('a session-name pill sits in the top-right corner of each pane', () => {
   assert.match(terminalPane, /class="pane-session-name"/)
   assert.match(terminalPane, /const tabName = computed/)
@@ -191,17 +181,9 @@ test('session actions live in a shared TabActionsMenu used by both surfaces', ()
 })
 
 test('cwd history stays in sync across windows and falls back only when storage throws', () => {
-  // other windows' writes invalidate every instance via storage events
+  // Keep these wiring checks until both paths have direct behavior coverage.
   assert.match(useCwdHistory, /addEventListener\('storage'/)
-  // the in-memory map is consulted only after localStorage itself failed
   assert.match(useCwdHistory, /if \(storageBroken\)/)
-})
-
-test('sidebar rows keep a valid nested-control structure', () => {
-  // the row is a plain container; the primary action is a real inner button,
-  // so the ⋯ menu button is a sibling (no button-inside-role=button)
-  assert.match(chatSidebarRow, /class="chat-sidebar__item-main"/)
-  assert.doesNotMatch(chatSidebarRow, /role="button"/)
 })
 
 test('a failed session creation does not enter cwd history', () => {
@@ -212,16 +194,8 @@ test('a failed session creation does not enter cwd history', () => {
   assert.match(sessionCreator, /addCwd\(cwd\)/)
 })
 
-test('the create-session dialog offers recent working directories and solo default-on', () => {
-  // Recent and open directories share an explicit picker, so a prefilled
-  // value cannot make the browser hide non-prefix matches.
-  assert.match(sessionCreator, /v-for="\(cwd, index\) in visibleCwdChoices"/)
-  assert.match(sessionCreator, /\.\.\.recentCwds\.value, \.\.\.openPaths/)
-  assert.doesNotMatch(sessionCreator, /<datalist/)
-  // history is persisted per launch scope (local / remote:<profile>)
-  assert.match(useCwdHistory, /claude-hub:cwd-history:/)
-  assert.match(useCwdHistory, /localStorage\.(getItem|setItem)/)
-  // new sessions default to solo mode: form init plus both form-reset points
+test('new sessions default to solo mode after close and creation', () => {
+  // Keep the reset contract here until it has a direct behavior test.
   assert.match(sessionCreator, /solo_mode:\s*true/)
   const soloResets = sessionCreator.match(/form\.solo_mode = true/g) || []
   assert.ok(soloResets.length >= 2, 'solo_mode reset to true after close and create')

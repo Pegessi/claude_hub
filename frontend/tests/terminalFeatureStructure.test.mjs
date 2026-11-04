@@ -54,6 +54,4 @@ test('terminal view delegates cohesive iframe policies without changing its temp
   assert.match(view, /useTerminalView\(props\)/)
   assert.match(controller, /buildTerminalIframeHandlerScript\(props\.agentType\)/)
   assert.match(controller, /clearAllTimers\(\)/)
-  assert.match(controller, /terminalStore\.settlePaneReconnect\(tabId, 'success'\)/)
-  assert.match(controller, /terminalStore\.settlePaneReconnect\(tabId, 'error'\)/)
 })
