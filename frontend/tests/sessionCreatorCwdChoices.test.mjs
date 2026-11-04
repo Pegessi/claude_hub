@@ -34,6 +34,7 @@ const choicesBlock = sliceBetween(vue, 'const cwdChoices = computed', 'const vis
 
 test('AC1: dropdown renders a presentation row with two sibling native buttons', () => {
   assert.ok(rowStart > 0)
+  assert.doesNotMatch(vue, /<datalist/)
   assert.match(rowBlock, /role="presentation"/)
   assert.match(rowBlock, /class="cwd-choice-row"/)
   assert.equal((rowBlock.match(/<button/g) || []).length, 2)
@@ -71,6 +72,7 @@ test('AC2: useCwdHistory exposes removeCwd/dismissedCwds and empty-key cleanup',
 })
 
 test('AC3: cwdChoices merges open tabs then filters dismissed paths', () => {
+  assert.match(choicesBlock, /\.\.\.recentCwds\.value, \.\.\.openPaths/)
   assert.match(script, /dismissedCwds,?[\s\S]*removeCwd/)
   assert.match(choicesBlock, /const dismissed = new Set\(dismissedCwds\.value\)/)
   assert.match(choicesBlock, /\.filter\(path => !dismissed\.has\(path\)\)/)

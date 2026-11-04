@@ -5,7 +5,8 @@ import ts from 'typescript'
 import { createRenderer } from 'vue'
 
 const require = createRequire(import.meta.url)
-export const { parse, compileScript, compileStyle } = require('vue/compiler-sfc')
+const { parse, compileScript, compileStyle } = require('vue/compiler-sfc')
+export { parse, compileStyle }
 export const source = path => readFileSync(new URL(`../src/${path}`, import.meta.url), 'utf8')
 
 /** Load real modules, keeping compatibility exports and component identity intact. */

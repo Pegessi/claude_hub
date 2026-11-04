@@ -8,7 +8,7 @@ import ts from 'typescript'
 const require = createRequire(import.meta.url)
 const vueUrl = import.meta.resolve('vue')
 const piniaUrl = import.meta.resolve('pinia')
-export const vue = await import(vueUrl)
+const vue = await import(vueUrl)
 const { createPinia, getActivePinia, setActivePinia } = await import(piniaUrl)
 const { parse, compileScript } = require('vue/compiler-sfc')
 const source = path => readFileSync(new URL(`../src/${path}`, import.meta.url), 'utf8')
@@ -29,7 +29,7 @@ export const config = await import(configUrl)
 const storeUrl = moduleUrl(rewrite(source('stores/feishuBotPoolStore.ts')))
 imports['@/stores/feishuBotPoolStore'] = storeUrl
 const { useFeishuBotPoolStore } = await import(storeUrl)
-export const { useFeishuBinding } = await import(moduleUrl(rewrite(source('composables/useFeishuBinding.ts'))))
+const { useFeishuBinding } = await import(moduleUrl(rewrite(source('composables/useFeishuBinding.ts'))))
 const clipboardUrl = moduleUrl(`
   let writer = async () => undefined
   export function setWriter(next) {
@@ -39,7 +39,7 @@ const clipboardUrl = moduleUrl(`
   }
   export function writeClipboard(value) { return writer(value) }
 `)
-export const clipboard = await import(clipboardUrl)
+await import(clipboardUrl)
 imports['@/utils/clipboard'] = clipboardUrl
 const filename = 'FeishuBotSettingsDialog.vue'
 const { descriptor } = parse(source(`features/feishu-bot/${filename}`), { filename })

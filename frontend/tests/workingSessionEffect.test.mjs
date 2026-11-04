@@ -24,9 +24,16 @@ const sidebarShell = readFileSync(
   'utf8',
 )
 
-test('sidebar row owns the effect while the shell pauses hidden mobile animations', () => {
+test('sidebar working effects preserve row controls and pause when hidden', () => {
   assert.match(sidebarRow, /<ChatSidebarWorkingEffect/)
   assert.match(sidebarRow, /v-if="status === 'working'"/)
+  assert.match(sidebarRow, /:data-runtime-status="status"/)
+  assert.match(sidebarShell, /:status="getTabStatus\(tab\)"/)
+  assert.doesNotMatch(sidebarRow, /\[data-runtime-status='working'\]:not\(\.active\)/)
+  assert.match(sidebarRow, /\.chat-sidebar__item\.active\[data-runtime-status='working'\] \{\s*border-color: color-mix\(in srgb, var\(--ch-color-border-selected\) 20%, transparent\);\s*box-shadow: none;/)
+  // Content and actions must remain above the decorative effect.
+  assert.match(sidebarRow, /\[data-runtime-status='working'\] > \.chat-sidebar__item-main,[\s\S]*?z-index: 1;/)
+  assert.match(sidebarRow, /> :deep\(\.chat-sidebar__item-menu\) \{\s*position: absolute;[\s\S]*?z-index: 1;/)
   assert.match(sidebarShell, /\.chat-sidebar\.mobile-drawer:not\(\.mobile-drawer--open\) :deep\(\.working-effect \*\)/)
   assert.match(sidebarShell, /\.chat-sidebar\.mobile-drawer\.mobile-drawer--dragging :deep\(\.working-effect \*\)/)
 })

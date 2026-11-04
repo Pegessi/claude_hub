@@ -217,10 +217,10 @@ test('feature facade preserves KeepAlive identity, DOM refs and owner instances 
   assert.equal(h.owner(h.keys.chatDeliveryKey).draftMessage.value, '')
   h.selected.value = 'one'
   await flush()
-  assert.equal(h.active(), first)
-  assert.equal(h.owner(h.keys.chatTimelineKey), timeline)
-  assert.equal(h.owner(h.keys.chatDeliveryKey), delivery)
-  assert.equal(h.owner(h.keys.chatAttachmentsKey), attachments)
+  assert.ok(h.active() === first, 'KeepAlive must restore the existing pane instance')
+  assert.ok(h.owner(h.keys.chatTimelineKey) === timeline, 'The pane must retain its timeline owner')
+  assert.ok(h.owner(h.keys.chatDeliveryKey) === delivery, 'The pane must retain its delivery owner')
+  assert.ok(h.owner(h.keys.chatAttachmentsKey) === attachments, 'The pane must retain its attachment owner')
   assert.equal(delivery.draftMessage.value, 'preserve this draft')
   assert.equal(timeline.visibleHistoryStart.value, null)
   assert.equal(timeline.timelineDisposed, false)
@@ -278,7 +278,7 @@ test('mutable standalone subagent results invalidate their leaf without remounti
   stream.events.value = [...stream.events.value, event(3, 'tool_call_completed', { tool_call_id: 'child', status: 'completed', result: 'child finished' })]
   await flush()
   const current = collectInstances(h.vm.$.subTree).find(instance => instance.type === cardType)
-  assert.equal(current, first)
+  assert.ok(current === first, 'A result update must retain the existing subagent card instance')
   assert.match(renderedText(current.subTree.el), /Returned/)
   assert.match(renderedText(current.subTree.el), /child finished/)
 })
@@ -315,8 +315,8 @@ test('timeline child, tool and approval updates keep their keyed renderers and v
     event(7, 'text_delta', { text: ' and second child report', subagent_thread: 'child-id' }),
   ]
   await flush()
-  assert.equal(instances().find(instance => instance.type === toolType), firstTool)
-  assert.equal(instances().find(instance => instance.type === threadType), firstThread)
+  assert.ok(instances().find(instance => instance.type === toolType) === firstTool, 'Tool updates must retain the tool group instance')
+  assert.ok(instances().find(instance => instance.type === threadType) === firstThread, 'Child updates must retain the subthread instance')
   assert.match(renderedText(firstTool.subTree.el), /shell done/)
   assert.match(renderedText(firstThread.subTree.el), /second child report/)
   assert.ok(timeline.expandedToolGroups.get(turn.key).has(group.key))

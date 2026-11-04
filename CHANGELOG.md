@@ -7,6 +7,18 @@
 
 ## Released
 
+### test(frontend): remove brittle snapshots and bound assertion diagnostics
+
+- Retire the whole-Workspace template/CSS hashes and their eager recursive
+  parsing, while preserving facade ownership, line/scoped-style budgets and
+  actual-owner responsive-style compilation checks.
+- Consolidate duplicate Feishu and terminal/sidebar wiring assertions into
+  their behavior-owning suites; preserve the union of security checks and
+  existing browser/lifecycle coverage. Make five unused helper exports private.
+- Compare rendered-node, component and owner identity as booleans so failures
+  do not expand cyclic Vue graphs into assertion diagnostics. Document and
+  verify resource-bounded negative controls without changing production code.
+
 ### feat(terminal): remove working-directory entries from the New Session dropdown
 
 - Each Working Directory row in the New Session modal offers a labeled remove

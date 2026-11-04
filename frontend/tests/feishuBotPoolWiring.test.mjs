@@ -5,10 +5,12 @@ const files=['../src/utils/feishuBotConfig.ts','../src/stores/feishuBotPoolStore
 const source=files.join('\n')
 test('new UI contains no removed routes',()=>{
   assert.doesNotMatch(source,/\/api\/feishu\/bot\/(?:config|bind\/start|binding|pairings)(?:[/'"`]|$)/)
+  // API helpers also assemble URLs from ROOT and route suffixes.
+  assert.doesNotMatch(files[0],/\/config(?:\/status)?|\/bind\/start|\/binding(?:['"`])|\/pairings/)
 })
 test('secrets and confirmation are not persisted or logged',()=>{
   const sensitive=files.slice(1).join('\n')
-  assert.doesNotMatch(sensitive,/localStorage/)
+  assert.doesNotMatch(sensitive,/localStorage|sessionStorage/)
   assert.doesNotMatch(sensitive,/console\.(?:log|info|warn|error)/)
   assert.doesNotMatch(files[1],/app_secret|verification_token|encrypt_key|confirm_word/)
 })
