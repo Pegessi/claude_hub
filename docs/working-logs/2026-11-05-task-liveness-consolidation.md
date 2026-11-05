@@ -29,20 +29,65 @@ stall recovery. The single owner receives configured watch/review timeout inputs
 
 ## Validation and handoff
 
-Locked dependencies installed in the isolated feature worktree. Focused regression
-runs cover historical stalls, restart/idempotency, provider fences, scheduled
-replacement, prerequisites, explicit SUBAGENT timeouts, notices and Dot tracking.
-The provider audit additionally found mailbox admission races and a Dot watch
-re-arm regression; central admission guards and activity markers now cover both.
-143 focused tests pass, including real-pump lock contention, readiness/retry/native
-question boundaries, receipt preservation and later ordinary messages. Backend
-types pass all 613 files. The first full run had one retired-counter fixture
-failure (4,254 passed) and test typing failures; those fixtures are corrected.
-Full verification and independent final review are pending. This log is updated
-with final results before handoff; no passing final review or integration is claimed.
+The feature incorporates main `a34cfea62b6751876df63e6f7c15e9da46f5c255`
+by rebase; both changelog entries were preserved. No merge commit was created,
+so the fixed-merge decision-record target does not apply. The code candidate is
+`0a36e2dcad23f77a70765feb8c76fcb24daec94c`; the subsequent evidence commit
+changes only this log and is checked with the documentation/staged gates.
+
+`./scripts/verify.sh all` passed with exit **0** in the feature worktree.
+The foreground command and its explicit exit receipt are retained at
+`/tmp/liveness-all-round7.log`. Backend test evidence is
+`/tmp/claude-hub-verify.kwt26lqq/` (pytest log, provenance and exit code).
+
+| Check | Result |
+| --- | --- |
+| Documentation, checkout safety, Black/isort, backend types | Passed; 614 type-checked source files |
+| Full backend tests | 6,060 passed, 9 skipped, 16 warnings; 344.50 seconds |
+| Frontend lint, types, tests and production build | Passed; 1,224 tests passed |
+| Explicit staged safety and whitespace checks | Passed before each code commit |
+| Focused controls, cold restart, managed Chat and workspace regression groups | 230 passed after the control-lock fix |
+| Structural ownership and liveness group | 55 passed after the module-level import correction |
+
+Earlier runs exposed migrated-fixture assumptions, a delayed import prohibited by
+the repository, and an obsolete concurrency-test ordering; these were corrected.
+One earlier wrapper ended after a passing backend suite without its final receipt;
+it was not counted as a full pass. The successful run above includes cleanup and
+all standard frontend targets. The existing Vite chunk-size advisory remains.
+Browser mocks/HMR/replay and manual UI checks were not run: no frontend source or
+user-facing flow changed. All verification used isolated runtime homes/sockets;
+no production Hub restart or live-incident experiment occurred.
+
+## Independent audit ledger
+
+Root was the sole writer. Both native delegates used `model_or_api=runtime-default`
+and read-only scopes. Their findings were integrated; they did not claim Hub
+approval, complete the Task, or mutate live sessions.
+
+| Role / primitive / agent | Decision and evidence |
+| --- | --- |
+| lifecycle evidence / P-RESEARCH / `/root/lifecycle_evidence` | Accepted legacy call-path and regression inventory against original base `aa359fd`. |
+| provider evidence / P-RESEARCH / `/root/provider_evidence` | Accepted provider facts and delivery boundary audit. |
+| provider safety / P-JUDGE / `/root/provider_evidence` | Accepted fixes for pending-message ownership, question/startup races and watch re-arming; scoped provider admission preserves existing resume guards and one-shot inbox markers. Actual Claude/Codex preparation regressions prevent provider submission after revocation. |
+| lifecycle safety / P-JUDGE / `/root/lifecycle_evidence` | Accepted fixes for condition age, one-time migration, stale claims, replacement races and explicit SUBAGENT deadlines. Final audit found no duplicate Task recovery owner; its Enter/reset contention finding was fixed and independently rechecked. |
+
+The principal deleted policy files account for 1,784 removed lines:
+`monitoring/recovery.py` (528), `tmux/review_delivery.py` (146),
+`tmux/review_reaper.py` (394), `monitoring/lifecycle.py` (442) and
+`scheduling/hub_tasks.py` (274). Retained review resource mechanics moved into
+`review_resources.py`; notice code moved into the sole liveness owner. Refresh
+lost 410 lines of mixed policy, and Dot work tracking lost 67 lines, including
+its independent stall comparison. Deprecated schema fields are read-only upgrade
+evidence; no old timing constants or live recovery-counter writers remain.
+
+Mandatory Hub review of the fixed candidate is requested after this evidence
+commit, explicitly including duplicate-owner detection. Local fast-forward and
+human acceptance remain pending that gate at this handoff; their results belong
+in the subsequent managed Task report. Origin push is forbidden.
 
 ## Limits
 
 No durable background-job runner or Stop hook. Notice acceptance is Dot inbox
 acceptance, not human receipt. Unknown quota/permission causes stay explicit
-uncertainty. No lessons needed.
+uncertainty. Direct external terminal keystrokes retain the phase-0 sampled-observation limit.
+No lessons needed.
