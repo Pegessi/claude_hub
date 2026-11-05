@@ -22,6 +22,8 @@ LIFECYCLE_RECIPE = (
     "Any built-in or saved custom env preset works by name/id; day1 is only an example.\n"
     "Local Claude (feature worktree): claude-hub agent create WORKSPACE "
     "--agent-type claude --cwd . --env-preset NAME_OR_ID\n"
+    "Inside a Hub agent ($CLAUDE_HUB_TAB_ID) a local, Chat-capable agent create defaults to\n"
+    "--session-kind chat (no tmux/ttyd); pass --session-kind terminal to override.\n"
     "\n"
     "Never delete reused/shared agents."
 )

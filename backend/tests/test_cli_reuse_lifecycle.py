@@ -45,6 +45,12 @@ from claude_hub.services.workspace_manager import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _outside_hub_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``agent create`` defaults depend on $CLAUDE_HUB_TAB_ID; keep runs inside Hub hermetic."""
+    monkeypatch.delenv("CLAUDE_HUB_TAB_ID", raising=False)
+
+
 def make_client(handler: Callable[[httpx.Request], httpx.Response], **kwargs: Any) -> HubClient:
     transport = httpx.MockTransport(handler)
     return HubClient(base_url="http://testserver", transport=transport, **kwargs)
@@ -199,6 +205,134 @@ def test_agent_create_non_ephemeral_leaves_caller_owned_false(
     result = runner.invoke(cli, ["agent", "create", "ws1", "--agent-type", "claude"])
     assert result.exit_code == 0, result.output
     assert bodies[0].get("caller_owned_ephemeral") is False
+
+
+def _agent_create_session_kind(
+    monkeypatch: pytest.MonkeyPatch,
+    args: list[str],
+    *,
+    tab_id: str | None,
+    workspaces: Any = None,
+) -> tuple[str | None, list[str]]:
+    """Run ``agent create ws1 ...`` and return (sent session_kind, request log)."""
+    if tab_id is None:
+        monkeypatch.delenv("CLAUDE_HUB_TAB_ID", raising=False)
+    else:
+        monkeypatch.setenv("CLAUDE_HUB_TAB_ID", tab_id)
+    if workspaces is None:
+        workspaces = [{"id": "ws1", "name": "hub", "target": "local"}]
+    requests: list[str] = []
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(f"{request.method} {request.url.path}")
+        if request.method == "GET" and request.url.path == "/api/workspaces":
+            if isinstance(workspaces, int):
+                return httpx.Response(workspaces, json={"detail": "boom"})
+            return httpx.Response(200, json=workspaces)
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": "s1"})
+
+    patch_get_client(monkeypatch, handler)
+    result = CliRunner().invoke(cli, ["agent", "create", "ws1", *args])
+    assert result.exit_code == 0, result.output
+    return bodies[0].get("session_kind"), requests
+
+
+def test_agent_create_inside_hub_agent_defaults_to_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+    kind, requests = _agent_create_session_kind(
+        monkeypatch, ["--agent-type", "claude", "--cwd", "."], tab_id="tab-parent"
+    )
+    assert kind == "chat"
+    assert requests == ["GET /api/workspaces", "POST /api/workspaces/ws1/agent"]
+
+
+def test_agent_create_resolves_workspace_by_name_for_chat_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kind, _ = _agent_create_session_kind(
+        monkeypatch,
+        ["--agent-type", "codex"],
+        tab_id="tab-parent",
+        workspaces=[{"id": "other", "name": "ws1", "target": "local"}],
+    )
+    assert kind == "chat"
+
+
+def test_agent_create_outside_hub_agent_keeps_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    kind, requests = _agent_create_session_kind(
+        monkeypatch, ["--agent-type", "claude"], tab_id=None
+    )
+    assert kind == "terminal"
+    assert requests == ["POST /api/workspaces/ws1/agent"]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--agent-type", "claude", "--target", "remote"],
+        ["--agent-type", "claude", "--remote-profile-id", "profile-a"],
+        ["--agent-type", "claude", "--remote-cwd", "~/work"],
+        ["--agent-type", "claude", "--no-remote-reconnect"],
+        ["--agent-type", "claude", "--payload-json", '{"target": "remote"}'],
+        ["--agent-type", "traex"],
+    ],
+)
+def test_agent_create_inside_hub_agent_keeps_terminal_for_remote_or_terminal_only(
+    monkeypatch: pytest.MonkeyPatch, args: list[str]
+) -> None:
+    kind, requests = _agent_create_session_kind(monkeypatch, args, tab_id="tab-parent")
+    assert kind == "terminal"
+    assert requests == ["POST /api/workspaces/ws1/agent"]
+
+
+@pytest.mark.parametrize(
+    "workspaces",
+    [
+        [{"id": "ws1", "name": "hub", "target": "remote"}],
+        [{"id": "elsewhere", "name": "other", "target": "local"}],
+        503,
+    ],
+    ids=["remote-workspace", "unknown-workspace", "lookup-error"],
+)
+def test_agent_create_chat_default_falls_back_to_terminal_on_doubt(
+    monkeypatch: pytest.MonkeyPatch, workspaces: Any
+) -> None:
+    kind, _ = _agent_create_session_kind(
+        monkeypatch, ["--agent-type", "claude"], tab_id="tab-parent", workspaces=workspaces
+    )
+    assert kind == "terminal"
+
+
+@pytest.mark.parametrize(
+    ("explicit", "tab_id"),
+    [("terminal", "tab-parent"), ("chat", None)],
+)
+def test_agent_create_explicit_session_kind_wins(
+    monkeypatch: pytest.MonkeyPatch, explicit: str, tab_id: str | None
+) -> None:
+    kind, requests = _agent_create_session_kind(
+        monkeypatch, ["--agent-type", "claude", "--session-kind", explicit], tab_id=tab_id
+    )
+    assert kind == explicit
+    assert requests == ["POST /api/workspaces/ws1/agent"]
+
+
+def test_agent_create_payload_session_kind_wins_over_hub_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kind, requests = _agent_create_session_kind(
+        monkeypatch,
+        ["--agent-type", "claude", "--payload-json", '{"session_kind": "terminal"}'],
+        tab_id="tab-parent",
+    )
+    assert kind == "terminal"
+    assert requests == ["POST /api/workspaces/ws1/agent"]
+
+
+def test_ensure_agent_request_server_default_stays_terminal() -> None:
+    request = EnsureWorkspaceAgentRequest(agent_type=AgentType.CLAUDE)
+    assert request.session_kind == SessionKind.TERMINAL
 
 
 def test_workspace_ensure_posts_to_api(monkeypatch: pytest.MonkeyPatch) -> None:

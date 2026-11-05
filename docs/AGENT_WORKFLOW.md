@@ -29,7 +29,10 @@ execution cwd is separate; explicitly pass the feature worktree.
 
 Workspace execution agents and reviewers may use a fixed Chat surface. Choose
 **Chat** when adding the agent, or pass `--session-kind chat` to `agent create`
-or `task run`. The default remains `terminal`; existing sessions are not migrated.
+or `task run`. The server/UI default remains `terminal`; existing sessions are not
+migrated. Exception: `agent create` run from inside a Hub agent (`$CLAUDE_HUB_TAB_ID`
+set) defaults to `chat` when the target is local and the agent type supports Chat,
+saving a tmux/ttyd runtime per helper; an explicit `--session-kind` always wins.
 For example, from the intended feature worktree:
 
 ```bash
