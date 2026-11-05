@@ -7,6 +7,19 @@
 
 ## Released
 
+### fix(workspace): consolidate delegated Task liveness and bounded recovery
+
+- One Task liveness owner replaces terminal auto-continue, review delivery/reaping,
+  owner-loss reconciliation, scheduled orphan recovery, SUBAGENT failure scans,
+  prompt-submit recovery and Dot's independent stall alarm.
+- Idle managed Chat workers and idle or blocked reviewers now receive bounded
+  continuation or attention routing. Two persisted recovery actions share one
+  budget across session replacement; active turns and ambiguous delivery remain
+  fenced, and review/human acceptance requirements remain authoritative.
+- Durable claims, cold-state migration and explicit notice outcomes preserve
+  recovery evidence across restarts. Detached job completion and provider Stop
+  hooks remain follow-up work.
+
 ### fix(chat): start each turn with fresh watchdog clocks
 
 - Initialize the activity clock and clear the previous in-flight observation
@@ -16,6 +29,7 @@
 - Keep the existing inactivity threshold and tool, approval and queue waiting
   rules. Add regression coverage for idle control records before/after normal
   completion, provider-initiated turns and genuine current-turn silence.
+
 
 ### feat(cli): agent create from inside a Hub agent defaults to a Chat session
 

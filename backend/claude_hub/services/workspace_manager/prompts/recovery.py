@@ -184,10 +184,7 @@ class _RecoveryPromptsMixin(_ReviewPromptsMixin):
         to avoid repiling prompt text on a cleared context.
         """
         if recovery_attempt is None:
-            prior_attempts = (
-                session.hard_recovery_attempts if session.hard_recovery_task_id == task.id else 0
-            )
-            recovery_attempt = prior_attempts + 1
+            recovery_attempt = task.liveness.attempts if task.liveness else 1
         run = task.autonomous_run
         iteration = run.iteration if run else 0
         use_resume = task.task_mode == WorkspaceTaskMode.AUTONOMOUS and (
@@ -242,10 +239,7 @@ class _RecoveryPromptsMixin(_ReviewPromptsMixin):
         recovery gets a new attempt.
         """
         if recovery_attempt is None:
-            prior_attempts = (
-                session.hard_recovery_attempts if session.hard_recovery_task_id == task.id else 0
-            )
-            recovery_attempt = prior_attempts + 1
+            recovery_attempt = task.liveness.attempts if task.liveness else 1
         review_started_call_id = self._report_prompt_call_id(
             task.id, "review-started-recovery", attempt=recovery_attempt
         )

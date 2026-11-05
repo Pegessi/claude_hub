@@ -61,9 +61,6 @@ class _SchedulingHost(_WorkspaceManagerBase):
     async def _reap_stale_scheduled_chat_runs(self, now: datetime) -> None: ...
 
     @abstractmethod
-    async def _converge_orphaned_hub_tasks(self, now: datetime) -> None: ...
-
-    @abstractmethod
     async def _ensure_scheduled_chat_runtime_ready(self, tab_id: str) -> bool: ...
 
     @abstractmethod

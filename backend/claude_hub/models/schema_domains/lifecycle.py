@@ -82,6 +82,9 @@ class TaskLifecycleMark(BaseModel):
     changed_at: datetime
     # Set once the change was delivered, had no recipient, or needs no notice.
     notified_at: Optional[datetime] = None
+    # Explicit transport outcome. A handled timestamp is never proof that a
+    # person received anything; "sent" means the configured inbox accepted it.
+    delivery_outcome: Optional[str] = None
     notify_attempts: int = 0
     next_notify_at: Optional[datetime] = None
     # Digest of the last Goal Packet announced as a plan checkpoint.
@@ -90,3 +93,29 @@ class TaskLifecycleMark(BaseModel):
     # marks so a phase that flaps back within the cooldown is not re-announced.
     last_notice_key: Optional[str] = None
     last_notice_at: Optional[datetime] = None
+
+
+class TaskLiveness(BaseModel):
+    """Durable recovery claim for one execution/review obligation.
+
+    Agent output and session replacement never reset this budget. An explicit
+    new execution epoch or work/review cycle creates a new obligation.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    generation: str
+    reason: str = ""
+    since: datetime
+    attempts: int = 0
+    incident: int = 1
+    action: Optional[str] = None
+    action_id: Optional[str] = None
+    action_at: Optional[datetime] = None
+    action_finished: bool = False
+    session_id: Optional[str] = None
+    session_created_at: Optional[datetime] = None
+    message: Optional[str] = None
+    escalated_at: Optional[datetime] = None
+    watch_activity_at: Optional[datetime] = None
+    detail: str = ""

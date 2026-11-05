@@ -75,6 +75,16 @@ class _MessageDeliveryMixin(_WorkspaceManagerBase):
                     or live.created_at != expected_created_at
                 ):
                     raise KeyError(f"session {session_id} was deleted or replaced")
+                if (
+                    call_id
+                    and call_id
+                    not in (
+                        live.processing_call_ids + live.delivered_call_ids + live.uncertain_call_ids
+                    )
+                    and not await self._liveness_delivery_allowed(session_id, call_id)
+                ):
+                    self._retire_liveness_delivery(session_id, call_id)
+                    return
                 await self._send_session_message_locked(
                     session_id,
                     message,
@@ -483,6 +493,9 @@ class _MessageDeliveryMixin(_WorkspaceManagerBase):
             if call_id not in session.pending_call_ids:
                 # Already claimed by a concurrent pump cycle.
                 continue
+            if not await self._liveness_delivery_allowed(session_id, call_id):
+                self._retire_liveness_delivery(session_id, call_id)
+                continue
             if session.session_kind == SessionKind.CHAT and (
                 session.archived
                 or session.chat_paused
@@ -629,15 +642,32 @@ class _MessageDeliveryMixin(_WorkspaceManagerBase):
                 self._rollback_processing_to_pending(session.task_id, session_id, [call_id])
                 continue
 
+            if not await self._liveness_delivery_allowed(session_id, call_id):
+                self._rollback_processing_to_pending(session.task_id, session_id, [call_id])
+                self._retire_liveness_delivery(session_id, call_id)
+                continue
+
             if session.session_kind == SessionKind.CHAT:
                 try:
-                    await managed_chat.send_message(
-                        self.sessions[session_id], full_message, native_attachments, call_id
-                    )
+                    guard = self._liveness_native_guard(session_id, call_id)
+                    if guard is None:
+                        await managed_chat.send_message(
+                            self.sessions[session_id], full_message, native_attachments, call_id
+                        )
+                    else:
+                        await managed_chat.send_message(
+                            self.sessions[session_id],
+                            full_message,
+                            native_attachments,
+                            call_id,
+                            before_delivery=guard,
+                        )
                 except (Exception, asyncio.CancelledError) as exc:
                     state = self._chat_delivery_state(self.sessions[session_id], call_id)
                     if state == "not_sent":
                         self._rollback_chat_processing_to_pending(session_id, [call_id])
+                        if not await self._liveness_delivery_allowed(session_id, call_id):
+                            self._retire_liveness_delivery(session_id, call_id)
                         raise
                     if (
                         state != "accepted"

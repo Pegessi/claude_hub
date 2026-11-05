@@ -428,7 +428,7 @@ class _ReviewMixin(_WorkspaceManagerBase):
             if not worker_session_id or worker_session_id not in self.sessions:
                 # continue_task would have raised on missing session; nothing more to mark.
                 return
-            self._mark_prompt_dispatch_stalled(
+            self._record_dispatch_failure(
                 task_id=updated_task.id,
                 session_id=worker_session_id,
                 message=(
@@ -589,7 +589,7 @@ class _ReviewMixin(_WorkspaceManagerBase):
             worker_session_id = task.session_id if task else None
             if not worker_session_id or worker_session_id not in self.sessions:
                 return
-            self._mark_prompt_dispatch_stalled(
+            self._record_dispatch_failure(
                 task_id=task_id,
                 session_id=worker_session_id,
                 message=(

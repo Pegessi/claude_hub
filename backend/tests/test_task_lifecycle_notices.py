@@ -22,7 +22,6 @@ from claude_hub.models import (
     WorkspaceTaskStatus,
 )
 from claude_hub.models.schemas import TaskPhase, TaskSourceReference
-from claude_hub.services.dot.runtime.work import _lifecycle_hint
 from claude_hub.services.task_lifecycle import (
     TaskNotice,
     attention_notice,
@@ -30,6 +29,7 @@ from claude_hub.services.task_lifecycle import (
     plan_notice,
 )
 from claude_hub.services.workspace_manager import workspace_manager
+from tests.liveness_helpers import liveness_round
 from tests.test_task_lifecycle_board import isolated_hub  # noqa: F401  (autouse fixture)
 
 NOW = datetime(2026, 10, 24, 9, 0, 0)
@@ -322,22 +322,6 @@ def test_dot_receives_hub_notice_into_its_inbox_and_wakes(tmp_path: Path) -> Non
     assert dot._wake_pending is True
 
 
-def test_dot_stall_hint_names_the_blocking_task() -> None:
-    blocker = _task(id="blocker", title="Disk cleanup phase 4")
-    queued = _task(id="queued", status=WorkspaceTaskStatus.QUEUED)
-    lifecycles = {
-        "queued": SimpleNamespace(blocked_by_task_id="blocker", reason="agent_held_by_other_task"),
-        "blocker": SimpleNamespace(blocked_by_task_id=None, reason="reviewer_needs_input"),
-    }
-    manager = SimpleNamespace(
-        tasks={"blocker": blocker, "queued": queued},
-        task_lifecycles=lambda tasks: {task.id: lifecycles[task.id] for task in tasks},
-    )
-    hint = _lifecycle_hint(manager, queued)
-    assert "Disk cleanup phase 4" in hint
-    assert "AI reviewer has a question for you" in hint
-
-
 def _stop_worker(worker_id: str) -> None:
     workspace_manager.sessions[worker_id] = workspace_manager.sessions[worker_id].model_copy(
         update={"status": ManagedSessionStatus.STOPPED}
@@ -448,7 +432,7 @@ def test_self_reported_initiator_states_and_supervised_children_are_not_pushed(
 def test_slow_notifier_times_out_without_blocking(
     isolated_hub: Path, monkeypatch: MonkeyPatch  # noqa: F811
 ) -> None:
-    from claude_hub.services.workspace_manager.monitoring import lifecycle as lifecycle_module
+    from claude_hub.services.workspace_manager.monitoring import liveness as lifecycle_module
 
     monkeypatch.setattr(lifecycle_module, "NOTICE_SEND_TIMEOUT_SECONDS", 0.05)
     client = TestClient(app)
@@ -485,7 +469,16 @@ def _age_mark_by(task_id: str, delta: timedelta) -> None:
     mark = task.lifecycle_mark.model_copy(
         update={"changed_at": task.lifecycle_mark.changed_at - delta}
     )
-    workspace_manager.tasks[task_id] = task.model_copy(update={"lifecycle_mark": mark})
+    workspace_manager.tasks[task_id] = task.model_copy(
+        update={
+            "lifecycle_mark": mark,
+            "liveness": (
+                task.liveness.model_copy(update={"since": task.liveness.since - delta})
+                if task.liveness
+                else None
+            ),
+        }
+    )
 
 
 def test_reconciler_fails_a_task_whose_agent_stays_gone_and_continue_reassigns(
@@ -496,12 +489,12 @@ def test_reconciler_fails_a_task_whose_agent_stays_gone_and_continue_reassigns(
     _stop_worker(worker["id"])
     workspace_manager._observe_task_lifecycles(workspace["id"])
     # Within grace nothing is resolved, and agent loss is not pushed on its own.
-    assert workspace_manager._reconcile_orphaned_tasks(workspace["id"]) == 0
+    assert asyncio.run(liveness_round(workspace_manager, workspace["id"], refresh=False)) == 0
     lost = workspace_manager.tasks[task["id"]].lifecycle_mark
     assert lost is not None and lost.notified_at is not None
 
     _age_mark_by(task["id"], timedelta(minutes=6))
-    assert workspace_manager._reconcile_orphaned_tasks(workspace["id"]) == 1
+    assert asyncio.run(liveness_round(workspace_manager, workspace["id"], refresh=False)) == 1
     failed = workspace_manager.tasks[task["id"]]
     assert failed.status == WorkspaceTaskStatus.FAILED
     assert "task continue" in (failed.failure_reason or "")
@@ -544,13 +537,13 @@ def test_reconciler_waits_a_week_before_failing_an_initiator_task_without_its_ch
     assert mark.notified_at is None  # Chat loss is announced right away
 
     _age_mark_by(task["id"], timedelta(days=6))
-    assert workspace_manager._reconcile_orphaned_tasks(workspace["id"]) == 0
+    assert asyncio.run(liveness_round(workspace_manager, workspace["id"], refresh=False)) == 0
     _age_mark_by(task["id"], timedelta(days=2))
-    assert workspace_manager._reconcile_orphaned_tasks(workspace["id"]) == 1
+    assert asyncio.run(liveness_round(workspace_manager, workspace["id"], refresh=False)) == 1
     assert workspace_manager.tasks[task["id"]].status == WorkspaceTaskStatus.FAILED
 
 
-def test_reconciler_leaves_subagent_tasks_to_their_own_handling(
+def test_liveness_owner_also_resolves_subagent_loss(
     isolated_hub: Path,  # noqa: F811
 ) -> None:
     client = TestClient(app)
@@ -561,7 +554,7 @@ def test_reconciler_leaves_subagent_tasks_to_their_own_handling(
     _stop_worker(worker["id"])
     workspace_manager._observe_task_lifecycles(workspace["id"])
     _age_mark_by(task["id"], timedelta(hours=1))
-    assert workspace_manager._reconcile_orphaned_tasks(workspace["id"]) == 0
+    assert asyncio.run(liveness_round(workspace_manager, workspace["id"], refresh=False)) == 1
 
 
 def _notifier_into(sent: list[TaskNotice]):
@@ -664,7 +657,7 @@ def test_reconciler_skips_feedback_reaper_and_simultaneous_loss_of_every_agent(
     workspace_manager._observe_task_lifecycles(workspace["id"])
     _age_mark_by(task["id"], timedelta(minutes=10))
     # Every agent vanished at once: treated as an outage, not as agent loss.
-    assert workspace_manager._reconcile_orphaned_tasks(workspace["id"]) == 0
+    assert asyncio.run(liveness_round(workspace_manager, workspace["id"], refresh=False)) == 0
 
     workspace_manager.sessions[other["id"]] = workspace_manager.sessions[other["id"]].model_copy(
         update={"status": ManagedSessionStatus.IDLE}
@@ -672,7 +665,7 @@ def test_reconciler_skips_feedback_reaper_and_simultaneous_loss_of_every_agent(
     workspace_manager.tasks[task["id"]] = workspace_manager.tasks[task["id"]].model_copy(
         update={"system_internal": True, "internal_kind": "feedback_reaper"}
     )
-    assert workspace_manager._reconcile_orphaned_tasks(workspace["id"]) == 0
+    assert asyncio.run(liveness_round(workspace_manager, workspace["id"], refresh=False)) == 0
 
 
 def test_stopping_the_monitor_cancels_background_jobs() -> None:
@@ -714,6 +707,6 @@ def test_agent_outage_guard_still_resolves_initiator_tasks_without_their_chat(
     _age_mark_by(task["id"], timedelta(days=8))
     _age_mark_by(chat_task["id"], timedelta(days=8))
 
-    assert workspace_manager._reconcile_orphaned_tasks(workspace["id"]) == 1
+    assert asyncio.run(liveness_round(workspace_manager, workspace["id"], refresh=False)) == 1
     assert workspace_manager.tasks[chat_task["id"]].status == WorkspaceTaskStatus.FAILED
     assert workspace_manager.tasks[task["id"]].status == WorkspaceTaskStatus.WORKING

@@ -43,7 +43,6 @@ class _DispatchQueueMixin(_WorkspaceManagerBase):
         # strand the task in "Awaiting AI review" with idle reviewers.
         if self._cleanup_stale_reviewer_assignments(workspace_id):
             self._save_state()
-        await self._reap_stuck_reviews(workspace_id)
         # Drop managed terminal tabs left behind by removed sessions so leaked
         # reviewer tabs (visible in the tab bar but absent from Manage Agents)
         # do not accumulate.

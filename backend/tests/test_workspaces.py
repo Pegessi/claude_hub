@@ -37,6 +37,7 @@ from claude_hub.models import (
 )
 from claude_hub.services.feedback_lessons import FeedbackLessonStore
 from claude_hub.services.workspace_manager import workspace_manager
+from tests.liveness_helpers import liveness_round
 
 workspace_module = import_module("claude_hub.services.workspace_manager")
 ORIGINAL_WRITE_TASK_RECORD = workspace_manager._write_task_record
@@ -6753,6 +6754,9 @@ def test_background_monitor_auto_continues_interrupted_idle_working_agent(
     sent_messages.clear()
 
     sampled_at = datetime.now()
+    monkeypatch.setattr(
+        workspace_manager, "_runtime_now", lambda: sampled_at + timedelta(seconds=61)
+    )
     status_samples[:] = [
         TerminalAgentStatus(
             tab_id="tab-api-error",
@@ -6771,25 +6775,25 @@ def test_background_monitor_auto_continues_interrupted_idle_working_agent(
     assert sent_messages == []
     assert board["tasks"][0]["status"] == "working"
     assert board["sessions"][0]["runtime_status"] == "idle"
-    assert board["sessions"][0]["auto_continue_task_id"] == started["id"]
+    assert board["sessions"][0]["auto_continue_task_id"] is None
     assert board["sessions"][0]["auto_continue_attempts"] == 0
 
     asyncio.run(
-        workspace_manager._refresh_session_statuses(
+        liveness_round(
+            workspace_manager,
             workspace["id"],
-            run_auto_continue=True,
         )
     )
 
     session = workspace_manager.sessions[started["session_id"]]
     assert len(sent_messages) == 1
     assert sent_messages[0][0] == "claude-hub-tab-api-"
-    assert "continue from the last actionable step" in sent_messages[0][1]
-    assert "ready_for_review or completed report" in sent_messages[0][1]
+    assert "resume the same work" in sent_messages[0][1]
+    assert "/reports" in sent_messages[0][1]
     assert workspace_manager.tasks[started["id"]].status == WorkspaceTaskStatus.WORKING
-    assert session.runtime_status == AgentRuntimeStatus.WORKING
-    assert session.auto_continue_task_id == started["id"]
-    assert session.auto_continue_attempts == 1
+    assert session.runtime_status == AgentRuntimeStatus.IDLE  # Receipt is not turn activity.
+    liveness = workspace_manager.tasks[started["id"]].liveness
+    assert liveness is not None and liveness.attempts == 1
 
 
 def test_non_interrupted_idle_working_agent_is_not_auto_continued(
@@ -6912,13 +6916,13 @@ def test_non_interrupted_idle_working_agent_is_not_auto_continued(
     assert sent_messages == []
     assert board["tasks"][0]["status"] == "working"
     assert board["sessions"][0]["runtime_status"] == "idle"
-    assert board["sessions"][0]["auto_continue_task_id"] == started["id"]
+    assert board["sessions"][0]["auto_continue_task_id"] is None
     assert board["sessions"][0]["auto_continue_attempts"] == 0
 
     asyncio.run(
-        workspace_manager._refresh_session_statuses(
+        liveness_round(
+            workspace_manager,
             workspace["id"],
-            run_auto_continue=True,
         )
     )
 
@@ -6926,7 +6930,6 @@ def test_non_interrupted_idle_working_agent_is_not_auto_continued(
     assert sent_messages == []
     assert workspace_manager.tasks[started["id"]].status == WorkspaceTaskStatus.WORKING
     assert session.runtime_status == AgentRuntimeStatus.IDLE
-    assert session.auto_continue_task_id == started["id"]
     assert session.auto_continue_attempts == 0
 
 
@@ -7039,6 +7042,9 @@ def test_completed_idle_working_agent_is_prompted_to_report(
     sent_messages.clear()
 
     sampled_at = datetime.now()
+    monkeypatch.setattr(
+        workspace_manager, "_runtime_now", lambda: sampled_at + timedelta(seconds=61)
+    )
     status_samples[:] = [
         TerminalAgentStatus(
             tab_id="tab-report-missing",
@@ -7058,21 +7064,22 @@ def test_completed_idle_working_agent_is_prompted_to_report(
     assert board["sessions"][0]["runtime_status"] == "idle"
 
     asyncio.run(
-        workspace_manager._refresh_session_statuses(
+        liveness_round(
+            workspace_manager,
             workspace["id"],
-            run_auto_continue=True,
         )
     )
 
     session = workspace_manager.sessions[started["session_id"]]
     assert len(sent_messages) == 1
     assert sent_messages[0][0] == "claude-hub-tab-repo"
-    assert "no workspace report was recorded" in sent_messages[0][1]
-    assert "changed_files, validation, risks" in sent_messages[0][1]
-    assert "acceptance_check evidence" in sent_messages[0][1]
+    assert "without its required handoff" in sent_messages[0][1]
+    assert "/reports" in sent_messages[0][1]
+    assert "same work" in sent_messages[0][1]
     assert workspace_manager.tasks[started["id"]].status == WorkspaceTaskStatus.WORKING
-    assert session.runtime_status == AgentRuntimeStatus.WORKING
-    assert session.auto_continue_attempts == 1
+    assert session.runtime_status == AgentRuntimeStatus.IDLE  # Receipt is not turn activity.
+    liveness = workspace_manager.tasks[started["id"]].liveness
+    assert liveness is not None and liveness.attempts == 1
 
 
 def test_idle_working_agent_with_review_in_flight_is_not_prompted(
@@ -7208,9 +7215,9 @@ def test_idle_working_agent_with_review_in_flight_is_not_prompted(
     ]
 
     asyncio.run(
-        workspace_manager._refresh_session_statuses(
+        liveness_round(
+            workspace_manager,
             workspace["id"],
-            run_auto_continue=True,
         )
     )
 
@@ -7400,9 +7407,9 @@ def test_bound_reviewer_on_reopened_task_is_not_auto_prompted(
     ]
 
     asyncio.run(
-        workspace_manager._refresh_session_statuses(
+        liveness_round(
+            workspace_manager,
             workspace["id"],
-            run_auto_continue=True,
         )
     )
 
@@ -7487,25 +7494,25 @@ def test_monitor_surfaces_worker_prompt_stuck_in_input(
         )
     ]
 
-    asyncio.run(workspace_manager._refresh_session_statuses(workspace["id"]))
+    asyncio.run(liveness_round(workspace_manager, workspace["id"]))
 
     updated_task = workspace_manager.tasks[started["id"]]
     updated_session = workspace_manager.sessions[started["session_id"]]
     assert updated_task.status == WorkspaceTaskStatus.WORKING
     assert updated_session.runtime_status == AgentRuntimeStatus.WORKING
-    assert updated_session.prompt_retry_task_id == started["id"]
+    assert updated_task.liveness is not None
+    assert updated_task.liveness.action == "submit_prompt"
     assert submitted_keys == [("send-keys", "-t", session.tmux_session, "Enter")]
     assert sent_messages == []
 
     retry_at = datetime.now() - timedelta(seconds=30)
-    workspace_manager.sessions[started["session_id"]] = updated_session.model_copy(
-        update={"prompt_retry_attempted_at": retry_at, "updated_at": retry_at}
+    workspace_manager.tasks[started["id"]] = updated_task.model_copy(
+        update={"liveness": updated_task.liveness.model_copy(update={"action_at": retry_at})}
     )
-    asyncio.run(workspace_manager._refresh_session_statuses(workspace["id"]))
+    asyncio.run(liveness_round(workspace_manager, workspace["id"]))
 
     updated_task = workspace_manager.tasks[started["id"]]
     updated_session = workspace_manager.sessions[started["session_id"]]
-    report = list(workspace_manager.reports.values())[-1]
     # Worker prompt stuck: task stays WORKING (it never completed the work
     # phase to justify moving to REVIEW), but the session is flagged
     # NEEDS_INPUT/ATTENTION so the human sees attention is required. Previously
@@ -7513,11 +7520,8 @@ def test_monitor_surfaces_worker_prompt_stuck_in_input(
     # look like a completed work phase awaiting review. Reviewer prompt-stuck
     # is the only case that keeps status=REVIEW.
     assert updated_task.status == WorkspaceTaskStatus.WORKING
-    assert updated_session.runtime_status == AgentRuntimeStatus.ATTENTION
-    assert updated_session.status == ManagedSessionStatus.NEEDS_INPUT
-    assert report.state.value == "needs_input"
-    assert report.risk_level == "prompt_dispatch_stalled"
-    assert "terminal input box" in report.message
+    assert updated_task.liveness is not None
+    assert updated_task.liveness.escalated_at is not None
     assert len(submitted_keys) == 1
 
 
@@ -7611,30 +7615,28 @@ def test_monitor_surfaces_reviewer_prompt_stuck_in_input(
         )
     ]
 
-    asyncio.run(workspace_manager._refresh_session_statuses(workspace["id"]))
+    asyncio.run(liveness_round(workspace_manager, workspace["id"]))
 
     updated_task = workspace_manager.tasks[started["id"]]
     updated_reviewer = workspace_manager.sessions[review_session_id]
     assert updated_task.status == WorkspaceTaskStatus.REVIEW
     assert updated_reviewer.runtime_status == AgentRuntimeStatus.WORKING
-    assert updated_reviewer.prompt_retry_task_id == started["id"]
+    assert updated_task.liveness is not None
+    assert updated_task.liveness.action == "submit_prompt"
     assert submitted_keys == [("send-keys", "-t", reviewer.tmux_session, "Enter")]
     assert sent_messages == []
 
     retry_at = datetime.now() - timedelta(seconds=30)
-    workspace_manager.sessions[review_session_id] = updated_reviewer.model_copy(
-        update={"prompt_retry_attempted_at": retry_at, "updated_at": retry_at}
+    workspace_manager.tasks[started["id"]] = updated_task.model_copy(
+        update={"liveness": updated_task.liveness.model_copy(update={"action_at": retry_at})}
     )
-    asyncio.run(workspace_manager._refresh_session_statuses(workspace["id"]))
+    asyncio.run(liveness_round(workspace_manager, workspace["id"]))
 
     updated_task = workspace_manager.tasks[started["id"]]
     updated_reviewer = workspace_manager.sessions[review_session_id]
-    report = list(workspace_manager.reports.values())[-1]
     assert updated_task.status == WorkspaceTaskStatus.REVIEW
-    assert updated_reviewer.runtime_status == AgentRuntimeStatus.ATTENTION
-    assert report.state.value == "review_needs_input"
-    assert report.risk_level == "prompt_dispatch_stalled"
-    assert "Review" in report.message or "review" in report.message
+    assert updated_task.liveness is not None
+    assert updated_task.liveness.escalated_at is not None
     assert len(submitted_keys) == 1
 
 
@@ -7714,7 +7716,7 @@ def test_fallback_reaper_grace_skips_recently_dispatched_idle_reviewer(
         }
     )
 
-    asyncio.run(workspace_manager.dispatch_workspace(workspace["id"], refresh_sessions=False))
+    asyncio.run(liveness_round(workspace_manager, workspace["id"], refresh=False))
 
     after_grace_task = workspace_manager.tasks[started["id"]]
     assert (
@@ -7726,9 +7728,7 @@ def test_fallback_reaper_grace_skips_recently_dispatched_idle_reviewer(
 
     # Push the dispatch + last activity past the grace window — the reaper
     # should now treat the reviewer as genuinely stuck and redispatch.
-    stale = datetime.now() - timedelta(
-        seconds=workspace_module.REVIEW_REAPER_DISPATCH_GRACE_SECONDS + 5
-    )
+    stale = datetime.now() - timedelta(seconds=60 + 5)
     workspace_manager.tasks[started["id"]] = workspace_manager.tasks[started["id"]].model_copy(
         update={"review_requested_at": stale, "updated_at": stale}
     )
@@ -7744,7 +7744,7 @@ def test_fallback_reaper_grace_skips_recently_dispatched_idle_reviewer(
         }
     )
 
-    asyncio.run(workspace_manager.dispatch_workspace(workspace["id"], refresh_sessions=False))
+    asyncio.run(liveness_round(workspace_manager, workspace["id"], refresh=False))
 
     redispatched_task = workspace_manager.tasks[started["id"]]
     assert (
@@ -7817,9 +7817,7 @@ def test_fallback_reaper_does_not_redispatch_already_judged_round(
     # Drive the task into the self-sustaining limbo state the reaper itself
     # produces: status=REVIEW, a stale review_requested_at, verdict timestamps
     # cleared, but reviewed_cycle still == review_cycle (round already judged).
-    stale = datetime.now() - timedelta(
-        seconds=workspace_module.REVIEW_REAPER_DISPATCH_GRACE_SECONDS + 30
-    )
+    stale = datetime.now() - timedelta(seconds=60 + 30)
     workspace_manager.tasks[started["id"]] = judged_task.model_copy(
         update={
             "status": WorkspaceTaskStatus.REVIEW,
@@ -7846,11 +7844,13 @@ def test_fallback_reaper_does_not_redispatch_already_judged_round(
     review_reports_before = [
         r
         for r in workspace_manager.reports.values()
-        if r.task_id == started["id"] and r.review_decision is not None
+        if r.task_id == started["id"]
+        and r.review_decision is not None
+        and r.review_cycle == judged_task.review_cycle
     ]
     sent_messages.clear()
 
-    asyncio.run(workspace_manager.dispatch_workspace(workspace["id"], refresh_sessions=False))
+    asyncio.run(liveness_round(workspace_manager, workspace["id"], refresh=False))
 
     looped_task = workspace_manager.tasks[started["id"]]
     assert looped_task.review_attempts == initial_attempts, (
@@ -7863,7 +7863,9 @@ def test_fallback_reaper_does_not_redispatch_already_judged_round(
     review_reports_after = [
         r
         for r in workspace_manager.reports.values()
-        if r.task_id == started["id"] and r.review_decision is not None
+        if r.task_id == started["id"]
+        and r.review_decision is not None
+        and r.review_cycle == judged_task.review_cycle
     ]
     assert len(review_reports_after) == len(review_reports_before), (
         "fallback reaper must not spawn a new review trigger report for a sealed "
@@ -7893,77 +7895,13 @@ def test_fallback_reaper_does_not_redispatch_already_judged_round(
         }
     )
 
-    asyncio.run(workspace_manager.dispatch_workspace(workspace["id"], refresh_sessions=False))
+    asyncio.run(liveness_round(workspace_manager, workspace["id"], refresh=False))
 
     recovered_task = workspace_manager.tasks[started["id"]]
     assert recovered_task.review_attempts == initial_attempts + 1, (
         "fallback reaper must still recover a genuinely stuck UNjudged round "
         f"(reviewed_cycle < review_cycle); attempts={recovered_task.review_attempts}"
     )
-
-
-def test_reviewer_dispatch_stuck_predicate() -> None:
-    """Unit coverage for the reaper-only ``_reviewer_dispatch_stuck`` predicate:
-    a reviewer bound to THIS task and not stopped is NEVER considered stuck
-    regardless of IDLE; missing/stopped/unbound/cross-bound IS stuck."""
-    now = datetime.now()
-
-    def make_task(review_session_id: str | None) -> WorkspaceTask:
-        return WorkspaceTask(
-            id="task-x",
-            workspace_id="ws-x",
-            title="t",
-            prompt="p",
-            agent_type=AgentType.CLAUDE,
-            status=WorkspaceTaskStatus.REVIEW,
-            created_at=now,
-            updated_at=now,
-            review_session_id=review_session_id,
-        )
-
-    def make_reviewer(
-        *,
-        status: ManagedSessionStatus = ManagedSessionStatus.IDLE,
-        runtime_status: AgentRuntimeStatus = AgentRuntimeStatus.IDLE,
-        task_id: str | None = "task-x",
-    ) -> ManagedSession:
-        return ManagedSession(
-            id="rev-x",
-            workspace_id="ws-x",
-            tab_id="tab-x",
-            title="Reviewer X",
-            workspace_path="/tmp/ws-x",
-            tmux_session="claude-hub-revx",
-            role=WorkspaceSessionRole.REVIEWER,
-            agent_type=AgentType.CLAUDE,
-            status=status,
-            runtime_status=runtime_status,
-            task_id=task_id,
-            current_task_id=task_id,
-            created_at=now,
-            updated_at=now,
-        )
-
-    wm = workspace_manager
-
-    # No review_session_id -> stuck.
-    assert wm._reviewer_dispatch_stuck(make_task(None)) is True
-
-    # Bound + IDLE reviewer -> NOT stuck (the regression we are fixing).
-    wm.sessions["rev-x"] = make_reviewer()
-    try:
-        assert wm._reviewer_dispatch_stuck(make_task("rev-x")) is False
-        # Missing session -> stuck.
-        del wm.sessions["rev-x"]
-        assert wm._reviewer_dispatch_stuck(make_task("rev-x")) is True
-        # Stopped -> stuck.
-        wm.sessions["rev-x"] = make_reviewer(status=ManagedSessionStatus.STOPPED)
-        assert wm._reviewer_dispatch_stuck(make_task("rev-x")) is True
-        # Cross-bound to a different task -> stuck.
-        wm.sessions["rev-x"] = make_reviewer(task_id="other-task")
-        assert wm._reviewer_dispatch_stuck(make_task("rev-x")) is True
-    finally:
-        wm.sessions.pop("rev-x", None)
 
 
 def _setup_review_in_flight_task(
@@ -8012,9 +7950,7 @@ def _setup_review_in_flight_task(
 
     # Push review_requested_at + reviewer last activity past the dispatch grace
     # so only the stuck-detection predicate decides whether to re-dispatch.
-    stale = datetime.now() - timedelta(
-        seconds=workspace_module.REVIEW_REAPER_DISPATCH_GRACE_SECONDS + 30
-    )
+    stale = datetime.now() - timedelta(seconds=60 + 30)
     workspace_manager.tasks[started["id"]] = workspace_manager.tasks[started["id"]].model_copy(
         update={"review_requested_at": stale, "updated_at": stale}
     )
@@ -8043,9 +7979,7 @@ def test_fallback_reaper_keeps_bound_idle_reviewer(
     )
 
     initial_attempts = workspace_manager.tasks[task_id].review_attempts
-    stale = datetime.now() - timedelta(
-        seconds=workspace_module.REVIEW_REAPER_DISPATCH_GRACE_SECONDS + 30
-    )
+    stale = datetime.now() - timedelta(seconds=60 + 30)
     # Reviewer is bound to the task but IDLE with stale activity (silent think).
     reviewer = workspace_manager.sessions[review_session_id]
     workspace_manager.sessions[review_session_id] = reviewer.model_copy(
@@ -8067,7 +8001,7 @@ def test_fallback_reaper_keeps_bound_idle_reviewer(
     monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture_output)
     sent_messages.clear()
 
-    asyncio.run(workspace_manager.dispatch_workspace(workspace_id, refresh_sessions=False))
+    asyncio.run(liveness_round(workspace_manager, workspace_id, refresh=False))
 
     after = workspace_manager.tasks[task_id]
     assert after.review_attempts == initial_attempts, (
@@ -8109,9 +8043,7 @@ def test_fallback_reaper_redispatches_unavailable_reviewer(
     )
 
     initial_attempts = workspace_manager.tasks[task_id].review_attempts
-    stale = datetime.now() - timedelta(
-        seconds=workspace_module.REVIEW_REAPER_DISPATCH_GRACE_SECONDS + 30
-    )
+    stale = datetime.now() - timedelta(seconds=60 + 30)
     if mutation.get("__remove__"):
         del workspace_manager.sessions[review_session_id]
     else:
@@ -8126,7 +8058,7 @@ def test_fallback_reaper_redispatches_unavailable_reviewer(
         )
     sent_messages.clear()
 
-    asyncio.run(workspace_manager.dispatch_workspace(workspace_id, refresh_sessions=False))
+    asyncio.run(liveness_round(workspace_manager, workspace_id, refresh=False))
 
     after = workspace_manager.tasks[task_id]
     assert after.review_attempts == initial_attempts + 1, (
@@ -8135,7 +8067,7 @@ def test_fallback_reaper_redispatches_unavailable_reviewer(
     )
 
 
-def test_fallback_reaper_redispatches_when_prompt_still_pending(
+def test_liveness_retries_submit_when_prompt_still_pending(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -8154,9 +8086,7 @@ def test_fallback_reaper_redispatches_when_prompt_still_pending(
     )
 
     initial_attempts = workspace_manager.tasks[task_id].review_attempts
-    stale = datetime.now() - timedelta(
-        seconds=workspace_module.REVIEW_REAPER_DISPATCH_GRACE_SECONDS + 30
-    )
+    stale = datetime.now() - timedelta(seconds=60 + 30)
     reviewer = workspace_manager.sessions[review_session_id]
     workspace_manager.sessions[review_session_id] = reviewer.model_copy(
         update={
@@ -8177,13 +8107,12 @@ def test_fallback_reaper_redispatches_when_prompt_still_pending(
     monkeypatch.setattr(workspace_manager, "_capture_tmux_output", fake_capture_output)
     sent_messages.clear()
 
-    asyncio.run(workspace_manager.dispatch_workspace(workspace_id, refresh_sessions=False))
+    asyncio.run(liveness_round(workspace_manager, workspace_id, refresh=False))
 
     after = workspace_manager.tasks[task_id]
-    assert after.review_attempts == initial_attempts + 1, (
-        "fallback reaper backstop must re-dispatch when the review prompt is "
-        f"still pending in the input box; attempts {initial_attempts} -> {after.review_attempts}"
-    )
+    assert after.review_attempts == initial_attempts
+    assert after.liveness is not None
+    assert after.liveness.action == "submit_prompt"
 
 
 def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(
@@ -8294,6 +8223,9 @@ def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(
     sent_messages.clear()
 
     sampled_at = datetime.now()
+    monkeypatch.setattr(
+        workspace_manager, "_runtime_now", lambda: sampled_at + timedelta(seconds=61)
+    )
     status_samples[:] = [
         TerminalAgentStatus(
             tab_id="tab-api-limit",
@@ -8314,22 +8246,20 @@ def test_interrupted_idle_working_agent_auto_continue_stops_after_limit(
     assert board["sessions"][0]["runtime_status"] == "idle"
 
     asyncio.run(
-        workspace_manager._refresh_session_statuses(
+        liveness_round(
+            workspace_manager,
             workspace["id"],
-            run_auto_continue=True,
         )
     )
 
     session = workspace_manager.sessions[started["session_id"]]
     task_after_limit = workspace_manager.tasks[started["id"]]
-    assert len(sent_messages) == 2
-    assert "independent reviewer agent" in sent_messages[0][1]
-    assert "Review workspace task" in sent_messages[1][1]
-    assert task_after_limit.status == WorkspaceTaskStatus.REVIEW
+    assert not sent_messages
+    assert task_after_limit.status == WorkspaceTaskStatus.WORKING
     assert task_after_limit.session_id == started["session_id"]
-    assert task_after_limit.review_session_id is not None
-    assert session.runtime_status == AgentRuntimeStatus.ATTENTION
-    assert session.auto_continue_attempts == 10
+    assert task_after_limit.liveness is not None
+    assert task_after_limit.liveness.attempts == 2
+    assert task_after_limit.liveness.escalated_at is not None
 
 
 def test_review_passed_task_stays_in_review_when_agent_runtime_is_working(
@@ -11428,9 +11358,7 @@ def test_monitor_recovers_sealed_gp_verdict_when_worker_idle(
         )
     ]
 
-    asyncio.run(
-        workspace_manager._refresh_session_statuses(workspace["id"], run_auto_continue=True)
-    )
+    asyncio.run(liveness_round(workspace_manager, workspace["id"]))
 
     recovered = workspace_manager.tasks[task["id"]]
     assert (
@@ -11557,9 +11485,7 @@ def test_monitor_does_not_auto_continue_parked_human_acceptance(
         )
     ]
 
-    asyncio.run(
-        workspace_manager._refresh_session_statuses(workspace["id"], run_auto_continue=True)
-    )
+    asyncio.run(liveness_round(workspace_manager, workspace["id"]))
 
     still_parked = workspace_manager.tasks[task["id"]]
     # Must stay in REVIEW with human acceptance still set — no auto-continue.
@@ -11746,9 +11672,7 @@ def test_monitor_does_not_auto_continue_review_needs_input_parking(
         verdict_state=AgentReportState.REVIEW_NEEDS_INPUT,
     )
 
-    asyncio.run(
-        workspace_manager._refresh_session_statuses(workspace["id"], run_auto_continue=True)
-    )
+    asyncio.run(liveness_round(workspace_manager, workspace["id"]))
 
     still_parked = workspace_manager.tasks[task["id"]]
     # Must stay REVIEW — review_needs_input requires human judgment.
@@ -11841,9 +11765,7 @@ def test_monitor_does_not_auto_continue_reviewer_after_sealed_terminal_verdict(
         ),
     ]
 
-    asyncio.run(
-        workspace_manager._refresh_session_statuses(workspace["id"], run_auto_continue=True)
-    )
+    asyncio.run(liveness_round(workspace_manager, workspace["id"]))
 
     reviewer_after = workspace_manager.sessions[reviewer_id]
     recovered = workspace_manager.tasks[task["id"]]
@@ -11875,9 +11797,7 @@ def test_monitor_recovers_sealed_gp_rejected_verdict(
         packet_status=GoalPacketStatus.REJECTED,
     )
 
-    asyncio.run(
-        workspace_manager._refresh_session_statuses(workspace["id"], run_auto_continue=True)
-    )
+    asyncio.run(liveness_round(workspace_manager, workspace["id"]))
 
     recovered = workspace_manager.tasks[task["id"]]
     assert (
@@ -11944,9 +11864,7 @@ def test_monitor_recovers_sealed_impl_review_failed_verdict(
     ]:
         del workspace_manager.reports[rid]
 
-    asyncio.run(
-        workspace_manager._refresh_session_statuses(workspace["id"], run_auto_continue=True)
-    )
+    asyncio.run(liveness_round(workspace_manager, workspace["id"]))
 
     recovered = workspace_manager.tasks[task["id"]]
     assert (

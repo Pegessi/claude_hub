@@ -325,9 +325,9 @@ async def test_chat_monitor_never_uses_terminal_status_or_auto_review(
     monkeypatch.setattr(wm_module.ttyd_manager, "list_tab_agent_statuses", terminal_status)
     review = AsyncMock(side_effect=AssertionError("A model ending is not a review request"))
     monkeypatch.setattr(manager, "_request_task_review", review)
-    await manager._refresh_session_statuses(run_auto_continue=True)
+    await manager._refresh_session_statuses()
     assert manager.tasks["chat-task"].status == WorkspaceTaskStatus.WORKING
-    assert manager.sessions[session.id].status == ManagedSessionStatus.NEEDS_INPUT
+    assert manager.sessions[session.id].status == ManagedSessionStatus.IDLE
     terminal_status.assert_not_awaited()
     review.assert_not_awaited()
 
@@ -338,7 +338,7 @@ async def test_chat_paused_status_survives_monitor_refresh(
 ) -> None:
     session = manager.sessions["chat-worker"]
     manager.sessions[session.id] = session.model_copy(update={"chat_paused": True})
-    await manager._refresh_session_statuses(run_auto_continue=True)
+    await manager._refresh_session_statuses()
     assert manager.sessions[session.id].chat_paused
     assert manager.sessions[session.id].runtime_status == AgentRuntimeStatus.ATTENTION
 
@@ -444,8 +444,28 @@ async def test_prompt_retry_after_workspace_delete_cannot_resurrect_session(
     manager: WorkspaceManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    session = manager.sessions["chat-worker"]
-    task = manager.tasks["chat-task"]
+    now = datetime.now()
+    session = manager.sessions["chat-worker"].model_copy(
+        update={
+            "session_kind": SessionKind.TERMINAL,
+            "tmux_session": "old-tmux",
+            "task_id": "chat-task",
+            "current_task_id": "chat-task",
+        }
+    )
+    task = manager.tasks["chat-task"].model_copy(
+        update={
+            "status": WorkspaceTaskStatus.WORKING,
+            "started_at": now - timedelta(minutes=5),
+            "updated_at": now - timedelta(minutes=5),
+        }
+    )
+    manager.sessions[session.id], manager.tasks[task.id] = session, task
+
+    async def capture(*args):
+        return "> New workspace task assigned."
+
+    monkeypatch.setattr(manager, "_capture_tmux_output", capture)
     tmux_entered = asyncio.Event()
     release_tmux = asyncio.Event()
 
@@ -458,9 +478,7 @@ async def test_prompt_retry_after_workspace_delete_cannot_resurrect_session(
 
     monkeypatch.setattr(manager, "_run_tmux", blocked_tmux)
     monkeypatch.setattr(wm_module.ttyd_manager, "delete_tab", fake_delete_tab)
-    retrying = asyncio.create_task(
-        manager._retry_pending_prompt_submit(session, task, datetime.now(timezone.utc))
-    )
+    retrying = asyncio.create_task(manager._check_task_liveness(task.id))
     await asyncio.wait_for(tmux_entered.wait(), timeout=1)
     await manager.delete_workspace(session.workspace_id)
     release_tmux.set()
@@ -476,11 +494,13 @@ async def test_prompt_stall_capture_cannot_corrupt_reused_session(
     manager: WorkspaceManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now()
     original = manager.sessions["chat-worker"].model_copy(
         update={
             "session_kind": SessionKind.TERMINAL,
             "tab_id": "old-tab",
+            "task_id": "chat-task",
+            "current_task_id": "chat-task",
             "tmux_session": "old-tmux",
             "prompt_retry_task_id": "chat-task",
             "created_at": now,
@@ -505,7 +525,7 @@ async def test_prompt_stall_capture_cannot_corrupt_reused_session(
         return "> New workspace task assigned."
 
     monkeypatch.setattr(manager, "_capture_tmux_output", blocked_capture)
-    detecting = asyncio.create_task(manager._detect_prompt_dispatch_stall(original, task, now))
+    detecting = asyncio.create_task(manager._check_task_liveness(task.id))
     await asyncio.wait_for(capture_entered.wait(), timeout=1)
     replacement = original.model_copy(
         update={
@@ -518,7 +538,7 @@ async def test_prompt_stall_capture_cannot_corrupt_reused_session(
     manager.sessions[original.id] = replacement
     release_capture.set()
 
-    assert await asyncio.wait_for(detecting, timeout=1) is None
+    await asyncio.wait_for(detecting, timeout=1)
     assert manager.sessions[original.id] == replacement
     assert not manager.reports
 
@@ -528,11 +548,13 @@ async def test_auto_continue_capture_after_workspace_delete_cannot_resurrect_tas
     manager: WorkspaceManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now()
     session = manager.sessions["chat-worker"].model_copy(
         update={
             "session_kind": SessionKind.TERMINAL,
             "tab_id": "terminal-tab",
+            "task_id": "chat-task",
+            "current_task_id": "chat-task",
             "tmux_session": "terminal-tmux",
             "status": ManagedSessionStatus.IDLE,
             "runtime_status": AgentRuntimeStatus.IDLE,
@@ -567,12 +589,12 @@ async def test_auto_continue_capture_after_workspace_delete_cannot_resurrect_tas
 
     monkeypatch.setattr(manager, "_capture_tmux_output", blocked_capture)
     monkeypatch.setattr(wm_module.ttyd_manager, "delete_tab", fake_delete_tab)
-    continuing = asyncio.create_task(manager._auto_continue_stopped_task(session, task, now))
+    continuing = asyncio.create_task(manager._check_task_liveness(task.id))
     await asyncio.wait_for(capture_entered.wait(), timeout=1)
     await manager.delete_workspace(session.workspace_id)
     release_capture.set()
 
-    assert await asyncio.wait_for(continuing, timeout=1) is None
+    await asyncio.wait_for(continuing, timeout=1)
     assert session.workspace_id not in manager.workspaces
     assert task.id not in manager.tasks
     assert session.id not in manager.sessions

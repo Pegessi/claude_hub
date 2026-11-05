@@ -15,7 +15,7 @@ import json
 import os
 import uuid
 from pathlib import Path
-from typing import AbstractSet, Any, Literal, Optional, Sequence
+from typing import AbstractSet, Any, Callable, Literal, Optional, Sequence
 
 from ..models import (
     AgentRuntimeStatus,
@@ -474,6 +474,11 @@ def runtime_status(session: ManagedSession) -> AgentRuntimeStatus:
     return session.runtime_status
 
 
+def has_pending_question(session: ManagedSession) -> bool:
+    tailer = _manager().get_tailer(session.id)
+    return bool(tailer and tailer.has_pending_question())
+
+
 def question_input_blocked(session: ManagedSession, call_id: str) -> bool:
     from fastapi import HTTPException
 
@@ -491,6 +496,8 @@ async def send_message(
     text: str,
     attachments: Sequence[Any],
     call_id: str,
+    *,
+    before_delivery: Callable[[], None] | None = None,
 ) -> None:
     """Hand one immutable turn to the provider and persist acceptance evidence."""
 
@@ -534,6 +541,7 @@ async def send_message(
                 previews=previews,
                 turn_metadata={"origin": "workspace"},
                 allow_question_answer=False,
+                before_delivery=before_delivery,
             )
         except NativeInputNotSubmittedError:
             attempts.pop(call_id, None)

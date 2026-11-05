@@ -69,7 +69,7 @@ class _StateMixin(_WorkspaceManagerBase):
         # Per-internal-task locks serializing orphan convergence for a WORKING
         # scheduled hub_task whose worker session died. Keyed by the internal
         # WorkspaceTask id (distinct from the ScheduledTask fire lock above).
-        self._hubtask_orphan_locks: dict[str, asyncio.Lock] = {}
+        self._liveness_locks: dict[str, asyncio.Lock] = {}
         # Injected by the API layer: delivers Task notices (e.g. to Feishu).
         self._task_notifier: TaskNotifier | None = None
         # One background job per workspace delivers Task notices.

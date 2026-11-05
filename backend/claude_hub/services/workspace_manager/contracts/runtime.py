@@ -53,11 +53,6 @@ class _RuntimeHostContract(ABC):
     def _is_spawn_grace_period(self, session: ManagedSession) -> bool: ...
 
     @abstractmethod
-    async def _auto_continue_stopped_task(
-        self, session: ManagedSession, task: WorkspaceTask, sampled_at: datetime
-    ) -> dict[str, Any] | None: ...
-
-    @abstractmethod
     def _latest_report_has_risk(self, task_id: str, risk_level: str) -> bool: ...
 
     @abstractmethod
@@ -82,9 +77,6 @@ class _RuntimeHostContract(ABC):
 
     @abstractmethod
     def _latest_report_for_task(self, task_id: str) -> AgentReport | None: ...
-
-    @abstractmethod
-    async def _review_dispatch_failed(self, task: WorkspaceTask) -> bool: ...
 
     @abstractmethod
     def _reviewer_has_active_task_binding(self, session: ManagedSession) -> bool: ...

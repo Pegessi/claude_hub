@@ -172,7 +172,7 @@ async def workflow(monkeypatch, tmp_path):
     assert worker.session_kind == SessionKind.CHAT
     assert tabs.processes[worker.tab_id].is_managed_chat
     assert tabs.processes[worker.tab_id].process is None
-    await manager._refresh_session_statuses(workspace.id, run_auto_continue=False)
+    await manager._refresh_session_statuses(workspace.id)
     if worker.id in native.active:
         bootstrap_id = native.last_call(worker.id)
         await manager.create_report(
@@ -185,7 +185,7 @@ async def workflow(monkeypatch, tmp_path):
             ),
         )
         native.finish(worker.id)
-        await manager._refresh_session_statuses(workspace.id, run_auto_continue=False)
+        await manager._refresh_session_statuses(workspace.id)
         native.calls.clear()  # Task assertions below start after the completed bootstrap.
     yield Workflow(manager, native, workspace.id, worker.id, forbidden)
     forbidden.assert_not_awaited()
@@ -374,7 +374,7 @@ async def test_chat_stop_keeps_task_followup_pending_across_monitor_and_restart(
     assert await manager.cancel_chat_session(workflow.worker_id, expected_turn_id=dispatch_id)
     assert native.cancelled == [workflow.worker_id]
     assert manager.sessions[workflow.worker_id].chat_paused
-    await manager._refresh_session_statuses(workflow.workspace_id, run_auto_continue=True)
+    await manager._refresh_session_statuses(workflow.workspace_id)
     await manager._pump_session_messages(workflow.worker_id)
     assert len(native.calls) == 1
     assert "followup-1" in manager.sessions[workflow.worker_id].pending_call_ids
@@ -386,7 +386,7 @@ async def test_chat_stop_keeps_task_followup_pending_across_monitor_and_restart(
     assert fresh.sessions[workflow.worker_id].session_kind == SessionKind.CHAT
     assert fresh.sessions[workflow.worker_id].chat_paused
     await fresh._recover_processing_via_receipt(workflow.worker_id)
-    await fresh._refresh_session_statuses(workflow.workspace_id, run_auto_continue=True)
+    await fresh._refresh_session_statuses(workflow.workspace_id)
     await fresh._pump_session_messages(workflow.worker_id)
     assert len(native.calls) == 1
     assert dispatch_id in fresh.sessions[workflow.worker_id].processing_call_ids
@@ -408,7 +408,7 @@ async def test_chat_restart_does_not_replay_uncertain_assignment(workflow):
     fresh = WorkspaceManager()
     native.manager = fresh
     await fresh._recover_processing_via_receipt(workflow.worker_id)
-    await fresh._refresh_session_statuses(workflow.workspace_id, run_auto_continue=True)
+    await fresh._refresh_session_statuses(workflow.workspace_id)
     await fresh._pump_session_messages(workflow.worker_id)
     assert len(native.calls) == 1
     assert call_id in fresh.sessions[workflow.worker_id].uncertain_call_ids
@@ -478,7 +478,7 @@ async def test_chat_review_reuses_independently_configured_chat_provider(workflo
             reuse_existing=False,
         ),
     )
-    await manager._refresh_session_statuses(workflow.workspace_id, run_auto_continue=False)
+    await manager._refresh_session_statuses(workflow.workspace_id)
     if existing.id in native.active:
         await _report(
             workflow,
@@ -489,7 +489,7 @@ async def test_chat_review_reuses_independently_configured_chat_provider(workflo
             ack=[native.last_call(existing.id)],
         )
         native.finish(existing.id)
-        await manager._refresh_session_statuses(workflow.workspace_id, run_auto_continue=False)
+        await manager._refresh_session_statuses(workflow.workspace_id)
     independent_env = dict(manager.sessions[existing.id].env)
     task_id = await _start_task(workflow)
     dispatch_id = native.last_call(workflow.worker_id)

@@ -20,9 +20,6 @@ class _ReportReconciliationMixin(_WorkspaceManagerBase):
     def _auto_continue_interruption_reason(self, output: str) -> str | None:
         return state_policy.auto_continue_interruption_reason(output)
 
-    def _auto_continue_recent_output_segment(self, output: str) -> str:
-        return state_policy.auto_continue_recent_output_segment(output)
-
     def _auto_continue_output_looks_busy(self, output: str) -> bool:
         return state_policy.auto_continue_output_looks_busy(output)
 
@@ -213,12 +210,6 @@ class _ReportReconciliationMixin(_WorkspaceManagerBase):
                     "current_task_id": None,
                     "status": ManagedSessionStatus.IDLE,
                     "runtime_status": AgentRuntimeStatus.IDLE,
-                    "auto_continue_task_id": None,
-                    "auto_continue_attempts": 0,
-                    "last_auto_continue_at": None,
-                    "hard_recovery_task_id": None,
-                    "hard_recovery_attempts": 0,
-                    "last_hard_recovery_at": None,
                     "updated_at": self._runtime_now(),
                 }
             )
@@ -257,12 +248,6 @@ class _ReportReconciliationMixin(_WorkspaceManagerBase):
                     "current_task_id": None,
                     "status": status,
                     "runtime_status": runtime_status,
-                    "auto_continue_task_id": None,
-                    "auto_continue_attempts": 0,
-                    "last_auto_continue_at": None,
-                    "hard_recovery_task_id": None,
-                    "hard_recovery_attempts": 0,
-                    "last_hard_recovery_at": None,
                     "updated_at": updated_at,
                     "last_activity_at": updated_at,
                 }
@@ -323,12 +308,6 @@ class _ReportReconciliationMixin(_WorkspaceManagerBase):
                     "current_task_id": None,
                     "status": ManagedSessionStatus.IDLE,
                     "runtime_status": AgentRuntimeStatus.IDLE,
-                    "auto_continue_task_id": None,
-                    "auto_continue_attempts": 0,
-                    "last_auto_continue_at": None,
-                    "hard_recovery_task_id": None,
-                    "hard_recovery_attempts": 0,
-                    "last_hard_recovery_at": None,
                     "updated_at": updated_at,
                     "last_activity_at": updated_at,
                 }
@@ -365,12 +344,6 @@ class _ReportReconciliationMixin(_WorkspaceManagerBase):
                 "task_id": task_id,
                 "current_task_id": task_id,
                 "title": title,
-                "auto_continue_task_id": task_id,
-                "auto_continue_attempts": 0,
-                "last_auto_continue_at": None,
-                "hard_recovery_task_id": None,
-                "hard_recovery_attempts": 0,
-                "last_hard_recovery_at": None,
                 "updated_at": self._runtime_now(),
             }
         )

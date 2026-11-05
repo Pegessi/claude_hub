@@ -228,26 +228,6 @@ class _ChatMixin(_WorkspaceManagerBase):
             AgentRuntimeStatus.ATTENTION: ManagedSessionStatus.NEEDS_INPUT,
             AgentRuntimeStatus.OFFLINE: ManagedSessionStatus.NEEDS_INPUT,
         }.get(runtime, ManagedSessionStatus.NEEDS_INPUT)
-        task_id = session.current_task_id or session.task_id
-        task = self.tasks.get(task_id) if task_id else None
-        if (
-            runtime == AgentRuntimeStatus.IDLE
-            and task is not None
-            and self._workspace_owns_task(task)
-            and (
-                task.status == WorkspaceTaskStatus.WORKING
-                or (
-                    task.status == WorkspaceTaskStatus.REVIEW
-                    and task.review_session_id == session.id
-                    and task.review_requested_at is not None
-                    and task.review_completed_at is None
-                )
-            )
-            and not session.pending_call_ids
-        ):
-            # A model turn ending is not a Task report. Surface the missing handoff
-            # instead of declaring success or replaying potentially executed work.
-            status = ManagedSessionStatus.NEEDS_INPUT
         if status != session.status or runtime != session.runtime_status:
             self.sessions[session.id] = session.model_copy(
                 update={"status": status, "runtime_status": runtime, "updated_at": _now()}

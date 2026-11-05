@@ -37,7 +37,7 @@ MONITOR_METHODS = (
     "_monitor_refresh_sessions",
     "_collect_session_agent_statuses",
     "_refresh_one_session_status",
-    "_mark_runtime_task_failures",
+    "_check_task_liveness",
     "_background_monitor_loop",
 )
 

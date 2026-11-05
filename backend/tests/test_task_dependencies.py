@@ -464,7 +464,7 @@ async def test_orphan_recovery_preserves_operator_todo_edit_while_spawning(
             "system_internal": True,
             "internal_kind": "scheduled",
             "session_id": dead.id,
-            "updated_at": now - timedelta(seconds=_wm.HUBTASK_ORPHAN_GRACE_SECONDS + 1),
+            "updated_at": now - timedelta(seconds=61),
         }
     )
     manager.tasks[orphan.id] = orphan
@@ -486,7 +486,7 @@ async def test_orphan_recovery_preserves_operator_todo_edit_while_spawning(
     cleanup = AsyncMock()
     monkeypatch.setattr(manager, "_send_dispatch_message", send)
     monkeypatch.setattr(manager, "_best_effort_delete_session", cleanup)
-    await manager._converge_one_orphaned_hub_task(orphan, now)
+    await manager._check_task_liveness(orphan.id)
     current = manager.tasks[orphan.id]
     assert current.status == WorkspaceTaskStatus.TODO
     assert current.depends_on_task_ids == [prerequisite.id]

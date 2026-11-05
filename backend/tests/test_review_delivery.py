@@ -1,4 +1,4 @@
-"""Lost reviewer verdicts recover through the existing dispatch/reaper loop."""
+"""Lost reviewer verdicts recover through the sole Task liveness owner."""
 
 import asyncio
 from datetime import datetime, timedelta
@@ -85,27 +85,27 @@ def delivery_env(monkeypatch, tmp_path):
     async def ready(session):
         pass
 
-    async def failed(task):
-        return False
-
     monkeypatch.setattr(
         WorkspaceManager, "_send_tmux_message_with_receipt", lambda self, *args: fake_send(*args)
     )
     monkeypatch.setattr(
         WorkspaceManager, "_ensure_session_ready_for_send", lambda self, *args: ready(*args)
     )
-    monkeypatch.setattr(
-        WorkspaceManager, "_review_dispatch_failed", lambda self, *args: failed(*args)
-    )
+
+    async def capture(self, *_args):
+        return "> "
+
+    monkeypatch.setattr(WorkspaceManager, "_capture_tmux_output", capture)
     monkeypatch.setattr(wm.settings, "review_verdict_idle_timeout_seconds", 180)
+    manager._save_state()
     return manager, clock, sent
 
 
 async def tick(manager):
-    return await manager._reap_stuck_reviews("w")
+    return await manager._check_task_liveness("t")
 
 
-def test_one_nudge_then_escalation_across_restart(delivery_env):
+def test_two_nudges_then_escalation_across_restart(delivery_env):
     manager, clock, sent = delivery_env
     original = manager.tasks["t"]
     asyncio.run(tick(manager))
@@ -128,19 +128,25 @@ def test_one_nudge_then_escalation_across_restart(delivery_env):
         update={"status": ManagedSessionStatus.IDLE, "runtime_status": AgentRuntimeStatus.IDLE}
     )
     asyncio.run(tick(reloaded))
+    assert len(sent) == 2
+    clock[0] += timedelta(seconds=181)
+    session = reloaded.sessions["reviewer"]
+    reloaded.sessions[session.id] = session.model_copy(
+        update={"status": ManagedSessionStatus.IDLE, "runtime_status": AgentRuntimeStatus.IDLE}
+    )
+    asyncio.run(tick(reloaded))
     events = reloaded.task_mailbox._events["w"]
-    alerts = [e for e in events if e.action == "review:delivery_stalled"]
+    alerts = [e for e in events if e.action == "liveness:attention"]
     assert len(alerts) == 1 and alerts[0].type.value == "needs_input"
     assert alerts[0].review_cycle == original.review_cycle
-    assert "/api/workspaces/sessions/reviewer/reports" in alerts[0].payload["recovery_commands"]
+    assert alerts[0].payload["attempts"] == 2
     assert reloaded.tasks["t"].review_completed_at is None
     assert reloaded.tasks["t"].reviewed_cycle == 0
     again = WorkspaceManager()
     asyncio.run(tick(again))
-    assert len(sent) == 1
+    assert len(sent) == 2
     assert (
-        len([e for e in again.task_mailbox._events["w"] if e.action == "review:delivery_stalled"])
-        == 1
+        len([e for e in again.task_mailbox._events["w"] if e.action == "liveness:attention"]) == 1
     )
 
 
@@ -192,7 +198,7 @@ def test_no_false_nudge(delivery_env, case):
         manager.tasks[t.id] = t.model_copy(update={"status": WorkspaceTaskStatus.FAILED})
     asyncio.run(tick(manager))
     assert not sent
-    assert manager.tasks[t.id].review_delivery_nudged_at is None
+    assert not manager.tasks[t.id].liveness or manager.tasks[t.id].liveness.action != "nudge"
 
 
 @pytest.mark.parametrize("restart_delay", [0, 500])
@@ -206,14 +212,21 @@ def test_intent_saved_before_enqueue_crash_resumes_same_message(
 
     monkeypatch.setattr(manager, "send_session_message", crash)
     asyncio.run(tick(manager))
-    saved = manager.tasks["t"].review_delivery_message
+    saved = manager.tasks["t"].liveness.message
     assert saved and not sent
     clock[0] += timedelta(seconds=restart_delay)
     reloaded = WorkspaceManager()
     # A changed port cannot change the fingerprint of an already-intended message.
     monkeypatch.setattr(wm.settings, "port", 9999)
     asyncio.run(tick(reloaded))
-    assert len(sent) == 1 and sent[0][0].split("\n", 1)[1] == saved
+    if restart_delay < 180:
+        assert len(sent) == 1 and sent[0][0].split("\n", 1)[1] == saved, (
+            reloaded.tasks["t"].liveness,
+            reloaded.sessions["reviewer"],
+        )
+    else:
+        assert not sent
+        assert reloaded.tasks["t"].liveness.escalated_at is not None
 
 
 def test_wrong_paths_stay_404_without_state_effects(delivery_env, monkeypatch):
@@ -254,7 +267,7 @@ def test_busy_or_reporting_after_nudge_postpones_escalation(delivery_env):
         }
     )
     asyncio.run(tick(manager))
-    assert manager.tasks["t"].review_delivery_escalated_at is None
+    assert manager.tasks["t"].liveness.escalated_at is None
     manager.sessions[session.id] = session.model_copy(
         update={"status": ManagedSessionStatus.IDLE, "runtime_status": AgentRuntimeStatus.IDLE}
     )
@@ -269,7 +282,7 @@ def test_busy_or_reporting_after_nudge_postpones_escalation(delivery_env):
         created_at=clock[0],
     )
     asyncio.run(tick(manager))
-    assert manager.tasks["t"].review_delivery_escalated_at is None
+    assert manager.tasks["t"].liveness.escalated_at is None
     assert len(sent) == 1
 
 
@@ -311,29 +324,27 @@ def test_ambiguous_send_is_not_replayed_after_restart(delivery_env, monkeypatch)
     assert len(sent) == 1
 
 
-def test_escalation_append_before_save_crash_is_idempotent(delivery_env, monkeypatch):
+def test_escalation_save_crash_retries_same_incident(delivery_env, monkeypatch):
     manager, clock, sent = delivery_env
-    asyncio.run(tick(manager))
-    clock[0] += timedelta(seconds=181)
-    session = manager.sessions["reviewer"]
-    manager.sessions[session.id] = session.model_copy(
-        update={"status": ManagedSessionStatus.IDLE, "runtime_status": AgentRuntimeStatus.IDLE}
-    )
-    append = manager.task_mailbox.append_event
+    for _ in range(2):
+        asyncio.run(tick(manager))
+        clock[0] += timedelta(seconds=181)
+        session = manager.sessions["reviewer"]
+        manager.sessions[session.id] = session.model_copy(
+            update={"status": ManagedSessionStatus.IDLE, "runtime_status": AgentRuntimeStatus.IDLE}
+        )
+    manager._save_workspace_state("w")
 
-    def append_then_crash(**kwargs):
-        append(**kwargs)
-        raise RuntimeError("crash after event persisted, before task marker")
+    def crash(*args):
+        raise RuntimeError("before atomic state save")
 
-    monkeypatch.setattr(manager.task_mailbox, "append_event", append_then_crash)
-    with pytest.raises(RuntimeError, match="before task marker"):
+    monkeypatch.setattr(manager, "_save_workspace_state", crash)
+    with pytest.raises(RuntimeError, match="atomic state save"):
         asyncio.run(tick(manager))
     reloaded = WorkspaceManager()
-    monkeypatch.setattr(wm.settings, "port", 9998)
     asyncio.run(tick(reloaded))
-    assert len(sent) == 1
-    alerts = [
-        e for e in reloaded.task_mailbox._events["w"] if e.action == "review:delivery_stalled"
-    ]
+    asyncio.run(tick(reloaded))
+    assert len(sent) == 2
+    alerts = [e for e in reloaded.task_mailbox._events["w"] if e.action == "liveness:attention"]
     assert len(alerts) == 1
-    assert reloaded.tasks["t"].review_delivery_escalated_at == clock[0]
+    assert reloaded.tasks["t"].liveness.escalated_at == clock[0]
