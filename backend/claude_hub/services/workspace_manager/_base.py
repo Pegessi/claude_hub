@@ -59,7 +59,7 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     _feedback_chat_busy: Callable[[], bool] | None
     _feedback_started_at: datetime
     _feedback_summary_locks: dict[str, asyncio.Lock]
-    _hubtask_orphan_locks: dict[str, asyncio.Lock]
+    _liveness_locks: dict[str, asyncio.Lock]
     _task_notifier: TaskNotifier | None
     _task_notice_jobs: dict[str, asyncio.Task[None]]
     _monitor_task: asyncio.Task[None] | None
@@ -235,9 +235,7 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     ) -> str: ...
 
     @abstractmethod
-    async def _refresh_session_statuses(
-        self, workspace_id: Optional[str] = None, *, run_auto_continue: bool = False
-    ) -> None: ...
+    async def _refresh_session_statuses(self, workspace_id: Optional[str] = None) -> None: ...
 
     @abstractmethod
     def _monitor_refresh_sessions(self, workspace_id: Optional[str]) -> list[ManagedSession]: ...
@@ -252,12 +250,7 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
         self,
         session: ManagedSession,
         statuses: dict[str, Any],
-        *,
-        run_auto_continue: bool,
     ) -> bool: ...
-
-    @abstractmethod
-    def _mark_runtime_task_failures(self, workspace_id: Optional[str], now: datetime) -> bool: ...
 
     @abstractmethod
     def _expected_pending_prompt_prefixes(
@@ -265,7 +258,10 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     ) -> list[str]: ...
 
     @abstractmethod
-    def _mark_prompt_dispatch_stalled(
+    async def _best_effort_delete_session(self, session_id: str) -> None: ...
+
+    @abstractmethod
+    def _record_dispatch_failure(
         self,
         *,
         task_id: str,
@@ -568,9 +564,6 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     ) -> Optional[ScheduledTaskRun]: ...
 
     @abstractmethod
-    async def _converge_orphaned_hub_tasks(self, now: datetime) -> None: ...
-
-    @abstractmethod
     async def _drain_scheduled_chat_runs(self, tab_id: Optional[str] = None) -> None: ...
 
     @staticmethod
@@ -605,10 +598,24 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
     def _schedule_task_notices(self, workspace_id: str) -> None: ...
 
     @abstractmethod
-    def _reconcile_orphaned_tasks(self, workspace_id: str) -> int: ...
+    async def _tick_task_lifecycles(self, workspace_id: str) -> None: ...
 
     @abstractmethod
-    async def _tick_task_lifecycles(self, workspace_id: str) -> None: ...
+    async def _check_task_liveness(self, task_id: str) -> None: ...
+
+    @abstractmethod
+    def _liveness_review_claim_valid(self, task: WorkspaceTask) -> bool: ...
+
+    @abstractmethod
+    async def _liveness_delivery_allowed(self, session_id: str, call_id: str) -> bool: ...
+
+    @abstractmethod
+    def _liveness_native_guard(
+        self, session_id: str, call_id: str
+    ) -> Callable[[], None] | None: ...
+
+    @abstractmethod
+    def _retire_liveness_delivery(self, session_id: str, call_id: str) -> None: ...
 
     @abstractmethod
     def task_lifecycles(self, tasks: list[WorkspaceTask]) -> dict[str, TaskLifecycle]: ...
@@ -776,9 +783,6 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
 
     @abstractmethod
     async def _prune_orphan_workspace_tabs(self, workspace_id: str) -> int: ...
-
-    @abstractmethod
-    async def _reap_stuck_reviews(self, workspace_id: str) -> int: ...
 
     @abstractmethod
     def _review_submission_block(self, task: WorkspaceTask, reviewer: ManagedSession) -> str: ...

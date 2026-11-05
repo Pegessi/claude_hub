@@ -225,19 +225,10 @@ class _WorkspacesMixin(
                             self._refresh_one_session_status(
                                 session,
                                 statuses,
-                                run_auto_continue=True,
                             ),
                         )
                         refresh_changed = item_changed is True or refresh_changed
-                    failure_scan_now = self._runtime_now()
-                    failures_changed = _guard_call(
-                        "refresh_session_statuses",
-                        "phase=runtime_failure_scan",
-                        self._mark_runtime_task_failures,
-                        None,
-                        failure_scan_now,
-                    )
-                    if refresh_changed or failures_changed is True:
+                    if refresh_changed:
                         _guard_call(
                             "refresh_session_statuses",
                             "phase=save_state",
@@ -297,6 +288,14 @@ class _WorkspacesMixin(
                         f"workspace_id={workspace_id}",
                         self.dispatch_workspace(workspace_id, refresh_sessions=False),
                     )
+                    for task_id in [
+                        t.id for t in self.tasks.values() if t.workspace_id == workspace_id
+                    ]:
+                        await _guard_awaitable(
+                            "task_liveness",
+                            f"task_id={task_id}",
+                            self._check_task_liveness(task_id),
+                        )
                     await _guard_awaitable(
                         "tick_task_lifecycles",
                         f"workspace_id={workspace_id}",
@@ -358,11 +357,6 @@ class _WorkspacesMixin(
                         f"task_id={scheduled_task_id}",
                         self._fire_scheduled_task(scheduled_task, scheduled_now),
                     )
-                await _guard_awaitable(
-                    "tick_scheduled_tasks",
-                    "phase=converge_orphaned_hub_tasks",
-                    self._converge_orphaned_hub_tasks(scheduled_now),
-                )
                 await _guard_awaitable(
                     "tick_scheduled_tasks",
                     "phase=drain_scheduled_chat_runs",

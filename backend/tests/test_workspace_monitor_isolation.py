@@ -13,6 +13,7 @@ import importlib
 import logging
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -47,9 +48,6 @@ def _make_fake(calls: list[tuple[str, str]], **overrides: Any) -> SimpleNamespac
     async def _refresh_one(_session: Any, _statuses: dict[str, Any]) -> bool:
         return False
 
-    def _mark_failures(_workspace_id: Any, _now: Any) -> bool:
-        return False
-
     def _expire(_session_id: str) -> None:
         return None
 
@@ -74,14 +72,13 @@ def _make_fake(calls: list[tuple[str, str]], **overrides: Any) -> SimpleNamespac
     async def _fire(task: Any, _now: Any) -> None:
         calls.append(("fire_scheduled_task", task.id))
 
-    async def _converge(_now: Any) -> None:
-        return None
-
     async def _drain() -> None:
         calls.append(("tick_scheduled_tasks", ""))
 
     fake = SimpleNamespace(
         sessions={},
+        tasks=overrides.get("tasks", {}),
+        _check_task_liveness=overrides.get("_check_task_liveness", AsyncMock()),
         workspaces={},
         scheduled_tasks={},
         _scheduled_chat_recovery_pending=False,
@@ -93,7 +90,6 @@ def _make_fake(calls: list[tuple[str, str]], **overrides: Any) -> SimpleNamespac
             "_collect_session_agent_statuses", _collect_statuses
         ),
         _refresh_one_session_status=overrides.get("_refresh_one_session_status", _refresh_one),
-        _mark_runtime_task_failures=overrides.get("_mark_runtime_task_failures", _mark_failures),
         _save_state=lambda: None,
         _expire_processing_leases=_expire,
         dispatch_workspace=overrides.get(
@@ -107,7 +103,6 @@ def _make_fake(calls: list[tuple[str, str]], **overrides: Any) -> SimpleNamespac
         _disable_deleted_chat_targets=_disable_deleted,
         _reap_stale_scheduled_chat_runs=_reap,
         _fire_scheduled_task=overrides.get("_fire_scheduled_task", _fire),
-        _converge_orphaned_hub_tasks=_converge,
         _drain_scheduled_chat_runs=_drain,
         _kick_feedback_automation=overrides.get(
             "_kick_feedback_automation",
@@ -571,3 +566,27 @@ def test_error_log_state_prunes_idle_buckets(monkeypatch: pytest.MonkeyPatch) ->
     state.prune_idle(now=1000.0, retention_seconds=480.0)
     assert state.record_failure("step", "scope-gone", "RuntimeError", now=1000.0) == (True, 0)
     assert state.record_failure("step", "scope-fresh", "RuntimeError", now=905.0) == (False, 0)
+
+
+@pytest.mark.asyncio
+async def test_slow_liveness_task_does_not_starve_next_task(monkeypatch):
+    calls = []
+
+    async def liveness(task_id):
+        calls.append(("liveness", task_id))
+        if task_id == "slow":
+            await asyncio.Event().wait()
+
+    _patch_ttyd_cleanup(monkeypatch)
+    monkeypatch.setattr(workspaces_module, "WORKSPACE_MONITOR_STEP_TIMEOUT_SECONDS", 0.01)
+    fake = _make_fake(
+        calls,
+        workspaces={"ws": SimpleNamespace(id="ws")},
+        tasks={
+            "slow": SimpleNamespace(id="slow", workspace_id="ws"),
+            "next": SimpleNamespace(id="next", workspace_id="ws"),
+        },
+        _check_task_liveness=liveness,
+    )
+    await _run_exact_rounds(fake, 1, calls)
+    assert ("liveness", "slow") in calls and ("liveness", "next") in calls

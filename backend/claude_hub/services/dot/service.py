@@ -11,7 +11,6 @@ from claude_hub.services.dot.runtime.common import (
     _REAPER_REASON_SUFFIX,
     _RETURN_REPORT_STATES,
     _SENT_TURNS_KEPT,
-    _STALL_TASK_STATES,
     _TERMINAL_TASK_STATES,
     BRIEF_TEMPLATE,
     DEFAULT_STALL_HOURS,

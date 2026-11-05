@@ -913,7 +913,7 @@ async def test_tasks_started_from_the_dot_chat_are_watched(
 
 
 @pytest.mark.asyncio
-async def test_watch_an_existing_task_and_alarm_once_per_stall(
+async def test_watch_preserves_tracking_and_consumes_central_stall_notice(
     service: DotService, monkeypatch: MonkeyPatch
 ) -> None:
     start = datetime.now(timezone.utc)
@@ -929,16 +929,23 @@ async def test_watch_an_existing_task_and_alarm_once_per_stall(
     assert await service.check_work() == 0, "old reports and the old update are history"
 
     clock["now"] = start + timedelta(hours=3)
-    assert await service.check_work() == 1
+    assert await service.check_work() == 0, "Dot no longer owns a competing stall timer"
+    await service.receive_hub_notice(
+        "task-5", "task_stalled", "Central liveness requires attention", "liveness:task-5:1"
+    )
+    await service.receive_hub_notice(
+        "task-5", "task_stalled", "Central liveness requires attention", "liveness:task-5:1"
+    )
     stalled = service.store.list_inbox()[-1]
-    assert stalled["kind"] == "task_stalled" and "no progress for 3.0h" in stalled["text"]
+    assert stalled["kind"] == "task_stalled" and "Central liveness" in stalled["text"]
+    assert len([e for e in service.store.list_inbox() if e["kind"] == "task_stalled"]) == 1
     assert await service.check_work() == 0, "one alarm per stall"
 
-    # A sign of life re-arms the alarm.
+    # Progress remains tracked; only the liveness owner may re-arm an incident.
     tasks["task-5"] = _hub_task("working", start + timedelta(hours=3, minutes=30))
     assert await service.check_work() == 0
     clock["now"] = start + timedelta(hours=6)
-    assert await service.check_work() == 1
+    assert await service.check_work() == 0
 
     # Review waits on a person: never "stuck".
     tasks["task-5"] = _hub_task("review", start)
@@ -964,7 +971,9 @@ async def test_custom_stall_hours(service: DotService, monkeypatch: MonkeyPatch)
     monkeypatch.setattr(workspace_manager, "tasks", {"task-5": _hub_task("queued", start)})
     monkeypatch.setattr(workspace_manager, "reports_for_task", lambda _ws, _id: [])
     await service.watch("task-5", stall_hours=0.5)
-    assert await service.check_work() == 1
+    item = service.store.get_work("task-5")
+    assert item is not None and item["stall_hours"] == 0.5
+    assert await service.check_work() == 0
 
 
 # ── name and avatar ────────────────────────────────────────────────────

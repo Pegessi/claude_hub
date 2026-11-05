@@ -26,11 +26,7 @@ from claude_hub.models import (
     WorkspaceTaskStatus,
 )
 from claude_hub.services.workspace_manager import (
-    AUTO_CONTINUE_MAX_ATTEMPTS,
-    AUTO_CONTINUE_MAX_HARD_RECOVERIES,
-    AUTO_CONTINUE_SOFT_ATTEMPTS_BEFORE_HARD_RECOVERY,
     CLEAR_CONTEXT_SETTLE_SECONDS,
-    INTERRUPT_SETTLE_SECONDS,
     workspace_manager,
 )
 
@@ -103,16 +99,6 @@ def test_managed_session_has_hard_recovery_fields() -> None:
     assert session.hard_recovery_task_id is None
     assert session.hard_recovery_attempts == 0
     assert session.last_hard_recovery_at is None
-
-
-def test_hard_recovery_constants_are_defined() -> None:
-    """Escalation thresholds are defined with sensible values."""
-    assert AUTO_CONTINUE_SOFT_ATTEMPTS_BEFORE_HARD_RECOVERY == 3
-    assert AUTO_CONTINUE_MAX_HARD_RECOVERIES == 2
-    assert 0 < CLEAR_CONTEXT_SETTLE_SECONDS < 5
-    assert 0 < INTERRUPT_SETTLE_SECONDS < 5
-    # Soft max must be > hard-escalation threshold or hard recovery never fires
-    assert AUTO_CONTINUE_MAX_ATTEMPTS > AUTO_CONTINUE_SOFT_ATTEMPTS_BEFORE_HARD_RECOVERY
 
 
 def test_normalize_session_sets_hard_recovery_defaults() -> None:
@@ -218,45 +204,6 @@ def _make_session_and_task(
     return session, task
 
 
-def test_hard_recovery_escalation_threshold_requires_soft_attempts() -> None:
-    """Hard recovery does NOT fire before AUTO_CONTINUE_SOFT_ATTEMPTS_BEFORE_HARD_RECOVERY."""
-    session, task = _make_session_and_task(auto_continue_attempts=2)
-    assert session.hard_recovery_attempts == 0
-    assert session.auto_continue_attempts < AUTO_CONTINUE_SOFT_ATTEMPTS_BEFORE_HARD_RECOVERY
-
-
-def test_hard_recovery_escalation_triggers_at_threshold() -> None:
-    """Hard recovery fires when soft attempts hit threshold and hard attempts remain."""
-    session, task = _make_session_and_task(auto_continue_attempts=3)
-    interruption_reason = "api error"
-    should_escalate = (
-        bool(interruption_reason)
-        and session.agent_type == AgentType.CLAUDE
-        and session.auto_continue_attempts >= AUTO_CONTINUE_SOFT_ATTEMPTS_BEFORE_HARD_RECOVERY
-        and session.hard_recovery_attempts < AUTO_CONTINUE_MAX_HARD_RECOVERIES
-    )
-    assert should_escalate is True
-
-
-def test_hard_recovery_not_for_codex_or_cursor() -> None:
-    """Hard recovery is Claude-only (/clear is a Claude CLI slash command)."""
-    for non_claude in (AgentType.CODEX, AgentType.CURSOR):
-        session, task = _make_session_and_task(auto_continue_attempts=3, agent_type=non_claude)
-        should_escalate = (
-            session.agent_type == AgentType.CLAUDE
-            and session.auto_continue_attempts >= AUTO_CONTINUE_SOFT_ATTEMPTS_BEFORE_HARD_RECOVERY
-        )
-        assert should_escalate is False, f"{non_claude} should not hard-recover"
-
-
-def test_hard_recovery_caps_at_max_attempts() -> None:
-    """After AUTO_CONTINUE_MAX_HARD_RECOVERIES, no more escalation; should give up."""
-    session, task = _make_session_and_task(auto_continue_attempts=10, hard_recovery_attempts=2)
-    should_escalate = session.hard_recovery_attempts < AUTO_CONTINUE_MAX_HARD_RECOVERIES
-    assert should_escalate is False
-    assert session.hard_recovery_attempts >= AUTO_CONTINUE_MAX_HARD_RECOVERIES
-
-
 def test_worker_vs_reviewer_role_detection() -> None:
     """is_worker and is_reviewer detection from task/session bindings."""
     w_session, w_task = _make_session_and_task(
@@ -333,10 +280,10 @@ def test_reviewer_fallback_recovery_call_ids_are_verdict_specific_and_stable() -
     workspace_manager.tasks[task.id] = task
     try:
         first = workspace_manager._build_hard_recovery_reviewer_fallback_prompt(
-            task, session, "api error"
+            task, session, "api error", recovery_attempt=2
         )
         retry = workspace_manager._build_hard_recovery_reviewer_fallback_prompt(
-            task, session, "api error"
+            task, session, "api error", recovery_attempt=2
         )
         assert first == retry
         assert f"{task.id}-review-started-recovery-cycle-1-attempt-2" in first
@@ -349,67 +296,3 @@ def test_reviewer_fallback_recovery_call_ids_are_verdict_specific_and_stable() -
         assert first != later
     finally:
         workspace_manager.tasks.pop(task.id, None)
-
-
-def test_perform_hard_recovery_uses_verdict_fallback_when_no_trigger(
-    monkeypatch,
-) -> None:
-    """Monitor reviewer recovery without a trigger report still emits durable verdict IDs."""
-    import asyncio
-
-    now = datetime.now()
-    session, task = _make_session_and_task(
-        task_status=WorkspaceTaskStatus.REVIEW,
-        role=WorkspaceSessionRole.REVIEWER,
-        hard_recovery_attempts=0,
-    )
-    workspace = Workspace(
-        id=task.workspace_id,
-        name="Recovery WS",
-        path="/tmp/ws",
-        default_branch="main",
-        session_prefix="rec",
-        created_at=now,
-        updated_at=now,
-    )
-    sent: list[str] = []
-
-    async def fake_interrupt(_session) -> None:
-        return None
-
-    async def fake_send(session_id: str, message: str, **_kwargs) -> None:
-        sent.append(message)
-
-    async def fake_sleep(_seconds: float) -> None:
-        return None
-
-    monkeypatch.setattr(workspace_manager, "_interrupt_session", fake_interrupt)
-    monkeypatch.setattr(workspace_manager, "send_session_message", fake_send)
-    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-    workspace_manager.workspaces[workspace.id] = workspace
-    workspace_manager.sessions[session.id] = session
-    workspace_manager.tasks[task.id] = task
-    try:
-        update = asyncio.run(
-            workspace_manager._perform_hard_recovery(
-                session,
-                task,
-                now,
-                "api error",
-                soft_attempts=3,
-                hard_attempts=0,
-            )
-        )
-    finally:
-        workspace_manager.workspaces.pop(workspace.id, None)
-        workspace_manager.sessions.pop(session.id, None)
-        workspace_manager.tasks.pop(task.id, None)
-
-    assert update is not None
-    assert update["hard_recovery_attempts"] == 1
-    assert len(sent) == 2
-    assert sent[0] == "/clear"
-    prompt = sent[1]
-    assert f"{task.id}-review-started-recovery-cycle-1-attempt-1" in prompt
-    assert f"{task.id}-review-passed-recovery-cycle-1-attempt-1" in prompt
-    assert "working-progress" not in prompt

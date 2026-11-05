@@ -6,7 +6,8 @@ import asyncio
 import os
 import shutil
 from abc import ABC, abstractmethod
-from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple
+from contextlib import contextmanager
+from typing import Any, Awaitable, Callable, Dict, Iterator, List, Literal, Optional, Tuple
 
 from ....models import (
     AgentType,
@@ -356,6 +357,23 @@ class SessionCore(ABC):
             or (self.active_thread_id is not None and self.active_thread_id != expected)
         ):
             raise RuntimeError("the original provider conversation could not be resumed")
+
+    @contextmanager
+    def delivery_admission(self, guard: Callable[[], None]) -> Iterator[None]:
+        """Scope an input fence across provider startup without replacing resume guards."""
+        previous = self._delivery_admission
+
+        def combined() -> None:
+            if previous is not None:
+                previous()
+            guard()
+
+        self._delivery_admission = combined
+        try:
+            yield
+        finally:
+            if self._delivery_admission is combined:
+                self._delivery_admission = previous
 
     def check_delivery_admission(self) -> None:
         """Recheck automatic intent after preparation, at the input boundary."""

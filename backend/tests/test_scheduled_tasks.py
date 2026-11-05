@@ -53,6 +53,7 @@ from claude_hub.models import (
 from claude_hub.services.ttyd_manager import ttyd_manager
 from claude_hub.services.workspace_manager import WorkspaceManager
 from claude_hub.services.workspace_manager._constants import ScheduledChatLivenessResult
+from tests.liveness_helpers import liveness_round
 
 _wm = import_module("claude_hub.services.workspace_manager")
 
@@ -2806,7 +2807,7 @@ async def test_e2e_hub_task_worker_dies_early_redispatches_then_completes(
     manager.tasks[task.id] = backdated
 
     # Convergence sweep: bounded redispatch to a FRESH healthy ephemeral.
-    await manager._converge_orphaned_hub_tasks(datetime.now())
+    await liveness_round(manager, refresh=False)
 
     redispatched = manager.tasks[task.id]
     assert redispatched.status == WorkspaceTaskStatus.WORKING
@@ -2829,7 +2830,7 @@ async def test_e2e_hub_task_worker_dies_early_redispatches_then_completes(
     # No double-fire: another sweep while the replacement is healthy is a no-op
     # (same binding, same attempt, no extra session spawned).
     sessions_at = set(manager.sessions)
-    await manager._converge_orphaned_hub_tasks(datetime.now())
+    await liveness_round(manager, refresh=False)
     assert set(manager.sessions) == sessions_at
     again = manager.tasks[task.id]
     assert again.session_id == second_worker.id
@@ -2863,7 +2864,7 @@ async def test_e2e_hub_task_dead_worker_exhausts_retries_fails_and_cleans_sessio
         update={
             "status": WorkspaceTaskStatus.WORKING,
             "session_id": dead.id,
-            "dispatch_attempt": _wm._scheduling.HUBTASK_ORPHAN_MAX_ATTEMPTS,
+            "dispatch_attempt": 3,
             "started_at": now - timedelta(seconds=300),
             "updated_at": now - timedelta(seconds=120),
         }
@@ -2877,7 +2878,7 @@ async def test_e2e_hub_task_dead_worker_exhausts_retries_fails_and_cleans_sessio
         }
     )
 
-    await manager._converge_orphaned_hub_tasks(now)
+    await liveness_round(manager, refresh=False)
 
     failed = manager.tasks[task.id]
     assert failed.status == WorkspaceTaskStatus.FAILED
@@ -2888,7 +2889,7 @@ async def test_e2e_hub_task_dead_worker_exhausts_retries_fails_and_cleans_sessio
 
     # A second sweep is a no-op on the now-terminal task (no respawn storm).
     sessions_before = set(manager.sessions)
-    await manager._converge_orphaned_hub_tasks(now)
+    await liveness_round(manager, refresh=False)
     assert set(manager.sessions) == sessions_before
     assert manager.tasks[task.id].status == WorkspaceTaskStatus.FAILED
 
@@ -2950,7 +2951,7 @@ async def test_hub_task_orphan_convergence_leaves_healthy_and_non_scheduled_task
     )
 
     sessions_before = set(manager.sessions)
-    await manager._converge_orphaned_hub_tasks(datetime.now())
+    await liveness_round(manager, refresh=False)
 
     assert set(manager.sessions) == sessions_before
     assert manager.tasks[healthy_task.id].status == WorkspaceTaskStatus.WORKING

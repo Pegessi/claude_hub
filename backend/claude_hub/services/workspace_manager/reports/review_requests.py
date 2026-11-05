@@ -145,13 +145,22 @@ class _ReportReviewRequestMixin(_AutonomousReportMixin):
         workspace = self.workspaces.get(task.workspace_id)
         if not workspace:
             raise KeyError(task.workspace_id)
+        prior_sessions = set(self.sessions)
         reviewer = await self._select_or_create_reviewer(workspace, task)
+        if not self._liveness_review_claim_valid(task):
+            if reviewer.id not in prior_sessions and reviewer.ephemeral:
+                await self._best_effort_delete_session(reviewer.id)
+            return
         now = self._runtime_now()
         lesson_context = self._lesson_context_payload(
             workspace,
             f"{task.title}\n{task.prompt}\n{trigger_report.message}",
         )
         reviewer = await self._rename_session_for_task(reviewer, task, updated_at=now)
+        if not self._liveness_review_claim_valid(task):
+            if reviewer.id not in prior_sessions and reviewer.ephemeral:
+                await self._best_effort_delete_session(reviewer.id)
+            return
         autonomous_run = task.autonomous_run
         if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
             autonomous_run = autonomous_run or self._default_autonomous_run(
@@ -199,14 +208,6 @@ class _ReportReviewRequestMixin(_AutonomousReportMixin):
                 "current_task_id": task.id,
                 "status": ManagedSessionStatus.WORKING,
                 "runtime_status": AgentRuntimeStatus.WORKING,
-                "auto_continue_task_id": task.id,
-                "auto_continue_attempts": 0,
-                "last_auto_continue_at": None,
-                "hard_recovery_task_id": None,
-                "hard_recovery_attempts": 0,
-                "last_hard_recovery_at": None,
-                "prompt_retry_task_id": None,
-                "prompt_retry_attempted_at": None,
                 "last_review_task_id": (
                     previous_review_task_id
                     if reviewer.session_kind == SessionKind.CHAT
@@ -273,7 +274,7 @@ class _ReportReviewRequestMixin(_AutonomousReportMixin):
                 task.id,
                 reviewer.id,
             )
-            self._mark_prompt_dispatch_stalled(
+            self._record_dispatch_failure(
                 task_id=task.id,
                 session_id=reviewer.id,
                 message=(

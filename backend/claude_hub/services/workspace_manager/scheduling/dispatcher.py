@@ -27,14 +27,6 @@ class _ScheduleDispatcherMixin(_SchedulingHost):
                 await self._fire_scheduled_task(task, now)
             except Exception:
                 logger.exception("Scheduled task tick failed for task_id=%s", task_id)
-        # Converge scheduled hub_tasks whose bound worker died before reporting
-        # (stopped/offline/missing past the orphan grace): bounded redispatch to
-        # a fresh throwaway worker, or FAILED + ephemeral cleanup. Runs after the
-        # monitor's status refresh so session liveness is current.
-        try:
-            await self._converge_orphaned_hub_tasks(now)
-        except Exception:
-            logger.exception("Scheduled hub_task orphan convergence sweep failed")
         await self._drain_scheduled_chat_runs()
 
     def _disable_deleted_chat_targets(self, now: datetime) -> None:

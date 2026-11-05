@@ -851,12 +851,14 @@ def test_task_prompts_render_stable_distinct_call_ids_for_two_real_cycles(
         task,
         recovering_worker,
         "api error",
+        recovery_attempt=2,
     )
     worker_recovery_retry = manager._build_hard_recovery_worker_prompt(
         workspace,
         task,
         recovering_worker,
         "api error",
+        recovery_attempt=2,
     )
     assert worker_recovery == worker_recovery_retry
     assert f"{task.id}-worker-recovery-progress-cycle-2-attempt-2" in worker_recovery
@@ -874,13 +876,14 @@ def test_task_prompts_render_stable_distinct_call_ids_for_two_real_cycles(
         recovering_reviewer,
         trigger,
         "api error",
+        recovery_attempt=2,
     )
     for verdict in (
         "review-passed",
         "review-failed",
         "review-needs-input",
     ):
-        assert f"{task.id}-{verdict}-recovery-cycle-2-attempt-3" in recovery_prompt
+        assert f"{task.id}-{verdict}-recovery-cycle-2-attempt-2" in recovery_prompt
 
     supplement_report = trigger.model_copy(update={"review_cycle": 2})
     supplement_id = manager._report_prompt_call_id(

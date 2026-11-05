@@ -63,11 +63,11 @@ class ManagedSession(BaseModel):
     # from the tab record for ephemeral terminal-tab stream sessions only.
     subagent_id: Optional[str] = None
     remote_forward_port: Optional[int] = None
+    # Deprecated read-only upgrade evidence, imported once into TaskLiveness.
+    # Live recovery never writes or resets these per-session counters.
     auto_continue_task_id: Optional[str] = None
     auto_continue_attempts: int = 0
     last_auto_continue_at: Optional[datetime] = None
-    # Hard recovery: interrupt + /clear + re-inject prompt after repeated API errors.
-    # Tracked per task_id so counter resets on new task dispatch.
     hard_recovery_task_id: Optional[str] = None
     hard_recovery_attempts: int = 0
     last_hard_recovery_at: Optional[datetime] = None

@@ -45,7 +45,6 @@ NOTIFY_REPEAT_SECONDS = 1800.0
 DEFAULT_STALL_HOURS = 1.0
 _TERMINAL_TASK_STATES = {"done", "failed"}
 # Only running tasks can look stuck; review waits on a person, todo was never started.
-_STALL_TASK_STATES = {"queued", "working"}
 # A worker question: it counts against first pass.
 _QUESTION_REPORT_STATES = {"needs_input", "blocked"}
 _ATTENTION_REPORT_STATES = _QUESTION_REPORT_STATES | {"review_needs_input"}

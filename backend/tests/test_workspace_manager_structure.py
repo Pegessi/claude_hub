@@ -149,7 +149,7 @@ _COMPATIBILITY_LOOKUPS = (
         ),
     ),
     (
-        "tmux/review_reaper.py",
+        "tmux/review_resources.py",
         "_first_available_reviewer",
         "claude_hub.services.workspace_identity",
         ("normalize_remote_cwd", "resolve_path"),

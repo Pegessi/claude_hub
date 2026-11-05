@@ -150,14 +150,6 @@ class _SessionInventoryMixin(_WorkspaceManagerBase):
                 "current_task_id": None,
                 "status": ManagedSessionStatus.IDLE,
                 "runtime_status": AgentRuntimeStatus.IDLE,
-                "auto_continue_task_id": None,
-                "auto_continue_attempts": 0,
-                "last_auto_continue_at": None,
-                "hard_recovery_task_id": None,
-                "hard_recovery_attempts": 0,
-                "last_hard_recovery_at": None,
-                "prompt_retry_task_id": None,
-                "prompt_retry_attempted_at": None,
                 "updated_at": now,
                 "last_activity_at": now,
             }
@@ -305,92 +297,6 @@ class _SessionInventoryMixin(_WorkspaceManagerBase):
             return False
         return True
 
-    def _reviewer_dispatch_stuck(self, task: WorkspaceTask) -> bool:
-        """Reaper-only test: return True when the task's review dispatch has
-        positively failed and a fresh dispatch is warranted.
-
-        This is deliberately stricter than ``not _reviewer_is_active``. The
-        fallback reaper must NOT re-dispatch a reviewer that is simply slow:
-        the terminal classifier reports ``runtime_status == IDLE`` between
-        bursts of model output, and a reviewer reading/thinking over a large
-        review prompt emits no terminal frame change for minutes. Treating that
-        transient IDLE as "stuck" (the old behaviour) made the reaper re-send
-        the review prompt to a reviewer that was actively working, producing a
-        duplicate "fallback reaper" review report and a confusing status.
-
-        A dispatch is considered stuck only when the reviewer is genuinely
-        unavailable:
-
-        - the task has no ``review_session_id``;
-        - the referenced reviewer session no longer exists;
-        - the reviewer session is STOPPED;
-        - the reviewer is bound to a *different* task.
-
-        A reviewer that is bound to THIS task and not stopped is presumed
-        mid-review and is never reaped here regardless of IDLE duration. The
-        genuine "bound but the prompt never landed" failure is handled
-        separately by the input-box backstop in ``_reap_stuck_reviews``.
-        """
-        if not task.review_session_id:
-            return True
-        reviewer = self.sessions.get(task.review_session_id)
-        if not reviewer or reviewer.archived:
-            return True
-        if reviewer.status == ManagedSessionStatus.STOPPED:
-            return True
-        if reviewer.task_id != task.id and reviewer.current_task_id != task.id:
-            return True
-        return False
-
-    async def _reviewer_prompt_still_pending(self, task: WorkspaceTask) -> bool:
-        """Backstop for the genuine "bound but the prompt never landed" failure.
-
-        ``_reviewer_dispatch_stuck`` deliberately refuses to reap a reviewer that
-        is bound to THIS task and not stopped, because a slow/thinking reviewer
-        is reported IDLE by the terminal classifier. But if ``_request_task_review``
-        bound the reviewer and the review prompt never actually left the tmux
-        input box (e.g. the send raised after binding), the reviewer would sit
-        bound + IDLE forever and would never be recovered.
-
-        Return True only when the reviewer's review prompt is *still verifiably
-        sitting in the terminal input box* — the same positive signal the
-        monitor's ``_detect_prompt_dispatch_stall`` already trusts. A reviewer
-        that is genuinely working has already submitted the prompt, so its input
-        box is empty and this returns False.
-        """
-        if not task.review_session_id:
-            return False
-        reviewer = self.sessions.get(task.review_session_id)
-        if not reviewer or reviewer.session_kind == SessionKind.CHAT or not reviewer.tmux_session:
-            return False
-        try:
-            output = await self._capture_tmux_output(reviewer.tmux_session)
-        except RuntimeError as exc:
-            logger.warning(
-                "Could not inspect reviewer prompt for reaper task_id=%s session_id=%s: %s",
-                task.id,
-                reviewer.id,
-                exc,
-            )
-            return False
-        # Check every prefix that could legitimately be in the reviewer's
-        # input box (review prompt or hard-recovery reviewer prompt). If none
-        # match, the prompt was submitted and the reviewer is genuinely idle.
-        for prefix in self._expected_pending_prompt_prefixes(reviewer, task):
-            if self._message_still_in_input(output, prefix):
-                return True
-        return False
-
-    async def _review_dispatch_failed(self, task: WorkspaceTask) -> bool:
-        """Reaper gate: True when this task's review dispatch should be re-sent.
-
-        Combines the strict reviewer-availability predicate with the input-box
-        backstop so the fallback reaper only re-dispatches on positive evidence
-        of a failed dispatch, never on transient reviewer IDLE."""
-        if self._reviewer_dispatch_stuck(task):
-            return True
-        return await self._reviewer_prompt_still_pending(task)
-
     def _reviewer_has_active_task_binding(self, session: ManagedSession) -> bool:
         return any(
             task.workspace_id == session.workspace_id
@@ -477,14 +383,6 @@ class _SessionInventoryMixin(_WorkspaceManagerBase):
                     "current_task_id": None,
                     "status": ManagedSessionStatus.IDLE,
                     "runtime_status": AgentRuntimeStatus.IDLE,
-                    "auto_continue_task_id": None,
-                    "auto_continue_attempts": 0,
-                    "last_auto_continue_at": None,
-                    "hard_recovery_task_id": None,
-                    "hard_recovery_attempts": 0,
-                    "last_hard_recovery_at": None,
-                    "prompt_retry_task_id": None,
-                    "prompt_retry_attempted_at": None,
                     "updated_at": now,
                     "last_activity_at": now,
                 }

@@ -6,7 +6,6 @@ from claude_hub.services import workspace_state_policy as state_policy
 from claude_hub.services.dot.runtime.common import (
     _ATTENTION_REPORT_STATES,
     _QUESTION_REPORT_STATES,
-    _STALL_TASK_STATES,
     _TERMINAL_TASK_STATES,
     BRIEF_TEMPLATE,
     DEFAULT_STALL_HOURS,
@@ -69,34 +68,6 @@ def _final_review_report(task: Any, reports: list[Any]) -> Any:
         ):
             return report if _report_state(report) == "review_passed" else None
     return None
-
-
-def _lifecycle_hint(workspace_manager: Any, task: Any) -> str:
-    """Why a quiet task is quiet, from the Hub's lifecycle view (empty if unknown)."""
-    from ...task_lifecycle import reason_text
-
-    try:
-        lifecycle = workspace_manager.task_lifecycles([task])[task.id]
-        if lifecycle.blocked_by_task_id:
-            blocker = workspace_manager.tasks.get(lifecycle.blocked_by_task_id)
-            if blocker is None:
-                return "; waiting behind another task"
-            blocked_by = workspace_manager.task_lifecycles([blocker])[blocker.id]
-            return f"; waiting behind {blocker.title!r}: {reason_text(blocked_by.reason)}"
-        if lifecycle.reason in {
-            "agent_working",
-            "initiator_working",
-            "waiting_for_agent",
-        }:
-            return ""
-        return f"; {reason_text(lifecycle.reason)}"
-    except Exception:
-        logger.debug(
-            "dot: lifecycle hint failed for %s",
-            getattr(task, "id", None),
-            exc_info=True,
-        )
-        return ""
 
 
 class DotWorkService(DotSessionService, ABC):
@@ -557,19 +528,6 @@ class DotWorkService(DotSessionService, ABC):
         reports = self._reports(workspace_id, task_id)
         return reports[-1] if reports else None
 
-    @staticmethod
-    def _last_activity(item: dict[str, Any], task: Any, report: Any) -> Optional[datetime]:
-        """Newest sign of life: task update, progress, runtime change, report, or watch start."""
-        moments = (
-            getattr(task, "updated_at", None),
-            getattr(getattr(task, "latest_progress", None), "reported_at", None),
-            getattr(getattr(task, "runtime_observation", None), "observed_at", None),
-            getattr(report, "created_at", None),
-            item.get("watched_at") or item.get("created"),
-        )
-        parsed = [moment for moment in map(_parse_time, moments) if moment is not None]
-        return max(parsed, default=None)
-
     def _result_card(
         self,
         item: dict[str, Any],
@@ -869,27 +827,6 @@ class DotWorkService(DotSessionService, ABC):
         ):
             question = _first_line(str(getattr(asking, "message", "") or ""), 300)
             notices.append(("task_needs_input", f"{title} — {question}", None))
-        elif (
-            not notices
-            and status in _STALL_TASK_STATES
-            and (activity := self._last_activity(item, task, report))
-        ):
-            idle = self._utc_now() - activity
-            limit = float(item.get("stall_hours") or DEFAULT_STALL_HOURS)
-            # One alarm per stall: a new sign of life re-arms it.
-            if idle > timedelta(hours=limit) and item.get("stall_alarm_for") != (
-                marker := activity.isoformat()
-            ):
-                notices.append(
-                    (
-                        "task_stalled",
-                        f"{title} — no progress for "
-                        f"{idle.total_seconds() / 3600:.1f}h (status {status}"
-                        f"{_lifecycle_hint(workspace_manager, task)})",
-                        None,
-                    )
-                )
-                changes["stall_alarm_for"] = marker
         if report_id and report_id != last_seen:
             changes["last_report_id"] = report_id
         if status in _TERMINAL_TASK_STATES:
@@ -900,10 +837,7 @@ class DotWorkService(DotSessionService, ABC):
             changes["closed"] = False
         # Events go first, so a failed write cannot lose one. The next tick sees the same
         # change again; its key makes that the same unread event, not a second one.
-        key = ":".join(
-            str(part or "")
-            for part in (task_id, status, report_id, ended, changes.get("stall_alarm_for"))
-        )
+        key = ":".join(str(part or "") for part in (task_id, status, report_id, ended))
         for kind, text, card_id in notices:
             extra = {"card_id": card_id} if card_id else {}
             event_key = (

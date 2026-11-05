@@ -146,6 +146,21 @@ def _derive(
         return TaskPhase.DONE, reason, TaskOwner(kind=TaskOwnerKind.NONE), task.completed_at
     if status == WorkspaceTaskStatus.FAILED:
         return TaskPhase.FAILED, "failed", TaskOwner(kind=TaskOwnerKind.NONE), task.failed_at
+    liveness = task.liveness
+    if (
+        liveness
+        and liveness.escalated_at
+        and liveness.generation == f"{task.execution_epoch}:{task.review_cycle}"
+        and not task.human_acceptance_requested_at
+    ):
+        owner_id = task.review_session_id or task.session_id
+        owner_session = facts.reviewer_session if task.review_session_id else facts.worker_session
+        return (
+            TaskPhase.NEEDS_USER,
+            "liveness_attention",
+            _session_owner(owner_id, owner_session),
+            liveness.escalated_at,
+        )
     if task.execution_control == TaskExecutionControl.INITIATOR:
         return _derive_initiator(facts)
     if status == WorkspaceTaskStatus.TODO:
@@ -281,6 +296,7 @@ NOTIFY_PHASES = frozenset(
 )
 
 REASON_TEXT = {
+    "liveness_attention": "Task recovery requires attention",
     "reviewer_needs_input": "AI reviewer has a question for you",
     "review_failed_not_resumed": "Review failed and was not sent back to the worker",
     "review_unrouted": "Waiting for review, but no reviewer picked it up",
@@ -406,6 +422,8 @@ def attention_notice(
         if phase == TaskPhase.ORPHANED
         else NEXT_STEP_TEXT.get(task.status.value, "")
     )
+    if reason == "liveness_attention":
+        step = "Inspect the assigned executor and its delivery receipts. Resolve the blocker or explicitly resume the Task; review and human acceptance remain required."
     if step:
         lines += [step.format(id=task.id, ws=task.workspace_id)]
     if detail.strip():

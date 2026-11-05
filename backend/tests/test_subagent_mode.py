@@ -26,6 +26,7 @@ from claude_hub.models import (
 )
 from claude_hub.services.session_seat import SessionSeatMismatch
 from claude_hub.services.workspace_manager import workspace_manager
+from tests.liveness_helpers import liveness_round
 from tests.test_workspaces import stub_workspace_terminal
 
 workspace_module = import_module("claude_hub.services.workspace_manager")
@@ -152,7 +153,7 @@ async def test_subagent_session_death_marks_failed(isolated_hub: Path) -> None:
         update={"status": ManagedSessionStatus.STOPPED}
     )
     assert workspace_manager.tasks[task["id"]].status == WorkspaceTaskStatus.WORKING
-    await workspace_manager._refresh_session_statuses(workspace["id"])
+    await liveness_round(workspace_manager, workspace["id"])
     failed = workspace_manager.tasks[task["id"]]
     assert failed.status == WorkspaceTaskStatus.FAILED
     assert failed.failure_reason == "session died"
@@ -178,7 +179,7 @@ async def test_reviewed_session_death_does_not_mark_failed(isolated_hub: Path) -
     workspace_manager.sessions[worker["id"]] = session.model_copy(
         update={"status": ManagedSessionStatus.STOPPED}
     )
-    await workspace_manager._refresh_session_statuses(workspace["id"])
+    await liveness_round(workspace_manager, workspace["id"])
     stored = workspace_manager.tasks[task["id"]]
     assert stored.status == WorkspaceTaskStatus.WORKING
     assert stored.failure_reason is None
@@ -203,7 +204,7 @@ async def test_subagent_timeout_marks_failed(isolated_hub: Path) -> None:
     stored = workspace_manager.tasks[task["id"]]
     stale = stored.updated_at - timedelta(seconds=30)
     workspace_manager.tasks[task["id"]] = stored.model_copy(update={"updated_at": stale})
-    await workspace_manager._refresh_session_statuses(workspace["id"])
+    await liveness_round(workspace_manager, workspace["id"])
     failed = workspace_manager.tasks[task["id"]]
     assert failed.status == WorkspaceTaskStatus.FAILED
     assert failed.failure_reason == "timeout after 10s"

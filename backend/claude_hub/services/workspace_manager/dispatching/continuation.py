@@ -153,14 +153,6 @@ class _TaskContinuationMixin(_WorkspaceManagerBase):
                 "current_task_id": task.id,
                 "status": ManagedSessionStatus.WORKING,
                 "runtime_status": AgentRuntimeStatus.WORKING,
-                "auto_continue_task_id": task.id,
-                "auto_continue_attempts": 0,
-                "last_auto_continue_at": None,
-                "hard_recovery_task_id": None,
-                "hard_recovery_attempts": 0,
-                "last_hard_recovery_at": None,
-                "prompt_retry_task_id": None,
-                "prompt_retry_attempted_at": None,
                 "updated_at": now,
                 "last_activity_at": now,
             }
@@ -205,7 +197,7 @@ class _TaskContinuationMixin(_WorkspaceManagerBase):
                 task.id,
                 session.id,
             )
-            self._mark_prompt_dispatch_stalled(
+            self._record_dispatch_failure(
                 task_id=task.id,
                 session_id=session.id,
                 message=(

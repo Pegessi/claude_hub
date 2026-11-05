@@ -105,47 +105,10 @@ AGENT_UPDATE_DIALOG_SETTLE_SECONDS = 0.35
 TMUX_SUBMIT_ATTEMPTS = 3
 TMUX_PASTE_SETTLE_SECONDS = 0.35
 TMUX_SUBMIT_SETTLE_SECONDS = 0.7
-AUTO_CONTINUE_MAX_ATTEMPTS = 10
-AUTO_CONTINUE_MIN_INTERVAL_SECONDS = 15
-AUTO_CONTINUE_IDLE_GRACE_SECONDS = 20
-# Clean-idle grace: when an agent is idle at a prompt with no error patterns
-# and no completion patterns, wait this long before sending the first nudge.
-# Longer than the error/completion grace because agents legitimately sit at a
-# clean prompt while reading files, thinking, or between output bursts — but a
-# prompt that was never delivered (e.g. continue_task Enter failed) leaves the
-# agent at a permanently clean idle, and we need to recover within ~1 minute
-# rather than leaving the task stuck in WORKING forever.
-AUTO_CONTINUE_CLEAN_IDLE_GRACE_SECONDS = 60
-# After this many soft auto-continue prompts fail to revive an agent stuck on
-# an API error, escalate to hard recovery: interrupt, /clear, re-inject prompt.
-AUTO_CONTINUE_SOFT_ATTEMPTS_BEFORE_HARD_RECOVERY = 3
-# Maximum hard recoveries per task before giving up and marking NEEDS_INPUT.
-AUTO_CONTINUE_MAX_HARD_RECOVERIES = 2
 # Wait this long after sending /clear for the CLI to settle before re-pasting.
 CLEAR_CONTEXT_SETTLE_SECONDS = 1.5
 # Wait this long after interrupt (Escape + C-c) before sending /clear.
-INTERRUPT_SETTLE_SECONDS = 1.0
-REVIEW_RUNTIME_REOPEN_GRACE_SECONDS = 20
 MAX_AUTOMATED_REVIEW_FAILURES = 3
-PROMPT_DISPATCH_STALL_GRACE_SECONDS = 20
-PROMPT_DISPATCH_RETRY_GRACE_SECONDS = 10
-# How long the fallback reaper waits after a review_requested_at timestamp
-# (or after the reviewer's last terminal activity) before treating an
-# idle-looking reviewer as stuck. Covers the gap between dispatching a
-# review prompt and the reviewer actually emitting first tokens — without
-# this grace, a slow-to-start reviewer is repeatedly re-dispatched.
-REVIEW_REAPER_DISPATCH_GRACE_SECONDS = 60
-# Orphan convergence for scheduled hub_tasks. A system-internal scheduled task
-# whose bound worker session is stopped/offline/missing cannot report and would
-# otherwise hang in WORKING forever (dispatch/recovery/migration require QUEUED,
-# the failure reaper is subagent-only, and an uncertain dispatch is fail-closed
-# against auto-resend to the SAME session). After this grace the scheduler may
-# bind a fresh throwaway worker and redispatch, up to HUBTASK_ORPHAN_MAX_ATTEMPTS
-# total worker sessions; beyond that the task is FAILED and its ephemeral
-# session is cleaned up. The gate is keyed on a DEAD session, so a healthy long
-# task — regardless of age — is never touched.
-HUBTASK_ORPHAN_GRACE_SECONDS = 60
-HUBTASK_ORPHAN_MAX_ATTEMPTS = 3
 PROMPT_STUCK_RISK_LEVEL = "prompt_dispatch_stalled"
 WORKSPACE_MONITOR_INTERVAL_SECONDS = 5
 # Each monitor step (session refresh, per-session recovery, per-workspace
@@ -178,33 +141,6 @@ RESIDENT_ACTIVITY_DEBOUNCE_SECONDS = 300
 # window keeps the reconciler from deleting a tab that belongs to an agent
 # whose session is still being registered.
 ORPHAN_TAB_PRUNE_GRACE_SECONDS = 60
-AUTO_CONTINUE_MESSAGE = (
-    "Please inspect the current task state. If the task was interrupted or is unfinished, "
-    "continue from the last actionable step. If the task is already complete and only missed "
-    "the workspace report, immediately POST a ready_for_review or completed report instead of "
-    "doing more work."
-)
-AUTO_CONTINUE_IDLE_PROMPT_MESSAGE = (
-    "You are the workspace agent assigned to this task and appear to be at a clean idle prompt. "
-    "Read the state snapshot at the path given in your original assignment, inspect the current "
-    "state of any files you were editing, and resume work from the last actionable step. "
-    "If the task was already complete before this nudge (for example, if you already posted a "
-    "ready_for_review report that did not reach the server), immediately POST a ready_for_review "
-    "or completed report with changed_files, validation, risks, the stored Goal Packet, and "
-    "acceptance_check evidence."
-)
-AUTO_CONTINUE_REVIEWER_MESSAGE = (
-    "Please inspect the review state. If the review was interrupted by an API error, continue "
-    "from the last step: read the worker's report and changed files, judge against the Goal "
-    "Packet, and issue a review_passed, review_failed, or review_needs_input verdict. "
-    "If you already posted your verdict and the message did not reach the server, re-POST it now."
-)
-AUTO_REPORT_MISSING_MESSAGE = (
-    "The task appears complete but no workspace report was recorded. Please immediately POST "
-    "the final ready_for_review or completed report with changed_files, validation, risks, "
-    "the stored Goal Packet if it has not been reported yet, and acceptance_check evidence; "
-    "only continue work if you find it is actually unfinished."
-)
 HARD_RECOVERY_WORKER_MESSAGE = (
     "⚠️  Your previous context was automatically cleared because the agent encountered a persistent "
     "API error and could not continue. A fresh context has been started for you within the SAME "
@@ -324,16 +260,6 @@ __all__ = [
     "WorkspaceAgentInitializationError",
     "ARTIFACT_PREVIEW_MAX_BYTES",
     "ATTACHMENT_MAX_BYTES",
-    "AUTO_CONTINUE_IDLE_GRACE_SECONDS",
-    "AUTO_CONTINUE_CLEAN_IDLE_GRACE_SECONDS",
-    "AUTO_CONTINUE_IDLE_PROMPT_MESSAGE",
-    "AUTO_CONTINUE_MAX_ATTEMPTS",
-    "AUTO_CONTINUE_MAX_HARD_RECOVERIES",
-    "AUTO_CONTINUE_MESSAGE",
-    "AUTO_CONTINUE_MIN_INTERVAL_SECONDS",
-    "AUTO_CONTINUE_REVIEWER_MESSAGE",
-    "AUTO_CONTINUE_SOFT_ATTEMPTS_BEFORE_HARD_RECOVERY",
-    "AUTO_REPORT_MISSING_MESSAGE",
     "AgentReport",
     "AgentReportCreate",
     "AgentReportState",
@@ -366,13 +292,10 @@ __all__ = [
     "GoalPacketStatus",
     "HARD_RECOVERY_REVIEWER_MESSAGE",
     "HARD_RECOVERY_WORKER_MESSAGE",
-    "HUBTASK_ORPHAN_GRACE_SECONDS",
-    "HUBTASK_ORPHAN_MAX_ATTEMPTS",
     "IMAGE_ATTACHMENT_TYPES",
     "IMAGE_ATTACHMENT_SIGNATURES",
     "INDEX_FILE",
     "INTERNAL_API_CURL",
-    "INTERRUPT_SETTLE_SECONDS",
     "LEGACY_STATE_FILE",
     "MARKDOWN_ARTIFACT_SUFFIXES",
     "MARKDOWN_DISCOVERY_EXCLUDED_DIRS",
@@ -383,15 +306,11 @@ __all__ = [
     "ManualTaskControlRequest",
     "Optional",
     "ORPHAN_TAB_PRUNE_GRACE_SECONDS",
-    "PROMPT_DISPATCH_RETRY_GRACE_SECONDS",
-    "PROMPT_DISPATCH_STALL_GRACE_SECONDS",
     "PROMPT_STUCK_RISK_LEVEL",
     "Path",
     "REMOTE_FORWARD_PORT_BASE",
     "REMOTE_FORWARD_PORT_OFFSET",
     "RESIDENT_ACTIVITY_DEBOUNCE_SECONDS",
-    "REVIEW_REAPER_DISPATCH_GRACE_SECONDS",
-    "REVIEW_RUNTIME_REOPEN_GRACE_SECONDS",
     "SCHEDULED_TASKS_FILE",
     "RequestTaskReviewRequest",
     "ResidentPeriodicTask",

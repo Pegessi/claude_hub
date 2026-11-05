@@ -18,6 +18,14 @@ logger = logging.getLogger("claude_hub.services.agent_stream.tailer")
 class InputMixin(SessionState):
     """Input behavior on the sole session owner."""
 
+    def has_pending_question(self) -> bool:
+        """Read live, incarnation-checked cards without starting a provider."""
+        return any(
+            self.question_snapshot(card.turn_id, call_id) is not None
+            for call_id, card in self._pending_approvals.items()
+            if card.turn_id is not None
+        )
+
     def question_snapshot(self, turn_id: str, call_id: str) -> Optional[Dict[str, Any]]:
         """Exact live card, without spawning a provider or trusting a transcript."""
         try:
@@ -408,9 +416,12 @@ class InputMixin(SessionState):
                     raise NativeInputNotSubmittedError(
                         "service is shutting down; try again after it reconnects"
                     )
-                if before_delivery is not None:
-                    before_delivery()
-                await transport.send_message(text, images)
+                if before_delivery is None:
+                    await transport.send_message(text, images)
+                else:
+                    with transport.delivery_admission(before_delivery):
+                        before_delivery()
+                        await transport.send_message(text, images)
 
             submit_task = asyncio.create_task(
                 submit_to_provider(),

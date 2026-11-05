@@ -19,7 +19,7 @@ from claude_hub.models.schema_domains.execution import (
     TaskSourceReference,
     validate_workspace_session_surface,
 )
-from claude_hub.models.schema_domains.lifecycle import TaskLifecycleMark
+from claude_hub.models.schema_domains.lifecycle import TaskLifecycleMark, TaskLiveness
 from claude_hub.models.schema_domains.runtime import (
     AgentType,
     ReviewProfile,
@@ -155,6 +155,7 @@ class WorkspaceTask(BaseModel):
     runtime_observation: Optional[TaskRuntimeObservation] = None
     # Last observed lifecycle phase and its notification state (Hub-maintained).
     lifecycle_mark: Optional[TaskLifecycleMark] = None
+    liveness: Optional[TaskLiveness] = None
     # Explicitly included by the state codec, never by public model serialization.
     reporter_key_hash: Optional[str] = Field(default=None, exclude=True, repr=False)
     execution_call_fingerprints: Dict[str, str] = Field(
@@ -240,7 +241,7 @@ class WorkspaceTask(BaseModel):
     review_cycle: int = 1
     reviewed_cycle: int = 0
     review_requested_at: Optional[datetime] = None
-    # One delivery reminder per exact review dispatch, durable across restarts.
+    # Deprecated read-only upgrade envelope, imported once into TaskLiveness.
     review_delivery_round: Optional[str] = None
     review_delivery_message: Optional[str] = None
     review_delivery_nudged_at: Optional[datetime] = None
