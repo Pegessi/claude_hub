@@ -232,3 +232,32 @@ reload, completion, active/uncertain/missing-proof/adopted cases and evidence th
 changes while cleanup waits for the pump lock. The initial ten-case test passed
 (`/tmp/claude-hub-verify.x8w22nhz/`); final expanded checks and full validation are
 recorded below. This is the sole blocking revision; no lessons needed.
+
+
+### Cycle-5 fixed-candidate evidence
+
+The expanded five-file regression group passed **281 tests**, 4.56 seconds,
+including all 14 real-mailbox cases (`/tmp/claude-hub-verify.geejib0m/`). Read-only
+`bootstrap_receipt_audit` / P-JUDGE / owner=root /
+agent=`/root/provider_evidence` / `model_or_api=runtime-default` was accepted:
+at `852a28da8b922b26a3d0b3750bf54a3cc26c86d7`, it traced real provisioning,
+mailbox acceptance, receipt reconciliation, final lock admission and deletion;
+no remaining scoped blocker or duplicate recovery policy. This audit inspected
+code and whitespace checks; it did not independently rerun tests or exercise live
+providers. Mandatory Hub review remains a separate gate.
+
+Foreground `./scripts/verify.sh all` **passed, exit 0**, at that fixed candidate.
+Backend: **6,121 passed, 9 skipped, 16 warnings**, 342.17 seconds. Frontend:
+**1,224 passed, 0 failed**. Docs, checkout safety, formatting, complete backend and
+frontend types, lint and production build all passed. Evidence:
+`/tmp/liveness-all-round11.log` contains `LIVENESS_VERIFY_EXIT=0`, and
+`/tmp/claude-hub-verify.5m8uwb6_/` retains backend output, interpreter/SHA provenance
+and exit receipts. The existing Vite chunk-size advisory remains. This subsequent
+commit records evidence only; documentation, staged safety and whitespace are
+rechecked before review handoff.
+
+Main is still `a34cfea62b6751876df63e6f7c15e9da46f5c255`; the original untracked
+design is preserved unchanged. Independent Hub approval and then the authorized
+local fast-forward remain pending. No push or primary restart. Browser/HMR/replay
+and live-provider/tab teardown remain unverified. Human acceptance is still
+required; no lessons needed.
