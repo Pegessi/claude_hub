@@ -184,6 +184,7 @@ class TailerManager(EditResendMixin):
         turn_metadata: Optional[Dict[str, Any]] = None,
         before_send: Optional[Callable[[], Awaitable[None]]] = None,
         before_delivery: Optional[Callable[[], None]] = None,
+        delivery_guard: Optional[Callable[[], None]] = None,
         allow_question_answer: bool = True,
     ) -> None:
         """Atomically deliver a user turn (text + images) for ``session``.
@@ -208,6 +209,7 @@ class TailerManager(EditResendMixin):
             turn_metadata=turn_metadata,
             before_send=before_send,
             before_delivery=before_delivery,
+            delivery_guard=delivery_guard,
             allow_question_answer=allow_question_answer,
         )
 

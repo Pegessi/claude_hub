@@ -541,7 +541,7 @@ async def send_message(
                 previews=previews,
                 turn_metadata={"origin": "workspace"},
                 allow_question_answer=False,
-                before_delivery=before_delivery,
+                delivery_guard=before_delivery,
             )
         except NativeInputNotSubmittedError:
             attempts.pop(call_id, None)

@@ -597,7 +597,7 @@ async def test_native_preparation_cannot_outlive_recovery_admission(
                 "resume",
                 [],
                 client_turn_id=call_id,
-                before_delivery=manager._liveness_native_guard(session.id, call_id),
+                delivery_guard=manager._liveness_native_guard(session.id, call_id),
                 allow_question_answer=False,
             )
         writes.assert_not_awaited()
