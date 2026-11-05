@@ -480,9 +480,11 @@ async def test_prompt_retry_after_workspace_delete_cannot_resurrect_session(
     monkeypatch.setattr(wm_module.ttyd_manager, "delete_tab", fake_delete_tab)
     retrying = asyncio.create_task(manager._check_task_liveness(task.id))
     await asyncio.wait_for(tmux_entered.wait(), timeout=1)
-    await manager.delete_workspace(session.workspace_id)
+    deleting = asyncio.create_task(manager.delete_workspace(session.workspace_id))
+    await asyncio.sleep(0)
+    assert not deleting.done()  # Enter and deletion serialize on workspace ownership.
     release_tmux.set()
-    await asyncio.wait_for(retrying, timeout=1)
+    await asyncio.wait_for(asyncio.gather(retrying, deleting), timeout=1)
 
     assert session.workspace_id not in manager.workspaces
     assert task.id not in manager.tasks
