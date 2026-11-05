@@ -155,6 +155,7 @@ class InputMixin(SessionState):
         turn_metadata: Optional[Dict[str, Any]] = None,
         before_send: Optional[Callable[[], Awaitable[None]]] = None,
         before_delivery: Optional[Callable[[], None]] = None,
+        delivery_guard: Optional[Callable[[], None]] = None,
         allow_question_answer: bool = True,
     ) -> None:
         """Atomically deliver a user turn (text + images) to the native transport.
@@ -416,11 +417,13 @@ class InputMixin(SessionState):
                     raise NativeInputNotSubmittedError(
                         "service is shutting down; try again after it reconnects"
                     )
-                if before_delivery is None:
+                if before_delivery is not None:
+                    before_delivery()
+                if delivery_guard is None:
                     await transport.send_message(text, images)
                 else:
-                    with transport.delivery_admission(before_delivery):
-                        before_delivery()
+                    with transport.delivery_admission(delivery_guard):
+                        delivery_guard()
                         await transport.send_message(text, images)
 
             submit_task = asyncio.create_task(
