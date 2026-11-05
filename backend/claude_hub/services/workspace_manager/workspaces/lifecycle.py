@@ -8,6 +8,34 @@ class _WorkspaceLifecycleMixin(_WorkspaceManagerBase):
     def get_workspace(self, workspace_id: str) -> Optional[Workspace]:
         return self.workspaces.get(workspace_id)
 
+    def find_workspace_for_local_path(self, path: str | Path) -> Optional[Workspace]:
+        """Return the registered LOCAL workspace whose repo/path contains ``path``.
+
+        Read-only attribution lookup for display-only tab grouping (Hub
+        subagents): unlike ``ensure_workspace`` it never creates a workspace,
+        and an ambiguous multi-worktree identity resolves to ``None`` rather
+        than guessing. Missing dirs and non-git paths simply do not match.
+        """
+        from claude_hub.services.workspace_identity import (
+            AmbiguousWorkspaceError,
+            select_workspace_candidate,
+            workspace_identity_for_fields,
+        )
+
+        source_path = Path(path).expanduser().resolve()
+        if not source_path.is_dir():
+            return None
+        identity = workspace_identity_for_fields(
+            path=str(source_path), target=ExecutionTarget.LOCAL
+        )
+        matches = self._workspaces_for_identity_key(identity.key)
+        if not matches:
+            return None
+        try:
+            return select_workspace_candidate(matches, requested_path=str(source_path))
+        except AmbiguousWorkspaceError:
+            return None
+
     def _workspaces_for_identity_key(self, identity_key: str) -> list[Workspace]:
         from claude_hub.services.workspace_identity import workspace_identity
 

@@ -518,6 +518,9 @@ async def main(browser_run: BrowserRun) -> None:
             elif method == "GET" and path == "/api/dot/identity":
                 # The Dot launcher in the tab bar reads Dot's name and avatar.
                 body = {"name": "Dot", "avatar": "", "avatar_image": None}
+            elif method == "GET" and path == "/api/subagents":
+                # Every Chat polls Hub sub-agent links; this fixture has none.
+                body = []
             else:
                 unknown_requests.append((method, path))
                 await route.fulfill(

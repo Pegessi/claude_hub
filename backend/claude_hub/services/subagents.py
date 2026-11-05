@@ -108,6 +108,21 @@ it when the awaiting task is cancelled, and raise
 ``SubagentInteractionRequired`` after retiring a turn that awaits input.
 """
 
+# Resolved display-only Agent Workspace attribution for a new subagent tab.
+WorkspaceAttribution = Tuple[str, str]
+ResolveWorkspace = Callable[[Optional[TerminalTab], str], Optional[WorkspaceAttribution]]
+"""``resolve_workspace(parent, cwd) -> (workspace_id, workspace_name) | None``.
+
+Purely a grouping hint: the child stays a direct Chat (no workspace role, no
+managed session). Returns ``None`` when no registered workspace matches.
+"""
+
+
+def _no_workspace_attribution(
+    parent: Optional[TerminalTab], cwd: str
+) -> Optional[WorkspaceAttribution]:
+    return None
+
 
 @dataclass
 class SubagentRuntime:
@@ -119,6 +134,7 @@ class SubagentRuntime:
     get_tab: Callable[[str], Optional[TerminalTab]]
     list_tabs: Callable[[], Iterable[TerminalTab]]
     resolve_env: Callable[[Optional[str], Dict[str, str]], Dict[str, str]]
+    resolve_workspace: ResolveWorkspace = _no_workspace_attribution
 
 
 def _digest(payload: Dict[str, Any]) -> str:
@@ -549,6 +565,16 @@ class SubagentService:
             raise SubagentError(400, f"cwd must be an existing absolute directory: {cwd}")
         return cwd
 
+    def _resolve_attribution(
+        self, parent: Optional[TerminalTab], cwd: str
+    ) -> Optional[WorkspaceAttribution]:
+        """Display-only workspace grouping for the child tab; never blocks spawn."""
+        try:
+            return self.runtime.resolve_workspace(parent, cwd)
+        except Exception:
+            logger.exception("Subagent workspace attribution failed for cwd %s", cwd)
+            return None
+
     async def create(
         self, req: SubagentCreate, *, created_by: Optional[str] = None
     ) -> Tuple[Subagent, SubagentTurn]:
@@ -572,6 +598,7 @@ class SubagentService:
         env = self._launch_env(req)
         parent = self._resolve_parent(req)
         cwd = self._resolve_cwd(req, parent)
+        attribution = self._resolve_attribution(parent, cwd)
         # Unless the caller chooses, a subagent follows its parent's approval
         # policy; without a parent nobody could approve, so it runs solo.
         if req.solo_mode is not None:
@@ -609,6 +636,8 @@ class SubagentService:
                 env=env,
                 parent_tab_id=parent_id,
                 subagent_id=subagent_id,
+                workspace_id=attribution[0] if attribution else None,
+                workspace_name=attribution[1] if attribution else None,
             )
         except SubagentError:
             raise
@@ -917,6 +946,38 @@ def subagent_state_path() -> Path:
     return resolve_runtime_home() / "subagents.json"
 
 
+def _resolve_subagent_workspace(
+    parent: Optional[TerminalTab], cwd: str
+) -> Optional[WorkspaceAttribution]:
+    """Production ResolveWorkspace: parent workspace first, cwd lookup fallback.
+
+    A parent's workspace wins when it still exists and the child cwd is inside
+    it (same git repo, including linked worktrees); a REMOTE workspace always
+    inherits. Otherwise the child cwd is matched against registered LOCAL
+    workspaces, read-only. Any miss leaves the tab unattributed.
+    """
+    from ..models import ExecutionTarget
+    from .workspace_identity import (
+        InvalidLocalAgentCwdError,
+        validate_local_agent_cwd_for_workspace,
+    )
+    from .workspace_manager import workspace_manager
+
+    if parent is not None and parent.workspace_id:
+        workspace = workspace_manager.get_workspace(parent.workspace_id)
+        if workspace is not None:
+            if workspace.target == ExecutionTarget.REMOTE:
+                return workspace.id, workspace.name
+            try:
+                validate_local_agent_cwd_for_workspace(workspace.path, cwd)
+            except InvalidLocalAgentCwdError:
+                pass  # child runs in another repo; try cwd-based lookup below
+            else:
+                return workspace.id, workspace.name
+    workspace = workspace_manager.find_workspace_for_local_path(cwd)
+    return (workspace.id, workspace.name) if workspace is not None else None
+
+
 def _default_runtime() -> SubagentRuntime:
     from . import ttyd_manager
     from .env_preset_resolver import merge_env_with_preset
@@ -949,6 +1010,7 @@ def _default_runtime() -> SubagentRuntime:
         get_tab=ttyd_manager.get_tab,
         list_tabs=list_tabs,
         resolve_env=lambda preset, env: merge_env_with_preset(preset=preset, explicit_env=env),
+        resolve_workspace=_resolve_subagent_workspace,
     )
 
 

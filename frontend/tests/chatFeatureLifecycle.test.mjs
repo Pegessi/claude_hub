@@ -61,6 +61,8 @@ function runtime(t) {
   }
   const store = vue.reactive({
     tabs: [{ id: 'one', agent_type: 'codex', env: {} }, { id: 'two', agent_type: 'codex', env: {} }],
+    archivedTabs: [],
+    agentStatuses: [],
     getQueuedChatState(paneId, tabId) {
       const key = `${paneId}:${tabId}`
       if (!state.queues.has(key)) state.queues.set(key, vue.reactive({ drafts: [], editing: false, editingDraftId: null, editingMessage: '', sendInProgress: false, paused: false, autoActivationBlock: null }))

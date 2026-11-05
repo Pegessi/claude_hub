@@ -225,3 +225,62 @@ def test_validate_local_agent_cwd_non_git_descendant(tmp_path: Path) -> None:
     assert validate_local_agent_cwd_for_workspace(plain, sub) == str(sub.resolve())
     with pytest.raises(InvalidLocalAgentCwdError, match="subdirectory"):
         validate_local_agent_cwd_for_workspace(plain, outside)
+
+
+def _git_env() -> dict[str, str]:
+    import os
+
+    return {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@e.com",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@e.com",
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", ""),
+    }
+
+
+def test_find_workspace_for_local_path_matches_repo_and_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.models import WorkspaceCreate
+    from claude_hub.services.workspace_manager import workspace_manager
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    (repo / "README.md").write_text("hi\n")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, env=_git_env()
+    )
+    linked = tmp_path / "linked"
+    subprocess.run(
+        ["git", "worktree", "add", str(linked), "-b", "feat/wt"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    other = tmp_path / "other"
+    other.mkdir()
+
+    saved = dict(workspace_manager.workspaces)
+    workspace_manager.workspaces.clear()
+    monkeypatch.setattr(workspace_manager, "_save_state", lambda: None)
+    try:
+        ws = workspace_manager.create_workspace(
+            WorkspaceCreate(name="Repo", path=str(repo), target=ExecutionTarget.LOCAL)
+        )
+        # Main checkout and linked worktree resolve to the same workspace.
+        assert workspace_manager.find_workspace_for_local_path(str(repo)) is ws
+        subdir = repo / "sub"
+        subdir.mkdir()
+        assert workspace_manager.find_workspace_for_local_path(str(subdir)) is ws
+        assert workspace_manager.find_workspace_for_local_path(str(linked)) is ws
+        # Unrelated dirs / missing paths do not match and never create one.
+        assert workspace_manager.find_workspace_for_local_path(str(other)) is None
+        assert workspace_manager.find_workspace_for_local_path(str(tmp_path / "missing")) is None
+        assert len(workspace_manager.workspaces) == 1
+    finally:
+        workspace_manager.workspaces.clear()
+        workspace_manager.workspaces.update(saved)

@@ -39,6 +39,8 @@ class FakeChats:
         self.behavior: Behavior = self.answer
         self.counter = 0
         self.create_delay = 0.0
+        # Test seam for SubagentRuntime.resolve_workspace: (parent, cwd) -> (id, name).
+        self.resolve_workspace: Optional[Callable[[Optional[TerminalTab], str], Any]] = None
 
     def add_tab(
         self, tab_id: str, *, cwd: str, archived: bool = False, **extra: Any
@@ -70,6 +72,8 @@ class FakeChats:
             solo_mode=kwargs["solo_mode"],
             parent_tab_id=kwargs.get("parent_tab_id"),
             subagent_id=kwargs.get("subagent_id"),
+            workspace_id=kwargs.get("workspace_id"),
+            workspace_name=kwargs.get("workspace_name"),
         )
 
     async def archive_tab(self, tab_id: str) -> None:
@@ -112,6 +116,7 @@ class FakeChats:
             get_tab=self.tabs.get,
             list_tabs=lambda: list(self.tabs.values()),
             resolve_env=resolve_env,
+            resolve_workspace=self.resolve_workspace or (lambda parent, cwd: None),
         )
 
 
@@ -453,6 +458,176 @@ async def test_solo_mode_defaults_on_without_parent(env) -> None:
     body = _body(tmp_path, parent_tab_id=None, cwd=str(tmp_path))
     assert (await client.post("/api/subagents", json=body)).status_code == 201
     assert chats.create_calls[-1]["solo_mode"] is True
+
+
+# ── workspace attribution ────────────────────────────────────────────────
+
+
+async def test_subagent_inherits_resolved_workspace_attribution(env) -> None:
+    chats, service, client, tmp_path = env
+    chats.add_tab(
+        "parent", cwd=str(tmp_path), solo_mode=True, workspace_id="ws-1", workspace_name="Repo"
+    )
+    seen: List[tuple] = []
+
+    def resolve_workspace(parent: Optional[TerminalTab], cwd: str) -> Any:
+        seen.append((parent.id if parent else None, cwd))
+        return ("ws-1", "Repo")
+
+    chats.resolve_workspace = resolve_workspace
+    # The env fixture built the service before the seam was set; rebuild it.
+    service.runtime = chats.runtime()
+    started = (await client.post("/api/subagents", json=_body(tmp_path))).json()
+    assert seen == [("parent", str(tmp_path))]
+    call = chats.create_calls[-1]
+    assert call["workspace_id"] == "ws-1"
+    assert call["workspace_name"] == "Repo"
+    # Display-only: the child tab is stamped but has no managed role.
+    child = chats.tabs[started["tab_id"]]
+    assert child.workspace_id == "ws-1"
+    assert child.workspace_name == "Repo"
+    assert child.workspace_role is None
+    assert child.managed_session_id is None
+
+
+async def test_subagent_without_workspace_match_stays_unstamped(env) -> None:
+    chats, service, client, tmp_path = env
+    chats.resolve_workspace = lambda parent, cwd: None
+    service.runtime = chats.runtime()
+    assert (await client.post("/api/subagents", json=_body(tmp_path))).status_code == 201
+    call = chats.create_calls[-1]
+    assert call["workspace_id"] is None
+    assert call["workspace_name"] is None
+
+
+async def test_workspace_attribution_failure_never_blocks_spawn(env) -> None:
+    chats, service, client, tmp_path = env
+
+    def resolve_workspace(parent: Optional[TerminalTab], cwd: str) -> Any:
+        raise RuntimeError("workspace subsystem unavailable")
+
+    chats.resolve_workspace = resolve_workspace
+    service.runtime = chats.runtime()
+    response = await client.post("/api/subagents", json=_body(tmp_path))
+    assert response.status_code == 201, response.text
+    assert chats.create_calls[-1]["workspace_id"] is None
+
+
+async def test_parent_remote_workspace_inherits_without_cwd_check(tmp_path: Path) -> None:
+    import sys
+    from types import SimpleNamespace
+
+    from claude_hub.models import ExecutionTarget
+    from claude_hub.services.subagents import _resolve_subagent_workspace
+
+    remote = SimpleNamespace(
+        id="ws-remote", name="Remote Repo", target=ExecutionTarget.REMOTE, path="/nonexistent"
+    )
+    parent = TerminalTab(
+        id="parent",
+        name="parent",
+        cwd=str(tmp_path),
+        port=0,
+        created_at=datetime.now(timezone.utc),
+        is_active=True,
+        session_kind=SessionKind.CHAT,
+        workspace_id="ws-remote",
+    )
+    wm_module = sys.modules["claude_hub.services.workspace_manager"]
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            wm_module.workspace_manager,
+            "get_workspace",
+            lambda ws_id: remote if ws_id == "ws-remote" else None,
+        )
+        mp.setattr(wm_module.workspace_manager, "find_workspace_for_local_path", lambda path: None)
+        assert _resolve_subagent_workspace(parent, str(tmp_path)) == (
+            "ws-remote",
+            "Remote Repo",
+        )
+
+
+async def test_parent_workspace_cross_repo_child_falls_back_to_cwd_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+    from types import SimpleNamespace
+
+    from claude_hub.models import ExecutionTarget
+    from claude_hub.services.subagents import _resolve_subagent_workspace
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    other_root = tmp_path / "other"
+    other_root.mkdir()
+    local_ws = SimpleNamespace(
+        id="ws-local",
+        name="Repo",
+        target=ExecutionTarget.LOCAL,
+        path=str(repo_root),
+    )
+    other_ws = SimpleNamespace(id="ws-other", name="Other", target=ExecutionTarget.LOCAL)
+    parent = TerminalTab(
+        id="parent",
+        name="parent",
+        cwd=str(repo_root),
+        port=0,
+        created_at=datetime.now(timezone.utc),
+        is_active=True,
+        session_kind=SessionKind.CHAT,
+        workspace_id="ws-local",
+    )
+
+    def fake_find(path: str) -> Any:
+        return other_ws if str(other_root) in path else None
+
+    wm_module = sys.modules["claude_hub.services.workspace_manager"]
+    monkeypatch.setattr(
+        wm_module.workspace_manager,
+        "get_workspace",
+        lambda ws_id: local_ws if ws_id == "ws-local" else None,
+    )
+    monkeypatch.setattr(wm_module.workspace_manager, "find_workspace_for_local_path", fake_find)
+    # Child cwd inside the parent's non-git workspace path -> inherit.
+    inside = repo_root / "subdir"
+    inside.mkdir()
+    assert _resolve_subagent_workspace(parent, str(inside)) == ("ws-local", "Repo")
+    # Child cwd elsewhere -> parent rejected, cwd lookup supplies other_ws.
+    assert _resolve_subagent_workspace(parent, str(other_root)) == ("ws-other", "Other")
+    # Unstamped parent resolves purely from cwd.
+    plain_parent = parent.model_copy(update={"workspace_id": None})
+    assert _resolve_subagent_workspace(plain_parent, str(other_root)) == ("ws-other", "Other")
+    assert _resolve_subagent_workspace(plain_parent, str(tmp_path / "nowhere-x")) is None
+
+
+async def test_subagent_summary_lists_bounded_last_answer(env) -> None:
+    chats, service, client, tmp_path = env
+
+    async def long_answer(tab_id: str, text: str, turn_id: str, timeout: float) -> str:
+        await asyncio.sleep(0)
+        return "Line 1\nLine 2\n" + "x" * 400
+
+    chats.behavior = long_answer
+    started = (await client.post("/api/subagents", json=_body(tmp_path))).json()
+    await _wait(client, started)
+    await _settle()
+    listed = await client.get(
+        "/api/subagents", params={"parent_tab_id": "parent", "include_closed": "true"}
+    )
+    assert listed.status_code == 200, listed.text
+    rows = listed.json()
+    assert len(rows) == 1
+    summary = rows[0]["last_summary"]
+    assert summary is not None
+    assert "\n" not in summary
+    assert summary.startswith("Line 1 Line 2 xxxxxx")
+    from claude_hub.models.subagent import SUBAGENT_SUMMARY_MAX_CHARS
+
+    assert len(summary) == SUBAGENT_SUMMARY_MAX_CHARS + 1  # ellipsis suffix
+    assert summary.endswith("…")
+
+
+# ── workspace attribution (resolver policy with a stubbed manager) ───────
 
 
 @pytest.mark.parametrize("solo", [False, True])

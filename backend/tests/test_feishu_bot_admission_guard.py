@@ -635,6 +635,21 @@ def test_an_unscoped_tab_resolves_to_no_workspace(monkeypatch) -> None:
     assert bot_api._validate_bind_target("tab-1", None) is None
 
 
+def test_display_attributed_subagent_chat_binds_its_workspace(monkeypatch) -> None:
+    # InfoWall d2627d2f N7: a kept Hub sub-agent tab (workspace_id stamped for
+    # grouping, no managed role) is bindable as a workspace-scoped Chat...
+    _install_chat_tab(monkeypatch, workspace_id="ws-1")
+
+    assert bot_api._validate_bind_target("tab-1", None) == "ws-1"
+    assert bot_api._validate_bind_target("tab-1", "ws-1") == "ws-1"
+    # ...and an auto-archived non-kept child stays rejected like any archived tab.
+    _install_chat_tab(monkeypatch, workspace_id="ws-1", archived=True)
+    with pytest.raises(HTTPException) as raised:
+        bot_api._validate_bind_target("tab-1", None)
+    assert raised.value.status_code == 404
+    assert raised.value.detail == "chat_tab_not_found"
+
+
 @pytest.mark.asyncio
 async def test_no_confirmation_word_is_sent_when_the_hub_owner_lost_authorization(env):
     """The confirmation word must not be sent after owner revocation.
