@@ -7,6 +7,16 @@
 
 ## Released
 
+### fix(chat): start each turn with fresh watchdog clocks
+
+- Initialize the activity clock and clear the previous in-flight observation
+  when either a Hub send or provider-initiated turn begins. Idle provider
+  notifications can no longer make a new turn appear ten minutes silent and
+  immediately cancel it.
+- Keep the existing inactivity threshold and tool, approval and queue waiting
+  rules. Add regression coverage for idle control records before/after normal
+  completion, provider-initiated turns and genuine current-turn silence.
+
 ### feat(cli): agent create from inside a Hub agent defaults to a Chat session
 
 - `claude-hub agent create` without `--session-kind` now sends `chat` when it
