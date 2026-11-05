@@ -333,9 +333,7 @@ def test_cold_restart_repairs_stale_reviewed_cycle_when_verdict_present(
 
     state_file = cold_review_env[0] / workspace_id / "state.json"
     disk = json.loads(state_file.read_text(encoding="utf-8"))
-    stale_at = (
-        datetime.utcnow() - timedelta(seconds=_wm.REVIEW_REAPER_DISPATCH_GRACE_SECONDS + 30)
-    ).isoformat()
+    stale_at = (datetime.utcnow() - timedelta(minutes=10)).isoformat()
     for item in disk["tasks"]:
         if item.get("id") == child_id:
             item["reviewed_cycle"] = 0

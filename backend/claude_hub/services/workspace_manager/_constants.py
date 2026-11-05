@@ -107,7 +107,6 @@ TMUX_PASTE_SETTLE_SECONDS = 0.35
 TMUX_SUBMIT_SETTLE_SECONDS = 0.7
 # Wait this long after sending /clear for the CLI to settle before re-pasting.
 CLEAR_CONTEXT_SETTLE_SECONDS = 1.5
-# Wait this long after interrupt (Escape + C-c) before sending /clear.
 MAX_AUTOMATED_REVIEW_FAILURES = 3
 PROMPT_STUCK_RISK_LEVEL = "prompt_dispatch_stalled"
 WORKSPACE_MONITOR_INTERVAL_SECONDS = 5
