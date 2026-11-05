@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "834cbade3001ac0cba81d96a83569b66e5b5fe33",
+  "parents": [
+    "cb0e9dff497e9ca9301cc51c6b1fd576ce811544",
+    "924a03c13898782f2fb58d7f4d942ea0ea869229"
+  ],
+  "base": "dd681a722be886b78ab9d2ac568868817ce637f8",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "af290f760165d3ff5bce42d1f13ce95630308a14",
+  "reconstructed_tree": "0d59a5627d84e83606d8b227b715e5338048cd6d",
+  "conflicts": [
+    "CHANGELOG.md",
+    "frontend/tests/workspaceStructure.test.mjs"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9dd2456776694f2ea61c6fef4f790a3b7348ae4e"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "fa6d4fa1c656da770814eab5af6ceb3c198a06ee"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "7308df0b9e3ddbd2957ae7406630a10fbded92c5"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9fcb6a0debe00acf3eb68531e0d526388e4fa449"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "01b2bc484d2e1faaccc6257bbceac4b45e994f9d"
+      },
+      "reason": "Both sides added a Released entry at the top; keep both, sub-agent entry above main's frontend-test entry.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/tests/workspaceStructure.test.mjs",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ef408228e15c1e386144adf153a85a622c4f3c93"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a29aa37840599d3985f11a1b5fbbc76d26bf6d97"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a884fb1debf2629e9500b4a4ceaf286cc264626b"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9c77dff79791042cdbe9223f0d0da62104294a9d"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a29aa37840599d3985f11a1b5fbbc76d26bf6d97"
+      },
+      "reason": "Main (cb0e9df) retired the whole-Workspace template/CSS digest tests; the branch only re-baselined those digests, so its change is obsolete.",
+      "disposition": "retain-parent",
+      "destinations": []
+    }
+  ]
+}
