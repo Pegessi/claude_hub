@@ -133,3 +133,26 @@ new callback (4,816 passed, 3 skipped before failure); frontend targets passed.
 checks the cleanup target and its authority callback; the 251-test dependency,
 workspace and liveness group passed (`/tmp/claude-hub-verify.hda7suzy/`). Runtime
 code did not change after `77f1bfc`. A fresh full run follows this fixture update.
+
+
+### Fixed-candidate verification (2026-11-06)
+
+The fresh foreground `./scripts/verify.sh all` **passed, exit 0**, at
+`c145623dc1bc6f71bf1be06672b78aaaa3f5af82`. All docs, checkout safety,
+Black/isort, backend types, backend tests, frontend lint/types/tests/build passed.
+Backend: **6,090 passed, 9 skipped, 16 warnings**, 342.70 seconds. Frontend:
+**1,224 passed, 0 failed**. The existing Vite chunk-size advisory remains.
+
+Evidence: `/tmp/liveness-all-round9.log`, including `LIVENESS_VERIFY_EXIT=0`;
+`/tmp/claude-hub-verify.egkr1wwr/{pytest.log,provenance.json,exit-code}` confirms the
+feature-worktree interpreter and successful isolated cleanup. This subsequent
+commit records evidence only; docs, staged safety and whitespace are rechecked.
+No runtime source changed after the independently audited `77f1bfc`.
+
+The cycle-3 native P-JUDGE audit was accepted: 27 adversarial cases passed with no
+remaining scoped blocker or second recovery policy. It supplements the required
+Hub reviewer and does not replace its verdict. The fixed candidate is submitted
+for mandatory Hub review with explicit attention to both reproduced blockers and
+the absence of duplicate mechanisms. Local main remains `a34cfea`; fast-forward
+is pending independent approval. Human acceptance remains required; no push.
+Browser/HMR/replay and live-provider checks remain unrun and are not claimed.
