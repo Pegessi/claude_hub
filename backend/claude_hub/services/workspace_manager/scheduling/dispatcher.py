@@ -1,5 +1,7 @@
 """Scheduled-task implementation split from the compatibility mixin."""
 
+from typing import Callable
+
 from claude_hub.services.task_transitions import apply_task_update
 
 from ...task_dependencies import require_task_dependencies
@@ -153,12 +155,17 @@ class _ScheduleDispatcherMixin(_SchedulingHost):
             raise ValueError(f"Terminal tab '{tab_id}' not found")
         await self._send_tmux_message(_tmux_session_name(tab_id), message)
 
-    async def _best_effort_delete_session(self, session_id: str | None) -> None:
+    async def _best_effort_delete_session(
+        self, session_id: str | None, *, before_delete: Callable[[], bool] | None = None
+    ) -> None:
         """Best-effort teardown of an ephemeral session; never raises."""
         if not session_id:
             return
         try:
-            await self.delete_session(session_id)
+            if before_delete is None:
+                await self.delete_session(session_id)
+            else:
+                await self.delete_session(session_id, before_delete=before_delete)
         except Exception:
             logger.exception("Best-effort delete of scheduled-task session %s failed", session_id)
 

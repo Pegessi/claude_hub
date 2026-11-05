@@ -3,7 +3,7 @@
 Task `ce373ec6-dec6-44ca-9a67-aa4d13a74efb`; base
 `aa359fd17ccd804cbf296db3644552481e140667`; branch
 `codex/task-liveness-consolidation`. Goal Packet approved in review cycle 1;
-implementation is in cycle 2. No push or main-service restart is authorized.
+implementation initially ran in cycle 2; the safety revision is in cycle 3. No push or main-service restart is authorized.
 
 ## Change boundary
 
@@ -54,8 +54,9 @@ the repository, and an obsolete concurrency-test ordering; these were corrected.
 One earlier wrapper ended after a passing backend suite without its final receipt;
 it was not counted as a full pass. The successful run above includes cleanup and
 all standard frontend targets. The existing Vite chunk-size advisory remains.
-Browser mocks/HMR/replay and manual UI checks were not run: no frontend source or
-user-facing flow changed. All verification used isolated runtime homes/sockets;
+Browser mocks/HMR/replay and manual UI checks were not run. Frontend source is
+unchanged, but lifecycle attention and idle status are observable changes. Backend
+state assertions do not establish browser acceptance; that remains unverified. All verification used isolated runtime homes/sockets;
 no production Hub restart or live-incident experiment occurred.
 
 ## Independent audit ledger
@@ -91,3 +92,33 @@ No durable background-job runner or Stop hook. Notice acceptance is Dot inbox
 acceptance, not human receipt. Unknown quota/permission causes stay explicit
 uncertainty. Direct external terminal keystrokes retain the phase-0 sampled-observation limit.
 No lessons needed.
+
+
+## Review cycle 3: two blocking safety races
+
+Hub review `02b410cc-e5b0-457e-9fe5-83e0de2e65a5` rejected candidate `96912a1`.
+The revision preserves the passing consolidation and fixes only the two blocking
+contracts, including sibling failure/cleanup paths with the same cause:
+
+- Reuse the evaluator's review-obligation predicate at final native submission.
+  A same-cycle review or plan gate revokes a worker wake after native preparation;
+  the real pending-mailbox/explicit-review route is covered in addition to actual
+  Claude/Codex preparation tests. Proven-unsent input is retired without an ACK.
+- Revalidate provisioning outcomes under the workspace lock before FAILED/rebind.
+  Resumed, replaced, paused or superseded owners retain their work. Dispatch
+  failures with possible submission retain their receipts and unfinished claim.
+  Session deletion calls the owner's fence after both workspace and pump locks;
+  the blanket FAILED scheduled-task cleanup retry was deleted.
+
+The focused six-file regression group passed **272 tests** in 3.57 seconds,
+including 30 new cases. Evidence: `/tmp/liveness-focused-round8.log` and
+`/tmp/claude-hub-verify.nhfle6to/`. Black/isort passed. Initial type checking caught
+an omitted scheduling host signature for the optional deletion callback; the
+contract was corrected before full validation. Full verification and independent
+Hub re-review are recorded with the next fixed-candidate handoff.
+
+Native read-only `revision_failure_audit` / P-RESEARCH /
+`/root/lifecycle_evidence` (`model_or_api=runtime-default`) identified the sibling
+dispatch exception and repeated FAILED cleanup paths; accepted and included in
+the same fix. It has no Task reporting or completion authority. Nonblocking dead
+helper cleanup was left outside this revision, as requested. No lessons needed.
