@@ -991,7 +991,7 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
         # delete_session rechecks this at its final workspace -> pump boundary.
         # Terminal Task status alone never authorizes deleting an active worker.
         def allowed() -> bool:
-            return (
+            if not (
                 self.tasks.get(task.id) == task
                 and self._liveness_worker_idle(session)
                 and (
@@ -1001,7 +1001,24 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
                         for t in self.tasks.values()
                     )
                 )
-            )
+            ):
+                return False
+            if unused and session.session_kind == SessionKind.CHAT:
+                try:
+                    if any(
+                        managed_chat.delivery_state(session, c) != "accepted"
+                        for c in session.processing_call_ids
+                    ):
+                        return False
+                    managed_chat.validate_delivery_state_discard(
+                        session.workspace_id,
+                        session.id,
+                        acknowledged_call_ids=set(session.delivered_call_ids),
+                        provider_fenced=False,
+                    )
+                except managed_chat.ManagedChatDeliveryUncertain:
+                    return False
+            return True
 
         if allowed():
             await self._best_effort_delete_session(session.id, before_delete=allowed)
@@ -1034,8 +1051,10 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
                 if owned and session is not None:
                     if (
                         session.pending_call_ids
-                        or session.processing_call_ids
                         or session.uncertain_call_ids
+                        or (
+                            session.processing_call_ids and session.session_kind != SessionKind.CHAT
+                        )
                     ):
                         continue  # Retain ownership until delivery is resolved.
                     await self._liveness_retire_worker(current, session, unused=True)

@@ -659,3 +659,11 @@ review/execution generations; they do not spend another recovery attempt. Missin
 recycled or adopted resources relinquish this claim. The final deletion callback
 also rechecks canonical Task references after pump-lock waits. This is retry of an
 already-owned resource effect, with no additional stall evaluator, timer or budget.
+
+An unassigned Chat bootstrap has no Task report to ACK its accepted message, so
+its processing receipt can legitimately survive turn completion. Retirement uses
+the existing managed-Chat discard validator: every processing call must be proven
+accepted, and unacknowledged acceptance requires durable terminal-turn evidence
+without a provider fence. This proof is repeated at final deletion admission;
+pending, uncertain, missing-proof or newly active delivery retains the claim. The
+owner neither fabricates an ACK nor clears recovery evidence to permit cleanup.
