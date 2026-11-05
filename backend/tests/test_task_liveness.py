@@ -369,7 +369,9 @@ def test_replacement_provisioning_cannot_overwrite_resumed_worker(delivery_env, 
     monkeypatch.setattr(manager, "_dispatch_task_to_session", dispatch)
     asyncio.run(tick(manager))
     dispatch.assert_not_awaited()
-    cleanup.assert_awaited_once_with(replacement.id)
+    cleanup.assert_awaited_once()
+    assert cleanup.await_args.args == (replacement.id,)
+    assert callable(cleanup.await_args.kwargs["before_delete"])
     assert manager.tasks[task.id].session_id == session.id
     assert manager.tasks[task.id].liveness.attempts == 0
 
@@ -439,6 +441,21 @@ def supersede_recovery(manager, task, session, monkeypatch, reason):
         manager.tasks[task.id] = current.model_copy(
             update={"review_cycle": current.review_cycle + 1}
         )
+    elif reason in {"review_gate", "plan_gate"}:
+        from claude_hub.models import GoalPacket, GoalPacketStatus
+
+        current = manager.tasks[task.id]
+        update = {
+            "review_session_id": "reviewer2",
+            "review_requested_at": current.updated_at,
+            "status": WorkspaceTaskStatus.REVIEW,
+        }
+        if reason == "plan_gate":
+            update.update(
+                status=WorkspaceTaskStatus.WORKING,
+                goal_packet=GoalPacket(objective="work", status=GoalPacketStatus.PENDING_REVIEW),
+            )
+        manager.tasks[task.id] = current.model_copy(update=update)
     elif reason == "question":
         monkeypatch.setattr(managed_chat, "has_pending_question", lambda s: True)
     elif reason == "paused":
@@ -452,7 +469,9 @@ def supersede_recovery(manager, task, session, monkeypatch, reason):
         )
 
 
-@pytest.mark.parametrize("reason", ["active", "question", "paused", "cycle"])
+@pytest.mark.parametrize(
+    "reason", ["active", "question", "paused", "cycle", "review_gate", "plan_gate"]
+)
 @pytest.mark.parametrize("boundary", ["mailbox_lock", "ready", "pending_retry"])
 def test_recovery_is_cancelled_at_actual_delivery_boundary(
     delivery_env, monkeypatch, reason, boundary
@@ -540,14 +559,15 @@ def test_recovery_cancellation_preserves_receipt_evidence(delivery_env, monkeypa
     assert call_id in getattr(manager.sessions[session.id], receipt)
 
 
-def test_final_native_callback_rechecks_question(delivery_env, monkeypatch):
+@pytest.mark.parametrize("reason", ["question", "review_gate", "plan_gate"])
+def test_final_native_callback_rechecks_obligation(delivery_env, monkeypatch, reason):
     from claude_hub.services.agent_stream.base import NativeInputNotSubmittedError
 
     manager, clock, _ = delivery_env
     task, session, call_id = prepare_recovery_envelope(manager, clock, monkeypatch)
 
     async def native_send(_session, _message, _attachments, _call_id, *, before_delivery):
-        supersede_recovery(manager, task, session, monkeypatch, "question")
+        supersede_recovery(manager, task, session, monkeypatch, reason)
         before_delivery()
         pytest.fail("superseded input reached provider")
 
@@ -560,8 +580,9 @@ def test_final_native_callback_rechecks_question(delivery_env, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider", [AgentType.CLAUDE, AgentType.CODEX])
+@pytest.mark.parametrize("reason", ["question", "review_gate", "plan_gate"])
 async def test_native_preparation_cannot_outlive_recovery_admission(
-    delivery_env, monkeypatch, provider
+    delivery_env, monkeypatch, provider, reason
 ):
     from claude_hub.services.agent_stream import get_adapter_for_session
     from claude_hub.services.agent_stream.base import NativeInputNotSubmittedError
@@ -581,7 +602,7 @@ async def test_native_preparation_cannot_outlive_recovery_admission(
 
     async def prepare():
         await asyncio.sleep(0)
-        supersede_recovery(manager, task, session, monkeypatch, "question")
+        supersede_recovery(manager, task, session, monkeypatch, reason)
 
     monkeypatch.setattr(native, "_prepare_for_send", prepare)
     tailer = SessionTailer(
@@ -636,3 +657,208 @@ def test_control_waiting_for_workspace_lock_yields_to_new_turn(
     reset.assert_not_awaited()
     assert manager.tasks[task.id].liveness.action_id is None
     assert manager.tasks[task.id].liveness.attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_pending_worker_wake_yields_to_real_review_routing_during_native_prepare(
+    delivery_env, monkeypatch
+):
+    from claude_hub.services.agent_stream.base import NativeInputNotSubmittedError
+
+    manager, clock, _ = delivery_env
+    task, session, call_id = prepare_recovery_envelope(manager, clock, monkeypatch)
+    monkeypatch.setattr(
+        manager, "_ensure_session_ready_for_send", AsyncMock(side_effect=RuntimeError("not ready"))
+    )
+    with pytest.raises(RuntimeError, match="not ready"):
+        await manager.send_session_message(session.id, "resume", call_id=call_id)
+    assert call_id in manager.sessions[session.id].pending_call_ids
+    monkeypatch.setattr(manager, "_ensure_session_ready_for_send", AsyncMock())
+    selected, release = asyncio.Event(), asyncio.Event()
+    reviewer = session.model_copy(update={"id": "reviewer2", "role": WorkspaceSessionRole.REVIEWER})
+    manager.sessions[reviewer.id] = reviewer
+
+    async def select(*args):
+        selected.set()
+        await release.wait()
+        return reviewer
+
+    monkeypatch.setattr(manager, "_select_or_create_reviewer", select)
+    monkeypatch.setattr(manager, "_rename_session_for_task", AsyncMock(return_value=reviewer))
+    monkeypatch.setattr(manager, "_lesson_context_payload", lambda *a: None)
+    monkeypatch.setattr(manager, "_build_review_prompt", lambda *a, **kw: "review")
+
+    async def native_send(target, *args, before_delivery=None):
+        if target.id == session.id:
+            release.set()
+            while manager.tasks[task.id].status != WorkspaceTaskStatus.REVIEW:
+                await asyncio.sleep(0)
+            assert before_delivery is not None
+            before_delivery()
+            pytest.fail("worker wake crossed the review gate")
+
+    monkeypatch.setattr(managed_chat, "send_message", native_send)
+    review = asyncio.create_task(manager.request_task_review(task.id))
+    await selected.wait()
+    with pytest.raises(NativeInputNotSubmittedError):
+        await manager._pump_session_messages(session.id)
+    await review
+    current = manager.tasks[task.id]
+    assert current.review_cycle == task.review_cycle
+    assert current.session_id == session.id and current.review_session_id == reviewer.id
+    assert current.liveness.action_finished
+    assert call_id not in manager.sessions[session.id].pending_call_ids
+    assert call_id not in manager.sessions[session.id].uncertain_call_ids
+
+
+@pytest.mark.parametrize(
+    "change", ["revived", "cycle", "control", "incarnation", "question", "unchanged"]
+)
+def test_failed_provisioning_revalidates_claim_before_failure_and_cleanup(
+    delivery_env, monkeypatch, change
+):
+    from claude_hub.models.schemas import TaskExecutionControl
+
+    manager, clock, _ = delivery_env
+    task, session = as_worker(manager, kind=SessionKind.TERMINAL)
+    manager.tasks[task.id] = task.model_copy(
+        update={"system_internal": True, "internal_kind": "scheduled"}
+    )
+    manager.sessions[session.id] = session.model_copy(
+        update={"status": ManagedSessionStatus.STOPPED}
+    )
+
+    async def provision(*args):
+        current = manager.tasks[task.id]
+        original = manager.sessions[session.id]
+        if change == "revived":
+            manager.sessions[session.id] = original.model_copy(
+                update={
+                    "status": ManagedSessionStatus.WORKING,
+                    "runtime_status": AgentRuntimeStatus.WORKING,
+                }
+            )
+        elif change == "cycle":
+            manager.tasks[task.id] = current.model_copy(
+                update={"review_cycle": current.review_cycle + 1}
+            )
+        elif change == "control":
+            manager.tasks[task.id] = current.model_copy(
+                update={"execution_control": TaskExecutionControl.INITIATOR}
+            )
+        elif change == "incarnation":
+            manager.sessions[session.id] = original.model_copy(update={"created_at": clock[0]})
+        elif change == "question":
+            manager.sessions[session.id] = original.model_copy(
+                update={"session_kind": SessionKind.CHAT}
+            )
+            monkeypatch.setattr(managed_chat, "has_pending_question", lambda s: True)
+        raise RuntimeError("provisioning failed")
+
+    monkeypatch.setattr(manager, "ensure_workspace_agent", provision)
+    cleanup = AsyncMock()
+    monkeypatch.setattr(manager, "_best_effort_delete_session", cleanup)
+    asyncio.run(tick(manager))
+    current = manager.tasks[task.id]
+    if change == "unchanged":
+        assert current.status == WorkspaceTaskStatus.FAILED
+        cleanup.assert_awaited_once()
+        assert cleanup.await_args.args == (session.id,)
+    else:
+        assert current.status == WorkspaceTaskStatus.WORKING
+        assert current.liveness.attempts == 0
+        cleanup.assert_not_awaited()
+    # A terminal Task is not a fresh authorization to delete its current worker.
+    if change == "unchanged":
+        asyncio.run(tick(manager))
+        assert cleanup.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "change", ["active", "cycle", "uncertain", "original_revived", "unchanged"]
+)
+def test_failed_replacement_dispatch_preserves_new_work(delivery_env, monkeypatch, change):
+    manager, clock, _ = delivery_env
+    task, session = as_worker(manager, kind=SessionKind.TERMINAL)
+    manager.tasks[task.id] = task.model_copy(
+        update={"system_internal": True, "internal_kind": "scheduled"}
+    )
+    manager.sessions[session.id] = session.model_copy(
+        update={"status": ManagedSessionStatus.STOPPED}
+    )
+    replacement = session.model_copy(
+        update={"id": "new-worker", "task_id": None, "current_task_id": None}
+    )
+    manager.sessions[replacement.id] = replacement
+    monkeypatch.setattr(manager, "ensure_workspace_agent", AsyncMock(return_value=replacement))
+
+    async def dispatch(*args):
+        current = manager.tasks[task.id]
+        if change == "active":
+            manager.sessions[replacement.id] = replacement.model_copy(
+                update={"runtime_status": AgentRuntimeStatus.WORKING}
+            )
+        elif change == "cycle":
+            manager.tasks[task.id] = current.model_copy(
+                update={"review_cycle": current.review_cycle + 1}
+            )
+        elif change == "uncertain":
+            manager.sessions[replacement.id] = replacement.model_copy(
+                update={"uncertain_call_ids": ["dispatch:t:1"]}
+            )
+        elif change == "original_revived":
+            manager.sessions[session.id] = session.model_copy(
+                update={"runtime_status": AgentRuntimeStatus.WORKING}
+            )
+        raise RuntimeError("dispatch failed")
+
+    monkeypatch.setattr(manager, "_dispatch_task_to_session", dispatch)
+    cleanup = AsyncMock()
+    monkeypatch.setattr(manager, "_best_effort_delete_session", cleanup)
+    asyncio.run(tick(manager))
+    current = manager.tasks[task.id]
+    if change in {"unchanged", "original_revived"}:
+        assert current.status == WorkspaceTaskStatus.FAILED
+        assert [c.args[0] for c in cleanup.await_args_list] == (
+            [replacement.id] if change == "original_revived" else [replacement.id, session.id]
+        )
+    else:
+        assert current.status == WorkspaceTaskStatus.QUEUED
+        assert not current.liveness.action_finished
+        assert current.liveness.attempts == 1
+        cleanup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["workspace", "pump"])
+@pytest.mark.parametrize("change", ["active", "incarnation", "task"])
+async def test_recovery_cleanup_rechecks_identity_after_lock_wait(
+    delivery_env, monkeypatch, boundary, change
+):
+    manager, clock, _ = delivery_env
+    task, session = as_worker(manager, kind=SessionKind.TERMINAL)
+    failed = task.model_copy(update={"status": WorkspaceTaskStatus.FAILED})
+    manager.tasks[task.id] = failed
+    delete = AsyncMock()
+    monkeypatch.setattr(manager, "_delete_session_locked", delete)
+    lock = (
+        manager.workspace_mutation_lock(task.workspace_id)
+        if boundary == "workspace"
+        else manager._pump_locks.setdefault(session.id, asyncio.Lock())
+    )
+    async with lock:
+        cleanup = asyncio.create_task(manager._liveness_retire_worker(failed, session))
+        await asyncio.sleep(0)
+        if change == "active":
+            manager.sessions[session.id] = session.model_copy(
+                update={"runtime_status": AgentRuntimeStatus.WORKING}
+            )
+        elif change == "incarnation":
+            manager.sessions[session.id] = session.model_copy(update={"created_at": clock[0]})
+        else:
+            manager.tasks[task.id] = failed.model_copy(
+                update={"review_cycle": failed.review_cycle + 1}
+            )
+    await cleanup
+    delete.assert_not_awaited()
+    assert session.id in manager.sessions

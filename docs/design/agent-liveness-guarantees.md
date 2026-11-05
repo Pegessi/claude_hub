@@ -632,3 +632,18 @@ A watched queued or initiator Task re-arms on a newer recorded activity marker,
 even without a managed active session. This closes the prior notice incident,
 keeps its recovery budget and permits one subsequent alert after the configured
 watch interval expires again. Unchanged monitor observations do not write state.
+
+
+The final native callback selects the current review or worker obligation using
+the same review predicate as the evaluator. A review gate opened during provider
+preparation revokes an older worker wake even when the execution epoch and review
+cycle have not changed. It cannot be authorized by membership in either Task role.
+
+Worker provisioning success and failure both revalidate the exact claimed Task,
+execution control, original session incarnation and fresh inactive/dead facts under
+the workspace mutation lock. Superseded pre-dispatch claims are cancelled without
+failing the Task or deleting its revived worker. Dispatch exceptions preserve
+changed work and uncertain receipts; they do not complete or refund an ambiguous
+claim. Cleanup is an effect authorized by the owner, with a final callback after
+workspace/pump lock acquisition. It checks the captured Task and inactive session
+again. FAILED scheduled Tasks no longer trigger blanket deletion on every sweep.

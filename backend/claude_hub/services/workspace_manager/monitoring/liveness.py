@@ -235,12 +235,11 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
     ) -> None:
         self._liveness_watch_source = source
 
-    async def _liveness_facts(
-        self, task: WorkspaceTask, *, ignore_call_id: str | None = None
-    ) -> LivenessFacts:
-        now = self._runtime_now()
-        sealed = state_policy.current_round_has_verdict(task.review_cycle, task.reviewed_cycle)
-        reviewing = not sealed and (
+    @staticmethod
+    def _liveness_reviewing(task: WorkspaceTask) -> bool:
+        return not state_policy.current_round_has_verdict(
+            task.review_cycle, task.reviewed_cycle
+        ) and (
             state_policy.review_in_flight(task.review_requested_at, task.review_completed_at)
             or (task.status == WorkspaceTaskStatus.REVIEW and not task.review_completed_at)
             or (
@@ -249,6 +248,13 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
                 and task.goal_packet.status == GoalPacketStatus.PENDING_REVIEW
             )
         )
+
+    async def _liveness_facts(
+        self, task: WorkspaceTask, *, ignore_call_id: str | None = None
+    ) -> LivenessFacts:
+        now = self._runtime_now()
+        sealed = state_policy.current_round_has_verdict(task.review_cycle, task.reviewed_cycle)
+        reviewing = self._liveness_reviewing(task)
         resume = (
             sealed
             and task.status == WorkspaceTaskStatus.REVIEW
@@ -396,15 +402,6 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
             return
         async with lock:
             await self._evaluate_task_liveness(task_id)
-            current = self.tasks.get(task_id)
-            if (
-                current
-                and current.status == WorkspaceTaskStatus.FAILED
-                and current.system_internal
-                and current.internal_kind == "scheduled"
-                and current.session_id in self.sessions
-            ):
-                await self._best_effort_delete_session(current.session_id)
 
     async def _evaluate_task_liveness(self, task_id: str) -> None:
         task = self.tasks.get(task_id)
@@ -474,6 +471,12 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
                 return
             if decision.action in {"fail", "escalate"}:
                 self._liveness_escalate(task, state, decision, facts.now)
+                if (
+                    decision.action == "fail"
+                    and facts.session
+                    and task.internal_kind == "scheduled"
+                ):
+                    await self._liveness_retire_worker(self.tasks[task.id], facts.session)
                 return
             if state.action_finished or state.action_id is None:
                 attempt = state.attempts + 1
@@ -623,7 +626,12 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
             and state.session_created_at == session.created_at
             and session.workspace_id == task.workspace_id
             and (session.current_task_id or session.task_id) == task.id
-            and session.id in {task.session_id, task.review_session_id}
+            and session.id
+            == (
+                task.review_session_id
+                if self._liveness_reviewing(task)
+                else task.session_id if task.status == WorkspaceTaskStatus.WORKING else None
+            )
             and not session.archived
             and not session.chat_paused
             and session.status != ManagedSessionStatus.STOPPED
@@ -870,7 +878,7 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
         except Exception:
             logger.exception(
                 "Could not spawn replacement worker for orphaned scheduled task "
-                "task_id=%s; failing it",
+                "task_id=%s; rechecking recovery authority",
                 live.id,
             )
             await self._liveness_fail_replacement(
@@ -881,52 +889,30 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
             )
             return
 
-        # Operator edits or a new binding during worker creation supersede
-        # this recovery attempt. Do not overwrite or resume that newer contract.
-        current = self.tasks.get(live.id)
-        observed = await self._liveness_facts(current) if current is not None else None
-        if (
-            current != live
-            or observed is None
-            or not observed.dead
-            or observed.active
-            or observed.blocked
-            or (dead_session is not None and self.sessions.get(dead_session.id) != dead_session)
-        ):
-            await self._best_effort_delete_session(new_session.id)
-            if task.liveness is not None:
-                await self._cancel_liveness_claim(task, task.liveness)
-            return
-        live = current
-
-        # Re-bind the task to the new worker and open a new dispatch attempt.
-        # The fresh dispatch call_id (dispatch:{id}:{attempt}) has no uncertain
-        # marker, so the fail-closed uncertain contract on the dead session is
-        # never violated — we never auto-resend to that session.
-        reattempt = live.dispatch_attempt + 1
-        rebound = apply_task_update(
-            live,
-            {
-                "session_id": new_session.id,
-                "status": WorkspaceTaskStatus.QUEUED,
-                "queued_at": now,
-                "dispatch_attempt": reattempt,
-                "dispatch_reason": "scheduled worker died; redispatch to fresh worker",
-                "dispatch_pending": False,
-                "updated_at": now,
-            },
-            cause="scheduled",
-        )
-        self.tasks[live.id] = rebound
-        self._save_state()
-        logger.warning(
-            "Redispatching orphaned scheduled task task_id=%s to fresh session_id=%s "
-            "(dead session_id=%s, attempt=%s)",
-            live.id,
-            new_session.id,
-            live.session_id,
-            reattempt,
-        )
+        # Success and failure use the same fresh observation under the mutation
+        # lock; neither a provisioning result nor its exception grants authority.
+        async with self.workspace_mutation_lock(task.workspace_id):
+            if not await self._liveness_replacement_current(task, dead_session):
+                if task.liveness is not None:
+                    await self._cancel_liveness_claim(task, task.liveness)
+                await self._liveness_retire_worker(self.tasks.get(task.id), new_session)
+                return
+            reattempt = live.dispatch_attempt + 1
+            rebound = apply_task_update(
+                live,
+                {
+                    "session_id": new_session.id,
+                    "status": WorkspaceTaskStatus.QUEUED,
+                    "queued_at": now,
+                    "dispatch_attempt": reattempt,
+                    "dispatch_reason": "scheduled worker died; redispatch to fresh worker",
+                    "dispatch_pending": False,
+                    "updated_at": now,
+                },
+                cause="scheduled",
+            )
+            self.tasks[live.id] = rebound
+            self._save_state()
         try:
             await self._dispatch_task_to_session(rebound, new_session)
         except Exception:
@@ -935,14 +921,19 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
                 live.id,
                 new_session.id,
             )
-            current = self.tasks.get(rebound.id)
-            if (
-                current is not None
-                and current.status == WorkspaceTaskStatus.QUEUED
-                and current.session_id == new_session.id
-            ):
-                self.tasks[current.id] = apply_task_update(
-                    current,
+            async with self.workspace_mutation_lock(task.workspace_id):
+                if (
+                    self.tasks.get(rebound.id) != rebound
+                    or not self._liveness_worker_idle(new_session)
+                    or new_session.pending_call_ids
+                    or new_session.processing_call_ids
+                    or new_session.uncertain_call_ids
+                ):
+                    # Dispatch may have submitted or a newer contract owns it.
+                    # Preserve its receipts and unfinished claim for reconciliation.
+                    raise
+                failed = apply_task_update(
+                    rebound,
                     {
                         "status": WorkspaceTaskStatus.FAILED,
                         "failure_reason": "scheduled task redispatch to a fresh worker failed",
@@ -951,63 +942,104 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
                     },
                     cause="scheduled",
                 )
+                self.tasks[failed.id] = failed
                 self._save_state()
-            await self._best_effort_delete_session(new_session.id)
-            if live.session_id:
-                await self._best_effort_delete_session(live.session_id)
+                await self._liveness_retire_worker(failed, new_session)
+                if dead_session:
+                    await self._liveness_retire_worker(failed, dead_session)
             return
-        # Success: tear down the dead worker only after the task is canonically
-        # bound to the live one, so delete_session sees no non-terminal referrer.
-        if live.session_id:
-            await self._best_effort_delete_session(live.session_id)
+        if dead_session:
+            await self._liveness_retire_worker(self.tasks.get(task.id), dead_session)
+
+    def _liveness_worker_idle(self, session: ManagedSession) -> bool:
+        return bool(
+            self.sessions.get(session.id) == session
+            and session.status != ManagedSessionStatus.SPAWNING
+            and session.runtime_status != AgentRuntimeStatus.WORKING
+            and not session.chat_paused
+            and (
+                session.session_kind != SessionKind.CHAT
+                or not (
+                    managed_chat.is_turn_running(session)
+                    or managed_chat.runtime_status(session) == AgentRuntimeStatus.WORKING
+                    or managed_chat.has_pending_question(session)
+                    or managed_chat.question_input_blocked(session, "liveness")
+                )
+            )
+        )
+
+    async def _liveness_retire_worker(
+        self, task: WorkspaceTask | None, session: ManagedSession
+    ) -> None:
+        if task is None:
+            return
+
+        # delete_session rechecks this at its final workspace -> pump boundary.
+        # Terminal Task status alone never authorizes deleting an active worker.
+        def allowed() -> bool:
+            return self.tasks.get(task.id) == task and self._liveness_worker_idle(session)
+
+        if allowed():
+            await self._best_effort_delete_session(session.id, before_delete=allowed)
+
+    async def _liveness_replacement_current(
+        self, task: WorkspaceTask, session: ManagedSession | None
+    ) -> bool:
+        observed = await self._liveness_facts(task)
+        return bool(
+            self.tasks.get(task.id) == task
+            and self._workspace_owns_task(task)
+            and task.status == WorkspaceTaskStatus.WORKING
+            and not task.human_acceptance_requested_at
+            and task.liveness
+            and task.liveness.action == "replace_worker"
+            and not task.liveness.action_finished
+            and task.liveness.generation == f"{task.execution_epoch}:{task.review_cycle}"
+            and observed.dead
+            and not observed.active
+            and not observed.blocked
+            and self.sessions.get(task.session_id or "") == session
+            and (session is None or self._liveness_worker_idle(session))
+        )
 
     async def _liveness_fail_replacement(
         self,
-        task: Any,
-        dead_session: Optional["ManagedSession"],
+        task: WorkspaceTask,
+        dead_session: ManagedSession | None,
         *,
         reason: str,
         now: datetime,
     ) -> None:
-        current = self.tasks.get(task.id)
-        if (
-            current is None
-            or current.status != WorkspaceTaskStatus.WORKING
-            or current.session_id != task.session_id
-        ):
-            return
-        task = current
-        failed = apply_task_update(
-            task,
-            {
-                "status": WorkspaceTaskStatus.FAILED,
-                "failure_reason": reason,
-                "failed_at": now,
-                "human_acceptance_requested_at": now,
-                "updated_at": now,
-            },
-            cause="runtime_failure",
-        )
-        self.tasks[task.id] = failed
-        self._record_system_task_audit(
-            task=failed,
-            message=f"Scheduled task failed to converge: {reason}.",
-            message_zh=f"定时任务无法收敛，已失败：{reason}。",
-            validation=(
-                f"dead_session_id={dead_session.id if dead_session else None}; "
-                f"dispatch_attempt={task.dispatch_attempt}; orphan_grace="
-                "60s"
-            ),
-            session_id=dead_session.id if dead_session else "system",
-        )
-        self._save_state()
-        logger.warning(
-            "Scheduled hub_task marked FAILED after orphan convergence task_id=%s reason=%s",
-            task.id,
-            reason,
-        )
-        if dead_session is not None:
-            await self._best_effort_delete_session(dead_session.id)
+        async with self.workspace_mutation_lock(task.workspace_id):
+            if not await self._liveness_replacement_current(task, dead_session):
+                if task.liveness is not None:
+                    await self._cancel_liveness_claim(task, task.liveness)
+                return
+            failed = apply_task_update(
+                task,
+                {
+                    "status": WorkspaceTaskStatus.FAILED,
+                    "failure_reason": reason,
+                    "failed_at": now,
+                    "human_acceptance_requested_at": now,
+                    "updated_at": now,
+                },
+                cause="runtime_failure",
+            )
+            self.tasks[task.id] = failed
+            self._record_system_task_audit(
+                task=failed,
+                message=f"Scheduled task failed to converge: {reason}.",
+                message_zh=f"定时任务无法收敛，已失败：{reason}。",
+                validation=(
+                    f"dead_session_id={dead_session.id if dead_session else None}; "
+                    f"dispatch_attempt={task.dispatch_attempt}; orphan_grace=60s"
+                ),
+                session_id=dead_session.id if dead_session else "system",
+            )
+            self._save_state()
+            if dead_session is not None:
+                await self._liveness_retire_worker(failed, dead_session)
 
     def _record_dispatch_failure(
         self,

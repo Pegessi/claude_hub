@@ -1,6 +1,7 @@
 """Typed cross-responsibility contract for scheduling mixins."""
 
 from abc import abstractmethod
+from typing import Callable
 
 from ...chat_message_inbox import ChatMessageInbox
 from .._base import _WorkspaceManagerBase
@@ -67,4 +68,6 @@ class _SchedulingHost(_WorkspaceManagerBase):
     def _schedule_chat_redrain(self, tab_id: str) -> None: ...
 
     @abstractmethod
-    async def _best_effort_delete_session(self, session_id: str | None) -> None: ...
+    async def _best_effort_delete_session(
+        self, session_id: str | None, *, before_delete: Callable[[], bool] | None = None
+    ) -> None: ...

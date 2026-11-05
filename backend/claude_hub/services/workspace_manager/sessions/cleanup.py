@@ -1,5 +1,7 @@
 """Session/task cleanup entry points and conversation-id updates."""
 
+from typing import Callable
+
 from claude_hub.services.workspace_manager._base import _WorkspaceManagerBase
 from claude_hub.services.workspace_manager._constants import *  # noqa: F401,F403
 
@@ -9,7 +11,9 @@ class _SessionCleanupMixin(_WorkspaceManagerBase):
         {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}
     )
 
-    async def delete_session(self, session_id: str) -> None:
+    async def delete_session(
+        self, session_id: str, *, before_delete: Callable[[], bool] | None = None
+    ) -> None:
         session = self.sessions.get(session_id)
         if not session:
             raise KeyError(session_id)
@@ -27,6 +31,8 @@ class _SessionCleanupMixin(_WorkspaceManagerBase):
                 session = self.sessions.get(session_id)
                 if session is None:
                     raise KeyError(session_id)
+                if before_delete is not None and not before_delete():
+                    return
                 try:
                     await self._delete_session_locked(session)
                 except BaseException:
