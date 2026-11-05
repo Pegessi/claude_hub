@@ -7,6 +7,20 @@
 
 ## Released
 
+### feat(cli): agent create from inside a Hub agent defaults to a Chat session
+
+- `claude-hub agent create` without `--session-kind` now sends `chat` when it
+  runs inside a Hub agent (`$CLAUDE_HUB_TAB_ID` set), the target is local (no
+  `--target remote`/remote profile/cwd/reconnect and the workspace itself is not
+  remote) and the agent type supports managed Chat. Any doubt (unknown
+  workspace, lookup error, terminal-only provider) keeps `terminal`; an
+  explicit `--session-kind` (or `session_kind` in `--payload-json`) always
+  wins. Server/API and UI defaults stay `terminal`.
+- Reuse matches on session kind, so agent callers no longer reuse idle
+  Terminal orchestrators by default; they reuse or create a Chat one.
+- The CLI lifecycle recipe, Chat runtime guidance and Agent workflow doc state
+  the new default.
+
 ### feat(subagent): inherit parent workspace and jump from a parent Chat tips card
 
 - Hub sub-agents started with `claude-hub agent run` / `POST /api/subagents`

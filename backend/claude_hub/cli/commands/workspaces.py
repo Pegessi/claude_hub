@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
@@ -12,12 +13,15 @@ from claude_hub.cli.client import HubError
 from claude_hub.cli.commands.common import (
     lifecycle_group_help,
     merge_payload,
+    parse_json_object,
     parse_kv_pairs,
     redact_session_env_payload,
     resolve_agent_reuse,
     resolve_cli_local_path,
 )
 from claude_hub.cli.output import emit, print_rows
+from claude_hub.models import AgentType, SessionKind
+from claude_hub.models.schemas import validate_workspace_session_surface
 
 WORKSPACE_COLUMNS = ["id", "name", "path", "default_branch"]
 TASK_COLUMNS = ["id", "title", "status", "agent_type", "task_mode"]
@@ -546,15 +550,58 @@ def agent_status(ctx: click.Context, workspace_id: str, role: Optional[str]) -> 
         print_rows(rows, SESSION_STATUS_COLUMNS)
 
 
+def _chat_capable(agent_type: str) -> bool:
+    try:
+        validate_workspace_session_surface(AgentType(agent_type), SessionKind.CHAT)
+    except ValueError:
+        return False
+    return True
+
+
+def _workspace_is_remote(ctx: click.Context, workspace_id: str) -> Optional[bool]:
+    """Return the workspace target, or ``None`` when it cannot be resolved."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            workspaces = client.list_workspaces()
+    except HubError:
+        return None
+    for workspace in workspaces if isinstance(workspaces, list) else []:
+        if isinstance(workspace, dict) and workspace_id in (
+            workspace.get("id"),
+            workspace.get("name"),
+        ):
+            return workspace.get("target") == "remote"
+    return None
+
+
+def _default_agent_session_kind(
+    ctx: click.Context, workspace_id: str, agent_type: str, *, remote: bool
+) -> str:
+    """Agents inside Hub default to a headless Chat; everyone else keeps Terminal.
+
+    Chat avoids a tmux/ttyd runtime per helper agent. It needs a local target
+    and a Chat-capable provider, so any doubt falls back to the server default.
+    """
+    if not os.environ.get("CLAUDE_HUB_TAB_ID", "").strip():
+        return "terminal"
+    if remote or not _chat_capable(agent_type):
+        return "terminal"
+    if _workspace_is_remote(ctx, workspace_id) is not False:
+        return "terminal"
+    return "chat"
+
+
 @agent.command("create")
 @click.argument("workspace_id")
 @click.option("--agent-type", default="codex", help="Agent type to run.")
 @click.option(
     "--session-kind",
     type=click.Choice(["terminal", "chat"]),
-    default="terminal",
-    show_default=True,
-    help="Managed session surface.",
+    default=None,
+    help=(
+        "Managed session surface. Default: chat when called from inside a Hub agent "
+        "($CLAUDE_HUB_TAB_ID) for a local, Chat-capable agent; otherwise terminal."
+    ),
 )
 @click.option("--title", default=None, help="Optional session title.")
 @click.option(
@@ -612,7 +659,7 @@ def agent_create(
     ctx: click.Context,
     workspace_id: str,
     agent_type: str,
-    session_kind: str,
+    session_kind: Optional[str],
     title: str,
     role: str,
     reuse_existing: bool,
@@ -630,6 +677,21 @@ def agent_create(
 ) -> None:
     """Ensure a resident workspace agent session."""
     effective_reuse = resolve_agent_reuse(ephemeral, reuse_existing, no_reuse_existing)
+    raw_payload = parse_json_object(payload_json)
+    if session_kind is None and "session_kind" not in raw_payload:
+        remote_fields = ("remote_profile_id", "remote_cwd", "remote_reconnect")
+        session_kind = _default_agent_session_kind(
+            ctx,
+            workspace_id,
+            agent_type,
+            remote=bool(
+                (target or raw_payload.get("target")) == "remote"
+                or remote_profile_id
+                or remote_cwd
+                or remote_reconnect is not None
+                or any(raw_payload.get(field) is not None for field in remote_fields)
+            ),
+        )
     settings = ctx.obj
     resolved_preset = (
         env_preset

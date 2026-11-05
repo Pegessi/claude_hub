@@ -65,7 +65,8 @@ _IMAGE_ATTACHMENT_GUIDANCE = (
 _AGENT_RUN_GUIDANCE = (
     "For help from another provider: `claude-hub agent run --provider X --prompt-file -` "
     "returns its final answer (see `agent run --help`). Use Workspace Tasks only for tracked, "
-    "reviewed work.\n"
+    "reviewed work. A resident helper from `claude-hub agent create` defaults here to a "
+    "Workspace Chat session.\n"
 )
 
 
