@@ -140,6 +140,36 @@ async def test_preserves_manual_tab(monkeypatch: MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_preserves_display_attributed_direct_chat(monkeypatch: MonkeyPatch) -> None:
+    deleted: list[str] = []
+    # A Hub subagent tab carries the parent workspace purely for grouping:
+    # workspace_id set, no role and no managed session. It must survive past
+    # the grace window and repeated board/dispatch loads.
+    tabs = [_tab("subagent-1", workspace_id="ws-1", role=None, age_seconds=3600.0)]
+    _patch_tabs(monkeypatch, tabs, deleted)
+
+    for _ in range(2):
+        pruned = await workspace_manager._prune_orphan_workspace_tabs("ws-1")
+        assert pruned == 0
+    assert deleted == []
+
+
+def test_board_and_dispatch_queue_share_the_guarded_reaper() -> None:
+    # InfoWall d2627d2f N1: the role-less display-attribution guard must apply
+    # on every reaper path, not just board loads.
+    import inspect
+
+    from claude_hub.services.workspace_manager import WorkspaceManager
+
+    assert "_prune_orphan_workspace_tabs" in inspect.getsource(WorkspaceManager.get_board)
+    assert "_prune_orphan_workspace_tabs" in inspect.getsource(
+        WorkspaceManager._dispatch_workspace_locked
+    )
+    # The single guarded implementation is inherited by the concrete manager.
+    assert type(workspace_manager) is WorkspaceManager
+
+
+@pytest.mark.asyncio
 async def test_preserves_tab_with_live_session(monkeypatch: MonkeyPatch) -> None:
     deleted: list[str] = []
     _session("cb-reviewer-1", "ws-1", "tab-live")

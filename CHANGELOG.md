@@ -7,6 +7,29 @@
 
 ## Released
 
+### feat(subagent): inherit parent workspace and jump from a parent Chat tips card
+
+- Hub sub-agents started with `claude-hub agent run` / `POST /api/subagents`
+  now inherit the parent Chat's Agent Workspace as display-only grouping
+  metadata when the child cwd stays inside that workspace repo (linked
+  worktrees included); otherwise the child cwd is matched read-only against
+  registered local workspaces, and a miss leaves the tab unattributed. The
+  child remains a direct Chat: no workspace role, managed session or board
+  entry is created.
+- The board's orphan-tab reaper no longer deletes such role-less,
+  workspace-attributed direct Chats; role-bearing managed orphans are still
+  reaped. `GET /api/subagents` summaries gain a bounded `last_summary`
+  preview of the last turn's answer.
+- Attributed sub-agent Chats leave the manual Terminal surfaces and appear in
+  the Workspace Agents panel under their workspace, marked `sub`; Agent
+  Workspace mode gains a Subagents view for the active workspace. The parent
+  Chat renders a compact Codex-style tips card with each sub-agent's name,
+  short id, live status and answer summary, one-click jumping to the child
+  tab (restoring it first when it was archived after a non-kept run).
+- Cover the inheritance matrix, reaper guard and summary model with backend
+  pytest, grouping/poll/jump logic with Node unit tests, and the card,
+  workspace grouping and archived-restore jump with a mocked browser check.
+
 ### test(frontend): remove brittle snapshots and bound assertion diagnostics
 
 - Retire the whole-Workspace template/CSS hashes and their eager recursive

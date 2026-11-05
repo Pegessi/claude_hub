@@ -23,11 +23,14 @@ import {
   computed,
   ref,
   reactive,
+  watch,
+  onUnmounted,
 } from 'vue'
 import {
   type WorkspaceTaskStatus,
   type ManagedSession,
   type TerminalAgentStatus,
+  type TerminalTab,
   type WorkspaceTask,
   type Workspace,
   type WorkspaceAttachment,
@@ -203,6 +206,61 @@ export function useWorkspaceRuntime() {
       map[status.tab_id] = status
     }
     return map
+  })
+
+  // Display-only Hub sub-agent Chats attributed to the active workspace. They
+  // are not ManagedSessions, so they come from the terminal tab list.
+  const workspaceSubagentView = ref(false)
+  const workspaceSubagentTabs = computed<TerminalTab[]>(() => {
+    const wsId = activeWorkspaceId.value
+    if (!wsId) return []
+    return terminalStore.tabs.filter(
+      tab =>
+        tab.workspace_id === wsId &&
+        Boolean(tab.parent_tab_id) &&
+        !tab.archived &&
+        tab.session_kind === 'chat',
+    )
+  })
+
+  function showManagedView(view: WorkspaceSessionView) {
+    workspaceSubagentView.value = false
+    workspaceSessionView.value = view
+  }
+
+  function toggleWorkspaceSubagentView() {
+    workspaceSubagentView.value = !workspaceSubagentView.value
+  }
+
+  async function openSubagentTab(tabId: string) {
+    await terminalStore.fetchTabs()
+    appStore.setMode('terminal')
+    terminalStore.setActiveTab(tabId)
+  }
+
+  function subagentRuntimeStatus(tab: TerminalTab): AgentRuntimeStatus {
+    return terminalStatusByTabId.value[tab.id]?.status ?? (tab.is_active ? 'idle' : 'offline')
+  }
+
+  function subagentStatusText(tab: TerminalTab): string {
+    const status = terminalStatusByTabId.value[tab.id]
+    return status?.status_text ?? (tab.is_active ? 'Idle' : 'Offline')
+  }
+
+  // The board does not refresh terminal tabs; keep the sub-agent list live
+  // only while its view is active.
+  let subagentRefreshTimer: ReturnType<typeof setInterval> | null = null
+  watch(workspaceSubagentView, active => {
+    if (active) {
+      void terminalStore.fetchTabs()
+      subagentRefreshTimer = setInterval(() => void terminalStore.fetchTabs(), 5000)
+    } else if (subagentRefreshTimer !== null) {
+      clearInterval(subagentRefreshTimer)
+      subagentRefreshTimer = null
+    }
+  })
+  onUnmounted(() => {
+    if (subagentRefreshTimer !== null) clearInterval(subagentRefreshTimer)
   })
 
   function taskActionKey(action: string, taskId: string | null | undefined) {
@@ -467,6 +525,13 @@ export function useWorkspaceRuntime() {
     columns,
     taskCountByStatus,
     workspaceSessionView,
+    workspaceSubagentView,
+    workspaceSubagentTabs,
+    showManagedView,
+    toggleWorkspaceSubagentView,
+    openSubagentTab,
+    subagentRuntimeStatus,
+    subagentStatusText,
     reviewerSessions,
     refreshAgentStatuses,
     visibleWorkspaceSessions,

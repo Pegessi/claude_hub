@@ -198,6 +198,16 @@ _COMPATIBILITY_LOOKUPS = (
     ),
     (
         "workspaces/lifecycle.py",
+        "find_workspace_for_local_path",
+        "claude_hub.services.workspace_identity",
+        (
+            "AmbiguousWorkspaceError",
+            "select_workspace_candidate",
+            "workspace_identity_for_fields",
+        ),
+    ),
+    (
+        "workspaces/lifecycle.py",
         "update_workspace",
         "claude_hub.services.workspace_identity",
         ("DuplicateWorkspaceError", "workspace_identity_for_fields"),
