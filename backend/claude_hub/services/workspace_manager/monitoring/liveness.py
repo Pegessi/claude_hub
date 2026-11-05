@@ -728,29 +728,49 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
                     live_session.processing_call_ids + live_session.delivered_call_ids
                 ):
                     return  # Enqueue is not provider acceptance.
-            elif state.action == "submit_prompt" and session:
-                await self._run_tmux("send-keys", "-t", session.tmux_session, "Enter")
-            elif state.action == "reset_context" and session:
-                await self._reset_session_context(session)
-                current = self._current_monitor_entities(session, task)
-                if current is None:
-                    return
-                workspace = self.workspaces[task.workspace_id]
-                prompt = self._build_hard_recovery_worker_prompt(
-                    workspace, task, session, facts.interruption, recovery_attempt=state.attempts
-                )
-                if facts.reviewing:
-                    prompt = self._build_hard_recovery_reviewer_fallback_prompt(
-                        task, session, facts.interruption, recovery_attempt=state.attempts
-                    )
-                await self.send_session_message(session.id, prompt, call_id=state.action_id)
+            elif state.action in {"submit_prompt", "reset_context"} and session:
+                # Controls must share the same workspace -> pump ordering as
+                # ordinary Hub input. Revalidate after lock contention; a newer
+                # turn or Task cycle wins before Enter or /clear can be sent.
+                async with self.workspace_mutation_lock(task.workspace_id):
+                    guarded = await self._liveness_facts(task)
+                    if (
+                        guarded.active
+                        or guarded.blocked
+                        or self.tasks.get(task.id) != task
+                        or self.sessions.get(session.id) != session
+                    ):
+                        await self._cancel_liveness_claim(task, state)
+                        return
+                    if state.action == "submit_prompt":
+                        await self._run_tmux("send-keys", "-t", session.tmux_session, "Enter")
+                    else:
+                        await self._reset_session_context(session)
+                        current = self._current_monitor_entities(session, task)
+                        if current is None:
+                            return
+                        workspace = self.workspaces[task.workspace_id]
+                        prompt = self._build_hard_recovery_worker_prompt(
+                            workspace,
+                            task,
+                            session,
+                            facts.interruption,
+                            recovery_attempt=state.attempts,
+                        )
+                        if facts.reviewing:
+                            prompt = self._build_hard_recovery_reviewer_fallback_prompt(
+                                task, session, facts.interruption, recovery_attempt=state.attempts
+                            )
+                        await self.send_session_message(session.id, prompt, call_id=state.action_id)
             elif state.action == "resume_verdict":
                 await self.continue_task(
                     task.id,
                     ContinueTaskRequest(
                         message="Continue workspace task from review (liveness recovered sealed verdict)."
                     ),
-                    call_id=state.action_id,
+                    # This is a normal, sealed-verdict transition into a new
+                    # cycle. Its durable continuation is not an old-cycle nudge.
+                    call_id=f"continue:{state.action_id}",
                 )
             elif state.action == "replace_reviewer":
                 await self._liveness_replace_reviewer(task, facts.now)

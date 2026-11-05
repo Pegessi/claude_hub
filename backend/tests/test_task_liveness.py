@@ -604,3 +604,35 @@ async def test_native_preparation_cannot_outlive_recovery_admission(
         assert native._delivery_admission is previous
     finally:
         await tailer.stop()
+
+
+@pytest.mark.parametrize("action", ["submit_prompt", "reset_context"])
+@pytest.mark.parametrize("reason", ["active", "cycle"])
+def test_control_waiting_for_workspace_lock_yields_to_new_turn(
+    delivery_env, monkeypatch, action, reason
+):
+    manager, clock, _ = delivery_env
+    task, session, _call_id = prepare_recovery_envelope(
+        manager, clock, monkeypatch, SessionKind.TERMINAL
+    )
+    current = manager.tasks[task.id]
+    state = current.liveness.model_copy(update={"action": action})
+    current = current.model_copy(update={"liveness": state})
+    manager.tasks[task.id] = current
+    enter, reset = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(manager, "_run_tmux", enter)
+    monkeypatch.setattr(manager, "_reset_session_context", reset)
+
+    async def run():
+        facts = await manager._liveness_facts(current)
+        async with manager.workspace_mutation_lock(task.workspace_id):
+            recovery = asyncio.create_task(manager._execute_liveness_action(current, facts, state))
+            await asyncio.sleep(0)
+            supersede_recovery(manager, task, session, monkeypatch, reason)
+        await recovery
+
+    asyncio.run(run())
+    enter.assert_not_awaited()
+    reset.assert_not_awaited()
+    assert manager.tasks[task.id].liveness.action_id is None
+    assert manager.tasks[task.id].liveness.attempts == 0
