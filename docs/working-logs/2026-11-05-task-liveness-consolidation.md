@@ -207,3 +207,28 @@ fixes and explicitly checking resource cleanup and absence of duplicate recovery
 owners. Main remains `a34cfea`; integration awaits independent approval. No push,
 primary restart or live-session experiment. Browser/HMR/replay and live-provider
 behavior remain unverified. No lessons needed.
+
+
+## Review cycle 5: completed bootstrap without a Task ACK
+
+Hub report `254bf2fa-ed5d-484e-9daa-a35b1ecb7d1e` confirms the prior safety fixes
+but rejects `0bb93f5`: actual Chat bootstrap acceptance remains in processing
+after turn completion because an unassigned worker has no Task report to ACK it.
+The cycle-4 tests stubbed the mailbox and missed this production contract.
+
+The existing owner's unused-resource retirement now reuses managed Chat's discard
+validator. Each processing call must be accepted, and unacknowledged acceptance
+must have durable terminal-turn evidence. Final admission repeats that proof after
+workspace/pump locks. Pending, uncertain, missing-proof, active, paused or adopted
+sessions remain protected. Neither receipts nor Task ACKs are fabricated; the
+existing retirement claim persists until safe deletion. No new recovery policy,
+timer, budget, notice route or receipt reconciliation rule is introduced.
+
+The new regression invokes real provisioning, Workspace send/pump, managed Chat
+receipt persistence, native stream storage, receipt reconciliation and deletion.
+Only provider submission, session creation and external tab teardown are controlled;
+the successful case never clears processing or injects a Task ACK. It covers cold
+reload, completion, active/uncertain/missing-proof/adopted cases and evidence that
+changes while cleanup waits for the pump lock. The initial ten-case test passed
+(`/tmp/claude-hub-verify.x8w22nhz/`); final expanded checks and full validation are
+recorded below. This is the sole blocking revision; no lessons needed.

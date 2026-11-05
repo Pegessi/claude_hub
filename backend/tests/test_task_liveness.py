@@ -1078,3 +1078,161 @@ async def test_unused_replacement_adopted_while_waiting_for_pump_is_preserved(
     assert unused.id in manager.sessions
     await manager._liveness_retire_unused_replacements(task.id)
     assert manager.tasks[task.id].liveness.retiring_sessions == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reload", [False, True])
+@pytest.mark.parametrize(
+    "outcome",
+    ["completed", "active", "uncertain", "missing", "adopted", "pump_active", "pump_uncertain"],
+)
+async def test_unused_chat_bootstrap_receipt_converges_through_real_mailbox(
+    delivery_env, monkeypatch, reload, outcome
+):
+    from claude_hub.models import AgentStreamEvent, AgentStreamEventType
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+    from tests.test_managed_chat_runtime import _FakeManager
+
+    manager, clock, _ = delivery_env
+    task, worker = as_worker(manager)
+    manager.tasks[task.id] = task.model_copy(
+        update={"system_internal": True, "internal_kind": "scheduled"}
+    )
+    manager.sessions[worker.id] = worker.model_copy(update={"status": ManagedSessionStatus.STOPPED})
+    replacement = worker.model_copy(
+        update={
+            "id": "bootstrap-unused",
+            "tab_id": "bootstrap-unused-tab",
+            "created_at": clock[0],
+            "status": ManagedSessionStatus.SPAWNING,
+            "runtime_status": AgentRuntimeStatus.IDLE,
+            "task_id": None,
+            "current_task_id": None,
+            "ephemeral": True,
+            "caller_owned_ephemeral": True,
+        }
+    )
+    stream = AgentStreamStore(replacement.workspace_id, replacement.id)
+    native = _FakeManager()
+    retired = []
+    monkeypatch.setattr(managed_chat, "_manager", lambda: native)
+
+    async def append_event(kind, call_id):
+        await stream.append(
+            AgentStreamEvent(
+                stream_sequence=0,
+                session_id=replacement.id,
+                tab_id=replacement.tab_id,
+                agent_type=replacement.agent_type,
+                type=kind,
+                turn_id=call_id,
+                created_at=clock[0],
+            )
+        )
+
+    async def native_accept():
+        call_id = native.calls[-1][0][3]
+        await append_event(AgentStreamEventType.TURN_STARTED, call_id)
+        # The old worker revives while replacement bootstrap is accepted.
+        manager.sessions[worker.id] = worker.model_copy(
+            update={
+                "status": ManagedSessionStatus.WORKING,
+                "runtime_status": AgentRuntimeStatus.WORKING,
+            }
+        )
+
+    async def create(_workspace, payload):
+        assert payload.session_kind == SessionKind.CHAT
+        assert payload.ephemeral and payload.caller_owned_ephemeral
+        manager.sessions[replacement.id] = replacement
+        return replacement
+
+    async def retire_resources(session):
+        # Real delete_session/_delete_session_locked have already authorized this
+        # evidence; tab teardown is the only resource operation replaced here.
+        assert session.id == replacement.id
+        assert session.processing_call_ids == [call_id]
+        assert session.delivered_call_ids == []  # No fabricated Task ACK.
+        assert managed_chat.delivery_state(session, call_id) == "accepted"
+        retired.append(session.id)
+
+    def install(owner):
+        monkeypatch.setattr(owner, "_retire_session_resources", retire_resources)
+        monkeypatch.setattr(owner, "_dispatch_task_to_session", AsyncMock())
+
+    native.on_send = native_accept
+    monkeypatch.setattr(manager, "_create_managed_session", create)
+    monkeypatch.setattr(manager, "_build_session_bootstrap_prompt", lambda *a: "bootstrap")
+    monkeypatch.setattr(manager, "_wait_for_agent_prompt", AsyncMock())
+    monkeypatch.setattr(manager, "_assert_session_seat", lambda s: "")
+    install(manager)
+    # Real provisioning, Workspace send/pump, managed bridge and receipt writes.
+    await tick(manager)
+    assert len(native.calls) == 1
+    call_id = native.calls[0][0][3]
+    assert call_id.startswith("chat:")
+    assert manager.sessions[replacement.id].processing_call_ids == [call_id]
+    assert managed_chat.delivery_state(manager.sessions[replacement.id], call_id) == "accepted"
+    assert manager.tasks[task.id].liveness.retiring_sessions == {
+        replacement.id: replacement.created_at
+    }
+    for _ in range(3):
+        assert await manager._recover_processing_via_receipt(replacement.id) == 0
+        manager._refresh_chat_session_status(manager.sessions[replacement.id])
+        await tick(manager)
+        assert retired == []
+    manager._save_state()
+    if reload:
+        manager = WorkspaceManager()
+        install(manager)
+    if outcome != "active":
+        await append_event(AgentStreamEventType.TURN_COMPLETED, call_id)
+    if outcome == "uncertain":
+        manager._mark_processing_as_uncertain(replacement.id, [call_id])
+    elif outcome == "missing":
+        managed_chat._attempt_path(replacement).unlink()
+    elif outcome == "adopted":
+        current = manager.sessions[replacement.id]
+        manager.sessions[replacement.id] = current.model_copy(
+            update={"current_task_id": "other-task"}
+        )
+    await manager._recover_processing_via_receipt(replacement.id)
+    manager._refresh_chat_session_status(manager.sessions[replacement.id])
+    if outcome in {"completed", "pump_active", "pump_uncertain"}:
+        assert manager.sessions[replacement.id].status == ManagedSessionStatus.IDLE
+        assert manager.sessions[replacement.id].processing_call_ids == [call_id]
+        assert manager.sessions[replacement.id].delivered_call_ids == []
+    if outcome in {"pump_active", "pump_uncertain"}:
+        lock = manager._pump_locks.setdefault(replacement.id, asyncio.Lock())
+        async with lock:
+            cleanup = asyncio.create_task(tick(manager))
+            await asyncio.sleep(0)
+            assert not cleanup.done()
+            # Native evidence can change without changing the captured session.
+            # The callback after pump acquisition must reevaluate that evidence.
+            if outcome == "pump_active":
+                await append_event(AgentStreamEventType.TURN_STARTED, "new-turn")
+            else:
+                attempts = managed_chat._read_attempts(replacement)
+                attempts["attempts"][call_id]["state"] = "uncertain"
+                managed_chat._write_attempts(replacement, attempts)
+        await cleanup
+    else:
+        await tick(manager)
+    if outcome == "completed":
+        assert retired == [replacement.id]
+        assert replacement.id not in manager.sessions
+        assert manager.tasks[task.id].liveness.retiring_sessions == {}
+        assert not stream.path.exists()
+        assert not managed_chat._attempt_path(replacement).exists()
+        assert replacement.id not in WorkspaceManager().sessions
+    else:
+        assert retired == []
+        assert replacement.id in manager.sessions
+        assert manager.sessions[replacement.id].delivered_call_ids == []
+        if outcome != "adopted":
+            assert manager.tasks[task.id].liveness.retiring_sessions
+    assert worker.id in manager.sessions
+    assert manager.tasks[task.id].liveness.attempts == 0
+    await tick(manager)
+    assert retired == ([replacement.id] if outcome == "completed" else [])
