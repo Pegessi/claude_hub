@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "bf1a0f408700155e51a440f235bf098cb36cc3e9",
+  "parents": [
+    "aa359fd17ccd804cbf296db3644552481e140667",
+    "6238e9e1d386de33fc611356d4a091eadd326a35"
+  ],
+  "base": "cb0e9dff497e9ca9301cc51c6b1fd576ce811544",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "ab64196f0b39033b8f3e0369dae324bd7a989b67",
+  "reconstructed_tree": "1cb133b4e62f2374e8797fda734f74b297d62721",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "fa6d4fa1c656da770814eab5af6ceb3c198a06ee"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a63a2c57020a1543069559d9eebd69fe7174ea04"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8582502bb8604bad4c4bd6dcc141d341de42fb92"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "e421faecb4dbf83a057216f77affa5c037c17d13"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "bbc4de6c9e06bd006e2fa309bd19bbe9664ab991"
+      },
+      "reason": "Preserve the watchdog-fix entry from parent2 and both CLI-default and Subagents entries from parent1, with the newly integrated fix first. No existing release entry is removed or rewritten.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
