@@ -468,7 +468,16 @@ async def test_orphan_recovery_preserves_operator_todo_edit_while_spawning(
         }
     )
     manager.tasks[orphan.id] = orphan
-    replacement = dead.model_copy(update={"id": "replacement", "status": ManagedSessionStatus.IDLE})
+    replacement = dead.model_copy(
+        update={
+            "id": "replacement",
+            "status": ManagedSessionStatus.IDLE,
+            "task_id": None,
+            "current_task_id": None,
+            "ephemeral": True,
+            "caller_owned_ephemeral": True,
+        }
+    )
 
     async def ensure_and_edit(*args, **kwargs):
         await manager.update_task(orphan.id, WorkspaceTaskUpdate(status=WorkspaceTaskStatus.TODO))

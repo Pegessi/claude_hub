@@ -647,3 +647,15 @@ changed work and uncertain receipts; they do not complete or refund an ambiguous
 claim. Cleanup is an effect authorized by the owner, with a final callback after
 workspace/pump lock acquisition. It checks the captured Task and inactive session
 again. FAILED scheduled Tasks no longer trigger blanket deletion on every sweep.
+
+
+Cancelled provisioning records its unused replacement's ID and immutable creation
+time in `TaskLiveness.retiring_sessions` before cancelling the recovery claim.
+The existing per-Task pass resolves the current same-incarnation session, because
+provisioning returns its initial SPAWNING snapshot. It retires only an unassigned,
+caller-owned ephemeral session that is idle with resolved delivery. Bootstrap,
+permission or delivery blockers retain the resource claim across restart and
+review/execution generations; they do not spend another recovery attempt. Missing,
+recycled or adopted resources relinquish this claim. The final deletion callback
+also rechecks canonical Task references after pump-lock waits. This is retry of an
+already-owned resource effect, with no additional stall evaluator, timer or budget.

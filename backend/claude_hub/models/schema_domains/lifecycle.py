@@ -10,7 +10,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class TaskPhase(str, Enum):
@@ -119,3 +119,7 @@ class TaskLiveness(BaseModel):
     escalated_at: Optional[datetime] = None
     watch_activity_at: Optional[datetime] = None
     detail: str = ""
+    # Unused replacement resources remain this owner's responsibility across
+    # claim cancellation, restart and execution/review generations. Values are
+    # immutable session incarnations, not mutable provisioning snapshots.
+    retiring_sessions: dict[str, datetime] = Field(default_factory=dict)

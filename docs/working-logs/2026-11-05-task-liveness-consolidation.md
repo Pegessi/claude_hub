@@ -156,3 +156,35 @@ for mandatory Hub review with explicit attention to both reproduced blockers and
 the absence of duplicate mechanisms. Local main remains `a34cfea`; fast-forward
 is pending independent approval. Human acceptance remains required; no push.
 Browser/HMR/replay and live-provider checks remain unrun and are not claimed.
+
+
+## Review cycle 4: cancelled provisioning cleanup
+
+Hub report `718419e6-b66d-4a19-9e62-2768518c4399` confirms both P1 fixes and
+single-owner consolidation pass, but rejects `8fa1642` for leaking the unused
+replacement when `ensure_workspace_agent` returns its initial SPAWNING object.
+The prior fixture returned an IDLE snapshot and missed the production contract.
+
+The correction records the unused replacement's immutable incarnation in existing
+TaskLiveness state before claim cancellation. The existing per-Task pass resolves
+the current resource, retires it only when unused/idle with no unresolved receipts,
+and retains the resource obligation while bootstrap is active. Restart and new
+review/execution generations preserve that obligation. Adoption/recycling removes
+old cleanup authority; the final callback repeats canonical-reference checks after
+pump contention. Existing P1 fences remain intact; no second recovery mechanism.
+
+Real `ensure_workspace_agent` tests now cover terminal/Chat SPAWNING returns with
+idle, active, still-spawning and pending/processing/uncertain live states, restart,
+generation changes, adoption and final-lock races. An independent read-only audit
+`unused_replacement_audit` / P-JUDGE / owner=root /
+agent=`/root/lifecycle_evidence`, `model_or_api=runtime-default`, was accepted:
+**17 tests passed**, no remaining scoped blocker or duplicate policy;
+evidence `/tmp/claude-hub-verify.dm1el7xb/`. Owner's initial four-file regression
+run passed **261 tests** (`/tmp/claude-hub-verify.mldrljo1/`); final focused/full
+validation follows the added final-adoption guard. No lessons needed.
+
+
+Final focused group including dependency, scheduled, managed Chat and structural
+checks: **267 passed**, 4.26 seconds (`/tmp/claude-hub-verify.a77ohy4v/`). Complete
+backend types passed, 614 files (`/tmp/claude-hub-verify.wgu7hrr8/`). The full run
+below validates the final recorded-claim check and simplified state updates too.

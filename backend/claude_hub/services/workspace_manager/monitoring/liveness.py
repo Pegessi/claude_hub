@@ -401,6 +401,7 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
         if lock.locked():
             return
         async with lock:
+            await self._liveness_retire_unused_replacements(task_id)
             await self._evaluate_task_liveness(task_id)
 
     async def _evaluate_task_liveness(self, task_id: str) -> None:
@@ -420,7 +421,11 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
             if state is None:
                 state = self._initial_liveness(task, facts, generation)
             elif state.generation != generation:
-                state = TaskLiveness(generation=generation, since=facts.now)
+                state = TaskLiveness(
+                    generation=generation,
+                    since=facts.now,
+                    retiring_sessions=state.retiring_sessions,
+                )
             watch_advanced = (
                 state.reason == "watch_stalled"
                 and facts.watch_activity is not None
@@ -893,9 +898,18 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
         # lock; neither a provisioning result nor its exception grants authority.
         async with self.workspace_mutation_lock(task.workspace_id):
             if not await self._liveness_replacement_current(task, dead_session):
+                current = self.tasks.get(task.id)
+                if current is not None and current.liveness is not None:
+                    retiring = {
+                        **current.liveness.retiring_sessions,
+                        new_session.id: new_session.created_at,
+                    }
+                    state = current.liveness.model_copy(update={"retiring_sessions": retiring})
+                    self.tasks[task.id] = current.model_copy(update={"liveness": state})
+                    self._save_workspace_state(task.workspace_id)
                 if task.liveness is not None:
                     await self._cancel_liveness_claim(task, task.liveness)
-                await self._liveness_retire_worker(self.tasks.get(task.id), new_session)
+                await self._liveness_retire_unused_replacements(task.id)
                 return
             reattempt = live.dispatch_attempt + 1
             rebound = apply_task_update(
@@ -969,7 +983,7 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
         )
 
     async def _liveness_retire_worker(
-        self, task: WorkspaceTask | None, session: ManagedSession
+        self, task: WorkspaceTask | None, session: ManagedSession, *, unused: bool = False
     ) -> None:
         if task is None:
             return
@@ -977,10 +991,65 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
         # delete_session rechecks this at its final workspace -> pump boundary.
         # Terminal Task status alone never authorizes deleting an active worker.
         def allowed() -> bool:
-            return self.tasks.get(task.id) == task and self._liveness_worker_idle(session)
+            return (
+                self.tasks.get(task.id) == task
+                and self._liveness_worker_idle(session)
+                and (
+                    not unused
+                    or not any(
+                        session.id in {t.session_id, t.review_session_id}
+                        for t in self.tasks.values()
+                    )
+                )
+            )
 
         if allowed():
             await self._best_effort_delete_session(session.id, before_delete=allowed)
+
+    async def _liveness_retire_unused_replacements(self, task_id: str) -> None:
+        task = self.tasks.get(task_id)
+        if task is None or task.liveness is None or not task.liveness.retiring_sessions:
+            return
+        async with self.workspace_mutation_lock(task.workspace_id):
+            for session_id, created_at in list(task.liveness.retiring_sessions.items()):
+                current = self.tasks.get(task_id)
+                if current is None or current.liveness is None:
+                    return
+                if current.liveness.retiring_sessions.get(session_id) != created_at:
+                    continue
+                session = self.sessions.get(session_id)
+                owned = bool(
+                    session
+                    and session.created_at == created_at
+                    and session.workspace_id == current.workspace_id
+                    and session.ephemeral
+                    and session.caller_owned_ephemeral
+                    and not session.task_id
+                    and not session.current_task_id
+                    and not any(
+                        session_id in {t.session_id, t.review_session_id}
+                        for t in self.tasks.values()
+                    )
+                )
+                if owned and session is not None:
+                    if (
+                        session.pending_call_ids
+                        or session.processing_call_ids
+                        or session.uncertain_call_ids
+                    ):
+                        continue  # Retain ownership until delivery is resolved.
+                    await self._liveness_retire_worker(current, session, unused=True)
+                    if session_id in self.sessions:
+                        continue  # Bootstrap is active or retirement failed; retry this same claim.
+                # Missing, recycled or adopted resources are no longer ours.
+                live = self.tasks.get(task_id)
+                if live is not None and live.liveness is not None:
+                    remaining = dict(live.liveness.retiring_sessions)
+                    if remaining.get(session_id) == created_at:
+                        remaining.pop(session_id)
+                        state = live.liveness.model_copy(update={"retiring_sessions": remaining})
+                        self.tasks[task_id] = live.model_copy(update={"liveness": state})
+                        self._save_workspace_state(task.workspace_id)
 
     async def _liveness_replacement_current(
         self, task: WorkspaceTask, session: ManagedSession | None

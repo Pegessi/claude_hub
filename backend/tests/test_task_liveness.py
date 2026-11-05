@@ -351,7 +351,16 @@ def test_replacement_provisioning_cannot_overwrite_resumed_worker(delivery_env, 
     manager.sessions[session.id] = session.model_copy(
         update={"status": ManagedSessionStatus.STOPPED}
     )
-    replacement = session.model_copy(update={"id": "new-worker"})
+    replacement = session.model_copy(
+        update={
+            "id": "new-worker",
+            "status": ManagedSessionStatus.SPAWNING,
+            "task_id": None,
+            "current_task_id": None,
+            "ephemeral": True,
+            "caller_owned_ephemeral": True,
+        }
+    )
 
     async def provision(*args):
         manager.sessions[session.id] = session.model_copy(
@@ -360,8 +369,10 @@ def test_replacement_provisioning_cannot_overwrite_resumed_worker(delivery_env, 
                 "runtime_status": AgentRuntimeStatus.WORKING,
             }
         )
-        manager.sessions[replacement.id] = replacement
-        return replacement
+        manager.sessions[replacement.id] = replacement.model_copy(
+            update={"status": ManagedSessionStatus.IDLE}
+        )
+        return replacement  # Production returns the original SPAWNING snapshot.
 
     monkeypatch.setattr(manager, "ensure_workspace_agent", provision)
     cleanup, dispatch = AsyncMock(), AsyncMock()
@@ -862,3 +873,208 @@ async def test_recovery_cleanup_rechecks_identity_after_lock_wait(
     await cleanup
     delete.assert_not_awaited()
     assert session.id in manager.sessions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [SessionKind.TERMINAL, SessionKind.CHAT])
+@pytest.mark.parametrize(
+    "bootstrap", ["idle", "active", "spawning", "pending", "processing", "uncertain"]
+)
+async def test_real_provisioning_retires_current_unused_incarnation_after_bootstrap(
+    delivery_env, monkeypatch, kind, bootstrap
+):
+    manager, clock, _ = delivery_env
+    task, worker = as_worker(manager, kind=kind)
+    manager.tasks[task.id] = task.model_copy(
+        update={"system_internal": True, "internal_kind": "scheduled"}
+    )
+    manager.sessions[worker.id] = worker.model_copy(update={"status": ManagedSessionStatus.STOPPED})
+    replacement = worker.model_copy(
+        update={
+            "id": "unused",
+            "tab_id": "unused-tab",
+            "created_at": clock[0],
+            "status": ManagedSessionStatus.SPAWNING,
+            "task_id": None,
+            "current_task_id": None,
+            "ephemeral": True,
+            "caller_owned_ephemeral": True,
+        }
+    )
+    returned = []
+    deleted = []
+    real_provision = manager.ensure_workspace_agent
+
+    async def create(_workspace, payload):
+        assert payload.ephemeral and payload.caller_owned_ephemeral
+        manager.sessions[replacement.id] = replacement
+        return replacement
+
+    async def provision(*args):
+        result = await real_provision(*args)
+        returned.append(result)
+        return result
+
+    async def bootstrap_send(*args, **kwargs):
+        update = {"status": ManagedSessionStatus.IDLE}
+        if bootstrap == "active":
+            update.update(
+                status=ManagedSessionStatus.WORKING, runtime_status=AgentRuntimeStatus.WORKING
+            )
+        elif bootstrap == "spawning":
+            update["status"] = ManagedSessionStatus.SPAWNING
+        elif bootstrap in {"pending", "processing", "uncertain"}:
+            update[f"{bootstrap}_call_ids"] = ["bootstrap-receipt"]
+        manager.sessions[replacement.id] = replacement.model_copy(update=update)
+        manager.sessions[worker.id] = worker.model_copy(
+            update={
+                "status": ManagedSessionStatus.WORKING,
+                "runtime_status": AgentRuntimeStatus.WORKING,
+            }
+        )
+
+    def install_cleanup(owner):
+        async def delete(session):
+            deleted.append(session.id)
+            owner.sessions.pop(session.id)
+            owner._save_state()
+
+        monkeypatch.setattr(owner, "_delete_session_locked", delete)
+
+    monkeypatch.setattr(manager, "_create_managed_session", create)
+    monkeypatch.setattr(manager, "_build_session_bootstrap_prompt", lambda *a: "bootstrap")
+    monkeypatch.setattr(manager, "_wait_for_agent_prompt", AsyncMock())
+    monkeypatch.setattr(manager, "send_session_message", bootstrap_send)
+    monkeypatch.setattr(manager, "ensure_workspace_agent", provision)
+    monkeypatch.setattr(managed_chat, "runtime_status", lambda s: s.runtime_status)
+    monkeypatch.setattr(
+        managed_chat, "is_turn_running", lambda s: s.runtime_status == AgentRuntimeStatus.WORKING
+    )
+    monkeypatch.setattr(managed_chat, "has_pending_question", lambda s: False)
+    monkeypatch.setattr(managed_chat, "question_input_blocked", lambda *a: False)
+    dispatch = AsyncMock()
+    monkeypatch.setattr(manager, "_dispatch_task_to_session", dispatch)
+    install_cleanup(manager)
+    await tick(manager)
+    assert returned == [replacement]
+    assert returned[0].status == ManagedSessionStatus.SPAWNING
+    dispatch.assert_not_awaited()
+    assert manager.tasks[task.id].session_id == worker.id
+    assert manager.tasks[task.id].liveness.attempts == 0
+    if bootstrap != "idle":
+        assert deleted == []
+        assert manager.tasks[task.id].liveness.retiring_sessions == {
+            replacement.id: replacement.created_at
+        }
+        manager = WorkspaceManager()
+        install_cleanup(manager)
+        current = manager.tasks[task.id]
+        manager.tasks[task.id] = current.model_copy(
+            update={"review_cycle": current.review_cycle + 1}
+        )
+        await tick(manager)
+        assert deleted == []
+        assert manager.tasks[task.id].liveness.retiring_sessions == {
+            replacement.id: replacement.created_at
+        }
+        manager.sessions[replacement.id] = manager.sessions[replacement.id].model_copy(
+            update={
+                "status": ManagedSessionStatus.IDLE,
+                "runtime_status": AgentRuntimeStatus.IDLE,
+                "pending_call_ids": [],
+                "processing_call_ids": [],
+                "uncertain_call_ids": [],
+            }
+        )
+        await tick(manager)
+    assert deleted == [replacement.id]
+    assert replacement.id not in manager.sessions
+    assert worker.id in manager.sessions
+    assert manager.tasks[task.id].liveness.retiring_sessions == {}
+    await tick(manager)
+    assert deleted == [replacement.id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["recycled", "bound", "referenced", "persistent"])
+async def test_unused_replacement_retirement_yields_ownership(delivery_env, monkeypatch, change):
+    manager, clock, _ = delivery_env
+    task, worker = as_worker(manager, kind=SessionKind.TERMINAL)
+    unused = worker.model_copy(
+        update={
+            "id": "unused",
+            "task_id": None,
+            "current_task_id": None,
+            "ephemeral": True,
+            "caller_owned_ephemeral": True,
+        }
+    )
+    manager.sessions[unused.id] = unused
+    manager.tasks[task.id] = task.model_copy(
+        update={
+            "liveness": TaskLiveness(
+                generation=f"{task.execution_epoch}:{task.review_cycle}",
+                since=clock[0],
+                retiring_sessions={unused.id: unused.created_at},
+            )
+        }
+    )
+    if change == "recycled":
+        manager.sessions[unused.id] = unused.model_copy(update={"created_at": clock[0]})
+    elif change == "bound":
+        manager.sessions[unused.id] = unused.model_copy(update={"current_task_id": "new-task"})
+    elif change == "referenced":
+        manager.tasks["new-task"] = task.model_copy(
+            update={"id": "new-task", "session_id": unused.id}
+        )
+    else:
+        manager.sessions[unused.id] = unused.model_copy(update={"caller_owned_ephemeral": False})
+    cleanup = AsyncMock()
+    monkeypatch.setattr(manager, "_best_effort_delete_session", cleanup)
+    await manager._liveness_retire_unused_replacements(task.id)
+    cleanup.assert_not_awaited()
+    assert unused.id in manager.sessions
+    assert manager.tasks[task.id].liveness.retiring_sessions == {}
+
+
+@pytest.mark.asyncio
+async def test_unused_replacement_adopted_while_waiting_for_pump_is_preserved(
+    delivery_env, monkeypatch
+):
+    manager, clock, _ = delivery_env
+    task, worker = as_worker(manager, kind=SessionKind.TERMINAL)
+    unused = worker.model_copy(
+        update={
+            "id": "unused",
+            "task_id": None,
+            "current_task_id": None,
+            "ephemeral": True,
+            "caller_owned_ephemeral": True,
+        }
+    )
+    manager.sessions[unused.id] = unused
+    manager.tasks[task.id] = task.model_copy(
+        update={
+            "liveness": TaskLiveness(
+                generation=f"{task.execution_epoch}:{task.review_cycle}",
+                since=clock[0],
+                retiring_sessions={unused.id: unused.created_at},
+            )
+        }
+    )
+    delete = AsyncMock()
+    monkeypatch.setattr(manager, "_delete_session_locked", delete)
+    lock = manager._pump_locks.setdefault(unused.id, asyncio.Lock())
+    async with lock:
+        cleanup = asyncio.create_task(manager._liveness_retire_unused_replacements(task.id))
+        await asyncio.sleep(0)
+        # Review/dispatch can finish awaited work by adding a canonical reference
+        # without changing this session snapshot. The final callback must see it.
+        manager.tasks["new-task"] = task.model_copy(
+            update={"id": "new-task", "session_id": unused.id}
+        )
+    await cleanup
+    delete.assert_not_awaited()
+    assert unused.id in manager.sessions
+    await manager._liveness_retire_unused_replacements(task.id)
+    assert manager.tasks[task.id].liveness.retiring_sessions == {}
