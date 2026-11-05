@@ -188,3 +188,22 @@ Final focused group including dependency, scheduled, managed Chat and structural
 checks: **267 passed**, 4.26 seconds (`/tmp/claude-hub-verify.a77ohy4v/`). Complete
 backend types passed, 614 files (`/tmp/claude-hub-verify.wgu7hrr8/`). The full run
 below validates the final recorded-claim check and simplified state updates too.
+
+
+### Cycle-4 full verification
+
+Foreground `./scripts/verify.sh all` **passed, exit 0**, at fixed candidate
+`572960ca8d511cb34da1f8e2443dc7a9f399bed2`. Backend: **6,107 passed, 9 skipped,
+16 warnings**, 341.54 seconds. Frontend: **1,224 passed, 0 failed**. Docs, checkout
+safety, formatting, complete backend/frontend types, lint and production build
+all passed. Evidence: `/tmp/liveness-all-round10.log` with
+`LIVENESS_VERIFY_EXIT=0`; `/tmp/claude-hub-verify.cjr91qhc/` retains pytest output,
+interpreter/SHA provenance and exit receipts. The existing Vite chunk-size advisory
+remains. This follow-up commit changes the working-log evidence only; docs, staged
+safety and whitespace checks are repeated before handoff.
+
+Hub review is requested for the exact final candidate, preserving the prior P1
+fixes and explicitly checking resource cleanup and absence of duplicate recovery
+owners. Main remains `a34cfea`; integration awaits independent approval. No push,
+primary restart or live-session experiment. Browser/HMR/replay and live-provider
+behavior remain unverified. No lessons needed.
