@@ -122,3 +122,14 @@ Native read-only `revision_failure_audit` / P-RESEARCH /
 dispatch exception and repeated FAILED cleanup paths; accepted and included in
 the same fix. It has no Task reporting or completion authority. Nonblocking dead
 helper cleanup was left outside this revision, as requested. No lessons needed.
+
+
+At fixed code commit `77f1bfc`, the native read-only safety re-audit found no
+remaining blocker or duplicate owner and independently replayed **27 tests**
+(`/tmp/claude-hub-verify.38mlge53/`). The first full revision run stopped its backend
+suite on an old dependency-test mock assertion that required cleanup without the
+new callback (4,816 passed, 3 skipped before failure); frontend targets passed.
+`/tmp/liveness-all-round8.log` records exit 1, not a full pass. The assertion now
+checks the cleanup target and its authority callback; the 251-test dependency,
+workspace and liveness group passed (`/tmp/claude-hub-verify.hda7suzy/`). Runtime
+code did not change after `77f1bfc`. A fresh full run follows this fixture update.

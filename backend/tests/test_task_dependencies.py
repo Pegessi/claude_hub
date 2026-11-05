@@ -495,7 +495,9 @@ async def test_orphan_recovery_preserves_operator_todo_edit_while_spawning(
     if spawn_fails:
         cleanup.assert_not_called()
     else:
-        cleanup.assert_awaited_once_with(replacement.id)
+        cleanup.assert_awaited_once()
+        assert cleanup.await_args.args == (replacement.id,)
+        assert cleanup.await_args.kwargs["before_delete"]()
     assert WorkspaceManager().tasks[orphan.id].depends_on_task_ids == [prerequisite.id]
 
 
