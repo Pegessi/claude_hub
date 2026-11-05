@@ -16,6 +16,7 @@ from claude_hub.models.schemas import (
     TaskPhase,
 )
 from claude_hub.models.task_mailbox import TaskActorRole, TaskEvent, TaskEventType
+from claude_hub.services.agent_stream.base import NativeInputNotSubmittedError
 from claude_hub.services.task_graph import task_supervisor_consumer_key
 from claude_hub.services.task_lifecycle import (
     NOTIFY_PHASES,
@@ -663,8 +664,6 @@ class _TaskLivenessMixin(_WorkspaceManagerBase):
             # Native input owns the turn lock here. Its own "sending" receipt
             # must not be mistaken for another active turn. This final callback
             # runs immediately before provider submission, after all startup waits.
-            from claude_hub.services.agent_stream.base import NativeInputNotSubmittedError
-
             session = self.sessions.get(session_id)
             if session is None or not self._liveness_delivery_current(session, call_id):
                 raise NativeInputNotSubmittedError("Task recovery wake was superseded")
