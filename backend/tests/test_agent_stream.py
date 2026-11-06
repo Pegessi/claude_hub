@@ -6939,6 +6939,171 @@ async def test_failed_result_with_whitespace_post_tool_is_not_adopted_completed(
         await tailer.stop()
 
 
+def test_is_substantive_answer_classifies_invisible_vs_real() -> None:
+    """Class predicate (Codex round 7): only-whitespace / zero-width / BOM /
+    control / separator text is absent; any real glyph (incl. one with a ZWSP
+    embedded mid-answer) is substantive."""
+    from claude_hub.services.agent_stream.base import is_substantive_answer
+
+    assert is_substantive_answer("") is False
+    assert is_substantive_answer("   \n\t ") is False
+    assert is_substantive_answer("​") is False  # U+200B zero-width space
+    assert is_substantive_answer("﻿") is False  # U+FEFF BOM
+    assert is_substantive_answer("​﻿") is False
+    assert is_substantive_answer("᠎") is False  # U+180E Cf
+    assert is_substantive_answer("  ") is False  # U+2028/U+2029 Zl/Zp
+    assert is_substantive_answer("x") is True
+    assert is_substantive_answer("  你好  ") is True
+    # ZWSP embedded INSIDE a normal answer is preserved (still substantive).
+    assert is_substantive_answer("真正​最终答复。") is True
+    assert is_substantive_answer(None) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("nonvisible", "answer"),
+    [("​", "**结论**：这是完整的长答复。" * 8), ("​", "已完成。"), ("﻿", "已完成。")],
+    ids=["zwsp-long-control", "zwsp-short", "bom-short"],
+)
+async def test_format_only_final_adopts_received_authoritative_answer(
+    nonvisible: str, answer: str
+) -> None:
+    """Codex round 7: post-tool text that is ONLY a format char (U+200B/U+FEFF,
+    category Cf, not stripped by str.strip) must not be delivered. The successful
+    authoritative ``result`` is adopted as final_text and appended to the
+    preserved commentary, for both short (below length threshold) and long
+    answers."""
+    import unicodedata
+
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    assert nonvisible.strip() == nonvisible  # strip() does NOT remove Cf
+    assert all(unicodedata.category(ch) == "Cf" for ch in nonvisible)
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("invisible final", [], client_turn_id="turn-fmt-result")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+
+        commentary = "工具前计划。"
+        transport._records.put_nowait(_message_start("msg-comment"))
+        transport._records.put_nowait(_text_delta(commentary))
+        transport._records.put_nowait(_message_stop())
+        transport._records.put_nowait(_tool_use_record("msg-tool", "read-1"))
+        transport._records.put_nowait(_tool_result_record("read-1"))
+        transport._records.put_nowait(_message_start("msg-final"))
+        transport._records.put_nowait(_text_delta(nonvisible))
+        transport._records.put_nowait(_message_stop())
+        transport._records.put_nowait(
+            {"type": "result", "subtype": "success", "is_error": False, "result": answer}
+        )
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "completed"
+        assert terminal.payload["final_text"] == answer
+        whole = terminal.payload["assistant_text"]
+        assert whole.startswith(commentary)
+        assert whole.endswith(answer)
+        assert terminal.payload["final_text_mismatch"]["post_tool_final_absent"] is True
+        assert "_authoritative_result_text" not in terminal.payload
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_format_only_closed_message_missing_result_cannot_certify_answer() -> None:
+    """Codex round 7: an OPEN... actually CLOSED final message that streamed only
+    U+200B then message_stop but NO result and clean EOF must not be synthesized
+    as a completed answer delivering the invisible char; it fails."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    transport.exit_error = None
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("no visible final", [], client_turn_id="turn-fmt-eof")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+
+        transport._records.put_nowait(_tool_use_record("msg-tool", "read-1"))
+        transport._records.put_nowait(_tool_result_record("read-1"))
+        transport._records.put_nowait(_message_start("msg-final"))
+        transport._records.put_nowait(_text_delta("​"))
+        transport._records.put_nowait(_message_stop())
+        transport._records.put_nowait(None)  # closed, no result, clean EOF
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "failed"
+        assert "final_text" not in terminal.payload
+        assert "assistant_text" not in terminal.payload
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_normal_answer_with_embedded_zwsp_completes_unmodified() -> None:
+    """Codex round 7 boundary: a normal long answer that legitimately contains a
+    ZWSP in its middle must complete and be delivered verbatim (the predicate is
+    presence-only and never deletes embedded format chars)."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("answer with embedded zwsp", [], client_turn_id="turn-emb")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+
+        answer = "真正​最终答复。" * 20
+        transport._records.put_nowait(_tool_use_record("msg-tool", "read-1"))
+        transport._records.put_nowait(_tool_result_record("read-1"))
+        transport._records.put_nowait(_message_start("msg-final"))
+        transport._records.put_nowait(_text_delta(answer))
+        transport._records.put_nowait(_message_stop())
+        transport._records.put_nowait(
+            {"type": "result", "subtype": "success", "is_error": False, "result": answer}
+        )
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "completed"
+        assert terminal.payload.get("final_text", terminal.payload["assistant_text"]) == answer
+        assert "​" in terminal.payload.get("final_text", terminal.payload["assistant_text"])
+        assert "final_text_mismatch" not in terminal.payload
+    finally:
+        await tailer.stop()
+
+
 def test_claude_adapter_tracks_open_assistant_message_lifecycle() -> None:
     """AC6(e): per-message open count isolates a closed tool message from a
     still-open final message, and resets on the result record."""

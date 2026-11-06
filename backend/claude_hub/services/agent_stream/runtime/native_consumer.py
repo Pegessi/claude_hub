@@ -9,7 +9,7 @@ import uuid
 from typing import Optional
 
 from ....models import AgentStreamEvent, AgentStreamEventType
-from ..base import NormalizeContext
+from ..base import NormalizeContext, is_substantive_answer
 from ..redaction import redact_event
 from .session_state import SessionState
 
@@ -32,16 +32,16 @@ class NativeConsumerMixin(SessionState):
         self._final_assistant_text += text
 
     def _has_substantive_post_tool_final(self) -> bool:
-        """True iff non-whitespace text streamed after the last tool call.
+        """True iff the answer buffer holds a visible, meaningful answer.
 
-        The single predicate every path uses to decide whether the turn already
-        has a real final answer. ``str.strip()`` removes ASCII and Unicode
-        whitespace (space/newline/tab/NBSP/…), so a post-tool answer made only
-        of whitespace — even chunked across several deltas — counts as ABSENT.
-        Covers uniformly: no delta, whitespace-only delta(s), and whitespace
-        chunks followed (or not) by real text.
+        The buffer is the whole answer when no tool ran, or the post-tool text
+        after the last tool (reset at each TOOL_CALL_STARTED). Presence uses the
+        shared :func:`is_substantive_answer` (Unicode whitespace AND invisible
+        format/control/separator chars removed), so no-delta, whitespace-only,
+        chunked NBSP, and zero-width/BOM-only (U+200B/U+FEFF) post-tool text all
+        count as ABSENT. Invisible chars embedded inside a normal answer do not.
         """
-        return bool(self._final_text_after_tool and self._final_assistant_text.strip())
+        return is_substantive_answer(self._final_assistant_text)
 
     async def _run_native(self) -> None:
         """Push consumer for native provider transports.
@@ -653,23 +653,32 @@ class NativeConsumerMixin(SessionState):
                 if is_turn_completed:
                     final = self._final_assistant_text.strip()
                     whole = event.payload.get("assistant_text")
-                    if final and isinstance(whole, str) and final != whole.strip():
+                    # Only expose final_text when the post-tool answer is
+                    # substantive (has a visible char): whitespace/zero-width-only
+                    # post-tool text is not an answer.
+                    if (
+                        is_substantive_answer(final)
+                        and isinstance(whole, str)
+                        and final != whole.strip()
+                    ):
                         event.payload.setdefault("final_text", final)
                     if self._goal_protocol_sanitizer is None:
                         # Defense in depth: if the provider result carried the
                         # authoritative final answer but the streamed final text
-                        # is missing or materially shorter (lost final
-                        # deltas/snapshot, whitespace-only post-tool text), warn
-                        # and deliver the authoritative text. "Absent" is decided
-                        # by ONE predicate (_has_substantive_post_tool_final: a
-                        # tool ran AND the post-tool buffer is non-empty after a
-                        # Unicode strip), shared by every shape: no delta,
-                        # whitespace-only / chunked whitespace, or whitespace
-                        # chunks followed by a real answer.
+                        # is missing or materially shorter (lost final deltas,
+                        # whitespace/zero-width-only post-tool text), warn and
+                        # deliver the authoritative text. "Absent" is decided by
+                        # ONE predicate (_has_substantive_post_tool_final ->
+                        # is_substantive_answer), shared by every shape: no delta,
+                        # whitespace / chunked NBSP, zero-width/BOM-only, or
+                        # invisible chunks followed by a real answer.
+                        # ONE presence predicate: the final-answer buffer (post-tool
+                        # after the last tool; the whole answer when no tool ran)
+                        # must contain a visible char. Whitespace/zero-width-only
+                        # with a successful result is treated as absent.
                         self._apply_authoritative_result_text(
                             event,
-                            post_tool_final_absent=self._final_text_after_tool
-                            and not self._has_substantive_post_tool_final(),
+                            post_tool_final_absent=not self._has_substantive_post_tool_final(),
                         )
                     else:
                         # The private authoritative key must never be persisted

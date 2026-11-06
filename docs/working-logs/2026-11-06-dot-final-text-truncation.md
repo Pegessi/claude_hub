@@ -203,3 +203,31 @@ Codex 任务 2cf145bd（卡片 w-result-dot-26052392-main-8eb5fa）发现 AC4 �
 - 验证（单条前台阻塞）：test_agent_stream.py 197 passed（+8）；coalescer/native/
   merge_contract 209；相关宽集（剔除 2 个 base 上既有的 goal stop-handoff 时序 flake）
   2248 passed、0 failed；mypy/black/isort 干净。
+
+## Codex 第七轮——整个『不可见答案』类别收口（cycle-8）
+
+第四例：工具后仅零宽/格式字符（U+200B、U+FEFF 等 Unicode Cf，非 White_Space，
+`str.strip()` 不去）也被当实质答案；干净 EOF（已 message_stop 缺 result）同样只看
+strip，于是合成 completed 外发 1 个不可见字符。
+
+按类一次性收口（阈值 80/0.5/40 不变）：
+- 新增唯一共享谓词 `agent_stream/base.py::is_substantive_answer(text)`：逐字符跳过
+  `isspace()` 与 Unicode 类别 Cc/Cf/Zs/Zl/Zp，仍有任意字符才算实质；仅判存在、不改文
+  本，故正文中间的零宽字符保留。另加 `trim_invisible_edges()` 仅用于拼接说明+权威答案
+  时去掉边界空白/不可见。
+- 全部答案存在判定只走这一个函数（grep 复核无残留裸 strip）：
+  * consumer `_has_substantive_post_tool_final`、完成块 final_text 仅在实质时设置、
+    `post_tool_final_absent`（无工具时缓冲即整答，统一覆盖）；
+  * watchdog 干净 EOF 合成守卫、合成 final_text、权威兜底的权威/投递存在判定；
+  * dispatch `dispatch_tab_chat_and_wait` 的 assistant_text/final_text 选择；
+  * dot journal `sync_journal` 是否记录 dot 答复。
+- 无实质（无/空白/零宽/BOM）+ 成功权威 result → 以权威为 final_text，
+  assistant_text = trim(说明) + 权威（短 result 同样采用，绕过长度门槛）；已闭合缺
+  result 的不可见答复 → 不合成 completed；失败 result 永不采用；正文内嵌零宽的正常
+  长答复照常完成、逐字投递、无 marker。
+- 并入 Codex round7 三个失败用例为正式测试（参数化 zwsp/bom×短长 result、format-only
+  干净 EOF）+ 谓词单测 + 内嵌 ZWSP 正常长答对照。旧提交 74904e61 上恰为 4 个失败
+  （3 format_only + format_eof）、内嵌对照通过；修复后全过。
+- 验证（单条前台阻塞）：test_agent_stream.py 203 passed；core 412；dot/dispatch/
+  feishu 89；相关宽集（剔除 2 个 base 既有 goal flake）2321 passed、0 failed；
+  mypy/black/isort 干净。

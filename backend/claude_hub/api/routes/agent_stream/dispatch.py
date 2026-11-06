@@ -25,6 +25,7 @@ from claude_hub.services.agent_stream import (
     StructuredSourceUnavailable,
     TailerManager,
 )
+from claude_hub.services.agent_stream.base import is_substantive_answer
 
 logger = logging.getLogger(__name__)
 CHAT_ERROR_REASON_HEADER = "X-Claude-Hub-Error-Reason"
@@ -492,14 +493,15 @@ async def dispatch_tab_chat_and_wait(
                     or f"Chat turn ended with status {status_value}"
                 )
             assistant_text = event.payload.get("assistant_text")
-            if not isinstance(assistant_text, str) or not assistant_text.strip():
+            if not isinstance(assistant_text, str) or not is_substantive_answer(assistant_text):
                 raise RuntimeError(last_error or "Chat turn completed without assistant text")
             # Dot writes its whole answer last (its turn rules say so): the chat app
             # gets that, not the notes between tool calls. Other Chats send it all.
+            # A whitespace/zero-width-only "final_text" is never a real answer.
             final_text = event.payload.get("final_text")
             if (
                 isinstance(final_text, str)
-                and final_text.strip()
+                and is_substantive_answer(final_text)
                 and (prefer_final_text or _answers_last(tab_id))
             ):
                 return final_text.strip()
