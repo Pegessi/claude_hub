@@ -13,6 +13,9 @@
   ("N running" with a pulsing dot, or muted "N done"; hidden with none). It opens an
   anchored popover: Active first, collapsible Earlier (completed/failed/closed/
   archived), one-line cleaned summary, relative time, Open / Restore & open.
+  When the centred chat column leaves a wide enough right gutter, the list rests
+  there expanded (running first, latest history muted, "N more"); the pill then
+  collapses/expands it and the choice persists. Narrow panes keep the popover.
 - Mobile shows a slim "N sub-agents running" pill above the composer only while
   something runs, opening a bottom sheet with the same list.
 - `claude-hub agent run` tool calls link to their live Hub sub-agent when the

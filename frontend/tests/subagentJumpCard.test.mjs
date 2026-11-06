@@ -48,11 +48,19 @@ test('mobile shows only a running-only bar above the composer', () => {
 test('dock pill is an accessible popover with Esc and outside-click dismissal', () => {
   assert.match(dockPill, /counts\.value\.running > 0\s*\? `\$\{counts\.value\.running\} running`\s*: `\$\{counts\.value\.history\} done`/)
   assert.match(dockPill, /v-if="counts\.total > 0"/)
-  assert.match(dockPill, /aria-haspopup="dialog"/)
-  assert.match(dockPill, /:aria-expanded="open"/)
+  assert.match(dockPill, /:aria-haspopup="railFits \? undefined : 'dialog'"/)
+  assert.match(dockPill, /:aria-expanded="railFits \? railMode : open"/)
   assert.match(dockPill, /@keydown\.esc\.stop="close\(true\)"/)
   assert.match(dockPill, /addEventListener\('pointerdown'/)
   assert.match(dockPill, /prefers-reduced-motion: reduce/)
+})
+
+test('wide panes rest the list in the right gutter; narrow panes fold it', () => {
+  assert.match(dockPill, /const gutter = computed\(\(\) => \(paneWidth\.value - CHAT_COLUMN_PX\) \/ 2/)
+  assert.match(dockPill, /const railMode = computed\(\(\) => railFits\.value && !userCollapsed\.value\)/)
+  assert.match(dockPill, /v-if="open && !railFits"/)
+  assert.match(dockPill, /new ResizeObserver/)
+  assert.match(dockPill, /\.subagent-dock \{\n  position: relative;\n  display: flex;/)
 })
 
 test('list shows Active first and a collapsible Earlier with restore wording', () => {

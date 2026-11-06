@@ -3,6 +3,7 @@
     v-if="counts.total > 0"
     ref="rootRef"
     class="subagent-dock"
+    :class="{ 'is-rail': railMode }"
     data-testid="subagent-dock"
     @keydown.esc.stop="close(true)"
   >
@@ -10,12 +11,13 @@
       ref="triggerRef"
       type="button"
       class="subagent-dock-pill"
-      :class="{ 'is-running': counts.running > 0, 'is-open': open }"
+      :class="{ 'is-running': counts.running > 0, 'is-open': open || railMode }"
       data-testid="subagent-dock-pill"
-      aria-haspopup="dialog"
-      :aria-expanded="open"
-      :aria-controls="popoverId"
+      :aria-haspopup="railFits ? undefined : 'dialog'"
+      :aria-expanded="railFits ? railMode : open"
+      :aria-controls="railFits ? railId : popoverId"
       :aria-label="`Sub-agents: ${label}`"
+      :title="railFits ? (railMode ? 'Collapse sub-agents' : 'Show sub-agents') : undefined"
       @click.stop="toggle"
     >
       <span
@@ -23,9 +25,50 @@
         aria-hidden="true"
       />
       <span class="subagent-dock-label">{{ label }}</span>
+      <span
+        v-if="railFits"
+        class="subagent-dock-chevron"
+        :class="{ 'is-open': railMode }"
+        aria-hidden="true"
+      />
     </button>
+
+    <!-- Wide panes: the chat column leaves an empty right gutter, so the
+         sub-agents rest there in full instead of hiding behind the pill. -->
+    <section
+      v-if="railMode"
+      :id="railId"
+      class="subagent-rail"
+      data-testid="subagent-rail"
+      aria-label="Sub-agents"
+      :style="{ width: `${railWidth}px` }"
+    >
+      <ul class="subagent-rail-rows">
+        <li
+          v-for="chip in railChips"
+          :key="chip.key"
+          :class="{ 'is-history': chip.group === 'earlier' }"
+        >
+          <ChatSubagentRow
+            :chip="chip"
+            :now-ms="nowMs"
+            @jump="emit('jump', $event)"
+          />
+        </li>
+      </ul>
+      <button
+        v-if="hiddenCount > 0 || showAll"
+        type="button"
+        class="subagent-rail-more"
+        data-testid="subagent-rail-more"
+        @click="showAll = !showAll"
+      >
+        {{ showAll ? 'Show less' : `${hiddenCount} more` }}
+      </button>
+    </section>
+
     <div
-      v-if="open"
+      v-if="open && !railFits"
       :id="popoverId"
       class="subagent-popover"
       data-testid="subagent-popover"
@@ -49,10 +92,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { subagentDockCounts, type SubagentJumpChip } from '../presentation/subagentJump'
 import ChatSubagentList from './ChatSubagentList.vue'
+import ChatSubagentRow from './ChatSubagentRow.vue'
 
 const props = defineProps<{
   chips: SubagentJumpChip[]
@@ -62,23 +106,73 @@ const emit = defineEmits<{
   (event: 'jump', chip: SubagentJumpChip): void
 }>()
 
-const popoverId = `subagent-popover-${Math.random().toString(36).slice(2, 8)}`
+/** Chat column max width (ChatTimeline) plus its side padding. */
+const CHAT_COLUMN_PX = 900
+const RAIL_MIN_PX = 230
+const RAIL_MAX_PX = 300
+const RAIL_LIMIT = 5
+const COLLAPSED_KEY = 'claude-hub:subagent-rail-collapsed'
+
+const uid = Math.random().toString(36).slice(2, 8)
+const popoverId = `subagent-popover-${uid}`
+const railId = `subagent-rail-${uid}`
 const open = ref(false)
+const showAll = ref(false)
 const nowMs = ref(Date.now())
 const rootRef = ref<HTMLElement | null>(null)
 const triggerRef = ref<HTMLButtonElement | null>(null)
+const paneWidth = ref(0)
+const userCollapsed = ref(readCollapsed())
 
 const counts = computed(() => subagentDockCounts(props.chips))
 const label = computed(() =>
   counts.value.running > 0 ? `${counts.value.running} running` : `${counts.value.history} done`,
 )
 
-function toggle() {
-  if (open.value) close(false)
-  else {
-    nowMs.value = Date.now()
-    open.value = true
+// Free space on each side of the centred chat column, minus a breathing gap.
+// The rail hangs from the chrome's right edge (8px pane inset) and keeps a
+// 16px gap from the column.
+const gutter = computed(() => (paneWidth.value - CHAT_COLUMN_PX) / 2 - 24)
+const railFits = computed(() => gutter.value >= RAIL_MIN_PX)
+const railMode = computed(() => railFits.value && !userCollapsed.value)
+const railWidth = computed(() => Math.min(RAIL_MAX_PX, Math.floor(gutter.value)))
+
+// Active first (chips already put running rows in the "active" group), then
+// the most recent history, capped so the rail never runs down the page.
+const orderedChips = computed(() => [
+  ...props.chips.filter(chip => chip.group === 'active'),
+  ...props.chips.filter(chip => chip.group === 'earlier'),
+])
+const railChips = computed(() =>
+  showAll.value ? orderedChips.value : orderedChips.value.slice(0, RAIL_LIMIT),
+)
+const hiddenCount = computed(() => orderedChips.value.length - railChips.value.length)
+
+function readCollapsed(): boolean {
+  try {
+    return localStorage.getItem(COLLAPSED_KEY) === '1'
+  } catch {
+    return false
   }
+}
+
+function setCollapsed(value: boolean) {
+  userCollapsed.value = value
+  try {
+    localStorage.setItem(COLLAPSED_KEY, value ? '1' : '0')
+  } catch {
+    // Storage is optional; the choice still holds for this page view.
+  }
+}
+
+function toggle() {
+  nowMs.value = Date.now()
+  if (railFits.value) {
+    setCollapsed(!userCollapsed.value)
+    return
+  }
+  if (open.value) close(false)
+  else open.value = true
 }
 
 function close(restoreFocus: boolean) {
@@ -106,13 +200,56 @@ watch(() => counts.value.total, total => {
   if (total === 0) open.value = false
 })
 
-onBeforeUnmount(() => document.removeEventListener('pointerdown', onOutsidePointer, true))
+// Switching to the rail supersedes an open popover.
+watch(railFits, fits => {
+  if (fits) open.value = false
+})
+
+// Relative times in the always-visible rail should not freeze.
+const clock = setInterval(() => {
+  nowMs.value = Date.now()
+}, 30_000)
+
+// The dock unmounts with zero sub-agents, so observe the pane, not the dock.
+let observer: ResizeObserver | null = null
+let observedPane: Element | null = null
+
+function observePane() {
+  const pane = rootRef.value?.closest('.terminal-pane') ?? null
+  if (!pane || pane === observedPane) return
+  observer?.disconnect()
+  observedPane = pane
+  paneWidth.value = pane.getBoundingClientRect().width
+  observer = new ResizeObserver(entries => {
+    for (const entry of entries) paneWidth.value = entry.contentRect.width
+  })
+  observer.observe(pane)
+}
+
+onMounted(observePane)
+watch(rootRef, () => void nextTick(observePane))
+
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', onOutsidePointer, true)
+  observer?.disconnect()
+  clearInterval(clock)
+})
 </script>
 
 <style scoped>
+/* A flex box, not a block: a block wrapper adds a line box around the
+   inline-flex pill, making it taller and lower than its chrome siblings. */
 .subagent-dock {
   position: relative;
+  display: flex;
+  align-items: center;
   flex: none;
+}
+
+/* In rail mode the rail anchors to the positioned pane chrome, so its right
+   edge lines up with the chrome row rather than with the pill. */
+.subagent-dock.is-rail {
+  position: static;
 }
 
 /* Matches the 24px raised pill used by the session name beside it. */
@@ -154,7 +291,100 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onOutsidePoint
   border-color: var(--ch-color-accent-ring);
 }
 
+.subagent-dock-chevron {
+  width: 5px;
+  height: 5px;
+  margin: -2px 0 0 1px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  opacity: 0.7;
+  transform: rotate(45deg);
+  transition: transform var(--ch-motion-fast);
+}
+
+.subagent-dock-chevron.is-open {
+  margin-top: 2px;
+  transform: rotate(-135deg);
+}
+
+.subagent-rail {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: min(70vh, 560px);
+  padding: 4px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-lg);
+  background: color-mix(in srgb, var(--ch-color-surface-raised) 88%, transparent);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 4px 16px var(--ch-shadow-color-soft);
+  overflow-y: auto;
+  animation: subagent-rail-in var(--ch-motion-base, 160ms) ease-out;
+}
+
+.subagent-rail-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* The rail is narrow: the action label only appears on hover/focus. */
+.subagent-rail :deep(.subagent-action) {
+  display: none;
+}
+
+.subagent-rail :deep(.subagent-row:hover .subagent-action),
+.subagent-rail :deep(.subagent-row:focus-visible .subagent-action) {
+  display: inline;
+}
+
+.subagent-rail .is-history {
+  opacity: 0.72;
+  transition: opacity var(--ch-motion-fast);
+}
+
+.subagent-rail .is-history:hover,
+.subagent-rail .is-history:focus-within {
+  opacity: 1;
+}
+
+.subagent-rail-more {
+  align-self: flex-start;
+  margin: 2px 6px 3px;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: var(--ch-radius-sm);
+  background: none;
+  color: var(--ch-color-text-subtle);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.subagent-rail-more:hover {
+  color: var(--ch-color-text);
+}
+
+.subagent-rail-more:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring);
+}
+
+@keyframes subagent-rail-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
 .subagent-dock-dot {
+  flex: none;
   width: 6px;
   height: 6px;
   border-radius: 50%;
@@ -219,7 +449,8 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onOutsidePoint
     transition: none;
   }
 
-  .is-running .subagent-dock-dot {
+  .is-running .subagent-dock-dot,
+  .subagent-rail {
     animation: none;
   }
 }
