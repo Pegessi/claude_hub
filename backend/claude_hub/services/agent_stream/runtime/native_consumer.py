@@ -20,7 +20,15 @@ class NativeConsumerMixin(SessionState):
     """Native consumer behavior on the sole session owner."""
 
     def _note_final_text(self, text: str) -> None:
-        """Text after a tool call starts a new last answer."""
+        """Track the answer emitted after the last tool call (``final_text``).
+
+        This isolates the Dot "answers last" final reply from pre-tool
+        commentary; it is NOT a completion-certification signal. Whether a clean
+        EOF may be certified as a completed turn is decided by the adapter's
+        assistant-message lifecycle (``provider_message_lifecycle``), not by
+        "some post-tool text already streamed" — a single prefix delta here used
+        to let a truncated answer be certified complete.
+        """
         if self._final_text_after_tool:
             self._final_assistant_text = ""
             self._final_text_after_tool = False
@@ -337,31 +345,51 @@ class NativeConsumerMixin(SessionState):
                             )
                         continue
                 if not self._turn_completed_seen and exit_error is None:
-                    # Ordinary (non-Goal) one-shot turn reached a CLEAN EOF after
-                    # streaming a complete, non-empty answer but never wrote a
-                    # completion record, with no outstanding tool call, blocking
-                    # approval, or capacity-queue wait. The streamed text is the
-                    # authoritative result: synthesize a completed turn (the
-                    # ordinary-turn counterpart of the Goal synthesis above) so
-                    # dispatch_tab_chat_and_wait returns the answer instead of
-                    # raising and making the external bridge (e.g. Feishu)
-                    # report failure after the reply was already delivered. A
-                    # nonzero exit is excluded up front; an empty answer or a
-                    # pending external wait makes the helper return False, so the
-                    # failure synthesis below still runs.
-                    try:
-                        async with self._send_lock:
-                            synthesized = await self._synthesize_clean_eof_completion_locked(
-                                transport
-                            )
-                    except Exception:
-                        synthesized = False
-                        logger.exception(
-                            "native clean-EOF completion synthesis failed for session %s",
+                    # First handle a clean EOF that cut the model's FINAL message
+                    # mid-generation (a message_start with no matching
+                    # message_stop after some final text streamed). The buffered
+                    # text is a truncated prefix: fail the turn retryable and
+                    # NEVER deliver/record the prefix. Mirrors the generic EOF
+                    # failure path below (same _fail_active_turn + cleanup/notify);
+                    # the external channel (Dot/Feishu) is resent to regenerate.
+                    if self._clean_eof_final_message_truncated(transport):
+                        logger.warning(
+                            "clean EOF cut off the final assistant message for "
+                            "session %s; failing retryable instead of delivering a "
+                            "truncated prefix",
                             self.session_id,
                         )
-                    if synthesized:
-                        continue
+                        failed = await self._fail_active_turn(
+                            self._deps._TRUNCATED_FINAL_MESSAGE_MESSAGE,
+                            transport,
+                            retryable=True,
+                        )
+                    else:
+                        # Ordinary (non-Goal) one-shot turn reached a CLEAN EOF after
+                        # streaming a complete, non-empty answer but never wrote a
+                        # completion record, with no outstanding tool call, blocking
+                        # approval, or capacity-queue wait. The streamed text is the
+                        # authoritative result: synthesize a completed turn (the
+                        # ordinary-turn counterpart of the Goal synthesis above) so
+                        # dispatch_tab_chat_and_wait returns the answer instead of
+                        # raising and making the external bridge (e.g. Feishu)
+                        # report failure after the reply was already delivered. A
+                        # nonzero exit is excluded up front; an empty answer or a
+                        # pending external wait makes the helper return False, so the
+                        # failure synthesis below still runs.
+                        try:
+                            async with self._send_lock:
+                                synthesized = await self._synthesize_clean_eof_completion_locked(
+                                    transport
+                                )
+                        except Exception:
+                            synthesized = False
+                            logger.exception(
+                                "native clean-EOF completion synthesis failed for session %s",
+                                self.session_id,
+                            )
+                        if synthesized:
+                            continue
                 if not self._turn_completed_seen:
                     # A cancelled reader cannot reach this branch: the
                     # transport retires its generation before publishing the
@@ -578,6 +606,16 @@ class NativeConsumerMixin(SessionState):
                     whole = event.payload.get("assistant_text")
                     if final and isinstance(whole, str) and final != whole.strip():
                         event.payload.setdefault("final_text", final)
+                    if self._goal_protocol_sanitizer is None:
+                        # Defense in depth: if the provider result carried the
+                        # authoritative final answer but the streamed text is
+                        # materially shorter (final deltas/snapshot were lost),
+                        # warn and deliver the authoritative text.
+                        self._apply_authoritative_result_text(event)
+                    else:
+                        # The private authoritative key must never be persisted
+                        # on a Goal turn either.
+                        event.payload.pop("_authoritative_result_text", None)
                 observer_event = (
                     event.model_copy(
                         deep=True,

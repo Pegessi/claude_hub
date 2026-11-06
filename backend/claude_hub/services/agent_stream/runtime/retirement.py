@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from ....models import AgentStreamEvent, AgentStreamEventType, AgentType
 from ..base import NormalizeContext
@@ -354,7 +354,11 @@ class RetirementMixin(SessionState):
         return False
 
     async def _fail_active_turn(
-        self, message: str, transport: ProviderSession
+        self,
+        message: str,
+        transport: ProviderSession,
+        *,
+        retryable: bool = False,
     ) -> Optional[AgentStreamEvent]:
         """Emit an ``error`` event and a failed ``turn_completed``.
 
@@ -363,6 +367,12 @@ class RetirementMixin(SessionState):
         error message is surfaced from the provider's bounded stderr. Exactly
         one ``turn_completed(status=failed)`` is appended for the active turn
         so the frontend never leaves it pending.
+
+        ``retryable`` marks a clean EOF that cut the model's final answer short
+        (the message was still open): the failed completion carries
+        ``retryable=True`` and the diagnostic ``error_message`` but NEVER the
+        streamed prefix as ``assistant_text``/``final_text``, so the external
+        channel can safely resend without delivering a truncated reply.
 
         This does NOT release the turn guard — the caller (EOF handler) is
         responsible for clearing ``_active_turn_id`` and calling
@@ -410,9 +420,17 @@ class RetirementMixin(SessionState):
                 "agent_stream store append failed for error session %s",
                 self.session_id,
             )
+        failed_payload: Dict[str, Any] = {"status": "failed"}
+        if retryable:
+            # A clean EOF that cut the final answer mid-message: the streamed
+            # prefix must never be attached (no assistant_text/final_text), and
+            # the external channel needs a stable machine-readable cause to
+            # resend rather than show a partial answer.
+            failed_payload["retryable"] = True
+            failed_payload["error_message"] = message
         completed = ctx.event(
             AgentStreamEventType.TURN_COMPLETED,
-            {"status": "failed"},
+            failed_payload,
         )
         completed = redact_event(completed)
         try:

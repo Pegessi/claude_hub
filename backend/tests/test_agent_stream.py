@@ -6181,6 +6181,318 @@ async def test_native_clean_exit_with_completion_does_not_synthesize_failure() -
     await tailer.stop()
 
 
+def _tool_use_record(message_id: str, tool_id: str, name: str = "Bash") -> Dict[str, Any]:
+    return {
+        "type": "assistant",
+        "message": {
+            "id": message_id,
+            "content": [{"type": "tool_use", "id": tool_id, "name": name, "input": {}}],
+        },
+    }
+
+
+def _tool_result_record(tool_id: str, result: str = "ok") -> Dict[str, Any]:
+    return {
+        "type": "user",
+        "message": {
+            "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": result}]
+        },
+    }
+
+
+def _message_start(message_id: str) -> Dict[str, Any]:
+    return {
+        "type": "stream_event",
+        "event": {"type": "message_start", "message": {"id": message_id}},
+    }
+
+
+def _text_delta(text: str, index: int = 0) -> Dict[str, Any]:
+    return {
+        "type": "stream_event",
+        "event": {
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {"type": "text_delta", "text": text},
+        },
+    }
+
+
+def _message_stop() -> Dict[str, Any]:
+    return {"type": "stream_event", "event": {"type": "message_stop"}}
+
+
+async def _collect_terminal(queue: "asyncio.Queue[Any]") -> Any:
+    while True:
+        event = await asyncio.wait_for(queue.get(), timeout=0.5)
+        if event.type == AgentStreamEventType.TURN_COMPLETED:
+            return event
+
+
+@pytest.mark.asyncio
+async def test_native_clean_eof_open_final_message_after_tool_failcloses_retryable() -> None:
+    """Regression for the Dot truncation: after tool calls the FINAL assistant
+    message streams only a prefix and the one-shot reaches a CLEAN EOF with no
+    matching message_stop and no result. The prefix must NEVER be certified as a
+    completed answer. The tailer publishes exactly one failed turn_completed
+    marked retryable (no assistant_text/final_text), so the external channel
+    resends instead of delivering/journaling a truncated reply."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    transport.exit_error = None
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    queue = await tailer.subscribe()
+    completion_q = await tailer.subscribe_completion()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("run tools then answer", [], client_turn_id="turn-trunc")
+        started = await asyncio.wait_for(queue.get(), timeout=0.5)
+        assert started.type == AgentStreamEventType.TURN_STARTED
+
+        # Tool message (top-level snapshot) + its result.
+        transport._records.put_nowait(_tool_use_record("msg-tool", "read-1"))
+        transport._records.put_nowait(_tool_result_record("read-1"))
+        # Final assistant message opens, streams a short prefix, then stdout ends
+        # with NO message_stop and NO result (clean EOF mid-generation).
+        transport._records.put_nowait(_message_start("msg-final"))
+        transport._records.put_nowait(_text_delta("**抖音工"))
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        # The prefix must not ride along as the answer.
+        assert terminal.payload["status"] == "failed"
+        assert terminal.payload.get("retryable") is True
+        assert isinstance(terminal.payload.get("error_message"), str)
+        assert "assistant_text" not in terminal.payload
+        assert "final_text" not in terminal.payload
+        assert tailer._active_turn_id is None
+        assert transport.turn_in_flight is False
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_clean_eof_closed_final_message_without_result_completes() -> None:
+    """Healthy shape proven on the real transport: the final assistant message
+    is fully closed (message_stop) but the trailing ``result`` record never
+    arrives before a clean EOF. This is the 602bf59d case that must keep
+    synthesizing a completed turn with the FULL streamed answer."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    transport.exit_error = None
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("run tools then answer", [], client_turn_id="turn-closed")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+
+        full_answer = "**结论**\n" + "完整的最终答复。" * 20
+        transport._records.put_nowait(_tool_use_record("msg-tool", "read-1"))
+        transport._records.put_nowait(_tool_result_record("read-1"))
+        transport._records.put_nowait(_message_start("msg-final"))
+        transport._records.put_nowait(_text_delta(full_answer))
+        transport._records.put_nowait(_message_stop())  # closed; result missing
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "completed"
+        assert terminal.payload["assistant_text"].strip() == full_answer
+        assert (
+            terminal.payload.get("final_text", terminal.payload["assistant_text"]).strip()
+            == full_answer
+        )
+        assert "retryable" not in terminal.payload
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_clean_eof_no_message_scope_still_synthesizes_completed() -> None:
+    """Final-only / backfill / synthetic streams never emit message_start; with
+    no message scope the lifecycle gate must not block the legacy
+    buffered-text synthesis (a deltas-only clean EOF still completes)."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    transport.exit_error = None
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("hello", [], client_turn_id="turn-noscope")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+        answer = "A complete answer with no message envelopes at all."
+        transport._records.put_nowait(_text_delta(answer))
+        transport._records.put_nowait(None)
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "completed"
+        assert terminal.payload["assistant_text"].strip() == answer
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_result_authoritative_text_substitutes_short_streamed_prefix() -> None:
+    """AC4: the provider ``result`` record carries the full answer but only a
+    short prefix streamed as deltas. The completed turn must substitute the
+    authoritative result text, log the mismatch (structured marker), and not
+    deliver/journal the prefix."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("answer long", [], client_turn_id="turn-auth")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+
+        prefix = "**抖音工"
+        authoritative = prefix + "具已经做好，可以用了。" + "这是完整的权威答复内容。" * 12
+        assert len(authoritative) >= 80
+        transport._records.put_nowait(_message_start("msg-final"))
+        transport._records.put_nowait(_text_delta(prefix))
+        transport._records.put_nowait(_message_stop())
+        transport._records.put_nowait(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": authoritative,
+                "usage": {"input": 10, "output": 500, "total": 500},
+            }
+        )
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "completed"
+        assert terminal.payload["assistant_text"] == authoritative
+        mismatch = terminal.payload.get("final_text_mismatch")
+        assert isinstance(mismatch, dict)
+        assert mismatch["source"] == "result"
+        assert mismatch["authoritative_len"] == len(authoritative.strip())
+        assert mismatch["delivered_len"] == len(prefix.strip())
+        # Private transport key must never be persisted.
+        assert "_authoritative_result_text" not in terminal.payload
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_result_authoritative_text_below_threshold_kept_as_is() -> None:
+    """AC4 boundary: when the authoritative/streamed gap does not cross the
+    configured thresholds, no substitution or marker is emitted."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("small", [], client_turn_id="turn-auth-small")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+
+        text = "x" * 40
+        authoritative = text + "y" * 20  # 60 chars total: below MIN_AUTHORITATIVE_CHARS
+        assert len(authoritative) < 80
+        transport._records.put_nowait(_message_start("msg-final"))
+        transport._records.put_nowait(_text_delta(text))
+        transport._records.put_nowait(_message_stop())
+        transport._records.put_nowait(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": authoritative,
+                "usage": {"input": 1, "output": 10, "total": 10},
+            }
+        )
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "completed"
+        assert terminal.payload["assistant_text"] == text
+        assert "final_text_mismatch" not in terminal.payload
+        assert "_authoritative_result_text" not in terminal.payload
+    finally:
+        await tailer.stop()
+
+
+def test_claude_adapter_tracks_open_assistant_message_lifecycle() -> None:
+    """AC6(e): per-message open count isolates a closed tool message from a
+    still-open final message, and resets on the result record."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    adapter = ClaudeJsonlAdapter()
+    ctx = _ctx()
+    # Tool message opens then closes; the final answer message opens but never
+    # closes (the truncation shape).
+    assert adapter.provider_message_lifecycle(ctx) == (False, 0)
+    adapter.normalize_line(_message_start("msg-tool"), ctx)
+    assert adapter.provider_message_lifecycle(ctx) == (True, 1)
+    adapter.normalize_line(_message_stop(), ctx)
+    assert adapter.provider_message_lifecycle(ctx) == (True, 0)
+    adapter.normalize_line(_message_start("msg-final"), ctx)
+    assert adapter.provider_message_lifecycle(ctx) == (True, 1)
+
+    # A fresh turn (new run_epoch) starts clean; closing the final message then
+    # seeing a result clears scope entirely.
+    ctx2 = NormalizeContext(
+        session_id="s1",
+        tab_id="t1",
+        agent_type=AgentType.CLAUDE,
+        run_epoch=1,
+    )
+    assert adapter.provider_message_lifecycle(ctx2) == (False, 0)
+    adapter.normalize_line(_message_start("msg-a"), ctx2)
+    adapter.normalize_line(_message_stop(), ctx2)
+    assert adapter.provider_message_lifecycle(ctx2) == (True, 0)
+    adapter.normalize_line({"type": "result", "subtype": "success"}, ctx2)
+    assert adapter.provider_message_lifecycle(ctx2) == (False, 0)
+
+
 @pytest.mark.asyncio
 async def test_native_provider_completion_then_nonzero_exit_emits_exactly_one_completion() -> None:
     """A provider that emits a terminal ``result``/``turn_completed`` and then
