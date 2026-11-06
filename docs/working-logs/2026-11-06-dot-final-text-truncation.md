@@ -177,3 +177,29 @@ Codex 任务 2cf145bd（卡片 w-result-dot-26052392-main-8eb5fa）发现 AC4 �
   merge_contract 209；mypy（全后端，仅既有 check_verify_runtime 3.11 报错）、black、
   isort 通过。说明：test_native_goal_transport.py 两个 stop-handoff 用例在 pristine
   base 610bec50 上同样失败（已知时序 flake，非本次回归）。
+
+## Codex 第三轮交叉验证——按『类』统一修复（cycle-7）
+
+同类问题第三次：工具后只流出**纯空白**（空格/换行/tab/NBSP/窄 NBSP，含分块）也会
+清掉 `_final_text_after_tool`；strip 后最终文本为空却仍传 `post_tool_final_absent=False`，
+兜底用整段 560 字说明与权威 175 比、负差跳过，外发 560 字旧说明且 completed。
+
+按类统一（不调阈值）：
+- 唯一判定 `_has_substantive_post_tool_final()` = `_final_text_after_tool and
+  _final_assistant_text.strip()`（`str.strip()` 覆盖 ASCII + Unicode 空白/NBSP）。
+- `_note_final_text` 改为只追加；缓冲在每次 TOOL_CALL_STARTED 清空，标志位语义固定为
+  「本回合运行过工具、最终答案起算点」，不再被（含空白的）首段 delta 清掉。多工具时
+  每个工具后重置，避免误把中间工具的文本当最终答复。
+- 完成归一化只用这一个谓词计算 `post_tool_final_absent`（无增量 / 纯空白 / 分块空白 /
+  空白后真答复 共用）；无实质答复且成功 result 在场 → 以权威 result 为 final_text、
+  `assistant_text = 前置说明 + 权威`；有实质但过短 → 仍走 80/0.5/40 阈值。
+- 干净 EOF 截断检测：最终消息「未闭合」即生成未完成（无论 0/空白/部分前缀），
+  有实质前缀→可重试 failed；0/空白的未闭合消息→普通 failed（同样不外发）。
+- 对抗自查回归（11 个相关用例，参数化）：无增量；单空白；分块空白（空格/换行/tab/
+  NBSP/窄 NBSP）；空白后 4 字真答复（走阈值，175 对照）；多工具；未闭合+仅空白 EOF→
+  retryable 且无 assistant/final；完整实质答复→不替换、无 marker；失败 result +
+  工具后空白→failed、不采用错误文本。包含 Codex 三轮全部反例（4 字/524 字、0 增量/
+  260 字、纯空白/560 字）。
+- 验证（单条前台阻塞）：test_agent_stream.py 197 passed（+8）；coalescer/native/
+  merge_contract 209；相关宽集（剔除 2 个 base 上既有的 goal stop-handoff 时序 flake）
+  2248 passed、0 failed；mypy/black/isort 干净。

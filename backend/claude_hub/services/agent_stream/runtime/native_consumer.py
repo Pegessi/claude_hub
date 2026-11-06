@@ -20,19 +20,28 @@ class NativeConsumerMixin(SessionState):
     """Native consumer behavior on the sole session owner."""
 
     def _note_final_text(self, text: str) -> None:
-        """Track the answer emitted after the last tool call (``final_text``).
+        """Buffer assistant text emitted after the most recent tool call.
 
-        This isolates the Dot "answers last" final reply from pre-tool
-        commentary; it is NOT a completion-certification signal. Whether a clean
-        EOF may be certified as a completed turn is decided by the adapter's
-        assistant-message lifecycle (``provider_message_lifecycle``), not by
-        "some post-tool text already streamed" — a single prefix delta here used
-        to let a truncated answer be certified complete.
+        The buffer is reset at every TOOL_CALL_STARTED, so this always appends
+        to the current post-tool answer (including whitespace-only chunks).
+        Whether a SUBSTANTIVE post-tool answer exists is decided once, by
+        :meth:`_has_substantive_post_tool_final` (Unicode-stripped non-empty) —
+        never by "any delta arrived", which let a whitespace-only chunk count as
+        the final answer.
         """
-        if self._final_text_after_tool:
-            self._final_assistant_text = ""
-            self._final_text_after_tool = False
         self._final_assistant_text += text
+
+    def _has_substantive_post_tool_final(self) -> bool:
+        """True iff non-whitespace text streamed after the last tool call.
+
+        The single predicate every path uses to decide whether the turn already
+        has a real final answer. ``str.strip()`` removes ASCII and Unicode
+        whitespace (space/newline/tab/NBSP/…), so a post-tool answer made only
+        of whitespace — even chunked across several deltas — counts as ABSENT.
+        Covers uniformly: no delta, whitespace-only delta(s), and whitespace
+        chunks followed (or not) by real text.
+        """
+        return bool(self._final_text_after_tool and self._final_assistant_text.strip())
 
     async def _run_native(self) -> None:
         """Push consumer for native provider transports.
@@ -648,13 +657,19 @@ class NativeConsumerMixin(SessionState):
                         event.payload.setdefault("final_text", final)
                     if self._goal_protocol_sanitizer is None:
                         # Defense in depth: if the provider result carried the
-                        # authoritative final answer but the streamed text is
-                        # materially shorter (final deltas/snapshot were lost),
-                        # warn and deliver the authoritative text. When a tool
-                        # ran and NO post-tool final text streamed at all, the
-                        # authoritative result is the answer outright.
+                        # authoritative final answer but the streamed final text
+                        # is missing or materially shorter (lost final
+                        # deltas/snapshot, whitespace-only post-tool text), warn
+                        # and deliver the authoritative text. "Absent" is decided
+                        # by ONE predicate (_has_substantive_post_tool_final: a
+                        # tool ran AND the post-tool buffer is non-empty after a
+                        # Unicode strip), shared by every shape: no delta,
+                        # whitespace-only / chunked whitespace, or whitespace
+                        # chunks followed by a real answer.
                         self._apply_authoritative_result_text(
-                            event, post_tool_final_absent=self._final_text_after_tool
+                            event,
+                            post_tool_final_absent=self._final_text_after_tool
+                            and not self._has_substantive_post_tool_final(),
                         )
                     else:
                         # The private authoritative key must never be persisted

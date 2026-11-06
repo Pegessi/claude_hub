@@ -6698,6 +6698,247 @@ async def test_no_post_tool_final_uses_authoritative_result_keeping_commentary()
         await tailer.stop()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "post_tool_chunks",
+    [
+        [],  # no final delta at all (Codex round 2)
+        ["   "],  # single whitespace chunk (Codex round 3)
+        [" ", "\n", "\t", " ", "  "],  # chunked incl. NBSP + narrow NBSP
+        ["  ", " \n\t "],  # multi-char whitespace chunks
+        [" ", "\n", "**结论"],  # whitespace chunks BEFORE a real short answer
+    ],
+)
+async def test_post_tool_non_substantive_text_uses_authoritative_result(
+    post_tool_chunks: List[str],
+) -> None:
+    """Class-level fix (Codex round 3): one predicate decides whether a
+    substantive post-tool answer exists (Unicode-stripped non-empty). Whitespace
+    alone — absent, single, chunked, NBSP, or whitespace before a tiny real
+    answer that is still material — must never be delivered as the answer; the
+    successful authoritative ``result`` is. Multi-tool shape included.
+
+    Cases 0-3: the substantive answer is absent/empty (strip == '') -> adopted
+    regardless of length thresholds. Case 4: a real 4-char answer exists but is
+    still materially short -> the threshold backstop substitutes it. In all
+    cases Feishu (final_text) gets the authoritative answer and the pre-tool
+    commentary is preserved in assistant_text.
+    """
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("commentary, two tools, answer", [], client_turn_id="turn-cls")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+
+        commentary = "C" * 560
+        authoritative = "**结论**：" + "这是完整权威的最终答复内容。" * 12
+        assert len(authoritative) == 175
+
+        # Pre-tool commentary, then TWO tools, then the post-tool chunks.
+        transport._records.put_nowait(_message_start("msg-comment"))
+        transport._records.put_nowait(_text_delta(commentary))
+        transport._records.put_nowait(_message_stop())
+        transport._records.put_nowait(_tool_use_record("msg-tool-1", "read-1"))
+        transport._records.put_nowait(_tool_result_record("read-1", "a"))
+        transport._records.put_nowait(_tool_use_record("msg-tool-2", "read-2"))
+        transport._records.put_nowait(_tool_result_record("read-2", "b"))
+        transport._records.put_nowait(_message_start("msg-final"))
+        for chunk in post_tool_chunks:
+            transport._records.put_nowait(_text_delta(chunk))
+        transport._records.put_nowait(_message_stop())
+        transport._records.put_nowait(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": authoritative,
+                "usage": {"input": 10, "output": 400, "total": 400},
+            }
+        )
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "completed"
+        # Feishu answers-last deliverable is the authoritative 175 chars, never
+        # the 560-char commentary or whitespace.
+        assert terminal.payload["final_text"] == authoritative
+        # Journal whole text keeps the commentary and ends with the answer.
+        whole = terminal.payload["assistant_text"]
+        assert whole.startswith(commentary)
+        assert whole.endswith(authoritative)
+        assert not whole.endswith("**结论") or authoritative.startswith("**结论")
+        mismatch = terminal.payload["final_text_mismatch"]
+        assert mismatch["authoritative_len"] == 175
+        assert "_authoritative_result_text" not in terminal.payload
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_clean_eof_open_final_message_with_only_whitespace_is_retryable() -> None:
+    """Class-level fix: a clean EOF with an OPEN final message that streamed only
+    whitespace (no message_stop/result) is still an incomplete generation. It
+    fail-closes as a single retryable failure and never carries the whitespace
+    or pre-tool commentary as the answer."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    transport.exit_error = None
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("answer after tool", [], client_turn_id="turn-ws-eof")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+
+        commentary = "pre-tool commentary"
+        transport._records.put_nowait(_message_start("msg-comment"))
+        transport._records.put_nowait(_text_delta(commentary))
+        transport._records.put_nowait(_message_stop())
+        transport._records.put_nowait(_tool_use_record("msg-tool", "read-1"))
+        transport._records.put_nowait(_tool_result_record("read-1"))
+        # Final message opens, streams only whitespace (chunked, incl. NBSP),
+        # then stdout ends with no message_stop/result (clean EOF).
+        transport._records.put_nowait(_message_start("msg-final"))
+        transport._records.put_nowait(_text_delta("  \n"))
+        transport._records.put_nowait(_text_delta(" "))
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "failed"
+        assert terminal.payload.get("retryable") is True
+        assert "assistant_text" not in terminal.payload
+        assert "final_text" not in terminal.payload
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_complete_substantive_answer_not_overridden_or_marked() -> None:
+    """Adversarial: a normal turn streams a full substantive post-tool answer
+    matching the authoritative result. The backstop must NOT substitute and must
+    NOT add a mismatch marker (no false positive), and commentary is untouched."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("answer fully", [], client_turn_id="turn-ok")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+
+        commentary = "我先看一下。"
+        answer = "**结论**：" + "完整答复内容。" * 40
+        transport._records.put_nowait(_message_start("msg-comment"))
+        transport._records.put_nowait(_text_delta(commentary))
+        transport._records.put_nowait(_message_stop())
+        transport._records.put_nowait(_tool_use_record("msg-tool", "read-1"))
+        transport._records.put_nowait(_tool_result_record("read-1"))
+        transport._records.put_nowait(_message_start("msg-final"))
+        transport._records.put_nowait(_text_delta(answer))
+        transport._records.put_nowait(_message_stop())
+        transport._records.put_nowait(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": answer,
+                "usage": {"input": 1, "output": 200, "total": 200},
+            }
+        )
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "completed"
+        assert terminal.payload["final_text"] == answer
+        assert "final_text_mismatch" not in terminal.payload
+        assert "_authoritative_result_text" not in terminal.payload
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_failed_result_with_whitespace_post_tool_is_not_adopted_completed() -> None:
+    """Adversarial: a tool ran and only whitespace streamed after it, then the
+    provider result is an ERROR. There is no successful authoritative answer to
+    adopt, so the turn must surface as failed (never the commentary/whitespace,
+    and not a synthesized completed answer)."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    transport.exit_error = None
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("then it errors", [], client_turn_id="turn-err")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+
+        transport._records.put_nowait(_message_start("msg-comment"))
+        transport._records.put_nowait(_text_delta("pre-tool commentary"))
+        transport._records.put_nowait(_message_stop())
+        transport._records.put_nowait(_tool_use_record("msg-tool", "read-1"))
+        transport._records.put_nowait(_tool_result_record("read-1"))
+        transport._records.put_nowait(_message_start("msg-final"))
+        transport._records.put_nowait(_text_delta(" \n"))
+        transport._records.put_nowait(_message_stop())
+        # Failed result carries no usable authoritative answer.
+        transport._records.put_nowait(
+            {
+                "type": "result",
+                "subtype": "error",
+                "is_error": True,
+                "result": "upstream failure",
+                "usage": {"input": 1, "output": 5, "total": 5},
+            }
+        )
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "failed"
+        assert terminal.payload.get("final_text") != "upstream failure"
+        assert "final_text_mismatch" not in terminal.payload
+    finally:
+        await tailer.stop()
+
+
 def test_claude_adapter_tracks_open_assistant_message_lifecycle() -> None:
     """AC6(e): per-message open count isolates a closed tool message from a
     still-open final message, and resets on the result record."""
