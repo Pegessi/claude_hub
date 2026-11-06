@@ -604,7 +604,15 @@ class NativeConsumerMixin(SessionState):
                 elif event.type == AgentStreamEventType.TOOL_CALL_STARTED and not event.payload.get(
                     "subagent_thread"
                 ):
+                    # A new tool call moves the "final answer" boundary to
+                    # whatever streams AFTER it. Drop the prior buffer (pre-tool
+                    # commentary, or an earlier tool's text): if no text follows
+                    # this tool, an empty buffer means "no post-tool answer yet",
+                    # never "the commentary is the answer". Leaving the stale
+                    # text here used to make a zero-post-tool-delta turn deliver
+                    # the pre-tool commentary as final_text.
                     self._final_text_after_tool = True
+                    self._final_assistant_text = ""
                 goal_protocol_text: Optional[str] = None
                 if is_turn_completed and self._assistant_text:
                     if self._goal_protocol_sanitizer is None:
@@ -642,8 +650,12 @@ class NativeConsumerMixin(SessionState):
                         # Defense in depth: if the provider result carried the
                         # authoritative final answer but the streamed text is
                         # materially shorter (final deltas/snapshot were lost),
-                        # warn and deliver the authoritative text.
-                        self._apply_authoritative_result_text(event)
+                        # warn and deliver the authoritative text. When a tool
+                        # ran and NO post-tool final text streamed at all, the
+                        # authoritative result is the answer outright.
+                        self._apply_authoritative_result_text(
+                            event, post_tool_final_absent=self._final_text_after_tool
+                        )
                     else:
                         # The private authoritative key must never be persisted
                         # on a Goal turn either.

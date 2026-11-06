@@ -6630,6 +6630,74 @@ async def test_result_backstop_compares_delivered_final_not_whole_with_commentar
         await tailer.stop()
 
 
+@pytest.mark.asyncio
+async def test_no_post_tool_final_uses_authoritative_result_keeping_commentary() -> None:
+    """P1 round 2 (Codex w-result-dot-26052392): the turn streams 260 chars of
+    pre-tool commentary, runs a tool, then produces ZERO post-tool final deltas
+    and no final snapshot; the successful ``result`` carries the 175-char answer.
+    The stale commentary must NOT be delivered as final_text, and the 260-vs-175
+    negative length gap must NOT suppress the fix. The delivered answer is the
+    authoritative 175 chars (final_text), while the commentary is preserved ahead
+    of it in assistant_text (journal)."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("commentary, tool, no final text", [], client_turn_id="turn-p1b")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+
+        commentary = "C" * 260
+        authoritative = "**结论**：" + "这是完整权威的最终答复内容。" * 12
+        assert len(commentary) == 260
+        assert len(authoritative) == 175
+
+        # Pre-tool commentary message (closed), then a tool round-trip.
+        transport._records.put_nowait(_message_start("msg-comment"))
+        transport._records.put_nowait(_text_delta(commentary))
+        transport._records.put_nowait(_message_stop())
+        transport._records.put_nowait(_tool_use_record("msg-tool", "read-1"))
+        transport._records.put_nowait(_tool_result_record("read-1"))
+        # NO final message_start/delta/snapshot after the tool — zero post-tool
+        # final text. Only the authoritative result record.
+        transport._records.put_nowait(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": authoritative,
+                "usage": {"input": 10, "output": 400, "total": 400},
+            }
+        )
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "completed"
+        # Dispatch (answers-last) returns final_text: the 175-char answer, not
+        # the 260-char commentary.
+        assert terminal.payload["final_text"] == authoritative
+        # The journal-facing whole text keeps the commentary then the answer.
+        assert terminal.payload["assistant_text"] == commentary + authoritative
+        assert terminal.payload["assistant_text"].startswith(commentary)
+        mismatch = terminal.payload["final_text_mismatch"]
+        assert mismatch["post_tool_final_absent"] is True
+        assert mismatch["delivered_len"] == 0
+        assert mismatch["authoritative_len"] == 175
+        assert "_authoritative_result_text" not in terminal.payload
+    finally:
+        await tailer.stop()
+
+
 def test_claude_adapter_tracks_open_assistant_message_lifecycle() -> None:
     """AC6(e): per-message open count isolates a closed tool message from a
     still-open final message, and resets on the result record."""

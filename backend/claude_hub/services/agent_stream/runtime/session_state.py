@@ -371,7 +371,9 @@ class SessionState(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def _apply_authoritative_result_text(self, event: AgentStreamEvent) -> None:
+    def _apply_authoritative_result_text(
+        self, event: AgentStreamEvent, *, post_tool_final_absent: bool = False
+    ) -> None:
         raise NotImplementedError()
 
     @abstractmethod
