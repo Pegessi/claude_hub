@@ -5,7 +5,7 @@
     class="subagent-dock"
     :class="{ 'is-rail': railMode }"
     data-testid="subagent-dock"
-    @keydown.esc.stop="close(true)"
+    @keydown.esc="onEscape"
   >
     <button
       ref="triggerRef"
@@ -15,7 +15,7 @@
       data-testid="subagent-dock-pill"
       :aria-haspopup="railFits ? undefined : 'dialog'"
       :aria-expanded="railFits ? railMode : open"
-      :aria-controls="railFits ? railId : popoverId"
+      :aria-controls="railMode ? railId : (open ? popoverId : undefined)"
       :aria-label="`Sub-agents: ${label}`"
       :title="railFits ? (railMode ? 'Collapse sub-agents' : 'Show sub-agents') : undefined"
       @click.stop="toggle"
@@ -181,6 +181,14 @@ function close(restoreFocus: boolean) {
   if (restoreFocus) void nextTick(() => triggerRef.value?.focus())
 }
 
+// Esc only belongs to the dock while its popover is open; otherwise (rail or
+// closed pill) let it reach ancestor handlers such as stopping the turn.
+function onEscape(event: KeyboardEvent) {
+  if (!open.value) return
+  event.stopPropagation()
+  close(true)
+}
+
 function onJump(chip: SubagentJumpChip) {
   close(false)
   emit('jump', chip)
@@ -219,7 +227,8 @@ function observePane() {
   if (!pane || pane === observedPane) return
   observer?.disconnect()
   observedPane = pane
-  paneWidth.value = pane.getBoundingClientRect().width
+  // clientWidth matches the ResizeObserver contentRect (no border) used below.
+  paneWidth.value = pane.clientWidth
   observer = new ResizeObserver(entries => {
     for (const entry of entries) paneWidth.value = entry.contentRect.width
   })

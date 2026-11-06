@@ -1,5 +1,8 @@
 # Sub-agent workspace attribution and parent-Chat jump tips (2026-11-03)
 
+> Superseded 2026-11-06: `ChatSubagentJumpCard` was replaced by the Agents dock
+> (top-right pill / wide-pane rail, mobile bar + sheet). See CHANGELOG.
+
 InfoWall P0 d2627d2f: 「Subagent 默认归属对应 Agent Workspace 并增加类 Codex
 跳转 Tips 卡片」。Branch `feat/subagent-workspace-and-tips` from main `dd681a7`.
 

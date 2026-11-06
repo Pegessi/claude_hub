@@ -50,7 +50,10 @@ test('dock pill is an accessible popover with Esc and outside-click dismissal', 
   assert.match(dockPill, /v-if="counts\.total > 0"/)
   assert.match(dockPill, /:aria-haspopup="railFits \? undefined : 'dialog'"/)
   assert.match(dockPill, /:aria-expanded="railFits \? railMode : open"/)
-  assert.match(dockPill, /@keydown\.esc\.stop="close\(true\)"/)
+  assert.match(dockPill, /@keydown\.esc="onEscape"/)
+  // Esc is only consumed while the popover is open.
+  assert.match(dockPill, /if \(!open\.value\) return\s+event\.stopPropagation\(\)/)
+  assert.match(dockPill, /:aria-controls="railMode \? railId : \(open \? popoverId : undefined\)"/)
   assert.match(dockPill, /addEventListener\('pointerdown'/)
   assert.match(dockPill, /prefers-reduced-motion: reduce/)
 })

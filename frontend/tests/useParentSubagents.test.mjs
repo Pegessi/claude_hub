@@ -83,11 +83,12 @@ function makeHarness() {
       return true
     },
   })
-  const appStore = {
+  const appStore = vue.reactive({
+    mode: 'terminal',
     setMode(mode) {
       calls.push(['setMode', mode])
     },
-  }
+  })
   globalThis.__subagentHarness = { terminalStore, appStore, calls }
   return { terminalStore, appStore, calls }
 }
@@ -210,4 +211,24 @@ test('switching parent tab resets and refetches rows', async () => {
   await Promise.resolve()
   const lastUrl = new URL(requests.at(-1), 'http://local')
   assert.equal(lastUrl.searchParams.get('parent_tab_id'), 'other-parent')
+})
+
+test('polling pauses outside terminal mode and refetches on return', async () => {
+  const harness = makeHarness()
+  const requests = stubFetch([{ prefix: '/api/subagents', rows: [summaryRow()] }])
+  const controller = useParentSubagents(vue.ref('parent-tab'))
+  await controller.refresh()
+  assert.equal(requests.length, 1)
+
+  harness.appStore.mode = 'workspace'
+  await vue.nextTick()
+  assert.equal(requests.length, 1)
+
+  // Coming back must not wait a whole poll interval for fresh rows.
+  harness.appStore.mode = 'terminal'
+  await vue.nextTick()
+  assert.equal(requests.length, 2)
+  // The resumed interval belongs to this controller; leave no timer behind.
+  harness.appStore.mode = 'workspace'
+  await vue.nextTick()
 })
