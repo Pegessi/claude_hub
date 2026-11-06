@@ -357,19 +357,17 @@ class WatchdogMixin(SessionState):
     def _apply_authoritative_result_text(self, event: AgentStreamEvent) -> None:
         """Delivery-length backstop (AC4) for a real ``result`` completion.
 
-        The provider ``result`` record carries the authoritative final answer in
-        a private ``_authoritative_result_text`` payload key (popped here so it
-        is never persisted). When the streamed whole-turn text is materially
-        shorter than it (configurable thresholds), log a structured warning and
-        substitute the authoritative answer so the external bridge and journal
-        deliver complete text.
+        The comparison is against the text actually delivered as the ANSWER:
+        ``final_text`` when the turn had pre-tool commentary (the answers-last
+        Dot/Feishu deliverable), otherwise ``assistant_text``. Comparing the whole
+        turn text (commentary + short final) against the authoritative answer
+        hides a truncated final: a 524-char whole whose delivered final is only
+        4 chars (``**结论``) versus a 175-char authoritative result used to pass.
 
-        The whole-turn ``assistant_text`` is replaced only when it is a strict
-        prefix of the authoritative answer (a pure streaming cut — the Dot shape,
-        where no pre-tool commentary text is emitted). When the turn also
-        contained pre-tool commentary, ``assistant_text`` is preserved and only
-        ``final_text`` (what the answers-last Dot channel delivers) is replaced,
-        so commentary is never dropped.
+        When pre-tool commentary is present it is preserved: the whole-turn
+        ``assistant_text`` (which the journal records) is rebuilt as
+        ``commentary + authoritative`` and ``final_text`` becomes authoritative,
+        so neither Feishu nor the journal keeps the 4-char prefix.
         """
         authoritative = event.payload.pop("_authoritative_result_text", None)
         if not isinstance(authoritative, str) or not authoritative.strip():
@@ -379,8 +377,17 @@ class WatchdogMixin(SessionState):
             return
         whole = event.payload.get("assistant_text")
         whole_s = whole.strip() if isinstance(whole, str) else ""
-        gap = len(auth) - len(whole_s)
-        ratio = (len(whole_s) / len(auth)) if auth else 1.0
+        final = event.payload.get("final_text")
+        # The text the answers-last channel actually returns as the answer is the
+        # post-tool ``final_text`` when present, else the whole-turn text.
+        if isinstance(final, str) and final.strip():
+            has_final = True
+            delivered_s = final.strip()
+        else:
+            has_final = False
+            delivered_s = whole_s
+        gap = len(auth) - len(delivered_s)
+        ratio = (len(delivered_s) / len(auth)) if auth else 1.0
         if (
             gap < self._deps.FINAL_TEXT_MIN_GAP_CHARS
             or ratio > self._deps.FINAL_TEXT_MIN_DELIVERY_RATIO
@@ -390,27 +397,27 @@ class WatchdogMixin(SessionState):
             "final_text_mismatch session=%s authoritative_len=%d delivered_len=%d ratio=%.3f",
             self.session_id,
             len(auth),
-            len(whole_s),
+            len(delivered_s),
             ratio,
         )
-        if not whole_s:
-            # Nothing streamed to preserve (e.g. backfill/final-only result):
-            # the authoritative answer becomes the whole-turn text so both the
-            # external bridge and the Dot journal see it.
-            event.payload["assistant_text"] = authoritative
-            event.payload.pop("final_text", None)
-        elif auth.startswith(whole_s):
-            # Pure streaming cut of the final-answer buffer: the persisted
-            # assistant_text (also what the Dot journal records) is the prefix.
-            event.payload["assistant_text"] = authoritative
-            event.payload.pop("final_text", None)
-        else:
-            # Pre-tool commentary present: keep the whole-turn text but make the
-            # answers-last final answer authoritative.
+        if has_final:
+            # Pre-tool commentary + a short post-tool final answer. Preserve the
+            # commentary and replace only the final answer, in both the
+            # answers-last ``final_text`` and the whole-turn ``assistant_text``
+            # the Dot journal records.
             event.payload["final_text"] = authoritative
+            if whole_s.endswith(delivered_s):
+                commentary = whole_s[: len(whole_s) - len(delivered_s)]
+                event.payload["assistant_text"] = commentary + authoritative
+        else:
+            # No separate final answer (final-only, or answer with no pre-tool
+            # commentary): the streamed whole text is a pure prefix of the
+            # authoritative answer (or empty). Replace it outright.
+            event.payload["assistant_text"] = authoritative
+            event.payload.pop("final_text", None)
         event.payload["final_text_mismatch"] = {
             "authoritative_len": len(auth),
-            "delivered_len": len(whole_s),
+            "delivered_len": len(delivered_s),
             "ratio": round(ratio, 4),
             "source": "result",
         }

@@ -137,3 +137,21 @@ delta（`native_consumer.py::_note_final_text`）提前清零，于是哪怕只�
   失败锁段（turn 已终态后）调用；测试断言下一个 turn 的 lifecycle 为 `(False,0)`。
 - 非阻塞 N3（工具前注释 + 截断的混合回合 journal 留注释+前缀、飞书得全文）与 N4
   （任何 delta 之前被切 → 普通不可重试 failed，本就无前缀）经评审确认可接受，保持。
+
+## Codex 交叉验证 P1 修复（用户拍板 A，cycle-5）
+
+Codex 任务 2cf145bd（卡片 w-result-dot-26052392-main-8eb5fa）发现 AC4 兜底比错对象：
+回合流出 520 字工具前说明 + 工具 + 仅 4 字最终回复（`**结论`）并正常闭合，`result`
+带 175 字权威答复。旧逻辑用整段 `assistant_text`（524 字）与权威 175 字比，差值为负
+→ 跳过替换/告警，于是 4 字回复仍以 completed 外发。
+
+- 改为比较**实际投递的最终答复**：有 post-tool `final_text` 时以其长度为准，否则用
+  `assistant_text`；阈值仍 80/0.5/40。命中时：有 commentary 则 `final_text` 置权威、
+  且 `assistant_text` 重建为 `commentary + authoritative`（journal 也得到修正、不丢
+  说明）；无 commentary 则直接整体替换。`final_text_mismatch.delivered_len` 记实际
+  投递长度。
+- 新增确定性回归 `test_result_backstop_compares_delivered_final_not_whole_with_commentary`
+  （520 commentary + 4 字 final vs 175 权威，断言 final_text/assistant_text 均为权威、
+  commentary 保留）；对 26052392 运行确证 `final_text=='**结论'`（失败），修复后通过。
+- 复跑（单条前台阻塞命令）：test_agent_stream.py 188 passed；coalescer/native/
+  merge_contract 209 passed；mypy/black/isort 通过。
