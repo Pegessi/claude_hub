@@ -380,4 +380,35 @@ function onAgentTypeChange(value: string) {
   white-space: nowrap;
   flex-shrink: 0;
 }
+
+/* `tool-button` is scoped in its owners, so the modal variant styles itself. */
+.env-manage-button.tool-button {
+  align-self: stretch;
+  padding: 0 14px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-raised);
+  color: var(--ch-color-text);
+  font: inherit;
+  font-size: var(--ch-font-size-sm, 13px);
+  cursor: pointer;
+  transition:
+    background-color var(--ch-motion-fast),
+    border-color var(--ch-motion-fast);
+}
+
+.env-manage-button.tool-button:hover:not(:disabled) {
+  border-color: var(--ch-color-border-strong, var(--ch-color-border));
+  background: var(--ch-color-surface-hover, var(--ch-color-surface-raised));
+}
+
+.env-manage-button.tool-button:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring);
+  outline-offset: 1px;
+}
+
+.env-manage-button.tool-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 </style>
