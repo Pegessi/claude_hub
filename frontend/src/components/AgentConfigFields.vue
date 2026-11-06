@@ -381,8 +381,8 @@ function onAgentTypeChange(value: string) {
   flex-shrink: 0;
 }
 
-/* `tool-button` is scoped in its owners, so the modal variant styles itself. */
-.env-manage-button.tool-button {
+/* No stylesheet defines `.btn`, so the form variant styles itself. */
+.env-manage-button.btn {
   align-self: stretch;
   padding: 0 14px;
   border: 1px solid var(--ch-color-border);
@@ -397,17 +397,17 @@ function onAgentTypeChange(value: string) {
     border-color var(--ch-motion-fast);
 }
 
-.env-manage-button.tool-button:hover:not(:disabled) {
+.env-manage-button.btn:hover:not(:disabled) {
   border-color: var(--ch-color-border-strong, var(--ch-color-border));
   background: var(--ch-color-surface-hover, var(--ch-color-surface-raised));
 }
 
-.env-manage-button.tool-button:focus-visible {
+.env-manage-button.btn:focus-visible {
   outline: 2px solid var(--ch-color-accent-ring);
   outline-offset: 1px;
 }
 
-.env-manage-button.tool-button:disabled {
+.env-manage-button.btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
