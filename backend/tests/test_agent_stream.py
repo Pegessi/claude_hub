@@ -6553,6 +6553,83 @@ async def test_native_result_authoritative_text_below_threshold_kept_as_is() -> 
         await tailer.stop()
 
 
+@pytest.mark.asyncio
+async def test_result_backstop_compares_delivered_final_not_whole_with_commentary() -> None:
+    """P1 (Codex cross-validation w-result-dot-26052392): the turn streams a
+    long pre-tool commentary, runs a tool, then only a 4-char post-tool final
+    (``**结论``) that closes normally, while the ``result`` record carries the
+    authoritative 175-char answer. The backstop must compare the DELIVERED
+    ``final_text`` (4 chars), not the whole ``assistant_text`` (commentary + 4 =
+    524 chars, which used to make the gap negative and skip the fix). The
+    answers-last final becomes authoritative and the commentary is preserved in
+    ``assistant_text`` so the journal is corrected too."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("commentary then tool then answer", [], client_turn_id="turn-p1")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+
+        commentary = "C" * 520
+        truncated_final = "**结论"  # 4 chars, the observed truncation
+        authoritative = "**结论**：" + "这是完整权威的最终答复内容。" * 12
+        assert len(authoritative) == 175, len(authoritative)
+        assert len(truncated_final) == 4
+
+        # Pre-tool commentary message (closed).
+        transport._records.put_nowait(_message_start("msg-comment"))
+        transport._records.put_nowait(_text_delta(commentary))
+        transport._records.put_nowait(_message_stop())
+        # Tool round-trip.
+        transport._records.put_nowait(_tool_use_record("msg-tool", "read-1"))
+        transport._records.put_nowait(_tool_result_record("read-1"))
+        # Final message closes normally with only the 4-char prefix streamed.
+        transport._records.put_nowait(_message_start("msg-final"))
+        transport._records.put_nowait(_text_delta(truncated_final))
+        transport._records.put_nowait(_message_stop())
+        # The authoritative result carries the full 175-char answer.
+        transport._records.put_nowait(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": authoritative,
+                "usage": {"input": 10, "output": 500, "total": 500},
+            }
+        )
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "completed"
+        # The answers-last deliverable (Feishu) is the authoritative answer...
+        assert terminal.payload["final_text"] == authoritative
+        # ...and the whole-turn text the Dot journal records keeps the
+        # commentary but ends with the authoritative answer, not the 4-char
+        # prefix.
+        whole = terminal.payload["assistant_text"]
+        assert whole.endswith(authoritative)
+        assert whole.startswith(commentary)
+        assert not whole.endswith(truncated_final)
+        assert whole == commentary + authoritative
+        mismatch = terminal.payload["final_text_mismatch"]
+        assert mismatch["delivered_len"] == 4
+        assert mismatch["authoritative_len"] == 175
+        assert "_authoritative_result_text" not in terminal.payload
+    finally:
+        await tailer.stop()
+
+
 def test_claude_adapter_tracks_open_assistant_message_lifecycle() -> None:
     """AC6(e): per-message open count isolates a closed tool message from a
     still-open final message, and resets on the result record."""
