@@ -155,3 +155,25 @@ Codex 任务 2cf145bd（卡片 w-result-dot-26052392-main-8eb5fa）发现 AC4 �
   commentary 保留）；对 26052392 运行确证 `final_text=='**结论'`（失败），修复后通过。
 - 复跑（单条前台阻塞命令）：test_agent_stream.py 188 passed；coalescer/native/
   merge_contract 209 passed；mypy/black/isort 通过。
+
+## Codex 第二轮交叉验证 P1 修复（cycle-6）
+
+卡片 w-result-dot-26052392 第二轮：工具后最终答复 **0 个增量且无快照**时，
+`_final_text_after_tool=True` 却未清旧的 `_final_assistant_text`（仅在首段文本到来时
+于 `_note_final_text` 清），于是完成块把工具前 260 字说明当成 `final_text`；兜底用
+260 对权威 175 得负差而提前返回，Dot 实际投递 260 字旧说明且标 completed。
+
+- TOOL_CALL_STARTED 处即把 `_final_assistant_text` 清空并保持
+  `_final_text_after_tool=True`（边界从"有工具"推进到"工具后是否已有文本"，避免
+  陈旧说明被当作答案）。
+- `_apply_authoritative_result_text(event, post_tool_final_absent=...)`：工具后无最终
+  文本时**忽略长度阈值**，直接以成功的权威 result 作为最终答复：`final_text=权威`，
+  且 `assistant_text = 工具前说明 + 权威`（保留说明、修正 journal）；marker 增
+  `post_tool_final_absent=true, delivered_len=0`。其余情形仍走 80/0.5/40 阈值。
+- 新增零增量回归 `test_no_post_tool_final_uses_authoritative_result_keeping_commentary`
+  （260 说明 + 工具 + 0 最终增量 + 175 result → final_text=175、assistant_text=
+  260+175）；对 91efbaf8 运行确证失败，修复后通过。
+- 复跑（单条前台阻塞）：test_agent_stream.py 189 passed；coalescer/native/
+  merge_contract 209；mypy（全后端，仅既有 check_verify_runtime 3.11 报错）、black、
+  isort 通过。说明：test_native_goal_transport.py 两个 stop-handoff 用例在 pristine
+  base 610bec50 上同样失败（已知时序 flake，非本次回归）。

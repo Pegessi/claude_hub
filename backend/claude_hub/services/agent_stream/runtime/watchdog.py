@@ -354,7 +354,9 @@ class WatchdogMixin(SessionState):
         saw_scope, open_messages = self.adapter.provider_message_lifecycle(ctx)
         return bool(saw_scope and open_messages > 0)
 
-    def _apply_authoritative_result_text(self, event: AgentStreamEvent) -> None:
+    def _apply_authoritative_result_text(
+        self, event: AgentStreamEvent, *, post_tool_final_absent: bool = False
+    ) -> None:
         """Delivery-length backstop (AC4) for a real ``result`` completion.
 
         The comparison is against the text actually delivered as the ANSWER:
@@ -364,28 +366,67 @@ class WatchdogMixin(SessionState):
         hides a truncated final: a 524-char whole whose delivered final is only
         4 chars (``**结论``) versus a 175-char authoritative result used to pass.
 
-        When pre-tool commentary is present it is preserved: the whole-turn
-        ``assistant_text`` (which the journal records) is rebuilt as
-        ``commentary + authoritative`` and ``final_text`` becomes authoritative,
-        so neither Feishu nor the journal keeps the 4-char prefix.
+        ``post_tool_final_absent`` means a tool ran but NO post-tool final text
+        streamed (zero deltas, no snapshot). The buffered whole text is then only
+        pre-tool commentary, never the answer, so the successful authoritative
+        ``result`` is adopted as the final answer regardless of the length
+        thresholds; the commentary is still preserved ahead of it in
+        ``assistant_text`` (what the journal records).
+
+        Otherwise, when a short final answer did stream, the thresholds apply and
+        the commentary is preserved: ``final_text`` becomes authoritative and
+        ``assistant_text`` is rebuilt as ``commentary + authoritative``.
         """
         authoritative = event.payload.pop("_authoritative_result_text", None)
         if not isinstance(authoritative, str) or not authoritative.strip():
             return
         auth = authoritative.strip()
-        if len(auth) < self._deps.FINAL_TEXT_MIN_AUTHORITATIVE_CHARS:
-            return
         whole = event.payload.get("assistant_text")
         whole_s = whole.strip() if isinstance(whole, str) else ""
         final = event.payload.get("final_text")
         # The text the answers-last channel actually returns as the answer is the
-        # post-tool ``final_text`` when present, else the whole-turn text.
-        if isinstance(final, str) and final.strip():
+        # post-tool ``final_text`` when present, else the whole-turn text. When a
+        # tool ran with no post-tool final, the delivered answer length is zero
+        # regardless of how much pre-tool commentary was streamed.
+        if post_tool_final_absent:
+            has_final = False
+            delivered_s = ""
+        elif isinstance(final, str) and final.strip():
             has_final = True
             delivered_s = final.strip()
         else:
             has_final = False
             delivered_s = whole_s
+
+        def _emit_marker(ratio: float) -> None:
+            event.payload["final_text_mismatch"] = {
+                "authoritative_len": len(auth),
+                "delivered_len": len(delivered_s),
+                "ratio": round(ratio, 4),
+                "source": "result",
+                "post_tool_final_absent": post_tool_final_absent,
+            }
+
+        if post_tool_final_absent:
+            # No post-tool answer streamed at all; the result is the answer. Do
+            # not apply the length thresholds (the alternative is pre-tool
+            # commentary, which is definitively not the answer).
+            logger.warning(
+                "final_text_missing_after_tool session=%s authoritative_len=%d commentary_len=%d",
+                self.session_id,
+                len(auth),
+                len(whole_s),
+            )
+            event.payload["final_text"] = authoritative
+            if whole_s:
+                event.payload["assistant_text"] = whole_s + authoritative
+            else:
+                event.payload["assistant_text"] = authoritative
+            _emit_marker(0.0)
+            return
+
+        if len(auth) < self._deps.FINAL_TEXT_MIN_AUTHORITATIVE_CHARS:
+            return
         gap = len(auth) - len(delivered_s)
         ratio = (len(delivered_s) / len(auth)) if auth else 1.0
         if (
@@ -415,12 +456,7 @@ class WatchdogMixin(SessionState):
             # authoritative answer (or empty). Replace it outright.
             event.payload["assistant_text"] = authoritative
             event.payload.pop("final_text", None)
-        event.payload["final_text_mismatch"] = {
-            "authoritative_len": len(auth),
-            "delivered_len": len(delivered_s),
-            "ratio": round(ratio, 4),
-            "source": "result",
-        }
+        _emit_marker(ratio)
 
     def _record_watchdog_activity(self, event: AgentStreamEvent) -> None:
         """Track conditions that legitimately pause model streaming."""
