@@ -132,10 +132,10 @@ function submit() {
 </script>
 
 <style scoped>
-.goal-dialog-backdrop { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 16px; background: rgb(0 0 0 / 55%); }
-.goal-dialog { display: grid; gap: 16px; width: min(560px, 100%); max-height: calc(100dvh - 32px); padding: 20px; overflow-y: auto; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-lg, 12px); background: var(--ch-color-surface); box-shadow: var(--ch-shadow-lg, 0 20px 50px rgb(0 0 0 / 35%)); }
+.goal-dialog-backdrop { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 16px; }
+.goal-dialog { display: grid; gap: 16px; width: min(560px, 100%); max-height: calc(100dvh - 32px); padding: 20px; overflow-y: auto; border: 1px solid var(--ch-color-border); background: var(--ch-color-surface); }
 h2, p { margin: 0; }
-h2 { font-size: 18px; }
+
 p { color: var(--ch-color-text-muted); }
 label { display: grid; gap: 6px; font-weight: 600; }
 textarea { box-sizing: border-box; width: 100%; padding: 9px 10px; color: var(--ch-color-text); background: var(--ch-color-app-bg); border: 1px solid var(--ch-color-border-strong); border-radius: var(--ch-radius-sm); font: inherit; }

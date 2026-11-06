@@ -1,6 +1,7 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import '@/features/app-shell/styles/theme.css'
+import '@/features/app-shell/styles/overlays.css'
 import type { ClaudeHubNamespace } from '@/types'
 import { rawHtmlPreviewPath } from '@/utils/markdownPreview'
 

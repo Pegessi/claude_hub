@@ -8,13 +8,12 @@
   padding: 0;
   overflow: hidden;
   border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-xl);
+  border-radius: var(--ch-radius-overlay);
   background: var(--ch-color-surface);
   color: var(--ch-color-text);
   box-shadow: var(--ch-shadow-dialog);
 }
 
-.bot-pool::backdrop { background: var(--ch-color-overlay); }
 
 .bot-pool__header {
   display: flex;

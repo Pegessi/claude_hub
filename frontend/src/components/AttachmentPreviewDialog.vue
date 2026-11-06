@@ -86,8 +86,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.attachment-preview-dialog { padding: 0; border: 1px solid var(--ch-color-border); border-radius: 16px; margin: auto; width: min(1120px, calc(100vw - 48px)); height: min(900px, calc(100dvh - 48px)); max-width: none; max-height: none; overflow: hidden; background: var(--ch-color-main-bg); color: var(--ch-color-text); box-shadow: 0 24px 80px rgb(0 0 0 / 35%); }
-.attachment-preview-dialog::backdrop { background: rgb(0 0 0 / 65%); }
+.attachment-preview-dialog { padding: 0; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-overlay); margin: auto; width: min(1120px, calc(100vw - 48px)); height: min(900px, calc(100dvh - 48px)); max-width: none; max-height: none; overflow: hidden; background: var(--ch-color-main-bg); color: var(--ch-color-text); box-shadow: var(--ch-shadow-lg); }
 @media (max-width: 600px) {
   .attachment-preview-dialog { inset: 0; margin: 0; width: 100%; height: 100dvh; border: 0; border-radius: 0; }
 }

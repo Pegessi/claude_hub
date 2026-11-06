@@ -551,8 +551,6 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   padding: 20px;
-  background: rgba(15, 23, 42, 0.48);
-  backdrop-filter: blur(2px);
 }
 
 .quota-modal {

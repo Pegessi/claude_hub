@@ -1,0 +1,104 @@
+/*
+ * Shared overlay surface language: dialogs, bottom sheets and popovers.
+ *
+ * Many dialogs own their layout in scoped styles but historically disagreed on
+ * backdrop, radius, shadow and motion. These rules unify only that visual
+ * layer. `:root:root` raises specificity above component-scoped selectors so
+ * the look stays centralized without touching every dialog's layout CSS.
+ */
+@keyframes ch-backdrop-in { from { opacity: 0; } }
+@keyframes ch-dialog-in { from { opacity: 0; transform: translateY(10px) scale(0.985); } }
+@keyframes ch-sheet-in { from { transform: translateY(100%); } }
+@keyframes ch-popover-in { from { opacity: 0; transform: translateY(-4px) scale(0.98); } }
+
+/* Backdrop: tinted scrim with a subtle blur. */
+:root:root :is(.modal-overlay, .workspace-modal-overlay, .goal-dialog-backdrop, .quota-modal-backdrop, .task-detail-overlay):not(.image-lightbox-overlay) {
+  background: var(--ch-color-backdrop);
+  -webkit-backdrop-filter: blur(var(--ch-backdrop-blur));
+  backdrop-filter: blur(var(--ch-backdrop-blur));
+  animation: ch-backdrop-in var(--ch-duration-overlay) var(--ch-ease-out) both;
+}
+
+/* Dialog surface. */
+:root:root :is(.modal-overlay, .workspace-modal-overlay, .goal-dialog-backdrop, .quota-modal-backdrop):not(.image-lightbox-overlay) > :is(.modal, .workspace-modal, .goal-dialog, .quota-modal),
+:root:root .task-detail-overlay > .task-detail-panel {
+  border-color: var(--ch-color-border);
+  border-radius: var(--ch-radius-overlay);
+  box-shadow: var(--ch-shadow-lg);
+  animation: ch-dialog-in var(--ch-duration-overlay) var(--ch-ease-out) both;
+}
+
+/* Dialog titles share one scale. */
+:root:root :is(.modal, .workspace-modal) > h3,
+:root:root .goal-dialog h2,
+:root:root .restart-dialog h2 {
+  color: var(--ch-color-text-strong);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  line-height: 1.3;
+}
+
+/* Native <dialog> surfaces (backdrop is styled in each component). */
+:root:root dialog[open] { animation: ch-dialog-in var(--ch-duration-overlay) var(--ch-ease-out) both; }
+dialog[open]::backdrop { animation: ch-backdrop-in var(--ch-duration-overlay) var(--ch-ease-out) both; }
+dialog::backdrop {
+  background: var(--ch-color-backdrop);
+  -webkit-backdrop-filter: blur(var(--ch-backdrop-blur));
+  backdrop-filter: blur(var(--ch-backdrop-blur));
+}
+
+/* Popovers and menus: one border, radius, elevation and entrance. */
+:root:root :is(.tam-panel, .layout-menu-panel, .extensions-panel, .network-access-panel, .mobile-app-menu-panel, .composer-add-options) {
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-popover);
+  box-shadow: var(--ch-shadow-md);
+  animation: ch-popover-in var(--ch-duration-popover) var(--ch-ease-out) both;
+  transform-origin: top right;
+}
+:root:root .composer-add-options { transform-origin: bottom left; animation-name: ch-popover-in; }
+
+/* Phones: dialogs become bottom sheets that respect the safe area. */
+@media (max-width: 640px) {
+  :root:root :is(.modal-overlay, .workspace-modal-overlay, .goal-dialog-backdrop, .quota-modal-backdrop):not(.image-lightbox-overlay) {
+    align-items: flex-end;
+    place-items: end center;
+    padding: 0;
+  }
+
+  :root:root :is(.modal-overlay, .workspace-modal-overlay, .goal-dialog-backdrop, .quota-modal-backdrop):not(.image-lightbox-overlay) > :is(.modal, .workspace-modal, .goal-dialog, .quota-modal) {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    max-height: calc(100dvh - 24px - env(safe-area-inset-top, 0px));
+    border-width: 1px 0 0;
+    border-radius: var(--ch-radius-overlay) var(--ch-radius-overlay) 0 0;
+    box-shadow: var(--ch-shadow-sheet);
+    animation-name: ch-sheet-in;
+  }
+
+  :root:root :is(.modal-overlay, .workspace-modal-overlay, .goal-dialog-backdrop):not(.image-lightbox-overlay) > :is(.modal, .workspace-modal, .goal-dialog) {
+    padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  }
+
+  :root:root dialog.restart-dialog[open],
+  :root:root dialog.bot-pool[open] {
+    inset: auto 0 0 0;
+    margin: 0;
+    width: 100%;
+    max-width: 100%;
+    border-width: 1px 0 0;
+    border-radius: var(--ch-radius-overlay) var(--ch-radius-overlay) 0 0;
+    box-shadow: var(--ch-shadow-sheet);
+    animation-name: ch-sheet-in;
+  }
+  :root:root dialog.restart-dialog[open] {
+    padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  }
+  :root:root dialog.bot-pool[open] { height: calc(100dvh - 24px - env(safe-area-inset-top, 0px)); }
+
+  /* Anchored popovers must not overflow the narrow viewport. */
+  :root:root :is(.tam-panel, .layout-menu-panel, .extensions-panel, .network-access-panel, .mobile-app-menu-panel) {
+    max-width: calc(100vw - 16px);
+  }
+}
