@@ -30,9 +30,12 @@ export interface SubagentJumpChip {
   summary: string
   archived: boolean
   canJump: boolean
+  /** Running children are "active"; everything else is history ("earlier"). */
+  group: 'active' | 'earlier'
+  createdAt: string
 }
 
-export const SUBAGENT_JUMP_MAX_CHIPS = 10
+export const SUBAGENT_JUMP_MAX_CHIPS = 30
 const POLL_INTERVAL_MS = 5000
 
 export function subagentPollIntervalMs(): number {
@@ -96,9 +99,11 @@ export function toSubagentJumpChip(
     agentType: summary.agent_type,
     state,
     stateLabel: STATE_LABELS[state],
-    summary: summary.last_summary || FALLBACK_SUMMARY[state],
+    summary: cleanSubagentSummary(summary.last_summary) || FALLBACK_SUMMARY[state],
     archived,
     canJump: tabId !== null,
+    group: state === 'running' ? 'active' : 'earlier',
+    createdAt: summary.created_at,
   }
 }
 
@@ -114,4 +119,61 @@ export function buildSubagentJumpChips(
   return summaries.slice(0, SUBAGENT_JUMP_MAX_CHIPS).map(summary =>
     toSubagentJumpChip(summary, { liveTabIds, archivedTabIds, statusByTabId }),
   )
+}
+
+/** Hub names sub-agents "<type> subagent: <task>"; the type already has its
+ *  own column, so list rows show just the task. */
+export function subagentDisplayName(name: string): string {
+  const task = name.replace(/^\S+ subagent:\s*/i, '').trim()
+  return task || name
+}
+
+/** One plain line from a markdown-ish summary ('### Title', '**bold**', code). */
+export function cleanSubagentSummary(text: string | null | undefined): string {
+  if (!text) return ''
+  const line = text
+    .split('\n')
+    .map(part => part.trim())
+    .find(part => part.replace(/[#>*\-_`\s]/g, '').length > 0)
+  if (!line) return ''
+  return line
+    .replace(/^#{1,6}\s+/, '')
+    .replace(/^>\s?/, '')
+    .replace(/^[-*]\s+/, '')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/(\*\*|__|\*|`)/g, '')
+    .trim()
+}
+
+/** "just now" / "5m ago" / "3h ago" / "2d ago"; '' when the date is unusable. */
+export function relativeSubagentTime(iso: string, now: number = Date.now()): string {
+  const then = Date.parse(iso)
+  if (!Number.isFinite(then)) return ''
+  const seconds = Math.max(0, Math.round((now - then) / 1000))
+  if (seconds < 45) return 'just now'
+  if (seconds < 3600) return `${Math.max(1, Math.round(seconds / 60))}m ago`
+  if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`
+  return `${Math.round(seconds / 86400)}d ago`
+}
+
+export interface SubagentDockCounts {
+  running: number
+  history: number
+  total: number
+}
+
+export function subagentDockCounts(chips: SubagentJumpChip[]): SubagentDockCounts {
+  const running = chips.filter(chip => chip.group === 'active').length
+  return { running, history: chips.length - running, total: chips.length }
+}
+
+const HUB_SUBAGENT_ID_RE = /\bsa-[0-9a-f]{12}\b/
+const HUB_AGENT_RUN_RE = /claude-hub\s+agent\s+(?:run|send)\b/
+
+/** Hub sub-agent id of a `claude-hub agent run` Bash call, only when the
+ *  command is an agent run AND its output clearly names the id (background
+ *  runs and `--json` print it; foreground runs may not, and then no link). */
+export function hubSubagentIdFromTool(argsText: string, resultText: string): string | null {
+  if (!HUB_AGENT_RUN_RE.test(argsText)) return null
+  return HUB_SUBAGENT_ID_RE.exec(resultText)?.[0] ?? null
 }

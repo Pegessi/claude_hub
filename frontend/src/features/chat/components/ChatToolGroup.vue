@@ -162,6 +162,12 @@
         </button>
       </template>
     </details>
+    <ChatHubSubagentLink
+      v-for="tool in part.tools"
+      :key="`hub-subagent-${tool.key}`"
+      :args-text="tool.argsText"
+      :result-text="tool.resultText"
+    />
   </div>
 </template>
 
@@ -170,6 +176,7 @@ import { requireChatOwner, chatTimelineKey } from '../owners'
 import { toolGroupNames, toolStatusLabel } from '@/utils/toolPresentation'
 import { ACTIVITY_ICONS, describeToolActivity, toolGroupSummary, type ToolActivity, type ToolDiffLine, type ToolGroupSummary } from '@/utils/toolActivity'
 import { toolGroupStatus } from '@/features/chat/presentation/chatTurnPresentation'
+import ChatHubSubagentLink from './ChatHubSubagentLink.vue'
 import type { TimelineTool, TimelineTurn } from '../timeline/types'
 import type { TimelinePart } from '../timeline/types'
 const { expandedToolGroups, onToolGroupToggle, collapseDetails } = requireChatOwner(chatTimelineKey)
@@ -208,6 +215,7 @@ function expandedItems(): { tool: TimelineTool, activity: ToolActivity }[] {
    group ("Ran `pnpm test`"), a card only once someone opens it. */
 .conversation-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   min-width: 0;
 }

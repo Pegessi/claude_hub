@@ -17,6 +17,11 @@ const {
   shortSubagentId,
   toSubagentJumpChip,
   buildSubagentJumpChips,
+  cleanSubagentSummary,
+  relativeSubagentTime,
+  subagentDockCounts,
+  subagentDisplayName,
+  hubSubagentIdFromTool,
 } = await import(
   `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`
 )
@@ -152,4 +157,42 @@ test('buildSubagentJumpChips caps rows and passes summaries through', () => {
 
 test('polling interval is 5 seconds', () => {
   assert.equal(subagentPollIntervalMs(), 5000)
+})
+
+test('chips group running as active and the rest as earlier', () => {
+  const chips = buildSubagentJumpChips(
+    [summary(), summary({ id: 'sa-b', last_status: 'completed' }), summary({ id: 'sa-c', closed: true })],
+    [tab()],
+    [],
+  )
+  assert.deepEqual(chips.map(chip => chip.group), ['active', 'earlier', 'earlier'])
+  assert.deepEqual(subagentDockCounts(chips), { running: 1, history: 2, total: 3 })
+})
+
+test('cleanSubagentSummary flattens markdown to one plain line', () => {
+  assert.equal(cleanSubagentSummary('### **Result**\nmore'), 'Result')
+  assert.equal(cleanSubagentSummary('\n\n- see [docs](http://x) `now`'), 'see docs now')
+  assert.equal(cleanSubagentSummary('---\n'), '')
+  assert.equal(cleanSubagentSummary(null), '')
+})
+
+test('relativeSubagentTime buckets and tolerates bad dates', () => {
+  const now = Date.parse('2026-11-03T12:00:00Z')
+  assert.equal(relativeSubagentTime('2026-11-03T11:59:50Z', now), 'just now')
+  assert.equal(relativeSubagentTime('2026-11-03T11:55:00Z', now), '5m ago')
+  assert.equal(relativeSubagentTime('2026-11-03T09:00:00Z', now), '3h ago')
+  assert.equal(relativeSubagentTime('2026-11-01T12:00:00Z', now), '2d ago')
+  assert.equal(relativeSubagentTime('nope', now), '')
+})
+
+test('hubSubagentIdFromTool needs an agent run command and an id in the output', () => {
+  const args = JSON.stringify({ command: 'claude-hub agent run codex --json "x"' })
+  assert.equal(hubSubagentIdFromTool(args, '{"subagent_id":"sa-0123456789ab"}'), 'sa-0123456789ab')
+  assert.equal(hubSubagentIdFromTool(args, 'finished'), null)
+  assert.equal(hubSubagentIdFromTool('{"command":"ls sa-0123456789ab"}', 'sa-0123456789ab'), null)
+})
+
+test('subagentDisplayName drops the redundant type prefix', () => {
+  assert.equal(subagentDisplayName('codex subagent: analyze parser'), 'analyze parser')
+  assert.equal(subagentDisplayName('my helper'), 'my helper')
 })

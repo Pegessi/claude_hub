@@ -21,7 +21,8 @@ import {
 
 /**
  * Lists Hub subagents (`claude-hub agent run`) attached to a parent Chat tab
- * and exposes the one-click jump used by the Codex-style tips card.
+ * and exposes the one-click jump used by the pane's Agents dock. Owned by
+ * TerminalPane (one poller per pane) and shared via `subagentDockKey`.
  *
  * The stream of a parent Chat never carries the child's Hub tab id, so the
  * source of truth is the durable /api/subagents record (includes archived
@@ -45,6 +46,8 @@ export function useParentSubagents(tabId: Ref<string>) {
 
   async function refresh(): Promise<void> {
     const requestedTabId = tabId.value
+    // An empty id means "this pane has no Chat tab": nothing to list.
+    if (!requestedTabId) return
     try {
       const response = await fetch(
         `${API_BASE}/subagents?parent_tab_id=${encodeURIComponent(requestedTabId)}&include_closed=true`,
@@ -97,6 +100,7 @@ export function useParentSubagents(tabId: Ref<string>) {
   // tabId change means this pane is the active one, so refetch immediately.
   watch(tabId, () => {
     summaries.value = []
+    failed.value = false
     void refresh()
   })
 

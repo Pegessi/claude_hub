@@ -102,6 +102,11 @@
           </svg>
         </span>
       </button>
+      <ChatSubagentDockPill
+        v-if="isChatSession && !isMobile"
+        :chips="subagentDock.chips.value"
+        @jump="subagentDock.jump"
+      />
       <span
         class="pane-session-name"
         :title="tabName"
@@ -189,9 +194,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted, provide } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useTerminalStore } from '@/stores/terminalStore'
+import ChatSubagentDockPill from '@/features/chat/components/ChatSubagentDockPill.vue'
+import { subagentDockKey } from '@/features/chat/controllers/subagentDock'
+import { useParentSubagents } from '@/features/chat/controllers/useParentSubagents'
+import { useViewport } from '@/composables/useViewport'
 import FeishuBindingPanel from '@/components/FeishuBindingPanel.vue'
 import TerminalView from '@/components/TerminalView.vue'
 import StructuredPane from '@/components/StructuredPane.vue'
@@ -221,6 +230,15 @@ const tabName = computed(() => paneTab.value?.name || '')
 const isManagedTab = computed(() => Boolean(paneTab.value?.workspace_role))
 const isManagedChat = computed(() => isManagedTab.value)
 const isChatSession = computed(() => paneTab.value?.session_kind === 'chat')
+
+// One sub-agent poller per pane, only while it shows a Chat session (an empty
+// id parks it). It follows the pane's tab, so switching tabs refetches and a
+// pane that is not showing a Chat never polls. Shared with the Chat body.
+const { isMobile } = useViewport()
+const subagentDock = useParentSubagents(
+  computed(() => (isChatSession.value && props.pane.tabId) || ''),
+)
+provide(subagentDockKey, subagentDock)
 
 // ── Manual reconnect button (Terminal panes only) ──────────────────────────
 // Status is per-tab in the store; TerminalView performs the actual re-attach

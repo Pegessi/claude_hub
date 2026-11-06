@@ -2,7 +2,7 @@
 
 Covers InfoWall d2627d2f: a Hub sub-agent (`claude-hub agent run`) attributed
 to its parent workspace groups under the Workspace Agents panel instead of
-the manual tab strip, and the parent Chat shows a Codex-style jump card that
+the manual tab strip, and the parent Chat shows an Agents pill/popover that
 focuses the live child or restores an archived child in one click.
 
 Run only with a dedicated Vite server, never 5173/8173:
@@ -288,21 +288,31 @@ async def main(browser_run: BrowserRun) -> None:
 
         await page.goto(base + f"/?tab={PARENT}")
 
-        card = page.get_by_test_id("subagent-jump-card")
-        await expect(card).to_be_visible()
-        rows = card.get_by_test_id(re.compile(r"^subagent-jump-row-"))
-        await expect(rows).to_have_count(2)
+        # Desktop: the running child shows in the pane-chrome Agents pill; the
+        # old full-width list above the composer is gone.
+        pill = page.get_by_test_id("subagent-dock-pill")
+        await expect(pill).to_be_visible()
+        await expect(pill).to_contain_text("1 running")
+        await expect(page.get_by_test_id("subagent-jump-card")).to_have_count(0)
+        await expect(page.get_by_test_id("subagent-popover")).to_have_count(0)
+        await pill.click()
+        popover = page.get_by_test_id("subagent-popover")
+        await expect(popover).to_be_visible()
 
-        live_row = card.get_by_test_id("subagent-jump-row-sa-live0000001")
-        arch_row = card.get_by_test_id("subagent-jump-row-sa-arch0000002")
+        live_row = popover.get_by_test_id("subagent-row-sa-live0000001")
+        arch_row = popover.get_by_test_id("subagent-row-sa-arch0000002")
         await expect(live_row).to_have_attribute("data-state", "running")
-        await expect(arch_row).to_have_attribute("data-state", "closed")
         await expect(live_row).to_contain_text("analyze parser")
-        await expect(live_row).to_contain_text("sa-…0001")
-        await expect(live_row).to_contain_text("Running")
+        # History is collapsed while something is running.
+        await expect(arch_row).to_be_hidden()
+        await popover.get_by_test_id("subagent-earlier-toggle").click()
+        await expect(arch_row).to_have_attribute("data-state", "closed")
         await expect(arch_row).to_contain_text("archived review")
         await expect(arch_row).to_contain_text("Found two failing edge cases.")
-        await expect(arch_row).to_contain_text("archived")
+        await expect(arch_row).to_contain_text("Restore & open")
+        await page.screenshot(path=str(output / "00-dock-popover.png"))
+        await page.keyboard.press("Escape")
+        await expect(popover).to_have_count(0)
 
         # The attributed child Chat is not a manual terminal-strip tab.
         await expect(page.locator(".tab-bar .tab")).to_have_count(1)
@@ -320,16 +330,22 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(managed_row).to_have_count(1)
         await expect(managed_row.locator(".agent-sub-tag")).to_have_text("sub")
         await page.screenshot(path=str(output / "01-workspace-grouped.png"))
+        await agents_trigger.click()
+        await expect(managed_panel).to_be_hidden()
 
         # One click focuses the live child tab (its Chat pane hydrates).
         assert LIVE not in event_tabs
+        await pill.click()
         await live_row.click()
         await wait_until(lambda: LIVE in event_tabs)
 
         # Back on the parent Chat, the archived child restores then focuses.
         await page.locator(".tab-bar .tab", has_text="Parent Chat").click()
-        await expect(card).to_be_visible()
+        await expect(pill).to_be_visible()
         assert not unarchived
+        await pill.click()
+        await expect(arch_row).to_be_hidden()
+        await popover.get_by_test_id("subagent-earlier-toggle").click()
         await arch_row.click()
         await wait_until(lambda: bool(unarchived))
         await wait_until(lambda: ARCH in event_tabs)
@@ -345,7 +361,7 @@ async def main(browser_run: BrowserRun) -> None:
     report = {
         "result": "PASS",
         "coverage": [
-            "jump card renders name/short id/live status/summary per Hub sub-agent",
+            "desktop Agents pill + popover: Active first, collapsible Earlier, Esc closes",
             "workspace-attributed child excluded from manual tab strip",
             "child grouped under workspace in Workspace Agents panel with sub marker",
             "one-click jump focuses live child Chat",
