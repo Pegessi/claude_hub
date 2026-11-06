@@ -161,7 +161,9 @@ onUnmounted(() => {
   position: fixed;
   inset: 0;
   z-index: 900;
-  background: var(--ch-color-overlay);
+  background: var(--ch-color-backdrop);
+  -webkit-backdrop-filter: blur(var(--ch-backdrop-blur));
+  backdrop-filter: blur(var(--ch-backdrop-blur));
 }
 
 .archive-panel {
@@ -175,7 +177,7 @@ onUnmounted(() => {
   flex-direction: column;
   background: var(--ch-color-surface);
   border-right: 1px solid var(--ch-color-border);
-  box-shadow: var(--ch-shadow-soft);
+  box-shadow: var(--ch-shadow-lg);
 }
 
 .archive-panel__header {

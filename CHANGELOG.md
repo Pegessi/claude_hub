@@ -19,6 +19,17 @@
   output names its id. TerminalPane owns the single poller and shares it.
 - Removed the always-visible full-width `ChatSubagentJumpCard`.
 
+### style(ui): unify overlay surfaces, backdrops, motion and mobile sheets
+
+- Added overlay tokens (elevation scale, backdrop tint + blur, overlay/popover
+  radii, motion durations/easing) and defined previously-missing tokens such as
+  `--ch-shadow-md/lg` that components already referenced.
+- New `overlays.css` gives every dialog, native `<dialog>`, popover/menu and the
+  archive/Goal sheets one border, radius, shadow, backdrop and entrance
+  animation; at <=640px dialogs become safe-area-aware bottom sheets.
+  `prefers-reduced-motion` zeroes the durations.
+- Error banner is now a tinted, accented strip instead of solid red.
+
 ### fix(workspace): consolidate delegated Task liveness and bounded recovery
 
 - One Task liveness owner replaces terminal auto-continue, review delivery/reaping,

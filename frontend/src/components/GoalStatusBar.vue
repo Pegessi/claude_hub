@@ -331,8 +331,8 @@ watch([expanded, isPhone], ([open, phone], [wasOpen, wasPhone]) => {
   .goal-status-quick { flex: 0 0 auto; min-width: 72px; min-height: 40px; padding: 0 14px; font-size: 13px; font-weight: 600; }
   .goal-status-error--summary { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
   .goal-status[data-error] .goal-status-summary .goal-status-dot { background: var(--ch-color-danger, #e5484d); }
-  .goal-sheet-backdrop { position: fixed; inset: 0; z-index: 1000; background: rgb(0 0 0 / 45%); }
-  .goal-status-details--sheet { position: fixed; top: auto; right: 0; bottom: 0; left: 0; z-index: 1001; display: flex; flex-direction: column; max-height: 85dvh; padding: 0; overflow: hidden; border-width: 1px 0 0; border-radius: 16px 16px 0 0; font-size: 14px; line-height: 1.5; box-shadow: 0 -12px 32px rgb(0 0 0 / 30%); }
+  .goal-sheet-backdrop { position: fixed; inset: 0; z-index: 1000; background: var(--ch-color-backdrop); -webkit-backdrop-filter: blur(var(--ch-backdrop-blur)); backdrop-filter: blur(var(--ch-backdrop-blur)); animation: ch-backdrop-in var(--ch-duration-overlay) var(--ch-ease-out) both; }
+  .goal-status-details--sheet { position: fixed; top: auto; right: 0; bottom: 0; left: 0; z-index: 1001; display: flex; flex-direction: column; max-height: 85dvh; padding: 0; overflow: hidden; border-width: 1px 0 0; border-radius: var(--ch-radius-overlay) var(--ch-radius-overlay) 0 0; font-size: 14px; line-height: 1.5; box-shadow: var(--ch-shadow-sheet); animation: ch-sheet-in var(--ch-duration-overlay) var(--ch-ease-out) both; }
   .goal-status-details--sheet .goal-status-details-header { flex: 0 0 auto; margin: 0; padding: 6px 6px 6px 16px; border-bottom: 1px solid var(--ch-color-border-muted); }
   .goal-status-details--sheet .goal-status-details-header .goal-status-dot { display: inline-block; }
   .goal-status-details--sheet .goal-status-details-close { width: 44px; height: 44px; font-size: 22px; }

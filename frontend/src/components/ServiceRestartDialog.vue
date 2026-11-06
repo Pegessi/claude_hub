@@ -200,12 +200,11 @@ onUnmounted(() => { disposed = true; dialog.value?.close() })
   margin: auto;
   padding: 24px;
   border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-lg);
+  border-radius: var(--ch-radius-overlay);
   background: var(--ch-color-surface);
   color: var(--ch-color-text);
-  box-shadow: var(--ch-shadow-popover);
+  box-shadow: var(--ch-shadow-dialog);
 }
-.restart-dialog::backdrop { background: rgb(0 0 0 / 55%); }
 h2 { margin: 0 0 14px; font-size: 19px; }
 p { margin: 0 0 18px; font-size: 14px; line-height: 1.6; }
 .restart-status { color: var(--ch-color-text-muted); }

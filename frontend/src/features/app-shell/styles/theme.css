@@ -93,6 +93,30 @@
   --ch-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   --ch-motion-fast: 120ms cubic-bezier(0.2, 0, 0, 1);
   --ch-motion-standard: 160ms cubic-bezier(0.2, 0, 0, 1);
+  /* Overlay system: one elevation scale, one backdrop, one overlay radius and
+     one pair of motion durations shared by dialogs, sheets and popovers. */
+  --ch-color-backdrop: rgba(8, 8, 10, 0.6);
+  --ch-backdrop-blur: 6px;
+  --ch-radius-popover: 10px;
+  --ch-radius-overlay: 14px;
+  --ch-shadow-sm: var(--ch-shadow-soft);
+  --ch-shadow-md: var(--ch-shadow-popover);
+  --ch-shadow-lg: var(--ch-shadow-dialog);
+  --ch-shadow-card: var(--ch-shadow-soft);
+  --ch-shadow-sheet: 0 -12px 40px rgba(0, 0, 0, 0.45);
+  --ch-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ch-duration-popover: 140ms;
+  --ch-duration-overlay: 220ms;
+  --ch-weight-medium: 500;
+  --ch-font-xs: var(--ch-font-size-xs);
+  /* Aliases for names already referenced by components. */
+  --ch-color-surface-elevated: var(--ch-color-surface-raised);
+  --ch-color-bg-elevated: var(--ch-color-surface-raised);
+  --ch-color-surface-hover: var(--ch-color-surface-control-hover);
+  --ch-color-text-secondary: var(--ch-color-text-muted);
+  --ch-color-accent-subtle: var(--ch-color-accent-soft);
+  --ch-color-on-accent: var(--ch-color-text-inverse);
+  --ch-color-success-text: var(--ch-color-success);
   --ch-shadow-button: 0 1px 2px rgba(0, 0, 0, 0.15);
   --ch-shadow-button-hover: 0 2px 8px rgba(0, 0, 0, 0.2);
   --ch-shadow-button-primary: 0 1px 6px rgba(50, 118, 186, 0.4);
@@ -229,6 +253,8 @@
   --ch-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   --ch-motion-fast: 120ms cubic-bezier(0.2, 0, 0, 1);
   --ch-motion-standard: 160ms cubic-bezier(0.2, 0, 0, 1);
+  --ch-color-backdrop: rgba(24, 24, 28, 0.38);
+  --ch-shadow-sheet: 0 -12px 40px rgba(32, 30, 27, 0.18);
   --ch-shadow-button: 0 1px 2px rgba(0, 0, 0, 0.06);
   --ch-shadow-button-hover: 0 2px 8px rgba(0, 0, 0, 0.1);
   --ch-shadow-button-primary: 0 1px 5px rgba(130, 83, 58, 0.24);
@@ -308,4 +334,11 @@ input,
 select,
 textarea {
   font: inherit;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --ch-duration-popover: 0.01ms;
+    --ch-duration-overlay: 0.01ms;
+  }
 }
