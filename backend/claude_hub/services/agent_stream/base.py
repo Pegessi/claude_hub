@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,61 @@ from .providers.spec import (
     TransportKind,
     get_spec,
 )
+
+# Unicode categories that carry no visible glyph of their own:
+# Cc control, Cf format (zero-width space U+200B, BOM U+FEFF, joiners …),
+# Zs space separator, Zl line separator, Zp paragraph separator.
+_ANSWER_INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Zs", "Zl", "Zp"})
+
+
+def is_substantive_answer(text: object) -> bool:
+    """Whether ``text`` contains at least one meaningful (visible) character.
+
+    The single predicate every path uses to decide whether a final answer
+    actually exists. A reply made ONLY of whitespace or invisible formatting is
+    treated as absent — including chunked content and non-``White_Space`` format
+    chars (U+200B/U+FEFF/…) that plain ``str.strip()`` leaves behind. A char is
+    skipped when it is Unicode whitespace (``str.isspace``) or in categories
+    Cc/Cf/Zs/Zl/Zp; any other char (letter, digit, punctuation, symbol, emoji…)
+    makes the answer substantive.
+
+    This is a presence predicate ONLY: it never mutates text, so zero-width
+    characters embedded INSIDE a normal answer are preserved in delivery.
+    """
+
+    if not isinstance(text, str):
+        return False
+    for ch in text:
+        if ch.isspace() or unicodedata.category(ch) in _ANSWER_INVISIBLE_CATEGORIES:
+            continue
+        return True
+    return False
+
+
+def trim_invisible_edges(text: object) -> str:
+    """Drop leading/trailing whitespace and invisible (Cc/Cf/Zs/Zl/Zp) chars.
+
+    Presentation-only join helper — used when concatenating preserved pre-tool
+    commentary with an authoritative final answer so a trailing whitespace /
+    zero-width-only post-tool buffer is not wedged between them. It does NOT touch
+    invisible characters in the middle of a real answer.
+    """
+
+    if not isinstance(text, str):
+        return ""
+    start = 0
+    end = len(text)
+    while start < end and (
+        text[start].isspace() or unicodedata.category(text[start]) in _ANSWER_INVISIBLE_CATEGORIES
+    ):
+        start += 1
+    while end > start and (
+        text[end - 1].isspace()
+        or unicodedata.category(text[end - 1]) in _ANSWER_INVISIBLE_CATEGORIES
+    ):
+        end -= 1
+    return text[start:end]
+
 
 # Negative-cache window for failed source discovery. Keeps the fail-closed
 # capabilities path cheap when an agent hasn't written its transcript yet.

@@ -7,7 +7,7 @@ import time
 from typing import Any, Dict, Optional
 
 from ....models import AgentRuntimeStatus, AgentStreamEvent, AgentStreamEventType
-from ..base import NormalizeContext
+from ..base import NormalizeContext, is_substantive_answer, trim_invisible_edges
 from ..native import ProviderSession
 from ..redaction import redact_event
 from .session_state import SessionState
@@ -262,11 +262,11 @@ class WatchdogMixin(SessionState):
             or self._goal_protocol_turn
             or self._waiting_for_external_activity()
             # The post-tool answer buffer is reset at each TOOL_CALL_STARTED, so
-            # a non-substantive buffer here means either no text at all or only
-            # whitespace (incl. NBSP / chunked) after the tool — pre-tool
-            # commentary and whitespace are never a certifiable final answer.
-            or not self._final_assistant_text.strip()
-            or not self._assistant_text.strip()
+            # a non-substantive buffer here means no text at all, whitespace
+            # (incl. NBSP/chunked), or invisible format-only (U+200B/U+FEFF)
+            # after the tool — none is a certifiable final answer.
+            or not is_substantive_answer(self._final_assistant_text)
+            or not is_substantive_answer(self._assistant_text)
         ):
             return False
         session = self._session_getter()
@@ -292,7 +292,7 @@ class WatchdogMixin(SessionState):
         # differs from the whole-turn assistant text.
         final = self._final_assistant_text.strip()
         whole = payload["assistant_text"]
-        if isinstance(whole, str) and final and final != whole.strip():
+        if is_substantive_answer(final) and isinstance(whole, str) and final != whole.strip():
             payload["final_text"] = final
         event = ctx.event(AgentStreamEventType.TURN_COMPLETED, payload)
         await self._publish(redact_event(event))
@@ -379,20 +379,20 @@ class WatchdogMixin(SessionState):
         ``assistant_text`` is rebuilt as ``commentary + authoritative``.
         """
         authoritative = event.payload.pop("_authoritative_result_text", None)
-        if not isinstance(authoritative, str) or not authoritative.strip():
+        if not is_substantive_answer(authoritative):
             return
         auth = authoritative.strip()
         whole = event.payload.get("assistant_text")
         whole_s = whole.strip() if isinstance(whole, str) else ""
         final = event.payload.get("final_text")
         # The text the answers-last channel actually returns as the answer is the
-        # post-tool ``final_text`` when present, else the whole-turn text. When a
-        # tool ran with no post-tool final, the delivered answer length is zero
-        # regardless of how much pre-tool commentary was streamed.
+        # post-tool ``final_text`` when it is substantive, else the whole-turn
+        # text. A tool ran with no visible post-tool final => delivered length 0
+        # regardless of pre-tool commentary or invisible/whitespace text.
         if post_tool_final_absent:
             has_final = False
             delivered_s = ""
-        elif isinstance(final, str) and final.strip():
+        elif isinstance(final, str) and is_substantive_answer(final):
             has_final = True
             delivered_s = final.strip()
         else:
@@ -409,9 +409,10 @@ class WatchdogMixin(SessionState):
             }
 
         if post_tool_final_absent:
-            # No post-tool answer streamed at all; the result is the answer. Do
-            # not apply the length thresholds (the alternative is pre-tool
-            # commentary, which is definitively not the answer).
+            # No visible post-tool answer (no/whitespace/zero-width-only text);
+            # the authoritative result is the answer. Do not apply the length
+            # thresholds: the only streamed text is pre-tool commentary or
+            # invisible formatting, which is definitively not the answer.
             logger.warning(
                 "final_text_missing_after_tool session=%s authoritative_len=%d commentary_len=%d",
                 self.session_id,
@@ -419,8 +420,11 @@ class WatchdogMixin(SessionState):
                 len(whole_s),
             )
             event.payload["final_text"] = authoritative
-            if whole_s:
-                event.payload["assistant_text"] = whole_s + authoritative
+            commentary = trim_invisible_edges(whole_s)
+            if commentary:
+                # Preserve the pre-tool commentary (trimmed of the absent final
+                # text at its edge) for the journal, then the answer.
+                event.payload["assistant_text"] = commentary + authoritative
             else:
                 event.payload["assistant_text"] = authoritative
             _emit_marker(0.0)

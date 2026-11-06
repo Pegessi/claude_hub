@@ -591,6 +591,7 @@ class DotSessionService(object):
     async def sync_journal(self) -> int:
         """Append completed Dot exchanges to the journal; returns the number of turns added."""
         from ....models.agent_stream import AgentStreamEventType
+        from ...agent_stream.base import is_substantive_answer
         from ...agent_stream.store import AgentStreamStore
 
         tab_id = self.tab_id()
@@ -647,7 +648,7 @@ class DotSessionService(object):
                             self.store.append_journal(
                                 "hub", "(turn failed)", _parse_time(event.created_at)
                             )
-                        elif answer.strip():
+                        elif answer and is_substantive_answer(answer):
                             self.store.append_journal(
                                 "dot",
                                 answer[:_JOURNAL_TEXT_LIMIT],
