@@ -35,6 +35,10 @@
         aria-modal="true"
         aria-label="Sub-agents"
       >
+        <span
+          class="subagent-sheet-grip"
+          aria-hidden="true"
+        />
         <header class="subagent-sheet-head">
           <strong>Sub-agents</strong>
           <button
@@ -148,7 +152,8 @@ watch(() => counts.value.running, running => {
   z-index: 1000;
   display: flex;
   align-items: flex-end;
-  background: var(--ch-color-overlay);
+  background: var(--ch-color-backdrop, var(--ch-color-overlay));
+  backdrop-filter: blur(var(--ch-backdrop-blur, 0));
 }
 
 .subagent-sheet {
@@ -161,7 +166,7 @@ watch(() => counts.value.running, running => {
   border-radius: var(--ch-radius-xl) var(--ch-radius-xl) 0 0;
   background: var(--ch-color-surface-raised);
   box-shadow: var(--ch-shadow-dialog);
-  padding-bottom: env(safe-area-inset-bottom, 0);
+  padding-bottom: max(10px, env(safe-area-inset-bottom, 0px));
   animation: subagent-sheet-in var(--ch-motion-standard) ease-out;
 }
 
@@ -172,11 +177,21 @@ watch(() => counts.value.running, running => {
   }
 }
 
+/* Bottom-sheet affordance, matching native iOS/Android sheets. */
+.subagent-sheet-grip {
+  align-self: center;
+  width: 36px;
+  height: 4px;
+  margin-top: 8px;
+  border-radius: 999px;
+  background: var(--ch-color-border-strong, var(--ch-color-border));
+}
+
 .subagent-sheet-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 14px 8px;
+  padding: 6px 14px 8px;
   border-bottom: 1px solid var(--ch-color-border-muted);
   font-size: 13px;
   color: var(--ch-color-text-strong);
