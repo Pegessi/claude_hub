@@ -60,7 +60,7 @@ test('wide panes rest the list in the right gutter; narrow panes fold it', () =>
   assert.match(dockPill, /const railMode = computed\(\(\) => railFits\.value && !userCollapsed\.value\)/)
   assert.match(dockPill, /v-if="open && !railFits"/)
   assert.match(dockPill, /new ResizeObserver/)
-  assert.match(dockPill, /\.subagent-dock \{\n  position: relative;\n  display: flex;/)
+  assert.match(dockPill, /\.subagent-dock \{\s+position: relative;\s+display: flex;/)
 })
 
 test('list shows Active first and a collapsible Earlier with restore wording', () => {
