@@ -371,6 +371,10 @@ class SessionState(ABC):
         raise NotImplementedError()
 
     @abstractmethod
+    def _has_substantive_post_tool_final(self) -> bool:
+        raise NotImplementedError()
+
+    @abstractmethod
     def _apply_authoritative_result_text(
         self, event: AgentStreamEvent, *, post_tool_final_absent: bool = False
     ) -> None:

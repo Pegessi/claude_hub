@@ -261,9 +261,10 @@ class WatchdogMixin(SessionState):
             or transport.goal_completion_requires_provider_event
             or self._goal_protocol_turn
             or self._waiting_for_external_activity()
-            # A tool ran and no post-tool final answer has started streaming:
-            # pre-tool commentary (already in the buffer) is not the answer.
-            or self._final_text_after_tool
+            # The post-tool answer buffer is reset at each TOOL_CALL_STARTED, so
+            # a non-substantive buffer here means either no text at all or only
+            # whitespace (incl. NBSP / chunked) after the tool — pre-tool
+            # commentary and whitespace are never a certifiable final answer.
             or not self._final_assistant_text.strip()
             or not self._assistant_text.strip()
         ):
@@ -321,15 +322,16 @@ class WatchdogMixin(SessionState):
         return True
 
     def _clean_eof_final_message_truncated(self, transport: ProviderSession) -> bool:
-        """Whether a clean EOF cut the final assistant message mid-generation.
+        """Whether a clean EOF cut an open final assistant message.
 
         Call only when the one-shot exited cleanly (``exit_error is None``) with
         no terminal completion record. Returns True when the turn used native
-        message envelopes, at least one assistant message is still open, some
-        final answer text already streamed, and the turn is not legitimately
-        blocked on a tool/approval. In that state the buffered text is a
-        truncated prefix: the EOF handler fail-closes with a single retryable
-        failure instead of delivering/certifying the prefix.
+        message envelopes and at least one assistant message is still open, with
+        no tool/approval legitimately in flight. An open message means
+        generation did not finish — this is incomplete whether zero,
+        whitespace-only (incl. NBSP/chunked), or a partial prefix streamed, so
+        the EOF handler fail-closes with one retryable failure (never carrying an
+        answer) rather than certifying anything as complete.
         """
         turn_id = self._active_turn_id
         if (
@@ -338,7 +340,6 @@ class WatchdogMixin(SessionState):
             or getattr(transport, "eof_is_fatal", False)
             or self._goal_protocol_turn
             or self._waiting_for_external_activity()
-            or not self._final_assistant_text.strip()
         ):
             return False
         session = self._session_getter()
