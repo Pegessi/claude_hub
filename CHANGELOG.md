@@ -32,6 +32,7 @@
 - Regression tests cover open/closed/no-scope clean EOF, authoritative-text
   substitution and its threshold boundary, and per-message lifecycle isolation.
 
+### feat(chat): replace the bottom sub-agent list with an Agents dock
 
 - Desktop Chat panes show a compact "Agents" pill in the top-right pane chrome
   ("N running" with a pulsing dot, or muted "N done"; hidden with none). It opens an

@@ -114,3 +114,26 @@ delta（`native_consumer.py::_note_final_text`）提前清零，于是哪怕只�
   时 Hub 未收到的文本无法补回，由三态门 fail-closed 处理。
 - 实测证据保留在 `/tmp/dot-trunc-probe/work/`（含密钥的临时 env 文件已删除；
   仓库 git 干净）。
+
+## 实现评审 cycle-4 修复（@9ca91f85 review_failed）
+
+- **B1（阻塞，并发）**：retryable fail 路径原本在 `_send_lock` 外调用
+  `_fail_active_turn`，随后的 `_active_turn_id=None` / `acknowledge_turn_complete`
+  也无锁；并发手动 Stop / `stop()` teardown（`_cancel_active_turn_locked`，仅按
+  `turn_in_flight/active_turn_id` 判定、不复查 `_turn_completed_seen`）会在两次
+  await `_publish` 之间插入，给同一 turn 持久化第二个终态（failed+cancelled）。
+  修复：把 retryable 与「通用缺 result 失败」（N1，同样无锁，既有缺陷）的
+  `_fail_active_turn` + id/guard 释放合并为 `_send_lock` 内单原子段，并在锁内复查
+  `_active_turn_id is not None`；通知在锁外。新增确定性测试
+  `test_truncated_clean_eof_concurrent_cancel_persists_one_terminal`：在 retryable
+  终态 publish 处注入并发 `cancel_turn()`，断言恰好 1 个 turn_completed；对旧提交
+  9ca91f85 运行该测试确证得到 2 个终态（失败），修复后为 1 个（通过）。
+- **B2（CHANGELOG）**：恢复误删的标题
+  `### feat(chat): replace the bottom sub-agent list with an Agents dock`，其 4 条
+  不再悬挂。`verify.sh docs` 通过。
+- **N2（顺手修）**：无 `result` 的终态（干净 EOF 合成 completed、failed/retryable
+  EOF）适配器每 turn 累加器原本不清（result 才清）。新增
+  `AgentStreamAdapter.clear_turn_state(ctx)` 公共方法，在合成完成 helper 与 EOF
+  失败锁段（turn 已终态后）调用；测试断言下一个 turn 的 lifecycle 为 `(False,0)`。
+- 非阻塞 N3（工具前注释 + 截断的混合回合 journal 留注释+前缀、飞书得全文）与 N4
+  （任何 delta 之前被切 → 普通不可重试 failed，本就无前缀）经评审确认可接受，保持。

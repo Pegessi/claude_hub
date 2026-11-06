@@ -364,6 +364,19 @@ class AgentStreamAdapter:
             return (False, 0)
         return (state.saw_message_scope, max(0, state.open_assistant_messages))
 
+    def clear_turn_state(self, ctx: NormalizeContext) -> None:
+        """Drop all per-turn accumulators (including the message lifecycle).
+
+        Called by the consumer when a turn terminalizes WITHOUT a provider
+        ``result`` record (clean-EOF synthesized completion, or a failed/retryable
+        EOF): the adapter normally clears on ``result``, but such a turn never
+        emits one, so without this its keyed accumulator (one dataclass per
+        ``(session, run_epoch, sub_thread)``) would linger for the process life.
+        The turn is already terminal, so no later record needs the state.
+        """
+
+        self._clear_turn_state(ctx)
+
     def _reconcile_text(self, ctx: NormalizeContext, final_text: str) -> Optional[str]:
         """Reconcile a final full-text snapshot against accumulated deltas.
 
