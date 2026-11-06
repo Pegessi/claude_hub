@@ -295,6 +295,10 @@ class WatchdogMixin(SessionState):
             payload["final_text"] = final
         event = ctx.event(AgentStreamEventType.TURN_COMPLETED, payload)
         await self._publish(redact_event(event))
+        # No provider ``result`` will arrive to clear the adapter's per-turn
+        # accumulators (incl. the message lifecycle); release them now so they
+        # do not linger for the process life.
+        self.adapter.clear_turn_state(ctx)
         self._turn_completed_seen = True
         self._terminalize_native_runtime("completed")
         self._active_turn_id = None

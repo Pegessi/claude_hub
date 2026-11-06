@@ -326,6 +326,7 @@ class NativeConsumerMixin(SessionState):
                 # produce two terminal events for the same turn.
                 exit_error = transport.exit_error
                 failed: Optional[AgentStreamEvent] = None
+                truncated_final = False
                 if not self._turn_completed_seen and self._goal_terminal_at is not None:
                     # One-shot exited before the Goal-terminal grace elapsed but
                     # after the model emitted a complete, controller-valid
@@ -345,25 +346,19 @@ class NativeConsumerMixin(SessionState):
                             )
                         continue
                 if not self._turn_completed_seen and exit_error is None:
-                    # First handle a clean EOF that cut the model's FINAL message
-                    # mid-generation (a message_start with no matching
-                    # message_stop after some final text streamed). The buffered
-                    # text is a truncated prefix: fail the turn retryable and
-                    # NEVER deliver/record the prefix. Mirrors the generic EOF
-                    # failure path below (same _fail_active_turn + cleanup/notify);
-                    # the external channel (Dot/Feishu) is resent to regenerate.
+                    # A clean EOF with no completion record. Two outcomes:
+                    #
+                    # 1. The final assistant message was cut mid-generation (a
+                    #    message_start with no matching message_stop after
+                    #    post-tool text streamed). The buffered text is a
+                    #    truncated prefix: set the flag so the locked terminal
+                    #    block below fails RETRYABLE and never delivers/records
+                    #    it.
+                    # 2. Otherwise, when a complete non-empty answer streamed with
+                    #    no outstanding tool/approval/queue wait, synthesize a
+                    #    completed turn (the 602bf59d clean-EOF behavior).
                     if self._clean_eof_final_message_truncated(transport):
-                        logger.warning(
-                            "clean EOF cut off the final assistant message for "
-                            "session %s; failing retryable instead of delivering a "
-                            "truncated prefix",
-                            self.session_id,
-                        )
-                        failed = await self._fail_active_turn(
-                            self._deps._TRUNCATED_FINAL_MESSAGE_MESSAGE,
-                            transport,
-                            retryable=True,
-                        )
+                        truncated_final = True
                     else:
                         # Ordinary (non-Goal) one-shot turn reached a CLEAN EOF after
                         # streaming a complete, non-empty answer but never wrote a
@@ -390,52 +385,89 @@ class NativeConsumerMixin(SessionState):
                             )
                         if synthesized:
                             continue
+                # Terminalize a turn whose stdout ended without a completion
+                # record. The fail publication AND the active-turn id/guard
+                # release must be ONE atomic step under ``_send_lock``: a
+                # concurrent manual Stop or stop()-teardown cancel
+                # (``_cancel_active_turn_locked``) could otherwise interleave
+                # around the awaited ERROR/turn_completed publishes and persist a
+                # SECOND terminal (failed + cancelled) for the same turn —
+                # breaking the exactly-one-terminal invariant and misrouting the
+                # Feishu FIFO. Mirrors the fatal-EOF locked path above.
                 if not self._turn_completed_seen:
-                    # A cancelled reader cannot reach this branch: the
-                    # transport retires its generation before publishing the
-                    # cancellation sentinel, so ``read_line`` discards it and
-                    # never surfaces it as EOF. Reaching here therefore means
-                    # the provider's stdout ended without a completion record —
-                    # a real failure, and one this branch used to swallow
-                    # silently, leaving no trace beyond the synthesized event.
-                    # "ended" and not "closed": the drain also stops reading
-                    # after a non-cancellation crash, and then the provider may
-                    # still be alive (its ``native transport stdout drain
-                    # failed`` line precedes this one).
-                    logger.warning(
-                        "provider stdout ended with no completion record for "
-                        "session %s (exit_error=%r); synthesizing a failed turn",
-                        self.session_id,
-                        exit_error,
-                    )
-                    failed = await self._fail_active_turn(
-                        exit_error or "provider exited without a completion record",
-                        transport,
-                    )
+                    if truncated_final:
+                        logger.warning(
+                            "clean EOF cut off the final assistant message for "
+                            "session %s; failing retryable instead of delivering a "
+                            "truncated prefix",
+                            self.session_id,
+                        )
+                        failure_message = self._deps._TRUNCATED_FINAL_MESSAGE_MESSAGE
+                    else:
+                        # A cancelled reader cannot reach this branch: the
+                        # transport retires its generation before publishing the
+                        # cancellation sentinel, so ``read_line`` discards it and
+                        # never surfaces it as EOF. "ended" and not "closed": the
+                        # drain also stops reading after a non-cancellation crash,
+                        # and then the provider may still be alive.
+                        logger.warning(
+                            "provider stdout ended with no completion record for "
+                            "session %s (exit_error=%r); synthesizing a failed turn",
+                            self.session_id,
+                            exit_error,
+                        )
+                        failure_message = (
+                            exit_error or "provider exited without a completion record"
+                        )
+                    async with self._send_lock:
+                        # A concurrent cancel may have terminalized and released
+                        # the turn while we waited for the lock; publish only when
+                        # the turn is still owned and non-terminal.
+                        if self._active_turn_id is not None:
+                            failed = await self._fail_active_turn(
+                                failure_message,
+                                transport,
+                                retryable=truncated_final,
+                            )
+                        self._active_turn_id = None
+                        self._active_tool_call_ids.clear()
+                        self._blocking_approval_call_ids.clear()
+                        self._reset_queue_wait_state()
+                        self._goal_terminal_at = None
+                        transport.acknowledge_turn_complete()
+                        # No provider result reached normalization, so the adapter
+                        # never cleared its per-turn accumulators/lifecycle: drop
+                        # them to avoid leaking one keyed state per failed EOF.
+                        ended_session = self._session_getter()
+                        if ended_session is not None:
+                            self.adapter.clear_turn_state(
+                                NormalizeContext(
+                                    session_id=self.session_id,
+                                    tab_id=ended_session.tab_id,
+                                    agent_type=ended_session.agent_type,
+                                    run_epoch=self._run_epoch,
+                                    turn_id=None,
+                                )
+                            )
                 elif exit_error is not None:
-                    # The provider emitted a terminal completion but still
-                    # exited nonzero. The completion's status already
-                    # reflects the outcome (failed/cancelled), so retain the
-                    # bounded stderr in diagnostics without emitting a second
-                    # terminal event.
+                    # The provider emitted a terminal completion but still exited
+                    # nonzero. The completion's status already reflects the
+                    # outcome (failed/cancelled); retain the bounded stderr in
+                    # diagnostics without emitting a second terminal event. The
+                    # result-completion path already released the id/guard, so the
+                    # locked release below is a defensive no-op.
                     logger.warning(
                         "provider exited nonzero after turn_completed for session %s: %s",
                         self.session_id,
                         exit_error,
                     )
-                # The active turn id and turn guard are normally released at
-                # ``TURN_COMPLETED`` (which is the provider's final record).
-                # If the process exited without ever emitting a completion
-                # record, ``_fail_active_turn`` above has already published a
-                # synthetic failed ``turn_completed``; clear the turn id and
-                # release the guard here so the next send can proceed. If a
-                # completion WAS emitted, these are no-ops.
-                self._active_turn_id = None
-                self._active_tool_call_ids.clear()
-                self._blocking_approval_call_ids.clear()
-                self._reset_queue_wait_state()
-                self._goal_terminal_at = None
-                transport.acknowledge_turn_complete()
+                    async with self._send_lock:
+                        self._active_turn_id = None
+                        self._active_tool_call_ids.clear()
+                        self._blocking_approval_call_ids.clear()
+                        self._reset_queue_wait_state()
+                        self._goal_terminal_at = None
+                        transport.acknowledge_turn_complete()
                 if failed is not None:
                     self._notify_post_persist(failed)
                 continue

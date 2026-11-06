@@ -6275,6 +6275,99 @@ async def test_native_clean_eof_open_final_message_after_tool_failcloses_retryab
         assert "final_text" not in terminal.payload
         assert tailer._active_turn_id is None
         assert transport.turn_in_flight is False
+        # A result-less failed turn must still release the adapter's per-turn
+        # lifecycle/accumulators (no leaked keyed state for the next turn).
+        ended_ctx = NormalizeContext(
+            session_id=session.id,
+            tab_id=session.tab_id,
+            agent_type=session.agent_type,
+            run_epoch=tailer._run_epoch,
+        )
+        assert tailer.adapter.provider_message_lifecycle(ended_ctx) == (False, 0)
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_truncated_clean_eof_concurrent_cancel_persists_one_terminal() -> None:
+    """Locking regression (review B1): the retryable clean-EOF failure and the
+    active-turn id/guard release must be atomic under ``_send_lock``. A manual
+    Stop racing the EOF fail path must not persist a SECOND turn_completed
+    (failed + cancelled). We inject the cancel at the fail path's terminal
+    publish; with the fix the cancel blocks on the lock until the failed turn is
+    released and terminal, so it cannot add a cancelled edge."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    transport.exit_error = None
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("run tools then answer", [], client_turn_id="turn-race")
+        await asyncio.wait_for(queue.get(), timeout=0.5)  # turn_started
+
+        transport._records.put_nowait(_tool_use_record("msg-tool", "read-1"))
+        transport._records.put_nowait(_tool_result_record("read-1"))
+        transport._records.put_nowait(_message_start("msg-final"))
+        transport._records.put_nowait(_text_delta("**抖音工"))
+
+        injected = {"done": False}
+        original_publish = tailer._publish
+
+        async def publish_with_racing_cancel(event: Any) -> None:
+            if (
+                not injected["done"]
+                and event.type == AgentStreamEventType.TURN_COMPLETED
+                and event.payload.get("retryable")
+            ):
+                injected["done"] = True
+                # Race a manual Stop at the exact terminal publish. With the fix
+                # this publish runs while the EOF path holds _send_lock, so the
+                # cancel blocks until the turn is released/terminal.
+                cancel_task = asyncio.create_task(tailer.cancel_turn())
+                await asyncio.sleep(0.05)  # let the cancel reach the lock
+                await original_publish(event)
+                await cancel_task
+                return
+            await original_publish(event)
+
+        tailer._publish = publish_with_racing_cancel  # type: ignore[method-assign]
+        transport._records.put_nowait(None)  # clean EOF, final message open
+
+        # Collect every terminal for the turn, then keep draining through a
+        # quiet window to expose any late second turn_completed.
+        terminals: List[Any] = []
+        quiet_until: Optional[float] = None
+        while True:
+            timeout = (
+                1.0
+                if quiet_until is None
+                else max(0.0, quiet_until - asyncio.get_event_loop().time())
+            )
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=timeout)
+            except asyncio.TimeoutError:
+                break
+            if event.type == AgentStreamEventType.TURN_COMPLETED:
+                terminals.append(event)
+                quiet_until = asyncio.get_event_loop().time() + 0.3
+            if quiet_until is not None and asyncio.get_event_loop().time() >= quiet_until:
+                break
+
+        assert injected["done"] is True, "the race injection did not fire"
+        assert len(terminals) == 1, f"expected exactly one terminal, got {len(terminals)}"
+        terminal = terminals[0]
+        assert terminal.payload["status"] == "failed"
+        assert terminal.payload.get("retryable") is True
+        assert "assistant_text" not in terminal.payload
     finally:
         await tailer.stop()
 
