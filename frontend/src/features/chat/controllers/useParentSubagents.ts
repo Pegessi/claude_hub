@@ -1,7 +1,5 @@
 import {
   computed,
-  onActivated,
-  onDeactivated,
   onMounted,
   onUnmounted,
   ref,
@@ -91,10 +89,26 @@ export function useParentSubagents(tabId: Ref<string>) {
     timer = null
   }
 
-  onMounted(startPolling)
-  // KeepAlive keeps the pane alive across tab visits; do not poll hidden panes.
-  onActivated(startPolling)
-  onDeactivated(stopPolling)
+  // The owner (TerminalPane) is never deactivated: other app modes hide the
+  // terminal shell with v-show. Pause while that shell or the page is hidden,
+  // and refetch at once on resume so the dock is not a poll interval stale.
+  const pageVisible = ref(typeof document === 'undefined' || !document.hidden)
+  const shouldPoll = computed(
+    () => pageVisible.value && appStore.mode === 'terminal',
+  )
+
+  function onVisibilityChange() {
+    pageVisible.value = !document.hidden
+  }
+
+  watch(shouldPoll, poll => (poll ? startPolling() : stopPolling()))
+
+  onMounted(() => {
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisibilityChange)
+    }
+    if (shouldPoll.value) startPolling()
+  })
 
   // The pane component stays mounted while the user switches its tab; a
   // tabId change means this pane is the active one, so refetch immediately.
@@ -107,6 +121,9 @@ export function useParentSubagents(tabId: Ref<string>) {
   onUnmounted(() => {
     disposed = true
     stopPolling()
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
   })
 
   return { chips, failed, refresh, jump }
