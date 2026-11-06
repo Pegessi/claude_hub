@@ -1,11 +1,17 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import test from 'node:test'
 
 const root = new URL('../', import.meta.url)
 const readSrc = path => readFileSync(new URL(`src/${path}`, root), 'utf8')
 
-const jumpCard = readSrc('features/chat/components/ChatSubagentJumpCard.vue')
+const rows = readSrc('features/chat/components/ChatSubagentRow.vue')
+const list = readSrc('features/chat/components/ChatSubagentList.vue')
+const dockPill = readSrc('features/chat/components/ChatSubagentDockPill.vue')
+const mobileBar = readSrc('features/chat/components/ChatSubagentMobileBar.vue')
+const hubLink = readSrc('features/chat/components/ChatHubSubagentLink.vue')
+const toolGroup = readSrc('features/chat/components/ChatToolGroup.vue')
+const terminalPane = readSrc('components/TerminalPane.vue')
 const structuredPane = readSrc('features/chat/StructuredPane.vue')
 const controller = readSrc('features/chat/controllers/useParentSubagents.ts')
 const panel = readSrc('features/agent-status/AgentStatusFloatingPanel.vue')
@@ -18,11 +24,51 @@ test('TerminalTab carries the Hub subagent linkage fields', () => {
   assert.match(terminalTypes, /subagent_id\?: string \| null/)
 })
 
-test('parent Chat mounts the jump card fed by the parent-subagent controller', () => {
-  assert.match(structuredPane, /<ChatSubagentJumpCard/)
-  assert.match(structuredPane, /:chips="parentSubagentChips"/)
-  assert.match(structuredPane, /@jump="jumpToSubagent"/)
-  assert.match(structuredPane, /useParentSubagents\(toRef\(props, 'tabId'\)\)/)
+test('old bottom jump card is gone', () => {
+  assert.equal(existsSync(new URL('src/features/chat/components/ChatSubagentJumpCard.vue', root)), false)
+  assert.doesNotMatch(structuredPane, /ChatSubagentJumpCard/)
+})
+
+test('TerminalPane owns the single poller and shares it with the pill and Chat body', () => {
+  assert.equal((terminalPane.match(/useParentSubagents\(/g) ?? []).length, 1)
+  assert.match(terminalPane, /provide\(subagentDockKey, subagentDock\)/)
+  assert.match(terminalPane, /<ChatSubagentDockPill[\s\S]*?v-if="isChatSession && !isMobile"/)
+  assert.doesNotMatch(structuredPane, /useParentSubagents/)
+  assert.match(structuredPane, /useSubagentDock\(\)/)
+})
+
+test('mobile shows only a running-only bar above the composer', () => {
+  assert.match(structuredPane, /<ChatSubagentMobileBar[\s\S]*?v-if="isMobile && subagentDock"/)
+  assert.ok(structuredPane.indexOf('<ChatSubagentMobileBar') < structuredPane.indexOf('<ChatComposer'))
+  assert.match(mobileBar, /v-if="counts\.running > 0"/)
+  assert.match(mobileBar, /aria-modal="true"/)
+  assert.match(mobileBar, /@keydown\.esc\.stop="closeSheet"/)
+})
+
+test('dock pill is an accessible popover with Esc and outside-click dismissal', () => {
+  assert.match(dockPill, /counts\.value\.running > 0\s*\? `\$\{counts\.value\.running\} running`\s*: `\$\{counts\.value\.history\} done`/)
+  assert.match(dockPill, /v-if="counts\.total > 0"/)
+  assert.match(dockPill, /aria-haspopup="dialog"/)
+  assert.match(dockPill, /:aria-expanded="open"/)
+  assert.match(dockPill, /@keydown\.esc\.stop="close\(true\)"/)
+  assert.match(dockPill, /addEventListener\('pointerdown'/)
+  assert.match(dockPill, /prefers-reduced-motion: reduce/)
+})
+
+test('list shows Active first and a collapsible Earlier with restore wording', () => {
+  assert.ok(list.indexOf('Active') < list.indexOf('Earlier'))
+  assert.match(list, /:aria-expanded="earlierOpen"/)
+  assert.match(list, /chip\.group === 'active'/)
+  assert.match(rows, /Restore & open/)
+  assert.match(rows, /:data-state="chip\.state"/)
+  assert.match(rows, /\{\{ chip\.summary \}\}/)
+  assert.match(rows, /:disabled="!chip\.canJump"/)
+})
+
+test('inline Hub agent run calls link to a matching sub-agent only', () => {
+  assert.match(toolGroup, /<ChatHubSubagentLink/)
+  assert.match(hubLink, /hubSubagentIdFromTool\(props\.argsText, props\.resultText\)/)
+  assert.match(hubLink, /dock\?\.jump\(chip\)/)
 })
 
 test('controller polls the durable subagent list and supports archived restore', () => {
@@ -31,20 +77,6 @@ test('controller polls the durable subagent list and supports archived restore',
   assert.match(controller, /subagentPollIntervalMs\(\)/)
   assert.match(controller, /terminalStore\.unarchiveTab\(chip\.tabId\)/)
   assert.match(controller, /appStore\.setMode\('terminal'\)/)
-})
-
-test('jump card renders one keyed row per chip with status and jump handler', () => {
-  assert.match(jumpCard, /v-for="chip in chips"/)
-  assert.match(jumpCard, /:key="chip\.key"/)
-  assert.match(jumpCard, /:data-state="chip\.state"/)
-  assert.match(jumpCard, /\{\{ chip\.name \}\}/)
-  assert.match(jumpCard, /\{\{ chip\.shortId \}\}/)
-  assert.match(jumpCard, /\{\{ chip\.stateLabel \}\}/)
-  assert.match(jumpCard, /\{\{ chip\.summary \}\}/)
-  assert.match(jumpCard, /:disabled="!chip\.canJump"/)
-  assert.match(jumpCard, /@click="emitJump\(chip\)"/)
-  // Archived children advertise the restore affordance.
-  assert.match(jumpCard, /chip\.archived/)
 })
 
 test('Terminal Workspace Agents panel marks sub-agent rows', () => {

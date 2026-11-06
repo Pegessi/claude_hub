@@ -7,6 +7,18 @@
 
 ## Released
 
+### feat(chat): replace the bottom sub-agent list with an Agents dock
+
+- Desktop Chat panes show a compact "Agents" pill in the top-right pane chrome
+  ("N running" with a pulsing dot, or muted "N done"; hidden with none). It opens an
+  anchored popover: Active first, collapsible Earlier (completed/failed/closed/
+  archived), one-line cleaned summary, relative time, Open / Restore & open.
+- Mobile shows a slim "N sub-agents running" pill above the composer only while
+  something runs, opening a bottom sheet with the same list.
+- `claude-hub agent run` tool calls link to their live Hub sub-agent when the
+  output names its id. TerminalPane owns the single poller and shares it.
+- Removed the always-visible full-width `ChatSubagentJumpCard`.
+
 ### fix(workspace): consolidate delegated Task liveness and bounded recovery
 
 - One Task liveness owner replaces terminal auto-continue, review delivery/reaping,
