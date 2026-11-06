@@ -367,6 +367,14 @@ class SessionState(ABC):
         raise NotImplementedError()
 
     @abstractmethod
+    def _clean_eof_final_message_truncated(self, transport: ProviderSession) -> bool:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def _apply_authoritative_result_text(self, event: AgentStreamEvent) -> None:
+        raise NotImplementedError()
+
+    @abstractmethod
     def _record_watchdog_activity(self, event: AgentStreamEvent) -> None:
         raise NotImplementedError()
 
@@ -421,7 +429,7 @@ class SessionState(ABC):
 
     @abstractmethod
     async def _fail_active_turn(
-        self, message: str, transport: ProviderSession
+        self, message: str, transport: ProviderSession, *, retryable: bool = False
     ) -> Optional[AgentStreamEvent]:
         raise NotImplementedError()
 

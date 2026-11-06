@@ -239,6 +239,15 @@ class ClaudeJsonlAdapter(AgentStreamAdapter):
             usage = normalize_provider_usage(raw, "claude")
             if usage is not None:
                 completed["usage"] = usage
+            # On success the ``result`` record carries the authoritative final
+            # answer in its ``result`` string (independent of how much of the
+            # final message streamed as deltas). Hand it to the consumer on a
+            # private key so the delivery-length backstop can substitute it when
+            # the streamed/persisted text is materially shorter. The consumer
+            # pops this before persistence/redaction.
+            result_text = raw.get("result")
+            if status == "completed" and isinstance(result_text, str) and result_text.strip():
+                completed["_authoritative_result_text"] = result_text
             events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, completed))
             return events
 
@@ -270,6 +279,7 @@ class ClaudeJsonlAdapter(AgentStreamAdapter):
             raw_message_id = msg.get("id") if isinstance(msg, dict) else None
             message_id = raw_message_id if isinstance(raw_message_id, str) else None
             self._begin_provider_message(ctx, message_id)
+            self._mark_provider_message_started(ctx)
             if not ctx.sub_thread_id:
                 events.append(ctx.event(AgentStreamEventType.TURN_STARTED, {"summary": ""}))
         elif etype == "content_block_start":
@@ -306,7 +316,11 @@ class ClaudeJsonlAdapter(AgentStreamAdapter):
             # snapshot arrive after the turn is marked complete. The
             # accumulator is cleared and ``TURN_COMPLETED`` is emitted on the
             # top-level ``result`` record instead.
-            pass
+            #
+            # We DO record that this assistant message closed, so at a clean
+            # EOF the consumer can tell a complete stream (message stopped) from
+            # a stdout that closed mid-final-message (no matching stop).
+            self._mark_provider_message_stopped(ctx)
         return events
 
     def _handle_tool_use_start(

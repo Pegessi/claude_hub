@@ -170,6 +170,29 @@ _MIN_TURN_SILENCE_S = 0.25
 #   + resume). A healthy queue emits roughly one status per second.
 QUEUED_TURN_MAX_WAIT_S = float(os.environ.get("CLAUDE_HUB_QUEUED_TURN_MAX_WAIT_S", "1800"))
 QUEUE_HEARTBEAT_STALL_S = float(os.environ.get("CLAUDE_HUB_QUEUE_HEARTBEAT_STALL_S", "90"))
+# Delivery-length backstop: when an authoritative full final answer is known
+# (the provider ``result`` string or a final assistant snapshot) but the text we
+# are about to deliver is materially shorter, warn and deliver the authoritative
+# text instead. Fires only when ALL hold: the authoritative text is at least
+# ``..MIN_AUTHORITATIVE_CHARS`` long, the delivered text is at most
+# ``..MIN_DELIVERY_RATIO`` of it, and the absolute gap is at least
+# ``..MIN_GAP_CHARS``. Tunable so noisy small replies never trip it.
+FINAL_TEXT_MIN_AUTHORITATIVE_CHARS = int(
+    os.environ.get("CLAUDE_HUB_FINAL_TEXT_MIN_AUTHORITATIVE_CHARS", "80")
+)
+FINAL_TEXT_MIN_DELIVERY_RATIO = float(
+    os.environ.get("CLAUDE_HUB_FINAL_TEXT_MIN_DELIVERY_RATIO", "0.5")
+)
+FINAL_TEXT_MIN_GAP_CHARS = int(os.environ.get("CLAUDE_HUB_FINAL_TEXT_MIN_GAP_CHARS", "40"))
+# A one-shot provider closed stdout cleanly while its final assistant message
+# was still open (message_start without matching message_stop) and after tool
+# calls, so only a prefix of the real answer was streamed. The prefix must never
+# be delivered as the answer; the turn fails with this retryable diagnostic and
+# the external channel (Dot/Feishu) is resent.
+_TRUNCATED_FINAL_MESSAGE_MESSAGE = (
+    "The assistant's final reply was cut off before it finished; "
+    "resend your message to regenerate the complete reply."
+)
 # Grace between a Goal turn's trailing terminal signal and the provider's
 # completion record. One-shot CLIs (Claude/Cursor) can have their stdout held
 # open by a lingering child after the final assistant text, so the result
@@ -305,6 +328,22 @@ class _LegacyRuntimeDependencies(RuntimeDependencies):
     @property
     def QUEUE_HEARTBEAT_STALL_S(self) -> float:
         return QUEUE_HEARTBEAT_STALL_S
+
+    @property
+    def FINAL_TEXT_MIN_AUTHORITATIVE_CHARS(self) -> int:
+        return FINAL_TEXT_MIN_AUTHORITATIVE_CHARS
+
+    @property
+    def FINAL_TEXT_MIN_DELIVERY_RATIO(self) -> float:
+        return FINAL_TEXT_MIN_DELIVERY_RATIO
+
+    @property
+    def FINAL_TEXT_MIN_GAP_CHARS(self) -> int:
+        return FINAL_TEXT_MIN_GAP_CHARS
+
+    @property
+    def _TRUNCATED_FINAL_MESSAGE_MESSAGE(self) -> str:
+        return _TRUNCATED_FINAL_MESSAGE_MESSAGE
 
     @property
     def GOAL_TERMINAL_GRACE_S(self) -> float:

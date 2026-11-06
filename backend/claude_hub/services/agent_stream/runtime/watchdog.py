@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from ....models import AgentRuntimeStatus, AgentStreamEvent, AgentStreamEventType
 from ..base import NormalizeContext
@@ -11,6 +12,8 @@ from ..native import ProviderSession
 from ..redaction import redact_event
 from .session_state import SessionState
 from .values import NativeRuntimeSnapshot
+
+logger = logging.getLogger("claude_hub.services.agent_stream.tailer")
 
 
 class WatchdogMixin(SessionState):
@@ -239,6 +242,16 @@ class WatchdogMixin(SessionState):
         ordinary turn never installs the goal sanitizer
         (``input.py`` only installs it for goal-continuation turns), so the
         buffered text here is plain visible assistant output.
+
+        Message-lifecycle gate (tri-state): when the turn carried native
+        ``message_start`` envelopes (``saw_message_scope``), the streamed answer
+        is only certified complete once every opened assistant message received
+        its ``message_stop`` (``open_assistant_messages == 0``). A clean EOF
+        with a still-open final message means the provider closed stdout
+        mid-generation — the buffered text is a truncated prefix and must NOT be
+        certified; :meth:`_clean_eof_final_message_truncated` routes that to a
+        retryable failure instead. Turns with no message envelopes
+        (final-only/backfill/synthetic) keep the legacy buffered-text behavior.
         """
         turn_id = self._active_turn_id
         if (
@@ -248,6 +261,8 @@ class WatchdogMixin(SessionState):
             or transport.goal_completion_requires_provider_event
             or self._goal_protocol_turn
             or self._waiting_for_external_activity()
+            # A tool ran and no post-tool final answer has started streaming:
+            # pre-tool commentary (already in the buffer) is not the answer.
             or self._final_text_after_tool
             or not self._final_assistant_text.strip()
             or not self._assistant_text.strip()
@@ -263,6 +278,13 @@ class WatchdogMixin(SessionState):
             run_epoch=self._run_epoch,
             turn_id=turn_id,
         )
+        saw_scope, open_messages = self.adapter.provider_message_lifecycle(ctx)
+        if saw_scope and open_messages > 0:
+            # Native stream ended with an assistant message still open: the
+            # final answer was cut off mid-message. Do not synthesize a
+            # completed turn from the prefix; the EOF handler fail-closes this
+            # as retryable instead.
+            return False
         payload: Dict[str, Any] = {"status": "completed", "assistant_text": self._assistant_text}
         # Mirror the normal turn_completed finalizer: expose only the answer
         # emitted after the last tool call as final_text, and only when it
@@ -293,6 +315,101 @@ class WatchdogMixin(SessionState):
         self._goal_protocol_sanitizer = None
         self._goal_protocol_turn = False
         return True
+
+    def _clean_eof_final_message_truncated(self, transport: ProviderSession) -> bool:
+        """Whether a clean EOF cut the final assistant message mid-generation.
+
+        Call only when the one-shot exited cleanly (``exit_error is None``) with
+        no terminal completion record. Returns True when the turn used native
+        message envelopes, at least one assistant message is still open, some
+        final answer text already streamed, and the turn is not legitimately
+        blocked on a tool/approval. In that state the buffered text is a
+        truncated prefix: the EOF handler fail-closes with a single retryable
+        failure instead of delivering/certifying the prefix.
+        """
+        turn_id = self._active_turn_id
+        if (
+            turn_id is None
+            or self._turn_completed_seen
+            or getattr(transport, "eof_is_fatal", False)
+            or self._goal_protocol_turn
+            or self._waiting_for_external_activity()
+            or not self._final_assistant_text.strip()
+        ):
+            return False
+        session = self._session_getter()
+        if session is None:
+            return False
+        ctx = NormalizeContext(
+            session_id=self.session_id,
+            tab_id=session.tab_id,
+            agent_type=session.agent_type,
+            run_epoch=self._run_epoch,
+            turn_id=turn_id,
+        )
+        saw_scope, open_messages = self.adapter.provider_message_lifecycle(ctx)
+        return bool(saw_scope and open_messages > 0)
+
+    def _apply_authoritative_result_text(self, event: AgentStreamEvent) -> None:
+        """Delivery-length backstop (AC4) for a real ``result`` completion.
+
+        The provider ``result`` record carries the authoritative final answer in
+        a private ``_authoritative_result_text`` payload key (popped here so it
+        is never persisted). When the streamed whole-turn text is materially
+        shorter than it (configurable thresholds), log a structured warning and
+        substitute the authoritative answer so the external bridge and journal
+        deliver complete text.
+
+        The whole-turn ``assistant_text`` is replaced only when it is a strict
+        prefix of the authoritative answer (a pure streaming cut — the Dot shape,
+        where no pre-tool commentary text is emitted). When the turn also
+        contained pre-tool commentary, ``assistant_text`` is preserved and only
+        ``final_text`` (what the answers-last Dot channel delivers) is replaced,
+        so commentary is never dropped.
+        """
+        authoritative = event.payload.pop("_authoritative_result_text", None)
+        if not isinstance(authoritative, str) or not authoritative.strip():
+            return
+        auth = authoritative.strip()
+        if len(auth) < self._deps.FINAL_TEXT_MIN_AUTHORITATIVE_CHARS:
+            return
+        whole = event.payload.get("assistant_text")
+        whole_s = whole.strip() if isinstance(whole, str) else ""
+        gap = len(auth) - len(whole_s)
+        ratio = (len(whole_s) / len(auth)) if auth else 1.0
+        if (
+            gap < self._deps.FINAL_TEXT_MIN_GAP_CHARS
+            or ratio > self._deps.FINAL_TEXT_MIN_DELIVERY_RATIO
+        ):
+            return
+        logger.warning(
+            "final_text_mismatch session=%s authoritative_len=%d delivered_len=%d ratio=%.3f",
+            self.session_id,
+            len(auth),
+            len(whole_s),
+            ratio,
+        )
+        if not whole_s:
+            # Nothing streamed to preserve (e.g. backfill/final-only result):
+            # the authoritative answer becomes the whole-turn text so both the
+            # external bridge and the Dot journal see it.
+            event.payload["assistant_text"] = authoritative
+            event.payload.pop("final_text", None)
+        elif auth.startswith(whole_s):
+            # Pure streaming cut of the final-answer buffer: the persisted
+            # assistant_text (also what the Dot journal records) is the prefix.
+            event.payload["assistant_text"] = authoritative
+            event.payload.pop("final_text", None)
+        else:
+            # Pre-tool commentary present: keep the whole-turn text but make the
+            # answers-last final answer authoritative.
+            event.payload["final_text"] = authoritative
+        event.payload["final_text_mismatch"] = {
+            "authoritative_len": len(auth),
+            "delivered_len": len(whole_s),
+            "ratio": round(ratio, 4),
+            "source": "result",
+        }
 
     def _record_watchdog_activity(self, event: AgentStreamEvent) -> None:
         """Track conditions that legitimately pause model streaming."""

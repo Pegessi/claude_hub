@@ -7,7 +7,31 @@
 
 ## Released
 
-### feat(chat): replace the bottom sub-agent list with an Agents dock
+### fix(chat): never deliver a clean-EOF prefix as Dot's complete final reply
+
+- After tool calls, a one-shot provider (Claude `--print --include-partial-messages`
+  via the relay) can close stdout **mid final message** — only the opening
+  `text_delta`s arrive, with no matching `message_stop` and no `result`, yet the
+  process exits 0. The clean-EOF completion synthesis (the 602bf59d Feishu
+  false-failure fix) certified that partial buffer as a complete answer, so Dot's
+  final reply to Feishu and the journal was truncated to its first few characters
+  (observed 2026-11-06 12:25 → 56 chars, 18:09 → 5 chars; the provider transcript
+  held the full 583/373-char `end_turn` answers).
+- The adapter now tracks an open assistant-message lifecycle per turn
+  (`message_start` / `message_stop`, cleared on `result`). Clean-EOF synthesis is
+  tri-state: a still-open final message after streamed post-tool text fails
+  **retryable** (`turn_completed.status=failed`, `retryable=true`, no
+  `assistant_text`/`final_text`) so the prefix is never delivered/journaled and the
+  channel resends; a fully closed message missing only `result` still completes;
+  turns with no message envelopes (final-only/backfill) keep prior behavior.
+- Delivery-length backstop: a successful `result` carrying the authoritative answer
+  materially longer than the streamed text (defaults: ≥80 chars, delivered ≤50%,
+  gap ≥40; `CLAUDE_HUB_FINAL_TEXT_*` env) now logs `final_text_mismatch`, marks the
+  completion structurally, and substitutes the authoritative text for both the
+  bridge and the journal.
+- Regression tests cover open/closed/no-scope clean EOF, authoritative-text
+  substitution and its threshold boundary, and per-message lifecycle isolation.
+
 
 - Desktop Chat panes show a compact "Agents" pill in the top-right pane chrome
   ("N running" with a pulsing dot, or muted "N done"; hidden with none). It opens an

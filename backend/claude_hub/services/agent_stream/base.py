@@ -84,6 +84,18 @@ class _TurnAccumulator:
     # ``content_block_start`` and ``content_block_stop``.
     pending_tool_inputs: Dict[int, str] = field(default_factory=dict)
     pending_tool_meta: Dict[int, Dict[str, Any]] = field(default_factory=dict)
+    # Open assistant MESSAGE lifecycle (``message_start`` … ``message_stop``),
+    # distinct from the per-message text accumulator above. A one-shot provider
+    # can close stdout mid-generation after a ``message_start`` with only some
+    # ``text_delta`` records and no matching ``message_stop``/``result``.
+    # ``saw_message_scope`` records that this turn carried native stream-event
+    # envelopes at all (final-only/backfill/synthetic turns carry none and keep
+    # their legacy behavior); ``open_assistant_messages`` counts messages that
+    # were started but not yet stopped. Both are turn-scoped: they are cleared
+    # by ``_clear_turn_state`` and never by the per-message
+    # ``_reset_message_state``.
+    saw_message_scope: bool = False
+    open_assistant_messages: int = 0
 
 
 @dataclass
@@ -313,6 +325,44 @@ class AgentStreamAdapter:
         if message_id is not None and message_id != state.active_provider_message_id:
             state.active_provider_message_id = message_id
             self._reset_message_state(ctx)
+
+    def _mark_provider_message_started(self, ctx: NormalizeContext) -> None:
+        """Record a native ``message_start``: open a new assistant message.
+
+        Balanced by :meth:`_mark_provider_message_stopped` on ``message_stop``
+        and reset by :meth:`_clear_turn_state` on ``result``. The count lets the
+        consumer distinguish a complete stream (every opened message stopped)
+        from a stdout that closed mid-final-message (a ``message_start`` with no
+        matching ``message_stop``) — the latter must not be certified as a
+        complete answer at a clean EOF.
+        """
+
+        state = self._get_turn_state(ctx)
+        state.saw_message_scope = True
+        state.open_assistant_messages += 1
+
+    def _mark_provider_message_stopped(self, ctx: NormalizeContext) -> None:
+        """Record a native ``message_stop``: close the most recent message."""
+
+        state = self._get_turn_state(ctx)
+        state.saw_message_scope = True
+        if state.open_assistant_messages > 0:
+            state.open_assistant_messages -= 1
+
+    def provider_message_lifecycle(self, ctx: NormalizeContext) -> Tuple[bool, int]:
+        """Return ``(saw_message_scope, open_assistant_messages)`` for the turn.
+
+        Read-only, used by the native consumer at EOF. ``saw_message_scope`` is
+        False for final-only/backfill/synthetic turns that never emit
+        ``message_start`` (they keep the legacy synthesize-on-buffered-text
+        behavior); when True, a positive ``open_assistant_messages`` means the
+        provider closed stdout before finishing an assistant message.
+        """
+
+        state = self._turn_state.get(self._turn_key(ctx))
+        if state is None:
+            return (False, 0)
+        return (state.saw_message_scope, max(0, state.open_assistant_messages))
 
     def _reconcile_text(self, ctx: NormalizeContext, final_text: str) -> Optional[str]:
         """Reconcile a final full-text snapshot against accumulated deltas.
