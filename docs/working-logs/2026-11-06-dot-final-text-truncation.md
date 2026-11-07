@@ -275,3 +275,24 @@ strip，于是合成 completed 外发 1 个不可见字符。
 - 验证（单条前台阻塞）：test_agent_stream.py 229 passed；coalescer/native/merge 209；
   宽集 2405 passed（唯一失败 test_provider_process_group 依赖 Linux /proc，macOS 平台
   不兼容，与本改动无关）；black/isort/mypy（改动文件）干净。
+
+## Codex 第十轮——根治：按真实消息边界，不再按 Unicode 类别修剪 commentary（cycle-11）
+
+同类问题第三次（标签旗帜 Cf）。彻底放弃在 commentary 上做 Mn/Me/Cf 字形启发式：
+- 删除 `trim_invisible_edges`（逐码点/手写簇规则的根源）及 product 全部引用。
+- 权威 result 采纳（post-tool 无实质 final）时，**按真实 post-tool 缓冲边界**切分：
+  缺失的（仅空白/不可见）post-tool 答案正是整段文本的**原始后缀**（
+  `_final_assistant_text`），用**长度**从 `_assistant_text` 末尾去掉该后缀，再仅对
+  边界做普通 `str.strip()`（只去空白分隔，绝不删 mark/tag/emoji），然后
+  `assistant_text = commentary.strip() + authoritative`，`final_text = authoritative`。
+  「有无答案」仍只由 is_substantive_answer 对 post-tool 缓冲判定。
+- 效果：commentary 里任何合法字形——标点结尾、叠加 NFD（e+U+0301+U+0327）、键帽
+  1️⃣、ZWJ emoji、emoji 标签旗帜 England 🏴󠁧󠁢󠁥󠁮󠁧󠁿 / Scotland / Wales（黑旗+若干
+  Cf tag 码点+E007F）——全部逐字保留；真正流式 final 路径本就不经此处。
+- 测试：并入 round10 失败（England tag）+ Scotland/Wales + 标点结尾对照 + 完整标签旗
+  作为流式 final 对照；af4a2988 上三面 tag 旗（England/Scotland/Wales）皆失败、4 个
+  对照通过，新提交全过；前几轮（padded marks、multiple-Mn、keycap、孤立选择符、
+  cancelled/failed 等）全部保持通过。
+- 验证（单条前台阻塞）：test_agent_stream.py 233 passed；coalescer/native/merge 209；
+  宽集 2433 passed、0 failed（剔除 base 既有的 Linux /proc 与 goal flake）；
+  black/isort/mypy（全后端，除既有 harness 报错）干净。

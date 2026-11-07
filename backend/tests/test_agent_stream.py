@@ -7419,29 +7419,6 @@ async def test_long_answer_preserves_combining_keycap_zwj_and_embedded_format() 
 # ---------------------------------------------------------------------------
 
 
-def test_trim_invisible_edges_preserves_whole_grapheme_clusters() -> None:
-    """P2: trim drops only whitespace/format/base-less marks; a base with its
-    whole mark stack (multiple Mn, keycap VS16+U+20E3, ZWJ) is never split."""
-    from claude_hub.services.agent_stream.base import trim_invisible_edges
-
-    # Stacked NFD marks on a base stay; keycap stays; ZWJ emoji stays.
-    assert trim_invisible_edges("备注ȩ́") == "备注ȩ́"
-    assert trim_invisible_edges("键帽1️⃣") == "键帽1️⃣"
-    assert trim_invisible_edges("👩‍💻") == "👩‍💻"
-    assert trim_invisible_edges("é") == "é"
-    # Only orphan/whitespace/format edges are removed.
-    assert trim_invisible_edges("​") == ""
-    assert trim_invisible_edges("﻿") == ""
-    assert trim_invisible_edges("先核验。  \n\t ️") == "先核验。"
-    assert trim_invisible_edges("计划。​") == "计划。"
-    # Middle characters are untouched.
-    assert trim_invisible_edges("a​b") == "a​b"
-    # CGJ attached to a base is part of the cluster (kept). The absent post-tool
-    # buffer that matters here sits at the TRAILING edge (after commentary), and
-    # a leading mark is left to attach to the base that follows.
-    assert trim_invisible_edges("备注é͏") == "备注é͏"
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "chunks",
@@ -7636,6 +7613,136 @@ async def test_authority_adoption_keeps_whole_commentary_combining_cluster(plan:
         terminal = await _collect_terminal(completion_q)
         assert terminal.payload["final_text"] == "好"
         assert terminal.payload["assistant_text"] == plan * 2 + "好"
+    finally:
+        await tailer.stop()
+
+
+# ---------------------------------------------------------------------------
+# Codex cross-validation round 10: legal emoji tag-flag clusters must survive
+# authoritative adoption verbatim (no Unicode-category trimming of commentary).
+# ---------------------------------------------------------------------------
+
+# Subdivision flag = black flag U+1F3F4 + tag letters + tag_cancel U+E007F.
+ENGLAND_FLAG = "🏴󠁧󠁢󠁥󠁮󠁧󠁿"
+SCOTLAND_FLAG = "🏴󠁧󠁢󠁳󠁣󠁴󠁿"
+WALES_FLAG = "🏴󠁧󠁢󠁷󠁬󠁳󠁿"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "flag,name",
+    [(ENGLAND_FLAG, "england"), (SCOTLAND_FLAG, "scotland"), (WALES_FLAG, "wales")],
+    ids=["england", "scotland", "wales"],
+)
+async def test_authority_adoption_preserves_tag_flag_commentary(flag: str, name: str) -> None:
+    """P2 (round 10): commentary ending in a legal subdivision emoji-tag flag
+    (black flag + six/five Cf tag codepoints) is preserved byte-for-byte when
+    the short authoritative answer is adopted — the Cf tags must not be stripped
+    (they are part of the emoji extended grapheme cluster), for
+    England/Scotland/Wales."""
+    import unicodedata
+
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    # The tag codepoints are category Cf but the sequence is a valid emoji.
+    assert flag[0] == "🏴"
+    assert all(unicodedata.category(ch) == "Cf" for ch in flag[1:])
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("flag commentary", [], client_turn_id=f"turn-{name}")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+        plan = "分区旗" + flag
+        _two_tools_with_plan(transport, plan)
+        transport._records.put_nowait(_success_result("好"))
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["final_text"] == "好"
+        assert terminal.payload["assistant_text"] == plan * 2 + "好"
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_authority_adoption_preserves_punctuation_ending_commentary() -> None:
+    """Control: commentary ending in ordinary punctuation/Chinese full stop (no
+    trailing whitespace) is preserved verbatim on authoritative adoption."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("punct commentary", [], client_turn_id="turn-punct")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+        plan = "结论如下："
+        _two_tools_with_plan(transport, plan)
+        transport._records.put_nowait(_success_result("好"))
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["final_text"] == "好"
+        assert terminal.payload["assistant_text"] == plan * 2 + "好"
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_complete_tag_flag_streamed_final_preserved_verbatim() -> None:
+    """Control: a complete tag flag delivered as the real streamed final answer
+    (closed message + matching result) is delivered verbatim with no marker."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("flag answer", [], client_turn_id="turn-tag-final")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+        _two_tools_with_plan(transport, "答案保留原符号。")
+        transport._records.put_nowait(_message_start("tag-flag-final-msg"))
+        for ch in ENGLAND_FLAG:
+            transport._records.put_nowait(_text_delta(ch))
+        transport._records.put_nowait(_message_stop())
+        transport._records.put_nowait(_success_result(ENGLAND_FLAG))
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "completed"
+        assert (
+            terminal.payload.get("final_text", terminal.payload["assistant_text"]) == ENGLAND_FLAG
+        )
+        assert "final_text_mismatch" not in terminal.payload
     finally:
         await tailer.stop()
 

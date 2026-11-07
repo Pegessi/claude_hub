@@ -7,7 +7,7 @@ import time
 from typing import Any, Dict, Optional
 
 from ....models import AgentRuntimeStatus, AgentStreamEvent, AgentStreamEventType
-from ..base import NormalizeContext, is_substantive_answer, trim_invisible_edges
+from ..base import NormalizeContext, is_substantive_answer
 from ..native import ProviderSession
 from ..redaction import redact_event
 from .session_state import SessionState
@@ -420,14 +420,24 @@ class WatchdogMixin(SessionState):
                 len(whole_s),
             )
             event.payload["final_text"] = authoritative
-            # Preserve the full commentary, including any combining/keycap/ZWJ
-            # cluster at its end (cluster-safe trim removes only whitespace and
-            # base-less marks), then append the answer.
-            commentary = trim_invisible_edges(whole_s)
-            if commentary:
-                event.payload["assistant_text"] = commentary + authoritative
+            # Preserve the commentary VERBATIM and append the answer. The
+            # boundary is the real post-tool buffer, not Unicode heuristics: the
+            # absent (whitespace/invisible-only) post-tool answer is the exact
+            # suffix of the whole text, so split it off by LENGTH. This keeps
+            # every legal glyph in the commentary — punctuation-ending plans,
+            # stacked NFD/keycap marks, ZWJ and emoji tag-flag clusters
+            # (England/Scotland/Wales) — and removes only the separator that is
+            # part of the excluded post-tool buffer.
+            whole_raw = self._assistant_text
+            post_buffer = self._final_assistant_text  # raw suffix (invisible here)
+            if post_buffer and whole_raw.endswith(post_buffer):
+                commentary = whole_raw[: len(whole_raw) - len(post_buffer)]
             else:
-                event.payload["assistant_text"] = authoritative
+                commentary = whole_raw
+            commentary = commentary.strip()  # plain whitespace separator only
+            event.payload["assistant_text"] = (
+                commentary + authoritative if commentary else authoritative
+            )
             _emit_marker(0.0)
             return
 
