@@ -7,6 +7,21 @@
 
 ## Released
 
+### style(chat): one Agents pill in the pane chrome, phones included
+
+- The sub-agent control now lives in the top-right pane chrome at every width,
+  beside the session-name and Feishu pills and sharing their geometry exactly
+  (24px, raised surface, hairline border, muted 11px label). The separate
+  "N sub-agents running" bar above the composer is gone.
+- Only the reveal differs by width: the wide-pane gutter rail or the anchored
+  popover on desktop, a bottom sheet on phones (dialog semantics, safe-area
+  inset, grip, Done/Esc/backdrop dismissal, focus moved into the sheet, Tab
+  kept inside the dialog, and the same body scroll lock the other phone
+  overlays use). A breakpoint change dismisses the reveal rather than morphing
+  it.
+- Phones now also show history ("N done" when idle), so finished sub-agents
+  finally have an entry point there. Removed `ChatSubagentMobileBar.vue`.
+
 ### feat(chat): replace the bottom sub-agent list with an Agents dock
 
 - Desktop Chat panes show a compact "Agents" pill in the top-right pane chrome

@@ -15,7 +15,7 @@
       data-testid="subagent-dock-pill"
       :aria-haspopup="railFits ? undefined : 'dialog'"
       :aria-expanded="railFits ? railMode : open"
-      :aria-controls="railMode ? railId : (open ? popoverId : undefined)"
+      :aria-controls="railMode ? railId : (open ? revealId : undefined)"
       :aria-label="`Sub-agents: ${label}`"
       :title="railFits ? (railMode ? 'Collapse sub-agents' : 'Show sub-agents') : undefined"
       @click.stop="toggle"
@@ -68,7 +68,7 @@
     </section>
 
     <div
-      v-if="open && !railFits"
+      v-if="open && !railFits && !isMobile"
       :id="popoverId"
       class="subagent-popover"
       data-testid="subagent-popover"
@@ -88,15 +88,28 @@
         />
       </div>
     </div>
+
+    <!-- Mobile: the same pill lives in the pane chrome beside the session
+         name, and reveals the list as a bottom sheet. -->
+    <ChatSubagentSheet
+      v-if="open && isMobile"
+      :id="sheetId"
+      :chips="chips"
+      :now-ms="nowMs"
+      @close="close(true)"
+      @jump="onJump"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
+import { useViewport } from '@/composables/useViewport'
 import { subagentDockCounts, type SubagentJumpChip } from '../presentation/subagentJump'
 import ChatSubagentList from './ChatSubagentList.vue'
 import ChatSubagentRow from './ChatSubagentRow.vue'
+import ChatSubagentSheet from './ChatSubagentSheet.vue'
 
 const props = defineProps<{
   chips: SubagentJumpChip[]
@@ -116,6 +129,10 @@ const COLLAPSED_KEY = 'claude-hub:subagent-rail-collapsed'
 const uid = Math.random().toString(36).slice(2, 8)
 const popoverId = `subagent-popover-${uid}`
 const railId = `subagent-rail-${uid}`
+const sheetId = `subagent-sheet-${uid}`
+// One pill for every pane size; only the reveal differs (gutter rail or
+// popover on desktop, bottom sheet on phones).
+const { isMobile } = useViewport()
 const open = ref(false)
 const showAll = ref(false)
 const nowMs = ref(Date.now())
@@ -125,6 +142,7 @@ const paneWidth = ref(0)
 const userCollapsed = ref(readCollapsed())
 
 const counts = computed(() => subagentDockCounts(props.chips))
+const revealId = computed(() => (isMobile.value ? sheetId : popoverId))
 const label = computed(() =>
   counts.value.running > 0 ? `${counts.value.running} running` : `${counts.value.history} done`,
 )
@@ -133,7 +151,7 @@ const label = computed(() =>
 // The rail hangs from the chrome's right edge (8px pane inset) and keeps a
 // 16px gap from the column.
 const gutter = computed(() => (paneWidth.value - CHAT_COLUMN_PX) / 2 - 24)
-const railFits = computed(() => gutter.value >= RAIL_MIN_PX)
+const railFits = computed(() => !isMobile.value && gutter.value >= RAIL_MIN_PX)
 const railMode = computed(() => railFits.value && !userCollapsed.value)
 const railWidth = computed(() => Math.min(RAIL_MAX_PX, Math.floor(gutter.value)))
 
@@ -198,9 +216,39 @@ function onOutsidePointer(event: PointerEvent) {
   if (rootRef.value && !rootRef.value.contains(event.target as Node)) close(false)
 }
 
-watch(open, value => {
-  if (value) document.addEventListener('pointerdown', onOutsidePointer, true)
-  else document.removeEventListener('pointerdown', onOutsidePointer, true)
+// The reveal's own Esc handler only sees keys pressed while focus is inside it,
+// and tapping static content (popover body, sheet header) moves focus to
+// `body`. A document-level Escape keeps the promise that Esc closes the reveal
+// wherever focus is — the same precedent as the other overlays.
+function onDismissKey(event: KeyboardEvent) {
+  if (event.key !== 'Escape' || !open.value) return
+  event.preventDefault()
+  event.stopPropagation()
+  close(true)
+}
+
+// Dismissal plumbing for whichever reveal is actually on screen: an
+// outside-pointer only suits the anchored popover, Escape suits both.
+function syncDismissListeners() {
+  if (open.value && !isMobile.value) {
+    document.addEventListener('pointerdown', onOutsidePointer, true)
+  } else {
+    document.removeEventListener('pointerdown', onOutsidePointer, true)
+  }
+  if (open.value) {
+    document.addEventListener('keydown', onDismissKey, true)
+  } else {
+    document.removeEventListener('keydown', onDismissKey, true)
+  }
+}
+
+watch(open, syncDismissListeners)
+
+// A popover must not silently become a sheet (or the reverse) mid-view, so a
+// breakpoint change dismisses the reveal and lets the user reopen it.
+watch(isMobile, () => {
+  if (open.value) close(true)
+  syncDismissListeners()
 })
 
 // The pill disappears with the last sub-agent; never leave the popover open.
@@ -240,6 +288,7 @@ watch(rootRef, () => void nextTick(observePane))
 
 onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', onOutsidePointer, true)
+  document.removeEventListener('keydown', onDismissKey, true)
   observer?.disconnect()
   clearInterval(clock)
 })
