@@ -231,3 +231,27 @@ strip，于是合成 completed 外发 1 个不可见字符。
 - 验证（单条前台阻塞）：test_agent_stream.py 203 passed；core 412；dot/dispatch/
   feishu 89；相关宽集（剔除 2 个 base 既有 goal flake）2321 passed、0 failed；
   mypy/black/isort 干净。
+
+## Codex 第八轮——孤立修饰符(P1-A) 与 双方无答案(P1-B)（cycle-9）
+
+- **P1-A**：`is_substantive_answer` 把孤立 Mn/Me（VS16 U+FE0F、VS15 U+FE0E、CGJ
+  U+034F、补充 VS U+E0100）当有效答案。改为：逐字符扫描时维护 `has_base`，遇到 Mn/Me
+  仅在其前已有真实基字符时才算实质；无基的孤立修饰符一律忽略；任何其它真实字形
+  立即算实质。于是 e+U+0301、键帽 1️⃣、ZWJ 👩‍💻、正文内嵌 ZWSP/VS 全部原样保留
+  （谓词只判存在、不改文本）。`trim_invisible_edges` 同步：边界只剥「无基」修饰符，
+  附着在基字符后的标记（如 é 结尾）保留。
+- **P1-B**：工具后无有效 final，且 success result 为空/ZWSP/BOM/空白/缺字段时，旧逻辑
+  把工具前 commentary 当答案返回。修法：①adapter 生成 `_authoritative_result_text`
+  的存在性也改走 `is_substantive_answer`（空/不可见 result 直接不带权威键）；
+  ②consumer 完成块在 backstop 之后做最终存在性 fail-closed——仅当**本回合运行过工具、
+  工具后无实质 final、backstop 也未能给出实质 final_text** 时，把 `completed` 降级为
+  单个 retryable failed，并剥除 final_text/assistant_text（commentary 永不当答案）。
+  保留：有效流式 final + 空 authority → 仍投递 final；无工具无文本的空 success 不改
+  provider 的 completed 状态（由 dispatch「completed without assistant text」raise）。
+- 测试：并入 round8 6 个失败（VS16/VS15/CGJ/补充VS × 短/长 authority、仅 VS16 已闭合
+  EOF、empty/zwsp/bom/spaces/missing authority）+ 6 个对照（长组合/键帽/ZWJ/内嵌 ZWSP
+  正常长答、谓词单测、有效 final+空 authority、无 plan 无答案）。cda59f0a 上新测 12 个
+  失败（含谓词单测）、3 个对照通过；新提交全过。
+- 验证（单条前台阻塞）：test_agent_stream.py 218 passed；coalescer/native/merge 209；
+  dot/dispatch/feishu 89；相关宽集（剔除 2 个 base 既有 goal flake）2336 passed、0
+  failed；mypy（改动 5 文件及全后端，除既有 harness 报错）/black/isort 干净。

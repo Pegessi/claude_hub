@@ -34,54 +34,96 @@ from .providers.spec import (
 # Cc control, Cf format (zero-width space U+200B, BOM U+FEFF, joiners …),
 # Zs space separator, Zl line separator, Zp paragraph separator.
 _ANSWER_INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Zs", "Zl", "Zp"})
+# Combining marks (Mn nonspacing / Me enclosing) render only ON a base glyph.
+# An ISOLATED mark with no base (variation selectors U+FE00..FE0F / supplementary
+# U+E0100.., CGJ U+034F) carries no answer of its own; a mark attached to a real
+# base (e+U+0301, keycap 1+U+FE0F+U+20E3, ZWJ emoji) is part of a visible cluster.
+_ANSWER_COMBINING_MARK_CATEGORIES = frozenset({"Mn", "Me"})
 
 
 def is_substantive_answer(text: object) -> bool:
-    """Whether ``text`` contains at least one meaningful (visible) character.
+    """Whether ``text`` contains at least one meaningful (visible) glyph.
 
     The single predicate every path uses to decide whether a final answer
-    actually exists. A reply made ONLY of whitespace or invisible formatting is
-    treated as absent — including chunked content and non-``White_Space`` format
-    chars (U+200B/U+FEFF/…) that plain ``str.strip()`` leaves behind. A char is
-    skipped when it is Unicode whitespace (``str.isspace``) or in categories
-    Cc/Cf/Zs/Zl/Zp; any other char (letter, digit, punctuation, symbol, emoji…)
-    makes the answer substantive.
+    actually exists. A reply made ONLY of ignorable characters is treated as
+    absent: whitespace, control/format (Cc/Cf — U+200B/U+FEFF/joiners…),
+    separators (Zs/Zl/Zp), and ISOLATED combining marks (Mn/Me such as VS16
+    U+FE0F, VS15 U+FE0E, CGJ U+034F, supplementary VS U+E0100) that have no base
+    glyph before them. Chunked content is handled because the decision is made on
+    the accumulated string, not per delta.
 
-    This is a presence predicate ONLY: it never mutates text, so zero-width
-    characters embedded INSIDE a normal answer are preserved in delivery.
+    A combining mark that follows a real base (``é`` = e + U+0301, keycap
+    sequences, ZWJ emoji where bases are present) keeps the answer substantive —
+    the base already made it so. Any non-ignorable, non-mark glyph (letter,
+    digit, punctuation, symbol, emoji…) immediately makes the answer substantive.
+
+    Presence-only: it never mutates text, so zero-width/joining/format characters
+    embedded INSIDE a real answer are preserved in delivery.
     """
 
     if not isinstance(text, str):
         return False
+    has_base = False
     for ch in text:
-        if ch.isspace() or unicodedata.category(ch) in _ANSWER_INVISIBLE_CATEGORIES:
+        category = unicodedata.category(ch)
+        if ch.isspace() or category in _ANSWER_INVISIBLE_CATEGORIES:
             continue
+        if category in _ANSWER_COMBINING_MARK_CATEGORIES:
+            # Meaningful only when attached to a base already seen; an isolated
+            # mark (leading / the only content) proves no answer.
+            if has_base:
+                return True
+            continue
+        # A standalone glyph is itself a base and a real answer character.
         return True
     return False
 
 
 def trim_invisible_edges(text: object) -> str:
-    """Drop leading/trailing whitespace and invisible (Cc/Cf/Zs/Zl/Zp) chars.
+    """Drop leading/trailing whitespace, format chars and BASELESS combining
+    marks.
 
     Presentation-only join helper — used when concatenating preserved pre-tool
     commentary with an authoritative final answer so a trailing whitespace /
-    zero-width-only post-tool buffer is not wedged between them. It does NOT touch
-    invisible characters in the middle of a real answer.
+    zero-width / lone-variation-selector post-tool buffer is not wedged between
+    them. It does NOT touch invisible or combining characters in the middle of a
+    real answer (a combining mark after a base is kept even at an edge).
     """
 
     if not isinstance(text, str):
         return ""
+
+    def _ignorable(ch: str, has_base: bool) -> bool:
+        category = unicodedata.category(ch)
+        if ch.isspace() or category in _ANSWER_INVISIBLE_CATEGORIES:
+            return True
+        return category in _ANSWER_COMBINING_MARK_CATEGORIES and not has_base
+
     start = 0
     end = len(text)
-    while start < end and (
-        text[start].isspace() or unicodedata.category(text[start]) in _ANSWER_INVISIBLE_CATEGORIES
-    ):
+    while start < end and _ignorable(text[start], False):
         start += 1
-    while end > start and (
-        text[end - 1].isspace()
-        or unicodedata.category(text[end - 1]) in _ANSWER_INVISIBLE_CATEGORIES
-    ):
-        end -= 1
+    while end > start:
+        ch = text[end - 1]
+        category = unicodedata.category(ch)
+        if ch.isspace() or category in _ANSWER_INVISIBLE_CATEGORIES:
+            end -= 1
+            continue
+        if category in _ANSWER_COMBINING_MARK_CATEGORIES:
+            # Keep a mark attached to the real base glyph immediately before it;
+            # strip an orphan whose predecessor is only whitespace/another mark.
+            prev = text[end - 2] if end - 2 >= start else ""
+            prev_category = unicodedata.category(prev) if prev else ""
+            if (
+                prev
+                and not prev.isspace()
+                and prev_category not in _ANSWER_INVISIBLE_CATEGORIES
+                and prev_category not in _ANSWER_COMBINING_MARK_CATEGORIES
+            ):
+                break
+            end -= 1
+            continue
+        break
     return text[start:end]
 
 
