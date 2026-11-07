@@ -255,3 +255,23 @@ strip，于是合成 completed 外发 1 个不可见字符。
 - 验证（单条前台阻塞）：test_agent_stream.py 218 passed；coalescer/native/merge 209；
   dot/dispatch/feishu 89；相关宽集（剔除 2 个 base 既有 goal flake）2336 passed、0
   failed；mypy（改动 5 文件及全后端，除既有 harness 报错）/black/isort 干净。
+
+## Codex 第九轮——降级状态守卫 + 字形簇安全修剪（cycle-10）
+
+- **P1（回归）**：cycle-9 的 P1-B 降级块没检查原 status，把 provider 显式
+  `result(subtype=cancelled)`（工具后无 final）改写成 failed/retryable。修复：降级条件
+  增加 `event.payload.get("status") == "completed"` 守卫——只对 provider 的成功
+  completed 无答案做降级；cancelled/failed 的原状态与诊断原样保留（加测试
+  no-text 与 with-text-control）。
+- **P2（journal 污染）**：`trim_invisible_edges` 只看前一个码点，commentary 以
+  base+多个 Mn（e+U+0301+U+0327）或键帽（1+VS16+U+20E3，U+20E3 是 Me）结尾时会误删
+  一个合法组合符。改为**字形簇安全**：尾随先回退整段连续 Mn/Me 标记栈，若栈直接接在
+  真实基字符上则保留整簇（绝不拆散），仅当标记无基（前为空白/格式）才连同其前的空白
+  /格式一并剥除；前导只剥纯空白/控制/格式，不动标记（标记附后随基字符）。权威采纳时
+  journal 的 commentary 因此逐字保留（多 Mn、键帽、ZWJ emoji 均覆盖）。
+- 并入 round9 3 个失败（explicit cancelled no-text、multiple-mn、keycap）+ 7 个通过
+  对照（padded selector/marks、open 短中文/emoji+有效 result、无工具空 result 两种、
+  cancelled with-text、trim 单测）。ee8ef1e1 上恰 3 失败、8 对照通过；新提交全过。
+- 验证（单条前台阻塞）：test_agent_stream.py 229 passed；coalescer/native/merge 209；
+  宽集 2405 passed（唯一失败 test_provider_process_group 依赖 Linux /proc，macOS 平台
+  不兼容，与本改动无关）；black/isort/mypy（改动文件）干净。

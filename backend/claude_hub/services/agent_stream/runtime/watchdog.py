@@ -420,10 +420,11 @@ class WatchdogMixin(SessionState):
                 len(whole_s),
             )
             event.payload["final_text"] = authoritative
+            # Preserve the full commentary, including any combining/keycap/ZWJ
+            # cluster at its end (cluster-safe trim removes only whitespace and
+            # base-less marks), then append the answer.
             commentary = trim_invisible_edges(whole_s)
             if commentary:
-                # Preserve the pre-tool commentary (trimmed of the absent final
-                # text at its edge) for the journal, then the answer.
                 event.payload["assistant_text"] = commentary + authoritative
             else:
                 event.payload["assistant_text"] = authoritative
