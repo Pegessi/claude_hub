@@ -680,6 +680,30 @@ class NativeConsumerMixin(SessionState):
                             event,
                             post_tool_final_absent=not self._has_substantive_post_tool_final(),
                         )
+                        # Final fail-closed for the "commentary mistaken as the
+                        # answer" class. A tool ran and no substantive post-tool
+                        # final streamed: pre-tool commentary is in
+                        # assistant_text but is NOT the answer. If the backstop
+                        # could not substitute a substantive authoritative result
+                        # (it was empty/zero-width/whitespace/missing), there is
+                        # no answer anywhere — demote to a bounded retryable
+                        # failure and strip the text so the external channel
+                        # resends instead of returning the plan. (When no tool
+                        # ran, streamed text IS the answer; an empty provider
+                        # success is left to dispatch, which already raises
+                        # "completed without assistant text".)
+                        if (
+                            self._final_text_after_tool
+                            and not self._has_substantive_post_tool_final()
+                            and not is_substantive_answer(event.payload.get("final_text"))
+                        ):
+                            event.payload["status"] = "failed"
+                            event.payload["retryable"] = True
+                            event.payload["error_message"] = (
+                                self._deps._TRUNCATED_FINAL_MESSAGE_MESSAGE
+                            )
+                            event.payload.pop("final_text", None)
+                            event.payload.pop("assistant_text", None)
                     else:
                         # The private authoritative key must never be persisted
                         # on a Goal turn either.

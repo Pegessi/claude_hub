@@ -26,7 +26,13 @@ from ..ttyd_manager import (
     _jsonl_start_epoch,
     _pick_backfill_session,
 )
-from .base import AgentStreamAdapter, NormalizeContext, resolve_cwd, resolve_process_hint
+from .base import (
+    AgentStreamAdapter,
+    NormalizeContext,
+    is_substantive_answer,
+    resolve_cwd,
+    resolve_process_hint,
+)
 from .fork_seed import strip_fork_seed_history
 from .native import strip_hub_runtime_guidance
 
@@ -246,7 +252,7 @@ class ClaudeJsonlAdapter(AgentStreamAdapter):
             # the streamed/persisted text is materially shorter. The consumer
             # pops this before persistence/redaction.
             result_text = raw.get("result")
-            if status == "completed" and isinstance(result_text, str) and result_text.strip():
+            if status == "completed" and is_substantive_answer(result_text):
                 completed["_authoritative_result_text"] = result_text
             events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, completed))
             return events

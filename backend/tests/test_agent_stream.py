@@ -6229,6 +6229,23 @@ async def _collect_terminal(queue: "asyncio.Queue[Any]") -> Any:
             return event
 
 
+def _two_tools_with_plan(transport: Any, plan: str = "这只是工具执行前的计划。") -> None:
+    """Two tool round-trips, each preceded by the same pre-tool plan text,
+    mirroring the Codex crosscheck ``tools`` helper."""
+    for number in range(2):
+        mid, tid = f"msg-tool-{number}", f"tool-{number}"
+        transport._records.put_nowait(_message_start(mid))
+        if plan:
+            transport._records.put_nowait(_text_delta(plan))
+        transport._records.put_nowait(_tool_use_record(mid, tid, "Read"))
+        transport._records.put_nowait(_message_stop())
+        transport._records.put_nowait(_tool_result_record(tid, "evidence"))
+
+
+def _success_result(result: object) -> Dict[str, Any]:
+    return {"type": "result", "subtype": "success", "is_error": False, "result": result}
+
+
 @pytest.mark.asyncio
 async def test_native_clean_eof_open_final_message_after_tool_failcloses_retryable() -> None:
     """Regression for the Dot truncation: after tool calls the FINAL assistant
@@ -7099,6 +7116,298 @@ async def test_normal_answer_with_embedded_zwsp_completes_unmodified() -> None:
         assert terminal.payload["status"] == "completed"
         assert terminal.payload.get("final_text", terminal.payload["assistant_text"]) == answer
         assert "​" in terminal.payload.get("final_text", terminal.payload["assistant_text"])
+        assert "final_text_mismatch" not in terminal.payload
+    finally:
+        await tailer.stop()
+
+
+# ---------------------------------------------------------------------------
+# Codex cross-validation round 8: isolated combining marks (P1-A) and
+# empty/non-substantive success result with no post-tool final (P1-B).
+# ---------------------------------------------------------------------------
+
+
+def test_is_substantive_answer_ignores_isolated_combining_marks_but_keeps_clusters() -> None:
+    """P1-A: base-less Mn/Me marks (variation selectors, CGJ, supplementary VS)
+    alone prove no answer; the same marks attached to a base, keycap sequences
+    and ZWJ emoji are substantive."""
+    from claude_hub.services.agent_stream.base import is_substantive_answer
+
+    # Isolated marks / invisible.
+    for ch in ("️", "︎", "͏", "󠄀"):  # VS16, VS15, CGJ, supplementary VS
+        assert is_substantive_answer(ch) is False, hex(ord(ch))
+    assert is_substantive_answer("️︎") is False
+    # Meaningful clusters.
+    assert is_substantive_answer("é") is True  # e + U+0301
+    assert is_substantive_answer("1️⃣") is True  # digit + VS16 + keycap
+    assert is_substantive_answer("👩‍💻") is True  # ZWJ emoji
+    assert is_substantive_answer("已️完成") is True  # VS16 between real chars
+    assert is_substantive_answer("a") is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mark", "answer"),
+    [
+        ("\ufe0f", "**结论**：" + "长答复。" * 8),
+        ("\ufe0f", "已完成。"),
+        ("\ufe0e", "已完成。"),
+        ("\u034f", "已完成。"),
+        ("\U000e0100", "已完成。"),
+    ],
+    ids=["vs16-long", "vs16-short", "vs15-short", "cgj-short", "supplementary-vs-short"],
+)
+async def test_standalone_mark_final_uses_authoritative_answer(mark: str, answer: str) -> None:
+    """P1-A: post-tool text that is ONLY a base-less combining mark (VS16/VS15/
+    CGJ/supplementary VS) is absent. A successful authoritative result (short OR
+    long — not gated by the 80-char threshold) is delivered and commentary kept."""
+    import unicodedata
+
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    assert unicodedata.category(mark) in {"Mn", "Me"}
+    assert mark.strip() == mark  # strip does not remove the mark
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("standalone selector", [], client_turn_id="turn-mark")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+
+        plan = "工具前计划。"
+        _two_tools_with_plan(transport, plan)
+        transport._records.put_nowait(_message_start("mark-final"))
+        transport._records.put_nowait(_text_delta(mark))
+        transport._records.put_nowait(_message_stop())
+        transport._records.put_nowait(_success_result(answer))
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "completed"
+        assert terminal.payload["final_text"] == answer
+        whole = terminal.payload["assistant_text"]
+        assert whole.startswith(plan * 2)
+        assert whole.endswith(answer)
+        assert terminal.payload["final_text_mismatch"]["post_tool_final_absent"] is True
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_selector_only_closed_eof_does_not_certify_answer() -> None:
+    """P1-A: a final message that streamed only VS16, closed, with no result and a
+    clean EOF, is not a real answer: fail (retryable), no text delivered."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    transport.exit_error = None
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("selector eof", [], client_turn_id="turn-sel-eof")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+        _two_tools_with_plan(transport, "前置计划。")
+        transport._records.put_nowait(_message_start("sel-final"))
+        transport._records.put_nowait(_text_delta("️"))
+        transport._records.put_nowait(_message_stop())
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        # Closed message, no result, clean EOF, non-substantive content: the
+        # clean-EOF synthesis refuses to certify it, so it ends failed with no
+        # answer text carried (the precise retryable flag is not asserted; the
+        # guarantee is that no invisible marker is delivered as completed).
+        assert terminal.payload["status"] == "failed"
+        assert "final_text" not in terminal.payload
+        assert "assistant_text" not in terminal.payload
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "authority", ["", "​", "﻿", "   ", None], ids=["empty", "zwsp", "bom", "spaces", "missing"]
+)
+async def test_no_posttool_final_and_nonsubstantive_result_fails_not_plan(
+    authority: object,
+) -> None:
+    """P1-B: a tool ran, zero post-tool final, and the success result is
+    empty/zero-width/BOM/whitespace/missing. Neither source has an answer, so the
+    turn fails retryable and dispatch raises — the pre-tool plan must never be
+    returned as the answer (covered for authority present/absent)."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("no usable answer", [], client_turn_id="turn-noanswer")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+
+        plan = "这只是工具执行前的计划。"
+        _two_tools_with_plan(transport, plan)
+        if authority is None:
+            transport._records.put_nowait(
+                {"type": "result", "subtype": "success", "is_error": False}
+            )
+        else:
+            transport._records.put_nowait(_success_result(authority))
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "failed"
+        assert terminal.payload.get("retryable") is True
+        assert "final_text" not in terminal.payload
+        assert "assistant_text" not in terminal.payload
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_substantive_streamed_final_with_empty_authority_delivers_final() -> None:
+    """P1-B control: a real post-tool final DID stream but the success result is
+    empty -> trust the streamed final (do not fail), commentary preserved only in
+    the whole text."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message(
+            "real final, empty result", [], client_turn_id="turn-final-emptyauth"
+        )
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+
+        plan = "计划。"
+        answer = "这是真实的最终答复，应照常投递。"
+        _two_tools_with_plan(transport, plan)
+        transport._records.put_nowait(_message_start("fe-final"))
+        transport._records.put_nowait(_text_delta(answer))
+        transport._records.put_nowait(_message_stop())
+        transport._records.put_nowait(_success_result(""))
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "completed"
+        assert terminal.payload["final_text"] == answer
+        assert terminal.payload["assistant_text"] == plan * 2 + answer
+        assert "final_text_mismatch" not in terminal.payload
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_no_tool_no_final_empty_authority_completed_dispatches_as_no_text() -> None:
+    """P1-B control: NO tool ran and the provider reports an empty success with
+    no streamed text — completion status stays ``completed`` (we must not rewrite
+    the provider's own status), and the dispatch selection itself raises rather
+    than returning text."""
+    from claude_hub.services.agent_stream.base import is_substantive_answer
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("empty", [], client_turn_id="turn-empty-ok")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+        transport._records.put_nowait(_success_result(""))
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        # Provider status preserved; no answer text attached.
+        assert terminal.payload["status"] == "completed"
+        assert not terminal.payload.get("assistant_text")
+        # The delivery gate treats that as "no assistant text".
+        assert not is_substantive_answer(terminal.payload.get("assistant_text"))
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_long_answer_preserves_combining_keycap_zwj_and_embedded_format() -> None:
+    """P1-A control: a real long answer (chunked) containing base+Mn (é), keycap
+    (1+VS16+U+20E3), ZWJ emoji and an embedded ZWSP completes verbatim with no
+    mismatch marker — combining/format chars attached to bases are preserved."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("real unicode answer", [], client_turn_id="turn-real-marks")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+
+        plan = "计划说明。"
+        answer = "组合eé、键帽1️⃣、程序员👩‍💻、正文​正常。" * 10
+        _two_tools_with_plan(transport, plan)
+        transport._records.put_nowait(_message_start("real-marks-final"))
+        for offset in range(0, len(answer), 3):
+            transport._records.put_nowait(_text_delta(answer[offset : offset + 3]))
+        transport._records.put_nowait(_message_stop())
+        transport._records.put_nowait(_success_result(answer))
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "completed"
+        assert terminal.payload["final_text"] == answer
+        assert terminal.payload["assistant_text"] == plan * 2 + answer
         assert "final_text_mismatch" not in terminal.payload
     finally:
         await tailer.stop()
