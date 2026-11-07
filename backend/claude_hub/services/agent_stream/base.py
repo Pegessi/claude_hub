@@ -86,44 +86,53 @@ def trim_invisible_edges(text: object) -> str:
     Presentation-only join helper — used when concatenating preserved pre-tool
     commentary with an authoritative final answer so a trailing whitespace /
     zero-width / lone-variation-selector post-tool buffer is not wedged between
-    them. It does NOT touch invisible or combining characters in the middle of a
-    real answer (a combining mark after a base is kept even at an edge).
+    them. It removes only fully-ignorable leading/trailing GRAPHEME CLUSTERS
+    (whitespace/format/separator, and combining-mark clusters with no base); a
+    cluster that contains a base glyph — including a base with a whole STACK of
+    marks (NFD ế = e + U+0301 + U+0327) or keycap/ZWJ sequences (1️⃣, 👩‍💻) —
+    is kept intact. It never touches characters in the middle of the text.
     """
 
     if not isinstance(text, str):
         return ""
+    n = len(text)
 
-    def _ignorable(ch: str, has_base: bool) -> bool:
-        category = unicodedata.category(ch)
-        if ch.isspace() or category in _ANSWER_INVISIBLE_CATEGORIES:
-            return True
-        return category in _ANSWER_COMBINING_MARK_CATEGORIES and not has_base
+    def _is_mark(ch: str) -> bool:
+        return unicodedata.category(ch) in _ANSWER_COMBINING_MARK_CATEGORIES
 
+    def _is_invisible(ch: str) -> bool:
+        return ch.isspace() or unicodedata.category(ch) in _ANSWER_INVISIBLE_CATEGORIES
+
+    # Leading edge: strip only whitespace/control/format/separators. A leading
+    # combining mark is left alone (it attaches to the following base); this edge
+    # is not where the absent post-tool buffer sits.
     start = 0
-    end = len(text)
-    while start < end and _ignorable(text[start], False):
+    while start < n and _is_invisible(text[start]):
         start += 1
+
+    # Trailing edge (the absent post-tool buffer): strip whitespace/format and
+    # BASELESS marks, but never split a base from its mark stack.
+    end = n
     while end > start:
         ch = text[end - 1]
-        category = unicodedata.category(ch)
-        if ch.isspace() or category in _ANSWER_INVISIBLE_CATEGORIES:
-            end -= 1
-            continue
-        if category in _ANSWER_COMBINING_MARK_CATEGORIES:
-            # Keep a mark attached to the real base glyph immediately before it;
-            # strip an orphan whose predecessor is only whitespace/another mark.
-            prev = text[end - 2] if end - 2 >= start else ""
-            prev_category = unicodedata.category(prev) if prev else ""
-            if (
-                prev
-                and not prev.isspace()
-                and prev_category not in _ANSWER_INVISIBLE_CATEGORIES
-                and prev_category not in _ANSWER_COMBINING_MARK_CATEGORIES
-            ):
+        if not _is_mark(ch) and not _is_invisible(ch):
+            break  # a real glyph sits at the edge: keep it
+        # Pull the contiguous trailing combining-mark stack.
+        mark_start = end
+        while mark_start > start and _is_mark(text[mark_start - 1]):
+            mark_start -= 1
+        if mark_start < end and mark_start > start:
+            # The marks directly follow a real base glyph -> they are part of
+            # that grapheme cluster (NFD stack like e+U+0301+U+0327, keycap
+            # 1+VS16+U+20E3, ZWJ emoji). Keep the whole cluster.
+            if not _is_mark(text[mark_start - 1]) and not _is_invisible(text[mark_start - 1]):
                 break
-            end -= 1
-            continue
-        break
+        # Base-less: drop the mark stack and any whitespace/format before it
+        # (an orphan such as "space + VS16"), then re-evaluate the new edge.
+        j = mark_start
+        while j > start and _is_invisible(text[j - 1]):
+            j -= 1
+        end = j
     return text[start:end]
 
 

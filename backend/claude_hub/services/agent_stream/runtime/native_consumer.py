@@ -686,14 +686,18 @@ class NativeConsumerMixin(SessionState):
                         # assistant_text but is NOT the answer. If the backstop
                         # could not substitute a substantive authoritative result
                         # (it was empty/zero-width/whitespace/missing), there is
-                        # no answer anywhere — demote to a bounded retryable
-                        # failure and strip the text so the external channel
-                        # resends instead of returning the plan. (When no tool
-                        # ran, streamed text IS the answer; an empty provider
-                        # success is left to dispatch, which already raises
+                        # no answer anywhere — demote a SUCCESSFUL completion to a
+                        # bounded retryable failure and strip the text so the
+                        # external channel resends instead of returning the plan.
+                        # Guard on the provider's ORIGINAL status: an explicit
+                        # cancelled/failed result keeps its own status and
+                        # diagnostic and is never rewritten. (When no tool ran,
+                        # streamed text IS the answer; an empty provider success
+                        # is left to dispatch, which already raises
                         # "completed without assistant text".)
                         if (
-                            self._final_text_after_tool
+                            event.payload.get("status") == "completed"
+                            and self._final_text_after_tool
                             and not self._has_substantive_post_tool_final()
                             and not is_substantive_answer(event.payload.get("final_text"))
                         ):

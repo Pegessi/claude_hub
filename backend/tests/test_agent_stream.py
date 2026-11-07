@@ -7413,6 +7413,233 @@ async def test_long_answer_preserves_combining_keycap_zwj_and_embedded_format() 
         await tailer.stop()
 
 
+# ---------------------------------------------------------------------------
+# Codex cross-validation round 9: explicit-cancelled demotion guard (P1) and
+# whole-cluster preservation when adopting an authoritative result (P2).
+# ---------------------------------------------------------------------------
+
+
+def test_trim_invisible_edges_preserves_whole_grapheme_clusters() -> None:
+    """P2: trim drops only whitespace/format/base-less marks; a base with its
+    whole mark stack (multiple Mn, keycap VS16+U+20E3, ZWJ) is never split."""
+    from claude_hub.services.agent_stream.base import trim_invisible_edges
+
+    # Stacked NFD marks on a base stay; keycap stays; ZWJ emoji stays.
+    assert trim_invisible_edges("备注ȩ́") == "备注ȩ́"
+    assert trim_invisible_edges("键帽1️⃣") == "键帽1️⃣"
+    assert trim_invisible_edges("👩‍💻") == "👩‍💻"
+    assert trim_invisible_edges("é") == "é"
+    # Only orphan/whitespace/format edges are removed.
+    assert trim_invisible_edges("​") == ""
+    assert trim_invisible_edges("﻿") == ""
+    assert trim_invisible_edges("先核验。  \n\t ️") == "先核验。"
+    assert trim_invisible_edges("计划。​") == "计划。"
+    # Middle characters are untouched.
+    assert trim_invisible_edges("a​b") == "a​b"
+    # CGJ attached to a base is part of the cluster (kept). The absent post-tool
+    # buffer that matters here sits at the TRAILING edge (after commentary), and
+    # a leading mark is left to attach to the base that follows.
+    assert trim_invisible_edges("备注é͏") == "备注é͏"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "chunks",
+    [[" \n", "️", "\t"], [" ", "͏", "⃣", " "]],
+    ids=["padded-selector", "padded-marks"],
+)
+async def test_padded_isolated_marks_use_short_authoritative_result(
+    chunks: List[str],
+) -> None:
+    """Control: whitespace-padded isolated marks (ASCII+VS16, NBSP+CGJ+keycap
+    enclosing mark+NNBSP) are absent; the short authoritative answer '好' is
+    adopted and commentary preserved exactly."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("padded marks", [], client_turn_id="turn-padded")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+        plan = "先核验。"
+        _two_tools_with_plan(transport, plan)
+        transport._records.put_nowait(_message_start("padded-final"))
+        for chunk in chunks:
+            transport._records.put_nowait(_text_delta(chunk))
+        transport._records.put_nowait(_message_stop())
+        transport._records.put_nowait(_success_result("好"))
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "completed"
+        assert terminal.payload["final_text"] == "好"
+        assert terminal.payload["assistant_text"] == plan * 2 + "好"
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["好", "👍"], ids=["single-han", "single-emoji"])
+async def test_open_final_valid_short_stream_and_result_completes(answer: str) -> None:
+    """Control: a real short post-tool final streamed (final message open, no
+    message_stop) plus a successful result completes and is delivered, never
+    wrongly marked retryable, with a single terminal."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("short answer", [], client_turn_id="turn-open-short")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+        _two_tools_with_plan(transport, "计划。")
+        transport._records.put_nowait(_message_start("open-short-final"))
+        transport._records.put_nowait(_text_delta(answer))
+        # Deliberately no message_stop; explicit successful result present.
+        transport._records.put_nowait(_success_result(answer))
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "completed"
+        assert terminal.payload.get("final_text", terminal.payload["assistant_text"]) == answer
+        assert "retryable" not in terminal.payload
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["好", ""], ids=["streamed-short", "empty"])
+async def test_no_tool_empty_result_does_not_gain_retryable_failure(answer: str) -> None:
+    """Control: with NO tool, an empty-result success stays the provider's own
+    completed status (never rewritten to a retryable failure); streamed short
+    text is delivered, and the all-empty case is rejected at dispatch."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("no tools", [], client_turn_id="turn-no-tool")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+        if answer:
+            transport._records.put_nowait(_message_start("no-tool-final"))
+            transport._records.put_nowait(_text_delta(answer))
+            transport._records.put_nowait(_message_stop())
+        transport._records.put_nowait(_success_result(""))
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "completed"
+        assert "retryable" not in terminal.payload
+        if answer:
+            assert terminal.payload["assistant_text"] == answer
+        else:
+            assert not terminal.payload.get("assistant_text")
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("post_tool_text", ["已生成部分", ""], ids=["with-text-control", "no-text"])
+async def test_explicit_provider_cancelled_result_remains_cancelled(post_tool_text: str) -> None:
+    """P1: a provider result subtype=cancelled must keep status 'cancelled' with
+    no retryable/error rewrite, whether post-tool text streamed or not."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("provider cancels", [], client_turn_id="turn-provider-cancel")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+        _two_tools_with_plan(transport, "执行前计划。")
+        if post_tool_text:
+            transport._records.put_nowait(_message_start("cancel-final"))
+            transport._records.put_nowait(_text_delta(post_tool_text))
+        transport._records.put_nowait(
+            {"type": "result", "subtype": "cancelled", "is_error": False, "result": ""}
+        )
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["status"] == "cancelled"
+        assert "retryable" not in terminal.payload
+        assert terminal.payload.get("error_message") is None
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("plan", ["备注ȩ́", "键帽1️⃣"], ids=["multiple-mn", "keycap"])
+async def test_authority_adoption_keeps_whole_commentary_combining_cluster(plan: str) -> None:
+    """P2: commentary ending in a legal grapheme cluster (base + multiple Mn, or
+    1 + VS16 + keycap U+20E3) is preserved byte-for-byte when the short
+    authoritative answer is adopted — no combining mark is stripped."""
+    from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
+
+    transport = _FakeNativeTransport(eof_is_fatal=False)
+    session = _native_session()
+    tailer = SessionTailer(
+        workspace_id="ws-1",
+        session_id=session.id,
+        adapter=ClaudeJsonlAdapter(),
+        session_getter=lambda: session,
+        native_transport=_as_provider_session(transport),
+    )
+    completion_q = await tailer.subscribe_completion()
+    queue = await tailer.subscribe()
+    try:
+        await asyncio.sleep(0.05)
+        await tailer.send_message("commentary cluster", [], client_turn_id="turn-cluster-edge")
+        await asyncio.wait_for(queue.get(), timeout=0.5)
+        _two_tools_with_plan(transport, plan)
+        transport._records.put_nowait(_success_result("好"))
+        transport._records.put_nowait(None)
+
+        terminal = await _collect_terminal(completion_q)
+        assert terminal.payload["final_text"] == "好"
+        assert terminal.payload["assistant_text"] == plan * 2 + "好"
+    finally:
+        await tailer.stop()
+
+
 def test_claude_adapter_tracks_open_assistant_message_lifecycle() -> None:
     """AC6(e): per-message open count isolates a closed tool message from a
     still-open final message, and resets on the result record."""
