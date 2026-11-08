@@ -191,3 +191,71 @@ before broad validation; no registry/endpoint/directory widening was added.
   trust and documented; a negative test confirms assistant Markdown alone
   never grants a non-temp out-of-cwd path; redaction and suffix/magic
   filters apply on the pairing path via `image_tool_path`.
+
+## N1 scan cost (measured, not assumed)
+
+The completed-tool grant scans the session's canonical stream JSONL on
+each out-of-cwd image request (same read pattern as the pre-existing
+`referenced_temporary_image`; no new in-memory index or unbounded map was
+added). Measured on this host against a synthetic 10,000-event / 4.60 MiB
+stream: one full scan completes in ~0.2 ms (single thread, warm cache),
+i.e. negligible relative to the image read itself. Bounded by the
+session's persisted event count; the per-request work stays O(events)
+with constant extra memory. If event volumes grow beyond observed chat
+sizes, a bounded index can be added later without changing the grant
+contract; no truncation is applied to historical scans, so legitimate
+historical grants are never hidden.
+
+## Ordinary code-review follow-up (D1/D2/N1) and rendered-browser proof
+
+The independent ordinary source review (`reviewer/code-review-941730e.md`)
+raised two frontend correctness defects and one cache-label inconsistency;
+all were fixed as ordinary display-bug work, with no new mechanism or
+directory access.
+
+- **D1 — recovered Markdown image keeps its preview behavior.** The first
+  implementation replaced the whole `button[data-image-preview]` wrapper
+  with a placeholder and rebuilt a bare `<img>` on Retry, dropping
+  click/keyboard lightbox access and the `loading=lazy`/`decoding=async`
+  attributes. `MarkdownContent.handleError` now captures the original node
+  and its full rendering contract; Retry rebuilds the same preview-button
+  wrapper (class, `data-image-preview`, aria-label) around a fresh nonce
+  image, so recovered finished-message images still open the lightbox and
+  keep lazy/async attributes.
+- **D2 — reactive `turnActive`.** `ChatAgentImage.vue` copied the prop into
+  a plain constant at mount, so a turn settling after mount never flipped
+  the pending state. It is now a `computed` over `props.turnActive`; an
+  interrupted/crashed turn without a completion settles into image or
+  Retry placeholder rather than an endless "Loading image…" spinner (the
+  reducer's `turn_completed` side effect is no longer the only guarantee).
+- **Retry nonce identity.** `withFreshNonce` strips any previous
+  `retry=` parameter before appending a fresh one, so repeated retries keep
+  one stable URL identity and never accumulate query parameters.
+- **N1 — retained-cache label consistency.** Retained bytes served for a
+  grant-only (out-of-cwd, non-temp) source are now labeled
+  `IMAGE_SOURCE_COMPLETED_TOOL` instead of `IMAGE_SOURCE_CWD`, so the tab
+  route sends `no-store` consistently for provenance-granted images; the
+  immutable attachment-ID/blob route is untouched.
+- **Rendered-browser regression in the existing fixture.** Per the
+  functional-scope instruction, the new behavior is asserted inside the
+  existing `browser_chat_image_quality.py` (no new framework/scenario):
+  generated-Markdown failure → placeholder → first Retry stays usable while
+  404 continues → second Retry after recovery renders a decoded image inside
+  the original preview button (lightbox still opens, lazy/decoding
+  preserved, single nonce); failed image requested once despite multiple
+  same-block text-delta re-renders (no request storm); native completed-but-
+  missing tool image never shows the pending spinner, Retry recovers it and
+  the lightbox opens. Results are written to `report.image_retry`.
+- **Settled-state timing fix.** The pre-existing mobile tap-target
+  assertion read `bounding_box()` immediately after viewport resize and
+  caught a 43.865 px mid-reflow value against the CSS's real
+  `min-height: 44px` contract. It now polls the actual geometry until it
+  settles at ≥44 px (bounded 2 s, no blind delay, no weakened threshold).
+  A separate intermittent `context.expect_page()` popup-delivery timeout
+  (external-link target, unrelated to image display) appeared in one run and
+  passed in the next; it is recorded as a distinct pre-existing flake, not
+  relabeled or masked.
+
+Evidence: `author/validation/image-quality-retry-7` (full PASS,
+`image_retry` report with markdown/native results); run
+`image-quality-retry-6` preserves the distinct popup timeout.

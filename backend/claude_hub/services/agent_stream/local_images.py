@@ -608,7 +608,15 @@ async def _read_cached_image_locked(
             raise AgentImageUnavailable()
         try:
             data, mime = await store.read_source(key, owner_is_current=owner_is_current)
-            return data, mime, IMAGE_SOURCE_CWD
+            # Retained bytes of a grant-only (out-of-cwd, non-temp) source keep
+            # the grant's no-store policy; labeling them cwd would let an
+            # immutable header bypass replacement/revocation (N1).
+            retained_kind = (
+                IMAGE_SOURCE_COMPLETED_TOOL
+                if _is_grant_only_path(session, raw_path)
+                else IMAGE_SOURCE_CWD
+            )
+            return data, mime, retained_kind
         except (AttachmentOwnerUnavailable, KeyError, ValueError, OSError):
             raise AgentImageUnavailable() from None
     _require_current_owner(owner_is_current)
