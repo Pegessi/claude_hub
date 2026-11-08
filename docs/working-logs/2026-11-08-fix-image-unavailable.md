@@ -251,8 +251,8 @@ directory access.
   Retry recovers it and the lightbox opens. Results are written to
   `report.image_retry`. Stated coverage limits (per final review): the
   fixture has only one text delta, so same-block re-render resistance across
-  multiple deltas is covered by the `useChatImages`/Markdown unit tests, not
-  this browser run; the native tool is already completed in a completed turn,
+  multiple deltas is not demonstrated by the recorded checks. The native tool
+  is already completed in a completed turn,
   so the browser proves the settled state while the dynamic
   running-tool-settles transition stays unit-tested; repeated failure is
   browser-proven for Markdown and unit-tested for native cards.

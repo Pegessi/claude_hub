@@ -2155,9 +2155,8 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
             # The failed URL was requested exactly once at hydration; this
             # fixture carries one text_delta plus turn_completed, so it proves
             # no automatic re-request occurs after the initial failure and the
-            # later turn completion. Same-block re-render resistance across
-            # multiple deltas is covered by the useChatImages/Markdown unit
-            # tests, not asserted here.
+            # later turn completion. The recorded checks do not demonstrate
+            # same-block re-render resistance across multiple deltas.
             assert agent_image_requests.get("/tmp/missing.png") == 1, agent_image_requests
             markdown_retry = markdown_missing.get_by_role(
                 "button", name=re.compile("Retry loading image")
