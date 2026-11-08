@@ -2152,10 +2152,12 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
             assert await preview.locator("img").evaluate("img => img.naturalWidth") == 1920
 
             # ── Explicit Retry contract (generated Markdown image) ────────
-            # The failed URL was requested exactly once even though the
-            # Markdown block containing it was re-created by several text
-            # deltas during streaming: failed state survives v-html re-render
-            # without issuing another request (no retry storm).
+            # The failed URL was requested exactly once at hydration; this
+            # fixture carries one text_delta plus turn_completed, so it proves
+            # no automatic re-request occurs after the initial failure and the
+            # later turn completion. Same-block re-render resistance across
+            # multiple deltas is covered by the useChatImages/Markdown unit
+            # tests, not asserted here.
             assert agent_image_requests.get("/tmp/missing.png") == 1, agent_image_requests
             markdown_retry = markdown_missing.get_by_role(
                 "button", name=re.compile("Retry loading image")
@@ -2200,10 +2202,12 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
                 "lazy_decoding_preserved": True,
             }
 
-            # ── Native tool-image Retry and terminal-state settle ─────────
-            # The completed-but-missing native Read never shows the running
-            # "Loading image…" state (the turn is settled): it degrades to
-            # the same Retry placeholder instead of an endless spinner.
+            # ── Native tool-image Retry (completed-turn fixture) ──────────
+            # This native Read is already completed inside a completed turn,
+            # so the running/loading state never applies to it; the assertion
+            # confirms no pending placeholder is rendered for a settled tool.
+            # The dynamic running-tool-in-a-settled-turn transition is covered
+            # by the useChatImages unit tests, not by this fixture.
             await expect(page.locator(".agent-image-pending")).to_have_count(0)
             native_card = page.locator(".agent-image-card", has_text="native-missing.png").first
             await expect(native_card).to_be_visible()
@@ -2232,7 +2236,7 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
             await native_dialog.get_by_role("button", name="Close preview").click()
             report["image_retry"]["native"] = {
                 "requests": agent_image_requests.get(NATIVE_MISSING_PATH),
-                "settled_without_pending_spinner": True,
+                "no_pending_placeholder_for_completed_tool": True,
                 "lightbox_after_recovery": True,
             }
             await preview.click()
