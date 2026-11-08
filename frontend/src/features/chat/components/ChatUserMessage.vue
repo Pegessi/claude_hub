@@ -19,6 +19,11 @@
           data-testid="conversation-message-source-avatar"
         />
         <span class="conversation-message-source__label">{{ messageSourceLabel(turn) }}</span>
+        <span
+          v-if="messageSourceScope(turn)"
+          class="conversation-message-source__scope"
+          data-testid="conversation-message-scope"
+        >· {{ messageSourceScope(turn) }}</span>
       </div>
       <!-- Inline edit mode -->
       <div
@@ -138,7 +143,7 @@
 import { requireChatOwner, chatActionsKey, chatImagesKey, chatIdentityKey } from '../owners'
 import FeishuIdentityMark from '@/components/FeishuIdentityMark.vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
-import { messageSourceLabel } from '../timeline/eventValues'
+import { messageSourceLabel, messageSourceScope } from '../timeline/eventValues'
 import type { TimelineTurn } from '../timeline/types'
 const { resolvedFeishuSourceAvatarUrl, feishuSourceIdentityKey, isEditingTurn, editDraft, submitEdit, cancelEdit, editError, isEditSending } = requireChatOwner(chatActionsKey)
 const { erroredAttachments, attachmentUrl, onAttachmentError, openImageLightbox } = requireChatOwner(chatImagesKey)
@@ -204,6 +209,15 @@ defineProps<{
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Where a Feishu message came from: group / group topic. Absent for p2p, so
+   the historical private badge keeps its exact single-label look. */
+.conversation-message-source__scope {
+  flex: 0 0 auto;
+  color: var(--ch-color-message-user-muted);
+  font-weight: 500;
+  letter-spacing: .01em;
 }
 
 .turn-attachments {

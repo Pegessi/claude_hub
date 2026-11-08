@@ -1,6 +1,14 @@
 export type FeishuBotSource = 'stored' | 'environment' | 'invalid_environment'
 export type FeishuPairingOwnerKind = 'oauth' | 'local'
 export type FeishuBotConnectionStatus = 'connected' | 'connecting' | 'failed' | 'stopped'
+/** Where a Bot talks to Feishu: a private one-to-one conversation or a group chat. */
+export type FeishuChatType = 'p2p' | 'group'
+/**
+ * A group's Feishu form. ``topic`` marks a group that is itself in topic
+ * (thread) form; a group switched to that form can still report ``group``, so
+ * this only drives an advisory reply hint, never routing.
+ */
+export type FeishuChatMode = 'group' | 'topic' | 'p2p'
 
 export interface FeishuActiveBinding {
   pairing_id: string
@@ -11,6 +19,32 @@ export interface FeishuActiveBinding {
   is_mine: boolean
   owner_kind: FeishuPairingOwnerKind
   chat_id: string | null
+  /** Absent in responses from before group binding shipped, which always meant p2p. */
+  chat_type?: FeishuChatType
+  /** Group name recorded at bind time, so a bound view can name its target without a group read. */
+  chat_name?: string | null
+}
+
+/**
+ * One Feishu group this Bot is a member of, reported by the Bot's own token.
+ *
+ * ``chat_mode`` is the server's raw value: ``topic`` for a group that Feishu has
+ * switched to thread form, ``group`` otherwise, and possibly absent. Counts
+ * arrive as integers.
+ */
+export interface FeishuBotChat {
+  chat_id: string
+  name: string | null
+  chat_mode: FeishuChatMode | null
+  /** Resolved by the server: a 話題 group can still report ``chat_mode='group'``. */
+  is_topic_mode?: boolean
+  user_count: number | null
+  bot_count: number | null
+}
+
+export interface FeishuBotChatsResponse {
+  chats: FeishuBotChat[]
+  revision: number
 }
 
 export interface FeishuPairingClaim {
@@ -84,6 +118,11 @@ export interface FeishuPairActivateInput {
   confirm_word: string
   expected_revision: number
 }
+export interface FeishuGroupBindInput {
+  chat_id: string
+  tab_id: string
+  expected_revision: number
+}
 
 const ROOT = '/api/feishu/bot/bots'
 const ERROR_CODES = new Set([
@@ -96,6 +135,8 @@ const ERROR_CODES = new Set([
   'routing_cleanup_failed',
   'pool_capacity_reached', 'chat_tab_workspace_changed',
   'chat_tab_not_found', 'bot_credentials_read_only',
+  'bot_chats_unavailable', 'chat_not_group', 'chat_not_visible',
+  'invalid_bot_request', 'bot_occupied', 'tab_occupied',
 ])
 
 export class FeishuBotRequestError extends Error {
@@ -110,7 +151,11 @@ export class FeishuBotRequestError extends Error {
 }
 
 function fixedMessage(status: number, code: string | null): string {
-  if (status === 400 || status === 422) return 'The Bot request was rejected. Check the fields and try again.'
+  if (status === 400 || status === 422) {
+    if (code === 'chat_not_group') return 'Choose a group chat. A private conversation cannot be bound this way.'
+    if (code === 'chat_not_visible') return 'This Bot cannot see that group. Add the Bot to the group and reload the group list.'
+    return 'The Bot request was rejected. Check the fields and try again.'
+  }
   if (status === 401) return 'Sign in to use the Feishu Bot pool.'
   if (status === 403) {
     if (code === 'pairing_not_owned') return 'This pairing claim belongs to another authorized operator.'
@@ -125,6 +170,9 @@ function fixedMessage(status: number, code: string | null): string {
   if (status === 502) {
     if (code === 'feishu_access_control_denied') {
       return 'Feishu blocked this app with access-control policy 21001. Ask the app administrator to check Open API logs and contact Feishu support.'
+    }
+    if (code === 'bot_chats_unavailable') {
+      return 'Feishu could not list the groups for this Bot. Wait a moment and load the groups again.'
     }
     return 'Feishu could not validate these credentials. Check them and try again.'
   }
@@ -144,6 +192,8 @@ function fixedMessage(status: number, code: string | null): string {
     if (code === 'app_id_already_in_pool') return 'A Bot with this App ID already exists.'
     if (code === 'app_id_immutable') return 'A Bot App ID cannot be changed. Delete it and create another Bot.'
     if (code === 'bot_already_bound') return 'This Bot is already in use by another Chat.'
+    if (code === 'bot_occupied') return 'This Bot is already connected to another Chat. Disconnect it there first.'
+    if (code === 'tab_occupied') return 'This Chat is already connected to another Bot. Disconnect it first.'
     if (code === 'chat_already_bound') return 'This Chat is already connected to another Bot.'
     if (code === 'pairing_not_claimed') return 'Send the pairing code to the Bot before activating it.'
     if (code === 'pairing_confirmation_mismatch') return 'The confirmation word does not match. Read it from your Feishu conversation and try again.'
@@ -205,4 +255,11 @@ export function activateFeishuPairing(botId: string, input: FeishuPairActivateIn
 }
 export function disconnectFeishuPairing(botId: string, expectedRevision: number, signal?: AbortSignal): Promise<FeishuBotPoolResponse> {
   return requestJson(botUrl(botId, '/pairing'), jsonRequest('DELETE', { expected_revision: expectedRevision }, signal))
+}
+/** Groups the Bot itself is a member of. The Bot's token is used server-side only. */
+export function listBotChats(botId: string, signal?: AbortSignal): Promise<FeishuBotChatsResponse> {
+  return requestJson(botUrl(botId, '/chats'), { signal })
+}
+export function bindBotGroup(botId: string, input: FeishuGroupBindInput, signal?: AbortSignal): Promise<FeishuBotPoolResponse> {
+  return requestJson(botUrl(botId, '/bindings/group'), jsonRequest('POST', input, signal))
 }
