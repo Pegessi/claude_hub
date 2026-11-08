@@ -155,14 +155,59 @@ watch([blocks, contentRoot], (_, __, onCleanup) => {
 // A proxied image that fails to load (404 / expired temporary file) is
 // replaced in place by a restrained text placeholder — never a broken-image
 // icon or a large error frame. The ``error`` event does not bubble, so the
-// capture-phase listener on the root is what sees it.
+// capture-phase listener on the root is what sees it. The placeholder keeps
+// an explicit, accessible Retry that rebuilds the same authorized image URL
+// (with a cache-busting nonce) without re-running any agent tool.
 function handleError(event: Event) {
   const target = event.target
   if (!(target instanceof HTMLImageElement)) return
   if (!target.dataset.quotedImg && !target.dataset.localImg) return
+  if (target.closest('.quoted-img-missing')) return
+
+  const original = {
+    src: target.getAttribute('src') || '',
+    alt: target.alt,
+    quoted: target.dataset.quotedImg || '',
+    local: target.dataset.localImg || '',
+    className: target.className,
+    width: target.getAttribute('width'),
+    height: target.getAttribute('height'),
+  }
   const placeholder = document.createElement('span')
   placeholder.className = 'quoted-img-missing'
-  placeholder.textContent = target.alt ? `${target.alt} (image unavailable)` : '[image unavailable]'
+
+  const label = document.createElement('span')
+  label.className = 'quoted-img-missing-text'
+  label.textContent = target.alt ? `${target.alt} (image unavailable)` : '[image unavailable]'
+  placeholder.append(label)
+
+  const retry = document.createElement('button')
+  retry.type = 'button'
+  retry.className = 'quoted-img-retry'
+  retry.textContent = 'Retry'
+  retry.setAttribute(
+    'aria-label',
+    target.alt ? `Retry loading image ${target.alt}` : 'Retry loading image',
+  )
+  retry.addEventListener('click', (clickEvent) => {
+    clickEvent.preventDefault()
+    clickEvent.stopPropagation()
+    const img = document.createElement('img')
+    if (original.className) img.className = original.className
+    if (original.width) img.setAttribute('width', original.width)
+    if (original.height) img.setAttribute('height', original.height)
+    img.alt = original.alt
+    if (original.quoted) img.dataset.quotedImg = original.quoted
+    if (original.local) img.dataset.localImg = original.local
+    // Reuse the authorized URL; only a retry nonce is added to force a fresh
+    // request. The marker attributes are what keep sanitization/error handling
+    // applicable to the replacement.
+    const separator = original.src.includes('?') ? '&' : '?'
+    img.src = `${original.src}${separator}retry=${Date.now()}`
+    placeholder.replaceWith(img)
+  })
+  placeholder.append(retry)
+
   const button = target.closest('button[data-image-preview]')
   ;(button || target).replaceWith(placeholder)
 }
@@ -449,12 +494,34 @@ async function handleClick(event: MouseEvent) {
 /* Restrained fallback shown when a proxied quoted image cannot be loaded —
    muted inline text, not a broken-image frame. */
 .markdown-block :deep(.quoted-img-missing) {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 1px 6px;
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-sm);
   color: var(--ch-color-text-muted);
   font-size: 0.9em;
+  line-height: 1.4;
+}
+
+.markdown-block :deep(.quoted-img-retry) {
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-sm);
+  background: transparent;
+  color: var(--ch-color-text);
+  font: inherit;
+  padding: 0 6px;
+  cursor: pointer;
+}
+
+.markdown-block :deep(.quoted-img-retry:hover) {
+  border-color: var(--ch-color-accent);
+}
+
+.markdown-block :deep(.quoted-img-retry:focus-visible) {
+  outline: 2px solid var(--ch-color-accent);
+  outline-offset: 1px;
 }
 
 .markdown-block :deep(table) {
