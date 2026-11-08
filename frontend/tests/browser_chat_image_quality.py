@@ -33,7 +33,14 @@ LONG_FILENAME = "generated_output_" * 13 + ".py"
 LONG_CODE_SOURCE = "print('This source must remain readable')\n" * 50
 REGISTERED_HTML_PATH = "/fixture/task-assets/report.html"
 REGISTERED_ID_HTML_PATH = "/fixture/task-assets/id-report.html"
-WINDOW_NAMED_IDS = ("parent", "postMessage", "scrollTo", "Element", "location", "crypto")
+WINDOW_NAMED_IDS = (
+    "parent",
+    "postMessage",
+    "scrollTo",
+    "Element",
+    "location",
+    "crypto",
+)
 UNREGISTERED_HTML_PATH = "/fixture/unregistered.html"
 UNAUTHORIZED_HTML_PATH = "/fixture/unauthorized.html"
 HTML_EXTERNAL_LINK = "https://example.com/html-preview-user-link"
@@ -625,7 +632,12 @@ async def check_preview_routing(page, context, output: Path, report: dict) -> No
         await asyncio.sleep(0.15)
         actual = await active_chat(page)
         evidence["same_document_navigation"].append(
-            {"action": action, "expected_tab": target, "active_tab": actual, "url": page.url}
+            {
+                "action": action,
+                "expected_tab": target,
+                "active_tab": actual,
+                "url": page.url,
+            }
         )
         assert actual == target
         assert parse_qs(urlparse(page.url).query)["tab"] == [target]
@@ -683,7 +695,10 @@ async def check_long_attachment_mobile(page, context, output: Path, report: dict
     await page.get_by_role("link", name="Long generated code", exact=True).click()
     dialog = page.get_by_role("dialog", name="Attachment preview", exact=True)
     await expect(dialog).to_be_visible()
-    evidence = {"name_length": len(LONG_FILENAME), "viewport": {"width": 320, "height": 390}}
+    evidence = {
+        "name_length": len(LONG_FILENAME),
+        "viewport": {"width": 320, "height": 390},
+    }
     report["long_filename_dialog"] = evidence
     evidence["source_geometry"] = await check_source_viewport(page, dialog)
     evidence["controls"] = await check_mobile_actions(
@@ -723,7 +738,8 @@ async def check_standalone_attachment_mobile(page, context, output: Path, report
         assert parse_qs(urlparse(reader.url).query)["attachment"] == ["code.py"]
         await expect(reader.locator(".app, .structured-pane")).to_have_count(0)
         evidence["controls"] = await check_mobile_actions(
-            reader.locator(".attachment-viewer"), ("Wrap lines", "Copy", "Refresh", "Back to Hub")
+            reader.locator(".attachment-viewer"),
+            ("Wrap lines", "Copy", "Refresh", "Back to Hub"),
         )
         await reader.reload(wait_until="domcontentloaded")
         await expect(source).to_have_text(PYTHON_SOURCE)
@@ -769,7 +785,8 @@ async def wait_for_frame_scroll(frame, selector: str = "") -> None:
     deadline = asyncio.get_running_loop().time() + 5
     while asyncio.get_running_loop().time() < deadline:
         position = await frame.evaluate(
-            "selector => selector ? document.querySelector(selector).scrollLeft : scrollY", selector
+            "selector => selector ? document.querySelector(selector).scrollLeft : scrollY",
+            selector,
         )
         if position > 0:
             return
@@ -826,7 +843,10 @@ async def check_html_preview(page, context, output: Path, report: dict) -> None:
     serialized_frame = await iframe.get_attribute("srcdoc") or ""
     report["html_bridge_diagnostics"] = {
         "child_scripts": [
-            {"nonce_length": len(item["nonce"]), "has_nonce_attribute": item["hasNonce"]}
+            {
+                "nonce_length": len(item["nonce"]),
+                "has_nonce_attribute": item["hasNonce"],
+            }
             for item in bridge_scripts
         ],
         "serialized_script_count": len(re.findall(r"<script\b", serialized_frame)),
@@ -1909,7 +1929,7 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
                         content = (
                             TRUNCATED_HTML_SOURCE
                             if document_path == "truncated.html"
-                            else html_id_text if document_path == "id-report.html" else html_text
+                            else (html_id_text if document_path == "id-report.html" else html_text)
                         )
                         await route.fulfill(
                             status=200,
@@ -2017,9 +2037,7 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
                         )
                 elif path.endswith("/stream/agent-image"):
                     image_path = parse_qs(parsed.query).get("path", [""])[0]
-                    agent_image_requests[image_path] = (
-                        agent_image_requests.get(image_path, 0) + 1
-                    )
+                    agent_image_requests[image_path] = agent_image_requests.get(image_path, 0) + 1
                     missing_paths = {"/tmp/missing.png", NATIVE_MISSING_PATH}
                     is_recovered = image_path in image_retry_ready
                     should_404 = image_path in missing_paths and not is_recovered
@@ -2127,7 +2145,9 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
             preview = page.get_by_role("button", name="Open image View screenshot", exact=True)
             await expect(preview).to_be_visible()
             await expect(page.locator(".agent-image-card img")).to_have_count(1)
-            markdown_missing = page.locator(".quoted-img-missing", has_text="Missing screenshot").first
+            markdown_missing = page.locator(
+                ".quoted-img-missing", has_text="Missing screenshot"
+            ).first
             await expect(markdown_missing).to_contain_text("image unavailable")
             assert await preview.locator("img").evaluate("img => img.naturalWidth") == 1920
 
@@ -2171,9 +2191,7 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
             recovered_src = (await recovered_img.get_attribute("src")) or ""
             assert recovered_src.count("retry=") == 1, recovered_src
             await recovered_preview.click()
-            recovered_dialog = page.get_by_role(
-                "dialog", name="Attachment preview", exact=True
-            )
+            recovered_dialog = page.get_by_role("dialog", name="Attachment preview", exact=True)
             await expect(recovered_dialog).to_be_visible()
             await recovered_dialog.get_by_role("button", name="Close preview").click()
             report["image_retry"]["markdown"] = {
