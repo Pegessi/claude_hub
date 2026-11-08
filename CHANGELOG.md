@@ -7,6 +7,27 @@
 
 ## Released
 
+### fix(chat): authorize out-of-cwd images only via completed image tools and add image retry
+
+- A legitimate image produced by a recognized native image-view tool
+  (`Read` of an image / `view_image`) outside the session cwd and outside the
+  temporary-file grant is now readable only when that exact path has a
+  successfully **completed** tool call in the same session, run and turn.
+  Started-only/failed calls, user text, generic shell or another tool, a
+  different run/turn (including a colliding call id) and other sessions grant
+  nothing; symlink, traversal, size, magic-byte and owner-lifecycle checks are
+  unchanged, and the existing cwd/temporary semantics, original-byte
+  retention and invalid-replacement rules are preserved. Historical
+  successful stream records work without a backfill job.
+- Image retention now captures newly authorized images at successful tool
+  completion rather than on the start event, so an uncompleted Read can no
+  longer publish a grant before completion.
+- Failed native tool images, subthread images and generated Markdown images
+  show an accessible user-controlled **Retry** that re-requests the same
+  authorized URL (with a cache-busting nonce) without replaying any tool or
+  retrying 404s automatically; a still-running image tool renders a pending
+  state instead of a permanent failure placeholder.
+
 ### style(chat): one Agents pill in the pane chrome, phones included
 
 - The sub-agent control now lives in the top-right pane chrome at every width,

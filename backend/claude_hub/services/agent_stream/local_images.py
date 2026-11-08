@@ -130,6 +130,96 @@ class AgentImageUnavailable(ValueError):
     """Uniform denial of a local image, without exposing filesystem details."""
 
 
+# Status recorded on a canonical tool_call_completed event when the tool ran
+# successfully; anything else (failed/cancelled/missing) grants nothing.
+_COMPLETED_TOOL_STATUS = "completed"
+
+
+def referenced_completed_tool_image(session: ManagedSession, raw_path: str) -> Optional[Path]:
+    """Grant an exact out-of-cwd image read by a successfully completed image tool.
+
+    Authorization boundary (narrow, fail-closed): a recognized native
+    image-view tool (``Read`` of an image / ``view_image``) must have
+    *started* and *completed successfully* for this exact path in this same
+    session, with the completion carrying the same call id, run epoch and
+    turn id as the start. A started-only or failed call, another tool, user
+    text, generic shell output, a different run/turn (including a colliding
+    call id) or another session never grants access. The grant is derived
+    from the persisted canonical stream, so historical successful records
+    work without any migration or backfill.
+
+    Returns the strict-resolved regular file, or ``None``. Callers still run
+    the shared size/magic validation; this function never opens the file.
+    """
+    if session.target != ExecutionTarget.LOCAL or not session.workspace_path:
+        return None
+    if (
+        not isinstance(raw_path, str)
+        or not raw_path.strip()
+        or len(raw_path) > 4096
+        or any(ord(ch) < 32 for ch in raw_path)
+    ):
+        return None
+    candidate = Path(raw_path)
+    # Only explicit absolute paths need this grant: relative paths are
+    # anchored at the session cwd and handled by the normal root containment.
+    if not candidate.is_absolute() or ".." in candidate.parts:
+        return None
+    try:
+        if candidate.is_symlink():
+            # The grant names the exact authored file; a swapped symlink must
+            # not turn a completed read into a different-target read.
+            return None
+        real = candidate.resolve(strict=True)
+    except (OSError, ValueError, RuntimeError):
+        return None
+    if not real.is_file():
+        return None
+
+    # call id -> (run epoch, turn id) for started image-view calls naming the
+    # exact requested path. Bounded by the session's persisted event count.
+    started: Dict[str, Tuple[Optional[int], Optional[str]]] = {}
+    try:
+        with AgentStreamStore(session.workspace_id, session.id).path.open() as events:
+            for line in events:
+                try:
+                    event = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(event, dict) or event.get("session_id") != session.id:
+                    continue
+                payload = event.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                kind = event.get("type")
+                call_id = payload.get("tool_call_id") or event.get("call_id")
+                if not isinstance(call_id, str) or not call_id:
+                    continue
+                if kind == "tool_call_started":
+                    if (
+                        payload.get("role", "assistant") == "assistant"
+                        and image_tool_path(payload) == raw_path
+                    ):
+                        started[call_id] = (event.get("run_epoch"), event.get("turn_id"))
+                    continue
+                if kind != "tool_call_completed":
+                    continue
+                if payload.get("status") != _COMPLETED_TOOL_STATUS:
+                    continue
+                origin = started.get(call_id)
+                if origin is None:
+                    continue
+                # Same call id alone is insufficient: the completion must be
+                # the same run/turn incarnation as the recorded start, so a
+                # colliding id from another turn cannot complete this grant.
+                if origin != (event.get("run_epoch"), event.get("turn_id")):
+                    continue
+                return real
+    except (OSError, UnicodeError):
+        return None
+    return None
+
+
 OwnerIsCurrent = Callable[[], bool]
 
 
@@ -283,6 +373,11 @@ def _read_referenced_image(session: ManagedSession, raw_path: str) -> Tuple[byte
     except AgentImageUnavailable:
         referenced = referenced_temporary_image(session, raw_path)
         if referenced is None:
+            # Last resort: an exact path whose successful image-view tool
+            # completed in this session. Still passes the shared size/magic
+            # and regular-file validation inside _read_agent_image.
+            referenced = referenced_completed_tool_image(session, raw_path)
+        if referenced is None:
             raise
         return _read_agent_image(session, raw_path, referenced_image=referenced)
 
@@ -435,11 +530,41 @@ class ImageReferenceBuffer:
 
     def __init__(self) -> None:
         self._tails: Dict[Tuple[str, str, str], str] = {}
+        # Started image-view calls awaiting completion, keyed by
+        # (run epoch, turn id, call id) so a colliding call id in another
+        # run/turn stays separate. Entries are removed on completion or when
+        # the turn ends; the map is bounded by the live turn count.
+        self._pending_image_tools: Dict[Tuple[Optional[int], Optional[str], str], List[str]] = {}
 
     def paths(self, event: AgentStreamEvent) -> List[str]:
         turn = (str(event.run_epoch), str(event.turn_id))
         if event.type == "turn_completed":
             self._tails = {key: tail for key, tail in self._tails.items() if key[:2] != turn}
+            self._pending_image_tools = {
+                key: paths
+                for key, paths in self._pending_image_tools.items()
+                if (str(key[0]), str(key[1])) != turn
+            }
+        if event.type == "tool_call_started":
+            paths = image_paths_from_event(event)
+            payload = event.payload
+            call_id = payload.get("tool_call_id") or event.call_id
+            if paths and isinstance(call_id, str) and call_id:
+                self._pending_image_tools[(event.run_epoch, event.turn_id, call_id)] = paths
+            return paths
+        if event.type == "tool_call_completed":
+            # Retain the newly authorized out-of-cwd image only once the tool
+            # has successfully completed in this same run/turn. A failed or
+            # unattributable completion emits nothing, so no pre-completion
+            # fetch can publish a grant and no failed output is retained.
+            payload = event.payload
+            if payload.get("status") != _COMPLETED_TOOL_STATUS:
+                return []
+            call_id = payload.get("tool_call_id") or event.call_id
+            if not isinstance(call_id, str) or not call_id:
+                return []
+            key = (event.run_epoch, event.turn_id, call_id)
+            return list(self._pending_image_tools.pop(key, ()))
         if event.type != "text_delta":
             return image_paths_from_event(event)
         payload = event.payload
