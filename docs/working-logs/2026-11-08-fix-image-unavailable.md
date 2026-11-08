@@ -126,3 +126,68 @@ node suites; `vue-tsc` and ESLint clean.
   separate workstream.
 - Lessons used: `a-closed-file-list-can-omit-behavior-required-by-acceptance-criteria-compare-the`
   (full-diff review discipline; applied at final handoff).
+
+## Threat-review B1–B6 dispositions (independent pai phase one)
+
+Reviewer artifact: `image-unavailable-fix-20261108/reviewer/threat-review.md`.
+All six blocking gaps were closed with concrete code and negative tests
+before broad validation; no registry/endpoint/directory widening was added.
+
+- **B1 — producer-specific success provenance.** A generic
+  `status == "completed"` is no longer trusted. `_PROVEN_IMAGE_TOOL_SUCCESS`
+  is an explicit allowlist of `(agent_type, tool)` pairs whose failure
+  encoding is adapter-verified; today only `(claude, Read)` qualifies
+  (Claude JSONL `tool_result.is_error` → failed). Codex transcript
+  `function_call_output` hard-codes "completed" and MASO omits its success
+  flag, so both fail closed. Tests: Codex `view_image` with a
+  hard-coded completed event denied; MASO completed-without-success denied.
+- **B2 — full identity pairing.** Grant key is
+  `(session, run_epoch, turn_id, sub_thread_id, call_id)`; the start must
+  exist exactly once (duplicate start → ambiguous → deny) and precede the
+  completion in the same run/turn/sub-thread; same call id in another
+  run/turn/sub-thread is denied; a failed first attempt followed by a fresh
+  start+completion under a new run is decided on the new occurrence.
+- **B3 — symlink/TOCTOU bound (strengthened after controller red).** The
+  first implementation used lstat checks plus leaf `O_NOFOLLOW`; the
+  controller's `controller-parent-swap-red.json` proved a parent-directory
+  symlink swap between check and open still redirected the read to a decoy
+  inode. The final `_open_regular_image_pinned` walks the absolute path with
+  `openat(dir_fd=...)`: every directory component is opened with
+  `O_DIRECTORY | O_NOFOLLOW` relative to the previous component's pinned
+  descriptor, then the final file with `O_NOFOLLOW | O_NONBLOCK`; fstat
+  rejects non-regular files before reading. Once opened, a component's
+  identity cannot be changed by a later ancestor swap. A deterministic
+  route-boundary regression
+  (`test_b3_parent_directory_symlink_swap_between_check_and_open_is_denied`)
+  performs the exact swap and asserts 404 with no decoy bytes, then 200
+  after restore. Absolute-only paths, no `..`, no `~`; FIFO/device
+  substitution cannot hang before fstat due to `O_NONBLOCK`.
+- **B4 — retained-byte revalidation and caching.** A grant-only source
+  (lexically outside cwd and temp roots; `_is_grant_only_path`) re-proves
+  its provenance before any retained LRU fallback; if the granting turn was
+  truncated/cleared, the retained manifest entry is discarded and the route
+  404s instead of resurrecting authority-less bytes (test asserts the
+  source-key entry is gone and repeated requests stay closed). The route
+  sends `Cache-Control: no-store` for `completed_tool` sources instead of
+  the tab route's `immutable` header; cwd/temp retention semantics are
+  unchanged.
+- **B5 — no pre-completion fetch, no permanent loading.** The backend
+  buffer emits newly authorized paths only on the matching successful
+  completion (bounded pending map pruned at turn end). Frontend
+  `isAgentImagePending(part, active)` shows the pending state only while the
+  tool is running inside an active turn/thread; a completed/interrupted turn
+  (`turn.completed`, subthread `lifecycleStatus !== 'active'`) settles the
+  part into image or retryable placeholder, never an endless loader.
+- **B6 — retry mechanics and re-render loops.** Retry removes the failed
+  marker and adds a nonce to the same authorized URL; a second failure
+  re-enters the placeholder with no automatic loop (composable tests).
+  `MarkdownContent` keeps a per-instance `failedImageUrls` set so v-html
+  re-renders during streaming neutralize already-failed images instead of
+  re-requesting them; the accessible Retry button clears the entry and
+  remounts the image. No status-probe fetch was added.
+- **N1–N6:** the pairing scan remains bounded by the session's persisted
+  event count (no new unbounded in-memory map); owner checks bracket every
+  scan; forged-transcript residual risk is unchanged from existing tailer
+  trust and documented; a negative test confirms assistant Markdown alone
+  never grants a non-temp out-of-cwd path; redaction and suffix/magic
+  filters apply on the pairing path via `image_tool_path`.

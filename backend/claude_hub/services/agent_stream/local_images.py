@@ -16,13 +16,14 @@ import json
 import logging
 import os
 import re
+import stat
 import tempfile
 import weakref
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import unquote
 
-from ...models import AgentStreamEvent, ExecutionTarget, ManagedSession
+from ...models import AgentStreamEvent, AgentType, ExecutionTarget, ManagedSession
 from .attachments import AgentStreamAttachmentStore, AttachmentOwnerUnavailable
 from .attachments import _magic_mime as sniff_image_mime
 from .store import AgentStreamStore
@@ -134,22 +135,113 @@ class AgentImageUnavailable(ValueError):
 # successfully; anything else (failed/cancelled/missing) grants nothing.
 _COMPLETED_TOOL_STATUS = "completed"
 
+# B1 (threat review): a generic ``status == "completed"`` does not prove the
+# tool read an image for every producer — Codex transcript outputs hard-code
+# "completed" and MASO omits its success flag. Only (producer, tool) pairs
+# whose failure encoding is verified in the native adapter are eligible for
+# an out-of-cwd grant; everything else fails closed. Extend this table only
+# with adapter-level evidence, never from a status flag alone.
+#   * Claude JSONL ``tool_result`` sets failed from ``is_error``
+#     (claude_jsonl.py), so a completed Claude image Read is a real success.
+_PROVEN_IMAGE_TOOL_SUCCESS: frozenset = frozenset({(AgentType.CLAUDE, "Read")})
+
+# Where an authorized image came from; drives cache/revocation policy.
+IMAGE_SOURCE_CWD = "cwd"
+IMAGE_SOURCE_TEMPORARY = "temporary"
+IMAGE_SOURCE_COMPLETED_TOOL = "completed_tool"
+
+
+def _is_completed_tool_grant_candidate(event: dict, raw_path: str) -> bool:
+    """B1/N6: producer allowlist, assistant role and exact image-tool match."""
+    payload = event.get("payload")
+    if not isinstance(payload, dict) or payload.get("role", "assistant") != "assistant":
+        return False
+    producer = event.get("agent_type")
+    tool_name = payload.get("name")
+    if (producer, tool_name) not in _PROVEN_IMAGE_TOOL_SUCCESS:
+        return False
+    # image_tool_path enforces the image suffix allowlist and the exact
+    # provider-specific path argument.
+    return image_tool_path(payload) == raw_path
+
+
+def _open_regular_image_pinned(path: Path) -> Tuple[bytes, str]:
+    """Open *path* with every directory component pinned by a descriptor.
+
+    B3 (confirmed by ``controller-parent-swap-red.json``): checking for
+    symlinks and then doing an ordinary ``open`` — even with leaf
+    ``O_NOFOLLOW`` — leaves a TOCTOU window where a parent directory is
+    replaced by a symlink to another location before the open. Path
+    resolution would follow that new parent and serve a different inode.
+
+    This walks the path with ``openat`` relative to the previous
+    component's descriptor, using ``O_DIRECTORY | O_NOFOLLOW`` for every
+    directory and ``O_NOFOLLOW`` for the final file. Once a component is
+    opened its identity is fixed; a later swap of any ancestor cannot
+    redirect the walk. The final descriptor is validated with ``fstat``
+    (regular file, size cap) before reading. ``O_NONBLOCK`` on the file
+    prevents a FIFO/device substitution from blocking before fstat rejects
+    it. Raises :class:`AgentImageUnavailable` for every denial.
+    """
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    file_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    if not path.is_absolute() or ".." in path.parts:
+        raise AgentImageUnavailable()
+    parts = path.parts  # ("/", "a", "b", ...) for an absolute path
+    parent_fd: Optional[int] = None
+    file_fd: Optional[int] = None
+    try:
+        # Pin the filesystem root (or the platform's equivalent anchor).
+        parent_fd = os.open(parts[0], directory_flags)
+        for component in parts[1:-1]:
+            next_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = next_fd
+        file_fd = os.open(parts[-1], file_flags, dir_fd=parent_fd)
+        stat_result = os.fstat(file_fd)
+        if not stat.S_ISREG(stat_result.st_mode):
+            raise AgentImageUnavailable()
+        data = os.read(file_fd, _AGENT_IMAGE_MAX_BYTES + 1)
+    except AgentImageUnavailable:
+        raise
+    except OSError:
+        raise AgentImageUnavailable() from None
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if parent_fd is not None:
+            os.close(parent_fd)
+    if len(data) > _AGENT_IMAGE_MAX_BYTES:
+        raise AgentImageUnavailable()
+    mime = sniff_image_mime(data)
+    if mime is None:
+        raise AgentImageUnavailable()
+    return data, mime
+
 
 def referenced_completed_tool_image(session: ManagedSession, raw_path: str) -> Optional[Path]:
-    """Grant an exact out-of-cwd image read by a successfully completed image tool.
+    """Resolve an exact out-of-cwd image authorized by a completed image tool.
 
-    Authorization boundary (narrow, fail-closed): a recognized native
-    image-view tool (``Read`` of an image / ``view_image``) must have
-    *started* and *completed successfully* for this exact path in this same
-    session, with the completion carrying the same call id, run epoch and
-    turn id as the start. A started-only or failed call, another tool, user
-    text, generic shell output, a different run/turn (including a colliding
-    call id) or another session never grants access. The grant is derived
-    from the persisted canonical stream, so historical successful records
-    work without any migration or backfill.
-
-    Returns the strict-resolved regular file, or ``None``. Callers still run
-    the shared size/magic validation; this function never opens the file.
+    Authorization boundary (narrow, fail-closed; B1/B2): a producer-verified
+    native image-view tool must have *started* and *completed successfully*
+    for this exact path under the full identity
+    ``(session, run_epoch, turn_id, sub_thread, call_id)``. A started-only or
+    failed call, another tool, user text, generic shell output, a different
+    run/turn/sub-thread (including a colliding call id), a duplicated start,
+    or another session never grants access. Derived from the persisted
+    canonical stream, so historical successful records work without
+    migration; this function only resolves the path — the actual read goes
+    through the no-follow opener in :func:`_read_granted_tool_image`.
     """
     if session.target != ExecutionTarget.LOCAL or not session.workspace_path:
         return None
@@ -162,23 +254,21 @@ def referenced_completed_tool_image(session: ManagedSession, raw_path: str) -> O
         return None
     candidate = Path(raw_path)
     # Only explicit absolute paths need this grant: relative paths are
-    # anchored at the session cwd and handled by the normal root containment.
+    # anchored at the session cwd and handled by normal root containment.
+    # No ``~`` expansion and no traversal: the grant names the literal path.
     if not candidate.is_absolute() or ".." in candidate.parts:
         return None
     try:
-        if candidate.is_symlink():
-            # The grant names the exact authored file; a swapped symlink must
-            # not turn a completed read into a different-target read.
+        # Cheap lexical/stat pre-check; the authoritative symlink/TOCTOU
+        # boundary is the descriptor-pinned opener at read time (B3).
+        if candidate.is_symlink() or not candidate.is_file():
             return None
-        real = candidate.resolve(strict=True)
-    except (OSError, ValueError, RuntimeError):
-        return None
-    if not real.is_file():
+    except OSError:
         return None
 
-    # call id -> (run epoch, turn id) for started image-view calls naming the
-    # exact requested path. Bounded by the session's persisted event count.
-    started: Dict[str, Tuple[Optional[int], Optional[str]]] = {}
+    # Full start identity -> occurrence count. Any duplicated start makes the
+    # provenance ambiguous and denies the whole key (B2).
+    starts: Dict[Tuple[Optional[int], Optional[str], Optional[str], str], int] = {}
     try:
         with AgentStreamStore(session.workspace_id, session.id).path.open() as events:
             for line in events:
@@ -195,29 +285,68 @@ def referenced_completed_tool_image(session: ManagedSession, raw_path: str) -> O
                 call_id = payload.get("tool_call_id") or event.get("call_id")
                 if not isinstance(call_id, str) or not call_id:
                     continue
+                identity = (
+                    event.get("run_epoch"),
+                    event.get("turn_id"),
+                    payload.get("subagent_thread"),
+                    call_id,
+                )
                 if kind == "tool_call_started":
-                    if (
-                        payload.get("role", "assistant") == "assistant"
-                        and image_tool_path(payload) == raw_path
-                    ):
-                        started[call_id] = (event.get("run_epoch"), event.get("turn_id"))
+                    if _is_completed_tool_grant_candidate(event, raw_path):
+                        starts[identity] = starts.get(identity, 0) + 1
                     continue
                 if kind != "tool_call_completed":
                     continue
                 if payload.get("status") != _COMPLETED_TOOL_STATUS:
                     continue
-                origin = started.get(call_id)
-                if origin is None:
-                    continue
-                # Same call id alone is insufficient: the completion must be
-                # the same run/turn incarnation as the recorded start, so a
-                # colliding id from another turn cannot complete this grant.
-                if origin != (event.get("run_epoch"), event.get("turn_id")):
-                    continue
-                return real
+                # The completion must be the unique matching start in the same
+                # run/turn/sub-thread; ordering is guaranteed by the event log.
+                if starts.get(identity) == 1:
+                    return candidate
     except (OSError, UnicodeError):
         return None
     return None
+
+
+def _is_grant_only_path(session: ManagedSession, raw_path: str) -> bool:
+    """True when *raw_path* can only be authorized via the completed-tool grant.
+
+    Deliberately lexical (no filesystem existence checks): this runs in the
+    retained-LRU fallback after the source has disappeared, so it must still
+    classify a deleted path. It only decides retention/revocation policy;
+    actual read authorization always goes through the strict grant scan and
+    the no-follow opener. cwd-contained paths and temp-root paths keep the
+    existing retained-LRU semantics; everything else absolute is grant-only.
+    """
+    try:
+        candidate = Path(raw_path)
+        if not candidate.is_absolute() or ".." in candidate.parts:
+            return False
+        absolute = os.path.abspath(str(candidate))
+        lexical_roots = {os.path.abspath(str(root)) for root in _agent_image_allowed_roots(session)}
+        for root in lexical_roots:
+            if absolute == root or absolute.startswith(root + os.sep):
+                return False
+        for temp_root in _TEMP_IMAGE_ROOTS:
+            for alias in {
+                os.path.abspath(str(temp_root)),
+                os.path.abspath(str(temp_root.resolve())),
+            }:
+                if absolute == alias or absolute.startswith(alias + os.sep):
+                    return False
+        return True
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def _read_granted_tool_image(session: ManagedSession, raw_path: str) -> Tuple[bytes, str]:
+    granted = referenced_completed_tool_image(session, raw_path)
+    if granted is None:
+        raise AgentImageUnavailable()
+    # Re-resolve at open time: the descriptor-pinned opener re-validates
+    # every component and the inode atomically, so a swap after the scan
+    # cannot redirect the grant (B3).
+    return _open_regular_image_pinned(granted)
 
 
 OwnerIsCurrent = Callable[[], bool]
@@ -367,19 +496,27 @@ def _source_exists(session: ManagedSession, raw_path: str) -> bool:
     return os.path.lexists(path)
 
 
-def _read_referenced_image(session: ManagedSession, raw_path: str) -> Tuple[bytes, str]:
+def _read_referenced_image(session: ManagedSession, raw_path: str) -> Tuple[bytes, str, str]:
+    """Read with the existing cwd/temp/tool-grant order, tagging the source.
+
+    Returns ``(data, mime, source_kind)`` where *source_kind* is one of
+    :data:`IMAGE_SOURCE_CWD`, :data:`IMAGE_SOURCE_TEMPORARY` or
+    :data:`IMAGE_SOURCE_COMPLETED_TOOL`; the tag drives revocation and cache
+    policy without weakening any read validation.
+    """
     try:
-        return _read_agent_image(session, raw_path)
+        data, mime = _read_agent_image(session, raw_path)
+        return data, mime, IMAGE_SOURCE_CWD
     except AgentImageUnavailable:
         referenced = referenced_temporary_image(session, raw_path)
-        if referenced is None:
-            # Last resort: an exact path whose successful image-view tool
-            # completed in this session. Still passes the shared size/magic
-            # and regular-file validation inside _read_agent_image.
-            referenced = referenced_completed_tool_image(session, raw_path)
-        if referenced is None:
-            raise
-        return _read_agent_image(session, raw_path, referenced_image=referenced)
+        if referenced is not None:
+            data, mime = _read_agent_image(session, raw_path, referenced_image=referenced)
+            return data, mime, IMAGE_SOURCE_TEMPORARY
+        # Last resort: an exact path whose producer-verified image tool
+        # completed in this session. Read through the no-follow opener so
+        # symlink swaps cannot redirect the grant.
+        data, mime = _read_granted_tool_image(session, raw_path)
+        return data, mime, IMAGE_SOURCE_COMPLETED_TOOL
 
 
 async def read_cached_agent_image(
@@ -388,12 +525,22 @@ async def read_cached_agent_image(
     *,
     owner_is_current: Optional[OwnerIsCurrent] = None,
 ) -> Tuple[bytes, str]:
-    """Preserve original bytes in the existing attachment LRU, never re-encode.
+    data, mime, _source_kind = await read_cached_agent_image_with_policy(
+        session, raw_path, owner_is_current=owner_is_current
+    )
+    return data, mime
 
-    Live files take precedence so overwriting a screenshot does not freeze an
-    old image. A missing source falls back to the latest retained version.
-    Originals exceeding the configured storage bounds remain source-only;
-    they are never silently downsampled to squeeze into the cache.
+
+async def read_cached_agent_image_with_policy(
+    session: ManagedSession,
+    raw_path: str,
+    *,
+    owner_is_current: Optional[OwnerIsCurrent] = None,
+) -> Tuple[bytes, str, str]:
+    """Like :func:`read_cached_agent_image`, plus the source-kind policy tag.
+
+    The route layer uses the tag to avoid ``immutable`` caching on
+    provenance-granted reads, and the retention path uses it for revocation.
     """
     _require_current_owner(owner_is_current)
     key = _source_key(session, raw_path)
@@ -421,11 +568,11 @@ async def _read_cached_image_locked(
     key: str,
     *,
     owner_is_current: Optional[OwnerIsCurrent],
-) -> Tuple[bytes, str]:
+) -> Tuple[bytes, str, str]:
     store = AgentStreamAttachmentStore(session.workspace_id, session.id)
     _require_current_owner(owner_is_current)
     try:
-        data, mime = await asyncio.to_thread(_read_referenced_image, session, raw_path)
+        data, mime, source_kind = await asyncio.to_thread(_read_referenced_image, session, raw_path)
     except AgentImageUnavailable:
         _require_current_owner(owner_is_current)
         if await asyncio.to_thread(_source_exists, session, raw_path):
@@ -440,8 +587,28 @@ async def _read_cached_image_locked(
             except AttachmentOwnerUnavailable:
                 raise AgentImageUnavailable() from None
             raise
+        # B4: a tool-grant-only source (outside cwd, not a temp grant) may
+        # use the retained LRU only while its provenance still exists. If the
+        # granting turn was truncated/cleared (or the store reset), the
+        # retained copy is invalidated instead of resurrecting bytes whose
+        # authority is gone. A still-valid grant with a deleted source keeps
+        # the normal retained-original behavior. cwd/temp sources are
+        # unaffected because their authority is the live session itself.
+        if _is_grant_only_path(session, raw_path) and (
+            referenced_completed_tool_image(session, raw_path) is None
+        ):
+            try:
+                await _discard_cached_source(
+                    store,
+                    key,
+                    owner_is_current=owner_is_current,
+                )
+            except (AttachmentOwnerUnavailable, OSError):
+                pass
+            raise AgentImageUnavailable()
         try:
-            return await store.read_source(key, owner_is_current=owner_is_current)
+            data, mime = await store.read_source(key, owner_is_current=owner_is_current)
+            return data, mime, IMAGE_SOURCE_CWD
         except (AttachmentOwnerUnavailable, KeyError, ValueError, OSError):
             raise AgentImageUnavailable() from None
     _require_current_owner(owner_is_current)
@@ -467,7 +634,7 @@ async def _read_cached_image_locked(
         except AttachmentOwnerUnavailable:
             raise AgentImageUnavailable() from None
     _require_current_owner(owner_is_current)
-    return data, mime
+    return data, mime, source_kind
 
 
 async def _discard_cached_source(
@@ -563,8 +730,8 @@ class ImageReferenceBuffer:
             call_id = payload.get("tool_call_id") or event.call_id
             if not isinstance(call_id, str) or not call_id:
                 return []
-            key = (event.run_epoch, event.turn_id, call_id)
-            return list(self._pending_image_tools.pop(key, ()))
+            pending_key = (event.run_epoch, event.turn_id, call_id)
+            return list(self._pending_image_tools.pop(pending_key, ()))
         if event.type != "text_delta":
             return image_paths_from_event(event)
         payload = event.payload

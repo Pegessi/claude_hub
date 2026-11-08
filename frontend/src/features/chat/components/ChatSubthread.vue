@@ -100,7 +100,7 @@
           class="agent-image-card"
         >
           <div
-            v-if="isAgentImagePending(sub)"
+            v-if="isAgentImagePending(sub, thread.lifecycleStatus === 'active')"
             class="turn-attachment-placeholder agent-image-pending"
             role="status"
           >

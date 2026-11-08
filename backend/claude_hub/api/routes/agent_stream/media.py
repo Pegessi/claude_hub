@@ -20,7 +20,7 @@ from claude_hub.services.agent_stream import quoted_images
 from claude_hub.services.agent_stream.local_attachments import read_attachment_preview
 from claude_hub.services.agent_stream.local_images import (
     AgentImageUnavailable,
-    read_cached_agent_image,
+    read_cached_agent_image_with_policy,
 )
 from claude_hub.services.agent_stream.local_markdown import (
     MarkdownEncodingError,
@@ -88,7 +88,7 @@ async def serve_agent_image(
     cache_control: str,
 ) -> Response:
     try:
-        data, mime = await read_cached_agent_image(
+        data, mime, source_kind = await read_cached_agent_image_with_policy(
             session,
             path,
             owner_is_current=owner_is_current,
@@ -97,12 +97,16 @@ async def serve_agent_image(
         raise agent_image_not_available() from None
     if not owner_is_current():
         raise agent_image_not_available()
+    # B4: provenance-granted out-of-cwd images must not be cached as
+    # immutable — their authority can be revoked by stream truncation/clear,
+    # so every view revalidates through the route.
+    effective_cache = ATTACHMENT_NO_STORE if source_kind == "completed_tool" else cache_control
     return Response(
         content=data,
         media_type=mime,
         headers={
             "X-Content-Type-Options": "nosniff",
-            "Cache-Control": cache_control,
+            "Cache-Control": effective_cache,
         },
     )
 
