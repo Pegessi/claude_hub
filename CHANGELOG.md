@@ -23,9 +23,10 @@
   cwd/temporary semantics, original-byte retention and invalid-replacement
   rules are preserved. Historical successful stream records work without a
   backfill job.
-- Image retention now captures newly authorized images at successful tool
-  completion rather than on the start event, so an uncompleted Read can no
-  longer publish a grant before completion; retained bytes for these
+- Image retention additionally captures newly authorized images at
+  successful tool completion (the existing start-event capture is
+  retained for cwd/temp images), so an uncompleted Read cannot publish a
+  completion-gated grant before it finishes; retained bytes for these
   out-of-cwd grants are revalidated against the live stream and served
   `no-store`, so truncation/clear revokes them and browser caching cannot
   bypass replacement.

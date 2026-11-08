@@ -192,19 +192,22 @@ before broad validation; no registry/endpoint/directory widening was added.
   never grants a non-temp out-of-cwd path; redaction and suffix/magic
   filters apply on the pairing path via `image_tool_path`.
 
-## N1 scan cost (measured, not assumed)
+## N1 scan cost
 
 The completed-tool grant scans the session's canonical stream JSONL on
 each out-of-cwd image request (same read pattern as the pre-existing
 `referenced_temporary_image`; no new in-memory index or unbounded map was
-added). Measured on this host against a synthetic 10,000-event / 4.60 MiB
-stream: one full scan completes in ~0.2 ms (single thread, warm cache),
-i.e. negligible relative to the image read itself. Bounded by the
-session's persisted event count; the per-request work stays O(events)
-with constant extra memory. If event volumes grow beyond observed chat
-sizes, a bounded index can be added later without changing the grant
-contract; no truncation is applied to historical scans, so legitimate
-historical grants are never hidden.
+added). It is O(events) per request with constant extra memory, bounded
+by the session's persisted event count. No benchmark is asserted here: an
+earlier draft claimed ~0.2 ms for a synthetic 10,000-event stream, which
+the final review could not substantiate because every line goes through
+`json.loads`. The independent reviewer's read-only measurement on the
+live `claude-hub-agent-5.jsonl` (21,104 lines, 7.4 MB) was ~83 ms per
+full scan (`reviewer/final-review.md`); that figure is the reviewer's
+measurement, not an author benchmark. If event volumes grow beyond
+observed chat sizes, a bounded index can be added later without changing
+the grant contract; no truncation is applied to historical scans, so
+legitimate historical grants are never hidden.
 
 ## Ordinary code-review follow-up (D1/D2/N1) and rendered-browser proof
 
@@ -242,10 +245,17 @@ directory access.
   generated-Markdown failure → placeholder → first Retry stays usable while
   404 continues → second Retry after recovery renders a decoded image inside
   the original preview button (lightbox still opens, lazy/decoding
-  preserved, single nonce); failed image requested once despite multiple
-  same-block text-delta re-renders (no request storm); native completed-but-
-  missing tool image never shows the pending spinner, Retry recovers it and
-  the lightbox opens. Results are written to `report.image_retry`.
+  preserved, single nonce); the failed image is requested exactly once at
+  hydration and not re-requested after the fixture's one text delta and turn
+  completion; the completed native tool image shows no pending placeholder,
+  Retry recovers it and the lightbox opens. Results are written to
+  `report.image_retry`. Stated coverage limits (per final review): the
+  fixture has only one text delta, so same-block re-render resistance across
+  multiple deltas is covered by the `useChatImages`/Markdown unit tests, not
+  this browser run; the native tool is already completed in a completed turn,
+  so the browser proves the settled state while the dynamic
+  running-tool-settles transition stays unit-tested; repeated failure is
+  browser-proven for Markdown and unit-tested for native cards.
 - **Settled-state timing fix.** The pre-existing mobile tap-target
   assertion read `bounding_box()` immediately after viewport resize and
   caught a 43.865 px mid-reflow value against the CSS's real
