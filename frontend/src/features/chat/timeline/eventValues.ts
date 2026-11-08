@@ -61,10 +61,15 @@ export function turnProvenance(event: AgentStreamEvent): {
   ) {
     return { origin, feishu: null, hubMessage: null }
   }
+  // Group provenance is additive: a message recorded before group binding
+  // shipped carries neither field and stays a private conversation.
+  const chatType = value.chat_type === 'group' ? 'group' as const : 'p2p' as const
+  const threadId = typeof value.thread_id === 'string' && value.thread_id.trim()
+    ? value.thread_id.trim() : null
   return {
     origin,
     hubMessage: null,
-    feishu: { appId, botName, botAvatarUrl, chatId, messageId, senderOpenId },
+    feishu: { appId, botName, botAvatarUrl, chatId, messageId, senderOpenId, chatType, threadId },
   }
 }
 
@@ -104,6 +109,17 @@ export function messageSourceLabel(turn: TimelineTurn): string | null {
     ? `Hub message · ${turn.hubMessage.actor}` : 'Hub message'
   if (turn.origin !== 'feishu') return null
   return turn.feishu?.botName || 'Feishu'
+}
+
+/**
+ * Compact scope suffix for a Feishu source badge: ``group`` for a group chat,
+ * ``group topic`` inside a topic thread, ``null`` for a private conversation so
+ * the historical p2p badge keeps its exact look.
+ */
+export function messageSourceScope(turn: TimelineTurn): string | null {
+  const feishu = turn.origin === 'feishu' ? turn.feishu : null
+  if (!feishu || feishu.chatType !== 'group') return null
+  return feishu.threadId ? 'group topic' : 'group'
 }
 
 export function messageSourceAvatarUrl(turn: TimelineTurn): string | null {

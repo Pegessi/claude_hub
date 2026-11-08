@@ -86,7 +86,10 @@ def question_mirror_eligible(q: ChatQuestion) -> bool:
     from ... import feishu_bot as bot
 
     entry = bot._bot_bound_to_tab(q.tab_id)
-    if not entry or not entry.binding:
+    # answering a card is a private-chat capability; a group-bound Bot must
+    # keep the question inside the Chat instead of posting a card nobody there
+    # is allowed to answer.
+    if not entry or not entry.binding or entry.binding.is_group:
         return False
     effective = bot._pool.effective(entry.bot_id)
     return bool(
@@ -115,7 +118,7 @@ async def _mirror_question(q: ChatQuestion, *, remirror: bool = False) -> bool:
             return False
         answers.live(q)
         entry = bot._bot_bound_to_tab(q.tab_id)
-        if not entry or not entry.binding:
+        if not entry or not entry.binding or entry.binding.is_group:
             return False
         effective = bot._pool.effective(entry.bot_id)
         if not effective.callback_enabled or not effective.expected_tenant_key:

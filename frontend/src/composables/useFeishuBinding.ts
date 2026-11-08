@@ -1,8 +1,8 @@
 import { computed, ref, watch, type Ref } from 'vue'
 import { useFeishuBotPoolStore } from '@/stores/feishuBotPoolStore'
 import {
-  activateFeishuPairing, disconnectFeishuPairing, FeishuBotRequestError,
-  startFeishuPairing, type FeishuPairStartResponse,
+  activateFeishuPairing, bindBotGroup, disconnectFeishuPairing, FeishuBotRequestError,
+  listBotChats, startFeishuPairing, type FeishuBotChat, type FeishuPairStartResponse,
 } from '@/utils/feishuBotConfig'
 
 export type FeishuBindingViewState='unbound'|'pending'|'claimed'|'bound-current'|'error'
@@ -15,6 +15,8 @@ export interface FeishuBindingDependencies {
   startPairing?: typeof startFeishuPairing
   activatePairing?: typeof activateFeishuPairing
   disconnectPairing?: typeof disconnectFeishuPairing
+  listChats?: typeof listBotChats
+  bindGroup?: typeof bindBotGroup
 }
 export function useFeishuBinding(
   tabId: Ref<string>,
@@ -30,9 +32,15 @@ export function useFeishuBinding(
   const startPairing = dependencies.startPairing ?? startFeishuPairing
   const activatePairing = dependencies.activatePairing ?? activateFeishuPairing
   const disconnectPairing = dependencies.disconnectPairing ?? disconnectFeishuPairing
+  const listChats = dependencies.listChats ?? listBotChats
+  const requestGroupBind = dependencies.bindGroup ?? bindBotGroup
   const selectedBotId=ref<string|null>(null),pendingCode=ref<FeishuPairStartResponse|null>(null),confirmWord=ref('')
   const error=ref<string|null>(null),needsLogin=ref(false),isHydrated=ref(false),isLoading=ref(false),isMutating=ref(false)
+  // Group binding is a second, independent path: its own read and its own error,
+  // so a failed group list never disturbs the p2p pairing state machine.
+  const groups=ref<FeishuBotChat[]>([]),groupsLoaded=ref(false),groupsLoading=ref(false),groupsError=ref<string|null>(null)
   let epoch=0,controller:AbortController|null=null,pollTimer:ReturnType<typeof setTimeout>|null=null,polling=false
+  let groupEpoch=0,groupController:AbortController|null=null
 
   const currentBot=computed(()=>store.activeBotForTab(tabId.value))
   const binding=computed(()=>currentBot.value?.binding??null)
@@ -69,6 +77,16 @@ function clearPairingAttempt(message: string | null = null) {
   clearPollTimer()
   if (message) error.value = message
 }
+/** Drop the cached group list: it belongs to one Bot in one Chat, never to the next. */
+function resetGroups() {
+  groupEpoch += 1
+  groupController?.abort()
+  groupController = null
+  groups.value = []
+  groupsLoaded.value = false
+  groupsLoading.value = false
+  groupsError.value = null
+}
 function schedulePoll() {
   clearPollTimer()
   if (!polling || isMutating.value || isLoading.value) return
@@ -102,6 +120,46 @@ function schedulePoll() {
   }
 }
 
+  async function loadGroups(): Promise<boolean> {
+  const bot = selectedBot.value
+  if (!bot || isMutating.value || groupsLoading.value || needsLogin.value) return false
+  const requestEpoch = ++groupEpoch
+  groupController?.abort()
+  const request = new AbortController()
+  groupController = request
+  const requestBotId = bot.bot_id, requestTabId = tabId.value
+  groupsLoading.value = true
+  groupsError.value = null
+  try {
+    const value = await listChats(bot.bot_id, request.signal)
+    if (requestEpoch !== groupEpoch || request.signal.aborted) return false
+    // The reply describes the Bot and Chat that asked for it; a selection or
+    // Chat change while it was in flight makes it useless, not merely stale.
+    if (selectedBotId.value !== requestBotId || tabId.value !== requestTabId) return false
+    // The endpoint lists groups only, so every returned chat is bindable; the
+    // server refuses a private chat id itself (``chat_not_group``).
+    groups.value = [...value.chats]
+    groupsLoaded.value = true
+    return true
+  } catch (cause) {
+    if (requestEpoch !== groupEpoch || request.signal.aborted) return false
+    const e = cause instanceof FeishuBotRequestError ? cause : null
+    groupsError.value = e?.message ?? 'The Bot groups could not be loaded. Try again.'
+    needsLogin.value = e?.status === 401
+    return false
+  } finally {
+    if (requestEpoch === groupEpoch) {
+      groupController = null
+      groupsLoading.value = false
+    }
+  }
+}
+/** Load the group list once per Bot; an explicit reload stays the user's choice after a failure. */
+function ensureGroups(): void {
+  if (groupsLoaded.value || groupsLoading.value || groupsError.value) return
+  if (!selectedBot.value || needsLogin.value || isMutating.value) return
+  void loadGroups()
+}
   async function refresh(): Promise<boolean> {
   if (isMutating.value) return false
   clearPollTimer()
@@ -121,7 +179,7 @@ function schedulePoll() {
     if (!selectedBotId.value || !selectedBot.value) {
       const nextId = currentBot.value?.bot_id
         ?? store.bots.find(bot => bot.enabled && bot.configured && !bot.binding)?.bot_id ?? null
-      if (nextId !== selectedBotId.value) clearPairingAttempt()
+      if (nextId !== selectedBotId.value) { clearPairingAttempt(); resetGroups() }
       selectedBotId.value = nextId
     }
     if (claim.value) seenClaimId.value = claim.value.pairing_id
@@ -143,6 +201,7 @@ function schedulePoll() {
   controller?.abort(); controller = null; isLoading.value = false
   selectedBotId.value = botId
   clearPairingAttempt()
+  resetGroups()
   error.value = null
   clockMs.value = now()
   schedulePoll()
@@ -188,6 +247,26 @@ function schedulePoll() {
     return false
   } finally { finishMutation(requestEpoch) }
 }
+  async function bindGroup(chatId: string): Promise<boolean> {
+  const bot = selectedBot.value
+  if (!bot || !chatId || !bot.enabled || !bot.configured || bot.binding || isMutating.value || needsLogin.value) return false
+  const { requestEpoch, request } = beginMutation()
+  try {
+    // The mutation response is the authoritative pool snapshot: applyPool adopts
+    // it and reconciles when the pool moved on while this request was open.
+    const next = await requestGroupBind(bot.bot_id, { chat_id: chatId, tab_id: tabId.value, expected_revision: bot.revision }, request.signal)
+    if (requestEpoch !== epoch || request.signal.aborted) return false
+    store.applyPool(next)
+    groupsError.value = null
+    clearPairingAttempt()
+    return true
+  } catch (cause) {
+    if (requestEpoch !== epoch || request.signal.aborted) return false
+    setFailure(cause, 'Failed to bind this group.')
+    await reconcileAfterFailure(cause, request.signal)
+    return false
+  } finally { finishMutation(requestEpoch) }
+}
   async function disconnect(): Promise<boolean> {
   const bot = currentBot.value
   if (!bot || isMutating.value || needsLogin.value) return false
@@ -216,6 +295,7 @@ function pause() {
   clearPollTimer()
   epoch += 1
   controller?.abort(); controller = null
+  resetGroups()
   isLoading.value = false; isMutating.value = false
   confirmWord.value = ''
 }
@@ -249,5 +329,5 @@ function finishMutation(requestEpoch: number) {
   schedulePoll()
 }
 
-  return{bots,binding,currentBot,selectedBotId,selectedBot,pendingCode,claim,confirmWord,error,needsLogin,isHydrated,isLoading,isMutating,viewState,statusText,refresh,selectBot,generateCode,activate,disconnect,resume,pause}
+  return{bots,binding,currentBot,selectedBotId,selectedBot,pendingCode,claim,confirmWord,error,needsLogin,isHydrated,isLoading,isMutating,viewState,statusText,groups,groupsLoaded,groupsLoading,groupsError,refresh,selectBot,generateCode,activate,bindGroup,loadGroups,ensureGroups,disconnect,resume,pause}
 }

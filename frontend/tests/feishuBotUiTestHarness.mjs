@@ -69,6 +69,10 @@ export const claim = () => ({
   workspace_id: null, chat_id: 'chat-a', created_at: new Date(1100).toISOString(),
   expires_at: new Date(4000).toISOString(),
 })
+export const groupChat = (id = 'oc-group', overrides = {}) => ({
+  chat_id: id, name: `Group ${id}`, chat_mode: 'group', user_count: 3, bot_count: 1, ...overrides,
+})
+export const chatList = (chats = [groupChat()], revision = 1) => ({ chats, revision })
 export const code = () => ({
   bot_id: 'a', revision: 2, code: 'CH-TEST', expires_at: new Date(2000).toISOString(),
 })

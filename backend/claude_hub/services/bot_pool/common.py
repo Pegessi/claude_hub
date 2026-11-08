@@ -170,8 +170,31 @@ class PairingClaim:
     generation: int
 
 
+BINDING_CHAT_TYPE_P2P = "p2p"
+BINDING_CHAT_TYPE_GROUP = "group"
+_BINDING_CHAT_TYPES = (BINDING_CHAT_TYPE_P2P, BINDING_CHAT_TYPE_GROUP)
+
+
+def binding_chat_type(value: Any) -> str:
+    """Read a persisted binding's chat type, defaulting legacy entries to p2p."""
+
+    raw = value.get("chat_type")
+    if raw is None:
+        return BINDING_CHAT_TYPE_P2P
+    if not isinstance(raw, str) or raw not in _BINDING_CHAT_TYPES:
+        raise FeishuBotPoolStateError("binding.chat_type is invalid")
+    return raw
+
+
 @dataclass(frozen=True)
 class BotBinding:
+    """One Bot channel bound to one Chat.
+
+    ``chat_type`` is ``p2p`` for a private pairing (the sender must match) and
+    ``group`` for a group binding made from the Hub (any member of that group
+    may address the Bot). ``chat_name`` is display-only.
+    """
+
     pairing_id: str
     bot_id: str
     owner: OwnerIdentity
@@ -181,6 +204,12 @@ class BotBinding:
     chat_id: str
     created_at: float
     generation: int
+    chat_type: str = "p2p"
+    chat_name: str | None = None
+
+    @property
+    def is_group(self) -> bool:
+        return self.chat_type == "group"
 
 
 @dataclass(frozen=True)

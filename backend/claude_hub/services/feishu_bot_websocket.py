@@ -334,6 +334,12 @@ def _strip_mention_key(text: str, key: str, mention_keys: tuple[str, ...]) -> st
     return stripped
 
 
+def _optional_thread_id(value: Any) -> str | None:
+    """A topic id is optional metadata: blank or unknown means "not in a topic"."""
+
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def _optional_message_id(value: Any) -> str | None:
     if value is None:
         return None
@@ -347,8 +353,15 @@ def message_event_from_sdk(
     *,
     expected_app_id: str,
     expected_bot_open_id: str | None = None,
+    owns_sent_message: Callable[[str | None], bool] | None = None,
+    owns_sent_thread: Callable[[str | None], bool] | None = None,
 ) -> FeishuMessageEvent:
-    """Normalize the SDK model after the long connection authenticated it."""
+    """Normalize the SDK model after the long connection authenticated it.
+
+    ``owns_sent_message`` recognises ids this Bot sent. It is only consulted for
+    a group message that does not mention the Bot: a follow-up inside a topic the
+    Bot started is addressed to it even without a fresh @mention.
+    """
 
     header = getattr(data, "header", None)
     envelope = getattr(data, "event", None)
@@ -363,12 +376,26 @@ def message_event_from_sdk(
     chat_type = getattr(message, "chat_type", None)
     if chat_type not in {"p2p", "group"}:
         raise ValueError("Only Feishu p2p and mentioned group messages are supported")
+    parent_id = _optional_message_id(getattr(message, "parent_id", None))
+    root_id = _optional_message_id(getattr(message, "root_id", None))
+    thread_id = _optional_thread_id(getattr(message, "thread_id", None))
     mention_key = None
     mention_keys: tuple[str, ...] = ()
     if chat_type == "group":
         if expected_bot_open_id is None:
             raise ValueError("Feishu Bot open_id is unavailable for group messages")
-        mention_key, mention_keys = _mentioned_bot_key(message, expected_bot_open_id)
+        try:
+            mention_key, mention_keys = _mentioned_bot_key(message, expected_bot_open_id)
+        except ValueError:
+            # A follow-up inside a topic this Bot answered needs no new @mention:
+            # either it replies to one of our messages, or it belongs to a
+            # topic we already answered in.
+            continues_thread = (
+                owns_sent_message is not None
+                and (owns_sent_message(parent_id) or owns_sent_message(root_id))
+            ) or (owns_sent_thread is not None and owns_sent_thread(thread_id))
+            if not continues_thread:
+                raise
     message_type = getattr(message, "message_type", None)
     if message_type not in {"text", "post"}:
         raise ValueError("Only Feishu text and post messages are supported")
@@ -409,15 +436,10 @@ def message_event_from_sdk(
         text=text,
         message_created_at_ms=created_at,
         image_keys=image_keys,
-        parent_id=_optional_message_id(getattr(message, "parent_id", None)),
-        root_id=_optional_message_id(getattr(message, "root_id", None)),
+        parent_id=parent_id,
+        root_id=root_id,
         chat_type=chat_type,
-        thread_id=(
-            getattr(message, "thread_id").strip()
-            if isinstance(getattr(message, "thread_id", None), str)
-            and getattr(message, "thread_id").strip()
-            else None
-        ),
+        thread_id=thread_id,
     )
 
 

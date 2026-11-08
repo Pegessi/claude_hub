@@ -7,6 +7,28 @@
 
 ## Released
 
+### feat(feishu): bind the Bot to a group and follow topics without re-mentioning
+
+- A Bot can now be bound to a **group chat** from the Hub, not only to a private
+  chat through a pairing code. Feishu is asked for the chat first (`GET
+  /open-apis/im/v1/chats/{id}`), a private id is refused, and the binding then
+  belongs to the group: an @mention from **any member** reaches the bound Chat.
+  Existing private pairings keep their exact sender+chat rule.
+- Topic replies: a reply inside a topic stays in that topic, and in a
+  topic-mode group a root message is promoted into a new topic
+  (`reply_in_thread`). Topic-mode detection reads `chat_mode`/`group_message_type`
+  once per window; a private reply's request shape is unchanged.
+- Topic follow-ups: after the Bot has answered, messages inside that topic no
+  longer need a fresh @mention. Ownership comes from a bounded per-Bot registry
+  of the message ids it sent and the topics it answered in.
+- The Feishu panel offers "Private chat" / "Group chat" paths and shows
+  `Target: Group · <name>` with a topic hint; provenance chips append
+  `· group` / `· group topic`.
+- Ported from MASO's Feishu bot (see `docs/working-logs/2026-11-08-feishu-group-topic.md`):
+  group-wide conversations, topic-mode detection and owned-topic activation.
+  Deliberately not ported: per-topic sessions, `/mode observe|ignore` policies,
+  thread-history injection, relay/meeting/card infrastructure.
+
 ### style(chat): one Agents pill in the pane chrome, phones included
 
 - The sub-agent control now lives in the top-right pane chrome at every width,

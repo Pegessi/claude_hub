@@ -776,6 +776,8 @@ def _message(
     thread_id: str = "omt-topic",
     mentioned_bot_open_id: str | None = None,
     sender_open_id: str = "ou-sender",
+    parent_id: str | None = None,
+    root_id: str | None = None,
 ) -> Any:
     from types import SimpleNamespace
 
@@ -792,6 +794,8 @@ def _message(
                 create_time=str(int(now * 1000)),
                 chat_id=chat_id,
                 thread_id=thread_id if chat_type == "group" else None,
+                parent_id=parent_id,
+                root_id=root_id,
                 mentions=(
                     [
                         SimpleNamespace(
@@ -858,6 +862,12 @@ class _Wire:
         self.fail_reaction_delete = False
         self.token_calls = 0
         self.message_images = {("om-post", "img_v3_input"): _png(48, 32)}
+        # chat_id -> chat info payload returned by the Bot's chat lookup.
+        self.chats: dict[str, dict[str, Any]] = {}
+        self.chat_list_calls = 0
+        self.fail_chat_lookup = False
+        self.fail_chat_list = False
+        self.sent_sequence = 0
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/tenant_access_token/internal"):
@@ -887,7 +897,31 @@ class _Wire:
         if request.url.path.endswith("/reply"):
             self.replies.append(json.loads(request.content))
             self.reply_message_ids.append(request.url.path.split("/")[-2])
-            return httpx.Response(200, json={"code": 0})
+            self.sent_sequence += 1
+            body = json.loads(request.content)
+            sent = {"message_id": f"om-sent-{self.sent_sequence}"}
+            if body.get("reply_in_thread"):
+                sent["thread_id"] = f"omt-sent-{self.sent_sequence}"
+            return httpx.Response(200, json={"code": 0, "data": sent})
+        if request.method == "GET" and request.url.path == "/open-apis/im/v1/chats":
+            self.chat_list_calls += 1
+            if self.fail_chat_list:
+                return httpx.Response(403, json={"code": 99991672, "msg": "no scope"})
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {"items": list(self.chats.values()), "has_more": False},
+                },
+            )
+        if request.method == "GET" and request.url.path.startswith("/open-apis/im/v1/chats/"):
+            chat_id = request.url.path.split("/")[-1]
+            if self.fail_chat_lookup:
+                return httpx.Response(403, json={"code": 99991672, "msg": "no scope"})
+            info = self.chats.get(chat_id)
+            if info is None:
+                return httpx.Response(404, json={"code": 230002, "msg": "no chat"})
+            return httpx.Response(200, json={"code": 0, "data": info})
         if request.method == "GET" and "/resources/" in request.url.path:
             message_id, image_key = (
                 request.url.path.split("/")[-3],
@@ -3146,5 +3180,499 @@ def test_on_the_dot_chat_a_newer_message_stops_the_answer_in_progress(
             }.get(case, "answer-1")
             assert api.wire.reply_texts() == [first_reply, "answer-2"]
         assert bot_api._tab_dispatch_queues == {}
+
+    asyncio.run(scenario())
+
+
+# --------------------------------------------- H. group bindings and topics
+
+
+def _bind_group(api: Any, bot_id: str, *, chat_id: str = "oc-group", name: str = "Team") -> Any:
+    entry = api.pool.snapshot({}).get(bot_id)
+    assert entry is not None
+    return api.pool.bind_group(
+        bot_id,
+        owner=LOCAL,
+        tab_id="tab-1",
+        workspace_id=None,
+        chat_id=chat_id,
+        chat_name=name,
+        expected_revision=entry.revision,
+        environ={},
+    )
+
+
+def test_group_binding_routes_an_mention_from_any_member(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The point of a group binding: it belongs to the group, not to one person."""
+
+    async def scenario() -> None:
+        bot_id = api.pool.create_bot(
+            name="One",
+            config=_config("app-1"),
+            feishu_name="Test Bot",
+            feishu_open_id="ou-current-bot",
+            environ={},
+        )
+        _bind_group(api, bot_id)
+        dispatched: list[str] = []
+
+        async def dispatch(tab_id, text, _turn_id, *, admission_guard, visible_text, **_kwargs):
+            async with admission_guard():
+                dispatched.append(tab_id)
+            return "收到"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", dispatch)
+        await bot_api._handle_sdk_event(
+            bot_id,
+            _message(
+                "app-1",
+                "帮我看下这个报错",
+                clock.value,
+                message_id="om-group-member",
+                chat_id="oc-group",
+                chat_type="group",
+                mentioned_bot_open_id="ou-current-bot",
+                sender_open_id="ou-someone-else",
+            ),
+        )
+
+        assert dispatched == ["tab-1"]
+        assert api.wire.replies[0]["reply_in_thread"] is True
+
+    asyncio.run(scenario())
+
+
+def test_group_binding_ignores_another_group(api, clock: Clock) -> None:
+    bot_id = api.pool.create_bot(
+        name="One",
+        config=_config("app-1"),
+        feishu_name="Test Bot",
+        feishu_open_id="ou-current-bot",
+        environ={},
+    )
+    _bind_group(api, bot_id, chat_id="oc-group")
+    asyncio.run(
+        bot_api._handle_sdk_event(
+            bot_id,
+            _message(
+                "app-1",
+                "别的群不该触发",
+                clock.value,
+                message_id="om-other-group",
+                chat_id="oc-other-group",
+                chat_type="group",
+                mentioned_bot_open_id="ou-current-bot",
+            ),
+        )
+    )
+    assert api.wire.replies == []
+
+
+def test_topic_mode_group_reply_is_promoted_into_a_topic(api, clock: Clock) -> None:
+    """A root message in a 话题 group has no thread id yet; the reply starts one."""
+
+    api.wire.chats["oc-group"] = {
+        "chat_id": "oc-group",
+        "name": "Team",
+        "chat_mode": "topic",
+        "chat_type": "group",
+        "user_count": "2",
+        "bot_count": "1",
+    }
+    bot_id = api.pool.create_bot(
+        name="One",
+        config=_config("app-1"),
+        feishu_name="Test Bot",
+        feishu_open_id="ou-current-bot",
+        environ={},
+    )
+    _bind_group(api, bot_id)
+    asyncio.run(
+        bot_api._handle_sdk_event(
+            bot_id,
+            _message(
+                "app-1",
+                "标题式提问",
+                clock.value,
+                message_id="om-root",
+                chat_id="oc-group",
+                chat_type="group",
+                mentioned_bot_open_id="ou-current-bot",
+                thread_id="",
+            ),
+        )
+    )
+    assert len(api.wire.replies) == 1
+    assert api.wire.replies[0]["reply_in_thread"] is True
+
+
+def test_ordinary_group_reply_stays_flat(api, clock: Clock) -> None:
+    api.wire.chats["oc-group"] = {
+        "chat_id": "oc-group",
+        "name": "Team",
+        "chat_mode": "group",
+        "chat_type": "group",
+    }
+    bot_id = api.pool.create_bot(
+        name="One",
+        config=_config("app-1"),
+        feishu_name="Test Bot",
+        feishu_open_id="ou-current-bot",
+        environ={},
+    )
+    _bind_group(api, bot_id)
+    asyncio.run(
+        bot_api._handle_sdk_event(
+            bot_id,
+            _message(
+                "app-1",
+                "普通群提问",
+                clock.value,
+                message_id="om-flat",
+                chat_id="oc-group",
+                chat_type="group",
+                mentioned_bot_open_id="ou-current-bot",
+                thread_id="",
+            ),
+        )
+    )
+    assert "reply_in_thread" not in api.wire.replies[0]
+
+
+def test_follow_up_inside_the_bots_topic_needs_no_second_mention(api, clock: Clock) -> None:
+    """Once the Bot answered in a topic, plain replies there keep the conversation."""
+
+    async def scenario() -> None:
+        bot_id = api.pool.create_bot(
+            name="One",
+            config=_config("app-1"),
+            feishu_name="Test Bot",
+            feishu_open_id="ou-current-bot",
+            environ={},
+        )
+        _bind_group(api, bot_id)
+        await bot_api._handle_sdk_event(
+            bot_id,
+            _message(
+                "app-1",
+                "第一个问题",
+                clock.value,
+                message_id="om-first",
+                chat_id="oc-group",
+                chat_type="group",
+                mentioned_bot_open_id="ou-current-bot",
+            ),
+        )
+        # The Bot's own answer is recorded, so a plain follow-up in that topic
+        # is addressed to it without repeating the @.
+        await bot_api._handle_sdk_event(
+            bot_id,
+            _message(
+                "app-1",
+                "接着说",
+                clock.value,
+                message_id="om-follow-up",
+                chat_id="oc-group",
+                chat_type="group",
+                mentioned_bot_open_id=None,
+                parent_id="om-sent-1",
+                root_id="om-sent-1",
+            ),
+        )
+        assert len(api.wire.replies) == 2
+
+    asyncio.run(scenario())
+
+
+def test_group_message_without_mention_or_owned_root_is_ignored(api, clock: Clock) -> None:
+    bot_id = api.pool.create_bot(
+        name="One",
+        config=_config("app-1"),
+        feishu_name="Test Bot",
+        feishu_open_id="ou-current-bot",
+        environ={},
+    )
+    _bind_group(api, bot_id)
+    asyncio.run(
+        bot_api._handle_sdk_event(
+            bot_id,
+            _message(
+                "app-1",
+                "闲聊",
+                clock.value,
+                message_id="om-chat",
+                chat_id="oc-group",
+                chat_type="group",
+                mentioned_bot_open_id=None,
+                parent_id="om-someone-else",
+            ),
+        )
+    )
+    assert api.wire.replies == []
+
+
+def test_binding_view_reports_a_group_and_its_name(api, clock: Clock) -> None:
+    bot_id = api.pool.create_bot(
+        name="One", config=_config("app-1"), feishu_name="Test Bot", environ={}
+    )
+    _bind_group(api, bot_id, name="集团队")
+    body = api.client.get("/api/feishu/bot/bots").json()
+    bot = next(item for item in body["bots"] if item["bot_id"] == bot_id)
+    assert bot["binding"]["chat_type"] == "group"
+    assert bot["binding"]["chat_name"] == "集团队"
+
+
+def test_private_binding_view_still_reports_p2p(api, clock: Clock) -> None:
+    bot_id = api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+    _pair(api.pool, bot_id, environ={})
+    body = api.client.get("/api/feishu/bot/bots").json()
+    bot = next(item for item in body["bots"] if item["bot_id"] == bot_id)
+    assert bot["binding"]["chat_type"] == "p2p"
+    assert bot["binding"]["chat_name"] is None
+
+
+def test_chat_list_endpoint_returns_the_bots_groups(api, clock: Clock) -> None:
+    api.wire.chats["oc-group"] = {
+        "chat_id": "oc-group",
+        "name": "Team",
+        "chat_mode": "topic",
+        "user_count": "2",
+        "bot_count": "1",
+    }
+    bot_id = api.pool.create_bot(
+        name="One", config=_config("app-1"), feishu_name="Test Bot", environ={}
+    )
+    response = api.client.get(f"/api/feishu/bot/bots/{bot_id}/chats")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["chats"] == [
+        {
+            "chat_id": "oc-group",
+            "name": "Team",
+            "chat_mode": "topic",
+            "is_topic_mode": True,
+            "user_count": 2,
+            "bot_count": 1,
+        }
+    ]
+
+
+def test_chat_list_endpoint_maps_scope_failures_to_502(api, clock: Clock) -> None:
+    api.wire.fail_chat_list = True
+    bot_id = api.pool.create_bot(
+        name="One", config=_config("app-1"), feishu_name="Test Bot", environ={}
+    )
+    response = api.client.get(f"/api/feishu/bot/bots/{bot_id}/chats")
+    assert response.status_code == 502
+    assert response.json()["detail"] == "bot_chats_unavailable"
+
+
+def test_group_bind_endpoint_reports_partial_chat_info_as_not_visible(api, clock: Clock) -> None:
+    """Feishu answers without form information when the Bot is not in the group."""
+
+    api.wire.chats["oc-hidden"] = {"chat_id": "oc-hidden", "name": "Elsewhere"}
+    bot_id = api.pool.create_bot(
+        name="One", config=_config("app-1"), feishu_name="Test Bot", environ={}
+    )
+    entry = api.pool.snapshot({}).get(bot_id)
+    assert entry is not None
+    response = api.client.post(
+        f"/api/feishu/bot/bots/{bot_id}/bindings/group",
+        json={"chat_id": "oc-hidden", "tab_id": "tab-1", "expected_revision": entry.revision},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "chat_not_visible"
+
+
+def test_group_bind_endpoint_refuses_a_private_chat(api, clock: Clock) -> None:
+    api.wire.chats["oc-private"] = {
+        "chat_id": "oc-private",
+        "name": None,
+        "chat_mode": None,
+        "chat_type": "p2p",
+    }
+    bot_id = api.pool.create_bot(
+        name="One", config=_config("app-1"), feishu_name="Test Bot", environ={}
+    )
+    entry = api.pool.snapshot({}).get(bot_id)
+    assert entry is not None
+    response = api.client.post(
+        f"/api/feishu/bot/bots/{bot_id}/bindings/group",
+        json={"chat_id": "oc-private", "tab_id": "tab-1", "expected_revision": entry.revision},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "chat_not_group"
+
+
+def test_group_bind_endpoint_refuses_an_unreadable_chat(api, clock: Clock) -> None:
+    bot_id = api.pool.create_bot(
+        name="One", config=_config("app-1"), feishu_name="Test Bot", environ={}
+    )
+    entry = api.pool.snapshot({}).get(bot_id)
+    assert entry is not None
+    response = api.client.post(
+        f"/api/feishu/bot/bots/{bot_id}/bindings/group",
+        json={"chat_id": "oc-unknown", "tab_id": "tab-1", "expected_revision": entry.revision},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "chat_not_visible"
+
+
+def test_group_bind_endpoint_binds_a_visible_group(api, clock: Clock) -> None:
+    api.wire.chats["oc-group"] = {
+        "chat_id": "oc-group",
+        "name": "Team",
+        "chat_mode": "topic",
+        "chat_type": "group",
+    }
+    bot_id = api.pool.create_bot(
+        name="One", config=_config("app-1"), feishu_name="Test Bot", environ={}
+    )
+    entry = api.pool.snapshot({}).get(bot_id)
+    assert entry is not None
+    response = api.client.post(
+        f"/api/feishu/bot/bots/{bot_id}/bindings/group",
+        json={"chat_id": "oc-group", "tab_id": "tab-1", "expected_revision": entry.revision},
+    )
+    assert response.status_code == 200
+    bot = next(item for item in response.json()["bots"] if item["bot_id"] == bot_id)
+    assert bot["binding"]["chat_type"] == "group"
+    assert bot["binding"]["chat_name"] == "Team"
+
+
+def test_topic_follow_up_is_accepted_inside_a_topic_the_bot_answered(api, clock: Clock) -> None:
+    """A message in our topic carries the human's root id, so the thread is the proof."""
+
+    api.wire.chats["oc-group"] = {
+        "chat_id": "oc-group",
+        "name": "Team",
+        "chat_mode": "topic",
+        "chat_type": "group",
+    }
+
+    async def scenario() -> None:
+        bot_id = api.pool.create_bot(
+            name="One",
+            config=_config("app-1"),
+            feishu_name="Test Bot",
+            feishu_open_id="ou-current-bot",
+            environ={},
+        )
+        _bind_group(api, bot_id)
+        await bot_api._handle_sdk_event(
+            bot_id,
+            _message(
+                "app-1",
+                "第一个问题",
+                clock.value,
+                message_id="om-root",
+                chat_id="oc-group",
+                chat_type="group",
+                mentioned_bot_open_id="ou-current-bot",
+                thread_id="",
+            ),
+        )
+        # The reply was promoted into topic omt-sent-1; a plain follow-up there
+        # carries the human's root id and that same topic.
+        await bot_api._handle_sdk_event(
+            bot_id,
+            _message(
+                "app-1",
+                "接着说",
+                clock.value,
+                message_id="om-follow",
+                chat_id="oc-group",
+                chat_type="group",
+                mentioned_bot_open_id=None,
+                thread_id="omt-sent-1",
+                root_id="om-root",
+            ),
+        )
+        assert len(api.wire.replies) == 2
+
+    asyncio.run(scenario())
+
+
+def test_topic_follow_up_in_an_unanswered_topic_is_ignored(api, clock: Clock) -> None:
+    bot_id = api.pool.create_bot(
+        name="One",
+        config=_config("app-1"),
+        feishu_name="Test Bot",
+        feishu_open_id="ou-current-bot",
+        environ={},
+    )
+    _bind_group(api, bot_id)
+    asyncio.run(
+        bot_api._handle_sdk_event(
+            bot_id,
+            _message(
+                "app-1",
+                "别的群里的话题",
+                clock.value,
+                message_id="om-unowned",
+                chat_id="oc-group",
+                chat_type="group",
+                mentioned_bot_open_id=None,
+                thread_id="omt-unknown",
+            ),
+        )
+    )
+    assert api.wire.replies == []
+
+
+def test_sent_ids_are_scoped_to_the_bot_that_sent_them(api, clock: Clock) -> None:
+    """Bot B must not accept a follow-up anchored on Bot A's message."""
+
+    from claude_hub.services.feishu_sent_messages import FeishuSentMessageRegistry
+
+    registry = FeishuSentMessageRegistry(per_bot_limit=2)
+    registry.record("bot-a", "om-a")
+    registry.record_thread("bot-a", "omt-a")
+    assert registry.owns("bot-a", "om-a")
+    assert not registry.owns("bot-b", "om-a")
+    assert registry.owns_thread("bot-a", "omt-a")
+    assert not registry.owns_thread("bot-b", "omt-a")
+    # Bounded per Bot: the oldest id is forgotten first, never the newest.
+    registry.record("bot-a", "om-a2")
+    registry.record("bot-a", "om-a3")
+    assert registry.owns("bot-a", "om-a2") and registry.owns("bot-a", "om-a3")
+    assert not registry.owns("bot-a", "om-a")
+
+
+def test_topic_probe_failure_keeps_the_flat_reply_and_is_not_cached(
+    api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.api.routes.feishu_bot import message_dispatch
+
+    api.wire.fail_chat_lookup = True
+
+    async def scenario() -> None:
+        bot_id = api.pool.create_bot(
+            name="One",
+            config=_config("app-1"),
+            feishu_name="Test Bot",
+            feishu_open_id="ou-current-bot",
+            environ={},
+        )
+        _bind_group(api, bot_id)
+        message_dispatch._topic_mode_cache.clear()
+        await bot_api._handle_sdk_event(
+            bot_id,
+            _message(
+                "app-1",
+                "普通群提问",
+                clock.value,
+                message_id="om-probe-fail",
+                chat_id="oc-group",
+                chat_type="group",
+                mentioned_bot_open_id="ou-current-bot",
+                thread_id="",
+            ),
+        )
+        assert "reply_in_thread" not in api.wire.replies[0]
+        # A failed read must not be remembered, or the shape would be pinned.
+        assert message_dispatch._topic_mode_cache == {}
 
     asyncio.run(scenario())

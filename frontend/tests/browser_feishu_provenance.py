@@ -404,6 +404,11 @@ async def main(browser_run: BrowserRun) -> None:
                     await expect(
                         labels.locator(".conversation-message-source__label")
                     ).to_have_text("Hub 助手")
+                    # A private-chat message carries no scope suffix, so the
+                    # badge keeps its historical single-label look.
+                    await expect(
+                        labels.locator(".conversation-message-source__scope")
+                    ).to_have_count(0)
                     source_mark = labels.get_by_test_id("conversation-message-source-avatar")
                     avatar = source_mark.locator("img")
                     await expect(source_mark).to_have_count(1)
@@ -587,6 +592,21 @@ async def main(browser_run: BrowserRun) -> None:
                 assert not overlap["intersections"], overlap
                 await page.screenshot(path=str(output / "mobile-unbound.png"), full_page=True)
                 report["screenshots"].append("mobile-unbound.png")
+
+                # Group provenance: one reload proves the badge names where the
+                # message came from, not only which Bot relayed it.
+                feishu_metadata["chat_type"] = "group"
+                feishu_metadata["thread_id"] = "omt-topic"
+                await page.reload(wait_until="domcontentloaded")
+                group_badge = page.locator(
+                    '.conversation-bubble--user[data-message-origin="feishu"]'
+                ).get_by_test_id("conversation-message-source")
+                await expect(
+                    group_badge.locator(".conversation-message-source__label")
+                ).to_have_text("Hub 助手")
+                await expect(
+                    group_badge.get_by_test_id("conversation-message-scope")
+                ).to_have_text("· group topic")
 
                 hub_bubble = page.locator(
                     '.conversation-bubble--user[data-message-origin="hub_message"]'
