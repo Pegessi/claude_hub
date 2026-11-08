@@ -4,7 +4,7 @@
   >
     <div class="agent-image-card">
       <div
-        v-if="isAgentImagePending(part)"
+        v-if="isAgentImagePending(part, turnActive)"
         class="turn-attachment-placeholder agent-image-pending"
         role="status"
       >
@@ -63,10 +63,12 @@ const {
   retryAgentImage,
 } = requireChatOwner(chatImagesKey)
 // Reducer parts mutate in place; revision invalidates this leaf without replacing its DOM.
-defineProps<{
+const props = defineProps<{
   renderRevision: number
   part: Extract<TimelinePart, { kind: 'agent_image' }>
+  turnActive?: boolean
 }>()
+const turnActive = props.turnActive ?? true
 </script>
 
 <style scoped>

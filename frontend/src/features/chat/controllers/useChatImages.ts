@@ -62,9 +62,20 @@ export function useChatImages(deps: Dependencies) {
   /**
    * Out-of-cwd image grants exist only after the producing tool completes
    * successfully, so a still-running image tool must not issue a request that
-   * would 404 and create a permanent placeholder.
+   * would 404 and create a permanent placeholder. A non-running status
+   * (completed/failed/cancelled — including an interrupted turn whose tool
+   * never received a completion) is treated as settled and rendered normally,
+   * so the UI can never get stuck in a permanent "loading" state.
    */
-  function isAgentImagePending(part: Extract<TimelinePart, { kind: 'agent_image' }>): boolean {
+  function isAgentImagePending(
+    part: Extract<TimelinePart, { kind: 'agent_image' }>,
+    active = true,
+  ): boolean {
+    // A running tool only blocks the image while its turn/thread is still
+    // active. Once the surrounding turn is completed/interrupted (active =
+    // false) the part is settled: it renders the image or, on fetch failure,
+    // the placeholder with manual retry — never a permanent "loading".
+    if (!active) return false
     const status = (part.tool as TimelineTool | undefined)?.status
     return status === 'running'
   }

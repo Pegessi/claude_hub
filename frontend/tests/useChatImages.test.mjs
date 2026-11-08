@@ -43,9 +43,17 @@ test('agent image url keeps the authorized scoped path and encodes it', () => {
 test('a running tool image is pending and must not be fetched yet', () => {
   const images = makeController()
   assert.equal(images.isAgentImagePending(part('running')), true)
+  assert.equal(images.isAgentImagePending(part('running'), true), true)
   for (const status of ['completed', 'failed', 'cancelled']) {
     assert.equal(images.isAgentImagePending(part(status)), false)
   }
+})
+
+test('a running tool in a settled (completed/interrupted) turn is not pending forever', () => {
+  const images = makeController()
+  // turn/thread no longer active (interrupted before a completion event):
+  // the part must settle instead of showing a permanent loading state.
+  assert.equal(images.isAgentImagePending(part('running'), false), false)
 })
 
 test('error marks the part key and retry clears the tombstone with a fresh nonce', () => {

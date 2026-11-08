@@ -89,6 +89,12 @@ const emit = defineEmits<{
 const blockCache = new MarkdownBlockCache()
 const contentRoot = ref<HTMLElement | null>(null)
 
+// B6: image URLs already known to fail in this component instance. v-html
+// re-creates <img> nodes on every streaming delta; without this set each
+// re-render would re-request a dead URL and loop. Failed URLs render the
+// placeholder directly until the user explicitly retries one.
+const failedImageUrls = new Set<string>()
+
 const blocks = computed(() => {
   // Depend on highlightReady so the computed re-evaluates when the
   // lazy-loaded highlighter finishes loading.
@@ -145,6 +151,8 @@ watch([blocks, contentRoot], (_, __, onCleanup) => {
   const observer = new MutationObserver(render)
   observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
   render()
+  // Neutralize any image already known to fail after this v-html update.
+  if (root) neutralizeKnownFailures(root)
   onCleanup(() => {
     current = false
     clearTimeout(timer)
@@ -173,43 +181,67 @@ function handleError(event: Event) {
     width: target.getAttribute('width'),
     height: target.getAttribute('height'),
   }
-  const placeholder = document.createElement('span')
-  placeholder.className = 'quoted-img-missing'
+  // Remember the authorized URL (without the retry nonce) so later v-html
+  // re-renders during streaming go straight to the placeholder instead of
+  // issuing another failing request.
+  const identityUrl = original.src.replace(/[?&]retry=\d+$/, '')
+  failedImageUrls.add(identityUrl)
 
-  const label = document.createElement('span')
-  label.className = 'quoted-img-missing-text'
-  label.textContent = target.alt ? `${target.alt} (image unavailable)` : '[image unavailable]'
-  placeholder.append(label)
+  const buildPlaceholder = () => {
+    const placeholder = document.createElement('span')
+    placeholder.className = 'quoted-img-missing'
 
-  const retry = document.createElement('button')
-  retry.type = 'button'
-  retry.className = 'quoted-img-retry'
-  retry.textContent = 'Retry'
-  retry.setAttribute(
-    'aria-label',
-    target.alt ? `Retry loading image ${target.alt}` : 'Retry loading image',
-  )
-  retry.addEventListener('click', (clickEvent) => {
-    clickEvent.preventDefault()
-    clickEvent.stopPropagation()
-    const img = document.createElement('img')
-    if (original.className) img.className = original.className
-    if (original.width) img.setAttribute('width', original.width)
-    if (original.height) img.setAttribute('height', original.height)
-    img.alt = original.alt
-    if (original.quoted) img.dataset.quotedImg = original.quoted
-    if (original.local) img.dataset.localImg = original.local
-    // Reuse the authorized URL; only a retry nonce is added to force a fresh
-    // request. The marker attributes are what keep sanitization/error handling
-    // applicable to the replacement.
-    const separator = original.src.includes('?') ? '&' : '?'
-    img.src = `${original.src}${separator}retry=${Date.now()}`
-    placeholder.replaceWith(img)
-  })
-  placeholder.append(retry)
+    const label = document.createElement('span')
+    label.className = 'quoted-img-missing-text'
+    label.textContent = target.alt ? `${target.alt} (image unavailable)` : '[image unavailable]'
+    placeholder.append(label)
 
+    const retry = document.createElement('button')
+    retry.type = 'button'
+    retry.className = 'quoted-img-retry'
+    retry.textContent = 'Retry'
+    retry.setAttribute(
+      'aria-label',
+      target.alt ? `Retry loading image ${target.alt}` : 'Retry loading image',
+    )
+    retry.addEventListener('click', (clickEvent) => {
+      clickEvent.preventDefault()
+      clickEvent.stopPropagation()
+      // Manual retry: stop treating the URL as failed and rebuild the same
+      // authorized URL with a fresh nonce. One request per user action; if it
+      // fails again the error handler re-enters this path.
+      failedImageUrls.delete(identityUrl)
+      const img = document.createElement('img')
+      if (original.className) img.className = original.className
+      if (original.width) img.setAttribute('width', original.width)
+      if (original.height) img.setAttribute('height', original.height)
+      img.alt = original.alt
+      if (original.quoted) img.dataset.quotedImg = original.quoted
+      if (original.local) img.dataset.localImg = original.local
+      const separator = original.src.includes('?') ? '&' : '?'
+      img.src = `${original.src}${separator}retry=${Date.now()}`
+      placeholder.replaceWith(img)
+    })
+    placeholder.append(retry)
+    return placeholder
+  }
+
+  const placeholder = buildPlaceholder()
   const button = target.closest('button[data-image-preview]')
   ;(button || target).replaceWith(placeholder)
+}
+
+// B6: after every v-html render, neutralize images whose URL already failed
+// in this component instance, so streaming deltas cannot re-request them.
+function neutralizeKnownFailures(root: HTMLElement) {
+  if (failedImageUrls.size === 0) return
+  root.querySelectorAll<HTMLImageElement>('img[data-quoted-img], img[data-local-img]').forEach((img) => {
+    const src = (img.getAttribute('src') || '').replace(/[?&]retry=\d+$/, '')
+    if (!failedImageUrls.has(src) || img.closest('.quoted-img-missing')) return
+    const synthetic = new Event('error', { bubbles: false, cancelable: true })
+    Object.defineProperty(synthetic, 'target', { value: img })
+    handleError(synthetic)
+  })
 }
 
 async function handleClick(event: MouseEvent) {
