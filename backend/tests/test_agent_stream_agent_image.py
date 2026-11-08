@@ -1563,3 +1563,40 @@ async def test_b3_parent_directory_symlink_swap_between_check_and_open_is_denied
     if real_root.exists() and not granted_root.exists():
         os.rename(real_root, granted_root)
     assert (await _get_image(client, "tab-a", str(evidence))).status_code == 200
+
+
+async def test_b3_fifo_and_device_substitution_cannot_hang_or_serve(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """O_NONBLOCK + fstat S_ISREG reject FIFO/device before any read blocks."""
+    from claude_hub.services.agent_stream import local_images
+
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (tmp_path / "temp-isolated",))
+    fifo_root = tmp_path / "elsewhere-fifo"
+    fifo_root.mkdir()
+    fifo = fifo_root / "pipe.png"
+    os.mkfifo(fifo)
+    _write_lifecycle_full(fifo)
+    # Must return promptly with 404, not block on a reader-less FIFO.
+    response = await asyncio.wait_for(_get_image(client, "tab-a", str(fifo)), timeout=5)
+    assert response.status_code == 404
+
+    # A symlink leaf pointing at a device is rejected by the pinned traversal.
+    device_link = fifo_root / "device.png"
+    device_link.symlink_to("/dev/null")
+    _write_lifecycle_full(device_link, call_id="call-grant-fifo-2")
+    assert (await _get_image(client, "tab-a", str(device_link))).status_code == 404
+
+
+async def test_b2_orphan_completion_without_start_never_grants(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A completion event with no matching started event cannot mint a grant."""
+    from claude_hub.services.agent_stream import local_images
+
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (tmp_path / "temp-isolated",))
+    evidence = tmp_path / "elsewhere" / "orphan.png"
+    evidence.parent.mkdir()
+    evidence.write_bytes(PNG_BYTES)
+    _write_lifecycle_full(evidence, include_started=False)
+    assert (await _get_image(client, "tab-a", str(evidence))).status_code == 404

@@ -51,6 +51,7 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { requireChatOwner, chatImagesKey } from '../owners'
 import type { TimelinePart } from '../timeline/types'
 const {
@@ -68,7 +69,9 @@ const props = defineProps<{
   part: Extract<TimelinePart, { kind: 'agent_image' }>
   turnActive?: boolean
 }>()
-const turnActive = props.turnActive ?? true
+// Reactive: a turn that finishes (or is interrupted) after mount must flip
+// the pending state immediately instead of keeping a copied stale value.
+const turnActive = computed(() => props.turnActive ?? true)
 </script>
 
 <style scoped>

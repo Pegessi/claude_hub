@@ -166,12 +166,26 @@ watch([blocks, contentRoot], (_, __, onCleanup) => {
 // capture-phase listener on the root is what sees it. The placeholder keeps
 // an explicit, accessible Retry that rebuilds the same authorized image URL
 // (with a cache-busting nonce) without re-running any agent tool.
+function withFreshNonce(src: string): string {
+  // One stable identity: always strip any previous retry param before
+  // appending, so repeated retries never accumulate query parameters.
+  const identity = src.replace(/([?&])retry=\d+(?:&|$)/, (_, prefix: string, suffix: string) =>
+    prefix === '?' && suffix === '&' ? '?' : '',
+  ).replace(/[?&]$/, '')
+  const separator = identity.includes('?') ? '&' : '?'
+  return `${identity}${separator}retry=${Date.now()}`
+}
+
 function handleError(event: Event) {
   const target = event.target
   if (!(target instanceof HTMLImageElement)) return
   if (!target.dataset.quotedImg && !target.dataset.localImg) return
   if (target.closest('.quoted-img-missing')) return
 
+  // Preserve the original image's rendering contract (lazy load, async
+  // decode, dimensions, markers) and its preview wrapper: a Markdown image
+  // lives inside button[data-image-preview], and recovery must keep click and
+  // keyboard preview working (D1).
   const original = {
     src: target.getAttribute('src') || '',
     alt: target.alt,
@@ -180,12 +194,45 @@ function handleError(event: Event) {
     className: target.className,
     width: target.getAttribute('width'),
     height: target.getAttribute('height'),
+    loading: target.getAttribute('loading'),
+    decoding: target.getAttribute('decoding'),
   }
+  const previewButton = target.closest('button[data-image-preview]')
   // Remember the authorized URL (without the retry nonce) so later v-html
   // re-renders during streaming go straight to the placeholder instead of
-  // issuing another failing request.
+  // issuing another failing request — including re-creation of the same block.
   const identityUrl = original.src.replace(/[?&]retry=\d+$/, '')
   failedImageUrls.add(identityUrl)
+
+  const buildImage = () => {
+    const img = document.createElement('img')
+    if (original.className) img.className = original.className
+    if (original.width) img.setAttribute('width', original.width)
+    if (original.height) img.setAttribute('height', original.height)
+    img.alt = original.alt
+    if (original.quoted) img.dataset.quotedImg = original.quoted
+    if (original.local) img.dataset.localImg = original.local
+    if (original.loading) img.setAttribute('loading', original.loading)
+    if (original.decoding) img.setAttribute('decoding', original.decoding)
+    img.src = withFreshNonce(original.src)
+    return img
+  }
+
+  // Rebuild the original preview wrapper so a recovered image keeps the same
+  // click/keyboard lightbox behavior as a never-failed image. The root-level
+  // delegated handleClick picks up the replacement automatically.
+  const buildPreviewButton = () => {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = previewButton?.className || 'markdown-image-preview'
+    button.dataset.imagePreview = '1'
+    button.setAttribute(
+      'aria-label',
+      original.alt ? `Open image ${original.alt}` : 'Open image',
+    )
+    button.append(buildImage())
+    return button
+  }
 
   const buildPlaceholder = () => {
     const placeholder = document.createElement('span')
@@ -207,28 +254,20 @@ function handleError(event: Event) {
     retry.addEventListener('click', (clickEvent) => {
       clickEvent.preventDefault()
       clickEvent.stopPropagation()
-      // Manual retry: stop treating the URL as failed and rebuild the same
-      // authorized URL with a fresh nonce. One request per user action; if it
-      // fails again the error handler re-enters this path.
+      // Manual retry: stop treating the URL as failed and rebuild the image
+      // (inside its preview wrapper when the original had one). One request
+      // per user action; a second failure re-enters this path.
       failedImageUrls.delete(identityUrl)
-      const img = document.createElement('img')
-      if (original.className) img.className = original.className
-      if (original.width) img.setAttribute('width', original.width)
-      if (original.height) img.setAttribute('height', original.height)
-      img.alt = original.alt
-      if (original.quoted) img.dataset.quotedImg = original.quoted
-      if (original.local) img.dataset.localImg = original.local
-      const separator = original.src.includes('?') ? '&' : '?'
-      img.src = `${original.src}${separator}retry=${Date.now()}`
-      placeholder.replaceWith(img)
+      placeholder.replaceWith(previewButton ? buildPreviewButton() : buildImage())
     })
     placeholder.append(retry)
     return placeholder
   }
 
-  const placeholder = buildPlaceholder()
-  const button = target.closest('button[data-image-preview]')
-  ;(button || target).replaceWith(placeholder)
+  // Replace the whole original node (img or preview button) with the
+  // placeholder; recovery restores the same wrapper structure.
+  const originalNode = previewButton ?? target
+  originalNode.replaceWith(buildPlaceholder())
 }
 
 // B6: after every v-html render, neutralize images whose URL already failed

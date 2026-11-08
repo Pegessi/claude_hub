@@ -42,6 +42,9 @@ TURN = "cursor-turn"
 NOW = "2026-10-12T08:00:00Z"
 REPORT = "Run B regressed on 3 cases."
 OUTPUT_PATH = "/tmp/dotbm/dot-mobile-work.png"
+# A native tool image whose scoped URL fails until the user retries; proves
+# the native-card Retry and the settled (not endless pending) terminal state.
+NATIVE_MISSING_PATH = "/tmp/dotbm/native-missing.png"
 OUTPUT_TEXT = (
     "[View screenshot](/tmp/result.png)\n\n![Missing screenshot](/tmp/missing.png)"
     "\n\n[排查记录](<reports/排查 记录.md>)"
@@ -272,9 +275,28 @@ EVENTS = [
         {"tool_call_id": "image-read", "status": "completed"},
         "image-read",
     ),
-    event(5, "text_delta", {"text": OUTPUT_TEXT}, f"{TURN}:assistant"),
+    # A native image tool that completed but whose file is unavailable at
+    # render time: the card must degrade to a Retry placeholder (not stay in
+    # the running/loading state), and recover on explicit Retry.
+    event(
+        5,
+        "tool_call_started",
+        {
+            "tool_call_id": "native-missing-read",
+            "name": "Read",
+            "args": {"file_path": NATIVE_MISSING_PATH},
+        },
+        "native-missing-read",
+    ),
     event(
         6,
+        "tool_call_completed",
+        {"tool_call_id": "native-missing-read", "status": "completed"},
+        "native-missing-read",
+    ),
+    event(7, "text_delta", {"text": OUTPUT_TEXT}, f"{TURN}:assistant"),
+    event(
+        8,
         "turn_completed",
         {"status": "completed", "assistant_text": OUTPUT_TEXT},
         TURN,
@@ -401,7 +423,17 @@ async def check_attachment_preview(page, context, output: Path, report: dict) ->
         for name in ("Close preview", "Wrap lines", "Copy"):
             control = dialog.get_by_role("button", name=name, exact=True)
             await expect(control).to_be_in_viewport()
+            # The CSS contract is min-height: 44px; a raw bounding_box read
+            # right after a viewport resize can catch the dialog mid-reflow
+            # (observed 43.865). Wait on the real settled geometry instead of
+            # relaxing the accessibility minimum or adding a blind delay.
+            deadline = asyncio.get_running_loop().time() + 2
             bounds = await control.bounding_box()
+            while bounds is not None and bounds["height"] < 44:
+                if asyncio.get_running_loop().time() >= deadline:
+                    break
+                await asyncio.sleep(0.02)
+                bounds = await control.bounding_box()
             assert bounds and bounds["height"] >= 44, (width, name, bounds)
         wrap = dialog.get_by_role("button", name="Wrap lines", exact=True)
         pressed = await wrap.get_attribute("aria-pressed")
@@ -1697,6 +1729,12 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
     send_payloads: list[dict] = []
     markdown_attempts: dict[str, int] = {}
     attachment_attempts: dict[str, int] = {}
+    # Per-path agent-image request counters for the explicit Retry contract:
+    # a failed image must not be re-requested on unrelated streaming updates,
+    # and an explicit Retry produces exactly one additional request.
+    agent_image_requests: dict[str, int] = {}
+    # Paths whose mock flips to 200 after the user clicks Retry.
+    image_retry_ready: set[str] = set()
     report: dict = {
         "result": "FAIL",
         "api_requests": [],
@@ -1711,6 +1749,7 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
         "html_probe_requests": [],
         "html_explicit_external_requests": [],
         "service_worker_registration_requests": [],
+        "image_retry": {},
         "boundary": "Real SPA rendering with mocked APIs; no backend or provider traffic.",
     }
     failure: BaseException | None = None
@@ -1978,10 +2017,16 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
                         )
                 elif path.endswith("/stream/agent-image"):
                     image_path = parse_qs(parsed.query).get("path", [""])[0]
+                    agent_image_requests[image_path] = (
+                        agent_image_requests.get(image_path, 0) + 1
+                    )
+                    missing_paths = {"/tmp/missing.png", NATIVE_MISSING_PATH}
+                    is_recovered = image_path in image_retry_ready
+                    should_404 = image_path in missing_paths and not is_recovered
                     await route.fulfill(
-                        status=404 if image_path == "/tmp/missing.png" else 200,
+                        status=404 if should_404 else 200,
                         content_type="image/png",
-                        body=b"" if image_path == "/tmp/missing.png" else output_image,
+                        body=b"" if should_404 else output_image,
                     )
                     return
                 elif path.endswith("/wait"):
@@ -2082,8 +2127,96 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
             preview = page.get_by_role("button", name="Open image View screenshot", exact=True)
             await expect(preview).to_be_visible()
             await expect(page.locator(".agent-image-card img")).to_have_count(1)
-            await expect(page.locator(".quoted-img-missing")).to_contain_text("image unavailable")
+            markdown_missing = page.locator(".quoted-img-missing", has_text="Missing screenshot").first
+            await expect(markdown_missing).to_contain_text("image unavailable")
             assert await preview.locator("img").evaluate("img => img.naturalWidth") == 1920
+
+            # ── Explicit Retry contract (generated Markdown image) ────────
+            # The failed URL was requested exactly once even though the
+            # Markdown block containing it was re-created by several text
+            # deltas during streaming: failed state survives v-html re-render
+            # without issuing another request (no retry storm).
+            assert agent_image_requests.get("/tmp/missing.png") == 1, agent_image_requests
+            markdown_retry = markdown_missing.get_by_role(
+                "button", name=re.compile("Retry loading image")
+            )
+            await expect(markdown_retry).to_be_visible()
+            # First Retry while the backend still 404s: the placeholder stays
+            # usable (no broken icon, control remains), and one request fired.
+            await markdown_retry.click()
+            await expect(markdown_missing).to_be_visible()
+            await expect(markdown_retry).to_be_visible()
+            assert agent_image_requests.get("/tmp/missing.png") == 2, agent_image_requests
+
+            # Second Retry after the backend recovers: decoded image renders
+            # inside the original preview button, which still opens the
+            # lightbox (D1: recovery must not drop preview behavior).
+            image_retry_ready.add("/tmp/missing.png")
+            await markdown_retry.click()
+            recovered_preview = page.get_by_role(
+                "button", name="Open image Missing screenshot", exact=True
+            )
+            await expect(recovered_preview).to_be_visible()
+            recovered_img = recovered_preview.locator("img")
+            await recovered_img.evaluate(
+                "img => img.complete ? Promise.resolve() : new Promise(res => img.onload = res)"
+            )
+            assert await recovered_img.evaluate("img => img.naturalWidth") >= 1
+            # Auto-retrying attribute assertions wait for the settled DOM
+            # rather than reading a transient pre-decoration node.
+            await expect(recovered_img).to_have_attribute("loading", "lazy")
+            await expect(recovered_img).to_have_attribute("decoding", "async")
+            assert agent_image_requests.get("/tmp/missing.png") == 3, agent_image_requests
+            # Retry query never accumulates: one stable identity + single param.
+            recovered_src = (await recovered_img.get_attribute("src")) or ""
+            assert recovered_src.count("retry=") == 1, recovered_src
+            await recovered_preview.click()
+            recovered_dialog = page.get_by_role(
+                "dialog", name="Attachment preview", exact=True
+            )
+            await expect(recovered_dialog).to_be_visible()
+            await recovered_dialog.get_by_role("button", name="Close preview").click()
+            report["image_retry"]["markdown"] = {
+                "requests": agent_image_requests.get("/tmp/missing.png"),
+                "preview_preserved": True,
+                "lazy_decoding_preserved": True,
+            }
+
+            # ── Native tool-image Retry and terminal-state settle ─────────
+            # The completed-but-missing native Read never shows the running
+            # "Loading image…" state (the turn is settled): it degrades to
+            # the same Retry placeholder instead of an endless spinner.
+            await expect(page.locator(".agent-image-pending")).to_have_count(0)
+            native_card = page.locator(".agent-image-card", has_text="native-missing.png").first
+            await expect(native_card).to_be_visible()
+            native_placeholder = native_card.locator(".agent-image-missing")
+            await expect(native_placeholder).to_be_visible()
+            native_retry = native_placeholder.get_by_role(
+                "button", name=re.compile("Retry loading image")
+            )
+            await expect(native_retry).to_be_visible()
+            assert agent_image_requests.get(NATIVE_MISSING_PATH) == 1, agent_image_requests
+            image_retry_ready.add(NATIVE_MISSING_PATH)
+            await native_retry.click()
+            native_img = native_card.locator("img")
+            await expect(native_img).to_be_visible()
+            await native_img.evaluate(
+                "img => img.complete ? Promise.resolve() : new Promise(res => img.onload = res)"
+            )
+            assert await native_img.evaluate("img => img.naturalWidth") >= 1
+            assert agent_image_requests.get(NATIVE_MISSING_PATH) == 2, agent_image_requests
+            # The native lightbox still opens after recovery.
+            await native_card.get_by_role(
+                "button", name="Open image native-missing.png", exact=True
+            ).click()
+            native_dialog = page.get_by_role("dialog", name="Attachment preview", exact=True)
+            await expect(native_dialog).to_be_visible()
+            await native_dialog.get_by_role("button", name="Close preview").click()
+            report["image_retry"]["native"] = {
+                "requests": agent_image_requests.get(NATIVE_MISSING_PATH),
+                "settled_without_pending_spinner": True,
+                "lightbox_after_recovery": True,
+            }
             await preview.click()
             dialog = page.get_by_role("dialog", name="Attachment preview", exact=True)
             await expect(dialog).to_be_visible()
