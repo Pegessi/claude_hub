@@ -39,7 +39,8 @@ import time
 import uuid
 import weakref
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from enum import Enum
 from functools import partial
 from pathlib import Path
@@ -66,6 +67,7 @@ from ...models import (
     ManagedSession,
     SessionKind,
 )
+from .activity_labels import IDLE_DETAIL, WORKING_ACTIVITY
 from .attachments import AgentStreamAttachmentStore, _sync_existing_directory
 from .base import (
     AgentStreamAdapter,
@@ -522,11 +524,30 @@ class TailerManager(_RuntimeTailerManager):
         _TAILER_MANAGERS.add(self)
 
 
+def _working_extras(tailer: _RuntimeSessionTailer) -> dict[str, Any]:
+    """Inbox extras for a live turn: what it is doing and since when.
+
+    Reads only state the tailer already keeps (the current tool call's label
+    and the turn clock), so a status poll for ~40 tabs never reaches the
+    provider or the event stream.
+    """
+    started = tailer.turn_started_monotonic
+    since = None
+    if started is not None:
+        since = datetime.now() - timedelta(seconds=max(0.0, time.monotonic() - started))
+    return {
+        "activity": tailer.active_tool_label or WORKING_ACTIVITY,
+        "activity_since": since,
+    }
+
+
 def _native_runtime_snapshot(tailer: _RuntimeSessionTailer) -> Optional[NativeRuntimeSnapshot]:
+    pending_question = tailer.has_pending_question()
     if tailer.hard_failed or tailer.native_error is not None:
         return NativeRuntimeSnapshot(
             status=AgentRuntimeStatus.OFFLINE,
             detail=tailer.native_error or tailer.last_error or "native provider unavailable",
+            pending_question=pending_question,
         )
     transport = tailer.native_transport
     if transport is None:
@@ -535,23 +556,33 @@ def _native_runtime_snapshot(tailer: _RuntimeSessionTailer) -> Optional[NativeRu
         return NativeRuntimeSnapshot(
             status=AgentRuntimeStatus.OFFLINE,
             detail=transport.last_error,
+            pending_question=pending_question,
         )
     terminal_status = tailer.native_terminal_status
     if terminal_status is not None:
-        return terminal_status
+        # The terminal snapshot was captured at turn end, before a later
+        # question card could appear, so only the question flag is refreshed.
+        return replace(terminal_status, pending_question=pending_question)
     if transport.turn_in_flight:
+        extras = _working_extras(tailer)
         return NativeRuntimeSnapshot(
             status=AgentRuntimeStatus.WORKING,
-            detail="native provider turn is in flight",
+            # ``detail`` stays the plain state sentence ("Working — Responding")
+            # and ``activity`` names the concrete step for the inbox row.
+            detail=WORKING_ACTIVITY,
+            pending_question=pending_question,
+            **extras,
         )
     if transport.exit_error is not None:
         return NativeRuntimeSnapshot(
             status=AgentRuntimeStatus.ATTENTION,
             detail=transport.exit_error,
+            pending_question=pending_question,
         )
     return NativeRuntimeSnapshot(
         status=AgentRuntimeStatus.IDLE,
-        detail="native provider is ready",
+        detail=IDLE_DETAIL,
+        pending_question=pending_question,
     )
 
 
