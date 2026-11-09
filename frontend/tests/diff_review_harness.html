@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Diff review comments harness</title>
+    <link rel="icon" href="data:," />
+    <style>
+      body { margin: 0; background: var(--ch-color-main-bg); color: var(--ch-color-text); font-family: var(--ch-font-sans); font-size: 13px; }
+      #app { display: flex; flex-direction: column; height: 100vh; }
+      .pane { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 18px 28px 8px; }
+      .thread { max-width: 860px; margin: 0 auto; display: grid; gap: 10px; }
+      .composer-frame { flex: 0 0 auto; padding: 12px 28px; border-top: 1px solid var(--ch-color-border-muted); background: color-mix(in srgb, var(--ch-color-surface) 94%, transparent); }
+      .composer-shell { max-width: 860px; margin: 0 auto; }
+      .composer-row { display: flex; align-items: center; gap: 8px; padding: 5px; border: 1px solid var(--ch-color-border-strong); border-radius: calc(var(--ch-radius-md) + 2px); background: var(--ch-color-app-bg); }
+      .composer-placeholder { flex: 1 1 auto; padding: 7px 6px; color: var(--ch-color-text-subtle); }
+      .composer-send { padding: 0 14px; height: 34px; border: 0; border-radius: var(--ch-radius-sm); background: var(--ch-color-accent-strong); color: var(--ch-color-text-inverse); font: inherit; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      import '/src/features/app-shell/styles/theme.css'
+      import { createApp, defineComponent, h, provide, ref, shallowReactive } from 'vue'
+      import ChatToolGroup from '/src/features/chat/components/ChatToolGroup.vue'
+      import ChatReviewTray from '/src/features/chat/review/ChatReviewTray.vue'
+      import { chatReviewKey, chatTimelineKey } from '/src/features/chat/owners'
+      import { useChatReview } from '/src/features/chat/review/useChatReview'
+
+      // Two files edited in one Codex patch: numbered hunks for the gutter, and
+      // a single-file Edit tool that can only name its file.
+      const patch = [
+        '*** Begin Patch',
+        '*** Update File: backend/claude_hub/services/terminal_runtime/manager/status.py',
+        '@@ -236,7 +236,10 @@ def native_runtime_snapshot(runtime):',
+        '     if runtime is None:',
+        '         return {"state": "offline", "detail": None}',
+        '-    return {"state": runtime.state, "detail": runtime.detail}',
+        '+    snapshot = {"state": runtime.state, "detail": runtime.detail}',
+        '+    snapshot["pending_question"] = runtime.has_pending_question()',
+        '+    return snapshot',
+        ' ',
+        ' ',
+        ' def effective_status(runtime):',
+        '     snapshot = native_runtime_snapshot(runtime)',
+        '*** Update File: frontend/src/utils/toolActivity.ts',
+        '@@ -268,6 +268,8 @@ function unifiedDiffLines(text, out) {',
+        '   for (let index = 0; index < lines.length; index++) {',
+        '     const line = lines[index]',
+        '-    if (line.startsWith("@")) out.push({ sign: "@", text: line })',
+        '+    const hunk = HUNK_HEADER.exec(line)',
+        '+    if (line.startsWith("@")) out.push({ sign: "@", text: line, hunk })',
+        '     else if (line.startsWith("-")) out.push({ sign: "-", text: line.slice(1) })',
+        '   }',
+        ' }',
+        '*** End Patch',
+      ].join('\n')
+
+      const tools = [
+        {
+          key: 'tool-1',
+          name: 'apply_patch',
+          status: 'completed',
+          argsText: JSON.stringify({ input: patch }),
+          resultText: 'Done',
+        },
+      ]
+      const part = { key: 'part-1', kind: 'tool_group', tools }
+      const turn = { key: 'turn-1', parts: [part] }
+
+      const draftQueue = ref([])
+
+      const Host = defineComponent({
+        setup() {
+          const expandedToolGroups = shallowReactive(new Map([[turn.key, new Set([part.key])]]))
+          provide(chatTimelineKey, {
+            expandedToolGroups,
+            onToolGroupToggle() {},
+            collapseDetails() {},
+          })
+          const review = useChatReview({ tabKey: 'harness', draftQueue, storage: null })
+          provide(chatReviewKey, review)
+          window.__DIFF_REVIEW__ = { review, draftQueue, expandedToolGroups }
+          return () => h('div', { id: 'app' }, [
+            h('main', { class: 'pane' }, [
+              h('div', { class: 'thread' }, [
+                h(ChatToolGroup, { turn, part }),
+              ]),
+            ]),
+            h('footer', { class: 'composer-frame' }, [
+              h('div', { class: 'composer-shell' }, [
+                h(ChatReviewTray),
+                h('div', { class: 'composer-row' }, [
+                  h('span', { class: 'composer-placeholder' }, 'Send a message…'),
+                  h('button', { class: 'composer-send', type: 'button' }, 'Send'),
+                ]),
+              ]),
+            ]),
+          ])
+        },
+      })
+
+      createApp(Host).mount('#app')
+    </script>
+  </body>
+</html>

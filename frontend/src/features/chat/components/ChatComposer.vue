@@ -74,6 +74,10 @@
         {{ composerError }}
       </div>
 
+      <!-- Diff review comments stay next to the composer until sent as one
+           message through the ordinary queue. -->
+      <ChatReviewTray />
+
       <ChatDraftQueue
         :drafts="draftQueue"
         :busy="isSending || isQueueSendInProgress || isPreparingAttachments"
@@ -186,6 +190,7 @@ import ChatDraftQueue from '@/components/ChatDraftQueue.vue'
 import ComposerAddMenu from '@/components/ComposerAddMenu.vue'
 import ChatModelPicker from './ChatModelPicker.vue'
 import ChatModePicker from './ChatModePicker.vue'
+import ChatReviewTray from '@/features/chat/review/ChatReviewTray.vue'
 const { modeChangeError, isAddMenuOpen, modeOptions, isModelPickerAvailable } = requireChatOwner(chatSettingsKey)
 const { goalError, goal, isGoalSetupOpen, hydrateGoal, isGoalMutating, goalInputBlocked, goalSteerOnly, goalComposerReason, goalSetupDisabledReason, isGoalEditing, goalImageRecovery } = requireChatOwner(chatGoalKey)
 const { attachments, isPreparingAttachments, removeAttachment, handlePaste, attachmentDisabledReason, triggerFilePicker, fileInputEl, handleFilePick } = requireChatOwner(chatAttachmentsKey)

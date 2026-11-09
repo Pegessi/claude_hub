@@ -42,6 +42,7 @@ RUNNERS = (
     ("browser_markdown_reader.py", ""),
     ("browser_dot_panel.py", ""),
     ("browser_service_restart.py", ""),
+    ("browser_diff_review.py", "/tests/diff_review_harness.html"),
 )
 
 # A scenario's entry page cannot be derived from its filename, so the table
