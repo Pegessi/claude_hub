@@ -280,6 +280,14 @@ class NativeGoalCoordinator:
             connection = await self.connect(tab_id)
             if connection is None:
                 return None
+            if request.plan_first:
+                # Provider-owned Goals never accept a Hub turn, so the Hub
+                # cannot inject a plan-only first turn. Refuse instead of
+                # silently starting work the caller asked to approve first.
+                raise GoalPolicyError(
+                    "Plan first is unavailable for provider-native Goals; "
+                    "start the Goal without it or switch providers"
+                )
             current = await self.synchronize(tab_id, connection)
             replay = self.store.replay_create(tab_id, request)
             if replay is not None:

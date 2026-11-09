@@ -7,6 +7,7 @@ import { useChatGoal as useGoalResource } from '@/composables/useChatGoal'
 import { goalBlocksPlan, goalPlanLockReason, isGoalTerminal } from '@/utils/chatGoalPolicy'
 import { hasChatStatusRefreshBoundary } from '@/utils/chatTurnLifecycle'
 import { goalObservationVersion, goalTurnCompletionReflected, latestNativeGoalNotification, nativeGoalNotificationReflected } from '@/utils/chatGoalObservation'
+import { browserStorage, readPlanFirstPreference, writePlanFirstPreference } from '../goal-plan/planPreference'
 
 interface Dependencies {
   attachments: Ref<DraftAttachment[]>
@@ -63,7 +64,16 @@ export function useChatGoal(deps: Dependencies) {
 
   const goalInputBlocked = computed(() => goalComposerLocked.value && !goalSteerOnly.value)
 
-  async function startGoal(input: { objective: string }) {
+  // ── Plan first ─────────────────────────────────────────────────────────────
+  // A remembered preference for new Goals. Provider-native Goals never accept a
+  // Hub turn, so they cannot plan first; say so instead of failing on submit.
+  const planFirstPreferred = ref(readPlanFirstPreference(browserStorage()))
+
+  const planFirstDisabledReason = computed(() => deps.capabilities.value?.goal_execution_owner === 'provider_native'
+    ? 'This provider runs Goals itself, so it cannot plan a first turn. Start without it.'
+    : null)
+
+  async function startGoal(input: { objective: string; planFirst?: boolean }) {
     if (isGoalEditing.value) {
       if (await updateGoalObjective(input.objective)) isGoalSetupOpen.value = false
       return
@@ -72,8 +82,15 @@ export function useChatGoal(deps: Dependencies) {
       goalError.value = goalSetupDisabledReason.value
       return
     }
+    const planFirst = !planFirstDisabledReason.value && Boolean(input.planFirst)
+    writePlanFirstPreference(browserStorage(), planFirst)
+    planFirstPreferred.value = planFirst
     const imageSnapshot = [...deps.attachments.value]
-    const saved = await createGoal({ ...input, attachments: imageSnapshot.map(toStreamSendAttachment) })
+    const saved = await createGoal({
+      objective: input.objective,
+      plan_first: planFirst,
+      attachments: imageSnapshot.map(toStreamSendAttachment),
+    })
     if (saved) {
       deps.attachments.value = []
       isGoalSetupOpen.value = false
@@ -185,6 +202,8 @@ export function useChatGoal(deps: Dependencies) {
     goalSteerOnly,
     goalInputBlocked,
     startGoal,
+    planFirstPreferred,
+    planFirstDisabledReason,
     GOAL_REFRESH_DELAYS_MS,
     goalSnapshotVersion,
     goalReflectsCompletedTurn,

@@ -7,6 +7,22 @@
 
 ## Released
 
+### feat(ui): let a Goal plan its scope and execution budget before it starts
+
+- Goal setup offers a remembered **Plan first** option (on by default) that
+  sends the additive, optional `plan_first` field. Callers that never send it
+  keep the previous start-immediately behaviour and prompt byte for byte.
+- With `plan_first`, the first Goal turn may only plan: steps, acceptance
+  checks and an execution budget (helpers with provider/model, maximum
+  parallelism, rough duration), taking no implementing actions, and it ends on
+  the existing `needs_input` pause. Nothing is launched until the user's next
+  message approves the plan; a request to revise produces a fresh plan.
+- A planning turn renders as a plan card identified by the Goal snapshot's
+  `plan_turn_id`, not by transcript text, with the highlighted budget block and
+  **Approve & start** / **Revise** actions. Provider-native Goals cannot inject a
+  Hub turn, so the option is disabled there with the reason, and the API
+  refuses the field instead of starting unapproved work.
+
 ### feat(ui): make Workspace task detail and board evidence-first
 
 - The task detail dialog now opens with what a reviewer needs to decide: a
