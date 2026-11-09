@@ -32,6 +32,29 @@ def case(page, case_id):
     return page.locator(f'[data-case="{case_id}"]')
 
 
+def stream_event(sequence, event_type, payload, message_id=None):
+    return {
+        "stream_sequence": sequence,
+        "session_id": "s",
+        "tab_id": "t",
+        "agent_type": "claude",
+        "type": event_type,
+        "turn_id": "stream-turn",
+        "message_id": message_id,
+        "call_id": None,
+        "payload": payload,
+        "created_at": "2026-11-09T10:00:00Z",
+        "redacted": False,
+    }
+
+
+async def streaming_footer(page):
+    """Read the streaming case's footer text after one or more appended batches."""
+    return (await case(page, "streaming").locator(".turn-working").inner_text()).replace(
+        "\n", " | "
+    )
+
+
 async def footer(page, case_id):
     """The live footer's two lines, read as text and as rendered state."""
     section = case(page, case_id)
@@ -98,6 +121,61 @@ async def main(browser_run: BrowserRun) -> None:
 
         await page.goto(url, wait_until="networkidle")
         await expect(case(page, "busy")).to_be_visible()
+
+        # ── batches appended after mount: the footer must follow every one ───
+        # The pane hands the footer a fresh array per batch whose turn objects
+        # were mutated in place, so a footer that caches the turn object would
+        # freeze on its first label for the whole turn.
+        observed["streaming"] = []
+        batches = [
+            [
+                stream_event(1, "turn_started", {"summary": "investigate"}),
+                stream_event(2, "thinking_delta", {"text": "look at the reducer"}),
+            ],
+            [
+                stream_event(
+                    3,
+                    "tool_call_started",
+                    {
+                        "tool_call_id": "r1",
+                        "name": "Read",
+                        "args": {"file_path": "src/a.ts"},
+                    },
+                )
+            ],
+            [
+                stream_event(
+                    4,
+                    "tool_call_started",
+                    {
+                        "tool_call_id": "r2",
+                        "name": "Read",
+                        "args": {"file_path": "src/b.ts"},
+                    },
+                )
+            ],
+            [stream_event(5, "tool_call_completed", {"tool_call_id": "r1", "status": "failed"})],
+        ]
+        expectations = (
+            ("· Thinking", None),
+            ("· Reading src/a.ts", "1 read"),
+            ("Reading 2 files", "2 reads"),
+            ("1 failed", None),
+        )
+        for index, batch in enumerate(batches):
+            await page.evaluate("events => window.__workLogStreamProbe.push(events)", batch)
+            await page.wait_for_timeout(120)
+            text = await streaming_footer(page)
+            observed["streaming"].append(text)
+            step, counts = expectations[index]
+            assert "Working" in text, text
+            assert step in text, (index, step, text)
+            if counts is not None:
+                assert counts in text, (index, counts, text)
+            if index == 0:
+                assert "Reading" not in text, text
+        assert observed["streaming"][0] != observed["streaming"][-1], observed["streaming"]
+        assert "1 failed" in observed["streaming"][-1], observed["streaming"][-1]
 
         # ── a busy turn: the step it is on, and what it has done ──────────────
         busy = await footer(page, "busy")
