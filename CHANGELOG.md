@@ -118,6 +118,17 @@
   source Chat id, execution reference, runtime sampling) moves into a collapsed
   **Debug info** fold inside Execution control, which keeps progress reporting,
   handoff and reporter-credential actions reachable.
+- **Behaviour change**: the dialog's sticky action footer is gone. Decision
+  actions now scroll with the content as an inline section right after the
+  evidence. While a task waits for review, a compact bar stays pinned at the
+  panel edge and jumps to the decision (with focus moved there), then retires
+  itself once the decision is on screen — the always-reachable decision the
+  sticky footer used to provide is preserved where it matters, without
+  duplicating the action controls.
+- Evidence chips are no longer disabled buttons: only Markdown paths are
+  buttons that open the preview, while other changed files and artifact
+  references render as plain text chips (full path in the tooltip), so a
+  keyboard user is never given an unfocusable control that explains nothing.
 - The board no longer lets a failed task read as work in progress: failed tasks
   stay in the Working column (there is no Failed column) but sort first, carry a
   danger-tinted card and a sentence-case `Failed` pill, and show the failure
