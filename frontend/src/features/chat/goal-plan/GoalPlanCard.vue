@@ -2,11 +2,11 @@
   <section
     class="goal-plan-card"
     :data-mode="mode"
-    aria-labelledby="goal-plan-heading"
+    :aria-labelledby="headingId"
   >
     <header class="goal-plan-header">
       <span
-        id="goal-plan-heading"
+        :id="headingId"
         class="goal-plan-eyebrow"
       >Execution plan</span>
       <p
@@ -97,16 +97,16 @@
       </button>
     </div>
     <p
-      v-else-if="mode === 'decided'"
+      v-else-if="mode === 'answered'"
       class="goal-plan-note"
     >
-      Plan approved. The Goal continues with this scope.
+      The Goal continued after this plan.
     </p>
     <p
       v-else-if="mode === 'waiting'"
       class="goal-plan-note"
     >
-      The agent continued without waiting for approval.
+      The Goal moved on without approving this plan.
     </p>
   </section>
 </template>
@@ -119,6 +119,8 @@ import { goalPlanBudgetSummary, type GoalPlanCardMode } from './planCard'
 const props = defineProps<{
   plan: ChatGoalPlan | null
   mode: GoalPlanCardMode
+  /** Unique per turn: several cards can be on screen at once. */
+  headingId: string
   warning?: string | null
   approveDisabledReason?: string | null
 }>()

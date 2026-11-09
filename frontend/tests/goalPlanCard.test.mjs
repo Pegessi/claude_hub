@@ -53,7 +53,7 @@ test('only the Goal-owned planning turn becomes a plan card', () => {
   assert.equal(planCard.goalPlanCardMode(goal({ objective: 'plain' }), 'plan-turn'), null)
 })
 
-test('a running planning turn prepares, and an approved plan is decided', () => {
+test('a running planning turn prepares, and an answered plan stops offering approval', () => {
   const dispatched = goal({ plan_first: true, plan_turn_id: 'plan-turn', dispatch_state: 'dispatched' })
   assert.equal(planCard.goalPlanCardMode(dispatched, 'plan-turn'), 'preparing')
   const parsed = goal({ plan_first: true, plan_turn_id: 'plan-turn', plan: PLAN, dispatch_state: 'dispatched' })
@@ -62,8 +62,8 @@ test('a running planning turn prepares, and an approved plan is decided', () => 
   // A Goal that kept working instead of parking shows the plan without actions.
   assert.equal(planCard.goalPlanCardMode(goal({ plan_turn_id: 'plan-turn', plan: PLAN }), 'plan-turn'), 'waiting')
   assert.equal(
-    planCard.goalPlanCardMode(goal({ plan_turn_id: 'plan-turn', plan: PLAN, plan_approved: true, status: 'blocked' }), 'plan-turn'),
-    'decided',
+    planCard.goalPlanCardMode(goal({ plan_turn_id: 'plan-turn', plan: PLAN, plan_answered: true, status: 'blocked' }), 'plan-turn'),
+    'answered',
   )
 })
 
@@ -71,7 +71,7 @@ test('approval is refused with a reason while the Goal cannot accept it', () => 
   const blocked = goal({ plan_turn_id: 'plan-turn', plan: PLAN, status: 'blocked' })
   assert.equal(planCard.goalPlanApprovalDisabledReason(blocked, 'review', { sending: false, turnInFlight: false }), null)
   assert.match(
-    planCard.goalPlanApprovalDisabledReason(blocked, 'decided', { sending: false, turnInFlight: false }),
+    planCard.goalPlanApprovalDisabledReason(blocked, 'answered', { sending: false, turnInFlight: false }),
     /not awaiting approval/,
   )
   assert.match(
@@ -107,7 +107,7 @@ test('the memo signature changes only for the planning turn', () => {
   )
   assert.notEqual(
     planCard.goalPlanSignature(goal({ plan_turn_id: 'plan-turn', plan: PLAN }), 'plan-turn'),
-    planCard.goalPlanSignature(goal({ plan_turn_id: 'plan-turn', plan: PLAN, plan_approved: true }), 'plan-turn'),
+    planCard.goalPlanSignature(goal({ plan_turn_id: 'plan-turn', plan: PLAN, plan_answered: true }), 'plan-turn'),
   )
 })
 
@@ -121,6 +121,48 @@ test('the budget summary names helpers, models, parallelism and duration', () =>
     'no helpers · max 1 in parallel',
   )
   assert.equal(planCard.goalPlanBudgetSummary(null), '')
+})
+
+test('the heading id is unique per turn so two cards cannot share one label', () => {
+  const first = planCard.goalPlanHeadingId('turn-aaa')
+  const second = planCard.goalPlanHeadingId('turn-bbb')
+  assert.notEqual(first, second)
+  assert.equal(first, 'goal-plan-heading-turn-aaa')
+  // Provider turn ids are opaque: whitespace and punctuation must not leak into
+  // an id attribute, and two ids that differ only by such characters stay distinct
+  // enough to avoid sharing one accessible name.
+  assert.equal(planCard.goalPlanHeadingId('a b/c'), 'goal-plan-heading-a-b-c')
+  assert.equal(planCard.goalPlanHeadingId(null), 'goal-plan-heading')
+  assert.equal(planCard.goalPlanHeadingId('   '), 'goal-plan-heading')
+})
+
+test('a provider-native Chat cannot overwrite the remembered preference', () => {
+  const native = { requested: true, disabledReason: 'This provider runs Goals itself' }
+  assert.deepEqual(preference.planFirstChoice(native), { effective: false, remember: null })
+  const hubManaged = { requested: true, disabledReason: null }
+  assert.deepEqual(preference.planFirstChoice(hubManaged), { effective: true, remember: true })
+  assert.deepEqual(preference.planFirstChoice({ requested: false, disabledReason: null }), {
+    effective: false,
+    remember: false,
+  })
+})
+
+test('the remembered choice survives a native Goal and a storage failure', () => {
+  const store = new Map([['claude-hub.goal-plan-first', 'true']])
+  const storage = {
+    getItem: key => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => store.set(key, value),
+  }
+  // A native Goal asks for plan_first but must not be remembered as "off".
+  const native = preference.planFirstChoice({ requested: true, disabledReason: 'native' })
+  if (native.remember !== null) preference.writePlanFirstPreference(storage, native.remember)
+  assert.equal(preference.readPlanFirstPreference(storage), true)
+  // A remembered "off" from a Chat that can offer it still persists.
+  preference.writePlanFirstPreference(storage, preference.planFirstChoice({
+    requested: false,
+    disabledReason: null,
+  }).remember)
+  assert.equal(preference.readPlanFirstPreference(storage), false)
 })
 
 test('plan-first defaults on and survives a round trip, including storage failures', () => {

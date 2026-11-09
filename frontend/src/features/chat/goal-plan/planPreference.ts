@@ -17,6 +17,22 @@ export function readPlanFirstPreference(storage: Pick<Storage, 'getItem'> | null
   }
 }
 
+/**
+ * What a submitted setup dialog may remember.
+ *
+ * The request always carries the effective value; the *remembered* value must
+ * not be rewritten by a Chat that simply cannot offer the option (a
+ * provider-native Goal), or one such Goal would silently turn Plan first off
+ * for every other Chat.
+ */
+export function planFirstChoice(input: {
+  requested: boolean
+  disabledReason: string | null | undefined
+}): { effective: boolean; remember: boolean | null } {
+  if (input.disabledReason) return { effective: false, remember: null }
+  return { effective: input.requested, remember: input.requested }
+}
+
 export function writePlanFirstPreference(
   storage: Pick<Storage, 'setItem'> | null | undefined,
   planFirst: boolean,
