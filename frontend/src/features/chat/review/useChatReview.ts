@@ -141,6 +141,33 @@ export function useChatReview(deps: Dependencies) {
     persist()
   }
 
+  /** Move an existing note onto a different row range.
+   *
+   *  The editor can be opened on a note and then widened or shifted upward by a
+   *  later click, so the comment keeps its identity and takes the new anchor;
+   *  a note already sitting on the destination row is replaced, because one row
+   *  keeps one comment. */
+  function reanchorComment(id: string, anchor: ReviewAnchor, text: string): ReviewComment | null {
+    const note = reviewNote(text)
+    const comment = comments.value.find(item => item.id === id)
+    if (!comment || !note) return null
+    const destination = comments.value.find(item => item.key === anchor.key && item.id !== id)
+    if (destination) comments.value = comments.value.filter(item => item.id !== destination.id)
+    comment.text = note
+    comment.key = anchor.key
+    comment.turn = anchor.turn
+    comment.group = anchor.group
+    comment.tool = anchor.tool
+    comment.row = anchor.row
+    comment.file = anchor.file
+    comment.line = anchor.line
+    comment.endLine = anchor.endLine
+    comment.code = anchor.code
+    comment.stale = false
+    persist()
+    return comment
+  }
+
   /**
    * Record whether a stored anchor can still be reached.
    *
@@ -187,6 +214,7 @@ export function useChatReview(deps: Dependencies) {
     focusTarget,
     persist,
     addComment,
+    reanchorComment,
     updateComment,
     removeComment,
     clearComments,

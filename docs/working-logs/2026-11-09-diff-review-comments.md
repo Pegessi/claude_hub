@@ -67,6 +67,19 @@ soon as the row resolves. The flag is in-memory only: it describes the current
 timeline, so it is stripped before persisting and a stored comment without a row
 identity is dropped on load.
 
+## Range and tap corrections (review finding M-4)
+
+The row range logic now lives in `reviewComments.ts` as pure, unit-tested
+helpers: `reviewRangeRows` (one file, hunk rows skipped, either direction),
+`reviewRangeLines` (the span reported low-to-high, because a removal carries
+only an original-file number and an addition only a new-file number, so an
+offset hunk could make a range read backwards), `reviewCommentInRows` (the note
+sitting anywhere inside the range is the note being edited) and
+`reviewRowTapOpensEditor` (touch only, never inside a nested control).
+`ChatToolGroup`'s gutter `+` also stops its click from bubbling to the row's tap
+handler, so one tap opens one editor, and an edited note is re-anchored onto its
+new range (`useChatReview.reanchorComment`) instead of being duplicated.
+
 ## Not covered
 
 The tray renders only while a Chat pane is mounted; comments are local review

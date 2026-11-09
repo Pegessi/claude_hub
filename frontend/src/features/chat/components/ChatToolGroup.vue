@@ -138,7 +138,7 @@
                     class="activity-diff-add"
                     :aria-label="commentLabel(line)"
                     :title="commentLabel(line)"
-                    @click="startComment(tool, activity.diff, index, $event)"
+                    @click.stop="startComment(tool, activity.diff, index, $event)"
                   >
                     <span aria-hidden="true">+</span>
                   </button>
@@ -147,7 +147,7 @@
                     class="activity-diff-add activity-diff-add--muted"
                     aria-hidden="true"
                   />
-                  <span class="activity-diff-num">{{ rowLine(line) ?? '' }}</span>
+                  <span class="activity-diff-num">{{ reviewRowLine(line) ?? '' }}</span>
                   <span class="activity-diff-sign">{{ line.sign === '@' || line.sign === ' ' ? '' : line.sign }}</span>
                   <span class="activity-diff-text">{{ line.text }}</span>
                 </div>
@@ -269,13 +269,13 @@ import { requireChatOwner, chatTimelineKey, chatReviewKey } from '../owners'
 import { toolGroupNames, toolStatusLabel } from '@/utils/toolPresentation'
 import { ACTIVITY_ICONS, describeToolActivity, toolGroupSummary, type ToolActivity, type ToolDiffLine, type ToolGroupSummary } from '@/utils/toolActivity'
 import { toolGroupStatus } from '@/features/chat/presentation/chatTurnPresentation'
-import { reviewLocation, type ReviewAnchor, type ReviewComment } from '@/features/chat/review/reviewComments'
+import { reviewCommentInRows, reviewLocation, reviewRangeLines, reviewRangeRows, reviewRowLine, reviewRowTapOpensEditor, type ReviewAnchor, type ReviewComment } from '@/features/chat/review/reviewComments'
 import ChatHubSubagentLink from './ChatHubSubagentLink.vue'
 import type { TimelineTool, TimelineTurn } from '../timeline/types'
 import type { TimelinePart } from '../timeline/types'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 const { expandedToolGroups, onToolGroupToggle, collapseDetails } = requireChatOwner(chatTimelineKey)
-const { comments, addComment, removeComment, setAnchorStale, focusTarget } = requireChatOwner(chatReviewKey)
+const { comments, addComment, reanchorComment, removeComment, setAnchorStale, focusTarget } = requireChatOwner(chatReviewKey)
 const props = defineProps<{
   turn: TimelineTurn
   part: Extract<TimelinePart, { kind: 'tool_group' }>
@@ -367,14 +367,8 @@ function anchorKey(tool: TimelineTool, row: number): string {
   return `${anchorOwner(tool)}:${row}`
 }
 
-/** Preferred number for a row: the new file, else the original file. */
-function rowLine(line: ToolDiffLine | undefined): number | null {
-  if (!line) return null
-  return line.newLine ?? line.oldLine ?? null
-}
-
 function rowLocation(line: ToolDiffLine): string {
-  const lineNumber = rowLine(line)
+  const lineNumber = reviewRowLine(line)
   if (!line.file) return lineNumber === null ? '' : `${lineNumber}`
   return lineNumber === null ? line.file : `${line.file}:${lineNumber}`
 }
@@ -395,20 +389,6 @@ function isFocusedRow(tool: TimelineTool, row: number): boolean {
 
 function isEditorRow(tool: TimelineTool, row: number): boolean {
   return editor.value?.toolKey === tool.key && editor.value.rows[0] === row
-}
-
-/** Rows between two clicks that share the clicked row's file. */
-function selectRows(diff: readonly ToolDiffLine[], anchor: number, target: number): number[] {
-  if (anchor === target) return [target]
-  const file = diff[target]?.file ?? ''
-  const rows: number[] = []
-  for (let row = Math.min(anchor, target); row <= Math.max(anchor, target); row++) {
-    const line = diff[row]
-    if (!line || line.sign === '@') continue
-    if ((line.file ?? '') !== file) continue
-    rows.push(row)
-  }
-  return rows.length ? rows : [target]
 }
 
 function openEditor(tool: TimelineTool, rows: number[], comment: ReviewComment | null): void {
@@ -441,15 +421,17 @@ function bindEditorActions(node: unknown): void {
 function startComment(tool: TimelineTool, diff: readonly ToolDiffLine[] | undefined, row: number, event: MouseEvent): void {
   if (!diff || !diff[row] || diff[row].sign === '@') return
   const previous = lastRow.value?.toolKey === tool.key ? lastRow.value.row : row
-  const rows = event.shiftKey ? selectRows(diff, previous, row) : [row]
-  openEditor(tool, rows, commentIndex.value.get(anchorKey(tool, rows[0])) ?? null)
+  const rows = event.shiftKey ? reviewRangeRows(diff, previous, row) : [row]
+  // Shift-clicking upward from an existing note edits it instead of stacking a
+  // second one over it, so the whole range is searched.
+  const existing = reviewCommentInRows(comments.value, rows.map(item => anchorKey(tool, item)))
+  openEditor(tool, rows, existing)
 }
 
 /** Touch has no hover to reveal the gutter affordance: a tap on the row opens
  *  the editor instead of pressing a fingertip-sized button. */
 function onRowClick(tool: TimelineTool, diff: readonly ToolDiffLine[] | undefined, row: number, event: MouseEvent): void {
-  if (!coarsePointer.value) return
-  if (typeof HTMLButtonElement !== 'undefined' && event.target instanceof HTMLButtonElement) return
+  if (!reviewRowTapOpensEditor(coarsePointer.value, event.target as Element | null)) return
   startComment(tool, diff, row, event)
 }
 
@@ -469,9 +451,7 @@ function editorAnchor(): ReviewAnchor | null {
   if (!tool) return null
   const diff = describeToolActivity(tool).diff ?? []
   const first = diff[state.rows[0]]
-  const last = diff[state.rows[state.rows.length - 1]]
-  const line = rowLine(first)
-  const endLine = rowLine(last)
+  const { line, endLine } = reviewRangeLines(diff, state.rows)
   return {
     key: anchorKey(tool, state.rows[0]),
     turn: props.turn.key,
@@ -491,10 +471,13 @@ function editorLocation(): string {
 }
 
 function saveComment(): void {
+  const state = editor.value
   const anchor = editorAnchor()
-  if (!anchor) return
-  // Upsert by row: the note and any shifted range land on the same comment.
-  addComment(anchor, editorDraft.value)
+  if (!state || !anchor) return
+  // An edited note moves onto whatever range the editor now covers; a new note
+  // upserts by row so re-commenting one row never stacks a second entry.
+  if (state.id) reanchorComment(state.id, anchor, editorDraft.value)
+  else addComment(anchor, editorDraft.value)
   editor.value = null
   editorDraft.value = ''
 }

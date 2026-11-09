@@ -7,6 +7,22 @@
 
 ## Released
 
+### fix(chat): one tap opens one editor, and a widened range edits its own note
+
+- On a touch screen the gutter `+` button's click also bubbled to the row's tap
+  handler, so a tap whose target was the button's inner glyph started the
+  comment editor twice (re-focusing it and resetting the draft). The button now
+  stops propagation and the row handler ignores taps inside any nested control.
+- A Shift-click range now reports its span low-to-high: a removed row carries
+  only an original-file number and an added row only a new-file number, so an
+  earlier hunk that offsets the two sides could make the range read backwards
+  (`file.ts:45-42`).
+- A Shift-click that extends *over* an existing note edits that note (moved
+  onto the new range, replacing any note already on its first row) instead of
+  stacking a second overlapping comment; a first-row-only lookup missed every
+  note that was not the range's first row.
+
+
 ### fix(chat): say when a saved review comment's diff line is gone
 
 - A review comment is anchored on the row it was written against, and a
