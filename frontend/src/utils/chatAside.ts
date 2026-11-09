@@ -85,3 +85,36 @@ export function asideUnavailableReason(gate: AsideGate): string | null {
 export function canOfferAside(isManagedChat: boolean): boolean {
   return !isManagedChat
 }
+
+/** Where the reader has to be sent when an aside fails, and what to tell them.
+ *
+ *  Forking switches the pane to the new tab (``terminalStore.forkTab``). If the
+ *  follow-up send then fails — a 409/503 while the forked session is still
+ *  warming up — the reader is looking at an empty fork, while the question they
+ *  typed still lives in the composer of the Chat they came from. The failure
+ *  therefore has to move the pane *back* before the message can mean anything:
+ *  "your question is still here" is only true where they can see it.
+ *
+ *  The move respects an explicit switch: if the reader has already chosen
+ *  another tab in the meantime, yanking them back would override that choice,
+ *  so nothing is restored and the notification alone reports the failure. */
+export interface AsideFailure {
+  /** Tab to make active again, or ``null`` when the pane should stay put. */
+  restoreTabId: string | null
+  message: string
+}
+
+export function asideFailure(
+  sourceTabId: string,
+  forkedTabId: string | null,
+  activeTabId: string | null,
+  detail: string,
+): AsideFailure {
+  const stillOnFork = forkedTabId !== null && activeTabId === forkedTabId
+  return {
+    restoreTabId: stillOnFork ? sourceTabId : null,
+    message: forkedTabId === null
+      ? `Ask aside failed: ${detail}`
+      : `Ask aside failed: ${detail}. Your question is still in this Chat.`,
+  }
+}
