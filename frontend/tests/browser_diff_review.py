@@ -194,6 +194,41 @@ async def main(browser_run: BrowserRun) -> None:
             note("mobile tray stays inside 390px with reachable buttons")
             await page.set_viewport_size(DESKTOP)
 
+            # 6b. Shift-clicking upward from an existing note edits that note
+            #     instead of stacking a second, overlapping one.
+            before = await page.evaluate(
+                "() => window.__DIFF_REVIEW__.review.comments.value.length"
+            )
+            existing = page.locator(
+                ".activity-diff-line", has_text="def effective_status(runtime):"
+            ).first
+            await existing.scroll_into_view_if_needed()
+            await existing.hover()
+            await existing.locator(".activity-diff-add").click()
+            await expect(page.locator(".activity-diff-editor")).to_be_visible()
+            await page.keyboard.press("Escape")
+            # Shift-click *above* the note, so the note is no longer the range's
+            # first row - where a first-row-only lookup used to miss it.
+            upward = page.locator(".activity-diff-line", has_text='snapshot = {"state"').first
+            await upward.scroll_into_view_if_needed()
+            await upward.hover()
+            await upward.locator(".activity-diff-add").click(modifiers=["Shift"])
+            await expect(page.locator(".activity-diff-editor")).to_be_visible()
+            target = page.locator(".activity-diff-editor-target")
+            await expect(target).to_contain_text("status.py:238-243")
+            await expect(page.locator(".activity-diff-editor textarea")).to_have_value(
+                "Expose the pending-question flag only when it is set."
+            )
+            await page.locator(".activity-diff-editor-save").click()
+            after = await page.evaluate("() => window.__DIFF_REVIEW__.review.comments.value.length")
+            assert after == before, f"an upward range edits, it does not add: {before} -> {after}"
+            await expect(page.locator(".review-tray-count")).to_contain_text("1 comment")
+            await expect(page.locator(".activity-diff-note")).to_have_count(1)
+            await expect(page.locator(".review-tray-jump").first).to_contain_text(
+                "status.py:238-243"
+            )
+            note("shift-clicking upward re-anchored the existing note to 238-243")
+
             # 7. A warm-cache history reload renumbers the turn's parts, so a
             #    saved row can outlive the row it was written on: the tray says
             #    so instead of silently doing nothing.
@@ -241,8 +276,8 @@ async def main(browser_run: BrowserRun) -> None:
             lines = message.split("\n")
             assert lines[0] == "Review comments (1):", message
             assert lines[1] == (
-                "1. backend/claude_hub/services/terminal_runtime/manager/status.py:239 — "
-                '`snapshot["pending_question"] = runtime.has_pending_question()` — '
+                "1. backend/claude_hub/services/terminal_runtime/manager/status.py:238-243 — "
+                '`snapshot = {"state": runtime.state, "detail": runtime.detail}` — '
                 "Expose the pending-question flag only when it is set."
             ), message
             assert (
