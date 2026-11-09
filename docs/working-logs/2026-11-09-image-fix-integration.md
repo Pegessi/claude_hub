@@ -67,3 +67,26 @@ Final gate results and source identities are retained with controller Task
 `d9518419-c395-47d9-a887-2ba85232c811` and independent reviewer Task
 `db12288d-3aca-4304-b4f2-149276be8f31`. Old failed runs remain evidence, not passes.
 The older concept/workflow candidate and its browser limitation are separate.
+
+## Browser-gate synchronization
+
+At `9132e6b`, all nine strict standard targets passed, while two full browser
+runs stopped at 16/18. All image retry/streaming assertions passed. The failures
+were the mobile Goal sheet bounds and the HTML external-link popup wait.
+
+The mobile test sampled the sheet during its `translateY(100%)` entrance:
+the initial bottom was 1228px in a 664px viewport, while the settled bottom
+was 664px (within the existing 1px tolerance). The test now waits, bounded to
+2 seconds, for the root animation to finish and the original viewport bound.
+The original height and tap-target assertions remain; product CSS is unchanged.
+
+The external-link failure was intermittent in controlled reviewer runs. An
+initial proxy-environment hypothesis was withdrawn after a clean-environment
+rerun passed; it is not a causal conclusion. Additional controller diagnostics
+captured a failed run with no external-link click event in the frame. Explicit
+scrolling and resetting the parent window did not reliably fix it, so those
+experiments were removed. The original HTTPS URL, mocked response, proxy
+isolation and all popup assertions remain unchanged. No HTML preview product
+code was modified. The browser's intermittent click-delivery mechanism remains
+unresolved; final gate status must be read separately from the image-fix review,
+and failed runs remain retained evidence.
