@@ -46,170 +46,195 @@ async def main(browser_run: BrowserRun) -> None:
     page_errors: list[str] = []
     api_requests: list[str] = []
     notes: list[str] = []
+    # The mock owner reads this file back and requires "result": "PASS" before it
+    # records a passing scenario; the lifecycle.json next to it only reports the
+    # runner's own process outcome.
+    report = {
+        "result": "FAIL",
+        "scenario": "diff review comments",
+        "notes": notes,
+        "api_requests": api_requests,
+        "page_errors": page_errors,
+        "screenshots": [],
+        "boundary": (
+            "Real diff card and review tray components over a fixture patch; the page calls "
+            "no Hub API and no backend or provider traffic is involved."
+        ),
+    }
+    failure: BaseException | None = None
+    page = None
 
     def note(text: str) -> None:
         notes.append(text)
         print(f"- {text}", flush=True)
 
-    async with browser_run.context(viewport=DESKTOP) as context:
-        page = await context.new_page()
-        page.on("pageerror", lambda error: page_errors.append(f"pageerror: {error}"))
-        page.on(
-            "console",
-            lambda message: (
-                page_errors.append(f"console.{message.type}: {message.text}")
-                if message.type == "error"
-                else None
-            ),
-        )
-        page.on(
-            "request",
-            lambda request: api_requests.append(request.url) if "/api/" in request.url else None,
-        )
-        await page.goto(url, wait_until="load")
+    try:
+        async with browser_run.context(viewport=DESKTOP) as context:
+            page = await context.new_page()
+            page.on("pageerror", lambda error: page_errors.append(f"pageerror: {error}"))
+            page.on(
+                "console",
+                lambda message: (
+                    page_errors.append(f"console.{message.type}: {message.text}")
+                    if message.type == "error"
+                    else None
+                ),
+            )
+            page.on(
+                "request",
+                lambda request: (
+                    api_requests.append(request.url) if "/api/" in request.url else None
+                ),
+            )
+            await page.goto(url, wait_until="load")
 
-        diff = page.locator(".activity-diff")
-        await expect(diff).to_be_visible(timeout=15_000)
+            diff = page.locator(".activity-diff")
+            await expect(diff).to_be_visible(timeout=15_000)
 
-        # 1. Every file in the patch gets a header row, and numbered hunks put a
-        #    line number in the gutter next to the code.
-        files = page.locator(".activity-diff-file-name")
-        await expect(files).to_have_count(2)
-        await expect(files.first).to_have_text(
-            "backend/claude_hub/services/terminal_runtime/manager/status.py",
-        )
-        gutter = await page.eval_on_selector_all(
-            ".activity-diff-num",
-            "nodes => nodes.map(node => node.textContent.trim())",
-        )
-        assert gutter[1:5] == ["236", "237", "238", "238"], f"gutter numbers: {gutter[:6]}"
-        assert gutter.count("") == 2, f"file headers carry no line number: {gutter}"
-        note(f"gutter shows {len([value for value in gutter if value])} numbered rows")
+            # 1. Every file in the patch gets a header row, and numbered hunks put a
+            #    line number in the gutter next to the code.
+            files = page.locator(".activity-diff-file-name")
+            await expect(files).to_have_count(2)
+            await expect(files.first).to_have_text(
+                "backend/claude_hub/services/terminal_runtime/manager/status.py",
+            )
+            gutter = await page.eval_on_selector_all(
+                ".activity-diff-num",
+                "nodes => nodes.map(node => node.textContent.trim())",
+            )
+            assert gutter[1:5] == ["236", "237", "238", "238"], f"gutter numbers: {gutter[:6]}"
+            assert gutter.count("") == 2, f"file headers carry no line number: {gutter}"
+            note(f"gutter shows {len([value for value in gutter if value])} numbered rows")
 
-        async def comment(row_text: str, text: str, *, shift: bool = False) -> None:
-            row = page.locator(".activity-diff-line", has_text=row_text).first
-            await row.scroll_into_view_if_needed()
-            await row.hover()
-            add = row.locator(".activity-diff-add")
-            if shift:
-                await add.click(modifiers=["Shift"])
-            else:
-                await add.click()
+            async def comment(row_text: str, text: str, *, shift: bool = False) -> None:
+                row = page.locator(".activity-diff-line", has_text=row_text).first
+                await row.scroll_into_view_if_needed()
+                await row.hover()
+                add = row.locator(".activity-diff-add")
+                if shift:
+                    await add.click(modifiers=["Shift"])
+                else:
+                    await add.click()
+                await expect(page.locator(".activity-diff-editor")).to_be_visible()
+                textarea = page.locator(".activity-diff-editor textarea")
+                await expect(textarea).to_be_focused()
+                await textarea.fill(text)
+                await page.locator(".activity-diff-editor-save").click()
+                await expect(page.locator(".activity-diff-editor")).to_have_count(0)
+
+            # 2. A comment pins under the row it was written on and joins the tray.
+            await comment(
+                'snapshot["pending_question"]',
+                "Expose this only when a question is really pending.",
+            )
+            await expect(page.locator(".activity-diff-note")).to_have_count(1)
+            await expect(page.locator(".activity-diff-note-text")).to_have_text(
+                "Expose this only when a question is really pending.",
+            )
+            await expect(page.locator(".review-tray-count")).to_contain_text("1 comment")
+
+            # 3. Shift-click selects a range: one comment that names the span.
+            first = page.locator(".activity-diff-line", has_text="const line = lines[index]").first
+            await first.scroll_into_view_if_needed()
+            await first.hover()
+            await first.locator(".activity-diff-add").click()
             await expect(page.locator(".activity-diff-editor")).to_be_visible()
-            textarea = page.locator(".activity-diff-editor textarea")
-            await expect(textarea).to_be_focused()
-            await textarea.fill(text)
-            await page.locator(".activity-diff-editor-save").click()
+            await page.keyboard.press("Escape")
             await expect(page.locator(".activity-diff-editor")).to_have_count(0)
+            await comment(
+                'out.push({ sign: "@", text: line, hunk })',
+                "Comment the whole hunk, not just one row.",
+                shift=True,
+            )
+            await expect(page.locator(".activity-diff-editor-target")).to_have_count(0)
+            await expect(page.locator(".review-tray-count")).to_contain_text("2 comments")
+            await expect(page.locator(".review-tray-jump").last).to_contain_text("269-271")
+            note("shift-click range composed as utils/toolActivity.ts:269-271")
 
-        # 2. A comment pins under the row it was written on and joins the tray.
-        await comment(
-            'snapshot["pending_question"]', "Expose this only when a question is really pending."
-        )
-        await expect(page.locator(".activity-diff-note")).to_have_count(1)
-        await expect(page.locator(".activity-diff-note-text")).to_have_text(
-            "Expose this only when a question is really pending.",
-        )
-        await expect(page.locator(".review-tray-count")).to_contain_text("1 comment")
+            # 4. Clicking the tray entry reveals its row.
+            await page.locator(".activity-diff").evaluate("node => { node.scrollTop = 0 }")
+            await page.locator(".review-tray-jump").last.click()
+            marked = page.locator(".activity-diff-line--target")
+            await expect(marked).to_have_count(1)
+            await expect(marked).to_have_attribute("data-diff-row", "15")
+            note("tray jump highlighted the anchored row")
 
-        # 3. Shift-click selects a range: one comment that names the span.
-        first = page.locator(".activity-diff-line", has_text="const line = lines[index]").first
-        await first.scroll_into_view_if_needed()
-        await first.hover()
-        await first.locator(".activity-diff-add").click()
-        await expect(page.locator(".activity-diff-editor")).to_be_visible()
-        await page.keyboard.press("Escape")
-        await expect(page.locator(".activity-diff-editor")).to_have_count(0)
-        await comment(
-            'out.push({ sign: "@", text: line, hunk })',
-            "Comment the whole hunk, not just one row.",
-            shift=True,
-        )
-        await expect(page.locator(".activity-diff-editor-target")).to_have_count(0)
-        await expect(page.locator(".review-tray-count")).to_contain_text("2 comments")
-        await expect(page.locator(".review-tray-jump").last).to_contain_text("269-271")
-        note("shift-click range composed as utils/toolActivity.ts:269-271")
+            await page.screenshot(path=str(output / "diff-review-desktop.png"), full_page=False)
+            report["screenshots"].append("diff-review-desktop.png")
 
-        # 4. Clicking the tray entry reveals its row.
-        await page.locator(".activity-diff").evaluate("node => { node.scrollTop = 0 }")
-        await page.locator(".review-tray-jump").last.click()
-        marked = page.locator(".activity-diff-line--target")
-        await expect(marked).to_have_count(1)
-        await expect(marked).to_have_attribute("data-diff-row", "15")
-        note("tray jump highlighted the anchored row")
+            # 5. Notes can be edited and removed from the tray.
+            await page.locator(".review-tray-item-actions button", has_text="Edit").first.click()
+            editor = page.locator(".review-tray-editor textarea")
+            await expect(editor).to_be_visible()
+            await editor.fill("Expose the pending-question flag only when it is set.")
+            await page.locator(".review-tray-item-actions button", has_text="Save").click()
+            await expect(page.locator(".review-tray-note").first).to_have_text(
+                "Expose the pending-question flag only when it is set.",
+            )
+            await page.locator(".review-tray-item-actions button", has_text="Remove").last.click()
+            await expect(page.locator(".review-tray-count")).to_contain_text("1 comment")
 
-        await page.screenshot(path=str(output / "diff-review-desktop.png"), full_page=False)
+            # 6. The narrow layout keeps every tray control inside the viewport.
+            await page.set_viewport_size(MOBILE)
+            await expect(page.locator(".review-tray")).to_be_visible()
+            overflow = await page.evaluate(
+                """() => {
+                  const tray = document.querySelector('.review-tray');
+                  const box = tray.getBoundingClientRect();
+                  const outside = [...tray.querySelectorAll('button')]
+                    .map(node => node.getBoundingClientRect())
+                    .filter(rect => rect.right > innerWidth + 1 || rect.left < -1);
+                  return { trayRight: box.right, width: innerWidth, outside: outside.length };
+                }""",
+            )
+            assert overflow["trayRight"] <= overflow["width"] + 1, f"tray overflows: {overflow}"
+            assert overflow["outside"] == 0, f"tray buttons outside the viewport: {overflow}"
+            await page.screenshot(path=str(output / "diff-review-mobile.png"), full_page=False)
+            report["screenshots"].append("diff-review-mobile.png")
+            note("mobile tray stays inside 390px with reachable buttons")
+            await page.set_viewport_size(DESKTOP)
 
-        # 5. Notes can be edited and removed from the tray.
-        await page.locator(".review-tray-item-actions button", has_text="Edit").first.click()
-        editor = page.locator(".review-tray-editor textarea")
-        await expect(editor).to_be_visible()
-        await editor.fill("Expose the pending-question flag only when it is set.")
-        await page.locator(".review-tray-item-actions button", has_text="Save").click()
-        await expect(page.locator(".review-tray-note").first).to_have_text(
-            "Expose the pending-question flag only when it is set.",
-        )
-        await page.locator(".review-tray-item-actions button", has_text="Remove").last.click()
-        await expect(page.locator(".review-tray-count")).to_contain_text("1 comment")
+            # 7. Send composes exactly one message through the composer queue.
+            await page.locator(".review-tray-send").click()
+            sent = await page.evaluate("""() => {
+                  const harness = window.__DIFF_REVIEW__;
+                  return {
+                    drafts: harness.draftQueue.value.map(draft => draft.message),
+                    comments: harness.review.comments.value.length,
+                    tray: Boolean(document.querySelector('.review-tray')),
+                  };
+                }""")
+            assert len(sent["drafts"]) == 1, f"exactly one queued message: {sent}"
+            message = sent["drafts"][0]
+            lines = message.split("\n")
+            assert lines[0] == "Review comments (1):", message
+            assert lines[1] == (
+                "1. backend/claude_hub/services/terminal_runtime/manager/status.py:239 — "
+                '`snapshot["pending_question"] = runtime.has_pending_question()` — '
+                "Expose the pending-question flag only when it is set."
+            ), message
+            assert (
+                sent["comments"] == 0 and sent["tray"] is False
+            ), f"tray cleared after send: {sent}"
+            note("send queued one message: " + json.dumps(message))
 
-        # 6. The narrow layout keeps every tray control inside the viewport.
-        await page.set_viewport_size(MOBILE)
-        await expect(page.locator(".review-tray")).to_be_visible()
-        overflow = await page.evaluate(
-            """() => {
-              const tray = document.querySelector('.review-tray');
-              const box = tray.getBoundingClientRect();
-              const outside = [...tray.querySelectorAll('button')]
-                .map(node => node.getBoundingClientRect())
-                .filter(rect => rect.right > innerWidth + 1 || rect.left < -1);
-              return { trayRight: box.right, width: innerWidth, outside: outside.length };
-            }""",
-        )
-        assert overflow["trayRight"] <= overflow["width"] + 1, f"tray overflows: {overflow}"
-        assert overflow["outside"] == 0, f"tray buttons outside the viewport: {overflow}"
-        await page.screenshot(path=str(output / "diff-review-mobile.png"), full_page=False)
-        note("mobile tray stays inside 390px with reachable buttons")
-        await page.set_viewport_size(DESKTOP)
+            assert api_requests == [], f"the harness must not call the Hub API: {api_requests}"
+            assert page_errors == [], f"page errors: {page_errors}"
+            report["result"] = "PASS"
 
-        # 7. Send composes exactly one message through the composer queue.
-        await page.locator(".review-tray-send").click()
-        sent = await page.evaluate("""() => {
-              const harness = window.__DIFF_REVIEW__;
-              return {
-                drafts: harness.draftQueue.value.map(draft => draft.message),
-                comments: harness.review.comments.value.length,
-                tray: Boolean(document.querySelector('.review-tray')),
-              };
-            }""")
-        assert len(sent["drafts"]) == 1, f"exactly one queued message: {sent}"
-        message = sent["drafts"][0]
-        lines = message.split("\n")
-        assert lines[0] == "Review comments (1):", message
-        assert lines[1] == (
-            "1. backend/claude_hub/services/terminal_runtime/manager/status.py:239 — "
-            '`snapshot["pending_question"] = runtime.has_pending_question()` — '
-            "Expose the pending-question flag only when it is set."
-        ), message
-        assert sent["comments"] == 0 and sent["tray"] is False, f"tray cleared after send: {sent}"
-        note("send queued one message: " + json.dumps(message))
+    except BaseException as exc:
+        failure = exc
+        report["error_type"] = type(exc).__name__
+        if page is not None:
+            try:
+                await page.screenshot(path=str(output / "failure.png"), full_page=True)
+            except Exception:
+                pass
 
-        assert api_requests == [], f"the harness must not call the Hub API: {api_requests}"
-        assert page_errors == [], f"page errors: {page_errors}"
-
-    (output / "summary.json").write_text(
-        json.dumps(
-            {
-                "scenario": "diff review comments",
-                "notes": notes,
-                "page_errors": page_errors,
-                "api_requests": api_requests,
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    print("PASS diff review comments", flush=True)
+    (output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(report, indent=2))
+    if failure is not None:
+        raise failure
 
 
 if __name__ == "__main__":
