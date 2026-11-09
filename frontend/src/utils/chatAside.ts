@@ -115,6 +115,11 @@ export function asideFailure(
     restoreTabId: stillOnFork ? sourceTabId : null,
     message: forkedTabId === null
       ? `Ask aside failed: ${detail}`
-      : `Ask aside failed: ${detail}. Your question is still in this Chat.`,
+      // "this Chat" is only true while the reader is about to be put back in
+      // the source pane; after an explicit switch the draft lives somewhere
+      // else, so the sentence must not point at the pane they are looking at.
+      : stillOnFork
+        ? `Ask aside failed: ${detail}. Your question is still in this Chat.`
+        : `Ask aside failed: ${detail}. Your question is still in the Chat you asked from.`,
   }
 }
