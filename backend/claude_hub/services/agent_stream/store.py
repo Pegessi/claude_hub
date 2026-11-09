@@ -75,6 +75,9 @@ class ReplyExcerpt:
 
     ``mtime_ns``/``size`` let the caller reuse this excerpt on every status
     poll until the stream actually grows, so the inbox never rescans history.
+    ``written_at`` is the write time **only** when the text belongs to the
+    newest turn; a fallback to an earlier turn's answer leaves it ``None`` so a
+    row cannot claim an old reply landed "just now".
     """
 
     text: str
@@ -91,8 +94,12 @@ _REPLY_EXCERPT_MAX_CHARS = 160
 _REPLY_EXCERPT_MAX_COLLECTED = 4096
 
 
-def _read_reply_excerpt(path: Path, max_chars: int, max_scan_bytes: int) -> Optional[ReplyExcerpt]:
-    """Synchronous bounded tail scan; see :meth:`AgentStreamStore.reply_excerpt`."""
+def read_reply_excerpt(path: Path, max_chars: int, max_scan_bytes: int) -> Optional[ReplyExcerpt]:
+    """Bounded tail scan of one session stream, blocking by design.
+
+    Callers run this off the event loop (``asyncio.to_thread`` or the manager's
+    status worker): it reads and JSON-parses up to ``max_scan_bytes``.
+    """
     try:
         stat_result = path.stat()
     except OSError:
@@ -118,7 +125,9 @@ def _read_reply_excerpt(path: Path, max_chars: int, max_scan_bytes: int) -> Opti
     # dropped in favour of the answer after it.
     turn_id: Optional[str] = None
     pieces: List[str] = []
-    newest: Optional[str] = None
+    # (text, the turn that produced it) so ``written_at`` can stay honest.
+    best: Optional[tuple[str, str]] = None
+    last_started: Optional[str] = None
     for line in raw.decode("utf-8", errors="replace").splitlines():
         if not line.strip():
             continue
@@ -133,8 +142,9 @@ def _read_reply_excerpt(path: Path, max_chars: int, max_scan_bytes: int) -> Opti
         if not isinstance(event_turn, str):
             continue
         if kind == "turn_started":
-            if pieces:
-                newest = "".join(pieces)
+            last_started = event_turn
+            if pieces and turn_id is not None:
+                best = ("".join(pieces), turn_id)
             turn_id = event_turn
             pieces = []
             continue
@@ -152,16 +162,20 @@ def _read_reply_excerpt(path: Path, max_chars: int, max_scan_bytes: int) -> Opti
             # Text before the last tool call is narration; the answer after it
             # is what the user wants to read in a row.
             pieces = []
-    if pieces:
-        newest = "".join(pieces)
-    if not newest:
+    if pieces and turn_id is not None:
+        best = ("".join(pieces), turn_id)
+    if best is None:
         return None
+    newest, source_turn = best
     text = " ".join(newest.split())
     if len(text) > max_chars:
         text = text[: max_chars - 1].rstrip() + "…"
+    # The fallback case (a turn that started but wrote nothing yet) keeps the
+    # previous answer's text but must not borrow the newest write's timestamp.
+    is_newest_turn = last_started is not None and source_turn == last_started
     return ReplyExcerpt(
         text=text,
-        written_at=datetime.fromtimestamp(stat_result.st_mtime),
+        written_at=datetime.fromtimestamp(stat_result.st_mtime) if is_newest_turn else None,
         mtime_ns=stat_result.st_mtime_ns,
         size=size,
     )
@@ -686,13 +700,13 @@ class AgentStreamStore:
         """Newest assistant text for this session, from a bounded tail scan.
 
         Only the trailing ``max_scan_bytes`` of the stream are parsed, and the
-        answer after the turn's last tool call wins over earlier narration. Call
-        it through the caller's cache (see the terminal status manager): one
-        scan per stream write, never one per poll.
+        answer after the turn's last tool call wins over earlier narration.
+        The scan is blocking file I/O, so it runs in a worker thread and the
+        caller caches the result by (mtime_ns, size).
         """
         if not self._path.exists():
             return None
-        return _read_reply_excerpt(self._path, max_chars, max_scan_bytes)
+        return await asyncio.to_thread(read_reply_excerpt, self._path, max_chars, max_scan_bytes)
 
     async def truncate_before(self, sequence: int) -> int:
         """Remove all events with ``stream_sequence >= sequence``.

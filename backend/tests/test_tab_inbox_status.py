@@ -12,12 +12,13 @@ from typing import Any, Optional
 import pytest
 
 from claude_hub.models import AgentRuntimeStatus, AgentType, SessionKind, TerminalAgentStatus
+from claude_hub.services.agent_stream import store as store_module
 from claude_hub.services.agent_stream.activity_labels import (
     IDLE_DETAIL,
     WORKING_ACTIVITY,
     tool_activity_label,
 )
-from claude_hub.services.agent_stream.store import AgentStreamStore, _read_reply_excerpt
+from claude_hub.services.agent_stream.store import AgentStreamStore, read_reply_excerpt
 from claude_hub.services.ttyd_manager import TTYDManager, TTYDProcess
 
 ttyd_manager_module = importlib.import_module("claude_hub.services.ttyd_manager")
@@ -97,7 +98,7 @@ def test_reply_excerpt_reads_only_the_final_answer(tmp_path: Path) -> None:
             _event(6, "turn_completed", {"status": "completed"}),
         ],
     )
-    excerpt = _read_reply_excerpt(stream, max_chars=160, max_scan_bytes=4096)
+    excerpt = read_reply_excerpt(stream, max_chars=160, max_scan_bytes=4096)
     assert excerpt is not None
     # Narration before the tool call is dropped: the answer is what the row
     # shows, not the agent's thinking out loud.
@@ -121,9 +122,12 @@ def test_reply_excerpt_keeps_the_previous_turn_before_new_output(tmp_path: Path)
             ),
         ],
     )
-    excerpt = _read_reply_excerpt(stream, max_chars=160, max_scan_bytes=4096)
+    excerpt = read_reply_excerpt(stream, max_chars=160, max_scan_bytes=4096)
     assert excerpt is not None
     assert excerpt.text == "First answer."
+    # The text is the previous turn's answer, so it must not claim the newest
+    # write's time (the row would read "New reply · just now" for old text).
+    assert excerpt.written_at is None
 
 
 def test_reply_excerpt_scans_a_bounded_tail_of_a_large_stream(tmp_path: Path) -> None:
@@ -138,16 +142,16 @@ def test_reply_excerpt_scans_a_bounded_tail_of_a_large_stream(tmp_path: Path) ->
     stream = tmp_path / "stream.jsonl"
     _write_stream(stream, filler + newest)
     assert stream.stat().st_size > 32 * 1024
-    excerpt = _read_reply_excerpt(stream, max_chars=160, max_scan_bytes=32 * 1024)
+    excerpt = read_reply_excerpt(stream, max_chars=160, max_scan_bytes=32 * 1024)
     assert excerpt is not None
     assert excerpt.text == "short final answer"
 
 
 def test_reply_excerpt_is_absent_for_empty_or_missing_streams(tmp_path: Path) -> None:
-    assert _read_reply_excerpt(tmp_path / "missing.jsonl", 160, 4096) is None
+    assert read_reply_excerpt(tmp_path / "missing.jsonl", 160, 4096) is None
     empty = tmp_path / "empty.jsonl"
     empty.write_text("", encoding="utf-8")
-    assert _read_reply_excerpt(empty, 160, 4096) is None
+    assert read_reply_excerpt(empty, 160, 4096) is None
 
 
 @pytest.mark.asyncio
@@ -187,14 +191,17 @@ async def test_status_payload_carries_what_the_inbox_needs(
     workspace_manager = importlib.import_module("claude_hub.services.workspace_manager")
     monkeypatch.setattr(workspace_manager, "STATE_ROOT", tmp_path)
     started = datetime(2026, 11, 9, 10, 0, 0)
+    # A question card blocks an idle turn: the row still needs the user, and
+    # the previous answer stays readable (the working case is covered below,
+    # where the excerpt read is skipped on purpose).
     monkeypatch.setattr(
         ttyd_manager_module,
         "get_tab_native_runtime_snapshot",
         lambda _tab_id: SimpleNamespace(
-            status=AgentRuntimeStatus.WORKING,
-            detail='Running "pytest -q"',
+            status=AgentRuntimeStatus.IDLE,
+            detail=IDLE_DETAIL,
             pending_question=True,
-            activity='Running "pytest -q"',
+            activity="Asking you",
             activity_since=started,
         ),
     )
@@ -212,10 +219,12 @@ async def test_status_payload_carries_what_the_inbox_needs(
 
     assert isinstance(status, TerminalAgentStatus)
     assert status.pending_question is True
-    assert status.activity == 'Running "pytest -q"'
+    assert status.activity == "Asking you"
     assert status.activity_since == started
     assert status.last_reply_excerpt == "Previously answered."
-    assert status.last_reply_at is not None
+    # turn-2 has announced itself but written nothing: the excerpt is the
+    # previous answer and therefore carries no reply time.
+    assert status.last_reply_at is None
 
 
 @pytest.mark.asyncio
@@ -250,7 +259,7 @@ async def test_status_payload_reuses_one_excerpt_scan_per_stream_write(
     monkeypatch.setattr(
         ttyd_manager_module,
         "get_tab_native_runtime_snapshot",
-        lambda _tab_id: SimpleNamespace(status=AgentRuntimeStatus.WORKING, detail=WORKING_ACTIVITY),
+        lambda _tab_id: SimpleNamespace(status=AgentRuntimeStatus.IDLE, detail=IDLE_DETAIL),
     )
     manager = _chat_manager(
         state_root=tmp_path,
@@ -260,24 +269,69 @@ async def test_status_payload_reuses_one_excerpt_scan_per_stream_write(
         ],
     )
     scans = 0
-    original = AgentStreamStore.reply_excerpt
+    original = store_module.read_reply_excerpt
 
-    async def counting_reply_excerpt(self, *args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
+    def counting_read(*args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
         nonlocal scans
         scans += 1
-        return await original(self, *args, **kwargs)
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(AgentStreamStore, "reply_excerpt", counting_reply_excerpt)
+    monkeypatch.setattr(store_module, "read_reply_excerpt", counting_read)
 
     first = await manager.get_tab_agent_status("tab-1", use_cache=False)
     second = await manager.get_tab_agent_status("tab-1", use_cache=False)
     third = await manager.get_tab_agent_status("tab-1", use_cache=False)
 
+    # One scan for the first poll; the next two only stat an unchanged file.
     assert scans == 1
     assert first is not None and second is not None and third is not None
     assert first.last_reply_excerpt == "Working on it."
     assert second.last_reply_excerpt == first.last_reply_excerpt
     assert third.last_reply_at == first.last_reply_at
+
+
+@pytest.mark.asyncio
+async def test_working_turns_skip_the_excerpt_read_entirely(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A streaming turn would only show the previous answer and rescan a
+    growing file on every poll."""
+    workspace_manager = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(workspace_manager, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        ttyd_manager_module,
+        "get_tab_native_runtime_snapshot",
+        lambda _tab_id: SimpleNamespace(
+            status=AgentRuntimeStatus.WORKING,
+            detail=WORKING_ACTIVITY,
+            activity='Running "pytest -q"',
+        ),
+    )
+    manager = _chat_manager(
+        state_root=tmp_path,
+        reply_events=[
+            _event(0, "turn_started", {"text": "go"}),
+            _event(1, "text_delta", {"text": "Previous answer."}),
+        ],
+    )
+    reads = 0
+    original = store_module.read_reply_excerpt
+
+    def counting_read(*args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
+        nonlocal reads
+        reads += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store_module, "read_reply_excerpt", counting_read)
+
+    status = await manager.get_tab_agent_status("tab-1", use_cache=False)
+
+    assert reads == 0
+    assert status is not None
+    assert status.status == AgentRuntimeStatus.WORKING
+    assert status.activity == 'Running "pytest -q"'
+    assert status.last_reply_excerpt is None
+    assert status.last_reply_at is None
 
 
 @pytest.mark.asyncio
@@ -289,7 +343,7 @@ async def test_status_payload_reads_the_excerpt_again_after_the_stream_grows(
     monkeypatch.setattr(
         ttyd_manager_module,
         "get_tab_native_runtime_snapshot",
-        lambda _tab_id: SimpleNamespace(status=AgentRuntimeStatus.WORKING, detail=WORKING_ACTIVITY),
+        lambda _tab_id: SimpleNamespace(status=AgentRuntimeStatus.IDLE, detail=IDLE_DETAIL),
     )
     manager = _chat_manager(
         state_root=tmp_path,

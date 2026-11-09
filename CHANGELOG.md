@@ -7,6 +7,21 @@
 
 ## Released
 
+### fix(ui): inbox keyboard, excerpt cost, reply time and phone sheet follow-ups
+
+- The panel's container keydown no longer swallows what its own controls do:
+  Enter on a filter segment, refresh, the Recently-done toggle, a row's expand
+  or the inline reply field keeps its native activation instead of jumping to
+  the cursor row (arrow keys stay inside a text field), and a reload never
+  re-opens the phone sheet by itself. A new `Needs-you inbox` mocked browser
+  scenario gates that, including the phone sheet, and it was shown to fail
+  when the old Enter behaviour is put back.
+- The reply excerpt no longer scans on the event loop and no longer runs for a
+  streaming turn (it would only be the previous answer): the stat and bounded
+  tail scan execute in a worker thread, and a run that ends before writing
+  text keeps the previous answer's text without borrowing its write time, so
+  a row cannot read "New reply · just now" for an old reply.
+
 ### fix(chat): say when a saved review comment's diff line is gone
 
 - A review comment is anchored on the row it was written against, and a
