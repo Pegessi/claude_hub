@@ -285,3 +285,58 @@ export function statusLabel(row: InboxRow): string {
   if (row.group === 'needs') return 'Waiting for you'
   return 'Idle'
 }
+
+export type InboxKeyAction = 'move-down' | 'move-up' | 'expand' | 'collapse' | 'open' | 'close'
+
+export interface InboxKeyInput {
+  key: string
+  /** The key came from one of the panel's own buttons. */
+  fromButton: boolean
+  /** The key came from a text field (reply input or any future editor). */
+  fromTextEntry: boolean
+  /** There is a row under the keyboard cursor to act on. */
+  hasRow: boolean
+}
+
+/**
+ * Resolve one key press to a panel action, or null to let the browser have it.
+ *
+ * The panel is a container of real controls — filters, refresh, the done
+ * toggle, per-row expand, and the inline reply field. A container-level
+ * keydown must never swallow what those controls do natively: Enter on a
+ * button or in the reply field belongs to the control, and arrow keys inside a
+ * text field belong to the caret. Only keys pressed on the panel itself (or on
+ * non-interactive text such as a group header) drive the row cursor.
+ *
+ * Escape is the one exception: it closes the surface from anywhere inside it.
+ */
+export function resolveInboxKey(input: InboxKeyInput): InboxKeyAction | null {
+  if (input.key === 'Escape') return 'close'
+  if (input.fromTextEntry) return null
+  if (input.key === 'Enter') return input.fromButton || !input.hasRow ? null : 'open'
+  if (input.key === 'ArrowDown') return 'move-down'
+  if (input.key === 'ArrowUp') return 'move-up'
+  if (input.key === 'ArrowRight') return input.hasRow ? 'expand' : null
+  if (input.key === 'ArrowLeft') return input.hasRow ? 'collapse' : null
+  return null
+}
+
+/** Whether a keydown target is one of the panel's own interactive controls. */
+export function keyTargetKind(target: unknown, container: unknown): {
+  fromButton: boolean
+  fromTextEntry: boolean
+} {
+  if (!target || target === container) return { fromButton: false, fromTextEntry: false }
+  const element = target as {
+    tagName?: string
+    isContentEditable?: boolean
+  }
+  const tag = (element.tagName ?? '').toUpperCase()
+  if (tag === 'BUTTON') return { fromButton: true, fromTextEntry: false }
+  const textEntry =
+    tag === 'INPUT' ||
+    tag === 'TEXTAREA' ||
+    tag === 'SELECT' ||
+    element.isContentEditable === true
+  return { fromButton: false, fromTextEntry: textEntry }
+}

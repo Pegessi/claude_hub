@@ -228,7 +228,9 @@ import {
   flattenRows,
   formatElapsed,
   groupRowsByWorkspace,
+  keyTargetKind,
   moveSelection,
+  resolveInboxKey,
   statusLabel,
   type InboxGroupData,
   type InboxRow,
@@ -465,38 +467,35 @@ async function refresh() {
 }
 
 function onKeydown(event: KeyboardEvent) {
-  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-    event.preventDefault()
-    moveCursor(event.key === 'ArrowDown' ? 1 : -1)
-    return
-  }
-  if (event.key === 'ArrowRight') {
-    if (!cursorRowId.value) return
-    event.preventDefault()
-    expandedTabId.value = cursorRowId.value
-    return
-  }
-  if (event.key === 'ArrowLeft') {
-    if (!cursorRowId.value) return
-    event.preventDefault()
-    if (expandedTabId.value === cursorRowId.value) expandedTabId.value = null
-    return
-  }
-  if (event.key === 'Enter') {
-    const row = visibleRows.value.find(candidate => candidate.tab.id === cursorRowId.value)
-    // Enter inside the reply field submits the form, not the row.
-    const target = event.target as HTMLElement | null
-    if (target && target.tagName !== 'BUTTON' && target.classList?.contains('inbox-reply-input')) return
-    if (row) {
-      event.preventDefault()
-      openTab(row)
-    }
-    return
-  }
-  if (event.key === 'Escape') {
-    event.preventDefault()
+  const { fromButton, fromTextEntry } = keyTargetKind(event.target, contentRef.value)
+  const action = resolveInboxKey({
+    key: event.key,
+    fromButton,
+    fromTextEntry,
+    hasRow: cursorRowId.value !== null,
+  })
+  if (action === null) return
+  event.preventDefault()
+  if (action === 'close') {
     emit('close')
+    return
   }
+  if (action === 'move-down' || action === 'move-up') {
+    moveCursor(action === 'move-down' ? 1 : -1)
+    return
+  }
+  const rowId = cursorRowId.value
+  if (!rowId) return
+  if (action === 'expand') {
+    expandedTabId.value = rowId
+    return
+  }
+  if (action === 'collapse') {
+    if (expandedTabId.value === rowId) expandedTabId.value = null
+    return
+  }
+  const row = visibleRows.value.find(candidate => candidate.tab.id === rowId)
+  if (row) openTab(row)
 }
 
 defineExpose({ focus: () => contentRef.value?.focus?.() })

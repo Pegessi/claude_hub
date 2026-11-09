@@ -17,9 +17,11 @@ const {
   flattenRows,
   formatElapsed,
   groupRowsByWorkspace,
+  keyTargetKind,
   moveSelection,
   needsYouCount,
   RECENT_DONE_WINDOW_MS,
+  resolveInboxKey,
   statusLabel,
 } = await load('features/agent-status/inboxModel.ts')
 const { buildInboxReplyBody, canReplyInline, inlineReplyPath, sendInboxReply } = await load(
@@ -230,6 +232,52 @@ test('inline reply is only offered where it cannot collide with a turn or a card
   assert.equal(canReplyInline({ chatTab: true, pendingQuestion: true, working: false }), false)
   assert.equal(canReplyInline({ chatTab: true, pendingQuestion: false, working: true }), false)
   assert.equal(canReplyInline({ chatTab: false, pendingQuestion: false, working: false }), false)
+})
+
+test('the panel keyboard leaves its own controls their native Enter', () => {
+  // A container-level keydown must not turn "activate this filter/refresh/
+  // toggle/expand/reply" into "open the cursor row".
+  const onControl = { fromButton: true, fromTextEntry: false, hasRow: true }
+  assert.equal(resolveInboxKey({ key: 'Enter', ...onControl }), null)
+  assert.equal(resolveInboxKey({ key: 'Enter', fromButton: false, fromTextEntry: true, hasRow: true }), null)
+  assert.equal(resolveInboxKey({ key: 'Enter', fromButton: false, fromTextEntry: false, hasRow: true }), 'open')
+  // Nothing to open is not an action.
+  assert.equal(resolveInboxKey({ key: 'Enter', fromButton: false, fromTextEntry: false, hasRow: false }), null)
+})
+
+test('the panel keyboard moves the cursor only outside text fields', () => {
+  assert.equal(resolveInboxKey({ key: 'ArrowDown', fromButton: false, fromTextEntry: false, hasRow: true }), 'move-down')
+  assert.equal(resolveInboxKey({ key: 'ArrowUp', fromButton: true, fromTextEntry: false, hasRow: true }), 'move-up')
+  // Inside the reply field the arrows belong to the caret.
+  for (const key of ['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight']) {
+    assert.equal(resolveInboxKey({ key, fromButton: false, fromTextEntry: true, hasRow: true }), null, key)
+  }
+})
+
+test('the panel keyboard expands, collapses and closes from anywhere', () => {
+  assert.equal(resolveInboxKey({ key: 'ArrowRight', fromButton: false, fromTextEntry: false, hasRow: true }), 'expand')
+  assert.equal(resolveInboxKey({ key: 'ArrowLeft', fromButton: false, fromTextEntry: false, hasRow: true }), 'collapse')
+  assert.equal(resolveInboxKey({ key: 'ArrowRight', fromButton: false, fromTextEntry: false, hasRow: false }), null)
+  // Escape is the way out even from a text field.
+  assert.equal(resolveInboxKey({ key: 'Escape', fromButton: false, fromTextEntry: true, hasRow: true }), 'close')
+  assert.equal(resolveInboxKey({ key: 'Escape', fromButton: true, fromTextEntry: false, hasRow: false }), 'close')
+  // Unrelated keys pass through.
+  assert.equal(resolveInboxKey({ key: 'a', fromButton: false, fromTextEntry: false, hasRow: true }), null)
+})
+
+test('keydown targets are classified by their own tag, not by the container', () => {
+  const container = { tagName: 'DIV' }
+  assert.deepEqual(keyTargetKind(container, container), { fromButton: false, fromTextEntry: false })
+  assert.deepEqual(keyTargetKind({ tagName: 'BUTTON' }, container), { fromButton: true, fromTextEntry: false })
+  for (const tagName of ['INPUT', 'TEXTAREA', 'SELECT']) {
+    assert.deepEqual(keyTargetKind({ tagName }, container), { fromButton: false, fromTextEntry: true }, tagName)
+  }
+  assert.deepEqual(
+    keyTargetKind({ tagName: 'DIV', isContentEditable: true }, container),
+    { fromButton: false, fromTextEntry: true },
+  )
+  // Non-element targets (window, text nodes) are not controls.
+  assert.deepEqual(keyTargetKind(null, container), { fromButton: false, fromTextEntry: false })
 })
 
 test('reply routes to the managed session when the tab has one', () => {
