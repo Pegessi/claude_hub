@@ -260,7 +260,9 @@ def test_legacy_binding_without_chat_type_stays_private(tmp_path: Path) -> None:
         )
     )
     store = FeishuBotPoolStore(path=path, legacy_path=tmp_path / "secrets" / "feishu_bot.json")
-    binding = store.snapshot({}).get("bot-1").binding
+    entry = store.snapshot({}).get("bot-1")
+    assert entry is not None
+    binding = entry.binding
     assert binding is not None
     assert binding.chat_type == "p2p"
     assert binding.is_group is False
