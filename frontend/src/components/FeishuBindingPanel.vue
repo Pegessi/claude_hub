@@ -105,10 +105,16 @@
           />
           <div>
             <strong>{{ currentBot.feishu_name || currentBot.name }}</strong>
-            <p>New private messages enter this Chat.</p>
+            <p>{{ boundDescription }}</p>
           </div>
         </section>
         <dl class="connection-details">
+          <div>
+            <dt>Target</dt>
+            <dd data-testid="feishu-binding-target">
+              {{ boundTargetLabel }}
+            </dd>
+          </div>
           <div>
             <dt>Chat</dt>
             <dd>{{ binding.tab_id }}</dd>
@@ -118,6 +124,13 @@
             <dd>{{ formatTime(binding.created_at) }}</dd>
           </div>
         </dl>
+        <p
+          v-if="boundIsTopic"
+          class="selection-hint"
+          data-testid="feishu-binding-topic-hint"
+        >
+          Replies stay inside the group topic.
+        </p>
         <template v-if="confirmDisconnect">
           <div class="confirm-card">
             <strong>Disconnect this Chat?</strong>
@@ -244,17 +257,133 @@
         </template>
 
         <template v-else>
-          <p class="selection-hint">
-            Choose an available Bot to route its private conversation into this Chat.
-          </p>
-          <button
-            type="button"
-            class="ch-btn ch-btn--primary primary-action"
-            :disabled="isMutating || !selectedBot || !!selectedBot.binding || !selectedBot.enabled || !selectedBot.configured"
-            @click="generateCode"
+          <div
+            class="path-switch"
+            role="group"
+            aria-label="Connection type"
           >
-            {{ isMutating ? 'Generating…' : 'Generate pairing code' }}
-          </button>
+            <button
+              type="button"
+              class="ch-btn path-switch__option"
+              :class="{ 'is-selected': connectMode === 'private' }"
+              :aria-pressed="connectMode === 'private'"
+              data-testid="feishu-binding-path-private"
+              @click="connectMode = 'private'"
+            >
+              Private chat
+            </button>
+            <button
+              type="button"
+              class="ch-btn path-switch__option"
+              :class="{ 'is-selected': connectMode === 'group' }"
+              :aria-pressed="connectMode === 'group'"
+              data-testid="feishu-binding-path-group"
+              @click="connectMode = 'group'"
+            >
+              Group chat
+            </button>
+          </div>
+
+          <template v-if="connectMode === 'private'">
+            <p class="selection-hint">
+              Choose an available Bot to route its private conversation into this Chat.
+            </p>
+            <button
+              type="button"
+              class="ch-btn ch-btn--primary primary-action"
+              :disabled="isMutating || !selectedBot || !!selectedBot.binding || !selectedBot.enabled || !selectedBot.configured"
+              @click="generateCode"
+            >
+              {{ isMutating ? 'Generating…' : 'Generate pairing code' }}
+            </button>
+          </template>
+
+          <template v-else>
+            <p class="selection-hint">
+              {{ groupPathHint }}
+            </p>
+            <p
+              v-if="groupsError"
+              class="feedback feedback--error"
+              role="alert"
+              data-testid="feishu-binding-groups-error"
+            >
+              {{ groupsError }}
+            </p>
+            <div
+              v-if="groupsLoading"
+              class="panel-loading"
+              role="status"
+            >
+              <span
+                class="panel-spinner"
+                aria-hidden="true"
+              />
+              Loading groups…
+            </div>
+            <template v-else-if="groups.length">
+              <label class="field">
+                <span class="field-label">Group</span>
+                <select
+                  class="ch-select"
+                  aria-label="Group"
+                  data-testid="feishu-binding-group-select"
+                  :value="selectedChatId || ''"
+                  :disabled="isMutating"
+                  @change="chooseGroup"
+                >
+                  <option
+                    value=""
+                    disabled
+                  >
+                    Select a group
+                  </option>
+                  <option
+                    v-for="chat in groups"
+                    :key="chat.chat_id"
+                    :value="chat.chat_id"
+                  >
+                    {{ groupOptionLabel(chat) }}
+                  </option>
+                </select>
+              </label>
+              <p
+                class="group-warning"
+                data-testid="feishu-binding-group-warning"
+              >
+                Anyone in this group can talk to this Chat.
+              </p>
+              <button
+                type="button"
+                class="ch-btn ch-btn--primary primary-action"
+                data-testid="feishu-binding-bind-group"
+                :disabled="isMutating || !selectedChatId || !selectedBotReady"
+                @click="submitGroupBind"
+              >
+                {{ isMutating ? 'Binding…' : 'Bind this group' }}
+              </button>
+              <button
+                type="button"
+                class="ch-btn ch-btn--sm ch-btn--ghost reload-action"
+                data-testid="feishu-binding-reload-groups"
+                :disabled="isMutating || !selectedBotReady || groupsLoading"
+                @click="loadGroups"
+              >
+                Reload groups
+              </button>
+            </template>
+            <template v-else>
+              <button
+                type="button"
+                class="ch-btn ch-btn--primary primary-action"
+                data-testid="feishu-binding-load-groups"
+                :disabled="isMutating || !selectedBotReady || groupsLoading"
+                @click="loadGroups"
+              >
+                {{ groupsLoaded || groupsError ? 'Reload groups' : 'Load groups' }}
+              </button>
+            </template>
+          </template>
         </template>
       </template>
     </div>
@@ -268,16 +397,20 @@ import FeishuIdentityMark from '@/components/FeishuIdentityMark.vue'
 import { useFeishuBinding } from '@/composables/useFeishuBinding'
 import { trustedFeishuAvatarUrl } from '@/utils/feishuIdentity'
 import { writeClipboard } from '@/utils/clipboard'
+import type { FeishuBotChat } from '@/utils/feishuBotConfig'
 
 const props = defineProps<{ tabId: string }>()
 const root = ref<HTMLElement | null>(null)
 const open = ref(false)
 const copyError = ref<string | null>(null)
 const confirmDisconnect = ref(false)
+const connectMode = ref<'private' | 'group'>('private')
+const selectedChatId = ref<string | null>(null)
 const {
   bots, binding, currentBot, selectedBotId, selectedBot, pendingCode, claim, confirmWord, error,
-  needsLogin, isHydrated, isLoading, isMutating, viewState, statusText, refresh, selectBot,
-  generateCode, activate, disconnect, resume, pause,
+  needsLogin, isHydrated, isLoading, isMutating, viewState, statusText, groups, groupsLoaded,
+  groupsLoading, groupsError, refresh, selectBot, generateCode, activate, bindGroup, loadGroups,
+  ensureGroups, disconnect, resume, pause,
 } = useFeishuBinding(toRef(props, 'tabId'))
 const activeAvatarUrl = computed(() => {
   if (viewState.value !== 'bound-current') return null
@@ -289,6 +422,59 @@ const activeAvatarKey = computed(() => {
   if (!botId || !avatarUrl) return null
   return `${props.tabId}\n${botId}\n${avatarUrl}`
 })
+const isGroupBinding = computed(() => binding.value?.chat_type === 'group')
+const boundGroup = computed(() => {
+  const chatId = binding.value?.chat_id
+  return chatId ? groups.value.find(chat => chat.chat_id === chatId) ?? null : null
+})
+const boundTargetLabel = computed(() => {
+  if (!isGroupBinding.value) return 'Private chat'
+  const chatId = binding.value?.chat_id
+  // The binding records the group name; the freshly loaded list is the fallback
+  // for a binding created before that name was stored.
+  const name = binding.value?.chat_name || boundGroup.value?.name
+    || chatId || 'unnamed group'
+  return `Group · ${name}`
+})
+const boundDescription = computed(() => (isGroupBinding.value
+  ? 'Group messages from this Bot reach this Chat.'
+  : 'New private messages enter this Chat.'))
+const boundIsTopic = computed(() => isGroupBinding.value && (boundGroup.value?.is_topic_mode
+  ?? boundGroup.value?.chat_mode === 'topic'))
+// Picking a group needs the same preconditions as generating a pairing code:
+// a usable, unbound Bot. The pool already disables occupied Bots in the picker.
+const selectedBotReady = computed(() => {
+  const bot = selectedBot.value
+  return !!bot && bot.enabled && bot.configured && !bot.binding
+})
+const groupPathHint = computed(() => {
+  if (groupsLoaded.value && groups.value.length === 0) {
+    return 'This Bot is not in any group yet. Add the Bot to a group in Feishu, then reload.'
+  }
+  return 'Pick a group this Bot can see, then bind it to this Chat.'
+})
+function groupOptionLabel(chat: FeishuBotChat): string {
+  const name = chat.name || chat.chat_id
+  return (chat.is_topic_mode ?? chat.chat_mode === 'topic') ? `${name} · topic group` : name
+}
+// The chosen group belongs to one Bot: switching Bots or losing the list
+// must drop it, or "Bind this group" would submit a group the user no longer
+// sees. Watch the stable Bot id, not the Bot object: the pool snapshot is
+// rebuilt on every poll, so an object watcher would clear a half-made choice.
+watch(selectedBotId, () => { selectedChatId.value = null })
+watch(groups, value => {
+  if (selectedChatId.value && !value.some(chat => chat.chat_id === selectedChatId.value)) {
+    selectedChatId.value = null
+  }
+})
+
+function chooseGroup(event: Event) {
+  const value = (event.target as HTMLSelectElement).value
+  selectedChatId.value = value || null
+}
+async function submitGroupBind() {
+  if (await bindGroup(selectedChatId.value ?? '')) selectedChatId.value = null
+}
 function choose(event: Event) { selectBot((event.target as HTMLSelectElement).value) }
 function toggle() { if (open.value) close(); else open.value = true }
 function close() {
@@ -326,6 +512,17 @@ onUnmounted(() => {
 onActivated(() => { void resume() })
 onDeactivated(() => { close(); pause() })
 watch(() => props.tabId, close, { flush: 'sync' })
+// Fetch the Bot's groups only when they are needed: the group path is open, or
+// a group binding has to be named. ensureGroups never polls and never retries a
+// failed read on its own; "Reload groups" stays the user's decision.
+watch([open, viewState, connectMode, selectedBotId, groupsLoaded], () => {
+  if (!open.value) return
+  if (viewState.value === 'bound-current') {
+    if (isGroupBinding.value) ensureGroups()
+    return
+  }
+  if (viewState.value === 'unbound' && connectMode.value === 'group') ensureGroups()
+}, { flush: 'post' })
 </script>
 
 <style scoped>
@@ -445,6 +642,46 @@ watch(() => props.tabId, close, { flush: 'sync' })
 @keyframes feishu-spin { to { transform: rotate(360deg); } }
 
 .field { display: grid; gap: 6px; margin: 0 0 14px; }
+.path-switch {
+  display: flex;
+  gap: 4px;
+  margin: 0 0 12px;
+  padding: 3px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: 999px;
+  background: var(--ch-color-chip-bg-muted);
+}
+.path-switch .path-switch__option {
+  height: 28px;
+  flex: 1 1 0;
+  padding: 0 10px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--ch-color-text-muted);
+  font-size: var(--ch-font-size-sm);
+}
+.path-switch .path-switch__option:hover:not(:disabled) {
+  border-color: transparent;
+  background: transparent;
+  color: var(--ch-color-text);
+}
+.path-switch .path-switch__option.is-selected {
+  border-color: var(--ch-color-border-strong);
+  background: var(--ch-color-surface-raised);
+  color: var(--ch-color-text-strong);
+  font-weight: 600;
+  box-shadow: 0 1px 2px var(--ch-shadow-color-soft);
+}
+.group-warning {
+  margin: 0 0 14px;
+  padding: 9px 12px;
+  border: 1px solid color-mix(in srgb, var(--ch-color-warning-strong) 45%, var(--ch-color-border));
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-warning-bg);
+  color: var(--ch-color-text);
+  font-size: var(--ch-font-size-sm);
+  line-height: 1.45;
+}
 .field-label { color: var(--ch-color-text-muted); font-size: var(--ch-font-size-sm); font-weight: 500; }
 .selection-hint,
 .step-copy p,
@@ -453,6 +690,7 @@ watch(() => props.tabId, close, { flush: 'sync' })
 .selection-hint { margin-bottom: 14px; }
 .primary-action,
 .disconnect-button { width: 100%; }
+.reload-action { width: 100%; margin-top: 8px; }
 
 .step-copy { align-items: flex-start; gap: 9px; margin-bottom: 10px; }
 .step-number {

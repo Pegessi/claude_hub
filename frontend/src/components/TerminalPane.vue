@@ -103,7 +103,7 @@
         </span>
       </button>
       <ChatSubagentDockPill
-        v-if="isChatSession && !isMobile"
+        v-if="isChatSession"
         :chips="subagentDock.chips.value"
         @jump="subagentDock.jump"
       />
@@ -200,7 +200,6 @@ import { useTerminalStore } from '@/stores/terminalStore'
 import ChatSubagentDockPill from '@/features/chat/components/ChatSubagentDockPill.vue'
 import { subagentDockKey } from '@/features/chat/controllers/subagentDock'
 import { useParentSubagents } from '@/features/chat/controllers/useParentSubagents'
-import { useViewport } from '@/composables/useViewport'
 import FeishuBindingPanel from '@/components/FeishuBindingPanel.vue'
 import TerminalView from '@/components/TerminalView.vue'
 import StructuredPane from '@/components/StructuredPane.vue'
@@ -233,8 +232,8 @@ const isChatSession = computed(() => paneTab.value?.session_kind === 'chat')
 
 // One sub-agent poller per pane, only while it shows a Chat session (an empty
 // id parks it). It follows the pane's tab, so switching tabs refetches and a
-// pane that is not showing a Chat never polls. Shared with the Chat body.
-const { isMobile } = useViewport()
+// pane that is not showing a Chat never polls. The pill it feeds sits in this
+// pane's chrome at every width, so phones and desktops share one control.
 const subagentDock = useParentSubagents(
   computed(() => (isChatSession.value && props.pane.tabId) || ''),
 )

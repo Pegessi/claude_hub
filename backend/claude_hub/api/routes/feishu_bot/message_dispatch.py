@@ -6,6 +6,7 @@ import asyncio
 import base64
 import logging
 import re
+import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable
 
@@ -30,6 +31,7 @@ from claude_hub.services.feishu_bot import (
     FeishuBotClient,
     FeishuMessageEvent,
     FeishuMessageTimeStatus,
+    FeishuReplyReceipt,
     feishu_message_time_notice,
     feishu_message_time_status,
 )
@@ -64,6 +66,39 @@ class FeishuMessageTimeRejected(HTTPException):
             },
         )
         self.reason = reason
+
+
+#: A group's form (group vs topic) changes rarely; one read per window is enough.
+_TOPIC_MODE_TTL_SECONDS = 600.0
+_TOPIC_MODE_CACHE_LIMIT = 256
+_topic_mode_cache: dict[str, tuple[float, bool]] = {}
+
+
+async def _group_is_topic_mode(client: FeishuBotClient, bot_id: str, chat_id: str) -> bool:
+    """Whether this Bot's group chat is in the topic (话题) form.
+
+    Feishu keeps ``chat_mode='group'`` when a group is switched to the topic
+    form and reports ``group_message_type='thread'`` instead, so one read of the
+    chat decides it. A failed read is not cached: it must not pin reply shape
+    for ten minutes.
+    """
+
+    key = f"{bot_id}:{chat_id}"
+    now = time.monotonic()
+    cached = _topic_mode_cache.get(key)
+    if cached is not None and now - cached[0] < _TOPIC_MODE_TTL_SECONDS:
+        return cached[1]
+    try:
+        info = await client.chat_info(chat_id)
+    except Exception as exc:  # noqa: BLE001 - a failed probe must not fail a reply
+        logger.info("Feishu topic detection unavailable: %s", type(exc).__name__)
+        return False
+    _topic_mode_cache[key] = (now, info.is_topic_mode)
+    # One Bot may sit in many groups; keep the cache as bounded as the pool.
+    if len(_topic_mode_cache) > _TOPIC_MODE_CACHE_LIMIT:
+        oldest = min(_topic_mode_cache, key=lambda item: _topic_mode_cache[item][0])
+        _topic_mode_cache.pop(oldest, None)
+    return info.is_topic_mode
 
 
 class FeishuMessageDispatcher:
@@ -267,10 +302,15 @@ class FeishuMessageDispatcher:
         the previous binding can never be delivered against the new one.
         """
 
-        current = self.bindings.pool().routed_binding(
-            effective.bot_id,
-            sender_open_id=binding.sender_open_id,
-            chat_id=binding.chat_id,
+        pool = self.bindings.pool()
+        current = (
+            pool.routed_binding_for_chat(effective.bot_id, chat_id=binding.chat_id)
+            if binding.is_group
+            else pool.routed_binding(
+                effective.bot_id,
+                sender_open_id=binding.sender_open_id,
+                chat_id=binding.chat_id,
+            )
         )
         if current is None or current.pairing_id != binding.pairing_id:
             return False
@@ -375,40 +415,52 @@ class FeishuMessageDispatcher:
         formatted: bool = False,
     ) -> bool:
         try:
-            # Token acquisition can block on Feishu and must stay outside the gate.
+            # Token acquisition and the chat-form probe can block on Feishu and
+            # must stay outside the gate.
             token = await client.get_tenant_token()
+            # A reply inside a topic stays in that topic; a root message in a
+            # topic-mode group is promoted into a new topic instead of landing
+            # flat in the group.
+            reply_in_thread = event.thread_id is not None or (
+                event.chat_type == "group"
+                and await _group_is_topic_mode(client, effective.bot_id, event.chat_id)
+            )
             async with self.bindings.gate(effective.bot_id):
                 if not self.bindings.pool().is_current(effective):
                     return False
                 if still_valid is not None and not still_valid():
                     return False
                 # An already-sent request cannot be recalled, so a timeout is never retried.
+                # Only a thread reply carries the flag: a private reply keeps its
+                # previous request shape exactly.
+                thread_flag = {"reply_in_thread": True} if reply_in_thread else {}
                 if formatted:
                     payload = build_feishu_message_payload(text)
-                    if event.thread_id is not None:
-                        outbound = client.reply_message(
-                            event.message_id,
-                            payload.msg_type,
-                            payload.content,
-                            access_token=token,
-                            reply_in_thread=True,
-                        )
-                    else:
-                        outbound = client.reply_message(
-                            event.message_id,
-                            payload.msg_type,
-                            payload.content,
-                            access_token=token,
-                        )
+                    outbound = client.reply_message(
+                        event.message_id,
+                        payload.msg_type,
+                        payload.content,
+                        access_token=token,
+                        **thread_flag,
+                    )
                 else:
-                    if event.thread_id is not None:
-                        outbound = client.reply_text(
-                            event.message_id, text, access_token=token, reply_in_thread=True
-                        )
-                    else:
-                        outbound = client.reply_text(event.message_id, text, access_token=token)
-                await asyncio.wait_for(
+                    outbound = client.reply_text(
+                        event.message_id,
+                        text,
+                        access_token=token,
+                        **thread_flag,
+                    )
+                receipt = await asyncio.wait_for(
                     outbound, timeout=self.bindings.outbound_post_timeout_seconds()
+                )
+                # Remember our own message and the topic it landed in: a
+                # follow-up there is recognised without another @mention.
+                sent_id = receipt.message_id if isinstance(receipt, FeishuReplyReceipt) else None
+                landed_thread = (
+                    receipt.thread_id if isinstance(receipt, FeishuReplyReceipt) else None
+                )
+                self.bindings.record_sent_message(
+                    effective.bot_id, sent_id, thread_id=landed_thread or event.thread_id
                 )
                 return True
         except Exception as exc:

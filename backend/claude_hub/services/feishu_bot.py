@@ -8,7 +8,7 @@ import os
 import secrets
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from fractions import Fraction
 from pathlib import Path
@@ -141,6 +141,74 @@ class FeishuMessageEvent:
     thread_id: str | None = None
     parent_id: str | None = None
     root_id: str | None = None
+
+
+@dataclass(frozen=True)
+class FeishuReplyReceipt:
+    """Identity of one sent reply, so later follow-ups can be recognised."""
+
+    message_id: str | None = None
+    thread_id: str | None = None
+
+
+@dataclass(frozen=True)
+class FeishuChatInfo:
+    """One Feishu chat as this Bot sees it.
+
+    ``chat_mode`` is ``group`` or ``topic``; a group switched to the topic form
+    keeps ``chat_mode='group'`` and reports ``group_message_type='thread'``, so
+    both signals are needed to recognise a topic-mode group.
+    """
+
+    chat_id: str
+    name: str | None = None
+    chat_mode: str | None = None
+    group_message_type: str | None = None
+    chat_type: str | None = None
+    user_count: int | None = None
+    bot_count: int | None = None
+
+    @property
+    def is_group(self) -> bool:
+        # The chat-info API reports chat_mode group/topic for groups and uses
+        # chat_type for visibility (private/public), so both are checked. A
+        # direct-chat id is not addressable through this endpoint at all.
+        if self.chat_mode in {"group", "topic"}:
+            return True
+        return (self.chat_type or "").lower() in {"private", "public", "group"}
+
+    @property
+    def is_topic_mode(self) -> bool:
+        return self.chat_mode == "topic" or self.group_message_type == "thread"
+
+
+def _chat_info_from_payload(value: Mapping[str, Any]) -> FeishuChatInfo | None:
+    chat_id = value.get("chat_id")
+    if not isinstance(chat_id, str) or not chat_id.strip():
+        return None
+
+    def text(key: str) -> str | None:
+        raw = value.get(key)
+        return raw if isinstance(raw, str) and raw.strip() else None
+
+    def count(key: str) -> int | None:
+        raw = value.get(key)
+        if not isinstance(raw, (int, str)):
+            return None
+        try:
+            return int(raw)  # Feishu returns counts as strings.
+        except (TypeError, ValueError):
+            return None
+
+    return FeishuChatInfo(
+        chat_id=chat_id,
+        name=text("name"),
+        chat_mode=text("chat_mode"),
+        group_message_type=text("group_message_type"),
+        chat_type=text("chat_type"),
+        user_count=count("user_count"),
+        bot_count=count("bot_count"),
+    )
 
 
 class FeishuBotClient:
@@ -283,6 +351,59 @@ class FeishuBotClient:
             bounded = bounded[: _MAX_REPLY_CHARS - 1] + "…"
         await self.send_message(chat_id, "text", {"text": bounded})
 
+    async def chat_info(self, chat_id: str, *, access_token: str | None = None) -> FeishuChatInfo:
+        """Read one chat as this Bot sees it; used to prove membership and topic mode."""
+
+        token = await self.get_tenant_token() if access_token is None else access_token
+        response = await self._request(
+            "GET",
+            f"/open-apis/im/v1/chats/{quote(chat_id, safe='')}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get("code") != 0:
+            raise FeishuBotError("Feishu refused the Bot chat lookup")
+        data = payload.get("data")
+        info = _chat_info_from_payload(data) if isinstance(data, Mapping) else None
+        if info is None:
+            raise FeishuBotError("Feishu returned no usable chat identity")
+        return info
+
+    async def list_chats(self, *, page_size: int = 100, max_pages: int = 5) -> list[FeishuChatInfo]:
+        """List the groups this Bot belongs to (bounded, newest pages first)."""
+
+        token = await self.get_tenant_token()
+        found: list[FeishuChatInfo] = []
+        page_token: str | None = None
+        for _ in range(max_pages):
+            params: dict[str, Any] = {"page_size": page_size}
+            if page_token is not None:
+                params["page_token"] = page_token
+            response = await self._request(
+                "GET",
+                "/open-apis/im/v1/chats",
+                params=params,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict) or payload.get("code") != 0:
+                raise FeishuBotError("Feishu refused the Bot chat list")
+            data = payload.get("data")
+            if not isinstance(data, Mapping):
+                break
+            for item in data.get("items") or []:
+                info = _chat_info_from_payload(item) if isinstance(item, Mapping) else None
+                if info is None:
+                    continue
+                # This endpoint lists groups only, so a missing chat_type is a group.
+                found.append(info if info.chat_type else replace(info, chat_type="group"))
+            page_token = data.get("page_token") if data.get("has_more") else None
+            if not page_token:
+                break
+        return found
+
     async def reply_message(
         self,
         message_id: str,
@@ -291,8 +412,12 @@ class FeishuBotClient:
         *,
         access_token: str | None = None,
         reply_in_thread: bool = False,
-    ) -> None:
-        """Reply to one exact inbound message with any supported Feishu type."""
+    ) -> FeishuReplyReceipt:
+        """Reply to one exact inbound message with any supported Feishu type.
+
+        Returns what Feishu reports about the sent message, so callers can
+        recognise later follow-ups inside the same topic as their own.
+        """
 
         token = await self.get_tenant_token() if access_token is None else access_token
         if not token.strip():
@@ -311,6 +436,15 @@ class FeishuBotClient:
         payload = response.json()
         if payload.get("code") != 0:
             raise FeishuBotError("Feishu rejected the Bot reply")
+        data = payload.get("data")
+        if not isinstance(data, Mapping):
+            return FeishuReplyReceipt()
+        sent = data.get("message_id")
+        thread = data.get("thread_id")
+        return FeishuReplyReceipt(
+            message_id=sent if isinstance(sent, str) and sent.strip() else None,
+            thread_id=thread if isinstance(thread, str) and thread.strip() else None,
+        )
 
     async def reply_text(
         self,
@@ -319,13 +453,13 @@ class FeishuBotClient:
         *,
         access_token: str | None = None,
         reply_in_thread: bool = False,
-    ) -> None:
+    ) -> FeishuReplyReceipt:
         """Reply to one exact inbound message instead of a mutable chat target."""
 
         bounded = text.strip() or "Claude Hub completed without a text response."
         if len(bounded) > _MAX_REPLY_CHARS:
             bounded = bounded[: _MAX_REPLY_CHARS - 1] + "…"
-        await self.reply_message(
+        return await self.reply_message(
             message_id,
             "text",
             {"text": bounded},

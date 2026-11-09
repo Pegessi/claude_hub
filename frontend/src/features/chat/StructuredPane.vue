@@ -104,12 +104,6 @@
       :tab-id="props.tabId"
     />
 
-    <ChatSubagentMobileBar
-      v-if="isMobile && subagentDock"
-      :chips="subagentDock.chips.value"
-      @jump="subagentDock.jump"
-    />
-
     <!-- Composer -->
     <ChatComposer />
 
@@ -132,7 +126,6 @@ import { chatIdentityKey, chatGoalKey, chatTimelineKey, chatActionsKey, chatDeli
 import ChatTimeline from './components/ChatTimeline.vue'
 import ChatMessageInbox from './components/ChatMessageInbox.vue'
 import ChatComposer from './components/ChatComposer.vue'
-import ChatSubagentMobileBar from './components/ChatSubagentMobileBar.vue'
 import ChatGoalSetup from './components/ChatGoalSetup.vue'
 import AttachmentPreviewDialog from '@/components/AttachmentPreviewDialog.vue'
 import { provideAttachmentPreview } from '@/composables/useAttachmentPreview'
@@ -153,8 +146,6 @@ import { useChatTimeline } from '@/features/chat/controllers/useChatTimeline'
 import { useChatActions } from '@/features/chat/controllers/useChatActions'
 import { useChatQueue } from '@/features/chat/controllers/useChatQueue'
 import { useChatImages } from '@/features/chat/controllers/useChatImages'
-import { useSubagentDock } from '@/features/chat/controllers/subagentDock'
-import { useViewport } from '@/composables/useViewport'
 const props = defineProps<ChatPaneProps>()
 const preview = provideAttachmentPreview()
 const isManagedChat = computed(() => Boolean(props.managedChat))
@@ -171,10 +162,8 @@ const feishuBotPoolStore = useFeishuBotPoolStore()
 const currentTab = computed(() =>
   terminalStore.tabs.find(t => t.id === props.tabId) ?? null,
 )
-// TerminalPane owns the pane's single sub-agent poller; desktop shows it in the
-// pane chrome, mobile shows the running-only bar above the composer.
-const subagentDock = useSubagentDock()
-const { isMobile } = useViewport()
+// TerminalPane owns the pane's single sub-agent poller and shows it in the pane
+// chrome; the Chat body only contributes inline per-turn links.
 const capabilityConfiguration = computed(() => streamCapabilityConfiguration(currentTab.value))
 const {
   events,

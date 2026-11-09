@@ -50,10 +50,29 @@ class FeishuPairingView(BaseModel):
     tab_id: str
     workspace_id: str | None
     chat_id: str | None
+    # "p2p" for a private pairing, "group" for a group bound from the Hub.
+    chat_type: str = "p2p"
+    chat_name: str | None = None
     owner_kind: str
     is_mine: bool
     created_at: datetime
     expires_at: datetime | None
+
+
+class FeishuBotChatView(BaseModel):
+    chat_id: str
+    name: str | None
+    chat_mode: str | None
+    # A group switched to the topic (话题) form keeps chat_mode='group', so the
+    # resolved flag is what the UI needs to promise in-thread replies.
+    is_topic_mode: bool = False
+    user_count: int | None
+    bot_count: int | None
+
+
+class FeishuBotChatsResponse(BaseModel):
+    chats: list[FeishuBotChatView]
+    revision: int
 
 
 class FeishuBotSummary(BaseModel):
@@ -149,6 +168,8 @@ def pairing_view(
         # Another person's Feishu conversation id is not needed to understand
         # occupancy, so it is only returned to its own owner.
         chat_id=pairing.chat_id if is_mine else None,
+        chat_type=getattr(pairing, "chat_type", "p2p"),
+        chat_name=getattr(pairing, "chat_name", None),
         owner_kind=pairing.owner.kind,
         is_mine=is_mine,
         created_at=created,
@@ -486,6 +507,100 @@ def register_pool_routes(
                 raise HTTPException(400, "invalid_callback_settings") from exc
         return pool_response(user, bindings, focus_bot_id=bot_id)
 
+    @router.get("/bots/{bot_id}/chats", response_model=FeishuBotChatsResponse)
+    async def list_feishu_bot_chats(
+        bot_id: str, user: User = Depends(require_hub_user)
+    ) -> FeishuBotChatsResponse:
+        """List the groups this Bot belongs to, so a Chat can be bound to one."""
+
+        owner = bindings.owner_identity(user)
+        entry = get_pool_snapshot(bindings).get(bot_id)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="bot_not_found")
+        if not entry.configured:
+            raise HTTPException(status_code=503, detail="bot_pool_unavailable")
+        if not bindings.owner_is_authorized(owner):
+            raise HTTPException(status_code=403, detail="hub_identity_revoked")
+        if entry.config is None:
+            raise HTTPException(status_code=503, detail="bot_pool_unavailable")
+        client = bindings.bot_client_class()(entry.config)
+        try:
+            chats = await client.list_chats()
+        except Exception as exc:  # noqa: BLE001 - credentials/scope failures are 502-shaped
+            logger.info("Feishu Bot chat list unavailable: %s", type(exc).__name__)
+            raise HTTPException(status_code=502, detail="bot_chats_unavailable") from exc
+        return FeishuBotChatsResponse(
+            chats=[
+                FeishuBotChatView(
+                    chat_id=chat.chat_id,
+                    name=chat.name,
+                    chat_mode=chat.chat_mode,
+                    is_topic_mode=chat.is_topic_mode,
+                    user_count=chat.user_count,
+                    bot_count=chat.bot_count,
+                )
+                for chat in chats
+            ],
+            revision=entry.revision,
+        )
+
+    @router.post("/bots/{bot_id}/bindings/group", response_model=FeishuBotPoolResponse)
+    async def bind_feishu_group(
+        bot_id: str, request: Request, user: User = Depends(require_hub_user)
+    ) -> FeishuBotPoolResponse:
+        """Bind one group chat to this Chat without a pairing code.
+
+        The Bot is asked for the chat first: only a group it is really a member
+        of can be bound, and a private chat id is refused. Anyone in that group
+        can then address the Bot, which is why the UI states it explicitly.
+        """
+
+        value = await read_json(request)
+        exact_keys(value, {"chat_id", "tab_id", "expected_revision"})
+        chat_id = parse_secret(value, "chat_id")
+        tab_id = parse_secret(value, "tab_id")
+        expected_revision = parse_revision(value)
+        owner = bindings.owner_identity(user)
+        entry = get_pool_snapshot(bindings).get(bot_id)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="bot_not_found")
+        if not entry.configured:
+            raise HTTPException(status_code=503, detail="bot_pool_unavailable")
+        if not bindings.owner_is_authorized(owner):
+            raise HTTPException(status_code=403, detail="hub_identity_revoked")
+        if entry.binding is not None:
+            raise HTTPException(status_code=409, detail="bot_occupied")
+        # Reading the chat reaches Feishu, so it happens before the Bot gate:
+        # occupancy and revision are re-checked by the store under the gate.
+        workspace_id = bindings.validate_bind_target(tab_id, None)
+        if entry.config is None:
+            raise HTTPException(status_code=503, detail="bot_pool_unavailable")
+        client = bindings.bot_client_class()(entry.config)
+        try:
+            info = await client.chat_info(chat_id)
+        except Exception as exc:  # noqa: BLE001 - unreadable chat is a refusal
+            logger.info("Feishu group bind lookup failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=422, detail="chat_not_visible") from exc
+        if info.chat_mode is None and info.chat_type is None:
+            # Feishu answers with a partial record (no form information) when
+            # this Bot is not in the group, so that is a visibility problem.
+            raise HTTPException(status_code=422, detail="chat_not_visible")
+        if not info.is_group:
+            raise HTTPException(status_code=422, detail="chat_not_group")
+        async with bindings.gate(bot_id):
+            await in_pool(
+                lambda: bindings.pool().bind_group(
+                    bot_id,
+                    owner=owner,
+                    tab_id=tab_id,
+                    workspace_id=workspace_id,
+                    chat_id=chat_id,
+                    chat_name=info.name,
+                    expected_revision=expected_revision,
+                )
+            )
+        return pool_response(user, bindings, focus_bot_id=bot_id)
+
     @router.patch("/bots/{bot_id}", response_model=FeishuBotPoolResponse)
     async def update_feishu_bot(
         bot_id: str, request: Request, user: User = Depends(require_hub_user)
@@ -525,6 +640,7 @@ def register_pool_routes(
             await in_pool(
                 lambda: bindings.pool().delete_bot(bot_id, expected_revision=expected_revision)
             )
+            bindings.forget_sent_messages(bot_id)
         await reconcile_ws(bindings)
         return pool_response(user, bindings, focus_bot_id=None)
 
@@ -619,6 +735,8 @@ def register_pool_routes(
             await in_pool(
                 lambda: bindings.pool().release_binding(bot_id, expected_revision=expected_revision)
             )
+            # A released Bot keeps no ownership over the messages it sent.
+            bindings.forget_sent_messages(bot_id)
         return pool_response(user, bindings, focus_bot_id=bot_id)
 
     @router.api_route("/config/status", methods=["GET"])

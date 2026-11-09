@@ -38,6 +38,7 @@ from claude_hub.services.bot_pool.common import (
     _owner_from_dict,
     _safe_timestamp,
     _validate_pool_numbers,
+    binding_chat_type,
     deprecated_env_present,
     environment_config,
     environment_present,
@@ -247,6 +248,9 @@ class FeishuBotPoolStateStore(object):
             chat_id=_as_text(value.get("chat_id"), "binding.chat_id", limit=_MAX_ID_CHARS),
             created_at=_as_float(value.get("created_at"), "binding.created_at"),
             generation=_as_int(value.get("generation"), "binding.generation"),
+            # Legacy bindings predate groups and are all private pairings.
+            chat_type=binding_chat_type(value),
+            chat_name=_as_optional_text(value.get("chat_name"), "binding.chat_name"),
         )
 
     @staticmethod

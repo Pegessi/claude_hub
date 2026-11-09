@@ -25,6 +25,8 @@ LIVE = "fixture-live-child"
 ARCH = "fixture-archived-child"
 WS = "fixture-workspace"
 NOW = "2026-11-03T10:00:00Z"
+MOBILE = {"width": 390, "height": 844}
+DESKTOP = {"width": 1280, "height": 900}
 
 
 def tab(tab_id, name, **extra):
@@ -92,6 +94,8 @@ async def main(browser_run: BrowserRun) -> None:
     event_tabs = []
     unarchived = []
     arch_restored = asyncio.Event()
+    # Flip once the phone has shown a running child, to prove history-only.
+    all_done = asyncio.Event()
 
     live_sub = subagent(
         "sa-live0000001",
@@ -111,7 +115,7 @@ async def main(browser_run: BrowserRun) -> None:
         close_reason="completed",
     )
 
-    async with browser_run.context(viewport={"width": 1280, "height": 900}) as context:
+    async with browser_run.context(viewport=DESKTOP) as context:
 
         async def block_websocket(socket):
             await socket.close(code=1000, reason="mocked UI smoke")
@@ -199,7 +203,15 @@ async def main(browser_run: BrowserRun) -> None:
                 query = parse_qs(parsed.query)
                 assert query.get("include_closed") == ["true"]
                 parent_id = query.get("parent_tab_id", [None])[0]
-                body = [live_sub, arch_sub] if parent_id == PARENT else []
+                finished_live = dict(
+                    live_sub,
+                    closed=True,
+                    close_reason="completed",
+                    last_status="completed",
+                    last_summary="Finished the parser review.",
+                )
+                live = finished_live if all_done.is_set() else live_sub
+                body = [live, arch_sub] if parent_id == PARENT else []
             elif path == f"/api/tabs/{ARCH}/unarchive" and request.method == "POST":
                 unarchived.append(path)
                 arch_restored.set()
@@ -351,6 +363,111 @@ async def main(browser_run: BrowserRun) -> None:
         await wait_until(lambda: ARCH in event_tabs)
         await page.screenshot(path=str(output / "02-archived-restored.png"))
 
+        # Mobile: the same Agents pill keeps its place in the pane chrome, next
+        # to the session-name pill, instead of adding a bar above the composer.
+        await page.locator(".tab-bar .tab", has_text="Parent Chat").click()
+        await page.set_viewport_size(MOBILE)
+        await expect(pill).to_be_visible()
+        # One control for one pane: no second sub-agent control anywhere.
+        await expect(page.locator("[data-testid=subagent-dock-pill]")).to_have_count(1)
+        name_pill = page.locator(".pane-session-name").first
+        await expect(name_pill).to_be_visible()
+        chrome_box = await page.locator(".pane-chrome").first.bounding_box()
+        pill_box = await pill.bounding_box()
+        name_box = await name_pill.bounding_box()
+        assert chrome_box and pill_box and name_box, "chrome cluster must be laid out"
+        assert pill_box["y"] < chrome_box["y"] + chrome_box["height"], (chrome_box, pill_box)
+        assert (
+            abs((pill_box["y"] + pill_box["height"] / 2) - (name_box["y"] + name_box["height"] / 2))
+            < 2
+        ), (
+            "the Agents pill must sit on the session-name pill's row",
+            pill_box,
+            name_box,
+        )
+        assert pill_box["x"] < name_box["x"], "active count stays left of the session name"
+        assert name_box["x"] + name_box["width"] <= 390, name_box
+        await page.screenshot(path=str(output / "03-mobile-chrome-pill.png"))
+
+        await expect(page.get_by_test_id("subagent-sheet")).to_have_count(0)
+        await pill.click()
+        sheet = page.get_by_test_id("subagent-sheet")
+        await expect(sheet).to_be_visible()
+        await expect(page.get_by_test_id("subagent-popover")).to_have_count(0)
+        await expect(sheet.get_by_test_id("subagent-row-sa-live0000001")).to_have_attribute(
+            "data-state", "running"
+        )
+        # Modal hygiene: the body lock follows the other phone overlays, and a
+        # full Tab cycle cannot walk out of the sheet (hidden Earlier rows are
+        # not trap edges, so this must hold in the default running state too).
+        assert await page.evaluate("document.body.style.overflow") == "hidden"
+        for _ in range(6):
+            await page.keyboard.press("Tab")
+            assert await page.evaluate(
+                "Boolean(document.activeElement && document.activeElement.closest("
+                "'[data-testid=subagent-sheet]'))"
+            ), "Tab must stay inside the sheet"
+        await page.keyboard.press("Shift+Tab")
+        assert await page.evaluate(
+            "Boolean(document.activeElement && document.activeElement.closest("
+            "'[data-testid=subagent-sheet]'))"
+        ), "Shift+Tab must stay inside the sheet"
+        await page.screenshot(path=str(output / "04-mobile-sheet.png"))
+        await sheet.get_by_test_id("subagent-earlier-toggle").click()
+        await expect(sheet.get_by_test_id("subagent-row-sa-arch0000002")).to_be_visible()
+        await page.keyboard.press("Escape")
+        await expect(page.get_by_test_id("subagent-sheet")).to_have_count(0)
+
+        # Done and a backdrop tap close it too, and focus returns to the pill.
+        await pill.click()
+        await expect(sheet).to_be_visible()
+        await sheet.get_by_role("button", name="Close sub-agents").click()
+        await expect(page.get_by_test_id("subagent-sheet")).to_have_count(0)
+        await expect(pill).to_be_focused()
+        await pill.click()
+        await expect(sheet).to_be_visible()
+        await page.get_by_test_id("subagent-sheet-backdrop").click(position={"x": 12, "y": 120})
+        await expect(page.get_by_test_id("subagent-sheet")).to_have_count(0)
+        assert (
+            await page.evaluate("document.body.style.overflow") == ""
+        ), "scroll lock must be released"
+
+        # Esc also closes after a tap moved focus out of the sheet's subtree.
+        await pill.click()
+        await expect(sheet).to_be_visible()
+        await sheet.locator(".subagent-sheet-head strong").click()
+        assert (
+            await page.evaluate(
+                "Boolean(document.activeElement && document.activeElement.closest("
+                "'[data-testid=subagent-sheet]'))"
+            )
+        ) is False, "the tap must have moved focus out of the sheet"
+        await page.keyboard.press("Escape")
+        await expect(page.get_by_test_id("subagent-sheet")).to_have_count(0)
+
+        # A breakpoint change dismisses the reveal instead of morphing it.
+        await pill.click()
+        await expect(sheet).to_be_visible()
+        await page.set_viewport_size(DESKTOP)
+        await expect(page.get_by_test_id("subagent-sheet")).to_have_count(0)
+        await expect(page.get_by_test_id("subagent-popover")).to_have_count(0)
+
+        # History-only: back on a phone the same pill reads "2 done" and still
+        # opens the sheet, so a finished sub-agent has an entry point here.
+        await page.set_viewport_size(MOBILE)
+        all_done.set()
+        await expect(pill).to_contain_text("2 done", timeout=15000)
+        await pill.click()
+        await expect(sheet).to_be_visible()
+        await expect(sheet.get_by_test_id("subagent-row-sa-live0000001")).to_have_attribute(
+            "data-state", "closed"
+        )
+        await expect(sheet.get_by_test_id("subagent-row-sa-arch0000002")).to_be_visible()
+        await page.screenshot(path=str(output / "05-mobile-history-sheet.png"))
+        await page.keyboard.press("Escape")
+        await expect(page.get_by_test_id("subagent-sheet")).to_have_count(0)
+        await page.set_viewport_size(DESKTOP)
+
         # Let the 5s polls run once so unexpected responses surface as errors.
         await page.wait_for_timeout(1200)
         assert not unknown_requests, unknown_requests
@@ -366,6 +483,9 @@ async def main(browser_run: BrowserRun) -> None:
             "child grouped under workspace in Workspace Agents panel with sub marker",
             "one-click jump focuses live child Chat",
             "archived child click restores (unarchive) then focuses it",
+            "mobile keeps the pill in the pane chrome (no composer bar); sheet closes via Esc"
+            " (focused or not), Done, backdrop tap and a breakpoint change; history-only"
+            ' reads "2 done" and still opens the sheet',
         ],
         "unarchive_requests": unarchived,
         "event_tabs": event_tabs,

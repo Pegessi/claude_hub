@@ -10,6 +10,7 @@ const {
   messageClockLabel,
   messageSourceAvatarUrl,
   messageSourceLabel,
+  messageSourceScope,
   turnClockLabel,
 } = mod
 
@@ -79,6 +80,8 @@ test('serialized turn history preserves explicit source without inferring from t
   assert.equal(turns.length, 3)
   assert.equal(turns[0].userText, 'from Feishu')
   assert.equal(turns[0].origin, 'feishu')
+  // Metadata written before group binding shipped carries neither chat_type nor
+  // thread_id, so it must still read as a private conversation.
   assert.deepEqual(turns[0].feishu, {
     appId: 'cli-bot',
     botName: 'Hub 助手',
@@ -86,8 +89,11 @@ test('serialized turn history preserves explicit source without inferring from t
     chatId: 'oc-chat',
     messageId: 'om-message',
     senderOpenId: 'ou-sender',
+    chatType: 'p2p',
+    threadId: null,
   })
   assert.equal(messageSourceLabel(turns[0]), 'Hub 助手')
+  assert.equal(messageSourceScope(turns[0]), null)
   assert.equal(messageSourceAvatarUrl(turns[0]), 'https://example.test/bot.png')
   assert.equal(turns[1].origin, 'web')
   assert.equal(turns[1].feishu, null)
@@ -136,6 +142,42 @@ test('Feishu source avatars reject non-HTTPS URLs', () => {
 
   assert.equal(messageSourceLabel(turns[0]), 'Hub 助手')
   assert.equal(messageSourceAvatarUrl(turns[0]), null)
+})
+
+test('Feishu group provenance adds a scope suffix and leaves the p2p badge alone', () => {
+  const turnOf = (feishu, turnId) => groupEventsIntoTurns([makeEvent(1, 'turn_started', {
+    summary: 'from a group',
+    metadata: {
+      origin: 'feishu',
+      feishu: {
+        app_id: 'cli-bot',
+        bot_name: 'Ted',
+        chat_id: 'oc-group',
+        message_id: 'om-group',
+        sender_open_id: 'ou-sender',
+        ...feishu,
+      },
+    },
+  }, { turn_id: turnId })])[0]
+
+  const group = turnOf({ chat_type: 'group' }, 'turn-group')
+  assert.equal(group.feishu.chatType, 'group')
+  assert.equal(group.feishu.threadId, null)
+  assert.equal(messageSourceLabel(group), 'Ted')
+  assert.equal(messageSourceScope(group), 'group')
+
+  const topic = turnOf({ chat_type: 'group', thread_id: ' omt-topic ' }, 'turn-topic')
+  assert.equal(topic.feishu.threadId, 'omt-topic')
+  assert.equal(messageSourceScope(topic), 'group topic')
+
+  // Absent, explicit p2p, or unrecognised scope values all stay private chat.
+  for (const chatType of [undefined, 'p2p', 'GROUP', 'topic', 42, {}]) {
+    const turn = turnOf({ chat_type: chatType }, `turn-${String(chatType)}`)
+    assert.equal(turn.feishu.chatType, 'p2p')
+    assert.equal(messageSourceScope(turn), null)
+  }
+  // A blank thread id is a plain group message, not a topic one.
+  assert.equal(messageSourceScope(turnOf({ chat_type: 'group', thread_id: '   ' }, 'turn-blank')), 'group')
 })
 
 test('text_delta appends to assistant text within the current turn', () => {
