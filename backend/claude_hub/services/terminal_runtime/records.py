@@ -3,7 +3,10 @@
 from collections import namedtuple
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional, TypedDict
+from typing import TYPE_CHECKING, Optional, TypedDict
+
+if TYPE_CHECKING:
+    from ..agent_stream.store import ReplyExcerpt
 
 ScanEntry = namedtuple(
     "ScanEntry",
@@ -33,6 +36,20 @@ class _AgentStatusSnapshot(TypedDict):
     hash: str
     last_changed_at: Optional[datetime]
     frame_first_seen_at: Optional[datetime]
+
+
+@dataclass(frozen=True)
+class _ReplyExcerptCacheEntry:
+    """One cached reply excerpt keyed by the stream file's identity.
+
+    ``mtime_ns`` + ``size`` change on every append, so an unchanged pair proves
+    the cached excerpt is still the newest one and the status poll can skip the
+    tail scan entirely.
+    """
+
+    mtime_ns: int
+    size: int
+    excerpt: Optional["ReplyExcerpt"]
 
 
 class TabStateError(RuntimeError):

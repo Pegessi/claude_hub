@@ -7,6 +7,28 @@
 
 ## Released
 
+### feat(ui): needs-you Inbox replaces the permanent Status/Agents count pills
+
+- The top bar shows one **Inbox** entry whose amber badge counts only sessions
+  that actually need the user (a blocked provider question, an unread finished
+  turn, attention, or an agent that went offline); at zero it shows no number
+  at all, so a quiet Hub stops advertising "Status 36 / Agents 6". The panel
+  groups rows into **Needs you / Working / Recently done** (done stays collapsed
+  and drops out after 12 hours), keeps manual-versus-workspace as an
+  all/chats/agents filter, shows the newest reply as a two-line preview that
+  expands to the full text, and supports ↑/↓ move, Enter (open the session),
+  → (expand), Esc (close) plus a full-height sheet on phones.
+- `/api/tabs/status` gains additive `pending_question`, `activity`,
+  `activity_since`, `last_reply_excerpt` and `last_reply_at` (all optional, so
+  older producers and clients keep working) computed from state the tailer
+  already holds plus a cached bounded tail scan of the session stream; the
+  provider-jargon detail strings ("native provider turn is in flight",
+  "native provider is ready/completed") become "Responding"/"Ready", and the
+  running tool is named ("Running `pytest -q`"). Idle rows offer an inline
+  reply that posts the normal `/stream/send` body with a stable
+  `client_turn_id`, while a row blocked on a structured question links
+  "Answer in chat →" instead.
+
 ### fix(chat): authorize out-of-cwd images only via completed image tools and add image retry
 
 - A legitimate image produced by a recognized native image-view tool outside
