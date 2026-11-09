@@ -106,7 +106,10 @@
       /** Give each case its own owners: the live footer reads the turn from the
        *  pane owner, exactly as it does in the app. */
       const Case = {
-        props: { label: String, component: Object, currentTurn: Object, startedAt: String, part: Object, turnForParts: Object },
+        props: {
+          caseId: String, label: String, component: Object,
+          currentTurn: Object, startedAt: String, part: Object, turnForParts: Object,
+        },
         setup(props) {
           provide(chatTimelineKey, {
             turns: ref([props.currentTurn ?? completedTurn]),
@@ -116,7 +119,7 @@
           })
           provide(chatImagesKey, { openImageLightbox: () => {} })
           provide(chatIdentityKey, { markdownImageScope: 'fixture-tab' })
-          return () => h('section', { class: 'case' }, [
+          return () => h('section', { class: 'case', 'data-case': props.caseId }, [
             h('p', { class: 'case-label' }, props.label),
             h(props.component, props.part
               ? { turn: props.turnForParts ?? completedTurn, part: props.part }
@@ -129,24 +132,25 @@
       // 21:15 like the reported case instead of a 1970-scale number.
       const liveStartedAt = new Date(Date.now() - (21 * 60 + 15) * 1000).toISOString()
 
+      // ``caseId`` is what the browser gate selects on; the label is only text.
       const cases = [
-        ['Live turn: work in progress', ChatTurnWorking, { currentTurn: active, startedAt: liveStartedAt }],
-        ['Live turn: waiting on a sub-agent, pulse stopped', ChatTurnWorking, { currentTurn: waitingChild, startedAt: liveStartedAt }],
-        ['Live turn: waiting for your answer', ChatTurnWorking, { currentTurn: waitingAnswer, startedAt: liveStartedAt }],
-        ['Completed: counts loaded, failures kept', ChatTurnParts, {
+        ['busy', 'Live turn: work in progress', ChatTurnWorking, { currentTurn: active, startedAt: liveStartedAt }],
+        ['waiting-subagent', 'Live turn: waiting on a sub-agent, pulse stopped', ChatTurnWorking, { currentTurn: waitingChild, startedAt: liveStartedAt }],
+        ['waiting-answer', 'Live turn: waiting for your answer', ChatTurnWorking, { currentTurn: waitingAnswer, startedAt: liveStartedAt }],
+        ['completed-counts', 'Completed: counts loaded, failures kept', ChatTurnParts, {
           part: { kind: 'process', key: 'p1', meta: 'Activity · 18 steps · 1 failed · 21m', expanded: false },
         }],
-        ['Completed: detail not read yet', ChatTurnParts, {
+        ['completed-lazy', 'Completed: detail not read yet', ChatTurnParts, {
           part: { kind: 'process', key: 'p2', meta: 'Activity · 21m', expanded: false, detailStatus: 'loading' },
         }],
-        ['Completed: no duration available', ChatTurnParts, {
+        ['completed-none', 'Completed: no duration available', ChatTurnParts, {
           part: { kind: 'process', key: 'p3', meta: 'Activity', expanded: false },
         }],
       ]
 
       createApp({
-        render: () => h('div', { class: 'board' }, cases.map(([label, component, props]) => (
-          h(Case, { label, component, ...props })
+        render: () => h('div', { class: 'board' }, cases.map(([caseId, label, component, props]) => (
+          h(Case, { caseId, label, component, ...props })
         ))),
       }).mount('#app')
     </script>
