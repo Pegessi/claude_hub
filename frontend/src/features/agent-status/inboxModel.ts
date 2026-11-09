@@ -216,6 +216,42 @@ export function flattenRows(groups: readonly InboxGroupData[]): InboxRow[] {
   return groups.flatMap(group => group.rows)
 }
 
+export interface InboxWorkspaceSection {
+  key: string
+  /** Empty for rows that belong to no workspace (manual sessions). */
+  title: string
+  rows: InboxRow[]
+}
+
+/**
+ * Split one bucket's rows by owning workspace.
+ *
+ * The Workspace Agents view keeps what the old floating panel showed: a
+ * workspace-attributed Chat (including a sub-agent started from another Chat)
+ * must be readable as "this belongs to Repo", not as a loose row. Ordering is
+ * stable — workspaces by first appearance, rows in their bucket order — so the
+ * header does not jump while statuses poll.
+ */
+export function groupRowsByWorkspace(rows: readonly InboxRow[]): InboxWorkspaceSection[] {
+  const sections: InboxWorkspaceSection[] = []
+  const byKey = new Map<string, InboxWorkspaceSection>()
+  for (const row of rows) {
+    const key = row.tab.workspace_id || ''
+    let section = byKey.get(key)
+    if (!section) {
+      section = {
+        key,
+        title: key ? row.tab.workspace_name?.trim() || 'Workspace' : '',
+        rows: [],
+      }
+      byKey.set(key, section)
+      sections.push(section)
+    }
+    section.rows.push(row)
+  }
+  return sections
+}
+
 /**
  * Move the keyboard cursor by one row, clamped at both ends.
  *

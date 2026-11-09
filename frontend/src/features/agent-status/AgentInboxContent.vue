@@ -39,7 +39,7 @@
       v-if="renderedGroups.length === 0"
       class="inbox-empty"
     >
-      Nothing needs you right now.
+      {{ quietText }}
     </div>
 
     <div
@@ -50,7 +50,7 @@
         v-if="quiet"
         class="inbox-quiet"
       >
-        Nothing needs you right now.
+        {{ quietText }}
       </p>
       <section
         v-for="group in renderedGroups"
@@ -79,124 +79,139 @@
           <span>{{ group.title }}</span>
           <strong>{{ group.rows.length }}</strong>
         </div>
-        <ul
+        <div
           v-if="group.key !== 'done' || !doneCollapsed"
-          class="inbox-list"
+          class="inbox-group-body"
         >
-          <li
-            v-for="row in group.rows"
-            :key="row.tab.id"
-            class="inbox-row"
-            :data-row-tab-id="row.tab.id"
-            :class="{ 'is-cursor': row.tab.id === cursorRowId, 'is-expanded': row.tab.id === expandedTabId }"
-            :data-group="group.key"
+          <div
+            v-for="section in sectionsFor(group)"
+            :key="`${group.key}:${section.key}`"
+            class="inbox-section"
           >
-            <div class="inbox-row-line">
-              <button
-                :ref="el => registerRowButton(row.tab.id, el)"
-                type="button"
-                class="inbox-row-main"
-                :title="rowTooltip(row)"
-                @click="openTab(row)"
-                @focus="focusRow(row)"
-              >
-                <span
-                  class="inbox-row-dot"
-                  :data-status="rowState(row)"
-                />
-                <span class="inbox-row-text">
-                  <span class="inbox-row-top">
-                    <span class="inbox-row-name">{{ row.tab.name }}</span>
-                    <span
-                      v-if="row.tab.parent_tab_id"
-                      class="inbox-row-sub"
-                      title="Hub sub-agent started from another Chat"
-                    >sub</span>
-                    <span
-                      v-if="row.tab.agent_type"
-                      class="inbox-row-provider"
-                      :data-kind="row.tab.agent_type"
-                    >{{ row.tab.agent_type }}</span>
-                  </span>
-                  <span class="inbox-row-reason">{{ row.reason }}</span>
-                  <span
-                    v-if="row.excerpt"
-                    class="inbox-row-excerpt"
-                  >{{ row.excerpt }}</span>
-                </span>
-                <span class="inbox-row-meta">
-                  <span
-                    v-if="elapsedLabel(row)"
-                    class="inbox-row-time"
-                  >{{ elapsedLabel(row) }}</span>
-                </span>
-              </button>
-              <button
-                type="button"
-                class="inbox-row-expand"
-                :aria-expanded="row.tab.id === expandedTabId"
-                :aria-label="row.tab.id === expandedTabId ? `Collapse ${row.tab.name}` : `Expand ${row.tab.name}`"
-                @click="toggleExpand(row.tab.id)"
-              >
-                {{ row.tab.id === expandedTabId ? '▾' : '▸' }}
-              </button>
-            </div>
-
             <div
-              v-if="row.tab.id === expandedTabId"
-              class="inbox-row-detail"
+              v-if="section.title"
+              class="inbox-workspace-header"
             >
-              <p
-                v-if="row.excerpt"
-                class="inbox-row-detail-text"
-              >
-                {{ row.excerpt }}
-              </p>
-              <button
-                v-if="row.status?.pending_question"
-                type="button"
-                class="inbox-row-answer"
-                @click="openTab(row)"
-              >
-                Answer in chat →
-              </button>
-              <form
-                v-else-if="canReply(row)"
-                class="inbox-reply"
-                @submit.prevent="submitReply(row)"
-              >
-                <input
-                  v-model="draftFor(row.tab.id).text"
-                  type="text"
-                  class="inbox-reply-input"
-                  :placeholder="`Reply to ${row.tab.name}`"
-                  :aria-label="`Reply to ${row.tab.name}`"
-                  :disabled="draftFor(row.tab.id).sending"
-                >
-                <button
-                  type="submit"
-                  class="inbox-reply-send"
-                  :disabled="!draftFor(row.tab.id).text.trim() || draftFor(row.tab.id).sending"
-                >
-                  {{ draftFor(row.tab.id).sending ? 'Sending…' : 'Send' }}
-                </button>
-              </form>
-              <p
-                v-if="draftFor(row.tab.id).error"
-                class="inbox-reply-error"
-                role="alert"
-              >
-                {{ draftFor(row.tab.id).error }}
-              </p>
-              <p
-                v-if="!row.status?.pending_question && !canReply(row)"
-                class="inbox-row-detail-note"
-              >
-                {{ replyBlockedReason(row) }}
-              </p>
+              <span :title="section.title">{{ section.title }}</span>
             </div>
-          </li>
-        </ul>
+            <ul class="inbox-list">
+              <li
+                v-for="row in section.rows"
+                :key="row.tab.id"
+                class="inbox-row"
+                :data-row-tab-id="row.tab.id"
+                :class="{ 'is-cursor': row.tab.id === cursorRowId, 'is-expanded': row.tab.id === expandedTabId }"
+                :data-group="group.key"
+                :data-workspace="row.tab.workspace_id || undefined"
+              >
+                <div class="inbox-row-line">
+                  <button
+                    :ref="el => registerRowButton(row.tab.id, el)"
+                    type="button"
+                    class="inbox-row-main"
+                    :title="rowTooltip(row)"
+                    @click="openTab(row)"
+                    @focus="focusRow(row)"
+                  >
+                    <span
+                      class="inbox-row-dot"
+                      :data-status="rowState(row)"
+                    />
+                    <span class="inbox-row-text">
+                      <span class="inbox-row-top">
+                        <span class="inbox-row-name">{{ row.tab.name }}</span>
+                        <span
+                          v-if="row.tab.parent_tab_id"
+                          class="inbox-row-sub"
+                          title="Hub sub-agent started from another Chat"
+                        >sub</span>
+                        <span
+                          v-if="row.tab.agent_type"
+                          class="inbox-row-provider"
+                          :data-kind="row.tab.agent_type"
+                        >{{ row.tab.agent_type }}</span>
+                      </span>
+                      <span class="inbox-row-reason">{{ row.reason }}</span>
+                      <span
+                        v-if="row.excerpt"
+                        class="inbox-row-excerpt"
+                      >{{ row.excerpt }}</span>
+                    </span>
+                    <span class="inbox-row-meta">
+                      <span
+                        v-if="elapsedLabel(row)"
+                        class="inbox-row-time"
+                      >{{ elapsedLabel(row) }}</span>
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    class="inbox-row-expand"
+                    :aria-expanded="row.tab.id === expandedTabId"
+                    :aria-label="row.tab.id === expandedTabId ? `Collapse ${row.tab.name}` : `Expand ${row.tab.name}`"
+                    @click="toggleExpand(row.tab.id)"
+                  >
+                    {{ row.tab.id === expandedTabId ? '▾' : '▸' }}
+                  </button>
+                </div>
+
+                <div
+                  v-if="row.tab.id === expandedTabId"
+                  class="inbox-row-detail"
+                >
+                  <p
+                    v-if="row.excerpt"
+                    class="inbox-row-detail-text"
+                  >
+                    {{ row.excerpt }}
+                  </p>
+                  <button
+                    v-if="row.status?.pending_question"
+                    type="button"
+                    class="inbox-row-answer"
+                    @click="openTab(row)"
+                  >
+                    Answer in chat →
+                  </button>
+                  <form
+                    v-else-if="canReply(row)"
+                    class="inbox-reply"
+                    @submit.prevent="submitReply(row)"
+                  >
+                    <input
+                      v-model="draftFor(row.tab.id).text"
+                      type="text"
+                      class="inbox-reply-input"
+                      :placeholder="`Reply to ${row.tab.name}`"
+                      :aria-label="`Reply to ${row.tab.name}`"
+                      :disabled="draftFor(row.tab.id).sending"
+                    >
+                    <button
+                      type="submit"
+                      class="inbox-reply-send"
+                      :disabled="!draftFor(row.tab.id).text.trim() || draftFor(row.tab.id).sending"
+                    >
+                      {{ draftFor(row.tab.id).sending ? 'Sending…' : 'Send' }}
+                    </button>
+                  </form>
+                  <p
+                    v-if="draftFor(row.tab.id).error"
+                    class="inbox-reply-error"
+                    role="alert"
+                  >
+                    {{ draftFor(row.tab.id).error }}
+                  </p>
+                  <p
+                    v-if="!row.status?.pending_question && !canReply(row)"
+                    class="inbox-row-detail-note"
+                  >
+                    {{ replyBlockedReason(row) }}
+                  </p>
+                </div>
+              </li>
+            </ul>
+          </div>
+        </div>
       </section>
     </div>
   </div>
@@ -212,11 +227,13 @@ import {
   buildInbox,
   flattenRows,
   formatElapsed,
+  groupRowsByWorkspace,
   moveSelection,
   statusLabel,
   type InboxGroupData,
   type InboxRow,
   type InboxScope,
+  type InboxWorkspaceSection,
 } from './inboxModel'
 
 withDefaults(defineProps<{
@@ -280,6 +297,27 @@ const visibleRows = computed<InboxRow[]>(() => {
 const cursorIndex = computed(() =>
   visibleRows.value.findIndex(row => row.tab.id === cursorRowId.value),
 )
+
+/**
+ * Rows of one bucket, split by workspace in the Agents view. The old floating
+ * panel always grouped managed sessions under their workspace; keeping that in
+ * the Agents filter is what lets a sub-agent started from another Chat be read
+ * as "this belongs to Repo" instead of a loose row. The Chats view stays flat.
+ */
+function sectionsFor(group: InboxGroupData): InboxWorkspaceSection[] {
+  if (scope.value !== 'workspace') return [{ key: 'flat', title: '', rows: group.rows }]
+  return groupRowsByWorkspace(group.rows)
+}
+
+/**
+ * The filter is a view, not a different Hub: saying "nothing needs you" while
+ * the trigger badge shows another filter's count would read as a bug.
+ */
+const quietText = computed(() => {
+  if (scope.value === 'all') return 'Nothing needs you right now.'
+  const label = SCOPE_OPTIONS.find(option => option.value === scope.value)?.label ?? 'this view'
+  return `Nothing needs you in ${label}.`
+})
 
 /** Nothing needs the user; only finished history is left. */
 const quiet = computed(() => groups.value.every(group => group.key === 'done' || group.rows.length === 0))

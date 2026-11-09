@@ -16,6 +16,7 @@ const {
   classifyRow,
   flattenRows,
   formatElapsed,
+  groupRowsByWorkspace,
   moveSelection,
   needsYouCount,
   RECENT_DONE_WINDOW_MS,
@@ -159,6 +160,45 @@ test('the manual/agent filter is a filter, not a second list', () => {
 test('archived sessions never enter the inbox', () => {
   const rows = buildInbox([tab({ archived: true, is_unread: true })], [status()], { nowMs: NOW })
   assert.equal(flattenRows(rows).length, 0)
+})
+
+test('the Agents view groups rows under their workspace, sub-agents included', () => {
+  const tabs = [
+    tab({ id: 'a1', name: 'agent one', workspace_id: 'ws-a', workspace_name: 'Repo A' }),
+    tab({ id: 'b1', name: 'agent two', workspace_id: 'ws-b', workspace_name: 'Repo B' }),
+    tab({
+      id: 'a2',
+      name: 'child',
+      workspace_id: 'ws-a',
+      workspace_name: 'Repo A',
+      parent_tab_id: 'a1',
+      subagent_id: 'sa-1',
+    }),
+  ]
+  const statuses = ['a1', 'b1', 'a2'].map(id =>
+    status({ tab_id: id, status: 'working', activity: 'Responding' }),
+  )
+  const rows = flattenRows(buildInbox(tabs, statuses, { nowMs: NOW, scope: 'workspace' }))
+  const sections = groupRowsByWorkspace(rows)
+  assert.deepEqual(
+    sections.map(section => [section.title, section.rows.map(row => row.tab.id)]),
+    [
+      ['Repo A', ['a1', 'a2']],
+      ['Repo B', ['b1']],
+    ],
+  )
+  // The sub marker is a property of the row, independent of grouping.
+  assert.equal(sections[0].rows[1].tab.parent_tab_id, 'a1')
+})
+
+test('workspace grouping keeps one untitled section for rows without a workspace', () => {
+  const rows = flattenRows(
+    buildInbox([tab({ id: 'solo', name: 'solo chat' })], [status({ tab_id: 'solo' })], { nowMs: NOW }),
+  )
+  const sections = groupRowsByWorkspace(rows)
+  assert.equal(sections.length, 1)
+  assert.equal(sections[0].title, '')
+  assert.deepEqual(sections[0].rows.map(row => row.tab.id), ['solo'])
 })
 
 test('the cursor clamps instead of wrapping past the ends', () => {
