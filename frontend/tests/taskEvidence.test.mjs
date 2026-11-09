@@ -357,3 +357,34 @@ test('execution internals live in a collapsed Debug info fold', () => {
   // The old nested evidence fold must not come back; evidence moved up.
   assert.doesNotMatch(panelSource, /Validation, risks, and artifacts/)
 })
+
+test('only Markdown evidence opens a control; other paths are plain text', t => {
+  const { panel } = mountEvidence(
+    t,
+    task({}),
+    [report({
+      changed_files: ['frontend/src/app.ts', 'docs/notes.md'],
+      artifact_refs: ['reports/diff.md', 'reports/coverage.json'],
+    })],
+  )
+  // A disabled button is unfocusable and tells a keyboard user nothing, so a
+  // non-previewable path must not be a button at all.
+  const buttons = findAll(panel.root, node => node.tag === 'button' && hasClass(node, 'evidence-chip'))
+  assert.deepEqual(
+    buttons.map(button => textOf(button).trim()),
+    ['docs/notes.md', 'reports/diff.md'],
+  )
+  const chips = findAll(panel.root, node => hasClass(node, 'evidence-chip'))
+  const plain = chips.filter(chip => chip.tag !== 'button')
+  assert.deepEqual(
+    plain.map(chip => textOf(chip).trim()),
+    ['frontend/src/app.ts', 'reports/coverage.json'],
+  )
+  for (const chip of chips) {
+    assert.equal(
+      chip.props?.disabled,
+      undefined,
+      `no evidence chip may be disabled: ${textOf(chip)}`,
+    )
+  }
+})
