@@ -334,12 +334,14 @@ class ManagerStatusMixin(ManagerHost):
                 AgentRuntimeStatus.ATTENTION: "Needs attention",
                 AgentRuntimeStatus.OFFLINE: "Offline",
             }[native_runtime_status]
-            # While a turn streams, the excerpt would still be the previous
-            # answer and every poll would rescan a growing file: skip the read
-            # and let the activity line speak for the turn.
+            # A turn that is merely streaming shows the previous answer and
+            # would rescan a growing file on every poll, so its excerpt read is
+            # skipped and the activity line speaks for it. A turn that is ALSO
+            # blocked on a question is the top "Waiting for your answer" row:
+            # that row keeps its preview.
             excerpt = (
                 None
-                if native_runtime_status == AgentRuntimeStatus.WORKING
+                if (native_runtime_status == AgentRuntimeStatus.WORKING and not pending_question)
                 else await self._reply_excerpt(process)
             )
             return TerminalAgentStatus(
