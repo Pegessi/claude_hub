@@ -103,7 +103,7 @@
               option.id,
             )"
             :aria-label="optionAccessibleName(option)"
-            :aria-describedby="optionNoteId(question, option)"
+            :aria-describedby="optionNoteId(option, index)"
             @click="chooseOption(question, option)"
           >
             <span
@@ -121,7 +121,7 @@
               </span>
               <span
                 v-if="option.description"
-                :id="optionNoteId(question, option)"
+                :id="optionNoteId(option, index)"
                 class="approval-option-note"
               >{{ option.description }}</span>
             </span>
@@ -187,7 +187,7 @@
 import { requireChatOwner, chatComposerKey, chatDeliveryKey, chatIdentityKey, chatTimelineKey } from '../owners'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useQuestionReceipt } from './useQuestionReceipt'
-import { describeQuestionAnswers, isQuestionAnswered, latestPendingApprovalKey } from '@/utils/chatQuestionResponse'
+import { describeQuestionAnswers, isQuestionAnswered, latestPendingApprovalKey, questionOptionNoteId } from '@/utils/chatQuestionResponse'
 import type { TimelinePart, TimelineQuestion, TimelineQuestionOption, TimelineTurn } from '../timeline/types'
 const { isApprovalResolved, isQuestionOptionSelected, toggleQuestionOption, customAnswer, setCustomAnswer, canSubmitQuestion, submitQuestionResponse, answersFor } = requireChatOwner(chatComposerKey)
 const { isSending } = requireChatOwner(chatDeliveryKey)
@@ -305,9 +305,18 @@ function optionAccessibleName(option: TimelineQuestionOption): string {
   return option.recommended ? `${option.label} (recommended)` : option.label
 }
 
-function optionNoteId(question: TimelineQuestion, option: TimelineQuestionOption): string | undefined {
+/** The tradeoff line's DOM id, or none when the option has no tradeoff.
+ *
+ *  A provider option id is often the label itself ("Close and archive the
+ *  report"), which cannot be an ``id``/``aria-describedby`` token, so the id
+ *  is built from the positions plus a sanitized card key. */
+function optionNoteId(option: TimelineQuestionOption, optionIndex: number): string | undefined {
   if (!option.description) return undefined
-  return `approval-note-${props.part.approval.key}-${question.id}-${option.id}`
+  return questionOptionNoteId(
+    props.part.approval.key,
+    Math.min(stepIndex.value, Math.max(questions.value.length - 1, 0)),
+    optionIndex,
+  )
 }
 
 function chooseOption(question: TimelineQuestion, option: TimelineQuestionOption): void {
