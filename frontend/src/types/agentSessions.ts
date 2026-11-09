@@ -199,7 +199,11 @@ export interface ChatGoal {
   plan?: ChatGoalPlan | null
   /** Turn that produced (or is producing) the plan; keys the plan card. */
   plan_turn_id?: string | null
-  plan_approved?: boolean
+  /**
+   * A dispatched turn carrying the user's own message answered the plan
+   * request. It does not distinguish approval from a change request.
+   */
+  plan_answered?: boolean
   plan_warning?: string | null
   created_at: string
   updated_at: string
