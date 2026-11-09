@@ -116,7 +116,7 @@ PLAN_GOAL = {
     "plan_first": True,
     "plan_pending": False,
     "plan_turn_id": PLAN_TURN,
-    "plan_approved": False,
+    "plan_answered": False,
     "plan": {
         "summary": "Add a bounded cache with tests, nothing else.",
         "steps": [
@@ -357,11 +357,14 @@ async def main(browser_run: BrowserRun) -> None:
                         )
                         return
                     if current_goal:
+                        # The approval message is dispatched as the Goal's next
+                        # turn, which is what ends the plan's approval request.
                         current_goal = {
                             **current_goal,
                             "status": "active",
                             "dispatch_state": "dispatched",
                             "pending_image_count": 0,
+                            "plan_answered": bool(current_goal.get("plan_turn_id")),
                         }
                     body = {"ok": True}
                 elif path.endswith("/goal/current"):
@@ -616,12 +619,17 @@ async def main(browser_run: BrowserRun) -> None:
             # Approve sends the fixed approval message on the Goal steer path.
             await composer.fill("")
             await approve_button.click()
-            await expect(card).to_have_attribute("data-mode", "waiting")
+            await expect(card).to_have_attribute("data-mode", "answered")
+            await expect(card.locator(".goal-plan-note")).to_have_text(
+                "The Goal continued after this plan."
+            )
             await expect(
                 card.get_by_role("button", name="Approve & start", exact=True)
             ).not_to_be_visible()
             assert send_payloads[-1]["text"] == "Approve the plan. Start implementing it now."
             assert send_payloads[-1]["delivery"] == "steer"
+            await page.screenshot(path=str(output / "goal-plan-card-answered.png"), full_page=True)
+            report["screenshots"].append("goal-plan-card-answered.png")
             assert not any(
                 path.endswith("/resume") or path.endswith("/pause")
                 for _, path in report["api_requests"]

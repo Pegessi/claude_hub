@@ -7,7 +7,7 @@ import { useChatGoal as useGoalResource } from '@/composables/useChatGoal'
 import { goalBlocksPlan, goalPlanLockReason, isGoalTerminal } from '@/utils/chatGoalPolicy'
 import { hasChatStatusRefreshBoundary } from '@/utils/chatTurnLifecycle'
 import { goalObservationVersion, goalTurnCompletionReflected, latestNativeGoalNotification, nativeGoalNotificationReflected } from '@/utils/chatGoalObservation'
-import { browserStorage, readPlanFirstPreference, writePlanFirstPreference } from '../goal-plan/planPreference'
+import { browserStorage, planFirstChoice, readPlanFirstPreference, writePlanFirstPreference } from '../goal-plan/planPreference'
 
 interface Dependencies {
   attachments: Ref<DraftAttachment[]>
@@ -82,13 +82,21 @@ export function useChatGoal(deps: Dependencies) {
       goalError.value = goalSetupDisabledReason.value
       return
     }
-    const planFirst = !planFirstDisabledReason.value && Boolean(input.planFirst)
-    writePlanFirstPreference(browserStorage(), planFirst)
-    planFirstPreferred.value = planFirst
+    // The request always carries the effective value. Only a Chat that can
+    // actually offer the option may change the remembered preference: one
+    // provider-native Goal must not turn Plan first off everywhere.
+    const choice = planFirstChoice({
+      requested: Boolean(input.planFirst),
+      disabledReason: planFirstDisabledReason.value,
+    })
+    if (choice.remember !== null) {
+      writePlanFirstPreference(browserStorage(), choice.remember)
+      planFirstPreferred.value = choice.remember
+    }
     const imageSnapshot = [...deps.attachments.value]
     const saved = await createGoal({
       objective: input.objective,
-      plan_first: planFirst,
+      plan_first: choice.effective,
       attachments: imageSnapshot.map(toStreamSendAttachment),
     })
     if (saved) {

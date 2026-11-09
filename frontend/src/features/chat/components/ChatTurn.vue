@@ -73,6 +73,7 @@
       v-if="planCardMode(turn)"
       :plan="goal?.plan ?? null"
       :mode="planCardMode(turn)!"
+      :heading-id="planHeadingId(turn)"
       :warning="goal?.plan_warning ?? null"
       :approve-disabled-reason="planApprovalReason(turn)"
       @approve="approvePlan(turn)"
@@ -165,7 +166,7 @@ import ChatUserMessage from './ChatUserMessage.vue'
 import ChatTurnParts from './ChatTurnParts.vue'
 import ChatTurnWorking from './ChatTurnWorking.vue'
 import GoalPlanCard from '../goal-plan/GoalPlanCard.vue'
-import { GOAL_PLAN_APPROVAL_MESSAGE, GOAL_PLAN_REVISE_PREFIX, goalPlanApprovalDisabledReason, goalPlanCardMode, type GoalPlanCardMode } from '../goal-plan/planCard'
+import { GOAL_PLAN_APPROVAL_MESSAGE, GOAL_PLAN_REVISE_PREFIX, goalPlanApprovalDisabledReason, goalPlanCardMode, goalPlanHeadingId, type GoalPlanCardMode } from '../goal-plan/planCard'
 import type { TimelineTurn } from '../timeline/types'
 const { isEditingTurn, startEdit, turnCopyText, copyFeedbackLabel, copyTurnButtonLabel, copyTurn, copyFeedbackState, completedPlanText, implementingPlanKey, implementPlan, forkingOrdinal, forkFromTurn } = requireChatOwner(chatActionsKey)
 const { turnInFlight, isSending, submit, draftMessage } = requireChatOwner(chatDeliveryKey)
@@ -182,6 +183,11 @@ function isLive(turn: TimelineTurn): boolean {
 /** Which plan card this turn owns, if any. `null` for every ordinary turn. */
 function planCardMode(turn: TimelineTurn): GoalPlanCardMode | null {
   return goalPlanCardMode(goal.value, turn.turnId)
+}
+
+/** Per-turn heading id: a fixed literal would collide across cards. */
+function planHeadingId(turn: TimelineTurn): string {
+  return goalPlanHeadingId(turn.turnId)
 }
 
 function planApprovalReason(turn: TimelineTurn): string | null {
