@@ -135,7 +135,7 @@ maso in another):
   `DotExecutionEditor.vue:286-294`, `subagentTool.ts:202-206`,
   `quotaDisplay.ts:135-138`; glyphs and brand colors live in
   `frontend/src/components/AgentAvatar.vue:10-187` and are copied a second
-  time into two CSS palettes (`agent-status-floating-panel.css:351-374`,
+  time into two CSS palettes (`features/agent-status/agent-inbox.css`,
   `WorkspaceAgentStatus.vue:447-470`, which has no maso chip color).
 
 ### 1.3 Approval / readiness is asymmetric across surfaces

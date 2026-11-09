@@ -355,13 +355,13 @@ Subsequent requests:
 | `components/TerminalPane.vue` | Single pane: iframe loading `/api/terminal/proxy/{id}/`, lifecycle, postMessage bridge |
 | `components/TerminalView.vue` | Terminal interaction glue: postMessage key dispatch, clipboard-image upload, context-menu, mobile controls bridge |
 | `components/MobileControls.vue` | Mobile-specific soft-buttons (Ctrl, Alt, Esc, arrow keys, paste, etc.) |
+| `features/agent-status/AgentInboxPanel.vue` | Needs-you inbox popover: Needs you / Working / Recently done groups, filters, peek, inline reply (`inboxModel.ts`, `inboxReply.ts`) |
 | **Workspace components** | |
 | `components/AgentWorkspaceView.vue` | Task board/detail, report/review rendering, workspace/agent/edit forms; owns the Task creation flow lifetime |
 | `components/TaskCreateDialog.vue` | Task creation presentation and responsive styles; no independent request/recovery state |
 | `composables/useTaskCreateFlow.ts` | Task creation form, frozen requests, capability gating, credential recovery and late-response guards |
 | `utils/draftAttachments.ts` | Shared draft attachment conversion and preview cleanup, with caller-owned lists |
 | `components/AgentAvatar.vue` | Small agent/caller badge: type icon + name |
-| `features/agent-status/AgentInboxPanel.vue` | Needs-you inbox popover: Needs you / Working / Recently done groups, filters, peek, inline reply (`inboxModel.ts`, `inboxReply.ts`) |
 | `components/LoadingButton.vue` | Generic button with loading + success/error state |
 | `components/MarkdownContent.vue` | Markdown rendering (marked + DOMPurify), inline path mention linking |
 | `components/EnvPresetManager.vue` | Launch-env preset CRUD, hide/unhide, workspace-level assignment |
