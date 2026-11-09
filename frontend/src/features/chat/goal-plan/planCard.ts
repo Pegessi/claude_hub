@@ -20,11 +20,13 @@ export const GOAL_PLAN_REVISE_PREFIX = 'Revise the plan: '
  * `preparing` — the planning turn is still running and no plan arrived yet;
  * `review` — the Goal parked awaiting approval, so Approve/Revise apply;
  * `waiting` — the plan exists but the Goal moved on without asking for it;
- * `answered` — a turn carrying the user's own message was dispatched, which
- * ends this plan's approval request (approval and a change request look the
- * same here, so the card must not claim either).
+ * `continuing` — the user's answer was recorded and the Goal turn it dispatched
+ * is still running, so the plan is in effect but not yet continued;
+ * `answered` — a turn carrying the user's own message was dispatched and the
+ * Goal is idle again, which ends this plan's approval request (approval and a
+ * change request look the same here, so the card must not claim either).
  */
-export type GoalPlanCardMode = 'preparing' | 'review' | 'waiting' | 'answered'
+export type GoalPlanCardMode = 'preparing' | 'review' | 'waiting' | 'continuing' | 'answered'
 
 export function goalPlanCardMode(
   goal: ChatGoal | null | undefined,
@@ -32,7 +34,11 @@ export function goalPlanCardMode(
 ): GoalPlanCardMode | null {
   if (!goal || !goal.plan_turn_id || !turnId) return null
   if (goal.plan_turn_id !== turnId) return null
-  if (goal.plan_answered) return 'answered'
+  if (goal.plan_answered) {
+    // The answer is recorded when its turn is dispatched, so the Goal is only
+    // "continued" once that turn has settled; until then it is still running.
+    return goal.dispatch_state === 'idle' ? 'answered' : 'continuing'
+  }
   if (goal.status === 'blocked') return 'review'
   return goal.plan ? 'waiting' : 'preparing'
 }

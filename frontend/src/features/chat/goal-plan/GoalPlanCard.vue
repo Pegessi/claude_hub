@@ -97,6 +97,12 @@
       </button>
     </div>
     <p
+      v-else-if="mode === 'continuing'"
+      class="goal-plan-note"
+    >
+      The Goal is continuing with this plan during its current turn.
+    </p>
+    <p
       v-else-if="mode === 'answered'"
       class="goal-plan-note"
     >

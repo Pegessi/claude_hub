@@ -67,6 +67,28 @@ test('a running planning turn prepares, and an answered plan stops offering appr
   )
 })
 
+test('an answered plan only claims the Goal continued once its turn settled', () => {
+  // A revise request answers the plan too, so the turn it dispatched can still
+  // be running; saying "continued" while it runs claims more than happened.
+  const running = goal({ plan_turn_id: 'plan-turn', plan: PLAN, plan_answered: true, dispatch_state: 'dispatched' })
+  assert.equal(planCard.goalPlanCardMode(running, 'plan-turn'), 'continuing')
+  assert.equal(
+    planCard.goalPlanCardMode({ ...running, dispatch_state: 'pending' }, 'plan-turn'),
+    'continuing',
+  )
+  assert.equal(
+    planCard.goalPlanCardMode({ ...running, dispatch_state: 'uncertain' }, 'plan-turn'),
+    'continuing',
+  )
+  const settled = goal({ plan_turn_id: 'plan-turn', plan: PLAN, plan_answered: true, dispatch_state: 'idle' })
+  assert.equal(planCard.goalPlanCardMode(settled, 'plan-turn'), 'answered')
+  // The snapshot has to re-render when the turn settles, so the memo differs.
+  assert.notEqual(
+    planCard.goalPlanSignature(running, 'plan-turn'),
+    planCard.goalPlanSignature(settled, 'plan-turn'),
+  )
+})
+
 test('approval is refused with a reason while the Goal cannot accept it', () => {
   const blocked = goal({ plan_turn_id: 'plan-turn', plan: PLAN, status: 'blocked' })
   assert.equal(planCard.goalPlanApprovalDisabledReason(blocked, 'review', { sending: false, turnInFlight: false }), null)
