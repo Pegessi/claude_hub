@@ -146,7 +146,7 @@ export function useChatComposer(deps: Dependencies) {
 
   async function submitQuestionResponse(turn: TimelineTurn, approval: TimelineApproval) {
     if (!canSubmitQuestion(approval)) {
-      deps.composerError.value = '请选择所有问题的选项后再提交。'
+      deps.composerError.value = 'Choose an answer for every question before submitting.'
       return
     }
     if (!turn.turnId || !approval.callId) {

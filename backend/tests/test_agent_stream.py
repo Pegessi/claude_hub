@@ -2052,7 +2052,8 @@ def test_claude_ask_user_question_final_snapshot_emits_approval() -> None:
     emits ``TOOL_CALL_STARTED`` plus an ``approval_required`` event whose
     questions are normalized to the approval-card shape. Option ids default to
     the option label so the submitted answer is self-describing (Claude's own
-    tool call carries no option ids)."""
+    tool call carries no option ids). The per-option ``description`` is the
+    tradeoff line the card shows under the label, so it survives normalization."""
 
     from claude_hub.services.agent_stream.claude_jsonl import ClaudeJsonlAdapter
 
@@ -2095,8 +2096,8 @@ def test_claude_ask_user_question_final_snapshot_emits_approval() -> None:
     assert question["prompt"] == "Which approach should I take?"
     assert question["allow_multiple"] is False
     assert question["options"] == [
-        {"id": "Fast", "label": "Fast"},
-        {"id": "Safe", "label": "Safe"},
+        {"id": "Fast", "label": "Fast", "description": "Ship quickly"},
+        {"id": "Safe", "label": "Safe", "description": "More tests"},
     ]
 
 
