@@ -176,7 +176,10 @@ watch(decisionSection, (element) => {
     (entries) => {
       decisionInView.value = entries[0]?.isIntersecting ?? false
     },
-    { root: bodyElement.value, threshold: 0.2 },
+    // Ratio thresholds are measured against the target: a Decision section
+    // taller than 5x the scroll viewport could never reach 0.2 and the bar
+    // would never retire, so any visible sliver counts as "on screen".
+    { root: bodyElement.value, threshold: 0.01 },
   )
   decisionObserver.observe(element)
 })

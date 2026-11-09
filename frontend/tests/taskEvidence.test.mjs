@@ -173,10 +173,10 @@ test('an empty task reports no evidence instead of empty sections', () => {
   assert.deepEqual(model.links, [])
 })
 
-test('review and CI destinations become chips with stable labels', () => {
+test('bare review and CI URLs become chips with stable derived labels', () => {
   const links = evidence.evidenceLinks([
     'Ready: MR https://code.byted.org/seed/xperf_evo/-/merge_requests/3705.',
-    'See [pipeline](https://code.byted.org/seed/xperf_evo/-/pipelines/998877).',
+    'See the run https://code.byted.org/seed/xperf_evo/-/pipelines/998877.',
     'GitHub PR https://github.com/acme/hub/pull/42',
   ])
   assert.deepEqual(links, [
@@ -187,6 +187,29 @@ test('review and CI destinations become chips with stable labels', () => {
     },
     { label: 'PR 42', url: 'https://github.com/acme/hub/pull/42' },
   ])
+})
+
+test('a named Markdown link keeps the executor label over the derived one', () => {
+  const links = evidence.evidenceLinks([
+    'Blocked on [Release blocker MR](https://code.byted.org/acme/hub/-/merge_requests/42).',
+    'Package: [nightly CI](https://code.byted.org/acme/hub/-/pipelines/998877)',
+    'Proof: [**bench numbers**](https://ci.example.com/-/jobs/123)',
+  ])
+  assert.deepEqual(links, [
+    {
+      label: 'Release blocker MR',
+      url: 'https://code.byted.org/acme/hub/-/merge_requests/42',
+    },
+    { label: 'nightly CI', url: 'https://code.byted.org/acme/hub/-/pipelines/998877' },
+    { label: 'bench numbers', url: 'https://ci.example.com/-/jobs/123' },
+  ])
+})
+
+test('a generic Markdown label falls back to the derived destination', () => {
+  assert.deepEqual(
+    evidence.evidenceLinks(['See [here](https://code.byted.org/acme/hub/-/merge_requests/42).']),
+    [{ label: 'MR 42', url: 'https://code.byted.org/acme/hub/-/merge_requests/42' }],
+  )
 })
 
 test('duplicate links are emitted once and non-links are ignored', () => {
@@ -387,4 +410,22 @@ test('only Markdown evidence opens a control; other paths are plain text', t => 
       `no evidence chip may be disabled: ${textOf(chip)}`,
     )
   }
+})
+
+const actionsSource = await readFile(
+  new URL('../src/features/workspace/components/TaskDetailActions.vue', import.meta.url),
+  'utf8',
+)
+
+test('the review bar retires for a tall decision, so any visible sliver counts', () => {
+  // A ratio threshold is measured against the target; 0.2 can never be reached
+  // by a Decision section more than five screens tall.
+  assert.match(dialogSource, /threshold: 0\.01/)
+  assert.doesNotMatch(dialogSource, /threshold: 0\.2/)
+})
+
+test('the actions caret is decorative and points the way the drawer moves', () => {
+  assert.match(actionsSource, /class="detail-footer-chevron"\s+aria-hidden="true"/)
+  assert.match(actionsSource, /isDetailActionsExpanded \? '▾' : '▸'/)
+  assert.doesNotMatch(actionsSource, /isDetailActionsExpanded \? 'v' : '\^'/)
 })

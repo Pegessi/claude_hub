@@ -131,10 +131,29 @@ function shortUrlLabel(url: string): string {
   }
 }
 
+// A Markdown label of "here" says less than the derived destination name.
+const GENERIC_LINK_LABELS = new Set([
+  'here',
+  'link',
+  'this',
+  'this link',
+  'click here',
+  'see here',
+  'url',
+])
+
+function usableNamedLabel(named: string): string | null {
+  const value = named.replace(/[*_`]/g, '').replace(/\s+/g, ' ').trim()
+  if (!value || GENERIC_LINK_LABELS.has(value.toLowerCase())) return null
+  return value.length > 48 ? `${value.slice(0, 45)}…` : value
+}
+
 /**
  * Pull review/CI destinations out of free text so a reviewer can open the MR
- * or pipeline instead of re-reading the prose. Markdown link labels win over a
- * derived label because the executor already named the destination.
+ * or pipeline instead of re-reading the prose. The executor's own Markdown
+ * label wins because it already named the destination ("Release blocker MR"
+ * beats a derived "MR 42"); a generic label does not, so those fall back to
+ * the derived destination and then to the URL itself.
  */
 export function evidenceLinks(sources: readonly (string | null | undefined)[]): EvidenceLink[] {
   const links: EvidenceLink[] = []
@@ -143,9 +162,9 @@ export function evidenceLinks(sources: readonly (string | null | undefined)[]): 
     const trimmed = url.trim().replace(TRAILING_PUNCTUATION, '')
     if (!/^https?:\/\//.test(trimmed) || seen.has(trimmed)) return
     seen.add(trimmed)
-    const named = (label ?? '').trim()
+    const named = usableNamedLabel(label ?? '')
     links.push({
-      label: linkLabel(trimmed) ?? (named || shortUrlLabel(trimmed)),
+      label: named ?? linkLabel(trimmed) ?? shortUrlLabel(trimmed),
       url: trimmed,
     })
   }
