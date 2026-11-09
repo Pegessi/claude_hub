@@ -20,6 +20,7 @@ const {
   isQuestionAnswered,
   latestPendingApprovalKey,
   parseStructuredQuestions,
+  questionOptionNoteId,
   splitRecommendedLabel,
 } = await loadChatUtility('chatQuestionResponse')
 
@@ -93,6 +94,24 @@ test('one question is answered without answering the others', () => {
   assert.equal(isQuestionAnswered(question, { q1: ['ui'] }), true)
 })
 
+test('a tradeoff line id is one token even when the provider id is prose', () => {
+  // Claude and Codex reuse the label as the option id, so ids such as
+  // "Inbox in the top bar" reach the card. An id/aria-describedby reference
+  // cannot carry whitespace: it would split into dangling IDREFs.
+  const claudeId = parseStructuredQuestions([
+    { id: 'scope', prompt: 'Where?', options: [{ id: 'Inbox in the top bar', label: 'Inbox in the top bar' }] },
+  ])[0].options[0].id
+  assert.equal(claudeId, 'Inbox in the top bar')
+  for (const key of ['approval-call-toolu_01abc', 'approval-call with spaces', 'approval-¡unusual¡', '']) {
+    const id = questionOptionNoteId(key, 0, 1)
+    assert.equal(/\s/.test(id), false, `${key} produced whitespace in ${id}`)
+    assert.notEqual(id, '')
+  }
+  // Positions keep two options of one card, and two cards, distinct.
+  assert.notEqual(questionOptionNoteId('approval-a', 0, 0), questionOptionNoteId('approval-a', 0, 1))
+  assert.notEqual(questionOptionNoteId('approval-a', 0, 0), questionOptionNoteId('approval-b', 0, 0))
+})
+
 test('only the last unresolved approval owns the shortcuts', () => {
   assert.equal(latestPendingApprovalKey([]), null)
   assert.equal(
@@ -131,6 +150,14 @@ test('the card answers with number keys only while it is the latest open decisio
   assert.match(approvalCard, /if \(!isLatestPending\.value && !hasFocusInside\(\)\) return/)
   assert.match(approvalCard, /root\.contains\(active\)/)
   assert.match(approvalCard, /\[role="dialog"\]\[aria-modal="true"\]/)
+})
+
+test('the tradeoff reference is keyed on positions, not on provider ids', () => {
+  assert.match(approvalCard, /:aria-describedby="optionNoteId\(option, index\)"/)
+  assert.match(approvalCard, /:id="optionNoteId\(option, index\)"/)
+  // The raw provider ids must never be interpolated into a DOM id.
+  assert.equal(approvalCard.includes('approval-note-${'), false)
+  assert.match(approvalCard, /questionOptionNoteId\(\s*props\.part\.approval\.key/)
 })
 
 test('an answered card collapses to one line and drops the form', () => {
