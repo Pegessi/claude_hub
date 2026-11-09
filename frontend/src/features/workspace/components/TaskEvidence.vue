@@ -70,16 +70,28 @@
       >
         <h4>Changed files</h4>
         <div class="evidence-chips">
-          <button
+          <!-- Only Markdown opens a preview. A disabled button is unfocusable
+               and explains nothing to a keyboard user, so everything else is
+               plain text with the same chip styling. -->
+          <template
             v-for="file in evidence.changedFiles"
             :key="file"
-            type="button"
-            :class="['evidence-chip', 'evidence-file-chip', { 'evidence-chip--action': isMarkdownArtifact(file) }]"
-            :disabled="!isMarkdownArtifact(file)"
-            @click="openMarkdownPreviewModal(file)"
           >
-            {{ file }}
-          </button>
+            <button
+              v-if="isMarkdownArtifact(file)"
+              type="button"
+              class="evidence-chip evidence-chip--action"
+              :title="`Preview ${file}`"
+              @click="openMarkdownPreviewModal(file)"
+            >
+              {{ file }}
+            </button>
+            <span
+              v-else
+              class="evidence-chip"
+              :title="file"
+            >{{ file }}</span>
+          </template>
         </div>
       </div>
 
@@ -110,17 +122,25 @@
           v-if="evidence.artifactRefs.length > 0"
           class="evidence-chips"
         >
-          <button
+          <template
             v-for="artifact in evidence.artifactRefs"
             :key="artifact"
-            type="button"
-            :class="['evidence-chip', { 'evidence-chip--action': isMarkdownArtifact(artifact) }]"
-            :disabled="!isMarkdownArtifact(artifact)"
-            :title="isMarkdownArtifact(artifact) ? `Preview ${artifact}` : artifact"
-            @click="openMarkdownPreviewModal(artifact)"
           >
-            {{ artifact }}
-          </button>
+            <button
+              v-if="isMarkdownArtifact(artifact)"
+              type="button"
+              class="evidence-chip evidence-chip--action"
+              :title="`Preview ${artifact}`"
+              @click="openMarkdownPreviewModal(artifact)"
+            >
+              {{ artifact }}
+            </button>
+            <span
+              v-else
+              class="evidence-chip"
+              :title="artifact"
+            >{{ artifact }}</span>
+          </template>
         </div>
       </div>
 
@@ -351,6 +371,7 @@ function acceptanceMark(status: EvidenceCriterionStatus): string {
 
 .evidence-chip {
   max-width: 100%;
+  display: inline-block;
   border: 0;
   border-radius: 999px;
   background: var(--ch-color-surface-control-active);
@@ -368,10 +389,6 @@ function acceptanceMark(status: EvidenceCriterionStatus): string {
   cursor: pointer;
   text-decoration: underline;
   text-underline-offset: 2px;
-}
-
-.evidence-chip:disabled {
-  opacity: 1;
 }
 
 .evidence-link-chip {
