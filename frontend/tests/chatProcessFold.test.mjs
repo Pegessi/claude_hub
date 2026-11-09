@@ -325,12 +325,12 @@ test('elapsed time is omitted when it cannot be trusted', () => {
   assert.equal(turnElapsedMs({ ...turn, completedAt: null }), null)
 })
 
-test('the folded label reads as process, work done, and time taken', () => {
+test('the folded label reads as activity, work done, and time taken', () => {
   const turn = completedTurn()
   const split = splitTurnProcess(turn)
   // 83s floors to "1m": the shared formatter is deliberately coarse so the
   // Chat timeline and the workspace progress timeline read the same way.
-  assert.equal(turnProcessLabel(turn, split.before), '过程 · 1 个工具调用 · 1m')
+  assert.equal(turnProcessLabel(turn, split.before), 'Activity · 1 step · 1m')
 
   const noTools = groupEventsIntoTurns([
     makeEvent(1, 'turn_started', { summary: 'go' }),
@@ -340,7 +340,7 @@ test('the folded label reads as process, work done, and time taken', () => {
       created_at: '2026-01-01T00:00:05Z',
     }),
   ])[0]
-  assert.equal(turnProcessLabel(noTools, splitTurnProcess(noTools).before), '过程 · 5s')
+  assert.equal(turnProcessLabel(noTools, splitTurnProcess(noTools).before), 'Activity · 5s')
 })
 
 // ── foldTurnParts ───────────────────────────────────────────────────────
@@ -350,7 +350,7 @@ test('folding replaces the process with one line ahead of the answer', () => {
   const folded = foldTurnParts(turn, false)
   assert.equal(folded.length, 2)
   assert.equal(folded[0].kind, 'process')
-  assert.equal(folded[0].meta, '过程 · 1 个工具调用 · 1m')
+  assert.equal(folded[0].meta, 'Activity · 1 step · 1m')
   assert.equal(folded[1].kind, 'text')
   assert.equal(folded[1].text, 'the answer')
 })
@@ -525,7 +525,7 @@ test('the folded header says when a card is folded in with it', () => {
   const split = splitTurnProcess(turn)
   const folded = foldTurnParts(turn, false)
   assert.equal(folded[0].kind, 'process')
-  assert.match(folded[0].meta, /1 张审批卡/, 'the header must count the card inside')
+  assert.match(folded[0].meta, /1 approval/, 'the header must count the card inside')
 
   const plain = groupEventsIntoTurns([
     makeEvent(1, 'turn_started', { summary: 'go' }),
@@ -535,10 +535,25 @@ test('the folded header says when a card is folded in with it', () => {
   ])[0]
   assert.doesNotMatch(
     foldTurnParts(plain, false)[0].meta,
-    /审批卡/,
+    /approval/,
     'a turn without one must not claim to have one',
   )
   assert.ok(split)
+})
+
+test('the folded header reports a failure it is about to hide', () => {
+  // A failed call is not pinned, so once the region folds the header is the
+  // reader's only warning that the turn hit one.
+  const turn = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }),
+    makeEvent(2, 'tool_call_started', { tool_call_id: 'c1', name: 'Bash', args: { command: 'pnpm lint' } }),
+    makeEvent(3, 'tool_call_completed', { tool_call_id: 'c1', status: 'failed' }),
+    makeEvent(4, 'text_delta', { text: 'the answer' }),
+    makeEvent(5, 'turn_completed', { status: 'completed' }),
+  ])[0]
+  const folded = foldTurnParts(turn, false)
+  assert.match(folded[0].meta, /1 failed/, 'a hidden failure must still be counted')
+  assert.equal(folded.length, 2, 'the failed call itself folds with the rest')
 })
 
 test('a subagent region with dispatch or child errors stays pinned when process folds', () => {

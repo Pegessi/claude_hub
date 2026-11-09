@@ -1,4 +1,5 @@
 import { formatClockTime, formatElapsedDuration, parseTimestampMs } from '@/utils/duration'
+import { countWorkLogParts } from '../worklog/workLog'
 import type { TimelinePart, TimelineTurn, TimelineTool } from './types'
 
 // ── process folding ─────────────────────────────────────────────────────
@@ -213,16 +214,23 @@ export function turnElapsedMs(turn: TimelineTurn): number | null {
   return elapsed >= 1000 ? elapsed : null
 }
 
-/** Label for the folded process line, e.g. ``过程 · 8 个工具调用 · 1m 23s``. */
+/** Label for the folded process line, e.g. ``Activity · 18 steps · 1 failed · 21m``.
+ *
+ *  Steps, never raw events: a turn's event count is a transport detail
+ *  (``12782 events``) that tells a reader nothing about what happened. Failures
+ *  stay on the header because folding is what would otherwise hide them. */
 export function turnProcessLabel(turn: TimelineTurn, process: TimelinePart[]): string {
-  const segments = ['过程']
+  const segments = ['Activity']
   const steps = countProcessSteps(process)
-  if (steps > 0) segments.push(`${steps} 个工具调用`)
+  if (steps > 0) segments.push(`${steps} step${steps === 1 ? '' : 's'}`)
   // The header is the only thing left on screen, so it has to say when a card
   // is folded in with the rest — otherwise a question the user may never have
   // answered disappears without a trace.
   const cards = process.filter(part => part.kind === 'approval').length
-  if (cards > 0) segments.push(`${cards} 张审批卡`)
+  if (cards > 0) segments.push(`${cards} approval${cards === 1 ? '' : 's'}`)
+  // A failed call inside the folded region is invisible once it is folded away.
+  const failed = countWorkLogParts(process).failed
+  if (failed > 0) segments.push(`${failed} failed`)
   const elapsed = turnElapsedMs(turn)
   if (elapsed !== null) segments.push(formatElapsedDuration(elapsed))
   return segments.join(' · ')
