@@ -75,5 +75,10 @@ test('a failure before the fork leaves the pane alone', () => {
 test('a failure never overrides a tab the user chose in the meantime', () => {
   const failure = asideFailure('source-tab', 'fork-tab', 'other-tab', 'HTTP 503')
   assert.equal(failure.restoreTabId, null, 'an explicit switch wins over the recovery')
-  assert.match(failure.message, /still in this Chat/, 'the draft is still reported where it lives')
+  assert.equal(
+    failure.message,
+    'Ask aside failed: HTTP 503. Your question is still in the Chat you asked from.',
+    'the draft is named where it lives, not "this Chat" which is now a third tab',
+  )
+  assert.doesNotMatch(failure.message, /this Chat/)
 })
