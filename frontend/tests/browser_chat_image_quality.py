@@ -1674,6 +1674,74 @@ async def check_mermaid(page, output: Path, report: dict) -> None:
     await page.evaluate("document.documentElement.dataset.theme = 'dark'")
 
 
+async def exercise_streamed_image_retry(context, base: str, report: dict) -> None:
+    """A failed image must stay failed through real same-paragraph DOM updates."""
+    page = await context.new_page()
+    requests = []
+    healthy = False
+    evidence = {"deltas": []}
+    report["image_streaming_retry"] = evidence
+
+    async def image_response(route) -> None:
+        query = parse_qs(urlparse(route.request.url).query)
+        assert query["path"] == ["/tmp/streaming-missing.png"], query
+        requests.append(route.request.url)
+        await route.fulfill(
+            status=200 if healthy else 404,
+            content_type="image/png" if healthy else "text/plain",
+            body=png(4, 4) if healthy else b"missing",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    await page.route("**/tabs/image-streaming-probe/stream/agent-image?*", image_response)
+    try:
+        await page.goto(base + "/tests/image_streaming_harness.html")
+        root = page.locator(".markdown-content")
+        missing = root.locator(".quoted-img-missing")
+        await expect(missing).to_be_visible()
+        assert len(requests) == 1, requests
+        await root.evaluate("el => { el.dataset.instance = 'original' }")
+        for index in range(1, 6):
+            await page.evaluate(
+                "delta => window.__imageStreamProbe.append(delta)", f" delta-{index}"
+            )
+            await expect(root).to_contain_text(f"delta-{index}")
+            # Yield rendering frames so a newly inserted lazy image can request.
+            await page.evaluate(
+                "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
+            )
+            await expect(missing).to_be_visible()
+            await expect(root.locator(".markdown-block")).to_have_count(1)
+            await expect(root).to_have_attribute("data-instance", "original")
+            mounts = await page.evaluate("window.__imageStreamProbe.mounts")
+            evidence["deltas"].append({"index": index, "requests": len(requests), "mounts": mounts})
+            assert mounts == 1
+            assert len(requests) == 1, evidence
+
+        healthy = True
+        await missing.get_by_role("button", name="Retry loading image", exact=False).click()
+        preview = root.get_by_role("button", name="Open image Streaming image", exact=True)
+        await expect(preview).to_be_visible()
+        await page.wait_for_function(
+            "() => { const img = document.querySelector('img'); return img?.complete && img.naturalWidth > 0 }"
+        )
+        assert len(requests) == 2, requests
+        await preview.click()
+        await preview.focus()
+        await page.keyboard.press("Enter")
+        assert len(await page.evaluate("window.__imageStreamProbe.previews")) == 2
+        await page.evaluate("window.__imageStreamProbe.append(' after-recovery')")
+        await expect(root).to_contain_text("after-recovery")
+        await expect(missing).to_have_count(0)
+        await page.wait_for_function(
+            "() => { const img = document.querySelector('img'); return img?.complete && img.naturalWidth > 0 }"
+        )
+        evidence.update(manual_retry_requests=1, recovered=True, click_and_keyboard_preview=True)
+    finally:
+        evidence["request_urls"] = requests
+        await page.close()
+
+
 async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None:
     if len(sys.argv) != 4:
         raise SystemExit(__doc__)
@@ -2115,6 +2183,7 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
 
             await context.route_web_socket("**/*", block_websocket)
             await context.route("**/*", route_all)
+            await exercise_streamed_image_retry(context, base, report)
             page = await context.new_page()
             await page.add_init_script("""window.__copiedCode = [];
                 Object.defineProperty(navigator, 'clipboard', { configurable: true,
@@ -2155,8 +2224,8 @@ async def main(browser_run: BrowserRun, real_report: Path | None = None) -> None
             # The failed URL was requested exactly once at hydration; this
             # fixture carries one text_delta plus turn_completed, so it proves
             # no automatic re-request occurs after the initial failure and the
-            # later turn completion. The recorded checks do not demonstrate
-            # same-block re-render resistance across multiple deltas.
+            # later turn completion. exercise_streamed_image_retry above covers
+            # five actual same-paragraph updates in one mounted component.
             assert agent_image_requests.get("/tmp/missing.png") == 1, agent_image_requests
             markdown_retry = markdown_missing.get_by_role(
                 "button", name=re.compile("Retry loading image")
