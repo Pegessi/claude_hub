@@ -1,23 +1,31 @@
+import { formatElapsedDuration } from '@/utils/duration'
 import type { AgentStreamHistoryDetailEntry } from '@/utils/agentStreamHistoryCache'
 import type { TimelinePart, TimelineTool, TimelineTurn } from '../timeline/types'
 import {
   foldTurnParts,
   splitTurnProcess,
   subagentRegionErrorCount,
+  turnElapsedMs,
   turnProcessLabel,
 } from '../timeline/turnProcess'
 import { presentThinkingParts, type ThinkingDisplayPart, type ThinkingState } from '@/utils/thinkingPresentation'
 
-function processMetaForDetail(detail: AgentStreamHistoryDetailEntry): string {
-  const count = detail.descriptor.event_count
-  return `Execution details · ${count} event${count === 1 ? '' : 's'}`
+/** Header for a turn whose detail has not been read yet.
+ *
+ *  Only the descriptor (a raw event count) is available here, and a count of
+ *  transport events is not something a reader can use, so the label stays at
+ *  what is known for free: that there was activity, and how long it took. The
+ *  human counts arrive with the detail, once the reader asks for it. */
+function processMetaForDetail(turn: TimelineTurn): string {
+  const elapsed = turnElapsedMs(turn)
+  return elapsed === null ? 'Activity' : `Activity · ${formatElapsedDuration(elapsed)}`
 }
 
 function lazyProcessPart(turn: TimelineTurn, detail: AgentStreamHistoryDetailEntry): TimelinePart {
   return {
     kind: 'process',
     key: `process-${turn.key}`,
-    meta: processMetaForDetail(detail),
+    meta: processMetaForDetail(turn),
     expanded: false,
     turnId: turn.turnId,
     detailStatus: detail.status,
@@ -90,7 +98,7 @@ export function turnProcessFoldSignature(
   detail?: AgentStreamHistoryDetailEntry,
 ): string {
   if (detail && detail.status !== 'loaded') {
-    return `lazy|${detail.status}|${detail.errorMessage ?? ''}|${processMetaForDetail(detail)}`
+    return `lazy|${detail.status}|${detail.errorMessage ?? ''}|${processMetaForDetail(turn)}`
   }
   if (!isTurnFoldable(turn, latestTurnKey)) return ''
   const split = splitTurnProcess(turn)

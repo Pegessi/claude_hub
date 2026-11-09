@@ -7,6 +7,27 @@
 
 ## Released
 
+### feat(ui): live work log for running turns and human activity for finished ones
+
+- The footer of an in-flight turn now reads `Working · Reading 2 files · 21:16`
+  with a quiet second line of what it has done so far
+  (`12 edits · 4 commands · 1 failed · 3 sub-agents`), replacing the lone
+  `Working 21:15` that sat under an otherwise empty screen. Counts cover the
+  turn's own calls and its delegated child threads, plan-list rewrites are
+  excluded, and failures keep a count of their own so folding can never hide
+  them. A turn blocked on the user's answer or on a sub-agent drops the
+  "Working" word and the pulse instead of pretending to make progress.
+- Finished turns report `Activity · 18 steps · 1 failed · 21m` instead of the
+  raw `Execution details · 12782 events`, which said nothing about what
+  happened or whether anything broke. A turn whose detail has not been read yet
+  falls back to `Activity` plus its duration, and lazy detail loading,
+  pagination and retry are unchanged.
+- The composer gains **Ask aside**: it forks the current Chat at its newest
+  turn and posts the question into the fork as its first turn, so a running
+  turn can be asked about without queueing or steering it. Text only, local
+  Chats only; the fork and send effects are user-triggered and the request
+  shape is unit-tested rather than exercised against a live provider.
+
 ### feat(ui): let a Goal plan its scope and execution budget before it starts
 
 - Goal setup offers a remembered **Plan first** option (on by default) that
