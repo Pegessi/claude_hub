@@ -99,15 +99,22 @@
           v-else-if="sub.kind === 'agent_image'"
           class="agent-image-card"
         >
+          <div
+            v-if="isAgentImagePending(sub, thread.lifecycleStatus === 'active')"
+            class="turn-attachment-placeholder agent-image-pending"
+            role="status"
+          >
+            Loading image…
+          </div>
           <button
-            v-if="!erroredAgentImages.has(sub.key)"
+            v-else-if="!erroredAgentImages.has(sub.key)"
             type="button"
             class="turn-attachment-button agent-image-button"
             :aria-label="`Open image ${agentImageBasename(sub.path)}`"
-            @click="openImageLightbox(agentImageUrl(sub.path), agentImageBasename(sub.path), $event)"
+            @click="openImageLightbox(agentImageUrl(sub.path, sub.key), agentImageBasename(sub.path), $event)"
           >
             <img
-              :src="agentImageUrl(sub.path)"
+              :src="agentImageUrl(sub.path, sub.key)"
               class="turn-attachment-img"
               :alt="agentImageBasename(sub.path)"
               loading="lazy"
@@ -119,7 +126,15 @@
             v-else
             class="turn-attachment-placeholder agent-image-missing"
           >
-            Image unavailable
+            <span>Image unavailable</span>
+            <button
+              type="button"
+              class="agent-image-retry"
+              :aria-label="`Retry loading image ${agentImageBasename(sub.path)}`"
+              @click="retryAgentImage(sub.key)"
+            >
+              Retry
+            </button>
           </div>
           <div
             class="agent-image-path"
@@ -151,7 +166,7 @@ import ChatThinkingCard from './ChatThinkingCard.vue'
 import type { TimelineTurn } from '../timeline/types'
 import type { TimelineSubthread } from '../timeline/types'
 const { subthreadPartsFor, collapseDetails } = requireChatOwner(chatTimelineKey)
-const { openImageLightbox, erroredAgentImages, agentImageBasename, agentImageUrl, onAgentImageError } = requireChatOwner(chatImagesKey)
+const { openImageLightbox, erroredAgentImages, agentImageBasename, agentImageUrl, isAgentImagePending, onAgentImageError, retryAgentImage } = requireChatOwner(chatImagesKey)
 const { markdownImageScope } = requireChatOwner(chatIdentityKey)
 defineProps<{
   turn: TimelineTurn

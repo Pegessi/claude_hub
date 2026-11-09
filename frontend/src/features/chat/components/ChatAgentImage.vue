@@ -3,15 +3,22 @@
     class="conversation-row conversation-row--assistant conversation-row--agent-image"
   >
     <div class="agent-image-card">
+      <div
+        v-if="isAgentImagePending(part, turnActive)"
+        class="turn-attachment-placeholder agent-image-pending"
+        role="status"
+      >
+        Loading image…
+      </div>
       <button
-        v-if="!erroredAgentImages.has(part.key)"
+        v-else-if="!erroredAgentImages.has(part.key)"
         type="button"
         class="turn-attachment-button agent-image-button"
         :aria-label="`Open image ${agentImageBasename(part.path)}`"
-        @click="openImageLightbox(agentImageUrl(part.path), agentImageBasename(part.path), $event)"
+        @click="openImageLightbox(agentImageUrl(part.path, part.key), agentImageBasename(part.path), $event)"
       >
         <img
-          :src="agentImageUrl(part.path)"
+          :src="agentImageUrl(part.path, part.key)"
           class="turn-attachment-img"
           :alt="agentImageBasename(part.path)"
           loading="lazy"
@@ -23,7 +30,15 @@
         v-else
         class="turn-attachment-placeholder agent-image-missing"
       >
-        Image unavailable
+        <span>Image unavailable</span>
+        <button
+          type="button"
+          class="agent-image-retry"
+          :aria-label="`Retry loading image ${agentImageBasename(part.path)}`"
+          @click="retryAgentImage(part.key)"
+        >
+          Retry
+        </button>
       </div>
       <div
         class="agent-image-path"
@@ -36,14 +51,27 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { requireChatOwner, chatImagesKey } from '../owners'
 import type { TimelinePart } from '../timeline/types'
-const { erroredAgentImages, agentImageBasename, openImageLightbox, agentImageUrl, onAgentImageError } = requireChatOwner(chatImagesKey)
+const {
+  erroredAgentImages,
+  agentImageBasename,
+  openImageLightbox,
+  agentImageUrl,
+  isAgentImagePending,
+  onAgentImageError,
+  retryAgentImage,
+} = requireChatOwner(chatImagesKey)
 // Reducer parts mutate in place; revision invalidates this leaf without replacing its DOM.
-defineProps<{
+const props = defineProps<{
   renderRevision: number
   part: Extract<TimelinePart, { kind: 'agent_image' }>
+  turnActive?: boolean
 }>()
+// Reactive: a turn that finishes (or is interrupted) after mount must flip
+// the pending state immediately instead of keeping a copied stale value.
+const turnActive = computed(() => props.turnActive ?? true)
 </script>
 
 <style scoped>
@@ -107,6 +135,32 @@ defineProps<{
 .agent-image-missing {
   width: clamp(72px, 8vw, 88px);
   cursor: default;
+  gap: 6px;
+}
+
+.agent-image-pending {
+  color: var(--ch-color-text-muted);
+  font-size: 11px;
+}
+
+.agent-image-retry {
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-sm);
+  background: transparent;
+  color: var(--ch-color-text);
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.agent-image-retry:hover {
+  border-color: color-mix(in srgb, #fff 70%, transparent);
+}
+
+.agent-image-retry:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
 }
 
 .turn-attachment-placeholder {
