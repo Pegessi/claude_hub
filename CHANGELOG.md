@@ -22,6 +22,11 @@
   happened or whether anything broke. A turn whose detail has not been read yet
   falls back to `Activity` plus its duration, and lazy detail loading,
   pagination and retry are unchanged.
+- The composer gains **Ask aside**: it forks the current Chat at its newest
+  turn and posts the question into the fork as its first turn, so a running
+  turn can be asked about without queueing or steering it. Text only, local
+  Chats only; the fork and send effects are user-triggered and the request
+  shape is unit-tested rather than exercised against a live provider.
 
 ### fix(chat): authorize out-of-cwd images only via completed image tools and add image retry
 
