@@ -203,6 +203,11 @@ review's open items are recorded in
   buttons that open the preview, while other changed files and artifact
   references render as plain text chips (full path in the tooltip), so a
   keyboard user is never given an unfocusable control that explains nothing.
+- Review/CI chips keep the executor's own Markdown label ("Release blocker MR")
+  instead of flattening it to a derived "MR 42"; only generic labels ("here")
+  fall back to the derived destination. The review bar now also retires for a
+  Decision section taller than the scroll viewport, and the mobile Actions
+  caret is decorative (aria-hidden) and points the way the drawer moves.
 - The board no longer lets a failed task read as work in progress: failed tasks
   stay in the Working column (there is no Failed column) but sort first, carry a
   danger-tinted card and a sentence-case `Failed` pill, and show the failure
