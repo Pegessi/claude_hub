@@ -92,6 +92,13 @@
           </div>
         </div>
         <p
+          v-if="comment.stale"
+          class="review-tray-stale"
+          role="note"
+        >
+          Line no longer in this turn. The note still names its file and line.
+        </p>
+        <p
           v-if="editingId !== comment.id"
           class="review-tray-note"
         >
@@ -117,10 +124,10 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from 'vue'
 import { requireChatOwner, chatReviewKey, chatTimelineKey } from '../owners'
-import { reviewCountLabel, reviewLocation, reviewShortLocation, type ReviewComment } from '../review/reviewComments'
+import { reviewAnchorIsLive, reviewCountLabel, reviewLocation, reviewShortLocation, type ReviewComment } from '../review/reviewComments'
 
-const { comments, updateComment, removeComment, clearComments, requestFocus, sendReview } = requireChatOwner(chatReviewKey)
-const { expandedToolGroups } = requireChatOwner(chatTimelineKey)
+const { comments, updateComment, removeComment, clearComments, setAnchorStale, requestFocus, sendReview } = requireChatOwner(chatReviewKey)
+const { expandedToolGroups, turns } = requireChatOwner(chatTimelineKey)
 
 /** Open by default: the list is the useful part, the toggle only saves space. */
 const isOpen = ref(true)
@@ -133,8 +140,18 @@ watch(() => comments.value.length, () => {
 })
 
 /** Reopen the folded card holding the row before asking it to scroll into
- *  view; the row can only be measured once it is mounted. */
+ *  view; the row can only be measured once it is mounted.
+ *
+ *  A warm-cache history reload renumbers the turn's parts, so the saved row may
+ *  not exist any more: mark the entry instead of silently doing nothing, and
+ *  clear the mark once the row resolves again. */
 function reveal(comment: ReviewComment): void {
+  const live = reviewAnchorIsLive(comment, turns.value)
+  setAnchorStale(comment.key, !live)
+  if (!live) {
+    liveMessage.value = `${reviewLocation(comment)} is no longer in this turn`
+    return
+  }
   const previous = expandedToolGroups.get(comment.turn)
   if (!previous?.has(comment.group)) {
     expandedToolGroups.set(comment.turn, new Set([...(previous ?? []), comment.group]))
@@ -297,6 +314,13 @@ function send(): void {
 
 .review-tray-jump:hover {
   color: var(--ch-color-accent);
+}
+
+.review-tray-stale {
+  margin: 0;
+  color: var(--ch-color-warning, #fbbf24);
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .review-tray-note {

@@ -21,7 +21,7 @@
     <div id="app"></div>
     <script type="module">
       import '/src/features/app-shell/styles/theme.css'
-      import { createApp, defineComponent, h, provide, ref, shallowReactive } from 'vue'
+      import { createApp, defineComponent, h, provide, reactive, ref, shallowReactive } from 'vue'
       import ChatToolGroup from '/src/features/chat/components/ChatToolGroup.vue'
       import ChatReviewTray from '/src/features/chat/review/ChatReviewTray.vue'
       import { chatReviewKey, chatTimelineKey } from '/src/features/chat/owners'
@@ -65,8 +65,11 @@
           resultText: 'Done',
         },
       ]
-      const part = { key: 'part-1', kind: 'tool_group', tools }
-      const turn = { key: 'turn-1', parts: [part] }
+      // Reactive so a check can renumber the part the way a warm-cache
+      // history reload does, without losing the rendered card's identity.
+      const part = reactive({ key: 'part-1', kind: 'tool_group', tools })
+      const turn = reactive({ key: 'turn-1', parts: [part] })
+      const turns = ref([turn])
 
       const draftQueue = ref([])
 
@@ -75,12 +78,13 @@
           const expandedToolGroups = shallowReactive(new Map([[turn.key, new Set([part.key])]]))
           provide(chatTimelineKey, {
             expandedToolGroups,
+            turns,
             onToolGroupToggle() {},
             collapseDetails() {},
           })
           const review = useChatReview({ tabKey: 'harness', draftQueue, storage: null })
           provide(chatReviewKey, review)
-          window.__DIFF_REVIEW__ = { review, draftQueue, expandedToolGroups }
+          window.__DIFF_REVIEW__ = { review, draftQueue, expandedToolGroups, turns, part, turn }
           return () => h('div', { id: 'app' }, [
             h('main', { class: 'pane' }, [
               h('div', { class: 'thread' }, [

@@ -194,7 +194,39 @@ async def main(browser_run: BrowserRun) -> None:
             note("mobile tray stays inside 390px with reachable buttons")
             await page.set_viewport_size(DESKTOP)
 
-            # 7. Send composes exactly one message through the composer queue.
+            # 7. A warm-cache history reload renumbers the turn's parts, so a
+            #    saved row can outlive the row it was written on: the tray says
+            #    so instead of silently doing nothing.
+            await page.evaluate("""() => {
+                  const harness = window.__DIFF_REVIEW__;
+                  window.__PRENUMBERED__ = harness.part.key;
+                  harness.part.key = `${harness.part.key}-reloaded`;
+                  harness.expandedToolGroups.set(harness.turn.key, new Set([harness.part.key]));
+                }""")
+            await expect(page.locator(".activity-diff-note")).to_have_count(0)
+            await page.locator(".review-tray-jump").first.click()
+            stale = page.locator(".review-tray-stale")
+            await expect(stale).to_be_visible()
+            await expect(stale).to_have_text(
+                "Line no longer in this turn. The note still names its file and line."
+            )
+            await expect(page.locator(".activity-diff-line--target")).to_have_count(0)
+            await page.screenshot(path=str(output / "diff-review-stale.png"), full_page=False)
+            report["screenshots"].append("diff-review-stale.png")
+            note("a renumbered part marks the entry as no longer in this turn")
+
+            # 8. When the row resolves again the mark clears and the jump works.
+            await page.evaluate("""() => {
+                  const harness = window.__DIFF_REVIEW__;
+                  harness.part.key = window.__PRENUMBERED__;
+                  harness.expandedToolGroups.set(harness.turn.key, new Set([harness.part.key]));
+                }""")
+            await page.locator(".review-tray-jump").first.click()
+            await expect(page.locator(".review-tray-stale")).to_have_count(0)
+            await expect(page.locator(".activity-diff-line--target")).to_have_count(1)
+            note("the mark clears once the row resolves again")
+
+            # 9. Send composes exactly one message through the composer queue.
             await page.locator(".review-tray-send").click()
             sent = await page.evaluate("""() => {
                   const harness = window.__DIFF_REVIEW__;
