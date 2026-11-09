@@ -214,17 +214,6 @@ def _parse_plan(assistant_text: str) -> GoalPlan | None:
     return GoalPlan.model_validate(payload)
 
 
-def _mark_plan_answered(goal: GoalRun) -> None:
-    """Record that the user answered a plan request.
-
-    Approval and revision both arrive as the user's next message on the
-    existing resume/steer path, so either one ends this plan's approval
-    request. A revised plan re-opens it when the next turn parses one.
-    """
-    if goal.plan_turn_id is not None:
-        goal.plan_approved = True
-
-
 class GoalRunController:
     def __init__(
         self,
@@ -464,7 +453,6 @@ class GoalRunController:
             goal.status_message = (
                 "resumes when the current Chat turn finishes" if deferred else None
             )
-            _mark_plan_answered(goal)
 
         goal = self._mutate_once(goal_id, client_request_id, "resume", apply)
         if goal.dispatch_state != GoalDispatchState.IDLE or goal.resume_after_turn:
@@ -532,7 +520,6 @@ class GoalRunController:
                     goal.pending_image_count = image_count
                     goal.pending_image_fingerprint = image_digest
                     goal.resume_after_turn = False
-                    _mark_plan_answered(goal)
 
                 goal = self._mutate_once(goal_id, client_request_id, operation, apply)
             goal = await self._cancel_current(goal)
@@ -749,28 +736,11 @@ class GoalRunController:
             return self.store.put(goal)
 
         # The planning turn is spent once it completes successfully; the next
-        # turn implements, or revises if the user asks for changes.
-        if goal.plan_pending and goal.plan_turn_id == turn_id:
+        # turn implements. A cancelled or failed turn keeps the marker so the
+        # retried turn still plans.
+        planning_turn = goal.plan_pending and goal.plan_turn_id == turn_id
+        if planning_turn:
             goal.plan_pending = False
-
-        if goal.plan_first:
-            try:
-                plan = _parse_plan(protocol_tail)
-            except (
-                ValueError,
-                TypeError,
-                json.JSONDecodeError,
-                RecursionError,
-                MemoryError,
-            ) as exc:
-                goal.plan_warning = f"ignored invalid plan: {exc}"
-            else:
-                if plan is not None:
-                    goal.plan = plan
-                    goal.plan_turn_id = turn_id
-                    # A revised plan needs approval again, on its own turn.
-                    goal.plan_approved = False
-                    goal.plan_warning = None
 
         try:
             checkpoint = _parse_checkpoint(protocol_tail, turn_id)
@@ -793,6 +763,31 @@ class GoalRunController:
 
         signal, message = match.group(1).lower(), match.group(2).strip() or None
         goal.status_message = message
+
+        # A plan block is accepted only when it belongs to the turn the Hub asked
+        # to plan, or when this turn really parks for the user's input: that is
+        # the agent asking for approval again (a revision), and the Goal then
+        # blocks like any other needs_input turn. An implementing turn that
+        # merely echoes the plan keeps running and must not rewrite the approved
+        # scope or re-open its approval.
+        if goal.plan_first and (planning_turn or signal == "needs_input"):
+            try:
+                plan = _parse_plan(protocol_tail)
+            except (
+                ValueError,
+                TypeError,
+                json.JSONDecodeError,
+                RecursionError,
+                MemoryError,
+            ) as exc:
+                goal.plan_warning = f"ignored invalid plan: {exc}"
+            else:
+                if plan is not None:
+                    goal.plan = plan
+                    goal.plan_turn_id = turn_id
+                    # A revised plan needs approval again, on its own turn.
+                    goal.plan_answered = False
+                    goal.plan_warning = None
         if goal.dispatched_objective_revision != goal.objective_revision:
             self.store.put(goal)
             return self._prepare_dispatch_locked(goal.id)
@@ -909,6 +904,17 @@ class GoalRunController:
                     return goal
                 goal.current_turn_id = next_turn_id or step_id
                 goal.dispatch_state = GoalDispatchState.DISPATCHED
+                if (
+                    goal.plan_turn_id is not None
+                    and not goal.plan_pending
+                    and prepared.pending_input is not None
+                ):
+                    # The plan's approval request is answered only once the turn
+                    # carrying the user's own message is really dispatched. The
+                    # Hub cannot tell approval from a change request without
+                    # reading that prose, so it records "answered", and a plain
+                    # resume or an automatic continuation stays unapproved.
+                    goal.plan_answered = True
                 if goal.pending_input == prepared.pending_input:
                     goal.pending_input = None
                 if goal.pending_image_fingerprint == prepared.pending_image_fingerprint:
