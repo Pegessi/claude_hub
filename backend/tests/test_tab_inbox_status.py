@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -104,6 +104,10 @@ def test_reply_excerpt_reads_only_the_final_answer(tmp_path: Path) -> None:
     # shows, not the agent's thinking out loud.
     assert excerpt.text == "All 12 tests pass now."
     assert excerpt.written_at is not None
+    # The rest of the API speaks aware UTC; a naive stamp here would be read
+    # as local time by the browser.
+    assert excerpt.written_at.tzinfo is not None
+    assert excerpt.written_at.utcoffset() == timedelta(0)
     assert excerpt.size == stream.stat().st_size
 
 
@@ -165,7 +169,11 @@ async def test_store_reply_excerpt_returns_none_without_a_stream(
 
 
 def _chat_manager(
-    *, reply_events: list[dict[str, Any]] | None = None, state_root: Path
+    *,
+    reply_events: list[dict[str, Any]] | None = None,
+    state_root: Path,
+    workspace_id: str | None = None,
+    managed_session_id: str | None = None,
 ) -> TTYDManager:
     manager = TTYDManager.__new__(TTYDManager)
     manager._status_snapshots = {}
@@ -176,10 +184,17 @@ def _chat_manager(
         name="Native Chat",
         agent_type=AgentType.CLAUDE,
         session_kind=SessionKind.CHAT,
+        workspace_id=workspace_id,
+        managed_session_id=managed_session_id,
     )
     manager.processes = {process.tab_id: process}
     if reply_events is not None:
-        store = AgentStreamStore("terminal-tabs", f"terminal-tab-{process.tab_id}")
+        # A workspace Chat writes its stream under its managed session, not
+        # under the terminal-tab namespace.
+        if workspace_id and managed_session_id:
+            store = AgentStreamStore(workspace_id, managed_session_id)
+        else:
+            store = AgentStreamStore("terminal-tabs", f"terminal-tab-{process.tab_id}")
         _write_stream(store.path, reply_events)
     return manager
 
@@ -380,6 +395,92 @@ async def test_working_turn_blocked_on_a_question_still_reads_the_excerpt(
     assert status.last_reply_excerpt == "Which branch should I rebase?"
     # The text is the working turn's own output, so it keeps its write time.
     assert status.last_reply_at is not None
+
+
+@pytest.mark.asyncio
+async def test_managed_chat_tab_reads_its_excerpt_from_the_managed_namespace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A Workspace Chat persists its stream under its managed session, so
+    reading the terminal-tab namespace would silently report "no reply" for
+    every agent row in the inbox."""
+    workspace_manager = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(workspace_manager, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        ttyd_manager_module,
+        "get_tab_native_runtime_snapshot",
+        lambda _tab_id: SimpleNamespace(status=AgentRuntimeStatus.IDLE, detail=IDLE_DETAIL),
+    )
+    manager = _chat_manager(
+        state_root=tmp_path,
+        workspace_id="ws-1",
+        managed_session_id="managed-session-1",
+        reply_events=[
+            _event(0, "turn_started", {"text": "go"}),
+            _event(1, "text_delta", {"text": "Rebased onto main."}),
+        ],
+    )
+
+    status = await manager.get_tab_agent_status("tab-1", use_cache=False)
+
+    assert status is not None
+    assert status.last_reply_excerpt == "Rebased onto main."
+    assert status.last_reply_at is not None
+    # ...and it came from the managed session file, not the tab namespace.
+    managed = AgentStreamStore("ws-1", "managed-session-1")
+    assert managed.path.exists()
+    assert not AgentStreamStore("terminal-tabs", "terminal-tab-tab-1").path.exists()
+
+
+@pytest.mark.asyncio
+async def test_managed_chat_tab_reports_unread_from_the_managed_namespace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_manager = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(workspace_manager, "STATE_ROOT", tmp_path)
+    manager = _chat_manager(
+        state_root=tmp_path,
+        workspace_id="ws-1",
+        managed_session_id="managed-session-1",
+        reply_events=[
+            _event(0, "turn_started", {"text": "go"}),
+            _event(1, "text_delta", {"text": "done"}),
+            _event(
+                2,
+                "turn_completed",
+                {"status": "completed"},
+                created_at="2026-11-09T10:05:00+00:00",
+            ),
+        ],
+    )
+    process = manager.processes["tab-1"]
+
+    assert await manager.compute_tab_unread(process) is True
+
+
+@pytest.mark.asyncio
+async def test_direct_chat_tab_still_reports_unread_from_the_tab_namespace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The direct-Chat namespace must keep working exactly as before."""
+    workspace_manager = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(workspace_manager, "STATE_ROOT", tmp_path)
+    manager = _chat_manager(
+        state_root=tmp_path,
+        reply_events=[
+            _event(0, "turn_started", {"text": "go"}),
+            _event(1, "text_delta", {"text": "done"}),
+            _event(
+                2,
+                "turn_completed",
+                {"status": "completed"},
+                created_at="2026-11-09T10:05:00+00:00",
+            ),
+        ],
+    )
+    process = manager.processes["tab-1"]
+
+    assert await manager.compute_tab_unread(process) is True
 
 
 @pytest.mark.asyncio

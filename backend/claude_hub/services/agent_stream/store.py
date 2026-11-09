@@ -15,7 +15,7 @@ import importlib
 import json
 import shutil
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from itertools import groupby
 from pathlib import Path
@@ -175,7 +175,11 @@ def read_reply_excerpt(path: Path, max_chars: int, max_scan_bytes: int) -> Optio
     is_newest_turn = last_started is not None and source_turn == last_started
     return ReplyExcerpt(
         text=text,
-        written_at=datetime.fromtimestamp(stat_result.st_mtime) if is_newest_turn else None,
+        written_at=(
+            datetime.fromtimestamp(stat_result.st_mtime, tz=timezone.utc)
+            if is_newest_turn
+            else None
+        ),
         mtime_ns=stat_result.st_mtime_ns,
         size=size,
     )

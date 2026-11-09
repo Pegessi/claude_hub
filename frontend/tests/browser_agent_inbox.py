@@ -73,6 +73,7 @@ async def main(browser_run: BrowserRun) -> None:
 
     requests: list[tuple[str, str]] = []
     unknown_requests: list[tuple[str, str]] = []
+    status_reads: list[str] = []
     page_errors: list[str] = []
     viewed: list[str] = []
     report: dict = {
@@ -131,6 +132,7 @@ async def main(browser_run: BrowserRun) -> None:
             elif path == "/api/tabs/archived":
                 body = []
             elif path == "/api/tabs/status":
+                status_reads.append(path)
                 body = [
                     {
                         "tab_id": NEEDS,
@@ -318,11 +320,26 @@ async def main(browser_run: BrowserRun) -> None:
             await page.set_viewport_size(MOBILE)
             trigger = page.locator(".inbox-trigger").first
             await expect(trigger).to_be_visible()
+            # Opening on the phone refreshes instead of waiting for the poll.
+            reads_before_open = len(status_reads)
             await trigger.click()
             sheet = page.locator("[data-testid=inbox-sheet]")
             await expect(sheet).to_be_visible()
+            # Tight window: the 5 s background poll must not be what satisfies
+            # this assertion, only the open-triggered refresh.
+            for _ in range(8):
+                if len(status_reads) > reads_before_open:
+                    break
+                await page.wait_for_timeout(80)
+            assert len(status_reads) > reads_before_open, "phone open refreshes the inbox"
             await expect(page.locator(".inbox-panel")).to_have_count(0)
             await expect(sheet.locator(".inbox-row")).to_have_count(3)
+            # Focus lands on the list container that owns the keyboard contract,
+            # not on the Done button (which would disable ↑/↓/Enter/Esc).
+            focused_class = await page.evaluate(
+                "() => (document.activeElement && document.activeElement.className) || ''"
+            )
+            assert "inbox-content" in str(focused_class), f"focus went to {focused_class!r}"
             await shot("03-mobile-sheet.png")
             assert (
                 await sheet.get_by_role("button", name="Done").count() == 1
