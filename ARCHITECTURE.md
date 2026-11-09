@@ -361,7 +361,7 @@ Subsequent requests:
 | `composables/useTaskCreateFlow.ts` | Task creation form, frozen requests, capability gating, credential recovery and late-response guards |
 | `utils/draftAttachments.ts` | Shared draft attachment conversion and preview cleanup, with caller-owned lists |
 | `components/AgentAvatar.vue` | Small agent/caller badge: type icon + name |
-| `components/AgentStatusFloatingPanel.vue` | Per-agent floating status chip grid: idle/working/attention/offline |
+| `features/agent-status/AgentInboxPanel.vue` | Needs-you inbox popover: Needs you / Working / Recently done groups, filters, peek, inline reply (`inboxModel.ts`, `inboxReply.ts`) |
 | `components/LoadingButton.vue` | Generic button with loading + success/error state |
 | `components/MarkdownContent.vue` | Markdown rendering (marked + DOMPurify), inline path mention linking |
 | `components/EnvPresetManager.vue` | Launch-env preset CRUD, hide/unhide, workspace-level assignment |
