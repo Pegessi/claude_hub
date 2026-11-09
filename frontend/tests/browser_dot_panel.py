@@ -573,7 +573,7 @@ async def main(browser_run: BrowserRun) -> None:
                     page.locator(".app-mode-tools [data-testid=dot-launcher]")
                 ).to_be_visible()
                 await expect(page.locator(".tab-bar .dot-launcher")).to_have_count(0)
-                await expect(page.locator(".tab-bar .status-trigger")).to_be_visible()
+                await expect(page.locator(".tab-bar .inbox-trigger")).to_be_visible()
                 await expect(page.locator(".dot-launcher__name")).to_have_text("Jarvis")
             await shot("dot-desktop-home.png")
 
