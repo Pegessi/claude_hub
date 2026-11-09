@@ -256,13 +256,11 @@ const {
 <style scoped src="../styles/shared-attachments.css"></style>
 
 <style scoped>
+/* Rendered inside the dialog's Decision section, so it is a plain block rather
+   than a sticky footer; the section owns the border and spacing. */
 .detail-footer {
-  position: sticky;
-  bottom: 0;
-  z-index: 2;
-  border-top: 1px solid var(--ch-color-border-muted);
-  background: var(--ch-color-surface-raised);
-  padding: 12px 16px;
+  display: grid;
+  gap: 10px;
 }
 </style>
 
@@ -281,10 +279,7 @@ const {
   }
 
   .detail-footer {
-    position: sticky;
-    bottom: 0;
-    padding: 8px 12px max(10px, env(safe-area-inset-bottom));
-    box-shadow: 0 -12px 24px var(--ch-shadow-color-soft);
+    padding-bottom: max(4px, env(safe-area-inset-bottom));
   }
 
   .detail-footer-toggle {

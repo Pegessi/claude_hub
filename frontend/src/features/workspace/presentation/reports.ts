@@ -70,7 +70,7 @@ function acceptanceSummary(report: AgentReport): string | null {
   return parts.join(' · ')
 }
 
-function isSubstantiveReport(report: AgentReport): boolean {
+export function isSubstantiveReport(report: AgentReport): boolean {
   return Boolean(
     (report.changed_files && report.changed_files.length > 0) ||
     report.validation ||

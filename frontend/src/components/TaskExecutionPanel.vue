@@ -3,77 +3,74 @@
     class="task-execution-panel"
     aria-label="Task execution and progress"
   >
-    <h3>Execution and progress</h3>
-    <dl class="task-execution-facts">
-      <div><dt>Source</dt><dd>{{ taskSourceLabel(task.source) }}</dd></div>
-      <div><dt>Execution</dt><dd>{{ taskExecutionLabel(task) }}</dd></div>
-      <div><dt>Epoch</dt><dd>{{ task.execution_epoch ?? 'legacy' }}</dd></div>
-      <div><dt>Progress revision</dt><dd>{{ task.progress_revision ?? 'legacy' }}</dd></div>
-      <div v-if="task.source?.tab_id">
-        <dt>Source Chat</dt><dd><code>{{ task.source.tab_id }}</code></dd>
+    <h3>Execution control</h3>
+
+    <!-- Internal bookkeeping (source, epoch, revision, runtime sampling) is
+         captured evidence for debugging, not something a reviewer decides on,
+         so it stays folded. Latest validation/risks/artifacts moved up to the
+         Evidence section. -->
+    <details
+      class="task-execution-block task-execution-debug"
+      :open="debugOpen"
+    >
+      <summary>Debug info</summary>
+      <dl class="task-execution-facts">
+        <div><dt>Source</dt><dd>{{ taskSourceLabel(task.source) }}</dd></div>
+        <div><dt>Execution</dt><dd>{{ taskExecutionLabel(task) }}</dd></div>
+        <div v-if="task.execution_control">
+          <dt>Execution control</dt><dd>{{ task.execution_control }}</dd>
+        </div>
+        <div><dt>Epoch</dt><dd>{{ task.execution_epoch ?? 'legacy' }}</dd></div>
+        <div><dt>Progress revision</dt><dd>{{ task.progress_revision ?? 'legacy' }}</dd></div>
+        <div v-if="task.source?.tab_id">
+          <dt>Source Chat</dt><dd><code>{{ task.source.tab_id }}</code></dd>
+        </div>
+        <div v-if="task.source?.agent_id">
+          <dt>Source Agent</dt><dd><code>{{ task.source.agent_id }}</code></dd>
+        </div>
+      </dl>
+
+      <div class="task-execution-block">
+        <strong>Runtime activity</strong>
+        <p v-if="task.runtime_observation">
+          {{ runtimeLabel }} · {{ formatTime(task.runtime_observation.observed_at) }}
+          <span v-if="task.runtime_observation.detail"> — {{ task.runtime_observation.detail }}</span>
+        </p>
+        <p v-else>
+          Unknown
+        </p>
+        <small>Runtime activity does not change the Task’s final state.</small>
       </div>
-      <div v-if="task.source?.agent_id">
-        <dt>Source Agent</dt><dd><code>{{ task.source.agent_id }}</code></dd>
-      </div>
-    </dl>
+
+      <details
+        v-if="task.execution_ref"
+        class="task-execution-block"
+      >
+        <summary>Execution reference</summary>
+        <dl class="task-execution-facts">
+          <div><dt>Provider</dt><dd>{{ task.execution_ref.provider || 'none' }}</dd></div>
+          <div><dt>Session</dt><dd>{{ task.execution_ref.session_id || 'none' }}</dd></div>
+          <div><dt>Thread</dt><dd>{{ task.execution_ref.thread_id || 'none' }}</dd></div>
+          <div><dt>Turn</dt><dd>{{ task.execution_ref.turn_id || 'none' }}</dd></div>
+          <div><dt>Run epoch</dt><dd>{{ task.execution_ref.run_epoch ?? 'none' }}</dd></div>
+        </dl>
+      </details>
+    </details>
 
     <div
-      v-if="task.latest_progress"
+      v-if="showProgress && task.latest_progress"
       class="task-execution-block"
     >
       <strong>{{ progressStateLabel(task.latest_progress.state) }}</strong>
       <p>{{ task.latest_progress.summary }}</p>
       <small>{{ formatTime(task.latest_progress.reported_at) }}</small>
-      <details v-if="task.latest_progress.validation || task.latest_progress.risks || task.latest_progress.artifact_refs.length">
-        <summary>Validation, risks, and artifacts</summary>
-        <p v-if="task.latest_progress.validation">
-          <b>Validation:</b> {{ task.latest_progress.validation }}
-        </p>
-        <p v-if="task.latest_progress.risks">
-          <b>Risks:</b> {{ task.latest_progress.risks }}
-        </p>
-        <ul v-if="task.latest_progress.artifact_refs.length">
-          <li
-            v-for="artifact in task.latest_progress.artifact_refs"
-            :key="artifact"
-          >
-            <code>{{ artifact }}</code>
-          </li>
-        </ul>
-      </details>
     </div>
     <p
-      v-else
+      v-else-if="showProgress"
       class="task-execution-muted"
     >
       No progress has been reported.
     </p>
-
-    <div class="task-execution-block">
-      <strong>Runtime activity</strong>
-      <p v-if="task.runtime_observation">
-        {{ runtimeLabel }} · {{ formatTime(task.runtime_observation.observed_at) }}
-        <span v-if="task.runtime_observation.detail"> — {{ task.runtime_observation.detail }}</span>
-      </p>
-      <p v-else>
-        Unknown
-      </p>
-      <small>Runtime activity does not change the Task’s final state.</small>
-    </div>
-
-    <details
-      v-if="task.execution_ref"
-      class="task-execution-block"
-    >
-      <summary>Execution reference</summary>
-      <dl class="task-execution-facts">
-        <div><dt>Provider</dt><dd>{{ task.execution_ref.provider || 'none' }}</dd></div>
-        <div><dt>Session</dt><dd>{{ task.execution_ref.session_id || 'none' }}</dd></div>
-        <div><dt>Thread</dt><dd>{{ task.execution_ref.thread_id || 'none' }}</dd></div>
-        <div><dt>Turn</dt><dd>{{ task.execution_ref.turn_id || 'none' }}</dd></div>
-        <div><dt>Run epoch</dt><dd>{{ task.execution_ref.run_epoch ?? 'none' }}</dd></div>
-      </dl>
-    </details>
 
     <p
       v-if="recordOnly && !hasMutationVersion"
@@ -303,7 +300,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onUnmounted, reactive, ref, watch, withDefaults } from 'vue'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
 import type {
   WorkspaceTask,
@@ -333,11 +330,18 @@ import {
 } from '@/utils/taskExecution'
 import { writeClipboard } from '@/utils/clipboard'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   workspaceId: string
   task: WorkspaceTask
   capabilities: WorkspaceTaskCapabilities | null
-}>()
+  /** Keep the internal debug facts open (the Task dialog folds them shut). */
+  debugOpen?: boolean
+  /** Render the latest progress summary; the Task dialog shows it in its header. */
+  showProgress?: boolean
+}>(), {
+  debugOpen: true,
+  showProgress: true,
+})
 
 const store = useWorkspaceStore()
 const busy = ref(false)
@@ -744,8 +748,11 @@ onUnmounted(() => {
 }
 .task-execution-panel {
   padding: 14px;
-  border: 1px solid var(--ch-color-border-muted);
+  border: 1px solid var(--ch-color-border, var(--ch-color-border-muted));
   border-radius: var(--ch-radius-md);
+  /* Same surface as the dialog's other sections; transparent made the border
+     the only edge and it disappeared into the dialog background. */
+  background: var(--ch-color-surface);
 }
 h3,
 h4,
@@ -767,6 +774,38 @@ small,
 .task-execution-block {
   padding-top: 10px;
   border-top: 1px solid var(--ch-color-border-muted);
+}
+summary {
+  cursor: pointer;
+  list-style: none;
+}
+summary::-webkit-details-marker { display: none; }
+.task-execution-block > summary {
+  color: var(--ch-color-text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.task-execution-debug > summary,
+.task-execution-block > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.task-execution-debug > summary::after,
+.task-execution-block > summary::after {
+  content: '▸';
+  flex: 0 0 auto;
+  font-size: 9px;
+}
+.task-execution-debug[open] > summary::after,
+.task-execution-block[open] > summary::after {
+  content: '▾';
+}
+.task-execution-debug[open] > summary {
+  margin-bottom: 8px;
 }
 .task-execution-form label {
   display: grid;
