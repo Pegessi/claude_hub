@@ -197,6 +197,23 @@ def test_codex_question_option_descriptions_survive_normalization() -> None:
     assert questions[0]["options"] == [{"id": "UI", "label": "UI", "description": "Question cards"}]
 
 
+def test_question_guidance_asks_for_decisions_on_the_card() -> None:
+    """Agents must reach for the question tool instead of closing prose.
+
+    A report that ends with "should I proceed?" leaves the user typing an
+    answer; the card carries the options and their tradeoffs. This adds the
+    preference without weakening the wait-don't-decline rule beside it.
+    """
+    from claude_hub.services.agent_stream.providers.guidance import QUESTION_PROTOCOL_GUIDANCE
+
+    assert "does NOT mean the user declined" in QUESTION_PROTOCOL_GUIDANCE
+    assert "Prefer this tool over an open question in prose" in QUESTION_PROTOCOL_GUIDANCE
+    assert "2–4 concrete options" in QUESTION_PROTOCOL_GUIDANCE
+    assert "one-line description of its tradeoff" in QUESTION_PROTOCOL_GUIDANCE
+    assert "'(Recommended)'" in QUESTION_PROTOCOL_GUIDANCE
+    assert "Do not end a report with a prose question" in QUESTION_PROTOCOL_GUIDANCE
+
+
 @pytest.mark.parametrize(
     "params,expected",
     [

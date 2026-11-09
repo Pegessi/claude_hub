@@ -7,6 +7,25 @@
 
 ## Released
 
+### feat(chat): decisions arrive as cards, and agents ask through the question tool
+
+- A provider question now renders as a decision card: the question itself is
+  the title, every option is a full-width row with its tradeoff line under the
+  label, the provider's "(Recommended)" label suffix is peeled off into a
+  marker, and a multi-question card walks `Question 1 of 3` with Back/Next
+  instead of stacking every question at once. Options are 44px targets at
+  mobile/coarse-pointer widths.
+- The open decision in the conversation can be answered with the number keys
+  (1–9 while it is the latest pending card, and never while a field has focus).
+  Once answered it collapses to one quiet line — `You chose: X · receipt state`
+  — instead of a dead form, and the card's product strings (plus the receipt
+  and submit-error wording) are English.
+- Claude's `AskUserQuestion` option descriptions now survive normalization, so
+  the tradeoff line reaches the card (Codex and Cursor already carried them).
+- Dot and native Chat agents are told to put decisions on the card: 2–4
+  concrete options with a one-line tradeoff each, `(Recommended)` on the
+  suggestion, instead of ending a report with an open prose question.
+
 ### feat(ui): needs-you Inbox replaces the permanent Status/Agents count pills
 
 - The top bar shows one **Inbox** entry whose amber badge counts only sessions
