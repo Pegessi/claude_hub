@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { loadChatUtility } from './chatPresentationTestHarness.mjs'
 
-const { asideClientTurnId, asideUnavailableReason, buildAsideSendRequest, canOfferAside } =
+const { asideClientTurnId, asideFailure, asideUnavailableReason, buildAsideSendRequest, canOfferAside } =
   await loadChatUtility('chatAside')
 
 const gate = overrides => asideUnavailableReason({
@@ -53,4 +53,27 @@ test('generated aside turn ids are stable strings, never empty', () => {
   assert.equal(typeof first, 'string')
   assert.ok(first.trim().length > 0)
   assert.notEqual(first, second)
+})
+
+test('a send failure after the fork puts the reader back where the question is', () => {
+  // Forking switched the pane to the new tab; the draft only exists in the
+  // composer of the source Chat, so staying on the empty fork hides it.
+  const failure = asideFailure('source-tab', 'fork-tab', 'fork-tab', 'Session is still starting (409)')
+  assert.equal(failure.restoreTabId, 'source-tab')
+  assert.equal(
+    failure.message,
+    'Ask aside failed: Session is still starting (409). Your question is still in this Chat.',
+  )
+})
+
+test('a failure before the fork leaves the pane alone', () => {
+  const failure = asideFailure('source-tab', null, 'source-tab', 'Could not fork this Chat')
+  assert.equal(failure.restoreTabId, null, 'nothing moved, so nothing is put back')
+  assert.equal(failure.message, 'Ask aside failed: Could not fork this Chat')
+})
+
+test('a failure never overrides a tab the user chose in the meantime', () => {
+  const failure = asideFailure('source-tab', 'fork-tab', 'other-tab', 'HTTP 503')
+  assert.equal(failure.restoreTabId, null, 'an explicit switch wins over the recovery')
+  assert.match(failure.message, /still in this Chat/, 'the draft is still reported where it lives')
 })
