@@ -61,7 +61,7 @@ test('active Goal guards manual history edits and start waits for an idle turn',
 test('Goal setup and status have no budget or turn-limit controls', () => {
   const dialog = readFileSync(new URL('../src/components/GoalSetupDialog.vue', import.meta.url), 'utf8')
   assert.doesNotMatch(dialog + statusBar + composable, /token_budget|max_turns|updateBudget|budgetDraft/)
-  assert.ok(dialog.includes("emit('submit', { objective: trimmed })"))
+  assert.ok(dialog.includes("emit('submit', { objective: trimmed, planFirst: planFirst.value })"))
   assert.match(composer, /<ComposerAddMenu/)
   assert.doesNotMatch(composer, /composer-goal-btn|composer-attach-btn/)
 })
