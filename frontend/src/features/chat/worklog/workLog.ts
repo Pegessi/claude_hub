@@ -72,8 +72,12 @@ function countsAsWork(kind: ToolActivityKind): boolean {
   return kind !== 'plan'
 }
 
-function countTool(counts: WorkLogCounts, tool: TimelineTool): void {
-  if (tool.status === 'failed') counts.failed += 1
+function countTool(counts: WorkLogCounts, tool: TimelineTool, failures: Set<string>): void {
+  // Keyed rather than incremented: one spawn call addressed to several threads
+  // is attached to each of them by the reducer, and a directive to several
+  // threads is filed in each child, so the same failure would otherwise be
+  // reported once per addressee.
+  if (tool.status === 'failed') failures.add(tool.key)
   // A spawn or an instruction to a child is delegation, not work of its own:
   // the child's calls are counted where they arrive, and the delegation itself
   // is the sub-agent count. Counting it as "another tool" double-counted it.
@@ -109,9 +113,10 @@ function countTool(counts: WorkLogCounts, tool: TimelineTool): void {
 export function countWorkLogParts(parts: readonly TimelinePart[]): WorkLogCounts {
   const counts = emptyWorkLogCounts()
   const threads = new Set<string>()
+  const failures = new Set<string>()
   for (const part of parts) {
     for (const tool of toolsInPart(part)) {
-      countTool(counts, tool)
+      countTool(counts, tool, failures)
       // A spawn call names the child it started. Where the child also streamed
       // its own region the thread id above already counted it, so both paths
       // dedupe against one set instead of double-counting the same child.
@@ -124,16 +129,18 @@ export function countWorkLogParts(parts: readonly TimelinePart[]): WorkLogCounts
     if (part.kind !== 'subagents') continue
     for (const thread of part.threads) {
       threads.add(thread.threadId)
-      for (const tool of toolsInThread(thread)) countTool(counts, tool)
+      for (const tool of toolsInThread(thread)) countTool(counts, tool, failures)
       // A child that failed to launch or ended as an error is a failure of
-      // this turn even when no individual call carries the status.
-      if (thread.launchTool?.status === 'failed') counts.failed += 1
+      // this turn even when no individual call carries the status. Both are
+      // keyed too: a launch shared by several threads is one failure.
+      if (thread.launchTool?.status === 'failed') failures.add(thread.launchTool.key)
       for (const row of thread.parts) {
-        if (row.kind === 'status' && row.isError) counts.failed += 1
+        if (row.kind === 'status' && row.isError) failures.add(`status:${thread.threadId}:${row.key}`)
       }
     }
   }
   counts.subagents = threads.size
+  counts.failed = failures.size
   return counts
 }
 
