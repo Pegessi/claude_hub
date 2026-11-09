@@ -49,7 +49,6 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { formatStopwatch, parseTimestampMs } from '@/utils/duration'
 import { requireChatOwner, chatTimelineKey } from '../owners'
 import { countWorkLog, currentStep, emptyWorkLogCounts, workLogCountLabel } from '../worklog/workLog'
-import type { TimelineTurn } from '../timeline/types'
 
 const props = defineProps<{ startedAt: string | null }>()
 
@@ -58,11 +57,22 @@ const props = defineProps<{ startedAt: string | null }>()
 // the whole part list down just for a label.
 const { turns } = requireChatOwner(chatTimelineKey)
 
-const liveTurn = computed<TimelineTurn | null>(() => turns.value[turns.value.length - 1] ?? null)
+/** The turn in flight is the newest turn of the pane. Read it straight from
+ *  ``turns`` in each projection, never through an intermediate computed that
+ *  returns the turn object: ``IncrementalTimelineReducer`` mutates turns in
+ *  place and returns a fresh array, so the turn reference never changes and a
+ *  computed handing it back would never invalidate — the footer would keep
+ *  the first label of a 20-minute turn forever. The array reference does
+ *  change per batch, so depending on it is what keeps this live. */
+const step = computed(() => {
+  const turn = turns.value[turns.value.length - 1]
+  return turn ? currentStep(turn) : { label: '', waiting: false }
+})
 
-const step = computed(() => liveTurn.value ? currentStep(liveTurn.value) : { label: '', waiting: false })
-
-const counts = computed(() => liveTurn.value ? countWorkLog(liveTurn.value) : emptyWorkLogCounts())
+const counts = computed(() => {
+  const turn = turns.value[turns.value.length - 1]
+  return turn ? countWorkLog(turn) : emptyWorkLogCounts()
+})
 
 const countsLabel = computed(() => workLogCountLabel(counts.value))
 

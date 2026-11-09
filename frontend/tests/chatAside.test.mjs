@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { loadChatUtility } from './chatPresentationTestHarness.mjs'
 
-const { asideClientTurnId, asideFailure, asideUnavailableReason, buildAsideSendRequest, canOfferAside } =
+const { asideClientTurnId, asideFailure, asideForkOrdinal, asideUnavailableReason, buildAsideSendRequest, canOfferAside } =
   await loadChatUtility('chatAside')
 
 const gate = overrides => asideUnavailableReason({
@@ -10,6 +10,7 @@ const gate = overrides => asideUnavailableReason({
   question: 'why is pytest failing?',
   attachmentCount: 0,
   ordinal: 3,
+  hasTurns: true,
   busy: false,
   ...overrides,
 })
@@ -37,7 +38,12 @@ test('every reason the aside action cannot run is explicit', () => {
   assert.equal(gate({}), null)
   assert.equal(gate({ isManagedChat: true }), 'Asking aside needs a local Chat')
   assert.equal(gate({ busy: true }), 'Asking aside…')
-  assert.equal(gate({ ordinal: null }), 'Send a message first, then ask aside')
+  assert.equal(gate({ ordinal: null, hasTurns: false }), 'Send a message first, then ask aside')
+  assert.equal(
+    gate({ ordinal: null, hasTurns: true }),
+    'Ask aside after this turn finishes',
+    'a first turn still running is "not yet", not "nothing to ask about"',
+  )
   assert.equal(gate({ attachmentCount: 1 }), 'Ask aside sends text only — remove attachments first')
   assert.equal(gate({ question: '   ' }), 'Type a question to ask aside')
 })
@@ -55,30 +61,76 @@ test('generated aside turn ids are stable strings, never empty', () => {
   assert.notEqual(first, second)
 })
 
-test('a send failure after the fork puts the reader back where the question is', () => {
+test('a restored failure says the reader is back in the source Chat', () => {
   // Forking switched the pane to the new tab; the draft only exists in the
   // composer of the source Chat, so staying on the empty fork hides it.
-  const failure = asideFailure('source-tab', 'fork-tab', 'fork-tab', 'Session is still starting (409)')
+  const failure = asideFailure({
+    sourceTabId: 'source-tab',
+    sourceTabName: 'refactor ui',
+    forkedTabId: 'fork-tab',
+    activeTabId: 'fork-tab',
+    detail: 'Session is still starting (409)',
+  })
   assert.equal(failure.restoreTabId, 'source-tab')
   assert.equal(
     failure.message,
-    'Ask aside failed: Session is still starting (409). Your question is still in this Chat.',
+    'Ask aside failed: Session is still starting (409). Back in refactor ui — your question is still in the composer.',
   )
 })
 
 test('a failure before the fork leaves the pane alone', () => {
-  const failure = asideFailure('source-tab', null, 'source-tab', 'Could not fork this Chat')
+  const failure = asideFailure({
+    sourceTabId: 'source-tab',
+    sourceTabName: 'refactor ui',
+    forkedTabId: null,
+    activeTabId: 'source-tab',
+    detail: 'Could not fork this Chat',
+  })
   assert.equal(failure.restoreTabId, null, 'nothing moved, so nothing is put back')
   assert.equal(failure.message, 'Ask aside failed: Could not fork this Chat')
 })
 
-test('a failure never overrides a tab the user chose in the meantime', () => {
-  const failure = asideFailure('source-tab', 'fork-tab', 'other-tab', 'HTTP 503')
+test('a failure the reader has already moved past names where the question still is', () => {
+  // Nothing was restored, so "here" would be false: the sentence has to name
+  // the Chat that holds the draft instead.
+  const failure = asideFailure({
+    sourceTabId: 'source-tab',
+    sourceTabName: 'refactor ui',
+    forkedTabId: 'fork-tab',
+    activeTabId: 'other-tab',
+    detail: 'HTTP 503',
+  })
   assert.equal(failure.restoreTabId, null, 'an explicit switch wins over the recovery')
   assert.equal(
     failure.message,
-    'Ask aside failed: HTTP 503. Your question is still in the Chat you asked from.',
-    'the draft is named where it lives, not "this Chat" which is now a third tab',
+    'Ask aside failed: HTTP 503. Your question is still in the composer of refactor ui.',
   )
-  assert.doesNotMatch(failure.message, /this Chat/)
+  assert.doesNotMatch(failure.message, /this Chat|Back in/, 'the reader was not moved back')
+})
+
+test('an unknown Chat name still reads as a sentence in both branches', () => {
+  const restored = asideFailure({
+    sourceTabId: 'source-tab', sourceTabName: '  ', forkedTabId: 'fork-tab',
+    activeTabId: 'fork-tab', detail: 'HTTP 409',
+  })
+  assert.match(restored.message, /Back in the Chat you asked this in — /)
+  const moved = asideFailure({
+    sourceTabId: 'source-tab', sourceTabName: '', forkedTabId: 'fork-tab',
+    activeTabId: 'other-tab', detail: 'HTTP 409',
+  })
+  assert.match(moved.message, /composer of the Chat you asked this in\./)
+})
+
+test('the fork cuts at the last completed turn, never inside a running one', () => {
+  // A fork that copies an unfinished turn inherits tool cards and question
+  // cards its fresh provider session can never complete.
+  assert.equal(asideForkOrdinal([]), null)
+  assert.equal(asideForkOrdinal([{ completed: false }]), null, 'a first turn in flight has nothing to cut at')
+  assert.equal(asideForkOrdinal([{ completed: true }, { completed: false }]), 0)
+  assert.equal(asideForkOrdinal([{ completed: true }, { completed: true }]), 1)
+  assert.equal(
+    asideForkOrdinal([{ completed: true }, { completed: false }, { completed: true }, { completed: false }]),
+    2,
+    'the newest completed turn wins even when a newer one is running',
+  )
 })
