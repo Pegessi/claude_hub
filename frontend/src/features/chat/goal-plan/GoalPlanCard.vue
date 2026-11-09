@@ -66,6 +66,15 @@
     </div>
 
     <p
+      v-if="!plan && mode === 'review'"
+      class="goal-plan-missing"
+      role="status"
+    >
+      The Goal is waiting for your input, but no plan was proposed to approve.
+      Ask for a revised plan instead of starting work.
+    </p>
+
+    <p
       v-if="warning"
       class="goal-plan-warning"
       role="status"
@@ -89,8 +98,8 @@
       <button
         type="button"
         class="goal-plan-revise"
-        :disabled="Boolean(approveDisabledReason)"
-        :title="approveDisabledReason || 'Ask the agent to revise this plan before starting'"
+        :disabled="Boolean(reviseDisabledReason)"
+        :title="reviseDisabledReason || 'Ask the agent to revise this plan before starting'"
         @click="emit('revise')"
       >
         Revise
@@ -129,6 +138,8 @@ const props = defineProps<{
   headingId: string
   warning?: string | null
   approveDisabledReason?: string | null
+  /** Revise stays available when Approve is refused for a missing plan. */
+  reviseDisabledReason?: string | null
 }>()
 const emit = defineEmits<{ approve: []; revise: [] }>()
 const budgetSummary = computed(() => goalPlanBudgetSummary(props.plan))
@@ -191,6 +202,7 @@ const budgetSummary = computed(() => goalPlanBudgetSummary(props.plan))
 .goal-plan-budget-helpers li { display: flex; gap: 8px; }
 .goal-plan-helper-role { color: var(--ch-color-text); }
 .goal-plan-helper-model { font-family: var(--ch-font-mono); color: var(--ch-color-text-soft); }
+.goal-plan-missing { margin: 0; font-size: var(--ch-font-size-sm); line-height: 1.5; color: var(--ch-color-text-muted); }
 .goal-plan-warning { margin: 0; font-size: var(--ch-font-size-sm); color: var(--ch-color-warning); }
 .goal-plan-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .goal-plan-actions button {

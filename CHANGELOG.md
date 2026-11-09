@@ -171,10 +171,14 @@ review's open items are recorded in
   **Approve & start** / **Revise** actions. A plan block is accepted only from
   the turn the Hub asked to plan or from a turn that parks for input, so an
   implementing turn echoing it cannot rewrite the scope or re-open approval, and
-  the answered state says only that the Goal continued rather than that the user
-  approved. Provider-native Goals cannot inject a Hub turn, so the option is
-  disabled there with the reason and is not remembered from that Chat, and the
-  API refuses the field instead of starting unapproved work.
+  the answered state says only that the Goal continued — once its turn settled —
+  rather than that the user approved. The pause belongs to the Hub: a planning
+  turn parks even if the model asks to continue, an objective edited
+  mid-planning is planned again instead of implemented, a card with no
+  reviewable plan refuses approval, and the trailing-envelope sanitizer hides a
+  plan block as well. Provider-native Goals cannot inject a Hub turn, so the
+  option is disabled there with the reason and is not remembered from that
+  Chat, and the API refuses the field instead of starting unapproved work.
 
 ### feat(ui): make Workspace task detail and board evidence-first
 
