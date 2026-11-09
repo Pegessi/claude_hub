@@ -33,7 +33,8 @@
 - Failed native tool images, subthread images and generated Markdown images
   show an accessible user-controlled **Retry** that re-requests the same
   authorized URL (one stable identity with a single cache-busting nonce)
-  without replaying any tool or retrying 404s automatically; recovered
+  without replaying any tool or retrying 404s automatically, including across
+  same-paragraph streaming updates without Mermaid diagrams; recovered
   Markdown images keep their original click/keyboard preview button and
   lazy/async attributes; a still-running image tool renders a pending state
   only while its turn/thread is active and settles (never an endless

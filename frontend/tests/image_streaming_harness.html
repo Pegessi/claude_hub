@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Streamed image retry harness</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      import { createApp, h, ref } from 'vue'
+      import MarkdownContent from '/src/components/MarkdownContent.vue'
+
+      // Keep one real component and one live paragraph, not a replayed snapshot.
+      const text = ref('Look at ![Streaming image](/tmp/streaming-missing.png) and tail')
+      const probe = {
+        mounts: 0,
+        previews: [],
+        append: delta => { text.value += delta },
+      }
+      createApp({
+        setup() {
+          return () => h(MarkdownContent, {
+            text: text.value,
+            tabId: 'image-streaming-probe',
+            onVnodeMounted: () => { probe.mounts++ },
+            onImageClick: (url, alt) => { probe.previews.push({ url, alt }) },
+          })
+        },
+      }).mount('#app')
+      window.__imageStreamProbe = probe
+    </script>
+  </body>
+</html>
