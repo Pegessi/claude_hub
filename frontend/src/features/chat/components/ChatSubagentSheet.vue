@@ -1,39 +1,20 @@
 <template>
-  <div
-    v-if="counts.running > 0"
-    class="subagent-mobile-bar"
-  >
-    <button
-      ref="triggerRef"
-      type="button"
-      class="subagent-mobile-pill"
-      data-testid="subagent-mobile-pill"
-      aria-haspopup="dialog"
-      :aria-expanded="open"
-      @click="openSheet"
-    >
-      <span
-        class="subagent-mobile-dot"
-        aria-hidden="true"
-      />
-      <span>{{ counts.running }} sub-agent{{ counts.running === 1 ? '' : 's' }} running</span>
-      <span aria-hidden="true">›</span>
-    </button>
-  </div>
   <Teleport to="body">
     <div
-      v-if="open"
       class="subagent-sheet-backdrop"
       data-testid="subagent-sheet-backdrop"
-      @click.self="closeSheet"
-      @keydown.esc.stop="closeSheet"
+      @click.self="emit('close')"
+      @keydown.esc.stop="emit('close')"
     >
       <div
+        :id="props.id"
+        ref="sheetRef"
         class="subagent-sheet"
         data-testid="subagent-sheet"
         role="dialog"
         aria-modal="true"
         aria-label="Sub-agents"
+        @keydown.tab="onTab"
       >
         <span
           class="subagent-sheet-grip"
@@ -41,20 +22,21 @@
         />
         <header class="subagent-sheet-head">
           <strong>Sub-agents</strong>
+          <span class="subagent-sheet-count">{{ props.chips.length }}</span>
           <button
             ref="closeRef"
             type="button"
             class="subagent-sheet-close"
             aria-label="Close sub-agents"
-            @click="closeSheet"
+            @click="emit('close')"
           >
             Done
           </button>
         </header>
         <div class="subagent-sheet-body">
           <ChatSubagentList
-            :chips="chips"
-            :now-ms="nowMs"
+            :chips="props.chips"
+            :now-ms="props.nowMs"
             @jump="onJump"
           />
         </div>
@@ -64,88 +46,68 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 
-import { subagentDockCounts, type SubagentJumpChip } from '../presentation/subagentJump'
+import type { SubagentJumpChip } from '../presentation/subagentJump'
 import ChatSubagentList from './ChatSubagentList.vue'
 
+/** The mobile reveal for the Agents pill: a bottom sheet, the same native
+ *  pattern as the other phone-sized overlays. The pane chrome owns the pill;
+ *  this component owns only the sheet so the pane never grows a second bar. */
 const props = defineProps<{
+  /** Dialog id, so the owning pill can point `aria-controls` at it. */
+  id: string
   chips: SubagentJumpChip[]
+  nowMs: number
 }>()
 
 const emit = defineEmits<{
+  (event: 'close'): void
   (event: 'jump', chip: SubagentJumpChip): void
 }>()
 
-const open = ref(false)
-const nowMs = ref(Date.now())
-const triggerRef = ref<HTMLButtonElement | null>(null)
 const closeRef = ref<HTMLButtonElement | null>(null)
-const counts = computed(() => subagentDockCounts(props.chips))
-
-function openSheet() {
-  nowMs.value = Date.now()
-  open.value = true
-  void nextTick(() => closeRef.value?.focus())
-}
-
-function closeSheet() {
-  open.value = false
-  void nextTick(() => triggerRef.value?.focus())
-}
+const sheetRef = ref<HTMLElement | null>(null)
+let previousBodyOverflow = ''
 
 function onJump(chip: SubagentJumpChip) {
-  open.value = false
   emit('jump', chip)
 }
 
-// Nothing running means nothing to show: the bar and its sheet go away.
-watch(() => counts.value.running, running => {
-  if (running === 0) open.value = false
+// Keep Tab inside the modal sheet: without this, focus walks into the pane
+// behind the backdrop and only the mouse can bring it back. Only rendered
+// buttons count — the "Earlier" rows are v-show hidden while something runs,
+// and focusing a display:none button silently does nothing.
+function onTab(event: KeyboardEvent) {
+  const buttons = sheetRef.value?.querySelectorAll<HTMLElement>('button:not([disabled])')
+  const focusables = buttons ? [...buttons].filter(button => button.getClientRects().length > 0) : []
+  if (focusables.length === 0) return
+  const first = focusables[0]
+  const last = focusables[focusables.length - 1]
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
+// Move focus into the sheet the moment it opens (Esc, Done and the backdrop are
+// the only ways out, so all of them must be reachable), and stop the transcript
+// behind the fixed backdrop from scrolling under the finger.
+onMounted(() => {
+  closeRef.value?.focus()
+  previousBodyOverflow = document.body.style.overflow
+  document.body.style.overflow = 'hidden'
+})
+
+onBeforeUnmount(() => {
+  document.body.style.overflow = previousBodyOverflow
 })
 </script>
 
 <style scoped>
-.subagent-mobile-bar {
-  flex: none;
-  display: flex;
-  padding: 4px 12px 0;
-}
-
-.subagent-mobile-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  height: 28px;
-  padding: 0 11px;
-  border: 1px solid var(--ch-color-accent-ring);
-  border-radius: 999px;
-  background: var(--ch-color-surface-raised);
-  color: var(--ch-color-text);
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.subagent-mobile-pill:focus-visible {
-  outline: 2px solid var(--ch-color-accent);
-  outline-offset: 2px;
-}
-
-.subagent-mobile-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--ch-color-accent);
-  animation: subagent-mobile-pulse 1.6s ease-in-out infinite;
-}
-
-@keyframes subagent-mobile-pulse {
-  50% {
-    opacity: 0.35;
-  }
-}
-
 .subagent-sheet-backdrop {
   position: fixed;
   inset: 0;
@@ -190,11 +152,18 @@ watch(() => counts.value.running, running => {
 .subagent-sheet-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 6px;
   padding: 6px 14px 8px;
   border-bottom: 1px solid var(--ch-color-border-muted);
   font-size: 13px;
   color: var(--ch-color-text-strong);
+}
+
+.subagent-sheet-count {
+  margin-right: auto;
+  font-size: 11px;
+  color: var(--ch-color-text-subtle);
+  font-variant-numeric: tabular-nums;
 }
 
 .subagent-sheet-close {
@@ -219,10 +188,6 @@ watch(() => counts.value.running, running => {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .subagent-mobile-dot {
-    animation: none;
-  }
-
   .subagent-sheet {
     animation: none;
   }

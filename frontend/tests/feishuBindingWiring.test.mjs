@@ -78,3 +78,70 @@ test('Feishu message provenance resolves a bound Bot avatar before the outline b
   assert.ok(userMessage.includes(':identity-key="feishuSourceIdentityKey(turn)"'))
   assert.doesNotMatch(userMessage, /conversation-message-source__mark[\s\S]{0,120}>\s*飞/)
 })
+
+const eventValues = readFileSync(new URL('../src/features/chat/timeline/eventValues.ts', import.meta.url), 'utf8')
+
+test('the unbound panel offers the private pairing flow and a group path side by side', () => {
+  for (const marker of [
+    'data-testid="feishu-binding-path-private"',
+    'data-testid="feishu-binding-path-group"',
+    'data-testid="feishu-binding-group-select"',
+    'data-testid="feishu-binding-bind-group"',
+    'data-testid="feishu-binding-load-groups"',
+    'data-testid="feishu-binding-reload-groups"',
+    'aria-label="Group"',
+    'Anyone in this group can talk to this Chat.',
+    'Bind this group',
+  ]) {
+    assert.ok(panel.includes(marker), marker)
+  }
+  // Both ways in stay real buttons with a pressed state, so they are keyboard
+  // reachable and announce which path is active.
+  for (const path of ['private', 'group']) {
+    assert.match(panel, new RegExp(
+      `<button\\s+type="button"[\\s\\S]{0,200}:aria-pressed="connectMode === '${path}'"` +
+      `[\\s\\S]{0,120}@click="connectMode = '${path}'"`,
+    ), path)
+  }
+  assert.ok(panel.includes('Generate pairing code'), 'the existing pairing action remains')
+  // The group list is read only when the group path (or a group binding) needs it.
+  assert.match(panel, /ensureGroups\(\)/)
+  assert.doesNotMatch(panel, /setInterval/)
+})
+
+test('a stale group selection cannot survive a Bot switch or a reloaded list', () => {
+  // The chosen chat id belongs to one Bot: it must be dropped when the Bot
+  // changes or the option disappears, or "Bind this group" submits a chat the
+  // user never picked in that Bot's list.
+  assert.match(panel, /watch\(selectedBotId, \(\) => \{ selectedChatId\.value = null \}\)/)
+  assert.ok(panel.includes('!value.some(chat => chat.chat_id === selectedChatId.value)'))
+  assert.ok(panel.includes("selectedChatId.value = null"))
+})
+
+test('the topic hint follows the server-resolved form, not just chat_mode', () => {
+  assert.ok(panel.includes("chat.is_topic_mode ?? chat.chat_mode === 'topic'"))
+  assert.ok(panel.includes("boundGroup.value?.is_topic_mode"))
+})
+
+test('the bound panel names a private chat or a group, with the topic hint', () => {
+  assert.match(panel, /data-testid="feishu-binding-target"[\s\S]{0,80}\{\{ boundTargetLabel \}\}/)
+  assert.match(panel, /binding\.value\?\.chat_type === 'group'/)
+  assert.ok(panel.includes('Private chat'))
+  assert.ok(panel.includes('Group · '))
+  assert.ok(panel.includes('binding.value?.chat_name'))
+  assert.match(panel, /v-if="boundIsTopic"[\s\S]{0,180}data-testid="feishu-binding-topic-hint"/)
+  assert.ok(panel.includes('Replies stay inside the group topic.'))
+  assert.ok(panel.includes("chat.chat_mode === 'topic'"))
+  assert.ok(panel.includes('New private messages enter this Chat.'))
+  assert.match(binding, /groups,groupsLoaded,groupsLoading,groupsError/)
+  assert.ok(binding.includes('listChats'))
+  assert.ok(binding.includes('requestGroupBind'))
+})
+
+test('a group message badge appends a compact scope suffix and leaves p2p alone', () => {
+  assert.match(userMessage, /\{\{ messageSourceLabel\(turn\) \}\}/)
+  assert.match(userMessage, /v-if="messageSourceScope\(turn\)"[\s\S]{0,180}data-testid="conversation-message-scope"/)
+  assert.ok(userMessage.includes('· {{ messageSourceScope(turn) }}'))
+  assert.ok(eventValues.includes("feishu.chatType !== 'group'"))
+  assert.ok(eventValues.includes("threadId ? 'group topic' : 'group'"))
+})

@@ -79,6 +79,10 @@ export interface TimelineFeishuProvenance {
   chatId: string
   messageId: string
   senderOpenId: string
+  /** ``group`` only for a group binding; older events mean p2p. */
+  chatType: 'p2p' | 'group'
+  /** Feishu topic id when the message arrived inside a group topic (thread). */
+  threadId: string | null
 }
 
 /** One row rendered inside a nested sub-agent thread group (``subthread``).

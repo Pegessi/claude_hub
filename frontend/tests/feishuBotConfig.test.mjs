@@ -8,6 +8,11 @@ const source=readFileSync(new URL('../src/utils/feishuBotConfig.ts',import.meta.
 const js=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.ES2022,target:ts.ScriptTarget.ES2020}}).outputText
 const api=await import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`)
 const pool={pool_revision:0,bots:[],pool_editable:true,deprecated_env:[],focus_bot_id:null}
+const chats={revision:9,chats:[
+  {chat_id:'oc-group',name:'Design group',chat_mode:'group',user_count:4,bot_count:1},
+  {chat_id:'oc-topic',name:'Design topic group',chat_mode:'topic',user_count:12,bot_count:2},
+  {chat_id:'oc-unnamed',name:null,chat_mode:null,user_count:null,bot_count:null},
+]}
 const response=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:{'Content-Type':'application/json'}})
 
 const cases=[
@@ -19,6 +24,8 @@ const cases=[
   ['startFeishuPairing',['b',{tab_id:'t',expected_revision:6}], 'POST','/api/feishu/bot/bots/b/pair/start',{tab_id:'t',expected_revision:6},{bot_id:'b',revision:7,code:'123456',expires_at:'2026-01-01T00:00:00Z'}],
   ['activateFeishuPairing',['b',{pairing_id:'p',confirm_word:'654321',expected_revision:7}], 'POST','/api/feishu/bot/bots/b/pair/activate',{pairing_id:'p',confirm_word:'654321',expected_revision:7},pool],
   ['disconnectFeishuPairing',['b',8], 'DELETE','/api/feishu/bot/bots/b/pairing',{expected_revision:8},pool],
+  ['listBotChats',['bot/1'], 'GET','/api/feishu/bot/bots/bot%2F1/chats',undefined,chats],
+  ['bindBotGroup',['b',{chat_id:'oc-group',tab_id:'t',expected_revision:9}], 'POST','/api/feishu/bot/bots/b/bindings/group',{chat_id:'oc-group',tab_id:'t',expected_revision:9},pool],
 ]
 for(const [name,args,method,url,body,result] of cases){
   test(`${name} uses the frozen pool contract`,async t=>{
@@ -47,6 +54,12 @@ for (const [status, code, fragment] of [
   [409, 'bot_credentials_read_only', 'environment credentials'],
   [404, 'chat_tab_not_found', 'This Chat no longer exists'],
   [502, 'feishu_access_control_denied', 'access-control policy 21001'],
+  [502, 'bot_chats_unavailable', 'could not list the groups for this Bot'],
+  [422, 'chat_not_group', 'Choose a group chat'],
+  [422, 'chat_not_visible', 'cannot see that group'],
+  [400, 'invalid_bot_request', 'Check the fields and try again'],
+  [409, 'bot_occupied', 'already connected to another Chat'],
+  [409, 'tab_occupied', 'already connected to another Bot'],
 ]) {
   test(`${code} keeps its specific recovery guidance`, async t => {
     const detail = code === 'feishu_access_control_denied'

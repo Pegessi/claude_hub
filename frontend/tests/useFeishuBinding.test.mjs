@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { bindingHarness, bot, claim, code, config, deferred, flush, pool, response } from './feishuBotUiTestHarness.mjs'
+import { bindingHarness, bot, chatList, claim, code, config, deferred, flush, groupChat, pool, response } from './feishuBotUiTestHarness.mjs'
 
 async function claimed(h) {
   await h.api.resume()
@@ -174,4 +174,117 @@ test('401 hides a stale binding, clears pairing input and blocks disconnect', as
   assert.equal(await h.api.disconnect(), false)
   assert.equal(disconnects, 0)
   assert.equal(h.timers.size, 0)
+})
+
+test('ensureGroups reads the Bot groups once and keeps every listed group', async t => {
+  const h = bindingHarness(t, { listChats: async () => chatList([
+    groupChat('oc-group', { name: 'Design' }),
+    groupChat('oc-topic', { name: 'Design topics', chat_mode: 'topic' }),
+    groupChat('oc-plain', { name: null, chat_mode: null }),
+  ], 4) })
+  await h.api.resume()
+  const reads = h.calls.length
+  h.api.ensureGroups()
+  h.api.ensureGroups()
+  await flush()
+  assert.equal(h.calls.length, reads)
+  assert.equal(h.api.groupsLoaded.value, true)
+  assert.equal(h.api.groupsLoading.value, false)
+  assert.equal(h.api.groupsError.value, null)
+  // The endpoint lists groups only, so an unnamed or mode-less row is still a
+  // bindable group and must not be filtered away.
+  assert.deepEqual(h.api.groups.value.map(chat => chat.chat_id), ['oc-group', 'oc-topic', 'oc-plain'])
+  // A second explicit read is allowed but a concurrent one is not.
+  const reloading = h.api.loadGroups()
+  assert.equal(await h.api.loadGroups(), false)
+  assert.equal(await reloading, true)
+})
+
+test('a failed group read keeps the pairing state machine untouched and does not retry itself', async t => {
+  const h = bindingHarness(t)
+  await h.api.resume()
+  h.setTransport(async () => response({ detail: 'bot_chats_unavailable' }, 502))
+  assert.equal(await h.api.loadGroups(), false)
+  assert.match(h.api.groupsError.value, /could not list the groups for this Bot/)
+  assert.deepEqual(h.api.groups.value, [])
+  assert.equal(h.api.groupsLoaded.value, false)
+  assert.equal(h.api.groupsLoading.value, false)
+  assert.equal(h.api.error.value, null)
+  assert.equal(h.api.needsLogin.value, false)
+  assert.equal(h.api.viewState.value, 'unbound')
+  const reads = h.calls.length
+  h.api.ensureGroups()
+  await flush()
+  assert.equal(h.calls.length, reads, 'a failed read must wait for an explicit reload')
+})
+
+test('binding a group adopts the returned pool snapshot and shows the group target', async t => {
+  const bound = pool(3, [bot('a', { revision: 3, binding: {
+    pairing_id: 'bound', state: 'active', tab_id: 'tab-1', workspace_id: null,
+    created_at: new Date(1500).toISOString(), is_mine: true, owner_kind: 'oauth',
+    chat_id: 'oc-group', chat_type: 'group', chat_name: 'Design group',
+  } }), bot('b')])
+  const submitted = []
+  const h = bindingHarness(t, { bindGroup: async (botId, input) => { submitted.push({ botId, input }); return bound } })
+  await h.api.resume()
+  assert.equal(await h.api.bindGroup('oc-group'), true)
+  assert.deepEqual(submitted, [{
+    botId: 'a', input: { chat_id: 'oc-group', tab_id: 'tab-1', expected_revision: 1 },
+  }])
+  assert.equal(h.store.pool.pool_revision, 3)
+  assert.equal(h.api.viewState.value, 'bound-current')
+  assert.equal(h.api.binding.value.chat_type, 'group')
+  assert.equal(h.api.binding.value.chat_id, 'oc-group')
+  assert.equal(h.api.binding.value.chat_name, 'Design group')
+  assert.equal(h.api.isMutating.value, false)
+  assert.equal(h.api.groupsError.value, null)
+  assert.equal(h.store.activeBindingForTab('tab-1').chat_type, 'group')
+})
+
+test('a second group bind cannot submit twice or run beside a pairing code request', async t => {
+  const waiting = deferred()
+  const h = bindingHarness(t, { bindGroup: () => waiting.promise })
+  await h.api.resume()
+  const binding = h.api.bindGroup('oc-group')
+  assert.equal(h.api.isMutating.value, true)
+  assert.equal(await h.api.bindGroup('oc-group'), false, 'double submit is guarded')
+  assert.equal(await h.api.generateCode(), false, 'the p2p path stays closed')
+  waiting.resolve(pool(2, [bot('a', { binding: {
+    pairing_id: 'bound', state: 'active', tab_id: 'tab-1', workspace_id: null,
+    created_at: new Date(1500).toISOString(), is_mine: true, owner_kind: 'oauth',
+    chat_id: 'oc-group', chat_type: 'group',
+  } }), bot('b')]))
+  assert.equal(await binding, true)
+  assert.equal(h.api.isMutating.value, false)
+  assert.equal(h.api.viewState.value, 'bound-current')
+})
+
+test('a rejected group bind reports a readable reason and reconciles the pool', async t => {
+  const h = bindingHarness(t, { bindGroup: async () => {
+    throw new config.FeishuBotRequestError(409, 'tab_occupied', 'This Chat is already connected to another Bot. Disconnect it first.')
+  } })
+  await h.api.resume()
+  const reads = h.calls.length
+  assert.equal(await h.api.bindGroup('oc-group'), false)
+  assert.match(h.api.error.value, /already connected to another Bot/)
+  assert.equal(h.api.viewState.value, 'error')
+  assert.equal(h.api.isMutating.value, false)
+  assert.equal(h.api.groupsError.value, null)
+  assert.equal(h.calls.length, reads + 1, 'a 409 reconciles the pool before another action')
+})
+
+test('switching Bot discards the cached groups and any late group response', async t => {
+  const waiting = deferred()
+  let requested = 0
+  const h = bindingHarness(t, { listChats: () => { requested += 1; return waiting.promise } })
+  await h.api.resume()
+  const reading = h.api.loadGroups()
+  assert.equal(requested, 1)
+  h.api.selectBot('b')
+  assert.equal(h.api.groupsLoading.value, false)
+  waiting.resolve(chatList([groupChat('oc-a')]))
+  assert.equal(await reading, false)
+  assert.deepEqual(h.api.groups.value, [])
+  assert.equal(h.api.groupsLoaded.value, false)
+  assert.equal(h.api.groupsError.value, null)
 })

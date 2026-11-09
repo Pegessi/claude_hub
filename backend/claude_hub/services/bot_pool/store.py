@@ -14,6 +14,7 @@ from claude_hub.services.bot_pool.common import (
     _MAX_PENDING_PER_BOT,
     _RATE_MAX,
     _RESERVED_BOT_IDS,
+    BINDING_CHAT_TYPE_GROUP,
     ENV_BOT_ID,
     MAX_BOTS,
     BotBinding,
@@ -37,6 +38,7 @@ from claude_hub.services.bot_pool.common import (
     _owner_from_dict,
     _owner_to_dict,
     _safe_timestamp,
+    binding_chat_type,
     environment_config,
     environment_present,
     hmac,
@@ -497,11 +499,104 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             bot_id, raw, env_config, now, env_seen=environment_present(environ)
         )
         binding = entry.binding
-        if binding is None or not entry.enabled:
+        if binding is None or not entry.enabled or binding.is_group:
             return None
         if not hmac.compare_digest(binding.sender_open_id, sender_open_id):
             return None
         return binding
+
+    def routed_binding_for_chat(
+        self,
+        bot_id: str,
+        *,
+        chat_id: str,
+        environ: Mapping[str, str] | None = None,
+    ) -> BotBinding | None:
+        """Resolve a group binding for one verified inbound group chat.
+
+        A group binding carries no single sender: every member of the bound
+        group may address the Bot, and Feishu itself has already proven
+        membership by delivering the event. Private bindings never match here,
+        so their exact-sender rule stays intact.
+        """
+
+        now = self._now()
+        env_config = environment_config(environ)
+        with self._lock:
+            state = self._load_synced(environ, now)
+            raw = state["bots"].get(bot_id)
+        if not isinstance(raw, dict) or raw.get("revoked_at"):
+            return None
+        entry = self._entry_view(
+            bot_id, raw, env_config, now, env_seen=environment_present(environ)
+        )
+        binding = entry.binding
+        if binding is None or not entry.enabled:
+            return None
+        if not binding.is_group:
+            return None
+        if not hmac.compare_digest(binding.chat_id, chat_id):
+            return None
+        return binding
+
+    def bind_group(
+        self,
+        bot_id: str,
+        *,
+        owner: OwnerIdentity,
+        tab_id: str,
+        workspace_id: str | None,
+        chat_id: str,
+        chat_name: str | None,
+        expected_revision: int,
+        environ: Mapping[str, str] | None = None,
+    ) -> BotBinding:
+        """Bind one group chat without a pairing code.
+
+        The Hub owner acts from an authenticated session and the caller has
+        already proven the Bot is a member of ``chat_id``, so no in-chat
+        confirmation is required. Occupancy, tab and revision rules are the
+        same as the pairing flow.
+        """
+
+        now = self._now()
+        with self._lock:
+            state = self._load()
+            self._prune(state, now)
+            self._sync_env_entry(state, environ, now)
+            raw = self._live_entry(state, bot_id)
+            self._check_revision(raw, expected_revision)
+            if not raw.get("enabled"):
+                raise FeishuBotRevoked(bot_id)
+            if raw.get("binding") is not None:
+                raise FeishuBotOccupied(bot_id)
+            self._require_tab_free(state, tab_id, exclude=bot_id)
+            binding_id = secrets.token_hex(16)
+            # Validate before writing: a rejected value must never reach the
+            # file, or every later read of the pool would fail.
+            raw["binding"] = {
+                **_owner_to_dict(owner),
+                "pairing_id": binding_id,
+                "tab_id": tab_id,
+                "workspace_id": workspace_id,
+                # Group bindings carry no single sender authority; the column
+                # stays schema-valid and records who bound it.
+                "sender_open_id": owner.open_id,
+                "chat_id": _as_text(chat_id, "binding.chat_id", limit=_MAX_ID_CHARS),
+                "chat_name": (
+                    _as_text(chat_name, "binding.chat_name", limit=_MAX_ID_CHARS)
+                    if chat_name is not None
+                    else None
+                ),
+                "chat_type": BINDING_CHAT_TYPE_GROUP,
+                "created_at": now,
+                "generation": raw["generation"],
+            }
+            raw["claims"] = {}
+            raw["pending"] = {}
+            self._touch(raw, now)
+            self._save(state)
+            return self._binding_from_dict(bot_id, raw["binding"])
 
     def drop_binding(self, bot_id: str, pairing_id: str) -> bool:
         """Remove one specific binding without CAS.

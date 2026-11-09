@@ -7,6 +7,43 @@
 
 ## Released
 
+### feat(feishu): bind the Bot to a group and follow topics without re-mentioning
+
+- A Bot can now be bound to a **group chat** from the Hub, not only to a private
+  chat through a pairing code. Feishu is asked for the chat first (`GET
+  /open-apis/im/v1/chats/{id}`), a private id is refused, and the binding then
+  belongs to the group: an @mention from **any member** reaches the bound Chat.
+  Existing private pairings keep their exact sender+chat rule.
+- Topic replies: a reply inside a topic stays in that topic, and in a
+  topic-mode group a root message is promoted into a new topic
+  (`reply_in_thread`). Topic-mode detection reads `chat_mode`/`group_message_type`
+  once per window; a private reply's request shape is unchanged.
+- Topic follow-ups: after the Bot has answered, messages inside that topic no
+  longer need a fresh @mention. Ownership comes from a bounded per-Bot registry
+  of the message ids it sent and the topics it answered in.
+- The Feishu panel offers "Private chat" / "Group chat" paths and shows
+  `Target: Group · <name>` with a topic hint; provenance chips append
+  `· group` / `· group topic`.
+- Ported from MASO's Feishu bot (see `docs/working-logs/2026-11-08-feishu-group-topic.md`):
+  group-wide conversations, topic-mode detection and owned-topic activation.
+  Deliberately not ported: per-topic sessions, `/mode observe|ignore` policies,
+  thread-history injection, relay/meeting/card infrastructure.
+
+### style(chat): one Agents pill in the pane chrome, phones included
+
+- The sub-agent control now lives in the top-right pane chrome at every width,
+  beside the session-name and Feishu pills and sharing their geometry exactly
+  (24px, raised surface, hairline border, muted 11px label). The separate
+  "N sub-agents running" bar above the composer is gone.
+- Only the reveal differs by width: the wide-pane gutter rail or the anchored
+  popover on desktop, a bottom sheet on phones (dialog semantics, safe-area
+  inset, grip, Done/Esc/backdrop dismissal, focus moved into the sheet, Tab
+  kept inside the dialog, and the same body scroll lock the other phone
+  overlays use). A breakpoint change dismisses the reveal rather than morphing
+  it.
+- Phones now also show history ("N done" when idle), so finished sub-agents
+  finally have an entry point there. Removed `ChatSubagentMobileBar.vue`.
+
 ### fix(chat): never deliver a clean-EOF prefix as Dot's complete final reply
 
 - After tool calls, a one-shot provider (Claude `--print --include-partial-messages`

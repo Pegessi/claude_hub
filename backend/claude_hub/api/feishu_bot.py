@@ -14,7 +14,7 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -91,6 +91,7 @@ from claude_hub.services.feishu_message_format import (
     build_feishu_card_payload,
     build_feishu_message_payload,
 )
+from claude_hub.services.feishu_sent_messages import sent_messages
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/feishu/bot", tags=["feishu-bot"])
@@ -428,6 +429,15 @@ class _FeishuPoolBindings:
     def ttyd_manager(self) -> Any:
         return ttyd_manager
 
+    def forget_sent_messages(self, bot_id: str) -> None:
+        sent_messages.clear(bot_id)
+
+    def record_sent_message(
+        self, bot_id: str, message_id: Optional[str], *, thread_id: Optional[str] = None
+    ) -> None:
+        sent_messages.record(bot_id, message_id)
+        sent_messages.record_thread(bot_id, thread_id)
+
     def workspace_manager(self) -> Any:
         return workspace_manager
 
@@ -658,11 +668,7 @@ _CLAIM_CONTEXT_NOT_PROVIDED = object()
 
 def _current_dedup_retry_context(bot_id: str, event: FeishuMessageEvent) -> dict[str, str] | None:
     try:
-        binding = (
-            _pool.routed_binding(bot_id, sender_open_id=event.sender_open_id, chat_id=event.chat_id)
-            if event.chat_type == "p2p"
-            else _pool.routed_binding_for_sender(bot_id, sender_open_id=event.sender_open_id)
-        )
+        binding = _route_binding(bot_id, event)
     except FeishuBotPoolError:
         return None
     return _dedup_retry_context(bot_id, event, binding)
@@ -713,6 +719,23 @@ async def _handle_pairing_code(
     )
 
 
+def _route_binding(bot_id: str, event: FeishuMessageEvent) -> BotBinding | None:
+    """Which binding owns this inbound message.
+
+    A group binding is addressed by the whole group, so any member's mention
+    routes to the Chat bound to that group. Bots bound to a private chat keep the
+    previous rule: the group only works for the person who paired privately.
+    """
+
+    if event.chat_type == "p2p":
+        return _pool.routed_binding(
+            bot_id, sender_open_id=event.sender_open_id, chat_id=event.chat_id
+        )
+    return _pool.routed_binding_for_chat(bot_id, chat_id=event.chat_id) or (
+        _pool.routed_binding_for_sender(bot_id, sender_open_id=event.sender_open_id)
+    )
+
+
 async def _handle_message_event(
     bot_id: str,
     event: FeishuMessageEvent,
@@ -735,11 +758,7 @@ async def _handle_message_event(
             if await _handle_pairing_code(bot_id, event, effective, client, code):
                 status_value = "completed"
             return
-        binding = (
-            _pool.routed_binding(bot_id, sender_open_id=event.sender_open_id, chat_id=event.chat_id)
-            if event.chat_type == "p2p"
-            else _pool.routed_binding_for_sender(bot_id, sender_open_id=event.sender_open_id)
-        )
+        binding = _route_binding(bot_id, event)
         if binding is None:
             if event.chat_type == "group":
                 status_value = "pre_dispatch_rejected"
@@ -935,6 +954,9 @@ async def _handle_sdk_event(bot_id: str, data: Any) -> None:
             data,
             expected_app_id=effective.app_id,
             expected_bot_open_id=effective.feishu_open_id,
+            # A follow-up inside a topic this Bot answered needs no new mention.
+            owns_sent_message=lambda message_id: sent_messages.owns(bot_id, message_id),
+            owns_sent_thread=lambda thread_id: sent_messages.owns_thread(bot_id, thread_id),
         )
     except FeishuBotPoolError:
         return
