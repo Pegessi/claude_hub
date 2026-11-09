@@ -19,6 +19,7 @@
       import ChatTurnWorking from '@/features/chat/components/ChatTurnWorking.vue'
       import ChatTurnParts from '@/features/chat/components/ChatTurnParts.vue'
       import { chatIdentityKey, chatImagesKey, chatTimelineKey } from '@/features/chat/owners'
+      import { IncrementalTimelineReducer } from '@/features/chat/timeline/reducer'
 
       const tool = (key, name, status, args) => ({
         key, callId: null, name, status, argsText: JSON.stringify(args ?? {}), resultText: '',
@@ -109,10 +110,13 @@
         props: {
           caseId: String, label: String, component: Object,
           currentTurn: Object, startedAt: String, part: Object, turnForParts: Object,
+          turnsRef: Object,
         },
         setup(props) {
           provide(chatTimelineKey, {
-            turns: ref([props.currentTurn ?? completedTurn]),
+            // A streaming case owns its own ref so the gate can append events
+            // after mount, the way the pane receives live batches.
+            turns: props.turnsRef ?? ref([props.currentTurn ?? completedTurn]),
             latestTurnKey: ref(props.currentTurn?.key ?? completedTurn.key),
             toggleTurnProcess: () => {},
             retryHistoryDetail: () => {},
@@ -132,8 +136,26 @@
       // 21:15 like the reported case instead of a 1970-scale number.
       const liveStartedAt = new Date(Date.now() - (21 * 60 + 15) * 1000).toISOString()
 
+
+      // Live batches appended AFTER mount: the footer must follow them. This
+      // is the state a pre-populated fixture cannot reach — the pane mutates
+      // turns in place and hands back a fresh array per batch, which is exactly
+      // the reactivity the footer has to survive.
+      const streamReducer = new IncrementalTimelineReducer()
+      let streamEvents = []
+      const streamTurns = ref([])
+      window.__workLogStreamProbe = {
+        push: events => {
+          streamEvents = streamEvents.concat(events)
+          streamTurns.value = streamReducer.reduce(streamEvents)
+          return true
+        },
+        text: () => document.querySelector('[data-case="streaming"] .turn-working')?.innerText ?? '',
+      }
+
       // ``caseId`` is what the browser gate selects on; the label is only text.
       const cases = [
+        ['streaming', 'Live turn: batches appended after mount', ChatTurnWorking, { turnsRef: streamTurns, startedAt: liveStartedAt }],
         ['busy', 'Live turn: work in progress', ChatTurnWorking, { currentTurn: active, startedAt: liveStartedAt }],
         ['waiting-subagent', 'Live turn: waiting on a sub-agent, pulse stopped', ChatTurnWorking, { currentTurn: waitingChild, startedAt: liveStartedAt }],
         ['waiting-answer', 'Live turn: waiting for your answer', ChatTurnWorking, { currentTurn: waitingAnswer, startedAt: liveStartedAt }],

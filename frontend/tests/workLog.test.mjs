@@ -92,6 +92,35 @@ test('failures stay visible: failed calls, failed launches and turn errors all c
   assert.match(workLogCountLabel(counts), /3 failed/)
 })
 
+test('one launch addressed to several threads is one failure, not one per child', () => {
+  // The reducer attaches a single spawn call to every receiver thread, so
+  // counting per thread would report "3 failed" for one failed launch.
+  const launch = {
+    ...tool('spawnAgent', 'failed'),
+    subagent: {
+      provider: 'traex', agentType: null, description: 'children', prompt: '',
+      threadIds: ['T1', 'T2', 'T3'], background: false, directive: false,
+    },
+  }
+  const threads = ['T1', 'T2', 'T3'].map(threadId => ({
+    key: `th-${threadId}`, threadId, launchTool: launch, lifecycleStatus: 'failed', renderRevision: 0, parts: [],
+  }))
+  const counts = countWorkLogParts([{ kind: 'subagents', key: 's', threads }])
+  assert.equal(counts.failed, 1, 'the same call is one failure however many threads it started')
+  assert.equal(counts.subagents, 3, 'but it really did start three children')
+  assert.equal(workLogCountLabel(counts), '1 failed · 3 sub-agents')
+})
+
+test('one directive filed in several children is one failure', () => {
+  // sendInput is filed as an instruction row inside each addressed child.
+  const directive = { ...tool('sendInput', 'failed'), subagent: { provider: 'traex', agentType: null, description: 'x', prompt: '', threadIds: ['T1', 'T2'], background: false, directive: true } }
+  const row = { kind: 'instruction', key: 'instr', tool: directive }
+  const threads = ['T1', 'T2'].map(threadId => ({
+    key: `th-${threadId}`, threadId, launchTool: null, lifecycleStatus: 'active', renderRevision: 0, parts: [row],
+  }))
+  assert.equal(countWorkLogParts([{ kind: 'subagents', key: 's', threads }]).failed, 1)
+})
+
 test('a child that streams its own region and its spawn call count as one sub-agent', () => {
   const spawn = { ...tool('Agent', 'running'), subagent: { provider: 'claude', agentType: 'Explore', description: 'child', prompt: '', threadIds: ['T9'], background: true, directive: false } }
   const counts = countWorkLogParts([

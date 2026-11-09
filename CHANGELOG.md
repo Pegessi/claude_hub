@@ -171,19 +171,25 @@ review's open items are recorded in
   turn's own calls and its delegated child threads, plan-list rewrites are
   excluded, and failures keep a count of their own so folding can never hide
   them. A turn blocked on the user's answer or on a sub-agent drops the
-  "Working" word and the pulse instead of pretending to make progress.
+  "Working" word and the pulse instead of pretending to make progress. The
+  footer re-reads the turn on every streamed batch, so a long turn's label and
+  counts keep up with it rather than freezing on the first one.
 - Finished turns report `Activity · 18 steps · 1 failed · 21m` instead of the
   raw `Execution details · 12782 events`, which said nothing about what
   happened or whether anything broke. A turn whose detail has not been read yet
   falls back to `Activity` plus its duration, and lazy detail loading,
   pagination and retry are unchanged.
-- The composer gains **Ask aside**: it forks the current Chat at its newest
-  turn and posts the question into the fork as its first turn, so a running
-  turn can be asked about without queueing or steering it. Text only, local
-  Chats only. Forking switches the pane to the new tab, so a follow-up send
-  failure returns the reader to the source Chat with the draft intact instead
-  of leaving them in an empty fork holding a question they can no longer see;
-  an explicit tab switch in the meantime wins over that recovery.
+- The composer gains **Ask aside**: it forks the current Chat and posts the
+  question into the fork as its first turn, so a running turn can be asked
+  about without queueing or steering it. Text only, local Chats only, and the
+  fork always cuts at the last **completed** turn — never inside the running
+  one, whose tool and question cards its fresh session could never finish.
+  Forking switches the pane to the new tab, so a follow-up
+  send failure returns the reader to the source Chat with the draft intact and
+  says so, instead of leaving them in an empty fork holding a question they can
+  no longer see; if they have switched to another tab in the meantime that
+  switch wins, and the message names the Chat whose composer still holds the
+  question.
 
 ### feat(ui): let a Goal plan its scope and execution budget before it starts
 

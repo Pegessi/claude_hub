@@ -202,7 +202,7 @@
 import { requireChatOwner, chatSettingsKey, chatGoalKey, chatAttachmentsKey, chatImagesKey, chatDeliveryKey, chatQueueKey, chatComposerKey, chatIdentityKey, chatTimelineKey } from '../owners'
 import { computed, ref } from 'vue'
 import { useTerminalStore } from '@/stores/terminalStore'
-import { asideClientTurnId, asideFailure, asideUnavailableReason, buildAsideSendRequest, canOfferAside } from '@/utils/chatAside'
+import { asideClientTurnId, asideFailure, asideForkOrdinal, asideUnavailableReason, buildAsideSendRequest, canOfferAside } from '@/utils/chatAside'
 import ChatDraftQueue from '@/components/ChatDraftQueue.vue'
 import ComposerAddMenu from '@/components/ComposerAddMenu.vue'
 import ChatModelPicker from './ChatModelPicker.vue'
@@ -215,27 +215,26 @@ const { openImageLightbox } = requireChatOwner(chatImagesKey)
 const { isSending, composerError, isSubmissionReady, turnInFlight, composerTurnInFlight, draftMessage, stopArmed, isCancelling, cancelActiveTurn, canSend, submit } = requireChatOwner(chatDeliveryKey)
 const { draftQueue, isQueueSendInProgress, queuedChatState, setQueuedDraftEdit, updateQueuedDraft, cancelQueuedDraft, editQueuedDraft, sendQueuedDraft } = requireChatOwner(chatQueueKey)
 const { composerTextareaEl, isComposing, handleComposerEnter, syncComposerTextareaHeight, isMobileViewport } = requireChatOwner(chatComposerKey)
-const { isManagedChat, connectionState, capabilities, appStore, props } = requireChatOwner(chatIdentityKey)
+const { isManagedChat, connectionState, capabilities, appStore, props, currentTab } = requireChatOwner(chatIdentityKey)
 
 // ── Ask aside ──────────────────────────────────────────────────────────────
 // The fork request and the aside turn are built by ``utils/chatAside``; this
 // component only owns the two effects (fork, then send) and their ordering.
-const { visibleTurns } = requireChatOwner(chatTimelineKey)
+const { turns } = requireChatOwner(chatTimelineKey)
 const terminalStore = useTerminalStore()
 const asideBusy = ref(false)
 
-/** Ordinal of the newest turn: the fork keeps everything up to and including
- *  it, which is what "the conversation so far" means. */
-const asideOrdinal = computed<number | null>(() => {
-  const newest = visibleTurns.value[visibleTurns.value.length - 1]
-  return newest ? newest.ordinal : null
-})
+/** Ordinal the fork cuts at: the last completed turn. Cutting inside a running
+ *  turn would copy half a turn into a session that can never finish it, so the
+ *  running turn stays out of the fork entirely (see ``asideForkOrdinal``). */
+const asideOrdinal = computed<number | null>(() => asideForkOrdinal(turns.value))
 
 const asideReason = computed<string | null>(() => asideUnavailableReason({
   isManagedChat: isManagedChat.value,
   question: draftMessage.value,
   attachmentCount: attachments.value.length,
   ordinal: asideOrdinal.value,
+  hasTurns: turns.value.length > 0,
   busy: asideBusy.value,
 }))
 
@@ -290,12 +289,13 @@ async function askAside() {
     // same text ready to queue into the main thread by mistake.
     draftMessage.value = ''
   } catch (error) {
-    const failure = asideFailure(
+    const failure = asideFailure({
       sourceTabId,
+      sourceTabName: currentTab.value?.name ?? '',
       forkedTabId,
-      terminalStore.activeTabId,
-      error instanceof Error ? error.message : 'unknown error',
-    )
+      activeTabId: terminalStore.activeTabId,
+      detail: error instanceof Error ? error.message : 'unknown error',
+    })
     // A failure after the fork leaves the reader on an empty fork while the
     // draft sits in the source Chat. Restore it first, then report.
     if (failure.restoreTabId) terminalStore.setActiveTab(failure.restoreTabId)
