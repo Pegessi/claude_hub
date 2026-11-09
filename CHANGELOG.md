@@ -7,6 +7,38 @@
 
 ## Released
 
+### fix(chat): authorize out-of-cwd images only via completed image tools and add image retry
+
+- A legitimate image produced by a recognized native image-view tool outside
+  the session cwd and outside the temporary-file grant is now readable only
+  when that exact path has a successfully **completed** tool call in the same
+  session, run, turn and sub-thread. Today only the Claude image `Read`
+  producer is enabled (its failure is reliably encoded as `is_error`); Codex
+  transcript and MASO outputs that hard-code or imply `completed` without
+  success evidence are not granted and need explicit adapter-level evidence
+  before being added. Started-only/failed calls, user text, generic shell or
+  another tool, a different run/turn (including a colliding call id),
+  duplicated starts and other sessions grant nothing; symlink/traversal,
+  size, magic-byte and owner-lifecycle checks are unchanged, and the existing
+  cwd/temporary semantics, original-byte retention and invalid-replacement
+  rules are preserved. Historical successful stream records work without a
+  backfill job.
+- Image retention additionally captures newly authorized images at
+  successful tool completion (the existing start-event capture is
+  retained for cwd/temp images), so an uncompleted Read cannot publish a
+  completion-gated grant before it finishes; retained bytes for these
+  out-of-cwd grants are revalidated against the live stream and served
+  `no-store`, so truncation/clear revokes them and browser caching cannot
+  bypass replacement.
+- Failed native tool images, subthread images and generated Markdown images
+  show an accessible user-controlled **Retry** that re-requests the same
+  authorized URL (one stable identity with a single cache-busting nonce)
+  without replaying any tool or retrying 404s automatically; recovered
+  Markdown images keep their original click/keyboard preview button and
+  lazy/async attributes; a still-running image tool renders a pending state
+  only while its turn/thread is active and settles (never an endless
+  spinner) when the turn is interrupted or completes without the tool event.
+
 ### feat(feishu): bind the Bot to a group and follow topics without re-mentioning
 
 - A Bot can now be bound to a **group chat** from the Hub, not only to a private

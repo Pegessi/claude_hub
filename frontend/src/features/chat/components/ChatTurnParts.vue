@@ -53,6 +53,7 @@
     v-else-if="part.kind === 'agent_image'"
     :part="part"
     :render-revision="turn.renderRevision"
+    :turn-active="!turn.completed"
   />
 
   <ChatApprovalCard

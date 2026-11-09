@@ -89,6 +89,12 @@ const emit = defineEmits<{
 const blockCache = new MarkdownBlockCache()
 const contentRoot = ref<HTMLElement | null>(null)
 
+// B6: image URLs already known to fail in this component instance. v-html
+// re-creates <img> nodes on every streaming delta; without this set each
+// re-render would re-request a dead URL and loop. Failed URLs render the
+// placeholder directly until the user explicitly retries one.
+const failedImageUrls = new Set<string>()
+
 const blocks = computed(() => {
   // Depend on highlightReady so the computed re-evaluates when the
   // lazy-loaded highlighter finishes loading.
@@ -145,6 +151,8 @@ watch([blocks, contentRoot], (_, __, onCleanup) => {
   const observer = new MutationObserver(render)
   observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
   render()
+  // Neutralize any image already known to fail after this v-html update.
+  if (root) neutralizeKnownFailures(root)
   onCleanup(() => {
     current = false
     clearTimeout(timer)
@@ -155,16 +163,124 @@ watch([blocks, contentRoot], (_, __, onCleanup) => {
 // A proxied image that fails to load (404 / expired temporary file) is
 // replaced in place by a restrained text placeholder — never a broken-image
 // icon or a large error frame. The ``error`` event does not bubble, so the
-// capture-phase listener on the root is what sees it.
+// capture-phase listener on the root is what sees it. The placeholder keeps
+// an explicit, accessible Retry that rebuilds the same authorized image URL
+// (with a cache-busting nonce) without re-running any agent tool.
+function withFreshNonce(src: string): string {
+  // One stable identity: always strip any previous retry param before
+  // appending, so repeated retries never accumulate query parameters.
+  const identity = src.replace(/([?&])retry=\d+(?:&|$)/, (_, prefix: string, suffix: string) =>
+    prefix === '?' && suffix === '&' ? '?' : '',
+  ).replace(/[?&]$/, '')
+  const separator = identity.includes('?') ? '&' : '?'
+  return `${identity}${separator}retry=${Date.now()}`
+}
+
 function handleError(event: Event) {
   const target = event.target
   if (!(target instanceof HTMLImageElement)) return
   if (!target.dataset.quotedImg && !target.dataset.localImg) return
-  const placeholder = document.createElement('span')
-  placeholder.className = 'quoted-img-missing'
-  placeholder.textContent = target.alt ? `${target.alt} (image unavailable)` : '[image unavailable]'
-  const button = target.closest('button[data-image-preview]')
-  ;(button || target).replaceWith(placeholder)
+  if (target.closest('.quoted-img-missing')) return
+
+  // Preserve the original image's rendering contract (lazy load, async
+  // decode, dimensions, markers) and its preview wrapper: a Markdown image
+  // lives inside button[data-image-preview], and recovery must keep click and
+  // keyboard preview working (D1).
+  const original = {
+    src: target.getAttribute('src') || '',
+    alt: target.alt,
+    quoted: target.dataset.quotedImg || '',
+    local: target.dataset.localImg || '',
+    className: target.className,
+    width: target.getAttribute('width'),
+    height: target.getAttribute('height'),
+    loading: target.getAttribute('loading'),
+    decoding: target.getAttribute('decoding'),
+  }
+  const previewButton = target.closest('button[data-image-preview]')
+  // Remember the authorized URL (without the retry nonce) so later v-html
+  // re-renders during streaming go straight to the placeholder instead of
+  // issuing another failing request — including re-creation of the same block.
+  const identityUrl = original.src.replace(/[?&]retry=\d+$/, '')
+  failedImageUrls.add(identityUrl)
+
+  const buildImage = () => {
+    const img = document.createElement('img')
+    if (original.className) img.className = original.className
+    if (original.width) img.setAttribute('width', original.width)
+    if (original.height) img.setAttribute('height', original.height)
+    img.alt = original.alt
+    if (original.quoted) img.dataset.quotedImg = original.quoted
+    if (original.local) img.dataset.localImg = original.local
+    if (original.loading) img.setAttribute('loading', original.loading)
+    if (original.decoding) img.setAttribute('decoding', original.decoding)
+    img.src = withFreshNonce(original.src)
+    return img
+  }
+
+  // Rebuild the original preview wrapper so a recovered image keeps the same
+  // click/keyboard lightbox behavior as a never-failed image. The root-level
+  // delegated handleClick picks up the replacement automatically.
+  const buildPreviewButton = () => {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = previewButton?.className || 'markdown-image-preview'
+    button.dataset.imagePreview = '1'
+    button.setAttribute(
+      'aria-label',
+      original.alt ? `Open image ${original.alt}` : 'Open image',
+    )
+    button.append(buildImage())
+    return button
+  }
+
+  const buildPlaceholder = () => {
+    const placeholder = document.createElement('span')
+    placeholder.className = 'quoted-img-missing'
+
+    const label = document.createElement('span')
+    label.className = 'quoted-img-missing-text'
+    label.textContent = target.alt ? `${target.alt} (image unavailable)` : '[image unavailable]'
+    placeholder.append(label)
+
+    const retry = document.createElement('button')
+    retry.type = 'button'
+    retry.className = 'quoted-img-retry'
+    retry.textContent = 'Retry'
+    retry.setAttribute(
+      'aria-label',
+      target.alt ? `Retry loading image ${target.alt}` : 'Retry loading image',
+    )
+    retry.addEventListener('click', (clickEvent) => {
+      clickEvent.preventDefault()
+      clickEvent.stopPropagation()
+      // Manual retry: stop treating the URL as failed and rebuild the image
+      // (inside its preview wrapper when the original had one). One request
+      // per user action; a second failure re-enters this path.
+      failedImageUrls.delete(identityUrl)
+      placeholder.replaceWith(previewButton ? buildPreviewButton() : buildImage())
+    })
+    placeholder.append(retry)
+    return placeholder
+  }
+
+  // Replace the whole original node (img or preview button) with the
+  // placeholder; recovery restores the same wrapper structure.
+  const originalNode = previewButton ?? target
+  originalNode.replaceWith(buildPlaceholder())
+}
+
+// B6: after every v-html render, neutralize images whose URL already failed
+// in this component instance, so streaming deltas cannot re-request them.
+function neutralizeKnownFailures(root: HTMLElement) {
+  if (failedImageUrls.size === 0) return
+  root.querySelectorAll<HTMLImageElement>('img[data-quoted-img], img[data-local-img]').forEach((img) => {
+    const src = (img.getAttribute('src') || '').replace(/[?&]retry=\d+$/, '')
+    if (!failedImageUrls.has(src) || img.closest('.quoted-img-missing')) return
+    const synthetic = new Event('error', { bubbles: false, cancelable: true })
+    Object.defineProperty(synthetic, 'target', { value: img })
+    handleError(synthetic)
+  })
 }
 
 async function handleClick(event: MouseEvent) {
@@ -449,12 +565,34 @@ async function handleClick(event: MouseEvent) {
 /* Restrained fallback shown when a proxied quoted image cannot be loaded —
    muted inline text, not a broken-image frame. */
 .markdown-block :deep(.quoted-img-missing) {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 1px 6px;
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-sm);
   color: var(--ch-color-text-muted);
   font-size: 0.9em;
+  line-height: 1.4;
+}
+
+.markdown-block :deep(.quoted-img-retry) {
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-sm);
+  background: transparent;
+  color: var(--ch-color-text);
+  font: inherit;
+  padding: 0 6px;
+  cursor: pointer;
+}
+
+.markdown-block :deep(.quoted-img-retry:hover) {
+  border-color: var(--ch-color-accent);
+}
+
+.markdown-block :deep(.quoted-img-retry:focus-visible) {
+  outline: 2px solid var(--ch-color-accent);
+  outline-offset: 1px;
 }
 
 .markdown-block :deep(table) {
