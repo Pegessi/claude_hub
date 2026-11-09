@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Iterable, Optional, Tuple
 
 from ....models import AgentRuntimeStatus, AgentType, SessionKind, TerminalAgentStatus
@@ -30,6 +31,38 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("claude_hub.services.ttyd_manager")
+
+
+def _reply_excerpt_entry(
+    path: Path, cached: Optional[_ReplyExcerptCacheEntry]
+) -> Optional[_ReplyExcerptCacheEntry]:
+    """Stat the stream and rescan it only when it actually grew.
+
+    Runs in a worker thread: both the stat and the bounded tail scan are
+    blocking file I/O, and the status poll covers ~40 tabs every 5 seconds.
+    """
+    # Deferred import: the agent_stream package imports this module's graph.
+    from ...agent_stream.store import (
+        _REPLY_EXCERPT_MAX_CHARS,
+        _REPLY_EXCERPT_SCAN_BYTES,
+        read_reply_excerpt,
+    )
+
+    try:
+        stat_result = path.stat()
+    except OSError:
+        return None
+    if (
+        cached is not None
+        and cached.mtime_ns == stat_result.st_mtime_ns
+        and cached.size == stat_result.st_size
+    ):
+        return cached
+    return _ReplyExcerptCacheEntry(
+        mtime_ns=stat_result.st_mtime_ns,
+        size=stat_result.st_size,
+        excerpt=read_reply_excerpt(path, _REPLY_EXCERPT_MAX_CHARS, _REPLY_EXCERPT_SCAN_BYTES),
+    )
 
 
 class ManagerStatusMixin(ManagerHost):
@@ -201,8 +234,9 @@ class ManagerStatusMixin(ManagerHost):
         """Newest assistant text for this tab, reused until the stream grows.
 
         The status endpoint is polled for ~40 tabs every 5 seconds, so this
-        never rescans history: one stat per poll, and a bounded tail scan only
-        when the stream file's ``(mtime, size)`` actually changed.
+        stays cheap and off the event loop: the stat and any tail scan run in a
+        worker thread, and a streaming turn does not reach here at all (see the
+        caller, which skips the read while the turn is working).
         """
         from ...agent_stream.store import AgentStreamStore
 
@@ -220,27 +254,15 @@ class ManagerStatusMixin(ManagerHost):
         cache_key = (process.tab_id, str(store.path))
         cached = cache.get(cache_key)
         try:
-            stat_result = store.path.stat()
-        except OSError:
-            cache.pop(cache_key, None)
-            return None
-        if (
-            cached is not None
-            and cached.mtime_ns == stat_result.st_mtime_ns
-            and cached.size == stat_result.st_size
-        ):
-            return cached.excerpt
-        excerpt: Optional[ReplyExcerpt] = None
-        try:
-            excerpt = await store.reply_excerpt()
+            entry = await asyncio.to_thread(_reply_excerpt_entry, store.path, cached)
         except Exception as e:  # pragma: no cover - defensive, best effort only
             logger.debug(f"Unable to read reply excerpt for tab {process.tab_id}: {e}")
-        cache[cache_key] = _ReplyExcerptCacheEntry(
-            mtime_ns=stat_result.st_mtime_ns,
-            size=stat_result.st_size,
-            excerpt=excerpt,
-        )
-        return excerpt
+            entry = None
+        if entry is None:
+            cache.pop(cache_key, None)
+            return None
+        cache[cache_key] = entry
+        return entry.excerpt
 
     async def compute_tab_unread(self, process: TTYDProcess) -> bool:
         """Return True when the tab's latest completed turn is unread.
@@ -312,7 +334,14 @@ class ManagerStatusMixin(ManagerHost):
                 AgentRuntimeStatus.ATTENTION: "Needs attention",
                 AgentRuntimeStatus.OFFLINE: "Offline",
             }[native_runtime_status]
-            excerpt = await self._reply_excerpt(process)
+            # While a turn streams, the excerpt would still be the previous
+            # answer and every poll would rescan a growing file: skip the read
+            # and let the activity line speak for the turn.
+            excerpt = (
+                None
+                if native_runtime_status == AgentRuntimeStatus.WORKING
+                else await self._reply_excerpt(process)
+            )
             return TerminalAgentStatus(
                 tab_id=process.tab_id,
                 tab_name=process.name,

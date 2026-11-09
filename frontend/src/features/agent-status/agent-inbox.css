@@ -160,6 +160,29 @@
   padding: 0;
 }
 
+/* Workspace grouping inside the Agents filter (the Chats view stays flat). */
+.inbox-section + .inbox-section {
+  border-top: 1px solid var(--ch-color-border-muted);
+}
+
+.inbox-workspace-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px 3px;
+  color: var(--ch-color-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.inbox-workspace-header span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .inbox-row {
   border-bottom: 1px solid var(--ch-color-border-muted);
 }
