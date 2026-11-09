@@ -150,3 +150,22 @@ export function latestPendingApprovalKey(
   }
   return pending
 }
+
+/** DOM id for one option's tradeoff line.
+ *
+ *  Claude and Codex reuse the option *label* as the option id, so ``option.id``
+ *  is ordinary prose ("Inbox in the top bar"). Neither an ``id`` (no ASCII
+ *  whitespace allowed) nor an ``aria-describedby`` reference (a
+ *  whitespace-separated IDREF list) can carry that: the reference splits into
+ *  several dangling tokens and the tradeoff line stops being announced. Keying
+ *  on the question/option *positions* and a sanitized card key keeps the
+ *  attribute one valid token whatever the provider puts in the labels.
+ */
+export function questionOptionNoteId(
+  approvalKey: string,
+  questionIndex: number,
+  optionIndex: number,
+): string {
+  const scope = approvalKey.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '')
+  return `approval-note-${scope || 'approval'}-q${questionIndex}-o${optionIndex}`
+}
