@@ -291,11 +291,11 @@ async def test_status_payload_reuses_one_excerpt_scan_per_stream_write(
 
 
 @pytest.mark.asyncio
-async def test_working_turns_skip_the_excerpt_read_entirely(
+async def test_working_turns_without_a_question_skip_the_excerpt_read(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A streaming turn would only show the previous answer and rescan a
-    growing file on every poll."""
+    """A merely streaming turn would only show the previous answer and would
+    rescan a growing file on every poll."""
     workspace_manager = importlib.import_module("claude_hub.services.workspace_manager")
     monkeypatch.setattr(workspace_manager, "STATE_ROOT", tmp_path)
     monkeypatch.setattr(
@@ -305,6 +305,7 @@ async def test_working_turns_skip_the_excerpt_read_entirely(
             status=AgentRuntimeStatus.WORKING,
             detail=WORKING_ACTIVITY,
             activity='Running "pytest -q"',
+            pending_question=False,
         ),
     )
     manager = _chat_manager(
@@ -332,6 +333,53 @@ async def test_working_turns_skip_the_excerpt_read_entirely(
     assert status.activity == 'Running "pytest -q"'
     assert status.last_reply_excerpt is None
     assert status.last_reply_at is None
+
+
+@pytest.mark.asyncio
+async def test_working_turn_blocked_on_a_question_still_reads_the_excerpt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A working tab that is also waiting for an answer is the top
+    "Waiting for your answer" row: it keeps its preview, so it must read."""
+    workspace_manager = importlib.import_module("claude_hub.services.workspace_manager")
+    monkeypatch.setattr(workspace_manager, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        ttyd_manager_module,
+        "get_tab_native_runtime_snapshot",
+        lambda _tab_id: SimpleNamespace(
+            status=AgentRuntimeStatus.WORKING,
+            detail=WORKING_ACTIVITY,
+            activity="Asking you",
+            pending_question=True,
+        ),
+    )
+    manager = _chat_manager(
+        state_root=tmp_path,
+        reply_events=[
+            _event(0, "turn_started", {"text": "go"}),
+            _event(1, "text_delta", {"text": "Which branch should I rebase?"}),
+        ],
+    )
+    reads = 0
+    original = store_module.read_reply_excerpt
+
+    def counting_read(*args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
+        nonlocal reads
+        reads += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store_module, "read_reply_excerpt", counting_read)
+
+    status = await manager.get_tab_agent_status("tab-1", use_cache=False)
+
+    assert reads == 1
+    assert status is not None
+    assert status.status == AgentRuntimeStatus.WORKING
+    assert status.pending_question is True
+    assert status.activity == "Asking you"
+    assert status.last_reply_excerpt == "Which branch should I rebase?"
+    # The text is the working turn's own output, so it keeps its write time.
+    assert status.last_reply_at is not None
 
 
 @pytest.mark.asyncio
