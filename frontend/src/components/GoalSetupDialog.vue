@@ -35,6 +35,29 @@
         </label>
         <slot name="images" />
         <div
+          v-if="!editing"
+          class="goal-dialog-plan"
+        >
+          <label class="goal-dialog-plan-toggle">
+            <input
+              type="checkbox"
+              :checked="planFirst"
+              :disabled="busy || Boolean(planFirstDisabledReason)"
+              @change="togglePlanFirst"
+            >
+            <span>Plan first</span>
+          </label>
+          <p class="goal-dialog-plan-note">
+            <template v-if="planFirstDisabledReason">
+              {{ planFirstDisabledReason }}
+            </template>
+            <template v-else>
+              The first turn proposes the scope, steps and execution budget
+              (sub-agents, models, parallelism). Nothing starts until you approve.
+            </template>
+          </p>
+        </div>
+        <div
           id="goal-dialog-tips"
           class="goal-dialog-tips"
         >
@@ -77,15 +100,31 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from 'vue'
 
-const props = defineProps<{ open: boolean; busy?: boolean; submitDisabled?: boolean; error?: string | null; editing?: boolean; initialObjective?: string }>()
+const props = defineProps<{
+  open: boolean
+  busy?: boolean
+  submitDisabled?: boolean
+  error?: string | null
+  editing?: boolean
+  initialObjective?: string
+  /** Remembered choice for a new Goal; the parent owns the preference. */
+  initialPlanFirst?: boolean
+  /** Why the provider cannot plan first, or null when it can. */
+  planFirstDisabledReason?: string | null
+}>()
 const emit = defineEmits<{
   close: []
-  submit: [value: { objective: string }]
+  submit: [value: { objective: string; planFirst: boolean }]
 }>()
 const objective = ref('')
+const planFirst = ref(true)
 const validationError = ref<string | null>(null)
 const objectiveEl = ref<HTMLTextAreaElement | null>(null)
 let returnFocusEl: HTMLElement | null = null
+
+function togglePlanFirst(event: Event) {
+  planFirst.value = (event.target as HTMLInputElement).checked
+}
 
 function close() {
   if (!props.busy) emit('close')
@@ -113,6 +152,7 @@ function trapFocus(event: KeyboardEvent) {
 watch(() => props.open, open => {
   if (open) {
     if (props.editing) objective.value = props.initialObjective ?? ''
+    planFirst.value = Boolean(props.initialPlanFirst ?? true) && !props.planFirstDisabledReason
     returnFocusEl = document.activeElement instanceof HTMLElement ? document.activeElement : null
     validationError.value = null
     void nextTick(() => objectiveEl.value?.focus())
@@ -127,7 +167,7 @@ function submit() {
   if (props.busy || props.submitDisabled) return
   if (!trimmed) { validationError.value = 'Objective is required.'; return }
   validationError.value = null
-  emit('submit', { objective: trimmed })
+  emit('submit', { objective: trimmed, planFirst: planFirst.value })
 }
 </script>
 
@@ -140,6 +180,18 @@ p { color: var(--ch-color-text-muted); }
 label { display: grid; gap: 6px; font-weight: 600; }
 textarea { box-sizing: border-box; width: 100%; padding: 9px 10px; color: var(--ch-color-text); background: var(--ch-color-app-bg); border: 1px solid var(--ch-color-border-strong); border-radius: var(--ch-radius-sm); font: inherit; }
 textarea { resize: vertical; }
+.goal-dialog-plan { display: grid; gap: 6px; }
+.goal-dialog-plan-toggle {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-height: 24px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.goal-dialog-plan-toggle input { width: 15px; height: 15px; margin: 0; accent-color: var(--ch-color-accent-strong); cursor: pointer; }
+.goal-dialog-plan-toggle input:disabled { cursor: default; }
+.goal-dialog-plan-note { font-size: 12px; line-height: 1.5; }
 .goal-dialog-tips { display: grid; gap: 6px; font-size: 12px; line-height: 1.5; }
 .goal-dialog-error { color: var(--ch-color-danger, #e5484d); }
 .goal-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
@@ -147,5 +199,8 @@ button { padding: 7px 12px; color: var(--ch-color-text); background: transparent
 button.primary { color: white; background: var(--ch-color-accent-strong); border-color: var(--ch-color-accent-strong); }
 button:disabled { cursor: default; opacity: .55; }
 textarea:focus-visible, button:focus-visible { outline: 2px solid var(--ch-color-accent-ring); outline-offset: 2px; }
-@media (max-width: 640px), (pointer: coarse) { button { min-height: 44px; } }
+@media (max-width: 640px), (pointer: coarse) {
+  button { min-height: 44px; }
+  .goal-dialog-plan-toggle { min-height: 44px; }
+}
 </style>

@@ -26,7 +26,15 @@ from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
 TAB = "goal-steer-tab"
 DONE_TURN = "goal-turn-1"
 LIVE_TURN = "goal-turn-2"
+PLAN_TURN = "goal-plan-turn"
 NOW = "2026-10-12T08:00:00Z"
+# The browser receives sanitized stream text: the backend removes the
+# <goal-plan> block before publishing deltas, so the fixture omits it too.
+PLAN_TEXT = (
+    "Scope: add the bounded cache and verify it.\n\n"
+    "1. Extract the lookup behind a small helper.\n"
+    "2. Cover the helper with targeted tests."
+)
 ENVELOPE = '<goal-checkpoint>{"verified_progress":"x"}</goal-checkpoint>\n<goal-status state="continue">more work</goal-status>'
 
 
@@ -92,6 +100,51 @@ def fixture_png() -> bytes:
 
 PNG_IMAGE = fixture_png()
 
+PLAN_GOAL = {
+    "id": "goal-plan-card",
+    "tab_id": TAB,
+    "objective": "Add a bounded cache",
+    "status": "blocked",
+    "execution_owner": "hub_managed",
+    "token_usage": 120,
+    "usage_quality": "exact",
+    "turns_completed": 1,
+    "dispatch_state": "idle",
+    "pending_step_id": None,
+    "current_turn_id": None,
+    "completed_turn_ids": [PLAN_TURN],
+    "plan_first": True,
+    "plan_pending": False,
+    "plan_turn_id": PLAN_TURN,
+    "plan_approved": False,
+    "plan": {
+        "summary": "Add a bounded cache with tests, nothing else.",
+        "steps": [
+            {
+                "title": "Extract the cache",
+                "detail": "Move the lookup behind one helper",
+                "acceptance": "no duplicated lookup paths remain",
+            },
+            {
+                "title": "Cover it with tests",
+                "detail": "Hit the bound and the eviction path",
+                "acceptance": "targeted tests pass",
+            },
+        ],
+        "budget": {
+            "helpers": [
+                {"role": "implementation", "provider": "claude", "model": "opus"},
+                {"role": "verification", "provider": "codex", "model": "gpt-5"},
+            ],
+            "max_parallelism": 2,
+            "duration_estimate": "about 12 minutes",
+        },
+    },
+    "status_message": "Awaiting approval of the plan above.",
+    "created_at": NOW,
+    "updated_at": NOW,
+}
+
 GOAL = {
     "id": "goal-steer",
     "tab_id": TAB,
@@ -154,6 +207,7 @@ async def main(browser_run: BrowserRun) -> None:
     }
     current_goal = dict(GOAL)
     idle_fixture = False
+    plan_fixture = False
     fail_next_send = False
     goal_updates = []
     goal_creates = []
@@ -171,7 +225,7 @@ async def main(browser_run: BrowserRun) -> None:
                 await socket.close(code=1000, reason="mocked goal smoke")
 
             async def route_all(route) -> None:
-                nonlocal current_goal, fail_next_send
+                nonlocal current_goal, fail_next_send, plan_fixture
                 request = route.request
                 parsed = urlparse(request.url)
                 if origin(request.url) != origin(base):
@@ -220,14 +274,59 @@ async def main(browser_run: BrowserRun) -> None:
                     }
                 elif path.endswith("/events"):
                     since = int(parse_qs(parsed.query).get("since_sequence", ["-1"])[0])
-                    fixture_events = EVENTS + (
-                        [event(4, "turn_completed", LIVE_TURN, {"status": "completed"}, LIVE_TURN)]
-                        if idle_fixture
-                        else []
-                    )
+                    fixture_events = list(EVENTS)
+                    if idle_fixture:
+                        fixture_events.append(
+                            event(
+                                4,
+                                "turn_completed",
+                                LIVE_TURN,
+                                {"status": "completed"},
+                                LIVE_TURN,
+                            )
+                        )
+                    if plan_fixture:
+                        fixture_events.append(
+                            event(
+                                5,
+                                "turn_started",
+                                PLAN_TURN,
+                                {
+                                    "summary": "Plan this Goal before starting",
+                                    "mode": "default",
+                                    "metadata": {
+                                        "origin": "goal",
+                                        "protocol": "goal-continuation-v1",
+                                    },
+                                },
+                                f"{PLAN_TURN}:user",
+                            )
+                        )
+                        fixture_events.append(
+                            event(
+                                6,
+                                "text_delta",
+                                PLAN_TURN,
+                                {"text": PLAN_TEXT},
+                                f"{PLAN_TURN}:assistant",
+                            )
+                        )
+                        fixture_events.append(
+                            event(
+                                7,
+                                "turn_completed",
+                                PLAN_TURN,
+                                {"status": "completed"},
+                                PLAN_TURN,
+                            )
+                        )
                     rows = [item for item in fixture_events if item["stream_sequence"] > since]
                     next_sequence = rows[-1]["stream_sequence"] if rows else since
-                    body = {"events": rows, "next_sequence": next_sequence, "has_more": False}
+                    body = {
+                        "events": rows,
+                        "next_sequence": next_sequence,
+                        "has_more": False,
+                    }
                 elif path.endswith("/wait"):
                     since = int(parse_qs(parsed.query).get("since_sequence", ["-1"])[0])
                     await asyncio.sleep(0.2)
@@ -431,6 +530,102 @@ async def main(browser_run: BrowserRun) -> None:
             await page.set_viewport_size({"width": 390, "height": 844})
             await page.screenshot(path=str(output / "goal-controls-mobile.png"), full_page=True)
             report["screenshots"].append("goal-controls-mobile.png")
+
+            # The setup dialog carries the remembered "Plan first" choice and
+            # sends it as an additive optional field. Clear the previous Goal
+            # first: a Chat with a Goal cannot start a second one.
+            current_goal = None
+            await page.set_viewport_size({"width": 1440, "height": 900})
+            await page.reload(wait_until="domcontentloaded")
+            await expect(page.get_by_role("button", name="Add to chat", exact=True)).to_be_visible()
+            await page.get_by_role("button", name="Add to chat", exact=True).click()
+            await page.get_by_role("menuitem", name="Set a Goal").click()
+            dialog = page.get_by_role("dialog", name="Set a Goal", exact=True)
+            plan_toggle = dialog.get_by_label("Plan first", exact=True)
+            await expect(plan_toggle).to_be_checked()
+            await dialog.get_by_role("textbox").fill("Plan the cache before building it")
+            await expect(dialog.get_by_text("Nothing starts until you approve")).to_be_visible()
+            # The dialog fade-in is a 220ms entrance animation; shoot after it.
+            await page.wait_for_timeout(400)
+            await page.screenshot(path=str(output / "goal-setup-plan-first.png"), full_page=True)
+            report["screenshots"].append("goal-setup-plan-first.png")
+            # The same open dialog reflows to a phone width.
+            await page.set_viewport_size({"width": 390, "height": 844})
+            await page.wait_for_timeout(200)
+            await expect(plan_toggle).to_be_checked()
+            await page.screenshot(
+                path=str(output / "goal-setup-plan-first-mobile.png"), full_page=True
+            )
+            report["screenshots"].append("goal-setup-plan-first-mobile.png")
+            await page.set_viewport_size({"width": 1440, "height": 900})
+            await dialog.get_by_role("button", name="Start Goal", exact=True).click()
+            await expect(dialog).not_to_be_visible()
+            assert goal_creates[-1]["plan_first"] is True, goal_creates[-1]
+            assert goal_creates[-1]["objective"] == "Plan the cache before building it"
+
+            # A planning turn that parked on needs_input renders the approval
+            # card from the Goal snapshot, not from the transcript text.
+            current_goal = dict(PLAN_GOAL)
+            plan_fixture = True
+            await page.reload(wait_until="domcontentloaded")
+            await expect(
+                page.get_by_text("Scope: add the bounded cache and verify it.")
+            ).to_be_visible()
+            card = page.locator(".goal-plan-card")
+            await expect(card).to_be_visible()
+            await expect(card).to_have_attribute("data-mode", "review")
+            await expect(card.locator(".goal-plan-eyebrow")).to_have_text("Execution plan")
+            await expect(card.locator(".goal-plan-budget")).to_contain_text("Execution budget")
+            await expect(card.locator(".goal-plan-budget")).to_contain_text(
+                "2 helpers · claude/opus, codex/gpt-5 · max 2 in parallel · about 12 minutes"
+            )
+            await expect(card.locator(".goal-plan-budget-helpers li")).to_have_count(2)
+            await expect(card.locator(".goal-plan-steps li")).to_have_count(2)
+            assert "goal-plan" not in await page.locator(".structured-pane").first.inner_text()
+            await card.scroll_into_view_if_needed()
+            await page.screenshot(path=str(output / "goal-plan-card-desktop.png"), full_page=True)
+            report["screenshots"].append("goal-plan-card-desktop.png")
+
+            # Reload at each width: the app chooses its mobile shell from the
+            # viewport it boots in, so resizing alone would keep the desktop one.
+            await page.set_viewport_size({"width": 390, "height": 844})
+            await page.reload(wait_until="domcontentloaded")
+            await expect(
+                page.get_by_text("Scope: add the bounded cache and verify it.")
+            ).to_be_visible()
+            card = page.locator(".goal-plan-card")
+            await expect(card).to_have_attribute("data-mode", "review")
+            await card.scroll_into_view_if_needed()
+            approve_button = card.get_by_role("button", name="Approve & start", exact=True)
+            await expect(approve_button).to_be_visible()
+            assert (await approve_button.bounding_box())["height"] >= 44
+            await page.screenshot(path=str(output / "goal-plan-card-mobile.png"), full_page=True)
+            report["screenshots"].append("goal-plan-card-mobile.png")
+
+            # Revise only prepares the composer; nothing is sent.
+            await page.set_viewport_size({"width": 1440, "height": 900})
+            await page.reload(wait_until="domcontentloaded")
+            card = page.locator(".goal-plan-card")
+            await expect(card).to_have_attribute("data-mode", "review")
+            sends_before_revise = len(send_payloads)
+            await card.get_by_role("button", name="Revise", exact=True).click()
+            await expect(composer).to_have_value("Revise the plan: ")
+            assert len(send_payloads) == sends_before_revise
+            approve_button = card.get_by_role("button", name="Approve & start", exact=True)
+
+            # Approve sends the fixed approval message on the Goal steer path.
+            await composer.fill("")
+            await approve_button.click()
+            await expect(card).to_have_attribute("data-mode", "waiting")
+            await expect(
+                card.get_by_role("button", name="Approve & start", exact=True)
+            ).not_to_be_visible()
+            assert send_payloads[-1]["text"] == "Approve the plan. Start implementing it now."
+            assert send_payloads[-1]["delivery"] == "steer"
+            assert not any(
+                path.endswith("/resume") or path.endswith("/pause")
+                for _, path in report["api_requests"]
+            )
 
             assert not report["unknown_requests"], report["unknown_requests"]
             assert not report["page_errors"], report["page_errors"]

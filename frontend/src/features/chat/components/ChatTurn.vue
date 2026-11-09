@@ -66,6 +66,19 @@
       :part="part"
     />
 
+    <!-- A `plan_first` Goal's planning turn shows the scope and execution
+               budget for approval before any implementing turn runs. Identity
+               comes from the Goal snapshot (`plan_turn_id`), never from text. -->
+    <GoalPlanCard
+      v-if="planCardMode(turn)"
+      :plan="goal?.plan ?? null"
+      :mode="planCardMode(turn)!"
+      :warning="goal?.plan_warning ?? null"
+      :approve-disabled-reason="planApprovalReason(turn)"
+      @approve="approvePlan(turn)"
+      @revise="revisePlan()"
+    />
+
     <ChatTurnWorking
       v-if="isLive(turn) && !turn.awaitingAgentActivity"
       :started-at="turn.startedAt"
@@ -145,21 +158,58 @@
 </template>
 
 <script setup lang="ts">
-import { requireChatOwner, chatActionsKey, chatDeliveryKey, chatGoalKey, chatTimelineKey, chatIdentityKey } from '../owners'
+import { nextTick } from 'vue'
+import { requireChatOwner, chatActionsKey, chatComposerKey, chatDeliveryKey, chatGoalKey, chatTimelineKey, chatIdentityKey } from '../owners'
 import { messageClockLabel, turnClockLabel } from '../timeline/turnProcess'
 import ChatUserMessage from './ChatUserMessage.vue'
 import ChatTurnParts from './ChatTurnParts.vue'
 import ChatTurnWorking from './ChatTurnWorking.vue'
+import GoalPlanCard from '../goal-plan/GoalPlanCard.vue'
+import { GOAL_PLAN_APPROVAL_MESSAGE, GOAL_PLAN_REVISE_PREFIX, goalPlanApprovalDisabledReason, goalPlanCardMode, type GoalPlanCardMode } from '../goal-plan/planCard'
 import type { TimelineTurn } from '../timeline/types'
 const { isEditingTurn, startEdit, turnCopyText, copyFeedbackLabel, copyTurnButtonLabel, copyTurn, copyFeedbackState, completedPlanText, implementingPlanKey, implementPlan, forkingOrdinal, forkFromTurn } = requireChatOwner(chatActionsKey)
-const { turnInFlight } = requireChatOwner(chatDeliveryKey)
-const { goalEditReason, goalComposerLocked, goalComposerReason } = requireChatOwner(chatGoalKey)
+const { turnInFlight, isSending, submit, draftMessage } = requireChatOwner(chatDeliveryKey)
+const { goalEditReason, goalComposerLocked, goalComposerReason, goal } = requireChatOwner(chatGoalKey)
 const { turnPartsFor, latestTurnKey } = requireChatOwner(chatTimelineKey)
+const { composerTextareaEl, syncComposerTextareaHeight } = requireChatOwner(chatComposerKey)
 const { supportsEditResend, isManagedChat } = requireChatOwner(chatIdentityKey)
 /** Live means still streaming now: the latest turn while one is in flight.
  *  An incomplete turn whose completion never arrived is history, not live. */
 function isLive(turn: TimelineTurn): boolean {
   return !turn.completed && turn.key === latestTurnKey.value && turnInFlight.value
+}
+
+/** Which plan card this turn owns, if any. `null` for every ordinary turn. */
+function planCardMode(turn: TimelineTurn): GoalPlanCardMode | null {
+  return goalPlanCardMode(goal.value, turn.turnId)
+}
+
+function planApprovalReason(turn: TimelineTurn): string | null {
+  return goalPlanApprovalDisabledReason(goal.value, planCardMode(turn), {
+    sending: isSending.value,
+    turnInFlight: turnInFlight.value,
+  })
+}
+
+/** Approving is the user's next message, which resumes the parked Goal. */
+function approvePlan(turn: TimelineTurn) {
+  if (planApprovalReason(turn)) return
+  void submit('steer', GOAL_PLAN_APPROVAL_MESSAGE)
+}
+
+/** Revising only prepares the composer; the user still sends it. */
+function revisePlan() {
+  const draft = draftMessage.value
+  draftMessage.value = draft.startsWith(GOAL_PLAN_REVISE_PREFIX)
+    ? draft
+    : GOAL_PLAN_REVISE_PREFIX + draft
+  void nextTick(() => {
+    const el = composerTextareaEl.value
+    if (!el) return
+    el.focus()
+    el.setSelectionRange(el.value.length, el.value.length)
+    syncComposerTextareaHeight()
+  })
 }
 
 defineProps<{
