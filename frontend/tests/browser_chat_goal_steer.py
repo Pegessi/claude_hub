@@ -649,12 +649,35 @@ async def main(browser_run: BrowserRun) -> None:
             await page.reload(wait_until="domcontentloaded")
             card = page.locator(".goal-plan-card")
             await expect(card).to_have_attribute("data-mode", "answered")
+            # The dispatched turn is still running, so the card must not claim
+            # the Goal continued yet.
+            await expect(card).to_have_attribute("data-mode", "continuing")
             await expect(card.locator(".goal-plan-note")).to_have_text(
-                "The Goal continued after this plan."
+                "The Goal is continuing with this plan during its current turn."
             )
             await expect(
                 card.get_by_role("button", name="Approve & start", exact=True)
             ).not_to_be_visible()
+            assert send_payloads[-1]["text"] == "Approve the plan. Start implementing it now."
+            assert send_payloads[-1]["delivery"] == "steer"
+            await page.screenshot(
+                path=str(output / "goal-plan-card-continuing.png"), full_page=True
+            )
+            report["screenshots"].append("goal-plan-card-continuing.png")
+
+            # Once that turn settles the same card reports the Goal continued.
+            current_goal = {
+                **PLAN_GOAL,
+                "status": "active",
+                "dispatch_state": "idle",
+                "plan_answered": True,
+            }
+            await page.reload(wait_until="domcontentloaded")
+            card = page.locator(".goal-plan-card")
+            await expect(card).to_have_attribute("data-mode", "answered")
+            await expect(card.locator(".goal-plan-note")).to_have_text(
+                "The Goal continued after this plan."
+            )
             await page.screenshot(path=str(output / "goal-plan-card-answered.png"), full_page=True)
             report["screenshots"].append("goal-plan-card-answered.png")
             assert not any(

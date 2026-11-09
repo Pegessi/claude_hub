@@ -34,6 +34,18 @@ is not allowed to invent new control layers for it.
   turn that ends by parking for the user (`needs_input`, which is how a revision
   asks again). An implementing turn that merely echoes the plan therefore
   cannot rewrite the approved scope or re-open its approval.
+- The pause is the Hub's, not the model's: a turn that produced a plan and has
+  not been answered parks as `blocked` even when the model asks to `continue`,
+  so nothing implements itself. Only `complete` ends a planning turn without a
+  pause. If the objective is edited while the planning turn runs, the
+  replacement turn re-plans instead of implementing the scope the user
+  replaced.
+- A card in `review` with no validated plan refuses approval with a reason
+  (Revise stays available, since that is the way out), so a request for input
+  without a reviewable plan cannot start work.
+- The trailing-envelope sanitizer (ordinary turns in a Goal-using Chat)
+  recognises an optional leading `<goal-plan>` block too, so a plan block never
+  leaks into a durable completion summary.
 - `plan_answered` records that a turn carrying the user's own message was
   dispatched after the plan existed; that is what ends the approval request.
   It deliberately does not mean "approved": the Hub cannot tell approval from a

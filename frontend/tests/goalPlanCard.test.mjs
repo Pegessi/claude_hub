@@ -89,6 +89,29 @@ test('an answered plan only claims the Goal continued once its turn settled', ()
   )
 })
 
+test('a request with no reviewable plan cannot be approved', () => {
+  // The planning turn can end by asking for input while omitting or breaking
+  // its <goal-plan> block; there is then nothing to approve.
+  const noPlan = goal({ plan_turn_id: 'plan-turn', plan: null, status: 'blocked', plan_warning: 'ignored invalid plan' })
+  assert.equal(planCard.goalPlanCardMode(noPlan, 'plan-turn'), 'review')
+  const state = { sending: false, turnInFlight: false }
+  assert.match(
+    planCard.goalPlanApprovalDisabledReason(noPlan, 'review', state),
+    /No plan was proposed/,
+  )
+  // Revise stays available: it is the way out of that state.
+  assert.equal(planCard.goalPlanReviseDisabledReason(noPlan, 'review', state), null)
+  // With a real plan, approval is available again.
+  const withPlan = goal({ plan_turn_id: 'plan-turn', plan: PLAN, status: 'blocked' })
+  assert.equal(planCard.goalPlanApprovalDisabledReason(withPlan, 'review', state), null)
+  // Both actions stay blocked where neither can do anything.
+  assert.match(planCard.goalPlanReviseDisabledReason(withPlan, 'answered', state), /not awaiting approval/)
+  assert.match(
+    planCard.goalPlanReviseDisabledReason(withPlan, 'review', { sending: true, turnInFlight: false }),
+    /Sending/,
+  )
+})
+
 test('approval is refused with a reason while the Goal cannot accept it', () => {
   const blocked = goal({ plan_turn_id: 'plan-turn', plan: PLAN, status: 'blocked' })
   assert.equal(planCard.goalPlanApprovalDisabledReason(blocked, 'review', { sending: false, turnInFlight: false }), null)

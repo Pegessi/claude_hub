@@ -80,6 +80,18 @@ test('only a Chat that can offer Plan first changes the remembered choice', () =
   assert.ok(!plan.includes('plan_approved'))
 })
 
+test('a plan request with no reviewable plan cannot be approved from the card', () => {
+  const card = readChat('goal-plan/GoalPlanCard.vue')
+  const plan = readChat('goal-plan/planCard.ts')
+  assert.ok(plan.includes('No plan was proposed to approve'))
+  assert.ok(plan.includes('export function goalPlanReviseDisabledReason'))
+  // Approve is gated on the plan, Revise is not: it stays the way out.
+  assert.ok(card.includes(':disabled="Boolean(approveDisabledReason)"'))
+  assert.ok(card.includes(':disabled="Boolean(reviseDisabledReason)"'))
+  assert.ok(card.includes('v-if="!plan && mode === \'review\'"'))
+  assert.ok(turn.includes(':revise-disabled-reason="planReviseReason(turn)"'))
+})
+
 test('Goal setup and status have no budget or turn-limit controls', () => {
   const dialog = readFileSync(new URL('../src/components/GoalSetupDialog.vue', import.meta.url), 'utf8')
   assert.doesNotMatch(dialog + statusBar + composable, /token_budget|max_turns|updateBudget|budgetDraft/)

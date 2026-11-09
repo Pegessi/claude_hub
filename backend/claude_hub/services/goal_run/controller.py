@@ -152,6 +152,15 @@ def build_dispatch_prompt(goal: GoalRun) -> str:
 def _plan_revision_prompt(goal: GoalRun) -> str:
     if not goal.plan_first:
         return ""
+    if not goal.plan_answered:
+        # The user continued without approving (a resume, or an edited
+        # objective). Saying "approved" here would license work nobody agreed to.
+        return (
+            "This Goal began with a plan the user has not approved. Do not describe it as\n"
+            "approved and take no implementing actions. If the objective or scope still needs\n"
+            "confirming, respond with an updated <goal-plan> block in the same JSON shape and\n"
+            'end with <goal-status state="needs_input"> so the user can approve it first.\n\n'
+        )
     return (
         "This Goal began with a plan the user approved before work started. If the user asks to\n"
         "revise that plan, respond with an updated <goal-plan> block in the same JSON shape and end\n"
@@ -770,6 +779,7 @@ class GoalRunController:
         # blocks like any other needs_input turn. An implementing turn that
         # merely echoes the plan keeps running and must not rewrite the approved
         # scope or re-open its approval.
+        planned_now = False
         if goal.plan_first and (planning_turn or signal == "needs_input"):
             try:
                 plan = _parse_plan(protocol_tail)
@@ -788,7 +798,13 @@ class GoalRunController:
                     # A revised plan needs approval again, on its own turn.
                     goal.plan_answered = False
                     goal.plan_warning = None
+                    planned_now = True
         if goal.dispatched_objective_revision != goal.objective_revision:
+            if planning_turn or planned_now:
+                # The edited objective has not been planned yet, so the
+                # replacement turn must plan it instead of implementing the
+                # previous scope.
+                goal.plan_pending = True
             self.store.put(goal)
             return self._prepare_dispatch_locked(goal.id)
         if signal == "complete":
@@ -797,6 +813,13 @@ class GoalRunController:
             return self.store.put(goal)
         if signal in {"blocked", "needs_input"}:
             goal.status = GoalRunStatus.BLOCKED
+            return self.store.put(goal)
+        if planning_turn or planned_now:
+            # The Hub, not the model, owns this pause. A plan was produced and
+            # the user has not answered it, so the Goal parks even if the model
+            # asked to continue: approving is what starts implementation.
+            goal.status = GoalRunStatus.BLOCKED
+            goal.status_message = "The plan awaits your approval before the Goal continues"
             return self.store.put(goal)
 
         if self.dispatch is None:

@@ -30,6 +30,7 @@ _GOAL_TAIL_SCAN_CHARS = 64 * 1024 + 4096
 
 _STRICT_STATUS_OPENER_RE = re.compile(r'<goal-status\s+state=["\'][a-z_]+["\']\s*>', re.IGNORECASE)
 _CHECKPOINT_OPENER = "<goal-checkpoint>"
+_PLAN_OPENER = "<goal-plan>"
 # A trailing status block is a one-line signal; an unclosed opener with more
 # text than this is prose that mentions the tag.
 _MAX_STATUS_BODY_CHARS = 4096
@@ -39,21 +40,43 @@ def _trailing_envelope_state(
     text: str,
     *,
     tail_scan_chars: int = _GOAL_TAIL_SCAN_CHARS,
+    plan_opener: str = _PLAN_OPENER,
     checkpoint_opener: str = _CHECKPOINT_OPENER,
     status_opener_re: re.Pattern[str] = _STRICT_STATUS_OPENER_RE,
     max_status_body_chars: int = _MAX_STATUS_BODY_CHARS,
 ) -> str:
     """Classify ``text`` (starting at a protocol opener) as a trailing envelope.
 
-    Returns ``"complete"`` when it is an optional checkpoint followed by a
-    status block and only whitespace, ``"partial"`` while more text could still
-    make it one, and ``"no"`` otherwise.  The shape matches the frontend's
-    ``stripTrailingGoalProtocol`` and the controller's trailing signal.
+    Returns ``"complete"`` when it is an optional plan block, an optional
+    checkpoint and a status block followed by only whitespace, ``"partial"``
+    while more text could still make it one, and ``"no"`` otherwise. The shape
+    matches the controller's trailing signal and the blocks it parses.
     """
     if len(text) > tail_scan_chars:
         return "no"
     rest = text
     lowered = rest.lower()
+    if lowered.startswith("<goal-plan"):
+        if len(rest) < len(plan_opener):
+            return "partial" if plan_opener.startswith(lowered) else "no"
+        if not lowered.startswith(plan_opener):
+            return "no"
+        body = lowered[len(plan_opener) :]
+        if body.lstrip() and not body.lstrip().startswith("{"):
+            return "no"
+        end = body.find("</goal-plan>")
+        if "<goal-plan" in (body if end < 0 else body[:end]):
+            return "no"
+        if end < 0:
+            return "partial"
+        rest = rest[len(plan_opener) + end + len("</goal-plan>") :].lstrip()
+        lowered = rest.lower()
+        # The checkpoint is optional in the controller too, so a plan block may
+        # be followed by either block; anything else ends this envelope.
+        if not (lowered.startswith("<goal-checkpoint") or lowered.startswith("<goal-status")):
+            if "<goal-checkpoint".startswith(lowered) or "<goal-status".startswith(lowered):
+                return "partial"
+            return "no"
     if lowered.startswith("<goal-checkpoint"):
         if len(rest) < len(checkpoint_opener):
             return "partial" if checkpoint_opener.startswith(lowered) else "no"
