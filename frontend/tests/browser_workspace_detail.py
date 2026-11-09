@@ -306,10 +306,20 @@ async def main(browser_run: BrowserRun) -> None:
             for index in range(await decision_buttons.count())
         ]
         await page.screenshot(path=str(output / "review-decision-revealed-390.png"), full_page=True)
+        # The observer has to track both directions: a one-way latch would hide
+        # the bar forever after the first jump. Scrolling the decision away must
+        # bring the bar back, and the second jump must retire it again — with
+        # the drawer expanded, so the watched section is at its tallest.
+        await panel.locator(".detail-body").evaluate("element => { element.scrollTop = 0 }")
+        await expect(review_bar).to_be_visible()
+        await review_bar.get_by_role("button", name="Review decision", exact=True).click()
+        await expect(decision).to_be_in_viewport()
+        await expect(review_bar).to_be_hidden()
         observations.append(
             {
                 "review_bar": "visible while the decision was off screen",
                 "review_bar_jump": "revealed the decision and retired itself",
+                "review_bar_scroll_away": "reappeared and retired again (observer tracks both directions)",
                 "decision_actions": decision_labels,
             }
         )

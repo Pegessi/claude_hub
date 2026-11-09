@@ -10,8 +10,13 @@
       @click="toggleDetailActions"
     >
       <span>{{ isDetailActionsExpanded ? 'Hide actions' : 'Actions' }}</span>
-      <span class="detail-footer-chevron">
-        {{ isDetailActionsExpanded ? 'v' : '^' }}
+      <!-- Decorative: the label already says Actions/Hide actions. The caret
+           points the way the drawer will move (down when it is collapsed). -->
+      <span
+        class="detail-footer-chevron"
+        aria-hidden="true"
+      >
+        {{ isDetailActionsExpanded ? '▾' : '▸' }}
       </span>
     </button>
     <div class="detail-action-drawer">
