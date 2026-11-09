@@ -198,7 +198,7 @@
 import { requireChatOwner, chatSettingsKey, chatGoalKey, chatAttachmentsKey, chatImagesKey, chatDeliveryKey, chatQueueKey, chatComposerKey, chatIdentityKey, chatTimelineKey } from '../owners'
 import { computed, ref } from 'vue'
 import { useTerminalStore } from '@/stores/terminalStore'
-import { asideClientTurnId, asideUnavailableReason, buildAsideSendRequest, canOfferAside } from '@/utils/chatAside'
+import { asideClientTurnId, asideFailure, asideUnavailableReason, buildAsideSendRequest, canOfferAside } from '@/utils/chatAside'
 import ChatDraftQueue from '@/components/ChatDraftQueue.vue'
 import ComposerAddMenu from '@/components/ComposerAddMenu.vue'
 import ChatModelPicker from './ChatModelPicker.vue'
@@ -262,12 +262,17 @@ async function askAside() {
   const ordinal = asideOrdinal.value
   if (ordinal === null) return
   const question = draftMessage.value.trim()
+  const sourceTabId = props.tabId
+  // The fork is created first and switches the pane; remember it so a later
+  // failure can put the reader back where the question still is.
+  let forkedTabId: string | null = null
   asideBusy.value = true
   try {
-    const forked = await terminalStore.forkTab(props.tabId, ordinal)
+    const forked = await terminalStore.forkTab(sourceTabId, ordinal)
     // ``forkTab`` reports its own failures and resolves undefined; without the
     // fork there is nowhere to put the question.
     if (!forked) throw new Error('Could not fork this Chat')
+    forkedTabId = forked.id
     const request = buildAsideSendRequest(forked.id, question, asideClientTurnId())
     const response = await fetch(request.path, {
       method: 'POST',
@@ -280,9 +285,18 @@ async function askAside() {
     // same text ready to queue into the main thread by mistake.
     draftMessage.value = ''
   } catch (error) {
+    const failure = asideFailure(
+      sourceTabId,
+      forkedTabId,
+      terminalStore.activeTabId,
+      error instanceof Error ? error.message : 'unknown error',
+    )
+    // A failure after the fork leaves the reader on an empty fork while the
+    // draft sits in the source Chat. Restore it first, then report.
+    if (failure.restoreTabId) terminalStore.setActiveTab(failure.restoreTabId)
     terminalStore.pushNotification({
       type: 'error',
-      message: `Ask aside failed: ${error instanceof Error ? error.message : 'unknown error'}`,
+      message: failure.message,
       autoDismissMs: 8000,
     })
   } finally {

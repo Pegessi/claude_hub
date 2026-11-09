@@ -25,8 +25,10 @@
 - The composer gains **Ask aside**: it forks the current Chat at its newest
   turn and posts the question into the fork as its first turn, so a running
   turn can be asked about without queueing or steering it. Text only, local
-  Chats only; the fork and send effects are user-triggered and the request
-  shape is unit-tested rather than exercised against a live provider.
+  Chats only. Forking switches the pane to the new tab, so a follow-up send
+  failure returns the reader to the source Chat with the draft intact instead
+  of leaving them in an empty fork holding a question they can no longer see;
+  an explicit tab switch in the meantime wins over that recovery.
 
 ### fix(chat): authorize out-of-cwd images only via completed image tools and add image retry
 
