@@ -76,6 +76,7 @@
       :heading-id="planHeadingId(turn)"
       :warning="goal?.plan_warning ?? null"
       :approve-disabled-reason="planApprovalReason(turn)"
+      :revise-disabled-reason="planReviseReason(turn)"
       @approve="approvePlan(turn)"
       @revise="revisePlan()"
     />
@@ -166,7 +167,7 @@ import ChatUserMessage from './ChatUserMessage.vue'
 import ChatTurnParts from './ChatTurnParts.vue'
 import ChatTurnWorking from './ChatTurnWorking.vue'
 import GoalPlanCard from '../goal-plan/GoalPlanCard.vue'
-import { GOAL_PLAN_APPROVAL_MESSAGE, GOAL_PLAN_REVISE_PREFIX, goalPlanApprovalDisabledReason, goalPlanCardMode, goalPlanHeadingId, type GoalPlanCardMode } from '../goal-plan/planCard'
+import { GOAL_PLAN_APPROVAL_MESSAGE, GOAL_PLAN_REVISE_PREFIX, goalPlanApprovalDisabledReason, goalPlanCardMode, goalPlanHeadingId, goalPlanReviseDisabledReason, type GoalPlanCardMode } from '../goal-plan/planCard'
 import type { TimelineTurn } from '../timeline/types'
 const { isEditingTurn, startEdit, turnCopyText, copyFeedbackLabel, copyTurnButtonLabel, copyTurn, copyFeedbackState, completedPlanText, implementingPlanKey, implementPlan, forkingOrdinal, forkFromTurn } = requireChatOwner(chatActionsKey)
 const { turnInFlight, isSending, submit, draftMessage } = requireChatOwner(chatDeliveryKey)
@@ -192,6 +193,14 @@ function planHeadingId(turn: TimelineTurn): string {
 
 function planApprovalReason(turn: TimelineTurn): string | null {
   return goalPlanApprovalDisabledReason(goal.value, planCardMode(turn), {
+    sending: isSending.value,
+    turnInFlight: turnInFlight.value,
+  })
+}
+
+/** Revise may still fix a request that proposed no reviewable plan. */
+function planReviseReason(turn: TimelineTurn): string | null {
+  return goalPlanReviseDisabledReason(goal.value, planCardMode(turn), {
     sending: isSending.value,
     turnInFlight: turnInFlight.value,
   })
