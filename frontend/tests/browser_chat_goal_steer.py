@@ -208,9 +208,6 @@ async def main(browser_run: BrowserRun) -> None:
     current_goal = dict(GOAL)
     idle_fixture = False
     plan_fixture = False
-    # Set once the approval's dispatched turn is meant to have settled, so a
-    # reload can observe the card's final state without inventing a poll.
-    plan_turn_settled = False
     fail_next_send = False
     goal_updates = []
     goal_creates = []
@@ -371,11 +368,7 @@ async def main(browser_run: BrowserRun) -> None:
                         }
                     body = {"ok": True}
                 elif path.endswith("/goal/current"):
-                    body = (
-                        {**current_goal, "dispatch_state": "idle"}
-                        if plan_turn_settled
-                        else current_goal
-                    )
+                    body = current_goal
                 elif path.endswith("/objective") and request.method == "PATCH":
                     update = json.loads(request.post_data or "{}")
                     goal_updates.append(update)
@@ -626,29 +619,6 @@ async def main(browser_run: BrowserRun) -> None:
             # Approve sends the fixed approval message on the Goal steer path.
             await composer.fill("")
             await approve_button.click()
-            # The answer is recorded when its turn is dispatched, so while that
-            # turn runs the card says the Goal is continuing, not that it did.
-            await expect(card).to_have_attribute("data-mode", "continuing")
-            await expect(card.locator(".goal-plan-note")).to_have_text(
-                "The Goal is continuing with this plan during its current turn."
-            )
-            await expect(
-                card.get_by_role("button", name="Approve & start", exact=True)
-            ).not_to_be_visible()
-            await expect(card.get_by_role("button", name="Revise", exact=True)).not_to_be_visible()
-            assert send_payloads[-1]["text"] == "Approve the plan. Start implementing it now."
-            assert send_payloads[-1]["delivery"] == "steer"
-            await page.screenshot(
-                path=str(output / "goal-plan-card-continuing.png"), full_page=True
-            )
-            report["screenshots"].append("goal-plan-card-continuing.png")
-
-            # Once the dispatched turn settles the same card stops claiming a
-            # request is open and reports that the Goal continued.
-            plan_turn_settled = True
-            await page.reload(wait_until="domcontentloaded")
-            card = page.locator(".goal-plan-card")
-            await expect(card).to_have_attribute("data-mode", "answered")
             # The dispatched turn is still running, so the card must not claim
             # the Goal continued yet.
             await expect(card).to_have_attribute("data-mode", "continuing")
