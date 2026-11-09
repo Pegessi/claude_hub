@@ -18,7 +18,13 @@ from ....models import (
     TerminalTab,
     WorkspaceSessionRole,
 )
-from ..records import CursorPosition, ScanEntry, _AgentStatusSnapshot, _PendingTabCleanup
+from ..records import (
+    CursorPosition,
+    ScanEntry,
+    _AgentStatusSnapshot,
+    _PendingTabCleanup,
+    _ReplyExcerptCacheEntry,
+)
 
 if TYPE_CHECKING:
     from ...ttyd_manager import TTYDProcess
@@ -33,6 +39,7 @@ class ManagerHost(ABC):
     _tab_order: List[str]
     _status_snapshots: Dict[str, _AgentStatusSnapshot]
     _status_cache: Dict[str, TerminalAgentStatus]
+    _reply_excerpt_cache: Dict[Tuple[str, str], _ReplyExcerptCacheEntry]
     _start_locks: Dict[str, asyncio.Lock]
     _state_error: Optional[str]
     _state_confirmed: bool

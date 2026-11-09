@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import logging
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Iterable, Optional
+from typing import TYPE_CHECKING, Dict, Iterable, Optional, Tuple
 
 from ....models import AgentRuntimeStatus, AgentType, SessionKind, TerminalAgentStatus
 from ...agent_status_markers import codex_output_is_working
@@ -21,9 +21,11 @@ from ..defaults import (
     _WORKING_FRAME_STALE_SECONDS,
     _WORKING_TAIL_PATTERNS,
 )
+from ..records import _ReplyExcerptCacheEntry
 from .host import ManagerHost
 
 if TYPE_CHECKING:
+    from ...agent_stream.store import ReplyExcerpt
     from ...ttyd_manager import TTYDProcess
 
 
@@ -195,6 +197,51 @@ class ManagerStatusMixin(ManagerHost):
         self._save_state()
         return True
 
+    async def _reply_excerpt(self, process: TTYDProcess) -> "Optional[ReplyExcerpt]":
+        """Newest assistant text for this tab, reused until the stream grows.
+
+        The status endpoint is polled for ~40 tabs every 5 seconds, so this
+        never rescans history: one stat per poll, and a bounded tail scan only
+        when the stream file's ``(mtime, size)`` actually changed.
+        """
+        from ...agent_stream.store import AgentStreamStore
+
+        # Owners built without ``ManagerStateMixin.__init__`` (constructed
+        # directly in tests) have no cache yet; create it on first use instead
+        # of failing a best-effort status read.
+        cache: Optional[Dict[Tuple[str, str], _ReplyExcerptCacheEntry]] = getattr(
+            self, "_reply_excerpt_cache", None
+        )
+        if cache is None:
+            cache = {}
+            self._reply_excerpt_cache = cache
+
+        store = AgentStreamStore("terminal-tabs", f"terminal-tab-{process.tab_id}")
+        cache_key = (process.tab_id, str(store.path))
+        cached = cache.get(cache_key)
+        try:
+            stat_result = store.path.stat()
+        except OSError:
+            cache.pop(cache_key, None)
+            return None
+        if (
+            cached is not None
+            and cached.mtime_ns == stat_result.st_mtime_ns
+            and cached.size == stat_result.st_size
+        ):
+            return cached.excerpt
+        excerpt: Optional[ReplyExcerpt] = None
+        try:
+            excerpt = await store.reply_excerpt()
+        except Exception as e:  # pragma: no cover - defensive, best effort only
+            logger.debug(f"Unable to read reply excerpt for tab {process.tab_id}: {e}")
+        cache[cache_key] = _ReplyExcerptCacheEntry(
+            mtime_ns=stat_result.st_mtime_ns,
+            size=stat_result.st_size,
+            excerpt=excerpt,
+        )
+        return excerpt
+
     async def compute_tab_unread(self, process: TTYDProcess) -> bool:
         """Return True when the tab's latest completed turn is unread.
 
@@ -238,11 +285,21 @@ class ManagerStatusMixin(ManagerHost):
             process.session_kind == SessionKind.CHAT
             and process.cursor_transport != "terminal_transcript"
         ):
+            # Deferred import: the agent_stream package imports this manager's
+            # module graph, so a module-level import would be circular. The
+            # inbox wording lives next to the tool labels that use it.
+            from ...agent_stream.activity_labels import IDLE_DETAIL
+
             native = self._runtime.get_tab_native_runtime_snapshot(tab_id)
+            # Producers older than the inbox contract pass a bare snapshot, so
+            # read every new field defensively instead of assuming it exists.
+            pending_question = bool(getattr(native, "pending_question", False)) if native else False
+            activity = getattr(native, "activity", None) if native else None
+            activity_since = getattr(native, "activity_since", None) if native else None
             if native is None:
                 if self._runtime.native_provider_binary_available(process.agent_type):
                     native_runtime_status = AgentRuntimeStatus.IDLE
-                    native_detail = "native provider is ready"
+                    native_detail = IDLE_DETAIL
                 else:
                     native_runtime_status = AgentRuntimeStatus.OFFLINE
                     native_detail = "native provider binary is unavailable"
@@ -255,6 +312,7 @@ class ManagerStatusMixin(ManagerHost):
                 AgentRuntimeStatus.ATTENTION: "Needs attention",
                 AgentRuntimeStatus.OFFLINE: "Offline",
             }[native_runtime_status]
+            excerpt = await self._reply_excerpt(process)
             return TerminalAgentStatus(
                 tab_id=process.tab_id,
                 tab_name=process.name,
@@ -265,6 +323,11 @@ class ManagerStatusMixin(ManagerHost):
                 tmux_session=process.tmux_session,
                 last_changed_at=None,
                 sampled_at=sampled_at,
+                pending_question=pending_question,
+                activity=activity if native is not None else None,
+                activity_since=activity_since,
+                last_reply_excerpt=excerpt.text if excerpt else None,
+                last_reply_at=excerpt.written_at if excerpt else None,
             )
 
         cached = self._status_cache.get(tab_id)

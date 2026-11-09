@@ -108,6 +108,23 @@ class SessionTailer(
 
         return self._native_terminal_status
 
+    @property
+    def active_tool_label(self) -> Optional[str]:
+        """Human label of the newest still-running tool call, if any.
+
+        Reads only in-memory state recorded from ``tool_call_started``
+        payloads, so a status poll never touches the provider or the stream.
+        """
+        for call_id in reversed(self._active_tool_labels):
+            if call_id in self._active_tool_call_ids:
+                return self._active_tool_labels[call_id]
+        return None
+
+    @property
+    def turn_started_monotonic(self) -> Optional[float]:
+        """``time.monotonic()`` stamp of the current turn's first activity."""
+        return self._turn_in_flight_since
+
     async def poll_once(self) -> None:
         async with self._poll_lock:
             await self._poll_once()

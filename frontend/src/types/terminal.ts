@@ -156,4 +156,17 @@ export interface TerminalAgentStatus {
   tmux_session: string
   last_changed_at?: string | null
   sampled_at: string
+  /**
+   * Inbox contract: a question/approval card is blocked on the user's answer.
+   * Optional because an older backend simply does not report it.
+   */
+  pending_question?: boolean
+  /** Human label of what the agent is doing now ("Running pytest -q"). */
+  activity?: string | null
+  /** When the current activity started, for elapsed-time rendering. */
+  activity_since?: string | null
+  /** Newest assistant text (≤160 chars) for the row's preview line. */
+  last_reply_excerpt?: string | null
+  /** When that reply landed. */
+  last_reply_at?: string | null
 }
