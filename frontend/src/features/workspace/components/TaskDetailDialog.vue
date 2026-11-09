@@ -36,11 +36,17 @@
           </button>
         </div>
 
-        <div class="detail-body">
+        <div
+          ref="bodyElement"
+          class="detail-body"
+        >
           <TaskEvidence :selected-task="selectedTask" />
 
           <section
             v-if="canUseManagedTaskActions(selectedTask)"
+            ref="decisionSection"
+            tabindex="-1"
+            aria-label="Decision"
             :class="[
               'detail-section',
               'decision-section',
@@ -82,13 +88,37 @@
             />
           </section>
         </div>
+
+        <!-- The old sticky action footer guaranteed an always-reachable
+             decision. Keeping that promise only where it matters: while a task
+             waits for review, a compact bar stays at the panel edge and jumps
+             to the decision (it disappears once the decision is on screen, so
+             the actions are not duplicated). -->
+        <div
+          v-if="showReviewBar"
+          class="detail-review-bar"
+        >
+          <span class="detail-review-text">{{ decisionHint || 'Waiting for your decision' }}</span>
+          <button
+            type="button"
+            class="detail-review-jump"
+            @click="revealDecision"
+          >
+            Review decision
+          </button>
+        </div>
       </aside>
     </div>
   </Teleport>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import {
+  computed,
+  onUnmounted,
+  ref,
+  watch,
+} from 'vue'
 import TaskExecutionPanel from '@/components/TaskExecutionPanel.vue'
 import TaskEvidence from './TaskEvidence.vue'
 import TaskOverview from './TaskOverview.vue'
@@ -123,6 +153,50 @@ const evidence = computed(() =>
     ? taskEvidence(selectedTask.value, selectedReports.value)
     : { outcome: '', outcomeIsFailure: false },
 )
+
+const bodyElement = ref<HTMLElement | null>(null)
+const decisionSection = ref<HTMLElement | null>(null)
+const decisionInView = ref(false)
+let decisionObserver: IntersectionObserver | null = null
+
+function stopDecisionObserver(): void {
+  decisionObserver?.disconnect()
+  decisionObserver = null
+}
+
+// Watch the decision inside the dialog's own scroll container rather than the
+// viewport: the body, not the window, is what scrolls here.
+watch(decisionSection, (element) => {
+  stopDecisionObserver()
+  if (!element || typeof IntersectionObserver === 'undefined') {
+    decisionInView.value = false
+    return
+  }
+  decisionObserver = new IntersectionObserver(
+    (entries) => {
+      decisionInView.value = entries[0]?.isIntersecting ?? false
+    },
+    { root: bodyElement.value, threshold: 0.2 },
+  )
+  decisionObserver.observe(element)
+})
+
+onUnmounted(stopDecisionObserver)
+
+const showReviewBar = computed(() => {
+  const task = selectedTask.value
+  if (!task || task.status !== 'review') return false
+  return canUseManagedTaskActions(task) && !decisionInView.value
+})
+
+function revealDecision(): void {
+  const target = decisionSection.value
+  if (!target) return
+  const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+  target.scrollIntoView({ block: 'start', behavior: reduceMotion ? 'auto' : 'smooth' })
+  // Focus the region so keyboard and screen-reader users land on the decision.
+  target.focus({ preventScroll: true })
+}
 
 // The Decision section answers "what am I being asked to decide?" using the
 // same review wording the board badge shows, so both surfaces agree.
@@ -292,6 +366,57 @@ const decisionHint = computed(() => {
 .execution-section {
   display: grid;
 }
+
+.detail-review-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--ch-color-attention-strong) 55%, transparent);
+  background: color-mix(in srgb, var(--ch-color-attention-strong) 8%, var(--ch-color-surface-raised));
+  padding: 8px 18px;
+}
+
+.detail-review-text {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ch-color-text);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail-review-jump {
+  flex: 0 0 auto;
+  height: 30px;
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-control);
+  color: var(--ch-color-text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.detail-review-jump:hover {
+  border-color: var(--ch-color-border-hover);
+  background: var(--ch-color-surface-control-hover);
+}
+
+.detail-review-jump:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
+  border-color: var(--ch-color-accent);
+}
+
+.decision-section:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring);
+  outline-offset: 2px;
+}
 </style>
 
 <style scoped src="../styles/shared-compact-layout.css"></style>
@@ -336,6 +461,15 @@ const decisionHint = computed(() => {
 
   .task-detail-panel.mobile-actions-expanded .detail-body {
     max-height: none;
+  }
+
+  .detail-review-bar {
+    padding: 8px 12px max(8px, env(safe-area-inset-bottom));
+  }
+
+  .detail-review-jump {
+    height: 44px;
+    min-height: 44px;
   }
 }
 </style>
