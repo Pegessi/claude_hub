@@ -97,9 +97,13 @@ class _GoalProtocolSanitizer:
     else is released unchanged.
     """
 
-    _OPENERS = ("<goal-checkpoint", "<goal-status")
-    _OPENING_TAG = re.compile(r"<goal-(checkpoint|status)(?=[\s>])", re.IGNORECASE)
-    _CLOSERS = {"checkpoint": "</goal-checkpoint>", "status": "</goal-status>"}
+    _OPENERS = ("<goal-checkpoint", "<goal-plan", "<goal-status")
+    _OPENING_TAG = re.compile(r"<goal-(checkpoint|plan|status)(?=[\s>])", re.IGNORECASE)
+    _CLOSERS = {
+        "checkpoint": "</goal-checkpoint>",
+        "plan": "</goal-plan>",
+        "status": "</goal-status>",
+    }
 
     def __init__(self, *, trailing_only: bool = False) -> None:
         self._pending = ""

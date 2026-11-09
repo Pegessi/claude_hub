@@ -197,7 +197,11 @@ def test_legacy_opener_patch_affects_existing_sanitizer(
         monkeypatch.setattr(tailer._GoalProtocolSanitizer, "_OPENERS", ("<custom",))
 
     assert sanitizer.feed("") == "<goal-sta"
-    assert goal_protocol._GoalProtocolSanitizer._OPENERS == ("<goal-checkpoint", "<goal-status")
+    assert goal_protocol._GoalProtocolSanitizer._OPENERS == (
+        "<goal-checkpoint",
+        "<goal-plan",
+        "<goal-status",
+    )
 
 
 def test_goal_helper_does_not_own_runtime_state() -> None:
