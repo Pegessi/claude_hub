@@ -10,6 +10,14 @@ const TAB_STATUS_LABELS: Record<AgentRuntimeStatus, string> = {
 }
 
 /**
+ * Details that only restate the state. The backend reports them so a bare
+ * payload still reads as a sentence, but "Working — Responding" says nothing a
+ * user can act on, so the label stays "Working" and lets a concrete activity
+ * (a running tool) carry the detail.
+ */
+const REDUNDANT_DETAILS = new Set(['responding', 'ready'])
+
+/**
  * Shared tab-status logic: index the backend-reported agent statuses by tab id,
  * resolve a tab's runtime status (with a fallback), and build a human label.
  * Used by both the TabBar and the session sidebar so the logic lives in one
@@ -39,6 +47,9 @@ export function useTabStatus(agentStatuses: Ref<readonly TerminalAgentStatus[]>)
     if (!detail || detail.toLocaleLowerCase() === statusLabel.toLocaleLowerCase()) {
       return statusLabel
     }
+    // A concrete activity ("Running pytest -q") is worth appending; a
+    // restatement of the state is not.
+    if (REDUNDANT_DETAILS.has(detail.toLocaleLowerCase())) return statusLabel
     return `${statusLabel} — ${detail}`
   }
 

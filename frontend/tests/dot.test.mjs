@@ -82,12 +82,17 @@ test('Dot launcher sits in the app bar and opens the Dot Chat tab', () => {
   assert.match(launcher, /<DotPanel[\s\S]*:open="panelOpen"/)
 })
 
-test('phone tab bars hide status summary markup while retaining its polling owners', () => {
+test('phone tab bars keep one status owner and reveal it as a sheet', () => {
   const tabBar = read('../src/features/terminal/components/TabBar.vue')
-  const statusPanel = read('../src/features/agent-status/AgentStatusFloatingPanel.vue')
-  assert.match(tabBar, /v-if="manualTabs\.length > 0"\s+:hide-summary="isMobile"\s+source="manual"/)
-  assert.match(tabBar, /v-if="managedTabs\.length > 0"\s+:hide-summary="isMobile"\s+source="managed"/)
-  assert.match(statusPanel, /v-if="!hideSummary && availableRows\.length > 0"/)
+  const inboxPanel = read('../src/features/agent-status/AgentInboxPanel.vue')
+  // One mount at every width, so the 5-second status poll always has an owner;
+  // the panel itself decides popover versus sheet instead of TabBar hiding it.
+  assert.equal((tabBar.match(/<AgentInboxPanel \/>/g) ?? []).length, 1)
+  assert.match(inboxPanel, /v-if="open && !isMobile"/)
+  assert.match(inboxPanel, /data-testid="inbox-sheet"/)
+  assert.match(inboxPanel, /@keydown\.tab="trapTab"/)
+  assert.match(inboxPanel, /padding-bottom: env\(safe-area-inset-bottom/)
+  // The per-tab status light on the strip is unchanged.
   assert.match(tabBar, /v-if="tab\.session_kind === 'chat' \|\| tab\.is_active"\s+class="tab-indicator"/)
 })
 
