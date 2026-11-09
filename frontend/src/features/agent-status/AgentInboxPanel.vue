@@ -89,6 +89,7 @@
           </header>
           <div class="inbox-sheet-body">
             <AgentInboxContent
+              ref="sheetContentRef"
               variant="sheet"
               @open="selectTab"
               @close="close"
@@ -129,6 +130,9 @@ const { isMobile } = useViewport()
 // click away instead.
 const open = ref(false)
 const contentRef = ref<{ focus?: () => void } | null>(null)
+// The sheet renders its own content instance, so it needs its own ref: the
+// keyboard contract lives in the content container, not in the Done button.
+const sheetContentRef = ref<{ focus?: () => void } | null>(null)
 const sheetCloseRef = ref<HTMLButtonElement | null>(null)
 const nowMs = ref(Date.now())
 const panelLabel = 'Inbox'
@@ -153,7 +157,9 @@ function toggle() {
     return
   }
   open.value = true
-  if (!isMobile.value) void refreshInbox()
+  // Both presentations refresh: the row a phone user wants to see must not
+  // wait up to 5 seconds for the next status poll.
+  void refreshInbox()
 }
 
 function close() {
@@ -236,8 +242,11 @@ watch(open, value => {
 
 async function nextTickFocus() {
   await Promise.resolve()
-  if (isMobile.value) sheetCloseRef.value?.focus?.()
-  contentRef.value?.focus?.()
+  // Focus the list container in both presentations: that is where the panel's
+  // keydown contract (↑/↓, Enter, →, Esc) is handled. Focus on the Done button
+  // would silently disable every one of those keys.
+  const target = isMobile.value ? sheetContentRef.value : contentRef.value
+  target?.focus?.()
 }
 
 // Status polling lives with this surface: it is the only consumer of the

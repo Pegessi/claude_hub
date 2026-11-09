@@ -65,6 +65,26 @@ test('a pending question is the top reason to show the inbox at all', () => {
   assert.equal(row.reason, 'Waiting for your answer')
 })
 
+test('a blocked question keeps a timestamp even without an activity clock', () => {
+  // An idle turn that asked a question reports no activity_since; the newest
+  // reply is its only real time, so the top row must still say when.
+  const withActivity = classifyRow(
+    tab(),
+    status({ status: 'working', pending_question: true, activity_since: '2026-11-09T11:52:00Z' }),
+    NOW,
+  )
+  const replyOnly = classifyRow(
+    tab(),
+    status({ pending_question: true, activity_since: undefined, last_reply_at: '2026-11-09T11:48:00Z' }),
+    NOW,
+  )
+  const empty = classifyRow(tab(), status({ pending_question: true }), NOW)
+  assert.equal(withActivity.sinceMs, Date.parse('2026-11-09T11:52:00Z'))
+  assert.equal(replyOnly.sinceMs, Date.parse('2026-11-09T11:48:00Z'))
+  assert.equal(replyOnly.group, 'needs')
+  assert.equal(empty.sinceMs, null)
+})
+
 test('an unread finished turn needs you, a read one does not', () => {
   const unread = classifyRow(tab({ is_unread: true }), status({ last_reply_at: '2026-11-09T11:50:00Z' }), NOW)
   const read = classifyRow(tab({ is_unread: false }), status(), NOW)
