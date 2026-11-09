@@ -7,6 +7,33 @@
 
 ## Released
 
+### fix(ui): close the cross-model review's blocking and high findings
+
+A third review of the same batch, run on a different model, found a blocking
+defect plus two high ones that the previous two rounds missed. All are fixed.
+
+- The live work log no longer freezes on the first event of a streaming turn:
+  the projection reads the newest turn from the timeline array instead of
+  through a computed that returned the same in-place-mutated turn object, so a
+  long turn keeps updating its step and counts instead of showing
+  `Working · Thinking` forever. A streaming test and a harness case that appends
+  events after mount both fail if the old projection returns.
+- A `plan_first` Goal can no longer start work without approval: the pause is
+  owned by the Hub rather than trusted from the model, so a planning turn that
+  answers `continue`, and an objective edited mid-planning, both park (or re-plan)
+  instead of dispatching an implementation turn, and approval is refused when no
+  plan was parsed.
+- The inbox resolves each tab's event stream from where it actually lives, so
+  Workspace Chat agents in the `Agents` scope get their reply excerpt, reply
+  time, activity clock and unread state; the managed snapshot carries
+  `activity_since` like the tab one.
+- Smaller: review-link chips honour the executor's own label, approval option
+  note ids stay single valid tokens, `Ask aside` forks at the last completed
+  turn, diff taps open one editor and Shift ranges stay ordered and re-anchor
+  the note they edit, the review bar retires for a tall decision section, the
+  mobile inbox refreshes on open and keeps keyboard focus on the panel, and the
+  excerpt timestamp is UTC.
+
 ### fix(chat): one tap opens one editor, and a widened range edits its own note
 
 - On a touch screen the gutter `+` button's click also bubbled to the row's tap
