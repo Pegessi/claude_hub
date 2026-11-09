@@ -127,7 +127,10 @@ watchEffect(() => {
 // after streaming replacement/unmount; completed DOM nodes retain their diagrams.
 watch([blocks, contentRoot], (_, __, onCleanup) => {
   const root = contentRoot.value
-  if (!root || !blockCache.hasMermaid) return
+  if (!root) return
+  // Failed images need recovery placeholders even in prose-only messages.
+  neutralizeKnownFailures(root)
+  if (!blockCache.hasMermaid) return
   let current = true
   let timer: ReturnType<typeof setTimeout>
   const render = () => {
@@ -151,8 +154,6 @@ watch([blocks, contentRoot], (_, __, onCleanup) => {
   const observer = new MutationObserver(render)
   observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
   render()
-  // Neutralize any image already known to fail after this v-html update.
-  if (root) neutralizeKnownFailures(root)
   onCleanup(() => {
     current = false
     clearTimeout(timer)
