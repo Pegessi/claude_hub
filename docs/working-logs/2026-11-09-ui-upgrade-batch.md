@@ -88,3 +88,56 @@ is deliberately still open.
 - `tests/test_ci_health.py` fails on this machine independent of the batch (its
   helper looks for `ERROR:` on stderr while pytest writes stdout), and the
   default backend scope aborts there; the batch ran the remainder file by file.
+
+## Third review: a different model, different findings
+
+A cross-model review (Gemini-4 argon over MASO, given the diff and the repo's
+own rules, without reading the first review first) found 10 items the first
+reviewer missed — including a blocking defect and two high ones. All were fixed
+and merged; the counts at HEAD are one blocking, two high, four medium, three
+low, all closed except the documented product gaps below.
+
+- **Blocking (E):** the live work log froze on the first event of a streaming
+  turn. `ChatTurnWorking.vue` read the newest turn through a `computed` that
+  returned the *same* `TimelineTurn` object, and `IncrementalTimelineReducer`
+  mutates turns in place while returning a fresh array — so Vue saw an
+  unchanged value and never re-ran `step`/`counts`. A 20-minute turn showed
+  `Working · Thinking` and an empty counts line for its whole duration.
+  `workLog.test.mjs` (pure functions) and the browser harness (static
+  pre-populated turns) could not see it. Now the projections read `turns.value`
+  directly, and there is a streaming test plus a harness case that appends
+  events after mount; both fail if the old computed returns.
+- **High (F):** a `plan_first` Goal could start implementation without approval
+  — the Hub cleared `plan_pending` and trusted the model to end the planning
+  turn with `needs_input`, so a model answering `continue`, or an objective
+  edit during the planning turn, dispatched turn 2 with the "the user approved
+  this plan" continuation prompt. The pause is now owned by the Hub, not the
+  model: any turn that produced an unanswered plan parks unless the Goal is
+  complete, and an edited objective re-plans instead of implementing. Approval
+  is also refused when no plan was parsed.
+- **High (A):** the inbox read `AgentStreamStore("terminal-tabs",
+  "terminal-tab-<id>")` for every tab, but a Workspace Chat persists its stream
+  under `(workspace_id, managed_session_id)`. Every agent row in the `Agents`
+  scope therefore had no excerpt, no reply time, no `activity_since`, and could
+  never be `is_unread` — so it could never enter "Needs you" on a finished
+  unread reply. The store is now resolved per tab, and the managed snapshot
+  carries `activity_since` like the tab one.
+- **Medium:** evidence chips inverted their documented label precedence
+  (a named MR link rendered as `MR 42`); the approval card built `id` /
+  `aria-describedby` tokens out of raw option labels, so any multi-word label
+  broke the screen-reader association with the option's tradeoff; Ask aside
+  during a running turn forked the *incomplete* turn, leaving spinning tool
+  cards in the fork forever; a coarse-pointer tap on the diff `+` opened the
+  editor twice and Shift-click ranges could invert (`45-42`) or miss the
+  existing note.
+- **Low:** the review jump bar's 0.2 target-ratio threshold could never fire
+  for a tall Decision section; a mobile inbox open skipped the immediate
+  refresh and moved focus off the keyboard surface, a blocked row lost its
+  timestamp fallback, and the excerpt's timestamp was naive local time; a
+  multi-thread launch failure double-counted, and a trailing `<goal-plan>`
+  envelope was not stripped when only trailing tags were inspected.
+
+Cross-model caveat worth recording: this reviewer's *findings* were accurate
+(all three top ones were re-verified in code before fixing), but the commit
+hashes it cited for the branch history do not exist in this repository, so
+treat its bookkeeping as unreliable and its code claims as the evidence.
