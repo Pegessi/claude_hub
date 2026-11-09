@@ -44,7 +44,10 @@ export function useQuestionReceipt(base: Ref<string>, turnId: Ref<string | null>
   onScopeDispose(stop)
   const blocked = computed(() => ['claimed', 'resolved', 'stale', 'uncertain'].includes(state.value))
   const label = computed(() => ({
-    claimed: '回答已接收，正在投递', resolved: '已回答', stale: '问题已失效', uncertain: '回答状态待核实',
-  }[state.value] ?? (remoteExpired.value ? '飞书回答已过期；仍可在此回答' : '')))
-  return { blocked, label }
+    claimed: 'Answer received — delivering',
+    resolved: 'Answered',
+    stale: 'This question is no longer open',
+    uncertain: 'Answer status unverified',
+  }[state.value] ?? (remoteExpired.value ? 'Feishu answer expired; you can still answer here' : '')))
+  return { blocked, label, state }
 }
