@@ -114,6 +114,8 @@ def test_contract_validation_and_create_idempotency(tmp_path: Path) -> None:
     assert request().model_dump(exclude={"attachments"}) == {
         "objective": "Ship the requested feature",
         "client_request_id": "create-1",
+        # Additive plan scope approval stays off for every existing caller.
+        "plan_first": False,
     }
     with pytest.raises(ValidationError):
         GoalRunCreate(objective="x" * 4001, client_request_id="large")
