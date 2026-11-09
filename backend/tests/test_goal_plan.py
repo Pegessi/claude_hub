@@ -146,10 +146,22 @@ def test_absent_plan_first_keeps_the_continuation_prompt_byte_identical() -> Non
 
 
 def test_approved_plan_goals_keep_revision_instructions_in_continuations() -> None:
-    goal = GoalRun(tab_id="tab", objective="Add a bounded cache", plan_first=True)
+    goal = GoalRun(
+        tab_id="tab", objective="Add a bounded cache", plan_first=True, plan_answered=True
+    )
     prompt = build_dispatch_prompt(goal)
     assert "updated <goal-plan> block" in prompt
     assert "before work started" in prompt
+
+
+def test_unapproved_plan_continuations_never_claim_approval() -> None:
+    """The model must not be told a plan was approved when the user never did."""
+    goal = GoalRun(tab_id="tab", objective="Add a bounded cache", plan_first=True)
+    prompt = build_dispatch_prompt(goal)
+    assert "has not approved" in prompt
+    assert "Do not describe it as" in prompt
+    assert "the user approved before work started" not in prompt
+    assert "implement the approved plan" not in prompt
 
 
 @pytest.mark.asyncio
@@ -294,6 +306,78 @@ async def test_revised_plan_reopens_approval_on_its_own_turn(tmp_path: Path) -> 
     assert current.plan_turn_id == revision_turn
     assert current.plan_answered is False
     assert current.status == GoalRunStatus.BLOCKED
+
+
+@pytest.mark.asyncio
+async def test_planning_turn_that_asks_to_continue_still_parks(tmp_path: Path) -> None:
+    """The Hub, not the model, owns the pause before an implementing turn."""
+    manager, sent = controller(tmp_path)
+    goal = await manager.create_and_start("tab", create_request())
+    planning_turn = goal.current_turn_id
+    assert planning_turn is not None
+    current = await manager.on_turn_completed(
+        "tab", planning_turn, "completed", plan_response(state="continue")
+    )
+    assert current is not None
+    assert current.status == GoalRunStatus.BLOCKED
+    assert current.dispatch_state == GoalDispatchState.IDLE
+    assert current.plan_answered is False
+    assert current.plan is not None
+    assert current.status_message == "The plan awaits your approval before the Goal continues"
+    # No implementing turn was dispatched on the model's say-so.
+    assert len(sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_edited_objective_during_planning_replans_instead_of_implementing(
+    tmp_path: Path,
+) -> None:
+    manager, sent = controller(tmp_path)
+    goal = await manager.create_and_start("tab", create_request())
+    planning_turn = goal.current_turn_id
+    assert planning_turn is not None
+    await manager.update_objective(goal.id, "edit-1", "Add a cache with eviction tests")
+    current = await manager.on_turn_completed(
+        "tab", planning_turn, "completed", plan_response(state="continue")
+    )
+    assert current is not None
+    assert len(sent) == 2
+    prepared, prompt = sent[-1]
+    # The replacement turn plans the edited objective instead of implementing
+    # the scope the user replaced.
+    assert prompt == build_plan_prompt(prepared)
+    assert "Take no implementing actions" in prompt
+    assert current.plan_pending is True
+    assert current.plan_turn_id == current.current_turn_id
+    assert current.plan_answered is False
+    assert current.objective_revision == current.dispatched_objective_revision == 1
+
+
+@pytest.mark.asyncio
+async def test_a_plan_that_arrives_without_approval_request_still_parks(tmp_path: Path) -> None:
+    """A newly parsed plan is never followed by an implementing turn on its own."""
+    manager, sent = controller(tmp_path)
+    goal = await manager.create_and_start("tab", create_request())
+    planning_turn = goal.current_turn_id
+    assert planning_turn is not None
+    assert (
+        await manager.steer(goal.id, "steer:revise", "Revise the plan: split it.", "rev")
+        is not None
+    )
+    # The revision turn returns a new plan but asks for continuation, not input.
+    current = await manager.on_turn_completed(
+        "tab",
+        "rev",
+        "completed",
+        plan_response(state="continue", plan={**PLAN_JSON, "summary": "Revised"}),
+    )
+    assert current is not None
+    assert current.status == GoalRunStatus.BLOCKED
+    assert current.plan is not None and current.plan.summary == "Revised"
+    assert current.plan_turn_id == "rev"
+    assert current.plan_answered is False
+    assert len(sent) == 2
+    assert sent[-1][0].pending_step_id == "rev"
 
 
 @pytest.mark.asyncio

@@ -92,6 +92,7 @@ from .runtime.goal_protocol import _CHECKPOINT_OPENER as _CHECKPOINT_OPENER
 from .runtime.goal_protocol import _GOAL_STATUS_TERMINAL_RE as _GOAL_STATUS_TERMINAL_RE
 from .runtime.goal_protocol import _GOAL_TAIL_SCAN_CHARS as _GOAL_TAIL_SCAN_CHARS
 from .runtime.goal_protocol import _MAX_STATUS_BODY_CHARS as _MAX_STATUS_BODY_CHARS
+from .runtime.goal_protocol import _PLAN_OPENER as _PLAN_OPENER
 from .runtime.goal_protocol import _STRICT_STATUS_OPENER_RE as _STRICT_STATUS_OPENER_RE
 from .runtime.manager import TailerManager as _RuntimeTailerManager
 from .runtime.session import SessionTailer as _RuntimeSessionTailer
@@ -256,6 +257,7 @@ def _trailing_envelope_state(text: str) -> str:
     return _goal_protocol._trailing_envelope_state(
         text,
         tail_scan_chars=_GOAL_TAIL_SCAN_CHARS,
+        plan_opener=_PLAN_OPENER,
         checkpoint_opener=_CHECKPOINT_OPENER,
         status_opener_re=_STRICT_STATUS_OPENER_RE,
         max_status_body_chars=_MAX_STATUS_BODY_CHARS,
