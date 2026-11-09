@@ -165,12 +165,15 @@ class GoalRun(BaseModel):
     resume_after_turn: bool = False
     # Additive ``plan_first`` scope approval. The first Goal turn plans only and
     # parks on the existing needs_input pause; ``plan_pending`` says the next
-    # dispatched turn is still the planning turn.
+    # dispatched turn is still the planning turn. ``plan_answered`` records that
+    # a turn carrying the user's own message was dispatched after the plan
+    # existed, which is what ends the approval request; it deliberately says
+    # nothing about whether the user approved or asked for changes.
     plan_first: bool = False
     plan_pending: bool = False
     plan: GoalPlan | None = None
     plan_turn_id: str | None = None
-    plan_approved: bool = False
+    plan_answered: bool = False
     plan_warning: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

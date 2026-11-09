@@ -100,9 +100,13 @@
   message approves the plan; a request to revise produces a fresh plan.
 - A planning turn renders as a plan card identified by the Goal snapshot's
   `plan_turn_id`, not by transcript text, with the highlighted budget block and
-  **Approve & start** / **Revise** actions. Provider-native Goals cannot inject a
-  Hub turn, so the option is disabled there with the reason, and the API
-  refuses the field instead of starting unapproved work.
+  **Approve & start** / **Revise** actions. A plan block is accepted only from
+  the turn the Hub asked to plan or from a turn that parks for input, so an
+  implementing turn echoing it cannot rewrite the scope or re-open approval, and
+  the answered state says only that the Goal continued rather than that the user
+  approved. Provider-native Goals cannot inject a Hub turn, so the option is
+  disabled there with the reason and is not remembered from that Chat, and the
+  API refuses the field instead of starting unapproved work.
 
 ### feat(ui): make Workspace task detail and board evidence-first
 

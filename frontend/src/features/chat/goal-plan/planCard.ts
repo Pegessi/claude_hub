@@ -17,12 +17,14 @@ export const GOAL_PLAN_REVISE_PREFIX = 'Revise the plan: '
 /**
  * How the plan card should present itself for one transcript turn:
  * `null` — this turn is not the planning turn;
- * `preparing` — the planning turn is still running;
+ * `preparing` — the planning turn is still running and no plan arrived yet;
  * `review` — the Goal parked awaiting approval, so Approve/Revise apply;
- * `waiting` — the plan exists but the Goal continued without an approval;
- * `decided` — the user already approved or revised this plan.
+ * `waiting` — the plan exists but the Goal moved on without asking for it;
+ * `answered` — a turn carrying the user's own message was dispatched, which
+ * ends this plan's approval request (approval and a change request look the
+ * same here, so the card must not claim either).
  */
-export type GoalPlanCardMode = 'preparing' | 'review' | 'waiting' | 'decided'
+export type GoalPlanCardMode = 'preparing' | 'review' | 'waiting' | 'answered'
 
 export function goalPlanCardMode(
   goal: ChatGoal | null | undefined,
@@ -30,7 +32,7 @@ export function goalPlanCardMode(
 ): GoalPlanCardMode | null {
   if (!goal || !goal.plan_turn_id || !turnId) return null
   if (goal.plan_turn_id !== turnId) return null
-  if (goal.plan_approved) return 'decided'
+  if (goal.plan_answered) return 'answered'
   if (goal.status === 'blocked') return 'review'
   return goal.plan ? 'waiting' : 'preparing'
 }
@@ -40,6 +42,18 @@ export function goalPlanSignature(goal: ChatGoal | null | undefined, turnId: str
   const mode = goalPlanCardMode(goal, turnId)
   if (mode === null) return ''
   return `${mode}|${goal?.plan ? 'plan' : 'none'}|${goal?.plan_warning ? 'warn' : ''}`
+}
+
+/**
+ * Element id for the card's heading.
+ *
+ * Each transcript turn renders its own card, and a grid pane can show several
+ * Chats at once, so the id must be unique per turn: a fixed literal would make
+ * the second card's `aria-labelledby` resolve to the first one's heading.
+ */
+export function goalPlanHeadingId(turnId: string | null | undefined): string {
+  const slug = (turnId ?? '').replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '')
+  return slug ? `goal-plan-heading-${slug}` : 'goal-plan-heading'
 }
 
 /** Whether Approve & start is actionable right now, and why not when it is not. */

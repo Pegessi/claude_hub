@@ -30,8 +30,19 @@ is not allowed to invent new control layers for it.
   `plan_warning` and never authorizes anything.
 - `plan_turn_id` keys the planning turn in the Goal snapshot, so the UI
   identifies the card from control-plane identity rather than by matching prose.
-  A revised plan (any later turn that emits a valid block) moves the card to its
-  own turn and re-opens approval.
+- A plan block is accepted only from the turn the Hub asked to plan, or from a
+  turn that ends by parking for the user (`needs_input`, which is how a revision
+  asks again). An implementing turn that merely echoes the plan therefore
+  cannot rewrite the approved scope or re-open its approval.
+- `plan_answered` records that a turn carrying the user's own message was
+  dispatched after the plan existed; that is what ends the approval request.
+  It deliberately does not mean "approved": the Hub cannot tell approval from a
+  change request without reading the user's prose, so the card says only that
+  the Goal continued.
+- The remembered "Plan first" choice is written only by a Chat that can offer
+  the option, so one provider-native Goal cannot turn it off everywhere. Each
+  card's heading id comes from its turn id, so two cards never share one
+  accessible name.
 - Provider-native Goals never accept a Hub turn, so `plan_first` is refused for
   them (409) and the setup dialog disables the option with the reason.
 
