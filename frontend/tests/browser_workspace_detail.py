@@ -199,7 +199,9 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(start).to_be_enabled()
             await page.screenshot(path=str(output / f"detail-actions-{width}.png"), full_page=True)
             await start.click()
-            await expect(panel.locator(".detail-eyebrow")).to_have_text("working")
+            # The state pill renders sentence case ("Working"); the raw status
+            # string stays in the payload and the board badge dot carries tone.
+            await expect(panel.locator(".detail-eyebrow")).to_have_text("Working")
             await expect(start).to_be_hidden()
             if width <= 760:
                 await toggle.click()

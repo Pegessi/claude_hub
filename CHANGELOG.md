@@ -7,6 +7,30 @@
 
 ## Released
 
+### feat(ui): make Workspace task detail and board evidence-first
+
+- The task detail dialog now opens with what a reviewer needs to decide: a
+  state pill, one-line outcome (latest progress summary or failure reason) and
+  updated time, then an **Evidence** section with the Goal Packet acceptance
+  criteria and the executor's per-criterion verdict, validation, changed files,
+  artifacts (inline attachment thumbnails, Markdown previews) and risks, plus
+  review/CI link chips detected from reported text. The existing decision
+  actions move directly after the evidence and are highlighted while a task
+  waits for review; description, Goal Packet and Assignment follow, and empty
+  Goal Packet, Assignment and Markdown-output sections are dropped instead of
+  rendering headers with nothing in them.
+- Internal bookkeeping (source, execution control, epoch, progress revision,
+  source Chat id, execution reference, runtime sampling) moves into a collapsed
+  **Debug info** fold inside Execution control, which keeps progress reporting,
+  handoff and reporter-credential actions reachable.
+- The board no longer lets a failed task read as work in progress: failed tasks
+  stay in the Working column (there is no Failed column) but sort first, carry a
+  danger-tinted card and a sentence-case `Failed` pill, and show the failure
+  reason as a clean two-line clamp. Cards clamp their description to two lines,
+  empty columns say what is missing ("Nothing waiting for your review"), and the
+  agents/reviewers/sub-agents band collapses to one line when all counts are
+  zero.
+
 ### fix(chat): authorize out-of-cwd images only via completed image tools and add image retry
 
 - A legitimate image produced by a recognized native image-view tool outside
