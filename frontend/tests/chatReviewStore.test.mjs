@@ -139,6 +139,59 @@ test('a saved comment without a row identity is dropped on load', () => {
   assert.deepEqual(controller.comments.value.map(item => item.id), ['a'])
 })
 
+test('shift-clicking upward edits the existing note instead of stacking one', () => {
+  const storage = memoryStorage()
+  const { controller } = review(storage)
+  const first = controller.addComment(anchor({ key: 'group-1:tool-1:10', row: 10, line: 50 }), 'Row ten.')
+  assert.equal(controller.count.value, 1)
+
+  // The editor was opened on that note and then shift-clicked upward onto a
+  // wider range: the same comment moves, nothing is added.
+  const moved = controller.reanchorComment(
+    first.id,
+    anchor({ key: 'group-1:tool-1:6', row: 6, line: 44, endLine: 48, code: 'const x = 1' }),
+    'Row ten, widened upward.',
+  )
+  assert.equal(controller.count.value, 1, 'one note, not two overlapping ones')
+  assert.equal(moved.id, first.id, 'the note keeps its identity')
+  assert.equal(moved.key, 'group-1:tool-1:6')
+  assert.equal(moved.row, 6)
+  assert.equal(moved.line, 44)
+  assert.equal(moved.endLine, 48)
+  assert.deepEqual([moved.text, moved.code], ['Row ten, widened upward.', 'const x = 1'])
+
+  // The stored copy follows the move, so a remount keeps one entry.
+  const reloaded = useChatReview({ tabKey: 'tab-1', draftQueue: ref([]), storage })
+  assert.equal(reloaded.count.value, 1)
+  assert.deepEqual(
+    [reloaded.comments.value[0].key, reloaded.comments.value[0].line, reloaded.comments.value[0].endLine],
+    ['group-1:tool-1:6', 44, 48],
+  )
+})
+
+test('moving a note onto an occupied row replaces the note already there', () => {
+  const storage = memoryStorage()
+  const { controller } = review(storage)
+  const destination = controller.addComment(anchor({ key: 'group-1:tool-1:6', row: 6, line: 44 }), 'Row six.')
+  const moving = controller.addComment(anchor({ key: 'group-1:tool-1:10', row: 10, line: 50 }), 'Row ten.')
+  assert.equal(controller.count.value, 2)
+
+  controller.reanchorComment(moving.id, anchor({ key: destination.key, row: 6, line: 44, endLine: 47 }), 'Row ten, moved onto six.')
+  assert.equal(controller.count.value, 1, 'one row keeps one note')
+  assert.deepEqual(
+    [controller.comments.value[0].id, controller.comments.value[0].text, controller.comments.value[0].endLine],
+    [moving.id, 'Row ten, moved onto six.', 47],
+  )
+  const raw = JSON.parse(storage.entries.get('chub-review:tab-1'))
+  assert.equal(raw.comments.length, 1)
+  assert.equal(raw.comments[0].key, 'group-1:tool-1:6')
+
+  assert.equal(controller.reanchorComment('missing', anchor(), 'x'), null)
+  assert.equal(controller.count.value, 1, 'an unknown id changes nothing')
+  controller.reanchorComment(moving.id, anchor({ key: 'k2', row: 2 }), '   ')
+  assert.equal(controller.count.value, 1, 'an emptied edit is ignored')
+})
+
 test('the tray can ask a row to reveal itself, repeatedly', () => {
   const { controller } = review()
   assert.equal(controller.focusTarget.value, null)

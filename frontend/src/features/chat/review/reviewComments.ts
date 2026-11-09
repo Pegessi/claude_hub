@@ -1,4 +1,4 @@
-import { describeToolActivity } from '@/utils/toolActivity'
+import { describeToolActivity, type ToolDiffLine } from '@/utils/toolActivity'
 import type { TimelineTurn } from '../timeline/types'
 
 /**
@@ -110,6 +110,78 @@ export function reviewAnchorRowCount(
 export function reviewAnchorIsLive(anchor: ReviewAnchor, turns: readonly TimelineTurn[]): boolean {
   const rows = reviewAnchorRowCount(anchor, turns)
   return rows !== null && anchor.row >= 0 && anchor.row < rows
+}
+
+/** Preferred number for a diff row: the new file, else the original file. */
+export function reviewRowLine(line: ToolDiffLine | undefined): number | null {
+  if (!line) return null
+  return line.newLine ?? line.oldLine ?? null
+}
+
+/** Rows between two clicked rows that share the clicked row's file. */
+export function reviewRangeRows(
+  diff: readonly ToolDiffLine[],
+  anchor: number,
+  target: number,
+): number[] {
+  if (anchor === target) return [target]
+  const file = diff[target]?.file ?? ''
+  const rows: number[] = []
+  for (let row = Math.min(anchor, target); row <= Math.max(anchor, target); row++) {
+    const line = diff[row]
+    if (!line || line.sign === '@') continue
+    if ((line.file ?? '') !== file) continue
+    rows.push(row)
+  }
+  return rows.length ? rows : [target]
+}
+
+/** The span a range of diff rows names, as a low-high pair.
+ *
+ *  A removed row carries only an original-file number and an added row only a
+ *  new-file number, and earlier hunks can leave the two sides offset, so a
+ *  range that starts on a removal and ends on an addition can name its
+ *  endpoints in either order: report the smaller number first. */
+export function reviewRangeLines(
+  diff: readonly ToolDiffLine[],
+  rows: readonly number[],
+): { line: number | null, endLine: number | null } {
+  const values = rows
+    .map(row => reviewRowLine(diff[row]))
+    .filter((value): value is number => value !== null)
+  if (!values.length) return { line: null, endLine: null }
+  const line = Math.min(...values)
+  const endLine = Math.max(...values)
+  return { line, endLine: endLine === line ? null : endLine }
+}
+
+/** The comment sitting anywhere inside a row range.
+ *
+ *  Shift-clicking upward from an existing note must edit that note rather than
+ *  stack a second one over it, so the range is searched, not just its first
+ *  row. */
+export function reviewCommentInRows(
+  comments: readonly ReviewComment[],
+  keys: readonly string[],
+): ReviewComment | null {
+  for (const key of keys) {
+    const comment = comments.find(item => item.key === key)
+    if (comment) return comment
+  }
+  return null
+}
+
+/** Whether a tap on a diff row should open the editor: touch only, and never
+ *  for a click that belongs to a nested control (the gutter button handles its
+ *  own taps, including a tap whose target is its inner glyph). */
+export function reviewRowTapOpensEditor(
+  coarsePointer: boolean,
+  target: { closest?: (selector: string) => unknown } | null | undefined,
+): boolean {
+  if (!coarsePointer) return false
+  const closest = target?.closest
+  if (typeof closest !== 'function') return true
+  return !closest.call(target, 'button')
 }
 
 /** The whole tray as one message, so the agent gets a single review turn
