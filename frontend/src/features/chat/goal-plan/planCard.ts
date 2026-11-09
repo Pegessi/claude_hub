@@ -70,8 +70,25 @@ export function goalPlanApprovalDisabledReason(
 ): string | null {
   if (mode !== 'review') return 'This plan is not awaiting approval'
   if (!goal) return 'The Goal is no longer available'
+  // A Goal can ask for input without a reviewable plan (the agent omitted the
+  // block or it was rejected). There is nothing to approve, so the user has to
+  // ask for a plan instead of starting work on an empty promise.
+  if (!goal.plan) return 'No plan was proposed to approve. Ask for a revised plan instead.'
   if (goal.pending_image_count) return 'Reattach images and recover the Goal before approving'
   if (goal.dispatch_state && goal.dispatch_state !== 'idle') return 'Wait for the current Goal turn to settle'
+  if (state.sending) return 'Sending…'
+  if (state.turnInFlight) return 'Wait for the current turn to finish'
+  return null
+}
+
+/** Whether Revise is actionable: it may still fix a request with no plan. */
+export function goalPlanReviseDisabledReason(
+  goal: ChatGoal | null | undefined,
+  mode: GoalPlanCardMode | null,
+  state: { sending: boolean; turnInFlight: boolean },
+): string | null {
+  if (mode !== 'review') return 'This plan is not awaiting approval'
+  if (!goal) return 'The Goal is no longer available'
   if (state.sending) return 'Sending…'
   if (state.turnInFlight) return 'Wait for the current turn to finish'
   return null
