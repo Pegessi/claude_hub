@@ -2,8 +2,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { loadChatFeature } from './chatPresentationTestHarness.mjs'
 
-const { formatReviewMessage, reviewAnchorIsLive, reviewAnchorRowCount, reviewCode, reviewCountLabel, reviewLocation, reviewNote, reviewQuotedCode, reviewShortLocation, REVIEW_CODE_LIMIT } =
-  await loadChatFeature('review/reviewComments')
+const {
+  formatReviewMessage, reviewAnchorIsLive, reviewAnchorRowCount, reviewCode, reviewCommentInRows,
+  reviewCountLabel, reviewLocation, reviewNote, reviewQuotedCode, reviewRangeLines, reviewRangeRows,
+  reviewRowLine, reviewRowTapOpensEditor, reviewShortLocation, REVIEW_CODE_LIMIT,
+} = await loadChatFeature('review/reviewComments')
 
 const comment = overrides => ({
   id: 'c1',
@@ -92,4 +95,77 @@ test('a renumbered turn, part or tool makes the anchor stale', () => {
   const noDiff = [{ key: 'turn', parts: [{ kind: 'tool_group', key: 'group-1', tools: [emptyDiffTool] }] }]
   assert.equal(reviewAnchorRowCount(comment(), noDiff), 0, 'a call without a diff has no rows')
   assert.equal(reviewAnchorIsLive(comment(), noDiff), false)
+})
+
+// A two-hunk diff where removals outnumber additions, so the original side runs
+// ahead of the new side: row 9 is original 11, row 11 is new 9.
+const line = overrides => ({ sign: ' ', text: 'x', file: 'x.ts', ...overrides })
+const offsetDiff = [
+  line({ sign: '@', text: 'x.ts', fileHeader: true }),
+  line({ sign: '@', text: '@@ -1,5 +1,2 @@' }),
+  line({ sign: '-', text: 'a', oldLine: 1 }),
+  line({ sign: '-', text: 'b', oldLine: 2 }),
+  line({ sign: '-', text: 'c', oldLine: 3 }),
+  line({ sign: '+', text: 'd', newLine: 1 }),
+  line({ sign: '+', text: 'e', newLine: 2 }),
+  line({ sign: '@', text: '@@ -10,2 +6,3 @@' }),
+  line({ text: 'f', oldLine: 10, newLine: 7 }),
+  line({ sign: '-', text: 'g', oldLine: 11 }),
+  line({ sign: '+', text: 'h', newLine: 8 }),
+  line({ sign: '+', text: 'i', newLine: 9 }),
+]
+
+test('a range names its span low to high even when the sides are offset', () => {
+  // The endpoints are a removal (original 11) and an addition (new 9).
+  const inverted = reviewRangeLines(offsetDiff, [9, 10, 11])
+  assert.deepEqual(inverted, { line: 8, endLine: 11 })
+  assert.ok(inverted.line <= inverted.endLine, 'the span never reads backwards')
+
+  // Mixed sides in one hunk still report the extremes it touches.
+  assert.deepEqual(reviewRangeLines(offsetDiff, [8, 9]), { line: 7, endLine: 11 })
+  assert.deepEqual(reviewRangeLines(offsetDiff, [3]), { line: 2, endLine: null }, 'one row is not a range')
+  assert.deepEqual(reviewRangeLines([{ sign: '-', text: 'a' }], [0]), { line: null, endLine: null },
+    'an unnumbered edit states no span')
+
+  // The new side is preferred, the original side is the fallback.
+  assert.equal(reviewRowLine({ sign: '+', text: 'x', oldLine: 3, newLine: 9 }), 9)
+  assert.equal(reviewRowLine({ sign: '-', text: 'x', oldLine: 3 }), 3)
+  assert.equal(reviewRowLine({ sign: '@', text: '@@ -1 +1 @@' }), null)
+  assert.equal(reviewRowLine(undefined), null)
+})
+
+test('a range keeps one file and skips hunk rows in either direction', () => {
+  assert.deepEqual(reviewRangeRows(offsetDiff, 9, 11), [9, 10, 11])
+  assert.deepEqual(reviewRangeRows(offsetDiff, 11, 9), [9, 10, 11], 'shift-clicking upward selects the same rows')
+  assert.deepEqual(reviewRangeRows(offsetDiff, 3, 9), [3, 4, 5, 6, 8, 9], 'hunk and file rows drop out')
+  const twoFiles = [...offsetDiff, line({ sign: '@', text: 'y.ts', file: 'y.ts', fileHeader: true }), line({ text: 'z', file: 'y.ts', oldLine: 1 })]
+  assert.deepEqual(reviewRangeRows(twoFiles, 3, 13), [13],
+    "a range never spans two files: only the clicked row's file counts")
+})
+
+test('a note anywhere inside the range is the note being edited', () => {
+  const keys = ['g:t:6', 'g:t:7', 'g:t:8']
+  assert.equal(reviewCommentInRows([comment({ key: 'g:t:7' })], keys).key, 'g:t:7')
+  assert.equal(reviewCommentInRows([comment({ key: 'g:t:6' }), comment({ id: 'c2', key: 'g:t:8' })], keys).key, 'g:t:6',
+    'the first note in reading order wins')
+  assert.equal(reviewCommentInRows([comment({ key: 'g:t:99' })], keys), null)
+  assert.equal(reviewCommentInRows([], keys), null)
+})
+
+test('a touch tap opens the editor only away from nested controls', () => {
+  const button = { closest: () => ({ tagName: 'BUTTON' }) }
+  const glyph = { closest: () => button }
+  const cell = { closest: () => null }
+  assert.equal(reviewRowTapOpensEditor(true, glyph), false, 'the gutter button handles its own taps')
+  assert.equal(reviewRowTapOpensEditor(true, button), false)
+  assert.equal(reviewRowTapOpensEditor(true, cell), true)
+  assert.equal(reviewRowTapOpensEditor(false, cell), false, 'a desktop click selects text, it does not comment')
+  assert.equal(reviewRowTapOpensEditor(true, null), true, 'a target without closest() is a bare row tap')
+})
+
+test('the gutter button stops its click from also reaching the row handler', async () => {
+  const toolGroup = await (await import('node:fs/promises')).readFile(
+    new URL('../src/features/chat/components/ChatToolGroup.vue', import.meta.url), 'utf8')
+  assert.match(toolGroup, /@click\.stop="startComment\(tool, activity\.diff, index, \$event\)"/)
+  assert.match(toolGroup, /reviewRowTapOpensEditor\(coarsePointer\.value, event\.target as Element \| null\)/)
 })
