@@ -33,6 +33,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger("claude_hub.services.ttyd_manager")
 
 
+def tab_stream_identity(
+    tab_id: str,
+    workspace_id: Optional[str],
+    managed_session_id: Optional[str],
+) -> tuple[str, str]:
+    """Where this tab's structured stream actually lives.
+
+    A Workspace Chat persists its stream under its managed session
+    (``AgentStreamStore(workspace_id, managed_session_id)``, see
+    ``services/managed_chat``), while a direct Chat uses the terminal-tab
+    namespace. Reading the wrong namespace yields no events at all: no reply
+    excerpt, no unread flag, no activity time — which is exactly what the
+    Agents scope of the inbox would have shown.
+    """
+    managed = (managed_session_id or "").strip()
+    workspace = (workspace_id or "").strip()
+    if managed and workspace:
+        return workspace, managed
+    return "terminal-tabs", f"terminal-tab-{tab_id}"
+
+
 def _reply_excerpt_entry(
     path: Path, cached: Optional[_ReplyExcerptCacheEntry]
 ) -> Optional[_ReplyExcerptCacheEntry]:
@@ -250,7 +271,9 @@ class ManagerStatusMixin(ManagerHost):
             cache = {}
             self._reply_excerpt_cache = cache
 
-        store = AgentStreamStore("terminal-tabs", f"terminal-tab-{process.tab_id}")
+        store = AgentStreamStore(
+            *tab_stream_identity(process.tab_id, process.workspace_id, process.managed_session_id)
+        )
         cache_key = (process.tab_id, str(store.path))
         cached = cache.get(cache_key)
         try:
@@ -274,7 +297,9 @@ class ManagerStatusMixin(ManagerHost):
         # sibling service; the fork code at the top of this file does the same).
         from ...agent_stream.store import AgentStreamStore
 
-        store = AgentStreamStore("terminal-tabs", f"terminal-tab-{process.tab_id}")
+        store = AgentStreamStore(
+            *tab_stream_identity(process.tab_id, process.workspace_id, process.managed_session_id)
+        )
         completed_at_str = await store.latest_turn_completed_at()
         if completed_at_str is None:
             return False

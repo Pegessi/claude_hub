@@ -526,7 +526,7 @@ class TailerManager(_RuntimeTailerManager):
         _TAILER_MANAGERS.add(self)
 
 
-def _working_extras(tailer: _RuntimeSessionTailer) -> dict[str, Any]:
+def turn_activity_extras(tailer: _RuntimeSessionTailer) -> dict[str, Any]:
     """Inbox extras for a live turn: what it is doing and since when.
 
     Reads only state the tailer already keeps (the current tool call's label
@@ -566,7 +566,7 @@ def _native_runtime_snapshot(tailer: _RuntimeSessionTailer) -> Optional[NativeRu
         # question card could appear, so only the question flag is refreshed.
         return replace(terminal_status, pending_question=pending_question)
     if transport.turn_in_flight:
-        extras = _working_extras(tailer)
+        extras = turn_activity_extras(tailer)
         return NativeRuntimeSnapshot(
             status=AgentRuntimeStatus.WORKING,
             # ``detail`` stays the plain state sentence ("Working — Responding")

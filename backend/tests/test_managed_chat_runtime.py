@@ -1046,3 +1046,37 @@ async def test_managed_stream_api_cancel_uses_workspace_stop_semantics(
     )
     assert result == {"ok": True, "cancelled": True, "outcome": "cancelled_matching"}
     assert calls == [(session.id, "turn-9")]
+
+
+def test_managed_working_snapshot_carries_what_and_since_when(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The managed snapshot mirrors the tab-status contract: a live turn says
+    what it is doing and since when, so a viewer needs one read, not two."""
+    import time
+
+    session = _session()
+    tailer = SimpleNamespace(
+        native_transport=SimpleNamespace(turn_in_flight=True, last_error=None),
+        has_pending_question=lambda: False,
+        hard_failed=False,
+        native_error=None,
+        last_error=None,
+        native_terminal_status=None,
+        active_tool_label='Running "pytest -q"',
+        turn_started_monotonic=time.monotonic() - 90,
+    )
+    monkeypatch.setattr(
+        managed_chat,
+        "_manager",
+        lambda: SimpleNamespace(get_tailer=lambda _session_id: tailer),
+    )
+
+    snapshot = managed_chat._runtime_snapshot(session)
+
+    assert snapshot is not None
+    assert snapshot.status == AgentRuntimeStatus.WORKING
+    assert snapshot.activity == 'Running "pytest -q"'
+    assert snapshot.activity_since is not None
+    elapsed = (datetime.now() - snapshot.activity_since).total_seconds()
+    assert 89 <= elapsed <= 92

@@ -7,6 +7,20 @@
 
 ## Released
 
+### fix(inbox): every tab reads its own stream namespace; phone sheet opens focused
+
+- A Workspace Chat keeps its structured stream under its managed session, but
+  the inbox's reply excerpt and unread flag were reading the direct-Chat
+  namespace for every tab. Against a real backend that silently emptied the
+  whole Agents scope — no preview, no time, never unread, so it could never
+  enter "Needs you". The namespace is now derived per tab from the process,
+  and a live managed turn reports `activity_since` like the tab-status payload.
+- The phone sheet refreshes as soon as it opens instead of waiting up to five
+  seconds for the poll, and focus lands on the list container (not the Done
+  button), so the ↑/↓/Enter/Esc contract works as soon as the sheet appears.
+  A blocked row with no activity clock falls back to its reply time, and the
+  reply stamp is aware UTC like the rest of the API.
+
 ### feat(ui): six-question UI upgrade batch — inbox, decision cards, evidence, diff comments, work log, plan-first
 
 One batch, six independently reviewed features, fanned out in parallel
