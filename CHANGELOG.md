@@ -7,6 +7,18 @@
 
 ## Released
 
+### fix(chat): say when a saved review comment's diff line is gone
+
+- A review comment is anchored on the row it was written against, and a
+  warm-cache history reload renumbers a turn's part and tool keys. The tray now
+  checks the anchor against the live timeline when the entry is clicked: an
+  unreachable row marks the entry `Line no longer in this turn` (the note, file
+  and line stay readable and still go out with the review) instead of silently
+  doing nothing, and the mark clears as soon as the row resolves again.
+- The verdict is local to the current timeline: it is never persisted, a stored
+  comment without a row identity is dropped on load, and a fresh note on the
+  row resets it.
+
 ### feat(chat): decisions arrive as cards, and agents ask through the question tool
 
 - A provider question now renders as a decision card: the question itself is

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { loadChatFeature } from './chatPresentationTestHarness.mjs'
 
-const { formatReviewMessage, reviewCode, reviewCountLabel, reviewLocation, reviewNote, reviewQuotedCode, reviewShortLocation, REVIEW_CODE_LIMIT } =
+const { formatReviewMessage, reviewAnchorIsLive, reviewAnchorRowCount, reviewCode, reviewCountLabel, reviewLocation, reviewNote, reviewQuotedCode, reviewShortLocation, REVIEW_CODE_LIMIT } =
   await loadChatFeature('review/reviewComments')
 
 const comment = overrides => ({
@@ -10,6 +10,8 @@ const comment = overrides => ({
   key: 'group-1:tool-1:3',
   turn: 'turn',
   group: 'group-1',
+  tool: 'tool-1',
+  row: 3,
   file: 'src/app.ts',
   line: 42,
   endLine: null,
@@ -64,4 +66,30 @@ test('the tray label keeps the file tail and the line numbers', () => {
 
 test('an empty tray composes no message at all', () => {
   assert.equal(formatReviewMessage([]), '')
+})
+
+// A turn whose tool carries a five-row diff, and the shapes a reload can leave
+// behind: a renumbered part key, a dropped turn, a tool without a diff.
+const patch = '*** Begin Patch\n*** Update File: src/app.ts\n@@ -1,2 +1,3 @@\n keep\n-old\n+a\n+b\n*** End Patch'
+const tool = { key: 'tool-1', name: 'apply_patch', argsText: JSON.stringify({ input: patch }), resultText: '' }
+const turns = [{ key: 'turn', parts: [{ kind: 'tool_group', key: 'group-1', tools: [tool] }] }]
+const emptyDiffTool = { key: 'tool-1', name: 'Read', argsText: JSON.stringify({ file_path: 'src/app.ts' }), resultText: '' }
+const renumbered = [{ key: 'turn', parts: [{ kind: 'tool_group', key: 'group-renumbered', tools: [tool] }] }]
+
+test('a saved anchor stays live only while its row still exists', () => {
+  // Header row, hunk row and four content rows: rows 0..5 addressable.
+  assert.equal(reviewAnchorRowCount(comment(), turns), 6)
+  assert.equal(reviewAnchorIsLive(comment({ row: 5 }), turns), true)
+  assert.equal(reviewAnchorIsLive(comment({ row: 6 }), turns), false, 'a row past the end is gone')
+  assert.equal(reviewAnchorIsLive(comment({ row: -1 }), turns), false)
+})
+
+test('a renumbered turn, part or tool makes the anchor stale', () => {
+  assert.equal(reviewAnchorRowCount(comment(), renumbered), null, 'a reload renames the part')
+  assert.equal(reviewAnchorIsLive(comment(), renumbered), false)
+  assert.equal(reviewAnchorIsLive(comment({ turn: 'turn-gone' }), turns), false)
+  assert.equal(reviewAnchorIsLive(comment({ tool: 'tool-gone' }), turns), false)
+  const noDiff = [{ key: 'turn', parts: [{ kind: 'tool_group', key: 'group-1', tools: [emptyDiffTool] }] }]
+  assert.equal(reviewAnchorRowCount(comment(), noDiff), 0, 'a call without a diff has no rows')
+  assert.equal(reviewAnchorIsLive(comment(), noDiff), false)
 })

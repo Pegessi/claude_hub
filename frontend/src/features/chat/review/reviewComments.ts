@@ -1,3 +1,6 @@
+import { describeToolActivity } from '@/utils/toolActivity'
+import type { TimelineTurn } from '../timeline/types'
+
 /**
  * Review comments a reader leaves on a diff row, and the one message they
  * become.
@@ -13,6 +16,10 @@ export interface ReviewAnchor {
   turn: string
   /** Tool-group key inside that turn. */
   group: string
+  /** Tool call key inside that group. */
+  tool: string
+  /** Row index inside the tool's diff. */
+  row: number
   /** Path the comment is about; '' when the call names no file. */
   file: string
   /** Preferred line number: the new side, else the original side. */
@@ -26,6 +33,9 @@ export interface ReviewAnchor {
 export interface ReviewComment extends ReviewAnchor {
   id: string
   text: string
+  /** The row this comment points at is gone (a history reload renumbers the
+   *  turn's parts). Learned by trying to reveal it; never persisted. */
+  stale?: boolean
 }
 
 export const REVIEW_CODE_LIMIT = 160
@@ -75,6 +85,31 @@ export function reviewShortLocation(anchor: ReviewAnchor): string {
 
 export function reviewCountLabel(count: number): string {
   return `${count} ${count === 1 ? 'comment' : 'comments'}`
+}
+
+/** How many rows a stored anchor could point at today, or null when the turn,
+ *  group or tool it named is gone.
+ *
+ *  Turn and part keys are re-derived when a warm cache reloads history, so a
+ *  comment saved against one revision can outlive the row it was written on.
+ *  The check is on demand: only the entry being revealed pays for it, and a
+ *  turn outside the loaded history window is stale rather than a false hit. */
+export function reviewAnchorRowCount(
+  anchor: ReviewAnchor,
+  turns: readonly TimelineTurn[],
+): number | null {
+  const turn = turns.find(item => item.key === anchor.turn)
+  const part = turn?.parts.find(item => item.key === anchor.group)
+  if (!part || part.kind !== 'tool_group') return null
+  const tool = part.tools.find(item => item.key === anchor.tool)
+  if (!tool) return null
+  return describeToolActivity(tool).diff?.length ?? 0
+}
+
+/** Whether the anchor still addresses a rendered row. */
+export function reviewAnchorIsLive(anchor: ReviewAnchor, turns: readonly TimelineTurn[]): boolean {
+  const rows = reviewAnchorRowCount(anchor, turns)
+  return rows !== null && anchor.row >= 0 && anchor.row < rows
 }
 
 /** The whole tray as one message, so the agent gets a single review turn

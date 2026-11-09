@@ -275,7 +275,7 @@ import type { TimelineTool, TimelineTurn } from '../timeline/types'
 import type { TimelinePart } from '../timeline/types'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 const { expandedToolGroups, onToolGroupToggle, collapseDetails } = requireChatOwner(chatTimelineKey)
-const { comments, addComment, removeComment, focusTarget } = requireChatOwner(chatReviewKey)
+const { comments, addComment, removeComment, setAnchorStale, focusTarget } = requireChatOwner(chatReviewKey)
 const props = defineProps<{
   turn: TimelineTurn
   part: Extract<TimelinePart, { kind: 'tool_group' }>
@@ -322,14 +322,25 @@ onUnmounted(() => clearTimeout(focusTimer))
 watch(() => focusTarget.value?.nonce, () => {
   const key = focusTarget.value?.key
   if (!key) return
+  // Every rendered card hears the same request; only the one that owns the
+  // anchor may judge it, and only that one can report it missing.
+  if (!key.startsWith(`${props.part.key}:`)) return
   const split = key.lastIndexOf(':')
   const row = Number(key.slice(split + 1))
   const owner = key.slice(0, split)
   const tool = props.part.tools.find(item => anchorOwner(item) === owner)
-  if (!tool || !Number.isFinite(row)) return
   void nextTick(() => {
-    const node = queryRow(diffNodes.get(tool.key), `[data-diff-row="${row}"]`)
-    if (node && typeof node.scrollIntoView === 'function') {
+    const node = tool && Number.isFinite(row)
+      ? queryRow(diffNodes.get(tool.key), `[data-diff-row="${row}"]`)
+      : null
+    if (!tool || !node) {
+      // The row this comment was saved against is gone (a history reload
+      // renumbers these keys): tell the tray instead of doing nothing.
+      setAnchorStale(key, true)
+      return
+    }
+    setAnchorStale(key, false)
+    if (typeof node.scrollIntoView === 'function') {
       node.scrollIntoView({ block: 'center', behavior: 'smooth' })
     }
     focused.value = { toolKey: tool.key, row }
@@ -465,6 +476,8 @@ function editorAnchor(): ReviewAnchor | null {
     key: anchorKey(tool, state.rows[0]),
     turn: props.turn.key,
     group: props.part.key,
+    tool: tool.key,
+    row: state.rows[0],
     file: first?.file ?? '',
     line,
     endLine: endLine !== line ? endLine : null,

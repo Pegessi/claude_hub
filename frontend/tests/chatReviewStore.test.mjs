@@ -13,6 +13,8 @@ const anchor = overrides => ({
   key: 'group-1:tool-1:3',
   turn: 'turn-1',
   group: 'group-1',
+  tool: 'tool-1',
+  row: 3,
   file: 'src/app.ts',
   line: 42,
   endLine: null,
@@ -98,6 +100,45 @@ test('sending composes one message, queues it and empties the tray', () => {
   assert.equal(draftQueue.value.length, 1)
 })
 
+test('a stale anchor is marked, cleared by a successful reveal, and never persisted', () => {
+  const storage = memoryStorage()
+  const { controller } = review(storage)
+  controller.addComment(anchor(), 'Row three.')
+  const other = controller.addComment(anchor({ key: 'group-1:tool-1:9', row: 9 }), 'Row nine.')
+
+  controller.setAnchorStale(anchor().key)
+  assert.equal(controller.comments.value[0].stale, true)
+  assert.equal(controller.comments.value[1].stale, false, 'only the named anchor is marked')
+
+  // The stored copy describes the note, not the current timeline.
+  const raw = JSON.parse(storage.entries.get('chub-review:tab-1'))
+  assert.deepEqual(raw.comments.map(item => 'stale' in item), [false, false])
+  const reloaded = useChatReview({ tabKey: 'tab-1', draftQueue: ref([]), storage })
+  assert.deepEqual(reloaded.comments.value.map(item => Boolean(item.stale)), [false, false])
+
+  // Finding the row again clears the verdict, and editing the row resets it.
+  controller.setAnchorStale(anchor().key, false)
+  assert.equal(controller.comments.value[0].stale, false)
+  controller.setAnchorStale(anchor().key)
+  controller.addComment(anchor(), 'Row three, revised.')
+  assert.equal(controller.comments.value[0].stale, false, 'a fresh note on the row clears it')
+  controller.setAnchorStale('no-such-key')
+  assert.equal(controller.comments.value[0].stale, false, 'an unknown anchor changes nothing')
+  assert.equal(other.key, controller.comments.value[1].key)
+})
+
+test('a saved comment without a row identity is dropped on load', () => {
+  const storage = memoryStorage()
+  storage.setItem('chub-review:tab-1', JSON.stringify({
+    comments: [
+      { id: 'a', text: 'ok', file: 'src/app.ts', key: 'g:t:1', tool: 't', row: 1, turn: 'turn-1', group: 'g', line: 4, endLine: null, code: 'x' },
+      { id: 'b', text: 'legacy', file: 'src/app.ts', key: 'g:t:2', turn: 'turn-1', group: 'g' },
+    ],
+  }))
+  const controller = useChatReview({ tabKey: 'tab-1', draftQueue: ref([]), storage })
+  assert.deepEqual(controller.comments.value.map(item => item.id), ['a'])
+})
+
 test('the tray can ask a row to reveal itself, repeatedly', () => {
   const { controller } = review()
   assert.equal(controller.focusTarget.value, null)
@@ -122,10 +163,11 @@ test('comments survive a remount inside the same tab and drop malformed state', 
   const otherTab = useChatReview({ tabKey: 'tab-2', draftQueue: ref([]), storage })
   assert.equal(otherTab.count.value, 0, 'another tab starts empty')
 
-  // A hand-edited or older value must not be rendered as comments.
+  // A hand-edited or older value must not be rendered as comments; a note that
+  // lost its row identity is dropped rather than kept without an anchor.
   storage.setItem('chub-review:tab-1', '{"comments":[{"text":5},{"id":"a","text":"ok","file":"f","key":"k"}]}')
   const restored = useChatReview({ tabKey: 'tab-1', draftQueue: ref([]), storage })
-  assert.deepEqual(restored.comments.value.map(item => item.text), ['ok'])
+  assert.deepEqual(restored.comments.value.map(item => item.text), [])
   storage.setItem('chub-review:tab-1', 'not json')
   assert.equal(useChatReview({ tabKey: 'tab-1', draftQueue: ref([]), storage }).count.value, 0)
 })

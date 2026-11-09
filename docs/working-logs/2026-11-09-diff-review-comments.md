@@ -53,6 +53,20 @@ tray composes nothing.
 - `frontend-lint`, `frontend-types`, `frontend-tests`, `frontend-build`,
   `backend-format` all pass.
 
+## Stale anchors (review finding F-14)
+
+A comment is anchored on `${part.key}:${tool.key}:${row}`, and a warm-cache
+history reload re-derives those keys, so a saved note can outlive its row.
+`reviewAnchorRowCount` / `reviewAnchorIsLive` (pure, unit tested) resolve an
+anchor against the live `timeline.turns`; `ChatReviewTray` asserts the verdict
+when an entry is clicked and the owning `ChatToolGroup` asserts it again when it
+cannot find the row it was asked to reveal. An unreachable row marks the entry
+`Line no longer in this turn` (the note keeps its file and line and still goes
+out with the review) instead of silently doing nothing, and the mark clears as
+soon as the row resolves. The flag is in-memory only: it describes the current
+timeline, so it is stripped before persisting and a stored comment without a row
+identity is dropped on load.
+
 ## Not covered
 
 The tray renders only while a Chat pane is mounted; comments are local review
