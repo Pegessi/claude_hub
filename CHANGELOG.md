@@ -7,6 +7,47 @@
 
 ## Released
 
+### feat(ui): six-question UI upgrade batch — inbox, decision cards, evidence, diff comments, work log, plan-first
+
+One batch, six independently reviewed features, fanned out in parallel
+worktrees and merged through `feat/ui-upgrade-batch-20261109`. Design and the
+review's open items are recorded in
+`docs/working-logs/2026-11-09-ui-upgrade-batch.md`.
+
+- The top bar's always-on `Status N` / `Agents N` counts became one `Inbox`
+  control whose amber badge counts only what needs a human — a pending
+  question, a failed or offline turn, work parked on the user — grouped
+  Needs you / Working / Recently done with a workspace-aware All/Chats/Agents
+  filter, peek, inline reply, keyboard cursor and a phone sheet. The tab
+  status payload gained five optional fields (`pending_question`, `activity`,
+  `activity_since`, `last_reply_excerpt`, `last_reply_at`) and its internal
+  wording became "Responding" / "Ready" / "Last turn failed (reason)".
+- Approval cards now read as decisions: the question as the title, one
+  full-width row per option carrying the provider's tradeoff and a
+  "Recommended" marker, number-key answers, a multi-question stepper and a
+  collapsed "You chose: X · receipt". Claude's question normalizer stopped
+  dropping option descriptions, and the shared question-protocol guidance tells
+  agents to ask through the tool with 2–4 options instead of ending prose with
+  an open yes/no.
+- Workspace task detail opens with the outcome and the evidence (acceptance
+  criteria and their verdicts, validation, changed files, artifacts, risks,
+  review/CI chips) before the decision actions, with description and internal
+  bookkeeping after it and empty sections removed; the board sorts failures
+  first with a danger tint and collapses empty agent bands.
+- Diff cards gained a line-number gutter, one header per file, inline per-line
+  comments pinned under their row and a per-tab review tray that sends all
+  comments as one message through the existing composer queue.
+- A running turn shows the step it is on beside its stopwatch and counts the
+  work done so far including failures; waiting never reads as activity; finished
+  turns report `Activity · steps · failed · duration` instead of raw event
+  counts. "Ask aside" forks the Chat so a side question leaves the running turn
+  untouched.
+- A Goal can now plan first: an additive optional `plan_first` makes the first
+  turn plan scope and execution budget only and park on the existing
+  `needs_input` pause, with a plan card (budget block, Approve & start,
+  Revise) identified by the Goal snapshot rather than transcript text; callers
+  that omit the field keep the previous prompt byte for byte.
+
 ### fix(ui): inbox keyboard, excerpt cost, reply time and phone sheet follow-ups
 
 - The panel's container keydown no longer swallows what its own controls do:
