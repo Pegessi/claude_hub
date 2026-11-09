@@ -118,15 +118,16 @@ import { buildInbox, needsYouCount } from './inboxModel'
  * separates "needs you" from "working" and "recently done" instead of showing
  * one flat status list twice.
  */
-const STORAGE_KEY_EXPANDED = 'claude_hub_inbox_expanded'
-
 const store = useTerminalStore()
 const appStore = useAppStore()
 const { tabs, agentStatuses } = storeToRefs(store)
 const { mode } = storeToRefs(appStore)
 const { isMobile } = useViewport()
 
-const open = ref(localStorage.getItem(STORAGE_KEY_EXPANDED) === 'true')
+// Never restored from storage: an `aria-modal` phone sheet that opens itself
+// on reload would trap focus before the user asked for it. The panel is one
+// click away instead.
+const open = ref(false)
 const contentRef = ref<{ focus?: () => void } | null>(null)
 const sheetCloseRef = ref<HTMLButtonElement | null>(null)
 const nowMs = ref(Date.now())
@@ -226,7 +227,6 @@ function stopResize() {
 }
 
 watch(open, value => {
-  localStorage.setItem(STORAGE_KEY_EXPANDED, String(value))
   if (value) {
     // Move focus into the surface so the keyboard contract (↑/↓, Enter, →,
     // Esc) works immediately instead of only after clicking a row.

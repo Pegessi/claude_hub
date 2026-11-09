@@ -251,7 +251,9 @@ class TerminalAgentStatus(BaseModel):
     # Last ~160 characters of the newest assistant reply, from the durable
     # stream only when reading it stays cheap (see manager status cache).
     last_reply_excerpt: Optional[str] = None
-    # When that reply landed (stream write time), for the row's timestamp.
+    # When that reply landed, for the row's timestamp. None when the excerpt is
+    # a fallback to an earlier turn (the newest turn has written no text yet),
+    # so an old answer can never read as "just now".
     last_reply_at: Optional[datetime] = None
 
 
