@@ -31,7 +31,11 @@ from .agent_stream.base import NativeInputNotSubmittedError
 from .agent_stream.fork_seed import seed_sidecar_path
 from .agent_stream.native import _detect_image_mime
 from .agent_stream.store import AgentStreamStore
-from .agent_stream.tailer import NativeRuntimeSnapshot, TailerManager
+from .agent_stream.tailer import (
+    NativeRuntimeSnapshot,
+    TailerManager,
+    turn_activity_extras,
+)
 from .ttyd_manager import ttyd_manager
 
 DeliveryState = Literal["not_sent", "sending", "accepted", "uncertain"]
@@ -414,11 +418,14 @@ def _runtime_snapshot(session: ManagedSession) -> Optional[NativeRuntimeSnapshot
         # The captured terminal snapshot predates any later question card.
         return replace(tailer.native_terminal_status, pending_question=pending_question)
     if transport.turn_in_flight:
+        # Same activity contract as the tab status payload: what is running and
+        # since when, so a viewer can show elapsed time from one read.
+        extras = turn_activity_extras(tailer)
         return NativeRuntimeSnapshot(
             AgentRuntimeStatus.WORKING,
             WORKING_ACTIVITY,
             pending_question=pending_question,
-            activity=tailer.active_tool_label or WORKING_ACTIVITY,
+            **extras,
         )
     return NativeRuntimeSnapshot(
         AgentRuntimeStatus.IDLE,

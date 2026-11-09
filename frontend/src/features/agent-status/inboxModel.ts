@@ -114,7 +114,15 @@ export function classifyRow(
   })
 
   if (status?.pending_question) {
-    return row('needs', 'Waiting for your answer', replyExcerpt, activitySinceMs, 4)
+    // A blocked idle turn reports no activity clock; the newest reply is the
+    // only real timestamp it has, so the row keeps a time either way.
+    return row(
+      'needs',
+      'Waiting for your answer',
+      replyExcerpt,
+      activitySinceMs ?? replyAtMs,
+      4,
+    )
   }
 
   // A finished turn the user has not looked at yet is the inbox's core case:
