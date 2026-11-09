@@ -12,6 +12,7 @@ import type { useChatAttachments } from './controllers/useChatAttachments'
 import type { useChatImages } from './controllers/useChatImages'
 import type { useChatSettings } from './controllers/useChatSettings'
 import type { useChatComposer } from './controllers/useChatComposer'
+import type { useChatReview } from './review/useChatReview'
 
 export interface ChatIdentity {
   connectionState: Ref<'idle' | 'hydrating' | 'live' | 'reconciling' | 'failed'>
@@ -38,6 +39,7 @@ export const chatAttachmentsKey: InjectionKey<ReturnType<typeof useChatAttachmen
 export const chatImagesKey: InjectionKey<ReturnType<typeof useChatImages>> = Symbol('chatImages')
 export const chatSettingsKey: InjectionKey<ReturnType<typeof useChatSettings>> = Symbol('chatSettings')
 export const chatComposerKey: InjectionKey<ReturnType<typeof useChatComposer>> = Symbol('chatComposer')
+export const chatReviewKey: InjectionKey<ReturnType<typeof useChatReview>> = Symbol('chatReview')
 
 export function requireChatOwner<T>(key: InjectionKey<T>): T {
   const owner = inject(key)

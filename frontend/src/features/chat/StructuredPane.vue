@@ -122,7 +122,7 @@
 
 <script setup lang="ts">
 import { provide } from 'vue'
-import { chatIdentityKey, chatGoalKey, chatTimelineKey, chatActionsKey, chatDeliveryKey, chatQueueKey, chatAttachmentsKey, chatImagesKey, chatSettingsKey, chatComposerKey } from './owners'
+import { chatIdentityKey, chatGoalKey, chatTimelineKey, chatActionsKey, chatDeliveryKey, chatQueueKey, chatAttachmentsKey, chatImagesKey, chatSettingsKey, chatComposerKey, chatReviewKey } from './owners'
 import ChatTimeline from './components/ChatTimeline.vue'
 import ChatMessageInbox from './components/ChatMessageInbox.vue'
 import ChatComposer from './components/ChatComposer.vue'
@@ -146,6 +146,7 @@ import { useChatTimeline } from '@/features/chat/controllers/useChatTimeline'
 import { useChatActions } from '@/features/chat/controllers/useChatActions'
 import { useChatQueue } from '@/features/chat/controllers/useChatQueue'
 import { useChatImages } from '@/features/chat/controllers/useChatImages'
+import { useChatReview } from '@/features/chat/review/useChatReview'
 const props = defineProps<ChatPaneProps>()
 const preview = provideAttachmentPreview()
 const isManagedChat = computed(() => Boolean(props.managedChat))
@@ -350,6 +351,12 @@ const images = useChatImages({
   openPreview: preview.open,
   get streamBasePath() { return streamBasePath },
 })
+// Review comments are pane-local draft input: they belong to this Chat tab and
+// reach the agent through the same queue as a typed message.
+const review = useChatReview({
+  tabKey: props.tabId || props.managedSessionId || '',
+  get draftQueue() { return queue.draftQueue },
+})
 // The pane owns KeepAlive ordering; leaf components only borrow owner refs.
 onMounted(() => {
   composer.handleViewportResize()
@@ -424,6 +431,7 @@ provide(chatAttachmentsKey, attachmentsController)
 provide(chatImagesKey, images)
 provide(chatSettingsKey, settings)
 provide(chatComposerKey, composer)
+provide(chatReviewKey, review)
 </script>
 
 <style scoped>

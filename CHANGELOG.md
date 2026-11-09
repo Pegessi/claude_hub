@@ -7,6 +7,23 @@
 
 ## Released
 
+### feat(chat): review comments on diff lines, sent as one message
+
+- Diff rows now carry the file they belong to and, when the hunk header
+  numbers them, their old/new line numbers: a quiet gutter plus one file
+  header row per file. Claude `old_string`/`new_string` edits name their file
+  and stay unnumbered, because the call states no line.
+- A `+` in the gutter (hover on desktop, the row itself on touch, Shift-click
+  for a range inside one file) opens a small inline editor and the note stays
+  pinned under its row. Per Chat tab, comments collect in a tray above the
+  composer ("N comments · Send to agent · Clear") where each entry jumps back
+  to its line, or is edited or removed; the list survives a pane remount
+  through sessionStorage until it is sent or cleared.
+- Send composes ONE message (`Review comments (N):` plus
+  `path:line — `code` — note` per item) and drops it into the existing
+  composer draft queue, so a busy turn queues it exactly like typed input and
+  the queue keeps owning delivery, retry identity and cancel.
+
 ### feat(ui): live work log for running turns and human activity for finished ones
 
 - The footer of an in-flight turn now reads `Working · Reading 2 files · 21:16`
