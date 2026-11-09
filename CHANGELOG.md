@@ -7,6 +7,22 @@
 
 ## Released
 
+### feat(ui): live work log for running turns and human activity for finished ones
+
+- The footer of an in-flight turn now reads `Working · Reading 2 files · 21:16`
+  with a quiet second line of what it has done so far
+  (`12 edits · 4 commands · 1 failed · 3 sub-agents`), replacing the lone
+  `Working 21:15` that sat under an otherwise empty screen. Counts cover the
+  turn's own calls and its delegated child threads, plan-list rewrites are
+  excluded, and failures keep a count of their own so folding can never hide
+  them. A turn blocked on the user's answer or on a sub-agent drops the
+  "Working" word and the pulse instead of pretending to make progress.
+- Finished turns report `Activity · 18 steps · 1 failed · 21m` instead of the
+  raw `Execution details · 12782 events`, which said nothing about what
+  happened or whether anything broke. A turn whose detail has not been read yet
+  falls back to `Activity` plus its duration, and lazy detail loading,
+  pagination and retry are unchanged.
+
 ### fix(chat): authorize out-of-cwd images only via completed image tools and add image retry
 
 - A legitimate image produced by a recognized native image-view tool outside

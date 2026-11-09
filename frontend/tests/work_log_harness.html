@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chat work log fixture</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      // Screenshot fixture for the live work log and the folded activity header.
+      // It mounts the production components with the same owner contracts the
+      // Chat pane provides, so the markup and CSS captured here are the real
+      // ones. The turn parts are synthetic — a live 20-minute turn cannot be
+      // staged on demand, and the backend must never be driven to produce one.
+      import { createApp, h, provide, ref } from 'vue'
+      import '@/features/app-shell/styles/theme.css'
+      import '@/features/app-shell/styles/controls.css'
+      import ChatTurnWorking from '@/features/chat/components/ChatTurnWorking.vue'
+      import ChatTurnParts from '@/features/chat/components/ChatTurnParts.vue'
+      import { chatIdentityKey, chatImagesKey, chatTimelineKey } from '@/features/chat/owners'
+
+      const tool = (key, name, status, args) => ({
+        key, callId: null, name, status, argsText: JSON.stringify(args ?? {}), resultText: '',
+      })
+
+      const turn = (key, parts, extra = {}) => ({
+        key,
+        turnId: key,
+        userText: 'refactor the work log',
+        origin: 'web',
+        feishu: null,
+        hubMessage: null,
+        mode: 'default',
+        yieldsToUser: false,
+        attachments: [],
+        parts,
+        assistantText: '',
+        thinkingText: '',
+        tools: [],
+        approvals: [],
+        completed: false,
+        completionStatus: null,
+        startedAt: null,
+        completedAt: null,
+        errors: [],
+        statuses: [],
+        renderRevision: 1,
+        ...extra,
+      })
+
+      // A busy turn: finished work behind, parallel reads in front, one failure.
+      const active = turn('active', [
+        { kind: 'thinking', key: 'think', text: 'Trace the flaky test first.' },
+        {
+          kind: 'tool_group',
+          key: 'group',
+          tools: [
+            tool('a', 'Bash', 'completed', { command: 'pnpm test work-log' }),
+            tool('b', 'Edit', 'completed', { file_path: 'frontend/src/features/chat/worklog/workLog.ts' }),
+            tool('c', 'Edit', 'completed', { file_path: 'frontend/src/features/chat/components/ChatTurnWorking.vue' }),
+            tool('d', 'Bash', 'failed', { command: 'pnpm lint' }),
+            tool('e', 'Read', 'running', { file_path: 'frontend/src/features/chat/components/ChatTurnParts.vue' }),
+            tool('f', 'Read', 'running', { file_path: 'frontend/src/features/chat/timeline/turnProcess.ts' }),
+          ],
+        },
+      ])
+
+      // The parent is blocked on a delegated child, which is not activity.
+      const waitingChild = turn('waiting-child', [
+        {
+          kind: 'subagent',
+          key: 'spawn',
+          tool: {
+            ...tool('spawn', 'Agent', 'running', { description: 'audit the work log' }),
+            subagent: {
+              provider: 'claude', agentType: 'Explore', description: 'audit the work log',
+              prompt: 'p', threadIds: ['T1'], background: true, directive: false,
+            },
+          },
+        },
+        {
+          kind: 'subagents',
+          key: 'region',
+          threads: [{ key: 'th', threadId: 'T1', launchTool: null, lifecycleStatus: 'active', renderRevision: 0, parts: [] }],
+        },
+      ])
+
+      // A question only the user can answer.
+      const waitingAnswer = turn('waiting-answer', [
+        { kind: 'thinking', key: 'think', text: 'Need a decision.' },
+        {
+          kind: 'approval',
+          key: 'ask',
+          approval: { key: 'ask', callId: null, kind: 'question', title: 'Keep the old label?', questions: [], resolved: false },
+        },
+      ])
+
+      const completedTurn = turn('done', [], {
+        completed: true,
+        completionStatus: 'completed',
+        startedAt: '2026-11-09T07:40:00Z',
+        completedAt: '2026-11-09T08:01:00Z',
+      })
+
+      /** Give each case its own owners: the live footer reads the turn from the
+       *  pane owner, exactly as it does in the app. */
+      const Case = {
+        props: { label: String, component: Object, currentTurn: Object, startedAt: String, part: Object, turnForParts: Object },
+        setup(props) {
+          provide(chatTimelineKey, {
+            turns: ref([props.currentTurn ?? completedTurn]),
+            latestTurnKey: ref(props.currentTurn?.key ?? completedTurn.key),
+            toggleTurnProcess: () => {},
+            retryHistoryDetail: () => {},
+          })
+          provide(chatImagesKey, { openImageLightbox: () => {} })
+          provide(chatIdentityKey, { markdownImageScope: 'fixture-tab' })
+          return () => h('section', { class: 'case' }, [
+            h('p', { class: 'case-label' }, props.label),
+            h(props.component, props.part
+              ? { turn: props.turnForParts ?? completedTurn, part: props.part }
+              : { startedAt: props.startedAt }),
+          ])
+        },
+      }
+
+      // A finished 21-minute turn started 21m15s ago, so the stopwatch reads
+      // 21:15 like the reported case instead of a 1970-scale number.
+      const liveStartedAt = new Date(Date.now() - (21 * 60 + 15) * 1000).toISOString()
+
+      const cases = [
+        ['Live turn: work in progress', ChatTurnWorking, { currentTurn: active, startedAt: liveStartedAt }],
+        ['Live turn: waiting on a sub-agent, pulse stopped', ChatTurnWorking, { currentTurn: waitingChild, startedAt: liveStartedAt }],
+        ['Live turn: waiting for your answer', ChatTurnWorking, { currentTurn: waitingAnswer, startedAt: liveStartedAt }],
+        ['Completed: counts loaded, failures kept', ChatTurnParts, {
+          part: { kind: 'process', key: 'p1', meta: 'Activity · 18 steps · 1 failed · 21m', expanded: false },
+        }],
+        ['Completed: detail not read yet', ChatTurnParts, {
+          part: { kind: 'process', key: 'p2', meta: 'Activity · 21m', expanded: false, detailStatus: 'loading' },
+        }],
+        ['Completed: no duration available', ChatTurnParts, {
+          part: { kind: 'process', key: 'p3', meta: 'Activity', expanded: false },
+        }],
+      ]
+
+      createApp({
+        render: () => h('div', { class: 'board' }, cases.map(([label, component, props]) => (
+          h(Case, { label, component, ...props })
+        ))),
+      }).mount('#app')
+    </script>
+    <style>
+      body { margin: 0; background: var(--ch-color-main-bg); color: var(--ch-color-text); font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+      .board { display: grid; gap: 22px; padding: 28px; max-width: 900px; }
+      .case { border: 1px solid var(--ch-color-border-muted); border-radius: 10px; padding: 12px 14px; background: var(--ch-color-surface); }
+      .case-label { margin: 0 0 8px; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--ch-color-text-subtle); }
+    </style>
+  </body>
+</html>
