@@ -55,12 +55,26 @@ export function deferred() {
 export const response = (body, status = 200) => new Response(JSON.stringify(body), {
   status, headers: { 'Content-Type': 'application/json' },
 })
-export const bot = (id = 'a', overrides = {}) => ({
-  bot_id: id, name: `Bot ${id}`, app_id: `app-${id}`, source: 'stored', enabled: true,
-  credentials_editable: true, deletable: true, revision: 1, generation: 1, configured: true,
-  app_secret_configured: true, connection_status: 'connected', updated_at: null,
-  binding: null, my_claims: [], ...overrides,
+export const activeBinding = (tabId = 'tab-1', overrides = {}) => ({
+  pairing_id: `pair-${tabId}`, state: 'active', bot_id: 'a', app_id: 'app-a',
+  tab_id: tabId, workspace_id: null, chat_id: `oc-${tabId}`, chat_type: 'p2p',
+  chat_name: null, owner_kind: 'oauth', is_mine: true,
+  created_at: new Date(1500).toISOString(), expires_at: null, ...overrides,
 })
+export const bot = (id = 'a', overrides = {}) => {
+  const entry = {
+    bot_id: id, name: `Bot ${id}`, app_id: `app-${id}`, source: 'stored', enabled: true,
+    credentials_editable: true, deletable: true, revision: 1, generation: 1, configured: true,
+    app_secret_configured: true, connection_status: 'connected', updated_at: null,
+    mode: 'single', binding: null, bindings: [], my_claims: [], ...overrides,
+  }
+  if (overrides.binding !== undefined && overrides.bindings === undefined) {
+    entry.bindings = entry.binding ? [entry.binding] : []
+  } else if (overrides.bindings !== undefined && overrides.binding === undefined) {
+    entry.binding = entry.bindings[0] ?? null
+  }
+  return entry
+}
 export const pool = (revision, bots = [bot(), bot('b')], focus = null) => ({
   pool_revision: revision, bots, focus_bot_id: focus, pool_editable: true, deprecated_env: [],
 })

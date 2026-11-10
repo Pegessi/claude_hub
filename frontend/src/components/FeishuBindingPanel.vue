@@ -108,29 +108,144 @@
             <p>{{ boundDescription }}</p>
           </div>
         </section>
-        <dl class="connection-details">
-          <div>
-            <dt>Target</dt>
-            <dd data-testid="feishu-binding-target">
-              {{ boundTargetLabel }}
-            </dd>
+        <template v-if="isPerChannelMode">
+          <div
+            class="channel-section"
+            data-testid="feishu-binding-channels"
+          >
+            <div class="channel-section__header">
+              <span class="field-label">Current channels</span>
+              <span class="channel-section__count">{{ channelBindings.length }} / 8</span>
+            </div>
+            <ul
+              v-if="channelBindings.length"
+              class="channel-list"
+              aria-label="Current channels"
+              data-testid="feishu-binding-channel-list"
+            >
+              <li
+                v-for="item in channelBindings"
+                :key="item.pairing_id"
+                class="channel-list__item"
+                data-testid="feishu-binding-channel-item"
+              >
+                <span class="channel-list__source">{{ channelSourceLabel(item) }}</span>
+                <span class="channel-list__target">Chat <code>{{ item.tab_id }}</code></span>
+              </li>
+            </ul>
           </div>
-          <div>
-            <dt>Chat</dt>
-            <dd>{{ binding.tab_id }}</dd>
+          <div class="per-channel-group-bind">
+            <p class="selection-hint">
+              {{ groupPathHint }}
+            </p>
+            <p
+              v-if="groupsError"
+              class="feedback feedback--error"
+              role="alert"
+              data-testid="feishu-binding-groups-error"
+            >
+              {{ groupsError }}
+            </p>
+            <div
+              v-if="groupsLoading"
+              class="panel-loading"
+              role="status"
+            >
+              <span
+                class="panel-spinner"
+                aria-hidden="true"
+              />
+              Loading groups…
+            </div>
+            <template v-else-if="groups.length">
+              <label class="field">
+                <span class="field-label">Group</span>
+                <select
+                  class="ch-select"
+                  aria-label="Group"
+                  data-testid="feishu-binding-group-select"
+                  :value="selectedChatId || ''"
+                  :disabled="isMutating"
+                  @change="chooseGroup"
+                >
+                  <option
+                    value=""
+                    disabled
+                  >
+                    Select a group
+                  </option>
+                  <option
+                    v-for="chat in groups"
+                    :key="chat.chat_id"
+                    :value="chat.chat_id"
+                  >
+                    {{ groupOptionLabel(chat) }}
+                  </option>
+                </select>
+              </label>
+              <p
+                class="group-warning"
+                data-testid="feishu-binding-group-warning"
+              >
+                {{ groupWarningCopy }}
+              </p>
+              <button
+                type="button"
+                class="ch-btn ch-btn--primary primary-action"
+                data-testid="feishu-binding-bind-group"
+                :disabled="isMutating || !selectedChatId || !selectedBotReady"
+                @click="submitGroupBind"
+              >
+                {{ isMutating ? 'Binding…' : 'Bind this group' }}
+              </button>
+              <button
+                type="button"
+                class="ch-btn ch-btn--sm ch-btn--ghost reload-action"
+                data-testid="feishu-binding-reload-groups"
+                :disabled="isMutating || !selectedBotReady || groupsLoading"
+                @click="loadGroups"
+              >
+                Reload groups
+              </button>
+            </template>
+            <template v-else>
+              <button
+                type="button"
+                class="ch-btn ch-btn--primary primary-action"
+                data-testid="feishu-binding-load-groups"
+                :disabled="isMutating || !selectedBotReady || groupsLoading"
+                @click="loadGroups"
+              >
+                {{ groupsLoaded || groupsError ? 'Reload groups' : 'Load groups' }}
+              </button>
+            </template>
           </div>
-          <div>
-            <dt>Connected</dt>
-            <dd>{{ formatTime(binding.created_at) }}</dd>
-          </div>
-        </dl>
-        <p
-          v-if="boundIsTopic"
-          class="selection-hint"
-          data-testid="feishu-binding-topic-hint"
-        >
-          Replies stay inside the group topic.
-        </p>
+        </template>
+        <template v-else>
+          <dl class="connection-details">
+            <div>
+              <dt>Target</dt>
+              <dd data-testid="feishu-binding-target">
+                {{ boundTargetLabel }}
+              </dd>
+            </div>
+            <div>
+              <dt>Chat</dt>
+              <dd>{{ binding.tab_id }}</dd>
+            </div>
+            <div>
+              <dt>Connected</dt>
+              <dd>{{ formatTime(binding.created_at) }}</dd>
+            </div>
+          </dl>
+          <p
+            v-if="boundIsTopic"
+            class="selection-hint"
+            data-testid="feishu-binding-topic-hint"
+          >
+            Replies stay inside the group topic.
+          </p>
+        </template>
         <template v-if="confirmDisconnect">
           <div class="confirm-card">
             <strong>Disconnect this Chat?</strong>
@@ -257,7 +372,42 @@
         </template>
 
         <template v-else>
+          <template v-if="isPerChannelMode">
+            <div
+              class="channel-section"
+              data-testid="feishu-binding-channels"
+            >
+              <div class="channel-section__header">
+                <span class="field-label">Current channels</span>
+                <span class="channel-section__count">{{ channelBindings.length }} / 8</span>
+              </div>
+              <ul
+                v-if="channelBindings.length"
+                class="channel-list"
+                aria-label="Current channels"
+                data-testid="feishu-binding-channel-list"
+              >
+                <li
+                  v-for="item in channelBindings"
+                  :key="item.pairing_id"
+                  class="channel-list__item"
+                  data-testid="feishu-binding-channel-item"
+                >
+                  <span class="channel-list__source">{{ channelSourceLabel(item) }}</span>
+                  <span class="channel-list__target">Chat <code>{{ item.tab_id }}</code></span>
+                </li>
+              </ul>
+              <p
+                v-else
+                class="selection-hint"
+                data-testid="feishu-binding-channel-empty"
+              >
+                No active channels yet. Direct messages open their own Chat automatically.
+              </p>
+            </div>
+          </template>
           <div
+            v-else
             class="path-switch"
             role="group"
             aria-label="Connection type"
@@ -284,7 +434,7 @@
             </button>
           </div>
 
-          <template v-if="connectMode === 'private'">
+          <template v-if="!isPerChannelMode && connectMode === 'private'">
             <p class="selection-hint">
               Choose an available Bot to route its private conversation into this Chat.
             </p>
@@ -351,7 +501,7 @@
                 class="group-warning"
                 data-testid="feishu-binding-group-warning"
               >
-                Anyone in this group can talk to this Chat.
+                {{ groupWarningCopy }}
               </p>
               <button
                 type="button"
@@ -397,7 +547,7 @@ import FeishuIdentityMark from '@/components/FeishuIdentityMark.vue'
 import { useFeishuBinding } from '@/composables/useFeishuBinding'
 import { trustedFeishuAvatarUrl } from '@/utils/feishuIdentity'
 import { writeClipboard } from '@/utils/clipboard'
-import type { FeishuBotChat } from '@/utils/feishuBotConfig'
+import { botBindings, botMode, type FeishuActiveBinding, type FeishuBotChat } from '@/utils/feishuBotConfig'
 
 const props = defineProps<{ tabId: string }>()
 const root = ref<HTMLElement | null>(null)
@@ -407,11 +557,13 @@ const confirmDisconnect = ref(false)
 const connectMode = ref<'private' | 'group'>('private')
 const selectedChatId = ref<string | null>(null)
 const {
-  bots, binding, currentBot, selectedBotId, selectedBot, pendingCode, claim, confirmWord, error,
-  needsLogin, isHydrated, isLoading, isMutating, viewState, statusText, groups, groupsLoaded,
-  groupsLoading, groupsError, refresh, selectBot, generateCode, activate, bindGroup, loadGroups,
-  ensureGroups, disconnect, resume, pause,
+  bots, binding, bindings, mode, currentBot, selectedBotId, selectedBot, pendingCode, claim,
+  confirmWord, error, needsLogin, isHydrated, isLoading, isMutating, viewState, statusText, groups,
+  groupsLoaded, groupsLoading, groupsError, refresh, selectBot, generateCode, activate, bindGroup,
+  loadGroups, ensureGroups, disconnect, resume, pause,
 } = useFeishuBinding(toRef(props, 'tabId'))
+const isPerChannelMode = computed(() => mode.value === 'per_channel')
+const channelBindings = computed(() => bindings.value)
 const activeAvatarUrl = computed(() => {
   if (viewState.value !== 'bound-current') return null
   return trustedFeishuAvatarUrl(currentBot.value?.feishu_avatar_url)
@@ -436,23 +588,45 @@ const boundTargetLabel = computed(() => {
     || chatId || 'unnamed group'
   return `Group · ${name}`
 })
-const boundDescription = computed(() => (isGroupBinding.value
-  ? 'Group messages from this Bot reach this Chat.'
-  : 'New private messages enter this Chat.'))
+const boundDescription = computed(() => {
+  if (isPerChannelMode.value) return 'Each Feishu conversation gets its own Chat.'
+  return isGroupBinding.value
+    ? 'Group messages from this Bot reach this Chat.'
+    : 'New private messages enter this Chat.'
+})
 const boundIsTopic = computed(() => isGroupBinding.value && (boundGroup.value?.is_topic_mode
   ?? boundGroup.value?.chat_mode === 'topic'))
 // Picking a group needs the same preconditions as generating a pairing code:
-// a usable, unbound Bot. The pool already disables occupied Bots in the picker.
+// a usable Bot that can still accept a group binding in its serving mode.
 const selectedBotReady = computed(() => {
-  const bot = selectedBot.value
-  return !!bot && bot.enabled && bot.configured && !bot.binding
+  const bot = selectedBot.value ?? currentBot.value
+  if (!bot || !bot.enabled || !bot.configured) return false
+  if (botMode(bot) === 'per_channel') return botBindings(bot).length < 8
+  return !bot.binding && botBindings(bot).length === 0
 })
 const groupPathHint = computed(() => {
   if (groupsLoaded.value && groups.value.length === 0) {
     return 'This Bot is not in any group yet. Add the Bot to a group in Feishu, then reload.'
   }
+  if (isPerChannelMode.value) {
+    return 'Pick a group this Bot can see. Binding it creates a new Chat for that group.'
+  }
   return 'Pick a group this Bot can see, then bind it to this Chat.'
 })
+const groupWarningCopy = computed(() => (isPerChannelMode.value
+  ? 'Binding this group creates a new Chat. Anyone in the group can talk to it.'
+  : 'Anyone in this group can talk to this Chat.'))
+function channelSourceLabel(item: FeishuActiveBinding): string {
+  if (item.chat_type === 'group') {
+    const groupName = item.chat_name
+      || (item.chat_id ? groups.value.find(chat => chat.chat_id === item.chat_id)?.name : null)
+      || item.chat_id
+      || 'unnamed group'
+    return `Group · ${groupName}`
+  }
+  const senderTag = item.chat_name || item.chat_id || item.pairing_id
+  return senderTag ? `DM · ${senderTag}` : 'Private chat'
+}
 function groupOptionLabel(chat: FeishuBotChat): string {
   const name = chat.name || chat.chat_id
   return (chat.is_topic_mode ?? chat.chat_mode === 'topic') ? `${name} · topic group` : name
@@ -515,13 +689,13 @@ watch(() => props.tabId, close, { flush: 'sync' })
 // Fetch the Bot's groups only when they are needed: the group path is open, or
 // a group binding has to be named. ensureGroups never polls and never retries a
 // failed read on its own; "Reload groups" stays the user's decision.
-watch([open, viewState, connectMode, selectedBotId, groupsLoaded], () => {
+watch([open, viewState, connectMode, selectedBotId, groupsLoaded, isPerChannelMode], () => {
   if (!open.value) return
   if (viewState.value === 'bound-current') {
-    if (isGroupBinding.value) ensureGroups()
+    if (isGroupBinding.value || isPerChannelMode.value) ensureGroups()
     return
   }
-  if (viewState.value === 'unbound' && connectMode.value === 'group') ensureGroups()
+  if (viewState.value === 'unbound' && (connectMode.value === 'group' || isPerChannelMode.value)) ensureGroups()
 }, { flush: 'post' })
 </script>
 
@@ -718,6 +892,31 @@ watch([open, viewState, connectMode, selectedBotId, groupsLoaded], () => {
 .connection-details div { display: grid; grid-template-columns: 82px minmax(0, 1fr); gap: 8px; }
 .connection-details dt { color: var(--ch-color-text-subtle); font-size: var(--ch-font-size-xs); }
 .connection-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--ch-color-text-muted); font-size: var(--ch-font-size-xs); }
+.channel-section { display: grid; gap: 6px; margin: 0 0 14px; }
+.channel-section__header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.channel-section__count { color: var(--ch-color-text-subtle); font-size: var(--ch-font-size-xs); }
+.channel-list {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.channel-list__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-sunken);
+  font-size: var(--ch-font-size-xs);
+}
+.channel-list__source { min-width: 0; overflow: hidden; color: var(--ch-color-text); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.channel-list__target { flex: 0 0 auto; color: var(--ch-color-text-muted); }
+.channel-list__target code { color: var(--ch-color-text-code); font-family: var(--ch-font-mono); }
+.per-channel-group-bind { margin-bottom: 14px; }
 .confirm-card { border: 1px solid var(--ch-color-danger-border); background: var(--ch-color-danger-bg); }
 .confirm-card strong { display: block; margin-bottom: 3px; color: var(--ch-color-danger-text); font-size: var(--ch-font-size-sm); }
 .panel-actions { justify-content: flex-end; gap: 8px; }

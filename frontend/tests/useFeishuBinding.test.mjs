@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { bindingHarness, bot, chatList, claim, code, config, deferred, flush, groupChat, pool, response } from './feishuBotUiTestHarness.mjs'
+import { activeBinding, bindingHarness, bot, chatList, claim, code, config, deferred, flush, groupChat, pool, response } from './feishuBotUiTestHarness.mjs'
 
 async function claimed(h) {
   await h.api.resume()
@@ -287,4 +287,72 @@ test('switching Bot discards the cached groups and any late group response', asy
   assert.deepEqual(h.api.groups.value, [])
   assert.equal(h.api.groupsLoaded.value, false)
   assert.equal(h.api.groupsError.value, null)
+})
+
+test('per_channel mode reads bindings[] with fallback to binding and resolves non-first channel tabs', async t => {
+  const dmBinding = activeBinding('tab-dm', {
+    pairing_id: 'pair-dm', chat_type: 'p2p', chat_name: 'ou_sender_1',
+  })
+  const groupBinding = activeBinding('tab-1', {
+    pairing_id: 'pair-group', chat_type: 'group', chat_id: 'oc-group-1', chat_name: 'Release room',
+  })
+  const h = bindingHarness(t)
+  const snapshot = pool(2, [
+    bot('a', {
+      revision: 2,
+      mode: 'per_channel',
+      binding: dmBinding,
+      bindings: [dmBinding, groupBinding],
+    }),
+    bot('b', {
+      revision: 1,
+      mode: 'single',
+      binding: activeBinding('tab-legacy'),
+      bindings: [],
+    }),
+  ])
+  h.setServer(snapshot)
+  await h.api.resume()
+  assert.equal(h.api.mode.value, 'per_channel')
+  assert.equal(h.api.viewState.value, 'bound-current')
+  assert.equal(h.api.binding.value.pairing_id, 'pair-group')
+  assert.deepEqual(h.api.bindings.value.map(item => item.tab_id), ['tab-dm', 'tab-1'])
+  assert.equal(h.store.activeBindingForTab('tab-legacy').tab_id, 'tab-legacy', 'falls back to binding when bindings[] is empty')
+})
+
+test('binding a group in per_channel mode omits tab_id so the server creates a new Chat tab', async t => {
+  const dmBinding = activeBinding('tab-dm', {
+    pairing_id: 'pair-dm', chat_type: 'p2p', chat_name: 'ou_sender_1',
+  })
+  const createdGroupBinding = activeBinding('tab-auto-group', {
+    pairing_id: 'pair-group', chat_type: 'group', chat_id: 'oc-group', chat_name: 'Design group',
+  })
+  const submitted = []
+  const h = bindingHarness(t, {
+    bindGroup: async (botId, input) => {
+      submitted.push({ botId, input })
+      return pool(3, [
+        bot('a', {
+          revision: 3,
+          mode: 'per_channel',
+          bindings: [dmBinding, createdGroupBinding],
+        }),
+        bot('b'),
+      ])
+    },
+  })
+  h.setServer(pool(2, [
+    bot('a', { revision: 2, mode: 'per_channel', bindings: [dmBinding] }),
+    bot('b'),
+  ]))
+  await h.api.resume()
+  assert.equal(h.api.mode.value, 'per_channel')
+  assert.deepEqual(h.api.bindings.value.map(item => item.tab_id), ['tab-dm'])
+  assert.equal(await h.api.bindGroup('oc-group'), true)
+  assert.deepEqual(submitted, [{
+    botId: 'a',
+    input: { chat_id: 'oc-group', expected_revision: 2 },
+  }])
+  assert.equal('tab_id' in submitted[0].input, false)
+  assert.deepEqual(h.api.bindings.value.map(item => item.tab_id), ['tab-dm', 'tab-auto-group'])
 })
