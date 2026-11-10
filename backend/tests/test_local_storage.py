@@ -464,3 +464,104 @@ def test_services_lazy_exports_preserve_singleton_attributes_after_submodule_imp
         check=True,
         timeout=30,
     )
+
+
+def test_pre_import_and_delta_sync_legacy_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import datetime, timezone
+
+    from claude_hub.models import AgentStreamEvent, AgentStreamEventType, AgentType
+    from claude_hub.services import storage_maintenance
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+    from claude_hub.services.backend_instance_lock import BackendInstanceLock
+
+    home = tmp_path / "runtime"
+    ws1_dir = home / "workspaces" / "ws-1"
+    stream_dir = ws1_dir / "agent_streams"
+    stream_dir.mkdir(parents=True)
+    import importlib
+
+    workspace_manager = importlib.import_module("claude_hub.services.workspace_manager")
+    ws2_dir = home / "workspaces" / "ws-2"
+    ws2_dir.mkdir(parents=True)
+
+    monkeypatch.setenv("CLAUDE_HUB_HOME", str(home))
+    monkeypatch.setenv("CLAUDE_HUB_STATE_ROOT", str(home / "workspaces"))
+    monkeypatch.setattr(workspace_manager, "STATE_ROOT", home / "workspaces")
+
+    tabs_file = home / "tabs.json"
+    tabs_file.write_text('{"version":2,"tabs":[{"id":"t1"}],"pending_stream_cleanup":[]}')
+    state_file = ws1_dir / "state.json"
+    state_file.write_text('{"id":"ws-1","tasks":[{"id":"task-1","title":"initial"}]}')
+    orphan_bak = ws2_dir / "state.json.bak"
+    orphan_bak.write_text('{"id":"ws-2","tasks":[{"id":"task-2","title":"from-bak"}]}')
+
+    ev0 = AgentStreamEvent(
+        stream_sequence=0,
+        session_id="s1",
+        tab_id="t1",
+        agent_type=AgentType.CLAUDE,
+        type=AgentStreamEventType.TURN_STARTED,
+        turn_id="turn-1",
+        payload={"summary": "hello"},
+        created_at=datetime.now(timezone.utc),
+    )
+    ev1 = AgentStreamEvent(
+        stream_sequence=1,
+        session_id="s1",
+        tab_id="t1",
+        agent_type=AgentType.CLAUDE,
+        type=AgentStreamEventType.TURN_COMPLETED,
+        turn_id="turn-1",
+        payload={"final_text": "world"},
+        created_at=datetime.now(timezone.utc),
+    )
+    stream_file = stream_dir / "s1.jsonl"
+    ev1_bytes = ev1.model_dump_json().encode("utf-8")
+    # Write ev0 complete + ev1 half-written (no trailing newline)
+    stream_file.write_bytes(ev0.model_dump_json().encode("utf-8") + b"\n" + ev1_bytes[:30])
+
+    # Hold BackendInstanceLock to prove --pre-import coexists with a running legacy backend.
+    with BackendInstanceLock(home / "backend.lock"):
+        monkeypatch.setattr(
+            "sys.argv", ["storage_maintenance", "--root", str(home), "--pre-import"]
+        )
+        storage_maintenance.main()
+
+        # Legacy files remain intact on disk.
+        assert tabs_file.exists()
+        assert state_file.exists()
+        assert orphan_bak.exists()
+        assert stream_file.exists()
+
+        # SQLite has imported tabs, ws-1 state, orphan ws-2 state.json.bak, and only complete ev0.
+        assert storage.read_document(tabs_file)["tabs"] == [{"id": "t1"}]
+        assert storage.read_document(state_file)["tasks"][0]["title"] == "initial"
+        assert storage.read_document(ws2_dir / "state.json")["tasks"][0]["title"] == "from-bak"
+        store = AgentStreamStore("ws-1", "s1")
+        assert [e.stream_sequence for e in store._read_rows()] == [0]
+
+        # Complete ev1, append ev2, and update ws-1 state.json on disk.
+        ev2 = ev1.model_copy(
+            update={"stream_sequence": 2, "payload": {"final_text": "delta-appended"}}
+        )
+        stream_file.write_bytes(
+            ev0.model_dump_json().encode("utf-8")
+            + b"\n"
+            + ev1_bytes
+            + b"\n"
+            + ev2.model_dump_json().encode("utf-8")
+            + b"\n"
+        )
+        state_file.write_text('{"id":"ws-1","tasks":[{"id":"task-1","title":"updated"}]}')
+
+        sources = storage_maintenance.legacy_sources(home, workspace_root=home / "workspaces")
+        delta_summary = storage_maintenance.sync_legacy_sources(sources)
+        assert delta_summary["stream_rows_written"] == 2
+        assert storage.read_document(state_file)["tasks"][0]["title"] == "updated"
+        assert [e.stream_sequence for e in store._read_rows()] == [0, 1, 2]
+
+        # Re-running sync when nothing changed writes 0 stream rows.
+        noop_summary = storage_maintenance.sync_legacy_sources(sources)
+        assert noop_summary["stream_rows_written"] == 0
