@@ -19,7 +19,7 @@
       import ChatTurnWorking from '@/features/chat/components/ChatTurnWorking.vue'
       import ChatTurnParts from '@/features/chat/components/ChatTurnParts.vue'
       import { computed } from 'vue'
-      import { chatIdentityKey, chatImagesKey, chatSettingsKey, chatTimelineKey } from '@/features/chat/owners'
+      import { chatIdentityKey, chatImagesKey, chatTimelineKey } from '@/features/chat/owners'
       import { IncrementalTimelineReducer } from '@/features/chat/timeline/reducer'
 
       const tool = (key, name, status, args) => ({
@@ -105,7 +105,13 @@
       const freshStartAt = new Date(Date.now() - 5 * 1000).toISOString()
       // Long starts are common: after half a minute the footer explains itself.
       const slowStartAt = new Date(Date.now() - 45 * 1000).toISOString()
-      const offlineStart = ref('reconnecting')
+      const stuckStartAt = new Date(Date.now() - 150 * 1000).toISOString()
+      // What the Hub's status poll would report for this tab.
+      const status = (value, activity = null) => ({ status: value, activity, ageMs: 2000 })
+      const runningStatus = status('working')
+      const busyStatus = status('working', 'Running pytest -q')
+      const offlineStatus = status('offline')
+      const unknownStatus = null
 
       const completedTurn = turn('done', [], {
         completed: true,
@@ -120,7 +126,7 @@
         props: {
           caseId: String, label: String, component: Object,
           currentTurn: Object, startedAt: String, part: Object, turnForParts: Object,
-          turnsRef: Object, connectionState: Object,
+          turnsRef: Object, connectionState: String, runtimeStatus: Object,
         },
         setup(props) {
           provide(chatTimelineKey, {
@@ -132,14 +138,14 @@
             retryHistoryDetail: () => {},
           })
           provide(chatImagesKey, { openImageLightbox: () => {} })
-          // The footer names who it is waiting on, so the fixture supplies the
-          // same two owner slices the pane does.
+          // The footer reports the Hub's own view of this tab, so the fixture
+          // supplies the same identity slices the pane does.
           provide(chatIdentityKey, {
             markdownImageScope: computed(() => 'fixture-tab'),
-            connectionState: props.connectionState ?? ref('live'),
-            currentTab: computed(() => ({ agent_type: 'maso' })),
+            connectionState: computed(() => props.connectionState ?? 'live'),
+            currentTab: computed(() => ({ id: 'fixture-tab', agent_type: 'maso' })),
+            runtimeStatus: computed(() => props.runtimeStatus ?? null),
           })
-          provide(chatSettingsKey, { combinedModelLabel: computed(() => 'gemini-4-argon · High') })
           return () => h('section', { class: 'case', 'data-case': props.caseId }, [
             h('p', { class: 'case-label' }, props.label),
             h(props.component, props.part
@@ -176,9 +182,13 @@
         ['busy', 'Live turn: work in progress', ChatTurnWorking, { currentTurn: active, startedAt: liveStartedAt }],
         ['waiting-subagent', 'Live turn: waiting on a sub-agent, pulse stopped', ChatTurnWorking, { currentTurn: waitingChild, startedAt: liveStartedAt }],
         ['waiting-answer', 'Live turn: waiting for your answer', ChatTurnWorking, { currentTurn: waitingAnswer, startedAt: liveStartedAt }],
-        ['awaiting-first', 'Live turn: nothing reported yet', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: freshStartAt }],
-        ['awaiting-first-slow', 'Live turn: nothing after 45 s', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: slowStartAt }],
-        ['awaiting-first-offline', 'Live turn: stream reconnecting', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: freshStartAt, connectionState: offlineStart }],
+        ['awaiting-first', 'Live turn: provider running, nothing written', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: freshStartAt, runtimeStatus: runningStatus }],
+        ['awaiting-first-activity', 'Live turn: provider reports its activity', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: freshStartAt, runtimeStatus: busyStatus }],
+        ['awaiting-first-slow', 'Live turn: running but silent for 45 s', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: slowStartAt, runtimeStatus: runningStatus }],
+        ['awaiting-first-stuck', 'Live turn: running, silent for 2.5 min', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: stuckStartAt, runtimeStatus: runningStatus }],
+        ['awaiting-first-provider-offline', 'Live turn: provider offline', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: freshStartAt, runtimeStatus: offlineStatus }],
+        ['awaiting-first-unknown', 'Live turn: no fresh runtime status', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: slowStartAt, runtimeStatus: unknownStatus }],
+        ['awaiting-first-offline', 'Live turn: stream reconnecting', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: freshStartAt, connectionState: 'reconnecting', runtimeStatus: runningStatus }],
         ['completed-counts', 'Completed: counts loaded, failures kept', ChatTurnParts, {
           part: { kind: 'process', key: 'p1', meta: 'Activity · 18 steps · 1 failed · 21m', expanded: false },
         }],

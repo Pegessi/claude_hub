@@ -29,10 +29,6 @@
         v-if="step.label"
         class="turn-working-step"
       >{{ step.waiting || step.bare ? step.label : `· ${step.label}` }}</span>
-      <span
-        v-if="contextLabel && step.bare"
-        class="turn-working-context"
-      >{{ contextLabel }}</span>
       <time
         class="turn-working-elapsed"
         aria-hidden="true"
@@ -69,7 +65,7 @@
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, onMounted, ref } from 'vue'
 import { formatStopwatch, parseTimestampMs } from '@/utils/duration'
-import { chatIdentityKey, chatSettingsKey, requireChatOwner, chatTimelineKey } from '../owners'
+import { chatIdentityKey, requireChatOwner, chatTimelineKey } from '../owners'
 import {
   countWorkLog,
   currentStep,
@@ -86,11 +82,10 @@ const props = defineProps<{ startedAt: string | null }>()
 // the whole part list down just for a label.
 const { turns } = requireChatOwner(chatTimelineKey)
 
-// The provider and the model are what a reader wants while nothing is happening:
-// "waiting for the first response" alone does not say from whom. Both owners are
-// optional so the footer still projects a turn outside a full pane (fixtures).
+// The Hub's own view of this tab is what makes a silent turn legible: "running,
+// nothing written yet" and "offline, nothing can arrive" look identical in a
+// transcript otherwise. Optional so the footer still projects a turn in fixtures.
 const identity = inject(chatIdentityKey, null)
-const settings = inject(chatSettingsKey, null)
 
 /** The turn in flight is the newest turn of the pane. Read it straight from
  *  ``turns`` in each projection, never through an intermediate computed that
@@ -115,12 +110,7 @@ const countsLabel = computed(() => workLogCountLabel(counts.value))
  *  not repaint the whole summary, so only that phrase carries the warning tone. */
 const countParts = computed(() => workLogCountParts(counts.value))
 
-/** Who is being waited on: ``MASO · gemini-4-argon · High`` when known. */
-const contextLabel = computed(() => {
-  const provider = (identity?.currentTab?.value?.agent_type ?? '').toUpperCase()
-  const model = (settings?.combinedModelLabel?.value ?? '').trim()
-  return [provider, model].filter(Boolean).join(' · ')
-})
+
 
 const mountedAt = Date.now()
 const now = ref(Date.now())
@@ -147,7 +137,11 @@ const elapsedLabel = computed(() => formatStopwatch(elapsedMs.value))
  *  the step itself says what is happening. */
 const hint = computed(() => {
   if (!step.value.bare) return ''
-  return firstResponseHint(elapsedMs.value, identity?.connectionState?.value ?? 'live')
+  return firstResponseHint({
+    elapsedMs: elapsedMs.value,
+    connectionState: identity?.connectionState?.value ?? 'live',
+    runtime: identity?.runtimeStatus?.value ?? null,
+  })
 })
 </script>
 
@@ -228,15 +222,6 @@ const hint = computed(() => {
   padding-left: 15px;
   font-size: 11.5px;
   line-height: 1.45;
-}
-
-/* Which provider and model this turn is waiting on. Quiet, after the sentence,
-   so the state line still leads. */
-.turn-working-context {
-  flex: 0 0 auto;
-  color: var(--ch-color-text-subtle);
-  font-size: 11.5px;
-  opacity: 0.75;
 }
 
 /* The reason behind a silent start; one short sentence, never a second status. */

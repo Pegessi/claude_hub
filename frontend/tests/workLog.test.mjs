@@ -3,9 +3,10 @@ import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import { loadChatFeature, loadChatUtility } from './chatPresentationTestHarness.mjs'
 
-const { countWorkLog, countWorkLogParts, currentStep, describeRunningTool, describeRunningTools, emptyWorkLogCounts, workLogCountLabel, workLogCountParts } =
+const { countWorkLog, countWorkLogParts, currentStep, describeRunningTool, describeRunningTools, emptyWorkLogCounts, firstResponseHint, FIRST_RESPONSE_HINT_AFTER_MS, FIRST_RESPONSE_STUCK_AFTER_MS, workLogCountLabel, workLogCountParts } =
   await loadChatFeature('worklog/workLog')
 const { groupEventsIntoTurns } = await loadChatUtility('agentStreamTimeline')
+const { RUNTIME_STATUS_MAX_AGE_MS, runtimeStatusFor } = await loadChatFeature('worklog/runtimeStatus')
 
 /** Raw view of a component file for structural pins (the repo keeps these in
  *  unit tests rather than byte-asserting rendered HTML). */
@@ -234,4 +235,83 @@ test('a failure is its own phrase so only it takes the warning tone', () => {
   assert.equal(failuresOnly.prefix, '', 'nothing went through, so there is no neutral phrase')
   assert.equal(failuresOnly.failed, '2 failed')
   assert.equal(workLogCountLabel({ ...emptyWorkLogCounts(), failed: 2 }), '2 failed')
+})
+
+test('the silent-start sentence reports what the tab is actually doing', () => {
+  const running = { status: 'working', activity: null, ageMs: 2000 }
+  const facts = (elapsedMs, runtime, connectionState = 'live') => ({ elapsedMs, runtime, connectionState })
+
+  // A running provider is the common, healthy case: say so instead of implying
+  // the turn is stalled.
+  assert.equal(
+    firstResponseHint(facts(5_000, running)),
+    'The provider is running; it has not written anything yet.',
+  )
+  // Past two minutes of silence the same fact becomes a warning worth acting on.
+  assert.equal(
+    firstResponseHint(facts(FIRST_RESPONSE_STUCK_AFTER_MS, running)),
+    'The provider is running but has written nothing for a while — usually a queued or stuck session.',
+  )
+  // A concrete activity is more specific than the generic sentence.
+  assert.equal(
+    firstResponseHint(facts(5_000, { status: 'working', activity: 'Running pytest -q', ageMs: 2000 })),
+    'The provider is running pytest -q — nothing written yet.',
+  )
+  // Dead providers never deliver, so the sentence has to say that outright.
+  assert.match(firstResponseHint(facts(5_000, { status: 'offline', activity: null, ageMs: 2000 })), /offline, so nothing can arrive/)
+  assert.match(firstResponseHint(facts(5_000, { status: 'attention', activity: null, ageMs: 2000 })), /reported a problem/)
+  // An open turn against an idle provider is the dropped-request shape.
+  assert.match(firstResponseHint(facts(5_000, { status: 'idle', activity: null, ageMs: 2000 })), /may have dropped the request/)
+
+  // No fresh sample: say that the clock is all we have, and only once it matters.
+  assert.equal(firstResponseHint(facts(5_000, null)), '', 'half a second of silence needs no copy')
+  assert.equal(
+    firstResponseHint(facts(FIRST_RESPONSE_HINT_AFTER_MS, null)),
+    'Nothing has come back yet, and the Hub has no fresh runtime status for this tab.',
+  )
+
+  // The transport outranks the provider: nothing can arrive over a dead stream.
+  assert.equal(firstResponseHint(facts(5_000, running, 'reconciling')), 'Reconnecting to the event stream…')
+  assert.match(firstResponseHint(facts(5_000, running, 'failed')), /event stream failed/)
+})
+
+test('the footer says who is waiting from facts, not from the model label', () => {
+  const src = readSrc('features/chat/components/ChatTurnWorking.vue')
+  // The composer already shows the model; repeating it here was the noise this
+  // replaced. The sentence carries the information instead.
+  assert.doesNotMatch(src, /combinedModelLabel/, 'the model label belongs to the composer')
+  assert.doesNotMatch(src, /turn-working-context/, 'no second model chip on the state line')
+  assert.match(src, /runtimeStatus/, 'the footer reads the tab runtime status')
+})
+
+test('a polled tab status is read as server time and dropped once it stales', () => {
+  const now = Date.parse('2026-11-10T17:19:00.000Z')
+  // The payload carries no offset; read it as UTC, not as the client's zone.
+  const fresh = runtimeStatusFor(
+    { status: 'working', activity: 'Running pytest -q', sampled_at: '2026-11-10T17:18:49.175424' },
+    now,
+  )
+  assert.deepEqual(fresh, { status: 'working', activity: 'Running pytest -q', ageMs: 10_825 }, 'fresh sample survives')
+
+  // A +8 client would have read that same string as eight hours old.
+  const stale = runtimeStatusFor(
+    { status: 'working', sampled_at: '2026-11-10T16:00:00.000Z' },
+    now,
+  )
+  assert.equal(stale, null, 'a sample older than a minute is not evidence')
+  assert.ok(now - Date.parse('2026-11-10T16:00:00.000Z') > RUNTIME_STATUS_MAX_AGE_MS)
+
+  // A server clock running behind the browser must not yield a negative age.
+  const skewed = runtimeStatusFor(
+    { status: 'idle', sampled_at: '2026-11-10T17:19:30.000Z' },
+    now,
+  )
+  assert.deepEqual(skewed, { status: 'idle', activity: null, ageMs: 0 })
+
+  // Missing timestamp still means "this poll says so"; missing sample means null.
+  assert.deepEqual(
+    runtimeStatusFor({ status: 'offline' }, now),
+    { status: 'offline', activity: null, ageMs: 0 },
+  )
+  assert.equal(runtimeStatusFor(undefined, now), null)
 })

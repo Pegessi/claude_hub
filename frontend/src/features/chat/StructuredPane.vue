@@ -147,6 +147,7 @@ import { useChatActions } from '@/features/chat/controllers/useChatActions'
 import { useChatQueue } from '@/features/chat/controllers/useChatQueue'
 import { useChatImages } from '@/features/chat/controllers/useChatImages'
 import { useChatReview } from '@/features/chat/review/useChatReview'
+import { runtimeStatusFor } from '@/features/chat/worklog/runtimeStatus'
 const props = defineProps<ChatPaneProps>()
 const preview = provideAttachmentPreview()
 const isManagedChat = computed(() => Boolean(props.managedChat))
@@ -163,7 +164,12 @@ const feishuBotPoolStore = useFeishuBotPoolStore()
 const currentTab = computed(() =>
   terminalStore.tabs.find(t => t.id === props.tabId) ?? null,
 )
-// TerminalPane owns the pane's single sub-agent poller and shows it in the pane
+// A silent turn and a dead turn look identical from the transcript, so the
+// footer reads the Hub's own view of this tab. One stale sample is worse than
+// none: past a minute the answer is "unknown", not a stale label.
+const runtimeStatus = computed(() =>
+  runtimeStatusFor(terminalStore.agentStatuses.find(s => s.tab_id === props.tabId)),
+)// TerminalPane owns the pane's single sub-agent poller and shows it in the pane
 // chrome; the Chat body only contributes inline per-turn links.
 const capabilityConfiguration = computed(() => streamCapabilityConfiguration(currentTab.value))
 const {
@@ -421,7 +427,7 @@ const { goal, goalError, isGoalMutating, hydrateGoal, pauseGoal, resumeGoal, com
 const { isFollowingLatest, timelineLoadingMessage, jumpToLatest } = timeline
 const { isCancelling, stopArmed, cancelActiveTurn } = delivery
 const { isDragOver, handleDragOver, handleDragLeave, handleDrop } = attachmentsController
-provide(chatIdentityKey, { connectionState, capabilities, props, isManagedChat, managedIdentityMissing, markdownImageScope, supportsEditResend, isHistoryVisible, currentTab, feishuBotPoolStore, appStore, isPaneActivated })
+provide(chatIdentityKey, { connectionState, capabilities, props, isManagedChat, managedIdentityMissing, markdownImageScope, supportsEditResend, isHistoryVisible, currentTab, runtimeStatus, feishuBotPoolStore, appStore, isPaneActivated })
 provide(chatGoalKey, goalController)
 provide(chatTimelineKey, timeline)
 provide(chatActionsKey, actions)

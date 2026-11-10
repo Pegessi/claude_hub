@@ -246,8 +246,8 @@ async def main(browser_run: BrowserRun) -> None:
         assert STOPWATCH_PATTERN.match(awaiting["elapsed"]), awaiting["elapsed"]
         assert awaiting["counts"] == [], "there is no work to count yet"
         # Who is being waited on belongs on this line: a bare state says nothing.
-        assert awaiting["context"] == ["MASO · gemini-4-argon · High"], awaiting["context"]
-        assert awaiting["hint"] == [], "an early wait needs no explanation"
+        assert awaiting["context"] == [], "the model belongs to the composer, not here"
+        assert awaiting["hint"] == ["The provider is running; it has not written anything yet."], awaiting["hint"]
         # The light sits on the text's centre line, not on its baseline.
         assert awaiting["orb_centre_offset"] is not None, awaiting
         assert abs(awaiting["orb_centre_offset"]) <= 1.0, (
@@ -255,16 +255,31 @@ async def main(browser_run: BrowserRun) -> None:
             awaiting["orb_centre_offset"],
         )
 
-        # ── a long silent start explains itself, and a dead stream says so ────
-        slow = await footer(page, "awaiting-first-slow")
-        observed["awaiting-first-slow"] = slow
-        assert slow["step"] == "Waiting for the first response", slow["step"]
-        assert slow["hint"], "a 45 s silence needs a reason"
-        assert "provider spinning up" in slow["hint"][0], slow["hint"]
+        # ── the sentence is a fact about this tab, not a reassurance ─────────
+        activity = await footer(page, "awaiting-first-activity")
+        observed["awaiting-first-activity"] = activity
+        assert activity["hint"] == ["The provider is running pytest -q — nothing written yet."], activity["hint"]
+
+        stuck = await footer(page, "awaiting-first-stuck")
+        observed["awaiting-first-stuck"] = stuck
+        assert stuck["step"] == "Waiting for the first response", stuck["step"]
+        assert "queued or stuck session" in stuck["hint"][0], stuck["hint"]
+
+        provider_offline = await footer(page, "awaiting-first-provider-offline")
+        observed["awaiting-first-provider-offline"] = provider_offline
+        assert provider_offline["hint"] == [
+            "The provider is offline, so nothing can arrive. Stop this turn and send it again once it is back."
+        ], provider_offline["hint"]
+
+        unknown = await footer(page, "awaiting-first-unknown")
+        observed["awaiting-first-unknown"] = unknown
+        assert unknown["hint"] == [
+            "Nothing has come back yet, and the Hub has no fresh runtime status for this tab."
+        ], unknown["hint"]
 
         offline = await footer(page, "awaiting-first-offline")
         observed["awaiting-first-offline"] = offline
-        assert offline["hint"] == ["Reconnecting to the stream…"], offline["hint"]
+        assert offline["hint"] == ["Reconnecting to the event stream…"], offline["hint"]
         assert not awaiting["waiting_class"], "the turn is live, not blocked by the user"
         assert awaiting["orb_animation"] != "none", "a live turn keeps its pulse"
         assert await page.locator(".agent-waiting-card").count() == 0, (
