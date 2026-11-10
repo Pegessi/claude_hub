@@ -1,6 +1,7 @@
 export type FeishuBotSource = 'stored' | 'environment' | 'invalid_environment'
 export type FeishuPairingOwnerKind = 'oauth' | 'local'
 export type FeishuBotConnectionStatus = 'connected' | 'connecting' | 'failed' | 'stopped'
+export type FeishuBotMode = 'single' | 'per_channel'
 /** Where a Bot talks to Feishu: a private one-to-one conversation or a group chat. */
 export type FeishuChatType = 'p2p' | 'group'
 /**
@@ -13,9 +14,12 @@ export type FeishuChatMode = 'group' | 'topic' | 'p2p'
 export interface FeishuActiveBinding {
   pairing_id: string
   state: 'active'
+  bot_id?: string
+  app_id?: string
   tab_id: string
   workspace_id: string | null
   created_at: string
+  expires_at?: string | null
   is_mine: boolean
   owner_kind: FeishuPairingOwnerKind
   chat_id: string | null
@@ -75,8 +79,20 @@ export interface FeishuBotSummary {
   app_secret_configured: boolean
   connection_status: FeishuBotConnectionStatus
   updated_at: string | null
+  mode?: FeishuBotMode
   binding: FeishuActiveBinding | null
+  bindings?: FeishuActiveBinding[]
   my_claims: FeishuPairingClaim[]
+}
+
+export function botMode(bot: FeishuBotSummary | null | undefined): FeishuBotMode {
+  return bot?.mode === 'per_channel' ? 'per_channel' : 'single'
+}
+
+export function botBindings(bot: FeishuBotSummary | null | undefined): FeishuActiveBinding[] {
+  if (!bot) return []
+  if (Array.isArray(bot.bindings) && bot.bindings.length > 0) return bot.bindings
+  return bot.binding ? [bot.binding] : []
 }
 
 export interface FeishuBotPoolResponse {
@@ -106,6 +122,7 @@ export interface FeishuBotSecretsInput {
 export interface FeishuBotPatchInput {
   name?: string
   enabled?: boolean
+  mode?: FeishuBotMode
   expected_revision: number
 }
 export interface FeishuPairStartInput {
@@ -120,7 +137,7 @@ export interface FeishuPairActivateInput {
 }
 export interface FeishuGroupBindInput {
   chat_id: string
-  tab_id: string
+  tab_id?: string
   expected_revision: number
 }
 
@@ -137,6 +154,9 @@ const ERROR_CODES = new Set([
   'chat_tab_not_found', 'bot_credentials_read_only',
   'bot_chats_unavailable', 'chat_not_group', 'chat_not_visible',
   'invalid_bot_request', 'bot_occupied', 'tab_occupied',
+  'bot_mode_locked', 'bot_has_active_bindings', 'bot_active_bindings',
+  'mode_switch_conflict', 'channel_capacity_reached', 'bot_channel_limit_reached',
+  'chat_tab_create_failed',
 ])
 
 export class FeishuBotRequestError extends Error {
@@ -182,6 +202,7 @@ function fixedMessage(status: number, code: string | null): string {
   }
   if (status === 503) {
     if (code === 'bot_operation_busy') return 'Another Bot operation is in progress. Wait and try again.'
+    if (code === 'chat_tab_create_failed') return 'Hub could not create a new Chat for this group. Try again.'
     return 'The Bot pool is unavailable or damaged. Check the Hub configuration.'
   }
   if (status === 409) {
@@ -191,8 +212,19 @@ function fixedMessage(status: number, code: string | null): string {
     if (code === 'bot_revision_conflict') return 'This Bot changed. Reload it before trying again.'
     if (code === 'app_id_already_in_pool') return 'A Bot with this App ID already exists.'
     if (code === 'app_id_immutable') return 'A Bot App ID cannot be changed. Delete it and create another Bot.'
-    if (code === 'bot_already_bound') return 'This Bot is already in use by another Chat.'
-    if (code === 'bot_occupied') return 'This Bot is already connected to another Chat. Disconnect it there first.'
+    if (code === 'bot_already_bound') return 'This Bot already has an active Feishu channel. Disconnect it before switching mode or connecting another Chat.'
+    if (code === 'bot_occupied') return 'This Bot is already connected to another Chat. Disconnect active channels before switching mode or rebinding.'
+    if (
+      code === 'bot_mode_locked'
+      || code === 'bot_has_active_bindings'
+      || code === 'bot_active_bindings'
+      || code === 'mode_switch_conflict'
+    ) {
+      return 'This Bot has an active Feishu channel. Disconnect it before switching serving mode.'
+    }
+    if (code === 'channel_capacity_reached' || code === 'bot_channel_limit_reached') {
+      return 'This Bot has reached its active channel limit (8). Disconnect a channel before adding another.'
+    }
     if (code === 'tab_occupied') return 'This Chat is already connected to another Bot. Disconnect it first.'
     if (code === 'chat_already_bound') return 'This Chat is already connected to another Bot.'
     if (code === 'pairing_not_claimed') return 'Send the pairing code to the Bot before activating it.'
