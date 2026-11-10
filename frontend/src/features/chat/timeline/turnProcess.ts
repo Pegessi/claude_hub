@@ -65,9 +65,11 @@ function hasFoldableProcess(parts: TimelinePart[]): boolean {
  *    would leave the tools and thinking on screen under a header claiming to
  *    have hidden them, because "the last text and everything after it" is only
  *    an answer when the turn actually stopped there;
- *  An approval card inside the region does not stop the fold — it goes with the
- *  rest of the record. An error is reported as ``pinned`` and stays visible
- *  beside the header: folding it would bury the reason the turn failed.
+ *  An approval card inside the region does not stop the fold: it stays visible so
+ *  a question is never buried, but it is rendered at the end of the turn instead
+ *  of on top of the answer (see ``withApprovalsLast``). An error is reported as
+ *  ``pinned`` and stays beside the header: folding it would bury the reason the
+ *  turn failed.
  */
 export function splitTurnProcess(turn: TimelineTurn): TurnProcessSplit | null {
   if (!turn.completed) return null
@@ -236,6 +238,20 @@ export function turnProcessLabel(turn: TimelineTurn, process: TimelinePart[]): s
   return segments.join(' · ')
 }
 
+/** Move choice cards to the end of a rendered turn.
+ *
+ *  An agent often asks its question *before* it writes the explanation, so in
+ *  arrival order the card sits on top of the answer it belongs to. Read as a
+ *  page, that is backwards: the answer is the reasoning, and the card is the one
+ *  thing the reader has to act on. Folded turns therefore keep their cards
+ *  visible but last, right where the turn ends. */
+export function withApprovalsLast(parts: TimelinePart[]): TimelinePart[] {
+  const cards = parts.filter(part => part.kind === 'approval')
+  if (cards.length === 0) return parts
+  const rest = parts.filter(part => part.kind !== 'approval')
+  return [...rest, ...cards]
+}
+
 /** Parts to render for a turn, with the working process folded away.
  *
  *  The header keeps its identity and its place in both states, and only the
@@ -252,13 +268,17 @@ export function foldTurnParts(turn: TimelineTurn, expanded: boolean): TimelinePa
   const header: TimelinePart = {
     kind: 'process',
     key: `process-${turn.key}`,
-    meta: turnProcessLabel(turn, split.before),
+    meta: turnProcessLabel(turn, split.before.filter(part => part.kind !== 'approval')),
     expanded,
   }
-  const foldedBefore = split.before
+  // A pin is a reason to stay visible, not a place in the reading order: errors
+  // stay beside the header, cards go to the end of the turn.
+  const keptVisible = split.before
     .filter(part => !isProcessPart(part) || isPinnedPart(part))
     .map(foldedPart)
+  const foldedBefore = keptVisible.filter(part => part.kind !== 'approval')
+  const cardsFromBefore = keptVisible.filter(part => part.kind === 'approval')
   return expanded
     ? [header, ...split.before, ...split.delivery]
-    : [header, ...foldedBefore, ...split.delivery]
+    : [header, ...foldedBefore, ...withApprovalsLast(split.delivery), ...cardsFromBefore]
 }

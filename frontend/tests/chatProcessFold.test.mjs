@@ -116,13 +116,13 @@ test('an approval card stays visible while tool/thinking process folds', () => {
 
   assert.deepEqual(
     foldTurnParts(turn, false).map(p => p.kind),
-    ['process', 'approval', 'text'],
-    'folded, the approval and answer stay visible',
+    ['process', 'text', 'approval'],
+    'folded, the card stays visible at the end of the turn, after its answer',
   )
   assert.deepEqual(
     foldTurnParts(turn, true).map(p => p.kind),
     ['process', 'thinking', 'approval', 'tool_group', 'text'],
-    'expanded, the card is still in its place in the record',
+    'expanded keeps the record order',
   )
 })
 
@@ -144,8 +144,8 @@ test('an answered approval card remains visible while process folds', () => {
   assert.deepEqual(split.pinned, [], 'a card folds with the record, answered or not')
   assert.deepEqual(
     foldTurnParts(turn, false).map(p => p.kind),
-    ['process', 'approval', 'text'],
-    'approval stays visible while surrounding process folds',
+    ['process', 'text', 'approval'],
+    'approval stays visible while surrounding process folds, at the end',
   )
   assert.deepEqual(
     foldTurnParts(turn, true).map(p => p.kind),
@@ -512,9 +512,9 @@ test('sticky summary keeps its scrolling ancestor intact', () => {
 })
 
 
-test('the folded header says when a card is folded in with it', () => {
-  // The header is the only thing left on screen, so a card inside must not
-  // vanish without a trace.
+test('the folded header does not count a card it leaves on screen', () => {
+  // The card is kept visible at the end of the turn, so counting it in the
+  // folded header would claim something is hidden that the reader can see.
   const turn = groupEventsIntoTurns([
     makeEvent(1, 'turn_started', { summary: 'go' }),
     makeEvent(2, 'thinking_delta', { text: 'hmm' }),
@@ -525,7 +525,8 @@ test('the folded header says when a card is folded in with it', () => {
   const split = splitTurnProcess(turn)
   const folded = foldTurnParts(turn, false)
   assert.equal(folded[0].kind, 'process')
-  assert.match(folded[0].meta, /1 approval/, 'the header must count the card inside')
+  assert.doesNotMatch(folded[0].meta, /approval/, 'the card is on screen, so it is not folded')
+  assert.equal(folded[folded.length - 1].kind, 'approval', 'the card ends the folded turn')
 
   const plain = groupEventsIntoTurns([
     makeEvent(1, 'turn_started', { summary: 'go' }),
