@@ -1,5 +1,4 @@
 import asyncio
-import json
 from pathlib import Path
 
 import pytest
@@ -16,6 +15,7 @@ from claude_hub.models import (
 from claude_hub.models.agent_stream import normalize_provider_usage
 from claude_hub.services.goal_run import GoalPolicyError, GoalRunController, GoalRunStore
 from claude_hub.services.goal_run.controller import build_continuation_prompt
+from claude_hub.services.local_storage import read_document, write_document
 
 
 def response_with_checkpoint(
@@ -728,7 +728,7 @@ async def test_legacy_limited_goal_migrates_without_autostart_and_can_resume(
     manager = controller(tmp_path)
     goal = manager.create("tab-1", request())
     path = tmp_path / "goal_runs.json"
-    snapshot = json.loads(path.read_text())
+    snapshot = read_document(path)
     snapshot["version"] = 1
     snapshot["goals"][0].update(
         status="budget_limited",
@@ -742,7 +742,7 @@ async def test_legacy_limited_goal_migrates_without_autostart_and_can_resume(
         snapshot["create_inputs"]["create-1"].update(token_budget=10, max_turns=20)
     else:
         snapshot.pop("create_inputs")
-    path.write_text(json.dumps(snapshot))
+    write_document(path, snapshot)
     dispatched = []
 
     def dispatch(goal, prompt):
@@ -767,7 +767,7 @@ async def test_legacy_limited_goal_migrates_without_autostart_and_can_resume(
     resumed = await cold.resume(goal.id, "resume")
     assert resumed.status == GoalRunStatus.ACTIVE
     assert len(dispatched) == 1
-    persisted = json.loads(path.read_text())
+    persisted = read_document(path)
     assert persisted["version"] == 2
     assert "token_budget" not in persisted["goals"][0]
     assert "max_turns" not in persisted["goals"][0]

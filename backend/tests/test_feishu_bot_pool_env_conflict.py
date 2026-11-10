@@ -26,6 +26,7 @@ from claude_hub.services.feishu_bot_pool import (
     FeishuBotUnavailable,
     OwnerIdentity,
 )
+from claude_hub.services.local_storage import read_document, write_document
 
 _T0 = 1_700_000_000.0
 _OWNER = OwnerIdentity(open_id="ou-owner", email="owner@example.com", kind=OWNER_KIND_OAUTH)
@@ -82,7 +83,7 @@ def _env(app_id: str) -> dict[str, str]:
 
 
 def _raw(store: FeishuBotPoolStore) -> _RawPool:
-    raw: object = json.loads(store.path.read_text(encoding="utf-8"))
+    raw: object = read_document(store.path)
     assert isinstance(raw, dict)
     return cast(_RawPool, raw)
 
@@ -193,7 +194,7 @@ def test_preexisting_duplicate_app_id_is_healed_on_first_sync(tmp_path: Path) ->
     assert len(state["bots"][ENV_BOT_ID]["bindings"]) == 1
     state["bots"][ENV_BOT_ID]["app_id"] = "cli_B"
     before = state["bots"][ENV_BOT_ID]["generation"]
-    store.path.write_text(json.dumps(state), encoding="utf-8")
+    write_document(store.path, state)
 
     store.snapshot(environ=_env("cli_B"))
 
@@ -218,7 +219,7 @@ def test_conflicted_environment_is_idempotent_across_reads(tmp_path: Path) -> No
 
     settled = store.snapshot(environ=environ)
     settled_entry = _raw(store)["bots"][ENV_BOT_ID]
-    settled_bytes = store.path.read_bytes()
+    settled_bytes = json.dumps(read_document(store.path), sort_keys=True)
 
     for _ in range(3):
         again = store.snapshot(environ=environ)
@@ -226,7 +227,7 @@ def test_conflicted_environment_is_idempotent_across_reads(tmp_path: Path) -> No
         current = _raw(store)["bots"][ENV_BOT_ID]
         assert current["revision"] == settled_entry["revision"]
         assert current["generation"] == settled_entry["generation"]
-        assert store.path.read_bytes() == settled_bytes
+        assert json.dumps(read_document(store.path), sort_keys=True) == settled_bytes
 
 
 def test_environment_change_into_a_conflict_revokes_the_binding(tmp_path: Path) -> None:
