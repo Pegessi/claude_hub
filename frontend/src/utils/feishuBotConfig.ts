@@ -2,6 +2,7 @@ export type FeishuBotSource = 'stored' | 'environment' | 'invalid_environment'
 export type FeishuPairingOwnerKind = 'oauth' | 'local'
 export type FeishuBotConnectionStatus = 'connected' | 'connecting' | 'failed' | 'stopped'
 export type FeishuBotMode = 'single' | 'per_channel'
+export const MAX_BOT_CHANNELS = 8
 /** Where a Bot talks to Feishu: a private one-to-one conversation or a group chat. */
 export type FeishuChatType = 'p2p' | 'group'
 /**
@@ -154,9 +155,7 @@ const ERROR_CODES = new Set([
   'chat_tab_not_found', 'bot_credentials_read_only',
   'bot_chats_unavailable', 'chat_not_group', 'chat_not_visible',
   'invalid_bot_request', 'bot_occupied', 'tab_occupied',
-  'bot_mode_locked', 'bot_has_active_bindings', 'bot_active_bindings',
-  'mode_switch_conflict', 'channel_capacity_reached', 'bot_channel_limit_reached',
-  'chat_tab_create_failed',
+  'bot_has_active_bindings', 'chat_tab_create_failed',
 ])
 
 export class FeishuBotRequestError extends Error {
@@ -206,7 +205,7 @@ function fixedMessage(status: number, code: string | null): string {
     return 'The Bot pool is unavailable or damaged. Check the Hub configuration.'
   }
   if (status === 409) {
-    if (code === 'pool_capacity_reached') return 'Bot or pairing capacity has been reached. Remove an unused Bot or wait for pending pairing attempts to expire.'
+    if (code === 'pool_capacity_reached') return `Bot, channel (${MAX_BOT_CHANNELS} per Bot), or pairing capacity has been reached. Release an active channel, remove an unused Bot, or wait for pending pairing attempts to expire.`
     if (code === 'chat_tab_workspace_changed') return 'This Chat changed workspace. Let the current pairing attempt expire, then generate a new code for this Chat.'
     if (code === 'bot_credentials_read_only') return 'This Bot uses environment credentials. Change them in the Hub environment instead.'
     if (code === 'bot_revision_conflict') return 'This Bot changed. Reload it before trying again.'
@@ -214,17 +213,7 @@ function fixedMessage(status: number, code: string | null): string {
     if (code === 'app_id_immutable') return 'A Bot App ID cannot be changed. Delete it and create another Bot.'
     if (code === 'bot_already_bound') return 'This Bot already has an active Feishu channel. Disconnect it before switching mode or connecting another Chat.'
     if (code === 'bot_occupied') return 'This Bot is already connected to another Chat. Disconnect active channels before switching mode or rebinding.'
-    if (
-      code === 'bot_mode_locked'
-      || code === 'bot_has_active_bindings'
-      || code === 'bot_active_bindings'
-      || code === 'mode_switch_conflict'
-    ) {
-      return 'This Bot has an active Feishu channel. Disconnect it before switching serving mode.'
-    }
-    if (code === 'channel_capacity_reached' || code === 'bot_channel_limit_reached') {
-      return 'This Bot has reached its active channel limit (8). Disconnect a channel before adding another.'
-    }
+    if (code === 'bot_has_active_bindings') return 'This Bot has an active Feishu channel. Disconnect it before switching serving mode.'
     if (code === 'tab_occupied') return 'This Chat is already connected to another Bot. Disconnect it first.'
     if (code === 'chat_already_bound') return 'This Chat is already connected to another Bot.'
     if (code === 'pairing_not_claimed') return 'Send the pairing code to the Bot before activating it.'
@@ -285,8 +274,16 @@ export function startFeishuPairing(botId: string, input: FeishuPairStartInput, s
 export function activateFeishuPairing(botId: string, input: FeishuPairActivateInput, signal?: AbortSignal): Promise<FeishuBotPoolResponse> {
   return requestJson(botUrl(botId, '/pair/activate'), jsonRequest('POST', input, signal))
 }
-export function disconnectFeishuPairing(botId: string, expectedRevision: number, signal?: AbortSignal): Promise<FeishuBotPoolResponse> {
-  return requestJson(botUrl(botId, '/pairing'), jsonRequest('DELETE', { expected_revision: expectedRevision }, signal))
+export function disconnectFeishuPairing(
+  botId: string,
+  expectedRevision: number,
+  signal?: AbortSignal,
+  pairingId?: string,
+): Promise<FeishuBotPoolResponse> {
+  const body = pairingId
+    ? { expected_revision: expectedRevision, pairing_id: pairingId }
+    : { expected_revision: expectedRevision }
+  return requestJson(botUrl(botId, '/pairing'), jsonRequest('DELETE', body, signal))
 }
 /** Groups the Bot itself is a member of. The Bot's token is used server-side only. */
 export function listBotChats(botId: string, signal?: AbortSignal): Promise<FeishuBotChatsResponse> {

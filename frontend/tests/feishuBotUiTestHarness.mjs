@@ -10,7 +10,7 @@ const vueUrl = import.meta.resolve('vue')
 const piniaUrl = import.meta.resolve('pinia')
 const vue = await import(vueUrl)
 const { createPinia, getActivePinia, setActivePinia } = await import(piniaUrl)
-const { parse, compileScript } = require('vue/compiler-sfc')
+const { parse, compileScript, compileTemplate } = require('vue/compiler-sfc')
 const source = path => readFileSync(new URL(`../src/${path}`, import.meta.url), 'utf8')
 const moduleUrl = text => {
   const { outputText } = ts.transpileModule(text, {
@@ -23,13 +23,33 @@ function rewrite(text) {
   return text.replace(/from\s+(['"])([^'"]+)\1/g, (full, _quote, name) =>
     imports[name] ? `from ${JSON.stringify(imports[name])}` : full)
 }
+function compileSfcUrl(path, id) {
+  const filename = path.split('/').at(-1)
+  const { descriptor } = parse(source(path), { filename })
+  const script = descriptor.script || descriptor.scriptSetup
+    ? compileScript(descriptor, { id, genDefaultAs: '__component' })
+    : { content: 'const __component = {}', bindings: undefined }
+  const template = descriptor.template
+    ? compileTemplate({
+      source: descriptor.template.content,
+      filename,
+      id,
+      compilerOptions: { bindingMetadata: script.bindings },
+    })
+    : { code: 'export function render() { return null }' }
+  return moduleUrl(rewrite(`${script.content}\n${template.code}\n__component.render = render\nexport default __component`))
+}
 const configUrl = moduleUrl(source('utils/feishuBotConfig.ts'))
 imports['@/utils/feishuBotConfig'] = configUrl
 export const config = await import(configUrl)
+const identityUrl = moduleUrl(source('utils/feishuIdentity.ts'))
+imports['@/utils/feishuIdentity'] = identityUrl
 const storeUrl = moduleUrl(rewrite(source('stores/feishuBotPoolStore.ts')))
 imports['@/stores/feishuBotPoolStore'] = storeUrl
 const { useFeishuBotPoolStore } = await import(storeUrl)
-const { useFeishuBinding } = await import(moduleUrl(rewrite(source('composables/useFeishuBinding.ts'))))
+const bindingComposableUrl = moduleUrl(rewrite(source('composables/useFeishuBinding.ts')))
+imports['@/composables/useFeishuBinding'] = bindingComposableUrl
+const { useFeishuBinding } = await import(bindingComposableUrl)
 const clipboardUrl = moduleUrl(`
   let writer = async () => undefined
   export function setWriter(next) {
@@ -41,10 +61,10 @@ const clipboardUrl = moduleUrl(`
 `)
 await import(clipboardUrl)
 imports['@/utils/clipboard'] = clipboardUrl
-const filename = 'FeishuBotSettingsDialog.vue'
-const { descriptor } = parse(source(`features/feishu-bot/${filename}`), { filename })
-const script = compileScript(descriptor, { id: 'bot-settings-behavior', genDefaultAs: '__component' })
-const Settings = (await import(moduleUrl(rewrite(`${script.content}\nexport default __component`)))).default
+imports['@/components/FeishuBrandMark.vue'] = compileSfcUrl('components/FeishuBrandMark.vue', 'feishu-brand-mark')
+imports['@/components/FeishuIdentityMark.vue'] = compileSfcUrl('components/FeishuIdentityMark.vue', 'feishu-identity-mark')
+const Settings = (await import(compileSfcUrl('features/feishu-bot/FeishuBotSettingsDialog.vue', 'bot-settings-behavior'))).default
+const BindingPanel = (await import(compileSfcUrl('components/FeishuBindingPanel.vue', 'feishu-binding-panel'))).default
 
 export const flush = () => new Promise(resolve => setImmediate(resolve))
 export function deferred() {
@@ -138,20 +158,161 @@ export function bindingHarness(t, dependencies = {}) {
     },
   }
 }
-export async function mountSettings(t, h) {
-  const renderer = vue.createRenderer({
-    createElement: tag => ({ tag, children: [] }), createText: text => ({ text }), createComment: text => ({ text }),
-    setText(node, text) { node.text = text }, setElementText(node, text) { node.text = text },
-    patchProp(node, name, _previous, value) { node[name] = value },
-    insert(node, parent) { node.parent = parent; (parent.children ??= []).push(node) },
-    remove(node) { const list = node.parent?.children; if (list) list.splice(list.indexOf(node), 1) },
-    parentNode: node => node.parent ?? null, nextSibling: () => null,
+function createNode(tag, text = '') {
+  return {
+    tag,
+    text,
+    props: {},
+    children: [],
+    parent: null,
+    open: false,
+    addEventListener() {},
+    removeEventListener() {},
+    getRootNode() { return globalThis.document ?? { activeElement: null } },
+    showModal() { this.open = true },
+    close() { this.open = false },
+    contains(target) {
+      let current = target
+      while (current) {
+        if (current === this) return true
+        current = current.parent
+      }
+      return false
+    },
+  }
+}
+function testRenderer() {
+  return vue.createRenderer({
+    createElement: tag => createNode(tag),
+    createText: text => createNode('#text', text),
+    createComment: text => createNode('#comment', text),
+    setText(node, text) { node.text = text },
+    setElementText(node, text) { node.text = text; node.children = [] },
+    patchProp(node, name, _previous, value) {
+      node.props[name] = value
+      node[name] = value
+    },
+    insert(node, parent, anchor = null) {
+      if (node.parent) {
+        const prev = node.parent.children.indexOf(node)
+        if (prev >= 0) node.parent.children.splice(prev, 1)
+      }
+      node.parent = parent
+      const list = (parent.children ??= [])
+      const idx = anchor ? list.indexOf(anchor) : -1
+      if (idx >= 0) list.splice(idx, 0, node)
+      else list.push(node)
+    },
+    remove(node) {
+      const list = node.parent?.children
+      if (list) {
+        const idx = list.indexOf(node)
+        if (idx >= 0) list.splice(idx, 1)
+      }
+      node.parent = null
+    },
+    parentNode: node => node.parent ?? null,
+    nextSibling: node => {
+      const list = node.parent?.children
+      return list ? list[list.indexOf(node) + 1] ?? null : null
+    },
   })
-  // Execute the real compiled SFC setup/lifecycle; DOM layout is a separate check.
-  const app = renderer.createApp({ ...Settings, render: () => null })
-  app.use(h.pinia)
-  const vm = app.mount({ children: [] })
-  t.after(() => app.unmount())
+}
+export function textOf(node) {
+  if (!node || node.tag === '#comment') return ''
+  return `${node.text ?? ''}${(node.children ?? []).map(textOf).join('')}`
+}
+export function findAll(node, predicate, results = []) {
+  if (!node) return results
+  if (predicate(node)) results.push(node)
+  for (const child of node.children ?? []) findAll(child, predicate, results)
+  return results
+}
+export function findByTestId(node, testId) {
+  return findAll(node, item => item.props?.['data-testid'] === testId)[0] ?? null
+}
+export function findAllByTestId(node, testId) {
+  return findAll(node, item => item.props?.['data-testid'] === testId)
+}
+export async function settleUi() {
+  await vue.nextTick()
   await flush()
-  return vm.$.setupState
+  await vue.nextTick()
+  await flush()
+}
+export async function clickNode(node) {
+  assert.ok(node, 'expected a target node to click')
+  assert.ok(!node.props?.disabled, `cannot click disabled node (${node.props?.['data-testid'] ?? node.tag})`)
+  const handler = node.props?.onClick
+  assert.equal(typeof handler, 'function', 'expected an onClick handler')
+  await handler({ preventDefault() {}, stopPropagation() {} })
+  await settleUi()
+}
+export async function changeSelect(node, value) {
+  assert.ok(node, 'expected a select node')
+  assert.ok(!node.props?.disabled, 'cannot change disabled select')
+  const handler = node.props?.onChange
+  assert.equal(typeof handler, 'function', 'expected an onChange handler')
+  await handler({ target: { value } })
+  await settleUi()
+}
+function ensureDomGlobals() {
+  const restore = []
+  function setGlobal(name, value) {
+    if (name in globalThis) return
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value })
+    restore.push(() => { delete globalThis[name] })
+  }
+  class Document {}
+  class ShadowRoot {}
+  setGlobal('Document', Document)
+  setGlobal('ShadowRoot', ShadowRoot)
+  setGlobal('document', Object.assign(new (globalThis.Document ?? Document)(), {
+    activeElement: null,
+    addEventListener() {},
+    removeEventListener() {},
+  }))
+  return () => restore.reverse().forEach(fn => fn())
+}
+export async function mountSettings(t, h) {
+  const cleanupDom = ensureDomGlobals()
+  const root = createNode('root')
+  const app = testRenderer().createApp(Settings)
+  app.use(h.pinia)
+  const vm = app.mount(root)
+  t.after(() => {
+    app.unmount()
+    cleanupDom()
+  })
+  await settleUi()
+  const state = vm.$.setupState
+  Object.defineProperty(state, '$root', { value: root, configurable: true })
+  return state
+}
+export async function mountBindingPanel(t, h, initialTabId = 'tab-1') {
+  const cleanupDom = ensureDomGlobals()
+  const tabId = vue.ref(initialTabId)
+  const root = createNode('root')
+  let panelVm = null
+  const Wrapper = {
+    setup() {
+      return () => vue.h(BindingPanel, {
+        tabId: tabId.value,
+        ref: instance => { panelVm = instance },
+      })
+    },
+  }
+  const app = testRenderer().createApp(Wrapper)
+  app.use(h.pinia)
+  app.mount(root)
+  t.after(() => {
+    app.unmount()
+    cleanupDom()
+  })
+  await settleUi()
+  return {
+    root,
+    tabId,
+    get state() { return panelVm?.$.setupState },
+  }
 }
