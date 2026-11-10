@@ -3,7 +3,8 @@
 Task: `78aa60c9-7dd7-4b0a-b566-4b7ed6ec6d66`. Base:
 `d8316e76044a443ec52aef7fa6ca94e7d1e4b567`. Candidate worktree:
 `/home/tiger/claude_hub_worktree/sqlite-storage`, branch `codex/sqlite-storage`.
-No production migration, service restart, merge or push is part of this delivery.
+No production cutover, service restart, merge or push is part of this delivery.
+An isolation incident during an early helper test is recorded below.
 
 ## Audit and design
 
@@ -136,3 +137,29 @@ no frontend behavior changed. Human acceptance remains required.
 Applied lesson: `a-closed-file-list-can-omit-behavior-required-by-acceptance-criteria-compare-the`.
 Review covers the full base-to-candidate diff and consumers discovered through
 behavioral regressions, rather than treating the initial file list as exhaustive.
+
+## Independent review fixes and isolation incident
+
+Independent review of `3531e12` found two defects: authentication retained a
+hardcoded default-home path, and one compact lifecycle-body reader conflated a
+nullable epoch with epoch zero. Both are fixed with regression tests. Auth path
+selection is now tested through a fresh subprocess import using fake HOME and an
+isolated runtime, without monkeypatching the sessions-file constant. Explicit
+legacy paths also pass the existing linked-worktree live-home guard. Nullable
+and zero lifecycle epochs remain distinct.
+
+The auth defect had already affected an early helper's direct pytest run:
+it created a schema-v0 SQLite artifact in the live home. A bounded read-only
+inspection found only the sessions namespace, with all 1,016 existing legacy
+sessions identical and 24 additional test records in that new artifact. The
+legacy JSON's content was not modified. No process held the new SQLite files.
+They were preserved with owner-only permissions outside the active runtime at
+`/tmp/hub-storage-isolation-evidence-20261110`, together with a content-free
+provenance record. The accidental database is absent from the live home; it must
+never be promoted as production state. No shared service was restarted.
+This exception is disclosed rather than claiming there were no live-home writes.
+The actual migration/archival benchmarks operated only on their `/tmp` copy.
+
+The fixed-snapshot replay check compared all 2,219,946 valid events, preserving
+all 22 malformed rows separately; integrity remained `ok`. Final-candidate
+reruns and the independent re-review are attached to the Task report.
