@@ -20,6 +20,7 @@ from claude_hub.api.agent_stream import (
 )
 from claude_hub.api.routes.agent_stream.dispatch import ExternalQuestionPending
 from claude_hub.api.routes.feishu_bot.bindings import FeishuBotRouteBindings
+from claude_hub.api.routes.feishu_bot.queueing import DispatchContextKey
 from claude_hub.api.routes.feishu_bot.queueing import TabDispatchItem as _TabDispatchItem
 from claude_hub.api.routes.feishu_bot.queueing import TabDispatchQueue as _TabDispatchQueue
 from claude_hub.services.agent_stream.attachments import preview_within_cache_bounds
@@ -385,17 +386,28 @@ class FeishuMessageDispatcher:
             for item in batch:
                 self._validate_binding_dispatch(item.effective, item.binding, item.event)
             yield
-        context = (
-            leader.effective.bot_id,
+        context = self._dispatch_context_key(leader)
+        queue.dispatched_contexts[context] = None
+        queue.dispatched_contexts.move_to_end(context)
+        while len(queue.dispatched_contexts) > self.bindings.max_tab_dispatch_contexts():
+            queue.dispatched_contexts.popitem(last=False)
+
+    @staticmethod
+    def _dispatch_context_key(leader: _TabDispatchItem) -> DispatchContextKey:
+        """The identity of "this sender in this conversation" for follow-up intros.
+
+        One definition, used both when recording a dispatched context and when
+        asking whether this batch continues one; two literals would drift and
+        silently disable the follow-up wording.
+        """
+
+        return (
+            leader.bot_id,
             leader.binding.pairing_id,
             leader.event.chat_id,
             leader.event.thread_id,
             leader.event.sender_open_id,
         )
-        queue.dispatched_contexts[context] = None
-        queue.dispatched_contexts.move_to_end(context)
-        while len(queue.dispatched_contexts) > self.bindings.max_tab_dispatch_contexts():
-            queue.dispatched_contexts.popitem(last=False)
 
     def _claim_still_live(self, bot_id: str, claim: PairingClaim) -> bool:
         try:
@@ -654,13 +666,7 @@ class FeishuMessageDispatcher:
             if not self._batch_matches(leader, item):
                 break
             candidates.append(item)
-        context = (
-            leader.bot_id,
-            leader.binding.pairing_id,
-            leader.event.chat_id,
-            leader.event.thread_id,
-            leader.event.sender_open_id,
-        )
+        context = self._dispatch_context_key(leader)
         return candidates, context in queue.dispatched_contexts
 
     def _claim_tab_dispatch_batch(
@@ -710,7 +716,10 @@ class FeishuMessageDispatcher:
                 visible_text = self._batch_visible_text(batch, followup=followup)
                 # The user's own words; a later stop carries these, without intros.
                 core_text = "\n\n".join(item.event.text for item in batch)
-                earlier = queue.interrupted_text.pop(leader.channel_key, "")
+                # Read without consuming: a batch that is retired, time-rejected
+                # or cancelled before the handoff must leave the stopped words in
+                # place, so the next message of this channel still answers them.
+                earlier = queue.interrupted_text.get(leader.channel_key, "")
                 if earlier:
                     # Other channels ahead of us in the FIFO must neither inherit
                     # nor discard the words from this channel's stopped answer.
@@ -752,6 +761,8 @@ class FeishuMessageDispatcher:
                 )
                 for item in batch:
                     item.native_bridge_started = True
+                # The handoff is now certain, so this channel's carryover is spent.
+                queue.interrupted_text.pop(leader.channel_key, None)
                 turn_metadata = self._turn_metadata(leader.effective, leader.event, leader.binding)
                 assistant_text = await self.bindings.dispatch_tab_chat_and_wait(
                     tab_id,
