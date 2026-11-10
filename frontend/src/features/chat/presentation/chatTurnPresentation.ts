@@ -17,16 +17,22 @@ import { presentThinkingParts, type ThinkingDisplayPart, type ThinkingState } fr
  *  transport events is not something a reader can use, so the label stays at
  *  what is known for free: that there was activity, and how long it took. The
  *  human counts arrive with the detail, once the reader asks for it. */
-function processMetaForDetail(turn: TimelineTurn): string {
+function processMetaForDetail(turn: TimelineTurn, detail: AgentStreamHistoryDetailEntry): string {
+  // How much work is behind the fold, and how long it took: the count is the
+  // only magnitude available before the detail is read, and it is what makes
+  // "there is something in here" visible on an unopened turn.
+  const count = detail.descriptor.event_count
+  const segments = ['Activity', `${count} event${count === 1 ? '' : 's'}`]
   const elapsed = turnElapsedMs(turn)
-  return elapsed === null ? 'Activity' : `Activity · ${formatElapsedDuration(elapsed)}`
+  if (elapsed !== null) segments.push(formatElapsedDuration(elapsed))
+  return segments.join(' · ')
 }
 
 function lazyProcessPart(turn: TimelineTurn, detail: AgentStreamHistoryDetailEntry): TimelinePart {
   return {
     kind: 'process',
     key: `process-${turn.key}`,
-    meta: processMetaForDetail(turn),
+    meta: processMetaForDetail(turn, detail),
     expanded: false,
     turnId: turn.turnId,
     detailStatus: detail.status,
@@ -105,7 +111,7 @@ export function turnProcessFoldSignature(
   detail?: AgentStreamHistoryDetailEntry,
 ): string {
   if (detail && detail.status !== 'loaded') {
-    return `lazy|${detail.status}|${detail.errorMessage ?? ''}|${processMetaForDetail(turn)}`
+    return `lazy|${detail.status}|${detail.errorMessage ?? ''}|${processMetaForDetail(turn, detail)}`
   }
   if (!isTurnFoldable(turn, latestTurnKey)) return ''
   const split = splitTurnProcess(turn)

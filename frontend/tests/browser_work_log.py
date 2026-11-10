@@ -72,7 +72,7 @@ async def footer(page, case_id):
             round((orb_box["y"] + orb_box["height"] / 2) - (step_box["y"] + step_box["height"] / 2), 1)
             if step_box and orb_box else None
         ),
-        "step": (await section.locator(".turn-working-step").inner_text()).strip(),
+        "step": ((await section.locator(".turn-working-step").all_inner_texts()) or [""])[0].strip(),
         "elapsed": (await section.locator(".turn-working-elapsed").inner_text()).strip(),
         "counts": await counts_line.all_inner_texts(),
         "counts_class": await counts_line.first.get_attribute("class") if has_counts else None,
@@ -198,7 +198,7 @@ async def main(browser_run: BrowserRun) -> None:
         assert busy["word"] == ["Working"], busy["word"]
         assert busy["step"] == "· Reading 2 files", busy["step"]
         assert len(busy["counts"]) == 1, busy["counts"]
-        assert busy["counts"][0] == "2 edits · 2 commands · 2 reads · 1 failed", busy["counts"][0]
+        assert busy["counts"][0] == "2 edits · 2 commands · 2 reads · 1 failed · 192 events so far", busy["counts"][0]
         # A partial failure marks the phrase that names it; the summary line is
         # not repainted, so one failed call cannot read as a stalled turn.
         assert "failed" not in (busy["counts_class"] or ""), busy["counts_class"]
@@ -217,6 +217,17 @@ async def main(browser_run: BrowserRun) -> None:
         assert abs(busy["orb_centre_offset"]) <= 1.0, busy["orb_centre_offset"]
         assert busy["hint"] == [], "a turn that is working needs no explanation"
         assert busy["context"] == [], "the busy line names its step instead"
+        # Volume of work rides on the counts line, so a long turn never shows a
+        # stopwatch alone.
+        assert busy["counts"] == ["2 edits · 2 commands · 2 reads · 1 failed · 192 events so far"], busy["counts"]
+
+        # ── events exist but the pane has not reduced them into parts ────────
+        unreduced = await footer(page, "events-unreduced")
+        observed["events-unreduced"] = unreduced
+        assert unreduced["step"] == "", "output is arriving, so it is not waiting for a first response"
+        assert unreduced["word"] == ["Working"], unreduced["word"]
+        assert unreduced["counts"] == ["1021 events so far"], unreduced["counts"]
+        assert unreduced["hint"] == [], "there is nothing to explain"
 
         # ── blocked on a sub-agent: waiting must not read as activity ─────────
         waiting_child = await footer(page, "waiting-subagent")
@@ -327,7 +338,7 @@ async def main(browser_run: BrowserRun) -> None:
         assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
         mobile_busy = await footer(page, "busy")
         assert mobile_busy["step"] == "· Reading 2 files", mobile_busy["step"]
-        assert mobile_busy["counts"][0] == "2 edits · 2 commands · 2 reads · 1 failed"
+        assert mobile_busy["counts"][0] == "2 edits · 2 commands · 2 reads · 1 failed · 192 events so far"
         await page.screenshot(path=str(output / "work-log-fixture-mobile.png"), full_page=True)
 
         assert not api_requests, api_requests

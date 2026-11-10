@@ -123,7 +123,9 @@ async function mountFooter() {
   const { renderer } = createRenderer()
   const app = renderer.createApp({
     setup() {
-      vue.provide(owners.chatTimelineKey, { turns })
+      // The pane reports the turn's event count; this fixture has no descriptor,
+      // so the footer is the parts-only case.
+      vue.provide(owners.chatTimelineKey, { turns, turnEventCount: () => null })
       return () => vue.h(ChatTurnWorking, { startedAt: new Date(Date.now() - 65_000).toISOString() })
     },
   })

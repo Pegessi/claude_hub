@@ -200,6 +200,16 @@ export function useChatTimeline(deps: Dependencies) {
     return presentTurnParts(turn, latestTurnKey.value, processExpandedOverrides.value, detail)
   }
 
+  /** How many events the turn has produced so far, as the pane's descriptor
+   *  reports it. This is the one magnitude that exists before the detail is
+   *  read and keeps growing while a turn streams: without it a long working
+   *  turn shows a stopwatch and nothing about how much has happened. */
+  function turnEventCount(turn: TimelineTurn): number | null {
+    const detail = turn.turnId ? deps.historyDetails.value[turn.turnId] : undefined
+    const count = detail?.descriptor.event_count
+    return typeof count === 'number' && count > 0 ? count : null
+  }
+
   const subthreadPartsFor = createSubthreadThinkingPresenter()
 
   function retryHistoryDetail(turn: TimelineTurn): void {
@@ -435,6 +445,7 @@ export function useChatTimeline(deps: Dependencies) {
     latestTurnKey,
     toggleTurnProcess,
     turnPartsFor,
+    turnEventCount,
     retryHistoryDetail,
     subthreadPartsFor,
     turnFoldSignature,
