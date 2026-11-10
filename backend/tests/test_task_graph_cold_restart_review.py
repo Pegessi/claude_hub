@@ -23,8 +23,10 @@ from claude_hub.models import (
     User,
     WorkspaceSessionRole,
 )
+from claude_hub.services.local_storage import read_document, write_document
 from claude_hub.services.task_graph import tasks_in_subtree
 from claude_hub.services.workspace_manager import WorkspaceManager, workspace_manager
+from tests.test_task_execution_control import _seed_legacy_json
 
 _wm = import_module("claude_hub.services.workspace_manager")
 
@@ -262,7 +264,7 @@ def test_cold_restart_after_verdict_does_not_append_task_events(
     )
     before_snapshots = {event.call_id: event.model_dump(mode="json") for event in before_events}
     state_file = cold_review_env[0] / workspace_id / "state.json"
-    disk_before = json.loads(state_file.read_text(encoding="utf-8"))
+    disk_before = read_document(state_file)
     disk_event_count = len(disk_before.get("task_events") or [])
 
     _reset_singleton()
@@ -289,7 +291,7 @@ def test_cold_restart_after_verdict_does_not_append_task_events(
         assert event.call_id in before_snapshots
         assert event.model_dump(mode="json") == before_snapshots[event.call_id]
 
-    disk_after = json.loads(state_file.read_text(encoding="utf-8"))
+    disk_after = read_document(state_file)
     assert len(disk_after.get("task_events") or []) == disk_event_count
 
 
@@ -332,7 +334,7 @@ def test_cold_restart_repairs_stale_reviewed_cycle_when_verdict_present(
     assert len(before_events) == 3
 
     state_file = cold_review_env[0] / workspace_id / "state.json"
-    disk = json.loads(state_file.read_text(encoding="utf-8"))
+    disk = read_document(state_file)
     stale_at = (datetime.utcnow() - timedelta(minutes=10)).isoformat()
     for item in disk["tasks"]:
         if item.get("id") == child_id:
@@ -341,7 +343,7 @@ def test_cold_restart_repairs_stale_reviewed_cycle_when_verdict_present(
             item["review_requested_at"] = stale_at
             item["human_acceptance_requested_at"] = None
             break
-    state_file.write_text(json.dumps(disk), encoding="utf-8")
+    write_document(state_file, disk)
 
     _reset_singleton()
     reloaded = WorkspaceManager()
@@ -397,7 +399,7 @@ def test_cold_restart_skips_orphan_fallback_reaper_report_backfill(
     assert len(before_events) == 3
 
     state_file = cold_review_env[0] / workspace_id / "state.json"
-    disk = json.loads(state_file.read_text(encoding="utf-8"))
+    disk = read_document(state_file)
     orphan_id = "00000000-0000-4000-8000-000000000099"
     judged = workspace_manager.tasks[child_id]
     disk["reports"].append(
@@ -422,7 +424,7 @@ def test_cold_restart_skips_orphan_fallback_reaper_report_backfill(
             "changed_files": [],
         }
     )
-    state_file.write_text(json.dumps(disk), encoding="utf-8")
+    write_document(state_file, disk)
 
     _reset_singleton()
     reloaded = WorkspaceManager()

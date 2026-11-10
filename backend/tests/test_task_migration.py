@@ -22,8 +22,10 @@ from claude_hub.models import (
     WorkspaceSessionRole,
 )
 from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
+from claude_hub.services.local_storage import read_document, write_document
 from claude_hub.services.task_graph import legacy_resident_consumer_key, make_task_consumer_key
 from claude_hub.services.workspace_manager import WorkspaceManager
+from tests.test_task_execution_control import _seed_legacy_json
 
 _wm = import_module("claude_hub.services.workspace_manager")
 
@@ -132,20 +134,20 @@ def _raw_agent_event(**kwargs: Any) -> dict[str, Any]:
 def _write_state(manager: WorkspaceManager, workspace_id: str, payload: dict[str, Any]) -> None:
     path = manager._workspace_state_file(workspace_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    _seed_legacy_json(path, json.dumps(payload, indent=2))
 
 
 def _omit_index_resident_ack(manager: WorkspaceManager, workspace_id: str) -> None:
-    index = json.loads(_wm.INDEX_FILE.read_text(encoding="utf-8"))
+    index = read_document(_wm.INDEX_FILE)
     for item in index.get("workspaces", []):
         if isinstance(item, dict) and item.get("id") == workspace_id:
             item.pop("resident_ack_sequence", None)
             break
-    _wm.INDEX_FILE.write_text(json.dumps(index, indent=2), encoding="utf-8")
+    write_document(_wm.INDEX_FILE, index)
 
 
 def _disk_has_no_legacy_agent_tree(manager: WorkspaceManager, workspace_id: str) -> None:
-    disk = json.loads(manager._workspace_state_file(workspace_id).read_text(encoding="utf-8"))
+    disk = read_document(manager._workspace_state_file(workspace_id))
     assert "agent_runs" not in disk
     assert "agent_events" not in disk
     for task in disk.get("tasks") or []:
