@@ -1129,7 +1129,7 @@ def test_group_topic_mention_routes_through_the_senders_existing_binding(
 
         assert len(dispatched) == 1
         assert dispatched[0][0] == "tab-1"
-        assert dispatched[0][1].startswith("Claude Hub verified message source (feishu-v2): ")
+        assert dispatched[0][1].startswith("Claude Hub verified message source (feishu-v3): ")
         assert dispatched[0][1].endswith("\n\n请继续执行")
         assert dispatched[0][2] == "请继续执行"
         assert api.wire.reply_message_ids == ["om-topic"]
@@ -1828,7 +1828,7 @@ def test_short_bound_message_burst_is_coalesced_in_arrival_order(
 
         async def dispatch(_tab_id, _text, _turn_id, *, admission_guard, visible_text, **_kwargs):
             assert "lightweight Markdown" in _text
-            assert _kwargs["turn_metadata"]["provider_text_format"] == "feishu-v2"
+            assert _kwargs["turn_metadata"]["provider_text_format"] == "feishu-v3"
             async with admission_guard():
                 submitted.append(visible_text)
             return "combined answer"
