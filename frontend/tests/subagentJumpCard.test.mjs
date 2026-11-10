@@ -95,7 +95,64 @@ test('list shows Active first and a collapsible Earlier with restore wording', (
   assert.match(rows, /Restore & open/)
   assert.match(rows, /:data-state="chip\.state"/)
   assert.match(rows, /\{\{ chip\.summary \}\}/)
-  assert.match(rows, /:disabled="!chip\.canJump"/)
+  // A row is inert only when neither action exists: Hub children jump to their
+  // tab, native children open the pane's detail window.
+  assert.match(rows, /:disabled="!chip\.canJump && !chip\.canOpen"/)
+})
+
+test('native sub-agents join the same dock as Hub children', () => {
+  // One control: the chrome merges both sources instead of adding a second pill.
+  assert.equal((terminalPane.match(/<ChatSubagentDockPill/g) ?? []).length, 1)
+  assert.match(terminalPane, /createNativeSubagentDock\(\)/)
+  assert.match(terminalPane, /provide\(nativeSubagentDockKey, nativeSubagentDock\)/)
+  assert.match(terminalPane, /:\s*chips="subagentRows"/)
+  assert.match(terminalPane, /\.\.\.subagentDock\.chips\.value,\s*\.\.\.nativeSubagentDock\.rows\.value/)
+  // The Chat body projects the rows and renders the window, because only it
+  // owns the timeline and image owners the window's content needs.
+  assert.match(structuredPane, /nativeSubagentRows\(timeline\.turns\.value, nativeRowMemo\)/)
+  assert.match(structuredPane, /nativeSubagentDock\?\.publish\(rows\)/)
+  // Mounted only while a row is open AND this pane is the active one: the
+  // window is teleported to <body>, so a cached (hidden) tab would otherwise
+  // keep showing it over the tab the reader switched to.
+  assert.match(structuredPane, /<ChatNativeSubagentOverlay v-if="nativeOverlayOpen && isPaneActivated" \/>/)
+  assert.match(structuredPane, /nativeOverlayOpen = computed\(\(\) => Boolean\(nativeSubagentDock\?\.openRow\.value\)\)/)
+  assert.match(structuredPane, /onUnmounted\(\(\) => nativeSubagentDock\?\.publish\(\[\]\)\)/)
+  // Every reveal forwards opens: the gutter rail is the default wide-pane
+  // presentation, so it must not be a dead click.
+  assert.equal((dockPill.match(/@open="onNativeOpen"/g) ?? []).length, 3)
+  assert.match(dockPill, /nativeDock\?\.open\(chip, source\)/)
+  // Focus goes back to the pill only when the dock could not restore it to a
+  // still-mounted row (the rail stays open, so there the row keeps focus).
+  assert.match(dockPill, /rootRef\.value\?\.contains\(active\)/)
+  // The pane keeps one dock while KeepAlive caches one timeline per tab:
+  // activation republishes this tab's rows, deactivation clears them.
+  assert.match(structuredPane, /onActivated\(\(\) => \{[\s\S]*?nativeSubagentDock\?\.publish\(nativeDockRows\.value\)/)
+  assert.match(structuredPane, /onDeactivated\(\(\) => \{[\s\S]*?nativeSubagentDock\?\.publish\(\[\]\)/)
+  // A cached, deactivated pane keeps flushing its own watchers, so the
+  // projection may only publish while this pane is the activated tab.
+  assert.match(structuredPane, /if \(isPaneActivated\.value\) nativeSubagentDock\?\.publish\(rows\)/)
+})
+
+test('the native window replays the inline thread rows and can jump back', () => {
+  const overlay = readSrc('features/chat/components/ChatNativeSubagentOverlay.vue')
+  const body = readSrc('features/chat/components/ChatSubthreadBody.vue')
+  // Same rows as the transcript: one body component serves both call sites.
+  assert.match(overlay, /<ChatSubthreadBody/)
+  assert.match(body, /subthreadPartsFor\(thread\)/)
+  const subthread = readSrc('features/chat/components/ChatSubthread.vue')
+  assert.match(subthread, /<ChatSubthreadBody/)
+  assert.equal((body.match(/subthreadPartsFor\(thread\)/g) ?? []).length, 1)
+  // Dialog semantics + focus trap + body lock, like the other phone overlays.
+  assert.match(overlay, /role="dialog"/)
+  assert.match(overlay, /aria-modal="true"/)
+  assert.match(overlay, /@keydown\.tab="onTab"/)
+  // The body itself holds tab stops (markdown links, tool <details>), so the
+  // trap cannot count only the footer buttons.
+  assert.match(overlay, /'a\[href\], button:not\(\[disabled\]\), summary, \[tabindex\]:not\(\[tabindex="-1"\]\)'/)
+  assert.match(overlay, /document\.body\.style\.overflow = 'hidden'/)
+  assert.match(overlay, /addEventListener\('keydown', onDismissKey, true\)/)
+  // A native child has no tab: the jump goes to the transcript, not a tab.
+  assert.match(overlay, /revealSubthread\(target\.turnKey, target\.threadId\)/)
 })
 
 test('inline Hub agent run calls link to a matching sub-agent only', () => {

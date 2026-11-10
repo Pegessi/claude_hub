@@ -53,6 +53,7 @@
             :chip="chip"
             :now-ms="nowMs"
             @jump="emit('jump', $event)"
+            @open="onNativeOpen"
           />
         </li>
       </ul>
@@ -85,6 +86,7 @@
           :chips="chips"
           :now-ms="nowMs"
           @jump="onJump"
+          @open="onNativeOpen"
         />
       </div>
     </div>
@@ -98,6 +100,7 @@
       :now-ms="nowMs"
       @close="close(true)"
       @jump="onJump"
+      @open="onNativeOpen"
     />
   </div>
 </template>
@@ -106,13 +109,15 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { useViewport } from '@/composables/useViewport'
-import { subagentDockCounts, type SubagentJumpChip } from '../presentation/subagentJump'
+import { subagentDockCounts, type SubagentDockRow, type SubagentJumpChip } from '../presentation/subagentJump'
+import { useNativeSubagentDock } from '../controllers/nativeSubagentDock'
+import type { NativeSubagentRow } from '../presentation/nativeSubagentRows'
 import ChatSubagentList from './ChatSubagentList.vue'
 import ChatSubagentRow from './ChatSubagentRow.vue'
 import ChatSubagentSheet from './ChatSubagentSheet.vue'
 
 const props = defineProps<{
-  chips: SubagentJumpChip[]
+  chips: SubagentDockRow[]
 }>()
 
 const emit = defineEmits<{
@@ -133,6 +138,7 @@ const sheetId = `subagent-sheet-${uid}`
 // One pill for every pane size; only the reveal differs (gutter rail or
 // popover on desktop, bottom sheet on phones).
 const { isMobile } = useViewport()
+const nativeDock = useNativeSubagentDock()
 const open = ref(false)
 const showAll = ref(false)
 const nowMs = ref(Date.now())
@@ -211,6 +217,27 @@ function onJump(chip: SubagentJumpChip) {
   close(false)
   emit('jump', chip)
 }
+
+// A native child has no Chat tab: the pane's Chat body renders the detail
+// window (it owns the timeline), so this chrome control only requests it.
+function onNativeOpen(chip: NativeSubagentRow, source: HTMLElement | null) {
+  close(false)
+  nativeDock?.open(chip, source)
+}
+
+// The window is rendered by the Chat body, so its dismissal would otherwise
+// strand focus on <body>; the pill is where the reader was last.
+watch(() => nativeDock?.openRow.value, (next, previous) => {
+  if (!previous || next) return
+  void nextTick(() => {
+    // The dock returns focus to the row that opened the window whenever that
+    // row is still mounted (the wide-pane rail stays open); the pill only
+    // takes it back when focus would otherwise be stranded.
+    const active = typeof document === 'undefined' ? null : document.activeElement
+    if (active instanceof Node && rootRef.value?.contains(active)) return
+    triggerRef.value?.focus()
+  })
+})
 
 function onOutsidePointer(event: PointerEvent) {
   if (rootRef.value && !rootRef.value.contains(event.target as Node)) close(false)

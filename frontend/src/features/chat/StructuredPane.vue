@@ -117,6 +117,11 @@
       @close="preview.close()"
       @back="preview.back"
     />
+
+    <!-- The dock's native-sub-agent window. It lives in this subtree because
+         only here do the timeline, image and markdown owners exist; the pane
+         chrome's pill opens it through the shared dock state. -->
+    <ChatNativeSubagentOverlay v-if="nativeOverlayOpen && isPaneActivated" />
   </div>
 </template>
 
@@ -124,6 +129,7 @@
 import { provide } from 'vue'
 import { chatIdentityKey, chatGoalKey, chatTimelineKey, chatActionsKey, chatDeliveryKey, chatQueueKey, chatAttachmentsKey, chatImagesKey, chatSettingsKey, chatComposerKey } from './owners'
 import ChatTimeline from './components/ChatTimeline.vue'
+import ChatNativeSubagentOverlay from './components/ChatNativeSubagentOverlay.vue'
 import ChatMessageInbox from './components/ChatMessageInbox.vue'
 import ChatComposer from './components/ChatComposer.vue'
 import ChatGoalSetup from './components/ChatGoalSetup.vue'
@@ -146,6 +152,8 @@ import { useChatTimeline } from '@/features/chat/controllers/useChatTimeline'
 import { useChatActions } from '@/features/chat/controllers/useChatActions'
 import { useChatQueue } from '@/features/chat/controllers/useChatQueue'
 import { useChatImages } from '@/features/chat/controllers/useChatImages'
+import { useNativeSubagentDock } from '@/features/chat/controllers/nativeSubagentDock'
+import { nativeSubagentRows, type NativeSubagentRowMemo } from '@/features/chat/presentation/nativeSubagentRows'
 const props = defineProps<ChatPaneProps>()
 const preview = provideAttachmentPreview()
 const isManagedChat = computed(() => Boolean(props.managedChat))
@@ -360,6 +368,10 @@ onMounted(() => {
 })
 onActivated(() => {
   isPaneActivated.value = true
+  // KeepAlive caches one StructuredPane per tab while the pane chrome keeps a
+  // single native dock: the activated tab must republish its own rows, or the
+  // pill would list the tab the reader just left.
+  nativeSubagentDock?.publish(nativeDockRows.value)
   timeline.activateViewport()
   startStream()
   if (!isManagedChat.value) void goalController.hydrateGoal()
@@ -370,6 +382,9 @@ onActivated(() => {
 })
 onDeactivated(() => {
   isPaneActivated.value = false
+  // Clearing also closes an open native window (publish nulls the row), so a
+  // hidden tab cannot leave a teleported window over the next one.
+  nativeSubagentDock?.publish([])
   preview.close(false)
   settings.isAddMenuOpen.value = false
   goalController.isGoalSetupOpen.value = false
@@ -424,6 +439,21 @@ provide(chatAttachmentsKey, attachmentsController)
 provide(chatImagesKey, images)
 provide(chatSettingsKey, settings)
 provide(chatComposerKey, composer)
+
+// Native sub-agent rows are a projection of this pane's timeline, and the
+// reducer bumps a turn's revision on every visible child mutation, so the memo
+// keeps the chrome's list O(changed turns) per stream batch.
+const nativeSubagentDock = useNativeSubagentDock()
+const nativeRowMemo: Map<string, NativeSubagentRowMemo> = new Map()
+const nativeDockRows = computed(() => nativeSubagentRows(timeline.turns.value, nativeRowMemo))
+const nativeOverlayOpen = computed(() => Boolean(nativeSubagentDock?.openRow.value))
+watch(nativeDockRows, rows => {
+  // A cached, deactivated pane keeps flushing its own effects (its stream may
+  // commit one more batch after the switch), so it may only publish while it is
+  // the pane's activated tab; `onActivated` is the single publisher on mount.
+  if (isPaneActivated.value) nativeSubagentDock?.publish(rows)
+}, { flush: 'post' })
+onUnmounted(() => nativeSubagentDock?.publish([]))
 </script>
 
 <style scoped>

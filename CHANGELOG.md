@@ -1,11 +1,37 @@
 # Changelog
 
+## Released
+
+### feat(chat): list provider-native sub-agents in the Agents dock and read one in a window
+
+- The pane-chrome Agents pill now lists provider-native children (Claude
+  `Agent`, Cursor `Task`, TraeX `spawnAgent`) beside Hub children
+  (`claude-hub agent run`), using the same rail / popover / phone-sheet reveal,
+  the same Active/earlier grouping and the same dot states. Rows are projected
+  from each parent turn's `subagents` part (newest first, bounded at 30) with a
+  per-turn memo keyed on the reducer's render revision, so a folded turn still
+  lists its children and a stream batch only reprojects changed turns.
+- A native child has no Chat tab, so its row offers `View` and opens a
+  read-only window instead of jumping: a gutter panel on desktop and a bottom
+  sheet on phones, with `aria-modal`, a Tab trap, Esc (from inside and from
+  `<body>`), a backdrop tap, a body scroll lock and focus back on the pill.
+  The window renders `ChatSubthreadBody`, the same rows the inline region shows,
+  so the two cannot drift, and it offers `Show in transcript`, which widens the
+  rendered tail window, loads a lazy turn's execution detail, expands the fold,
+  opens every collapsed `<details>` on the way and scrolls to the child.
+- Hub child behaviour is unchanged (jump, archive restore, workspace
+  attribution). Backend, protocol and `/api/subagents` are untouched; a
+  historical turn's children still appear only once that turn's execution detail
+  has been requested, because the backend keeps child events behind it.
+- Validation: typecheck, lint, bundle, the whole frontend unit suite, a new
+  projection suite, a new mocked browser scenario
+  (`browser_native_subagent_dock.py`) plus the existing inline-region and dock
+  scenarios re-run against the same build.
+
 > Each entry corresponds to a merge or significant commit on `main`.
 > Reaching `main` is what releases a change, so every entry below is released;
 > add new ones at the top of **Released**.
 > For detailed bug analysis, see `docs/working-logs/` and `WORKLOG.md`.
-
-## Released
 
 ### fix(chat): authorize out-of-cwd images only via completed image tools and add image retry
 
