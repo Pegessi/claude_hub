@@ -24,6 +24,10 @@ PARENT = "fixture-native-parent"
 OTHER = "fixture-native-free"
 WIDE = {"width": 1680, "height": 900}
 THREAD = "01a0e38b-0000-7031-b97e-cccccccccccc"
+# A second child that failed before producing anything. Its *status* survives
+# the shallow page (`conversation_event_visible` keeps failed/cancelled child
+# statuses), so a reloaded page carries a stub thread for it.
+THREAD_FAILED = "01a0e38b-0000-7031-b97e-dddddddddddd"
 TURN = "fixture-native-turn"
 NOW = "2026-11-10T10:00:00Z"
 MOBILE = {"width": 390, "height": 844}
@@ -64,11 +68,11 @@ def event(sequence, event_type, payload, *, message_id=None, call_id=None):
     }
 
 
-def child_event(sequence, event_type, payload, *, message_id=None, call_id=None):
+def child_event(sequence, event_type, payload, *, thread=THREAD, message_id=None, call_id=None):
     return event(
         sequence,
         event_type,
-        {**payload, "subagent_thread": THREAD},
+        {**payload, "subagent_thread": thread},
         message_id=message_id,
         call_id=call_id,
     )
@@ -115,8 +119,21 @@ EVENTS = [
         },
         message_id=f"subagent-lifecycle:{THREAD}",
     ),
-    event(5, "text_delta", {"text": "Parent answer."}, message_id=f"{TURN}:assistant"),
-    event(6, "turn_completed", {"status": "completed"}, message_id=TURN),
+    # Survives the shallow conversation page, unlike prose and tool calls.
+    child_event(
+        5,
+        "status",
+        {
+            "text": "Sub-agent turn failed",
+            "provider_status": "subagent_lifecycle",
+            "subagent_status": "failed",
+            "snapshot": True,
+        },
+        thread=THREAD_FAILED,
+        message_id=f"subagent-lifecycle:{THREAD_FAILED}",
+    ),
+    event(6, "text_delta", {"text": "Parent answer."}, message_id=f"{TURN}:assistant"),
+    event(7, "turn_completed", {"status": "completed"}, message_id=TURN),
 ]
 
 
@@ -143,19 +160,20 @@ OTHER_EVENTS = [
 # What `view=conversation` returns for this turn: the delivered answer and the
 # turn edges. Tool calls and child events stay behind the detail stream
 # (`conversation_event_visible`), which is what the descriptor below announces.
-SHALLOW_SEQUENCES = {0, 5, 6}
+SHALLOW_SEQUENCES = {0, 5, 6, 7}
 DETAIL = {
     "turn_id": TURN,
     "first_sequence": 0,
-    "last_sequence": 6,
-    "event_count": 7,
+    "last_sequence": 7,
+    "event_count": 8,
 }
+LAST_SEQUENCE = 7
 # `useAgentStream` sends `since_sequence` (inclusive cursor). The live stream is
 # delivered batch by batch from /wait, the way a running delegation arrives.
 PARENT_BATCHES = {
     -1: EVENTS[0:3],
     2: EVENTS[3:5],
-    4: EVENTS[5:7],
+    4: EVENTS[5:8],
 }
 OTHER_BATCHES = {-1: OTHER_EVENTS}
 
@@ -304,7 +322,7 @@ async def main(browser_run: BrowserRun) -> None:
                         row for row in full
                         if row["stream_sequence"] in SHALLOW_SEQUENCES and row["stream_sequence"] > since
                     ]
-                    details = [dict(DETAIL)] if full is EVENTS else []
+                    details = [dict(DETAIL)] if full is EVENTS and since < LAST_SEQUENCE else []
                 body = {
                     "events": events,
                     "next_sequence": events[-1]["stream_sequence"] if events else since,
@@ -507,6 +525,12 @@ async def main(browser_run: BrowserRun) -> None:
         region = page.get_by_test_id("subagent-region")
         assert await region.evaluate("element => element.open"), "the region must be expanded"
         await expect(inline).to_contain_text("child report ready")
+        # This turn is short enough that the reveal has nothing to scroll, so no
+        # scroll event rearms the tail it detached: the reader must not be left
+        # detached (with the Latest pill) at the bottom of the transcript.
+        await expect(
+            page.get_by_role("button", name="Scroll to latest message")
+        ).to_have_count(0)
         await page.screenshot(path=str(output / "02-show-in-transcript.png"))
 
         # Wide panes rest the list in the gutter rail instead of a popover;
@@ -601,6 +625,9 @@ async def main(browser_run: BrowserRun) -> None:
         state["history"] = True
         await page.reload()
         await expect(page.get_by_text("Parent answer.", exact=True)).to_have_count(1)
+        # The shallow page carries only the failed child's status, which the
+        # reducer turns into a stub thread. That stub must not become a row:
+        # its window could show nothing, and the active sibling is not known yet.
         await expect(page.get_by_test_id("subagent-dock-pill")).to_have_count(0)
         assert detail_requests == [], "a lazy turn must not be read before it is opened"
         process_fold = page.get_by_test_id("history-details-toggle")
@@ -610,7 +637,8 @@ async def main(browser_run: BrowserRun) -> None:
         assert detail_requests == [TURN], detail_requests
         # Now the children are readable: the inline region and the pill agree.
         inline = page.locator(f'[data-subagent-thread-id="{THREAD}"]')
-        await expect(inline).to_have_count(1)
+        await expect(page.locator(f'[data-subagent-thread-id="{THREAD}"]')).to_have_count(1)
+        await expect(page.locator(f'[data-subagent-thread-id="{THREAD_FAILED}"]')).to_have_count(1)
         await expect(pill).to_be_visible()
         await expect(pill).to_contain_text("1 running")
         await page.screenshot(path=str(output / "06-historical-detail.png"))
@@ -651,7 +679,7 @@ async def main(browser_run: BrowserRun) -> None:
             "wide panes: the gutter rail's row opens the window and keeps focus",
             "a Chat tab switch lists the activated tab's children and leaves exactly one window",
             "mobile: same pill, sheet, then the window as a bottom sheet with no overflow",
-            "reloaded shallow history lists no child until its turn is opened, then the child is",
+            "reloaded shallow history lists no child (not even the failed stub) until its turn is opened",
             "historical child opens the same window with prompt, report and dispatch result",
         ],
         "event_tabs": event_tabs,
