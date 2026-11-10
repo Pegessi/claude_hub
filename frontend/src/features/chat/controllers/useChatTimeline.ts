@@ -230,25 +230,34 @@ export function useChatTimeline(deps: Dependencies) {
     const detail = turn.turnId ? deps.historyDetails.value[turn.turnId] : undefined
     if (detail && detail.status !== 'loaded') {
       await loadAndExpandHistoryDetail(turn)
+      // The read may have crossed a deactivation or failed outright; either way
+      // there is nothing in the DOM to reveal and the new visit owns the tail.
+      if (timelineDisposed || visit !== timelineVisit) return
+      if (turn.turnId && deps.historyDetails.value[turn.turnId]?.status !== 'loaded') return
     } else if (!isTurnProcessExpanded(turn, latestTurnKey.value, processExpandedOverrides.value)) {
       const expanded = new Map(processExpandedOverrides.value)
       expanded.set(turn.key, true)
       processExpandedOverrides.value = expanded
     }
-    // The scroll below is deliberate: any pending tail anchor would undo it.
+    // The scroll below is deliberate, and both the resize observer (opening the
+    // region changes the content height) and the next stream batch would undo
+    // it while the pane still follows the tail. Following rearms itself as soon
+    // as the reader is near the bottom again (`handleTimelineScroll`).
     cancelScheduledTimelineScroll()
-    if (turn.key !== latestTurnKey.value && isFollowingLatest.value) detachFromTail()
+    if (isFollowingLatest.value) detachFromTail()
     await nextTick()
     if (timelineDisposed || visit !== timelineVisit) return
     const viewport = timelineEl.value
     if (!viewport) return
     // The expanded region mounts a turn's worth of children (markdown, tool
     // groups), so the row can arrive a frame or two after the fold changed.
-    // A bounded wait keeps this honest instead of guessing one frame.
+    // A bounded wait keeps this honest instead of guessing one frame. The
+    // lookup is scoped to this turn: a provider can address the same child
+    // thread id again in a later turn, and the first match would be that one.
     let row: HTMLElement | null = null
     for (let attempt = 0; attempt < 10 && !row; attempt += 1) {
       row = viewport.querySelector<HTMLElement>(
-        `[data-subagent-thread-id="${attributeValue(threadId)}"]`,
+        `[data-turn-key="${attributeValue(turnKey)}"] [data-subagent-thread-id="${attributeValue(threadId)}"]`,
       )
       if (row || attempt === 9) break
       await nextFrame()

@@ -104,19 +104,56 @@ child — a native child has no Chat tab to jump to.
   the DOM, since the modal covers the sidebar) and asserts the window and its
   scroll lock are gone, the hidden pane cannot republish rows, and the count
   stays zero across a quiet interval.
+
+### Second cross-review (Gemini 4 Argon), both halves
+
+- BLOCKING (fixed): `Show in transcript` skipped `detachFromTail()` for the
+  newest turn, so the resize observer (opening the region changes content
+  height) and the next stream batch re-anchored to the tail and undid the scroll.
+  Following now always detaches there and rearms itself when the reader is
+  already near the bottom.
+- BLOCKING (fixed): the DOM lookup was not scoped to the clicked turn. A
+  provider can address the same child thread id again in a later turn
+  (`sendInput`), and the first match in document order is the earlier turn.
+- BLOCKING (fixed): a lazy historical turn can already carry a stub
+  failed/cancelled child from the shallow page (`conversation_event_visible`
+  keeps that status), which projected a row whose window had nothing to show.
+  The projection now takes a readiness predicate built from `historyDetails`,
+  mirroring `presentTurnParts`; the scenario's reload phase covers it.
+- BLOCKING (fixed): a top-layer `<dialog>` (the image/attachment lightbox opened
+  from these rows) lost Escape to the window's document-level handler. A
+  `dialog[open]` now owns both Escape and Tab. Gate is non-vacuous: with the
+  guard removed the scenario fails at the "window stays open" assertion.
+- Fixed as well: memo identity (`IncrementalTimelineReducer.reset()` restarts
+  revision counts, so the cached turn instance is checked too); the missing
+  visit/disposed guard right after the detail read; focus restoration moved
+  into the dock so only a dismissal moves focus; `onUnmounted` clearing gated
+  on pane activation; document-level Tab refusal when a click dropped focus to
+  `<body>`; the phone header no longer crushes the name or repeats
+  "Native sub-agent"; missing `.tool-status.cancelled`; the scenario now
+  asserts the dispatch result, Shift+Tab, and captures the settled wide-pane
+  window.
 - Not changed: a historical turn's children still appear only once that turn's
   execution detail is loaded (the backend keeps child events behind it).
 
-### Mock fidelity note
+### Mock fidelity note (corrected)
 
-The first draft of the browser scenario served the whole history page for
-`since=-1` on every re-hydration. After a tab round trip the app applies that
-page again, which duplicated the delivered answer in the transcript. The same
-fixture ran against a throwaway worktree at `main` and reproduced identically,
-so this is the fixture's shape (a real backend serves the shallow page without
-child/process events and the client's cursor advances), not the candidate. The
-scenario now asserts the dock's own state across a switch instead of transcript
-content.
+The first draft of the scenario read `since` from the history request, but
+`useAgentStream` sends `since_sequence`, so every read was `-1`: after a tab
+round trip the app applied the same page twice and the delivered answer
+appeared twice in the transcript, and polling `next_sequence` never advanced
+the cursor (4,642 requests in 10s). It also served child/process events in the
+shallow conversation page, which the backend never does, so the lazy turn-detail
+path was never exercised.
+
+The fixture now: reads `since_sequence` (inclusive cursor) and echoes it; serves
+`view=conversation` with only the visible events plus an
+`AgentStreamHistoryDetail` descriptor; answers `turn_id`/`through_sequence`
+detail reads with the hidden events; delivers the live turn batch by batch from
+`/wait` (reading `since_sequence` from the POST body and holding each empty poll
+250ms). Requests dropped to 112 and the reload phase proves the documented
+boundary: no child row until that turn is opened, then the row and the window
+appear with the same content.
 
 ## Deliberate boundaries
 
@@ -164,6 +201,8 @@ browser server used port 5391 and was stopped afterwards (no 5173/8173 access).
 - The window replays the same content as the transcript, so a very long child
   transcript renders twice while it is open (the inline copy stays mounted
   behind the backdrop).
-- Focus is returned to the pill, not to the row that was clicked (its reveal
-  closes on open), matching the other overlays.
+- Focus on dismissal goes to the row that opened the window while it is still
+  mounted (the wide-pane rail stays open); when that reveal closed with it, to
+  the chrome pill. A data-driven row clear (tab switch, history reset) never
+  moves focus.
 - Not reviewed for right-to-left or long localized thread names.

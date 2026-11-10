@@ -140,6 +140,26 @@ OTHER_EVENTS = [
 ]
 
 
+# What `view=conversation` returns for this turn: the delivered answer and the
+# turn edges. Tool calls and child events stay behind the detail stream
+# (`conversation_event_visible`), which is what the descriptor below announces.
+SHALLOW_SEQUENCES = {0, 5, 6}
+DETAIL = {
+    "turn_id": TURN,
+    "first_sequence": 0,
+    "last_sequence": 6,
+    "event_count": 7,
+}
+# `useAgentStream` sends `since_sequence` (inclusive cursor). The live stream is
+# delivered batch by batch from /wait, the way a running delegation arrives.
+PARENT_BATCHES = {
+    -1: EVENTS[0:3],
+    2: EVENTS[3:5],
+    4: EVENTS[5:7],
+}
+OTHER_BATCHES = {-1: OTHER_EVENTS}
+
+
 async def wait_until(predicate, *, timeout_ms=5000, interval_ms=100):
     deadline = time.perf_counter() + timeout_ms / 1000
     while time.perf_counter() < deadline:
@@ -170,6 +190,8 @@ async def main(browser_run: BrowserRun) -> None:
     unexpected_external_requests = []
     blocked_external_requests = []
     event_tabs = []
+    detail_requests = []
+    state = {"history": False}
 
     async with browser_run.context(viewport=DESKTOP) as context:
 
@@ -247,6 +269,7 @@ async def main(browser_run: BrowserRun) -> None:
                     "supports_mode_switch": False,
                 }
             elif path.endswith("/stream/events"):
+                query = parse_qs(parsed.query)
                 if f"/tabs/{PARENT}/" in path:
                     event_tabs.append(PARENT)
                     full = EVENTS
@@ -257,16 +280,59 @@ async def main(browser_run: BrowserRun) -> None:
                     full = OTHER_EVENTS
                 else:
                     full = []
-                since = int((parse_qs(parsed.query).get("since") or ["-1"])[0])
-                events = [row for row in full if row["stream_sequence"] > since]
+                since = int((query.get("since_sequence") or ["-1"])[0])
+                turn_detail = (query.get("turn_id") or [None])[0]
+                through = int((query.get("through_sequence") or ["-1"])[0])
+                if turn_detail is not None:
+                    # Execution detail for one turn: everything the shallow page
+                    # hid, bounded by the descriptor's `through_sequence`.
+                    detail_requests.append(turn_detail)
+                    upper = through if through >= 0 else max(row["stream_sequence"] for row in full)
+                    events = [
+                        row
+                        for row in full
+                        if row["turn_id"] == turn_detail and since < row["stream_sequence"] <= upper
+                    ]
+                    details = []
+                elif not state["history"]:
+                    # No history until the reload: the live stream owns the
+                    # transcript, and an empty page must echo the cursor rather
+                    # than rewind it.
+                    events, details = [], []
+                else:
+                    events = [
+                        row for row in full
+                        if row["stream_sequence"] in SHALLOW_SEQUENCES and row["stream_sequence"] > since
+                    ]
+                    details = [dict(DETAIL)] if full is EVENTS else []
                 body = {
                     "events": events,
                     "next_sequence": events[-1]["stream_sequence"] if events else since,
                     "has_more": False,
-                    "history_details": [],
+                    "history_details": details,
                 }
             elif path.endswith("/wait"):
-                body = {"events": [], "next_sequence": 0, "has_more": False}
+                # The real long-poll blocks; the client re-issues immediately
+                # when a poll returns at once, so hold each empty poll briefly.
+                try:
+                    payload = json.loads(request.post_data or "{}")
+                except json.JSONDecodeError:
+                    payload = {}
+                cursor = int(payload.get("since_sequence", -1))
+                if f"/tabs/{PARENT}/" in path:
+                    batches = PARENT_BATCHES
+                elif f"/tabs/{OTHER}/" in path:
+                    batches = OTHER_BATCHES
+                else:
+                    batches = {}
+                batch = batches.get(cursor, [])
+                if not batch:
+                    await asyncio.sleep(0.25)
+                body = {
+                    "events": batch,
+                    "next_sequence": batch[-1]["stream_sequence"] if batch else cursor,
+                    "has_more": False,
+                }
             elif path.endswith("/live"):
                 try:
                     await route.fulfill(
@@ -351,16 +417,35 @@ async def main(browser_run: BrowserRun) -> None:
         )
         await expect(window).to_contain_text("inspect parser")
         await expect(window).to_contain_text("child report ready")
+        await expect(window.locator(".subthread-launch-result > summary")).to_have_text(
+            "Dispatch result"
+        )
         assert await page.evaluate("document.body.style.overflow") == "hidden"
         await page.screenshot(path=str(output / "01-native-window.png"))
 
-        # Modal hygiene: Tab cannot walk out of the window.
-        for _ in range(4):
+        # Modal hygiene: Tab cannot walk out of the window, in either direction,
+        # including from a click that dropped focus on <body>.
+        for _ in range(6):
             await page.keyboard.press("Tab")
             assert await page.evaluate(
                 "Boolean(document.activeElement && document.activeElement.closest("
                 "'[data-testid=native-subagent-overlay]'))"
             ), "Tab must stay inside the window"
+        await page.keyboard.press("Shift+Tab")
+        assert await page.evaluate(
+            "Boolean(document.activeElement && document.activeElement.closest("
+            "'[data-testid=native-subagent-overlay]'))"
+        ), "Shift+Tab must stay inside the window"
+        await window.locator(".native-subagent-message, .native-subagent-meta").first.click()
+        assert await page.evaluate(
+            "Boolean(document.activeElement && document.activeElement.closest("
+            "'[data-testid=native-subagent-overlay]'))"
+        ) is False, "the tap must have moved focus out of the window"
+        await page.keyboard.press("Tab")
+        assert await page.evaluate(
+            "Boolean(document.activeElement && document.activeElement.closest("
+            "'[data-testid=native-subagent-overlay]'))"
+        ), "Tab must pull focus back into the window"
 
         # Done closes it and returns focus to the pill it was opened from.
         await window.get_by_test_id("native-subagent-close").click()
@@ -377,6 +462,26 @@ async def main(browser_run: BrowserRun) -> None:
             "Boolean(document.activeElement && document.activeElement.closest("
             "'[data-testid=native-subagent-overlay]'))"
         ) is False, "the tap must have moved focus out of the window"
+        await page.keyboard.press("Escape")
+        await expect(page.get_by_test_id("native-subagent-overlay")).to_have_count(0)
+
+        # A top-layer <dialog> (the image/attachment lightbox opened from these
+        # rows) owns Escape: the window must stay open beneath it.
+        await pill.click()
+        await row.click()
+        await expect(overlay).to_be_visible()
+        await page.evaluate(
+            """() => {
+              const dialog = document.createElement('dialog')
+              dialog.id = 'review-top-layer-dialog'
+              dialog.textContent = 'preview'
+              document.body.appendChild(dialog)
+              dialog.showModal()
+            }"""
+        )
+        await page.keyboard.press("Escape")
+        await expect(overlay).to_be_visible()
+        await page.evaluate("() => document.getElementById('review-top-layer-dialog').remove()")
         await page.keyboard.press("Escape")
         await expect(page.get_by_test_id("native-subagent-overlay")).to_have_count(0)
 
@@ -414,6 +519,9 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(rail_row).to_have_attribute("data-kind", "native")
         await rail_row.click()
         await expect(overlay).to_be_visible()
+        # The window fades in over 160ms; capture it settled, not mid-fade.
+        await expect(window).to_be_visible()
+        await page.wait_for_timeout(250)
         await page.screenshot(path=str(output / "03-wide-rail-window.png"))
         await window.get_by_test_id("native-subagent-close").click()
         await expect(page.get_by_test_id("native-subagent-overlay")).to_have_count(0)
@@ -470,7 +578,7 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(sheet.get_by_test_id(ROW_ID)).to_have_attribute(
             "data-kind", "native"
         )
-        await page.screenshot(path=str(output / "03-mobile-sheet-native.png"))
+        await page.screenshot(path=str(output / "04-mobile-sheet-native.png"))
         await sheet.get_by_test_id(ROW_ID).click()
         await expect(sheet).to_have_count(0)
         await expect(overlay).to_be_visible()
@@ -479,11 +587,47 @@ async def main(browser_run: BrowserRun) -> None:
         assert bounds["width"] <= 391, bounds
         assert bounds["y"] + bounds["height"] >= 840, bounds
         assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
-        await page.screenshot(path=str(output / "04-mobile-window-native.png"))
+        await page.wait_for_timeout(250)
+        await page.screenshot(path=str(output / "05-mobile-window-native.png"))
         await window.get_by_test_id("native-subagent-close").click()
         await expect(page.get_by_test_id("native-subagent-overlay")).to_have_count(0)
         assert await page.evaluate("document.body.style.overflow") == ""
         await page.set_viewport_size(DESKTOP)
+
+        # ── A reloaded page sees a real shallow history: the delivered answer,
+        # no child events, plus a descriptor for the turn's execution detail.
+        # The dock must not invent a child row it cannot fill in, and opening
+        # that turn must be what makes the child reachable.
+        state["history"] = True
+        await page.reload()
+        await expect(page.get_by_text("Parent answer.", exact=True)).to_have_count(1)
+        await expect(page.get_by_test_id("subagent-dock-pill")).to_have_count(0)
+        assert detail_requests == [], "a lazy turn must not be read before it is opened"
+        process_fold = page.get_by_test_id("history-details-toggle")
+        await expect(process_fold).to_have_attribute("aria-expanded", "false")
+        await process_fold.click()
+        await expect(process_fold).to_have_attribute("aria-expanded", "true")
+        assert detail_requests == [TURN], detail_requests
+        # Now the children are readable: the inline region and the pill agree.
+        inline = page.locator(f'[data-subagent-thread-id="{THREAD}"]')
+        await expect(inline).to_have_count(1)
+        await expect(pill).to_be_visible()
+        await expect(pill).to_contain_text("1 running")
+        await page.screenshot(path=str(output / "06-historical-detail.png"))
+
+        # A historical child opens the same window with the same rows.
+        await pill.click()
+        await page.get_by_test_id("subagent-popover").get_by_test_id(ROW_ID).click()
+        await expect(overlay).to_be_visible()
+        await expect(window.locator(".native-subagent-thread")).to_have_text(THREAD)
+        await expect(window).to_contain_text("inspect parser")
+        await expect(window).to_contain_text("child report ready")
+        await expect(window.locator(".subthread-launch-result > summary")).to_have_text(
+            "Dispatch result"
+        )
+        await page.screenshot(path=str(output / "07-historical-window.png"))
+        await window.get_by_test_id("native-subagent-close").click()
+        await expect(page.get_by_test_id("native-subagent-overlay")).to_have_count(0)
 
         # Let one poll interval pass so an unmocked request would surface.
         await page.wait_for_timeout(5600)
@@ -507,8 +651,11 @@ async def main(browser_run: BrowserRun) -> None:
             "wide panes: the gutter rail's row opens the window and keeps focus",
             "a Chat tab switch lists the activated tab's children and leaves exactly one window",
             "mobile: same pill, sheet, then the window as a bottom sheet with no overflow",
+            "reloaded shallow history lists no child until its turn is opened, then the child is",
+            "historical child opens the same window with prompt, report and dispatch result",
         ],
         "event_tabs": event_tabs,
+        "detail_requests": detail_requests,
         "timings": timings,
         "api_requests": len(requests),
         "unknown_requests": unknown_requests,

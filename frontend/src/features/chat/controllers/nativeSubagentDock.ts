@@ -22,7 +22,9 @@ export interface NativeSubagentDock {
   /** The row whose detail window is open, or ``null``. */
   openRow: ShallowRef<NativeSubagentRow | null>
   publish(rows: NativeSubagentRow[]): void
-  open(row: NativeSubagentRow, opener?: HTMLElement | null): void
+  /** `opener` is the row that was clicked; `fallback` is the chrome control to
+   *  return to when that row is gone by the time the window closes. */
+  open(row: NativeSubagentRow, opener?: HTMLElement | null, fallback?: HTMLElement | null): void
   close(): void
 }
 
@@ -30,30 +32,41 @@ export function createNativeSubagentDock(): NativeSubagentDock {
   const rows = shallowRef<NativeSubagentRow[]>([])
   const openRow = shallowRef<NativeSubagentRow | null>(null)
   let opener: HTMLElement | null = null
+  let fallback: HTMLElement | null = null
   return {
     rows,
     openRow,
     publish(next) {
       rows.value = next
       // A row that left the transcript (tab switched, history reset) cannot
-      // stay open: its window would have nothing to resolve.
+      // stay open: its window would have nothing to resolve. This is a data
+      // change, not a dismissal, so it must not move focus.
       const current = openRow.value
       if (current && !next.some(row => row.key === current.key)) {
         openRow.value = null
         opener = null
+        fallback = null
       }
     },
-    open(row, source) {
+    open(row, source, chromeControl) {
       opener = source ?? null
+      fallback = chromeControl ?? null
       openRow.value = row
     },
     close() {
       openRow.value = null
-      // Return focus to whatever opened the window when it is still mounted;
-      // the chrome re-focuses its pill when its own reveal closed instead.
-      const target = opener
+      // Only a dismissal restores focus: to the row that opened the window
+      // while it is still mounted (the wide-pane rail stays open), else to the
+      // chrome control the reader came from.
+      const targets = [opener, fallback]
       opener = null
-      if (target?.isConnected) target.focus()
+      fallback = null
+      for (const target of targets) {
+        if (target?.isConnected) {
+          target.focus()
+          return
+        }
+      }
     },
   }
 }

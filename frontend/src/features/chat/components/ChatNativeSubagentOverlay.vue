@@ -12,12 +12,17 @@
         role="dialog"
         aria-modal="true"
         :aria-label="`Sub-agent ${row.name}`"
-        @keydown.tab="onTab"
       >
         <header class="native-subagent-head">
           <span class="native-subagent-badge">Native sub-agent</span>
-          <strong class="native-subagent-name">{{ row.name }}</strong>
-          <span class="native-subagent-type">{{ row.agentType }}</span>
+          <strong
+            class="native-subagent-name"
+            :title="row.name"
+          >{{ row.name }}</strong>
+          <span
+            v-if="row.agentType !== 'Native sub-agent'"
+            class="native-subagent-type"
+          >{{ row.agentType }}</span>
           <span
             class="tool-status"
             :class="liveState"
@@ -130,8 +135,26 @@ function locate() {
   close()
 }
 
-// Keep Tab inside the modal window; the backdrop covers the transcript.
-function onTab(event: KeyboardEvent) {
+/** Whether another modal surface (the image/attachment lightbox is a real
+ *  `<dialog>` in the top layer) owns the keyboard right now. */
+function topLayerOwnsKeys(): boolean {
+  return typeof document !== 'undefined' && document.querySelector('dialog[open]') !== null
+}
+
+// A tap on static content moves focus to <body>, so a handler bound to the
+// window would stop seeing keys; the document-level one keeps both promises:
+// Escape closes from anywhere, and Tab cannot leave the dialog even when focus
+// started outside it. A lightbox opened from inside the window is a top-layer
+// `<dialog>` and keeps its own Escape and Tab.
+function onDocumentKey(event: KeyboardEvent) {
+  if (!row.value || topLayerOwnsKeys()) return
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    close()
+    return
+  }
+  if (event.key !== 'Tab') return
   const root = windowRef.value
   if (!root) return
   // The body is prose and tool cards: links, <details> summaries and anything
@@ -142,22 +165,21 @@ function onTab(event: KeyboardEvent) {
   if (focusables.length === 0) return
   const first = focusables[0]
   const last = focusables[focusables.length - 1]
-  if (event.shiftKey && document.activeElement === first) {
+  const active = document.activeElement
+  if (!root.contains(active)) {
+    // Focus escaped (a tap on static text): put it back on an edge so the
+    // next Tab keeps walking inside the dialog.
+    event.preventDefault()
+    ;(event.shiftKey ? last : first).focus()
+    return
+  }
+  if (event.shiftKey && active === first) {
     event.preventDefault()
     last.focus()
-  } else if (!event.shiftKey && document.activeElement === last) {
+  } else if (!event.shiftKey && active === last) {
     event.preventDefault()
     first.focus()
   }
-}
-
-// A tap on static content moves focus to <body>, so the window's own Esc
-// handler stops seeing keys; the document-level one keeps the promise.
-function onDismissKey(event: KeyboardEvent) {
-  if (event.key !== 'Escape' || !row.value) return
-  event.preventDefault()
-  event.stopPropagation()
-  close()
 }
 
 function syncBodyLock(open: boolean) {
@@ -176,12 +198,12 @@ function syncBodyLock(open: boolean) {
 watch(() => Boolean(row.value), syncBodyLock, { immediate: true })
 
 if (typeof document?.addEventListener === 'function') {
-  document.addEventListener('keydown', onDismissKey, true)
+  document.addEventListener('keydown', onDocumentKey, true)
 }
 
 onBeforeUnmount(() => {
   if (typeof document?.removeEventListener === 'function') {
-    document.removeEventListener('keydown', onDismissKey, true)
+    document.removeEventListener('keydown', onDocumentKey, true)
   }
   if (document?.body) document.body.style.overflow = previousBodyOverflow
 })
@@ -357,6 +379,11 @@ onBeforeUnmount(() => {
   color: var(--ch-color-warning, #e0a800);
 }
 
+.tool-status.cancelled {
+  background-color: var(--ch-color-surface-muted, rgba(139, 148, 158, 0.12));
+  color: var(--ch-color-text-muted, #8b949e);
+}
+
 .tool-status.unknown {
   color: var(--ch-color-text-subtle);
 }
@@ -364,6 +391,17 @@ onBeforeUnmount(() => {
 @media (max-width: 640px) {
   .native-subagent-backdrop {
     align-items: flex-end;
+  }
+
+  /* The name is the one thing worth reading here: let the row wrap instead of
+     crushing it to an ellipsis behind four fixed siblings. */
+  .native-subagent-head {
+    flex-wrap: wrap;
+  }
+
+  .native-subagent-name {
+    flex: 1 1 100%;
+    order: 1;
   }
 
   .native-subagent-window {
