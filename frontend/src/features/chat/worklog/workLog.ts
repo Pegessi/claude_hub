@@ -267,6 +267,11 @@ const AWAITING_FIRST_EVENT: WorkLogStep = {
   waiting: false,
   bare: true,
 }
+
+/** Events exist but no part has been reduced from them yet (the pane reads the
+ *  turn's detail lazily). The label word carries the state, the counts line
+ *  carries the volume, so the footer still says how much has happened. */
+const WORKING_UNREDUCED: WorkLogStep = { label: '', waiting: false }
 const WAITING_FOR_ANSWER: WorkLogStep = { label: 'Waiting for your answer', waiting: true }
 const STOPPED_BY_ERROR: WorkLogStep = { label: 'Stopped by an error', waiting: true }
 
@@ -395,13 +400,17 @@ function hasPendingAnswer(turn: TimelineTurn): boolean {
  *  is waiting on. A turn whose last part is a finished call is *thinking*: it
  *  cannot be doing nothing, and "Working" with no step would be back to the
  *  empty label this replaces. */
-export function currentStep(turn: TimelineTurn): WorkLogStep {
+export function currentStep(turn: TimelineTurn, hasEvents = false): WorkLogStep {
   if (hasPendingAnswer(turn)) return WAITING_FOR_ANSWER
   const running = runningTools(turn)
   if (running.length > 0) return { label: describeRunningTools(running), waiting: false }
   const children = activeSubagents(turn)
   if (children > 0) return { label: `Waiting on ${plural(children, 'sub-agent')}`, waiting: true }
   const last = turn.parts[turn.parts.length - 1]
+  // Events the pane has not reduced into parts yet are still output: a turn
+  // whose descriptor already counts them is working behind an unopened fold,
+  // not waiting for a provider that has said nothing.
+  if (!last && hasEvents && turn.errors.length === 0) return WORKING_UNREDUCED
   if (!last && turn.errors.length === 0) return AWAITING_FIRST_EVENT
   if (!last) return STOPPED_BY_ERROR
   if (last.kind === 'error') return STOPPED_BY_ERROR

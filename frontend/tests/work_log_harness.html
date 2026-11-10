@@ -126,13 +126,16 @@
         props: {
           caseId: String, label: String, component: Object,
           currentTurn: Object, startedAt: String, part: Object, turnForParts: Object,
-          turnsRef: Object, connectionState: String, runtimeStatus: Object,
+          turnsRef: Object, connectionState: String, runtimeStatus: Object, eventCount: Number,
         },
         setup(props) {
           provide(chatTimelineKey, {
             // A streaming case owns its own ref so the gate can append events
             // after mount, the way the pane receives live batches.
             turns: props.turnsRef ?? ref([props.currentTurn ?? completedTurn]),
+            // The pane reports the turn's descriptor count; the gate sets it per
+            // case to model a turn whose events are not reduced into parts yet.
+            turnEventCount: () => props.eventCount ?? null,
             latestTurnKey: ref(props.currentTurn?.key ?? completedTurn.key),
             toggleTurnProcess: () => {},
             retryHistoryDetail: () => {},
@@ -179,7 +182,7 @@
       // ``caseId`` is what the browser gate selects on; the label is only text.
       const cases = [
         ['streaming', 'Live turn: batches appended after mount', ChatTurnWorking, { turnsRef: streamTurns, startedAt: liveStartedAt }],
-        ['busy', 'Live turn: work in progress', ChatTurnWorking, { currentTurn: active, startedAt: liveStartedAt }],
+        ['busy', 'Live turn: work in progress', ChatTurnWorking, { currentTurn: active, startedAt: liveStartedAt, eventCount: 192 }],
         ['waiting-subagent', 'Live turn: waiting on a sub-agent, pulse stopped', ChatTurnWorking, { currentTurn: waitingChild, startedAt: liveStartedAt }],
         ['waiting-answer', 'Live turn: waiting for your answer', ChatTurnWorking, { currentTurn: waitingAnswer, startedAt: liveStartedAt }],
         ['awaiting-first', 'Live turn: provider running, nothing written', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: freshStartAt, runtimeStatus: runningStatus }],
@@ -189,6 +192,7 @@
         ['awaiting-first-provider-offline', 'Live turn: provider offline', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: freshStartAt, runtimeStatus: offlineStatus }],
         ['awaiting-first-unknown', 'Live turn: no fresh runtime status', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: slowStartAt, runtimeStatus: unknownStatus }],
         ['awaiting-first-offline', 'Live turn: stream reconnecting', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: freshStartAt, connectionState: 'reconnecting', runtimeStatus: runningStatus }],
+        ['events-unreduced', 'Live turn: 1021 events, parts not reduced yet', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: liveStartedAt, eventCount: 1021, runtimeStatus: runningStatus }],
         ['completed-counts', 'Completed: counts loaded, failures kept', ChatTurnParts, {
           part: { kind: 'process', key: 'p1', meta: 'Activity · 18 steps · 1 failed · 21m', expanded: false },
         }],

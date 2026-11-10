@@ -7,6 +7,17 @@
 
 ## Released
 
+### fix(ui): put the volume of work back on the live footer
+
+- A long working turn showed a stopwatch and nothing about how much had
+  happened. The turn's event count now rides on the counts line as
+  `N events so far` and grows with the stream, and a fold whose detail has not
+  been read inventories itself as `Activity · N events` instead of a bare
+  duration.
+- A turn with events but no reduced parts reads `Working`, not `Waiting for the
+  first response`: output behind an unopened fold is not a provider that has
+  said nothing.
+
 ### feat(ui): the silent-start sentence reports what the tab is doing
 
 - The live footer no longer repeats the composer's model label. While nothing

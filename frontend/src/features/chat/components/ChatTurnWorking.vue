@@ -80,7 +80,7 @@ const props = defineProps<{ startedAt: string | null }>()
 // This footer only renders for the turn in flight, which is the newest turn of
 // the pane — reading it from the owner keeps ChatTurn.vue from having to pass
 // the whole part list down just for a label.
-const { turns } = requireChatOwner(chatTimelineKey)
+const { turns, turnEventCount } = requireChatOwner(chatTimelineKey)
 
 // The Hub's own view of this tab is what makes a silent turn legible: "running,
 // nothing written yet" and "offline, nothing can arrive" look identical in a
@@ -96,7 +96,7 @@ const identity = inject(chatIdentityKey, null)
  *  change per batch, so depending on it is what keeps this live. */
 const step = computed(() => {
   const turn = turns.value[turns.value.length - 1]
-  return turn ? currentStep(turn) : { label: '', waiting: false }
+  return turn ? currentStep(turn, turnEventCount(turn) !== null) : { label: '', waiting: false }
 })
 
 const counts = computed(() => {
@@ -104,11 +104,33 @@ const counts = computed(() => {
   return turn ? countWorkLog(turn) : emptyWorkLogCounts()
 })
 
-const countsLabel = computed(() => workLogCountLabel(counts.value))
+/** The event count is the volume of work even when nothing has been reduced
+ *  into tools yet, so it rides on the counts line and grows with the stream. */
+const eventCount = computed(() => {
+  const turn = turns.value[turns.value.length - 1]
+  return turn ? turnEventCount(turn) : null
+})
+
+/** ``N events so far``: the fold above it inventories the turn, this line
+ *  reports how fast it is filling, so the wording has to say it is still moving. */
+const eventsPhrase = computed(() => {
+  if (eventCount.value === null) return ''
+  return `${eventCount.value} event${eventCount.value === 1 ? '' : 's'} so far`
+})
+
+const countsLabel = computed(() => {
+  const label = workLogCountLabel(counts.value)
+  if (eventsPhrase.value === '') return label
+  return label ? `${label} · ${eventsPhrase.value}` : eventsPhrase.value
+})
 
 /** The failure phrase is its own span: one failed call inside a long turn must
  *  not repaint the whole summary, so only that phrase carries the warning tone. */
-const countParts = computed(() => workLogCountParts(counts.value))
+const countParts = computed(() => {
+  const parts = workLogCountParts(counts.value)
+  const tail = [parts.suffix, eventsPhrase.value].filter(Boolean).join(' · ')
+  return { ...parts, suffix: tail }
+})
 
 
 
