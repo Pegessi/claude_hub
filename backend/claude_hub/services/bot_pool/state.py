@@ -105,17 +105,27 @@ class FeishuBotPoolStateStore(object):
 
         if raw.get("revoked_at") is not None and "binding" not in raw and "bindings" not in raw:
             return
+        existing = raw.get("bindings")
+        if existing is not None and not isinstance(existing, list):
+            raise _state_error("bot.bindings")
         if "binding" in raw:
             legacy_binding = raw.pop("binding")
-            if "bindings" not in raw or raw["bindings"] is None:
-                if legacy_binding is None:
-                    raw["bindings"] = []
+            if legacy_binding is not None:
+                mapped_legacy = _as_mapping(legacy_binding, "binding")
+                if not existing:
+                    raw["bindings"] = [mapped_legacy]
                 else:
-                    raw["bindings"] = [_as_mapping(legacy_binding, "binding")]
-        elif "bindings" not in raw or raw["bindings"] is None:
+                    existing_ids = {
+                        item.get("pairing_id")
+                        for item in existing
+                        if isinstance(item, dict) and item.get("pairing_id") is not None
+                    }
+                    if mapped_legacy.get("pairing_id") not in existing_ids:
+                        raw["bindings"] = [mapped_legacy, *existing]
+            elif existing is None:
+                raw["bindings"] = []
+        elif existing is None:
             raw["bindings"] = []
-        elif not isinstance(raw["bindings"], list):
-            raise _state_error("bot.bindings")
         if "mode" not in raw or raw["mode"] is None:
             raw["mode"] = BOT_MODE_SINGLE
         else:
@@ -346,9 +356,12 @@ class FeishuBotPoolStateStore(object):
                 claims.append(claim)
         mode = bot_mode(raw)
         raw_bindings = raw.get("bindings")
-        if raw_bindings is None:
+        if raw_bindings is None or raw_bindings == []:
             raw_binding = raw.get("binding")
-            raw_bindings = [] if raw_binding is None else [raw_binding]
+            if raw_binding is not None:
+                raw_bindings = [raw_binding]
+            elif raw_bindings is None:
+                raw_bindings = []
         if not isinstance(raw_bindings, list):
             raise _state_error("bot.bindings")
         indexed_bindings: list[tuple[float, int, BotBinding]] = []
@@ -481,6 +494,10 @@ class FeishuBotPoolStateStore(object):
             and current.revision == effective.revision
             and current.generation == effective.generation
             and current.config == effective.config
+            and current.callback_enabled == effective.callback_enabled
+            and current.verification_token == effective.verification_token
+            and current.encrypt_key == effective.encrypt_key
+            and current.expected_tenant_key == effective.expected_tenant_key
         )
 
     # ------------------------------------------------------------ invariants
@@ -591,9 +608,12 @@ class FeishuBotPoolStateStore(object):
     def _active_raw_bindings(raw: dict[str, Any]) -> list[dict[str, Any]]:
         generation = raw.get("generation")
         items = raw.get("bindings")
-        if not isinstance(items, list):
+        if not isinstance(items, list) or not items:
             single = raw.get("binding")
-            items = [single] if isinstance(single, dict) else []
+            if isinstance(single, dict):
+                items = [single]
+            elif not isinstance(items, list):
+                items = []
         return [
             item
             for item in items

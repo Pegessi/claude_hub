@@ -22,9 +22,11 @@ from claude_hub.services.bot_pool.common import (
     MAX_CHANNELS_PER_BOT,
     OWNER_KIND_LOCAL,
     OWNER_KIND_OAUTH,
+    FeishuBotInvalidValue,
     FeishuBotModeSwitchBlocked,
     FeishuBotOccupied,
     FeishuChatOccupied,
+    FeishuPairingMismatch,
     FeishuPoolFull,
     OwnerIdentity,
 )
@@ -1125,3 +1127,431 @@ def test_per_channel_create_tab_timeout_and_bind_failures_roll_back_cleanly(
         assert "could not open a new session" in env_api.wire.reply_texts()[-1].lower()
 
     asyncio.run(dm_scenarios())
+
+
+def test_migration_preserves_legacy_binding_when_bindings_list_is_empty(tmp_path: Path) -> None:
+    path = tmp_path / "secrets" / "feishu_bot_pool.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "pool_revision": 1,
+                "bots": {
+                    "bot-mixed": {
+                        "bot_id": "bot-mixed",
+                        "name": "Mixed Bot",
+                        "app_id": "app-mixed",
+                        "credentials": {"app_secret": "secret-mixed"},
+                        "revision": 2,
+                        "generation": 1,
+                        "enabled": True,
+                        "created_at": 1_700_000_000.0,
+                        "updated_at": 1_700_000_000.0,
+                        "pending": {},
+                        "claims": {},
+                        "bindings": [],
+                        "binding": {
+                            "pairing_id": "pair-preserved",
+                            "owner_open_id": "ou-owner",
+                            "owner_email": "owner@example.test",
+                            "owner_kind": "oauth",
+                            "tab_id": "tab-preserved",
+                            "workspace_id": None,
+                            "sender_open_id": "ou-alice",
+                            "chat_id": "oc-preserved",
+                            "created_at": 1_700_000_010.0,
+                            "generation": 1,
+                        },
+                        "revoked_at": None,
+                    }
+                },
+                "rate_limits": {},
+            }
+        )
+    )
+    store = FeishuBotPoolStore(path=path, legacy_path=tmp_path / "secrets" / "feishu_bot.json")
+    entry = store.snapshot({}).get("bot-mixed")
+    assert entry is not None
+    assert len(entry.bindings) == 1
+    assert entry.bindings[0].pairing_id == "pair-preserved"
+    assert entry.binding == entry.bindings[0]
+
+    # Persisting a subsequent mutation must keep the migrated binding on disk.
+    store.update_bot("bot-mixed", expected_revision=entry.revision, name="Mixed Saved", environ={})
+    persisted = json.loads(path.read_text())
+    assert "binding" not in persisted["bots"]["bot-mixed"]
+    assert len(persisted["bots"]["bot-mixed"]["bindings"]) == 1
+    assert persisted["bots"]["bot-mixed"]["bindings"][0]["pairing_id"] == "pair-preserved"
+
+
+def test_store_writers_validate_owner_and_claim_fields_before_saving(
+    pool: FeishuBotPoolStore,
+) -> None:
+    bot_id = pool.create_bot(name="One", config=_config("app-1"), environ={})
+    entry = pool.snapshot({}).get(bot_id)
+    assert entry is not None
+    pool.update_bot(bot_id, expected_revision=entry.revision, mode=BOT_MODE_PER_CHANNEL, environ={})
+    entry = pool.snapshot({}).get(bot_id)
+    assert entry is not None
+    before_bytes = pool.path.read_bytes()
+
+    bad_owners = [
+        OwnerIdentity(open_id="local", email="e" * 129, kind=OWNER_KIND_LOCAL),
+        OwnerIdentity(open_id="local", email="", kind="bogus"),
+        OwnerIdentity(open_id="", email="", kind=OWNER_KIND_LOCAL),
+        OwnerIdentity(open_id="o" * 129, email="", kind=OWNER_KIND_LOCAL),
+    ]
+    for bad_owner in bad_owners:
+        with pytest.raises(FeishuBotInvalidValue):
+            pool.bind_p2p(
+                bot_id,
+                owner=bad_owner,
+                tab_id="tab-p2p",
+                workspace_id=None,
+                sender_open_id="ou-alice",
+                chat_id="oc-alice",
+                environ={},
+            )
+        assert pool.path.read_bytes() == before_bytes
+        assert pool.snapshot({}).get(bot_id) is not None
+
+        with pytest.raises(FeishuBotInvalidValue):
+            pool.bind_group(
+                bot_id,
+                owner=bad_owner,
+                tab_id="tab-grp",
+                workspace_id=None,
+                chat_id="oc-grp",
+                chat_name="Group",
+                expected_revision=entry.revision,
+                environ={},
+            )
+        assert pool.path.read_bytes() == before_bytes
+        assert pool.snapshot({}).get(bot_id) is not None
+
+        with pytest.raises(FeishuBotInvalidValue):
+            pool.issue_code(
+                bot_id,
+                owner=bad_owner,
+                tab_id="tab-code",
+                workspace_id=None,
+                expected_revision=entry.revision,
+                environ={},
+            )
+        assert pool.path.read_bytes() == before_bytes
+        assert pool.snapshot({}).get(bot_id) is not None
+
+    code, _expires, _rev = pool.issue_code(
+        bot_id,
+        owner=LOCAL,
+        tab_id="tab-claim",
+        workspace_id=None,
+        expected_revision=entry.revision,
+        environ={},
+    )
+    after_issue_bytes = pool.path.read_bytes()
+    for bad_sender, bad_chat in [
+        ("s" * 129, "oc-valid"),
+        ("", "oc-valid"),
+        ("ou-valid", "c" * 129),
+        ("ou-valid", ""),
+    ]:
+        with pytest.raises(FeishuBotInvalidValue):
+            pool.claim_code(
+                bot_id,
+                code=code,
+                sender_open_id=bad_sender,
+                chat_id=bad_chat,
+                environ={},
+            )
+        assert pool.path.read_bytes() == after_issue_bytes
+        assert pool.snapshot({}).get(bot_id) is not None
+
+    # The valid code was not consumed by the rejected claim_code calls.
+    claim, _word = pool.claim_code(
+        bot_id, code=code, sender_open_id="ou-valid", chat_id="oc-valid", environ={}
+    )
+    assert claim.sender_open_id == "ou-valid"
+
+
+def test_per_channel_sibling_provisioning_and_mutations_keep_inflight_answer_alive(
+    env_api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When Alice's DM turn is in flight on a per_channel Bot, sibling channel
+    provisioning (Bob's DM), group binding, pairing code issue/claim/mismatch/
+    activate, sibling channel release/drop, and Bot rename must not stale
+    Alice's EffectiveBot snapshot or drop her outbound reply."""
+
+    async def scenario() -> None:
+        bot_id = env_api.pool.create_bot(
+            name="Shared Bot",
+            config=_config("app-1"),
+            feishu_name="Test Bot",
+            feishu_open_id="ou-current-bot",
+            environ={},
+        )
+        env_api.pool.update_bot(bot_id, expected_revision=0, mode=BOT_MODE_PER_CHANNEL, environ={})
+
+        alice_admitted = asyncio.Event()
+        release_alice = asyncio.Event()
+        submitted: list[tuple[str, str]] = []
+
+        async def fake_dispatch(
+            tab_id: str,
+            _text: str,
+            _turn_id: str,
+            *,
+            admission_guard: Any,
+            visible_text: str,
+            **_kwargs: Any,
+        ) -> str:
+            async with admission_guard():
+                submitted.append((tab_id, visible_text))
+            if tab_id == "auto-tab-1":
+                alice_admitted.set()
+                await release_alice.wait()
+                return "reply-for-alice"
+            return "reply-for-bob"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", fake_dispatch)
+
+        alice_event = _sdk_dm(
+            "app-1",
+            "hello from alice",
+            clock.value,
+            message_id="om-alice-inflight",
+            chat_id="oc-alice-dm",
+            sender_open_id="ou_alice_1234",
+        )
+        alice_task = asyncio.create_task(bot_api._handle_sdk_event(bot_id, alice_event))
+        await asyncio.wait_for(alice_admitted.wait(), timeout=2.0)
+
+        # Advance past the 5s auto-create cooldown and let Bob auto-provision + finish.
+        clock.advance(6.0)
+        bob_event = _sdk_dm(
+            "app-1",
+            "hello from bob",
+            clock.value,
+            message_id="om-bob-quick",
+            chat_id="oc-bob-dm",
+            sender_open_id="ou_bob_5678",
+        )
+        await bot_api._handle_sdk_event(bot_id, bob_event)
+        assert env_api.wire.reply_texts() == ["reply-for-bob"]
+
+        # Exercise sibling group bind, pairing issue/claim/mismatch/activate,
+        # sibling release/drop, and Bot rename while Alice is still in flight.
+        entry = env_api.pool.snapshot({}).get(bot_id)
+        assert entry is not None
+        group_binding = env_api.pool.bind_group(
+            bot_id,
+            owner=LOCAL,
+            tab_id="tab-sib-group",
+            workspace_id=None,
+            chat_id="oc-sib-group",
+            chat_name="Sibling Group",
+            expected_revision=entry.revision,
+            environ={},
+        )
+        code, _exp, rev = env_api.pool.issue_code(
+            bot_id,
+            owner=LOCAL,
+            tab_id="tab-carol",
+            workspace_id=None,
+            expected_revision=entry.revision,
+            environ={},
+        )
+        claim, word = env_api.pool.claim_code(
+            bot_id, code=code, sender_open_id="ou-carol", chat_id="oc-carol-dm", environ={}
+        )
+        with pytest.raises(FeishuPairingMismatch):
+            env_api.pool.activate_claim(
+                bot_id,
+                pairing_id=claim.pairing_id,
+                confirm_word="WRONG9",
+                actor=LOCAL,
+                expected_revision=rev,
+                environ={},
+            )
+        carol_binding = env_api.pool.activate_claim(
+            bot_id,
+            pairing_id=claim.pairing_id,
+            confirm_word=word,
+            actor=LOCAL,
+            expected_revision=rev,
+            environ={},
+        )
+        env_api.pool.release_binding(
+            bot_id,
+            expected_revision=rev,
+            pairing_id=group_binding.pairing_id,
+            environ={},
+        )
+        assert env_api.pool.drop_binding(bot_id, carol_binding.pairing_id) is True
+        env_api.pool.update_bot(
+            bot_id, expected_revision=rev, name="Renamed During Turn", environ={}
+        )
+
+        # Now release Alice's turn: her answer must still be delivered to Feishu.
+        release_alice.set()
+        await asyncio.wait_for(alice_task, timeout=2.0)
+
+        assert submitted == [
+            ("auto-tab-1", "hello from alice"),
+            ("auto-tab-2", "hello from bob"),
+        ]
+        assert env_api.wire.reply_texts() == ["reply-for-bob", "reply-for-alice"]
+
+        # Replaying Alice's event is a duplicate no-op because her turn completed.
+        await bot_api._handle_sdk_event(bot_id, alice_event)
+        assert len(env_api.wire.reply_texts()) == 2
+
+    asyncio.run(scenario())
+
+
+def test_card_actions_and_dot_execution_resolve_non_first_channel_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import timedelta
+
+    from claude_hub.api.routes.feishu_bot import card_actions
+    from claude_hub.models.chat_message import ChatQuestion, utc_now
+    from claude_hub.services.chat_message_inbox import ChatMessageInbox, InboxEvidence, InboxTarget
+    from claude_hub.services.dot.execution import DotExecutionConflict, _check_switchable
+
+    store = FeishuBotPoolStore(
+        path=tmp_path / "pool.json",
+        legacy_path=tmp_path / "legacy.json",
+    )
+    bot_id = store.create_bot(name="Multi", config=_config("app-multi"), environ={})
+    store.update_bot(bot_id, expected_revision=0, mode=BOT_MODE_PER_CHANNEL, environ={})
+    current = store.effective(bot_id, {})
+    store.configure_callbacks(
+        bot_id,
+        callback_enabled=True,
+        expected_revision=current.revision,
+        verification_token="verify-token",
+        encrypt_key="encrypt-key",
+        expected_tenant_key="tenant-multi",
+        environ={},
+    )
+    # Channel 1: Alice's DM (tab-alice).
+    store.bind_p2p(
+        bot_id,
+        owner=LOCAL,
+        tab_id="tab-alice",
+        workspace_id=None,
+        sender_open_id="ou-alice",
+        chat_id="oc-alice-dm",
+        created_at=100.0,
+        environ={},
+    )
+    # Channel 2: Bob's DM (tab-bob) — non-first binding!
+    bob_binding = store.bind_p2p(
+        bot_id,
+        owner=LOCAL,
+        tab_id="tab-bob",
+        workspace_id=None,
+        sender_open_id="ou-bob",
+        chat_id="oc-bob-dm",
+        created_at=200.0,
+        environ={},
+    )
+    # Channel 3: A group chat (tab-group) — non-first binding while entry.binding is p2p!
+    entry = store.snapshot({}).get(bot_id)
+    assert entry is not None
+    store.bind_group(
+        bot_id,
+        owner=LOCAL,
+        tab_id="tab-group",
+        workspace_id=None,
+        chat_id="oc-group-chat",
+        chat_name="Team Group",
+        expected_revision=entry.revision,
+        environ={},
+    )
+
+    monkeypatch.setattr(bot_api, "_pool", store)
+    monkeypatch.setattr(bot_api, "_validate_saved_target", lambda _b: None)
+
+    # 1. Dot execution switch check blocks switching a non-first bound tab ("tab-bob").
+    fake_dot_service: Any = SimpleNamespace(
+        _peek_state=lambda: {"wake_schedule_id": None, "tidy_schedule_id": None}
+    )
+    with pytest.raises(DotExecutionConflict, match="Unbind the Feishu Bot"):
+        _check_switchable(fake_dot_service, "tab-bob")
+
+    # 2. Question mirror eligibility and mirroring target the question's own channel.
+    async def run_mirror_checks() -> None:
+        async def ordinary(*_args: Any) -> None:
+            return None
+
+        async def evidence(*_args: Any) -> InboxEvidence:
+            return InboxEvidence("absent")
+
+        inbox = ChatMessageInbox(
+            tmp_path / "inbox.json", lambda _: InboxTarget("incarnation"), ordinary, evidence
+        )
+        now = utc_now()
+        bob_question = ChatQuestion(
+            question_ref="q-bob",
+            tab_id="tab-bob",
+            session_id="terminal-tab-tab-bob",
+            incarnation="incarnation",
+            turn_id="turn-bob",
+            call_id="call-bob",
+            run_epoch=1,
+            question_id="0",
+            prompt="Approve Bob?",
+            options=["Yes", "No"],
+            mode="native",
+            created_at=now,
+            expires_at=now + timedelta(hours=24),
+        )
+        group_question = bob_question.model_copy(
+            update={
+                "question_ref": "q-group",
+                "tab_id": "tab-group",
+                "session_id": "terminal-tab-tab-group",
+            }
+        )
+        inbox.questions[bob_question.question_ref] = bob_question
+        inbox.questions[group_question.question_ref] = group_question
+        inbox._save()
+
+        sent_cards: list[tuple[str, str, dict[str, Any]]] = []
+
+        class FakeCardClient:
+            def __init__(self, _config: Any) -> None:
+                pass
+
+            async def get_tenant_token(self) -> str:
+                return "t-token"
+
+            async def send_message_with_identity(
+                self, chat_id: str, msg_type: str, content: dict[str, Any], **_kwargs: Any
+            ) -> str:
+                sent_cards.append((chat_id, msg_type, content))
+                return "om-bob-card"
+
+        monkeypatch.setattr(card_actions, "FeishuBotClient", FakeCardClient)
+        monkeypatch.setattr(card_actions.answers, "inbox", lambda: inbox)
+        monkeypatch.setattr(card_actions.answers, "live", lambda _q: (None, None, None))
+
+        assert card_actions.question_mirror_eligible(bob_question) is True
+        assert card_actions.question_mirror_eligible(group_question) is False
+        assert await card_actions.mirror_question(group_question) is False
+        assert await card_actions.mirror_question(bob_question) is True
+
+        assert len(sent_cards) == 1
+        assert sent_cards[0][0] == "oc-bob-dm"
+        assert bob_question.mirror is not None
+        assert bob_question.mirror.pairing_id == bob_binding.pairing_id
+        assert bob_question.mirror.chat_id == "oc-bob-dm"
+        assert bob_question.mirror.sender_open_id == "ou-bob"
+        assert bob_question.mirror.state == "sent"
+        _, resolved_binding = card_actions.current_binding(bob_question)
+        assert resolved_binding.pairing_id == bob_binding.pairing_id
+
+    asyncio.run(run_mirror_checks())

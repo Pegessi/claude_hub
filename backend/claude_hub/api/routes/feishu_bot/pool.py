@@ -494,6 +494,11 @@ def register_pool_routes(
         except Exception as exc:
             raise credentials_http_error(exc) from exc
         async with bindings.gate(bot_id):
+            gated_entry = get_pool_snapshot(bindings).get(bot_id)
+            if gated_entry is not None and (
+                gated_entry.updated_at != entry.updated_at or gated_entry.name != entry.name
+            ):
+                raise HTTPException(status_code=409, detail="bot_revision_conflict")
             await in_pool(
                 lambda: bindings.pool().rotate_secrets(
                     bot_id,

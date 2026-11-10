@@ -145,7 +145,11 @@ def _promote_tab_dispatch(tab_id: str, queue: _TabDispatchQueue) -> None:
         if not queue.processor.start.done():
             queue.processor.start.set_result(None)
         queue.changed.set()
-    elif not queue.active and _tab_dispatch_queues.get(tab_id) is queue:
+    elif (
+        not queue.active
+        and not queue.interrupted_text
+        and _tab_dispatch_queues.get(tab_id) is queue
+    ):
         del _tab_dispatch_queues[tab_id]
 
 
@@ -160,6 +164,19 @@ def _reserve_tab_dispatch(
 ) -> _TabDispatchItem:
     queue = _tab_dispatch_queues.get(tab_id)
     if queue is None:
+        if len(_tab_dispatch_queues) >= _MAX_TAB_DISPATCH_QUEUES:
+            idle_tab = next(
+                (
+                    tid
+                    for tid, candidate in _tab_dispatch_queues.items()
+                    if not candidate.pending
+                    and not candidate.active
+                    and candidate.processor is None
+                ),
+                None,
+            )
+            if idle_tab is not None:
+                del _tab_dispatch_queues[idle_tab]
         if len(_tab_dispatch_queues) >= _MAX_TAB_DISPATCH_QUEUES:
             raise _TabDispatchQueueFull("Feishu tab dispatch registry is at capacity")
         queue = _TabDispatchQueue(
@@ -570,6 +587,14 @@ _finish_tab_dispatch_batch = _message_dispatcher._finish_tab_dispatch_batch
 _dispatch_tab_batch = _message_dispatcher._dispatch_tab_batch
 
 
+def _entry_bindings(entry: Any) -> tuple[BotBinding, ...]:
+    bindings = getattr(entry, "bindings", None)
+    if bindings:
+        return tuple(bindings)
+    single = getattr(entry, "binding", None)
+    return (single,) if single is not None else ()
+
+
 def _bot_bound_to_tab(tab_id: str) -> BotEntry | None:
     return next(
         (
@@ -577,7 +602,7 @@ def _bot_bound_to_tab(tab_id: str) -> BotEntry | None:
             for bot in _pool.snapshot().bots
             if bot.enabled
             and bot.configured
-            and any(binding.tab_id == tab_id for binding in bot.bindings)
+            and any(binding.tab_id == tab_id for binding in _entry_bindings(bot))
         ),
         None,
     )
@@ -601,7 +626,7 @@ async def push_to_tab(
         if entry is None:
             return False
         binding = next(
-            (candidate for candidate in entry.bindings if candidate.tab_id == tab_id),
+            (candidate for candidate in _entry_bindings(entry) if candidate.tab_id == tab_id),
             entry.binding,
         )
         if binding is None:

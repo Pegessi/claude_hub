@@ -39,6 +39,20 @@ _rates: dict[str, deque[float]] = {}
 _mirror_locks: dict[str, asyncio.Lock] = {}
 
 
+def _entry_bindings(entry: Any) -> tuple[Any, ...]:
+    if not entry:
+        return ()
+    bindings = getattr(entry, "bindings", None)
+    if bindings:
+        return tuple(bindings)
+    single = getattr(entry, "binding", None)
+    return (single,) if single is not None else ()
+
+
+def _tab_binding(entry: Any, tab_id: str) -> Any:
+    return next((item for item in _entry_bindings(entry) if item.tab_id == tab_id), None)
+
+
 def current_binding(q: ChatQuestion) -> tuple[Any, Any]:
     from ... import feishu_bot as bot
 
@@ -48,10 +62,18 @@ def current_binding(q: ChatQuestion) -> tuple[Any, Any]:
     try:
         effective = bot._pool.effective(mirror.bot_id)
         entry = bot._pool.snapshot().get(mirror.bot_id)
-        binding = entry.binding if entry else None
+        binding = next(
+            (
+                item
+                for item in _entry_bindings(entry)
+                if item.pairing_id == mirror.pairing_id or item.tab_id == q.tab_id
+            ),
+            None,
+        )
         if (
             not effective.callback_enabled
             or not binding
+            or binding.is_group
             or not bot._owner_is_authorized(binding.owner)
             or not bot._binding_still_routes(effective, binding)
             or (
@@ -86,17 +108,18 @@ def question_mirror_eligible(q: ChatQuestion) -> bool:
     from ... import feishu_bot as bot
 
     entry = bot._bot_bound_to_tab(q.tab_id)
+    binding = _tab_binding(entry, q.tab_id)
     # answering a card is a private-chat capability; a group-bound Bot must
     # keep the question inside the Chat instead of posting a card nobody there
     # is allowed to answer.
-    if not entry or not entry.binding or entry.binding.is_group:
+    if not entry or not binding or binding.is_group:
         return False
     effective = bot._pool.effective(entry.bot_id)
     return bool(
         effective.callback_enabled
         and effective.expected_tenant_key
-        and bot._owner_is_authorized(entry.binding.owner)
-        and bot._binding_still_routes(effective, entry.binding)
+        and bot._owner_is_authorized(binding.owner)
+        and bot._binding_still_routes(effective, binding)
     )
 
 
@@ -118,12 +141,12 @@ async def _mirror_question(q: ChatQuestion, *, remirror: bool = False) -> bool:
             return False
         answers.live(q)
         entry = bot._bot_bound_to_tab(q.tab_id)
-        if not entry or not entry.binding or entry.binding.is_group:
+        binding = _tab_binding(entry, q.tab_id)
+        if not entry or not binding or binding.is_group:
             return False
         effective = bot._pool.effective(entry.bot_id)
         if not effective.callback_enabled or not effective.expected_tenant_key:
             return False
-        binding = entry.binding
         if not bot._owner_is_authorized(binding.owner):
             return False
         if q.mirror and q.mirror.message_id:
