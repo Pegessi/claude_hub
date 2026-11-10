@@ -9,6 +9,7 @@ import { isQuietDotTurn } from '@/utils/dotApi'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
 import { TIMELINE_PAGE_SIZE, selectTimelineWindow, timelineWindowStart } from '@/utils/timelineWindow'
+import { parseTimestampMs } from '@/utils/duration'
 import { withOptimisticCancelled } from '@/utils/agentStreamStopReset'
 import { createSubthreadThinkingPresenter } from '@/utils/thinkingPresentation'
 import { isTurnProcessExpanded, presentTurnParts, turnProcessFoldSignature } from '@/features/chat/presentation/chatTurnPresentation'
@@ -374,6 +375,11 @@ export function useChatTimeline(deps: Dependencies) {
    *  A descriptor keeps changing while a turn streams, and re-reading a growing
    *  turn on every batch would be quadratic. One read per turn is enough: from
    *  then on the live stream appends to the parts it produced. */
+  /** When this pane instance was created. A turn that started before this
+   *  moment cannot have all of its parts here — only events from after it were
+   *  reduced — which is what makes a mid-flight join recognisable. */
+  const paneOpenedAt = Date.now()
+
   /** Reads this pane has already made on a turn's behalf, by reason: one to
    *  restore a turn it joined mid-flight, one more to repair a gap. Two separate
    *  flags, because a turn may owe both and neither may repeat. */
@@ -383,14 +389,16 @@ export function useChatTimeline(deps: Dependencies) {
   const interruptedTurns = new Set<string>()
 
   /** Read the newest turn's detail so a turn the pane joined mid-flight has
-   *  parts, without opening its fold.
+   *  parts, without touching the fold's expansion state.
    *
    *  Events that arrived before the pane existed are not reduced into anything
    *  (there was no turn to reduce them into), so such a turn renders as a fold
    *  with nothing inside and a footer that has no step to name. The detail is
-   *  the record of those events, so one read restores them — and the fold stays
-   *  collapsed, because the reader asked for content, not for an expanded
-   *  transcript.
+   *  the record of those events, so one read restores them. It sets no
+   *  expansion override — the reader still decides whether to open a completed
+   *  turn's fold. A *live* turn is never foldable in the first place, so there
+   *  the read has the same end state as clicking its activity header today:
+   *  the steps render inline and the answer keeps streaming under them.
    *
    *  Scoped to the newest turn on purpose: it is the one whose state the reader
    *  is looking at, and backfilling every historical turn would read thousands
@@ -408,7 +416,13 @@ export function useChatTimeline(deps: Dependencies) {
     // turn has stopped moving, because before then the read would chase the very
     // stream it is trying to repair. Neither may repeat: a descriptor keeps
     // changing as a turn streams, so an uncapped read is a polling loop.
-    const joinOwed = reads.join === 0 && turn.parts.length === 0
+    // "Nothing reduced" is too strict: a turn in flight almost always emits some
+    // narration after this pane mounts, so those parts exist while the hundreds
+    // of steps from before the mount never will. A live turn that started before
+    // this pane was created is missing them by construction.
+    const startedMs = parseTimestampMs(turn.startedAt)
+    const joinedMidTurn = startedMs !== null && startedMs <= paneOpenedAt
+    const joinOwed = reads.join === 0 && (turn.parts.length === 0 || (!turn.completed && joinedMidTurn))
     const repairOwed = interruptedTurns.has(turnId) && turn.completed && reads.repair === 0
     if (!joinOwed && !repairOwed) return
     backfillReads.set(turnId, {

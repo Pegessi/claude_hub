@@ -484,9 +484,12 @@ test('a pane that joins a turn mid-flight reads its detail once and keeps the fo
 test('a turn that already has parts is never re-read behind the reader', async t => {
   const h = await mount(t)
   const stream = h.state.streams[0]
+  // This turn began after the pane opened, so nothing of it predates this pane:
+  // the live stream owns every part and a read would be work for nothing.
+  const startedNow = new Date().toISOString()
   const event = (sequence, type, payload = {}) => ({
     stream_sequence: sequence, type, payload, session_id: 's', tab_id: 'one',
-    turn_id: 'live', agent_type: 'claude', created_at: '2026-10-16T10:00:00Z', redacted: false,
+    turn_id: 'live', agent_type: 'claude', created_at: startedNow, redacted: false,
   })
   stream.events.value = [
     event(1, 'turn_started', { summary: 'streaming here' }),
@@ -510,9 +513,10 @@ test('a turn that already has parts is never re-read behind the reader', async t
 test('a turn whose stream dropped earns exactly one repair read when it stops', async t => {
   const h = await mount(t)
   const stream = h.state.streams[0]
+  const startedNow = new Date().toISOString()
   const event = (sequence, type, payload = {}) => ({
     stream_sequence: sequence, type, payload, session_id: 's', tab_id: 'one',
-    turn_id: 'gapped', agent_type: 'claude', created_at: '2026-10-16T10:00:00Z', redacted: false,
+    turn_id: 'gapped', agent_type: 'claude', created_at: startedNow, redacted: false,
   })
   const reads = () => h.state.calls.filter(call => call[0] === 'loadHistoryDetail')
   stream.events.value = [
@@ -550,4 +554,54 @@ test('a turn whose stream dropped earns exactly one repair read when it stops', 
   }
   await flush()
   assert.equal(reads().length, 1, 'one repair read, not a polling loop')
+})
+
+test('a pane that opens during a live turn still reads the steps it missed', async t => {
+  // Second cross-model review, H-2: "nothing reduced yet" was too strict a test
+  // for "this pane joined mid-flight". A live turn almost always narrates once
+  // after the mount, so parts exist while everything from before the mount is
+  // still missing — and that is exactly the case the reader complains about.
+  const h = await mount(t)
+  const stream = h.state.streams[0]
+  const timeline = h.owner(h.keys.chatTimelineKey)
+  const event = (sequence, type, payload = {}) => ({
+    stream_sequence: sequence, type, payload, session_id: 's', tab_id: 'one',
+    turn_id: 'midflight', agent_type: 'claude', created_at: '2026-10-16T10:00:00Z', redacted: false,
+  })
+  stream.events.value = [
+    event(1, 'turn_started', { summary: 'long turn, already in flight' }),
+    event(2, 'text_delta', { text: 'Let me check the files...' }),
+  ]
+  await flush()
+  const turn = timeline.turns.value.at(-1)
+  assert.equal(turn.parts.length, 1, 'the fixture has narration from after the mount')
+  assert.equal(turn.completed, false, 'and the turn is still running')
+  stream.historyDetails.value = {
+    midflight: {
+      descriptor: { turn_id: 'midflight', first_sequence: 1, last_sequence: 900, event_count: 900 },
+      status: 'idle',
+    },
+  }
+  await flush()
+  const reads = h.state.calls.filter(call => call[0] === 'loadHistoryDetail')
+  assert.deepEqual(
+    reads,
+    [['loadHistoryDetail', 'midflight']],
+    'a live turn that began before this pane opened owes one read, even though narration arrived',
+  )
+  assert.equal(timeline.processExpandedOverrides.value.size, 0, 'and the fold stays closed')
+
+  // Read once, not once per batch: the descriptor keeps growing.
+  stream.historyDetails.value = {
+    midflight: {
+      descriptor: { turn_id: 'midflight', first_sequence: 1, last_sequence: 1500, event_count: 1500 },
+      status: 'idle',
+    },
+  }
+  await flush()
+  assert.equal(
+    h.state.calls.filter(call => call[0] === 'loadHistoryDetail').length,
+    1,
+    'one join read per turn',
+  )
 })

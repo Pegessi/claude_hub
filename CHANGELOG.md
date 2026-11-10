@@ -7,6 +7,19 @@
 
 ## Released
 
+### fix(ui): keep a choice card an approval boundary, and backfill a pane's join
+
+- Cross-model review round 2, `H-1`: cards were moved to the end of the turn
+  *before* `presentThinkingParts` grouped the parts, which made the card the last
+  part — so a live turn's trailing reasoning run flushed as `done` (a frozen
+  spinner), and two reasoning phases either side of a card merged into one
+  block. The reorder now runs over the grouped display parts.
+- Cross-model review round 2, `H-2`: "nothing reduced yet" was too strict a test
+  for "this pane joined mid-flight". A live turn almost always narrates once
+  after the mount, so the parts existed while everything from before the mount
+  did not — and the read never happened. A live turn that started before this
+  pane was created now owes one read, still never more than one.
+
 ### feat(ui): put the needs-you entry before the phone's app menu
 
 - On a phone the ⋯ sheet sat to the left of the needs-you entry, so the
