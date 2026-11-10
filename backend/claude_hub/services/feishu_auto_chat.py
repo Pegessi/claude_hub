@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import inspect
 import logging
@@ -14,6 +15,7 @@ from claude_hub.services.bot_pool.common import MAX_CHANNELS_PER_BOT, BotEntry
 logger = logging.getLogger(__name__)
 
 AUTO_CHAT_MIN_INTERVAL_SECONDS = 5.0
+AUTO_CHAT_CREATE_TIMEOUT_SECONDS = 15.0
 DEFAULT_CHAT_AGENT_TYPE = AgentType.CLAUDE
 DEFAULT_CHAT_CWD: str | None = None
 _MAX_TAB_NAME_CHARS = 64
@@ -106,6 +108,7 @@ class FeishuAutoChatCreator:
         default_agent_type: AgentType = DEFAULT_CHAT_AGENT_TYPE,
         default_cwd: str | None = DEFAULT_CHAT_CWD,
         min_interval_seconds: float = AUTO_CHAT_MIN_INTERVAL_SECONDS,
+        create_timeout_seconds: float = AUTO_CHAT_CREATE_TIMEOUT_SECONDS,
         max_channels_per_bot: int = MAX_CHANNELS_PER_BOT,
         now: Callable[[], float] = time.time,
     ) -> None:
@@ -114,6 +117,7 @@ class FeishuAutoChatCreator:
         self.default_agent_type = default_agent_type
         self.default_cwd = default_cwd
         self.min_interval_seconds = min_interval_seconds
+        self.create_timeout_seconds = create_timeout_seconds
         self.max_channels_per_bot = max_channels_per_bot
         self._now = now
         self._last_auto_create_at: dict[tuple[int, str], float] = {}
@@ -171,12 +175,21 @@ class FeishuAutoChatCreator:
     def reset(self) -> None:
         self._last_auto_create_at.clear()
 
-    async def create_tab(self, name: str, *, manager: Any = None) -> str:
+    async def create_tab(
+        self,
+        name: str,
+        *,
+        manager: Any = None,
+        timeout_seconds: float | None = None,
+    ) -> str:
+        effective_timeout = (
+            self.create_timeout_seconds if timeout_seconds is None else timeout_seconds
+        )
         try:
             if self._tab_creator is not None:
                 result = self._tab_creator(name)
                 if inspect.isawaitable(result):
-                    result = await result
+                    result = await asyncio.wait_for(result, timeout=effective_timeout)
             else:
                 target_manager = self._resolve_manager(manager)
                 result = target_manager.create_tab(
@@ -186,7 +199,7 @@ class FeishuAutoChatCreator:
                     cwd=self.default_cwd,
                 )
                 if inspect.isawaitable(result):
-                    result = await result
+                    result = await asyncio.wait_for(result, timeout=effective_timeout)
         except FeishuAutoChatError:
             raise
         except Exception as exc:
