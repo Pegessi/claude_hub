@@ -22,6 +22,7 @@ from claude_hub.services.feishu_bot import (
     FeishuBotError,
     FeishuMessageDedupStore,
 )
+from claude_hub.services.local_storage import document_exists, read_document, write_document
 
 _T0 = 1_700_000_000.0
 
@@ -47,7 +48,7 @@ class _DedupState(TypedDict):
 
 
 def _read(path: Path) -> _DedupState:
-    raw: object = json.loads(path.read_text(encoding="utf-8"))
+    raw: object = read_document(path)
     assert isinstance(raw, dict)
     return cast(_DedupState, raw)
 
@@ -561,7 +562,7 @@ def test_legacy_claim_vetoes_an_otherwise_retryable_namespaced_record(tmp_path: 
     )
     saved = _read(path)
     saved["legacy_events"]["om-retry"] = {"claimed_at": _T0, "status": "failed"}
-    path.write_text(json.dumps(saved), encoding="utf-8")
+    write_document(path, saved)
     store.clock += 1
     assert not store.claim("bot-a:om-retry", retry_context=context)
 
@@ -574,4 +575,4 @@ def test_retry_context_must_identify_the_original_message_and_binding(
     store = _ClockedDedupStore(path, _T0)
     with pytest.raises(FeishuBotError, match="retry context"):
         store.claim("bot-a:om-retry", retry_context=context)
-    assert not path.exists()
+    assert not document_exists(path)
