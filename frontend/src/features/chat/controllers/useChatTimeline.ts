@@ -374,7 +374,13 @@ export function useChatTimeline(deps: Dependencies) {
    *  A descriptor keeps changing while a turn streams, and re-reading a growing
    *  turn on every batch would be quadratic. One read per turn is enough: from
    *  then on the live stream appends to the parts it produced. */
-  const backfilledTurns = new Set<string>()
+  /** Reads this pane has already made on a turn's behalf, by reason: one to
+   *  restore a turn it joined mid-flight, one more to repair a gap. Two separate
+   *  flags, because a turn may owe both and neither may repeat. */
+  const backfillReads = new Map<string, { join: number; repair: number }>()
+  /** Turns whose stream dropped while they were live. Their parts may be
+   *  missing whatever the backend accepted during the gap. */
+  const interruptedTurns = new Set<string>()
 
   /** Read the newest turn's detail so a turn the pane joined mid-flight has
    *  parts, without opening its fold.
@@ -394,11 +400,21 @@ export function useChatTimeline(deps: Dependencies) {
     const turn = turns.value[turns.value.length - 1]
     const turnId = turn?.turnId
     if (!turnId) return
-    if (turn.parts.length > 0) return
     const detail = deps.historyDetails.value[turnId]
     if (!detail || detail.status === 'loading' || detail.status === 'loaded') return
-    if (backfilledTurns.has(turnId)) return
-    backfilledTurns.add(turnId)
+    const reads = backfillReads.get(turnId) ?? { join: 0, repair: 0 }
+    // One read restores a turn the pane joined with nothing reduced. One more
+    // repairs a turn whose stream dropped while it was live — and only once that
+    // turn has stopped moving, because before then the read would chase the very
+    // stream it is trying to repair. Neither may repeat: a descriptor keeps
+    // changing as a turn streams, so an uncapped read is a polling loop.
+    const joinOwed = reads.join === 0 && turn.parts.length === 0
+    const repairOwed = interruptedTurns.has(turnId) && turn.completed && reads.repair === 0
+    if (!joinOwed && !repairOwed) return
+    backfillReads.set(turnId, {
+      join: reads.join + (joinOwed ? 1 : 0),
+      repair: reads.repair + (repairOwed ? 1 : 0),
+    })
     const visit = timelineVisit
     await deps.loadHistoryDetail(turnId)
     if (timelineDisposed || visit !== timelineVisit) return
@@ -408,6 +424,17 @@ export function useChatTimeline(deps: Dependencies) {
     watch(
       () => [deps.events.value.length, deps.pendingTurns.value.length],
       () => requestLatestAnchor(),
+    )
+
+    // A drop from ``live`` is the only thing that means "events may be missing".
+    // The initial ``hydrating`` state is the pane starting up, not a gap.
+    watch(
+      () => deps.connectionState.value,
+      (state, previous) => {
+        if (previous !== 'live' || state === 'live') return
+        const turnId = turns.value[turns.value.length - 1]?.turnId
+        if (turnId) interruptedTurns.add(turnId)
+      },
     )
 
     // A descriptor for the newest turn can arrive after activation (the pane

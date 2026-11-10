@@ -10,7 +10,7 @@
       <div
         class="inbox-scope"
         role="group"
-        aria-label="Inbox filter"
+        aria-label="Needs-you filter"
       >
         <button
           v-for="option in SCOPE_OPTIONS"
@@ -25,10 +25,10 @@
       <LoadingButton
         type="button"
         class="inbox-refresh"
-        title="Refresh inbox"
+        title="Refresh the needs-you list"
         :loading="isRefreshing"
         hide-content-while-loading
-        loading-label="Refreshing inbox"
+        loading-label="Refreshing"
         @click="refresh"
       >
         ↻

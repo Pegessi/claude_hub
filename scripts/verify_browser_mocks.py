@@ -44,6 +44,7 @@ RUNNERS = (
     ("browser_dot_panel.py", ""),
     ("browser_service_restart.py", ""),
     ("browser_diff_review.py", "/tests/diff_review_harness.html"),
+    ("browser_diff_code.py", "/tests/diff_code_harness.html"),
     ("browser_work_log.py", "/tests/work_log_harness.html"),
 )
 

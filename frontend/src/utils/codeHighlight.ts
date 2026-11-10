@@ -170,6 +170,87 @@ export function renderCodeBlockHtml(text: string, lang: string): string {
   return `<pre><code${langAttr}>${highlightCode(normalized, firstWord)}</code></pre>\n`
 }
 
+/** Language of a file path, for surfaces that show code they did not author.
+ *
+ *  A diff row has no info string — the only language hint is the file name —
+ *  so the extension is the contract here. Unknown or extension-less paths
+ *  return ``''``, which every caller must treat as "render as plain text" rather
+ *  than guessing. */
+export function languageForPath(path: string): string {
+  const name = (path || '').split(/[?#]/)[0].split('/').pop() ?? ''
+  const raw = name.includes('.') ? name.split('.').pop() ?? '' : ''
+  if (!raw) return ''
+  const candidate = normalizeLang(raw)
+  return LANG_ALIASES[raw.toLowerCase()] ?? candidate
+}
+
+/** Display name for a language identifier: ``python`` -> ``Python``.
+ *
+ *  Shown as a chip on a code block header, where the fence's ``py`` has to read
+ *  as the language a reader recognises, not as the info-string they typed. */
+const LANGUAGE_LABELS: Record<string, string> = {
+  javascript: 'JavaScript',
+  typescript: 'TypeScript',
+  python: 'Python',
+  bash: 'Bash',
+  shell: 'Bash',
+  json: 'JSON',
+  yaml: 'YAML',
+  toml: 'TOML',
+  xml: 'HTML',
+  html: 'HTML',
+  css: 'CSS',
+  scss: 'SCSS',
+  less: 'LESS',
+  markdown: 'Markdown',
+  sql: 'SQL',
+  go: 'Go',
+  rust: 'Rust',
+  java: 'Java',
+  kotlin: 'Kotlin',
+  swift: 'Swift',
+  ruby: 'Ruby',
+  php: 'PHP',
+  cpp: 'C++',
+  c: 'C',
+  csharp: 'C#',
+  objectivec: 'Objective-C',
+  protobuf: 'Protobuf',
+  graphql: 'GraphQL',
+  dockerfile: 'Dockerfile',
+  nginx: 'Nginx',
+  diff: 'Diff',
+  plaintext: 'Text',
+}
+
+export function languageLabel(lang: string): string {
+  const canonical = normalizeLang(lang || '')
+  if (!canonical) return ''
+  return LANGUAGE_LABELS[canonical] ?? canonical.replace(/^./, first => first.toUpperCase())
+}
+
+/** Highlight ONE line of code for an inline surface (a diff row).
+ *
+ *  ``highlightCode`` is built for fenced blocks where the whole snippet is at
+ *  hand. A diff row is a single line lifted out of its file, so it is
+ *  highlighted on its own: grammar state from the surrounding lines is missing,
+ *  which costs precision inside multi-line strings and block comments, but every
+ *  row stays independent — no span can cross a row boundary and swallow the
+ *  next row's tint or line number.
+ *
+ *  Returns HTML-escaped text when the highlighter has not loaded or the
+ *  language is unknown, exactly like ``highlightCode``. */
+export function highlightLine(text: string, lang: string): string {
+  if (!text || !hljsInstance) return escapeHtml(text)
+  const normalized = normalizeLang(lang || '')
+  if (!normalized || !hljsInstance.getLanguage(normalized)) return escapeHtml(text)
+  try {
+    return hljsInstance.highlight(text, { language: normalized, ignoreIllegals: true }).value
+  } catch {
+    return escapeHtml(text)
+  }
+}
+
 /** ``true`` if ``lang`` is registered with the loaded highlighter. */
 export function isLanguageRegistered(lang: string): boolean {
   if (!hljsInstance) return false

@@ -12,7 +12,7 @@
       @click="toggle"
     >
       <span class="inbox-trigger-dot" />
-      <span class="inbox-trigger-label">Inbox</span>
+      <span class="inbox-trigger-label">Needs you</span>
       <span
         v-if="needsCount > 0"
         class="inbox-trigger-badge"
@@ -30,7 +30,7 @@
         <button
           type="button"
           class="inbox-panel-close"
-          aria-label="Close inbox"
+          aria-label="Close the needs-you list"
           @click="close()"
         >
           ×
@@ -44,7 +44,7 @@
       <button
         type="button"
         class="inbox-panel-resize"
-        title="Resize inbox"
+        title="Resize the needs-you list"
         aria-hidden="true"
         @pointerdown="startResize"
       />
@@ -111,7 +111,7 @@ import AgentInboxContent from './AgentInboxContent.vue'
 import { buildInbox, needsYouCount } from './inboxModel'
 
 /**
- * The top bar's single Inbox entry.
+ * The top bar's single needs-you entry.
  *
  * It replaces the two permanent `Status N` / `Agents N` pills: those counted
  * every tab, so the number was never zero and never meant anything. Here the
@@ -135,7 +135,10 @@ const contentRef = ref<{ focus?: () => void } | null>(null)
 const sheetContentRef = ref<{ focus?: () => void } | null>(null)
 const sheetCloseRef = ref<HTMLButtonElement | null>(null)
 const nowMs = ref(Date.now())
-const panelLabel = 'Inbox'
+// The surface is a demand, not a mailbox: what it lists is sessions blocked on
+// the user, and its own copy says "Nothing needs you". "Inbox" is already the
+// composer's message tray (``ChatMessageInbox``), a different mailbox entirely.
+const panelLabel = 'Needs you'
 
 const needsCount = computed(() =>
   needsYouCount(buildInbox(tabs.value, agentStatuses.value, { scope: 'all', nowMs: nowMs.value })),

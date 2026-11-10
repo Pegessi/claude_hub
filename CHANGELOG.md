@@ -7,6 +7,38 @@
 
 ## Released
 
+### feat(ui): language-aware code display
+
+- An edited-file diff card now highlights each row with the language of the file
+  it came from — the card a reader opens to see a Python change reads as
+  Python, with the `+`/`-` tint, sign column and line numbers intact. The header
+  carries a small language chip when the bundled highlighter has that grammar
+  and nothing at all for an unknown extension; rows are memoised per
+  (language, text), a diff over 400 rows stays plain text, and only escaped
+  text plus highlight.js spans is ever bound, so a tool argument cannot inject
+  markup.
+- A fenced code block's header now names the language a reader recognises
+  (`py` → `Python`, no info string → `Code`) instead of echoing the fence, and a
+  block whose lines overflow scrolls behind a themed right-edge fade that only
+  appears when it really overflows and withdraws at the scroll end — a long line
+  no longer looks like a short one that happens to stop.
+
+### feat(ui): name the top bar's Needs-you list after what it holds
+
+- The entry, its panel title and its mobile sheet say `Needs you` instead of
+  `Inbox`. The list holds sessions blocked on the user — the copy inside it
+  already said "Nothing needs you" — while `Inbox` names the composer's message
+  tray (`ChatMessageInbox`), a different surface with a different mailbox. One
+  word for two things was the confusion.
+
+### feat(ui): repair a turn whose stream dropped while it was live
+
+- A turn that was interrupted mid-stream now gets exactly one extra detail read
+  once it stops moving, so its parts include whatever the backend accepted
+  during the gap. Join-backfill and gap-repair are budgeted separately: each can
+  happen once per turn, and neither repeats — a descriptor keeps changing while
+  a turn streams, so an uncapped read would be a polling loop.
+
 ### feat(ui): backfill the newest turn's detail on activation
 
 - A pane that joined a turn mid-flight never reduced that turn's earlier events,

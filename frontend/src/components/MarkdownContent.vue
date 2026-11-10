@@ -6,6 +6,7 @@
     :class="{ compact }"
     @click="handleClick"
     @error.capture="handleError"
+    @scroll.capture="handleCodeScroll"
   >
     <template
       v-for="block in blocks"
@@ -49,7 +50,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch, watchEffect } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { MarkdownBlockCache } from '@/utils/markdownBlocks'
 import { ensureHighlighter, highlightReady } from '@/utils/codeHighlight'
 import { ensureMathRenderer, mathVersion } from '@/utils/mathRendering'
@@ -128,6 +129,7 @@ watchEffect(() => {
 watch([blocks, contentRoot], (_, __, onCleanup) => {
   const root = contentRoot.value
   if (!root) return
+  syncCodeScrollState(root)
   // Failed images need recovery placeholders even in prose-only messages.
   neutralizeKnownFailures(root)
   if (!blockCache.hasMermaid) return
@@ -160,6 +162,53 @@ watch([blocks, contentRoot], (_, __, onCleanup) => {
     observer.disconnect()
   })
 }, { flush: 'post' })
+
+// Code blocks scroll horizontally (``white-space: pre``), and a clipped line is
+// indistinguishable from a short one. The block is marked only when its content
+// really is wider than the box, so the fade and the scrollbar never suggest a
+// remainder that does not exist.
+function syncCodeScrollState(root: HTMLElement) {
+  const blocks = Array.from(root.querySelectorAll<HTMLElement>('.markdown-code-block'))
+  if (blocks.length === 0) return
+  // Measure every block before writing any attribute: interleaving reads and
+  // writes would force a layout per block on every streamed delta.
+  const overflowing = blocks.map((block) => {
+    const pre = block.querySelector('pre')
+    return !!pre && pre.scrollWidth > pre.clientWidth + 1
+  })
+  blocks.forEach((block, index) => {
+    block.toggleAttribute('data-overflow-x', overflowing[index])
+    // A block that no longer overflows cannot be scrolled to its end either.
+    if (!overflowing[index]) block.removeAttribute('data-scroll-end')
+  })
+}
+
+// The fade withdraws once the reader reaches the end of the line: an edge that
+// dims the last characters would hide the very content it points at. Scroll does
+// not bubble, so this is a capture-phase listener on the content root.
+function handleCodeScroll(event: Event) {
+  const target = event.target
+  if (!(target instanceof HTMLElement) || !target.matches('.markdown-code-block > pre')) return
+  const block = target.closest<HTMLElement>('.markdown-code-block')
+  if (!block) return
+  const atEnd = target.scrollLeft + target.clientWidth >= target.scrollWidth - 1
+  block.toggleAttribute('data-scroll-end', atEnd)
+}
+
+// Text changes arrive through ``blocks``; width changes (window resize, zoom,
+// enlarged text) arrive here, and a block that fits at one width can overflow at
+// another.
+let codeScrollObserver: ResizeObserver | null = null
+onMounted(() => {
+  const root = contentRoot.value
+  if (!root || typeof ResizeObserver === 'undefined') return
+  codeScrollObserver = new ResizeObserver(() => syncCodeScrollState(root))
+  codeScrollObserver.observe(root)
+})
+onBeforeUnmount(() => {
+  codeScrollObserver?.disconnect()
+  codeScrollObserver = null
+})
 
 // A proxied image that fails to load (404 / expired temporary file) is
 // replaced in place by a restrained text placeholder — never a broken-image
@@ -646,7 +695,12 @@ async function handleClick(event: MouseEvent) {
   font-weight: 600;
 }
 
+/* Header and code share one grid column so the scroll hint can sit exactly
+   over the code area, below a header whose height depends on the theme. */
 .markdown-block :deep(.markdown-code-block) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto;
   overflow: hidden;
   margin-top: 8px;
   border: 1px solid var(--ch-color-surface-control-active);
@@ -655,6 +709,8 @@ async function handleClick(event: MouseEvent) {
 }
 
 .markdown-block :deep(.markdown-code-header) {
+  grid-row: 1;
+  grid-column: 1;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -664,6 +720,15 @@ async function handleClick(event: MouseEvent) {
   color: var(--ch-color-text-muted);
   font-family: var(--ch-font-mono);
   font-size: 11px;
+}
+
+/* An unknown info string can be arbitrarily long; the chip owns the space it
+   needs and the Copy button keeps its size. */
+.markdown-block :deep(.markdown-code-header .markdown-code-language) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .markdown-block :deep(.markdown-code-header button) {
@@ -678,9 +743,65 @@ async function handleClick(event: MouseEvent) {
 }
 
 .markdown-block :deep(.markdown-code-block pre) {
+  grid-row: 2;
+  grid-column: 1;
+  min-width: 0;
   margin: 0;
   border: 0;
   border-radius: 0;
+  /* Horizontal only: a vertical scrollbar inside a code block would trap the
+     reader's wheel in a few lines instead of scrolling the message. */
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* The scrollbar stays out of the way until the reader shows interest in the
+     block; the fade already says there is more to the right. The standard
+     properties cover Chrome and Firefox, the pseudo-element rules below cover
+     Safari, which only has that form. */
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+.markdown-block :deep(.markdown-code-block pre::-webkit-scrollbar) {
+  height: 8px;
+}
+
+.markdown-block :deep(.markdown-code-block pre::-webkit-scrollbar-track) {
+  background: transparent;
+}
+
+.markdown-block :deep(.markdown-code-block pre::-webkit-scrollbar-thumb) {
+  border-radius: var(--ch-radius-sm);
+  background: transparent;
+}
+
+/* Hovering the block, or focusing its Copy button, reveals the scrollbar — the
+   same two signals a reader already uses on the block. */
+.markdown-block :deep(.markdown-code-block:hover pre),
+.markdown-block :deep(.markdown-code-block:focus-within pre) {
+  scrollbar-color: var(--ch-color-border-strong) transparent;
+}
+
+.markdown-block :deep(.markdown-code-block:hover pre::-webkit-scrollbar-thumb),
+.markdown-block :deep(.markdown-code-block:focus-within pre::-webkit-scrollbar-thumb) {
+  background: var(--ch-color-border-strong);
+}
+
+/* The fade sits over the right edge of the code area and fades the line into
+   the block background, so a cut-off line looks cut off instead of finished. */
+.markdown-block :deep(.markdown-code-scroll-hint) {
+  grid-row: 2;
+  grid-column: 1;
+  justify-self: end;
+  align-self: stretch;
+  width: 28px;
+  background: linear-gradient(to left, var(--ch-color-canvas), transparent);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+
+.markdown-block :deep(.markdown-code-block[data-overflow-x]:not([data-scroll-end]) .markdown-code-scroll-hint) {
+  opacity: 1;
 }
 
 .markdown-block :deep(.markdown-table-scroll:focus-visible),
@@ -758,5 +879,12 @@ async function handleClick(event: MouseEvent) {
   padding: 6px 12px;
   color: var(--ch-color-text-muted);
   font-size: 12px;
+}
+
+/* The fade is a hint, not information: dropping its animation loses nothing. */
+@media (prefers-reduced-motion: reduce) {
+  .markdown-block :deep(.markdown-code-scroll-hint) {
+    transition: none;
+  }
 }
 </style>
