@@ -7,7 +7,6 @@ import base64
 import importlib
 import json
 import os
-import stat
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, replace
@@ -22,6 +21,7 @@ from claude_hub.models import AgentType, SessionKind, WorkspaceSessionRole
 from claude_hub.services.agent_stream.attachments import AgentStreamAttachmentStore
 from claude_hub.services.agent_stream.fork_seed import seed_sidecar_path
 from claude_hub.services.agent_stream.store import AgentStreamStore
+from claude_hub.services.local_storage import read_document, write_document
 from claude_hub.services.ttyd_manager import (
     TabCleanupPendingError,
     TabStateError,
@@ -80,12 +80,16 @@ async def retire_pending(subject: DirectChat, monkeypatch: pytest.MonkeyPatch) -
 
 
 def disk_state() -> dict[str, Any]:
-    return cast(dict[str, Any], json.loads(TM.STATE_FILE.read_text(encoding="utf-8")))
+    return cast(dict[str, Any], read_document(TM.STATE_FILE))
 
 
 @pytest.mark.asyncio
-async def test_legacy_load_is_read_only_and_new_writes_preserve_v2(subject: DirectChat) -> None:
+async def test_legacy_load_is_read_only_and_new_writes_preserve_v2(
+    subject: DirectChat, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     manager, process, *_ = subject
+    monkeypatch.setattr(TM, "STATE_FILE", tmp_path / "legacy" / "tabs.json")
+    TM.STATE_FILE.parent.mkdir()
     TM.STATE_FILE.write_text(json.dumps([process.to_dict()]))
     original = TM.STATE_FILE.read_bytes()
     loaded = TTYDManager()
@@ -110,35 +114,21 @@ async def test_commit_failure_and_ordinary_save_preserve_cleanup_obligation(
     manager._persist_state()
     call_count = 0
     target = 1 if phase == "retire" else 2
-    real_replace, real_fsync = os.replace, os.fsync
+    from claude_hub.services.terminal_runtime.local_io import _TabStateCommitError
 
-    def fail_replace(src: Any, dst: Any) -> None:
-        nonlocal call_count
-        if Path(dst) == TM.STATE_FILE:
-            call_count += 1
-            if call_count == target:
-                raise OSError("replace failed")
-        real_replace(src, dst)
+    real_write = TM._write_tabs_snapshot
 
-    def fail_directory_sync(fd: int) -> None:
+    def fail_commit(payload: dict[str, Any]) -> None:
         nonlocal call_count
-        directory_stat = os.stat(TM.STATE_FILE.parent)
-        actual = os.fstat(fd)
-        if stat.S_ISDIR(actual.st_mode) and (actual.st_dev, actual.st_ino) == (
-            directory_stat.st_dev,
-            directory_stat.st_ino,
-        ):
-            call_count += 1
-            if call_count == target:
-                raise OSError("directory sync failed")
-        real_fsync(fd)
+        call_count += 1
+        if call_count == target:
+            if after_replace:
+                real_write(payload)
+            raise _TabStateCommitError(OSError("commit failed"), replaced=after_replace)
+        real_write(payload)
 
     with monkeypatch.context() as patch:
-        patch.setattr(
-            os,
-            "fsync" if after_replace else "replace",
-            fail_directory_sync if after_replace else fail_replace,
-        )
+        patch.setattr(TM, "_write_tabs_snapshot", fail_commit)
         with pytest.raises(TabCleanupPendingError):
             await manager.delete_tab(process.tab_id)
     if phase == "retire" and not after_replace:
@@ -177,21 +167,19 @@ async def test_file_sync_failure_never_commits_retirement(
 ) -> None:
     manager, process, *_ = subject
     paths = await seed_artifacts(subject)
-    before = TM.STATE_FILE.read_bytes()
-    real_sync = os.fsync
+    before = read_document(TM.STATE_FILE)
+    from claude_hub.services.terminal_runtime import local_io
 
-    def fail_file_sync(fd: int) -> None:
-        if stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError("file sync failed")
-        real_sync(fd)
+    def fail_commit(*args: Any) -> None:
+        raise OSError("SQLite commit failed")
 
     with monkeypatch.context() as patch:
-        patch.setattr(os, "fsync", fail_file_sync)
+        patch.setattr(local_io, "write_document", fail_commit)
         with pytest.raises(TabCleanupPendingError, match="not committed"):
             await manager.delete_tab(process.tab_id)
     assert manager.processes[process.tab_id] is process
     assert not manager._pending_stream_cleanup
-    assert TM.STATE_FILE.read_bytes() == before
+    assert read_document(TM.STATE_FILE) == before
     assert all(path.exists() for path in paths)
 
 
@@ -214,9 +202,9 @@ async def test_pending_record_collision_never_touches_live_owner(
     assert await manager.retry_pending_stream_cleanup() == 0
     cleanup.assert_not_awaited()
     fence.assert_not_awaited()
-    before = TM.STATE_FILE.read_bytes()
+    before = read_document(TM.STATE_FILE)
     manager.rename_tab(process.tab_id, "still live")
-    assert TM.STATE_FILE.read_bytes() == before
+    assert read_document(TM.STATE_FILE) == before
     assert manager._pending_stream_cleanup[process.tab_id] == record
 
 
@@ -374,12 +362,12 @@ async def test_invalid_ledger_never_publishes_or_overwrites_state(
     payload["tabs"].append(
         TTYDProcess("valid-first", 23004, "Valid", agent_type=AgentType.TERMINAL).to_dict()
     )
-    TM.STATE_FILE.write_text(json.dumps(payload))
-    expected = TM.STATE_FILE.read_bytes()
+    write_document(TM.STATE_FILE, payload)
+    expected = read_document(TM.STATE_FILE)
     loaded = TTYDManager()
     assert loaded.processes == {}
     loaded._save_state()
-    assert TM.STATE_FILE.read_bytes() == expected
+    assert read_document(TM.STATE_FILE) == expected
     with pytest.raises(TabStateError):
         await loaded.retry_pending_stream_cleanup()
     with pytest.raises(TabStateError):
@@ -415,17 +403,16 @@ async def test_restart_reconfirms_loaded_obligation_before_destroying_artifacts(
 ) -> None:
     manager, process, *_ = subject
     paths = await seed_artifacts(subject)
-    tab_directory = TM.STATE_FILE.parent.stat()
-    real_sync = os.fsync
+    from claude_hub.services.terminal_runtime.local_io import _TabStateCommitError
 
-    def fail_tab_directory_sync(fd: int) -> None:
-        actual = os.fstat(fd)
-        if (actual.st_dev, actual.st_ino) == (tab_directory.st_dev, tab_directory.st_ino):
-            raise OSError("unconfirmed tab directory")
-        real_sync(fd)
+    real_write = TM._write_tabs_snapshot
+
+    def fail_confirmation(payload: dict[str, Any]) -> None:
+        real_write(payload)
+        raise _TabStateCommitError(OSError("unconfirmed commit"), replaced=True)
 
     with monkeypatch.context() as patch:
-        patch.setattr(os, "fsync", fail_tab_directory_sync)
+        patch.setattr(TM, "_write_tabs_snapshot", fail_confirmation)
         with pytest.raises(TabCleanupPendingError, match="unconfirmed"):
             await manager.delete_tab(process.tab_id)
         loaded = TTYDManager()
@@ -497,12 +484,12 @@ async def test_cleanup_authorization_precedes_retirement(subject: DirectChat) ->
     await seed_artifacts(subject)
     evidence = tailer.store.path.with_suffix(".maso-delivery.json")
     evidence.write_text(json.dumps({"uncertain": True}))
-    before = TM.STATE_FILE.read_bytes()
+    before = read_document(TM.STATE_FILE)
     with pytest.raises(RuntimeError, match="uncertain"):
         await manager.delete_tab(process.tab_id)
     assert manager.processes[process.tab_id] is process
     assert not manager._pending_stream_cleanup
-    assert TM.STATE_FILE.read_bytes() == before
+    assert read_document(TM.STATE_FILE) == before
     assert evidence.exists()
 
 
@@ -538,7 +525,7 @@ async def test_configured_runtime_home_alias_commits_and_acknowledges_cleanup(
     assert await manager.delete_tab(process.tab_id)
     assert manager._state_confirmed
     assert not manager._pending_stream_cleanup
-    assert json.loads((real_home / "tabs.json").read_text())["pending_stream_cleanup"] == []
+    assert read_document(real_home / "tabs.json")["pending_stream_cleanup"] == []
     assert all(not path.exists() for path in paths)
 
 
