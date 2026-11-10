@@ -115,7 +115,7 @@
           >
             <div class="channel-section__header">
               <span class="field-label">Current channels</span>
-              <span class="channel-section__count">{{ channelBindings.length }} / 8</span>
+              <span class="channel-section__count">{{ channelBindings.length }} / {{ MAX_BOT_CHANNELS }}</span>
             </div>
             <ul
               v-if="channelBindings.length"
@@ -130,13 +130,33 @@
                 data-testid="feishu-binding-channel-item"
               >
                 <span class="channel-list__source">{{ channelSourceLabel(item) }}</span>
-                <span class="channel-list__target">Chat <code>{{ item.tab_id }}</code></span>
+                <span class="channel-list__meta">
+                  <span class="channel-list__target">Chat <code>{{ item.tab_id }}</code></span>
+                  <button
+                    type="button"
+                    class="ch-btn ch-btn--sm ch-btn--danger channel-list__release"
+                    :aria-label="`Release ${channelSourceLabel(item)}`"
+                    :title="`Release ${channelSourceLabel(item)} from Chat ${item.tab_id}`"
+                    data-testid="feishu-binding-channel-release"
+                    :disabled="isMutating"
+                    @click="doReleaseChannel(item.pairing_id)"
+                  >
+                    Release
+                  </button>
+                </span>
               </li>
             </ul>
           </div>
           <div class="per-channel-group-bind">
             <p class="selection-hint">
               {{ groupPathHint }}
+            </p>
+            <p
+              v-if="channelCapReason"
+              class="selection-hint channel-cap-notice"
+              data-testid="feishu-binding-channel-cap-reason"
+            >
+              {{ channelCapReason }}
             </p>
             <p
               v-if="groupsError"
@@ -245,39 +265,39 @@
           >
             Replies stay inside the group topic.
           </p>
+          <template v-if="confirmDisconnect">
+            <div class="confirm-card">
+              <strong>Disconnect this Chat?</strong>
+              <p>Future Bot messages stop here. Existing source labels remain.</p>
+            </div>
+            <div class="panel-actions">
+              <button
+                type="button"
+                class="ch-btn ch-btn--danger"
+                :disabled="isMutating"
+                @click="doDisconnect"
+              >
+                Confirm disconnect
+              </button>
+              <button
+                type="button"
+                class="ch-btn"
+                :disabled="isMutating"
+                @click="confirmDisconnect = false"
+              >
+                Cancel
+              </button>
+            </div>
+          </template>
+          <button
+            v-else
+            type="button"
+            class="ch-btn ch-btn--danger disconnect-button"
+            @click="confirmDisconnect = true"
+          >
+            Disconnect Feishu
+          </button>
         </template>
-        <template v-if="confirmDisconnect">
-          <div class="confirm-card">
-            <strong>Disconnect this Chat?</strong>
-            <p>Future Bot messages stop here. Existing source labels remain.</p>
-          </div>
-          <div class="panel-actions">
-            <button
-              type="button"
-              class="ch-btn ch-btn--danger"
-              :disabled="isMutating"
-              @click="doDisconnect"
-            >
-              Confirm disconnect
-            </button>
-            <button
-              type="button"
-              class="ch-btn"
-              :disabled="isMutating"
-              @click="confirmDisconnect = false"
-            >
-              Cancel
-            </button>
-          </div>
-        </template>
-        <button
-          v-else
-          type="button"
-          class="ch-btn ch-btn--danger disconnect-button"
-          @click="confirmDisconnect = true"
-        >
-          Disconnect Feishu
-        </button>
       </template>
 
       <template v-else>
@@ -379,7 +399,7 @@
             >
               <div class="channel-section__header">
                 <span class="field-label">Current channels</span>
-                <span class="channel-section__count">{{ channelBindings.length }} / 8</span>
+                <span class="channel-section__count">{{ channelBindings.length }} / {{ MAX_BOT_CHANNELS }}</span>
               </div>
               <ul
                 v-if="channelBindings.length"
@@ -394,7 +414,20 @@
                   data-testid="feishu-binding-channel-item"
                 >
                   <span class="channel-list__source">{{ channelSourceLabel(item) }}</span>
-                  <span class="channel-list__target">Chat <code>{{ item.tab_id }}</code></span>
+                  <span class="channel-list__meta">
+                    <span class="channel-list__target">Chat <code>{{ item.tab_id }}</code></span>
+                    <button
+                      type="button"
+                      class="ch-btn ch-btn--sm ch-btn--danger channel-list__release"
+                      :aria-label="`Release ${channelSourceLabel(item)}`"
+                      :title="`Release ${channelSourceLabel(item)} from Chat ${item.tab_id}`"
+                      data-testid="feishu-binding-channel-release"
+                      :disabled="isMutating"
+                      @click="doReleaseChannel(item.pairing_id)"
+                    >
+                      Release
+                    </button>
+                  </span>
                 </li>
               </ul>
               <p
@@ -451,6 +484,13 @@
           <template v-else>
             <p class="selection-hint">
               {{ groupPathHint }}
+            </p>
+            <p
+              v-if="channelCapReason"
+              class="selection-hint channel-cap-notice"
+              data-testid="feishu-binding-channel-cap-reason"
+            >
+              {{ channelCapReason }}
             </p>
             <p
               v-if="groupsError"
@@ -547,7 +587,10 @@ import FeishuIdentityMark from '@/components/FeishuIdentityMark.vue'
 import { useFeishuBinding } from '@/composables/useFeishuBinding'
 import { trustedFeishuAvatarUrl } from '@/utils/feishuIdentity'
 import { writeClipboard } from '@/utils/clipboard'
-import { botBindings, botMode, type FeishuActiveBinding, type FeishuBotChat } from '@/utils/feishuBotConfig'
+import {
+  botBindings, botMode, MAX_BOT_CHANNELS,
+  type FeishuActiveBinding, type FeishuBotChat,
+} from '@/utils/feishuBotConfig'
 
 const props = defineProps<{ tabId: string }>()
 const root = ref<HTMLElement | null>(null)
@@ -560,10 +603,14 @@ const {
   bots, binding, bindings, mode, currentBot, selectedBotId, selectedBot, pendingCode, claim,
   confirmWord, error, needsLogin, isHydrated, isLoading, isMutating, viewState, statusText, groups,
   groupsLoaded, groupsLoading, groupsError, refresh, selectBot, generateCode, activate, bindGroup,
-  loadGroups, ensureGroups, disconnect, resume, pause,
+  loadGroups, ensureGroups, disconnect, releaseChannel, resume, pause,
 } = useFeishuBinding(toRef(props, 'tabId'))
 const isPerChannelMode = computed(() => mode.value === 'per_channel')
 const channelBindings = computed(() => bindings.value)
+const atChannelCap = computed(() => isPerChannelMode.value && channelBindings.value.length >= MAX_BOT_CHANNELS)
+const channelCapReason = computed(() => (atChannelCap.value
+  ? `This Bot has reached the ${MAX_BOT_CHANNELS}-channel limit. Release a channel before binding another group.`
+  : null))
 const activeAvatarUrl = computed(() => {
   if (viewState.value !== 'bound-current') return null
   return trustedFeishuAvatarUrl(currentBot.value?.feishu_avatar_url)
@@ -601,7 +648,7 @@ const boundIsTopic = computed(() => isGroupBinding.value && (boundGroup.value?.i
 const selectedBotReady = computed(() => {
   const bot = selectedBot.value ?? currentBot.value
   if (!bot || !bot.enabled || !bot.configured) return false
-  if (botMode(bot) === 'per_channel') return botBindings(bot).length < 8
+  if (botMode(bot) === 'per_channel') return botBindings(bot).length < MAX_BOT_CHANNELS
   return !bot.binding && botBindings(bot).length === 0
 })
 const groupPathHint = computed(() => {
@@ -658,6 +705,7 @@ function close() {
   confirmWord.value = ''
 }
 async function doDisconnect() { if (await disconnect()) confirmDisconnect.value = false }
+async function doReleaseChannel(pairingId: string) { await releaseChannel(pairingId) }
 async function copy(value: string, message: string) {
   copyError.value = null
   try {
@@ -914,8 +962,11 @@ watch([open, viewState, connectMode, selectedBotId, groupsLoaded, isPerChannelMo
   font-size: var(--ch-font-size-xs);
 }
 .channel-list__source { min-width: 0; overflow: hidden; color: var(--ch-color-text); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.channel-list__meta { display: inline-flex; align-items: center; gap: 8px; flex: 0 0 auto; }
 .channel-list__target { flex: 0 0 auto; color: var(--ch-color-text-muted); }
 .channel-list__target code { color: var(--ch-color-text-code); font-family: var(--ch-font-mono); }
+.channel-list__release { height: 24px; padding: 0 8px; font-size: var(--ch-font-size-xs); }
+.channel-cap-notice { color: var(--ch-color-warning); }
 .per-channel-group-bind { margin-bottom: 14px; }
 .confirm-card { border: 1px solid var(--ch-color-danger-border); background: var(--ch-color-danger-bg); }
 .confirm-card strong { display: block; margin-bottom: 3px; color: var(--ch-color-danger-text); font-size: var(--ch-font-size-sm); }

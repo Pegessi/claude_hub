@@ -684,7 +684,7 @@ async function saveMetadata() {
   const input = {
     name: editName.value.trim(),
     enabled: editEnabled.value,
-    mode: editMode.value,
+    ...(switchingMode ? { mode: editMode.value } : {}),
     expected_revision: revision,
   }
   return mutate(() => updateFeishuBot(botId, input), 'Bot details saved.', () => undefined, { switchingMode })

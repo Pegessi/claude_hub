@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import {
+  activeBinding, bot, changeSelect, chatList, clickNode, config,
+  findAllByTestId, findByTestId, groupChat, harness,
+  mountBindingPanel, mountSettings, pool, response, settleUi, textOf,
+} from './feishuBotUiTestHarness.mjs'
 
 const pane = readFileSync(new URL('../src/components/TerminalPane.vue', import.meta.url), 'utf8')
 const structuredPane = readFileSync(new URL('../src/features/chat/StructuredPane.vue', import.meta.url), 'utf8')
@@ -12,7 +17,6 @@ const binding = readFileSync(new URL('../src/composables/useFeishuBinding.ts', i
 const identity = readFileSync(new URL('../src/utils/feishuIdentity.ts', import.meta.url), 'utf8')
 const identityMark = readFileSync(new URL('../src/components/FeishuIdentityMark.vue', import.meta.url), 'utf8')
 const brandMark = readFileSync(new URL('../src/components/FeishuBrandMark.vue', import.meta.url), 'utf8')
-const settingsDialog = readFileSync(new URL('../src/features/feishu-bot/FeishuBotSettingsDialog.vue', import.meta.url), 'utf8')
 
 test('local direct Chat surface mounts one Feishu binding panel beside its session name', () => {
   assert.match(pane, /class="pane-chrome"[\s\S]*class="pane-session-name"[\s\S]*<FeishuBindingPanel/)
@@ -147,33 +151,186 @@ test('a group message badge appends a compact scope suffix and leaves p2p alone'
   assert.ok(eventValues.includes("threadId ? 'group topic' : 'group'"))
 })
 
-test('Bot settings dialog exposes keyboard-reachable serving mode options and disabled explanation', () => {
-  for (const marker of [
-    'data-testid="feishu-bot-mode-control"',
-    'data-testid="feishu-bot-mode-single"',
-    'data-testid="feishu-bot-mode-per-channel"',
-    'data-testid="feishu-bot-mode-disabled-reason"',
-    'This Bot serves one Chat',
-    'Everyone who talks to this Bot gets their own Chat',
-    ':aria-pressed="editMode === \'single\'"',
-    ':aria-pressed="editMode === \'per_channel\'"',
-    ':disabled="busy || modeSwitchDisabled"',
-  ]) {
-    assert.ok(settingsDialog.includes(marker), marker)
-  }
+test('mounted Bot settings dialog disables mode switching with an inline reason while channels exist', async t => {
+  const h = harness(t)
+  const bound = bot('b', {
+    mode: 'single',
+    bindings: [activeBinding('tab-active', { bot_id: 'b', app_id: 'app-b' })],
+  })
+  const initial = pool(1, [bot('a'), bound])
+  h.store.applyPool(initial)
+  h.setServer(initial)
+  const state = await mountSettings(t, h)
+
+  state.select(h.store.botById('a'))
+  await settleUi()
+  const singleButton = findByTestId(state.$root, 'feishu-bot-mode-single')
+  const perChannelButton = findByTestId(state.$root, 'feishu-bot-mode-per-channel')
+  assert.ok(singleButton && perChannelButton)
+  assert.equal(singleButton.props.disabled, false)
+  assert.equal(perChannelButton.props.disabled, false)
+  assert.equal(singleButton.props['aria-pressed'], true)
+  assert.equal(perChannelButton.props['aria-pressed'], false)
+  assert.match(textOf(singleButton), /This Bot serves one Chat/)
+  assert.match(textOf(perChannelButton), /Everyone who talks to this Bot gets their own Chat/)
+  assert.equal(findByTestId(state.$root, 'feishu-bot-mode-disabled-reason'), null)
+
+  await clickNode(perChannelButton)
+  assert.equal(state.editMode, 'per_channel')
+  assert.equal(perChannelButton.props['aria-pressed'], true)
+
+  state.select(h.store.botById('b'))
+  await settleUi()
+  const disabledSingle = findByTestId(state.$root, 'feishu-bot-mode-single')
+  const disabledPerChannel = findByTestId(state.$root, 'feishu-bot-mode-per-channel')
+  const reasonNode = findByTestId(state.$root, 'feishu-bot-mode-disabled-reason')
+  assert.equal(disabledSingle.props.disabled, true)
+  assert.equal(disabledPerChannel.props.disabled, true)
+  assert.ok(reasonNode, 'disabled reason must be rendered in the dialog')
+  assert.match(textOf(reasonNode), /Switching mode requires no active channels.*Disconnect/i)
 })
 
-test('per_channel binding panel renders the compact channel list and omits tab_id when binding a group', () => {
-  for (const marker of [
-    'data-testid="feishu-binding-channel-list"',
-    'data-testid="feishu-binding-channel-item"',
-    'channelSourceLabel(item)',
-    'Chat <code>{{ item.tab_id }}</code>',
-    'DM · ',
-    'Group · ',
-    'Bind this group',
-  ]) {
-    assert.ok(panel.includes(marker), marker)
-  }
-  assert.match(binding, /isPerChannel\s*\?\s*\{\s*chat_id:\s*chatId,\s*expected_revision:\s*bot\.revision\s*\}\s*:\s*\{\s*chat_id:\s*chatId,\s*tab_id:\s*tabId\.value,\s*expected_revision:\s*bot\.revision\s*\}/)
+test('mounted binding panel renders per_channel rows from bindings[] without a phantom projection row and releases one row by pairing_id', async t => {
+  const dmBinding = activeBinding('tab-dm', {
+    pairing_id: 'pair-dm', chat_type: 'p2p', chat_name: 'ou_sender_1',
+  })
+  const groupBinding = activeBinding('tab-1', {
+    pairing_id: 'pair-group', chat_type: 'group', chat_id: 'oc-group-1', chat_name: 'Release room',
+  })
+  const h = harness(t)
+  const snapshot = pool(2, [
+    bot('a', {
+      revision: 2,
+      mode: 'per_channel',
+      // Both `binding` (first-element projection) and `bindings` are present;
+      // the panel must render two rows, not three.
+      binding: dmBinding,
+      bindings: [dmBinding, groupBinding],
+    }),
+  ])
+  h.store.applyPool(snapshot)
+  h.setServer(snapshot)
+  h.setTransport(async (url, init = {}) => {
+    if (url.endsWith('/chats')) return response(chatList([groupChat('oc-group-1', { name: 'Release room' })], 2))
+    if (init.method === 'DELETE' && url.endsWith('/a/pairing')) {
+      const next = pool(3, [
+        bot('a', {
+          revision: 3,
+          mode: 'per_channel',
+          binding: groupBinding,
+          bindings: [groupBinding],
+        }),
+      ])
+      h.setServer(next)
+      return response(next)
+    }
+    return response(h.server())
+  })
+
+  const mounted = await mountBindingPanel(t, h, 'tab-1')
+  await clickNode(findByTestId(mounted.root, 'feishu-binding-trigger'))
+
+  assert.equal(findByTestId(mounted.root, 'feishu-binding-target'), null, 'single-target row is replaced in per_channel mode')
+  const rows = findAllByTestId(mounted.root, 'feishu-binding-channel-item')
+  assert.equal(rows.length, 2, 'renders exact bindings[] items with no duplicate from binding projection')
+  assert.match(textOf(rows[0]), /DM · ou_sender_1/)
+  assert.match(textOf(rows[0]), /Chat\s*tab-dm/)
+  assert.match(textOf(rows[1]), /Group · Release room/)
+  assert.match(textOf(rows[1]), /Chat\s*tab-1/)
+
+  const releaseButtons = findAllByTestId(mounted.root, 'feishu-binding-channel-release')
+  assert.equal(releaseButtons.length, 2)
+  assert.equal(releaseButtons[0].props['aria-label'], 'Release DM · ou_sender_1')
+  assert.equal(releaseButtons[1].props['aria-label'], 'Release Group · Release room')
+  assert.equal(
+    textOf(findByTestId(mounted.root, 'feishu-binding-panel')).includes('Disconnect Feishu'),
+    false,
+    'bulk Disconnect Feishu is hidden in per_channel mode in favour of per-row release',
+  )
+
+  await clickNode(releaseButtons[0])
+  const deleteCall = h.calls.find(call => call.init.method === 'DELETE' && call.url.endsWith('/a/pairing'))
+  assert.ok(deleteCall, 'clicking per-row Release must send DELETE /pairing')
+  assert.deepEqual(JSON.parse(deleteCall.init.body), {
+    expected_revision: 2,
+    pairing_id: 'pair-dm',
+  })
+  const remainingRows = findAllByTestId(mounted.root, 'feishu-binding-channel-item')
+  assert.equal(remainingRows.length, 1)
+  assert.match(textOf(remainingRows[0]), /Group · Release room/)
+})
+
+test('mounted binding panel omits tab_id when binding a group in per_channel mode, sends tab_id in single mode, and explains the channel cap', async t => {
+  const h = harness(t)
+  const dmBinding = activeBinding('tab-dm', {
+    pairing_id: 'pair-dm', chat_type: 'p2p', chat_name: 'ou_sender_1',
+  })
+  const initial = pool(2, [
+    bot('a', { revision: 2, mode: 'per_channel', bindings: [dmBinding] }),
+    bot('b', { revision: 4, mode: 'single', bindings: [] }),
+  ])
+  h.store.applyPool(initial)
+  h.setServer(initial)
+
+  h.setTransport(async (url, init = {}) => {
+    if (url.endsWith('/chats')) {
+      return response(chatList([groupChat('oc-group', { name: 'Design group' })], 2))
+    }
+    if (init.method === 'POST' && url.endsWith('/bindings/group')) {
+      return response(h.server())
+    }
+    return response(h.server())
+  })
+
+  const mounted = await mountBindingPanel(t, h, 'tab-1')
+  await clickNode(findByTestId(mounted.root, 'feishu-binding-trigger'))
+
+  // per_channel Bot 'a' is selected on unbound tab-1; groups auto-load when opened.
+  const groupSelect = findByTestId(mounted.root, 'feishu-binding-group-select')
+  assert.ok(groupSelect, 'group picker is rendered directly in per_channel mode')
+  await changeSelect(groupSelect, 'oc-group')
+  const bindButton = findByTestId(mounted.root, 'feishu-binding-bind-group')
+  assert.equal(bindButton.props.disabled, false)
+  await clickNode(bindButton)
+
+  const groupCalls = h.calls.filter(call => call.init.method === 'POST' && call.url.endsWith('/bindings/group'))
+  assert.equal(groupCalls.length, 1)
+  assert.equal(groupCalls[0].url, '/api/feishu/bot/bots/a/bindings/group')
+  const perChannelPayload = JSON.parse(groupCalls[0].init.body)
+  assert.deepEqual(perChannelPayload, { chat_id: 'oc-group', expected_revision: 2 })
+  assert.equal('tab_id' in perChannelPayload, false)
+
+  // At MAX_BOT_CHANNELS (8), Bind this group is disabled and the panel explains why.
+  const fullBindings = Array.from({ length: config.MAX_BOT_CHANNELS }, (_, idx) =>
+    activeBinding(`tab-ch-${idx + 1}`, { pairing_id: `pair-${idx + 1}`, chat_name: `ou_${idx + 1}` }),
+  )
+  const capped = pool(3, [
+    bot('a', { revision: 3, mode: 'per_channel', bindings: fullBindings }),
+    bot('b', { revision: 4, mode: 'single', bindings: [] }),
+  ])
+  h.store.applyPool(capped)
+  h.setServer(capped)
+  await settleUi()
+  const capReason = findByTestId(mounted.root, 'feishu-binding-channel-cap-reason')
+  assert.ok(capReason, 'channel cap reason must be shown when at MAX_BOT_CHANNELS')
+  assert.match(textOf(capReason), new RegExp(`${config.MAX_BOT_CHANNELS}-channel limit`))
+  await changeSelect(findByTestId(mounted.root, 'feishu-binding-group-select'), 'oc-group')
+  assert.equal(findByTestId(mounted.root, 'feishu-binding-bind-group').props.disabled, true)
+
+  // Switch to single-mode Bot 'b', open the Group chat path, and bind the group: tab_id is required.
+  const botSelect = findByTestId(mounted.root, 'feishu-binding-panel').children
+    .flatMap(node => node.children ?? [])
+    .find(node => node.tag === 'select' && node.props['aria-label'] === 'Bot')
+  await changeSelect(botSelect, 'b')
+  await clickNode(findByTestId(mounted.root, 'feishu-binding-path-group'))
+  await changeSelect(findByTestId(mounted.root, 'feishu-binding-group-select'), 'oc-group')
+  await clickNode(findByTestId(mounted.root, 'feishu-binding-bind-group'))
+
+  const singleCalls = h.calls.filter(call => call.init.method === 'POST' && call.url.endsWith('/b/bindings/group'))
+  assert.equal(singleCalls.length, 1)
+  assert.deepEqual(JSON.parse(singleCalls[0].init.body), {
+    chat_id: 'oc-group',
+    tab_id: 'tab-1',
+    expected_revision: 4,
+  })
 })
