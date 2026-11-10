@@ -128,7 +128,9 @@ test('the terminal status list is one Needs-you inbox, not two count pills', () 
   assert.doesNotMatch(tabBar, /AgentStatusFloatingPanel/)
   assert.match(tabBar, /<AgentInboxPanel \/>/)
   // One entry, and its badge counts only rows that need the user.
-  assert.match(agentInboxPanel, /class="inbox-trigger-label">Inbox/)
+  // The entry names the demand, not a mailbox: "Inbox" is the composer's
+  // message tray, a different surface entirely.
+  assert.match(agentInboxPanel, /class="inbox-trigger-label">Needs you/)
   assert.match(agentInboxPanel, /v-if="needsCount > 0"/)
   assert.match(agentInboxPanel, /needsYouCount\(/)
   // Manual versus managed is a filter inside the panel, not two triggers.

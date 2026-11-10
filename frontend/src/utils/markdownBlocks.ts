@@ -1,6 +1,6 @@
 import { Marked, type Token, type Tokens } from 'marked'
 import DOMPurify from 'dompurify'
-import { highlightVersion, renderCodeBlockHtml } from '@/utils/codeHighlight'
+import { highlightVersion, languageLabel, renderCodeBlockHtml } from '@/utils/codeHighlight'
 import { resolveLocalImageUrl, rewriteQuotedImageSrcs } from '@/utils/quotedImage'
 import { mathExtension, mathVersion } from '@/utils/mathRendering'
 import { attachmentPreviewUrl, rewriteMarkdownLinks } from '@/utils/markdownPreview'
@@ -103,6 +103,20 @@ function wrapImagePreviews(html: string): string {
   return template.innerHTML
 }
 
+const LANGUAGE_CLASS_PATTERN = /\blanguage-([\w#+.-]+)/
+
+/**
+ * Header chip text for one code block, from the ``<code>`` class attribute.
+ *
+ * The fence's info string is written for the highlighter (``py``, ``ts``), not
+ * for a reader, so the chip shows the language under the name a reader
+ * recognises. A fence without an info string names no language: it says
+ * ``Code`` rather than claiming one.
+ */
+export function codeChipLabel(codeClassName: string): string {
+  return languageLabel(codeClassName.match(LANGUAGE_CLASS_PATTERN)?.[1] || '') || 'Code'
+}
+
 /** Add keyboard-accessible chrome after sanitization, without changing source. */
 function decorateRichBlocks(html: string): string {
   if (typeof document === 'undefined' || !/<(?:pre|table)[\s>]/i.test(html)) return html
@@ -116,7 +130,8 @@ function decorateRichBlocks(html: string): string {
     const header = document.createElement('div')
     header.className = 'markdown-code-header'
     const language = document.createElement('span')
-    language.textContent = code.className.match(/\blanguage-([\w#+.-]+)/)?.[1] || 'Code'
+    language.className = 'markdown-code-language'
+    language.textContent = codeChipLabel(code.className)
     const copy = document.createElement('button')
     copy.type = 'button'
     copy.dataset.copyCode = '1'
@@ -124,8 +139,14 @@ function decorateRichBlocks(html: string): string {
     copy.setAttribute('aria-label', 'Copy code')
     copy.setAttribute('aria-live', 'polite')
     header.append(language, copy)
+    // A long line scrolls out of view silently, which reads the same as a short
+    // line. The hint is a decoration only: MarkdownContent marks the block when
+    // it really overflows, and the pre keeps the content and its scrolling.
+    const scrollHint = document.createElement('div')
+    scrollHint.className = 'markdown-code-scroll-hint'
+    scrollHint.setAttribute('aria-hidden', 'true')
     pre.replaceWith(container)
-    container.append(header, pre)
+    container.append(header, pre, scrollHint)
   })
   template.content.querySelectorAll('table').forEach((table) => {
     if (table.closest('.markdown-table-scroll')) return

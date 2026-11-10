@@ -506,3 +506,48 @@ test('a turn that already has parts is never re-read behind the reader', async t
     'the live stream owns a turn it is already reducing',
   )
 })
+
+test('a turn whose stream dropped earns exactly one repair read when it stops', async t => {
+  const h = await mount(t)
+  const stream = h.state.streams[0]
+  const event = (sequence, type, payload = {}) => ({
+    stream_sequence: sequence, type, payload, session_id: 's', tab_id: 'one',
+    turn_id: 'gapped', agent_type: 'claude', created_at: '2026-10-16T10:00:00Z', redacted: false,
+  })
+  const reads = () => h.state.calls.filter(call => call[0] === 'loadHistoryDetail')
+  stream.events.value = [
+    event(1, 'turn_started', { summary: 'streaming here' }),
+    event(2, 'tool_call_started', { tool_call_id: 'c1', name: 'Bash', args: { command: 'echo hi' } }),
+  ]
+  await flush()
+  stream.historyDetails.value = {
+    gapped: {
+      descriptor: { turn_id: 'gapped', first_sequence: 1, last_sequence: 2, event_count: 2 },
+      status: 'idle',
+    },
+  }
+  await flush()
+  assert.deepEqual(reads(), [], 'a turn the live stream is reducing is left alone')
+
+  // The connection drops while this turn is live: whatever the backend accepted
+  // in the gap never reached the parts.
+  stream.connectionState.value = 'reconciling'
+  await flush()
+  stream.connectionState.value = 'live'
+  await flush()
+  assert.deepEqual(reads(), [], 'a dropped stream alone does not trigger a read')
+
+  stream.events.value = [...stream.events.value, event(3, 'turn_completed', { status: 'completed' })]
+  await flush()
+  assert.deepEqual(reads(), [['loadHistoryDetail', 'gapped']], 'its completion earns the repair read')
+
+  // And no more: the descriptor keeps changing while history is written.
+  stream.historyDetails.value = {
+    gapped: {
+      descriptor: { turn_id: 'gapped', first_sequence: 1, last_sequence: 900, event_count: 900 },
+      status: 'idle',
+    },
+  }
+  await flush()
+  assert.equal(reads().length, 1, 'one repair read, not a polling loop')
+})

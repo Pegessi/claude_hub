@@ -1,3 +1,4 @@
+<!-- eslint-disable vue/no-v-html -->
 <template>
   <div
     class="conversation-row conversation-row--assistant conversation-row--activity"
@@ -124,6 +125,12 @@
                 >
                   <span aria-hidden="true">▸</span>
                   <span class="activity-diff-file-name">{{ line.file || line.text }}</span>
+                  <!-- The chip names the grammar the rows below really use; an
+                       unknown file renders nothing rather than a guessed label. -->
+                  <span
+                    v-if="diffFileLabel(line)"
+                    class="activity-diff-file-lang"
+                  >{{ diffFileLabel(line) }}</span>
                 </div>
                 <div
                   v-else
@@ -149,7 +156,13 @@
                   />
                   <span class="activity-diff-num">{{ reviewRowLine(line) ?? '' }}</span>
                   <span class="activity-diff-sign">{{ line.sign === '@' || line.sign === ' ' ? '' : line.sign }}</span>
-                  <span class="activity-diff-text">{{ line.text }}</span>
+                  <!-- A diff row is tool output: `diffRowHtml` returns escaped text
+                       unless the row is highlighted, and highlight.js only emits
+                       `<span class="hljs-…">`, so this cannot carry markup. -->
+                  <span
+                    class="activity-diff-text"
+                    v-html="diffRowHtml(activity.diff, line)"
+                  />
                 </div>
                 <div
                   v-for="comment in commentsFor(tool, index)"
@@ -270,10 +283,11 @@ import { toolGroupNames, toolStatusLabel } from '@/utils/toolPresentation'
 import { ACTIVITY_ICONS, describeToolActivity, toolGroupSummary, type ToolActivity, type ToolDiffLine, type ToolGroupSummary } from '@/utils/toolActivity'
 import { toolGroupStatus } from '@/features/chat/presentation/chatTurnPresentation'
 import { reviewCommentInRows, reviewLocation, reviewRangeLines, reviewRangeRows, reviewRowLine, reviewRowTapOpensEditor, type ReviewAnchor, type ReviewComment } from '@/features/chat/review/reviewComments'
+import { ensureHighlighter, highlightLine, highlightReady, highlightVersion, isLanguageRegistered, languageForPath, languageLabel } from '@/utils/codeHighlight'
 import ChatHubSubagentLink from './ChatHubSubagentLink.vue'
 import type { TimelineTool, TimelineTurn } from '../timeline/types'
 import type { TimelinePart } from '../timeline/types'
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch, watchEffect } from 'vue'
 const { expandedToolGroups, onToolGroupToggle, collapseDetails } = requireChatOwner(chatTimelineKey)
 const { comments, addComment, reanchorComment, removeComment, setAnchorStale, focusTarget } = requireChatOwner(chatReviewKey)
 const props = defineProps<{
@@ -282,6 +296,26 @@ const props = defineProps<{
 }>()
 
 const DIFF_CLASS: Record<ToolDiffLine['sign'], string> = { '+': 'add', '-': 'del', ' ': 'ctx', '@': 'hunk' }
+
+/** Past this many rows a diff stops being something a reader scans line by line,
+ *  so the spans cost more than they read for and the card keeps plain text (the
+ *  +/- tint and the sign column still carry the change). The diff builder caps a
+ *  diff at 400 rows, so this ceiling is the full-size card, not a hypothetical. */
+const DIFF_HIGHLIGHT_ROW_LIMIT = 400
+
+/** Highlighted HTML per ``language\0text``. The timeline re-renders this card on
+ *  every visible revision, so a row would otherwise be re-highlighted each time
+ *  even though its text and file have not moved. */
+const diffHighlightCache = new Map<string, string>()
+/** The ``highlightVersion`` the cache was filled at; a new highlighter chunk
+ *  invalidates every entry once. */
+let diffHighlightVersion = 0
+
+/** Bumped when the document theme flips. Token colours are CSS variables and
+ *  repaint on their own; the bump makes the rows re-render through the cache so a
+ *  card can never keep markup that was built for the palette it is no longer in. */
+const themeEpoch = ref(0)
+let themeObserver: MutationObserver | null = null
 
 /** One comment per row keeps the diff readable; the row is its identity. */
 const commentIndex = computed(() => {
@@ -313,9 +347,20 @@ onMounted(() => {
   coarsePointer.value = typeof window !== 'undefined' &&
     typeof window.matchMedia === 'function' &&
     window.matchMedia('(pointer: coarse)').matches
+  // The theme lives on the document element (``dataset.theme``), the same
+  // channel MarkdownContent watches; a card mounted before the flip still has to
+  // repaint its rows afterwards.
+  if (typeof MutationObserver === 'function' && typeof document !== 'undefined') {
+    themeObserver = new MutationObserver(() => { themeEpoch.value++ })
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
+  }
 })
 
-onUnmounted(() => clearTimeout(focusTimer))
+onUnmounted(() => {
+  clearTimeout(focusTimer)
+  themeObserver?.disconnect()
+  themeObserver = null
+})
 
 // The tray asks for a row by anchor; a folded card mounts only after the tray
 // expanded it, so the row is measured on the next tick.
@@ -376,6 +421,62 @@ function rowLocation(line: ToolDiffLine): string {
 function commentLabel(line: ToolDiffLine): string {
   const where = rowLocation(line)
   return where ? `Add a review comment at ${where}` : 'Add a review comment on this line'
+}
+
+/** Read the highlighter's reactive state. Anything that renders a token or a
+ *  language name has to depend on it, so rows painted before the chunk landed
+ *  are repainted with real highlighting instead of staying flat. */
+function trackHighlighter(): void {
+  void highlightReady.value
+  void highlightVersion.value
+  void themeEpoch.value
+}
+
+/** The language this row's code really is highlighted as, or ``''`` for
+ *  "plain text".
+ *
+ *  A row is one line lifted out of a file, so the file name is the only hint;
+ *  hunk and file-header rows are structure rather than code, and an extension
+ *  the bundled highlighter has no grammar for (``notes.log``) stays plain —
+ *  painting it with a neighbouring grammar would be a guess. */
+function diffRowLanguage(line: ToolDiffLine): string {
+  trackHighlighter()
+  if (line.sign === '@' || !line.file) return ''
+  const lang = languageForPath(line.file)
+  return lang && isLanguageRegistered(lang) ? lang : ''
+}
+
+/** The chip shown next to a file name: the grammar those rows are highlighted
+ *  as, and nothing at all when there is none. */
+function diffFileLabel(line: ToolDiffLine): string {
+  trackHighlighter()
+  const lang = languageForPath(line.file || line.text)
+  return lang && isLanguageRegistered(lang) ? languageLabel(lang) : ''
+}
+
+/** HTML for one row's code. Always escaped: ``highlightLine`` falls back to
+ *  escaped text when the chunk has not loaded or the language is unknown, and
+ *  highlight.js only ever emits ``<span class="hljs-…">``, so this is the one
+ *  shape of HTML the card may bind with ``v-html`` (the row text came from tool
+ *  arguments).
+ *
+ *  Highlighted HTML is memoised per (language, text): the card re-renders on
+ *  every visible revision, and a 400-row diff must not re-tokenise itself each
+ *  time. */
+function diffRowHtml(diff: readonly ToolDiffLine[] | undefined, line: ToolDiffLine): string {
+  if (!diff || diff.length > DIFF_HIGHLIGHT_ROW_LIMIT) return highlightLine(line.text, '')
+  const lang = diffRowLanguage(line)
+  if (!lang) return highlightLine(line.text, '')
+  if (diffHighlightVersion !== highlightVersion.value) {
+    diffHighlightCache.clear()
+    diffHighlightVersion = highlightVersion.value
+  }
+  const key = `${lang}\u0000${line.text}`
+  const cached = diffHighlightCache.get(key)
+  if (cached !== undefined) return cached
+  const html = highlightLine(line.text, lang)
+  diffHighlightCache.set(key, html)
+  return html
 }
 
 function commentsFor(tool: TimelineTool, row: number): ReviewComment[] {
@@ -508,6 +609,15 @@ function expandedItems(): { tool: TimelineTool, activity: ToolActivity }[] {
   if (!expandedToolGroups.get(props.turn.key)?.has(props.part.key)) return []
   return props.part.tools.map(tool => ({ tool, activity: describeToolActivity(tool) }))
 }
+
+// A card that shows code asks for the highlighting chunk — lazily, so a diff card
+// never pulls it into the first-load bundle. The turn's revision is read too:
+// a tool that is still running gains its diff after the card mounted, and the
+// chunk must be requested then as well, not only when the card first opened.
+watchEffect(() => {
+  void props.turn.renderRevision
+  if (expandedItems().some(item => item.activity.diff)) ensureHighlighter().catch(() => {})
+})
 </script>
 
 <style scoped>
@@ -907,6 +1017,20 @@ function expandedItems(): { tool: TimelineTool, activity: ToolActivity }[] {
   white-space: nowrap;
 }
 
+/* Which grammar the rows below are highlighted as. It never wraps and never
+   takes space from the path, which truncates instead. */
+.activity-diff-file-lang {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: 999px;
+  color: var(--ch-color-text-subtle);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
 .activity-diff-line {
   display: flex;
   align-items: center;
@@ -1106,6 +1230,59 @@ function expandedItems(): { tool: TimelineTool, activity: ToolActivity }[] {
   padding-bottom: 3px;
   background: var(--ch-color-surface-soft);
   color: var(--ch-color-text-subtle);
+}
+
+/* ---- Token colours inside a diff row ----
+ * The row keeps the +/- tint on its background and the sign gutter; tokens take
+ * the shared code palette (the same variables the markdown blocks use), so a
+ * Python diff reads as Python while still showing which side of the change each
+ * row is on. ``:deep`` because the spans come from highlight.js via ``v-html``. */
+.activity-diff-text :deep(.hljs-keyword),
+.activity-diff-text :deep(.hljs-selector-tag),
+.activity-diff-text :deep(.hljs-built_in),
+.activity-diff-text :deep(.hljs-name),
+.activity-diff-text :deep(.hljs-tag) {
+  color: var(--ch-code-keyword);
+}
+
+.activity-diff-text :deep(.hljs-string),
+.activity-diff-text :deep(.hljs-regexp),
+.activity-diff-text :deep(.hljs-code),
+.activity-diff-text :deep(.hljs-template-variable) {
+  color: var(--ch-code-string);
+}
+
+.activity-diff-text :deep(.hljs-title),
+.activity-diff-text :deep(.hljs-section) {
+  color: var(--ch-code-function);
+}
+
+.activity-diff-text :deep(.hljs-number),
+.activity-diff-text :deep(.hljs-literal),
+.activity-diff-text :deep(.hljs-symbol),
+.activity-diff-text :deep(.hljs-bullet) {
+  color: var(--ch-code-number);
+}
+
+.activity-diff-text :deep(.hljs-comment),
+.activity-diff-text :deep(.hljs-quote),
+.activity-diff-text :deep(.hljs-link) {
+  color: var(--ch-code-comment);
+}
+
+.activity-diff-text :deep(.hljs-type),
+.activity-diff-text :deep(.hljs-class .hljs-title) {
+  color: var(--ch-code-builtin);
+}
+
+.activity-diff-text :deep(.hljs-attr),
+.activity-diff-text :deep(.hljs-attribute),
+.activity-diff-text :deep(.hljs-variable) {
+  color: var(--ch-code-attr);
+}
+
+.activity-diff-text :deep(.hljs-meta) {
+  color: var(--ch-code-meta);
 }
 
 .tool-block {

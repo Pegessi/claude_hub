@@ -248,7 +248,7 @@ async def main(browser_run: BrowserRun) -> None:
             # The badge counts needs-you rows only: one unread turn plus one
             # blocked question; the streaming turn must not inflate it.
             await expect(trigger.locator(".inbox-trigger-badge")).to_have_text("2")
-            await expect(trigger.locator(".inbox-trigger-label")).to_have_text("Inbox")
+            await expect(trigger.locator(".inbox-trigger-label")).to_have_text("Needs you")
             await shot("00-trigger.png")
 
             await trigger.click()
