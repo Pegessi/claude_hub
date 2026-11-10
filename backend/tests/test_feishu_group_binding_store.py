@@ -17,6 +17,7 @@ from claude_hub.services.feishu_bot_pool import (
     FeishuChatOccupied,
     OwnerIdentity,
 )
+from claude_hub.services.local_storage import read_document
 
 OWNER = OwnerIdentity(open_id="local", email="local@localhost", kind=OWNER_KIND_LOCAL)
 OTHER = OwnerIdentity(open_id="ou-other", email="other@example.test", kind=OWNER_KIND_LOCAL)
@@ -60,7 +61,7 @@ def test_group_binding_is_persisted_as_a_group(pool: FeishuBotPoolStore) -> None
     assert entry.binding is not None
     assert entry.binding.pairing_id == binding.pairing_id
     # An in-memory snapshot must survive its own serialization.
-    raw = json.loads(pool.path.read_text())
+    raw = read_document(pool.path)
     stored_list = raw["bots"][bot_id]["bindings"]
     assert len(stored_list) == 1
     stored = stored_list[0]

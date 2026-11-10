@@ -23,7 +23,6 @@ from claude_hub.services.bot_pool.common import (
     OWNER_KIND_LOCAL,
     OWNER_KIND_OAUTH,
     FeishuBotModeSwitchBlocked,
-    FeishuBotOccupied,
     FeishuChatOccupied,
     FeishuPoolFull,
     OwnerIdentity,
@@ -39,6 +38,7 @@ from claude_hub.services.feishu_bot import (
     FeishuMessageDedupStore,
 )
 from claude_hub.services.feishu_bot_pool import FeishuBotPoolStore
+from claude_hub.services.local_storage import read_document
 
 OWNER = OwnerIdentity(open_id="ou-owner", email="owner@example.test", kind=OWNER_KIND_OAUTH)
 LOCAL = OwnerIdentity(open_id="local", email="local@localhost", kind=OWNER_KIND_LOCAL)
@@ -333,7 +333,7 @@ def test_v3_single_binding_migrates_to_v4_bindings_list_and_tolerates_missing_ke
 
     # Writing back commits v4 format with `bindings` and no `binding` key.
     store.update_bot("bot-bare", expected_revision=1, name="Bare Renamed", environ={})
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = read_document(path)
     assert persisted["version"] == 4
     assert "binding" not in persisted["bots"]["bot-v3"]
     assert len(persisted["bots"]["bot-v3"]["bindings"]) == 1
