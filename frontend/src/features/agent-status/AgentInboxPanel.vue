@@ -13,11 +13,10 @@
       :title="isMobile ? undefined : triggerTitle"
       @click="toggle"
     >
-      <!-- Compact: a tray glyph instead of the bare dot, so the entry reads as
-           a control rather than a status light. Amber keeps the Hub's one
+      <!-- The tray glyph is the entry's mark at every width: a bare dot read as
+           a status light, not as a control. Amber keeps the Hub's one
            "waiting on you" accent. -->
       <svg
-        v-if="isMobile"
         class="inbox-trigger-icon"
         viewBox="0 0 16 16"
         aria-hidden="true"
@@ -44,13 +43,9 @@
           stroke-linecap="round"
         />
       </svg>
-      <span
-        v-else
-        class="inbox-trigger-dot"
-      />
       <!-- Phone: the label costs a third of the top bar and the badge already
-           carries the count, so the entry shrinks to its dot and count. A mouse
-           on a narrow window still gets the name on hover. -->
+           carries the count, so the entry shrinks to its glyph and count. A
+           mouse on a narrow window still gets the name on hover. -->
       <span
         v-if="!isMobile"
         class="inbox-trigger-label"
@@ -362,19 +357,6 @@ onUnmounted(() => {
   outline: none;
   box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
   border-color: var(--ch-color-accent);
-}
-
-.inbox-trigger-dot {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: var(--ch-color-text-muted);
-}
-
-/* Amber is the one accent the Hub reserves for "live"/"waiting on you". */
-.inbox-trigger[data-needs='true'] .inbox-trigger-dot {
-  background: var(--ch-color-warning);
 }
 
 .inbox-trigger-label {

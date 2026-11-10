@@ -9,11 +9,13 @@
 
 ### feat(ui): the needs-you entry becomes an icon on a phone
 
-- At phone width the entry drops its label for an amber tray glyph and the count
-  badge — 55px instead of 114px, which is a third of the top bar handed back to
-  the tab strip. The name survives as `aria-label` ("Needs you, 2 waiting") and
-  as a hover tip for a narrow window that does have a pointer. Desktop keeps the
-  labelled pill for now.
+- Every width now marks the entry with the same amber tray glyph: a bare dot
+  read as a status light rather than a control, and the two widths no longer
+  speak two visual languages.
+- At phone width the label is dropped for that glyph and the count badge — 55px
+  instead of 114px, which is a third of the top bar handed back to the tab
+  strip. The name survives as `aria-label` ("Needs you, 2 waiting") and as a
+  hover tip for a narrow window that does have a pointer.
 
 ### feat(ui): language-aware code display
 
