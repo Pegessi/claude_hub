@@ -327,6 +327,15 @@ async def main(browser_run: BrowserRun) -> None:
             assert await trigger.get_attribute("aria-label") == "Needs you, 2 waiting"
             compact = await trigger.bounding_box()
             assert compact and compact["width"] <= 60, f"compact entry is {compact}"
+            # Phone toolbar convention: the ⋯ catch-all keeps the far-right slot
+            # and the needs-you entry sits next to the code, where it is found
+            # without hunting for it.
+            inbox_box = await page.locator(".agent-inbox").first.bounding_box()
+            menu_box = await page.locator(".mobile-app-menu").first.bounding_box()
+            assert inbox_box and menu_box, "both trailing entries are laid out"
+            assert inbox_box["x"] < menu_box["x"], (
+                f"needs-you must precede the app menu: inbox x={inbox_box['x']} menu x={menu_box['x']}"
+            )
             await trigger.hover()
             tip = trigger.locator(".inbox-trigger-tip")
             await expect(tip).to_be_visible()
