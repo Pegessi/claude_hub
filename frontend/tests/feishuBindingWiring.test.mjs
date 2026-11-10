@@ -12,6 +12,7 @@ const binding = readFileSync(new URL('../src/composables/useFeishuBinding.ts', i
 const identity = readFileSync(new URL('../src/utils/feishuIdentity.ts', import.meta.url), 'utf8')
 const identityMark = readFileSync(new URL('../src/components/FeishuIdentityMark.vue', import.meta.url), 'utf8')
 const brandMark = readFileSync(new URL('../src/components/FeishuBrandMark.vue', import.meta.url), 'utf8')
+const settingsDialog = readFileSync(new URL('../src/features/feishu-bot/FeishuBotSettingsDialog.vue', import.meta.url), 'utf8')
 
 test('local direct Chat surface mounts one Feishu binding panel beside its session name', () => {
   assert.match(pane, /class="pane-chrome"[\s\S]*class="pane-session-name"[\s\S]*<FeishuBindingPanel/)
@@ -144,4 +145,35 @@ test('a group message badge appends a compact scope suffix and leaves p2p alone'
   assert.ok(userMessage.includes('· {{ messageSourceScope(turn) }}'))
   assert.ok(eventValues.includes("feishu.chatType !== 'group'"))
   assert.ok(eventValues.includes("threadId ? 'group topic' : 'group'"))
+})
+
+test('Bot settings dialog exposes keyboard-reachable serving mode options and disabled explanation', () => {
+  for (const marker of [
+    'data-testid="feishu-bot-mode-control"',
+    'data-testid="feishu-bot-mode-single"',
+    'data-testid="feishu-bot-mode-per-channel"',
+    'data-testid="feishu-bot-mode-disabled-reason"',
+    'This Bot serves one Chat',
+    'Everyone who talks to this Bot gets their own Chat',
+    ':aria-pressed="editMode === \'single\'"',
+    ':aria-pressed="editMode === \'per_channel\'"',
+    ':disabled="busy || modeSwitchDisabled"',
+  ]) {
+    assert.ok(settingsDialog.includes(marker), marker)
+  }
+})
+
+test('per_channel binding panel renders the compact channel list and omits tab_id when binding a group', () => {
+  for (const marker of [
+    'data-testid="feishu-binding-channel-list"',
+    'data-testid="feishu-binding-channel-item"',
+    'channelSourceLabel(item)',
+    'Chat <code>{{ item.tab_id }}</code>',
+    'DM · ',
+    'Group · ',
+    'Bind this group',
+  ]) {
+    assert.ok(panel.includes(marker), marker)
+  }
+  assert.match(binding, /isPerChannel\s*\?\s*\{\s*chat_id:\s*chatId,\s*expected_revision:\s*bot\.revision\s*\}\s*:\s*\{\s*chat_id:\s*chatId,\s*tab_id:\s*tabId\.value,\s*expected_revision:\s*bot\.revision\s*\}/)
 })
