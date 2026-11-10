@@ -356,3 +356,31 @@ test('binding a group in per_channel mode omits tab_id so the server creates a n
   assert.equal('tab_id' in submitted[0].input, false)
   assert.deepEqual(h.api.bindings.value.map(item => item.tab_id), ['tab-dm', 'tab-auto-group'])
 })
+
+test('releasing a single channel in per_channel mode sends pairing_id and retains the remaining channels', async t => {
+  const dmBinding = activeBinding('tab-dm', {
+    pairing_id: 'pair-dm', chat_type: 'p2p', chat_name: 'ou_sender_1',
+  })
+  const groupBinding = activeBinding('tab-group', {
+    pairing_id: 'pair-group', chat_type: 'group', chat_id: 'oc-group', chat_name: 'Design group',
+  })
+  const releasedCalls = []
+  const h = bindingHarness(t, {
+    disconnectPairing: async (botId, revision, _signal, pairingId) => {
+      releasedCalls.push({ botId, revision, pairingId })
+      return pool(3, [
+        bot('a', { revision: 3, mode: 'per_channel', bindings: [groupBinding] }),
+        bot('b'),
+      ])
+    },
+  })
+  h.setServer(pool(2, [
+    bot('a', { revision: 2, mode: 'per_channel', bindings: [dmBinding, groupBinding] }),
+    bot('b'),
+  ]))
+  await h.api.resume()
+  assert.equal(await h.api.releaseChannel('pair-dm'), true)
+  assert.deepEqual(releasedCalls, [{ botId: 'a', revision: 2, pairingId: 'pair-dm' }])
+  assert.equal(h.api.selectedBotId.value, 'a')
+  assert.deepEqual(h.api.bindings.value.map(item => item.pairing_id), ['pair-group'])
+})

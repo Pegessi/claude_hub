@@ -167,3 +167,28 @@ test('mode switching is disabled and explained when the Bot has active channels,
   assert.equal(state.selectedRevision, 2)
   assert.equal(state.modeSwitchDisabled, true)
 })
+
+test('renaming or toggling enabled on a Bot with active channels omits mode from PATCH', async t => {
+  const h = harness(t)
+  const active = activeBinding('tab-1')
+  const initial = pool(1, [bot('a', { mode: 'per_channel', bindings: [active] }), bot('b')])
+  const updated = pool(2, [bot('a', { name: 'Renamed Bot', mode: 'per_channel', revision: 2, bindings: [active] }), bot('b')], 'a')
+  h.store.applyPool(initial)
+  h.setServer(initial)
+  h.setTransport(async (_url, init) => init.method === 'PATCH'
+    ? response(updated) : response(h.server()))
+  const state = await mountSettings(t, h)
+  state.select(h.store.botById('a'))
+  assert.equal(state.modeSwitchDisabled, true)
+  state.editName = 'Renamed Bot'
+  assert.equal(await state.saveMetadata(), true)
+  const patch = h.calls.find(call => call.init.method === 'PATCH')
+  const payload = JSON.parse(patch.init.body)
+  assert.deepEqual(payload, {
+    name: 'Renamed Bot',
+    enabled: true,
+    expected_revision: 1,
+  })
+  assert.equal('mode' in payload, false)
+  assert.equal(state.success, 'Bot details saved.')
+})

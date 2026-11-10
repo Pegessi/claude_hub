@@ -2,7 +2,7 @@ import { computed, ref, watch, type Ref } from 'vue'
 import { useFeishuBotPoolStore } from '@/stores/feishuBotPoolStore'
 import {
   activateFeishuPairing, bindBotGroup, botBindings, botMode, disconnectFeishuPairing,
-  FeishuBotRequestError, listBotChats, startFeishuPairing,
+  FeishuBotRequestError, listBotChats, MAX_BOT_CHANNELS, startFeishuPairing,
   type FeishuBotChat, type FeishuBotMode, type FeishuPairStartResponse,
 } from '@/utils/feishuBotConfig'
 
@@ -264,7 +264,7 @@ function ensureGroups(): void {
   const isPerChannel = botMode(bot) === 'per_channel'
   const active = botBindings(bot)
   if (!isPerChannel && active.length > 0) return false
-  if (isPerChannel && active.length >= 8) return false
+  if (isPerChannel && active.length >= MAX_BOT_CHANNELS) return false
   const { requestEpoch, request } = beginMutation()
   try {
     // The mutation response is the authoritative pool snapshot: applyPool adopts
@@ -285,23 +285,32 @@ function ensureGroups(): void {
     return false
   } finally { finishMutation(requestEpoch) }
 }
-  async function disconnect(): Promise<boolean> {
-  const bot = currentBot.value
+  async function disconnect(pairingId?: string): Promise<boolean> {
+  const bot = pairingId ? (currentBot.value ?? selectedBot.value) : currentBot.value
   if (!bot || isMutating.value || needsLogin.value) return false
+  if (pairingId !== undefined && (!pairingId || !botBindings(bot).some(item => item.pairing_id === pairingId))) {
+    return false
+  }
   const { requestEpoch, request } = beginMutation()
   try {
-    const next = await disconnectPairing(bot.bot_id, bot.revision, request.signal)
+    const next = pairingId
+      ? await disconnectPairing(bot.bot_id, bot.revision, request.signal, pairingId)
+      : await disconnectPairing(bot.bot_id, bot.revision, request.signal)
     if (requestEpoch !== epoch || request.signal.aborted) return false
     store.applyPool(next)
-    selectedBotId.value = null
+    if (!pairingId) selectedBotId.value = null
+    else selectedBotId.value = bot.bot_id
     clearPairingAttempt()
     return true
   } catch (cause) {
     if (requestEpoch !== epoch || request.signal.aborted) return false
-    setFailure(cause, 'Failed to disconnect Feishu.')
+    setFailure(cause, pairingId ? 'Failed to release this channel.' : 'Failed to disconnect Feishu.')
     await reconcileAfterFailure(cause, request.signal)
     return false
   } finally { finishMutation(requestEpoch) }
+}
+  function releaseChannel(pairingId: string): Promise<boolean> {
+  return disconnect(pairingId)
 }
   async function resume() {
   polling = true
@@ -347,5 +356,5 @@ function finishMutation(requestEpoch: number) {
   schedulePoll()
 }
 
-  return{bots,binding,bindings,mode,currentBot,selectedBotId,selectedBot,pendingCode,claim,confirmWord,error,needsLogin,isHydrated,isLoading,isMutating,viewState,statusText,groups,groupsLoaded,groupsLoading,groupsError,refresh,selectBot,generateCode,activate,bindGroup,loadGroups,ensureGroups,disconnect,resume,pause}
+  return{bots,binding,bindings,mode,currentBot,selectedBotId,selectedBot,pendingCode,claim,confirmWord,error,needsLogin,isHydrated,isLoading,isMutating,viewState,statusText,groups,groupsLoaded,groupsLoading,groupsError,refresh,selectBot,generateCode,activate,bindGroup,loadGroups,ensureGroups,disconnect,releaseChannel,resume,pause}
 }
