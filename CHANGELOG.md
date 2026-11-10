@@ -16,6 +16,8 @@
 - Structured streams use indexed, losslessly compressed events with per-stream
   dictionaries. History, lifecycle receipts, image/attachment authorization and
   feedback evidence read the same store; obsolete file indexes/caches are removed.
+- Edit-resend cleans Hub SQLite snapshots through their owning store; provider
+  transcript backups remain file-only and never create a Hub database.
 - Existing JSON/JSONL imports automatically and transactionally on first use.
   Original sources remain recovery evidence, malformed stream rows are retained,
   and offline verified gzip archival is available after import. No production

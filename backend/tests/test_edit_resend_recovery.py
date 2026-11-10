@@ -667,3 +667,40 @@ async def test_edit_resend_succeeds_when_idle(
         e.payload.get("summary") for e in page.events if e.type == AgentStreamEventType.TURN_STARTED
     ]
     assert summaries == ["msg0"], f"expected only t0, got {summaries}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("send_fails", [False, True])
+async def test_edit_resend_cleans_hub_and_external_provider_snapshots(
+    isolated_state_root: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, send_fails: bool
+) -> None:
+    """Provider JSONL cleanup must not route through the Hub SQLite engine."""
+    from claude_hub.services.local_storage import document_exists
+
+    monkeypatch.setattr(wm_module, "STATE_ROOT", tmp_path / "hub-workspaces")
+    monkeypatch.setenv("CLAUDE_HUB_HOME", str(tmp_path / "hub-home"))
+    provider_root = tmp_path / "provider-home"
+    transcript = provider_root / "transcripts" / "conversation.jsonl"
+    _write_transcript(transcript, ["msg0", "msg1"])
+    before = transcript.read_bytes()
+    _patch_discovery(monkeypatch, transcript)
+    session = _session()
+    store = AgentStreamStore(session.workspace_id, session.id)
+    await _append_turn(store, "t0", "msg0")
+    await _append_turn(store, "t1", "msg1")
+    manager, _ = _make_manager(
+        session, send_side_effect=RuntimeError("send failed") if send_fails else None
+    )
+    if send_fails:
+        with pytest.raises(RuntimeError, match="send failed"):
+            await manager.edit_resend(session, "edited", "c-new", "t1")
+        assert transcript.read_bytes() == before
+        assert await store.find_turn("t1") is not None
+    else:
+        await manager.edit_resend(session, "edited", "c-new", "t1")
+        assert await store.find_turn("t1") is None
+    # Exercise real snapshot, rollback and finally cleanup (only transport is mocked).
+    assert sorted(
+        path.relative_to(provider_root) for path in provider_root.rglob("*") if path.is_file()
+    ) == [Path("transcripts/conversation.jsonl")]
+    assert not document_exists(store.path.with_name(store.path.name + ".edit-bak"))
