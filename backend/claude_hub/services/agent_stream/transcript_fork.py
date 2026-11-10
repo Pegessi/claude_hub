@@ -78,6 +78,11 @@ def discard_snapshot(backup: Optional[Path]) -> None:
     """Delete a snapshot sidecar file, if it exists.  Never raises."""
     if backup is None:
         return
+    if backup.name.endswith(".jsonl.edit-bak"):
+        from ..local_storage import delete_document
+
+        delete_document(backup)
+        return
     try:
         backup.unlink()
     except FileNotFoundError:

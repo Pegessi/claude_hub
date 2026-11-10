@@ -5,6 +5,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from ..local_storage import has_stored_document, read_document, write_document
 from ..workspace_snapshot import render_workspace_snapshot
 from ._base import _WorkspaceManagerBase
 from ._constants import *  # noqa: F401,F403
@@ -37,7 +38,11 @@ class _PersistenceMixin(_WorkspaceManagerBase):
             payload["reporter_key_hash"] = task.reporter_key_hash
         if task.execution_call_fingerprints:
             payload["execution_call_fingerprints"] = dict(task.execution_call_fingerprints)
-        for name in ("creation_request_key", "creation_actor_key", "creation_fingerprint"):
+        for name in (
+            "creation_request_key",
+            "creation_actor_key",
+            "creation_fingerprint",
+        ):
             value = getattr(task, name)
             if value is not None:
                 payload[name] = value
@@ -87,40 +92,8 @@ class _PersistenceMixin(_WorkspaceManagerBase):
             raise
 
     def _atomic_save_state_text(self, path: Path, text: str) -> None:
-        """Persist a durable JSON store and maintain its rotating backup.
-
-        The previous complete primary is copied to ``<path>.bak`` (temp file
-        + replace, so an interrupted copy never corrupts the existing backup)
-        before the new payload replaces the primary. A torn primary write can
-        therefore always fall back to the last complete state.
-        """
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            backup_path = self._backup_path_for(path)
-            fd, tmp_backup = tempfile.mkstemp(
-                dir=str(path.parent),
-                prefix=f".{backup_path.name}.",
-                suffix=".tmp",
-            )
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    with open(path, "rb") as primary:
-                        shutil.copyfileobj(primary, f)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(tmp_backup, backup_path)
-            except OSError:
-                # Unreadable primary or copy failure: keep the prior backup
-                # untouched instead of replacing it with a partial copy.
-                logger.exception(
-                    "Could not rotate state backup before save; keeping previous backup: %s",
-                    backup_path,
-                )
-                try:
-                    os.unlink(tmp_backup)
-                except OSError:
-                    pass
-        self._atomic_write_text(path, text)
+        """Commit the legacy logical document name through SQLite WAL."""
+        write_document(path, json.loads(text))
 
     def _workspace_state_payload(self, workspace_id: str) -> dict[str, Any]:
         """Serialize one workspace's durable mutable state."""
@@ -148,7 +121,7 @@ class _PersistenceMixin(_WorkspaceManagerBase):
     def _save_workspace_state(self, workspace_id: str) -> None:
         """Write one workspace without rewriting the index or other workspaces.
 
-        The state.json replacement is authoritative; its Markdown snapshot
+        The SQLite document commit is authoritative; its Markdown snapshot
         remains derived output. Callers own mutation locks and rollback policy.
         An exception alone does not identify whether replacement occurred.
 
@@ -170,7 +143,7 @@ class _PersistenceMixin(_WorkspaceManagerBase):
             self._write_snapshot(workspace_id, state_text=state_text)
         except Exception:
             logger.exception(
-                "Committed state.json is authoritative; failed to refresh derived snapshot "
+                "Committed SQLite state is authoritative; failed to refresh derived snapshot "
                 "workspace_id=%s",
                 workspace_id,
             )
@@ -193,7 +166,9 @@ class _PersistenceMixin(_WorkspaceManagerBase):
         if not workspace:
             return
         if state_text is None:
-            state_text = self._workspace_state_file(workspace_id).read_text(encoding="utf-8")
+            state_text = json.dumps(
+                read_document(self._workspace_state_file(workspace_id)), indent=2
+            )
         snapshot = render_workspace_snapshot(
             workspace.model_dump(mode="json"), state_text, self._runtime_now()
         )
@@ -270,7 +245,11 @@ class _PersistenceMixin(_WorkspaceManagerBase):
         events.append(event)
         self._atomic_write_text(
             marker,
-            json.dumps({"store_path": str(path), "events": events}, indent=2, ensure_ascii=False),
+            json.dumps(
+                {"store_path": str(path), "events": events},
+                indent=2,
+                ensure_ascii=False,
+            ),
         )
         return marker
 
@@ -301,7 +280,7 @@ class _PersistenceMixin(_WorkspaceManagerBase):
             return None, f"backup unusable: {exc}"
         # Restore the primary from the last complete payload. The backup is
         # kept in place as additional evidence.
-        self._atomic_write_text(path, backup_text)
+        write_document(path, backup_data)
         logger.warning("Restored primary state %s from backup %s", path, backup_path)
         return backup_data, None
 
@@ -332,7 +311,7 @@ class _PersistenceMixin(_WorkspaceManagerBase):
             "reason": reason,
             "detected_at": timestamp,
             "original_sha256": digest if original_bytes is not None else None,
-            "quarantine_file": quarantine_path.name if quarantine_path is not None else None,
+            "quarantine_file": (quarantine_path.name if quarantine_path is not None else None),
             "quarantine_moved": moved,
             "recovered_from_backup": recovered,
             "backup_file": self._backup_path_for(path).name if recovered else None,
@@ -376,6 +355,11 @@ class _PersistenceMixin(_WorkspaceManagerBase):
         corrupt. It runs against both the primary and (if needed) the backup.
         """
 
+        if has_stored_document(path):
+            stored_payload = read_document(path)
+            if validator is not None:
+                stored_payload = validator(stored_payload)
+            return _DurableLoadResult(data=stored_payload, source="primary")
         if not path.exists():
             backup_path = self._backup_path_for(path)
             if backup_path.exists():
@@ -468,6 +452,7 @@ class _PersistenceMixin(_WorkspaceManagerBase):
                 return _DurableLoadResult(
                     data=data, source="backup" if data is not None else "empty"
                 )
+        write_document(path, payload)
         return _DurableLoadResult(data=payload, source="primary")
 
     def _quarantine_marker_paths(self) -> list[Path]:

@@ -38,7 +38,9 @@ def test_round_trip_preserves_document_shapes(tmp_path: Path, payload: Any) -> N
     assert not path.exists(), "SQLite writes must not maintain a JSON mirror"
 
 
-def test_legacy_import_is_once_and_delete_tombstone_cannot_revive_source(tmp_path: Path) -> None:
+def test_legacy_import_is_once_and_delete_tombstone_cannot_revive_source(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "metadata.json"
     path.write_text(json.dumps({"original": [1, 2]}))
     assert storage.read_document(path) == {"original": [1, 2]}
@@ -129,7 +131,9 @@ def test_concurrent_readers_never_observe_torn_document(tmp_path: Path) -> None:
             future.result(timeout=30)
 
 
-def test_corrupt_database_fails_closed_instead_of_reimporting_legacy(tmp_path: Path) -> None:
+def test_corrupt_database_fails_closed_instead_of_reimporting_legacy(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "metadata.json"
     path.write_text('{"stale": "must not revive"}')
     database, _ = storage.storage_location(path)
@@ -138,3 +142,66 @@ def test_corrupt_database_fails_closed_instead_of_reimporting_legacy(tmp_path: P
         storage.read_document(path)
     assert database.read_bytes() == b"not a SQLite database"
     assert path.read_text() == '{"stale": "must not revive"}'
+
+
+def test_custom_state_root_uses_runtime_database(tmp_path, monkeypatch):
+    home = tmp_path / "runtime"
+    state = tmp_path / "custom-state"
+    monkeypatch.setenv("CLAUDE_HUB_HOME", str(home))
+    monkeypatch.setenv("CLAUDE_HUB_STATE_ROOT", str(state))
+    expected = home / "storage.sqlite3"
+    for path in (
+        home / "tabs.json",
+        state / "index.json",
+        state / "ws" / "state.json",
+        state / "ws" / "agent_streams" / "session.jsonl",
+    ):
+        assert storage.storage_location(path)[0] == expected
+
+
+def test_stream_wal_reader_does_not_reserve_writer(tmp_path, monkeypatch):
+    import importlib
+
+    workspace_manager = importlib.import_module("claude_hub.services.workspace_manager")
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+
+    root = tmp_path / "workspaces"
+    monkeypatch.setattr(workspace_manager, "STATE_ROOT", root)
+    store = AgentStreamStore("ws", "session")
+    # First read imports only once; subsequent snapshots must coexist with writes.
+    store._read_rows(limit=0)
+    document = tmp_path / "tabs.json"
+    with store._read_database():
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(storage.write_document, document, {"value": 1}).result(timeout=2)
+    assert storage.read_document(document) == {"value": 1}
+
+
+def test_verified_archive_preserves_legacy_and_reopens_sqlite(tmp_path):
+    import gzip
+
+    from claude_hub.services.storage_maintenance import archive_sources
+
+    path = tmp_path / "sessions.json"
+    raw = b'{"session":{"value":"original"}}'
+    path.write_bytes(raw)
+    assert storage.read_document(path) == json.loads(raw)
+    archive_sources([path])
+    assert not path.exists()
+    assert gzip.decompress(path.with_name(path.name + ".gz").read_bytes()) == raw
+    assert storage.read_document(path) == json.loads(raw)
+    assert archive_sources([]) == 0
+
+
+def test_archive_refuses_conflicting_backup_without_deleting_source(tmp_path):
+    import gzip
+
+    from claude_hub.services.storage_maintenance import archive_sources
+
+    path = tmp_path / "sessions.json"
+    path.write_text('{"value":1}')
+    storage.read_document(path)
+    path.with_name(path.name + ".gz").write_bytes(gzip.compress(b'{"value":2}'))
+    with pytest.raises(ValueError, match="archive does not match"):
+        archive_sources([path])
+    assert path.read_text() == '{"value":1}'
