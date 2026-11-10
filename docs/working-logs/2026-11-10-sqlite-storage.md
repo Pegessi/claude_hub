@@ -163,3 +163,10 @@ The actual migration/archival benchmarks operated only on their `/tmp` copy.
 The fixed-snapshot replay check compared all 2,219,946 valid events, preserving
 all 22 malformed rows separately; integrity remained `ok`. Final-candidate
 reruns and the independent re-review are attached to the Task report.
+
+A final root-switching probe found that distinct external `CLAUDE_HUB_STATE_ROOT`
+values initially shared their `workspaces/...` keys. External roots now use
+separate namespaces derived from canonical directory identity within the same
+runtime database. A→B→A reads, stream identity, directory aliases and namespace
+retirement are tested together; retiring A cannot erase B's records. Offline
+archival also honors the configured external workspace root.

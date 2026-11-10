@@ -27,10 +27,21 @@ def storage_location(path: Path) -> tuple[Path, str]:
     path = path.absolute()
     home = resolve_runtime_home().absolute()
     state = resolve_state_root().absolute()
-    if path.is_relative_to(home):
-        return home / "storage.sqlite3", str(path.relative_to(home))
-    if path.is_relative_to(state):
-        return home / "storage.sqlite3", "workspaces/" + str(path.relative_to(state))
+    # Canonicalize directory aliases without following a symlink at the final
+    # document name: lifecycle ownership belongs to that logical file name.
+    canonical_path = path.parent.resolve() / path.name
+    canonical_home = home.resolve()
+    canonical_state = state.resolve()
+    if canonical_path.is_relative_to(canonical_home):
+        return home / "storage.sqlite3", str(canonical_path.relative_to(canonical_home))
+    if canonical_path.is_relative_to(canonical_state):
+        # Changing an external workspace-root override selects different state,
+        # even when top-level metadata keeps the same runtime home/database.
+        identity = hashlib.sha256(str(canonical_state).encode()).hexdigest()
+        name = (
+            "workspace-roots/" + identity + "/" + str(canonical_path.relative_to(canonical_state))
+        )
+        return home / "storage.sqlite3", name
     root = path.parent
     for parent in path.parents:
         if parent.name == "workspaces":
