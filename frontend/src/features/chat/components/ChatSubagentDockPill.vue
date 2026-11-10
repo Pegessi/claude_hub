@@ -220,24 +220,12 @@ function onJump(chip: SubagentJumpChip) {
 
 // A native child has no Chat tab: the pane's Chat body renders the detail
 // window (it owns the timeline), so this chrome control only requests it.
+// The window is rendered by the Chat body, so the dock owns focus restoration
+// on dismissal: the row that opened it when still mounted, else this pill.
 function onNativeOpen(chip: NativeSubagentRow, source: HTMLElement | null) {
   close(false)
-  nativeDock?.open(chip, source)
+  nativeDock?.open(chip, source, triggerRef.value)
 }
-
-// The window is rendered by the Chat body, so its dismissal would otherwise
-// strand focus on <body>; the pill is where the reader was last.
-watch(() => nativeDock?.openRow.value, (next, previous) => {
-  if (!previous || next) return
-  void nextTick(() => {
-    // The dock returns focus to the row that opened the window whenever that
-    // row is still mounted (the wide-pane rail stays open); the pill only
-    // takes it back when focus would otherwise be stranded.
-    const active = typeof document === 'undefined' ? null : document.activeElement
-    if (active instanceof Node && rootRef.value?.contains(active)) return
-    triggerRef.value?.focus()
-  })
-})
 
 function onOutsidePointer(event: PointerEvent) {
   if (rootRef.value && !rootRef.value.contains(event.target as Node)) close(false)

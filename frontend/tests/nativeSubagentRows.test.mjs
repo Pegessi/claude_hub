@@ -158,6 +158,36 @@ test('the memo skips unchanged turns and refreshes a bumped one', () => {
   assert.equal(memo.size, 0)
 })
 
+test('a turn whose children are not readable yet contributes no rows', () => {
+  // A lazy historical turn can already carry a stub failed child from the
+  // shallow page; the window could only show a bare status, so it is skipped
+  // until that turn's execution detail is loaded.
+  const observed = []
+  const pending = turn({ key: 'turn-2', parts: [region([thread({ lifecycleStatus: 'failed' })])] })
+  const rows = nativeSubagentRows([turn(), pending], undefined, candidate => {
+    observed.push(candidate.key)
+    return candidate.key !== 'turn-2'
+  })
+  assert.deepEqual(observed, ['turn-2', 'turn-1'])
+  assert.deepEqual(rows.map(row => row.turnKey), ['turn-1'])
+  // Once readable, the same turn projects normally.
+  const ready = nativeSubagentRows([turn(), pending], undefined, () => true)
+  assert.equal(ready.length, 2)
+})
+
+test('the memo cannot survive a rebuilt turn that reused its revisions', () => {
+  const memo = new Map()
+  const original = turn()
+  nativeSubagentRows([original], memo)
+  // `IncrementalTimelineReducer.reset()` rebuilds turns and restarts their
+  // revision count, so an equal revision on a different instance is not a hit.
+  const rebuilt = turn()
+  assert.notEqual(rebuilt, original)
+  rebuilt.parts = [region([thread({ lifecycleStatus: 'failed' })])]
+  const rows = nativeSubagentRows([rebuilt], memo, undefined)
+  assert.equal(rows[0].state, 'failed')
+})
+
 test('rows resolve back to the live child, with its transcript position', () => {
   const older = turn({ key: 'turn-1' })
   const newer = turn({ key: 'turn-2', parts: [region([thread({ threadId: 'child-b' })], 'subagents-turn-2')] })

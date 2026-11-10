@@ -109,21 +109,28 @@ test('native sub-agents join the same dock as Hub children', () => {
   assert.match(terminalPane, /\.\.\.subagentDock\.chips\.value,\s*\.\.\.nativeSubagentDock\.rows\.value/)
   // The Chat body projects the rows and renders the window, because only it
   // owns the timeline and image owners the window's content needs.
-  assert.match(structuredPane, /nativeSubagentRows\(timeline\.turns\.value, nativeRowMemo\)/)
+  assert.match(structuredPane, /nativeSubagentRows\(\s*timeline\.turns\.value,\s*nativeRowMemo,\s*nativeChildrenReadable,/)
+  // A lazy turn can already carry a stub failed child; only readable children
+  // may become rows (the same gate `presentTurnParts` uses).
+  assert.match(structuredPane, /return !\(detail && detail\.status !== 'loaded'\)/)
   assert.match(structuredPane, /nativeSubagentDock\?\.publish\(rows\)/)
   // Mounted only while a row is open AND this pane is the active one: the
   // window is teleported to <body>, so a cached (hidden) tab would otherwise
   // keep showing it over the tab the reader switched to.
   assert.match(structuredPane, /<ChatNativeSubagentOverlay v-if="nativeOverlayOpen && isPaneActivated" \/>/)
   assert.match(structuredPane, /nativeOverlayOpen = computed\(\(\) => Boolean\(nativeSubagentDock\?\.openRow\.value\)\)/)
-  assert.match(structuredPane, /onUnmounted\(\(\) => nativeSubagentDock\?\.publish\(\[\]\)\)/)
+  // A cached pane can be evicted while another tab is active, so only the
+  // pane that is on screen may clear the shared dock on unmount.
+  assert.match(structuredPane, /onUnmounted\(\(\) => \{[\s\S]*?if \(isPaneActivated\.value\) nativeSubagentDock\?\.publish\(\[\]\)/)
   // Every reveal forwards opens: the gutter rail is the default wide-pane
   // presentation, so it must not be a dead click.
   assert.equal((dockPill.match(/@open="onNativeOpen"/g) ?? []).length, 3)
-  assert.match(dockPill, /nativeDock\?\.open\(chip, source\)/)
-  // Focus goes back to the pill only when the dock could not restore it to a
-  // still-mounted row (the rail stays open, so there the row keeps focus).
-  assert.match(dockPill, /rootRef\.value\?\.contains\(active\)/)
+  // The dock owns focus restoration on dismissal (the row, else this pill);
+  // a data-driven row clear must not move focus at all.
+  assert.match(dockPill, /nativeDock\?\.open\(chip, source, triggerRef\.value\)/)
+  assert.doesNotMatch(dockPill, /watch\(\(\) => nativeDock\?\.openRow\.value/)
+  assert.match(readSrc('features/chat/controllers/nativeSubagentDock.ts'),
+    /const targets = \[opener, fallback\]/)
   // The pane keeps one dock while KeepAlive caches one timeline per tab:
   // activation republishes this tab's rows, deactivation clears them.
   assert.match(structuredPane, /onActivated\(\(\) => \{[\s\S]*?nativeSubagentDock\?\.publish\(nativeDockRows\.value\)/)
@@ -145,12 +152,18 @@ test('the native window replays the inline thread rows and can jump back', () =>
   // Dialog semantics + focus trap + body lock, like the other phone overlays.
   assert.match(overlay, /role="dialog"/)
   assert.match(overlay, /aria-modal="true"/)
-  assert.match(overlay, /@keydown\.tab="onTab"/)
+  // One document-level handler owns Escape and Tab, because a click on static
+  // text drops focus to <body>; a top-layer <dialog> (the image lightbox opened
+  // from the window) keeps its own keys.
+  assert.match(overlay, /document\.addEventListener\('keydown', onDocumentKey, true\)/)
+  assert.match(overlay, /function topLayerOwnsKeys\(\): boolean \{\s+return typeof document !== 'undefined' && document\.querySelector\('dialog\[open\]'\) !== null/)
   // The body itself holds tab stops (markdown links, tool <details>), so the
   // trap cannot count only the footer buttons.
   assert.match(overlay, /'a\[href\], button:not\(\[disabled\]\), summary, \[tabindex\]:not\(\[tabindex="-1"\]\)'/)
+  // Focus that escaped is pulled back to an edge instead of walking the page.
+  assert.match(overlay, /if \(!root\.contains\(active\)\) \{/)
   assert.match(overlay, /document\.body\.style\.overflow = 'hidden'/)
-  assert.match(overlay, /addEventListener\('keydown', onDismissKey, true\)/)
+  assert.match(overlay, /addEventListener\('keydown', onDocumentKey, true\)/)
   // A native child has no tab: the jump goes to the transcript, not a tab.
   assert.match(overlay, /revealSubthread\(target\.turnKey, target\.threadId\)/)
 })

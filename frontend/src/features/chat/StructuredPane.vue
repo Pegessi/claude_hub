@@ -154,6 +154,7 @@ import { useChatQueue } from '@/features/chat/controllers/useChatQueue'
 import { useChatImages } from '@/features/chat/controllers/useChatImages'
 import { useNativeSubagentDock } from '@/features/chat/controllers/nativeSubagentDock'
 import { nativeSubagentRows, type NativeSubagentRowMemo } from '@/features/chat/presentation/nativeSubagentRows'
+import type { TimelineTurn } from '@/features/chat/timeline/types'
 const props = defineProps<ChatPaneProps>()
 const preview = provideAttachmentPreview()
 const isManagedChat = computed(() => Boolean(props.managedChat))
@@ -445,7 +446,19 @@ provide(chatComposerKey, composer)
 // keeps the chrome's list O(changed turns) per stream batch.
 const nativeSubagentDock = useNativeSubagentDock()
 const nativeRowMemo: Map<string, NativeSubagentRowMemo> = new Map()
-const nativeDockRows = computed(() => nativeSubagentRows(timeline.turns.value, nativeRowMemo))
+// A lazy turn (its execution detail still unread) can already carry a stub
+// failed/cancelled child from the shallow page; projecting it would offer a
+// window with nothing in it. Gate on the same condition `presentTurnParts`
+// uses, so a turn's children appear exactly when its detail is readable.
+function nativeChildrenReadable(turn: TimelineTurn): boolean {
+  const detail = turn.turnId ? historyDetails.value[turn.turnId] : undefined
+  return !(detail && detail.status !== 'loaded')
+}
+const nativeDockRows = computed(() => nativeSubagentRows(
+  timeline.turns.value,
+  nativeRowMemo,
+  nativeChildrenReadable,
+))
 const nativeOverlayOpen = computed(() => Boolean(nativeSubagentDock?.openRow.value))
 watch(nativeDockRows, rows => {
   // A cached, deactivated pane keeps flushing its own effects (its stream may
@@ -453,7 +466,11 @@ watch(nativeDockRows, rows => {
   // the pane's activated tab; `onActivated` is the single publisher on mount.
   if (isPaneActivated.value) nativeSubagentDock?.publish(rows)
 }, { flush: 'post' })
-onUnmounted(() => nativeSubagentDock?.publish([]))
+onUnmounted(() => {
+  // A cached pane can be evicted while another tab is active; only the pane
+  // that is on screen may clear the shared dock.
+  if (isPaneActivated.value) nativeSubagentDock?.publish([])
+})
 </script>
 
 <style scoped>

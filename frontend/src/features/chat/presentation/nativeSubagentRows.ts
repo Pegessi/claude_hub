@@ -91,35 +91,53 @@ export function nativeSubagentRow(turn: TimelineTurn, thread: TimelineSubthread)
 }
 
 export interface NativeSubagentRowMemo {
+  /** The turn instance the rows were built from. `renderRevision` restarts at
+   *  0 whenever the reducer rebuilds from scratch, so the number alone cannot
+   *  tell a rebuilt turn from the one it replaced. */
+  turn: TimelineTurn
   revision: number
   rows: NativeSubagentRow[]
 }
+
+/** Whether a turn's children are fully known yet.
+ *
+ *  A historical turn keeps its child events behind its execution-detail stream,
+ *  but the shallow conversation page still carries a failed/cancelled child
+ *  *status* (see `conversation_event_visible`). The reducer therefore mounts a
+ *  stub child (no launch call, no prose) for it. Projecting that stub would put
+ *  a row in the dock that the window cannot fill in, and would hide the turn's
+ *  completed siblings. `StructuredPane` supplies the real check (the same one
+ *  `presentTurnParts` uses); the default projects everything. */
+export type NativeSubagentRowReadiness = (turn: TimelineTurn) => boolean
 
 /**
  * All native children the pane's timeline holds, newest turn first.
  *
  * Child rows are read from ``turn.parts``, never from the presentation layer:
  * a folded turn keeps its ``subagents`` part, so a rail row does not depend on
- * the transcript being expanded. A historical turn whose execution detail has
- * not been requested yet has no such part (the backend keeps child events
- * behind the turn's detail stream), so those children appear once the reader
- * opens that turn — the rail deliberately never invents a row it cannot open.
+ * the transcript being expanded. A historical turn's children are behind its
+ * execution-detail stream, so a turn whose detail has not been requested yet is
+ * skipped entirely (``isReady``) — the rail never invents a row it cannot open,
+ * and the stub a shallow page may carry for a failed child never surfaces.
  *
  * ``memo`` keeps this O(changed turns) per stream batch: the reducer bumps
  * ``turn.renderRevision`` for visible child mutations, so an unchanged turn
- * reuses its rows.
+ * reuses its rows. Identity is checked as well, because a rebuilt turn restarts
+ * the revision count from zero.
  */
 export function nativeSubagentRows(
   turns: readonly TimelineTurn[],
   memo?: Map<string, NativeSubagentRowMemo>,
+  isReady: NativeSubagentRowReadiness = () => true,
 ): NativeSubagentRow[] {
   const rows: NativeSubagentRow[] = []
   const liveKeys = new Set<string>()
   for (let index = turns.length - 1; index >= 0; index -= 1) {
     const turn = turns[index]
     liveKeys.add(turn.key)
+    if (!isReady(turn)) continue
     const cached = memo?.get(turn.key)
-    if (cached && cached.revision === turn.renderRevision) {
+    if (cached && cached.turn === turn && cached.revision === turn.renderRevision) {
       rows.push(...cached.rows)
     } else {
       const fresh: NativeSubagentRow[] = []
@@ -130,7 +148,7 @@ export function nativeSubagentRows(
           fresh.push(nativeSubagentRow(turn, part.threads[threadIndex]))
         }
       }
-      memo?.set(turn.key, { revision: turn.renderRevision, rows: fresh })
+      memo?.set(turn.key, { turn, revision: turn.renderRevision, rows: fresh })
       rows.push(...fresh)
     }
     if (rows.length >= NATIVE_SUBAGENT_ROW_LIMIT) break
