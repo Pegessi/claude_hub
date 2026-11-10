@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from claude_hub.models import AgentType
+from claude_hub.services.local_storage import read_document
 from claude_hub.services.terminal_runtime import bindings, records
 from claude_hub.services.terminal_runtime.manager.host import ManagerHost
 from claude_hub.services.terminal_runtime.process.host import ProcessHost
@@ -121,7 +122,7 @@ def test_existing_manager_observes_snapshot_path_parser_and_writer_patches(
     changed_order = runtime_paths / "changed" / "order.json"
     monkeypatch.setattr(TM, "ORDER_FILE", changed_order)
     manager._save_order()
-    assert changed_order.read_text() == "[]"
+    assert read_document(changed_order) == []
 
 
 def test_shared_launch_lock_lookup_is_late_and_bindings_are_frozen(

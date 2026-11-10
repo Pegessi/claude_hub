@@ -12,6 +12,7 @@ from claude_hub.auth.dependencies import get_current_user
 from claude_hub.main import app
 from claude_hub.models import GoalDispatchState, GoalRunCreate, GoalRunStatus, SessionKind, User
 from claude_hub.services.goal_run import GoalRunController, GoalRunStore
+from claude_hub.services.local_storage import read_document
 
 
 @pytest.fixture()
@@ -407,7 +408,7 @@ def test_goal_create_and_steer_send_original_images_without_snapshot_blobs(
     current = manager.get(goal["id"])
     assert current.status == GoalRunStatus.ACTIVE
     assert current.current_turn_id == "image-steer"
-    assert "data:image" not in (tmp_path / "steer-goals.json").read_text()
+    assert "data:image" not in json.dumps(read_document(tmp_path / "steer-goals.json"))
 
     edit = goal_client.patch(
         f'/api/goals/{goal["id"]}/objective',
@@ -445,7 +446,7 @@ def test_interrupted_goal_images_require_reattachment_after_restart(
     assert result.status_code == 503
     current = manager.current("tab-1")
     assert current.pending_image_count == 1
-    assert "data:image" not in (tmp_path / "steer-goals.json").read_text()
+    assert "data:image" not in json.dumps(read_document(tmp_path / "steer-goals.json"))
     cold = GoalRunController(GoalRunStore(tmp_path / "steer-goals.json"))
     from claude_hub.services.goal_run.images import pending_goal_images
 

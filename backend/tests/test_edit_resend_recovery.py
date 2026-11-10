@@ -156,6 +156,9 @@ def _make_manager(
 
 
 def _read_bytes(path: Path) -> bytes:
+    if path.parent.name == "agent_streams":
+        store = AgentStreamStore(path.parent.parent.name, path.stem)
+        return json.dumps([event.model_dump(mode="json") for event in store._read_rows()]).encode()
     return path.read_bytes()
 
 

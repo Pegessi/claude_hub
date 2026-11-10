@@ -30,6 +30,7 @@ from claude_hub.models import (
 from claude_hub.models.task_mailbox import TaskActorRole, TaskEvent, TaskEventType
 from claude_hub.services.workspace_manager import WorkspaceManager
 from claude_hub.services.workspace_manager._reports import ReportCallIdConflict
+from tests.test_task_execution_control import _read_persisted_bytes
 
 _wm = import_module("claude_hub.services.workspace_manager")
 
@@ -187,7 +188,7 @@ async def test_precommit_failure_rolls_back_both_acks_and_cold_retry_converges(
         acked_call_ids=call_ids,
     )
 
-    original_write = manager._atomic_write_text
+    original_write = manager._atomic_save_state_text
     failed = False
     staged_report_id: str | None = None
 
@@ -207,7 +208,7 @@ async def test_precommit_failure_rolls_back_both_acks_and_cold_retry_converges(
             raise OSError("pre-state atomic replace failed")
         original_write(path, text)
 
-    monkeypatch.setattr(manager, "_atomic_write_text", fail_target_state_once)
+    monkeypatch.setattr(manager, "_atomic_save_state_text", fail_target_state_once)
     with pytest.raises(OSError, match="pre-state"):
         await manager.create_report(session.id, payload)
 
@@ -296,7 +297,7 @@ async def test_report_rollback_preserves_concurrent_mailbox_write(
 
     monkeypatch.setattr(_wm.ttyd_manager, "update_tab", slow_update_tab)
 
-    original_write = manager._atomic_write_text
+    original_write = manager._atomic_save_state_text
     failed = False
     state_file = manager._workspace_state_file(workspace_id)
 
@@ -307,7 +308,7 @@ async def test_report_rollback_preserves_concurrent_mailbox_write(
             raise OSError("pre-commit fail after concurrent mailbox write")
         original_write(path, text)
 
-    monkeypatch.setattr(manager, "_atomic_write_text", fail_report_commit_once)
+    monkeypatch.setattr(manager, "_atomic_save_state_text", fail_report_commit_once)
 
     async def concurrent_mailbox_write() -> None:
         await rename_started.wait()
@@ -370,7 +371,7 @@ async def test_report_rollback_serializes_concurrent_followup_task(
 
     monkeypatch.setattr(_wm.ttyd_manager, "update_tab", slow_update_tab)
 
-    original_write = manager._atomic_write_text
+    original_write = manager._atomic_save_state_text
     failed = False
     state_file = manager._workspace_state_file(workspace_id)
 
@@ -381,7 +382,7 @@ async def test_report_rollback_serializes_concurrent_followup_task(
             raise OSError("pre-commit fail while followup waits on workspace lock")
         original_write(path, text)
 
-    monkeypatch.setattr(manager, "_atomic_write_text", fail_report_commit_once)
+    monkeypatch.setattr(manager, "_atomic_save_state_text", fail_report_commit_once)
 
     async def concurrent_followup() -> TaskEvent:
         await rename_started.wait()
@@ -591,7 +592,7 @@ async def test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges
     assert _call_ids(manager).count(bridge_call_id) == 1
 
     state_file = manager._workspace_state_file(workspace_id)
-    original_write = manager._atomic_write_text
+    original_write = manager._atomic_save_state_text
     failed = False
 
     def fail_replay_save_once(path: Path, text: str) -> None:
@@ -601,7 +602,7 @@ async def test_bound_replay_save_failure_rolls_back_ack_and_cold_retry_converges
             raise OSError("replay save failed")
         original_write(path, text)
 
-    monkeypatch.setattr(manager, "_atomic_write_text", fail_replay_save_once)
+    monkeypatch.setattr(manager, "_atomic_save_state_text", fail_replay_save_once)
     with pytest.raises(OSError, match="replay save failed"):
         await manager.create_report(session.id, payload)
 
@@ -1033,7 +1034,7 @@ async def test_report_and_bound_replay_commit_only_their_workspace(
     )
     manager._save_state()
     untouched = {
-        path: path.read_bytes()
+        path: _read_persisted_bytes(path)
         for path in (
             _wm.INDEX_FILE,
             manager._workspace_state_file(other.id),
@@ -1045,7 +1046,8 @@ async def test_report_and_bound_replay_commit_only_their_workspace(
     )
     manager.workspaces[other.id] = other.model_copy(update={"name": "uncommitted other name"})
     original_save = manager._save_workspace_state
-    original_write = manager._atomic_write_text
+    original_write = manager._atomic_save_state_text
+    original_snapshot = manager._atomic_write_text
     saves: list[str] = []
     writes: list[Path] = []
 
@@ -1055,12 +1057,16 @@ async def test_report_and_bound_replay_commit_only_their_workspace(
 
     def record_write(path: Path, text: str) -> None:
         writes.append(path)
-        original_write(path, text)
+        if path.suffix == ".json":
+            original_write(path, text)
+        else:
+            original_snapshot(path, text)
 
     def reject_bulk() -> None:
         pytest.fail("report intake must not use full-state save")
 
     monkeypatch.setattr(manager, "_save_workspace_state", save_one)
+    monkeypatch.setattr(manager, "_atomic_save_state_text", record_write)
     monkeypatch.setattr(manager, "_atomic_write_text", record_write)
     monkeypatch.setattr(manager, "_save_state", reject_bulk)
     payload = AgentReportCreate(
@@ -1082,7 +1088,7 @@ async def test_report_and_bound_replay_commit_only_their_workspace(
         * 2
     )
     for path, before in untouched.items():
-        assert path.read_bytes() == before
+        assert _read_persisted_bytes(path) == before
     assert manager.tasks[other_task.id].prompt == "uncommitted other prompt"
     assert manager.workspaces[other.id].name == "uncommitted other name"
     assert (
