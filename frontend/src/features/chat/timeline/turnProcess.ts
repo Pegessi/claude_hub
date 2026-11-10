@@ -243,11 +243,15 @@ export function turnProcessLabel(turn: TimelineTurn, process: TimelinePart[]): s
  *  An agent often asks its question *before* it writes the explanation, so in
  *  arrival order the card sits on top of the answer it belongs to. Read as a
  *  page, that is backwards: the answer is the reasoning, and the card is the one
- *  thing the reader has to act on. Folded turns therefore keep their cards
- *  visible but last, right where the turn ends. */
-export function withApprovalsLast(parts: TimelinePart[]): TimelinePart[] {
+ *  thing the reader has to act on. It runs over the *displayed* parts, after
+ *  ``presentThinkingParts`` has grouped them: reordering raw parts first would
+ *  drop the approval boundary between two thinking runs (merging them) and would
+ *  leave a live turn's trailing run looking finished, because the card became the
+ *  last part and ``presentThinkingParts`` then treats everything before it as
+ *  ended. */
+export function withApprovalsLast<T extends { kind: string }>(parts: readonly T[]): T[] {
+  if (!parts.some(part => part.kind === 'approval')) return parts as T[]
   const cards = parts.filter(part => part.kind === 'approval')
-  if (cards.length === 0) return parts
   const rest = parts.filter(part => part.kind !== 'approval')
   return [...rest, ...cards]
 }
@@ -271,14 +275,13 @@ export function foldTurnParts(turn: TimelineTurn, expanded: boolean): TimelinePa
     meta: turnProcessLabel(turn, split.before.filter(part => part.kind !== 'approval')),
     expanded,
   }
-  // A pin is a reason to stay visible, not a place in the reading order: errors
-  // stay beside the header, cards go to the end of the turn.
-  const keptVisible = split.before
+  // A pin is a reason to stay visible, not a place in the reading order: this
+  // list keeps arrival order, and the presenter moves cards to the end of the
+  // turn once the parts have been grouped (see ``withApprovalsLast`` there).
+  const foldedBefore = split.before
     .filter(part => !isProcessPart(part) || isPinnedPart(part))
     .map(foldedPart)
-  const foldedBefore = keptVisible.filter(part => part.kind !== 'approval')
-  const cardsFromBefore = keptVisible.filter(part => part.kind === 'approval')
   return expanded
     ? [header, ...split.before, ...split.delivery]
-    : [header, ...foldedBefore, ...withApprovalsLast(split.delivery), ...cardsFromBefore]
+    : [header, ...foldedBefore, ...split.delivery]
 }

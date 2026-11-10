@@ -4,7 +4,7 @@ import test from 'node:test'
 
 import { loadChatUtility, loadChatFeature } from './chatPresentationTestHarness.mjs'
 
-const { isTurnFoldable, turnProcessFoldSignature } = await loadChatFeature('presentation/chatTurnPresentation')
+const { isTurnFoldable, presentTurnParts, turnProcessFoldSignature } = await loadChatFeature('presentation/chatTurnPresentation')
 
 // ---------------------------------------------------------------------------
 // The fold helpers are pure functions over a finished turn, so they are tested
@@ -114,10 +114,17 @@ test('an approval card stays visible while tool/thinking process folds', () => {
   assert.deepEqual(split.pinned, [], 'approval cards fold with the process')
   assert.deepEqual(split.before.map(p => p.kind), ['thinking', 'approval', 'tool_group'])
 
+  // The fold keeps arrival order and keeps the card out of the collapsed
+  // region; the presenter is what ends the turn with it.
   assert.deepEqual(
     foldTurnParts(turn, false).map(p => p.kind),
+    ['process', 'approval', 'text'],
+    'folded, the card stays visible and is not hidden by the fold',
+  )
+  assert.deepEqual(
+    presentTurnParts(turn, null, new Map()).map(p => p.kind),
     ['process', 'text', 'approval'],
-    'folded, the card stays visible at the end of the turn, after its answer',
+    'presented, the turn ends with its card',
   )
   assert.deepEqual(
     foldTurnParts(turn, true).map(p => p.kind),
@@ -144,8 +151,13 @@ test('an answered approval card remains visible while process folds', () => {
   assert.deepEqual(split.pinned, [], 'a card folds with the record, answered or not')
   assert.deepEqual(
     foldTurnParts(turn, false).map(p => p.kind),
+    ['process', 'approval', 'text'],
+    'approval stays visible while surrounding process folds',
+  )
+  assert.deepEqual(
+    presentTurnParts(turn, null, new Map()).map(p => p.kind),
     ['process', 'text', 'approval'],
-    'approval stays visible while surrounding process folds, at the end',
+    'and presented, it ends the turn',
   )
   assert.deepEqual(
     foldTurnParts(turn, true).map(p => p.kind),
@@ -526,7 +538,8 @@ test('the folded header does not count a card it leaves on screen', () => {
   const folded = foldTurnParts(turn, false)
   assert.equal(folded[0].kind, 'process')
   assert.doesNotMatch(folded[0].meta, /approval/, 'the card is on screen, so it is not folded')
-  assert.equal(folded[folded.length - 1].kind, 'approval', 'the card ends the folded turn')
+  assert.equal(folded.filter(part => part.kind === 'approval').length, 1, 'the card is on screen')
+  assert.equal(presentTurnParts(turn, null, new Map()).at(-1).kind, 'approval', 'the card ends the turn')
 
   const plain = groupEventsIntoTurns([
     makeEvent(1, 'turn_started', { summary: 'go' }),
@@ -585,4 +598,26 @@ test('a subagent region with dispatch or child errors stays pinned when process 
     foldTurnParts(turn, false).map(part => part.kind),
     ['process', 'subagents', 'text'],
   )
+})
+
+test('cards move last without dissolving the thinking they separated', () => {
+  // Regression guard from the second cross-model review: reordering raw parts
+  // *before* presentThinkingParts made an approval card the last part, so the
+  // run before it flushed as `done` (a live turn's spinner froze) and two
+  // reasoning phases either side of the card merged into one block.
+  const turn = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }),
+    makeEvent(2, 'thinking_delta', { text: 'first phase' }),
+    makeEvent(3, 'approval_required', { tool_call_id: 'q1', kind: 'question', title: 'Pick' }),
+    makeEvent(4, 'thinking_delta', { text: 'second phase' }),
+  ])[0]
+  const presented = presentTurnParts(turn, null, new Map())
+  const kinds = presented.map(part => part.kind)
+  assert.equal(kinds[kinds.length - 1], 'approval', 'the card still ends the turn')
+  const thinking = presented.filter(part => part.kind === 'thinking')
+  assert.equal(thinking.length, 2, 'the two phases stay two blocks, not one merged run')
+  assert.equal(thinking[0].text, 'first phase')
+  assert.equal(thinking[1].text, 'second phase')
+  // A live turn is still thinking: the trailing run must animate, not read as done.
+  assert.equal(thinking[1].state, 'active', 'the trailing run keeps animating')
 })

@@ -76,8 +76,7 @@ function compactSummaryPart(part: TimelinePart): TimelinePart {
 }
 
 function summaryPartsForPendingDetail(turn: TimelineTurn): TimelinePart[] {
-  // Same reading order as a folded turn: the card ends the turn.
-  return withApprovalsLast(turn.parts.filter(isSummaryVisiblePart).map(compactSummaryPart))
+  return turn.parts.filter(isSummaryVisiblePart).map(compactSummaryPart)
 }
 
 export function presentTurnParts(
@@ -93,14 +92,15 @@ export function presentTurnParts(
     : folded
       ? foldTurnParts(turn, isExpanded)
       : turn.parts
-  // One reading order for every shape of the turn — folded, expanded or live:
-  // the answer is the reasoning and the card is the action, so the card ends
-  // the turn instead of sitting on top of the explanation it belongs to.
-  const ordered = withApprovalsLast(parts)
   const terminal: Exclude<ThinkingState, 'active'> | null =
     turn.errors.length > 0 || ['failed', 'cancelled', 'interrupted'].includes(turn.completionStatus ?? '')
       ? 'interrupted' : turn.completed ? 'done' : null
-  return presentThinkingParts(ordered, terminal)
+  // Group first, reorder second. One reading order for every shape of the turn —
+  // folded, expanded or live: the answer is the reasoning and the card is the
+  // action, so the card ends the turn instead of topping the explanation. Doing
+  // it after ``presentThinkingParts`` is what keeps a card an approval *boundary*
+  // (two reasoning runs stay two) and keeps a live turn's trailing run animating.
+  return withApprovalsLast(presentThinkingParts(parts, terminal))
 }
 
 /** Memoize unaffected turns while reflecting the visible fold/detail state and label. */
