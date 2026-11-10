@@ -11,9 +11,12 @@ monotonic ``stream_sequence`` (session-local) on append; reads are paged by
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import importlib
 import json
+import os
 import shutil
+import weakref
 from dataclasses import dataclass
 from enum import Enum
 from itertools import groupby
@@ -29,6 +32,18 @@ _COMPACTABLE_HISTORY_TYPES = frozenset(
 )
 _HISTORY_CHUNK_COUNT_KEY = "_history_chunk_count"
 _IOResult = TypeVar("_IOResult")
+# Managers and temporary history readers can construct separate stores for one
+# path. Keep lifecycle operations serialized across those instances as well.
+_PATH_LOCKS: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+
+
+def _path_lock(path: Path) -> asyncio.Lock:
+    key = str(path.resolve())
+    lock = _PATH_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _PATH_LOCKS[key] = lock
+    return lock
 
 
 async def _complete_io(operation: Callable[..., _IOResult], *args: Any) -> _IOResult:
@@ -130,7 +145,8 @@ class AgentStreamStore:
         self._dir = _state_root() / workspace_id / "agent_streams"
         self._path = self._dir / f"{session_id}.jsonl"
         self._next_seq: Optional[int] = None
-        self._lock = asyncio.Lock()
+        self._lock = _path_lock(self._path)
+        self._append_signature: Optional[Tuple[int, int, int]] = None
         # Replayed history is commonly read through many consecutive pages.
         # Keep a sparse in-memory sequence -> text-stream offset index so page
         # N resumes near its cursor instead of parsing pages 0..N-1 again.
@@ -180,22 +196,14 @@ class AgentStreamStore:
         Returns the event with ``stream_sequence`` set.
         """
         async with self._lock:
-            if self._next_seq is None:
-                self._next_seq = self._recover_next_seq()
-            seq = self._next_seq
-            event = event.model_copy(update={"stream_sequence": seq})
             self._ensure_dir()
             try:
-                await _complete_io(self._write_line, event)
+                return await _complete_io(self._write_line, event)
             except BaseException:
-                # A cancelled/failed write may already have reached disk. Recover
-                # the actual sequence on retry rather than reusing its old value.
+                # Disk work can finish before cancellation reaches this caller.
                 self._next_seq = None
+                self._append_signature = None
                 raise
-            # Only advance the sequence counter after a successful write so a
-            # failed append does not leave a permanent gap in the stream.
-            self._next_seq = seq + 1
-            return event
 
     async def clear(self) -> None:
         """Remove this session's event log and cursor checkpoint.
@@ -219,9 +227,41 @@ class AgentStreamStore:
             except FileNotFoundError:
                 continue
 
-    def _write_line(self, event: AgentStreamEvent) -> None:
-        with self._path.open("a", encoding="utf-8") as f:
-            f.write(event.model_dump_json() + "\n")
+    def _write_line(self, event: AgentStreamEvent) -> AgentStreamEvent:
+        # A stable sidecar also fences writers in different backend processes.
+        # Hold it across sequence recovery and the complete record write.
+        with self._path.with_suffix(".append.lock").open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                try:
+                    stat = self._path.stat()
+                    signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+                except FileNotFoundError:
+                    signature = None
+                if self._next_seq is None or signature != self._append_signature:
+                    self._next_seq = self._recover_next_seq()
+                event = event.model_copy(update={"stream_sequence": self._next_seq})
+                data = (event.model_dump_json() + "\n").encode("utf-8")
+                with self._path.open("ab", buffering=0) as output:
+                    start = output.tell()
+                    try:
+                        remaining = memoryview(data)
+                        while remaining:
+                            written = os.write(output.fileno(), remaining)
+                            if written <= 0:
+                                raise OSError("stream append made no progress")
+                            remaining = remaining[written:]
+                    except BaseException:
+                        # A failed partial record must not concatenate with the
+                        # next append. No cooperating writer can enter yet.
+                        output.truncate(start)
+                        raise
+                    stat = os.fstat(output.fileno())
+                self._append_signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+                self._next_seq += 1
+                return event
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
 
     async def replace_all(self, events: List[AgentStreamEvent]) -> None:
         """Replace the entire store with ``events`` (snapshot sources)."""

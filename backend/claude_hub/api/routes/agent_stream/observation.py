@@ -16,6 +16,7 @@ from claude_hub.models import (
     AgentStreamEventPage,
     ChatMode,
     ManagedSession,
+    SessionKind,
     StreamCapabilities,
     User,
 )
@@ -138,8 +139,13 @@ async def stream_events_for(
         )
     if view == "conversation" and turn_id is not None:
         raise HTTPException(status_code=400, detail="conversation view cannot filter one turn")
-    if persisted_only or session.archived:
-        store = manager.get_store(session.workspace_id, session.id)
+    store = manager.get_store(session.workspace_id, session.id)
+    # History reads do not depend on a provider handshake. Check the beginning,
+    # not the requested cursor: an exhausted page still belongs to this history.
+    has_history = not (persisted_only or session.archived) and bool(
+        (await store.read_since(-1, 1)).events
+    )
+    if persisted_only or session.archived or has_history:
         if view == "conversation":
             return await store.read_conversation(since_sequence, limit, compact=compact)
         if turn_id is not None and through_sequence is not None:
@@ -157,8 +163,10 @@ async def stream_events_for(
     except ValueError:
         return AgentStreamEventPage(events=[], next_sequence=since_sequence, has_more=False)
     except StructuredSourceUnavailable:
+        if session.session_kind == SessionKind.CHAT:
+            return AgentStreamEventPage(events=[], next_sequence=since_sequence, has_more=False)
         bindings.raise_structured_unavailable(session.id, manager)
-    if manager.hard_failed(session.id):
+    if manager.hard_failed(session.id) and session.session_kind != SessionKind.CHAT:
         bindings.raise_structured_unavailable(session.id, manager)
     store = manager.get_store(session.workspace_id, session.id)
     if view == "conversation":

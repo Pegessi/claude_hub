@@ -243,3 +243,82 @@ async def test_stuck_disk_teardown_is_bounded_and_retains_retryable_owner(
     finally:
         blocked.release.set()
         await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_separate_store_instances_serialize_sequences() -> None:
+    import json
+
+    stores = [AgentStreamStore("workspace", "worker-1") for _ in range(8)]
+    written = await asyncio.gather(*(stores[i % 8].append(event()) for i in range(80)))
+    rows = [json.loads(line) for line in stores[0].path.read_text().splitlines()]
+    assert [row["stream_sequence"] for row in rows] == list(range(80))
+    assert sorted(item.stream_sequence for item in written) == list(range(80))
+
+
+@pytest.mark.asyncio
+async def test_partial_append_is_completed_or_rolled_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+
+    store = AgentStreamStore("workspace", "worker-1")
+    original = os.write
+    calls = 0
+
+    def partial(fd: int, data: Any) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("disk full")
+        return original(fd, data[:17])
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "write", partial)
+        with pytest.raises(OSError, match="disk full"):
+            await store.append(event())
+    assert store.path.read_bytes() == b""
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "write", lambda fd, data: original(fd, data[:17]))
+        result = await store.append(event())
+    assert result.stream_sequence == 0
+    assert len((await store.read_since()).events) == 1
+
+
+@pytest.mark.asyncio
+async def test_store_appends_across_processes() -> None:
+    import json
+    import sys
+
+    store = AgentStreamStore("workspace", "worker-1")
+    script = """
+import asyncio, importlib, sys
+from pathlib import Path
+from claude_hub.services.agent_stream.store import AgentStreamStore
+from claude_hub.models import AgentStreamEvent
+wm = importlib.import_module('claude_hub.services.workspace_manager')
+wm.STATE_ROOT = Path(sys.argv[1])
+event = AgentStreamEvent.model_validate_json(sys.argv[2])
+async def run():
+    store = AgentStreamStore('workspace', 'worker-1')
+    for _ in range(20):
+        await store.append(event)
+asyncio.run(run())
+"""
+    processes = await asyncio.gather(
+        *(
+            asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                script,
+                str(store.path.parents[2]),
+                event().model_dump_json(),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            for _ in range(3)
+        )
+    )
+    for process in processes:
+        _, error = await process.communicate()
+        assert process.returncode == 0, error.decode()
+    rows = [json.loads(line) for line in store.path.read_text().splitlines()]
+    assert [row["stream_sequence"] for row in rows] == list(range(60))
