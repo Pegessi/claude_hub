@@ -26,9 +26,15 @@ from typing import Any, Mapping
 from claude_hub.services.feishu_bot import FeishuBotConfig
 from claude_hub.services.runtime_isolation import resolve_runtime_home
 
-_STATE_VERSION = 3
-_PREVIOUS_STATE_VERSION = 2
+_STATE_VERSION = 4
+_PREVIOUS_STATE_VERSION = 3
+_V2_STATE_VERSION = 2
 _LEGACY_STATE_VERSION = 1
+
+BOT_MODE_SINGLE = "single"
+BOT_MODE_PER_CHANNEL = "per_channel"
+BOT_MODES = (BOT_MODE_SINGLE, BOT_MODE_PER_CHANNEL)
+MAX_CHANNELS_PER_BOT = 8
 
 ENV_BOT_ID = "env"
 LEGACY_BOT_ID = "legacy"
@@ -114,6 +120,10 @@ class FeishuBotOccupied(FeishuBotPoolError):
     """Raised when the Bot already has an active binding."""
 
 
+class FeishuBotModeSwitchBlocked(FeishuBotOccupied):
+    """Raised when switching a Bot's serving mode while it has active bindings."""
+
+
 class FeishuChatOccupied(FeishuBotPoolError):
     """Raised when the Chat tab is already bound elsewhere in the pool."""
 
@@ -186,6 +196,17 @@ def binding_chat_type(value: Any) -> str:
     return raw
 
 
+def bot_mode(value: Mapping[str, Any]) -> str:
+    """Read a persisted Bot's serving mode, defaulting legacy entries to single."""
+
+    raw = value.get("mode")
+    if raw is None:
+        return BOT_MODE_SINGLE
+    if not isinstance(raw, str) or raw not in BOT_MODES:
+        raise _state_error("bot.mode")
+    return raw
+
+
 @dataclass(frozen=True)
 class BotBinding:
     """One Bot channel bound to one Chat.
@@ -231,11 +252,16 @@ class BotEntry:
     updated_at: float | None
     config: FeishuBotConfig | None
     claims: tuple[PairingClaim, ...]
-    binding: BotBinding | None
+    bindings: tuple[BotBinding, ...] = ()
+    mode: str = BOT_MODE_SINGLE
     callback_enabled: bool = False
     verification_token: str | None = field(default=None, repr=False)
     encrypt_key: str | None = field(default=None, repr=False)
     expected_tenant_key: str | None = None
+
+    @property
+    def binding(self) -> BotBinding | None:
+        return self.bindings[0] if self.bindings else None
 
 
 @dataclass(frozen=True)
@@ -346,11 +372,21 @@ def _validate_pool_numbers(bots: dict[str, Any], rate_limits: dict[str, Any]) ->
                 _as_int(value.get("generation"), f"{collection}.generation")
                 if collection == "claims":
                     _as_int(value.get("confirm_attempts", 0), "claims.confirm_attempts")
-        binding = raw.get("binding")
-        if binding is not None:
-            binding = _as_mapping(binding, "binding")
-            _as_float(binding.get("created_at"), "binding.created_at")
-            _as_int(binding.get("generation"), "binding.generation")
+        if "mode" in raw and raw.get("mode") is not None:
+            bot_mode(raw)
+        bindings = raw.get("bindings")
+        if bindings is not None:
+            if not isinstance(bindings, list):
+                raise _state_error("bot.bindings")
+            for item in bindings:
+                mapped_binding = _as_mapping(item, "binding")
+                _as_float(mapped_binding.get("created_at"), "binding.created_at")
+                _as_int(mapped_binding.get("generation"), "binding.generation")
+        legacy_binding = raw.get("binding")
+        if legacy_binding is not None:
+            mapped_legacy = _as_mapping(legacy_binding, "binding")
+            _as_float(mapped_legacy.get("created_at"), "binding.created_at")
+            _as_int(mapped_legacy.get("generation"), "binding.generation")
 
 
 def _owner_from_dict(value: dict[str, Any], name: str) -> OwnerIdentity:

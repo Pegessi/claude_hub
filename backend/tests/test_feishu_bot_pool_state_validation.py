@@ -125,8 +125,38 @@ def test_v2_pool_drops_callback_secrets_on_next_write(tmp_path):
     store.update_bot(bot_id, expected_revision=entry.revision, name="migrated", environ={})
 
     migrated = json.loads(store.path.read_text(encoding="utf-8"))
-    assert migrated["version"] == 3
+    assert migrated["version"] == 4
     assert migrated["bots"][bot_id]["credentials"] == {"app_secret": "test-secret"}
+    assert migrated["bots"][bot_id]["mode"] == "single"
+    assert migrated["bots"][bot_id]["bindings"] == []
+    assert "binding" not in migrated["bots"][bot_id]
+
+
+def test_v3_pool_migrates_single_binding_to_one_element_bindings_list(tmp_path):
+    store = _store(tmp_path)
+    bot_id = store.create_bot(name="test", config=_CONFIG, environ={})
+    pending, word = _claim(store, bot_id, {})
+    binding = _activate(store, bot_id, pending, word, {})
+    state = json.loads(store.path.read_text(encoding="utf-8"))
+    v3_binding = state["bots"][bot_id].pop("bindings")[0]
+    state["version"] = 3
+    state["bots"][bot_id].pop("mode", None)
+    state["bots"][bot_id]["binding"] = v3_binding
+    store.path.write_text(json.dumps(state), encoding="utf-8")
+
+    entry = store.snapshot(environ={}).get(bot_id)
+    assert entry is not None
+    assert entry.mode == "single"
+    assert len(entry.bindings) == 1
+    assert entry.bindings[0] == binding
+    assert entry.binding == binding
+
+    store.update_bot(bot_id, expected_revision=entry.revision, name="migrated-v4", environ={})
+    migrated = json.loads(store.path.read_text(encoding="utf-8"))
+    assert migrated["version"] == 4
+    assert migrated["bots"][bot_id]["mode"] == "single"
+    assert migrated["bots"][bot_id]["bindings"] == [v3_binding]
+    assert "binding" not in migrated["bots"][bot_id]
 
 
 @pytest.mark.parametrize("version", [True, False, 1.0, "1", None])
@@ -198,7 +228,7 @@ def test_invalid_persisted_time_fails_before_read_or_mutation(tmp_path, bad, fie
     else:
         collection, name = field.split(".")
         record = (
-            row[collection] if collection == "binding" else next(iter(row[collection].values()))
+            row["bindings"][0] if collection == "binding" else next(iter(row[collection].values()))
         )
         record[name] = bad
     store.path.write_text(json.dumps(state), encoding="utf-8")
