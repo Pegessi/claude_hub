@@ -786,3 +786,342 @@ def test_per_channel_dm_auto_provisions_tab_and_enforces_cooldown_and_caps(
         assert env_api.wire.pushes[-1][0] == "oc-bob"
 
     asyncio.run(scenario())
+
+
+def _sdk_group_mention(
+    app_id: str,
+    text: str,
+    now: float,
+    *,
+    message_id: str,
+    chat_id: str,
+    sender_open_id: str,
+    mentioned_bot_open_id: str = "ou-current-bot",
+) -> Any:
+    return SimpleNamespace(
+        header=SimpleNamespace(event_id=f"ev-{message_id}", app_id=app_id),
+        event=SimpleNamespace(
+            sender=SimpleNamespace(
+                sender_type="user", sender_id=SimpleNamespace(open_id=sender_open_id)
+            ),
+            message=SimpleNamespace(
+                chat_type="group",
+                message_type="text",
+                message_id=message_id,
+                create_time=str(int(now * 1000)),
+                chat_id=chat_id,
+                thread_id=None,
+                parent_id=None,
+                root_id=None,
+                mentions=[
+                    SimpleNamespace(
+                        key="@_user_1",
+                        id=SimpleNamespace(open_id=mentioned_bot_open_id),
+                        name="Test Bot",
+                    )
+                ],
+                content=json.dumps({"text": f"@_user_1 {text}"}),
+            ),
+        ),
+    )
+
+
+def test_group_bind_truncates_overlong_feishu_chat_name_and_rejected_write_is_not_503(
+    env_api,
+) -> None:
+    overlong_name = "Group-" + ("X" * 300)
+    env_api.wire.chats["oc-group-long"] = {
+        "chat_id": "oc-group-long",
+        "name": overlong_name,
+        "chat_mode": "group",
+        "chat_type": "public",
+    }
+    bot_id = env_api.pool.create_bot(name="One", config=_config("app-1"), environ={})
+    entry = env_api.pool.snapshot({}).get(bot_id)
+    assert entry is not None
+
+    # Rejected write (e.g. over-long tab_id) returns 400 invalid_bot_request, not 503.
+    bad_tab = env_api.client.post(
+        f"/api/feishu/bot/bots/{bot_id}/bindings/group",
+        json={
+            "chat_id": "oc-group-long",
+            "tab_id": "t" * 300,
+            "expected_revision": entry.revision,
+        },
+    )
+    assert bad_tab.status_code == 400
+    assert bad_tab.json()["detail"] == "invalid_bot_request"
+
+    # Untrusted over-long Feishu chat_info.name is truncated to 128 chars and succeeds.
+    ok = env_api.client.post(
+        f"/api/feishu/bot/bots/{bot_id}/bindings/group",
+        json={
+            "chat_id": "oc-group-long",
+            "tab_id": "tab-valid",
+            "expected_revision": entry.revision,
+        },
+    )
+    assert ok.status_code == 200
+    bound = ok.json()["bots"][0]["binding"]
+    assert bound is not None
+    assert bound["chat_name"] == overlong_name[:128]
+
+
+def test_group_mention_sender_fallback_only_in_single_mode_and_per_channel_replies_to_unbound_group(
+    env_api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        single_bot = env_api.pool.create_bot(
+            name="Single",
+            config=_config("app-single"),
+            feishu_name="Test Bot",
+            feishu_open_id="ou-current-bot",
+            environ={},
+        )
+        env_api.pool.bind_p2p(
+            single_bot,
+            owner=LOCAL,
+            tab_id="tab-single-alice",
+            workspace_id=None,
+            sender_open_id="ou-alice",
+            chat_id="oc-alice-dm",
+            environ={},
+        )
+
+        per_channel_bot = env_api.pool.create_bot(
+            name="PerChannel",
+            config=_config("app-per-channel"),
+            feishu_name="Test Bot",
+            feishu_open_id="ou-current-bot",
+            environ={},
+        )
+        pc_entry = env_api.pool.snapshot({}).get(per_channel_bot)
+        assert pc_entry is not None
+        env_api.pool.update_bot(
+            per_channel_bot,
+            expected_revision=pc_entry.revision,
+            mode=BOT_MODE_PER_CHANNEL,
+            environ={},
+        )
+        env_api.pool.bind_p2p(
+            per_channel_bot,
+            owner=LOCAL,
+            tab_id="tab-pc-alice-dm",
+            workspace_id=None,
+            sender_open_id="ou-alice",
+            chat_id="oc-pc-alice-dm",
+            environ={},
+        )
+        pc_entry = env_api.pool.snapshot({}).get(per_channel_bot)
+        assert pc_entry is not None
+        env_api.pool.bind_group(
+            per_channel_bot,
+            owner=LOCAL,
+            tab_id="tab-pc-bound-group",
+            workspace_id=None,
+            chat_id="oc-bound-group",
+            chat_name="Bound Group",
+            expected_revision=pc_entry.revision,
+            environ={},
+        )
+
+        dispatched: list[tuple[str, str]] = []
+
+        async def fake_dispatch(
+            tab_id: str,
+            _text: str,
+            _turn_id: str,
+            *,
+            admission_guard: Any,
+            visible_text: str,
+            **_kwargs: Any,
+        ) -> str:
+            async with admission_guard():
+                dispatched.append((tab_id, visible_text))
+            return f"ack:{visible_text}"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", fake_dispatch)
+
+        # Direct _route_binding checks across both modes.
+        unbound_group_event = bot_api.message_event_from_sdk(
+            _sdk_group_mention(
+                "app-single",
+                "probe",
+                clock.value,
+                message_id="om-probe-1",
+                chat_id="oc-unbound-group",
+                sender_open_id="ou-alice",
+            ),
+            expected_app_id="app-single",
+            expected_bot_open_id="ou-current-bot",
+        )
+        assert unbound_group_event is not None
+        single_routed = bot_api._route_binding(single_bot, unbound_group_event)
+        assert single_routed is not None and single_routed.tab_id == "tab-single-alice"
+        assert bot_api._route_binding(per_channel_bot, unbound_group_event) is None
+
+        bound_group_event = bot_api.message_event_from_sdk(
+            _sdk_group_mention(
+                "app-per-channel",
+                "probe",
+                clock.value,
+                message_id="om-probe-2",
+                chat_id="oc-bound-group",
+                sender_open_id="ou-bob",
+            ),
+            expected_app_id="app-per-channel",
+            expected_bot_open_id="ou-current-bot",
+        )
+        assert bound_group_event is not None
+        pc_group_routed = bot_api._route_binding(per_channel_bot, bound_group_event)
+        assert pc_group_routed is not None and pc_group_routed.tab_id == "tab-pc-bound-group"
+
+        # In single mode, Alice's mention in an unbound group falls back to her DM tab.
+        await bot_api._handle_sdk_event(
+            single_bot,
+            _sdk_group_mention(
+                "app-single",
+                "from single group",
+                clock.value,
+                message_id="om-single-grp",
+                chat_id="oc-unbound-group",
+                sender_open_id="ou-alice",
+            ),
+        )
+        assert dispatched == [("tab-single-alice", "from single group")]
+
+        # In per_channel mode, Alice's mention in an unbound group does NOT fall back
+        # to her private DM tab; it replies telling the operator to bind the group.
+        await bot_api._handle_sdk_event(
+            per_channel_bot,
+            _sdk_group_mention(
+                "app-per-channel",
+                "from unbound group",
+                clock.value,
+                message_id="om-pc-unbound-grp",
+                chat_id="oc-unbound-group",
+                sender_open_id="ou-alice",
+            ),
+        )
+        assert dispatched == [("tab-single-alice", "from single group")]
+        assert "not bound" in env_api.wire.reply_texts()[-1].lower()
+
+        # In per_channel mode, a mention in a bound group routes to that group's tab.
+        await bot_api._handle_sdk_event(
+            per_channel_bot,
+            _sdk_group_mention(
+                "app-per-channel",
+                "from bound group",
+                clock.value,
+                message_id="om-pc-bound-grp",
+                chat_id="oc-bound-group",
+                sender_open_id="ou-bob",
+            ),
+        )
+        assert dispatched[-1] == ("tab-pc-bound-group", "from bound group")
+
+    asyncio.run(scenario())
+
+
+def test_per_channel_create_tab_timeout_and_bind_failures_roll_back_cleanly(
+    env_api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_api.wire.chats["oc-group-rb"] = {
+        "chat_id": "oc-group-rb",
+        "name": "Rollback Group",
+        "chat_mode": "group",
+        "chat_type": "public",
+    }
+    bot_id = env_api.pool.create_bot(
+        name="One",
+        config=_config("app-1"),
+        feishu_name="Test Bot",
+        feishu_open_id="ou-current-bot",
+        environ={},
+    )
+    env_api.pool.update_bot(bot_id, expected_revision=0, mode=BOT_MODE_PER_CHANNEL, environ={})
+
+    # 1. FakeTabManager.fail_create on group route -> 503 chat_tab_create_failed.
+    env_api.tabs.fail_create = True
+    entry = env_api.pool.snapshot({}).get(bot_id)
+    assert entry is not None
+    res_fail_create = env_api.client.post(
+        f"/api/feishu/bot/bots/{bot_id}/bindings/group",
+        json={"chat_id": "oc-group-rb", "expected_revision": entry.revision},
+    )
+    assert res_fail_create.status_code == 503
+    assert res_fail_create.json()["detail"] == "chat_tab_create_failed"
+    assert env_api.tabs.created == []
+    assert env_api.tabs.deleted == []
+    env_api.tabs.fail_create = False
+
+    # 2. Group route creates a tab, then bind_group raises -> tab deleted, no binding, 503.
+    orig_bind_group = env_api.pool.bind_group
+
+    def exploding_bind_group(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("simulated bind_group failure")
+
+    monkeypatch.setattr(env_api.pool, "bind_group", exploding_bind_group)
+    entry = env_api.pool.snapshot({}).get(bot_id)
+    assert entry is not None
+    res_rollback = env_api.client.post(
+        f"/api/feishu/bot/bots/{bot_id}/bindings/group",
+        json={"chat_id": "oc-group-rb", "expected_revision": entry.revision},
+    )
+    assert res_rollback.status_code == 503
+    assert res_rollback.json()["detail"] == "chat_tab_create_failed"
+    assert [t["id"] for t in env_api.tabs.created] == ["auto-tab-1"]
+    assert env_api.tabs.deleted == ["auto-tab-1"]
+    entry = env_api.pool.snapshot({}).get(bot_id)
+    assert entry is not None and entry.bindings == ()
+    monkeypatch.setattr(env_api.pool, "bind_group", orig_bind_group)
+
+    async def dm_scenarios() -> None:
+        # 3. Inbound DM creates a tab, then bind_p2p raises -> tab deleted, no binding, refusal reply.
+        orig_bind_p2p = env_api.pool.bind_p2p
+
+        def exploding_bind_p2p(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("simulated bind_p2p failure")
+
+        monkeypatch.setattr(env_api.pool, "bind_p2p", exploding_bind_p2p)
+        await bot_api._handle_sdk_event(
+            bot_id,
+            _sdk_dm(
+                "app-1",
+                "hello rollback",
+                clock.value,
+                message_id="om-dm-rb",
+                chat_id="oc-dm-rb",
+                sender_open_id="ou_12345678abcd",
+            ),
+        )
+        assert [t["id"] for t in env_api.tabs.created] == ["auto-tab-1", "auto-tab-2"]
+        assert env_api.tabs.deleted == ["auto-tab-1", "auto-tab-2"]
+        entry_after = env_api.pool.snapshot({}).get(bot_id)
+        assert entry_after is not None and entry_after.bindings == ()
+        assert "could not open a new session" in env_api.wire.reply_texts()[-1].lower()
+        monkeypatch.setattr(env_api.pool, "bind_p2p", orig_bind_p2p)
+
+        # 4. Hung create_tab times out via _AUTO_CHAT_CREATE_TIMEOUT_SECONDS -> refusal reply.
+        async def slow_create_tab(**_kwargs: Any) -> Any:
+            await asyncio.sleep(5.0)
+            return SimpleNamespace(id="never")
+
+        monkeypatch.setattr(bot_api, "_AUTO_CHAT_CREATE_TIMEOUT_SECONDS", 0.02)
+        monkeypatch.setattr(env_api.tabs, "create_tab", slow_create_tab)
+        await bot_api._handle_sdk_event(
+            bot_id,
+            _sdk_dm(
+                "app-1",
+                "hello timeout",
+                clock.value,
+                message_id="om-dm-timeout",
+                chat_id="oc-dm-timeout",
+                sender_open_id="ou_87654321dcba",
+            ),
+        )
+        entry_timeout = env_api.pool.snapshot({}).get(bot_id)
+        assert entry_timeout is not None and entry_timeout.bindings == ()
+        assert "could not open a new session" in env_api.wire.reply_texts()[-1].lower()
+
+    asyncio.run(dm_scenarios())

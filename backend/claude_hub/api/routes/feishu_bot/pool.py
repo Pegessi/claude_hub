@@ -1,5 +1,6 @@
 """Feishu Bot pool administration and pairing routes."""
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -13,12 +14,17 @@ from claude_hub.api.agent_stream import CHAT_ERROR_REASON_HEADER
 from claude_hub.api.routes.feishu_bot.bindings import FeishuPoolRouteBindings
 from claude_hub.models import ExecutionTarget, SessionKind, User
 from claude_hub.services.bot_pool.common import (
+    _MAX_ID_CHARS,
     BOT_MODE_SINGLE,
     BOT_MODES,
     MAX_CHANNELS_PER_BOT,
+    FeishuBotInvalidValue,
     FeishuBotModeSwitchBlocked,
 )
-from claude_hub.services.feishu_auto_chat import format_group_tab_name
+from claude_hub.services.feishu_auto_chat import (
+    AUTO_CHAT_CREATE_TIMEOUT_SECONDS,
+    format_group_tab_name,
+)
 from claude_hub.services.feishu_bot import FeishuBotConfig, FeishuBotProfile, FeishuBotRemoteError
 from claude_hub.services.feishu_bot_pool import (
     MAX_BOTS,
@@ -143,6 +149,7 @@ def pool_http_error(exc: FeishuBotPoolError) -> HTTPException:
         (FeishuBindingCodeError, 409, "pairing_expired"),
         (FeishuBotRateLimited, 429, "pair_code_rate_limited"),
         (FeishuPoolFull, 409, "pool_capacity_reached"),
+        (FeishuBotInvalidValue, 400, "invalid_bot_request"),
         (FeishuBotPoolStateError, 503, "bot_pool_unavailable"),
     ]
     for error_type, code, detail in mapping:
@@ -301,6 +308,15 @@ def parse_mode(value: dict[str, Any], key: str) -> str:
     if not isinstance(raw, str) or raw not in BOT_MODES:
         raise HTTPException(status_code=400, detail="invalid_bot_request")
     return raw
+
+
+def normalize_chat_name(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    return stripped[:_MAX_ID_CHARS]
 
 
 def parse_revision(value: dict[str, Any]) -> int:
@@ -620,6 +636,7 @@ def register_pool_routes(
             raise HTTPException(status_code=422, detail="chat_not_visible")
         if not info.is_group:
             raise HTTPException(status_code=422, detail="chat_not_group")
+        chat_name = normalize_chat_name(info.name)
         async with bindings.gate(bot_id):
             if tab_id is None:
                 gated_snapshot = get_pool_snapshot(bindings)
@@ -642,9 +659,12 @@ def register_pool_routes(
                     raise HTTPException(status_code=409, detail="chat_already_bound")
                 auto_chat = bindings.auto_chat()
                 try:
-                    created_tab_id = await auto_chat.create_tab(
-                        format_group_tab_name(info.name, chat_id),
-                        manager=bindings.ttyd_manager(),
+                    created_tab_id = await asyncio.wait_for(
+                        auto_chat.create_tab(
+                            format_group_tab_name(chat_name, chat_id),
+                            manager=bindings.ttyd_manager(),
+                        ),
+                        timeout=AUTO_CHAT_CREATE_TIMEOUT_SECONDS,
                     )
                 except Exception as exc:
                     raise HTTPException(status_code=503, detail="chat_tab_create_failed") from exc
@@ -657,13 +677,13 @@ def register_pool_routes(
                             tab_id=created_tab_id,
                             workspace_id=workspace_id,
                             chat_id=chat_id,
-                            chat_name=info.name,
+                            chat_name=chat_name,
                             expected_revision=expected_revision,
                         )
                     )
-                except Exception:
+                except Exception as exc:
                     await auto_chat.delete_tab(created_tab_id, manager=bindings.ttyd_manager())
-                    raise
+                    raise HTTPException(status_code=503, detail="chat_tab_create_failed") from exc
             else:
                 target_tab_id = tab_id
                 await in_pool(
@@ -673,7 +693,7 @@ def register_pool_routes(
                         tab_id=target_tab_id,
                         workspace_id=workspace_id,
                         chat_id=chat_id,
-                        chat_name=info.name,
+                        chat_name=chat_name,
                         expected_revision=expected_revision,
                     )
                 )

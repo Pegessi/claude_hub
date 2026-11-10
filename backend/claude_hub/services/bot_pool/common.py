@@ -88,6 +88,10 @@ class FeishuBotPoolStateError(FeishuBotPoolError):
     """Raised when the persisted pool record cannot be read or trusted."""
 
 
+class FeishuBotInvalidValue(FeishuBotPoolStateError):
+    """Raised when a caller-supplied write value fails validation before saving."""
+
+
 class FeishuBotNotFound(FeishuBotPoolError):
     """Raised when no live or tombstoned entry exists for a bot_id."""
 
@@ -261,6 +265,9 @@ class BotEntry:
 
     @property
     def binding(self) -> BotBinding | None:
+        """First binding in ``bindings`` (ordered by ``binding.created_at``, which
+        for auto-provisioned DM channels may be backdated to the triggering
+        message timestamp so ``feishu_message_time_status`` admits that message)."""
         return self.bindings[0] if self.bindings else None
 
 
