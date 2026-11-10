@@ -1,4 +1,5 @@
 import type { TerminalAgentStatus, TerminalTab } from '@/types'
+import type { NativeSubagentRow } from './nativeSubagentRows'
 
 /** `GET /api/subagents` row (fields this card consumes). */
 export interface SubagentSummary {
@@ -18,6 +19,8 @@ export interface SubagentSummary {
 }
 
 export interface SubagentJumpChip {
+  /** Discriminant for the shared dock list; native rows are ``'native'``. */
+  kind: 'hub'
   key: string
   subagentId: string
   tabId: string | null
@@ -33,7 +36,13 @@ export interface SubagentJumpChip {
   /** Running children are "active"; everything else is history ("earlier"). */
   group: 'active' | 'earlier'
   createdAt: string
+  /** Hub children open by jumping to their Chat tab, never in a window. */
+  canOpen: false
 }
+
+/** One dock row: a Hub child Chat that jumps, or a native child that opens a
+ *  detail window. The list, rail, popover and sheet render both identically. */
+export type SubagentDockRow = SubagentJumpChip | NativeSubagentRow
 
 export const SUBAGENT_JUMP_MAX_CHIPS = 30
 const POLL_INTERVAL_MS = 5000
@@ -91,6 +100,7 @@ export function toSubagentJumpChip(
   const archived = summary.tab_id !== null && options.archivedTabIds.has(summary.tab_id)
   const tabId = summary.tab_id
   return {
+    kind: 'hub',
     key: summary.id,
     subagentId: summary.id,
     tabId,
@@ -102,6 +112,7 @@ export function toSubagentJumpChip(
     summary: cleanSubagentSummary(summary.last_summary) || FALLBACK_SUMMARY[state],
     archived,
     canJump: tabId !== null,
+    canOpen: false,
     group: state === 'running' ? 'active' : 'earlier',
     createdAt: summary.created_at,
   }
@@ -162,7 +173,8 @@ export interface SubagentDockCounts {
   total: number
 }
 
-export function subagentDockCounts(chips: SubagentJumpChip[]): SubagentDockCounts {
+export function subagentDockCounts(chips: readonly SubagentDockRow[]): SubagentDockCounts {
+  // Only the grouping matters here, so both row kinds count the same way.
   const running = chips.filter(chip => chip.group === 'active').length
   return { running, history: chips.length - running, total: chips.length }
 }

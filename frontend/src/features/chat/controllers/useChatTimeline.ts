@@ -191,6 +191,80 @@ export function useChatTimeline(deps: Dependencies) {
     processExpandedOverrides.value = next
   }
 
+  /** Attribute-value escape for a provider thread id in a query selector. */
+  function attributeValue(value: string): string {
+    return value.replace(/["\\]/g, character => `\\${character}`)
+  }
+
+  /** One animation frame, or a macrotask where rAF is unavailable (tests). */
+  function nextFrame(): Promise<void> {
+    if (typeof requestAnimationFrame === 'function') {
+      return new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+    }
+    return new Promise<void>(resolve => setTimeout(resolve, 16))
+  }
+
+  /**
+   * Take the reader to a native child's inline region.
+   *
+   * The dock's detail window can show any child the timeline holds, but the
+   * transcript is where the conversation continues, so the window offers a
+   * jump. Three things must hold before the row exists in the DOM: the turn has
+   * to be inside the rendered tail window, its process has to be expanded, and
+   * a historical turn's child rows have to be requested from its detail
+   * stream. This attempts all three and gives up silently — the window already
+   * gave the reader the content, so nothing correctness-bearing depends on it.
+   */
+  async function revealSubthread(turnKey: string, threadId: string): Promise<void> {
+    const visit = timelineVisit
+    const list = turns.value
+    const ordinal = list.findIndex(turn => turn.key === turnKey)
+    if (ordinal < 0) return
+    const turn = list[ordinal]
+    if (ordinal < historyWindowStart.value) {
+      detachFromTail()
+      visibleHistoryStart.value = ordinal
+      await nextTick()
+    }
+    if (timelineDisposed || visit !== timelineVisit) return
+    const detail = turn.turnId ? deps.historyDetails.value[turn.turnId] : undefined
+    if (detail && detail.status !== 'loaded') {
+      await loadAndExpandHistoryDetail(turn)
+    } else if (!isTurnProcessExpanded(turn, latestTurnKey.value, processExpandedOverrides.value)) {
+      const expanded = new Map(processExpandedOverrides.value)
+      expanded.set(turn.key, true)
+      processExpandedOverrides.value = expanded
+    }
+    // The scroll below is deliberate: any pending tail anchor would undo it.
+    cancelScheduledTimelineScroll()
+    if (turn.key !== latestTurnKey.value && isFollowingLatest.value) detachFromTail()
+    await nextTick()
+    if (timelineDisposed || visit !== timelineVisit) return
+    const viewport = timelineEl.value
+    if (!viewport) return
+    // The expanded region mounts a turn's worth of children (markdown, tool
+    // groups), so the row can arrive a frame or two after the fold changed.
+    // A bounded wait keeps this honest instead of guessing one frame.
+    let row: HTMLElement | null = null
+    for (let attempt = 0; attempt < 10 && !row; attempt += 1) {
+      row = viewport.querySelector<HTMLElement>(
+        `[data-subagent-thread-id="${attributeValue(threadId)}"]`,
+      )
+      if (row || attempt === 9) break
+      await nextFrame()
+      if (timelineDisposed || visit !== timelineVisit) return
+    }
+    if (!row) return
+    // Every collapsed <details> between the child row and the transcript
+    // (its inline region and, if the provider nests one, its child row).
+    let node: HTMLElement | null = row
+    while (node && node !== viewport) {
+      if (node.tagName === 'DETAILS') (node as HTMLDetailsElement).open = true
+      node = node.parentElement
+    }
+    row.scrollIntoView({ block: 'center' })
+  }
+
   /** Parts to render for a turn, with its process folded away once it is history. */
   function turnPartsFor(turn: TimelineTurn) {
     const detail = turn.turnId ? deps.historyDetails.value[turn.turnId] : undefined
@@ -431,6 +505,7 @@ export function useChatTimeline(deps: Dependencies) {
     processExpandedOverrides,
     latestTurnKey,
     toggleTurnProcess,
+    revealSubthread,
     turnPartsFor,
     retryHistoryDetail,
     subthreadPartsFor,

@@ -104,7 +104,7 @@
       </button>
       <ChatSubagentDockPill
         v-if="isChatSession"
-        :chips="subagentDock.chips.value"
+        :chips="subagentRows"
         @jump="subagentDock.jump"
       />
       <span
@@ -199,7 +199,9 @@ import { storeToRefs } from 'pinia'
 import { useTerminalStore } from '@/stores/terminalStore'
 import ChatSubagentDockPill from '@/features/chat/components/ChatSubagentDockPill.vue'
 import { subagentDockKey } from '@/features/chat/controllers/subagentDock'
+import { createNativeSubagentDock, nativeSubagentDockKey } from '@/features/chat/controllers/nativeSubagentDock'
 import { useParentSubagents } from '@/features/chat/controllers/useParentSubagents'
+import type { SubagentDockRow } from '@/features/chat/presentation/subagentJump'
 import FeishuBindingPanel from '@/components/FeishuBindingPanel.vue'
 import TerminalView from '@/components/TerminalView.vue'
 import StructuredPane from '@/components/StructuredPane.vue'
@@ -238,6 +240,17 @@ const subagentDock = useParentSubagents(
   computed(() => (isChatSession.value && props.pane.tabId) || ''),
 )
 provide(subagentDockKey, subagentDock)
+
+// One control for both kinds of sub-agent: Hub children (`claude-hub agent
+// run`) arrive from the durable poller, native children from the Chat body's
+// timeline projection. The body publishes into this state and renders the
+// native detail window; the pill only lists and requests.
+const nativeSubagentDock = createNativeSubagentDock()
+provide(nativeSubagentDockKey, nativeSubagentDock)
+const subagentRows = computed<SubagentDockRow[]>(() => [
+  ...subagentDock.chips.value,
+  ...nativeSubagentDock.rows.value,
+])
 
 // ── Manual reconnect button (Terminal panes only) ──────────────────────────
 // Status is per-tab in the store; TerminalView performs the actual re-attach
