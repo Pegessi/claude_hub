@@ -37,12 +37,12 @@ from claude_hub.config import settings
 from claude_hub.models import ExecutionTarget, SessionKind, User
 from claude_hub.services import ttyd_manager, workspace_manager
 from claude_hub.services.agent_stream.attachments import preview_within_cache_bounds
-from claude_hub.services.agent_stream.turn_source import (
-    FEISHU_PROVIDER_TEXT_FORMAT_V2,
-    format_feishu_provider_text_v2,
+from claude_hub.services.bot_pool.common import BOT_MODE_PER_CHANNEL, BOT_MODE_SINGLE
+from claude_hub.services.feishu_auto_chat import (
+    AUTO_CHAT_CREATE_TIMEOUT_SECONDS,
+    FeishuAutoChatCreator,
+    FeishuAutoChatError,
 )
-from claude_hub.services.bot_pool.common import BOT_MODE_PER_CHANNEL
-from claude_hub.services.feishu_auto_chat import FeishuAutoChatCreator, FeishuAutoChatError
 from claude_hub.services.feishu_bot import (
     FeishuBotClient,
     FeishuBotConfig,
@@ -106,6 +106,7 @@ _auto_chat = FeishuAutoChatCreator(now=lambda: _now())
 
 _BODY_BYTES = 16 * 1024
 _GATE_TIMEOUT_SECONDS = 20.0
+_AUTO_CHAT_CREATE_TIMEOUT_SECONDS = AUTO_CHAT_CREATE_TIMEOUT_SECONDS
 _OUTBOUND_POST_TIMEOUT_SECONDS = 20.0
 _REACTION_POST_TIMEOUT_SECONDS = 2.0
 _BATCH_RETIREMENT_WAIT_SECONDS = 12.0
@@ -546,7 +547,6 @@ class _FeishuMessageBindings(_FeishuPoolBindings):
 
 _message_dispatcher = FeishuMessageDispatcher(_FeishuMessageBindings())
 _binding_code = _message_dispatcher._binding_code
-_turn_metadata = _message_dispatcher._turn_metadata
 _image_mime = _message_dispatcher._image_mime
 _event_attachments = _message_dispatcher._event_attachments
 _refresh_missing_profile = _message_dispatcher._refresh_missing_profile
@@ -741,17 +741,23 @@ def _route_binding(bot_id: str, event: FeishuMessageEvent) -> BotBinding | None:
     """Which binding owns this inbound message.
 
     A group binding is addressed by the whole group, so any member's mention
-    routes to the Chat bound to that group. Bots bound to a private chat keep the
-    previous rule: the group only works for the person who paired privately.
+    routes to the Chat bound to that group. In ``single`` mode, a Bot bound to
+    a private chat keeps the legacy rule where a group mention from that same
+    paired sender routes to their private Chat; ``per_channel`` mode isolates
+    each channel and never falls back from a group to a sender's private DM.
     """
 
     if event.chat_type == "p2p":
         return _pool.routed_binding(
             bot_id, sender_open_id=event.sender_open_id, chat_id=event.chat_id
         )
-    return _pool.routed_binding_for_chat(bot_id, chat_id=event.chat_id) or (
-        _pool.routed_binding_for_sender(bot_id, sender_open_id=event.sender_open_id)
-    )
+    group_binding = _pool.routed_binding_for_chat(bot_id, chat_id=event.chat_id)
+    if group_binding is not None:
+        return group_binding
+    entry = _pool.snapshot().get(bot_id)
+    if entry is not None and entry.mode != BOT_MODE_SINGLE:
+        return None
+    return _pool.routed_binding_for_sender(bot_id, sender_open_id=event.sender_open_id)
 
 
 async def _provision_per_channel_binding(
@@ -782,7 +788,14 @@ async def _provision_per_channel_binding(
         try:
             _auto_chat.check_dm_limits(entry, event.sender_open_id, now=now_val, pool_key=id(_pool))
             tab_name = _auto_chat.dm_tab_name(event.sender_open_id)
-            tab_id = await _auto_chat.create_tab(tab_name, manager=ttyd_manager)
+            tab_id = await asyncio.wait_for(
+                _auto_chat.create_tab(
+                    tab_name,
+                    manager=ttyd_manager,
+                    timeout_seconds=_AUTO_CHAT_CREATE_TIMEOUT_SECONDS,
+                ),
+                timeout=_AUTO_CHAT_CREATE_TIMEOUT_SECONDS,
+            )
         except FeishuAutoChatError as exc:
             return None, effective, exc.reason, exc.user_message
         except Exception as exc:
@@ -795,6 +808,9 @@ async def _provision_per_channel_binding(
             )
         try:
             workspace_id = _validate_bind_target(tab_id, None)
+            # Anchor created_at to the triggering message timestamp when earlier
+            # than now_val so feishu_message_time_status admits the message that
+            # opened this session (note: BotEntry.bindings sorts by created_at).
             activated_at = min(now_val, max(0.0, event.message_created_at_ms / 1000.0))
             binding = _pool.bind_p2p(
                 bot_id,
@@ -851,12 +867,23 @@ async def _handle_message_event(
             return
         binding = _route_binding(bot_id, event)
         if binding is None:
+            entry = _pool.snapshot().get(bot_id)
             if event.chat_type == "group":
-                status_value = "pre_dispatch_rejected"
+                if entry is not None and entry.enabled and entry.mode == BOT_MODE_PER_CHANNEL:
+                    if await _reply_if_current(
+                        client,
+                        event,
+                        effective,
+                        "This group is not bound to a Claude Hub session yet; please bind it in Claude Hub first.",
+                    ):
+                        status_value = "pre_dispatch_rejected"
+                    else:
+                        status_value = "reply_failed"
+                else:
+                    status_value = "pre_dispatch_rejected"
                 status_stage = "pre_dispatch"
                 status_reason = "binding_missing"
                 return
-            entry = _pool.snapshot().get(bot_id)
             if entry is not None and entry.enabled and entry.mode == BOT_MODE_PER_CHANNEL:
                 binding, effective, reject_reason, reject_notice = (
                     await _provision_per_channel_binding(bot_id, event, effective)
