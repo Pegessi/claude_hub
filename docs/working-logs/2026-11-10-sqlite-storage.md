@@ -100,15 +100,16 @@ reads, JSON backup/rewrite and a changed-record SQLite save. Derived Markdown
 rendering is excluded from both persistence timing paths. Full workspace cold
 loads remain slower; pagination is where indexed reads give the largest gain.
 
-Reference run on the fixed copy (decimal MB):
+Reference run on the fixed copy (decimal MB, after Argon cross-review optimizations):
 
 | Measurement | JSON/JSONL | SQLite + recovery | Change |
 | --- | ---: | ---: | --- |
-| Active dataset | 1,997.23 MB | 1,076.41 MB | 46.1% smaller |
-| Total, retaining compressed migration sources | 1,997.23 MB | 1,387.23 MB | 30.5% smaller |
-| Full workspace read | 60.8 ms | 160.2 ms | 2.64x slower |
-| Workspace persistence | 187.4 ms | 108.5 ms | 1.73x faster |
-| Last 100 stream events | 571.1 ms | 2.98 ms | 191x faster |
+| Active dataset | 1,997.23 MB | 1,076.40 MB | 46.1% smaller |
+| Total, retaining compressed migration sources | 1,997.23 MB | 1,387.22 MB | 30.5% smaller |
+| Full workspace read | 51.9 ms | 58.4 ms | 1.12x (near parity; down from 165.5 ms) |
+| Workspace persistence (changed) | 185.1 ms | 46.3 ms | 4.00x faster (down from 109.8 ms) |
+| Workspace persistence (unchanged) | 185.1 ms | 45.4 ms | 4.07x faster (down from 109.7 ms) |
+| Last 100 stream events | 586.0 ms | 3.11 ms | 188x faster |
 
 The reference run imported 2,219,946 valid events and preserved 22 malformed rows,
 with `PRAGMA integrity_check=ok`; import took 242.2 seconds and a marker-only rerun
@@ -183,3 +184,20 @@ covers both successful send and rollback after send failure, asserts the Hub
 snapshot is gone, and enumerates provider files to reject stray SQLite artifacts.
 The retired-session path already clears its Hub snapshot through store.clear; its
 remaining sidecar cleanup stays file-only. Final validation is attached to Task.
+
+
+## Argon adversarial cross-review and main (4a4b02e) reconciliation
+
+Task: `3adfb932-f439-4632-9876-94212e10410d`. Rebased `codex/sqlite-storage` cleanly onto
+`main` @ `4a4b02e29c8560661a7622bcfce8c8e6d687212b`, retaining `4a4b02e`'s provider-failure
+history fallback (`observation.py`, `runtime.py`, and regression tests) alongside SQLite WAL
+persistence. Fixed all findings from the adversarial cross-review (see `CROSS_REVIEW_ARGON.md`):
+
+- **Lazy service package exports (`services/__init__.py`) and CLI runtime isolation (`storage_maintenance.py`, `benchmark_sqlite_storage.py`)**: prevented importing `claude_hub.services.*` submodules from eagerly instantiating `TTYDManager` / `WorkspaceManager` against the default runtime home before `--root` / `--destination` and `BackendInstanceLock` are acquired.
+- **Tolerant Stop vs strict retry lifecycle inspection (`agent_stream/store.py`)**: restored `main`'s separation between `latest_unfinished_turn()` (tolerant of historical `stream_errors` rows so UI Stop and orphan recovery remain functional on migrated streams with legacy malformed lines) and `inspect_turn_lifecycle()` (strictly fail-closed on `stream_errors` or `OSError`).
+- **Source-free stream clear/replace/restore (`agent_stream/store.py`)**: `_clear_rows`, `_replace_rows`, and `restore` now register or look up the `streams` marker via `_ensure_stream` without importing legacy `.jsonl` contents that are immediately being deleted/replaced, allowing `clear()` to succeed even when an unimported legacy file is unreadable.
+- **SQLite cursor & snapshot residual-state detection (`managed_chat.py`)**: `has_residual_state()` now checks `document_exists(store.cursor_path)` and `document_exists(<stream>.edit-bak)` so SQLite-only cursors and snapshots reserve session identity until retired.
+- **Primary/CI checkout compatibility (`auth/session.py`, `test_auth_session_runtime_isolation.py`) and custom non-`workspaces` state-root resolution (`local_storage.py`)**: dynamic `_sessions_file()` resolution, deterministic linked-worktree guard testing, and unified `storage_location` parent resolution for `agent_streams`/`state.json`/`.namespace`.
+- **Orphan backup archival (`storage_maintenance.py`)**: `legacy_sources()` now explicitly globs `*/state.json.bak` and `*/agent_streams/*.cursor.json.bak` so backups retained after missing-primary recovery are archived.
+- **Read/write performance optimization (`local_storage.py`)**: replaced per-item `json.dumps` with byte-identical `pydantic_core.to_json`, moved `_parts_and_digests` outside `BEGIN IMMEDIATE`, and added bounded content-addressed SHA-256 caches (`_RAW_BY_DIGEST` and `_DOC_JSON_CACHE`), reducing full workspace read latency from 165.5 ms to 58.4 ms (2.83x faster) and workspace save latency from 109.8 ms to 46.3 ms (2.37x faster).
+

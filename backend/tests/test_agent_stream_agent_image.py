@@ -1483,7 +1483,7 @@ async def test_b4_truncated_grant_revokes_retained_bytes_and_grant_uses_no_store
     # Simulate stream truncation that removes the granting turn, then delete
     # the source so only the retained LRU could serve it.
     stream = AgentStreamStore("terminal-tabs", "terminal-tab-tab-a")
-    stream.path.write_text("")
+    stream._replace_rows([])
     evidence.unlink()
     second = await _get_image(client, "tab-a", str(evidence))
     assert second.status_code == 404

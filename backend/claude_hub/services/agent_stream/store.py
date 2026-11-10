@@ -288,10 +288,37 @@ class AgentStreamStore:
         async with self._lock:
             return await _complete_io(write)
 
+    def _ensure_stream(self, db: Any, *, seed_events: List[AgentStreamEvent] | None = None) -> int:
+        """Ensure a stream row exists without importing legacy JSONL rows being replaced/cleared."""
+        _, logical_name = storage_location(self._path)
+        row = db.execute(
+            "SELECT id,dictionary FROM streams WHERE name=?", (logical_name,)
+        ).fetchone()
+        if row:
+            self._dictionary = row[1]
+            return int(row[0])
+        if seed_events:
+            raw = b"".join(
+                pack(
+                    ev.model_dump(mode="json", exclude_defaults=True, exclude_none=True),
+                    b"",
+                )
+                for ev in seed_events[:16]
+            )
+            self._dictionary = raw[:32768] or self.session_id.encode()
+        else:
+            self._dictionary = self.session_id.encode()
+        return int(
+            db.execute(
+                "INSERT INTO streams(name,dictionary) VALUES (?,?)",
+                (logical_name, self._dictionary),
+            ).lastrowid
+        )
+
     def _clear_rows(self) -> None:
         with self._database() as db, db:
             db.execute("BEGIN IMMEDIATE")
-            name = self._import(db)
+            name = self._ensure_stream(db)
             db.execute("UPDATE streams SET generation=generation+1 WHERE id=?", (name,))
             db.execute("DELETE FROM stream_events WHERE name=?", (name,))
             db.execute("DELETE FROM stream_errors WHERE name=?", (name,))
@@ -307,7 +334,7 @@ class AgentStreamStore:
     def _replace_rows(self, events: List[AgentStreamEvent]) -> None:
         with self._database() as db, db:
             db.execute("BEGIN IMMEDIATE")
-            name = self._import(db)
+            name = self._ensure_stream(db, seed_events=events)
             db.execute("UPDATE streams SET generation=generation+1 WHERE id=?", (name,))
             db.execute("DELETE FROM stream_events WHERE name=?", (name,))
             db.execute("DELETE FROM stream_errors WHERE name=?", (name,))
@@ -397,15 +424,15 @@ class AgentStreamStore:
 
         return await _complete_io(count_rows)
 
-    async def inspect_turn_lifecycle(self, turn_id: str) -> TurnLifecycleSnapshot:
-        if not turn_id:
-            raise ValueError("turn_id must not be empty")
-
-        def inspect() -> TurnLifecycleSnapshot:
+    def _scan_turn_lifecycle(self, turn_id: str, strict: bool) -> TurnLifecycleSnapshot:
+        try:
             with self._read_database() as (db, name):
-                if db.execute(
-                    "SELECT 1 FROM stream_errors WHERE name=? LIMIT 1", (name,)
-                ).fetchone():
+                if (
+                    strict
+                    and db.execute(
+                        "SELECT 1 FROM stream_errors WHERE name=? LIMIT 1", (name,)
+                    ).fetchone()
+                ):
                     raise RuntimeError(f"cannot inspect corrupt agent stream {self._path}")
                 rows = list(
                     db.execute(
@@ -413,29 +440,46 @@ class AgentStreamStore:
                         (name,),
                     )
                 )
-            state = TurnLifecycleState.NOT_STARTED
-            candidate = None
-            for (body,) in rows:
+        except RuntimeError:
+            raise
+        except OSError as exc:
+            if strict:
+                raise RuntimeError(f"cannot inspect agent stream {self._path}") from exc
+            return TurnLifecycleSnapshot(
+                state=TurnLifecycleState.NOT_STARTED, latest_unfinished=None
+            )
+        state = TurnLifecycleState.NOT_STARTED
+        candidate = None
+        for (body,) in rows:
+            try:
                 event = AgentStreamEvent.model_validate(unpack(body, self._dictionary))
-                if event.type == AgentStreamEventType.TURN_STARTED:
-                    candidate = event
-                    if event.turn_id == turn_id and state != TurnLifecycleState.TERMINAL:
-                        state = TurnLifecycleState.UNFINISHED
-                else:
-                    if event.turn_id == turn_id and state == TurnLifecycleState.UNFINISHED:
-                        state = TurnLifecycleState.TERMINAL
-                    if candidate is not None and (
-                        event.turn_id == candidate.turn_id
-                        if candidate.turn_id is not None
-                        else event.run_epoch == candidate.run_epoch
-                    ):
-                        candidate = None
-            return TurnLifecycleSnapshot(state=state, latest_unfinished=candidate)
+            except (ValueError, KeyError, OSError) as exc:
+                if strict:
+                    raise RuntimeError(f"cannot inspect corrupt agent stream {self._path}") from exc
+                continue
+            if event.type == AgentStreamEventType.TURN_STARTED:
+                candidate = event
+                if event.turn_id == turn_id and state != TurnLifecycleState.TERMINAL:
+                    state = TurnLifecycleState.UNFINISHED
+            else:
+                if event.turn_id == turn_id and state == TurnLifecycleState.UNFINISHED:
+                    state = TurnLifecycleState.TERMINAL
+                if candidate is not None and (
+                    event.turn_id == candidate.turn_id
+                    if candidate.turn_id is not None
+                    else event.run_epoch == candidate.run_epoch
+                ):
+                    candidate = None
+        return TurnLifecycleSnapshot(state=state, latest_unfinished=candidate)
 
-        return await _complete_io(inspect)
+    async def inspect_turn_lifecycle(self, turn_id: str) -> TurnLifecycleSnapshot:
+        if not turn_id:
+            raise ValueError("turn_id must not be empty")
+        return await _complete_io(self._scan_turn_lifecycle, turn_id, True)
 
     async def latest_unfinished_turn(self) -> Optional[AgentStreamEvent]:
-        return (await self.inspect_turn_lifecycle("__latest__")).latest_unfinished
+        snapshot = await _complete_io(self._scan_turn_lifecycle, "__latest__", False)
+        return snapshot.latest_unfinished
 
     async def last_event_at(self) -> Optional[str]:
         return await self._last_time(None)
@@ -501,7 +545,7 @@ class AgentStreamStore:
         def restore_rows() -> None:
             with self._database() as db, db:
                 db.execute("BEGIN IMMEDIATE")
-                name = self._import(db)
+                name = self._ensure_stream(db)
                 db.execute("UPDATE streams SET generation=generation+1 WHERE id=?", (name,))
                 db.execute("DELETE FROM stream_events WHERE name=?", (name,))
                 for event in events:

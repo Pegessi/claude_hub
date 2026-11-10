@@ -4,6 +4,7 @@ import logging
 import os
 import secrets
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from ..config import settings
@@ -14,7 +15,8 @@ from ..services.runtime_isolation import resolve_runtime_home
 logger = logging.getLogger(__name__)
 
 # Session storage file
-SESSIONS_FILE = resolve_runtime_home() / "sessions.json"
+_DEFAULT_SESSIONS_FILE = resolve_runtime_home() / "sessions.json"
+SESSIONS_FILE = _DEFAULT_SESSIONS_FILE
 
 # The file holds bearer session ids and Feishu tokens, so it must be
 # readable/writable by the owner only.
@@ -25,6 +27,12 @@ _SESSIONS_FILE_MODE = 0o600
 _SESSIONS_DIR_MODE = 0o700
 
 
+def _sessions_file() -> Path:
+    if SESSIONS_FILE != _DEFAULT_SESSIONS_FILE:
+        return SESSIONS_FILE
+    return resolve_runtime_home() / "sessions.json"
+
+
 def _ensure_sessions_dir() -> None:
     """Ensure the sessions directory exists and is owner-only.
 
@@ -32,7 +40,7 @@ def _ensure_sessions_dir() -> None:
     ``mode`` argument to ``mkdir`` is still filtered by the process umask, and
     a directory created by an older release may be looser than 0700.
     """
-    sessions_dir = SESSIONS_FILE.parent
+    sessions_dir = _sessions_file().parent
     sessions_dir.mkdir(parents=True, exist_ok=True)
     try:
         current_mode = sessions_dir.stat().st_mode & 0o777
@@ -48,10 +56,11 @@ def _tighten_file_permissions() -> None:
     Older releases wrote the file with the process umask (typically 0664);
     tighten it back to 0600 whenever the store is read.
     """
+    sessions_file = _sessions_file()
     try:
-        current_mode = SESSIONS_FILE.stat().st_mode & 0o777
+        current_mode = sessions_file.stat().st_mode & 0o777
         if current_mode != _SESSIONS_FILE_MODE:
-            os.chmod(SESSIONS_FILE, _SESSIONS_FILE_MODE)
+            os.chmod(sessions_file, _SESSIONS_FILE_MODE)
     except FileNotFoundError:
         return
     except OSError as e:
@@ -61,11 +70,12 @@ def _tighten_file_permissions() -> None:
 def _load_sessions() -> Dict[str, Any]:
     """Load sessions, importing the legacy file when first encountered."""
     _ensure_sessions_dir()
-    if not document_exists(SESSIONS_FILE):
+    sessions_file = _sessions_file()
+    if not document_exists(sessions_file):
         return {}
     _tighten_file_permissions()
     try:
-        result: Dict[str, Any] = read_document(SESSIONS_FILE)
+        result: Dict[str, Any] = read_document(sessions_file)
         return result
     except (ValueError, IOError) as e:
         logger.warning(f"Failed to load sessions: {e}")
@@ -76,7 +86,7 @@ def _save_sessions(sessions: Dict[str, Any]) -> None:
     """Commit sessions to the owner-only SQLite database."""
     _ensure_sessions_dir()
     try:
-        write_document(SESSIONS_FILE, sessions)
+        write_document(_sessions_file(), sessions)
     except OSError as e:
         logger.error(f"Failed to save sessions: {e}")
 

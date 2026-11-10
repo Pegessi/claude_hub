@@ -14,13 +14,64 @@ import sqlite3
 import threading
 import time
 import zlib
+from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+import pydantic_core
+
 from .runtime_isolation import resolve_runtime_home, resolve_state_root
 
 _SCHEMA_LOCK = threading.Lock()
+_CACHE_LOCK = threading.Lock()
+_PREPARED_WRITE = threading.local()
+# Content-addressed caches keyed by cryptographic SHA-256 digests. Because a
+# SHA-256 digest uniquely identifies immutable UTF-8 JSON text, entries never
+# go stale across transactions, rollbacks, threads, or external writers.
+_RAW_BY_DIGEST: OrderedDict[bytes, str] = OrderedDict()
+_DOC_JSON_CACHE: OrderedDict[bytes, str] = OrderedDict()
+_MAX_RAW_CACHE_ENTRIES = 32768
+_MAX_DOC_CACHE_ENTRIES = 32
+
+
+def _json_bytes(value: Any) -> bytes:
+    try:
+        return pydantic_core.to_json(value)
+    except (TypeError, ValueError):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def _cache_raw(digest: bytes, raw_str: str) -> None:
+    with _CACHE_LOCK:
+        _RAW_BY_DIGEST[digest] = raw_str
+        if len(_RAW_BY_DIGEST) > _MAX_RAW_CACHE_ENTRIES:
+            _RAW_BY_DIGEST.popitem(last=False)
+
+
+def _get_cached_raw(digest: bytes) -> str | None:
+    with _CACHE_LOCK:
+        return _RAW_BY_DIGEST.get(digest)
+
+
+def _cache_doc(doc_digest: bytes, doc_str: str) -> None:
+    with _CACHE_LOCK:
+        _DOC_JSON_CACHE[doc_digest] = doc_str
+        if len(_DOC_JSON_CACHE) > _MAX_DOC_CACHE_ENTRIES:
+            _DOC_JSON_CACHE.popitem(last=False)
+
+
+def _get_cached_doc(doc_digest: bytes) -> str | None:
+    with _CACHE_LOCK:
+        return _DOC_JSON_CACHE.get(doc_digest)
+
+
+def _compute_doc_digest(layout_blob: bytes, key_digests: list[tuple[str, bytes]]) -> bytes:
+    h = hashlib.sha256(layout_blob)
+    for key, digest in key_digests:
+        h.update(key.encode("utf-8"))
+        h.update(digest)
+    return h.digest()
 
 
 def storage_location(path: Path) -> tuple[Path, str]:
@@ -47,8 +98,16 @@ def storage_location(path: Path) -> tuple[Path, str]:
         if parent.name == "workspaces":
             root = parent.parent
             break
-    if root.name == "secrets":
-        root = root.parent
+    else:
+        for parent in path.parents:
+            if parent.name == "agent_streams":
+                root = parent.parent.parent
+                break
+        else:
+            if path.name in ("state.json", "state.json.bak", ".namespace"):
+                root = path.parent.parent
+            elif root.name == "secrets":
+                root = root.parent
     # Apply the existing linked-worktree live-home guard to explicit legacy
     # paths too; a forgotten caller override must not bootstrap production.
     resolve_runtime_home(environ={**os.environ, "CLAUDE_HUB_HOME": str(root)})
@@ -115,14 +174,18 @@ def connection(path: Path) -> Iterator[sqlite3.Connection]:
 
 
 def pack(value: Any, dictionary: bytes = b"") -> bytes:
-    raw = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+    raw = _json_bytes(value)
+    if not dictionary:
+        return zlib.compress(raw, 6)
     compressor = zlib.compressobj(6, zdict=dictionary)
     return compressor.compress(raw) + compressor.flush()
 
 
 def unpack(value: bytes, dictionary: bytes = b"") -> Any:
+    if not dictionary:
+        return json.loads(zlib.decompress(value).decode("utf-8"))
     decompressor = zlib.decompressobj(zdict=dictionary)
-    return json.loads(decompressor.decompress(value) + decompressor.flush())
+    return json.loads((decompressor.decompress(value) + decompressor.flush()).decode("utf-8"))
 
 
 def _parts(payload: Any) -> tuple[bytes, dict[str, bytes]]:
@@ -143,10 +206,10 @@ def _parts(payload: Any) -> tuple[bytes, dict[str, bytes]]:
                 identity = (
                     str(item["id"]) if isinstance(item, dict) and "id" in item else str(index)
                 )
-                key = json.dumps([field, identity])
+                key = _json_bytes([field, identity]).decode("utf-8")
                 if key in rows:
-                    key = json.dumps([field, str(index), identity])
-                rows[key] = json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode()
+                    key = _json_bytes([field, str(index), identity]).decode("utf-8")
+                rows[key] = _json_bytes(item)
                 keys.append([index, key])
             layout[field] = ["list" if isinstance(value, list) else "dict", keys]
         else:
@@ -154,8 +217,20 @@ def _parts(payload: Any) -> tuple[bytes, dict[str, bytes]]:
     return pack(["root-list" if root_list else "object", layout]), rows
 
 
-def _write(db: sqlite3.Connection, name: str, payload: Any) -> None:
+def _parts_and_digests(
+    payload: Any,
+) -> tuple[bytes, dict[str, bytes], dict[str, bytes]]:
     layout, rows = _parts(payload)
+    digests = {key: hashlib.sha256(value).digest() for key, value in rows.items()}
+    return layout, rows, digests
+
+
+def _write(db: sqlite3.Connection, name: str, payload: Any) -> None:
+    prepared = getattr(_PREPARED_WRITE, "pair", None)
+    if prepared is not None and prepared[0] == id(payload):
+        layout, rows, digests = prepared[1]
+    else:
+        layout, rows, digests = _parts_and_digests(payload)
     old = dict(db.execute("SELECT key,digest FROM document_rows WHERE name=?", (name,)))
     db.executemany(
         "DELETE FROM document_rows WHERE name=? AND key=?",
@@ -163,9 +238,10 @@ def _write(db: sqlite3.Connection, name: str, payload: Any) -> None:
     )
     changed = []
     for key, value in rows.items():
-        digest = hashlib.sha256(value).digest()
+        digest = digests[key]
         if old.get(key) != digest:
             changed.append((name, key, digest, zlib.compress(value, 6)))
+            _cache_raw(digest, value.decode("utf-8"))
     db.executemany(
         "INSERT INTO document_rows VALUES (?,?,?,?) ON CONFLICT(name,key) DO UPDATE SET digest=excluded.digest, body=excluded.body",
         changed,
@@ -199,17 +275,37 @@ def read_document(path: Path) -> Any:
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 _write(db, name, payload)
                 return payload
+            key_digests = db.execute(
+                "SELECT key,digest FROM document_rows WHERE name=?", (name,)
+            ).fetchall()
+            if key_digests:
+                doc_digest = _compute_doc_digest(record[0], key_digests)
+                cached_doc = _get_cached_doc(doc_digest)
+                if cached_doc is not None:
+                    return json.loads(cached_doc)
+            else:
+                doc_digest = None
             kind, layout = unpack(record[0])
             if kind == "deleted":
                 raise FileNotFoundError(path)
             if kind == "value":
                 return layout
-            rows = {
-                key: unpack(body)
-                for key, body in db.execute(
-                    "SELECT key,body FROM document_rows WHERE name=?", (name,)
-                )
-            }
+            rows: dict[str, Any] = {}
+            missing_body = any(_get_cached_raw(digest) is None for _, digest in key_digests)
+            if missing_body:
+                for key, digest, body in db.execute(
+                    "SELECT key,digest,body FROM document_rows WHERE name=?", (name,)
+                ):
+                    raw_str = _get_cached_raw(digest)
+                    if raw_str is None:
+                        raw_str = zlib.decompress(body).decode("utf-8")
+                        _cache_raw(digest, raw_str)
+                    rows[key] = json.loads(raw_str)
+            else:
+                for key, digest in key_digests:
+                    cached_raw = _get_cached_raw(digest)
+                    assert cached_raw is not None
+                    rows[key] = json.loads(cached_raw)
             result: dict[str, Any] = {}
             for field, (shape, value) in layout.items():
                 if shape == "value":
@@ -218,14 +314,21 @@ def read_document(path: Path) -> Any:
                     result[field] = [rows[key] for _, key in value]
                 else:
                     result[field] = {index: rows[key] for index, key in value}
-            return result[""] if kind == "root-list" else result
+            out = result[""] if kind == "root-list" else result
+            if doc_digest is not None:
+                _cache_doc(doc_digest, _json_bytes(out).decode("utf-8"))
+            return out
 
 
 def write_document(path: Path, payload: Any) -> None:
     _, name = storage_location(path)
-    with connection(path) as db, db:
-        db.execute("BEGIN IMMEDIATE")
-        _write(db, name, payload)
+    _PREPARED_WRITE.pair = (id(payload), _parts_and_digests(payload))
+    try:
+        with connection(path) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            _write(db, name, payload)
+    finally:
+        _PREPARED_WRITE.pair = None
 
 
 def has_stored_document(path: Path) -> bool:

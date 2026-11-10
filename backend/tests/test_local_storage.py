@@ -281,3 +281,85 @@ def test_offline_archive_honors_external_workspace_root(tmp_path, monkeypatch):
     assert not (selected / "index.json").exists()
     assert (selected / "index.json.gz").is_file()
     assert (other / "index.json").read_text() == '{"workspaces":[]}'
+
+
+def test_storage_maintenance_cli_does_not_eagerly_initialize_default_runtime(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    fake_home = tmp_path / "fake-home"
+    default_runtime = fake_home / ".claude_hub"
+    default_runtime.mkdir(parents=True)
+    (default_runtime / "tabs.json").write_text(
+        '{"version":2,"tabs":[],"pending_stream_cleanup":[]}'
+    )
+    target_copy = tmp_path / "copy-runtime"
+    (target_copy / "workspaces").mkdir(parents=True)
+    (target_copy / "sessions.json").write_text('{"s1":{"value":1}}')
+    env = dict(os.environ, HOME=str(fake_home))
+    env.pop("CLAUDE_HUB_HOME", None)
+    env.pop("CLAUDE_HUB_STATE_ROOT", None)
+    # Import sessions.json in target_copy first in an isolated subprocess
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os; from pathlib import Path; from claude_hub.services.local_storage import read_document; read_document(Path(os.environ['CLAUDE_HUB_HOME'])/'sessions.json')",
+        ],
+        env={
+            **env,
+            "CLAUDE_HUB_HOME": str(target_copy),
+            "CLAUDE_HUB_STATE_ROOT": str(target_copy / "workspaces"),
+        },
+        cwd=Path(__file__).parents[1],
+        check=True,
+        timeout=30,
+    )
+    assert not (default_runtime / "storage.sqlite3").exists()
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "claude_hub.services.storage_maintenance",
+            "--root",
+            str(target_copy),
+        ],
+        env=env,
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not (default_runtime / "storage.sqlite3").exists()
+    assert (default_runtime / "tabs.json").exists()
+    assert not (target_copy / "sessions.json").exists()
+    assert (target_copy / "sessions.json.gz").is_file()
+
+
+def test_legacy_sources_includes_orphan_workspace_and_cursor_backups(tmp_path, monkeypatch):
+    from claude_hub.services.storage_maintenance import archive_sources, legacy_sources
+
+    home = tmp_path / "runtime"
+    ws_dir = home / "workspaces" / "ws-1"
+    stream_dir = ws_dir / "agent_streams"
+    stream_dir.mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_HUB_HOME", str(home))
+    monkeypatch.setenv("CLAUDE_HUB_STATE_ROOT", str(home / "workspaces"))
+    # Simulate missing primary recovered from .bak into SQLite (primary absent on disk, .bak present)
+    state_primary = ws_dir / "state.json"
+    state_bak = ws_dir / "state.json.bak"
+    state_bak.write_text('{"tasks":[]}')
+    storage.write_document(state_primary, {"tasks": []})
+    cursor_primary = stream_dir / "s1.cursor.json"
+    cursor_bak = stream_dir / "s1.cursor.json.bak"
+    cursor_bak.write_text('{"offset":10}')
+    storage.write_document(cursor_primary, {"offset": 10})
+
+    found = legacy_sources(home)
+    assert state_bak in found
+    assert cursor_bak in found
+    archive_sources(found)
+    assert not state_bak.exists() and (ws_dir / "state.json.bak.gz").is_file()
+    assert not cursor_bak.exists() and (stream_dir / "s1.cursor.json.bak.gz").is_file()
