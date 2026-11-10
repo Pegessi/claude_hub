@@ -7,6 +7,14 @@
 
 ## Released
 
+### feat(ui): the needs-you entry becomes an icon on a phone
+
+- At phone width the entry drops its label for an amber tray glyph and the count
+  badge — 55px instead of 114px, which is a third of the top bar handed back to
+  the tab strip. The name survives as `aria-label` ("Needs you, 2 waiting") and
+  as a hover tip for a narrow window that does have a pointer. Desktop keeps the
+  labelled pill for now.
+
 ### feat(ui): language-aware code display
 
 - An edited-file diff card now highlights each row with the language of the file

@@ -7,17 +7,64 @@
       type="button"
       class="inbox-trigger"
       :data-needs="needsCount > 0"
+      :data-compact="isMobile"
       :aria-expanded="open"
-      :title="triggerTitle"
+      :aria-label="triggerAriaLabel"
+      :title="isMobile ? undefined : triggerTitle"
       @click="toggle"
     >
-      <span class="inbox-trigger-dot" />
-      <span class="inbox-trigger-label">Needs you</span>
+      <!-- Compact: a tray glyph instead of the bare dot, so the entry reads as
+           a control rather than a status light. Amber keeps the Hub's one
+           "waiting on you" accent. -->
+      <svg
+        v-if="isMobile"
+        class="inbox-trigger-icon"
+        viewBox="0 0 16 16"
+        aria-hidden="true"
+      >
+        <path
+          d="M2.2 8.2 3.9 3.4A1.6 1.6 0 0 1 5.4 2.3h5.2a1.6 1.6 0 0 1 1.5 1.1l1.7 4.8"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.4"
+          stroke-linecap="round"
+        />
+        <path
+          d="M2.2 8.2h3.1l.8 1.5h3.8l.8-1.5h3.1"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.4"
+          stroke-linejoin="round"
+        />
+        <path
+          d="M3.4 8.6v3.3a1.4 1.4 0 0 0 1.4 1.4h6.4a1.4 1.4 0 0 0 1.4-1.4V8.6"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.4"
+          stroke-linecap="round"
+        />
+      </svg>
+      <span
+        v-else
+        class="inbox-trigger-dot"
+      />
+      <!-- Phone: the label costs a third of the top bar and the badge already
+           carries the count, so the entry shrinks to its dot and count. A mouse
+           on a narrow window still gets the name on hover. -->
+      <span
+        v-if="!isMobile"
+        class="inbox-trigger-label"
+      >Needs you</span>
       <span
         v-if="needsCount > 0"
         class="inbox-trigger-badge"
         :aria-label="`${needsCount} need you`"
       >{{ needsCount }}</span>
+      <span
+        v-if="isMobile"
+        class="inbox-trigger-tip"
+        aria-hidden="true"
+      >{{ panelLabel }}</span>
     </button>
 
     <aside
@@ -148,6 +195,14 @@ const triggerTitle = computed(() =>
   needsCount.value > 0
     ? `${needsCount.value} session${needsCount.value === 1 ? '' : 's'} waiting for you`
     : 'Nothing needs you right now',
+)
+
+/** The name the compact entry keeps once its label is gone: an icon-only button
+ *  that announced itself as "button" would be unreadable to a screen reader. */
+const triggerAriaLabel = computed(() =>
+  needsCount.value > 0
+    ? `Needs you, ${needsCount.value} waiting`
+    : 'Needs you, nothing waiting',
 )
 
 let statusPollingActive = false
@@ -326,6 +381,60 @@ onUnmounted(() => {
   color: inherit;
   font-size: var(--ch-font-size-sm);
   font-weight: 600;
+}
+
+/* Icon-only width: the glyph and the badge, nothing else. Same height and radius
+   as the wide entry so the top bar's rhythm does not shift when it narrows. */
+.inbox-trigger[data-compact='true'] {
+  gap: 5px;
+  padding: 0 8px;
+}
+
+.inbox-trigger-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  color: var(--ch-color-text-muted);
+}
+
+/* Amber is the one accent the Hub reserves for "live"/"waiting on you". */
+.inbox-trigger[data-needs='true'] .inbox-trigger-icon {
+  color: var(--ch-color-warning);
+}
+
+/* The label the compact entry drops, for a pointer that can hover it: a narrow
+   window on a laptop still has a mouse, a phone never will (and never shows
+   this, because there is no hover). */
+.inbox-trigger-tip {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 130;
+  padding: 4px 8px;
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-glass);
+  box-shadow: var(--ch-shadow-popover);
+  color: var(--ch-color-text);
+  font-size: var(--ch-font-size-xs);
+  font-weight: 600;
+  white-space: nowrap;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity var(--ch-motion-fast), visibility var(--ch-motion-fast);
+}
+
+.agent-inbox:has(.inbox-trigger:hover) .inbox-trigger-tip,
+.agent-inbox:has(.inbox-trigger:focus-visible) .inbox-trigger-tip {
+  opacity: 1;
+  visibility: visible;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inbox-trigger-tip {
+    transition: none;
+  }
 }
 
 .inbox-trigger-badge {

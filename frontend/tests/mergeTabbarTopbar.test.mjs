@@ -130,7 +130,12 @@ test('the terminal status list is one Needs-you inbox, not two count pills', () 
   // One entry, and its badge counts only rows that need the user.
   // The entry names the demand, not a mailbox: "Inbox" is the composer's
   // message tray, a different surface entirely.
-  assert.match(agentInboxPanel, /class="inbox-trigger-label">Needs you/)
+  assert.match(agentInboxPanel, /class="inbox-trigger-label"[\s\S]{0,80}?Needs you/, 'the entry is labelled Needs you')
+  // On a phone the label is dropped for space; the hidden label must not take
+  // the accessible name with it.
+  assert.match(agentInboxPanel, /v-if="!isMobile"[\s\S]{0,80}?inbox-trigger-label/, 'the label is wide-only')
+  assert.match(agentInboxPanel, /:aria-label="triggerAriaLabel"/, 'the compact entry keeps a spoken name')
+  assert.match(agentInboxPanel, /class="inbox-trigger-tip"/, 'and a hover tip on a narrow mouse-capable window')
   assert.match(agentInboxPanel, /v-if="needsCount > 0"/)
   assert.match(agentInboxPanel, /needsYouCount\(/)
   // Manual versus managed is a filter inside the panel, not two triggers.

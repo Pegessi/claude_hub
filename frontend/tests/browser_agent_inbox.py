@@ -320,6 +320,19 @@ async def main(browser_run: BrowserRun) -> None:
             await page.set_viewport_size(MOBILE)
             trigger = page.locator(".inbox-trigger").first
             await expect(trigger).to_be_visible()
+            # The label costs a third of the top bar on a phone, so the entry is
+            # its dot and count; the name survives as aria-label and as a hover
+            # tip for a narrow window that does have a pointer.
+            await expect(trigger.locator(".inbox-trigger-label")).to_have_count(0)
+            assert await trigger.get_attribute("aria-label") == "Needs you, 2 waiting"
+            compact = await trigger.bounding_box()
+            assert compact and compact["width"] <= 60, f"compact entry is {compact}"
+            await trigger.hover()
+            tip = trigger.locator(".inbox-trigger-tip")
+            await expect(tip).to_be_visible()
+            await expect(tip).to_have_text("Needs you")
+            await page.mouse.move(4, 400)
+            await expect(tip).to_be_hidden()
             # Opening on the phone refreshes instead of waiting for the poll.
             reads_before_open = len(status_reads)
             await trigger.click()
