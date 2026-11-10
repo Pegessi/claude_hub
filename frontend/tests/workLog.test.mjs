@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { readFileSync } from 'node:fs'
 import { loadChatFeature, loadChatUtility } from './chatPresentationTestHarness.mjs'
 
-const { countWorkLog, countWorkLogParts, currentStep, describeRunningTool, describeRunningTools, workLogCountLabel } =
+const { countWorkLog, countWorkLogParts, currentStep, describeRunningTool, describeRunningTools, emptyWorkLogCounts, workLogCountLabel, workLogCountParts } =
   await loadChatFeature('worklog/workLog')
 const { groupEventsIntoTurns } = await loadChatUtility('agentStreamTimeline')
+
+/** Raw view of a component file for structural pins (the repo keeps these in
+ *  unit tests rather than byte-asserting rendered HTML). */
+const readSrc = path => readFileSync(new URL(`../src/${path}`, import.meta.url), 'utf8')
 
 const event = (sequence, type, payload = {}, extra = {}) => ({
   stream_sequence: sequence, type, payload, session_id: 's', tab_id: 't',
@@ -167,7 +172,13 @@ test('a turn whose newest part is finished work reports what it is doing instead
   assert.deepEqual(currentStep({ parts: [{ kind: 'text', key: 't', text: 'answer…', at: '' }], errors: [] }), { label: 'Writing the reply', waiting: false })
   const errored = { parts: [{ kind: 'error', key: 'e', message: 'boom' }], errors: [{ key: 'e', message: 'boom' }] }
   assert.deepEqual(currentStep(errored), { label: 'Stopped by an error', waiting: true })
-  assert.deepEqual(currentStep({ parts: [], errors: [] }), { label: 'Starting', waiting: false })
+  // A turn that exists but has reported nothing yet is live, not idle: it says
+  // what it is waiting for and keeps its clock, without claiming a step.
+  assert.deepEqual(
+    currentStep({ parts: [], errors: [] }),
+    { label: 'Waiting for the first response', waiting: false, bare: true },
+  )
+  assert.equal(currentStep({ parts: [], errors: [] }).waiting, false, 'the turn is not blocked')
 })
 
 test('mixed running calls report the newest one and long targets truncate', () => {
@@ -181,6 +192,46 @@ test('mixed running calls report the newest one and long targets truncate', () =
   assert.ok(label.endsWith('…`'), 'a truncated command is marked, not silently cut')
 })
 
+test('every live turn gets the footer, and the bare placeholder is gone', () => {
+  // The three-dot "Waiting for response…" card used to stand in for the first
+  // seconds of a turn, with no clock and no state. One footer covers both.
+  const turnSource = readSrc('features/chat/components/ChatTurn.vue')
+  assert.ok(!turnSource.includes('agent-waiting-card'), 'the bare placeholder must be removed')
+  assert.ok(!turnSource.includes('agent-waiting-pulse'), 'its animation must not linger')
+  assert.match(turnSource, /<ChatTurnWorking\n\s+v-if="isLive\(turn\)"/)
+  assert.ok(
+    !/<ChatTurnWorking[^>]*awaitingAgentActivity/s.test(turnSource),
+    'a live turn with no events must not skip the footer',
+  )
+  const footerSource = readSrc('features/chat/components/ChatTurnWorking.vue')
+  assert.match(footerSource, /turn-working-counts-failed/, 'the failure phrase has its own element')
+  assert.ok(
+    !/counts-text--failed/.test(footerSource),
+    'the whole counts line must not be repainted red for one failure',
+  )
+})
+
 test('an empty summary stays empty so the footer keeps one line', () => {
   assert.equal(workLogCountLabel(countWorkLogParts([])), '')
+})
+
+test('a failure is its own phrase so only it takes the warning tone', () => {
+  const counts = countWorkLogParts([{ kind: 'tool_group', key: 'g', tools: [tool('Bash', 'completed'), tool('Edit', 'completed'), tool('Bash', 'failed')] }])
+  const parts = workLogCountParts(counts)
+  assert.equal(parts.prefix, '1 edit · 2 commands')
+  assert.equal(parts.failed, '1 failed')
+  assert.equal(parts.suffix, '')
+  assert.equal(workLogCountLabel(counts), '1 edit · 2 commands · 1 failed', 'the joined line is unchanged')
+
+  // Delegation still reads after the failure, as it always did.
+  const withChild = workLogCountParts({ ...emptyWorkLogCounts(), commands: 1, failed: 1, subagents: 1 })
+  assert.equal(withChild.prefix, '1 command')
+  assert.equal(withChild.failed, '1 failed')
+  assert.equal(withChild.suffix, '1 sub-agent')
+  assert.equal(workLogCountLabel({ ...emptyWorkLogCounts(), commands: 1, failed: 1, subagents: 1 }), '1 command · 1 failed · 1 sub-agent')
+
+  const failuresOnly = workLogCountParts({ ...emptyWorkLogCounts(), failed: 2 })
+  assert.equal(failuresOnly.prefix, '', 'nothing went through, so there is no neutral phrase')
+  assert.equal(failuresOnly.failed, '2 failed')
+  assert.equal(workLogCountLabel({ ...emptyWorkLogCounts(), failed: 2 }), '2 failed')
 })

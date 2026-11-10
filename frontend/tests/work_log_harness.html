@@ -97,6 +97,10 @@
         },
       ])
 
+      // The moment right after a message is sent: the turn exists and the clock
+      // runs, but the provider has not reported anything yet.
+      const awaitingFirst = turn('awaiting-first', [])
+
       const completedTurn = turn('done', [], {
         completed: true,
         completionStatus: 'completed',
@@ -159,6 +163,7 @@
         ['busy', 'Live turn: work in progress', ChatTurnWorking, { currentTurn: active, startedAt: liveStartedAt }],
         ['waiting-subagent', 'Live turn: waiting on a sub-agent, pulse stopped', ChatTurnWorking, { currentTurn: waitingChild, startedAt: liveStartedAt }],
         ['waiting-answer', 'Live turn: waiting for your answer', ChatTurnWorking, { currentTurn: waitingAnswer, startedAt: liveStartedAt }],
+        ['awaiting-first', 'Live turn: nothing reported yet', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: liveStartedAt }],
         ['completed-counts', 'Completed: counts loaded, failures kept', ChatTurnParts, {
           part: { kind: 'process', key: 'p1', meta: 'Activity · 18 steps · 1 failed · 21m', expanded: false },
         }],

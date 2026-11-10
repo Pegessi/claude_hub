@@ -7,6 +7,17 @@
 
 ## Released
 
+### fix(ui): one live footer for every turn, and a quieter failure mark
+
+- A turn that has just been sent no longer shows a bare three-dot "Waiting for
+  response…" card with no clock: it gets the same footer as any live turn —
+  `Waiting for the first response` beside the stopwatch, pulsing while the
+  provider is still silent, with the counts line appearing as work arrives.
+- The counts line is no longer repainted red because one call failed: the
+  failure keeps its place in the line and takes the amber warning tone on its
+  own phrase, so `2 edits · 2 commands · 2 reads · 1 failed` reads as a turn that
+  mostly worked. The old placeholder card and its CSS are removed.
+
 ### fix(ui): close the cross-model review's blocking and high findings
 
 A third review of the same batch, run on a different model, found a blocking

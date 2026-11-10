@@ -18,15 +18,17 @@
         aria-hidden="true"
       />
       <!-- A blocked turn drops the "Working" word instead of dimming it: its
-           own sentence is the whole line, and nothing on it claims progress. -->
+           own sentence is the whole line, and nothing on it claims progress.
+           A turn that has not reported anything yet does the same, because
+           "Working · Waiting for the first response" contradicts itself. -->
       <span
-        v-if="!step.waiting"
+        v-if="!step.waiting && !step.bare"
         class="turn-working-label"
       >Working</span>
       <span
         v-if="step.label"
         class="turn-working-step"
-      >{{ step.waiting ? step.label : `· ${step.label}` }}</span>
+      >{{ step.waiting || step.bare ? step.label : `· ${step.label}` }}</span>
       <time
         class="turn-working-elapsed"
         aria-hidden="true"
@@ -36,10 +38,18 @@
       v-if="countsLabel"
       class="turn-working-counts"
     >
-      <span
-        class="turn-working-counts-text"
-        :class="{ 'turn-working-counts-text--failed': counts.failed > 0 }"
-      >{{ countsLabel }}</span>
+      <span class="turn-working-counts-text">
+        <template
+          v-if="countParts.prefix"
+        >{{ countParts.prefix }}</template>
+        <span
+          v-if="countParts.failed"
+          class="turn-working-counts-failed"
+        >{{ countParts.prefix ? ` · ${countParts.failed}` : countParts.failed }}</span>
+        <template
+          v-if="countParts.suffix"
+        >{{ `${countParts.prefix || countParts.failed ? ' · ' : ''}${countParts.suffix}` }}</template>
+      </span>
     </div>
   </div>
 </template>
@@ -48,7 +58,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { formatStopwatch, parseTimestampMs } from '@/utils/duration'
 import { requireChatOwner, chatTimelineKey } from '../owners'
-import { countWorkLog, currentStep, emptyWorkLogCounts, workLogCountLabel } from '../worklog/workLog'
+import { countWorkLog, currentStep, emptyWorkLogCounts, workLogCountLabel, workLogCountParts } from '../worklog/workLog'
 
 const props = defineProps<{ startedAt: string | null }>()
 
@@ -75,6 +85,10 @@ const counts = computed(() => {
 })
 
 const countsLabel = computed(() => workLogCountLabel(counts.value))
+
+/** The failure phrase is its own span: one failed call inside a long turn must
+ *  not repaint the whole summary, so only that phrase carries the warning tone. */
+const countParts = computed(() => workLogCountParts(counts.value))
 
 const mountedAt = Date.now()
 const now = ref(Date.now())
@@ -176,10 +190,13 @@ const elapsedLabel = computed(() => {
   opacity: 0.85;
 }
 
-.turn-working-counts-text--failed {
-  color: var(--ch-color-danger-strong, #f85149);
+/* A partial failure is not a stalled turn: the phrase that names it takes the
+   amber warning tone, the rest of the line stays as quiet as before. */
+.turn-working-counts-failed {
+  color: var(--ch-color-warning-strong, var(--ch-color-warning, #f59e0b));
   opacity: 1;
 }
+
 
 /* Blocked, not busy: no pulse and a hollow dot. */
 .turn-working--waiting .turn-working-orb {

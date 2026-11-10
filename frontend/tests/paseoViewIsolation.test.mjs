@@ -102,7 +102,10 @@ test('new-session launcher requires an explicit Chat or Terminal surface', () =>
   assert.match(sessionCreator, /Remote SSH is Terminal-only/)
   assert.match(chatTimelineView, /aria-label="Chat conversation"/)
   assert.match(chatTimelineView, /start this chat/)
-  assert.match(chatTurn, /Waiting for response…/)
+  // A fresh turn's waiting state is the live footer now (state + clock), not
+  // a standalone three-dot card inside ChatTurn.
+  assert.doesNotMatch(chatTurn, /Waiting for response…/)
+  assert.match(chatTurn, /ChatTurnWorking/)
   assert.match(chatPendingTurn, /Waiting for model activity…/)
   assert.match(chatAttachments, /This chat does not support image attachments/)
   // Switch Env / restart UI is shared between the TabBar and sidebar via
@@ -155,9 +158,13 @@ test('direct Paseo sends atomically with a stable client turn id', () => {
 })
 
 test('an acknowledged turn shows a waiting state until provider activity arrives', () => {
+  // The window is still tracked, but it is now carried by the same live footer
+  // as every other turn: it names what it waits for and keeps the clock, instead
+  // of a three-dot card that showed neither. The footer is not skipped there.
   assert.match(chatTimeline, /awaitingAgentActivity: !turn\.completed/)
-  assert.match(chatTurn, /Waiting for response…/)
-  assert.match(chatTurn, /agent-waiting-pulse/)
+  assert.doesNotMatch(chatTurn, /Waiting for response…/)
+  assert.doesNotMatch(chatTurn, /agent-waiting-pulse/)
+  assert.match(chatTurn, /<ChatTurnWorking\n\s+v-if="isLive\(turn\)"/)
 })
 
 test('structured Retry asks the backend to replace a failed provider transport', () => {
