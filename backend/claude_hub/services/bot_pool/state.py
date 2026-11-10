@@ -610,9 +610,7 @@ class FeishuBotPoolStateStore(object):
             raise FeishuPoolFull("channels")
 
     @classmethod
-    def _require_tab_free(
-        cls, state: dict[str, Any], tab_id: str, *, exclude: str | None = None
-    ) -> None:
+    def _require_tab_free(cls, state: dict[str, Any], tab_id: str) -> None:
         for _other_id, raw in state["bots"].items():
             if not isinstance(raw, dict) or raw.get("revoked_at"):
                 continue
