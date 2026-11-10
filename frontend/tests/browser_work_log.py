@@ -59,13 +59,20 @@ async def footer(page, case_id):
     """The live footer's two lines, read as text and as rendered state."""
     section = case(page, case_id)
     counts_line = section.locator(".turn-working-counts-text")
+    failed_phrase = section.locator(".turn-working-counts-failed")
     has_counts = await counts_line.count() > 0
+    has_failed = await failed_phrase.count() > 0
     return {
         "word": await section.locator(".turn-working-label").all_inner_texts(),
         "step": (await section.locator(".turn-working-step").inner_text()).strip(),
         "elapsed": (await section.locator(".turn-working-elapsed").inner_text()).strip(),
         "counts": await counts_line.all_inner_texts(),
         "counts_class": await counts_line.first.get_attribute("class") if has_counts else None,
+        "failed_phrase": (await failed_phrase.inner_text()).strip() if has_failed else None,
+        "failed_colour": (
+            await failed_phrase.evaluate("element => getComputedStyle(element).color")
+            if has_failed else None
+        ),
         "orb_animation": await section.locator(".turn-working-orb").evaluate(
             "element => getComputedStyle(element).animationName"
         ),
@@ -184,9 +191,18 @@ async def main(browser_run: BrowserRun) -> None:
         assert busy["step"] == "· Reading 2 files", busy["step"]
         assert len(busy["counts"]) == 1, busy["counts"]
         assert busy["counts"][0] == "2 edits · 2 commands · 2 reads · 1 failed", busy["counts"][0]
-        assert "turn-working-counts-text--failed" in (busy["counts_class"] or ""), busy[
-            "counts_class"
-        ]
+        # A partial failure marks the phrase that names it; the summary line is
+        # not repainted, so one failed call cannot read as a stalled turn.
+        assert "failed" not in (busy["counts_class"] or ""), busy["counts_class"]
+        assert busy["failed_phrase"] == "· 1 failed", busy["failed_phrase"]
+        neutral_colour = await case(page, "busy").locator(
+            ".turn-working-counts-text"
+        ).evaluate("element => getComputedStyle(element).color")
+        assert busy["failed_colour"] != neutral_colour, (
+            "the failure must be visibly distinct from the neutral counts",
+            busy["failed_colour"],
+            neutral_colour,
+        )
         assert STOPWATCH_PATTERN.match(busy["elapsed"]), busy["elapsed"]
         assert not busy["waiting_class"], "a busy turn must not use the blocked styling"
         assert busy["orb_animation"] != "none", "a busy turn keeps its pulse"
@@ -210,6 +226,19 @@ async def main(browser_run: BrowserRun) -> None:
         assert waiting_answer["step"] == "Waiting for your answer", waiting_answer["step"]
         assert waiting_answer["orb_animation"] == "none"
         assert waiting_answer["counts"] == [], "there is no work to count yet"
+
+        # ── nothing reported yet: the clock runs and the state is named ───────
+        awaiting = await footer(page, "awaiting-first")
+        observed["awaiting-first"] = awaiting
+        assert awaiting["word"] == [], "nothing has started, so no Working word"
+        assert awaiting["step"] == "Waiting for the first response", awaiting["step"]
+        assert STOPWATCH_PATTERN.match(awaiting["elapsed"]), awaiting["elapsed"]
+        assert awaiting["counts"] == [], "there is no work to count yet"
+        assert not awaiting["waiting_class"], "the turn is live, not blocked by the user"
+        assert awaiting["orb_animation"] != "none", "a live turn keeps its pulse"
+        assert await page.locator(".agent-waiting-card").count() == 0, (
+            "the old three-dot placeholder must be gone"
+        )
 
         # ── finished turns: human activity, never a raw event count ───────────
         counts_header = case(page, "completed-counts")

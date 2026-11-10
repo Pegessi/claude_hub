@@ -37,25 +37,6 @@
       >{{ messageClockLabel(turn) }}</time>
     </div>
 
-    <div
-      v-if="turn.awaitingAgentActivity"
-      class="conversation-row conversation-row--assistant"
-      role="status"
-      aria-live="polite"
-    >
-      <div class="agent-waiting-card">
-        <span
-          class="agent-waiting-pulse"
-          aria-hidden="true"
-        >
-          <i />
-          <i />
-          <i />
-        </span>
-        <span>Waiting for response…</span>
-      </div>
-    </div>
-
     <!-- Ordered parts: thinking, text, tool, error, and status render in
                the exact order the provider emitted them. Paseo does not defer
                protocol errors to the turn end, so neither do we. -->
@@ -81,8 +62,11 @@
       @revise="revisePlan()"
     />
 
+    <!-- Every live turn gets the same footer, including the moment before the
+         provider has reported anything: the clock and the state belong on one
+         line instead of a bare three-dot spinner. -->
     <ChatTurnWorking
-      v-if="isLive(turn) && !turn.awaitingAgentActivity"
+      v-if="isLive(turn)"
       :started-at="turn.startedAt"
     />
 
@@ -385,77 +369,7 @@ defineProps<{
   cursor: not-allowed;
 }
 
-.agent-waiting-card {
-  min-height: 28px;
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  padding: 2px 2px;
-  color: var(--ch-color-text-subtle);
-  font-size: 13px;
-}
 
-.agent-waiting-card > span:last-child {
-  background: linear-gradient(
-    90deg,
-    var(--ch-color-text-subtle) 0%,
-    var(--ch-color-text-strong, var(--ch-color-text)) 50%,
-    var(--ch-color-text-subtle) 100%
-  );
-  background-size: 200% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  animation: agent-waiting-shimmer 1.8s linear infinite;
-}
-
-@keyframes agent-waiting-shimmer {
-  from { background-position: 100% 0; }
-  to { background-position: -100% 0; }
-}
-
-.agent-waiting-pulse {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-}
-
-.agent-waiting-pulse i {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--ch-color-accent);
-  animation: agent-waiting-dot 1.2s ease-in-out infinite;
-}
-
-.agent-waiting-pulse i:nth-child(2) {
-  animation-delay: 0.15s;
-}
-
-.agent-waiting-pulse i:nth-child(3) {
-  animation-delay: 0.3s;
-}
-
-@keyframes agent-waiting-dot {
-  0%,
-  60%,
-  100% {
-    opacity: 0.35;
-    transform: translateY(0);
-  }
-
-  30% {
-    opacity: 1;
-    transform: translateY(-2px);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .agent-waiting-pulse i,
-  .agent-waiting-card > span:last-child {
-    animation: none;
-  }
-}
 .turn-copy-result--copied { color: var(--ch-color-accent); }
 .turn-copy-result--error { color: var(--ch-color-danger, var(--ch-color-accent)); }
 </style>

@@ -75,6 +75,9 @@ export function useChatTimeline(deps: Dependencies) {
     ordinal,
     turn: {
       ...turn,
+      // The turn exists but the provider has reported nothing yet; the live
+      // footer names that window from `currentStep`. The copy also keeps each
+      // recompute handing consumers a fresh object over an in-place-mutated turn.
       awaitingAgentActivity: !turn.completed &&
         turn.parts.length === 0 &&
         turn.errors.length === 0 &&

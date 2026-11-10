@@ -155,23 +155,45 @@ function plural(count: number, singular: string, pluralForm?: string): string {
   return `${count} ${count === 1 ? singular : pluralForm ?? `${singular}s`}`
 }
 
-/** The quiet second line: ``12 edits · 6 commands · 4 reads · 1 failed · 3 sub-agents``.
+/** The quiet second line, split so a failure tints only its own phrase.
  *
- *  Zero-count buckets are dropped rather than printed as ``0 commands``, and
+ *  ``plain`` is the work that went through (``12 edits · 6 commands · 4 reads``),
+ *  ``failed`` is the failure on its own (``1 failed``). The footer renders them
+ *  as two spans: a turn with one failed call among twenty is not a stalled turn,
+ *  so the failure is marked where it is mentioned instead of painting the whole
+ *  line red. */
+export interface WorkLogCountParts {
+  /** Work that went through, before the failure phrase. */
+  prefix: string
+  /** The failure on its own, empty when nothing failed. */
+  failed: string
+  /** Counts that read better after the failure (delegation). */
+  suffix: string
+}
+
+/** Zero-count buckets are dropped rather than printed as ``0 commands``, and
  *  failures are kept even at length: a summary that hides them is worse than no
- *  summary. Empty string when nothing has happened yet, so the footer stays one
- *  line until it has something to say. */
+ *  summary. */
+export function workLogCountParts(counts: WorkLogCounts): WorkLogCountParts {
+  const prefix: string[] = []
+  if (counts.edits > 0) prefix.push(plural(counts.edits, 'edit'))
+  if (counts.commands > 0) prefix.push(plural(counts.commands, 'command'))
+  if (counts.reads > 0) prefix.push(plural(counts.reads, 'read'))
+  if (counts.searches > 0) prefix.push(plural(counts.searches, 'search', 'searches'))
+  if (counts.web > 0) prefix.push(plural(counts.web, 'fetch', 'fetches'))
+  if (counts.other > 0) prefix.push(plural(counts.other, 'other tool'))
+  return {
+    prefix: prefix.join(' · '),
+    failed: counts.failed > 0 ? `${counts.failed} failed` : '',
+    suffix: counts.subagents > 0 ? plural(counts.subagents, 'sub-agent') : '',
+  }
+}
+
+/** The second line as one string. Empty when nothing has happened yet, so the
+ *  footer stays one line until it has something to say. */
 export function workLogCountLabel(counts: WorkLogCounts): string {
-  const items: string[] = []
-  if (counts.edits > 0) items.push(plural(counts.edits, 'edit'))
-  if (counts.commands > 0) items.push(plural(counts.commands, 'command'))
-  if (counts.reads > 0) items.push(plural(counts.reads, 'read'))
-  if (counts.searches > 0) items.push(plural(counts.searches, 'search', 'searches'))
-  if (counts.web > 0) items.push(plural(counts.web, 'fetch', 'fetches'))
-  if (counts.other > 0) items.push(plural(counts.other, 'other tool'))
-  if (counts.failed > 0) items.push(`${counts.failed} failed`)
-  if (counts.subagents > 0) items.push(plural(counts.subagents, 'sub-agent'))
-  return items.join(' · ')
+  const parts = workLogCountParts(counts)
+  return [parts.prefix, parts.failed, parts.suffix].filter(Boolean).join(' · ')
 }
 
 /** One step of work in the footer. */
@@ -181,11 +203,22 @@ export interface WorkLogStep {
    *  working. The footer stops its pulse for these: a waiting turn must not look
    *  like a busy one. */
   waiting: boolean
+  /** True when the label is a full sentence that needs no "Working" in front of
+   *  it (the turn has not reported anything yet). The footer is still live and
+   *  keeps its pulse; only the word is dropped. */
+  bare?: boolean
 }
 
 const THINKING: WorkLogStep = { label: 'Thinking', waiting: false }
 const WRITING_REPLY: WorkLogStep = { label: 'Writing the reply', waiting: false }
-const STARTING: WorkLogStep = { label: 'Starting', waiting: false }
+// Nothing reported yet is still "live": the turn exists, the provider has not
+// sent its first event. Saying so beats a bare spinner with no clock, and it
+// must not claim a step the agent has not taken.
+const AWAITING_FIRST_EVENT: WorkLogStep = {
+  label: 'Waiting for the first response',
+  waiting: false,
+  bare: true,
+}
 const WAITING_FOR_ANSWER: WorkLogStep = { label: 'Waiting for your answer', waiting: true }
 const STOPPED_BY_ERROR: WorkLogStep = { label: 'Stopped by an error', waiting: true }
 
@@ -321,7 +354,8 @@ export function currentStep(turn: TimelineTurn): WorkLogStep {
   const children = activeSubagents(turn)
   if (children > 0) return { label: `Waiting on ${plural(children, 'sub-agent')}`, waiting: true }
   const last = turn.parts[turn.parts.length - 1]
-  if (!last) return STARTING
+  if (!last && turn.errors.length === 0) return AWAITING_FIRST_EVENT
+  if (!last) return STOPPED_BY_ERROR
   if (last.kind === 'error') return STOPPED_BY_ERROR
   if (last.kind === 'text') return WRITING_REPLY
   return THINKING
