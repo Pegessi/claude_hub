@@ -51,19 +51,26 @@ def _cache_raw(digest: bytes, raw_str: str) -> None:
 
 def _get_cached_raw(digest: bytes) -> str | None:
     with _CACHE_LOCK:
-        return _RAW_BY_DIGEST.get(digest)
+        value = _RAW_BY_DIGEST.get(digest)
+        if value is not None:
+            _RAW_BY_DIGEST.move_to_end(digest)
+        return value
 
 
 def _cache_doc(doc_digest: bytes, doc_str: str) -> None:
     with _CACHE_LOCK:
         _DOC_JSON_CACHE[doc_digest] = doc_str
+        _DOC_JSON_CACHE.move_to_end(doc_digest)
         if len(_DOC_JSON_CACHE) > _MAX_DOC_CACHE_ENTRIES:
             _DOC_JSON_CACHE.popitem(last=False)
 
 
 def _get_cached_doc(doc_digest: bytes) -> str | None:
     with _CACHE_LOCK:
-        return _DOC_JSON_CACHE.get(doc_digest)
+        value = _DOC_JSON_CACHE.get(doc_digest)
+        if value is not None:
+            _DOC_JSON_CACHE.move_to_end(doc_digest)
+        return value
 
 
 def _compute_doc_digest(layout_blob: bytes, key_digests: list[tuple[str, bytes]]) -> bytes:
@@ -167,7 +174,7 @@ def connection(path: Path) -> Iterator[sqlite3.Connection]:
                 """)
                 db.execute("PRAGMA user_version=1")
         yield db
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, zlib.error) as exc:
         raise OSError(f"SQLite storage failed: {database}: {exc}") from exc
     finally:
         db.close()
@@ -182,10 +189,13 @@ def pack(value: Any, dictionary: bytes = b"") -> bytes:
 
 
 def unpack(value: bytes, dictionary: bytes = b"") -> Any:
-    if not dictionary:
-        return json.loads(zlib.decompress(value).decode("utf-8"))
-    decompressor = zlib.decompressobj(zdict=dictionary)
-    return json.loads((decompressor.decompress(value) + decompressor.flush()).decode("utf-8"))
+    try:
+        if not dictionary:
+            return json.loads(zlib.decompress(value).decode("utf-8"))
+        decompressor = zlib.decompressobj(zdict=dictionary)
+        return json.loads((decompressor.decompress(value) + decompressor.flush()).decode("utf-8"))
+    except zlib.error as exc:
+        raise OSError(f"Corrupt compressed SQLite payload: {exc}") from exc
 
 
 def _parts(payload: Any) -> tuple[bytes, dict[str, bytes]]:
@@ -290,22 +300,30 @@ def read_document(path: Path) -> Any:
                 raise FileNotFoundError(path)
             if kind == "value":
                 return layout
+            cached_raw_by_key: dict[str, str] = {}
+            missing_body = False
+            for key, digest in key_digests:
+                cached_raw = _get_cached_raw(digest)
+                if cached_raw is None:
+                    missing_body = True
+                    break
+                cached_raw_by_key[key] = cached_raw
             rows: dict[str, Any] = {}
-            missing_body = any(_get_cached_raw(digest) is None for _, digest in key_digests)
             if missing_body:
                 for key, digest, body in db.execute(
                     "SELECT key,digest,body FROM document_rows WHERE name=?", (name,)
                 ):
-                    raw_str = _get_cached_raw(digest)
+                    raw_str = cached_raw_by_key.get(key) or _get_cached_raw(digest)
                     if raw_str is None:
-                        raw_str = zlib.decompress(body).decode("utf-8")
+                        try:
+                            raw_str = zlib.decompress(body).decode("utf-8")
+                        except zlib.error as exc:
+                            raise OSError(f"Corrupt SQLite row in {path}: {exc}") from exc
                         _cache_raw(digest, raw_str)
                     rows[key] = json.loads(raw_str)
             else:
-                for key, digest in key_digests:
-                    cached_raw = _get_cached_raw(digest)
-                    assert cached_raw is not None
-                    rows[key] = json.loads(cached_raw)
+                for key, raw_str in cached_raw_by_key.items():
+                    rows[key] = json.loads(raw_str)
             result: dict[str, Any] = {}
             for field, (shape, value) in layout.items():
                 if shape == "value":

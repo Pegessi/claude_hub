@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar
 
 from ...models import AgentStreamEvent, AgentStreamEventPage, AgentStreamEventType
 from ..local_storage import (
+    _json_bytes,
     connection,
     delete_document,
     document_exists,
@@ -298,11 +299,8 @@ class AgentStreamStore:
             self._dictionary = row[1]
             return int(row[0])
         if seed_events:
-            raw = b"".join(
-                pack(
-                    ev.model_dump(mode="json", exclude_defaults=True, exclude_none=True),
-                    b"",
-                )
+            raw = b"\n".join(
+                _json_bytes(ev.model_dump(mode="json", exclude_defaults=True, exclude_none=True))
                 for ev in seed_events[:16]
             )
             self._dictionary = raw[:32768] or self.session_id.encode()

@@ -379,3 +379,35 @@ async def test_clear_unimported_unreadable_stream_succeeds_without_reading_sourc
     # Recreating a stale legacy file after clear must not resurrect deleted events.
     store.path.write_text(event().model_dump_json() + "\n")
     assert (await store.read_since(-1, 10)).events == []
+
+
+@pytest.mark.asyncio
+async def test_replace_rows_seeds_uncompressed_json_dictionary_and_ignores_unreadable_source() -> (
+    None
+):
+    from claude_hub.services.local_storage import storage_location
+
+    store = AgentStreamStore("workspace", "worker-dict")
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text("stale-unreadable-legacy-line\n")
+    store.path.chmod(0o000)
+    try:
+        seeded = event().model_copy(update={"payload": {"text": "seed-dictionary-event"}})
+        await store.replace_all([seeded])
+    finally:
+        if store.path.exists():
+            store.path.chmod(0o600)
+    with store._database() as db:
+        _, logical_name = storage_location(store.path)
+        dictionary = db.execute(
+            "SELECT dictionary FROM streams WHERE name=?", (logical_name,)
+        ).fetchone()[0]
+    assert dictionary.startswith(b"{")
+    assert b"seed-dictionary-event" in dictionary
+    appended = await store.append(event().model_copy(update={"payload": {"text": "second-event"}}))
+    assert appended.stream_sequence == 1
+    rows = (await store.read_since(-1, 10, compact=False)).events
+    assert [item.payload["text"] for item in rows] == [
+        "seed-dictionary-event",
+        "second-event",
+    ]

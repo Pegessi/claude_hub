@@ -363,3 +363,104 @@ def test_legacy_sources_includes_orphan_workspace_and_cursor_backups(tmp_path, m
     archive_sources(found)
     assert not state_bak.exists() and (ws_dir / "state.json.bak.gz").is_file()
     assert not cursor_bak.exists() and (stream_dir / "s1.cursor.json.bak.gz").is_file()
+
+
+def test_corrupt_compressed_blob_raises_oserror(tmp_path: Path) -> None:
+    path = tmp_path / "metadata.json"
+    storage.write_document(path, {"rows": [{"id": "1", "value": "ok"}]})
+    _, name = storage.storage_location(path)
+    with storage._CACHE_LOCK:
+        storage._DOC_JSON_CACHE.clear()
+        storage._RAW_BY_DIGEST.clear()
+    with storage.connection(path) as db, db:
+        db.execute("UPDATE document_rows SET body=? WHERE name=?", (b"not-zlib", name))
+    with pytest.raises(OSError, match="Corrupt SQLite row"):
+        storage.read_document(path)
+    with storage.connection(path) as db, db:
+        db.execute("UPDATE documents SET layout=? WHERE name=?", (b"not-zlib", name))
+    with pytest.raises(OSError, match="Corrupt compressed SQLite payload"):
+        storage.document_exists(path)
+
+
+def test_read_document_tolerates_concurrent_raw_cache_eviction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "metadata.json"
+    payload = {"rows": [{"id": str(i), "value": f"item-{i}"} for i in range(6)]}
+    storage.write_document(path, payload)
+    with storage._CACHE_LOCK:
+        storage._DOC_JSON_CACHE.clear()
+    calls = 0
+    original_get = storage._get_cached_raw
+
+    def evicting_get(digest: bytes) -> str | None:
+        nonlocal calls
+        calls += 1
+        result = original_get(digest)
+        if calls == 3:
+            with storage._CACHE_LOCK:
+                storage._RAW_BY_DIGEST.clear()
+        return result
+
+    monkeypatch.setattr(storage, "_get_cached_raw", evicting_get)
+    assert storage.read_document(path) == payload
+
+
+def test_load_durable_json_treats_tombstoned_document_as_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.workspace_manager import WorkspaceManager
+
+    home = tmp_path / "runtime"
+    state = home / "workspaces"
+    state.mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_HUB_HOME", str(home))
+    monkeypatch.setenv("CLAUDE_HUB_STATE_ROOT", str(state))
+    ws_state = state / "ws-retired" / "state.json"
+    ws_state.parent.mkdir(parents=True)
+    storage.write_document(ws_state, {"id": "ws-retired", "tasks": []})
+    storage.delete_document(ws_state)
+    # Even if a stale JSON or backup reappears on disk, tombstoned SQLite state returns empty.
+    ws_state.write_text('{"id":"ws-retired","tasks":[{"id":"stale"}]}')
+    ws_state.with_name("state.json.bak").write_text('{"id":"ws-retired","tasks":[{"id":"stale"}]}')
+    manager = WorkspaceManager()
+    loaded = manager._load_durable_json(ws_state, label="workspace ws-retired")
+    assert loaded.data is None
+    assert loaded.source == "empty"
+
+
+def test_services_lazy_exports_preserve_singleton_attributes_after_submodule_import(
+    tmp_path: Path,
+) -> None:
+    import os
+    import subprocess
+    import sys
+
+    env = dict(
+        os.environ,
+        CLAUDE_HUB_HOME=str(tmp_path / "home"),
+        CLAUDE_HUB_STATE_ROOT=str(tmp_path / "home" / "workspaces"),
+    )
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import importlib, sys; "
+                "import claude_hub.services as services; "
+                "assert 'claude_hub.services.ttyd_manager' not in sys.modules; "
+                "assert 'claude_hub.services.workspace_manager' not in sys.modules; "
+                "importlib.import_module('claude_hub.services.ttyd_manager'); "
+                "importlib.import_module('claude_hub.services.workspace_manager'); "
+                "from claude_hub.services import TTYDManager, WorkspaceManager, ttyd_manager, workspace_manager; "
+                "assert isinstance(ttyd_manager, TTYDManager), type(ttyd_manager); "
+                "assert isinstance(workspace_manager, WorkspaceManager), type(workspace_manager); "
+                "assert services.ttyd_manager is ttyd_manager; "
+                "assert services.workspace_manager is workspace_manager"
+            ),
+        ],
+        env=env,
+        cwd=Path(__file__).parents[1],
+        check=True,
+        timeout=30,
+    )
