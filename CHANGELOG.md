@@ -7,6 +7,13 @@
 
 ## Released
 
+### feat(ui): put the needs-you entry before the phone's app menu
+
+- On a phone the ⋯ sheet sat to the left of the needs-you entry, so the
+  catch-all was the last thing in the bar. The order is now needs-you then ⋯:
+  the catch-all keeps the conventional far-right slot, and the entry that
+  changes without being looked for sits next to the code.
+
 ### feat(ui): the needs-you entry becomes an icon on a phone
 
 - Every width now marks the entry with the same amber tray glyph: a bare dot
