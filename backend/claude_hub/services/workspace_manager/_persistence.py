@@ -356,7 +356,10 @@ class _PersistenceMixin(_WorkspaceManagerBase):
         """
 
         if has_stored_document(path):
-            stored_payload = read_document(path)
+            try:
+                stored_payload = read_document(path)
+            except FileNotFoundError:
+                return _DurableLoadResult(data=None, source="empty")
             if validator is not None:
                 stored_payload = validator(stored_payload)
             return _DurableLoadResult(data=stored_payload, source="primary")

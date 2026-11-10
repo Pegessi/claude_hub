@@ -1108,3 +1108,12 @@ def test_has_residual_state_detects_sqlite_cursor_and_clears_on_delete(
     assert managed_chat.has_residual_state(session.workspace_id, session.id) is True
     delete_document(store.cursor_path)
     assert managed_chat.has_residual_state(session.workspace_id, session.id) is False
+    edit_bak = store.path.with_name(store.path.name + ".edit-bak")
+    write_document(
+        edit_bak,
+        [event.model_dump(mode="json") for event in [_stream_event(session, type="turn_started")]],
+    )
+    assert not edit_bak.exists()
+    assert managed_chat.has_residual_state(session.workspace_id, session.id) is True
+    delete_document(edit_bak)
+    assert managed_chat.has_residual_state(session.workspace_id, session.id) is False
