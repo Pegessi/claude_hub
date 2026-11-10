@@ -543,18 +543,20 @@ def test_drop_binding_ignores_a_superseded_pairing_id(pool: FeishuBotPoolStore) 
 def test_non_finite_timestamps_are_rejected(pool: FeishuBotPoolStore) -> None:
     bot_id = pool.create_bot(name="One", config=_config(), environ={})
     state = json.loads(pool.path.read_text())
-    state["bots"][bot_id]["binding"] = {
-        "pairing_id": "p-1",
-        "owner_open_id": "ou-owner",
-        "owner_email": "o@e.test",
-        "owner_kind": "oauth",
-        "tab_id": "tab-1",
-        "workspace_id": None,
-        "sender_open_id": "ou-s",
-        "chat_id": "oc-1",
-        "created_at": float("inf"),
-        "generation": 0,
-    }
+    state["bots"][bot_id]["bindings"] = [
+        {
+            "pairing_id": "p-1",
+            "owner_open_id": "ou-owner",
+            "owner_email": "o@e.test",
+            "owner_kind": "oauth",
+            "tab_id": "tab-1",
+            "workspace_id": None,
+            "sender_open_id": "ou-s",
+            "chat_id": "oc-1",
+            "created_at": float("inf"),
+            "generation": 0,
+        }
+    ]
     pool.path.write_text(json.dumps(state))
     with pytest.raises(FeishuBotPoolStateError):
         pool.snapshot({})

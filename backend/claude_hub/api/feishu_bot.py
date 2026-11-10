@@ -41,6 +41,8 @@ from claude_hub.services.agent_stream.turn_source import (
     FEISHU_PROVIDER_TEXT_FORMAT_V2,
     format_feishu_provider_text_v2,
 )
+from claude_hub.services.bot_pool.common import BOT_MODE_PER_CHANNEL
+from claude_hub.services.feishu_auto_chat import FeishuAutoChatCreator, FeishuAutoChatError
 from claude_hub.services.feishu_bot import (
     FeishuBotClient,
     FeishuBotConfig,
@@ -100,6 +102,7 @@ _BIND_CODE_RE = re.compile(r"^(?:bind\s+)?(CH-[A-Z0-9]{10})$", re.IGNORECASE)
 _pool = FeishuBotPoolStore()
 _dedup = FeishuMessageDedupStore()
 _now: Callable[[], float] = time.time
+_auto_chat = FeishuAutoChatCreator(now=lambda: _now())
 
 _BODY_BYTES = 16 * 1024
 _GATE_TIMEOUT_SECONDS = 20.0
@@ -441,6 +444,9 @@ class _FeishuPoolBindings:
     def workspace_manager(self) -> Any:
         return workspace_manager
 
+    def auto_chat(self) -> Any:
+        return _auto_chat
+
 
 def _snapshot() -> PoolSnapshot:
     return pool_routes.get_pool_snapshot(_FeishuPoolBindings())
@@ -563,8 +569,7 @@ def _bot_bound_to_tab(tab_id: str) -> BotEntry | None:
             for bot in _pool.snapshot().bots
             if bot.enabled
             and bot.configured
-            and bot.binding is not None
-            and bot.binding.tab_id == tab_id
+            and any(binding.tab_id == tab_id for binding in bot.bindings)
         ),
         None,
     )
@@ -585,9 +590,14 @@ async def push_to_tab(
     coloured title when ``title`` is given (a post when Feishu refuses the card)."""
     try:
         entry = _bot_bound_to_tab(tab_id)
-        if entry is None or entry.binding is None:
+        if entry is None:
             return False
-        binding = entry.binding
+        binding = next(
+            (candidate for candidate in entry.bindings if candidate.tab_id == tab_id),
+            entry.binding,
+        )
+        if binding is None:
+            return False
         effective = _pool.effective(entry.bot_id)
     except FeishuBotPoolError:
         return False
@@ -736,6 +746,79 @@ def _route_binding(bot_id: str, event: FeishuMessageEvent) -> BotBinding | None:
     )
 
 
+async def _provision_per_channel_binding(
+    bot_id: str,
+    event: FeishuMessageEvent,
+    effective: EffectiveBot,
+) -> tuple[BotBinding | None, EffectiveBot, str | None, str | None]:
+    """Auto-provision a new Chat tab and p2p binding for a ``per_channel`` Bot."""
+
+    async with _gate(bot_id):
+        if not _pool.is_current(effective):
+            return None, effective, None, None
+        existing = _route_binding(bot_id, event)
+        if existing is not None:
+            return existing, _pool.effective(bot_id), None, None
+        snapshot = _pool.snapshot()
+        entry = snapshot.get(bot_id)
+        if entry is None or not entry.enabled or entry.mode != BOT_MODE_PER_CHANNEL:
+            return None, effective, None, None
+        if any(bound.chat_id == event.chat_id for bot in snapshot.bots for bound in bot.bindings):
+            return (
+                None,
+                effective,
+                "chat_occupied",
+                "This bot could not open a new session because this chat is already bound.",
+            )
+        now_val = _now()
+        try:
+            _auto_chat.check_dm_limits(entry, event.sender_open_id, now=now_val, pool_key=id(_pool))
+            tab_name = _auto_chat.dm_tab_name(event.sender_open_id)
+            tab_id = await _auto_chat.create_tab(tab_name, manager=ttyd_manager)
+        except FeishuAutoChatError as exc:
+            return None, effective, exc.reason, exc.user_message
+        except Exception as exc:
+            logger.warning("Feishu per_channel tab creation failed: %s", type(exc).__name__)
+            return (
+                None,
+                effective,
+                "tab_create_failed",
+                "This bot could not open a new session right now; please try again later.",
+            )
+        try:
+            workspace_id = _validate_bind_target(tab_id, None)
+            activated_at = min(now_val, max(0.0, event.message_created_at_ms / 1000.0))
+            binding = _pool.bind_p2p(
+                bot_id,
+                owner=OwnerIdentity(open_id="local", email="", kind=OWNER_KIND_LOCAL),
+                tab_id=tab_id,
+                workspace_id=workspace_id,
+                sender_open_id=event.sender_open_id,
+                chat_id=event.chat_id,
+                created_at=activated_at,
+            )
+            _auto_chat.record_auto_create(bot_id, now=now_val, pool_key=id(_pool))
+            refreshed = _pool.effective(bot_id)
+            return binding, refreshed, None, None
+        except FeishuPoolFull:
+            await _auto_chat.delete_tab(tab_id, manager=ttyd_manager)
+            return (
+                None,
+                effective,
+                "channel_limit_reached",
+                "This bot could not open a new session because its channel limit has been reached.",
+            )
+        except Exception as exc:
+            await _auto_chat.delete_tab(tab_id, manager=ttyd_manager)
+            logger.warning("Feishu per_channel bind failed: %s", type(exc).__name__)
+            return (
+                None,
+                effective,
+                "bind_failed",
+                "This bot could not open a new session right now; please try again later.",
+            )
+
+
 async def _handle_message_event(
     bot_id: str,
     event: FeishuMessageEvent,
@@ -765,20 +848,38 @@ async def _handle_message_event(
                 status_stage = "pre_dispatch"
                 status_reason = "binding_missing"
                 return
-            if await _reply_if_current(
-                client,
-                event,
-                effective,
-                "本会话尚未连接 Claude Hub。请在 Hub 网页选择一个 Bot 和 Chat 生成配对码。",
-            ):
-                status_value = "pre_dispatch_rejected"
-                status_stage = "pre_dispatch"
-                status_reason = "binding_missing"
+            entry = _pool.snapshot().get(bot_id)
+            if entry is not None and entry.enabled and entry.mode == BOT_MODE_PER_CHANNEL:
+                binding, effective, reject_reason, reject_notice = (
+                    await _provision_per_channel_binding(bot_id, event, effective)
+                )
+                if binding is None:
+                    if reject_notice is None:
+                        return
+                    if await _reply_if_current(client, event, effective, reject_notice):
+                        status_value = "pre_dispatch_rejected"
+                    else:
+                        status_value = "reply_failed"
+                    status_stage = "pre_dispatch"
+                    status_reason = reject_reason or "binding_missing"
+                    return
+                if claimed_retry_context is None:
+                    claimed_retry_context = _dedup_retry_context(bot_id, event, binding)
             else:
-                status_value = "reply_failed"
-                status_stage = "pre_dispatch"
-                status_reason = "binding_missing"
-            return
+                if await _reply_if_current(
+                    client,
+                    event,
+                    effective,
+                    "本会话尚未连接 Claude Hub。请在 Hub 网页选择一个 Bot 和 Chat 生成配对码。",
+                ):
+                    status_value = "pre_dispatch_rejected"
+                    status_stage = "pre_dispatch"
+                    status_reason = "binding_missing"
+                else:
+                    status_value = "reply_failed"
+                    status_stage = "pre_dispatch"
+                    status_reason = "binding_missing"
+                return
         from .routes.feishu_bot.card_actions import intercept_reply
 
         try:

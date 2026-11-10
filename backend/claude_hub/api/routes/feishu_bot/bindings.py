@@ -46,6 +46,8 @@ class FeishuPoolRouteBindings(Protocol):
 
     def workspace_manager(self) -> Any: ...
 
+    def auto_chat(self) -> Any: ...
+
 
 class FeishuBotRouteBindings(FeishuPoolRouteBindings, Protocol):
     """Resolve compatibility-owned dependencies for message dispatch."""

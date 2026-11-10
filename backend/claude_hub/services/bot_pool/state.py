@@ -9,8 +9,11 @@ from claude_hub.services.bot_pool.common import (
     _RATE_WINDOW_SECONDS,
     _STATE_VERSION,
     _TOMBSTONE_RETENTION_SECONDS,
+    _V2_STATE_VERSION,
+    BOT_MODE_SINGLE,
     ENV_BOT_ID,
     LEGACY_BOT_ID,
+    MAX_CHANNELS_PER_BOT,
     OFFICIAL_FEISHU_API,
     Any,
     BotBinding,
@@ -19,12 +22,14 @@ from claude_hub.services.bot_pool.common import (
     FeishuBotAppIdConflict,
     FeishuBotConfig,
     FeishuBotNotFound,
+    FeishuBotOccupied,
     FeishuBotPoolError,
     FeishuBotPoolStateError,
     FeishuBotRevisionConflict,
     FeishuBotRevoked,
     FeishuBotUnavailable,
     FeishuChatOccupied,
+    FeishuPoolFull,
     Mapping,
     PairingClaim,
     Path,
@@ -37,8 +42,10 @@ from claude_hub.services.bot_pool.common import (
     _as_text,
     _owner_from_dict,
     _safe_timestamp,
+    _state_error,
     _validate_pool_numbers,
     binding_chat_type,
+    bot_mode,
     deprecated_env_present,
     environment_config,
     environment_present,
@@ -92,6 +99,28 @@ class FeishuBotPoolStateStore(object):
             raise FeishuBotPoolStateError("Invalid Feishu Bot pool state")
         return value
 
+    @staticmethod
+    def _migrate_entry_bindings(raw: dict[str, Any]) -> None:
+        """Migrate v2/v3 single ``binding`` to ``bindings`` and normalize ``mode``."""
+
+        if raw.get("revoked_at") is not None and "binding" not in raw and "bindings" not in raw:
+            return
+        if "binding" in raw:
+            legacy_binding = raw.pop("binding")
+            if "bindings" not in raw or raw["bindings"] is None:
+                if legacy_binding is None:
+                    raw["bindings"] = []
+                else:
+                    raw["bindings"] = [_as_mapping(legacy_binding, "binding")]
+        elif "bindings" not in raw or raw["bindings"] is None:
+            raw["bindings"] = []
+        elif not isinstance(raw["bindings"], list):
+            raise _state_error("bot.bindings")
+        if "mode" not in raw or raw["mode"] is None:
+            raw["mode"] = BOT_MODE_SINGLE
+        else:
+            bot_mode(raw)
+
     def _load(self) -> dict[str, Any]:
         value = self._read_file(self.path)
         if value is None:
@@ -100,16 +129,17 @@ class FeishuBotPoolStateStore(object):
             # revoked authorization.
             return self._migrate_legacy()
         version = _as_int(value.get("version"), "version")
-        if version not in {_PREVIOUS_STATE_VERSION, _STATE_VERSION}:
+        if version not in {_V2_STATE_VERSION, _PREVIOUS_STATE_VERSION, _STATE_VERSION}:
             raise FeishuBotPoolStateError("Unsupported Feishu Bot pool state version")
         bots = _as_mapping(value.get("bots"), "bots")
         rate_limits = _as_mapping(value.get("rate_limits"), "rate_limits")
         for bot_id, raw in bots.items():
             _as_text(bot_id, "bots key", limit=_MAX_ID_CHARS)
-            _as_mapping(raw, f"bots[{bot_id}]")
-            credentials = raw.get("credentials") if isinstance(raw, dict) else None
+            raw_entry = _as_mapping(raw, f"bots[{bot_id}]")
+            credentials = raw_entry.get("credentials")
             if isinstance(credentials, dict):
-                raw["credentials"] = {"app_secret": credentials.get("app_secret")}
+                raw_entry["credentials"] = {"app_secret": credentials.get("app_secret")}
+            self._migrate_entry_bindings(raw_entry)
         _validate_pool_numbers(bots, rate_limits)
         return {
             "version": _STATE_VERSION,
@@ -167,6 +197,7 @@ class FeishuBotPoolStateStore(object):
             "bot_id": LEGACY_BOT_ID,
             "name": "Feishu Bot",
             "app_id": raw_config["app_id"],
+            "mode": BOT_MODE_SINGLE,
             "credentials": {
                 "app_secret": raw_config["app_secret"],
             },
@@ -177,7 +208,7 @@ class FeishuBotPoolStateStore(object):
             "updated_at": updated_at,
             "pending": {},
             "claims": {},
-            "binding": None,
+            "bindings": [],
             "revoked_at": None,
         }
         return state
@@ -259,6 +290,7 @@ class FeishuBotPoolStateStore(object):
             "bot_id": bot_id,
             "name": name,
             "app_id": app_id,
+            "mode": BOT_MODE_SINGLE,
             "credentials": None,
             "revision": 0,
             "generation": 0,
@@ -267,7 +299,7 @@ class FeishuBotPoolStateStore(object):
             "updated_at": now,
             "pending": {},
             "claims": {},
-            "binding": None,
+            "bindings": [],
             "revoked_at": None,
         }
 
@@ -312,12 +344,20 @@ class FeishuBotPoolStateStore(object):
                 continue
             if claim.expires_at > now and claim.generation == generation:
                 claims.append(claim)
-        binding = None
-        raw_binding = raw.get("binding")
-        if raw_binding is not None:
-            candidate = self._binding_from_dict(bot_id, _as_mapping(raw_binding, "binding"))
+        mode = bot_mode(raw)
+        raw_bindings = raw.get("bindings")
+        if raw_bindings is None:
+            raw_binding = raw.get("binding")
+            raw_bindings = [] if raw_binding is None else [raw_binding]
+        if not isinstance(raw_bindings, list):
+            raise _state_error("bot.bindings")
+        indexed_bindings: list[tuple[float, int, BotBinding]] = []
+        for idx, item in enumerate(raw_bindings):
+            candidate = self._binding_from_dict(bot_id, _as_mapping(item, "binding"))
             if candidate.generation == generation:
-                binding = candidate
+                indexed_bindings.append((candidate.created_at, idx, candidate))
+        indexed_bindings.sort(key=lambda pair: (pair[0], pair[1]))
+        bindings = tuple(pair[2] for pair in indexed_bindings)
         source = "stored"
         if is_env:
             source = "invalid_environment" if env_seen and config is None else "environment"
@@ -370,7 +410,8 @@ class FeishuBotPoolStateStore(object):
             ),
             config=config,
             claims=tuple(claims),
-            binding=binding,
+            bindings=bindings,
+            mode=mode,
             callback_enabled=callback_enabled,
             verification_token=verification_token,
             encrypt_key=encrypt_key,
@@ -543,16 +584,50 @@ class FeishuBotPoolStateStore(object):
         raw["generation"] = _as_int(raw.get("generation"), "generation") + 1
         raw["pending"] = {}
         raw["claims"] = {}
-        raw["binding"] = None
+        raw.pop("binding", None)
+        raw["bindings"] = []
 
     @staticmethod
-    def _require_tab_free(state: dict[str, Any], tab_id: str, *, exclude: str) -> None:
-        for other_id, raw in state["bots"].items():
-            if other_id == exclude or not isinstance(raw, dict) or raw.get("revoked_at"):
+    def _active_raw_bindings(raw: dict[str, Any]) -> list[dict[str, Any]]:
+        generation = raw.get("generation")
+        items = raw.get("bindings")
+        if not isinstance(items, list):
+            single = raw.get("binding")
+            items = [single] if isinstance(single, dict) else []
+        return [
+            item
+            for item in items
+            if isinstance(item, dict) and item.get("generation") == generation
+        ]
+
+    @classmethod
+    def _require_bot_binding_slot(cls, raw: dict[str, Any], bot_id: str) -> None:
+        active = cls._active_raw_bindings(raw)
+        if bot_mode(raw) == BOT_MODE_SINGLE:
+            if active:
+                raise FeishuBotOccupied(bot_id)
+        elif len(active) >= MAX_CHANNELS_PER_BOT:
+            raise FeishuPoolFull("channels")
+
+    @classmethod
+    def _require_tab_free(
+        cls, state: dict[str, Any], tab_id: str, *, exclude: str | None = None
+    ) -> None:
+        for _other_id, raw in state["bots"].items():
+            if not isinstance(raw, dict) or raw.get("revoked_at"):
                 continue
-            binding = raw.get("binding")
-            if isinstance(binding, dict) and binding.get("tab_id") == tab_id:
-                raise FeishuChatOccupied(tab_id)
+            for binding in cls._active_raw_bindings(raw):
+                if binding.get("tab_id") == tab_id:
+                    raise FeishuChatOccupied(tab_id)
+
+    @classmethod
+    def _require_chat_free(cls, state: dict[str, Any], chat_id: str) -> None:
+        for _other_id, raw in state["bots"].items():
+            if not isinstance(raw, dict) or raw.get("revoked_at"):
+                continue
+            for binding in cls._active_raw_bindings(raw):
+                if binding.get("chat_id") == chat_id:
+                    raise FeishuChatOccupied(chat_id)
 
     @staticmethod
     def _require_app_id_free(state: dict[str, Any], app_id: str, *, exclude: str | None) -> None:

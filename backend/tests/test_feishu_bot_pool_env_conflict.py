@@ -33,7 +33,8 @@ _OWNER = OwnerIdentity(open_id="ou-owner", email="owner@example.com", kind=OWNER
 
 class _RawBot(TypedDict):
     app_id: str
-    binding: object | None
+    bindings: list[object]
+    mode: str
     generation: int
     revision: int
     revoked_at: float | None
@@ -136,7 +137,7 @@ def test_first_sync_refuses_a_conflicting_environment_app_id(tmp_path: Path) -> 
 
     env_raw = _raw(store)["bots"][ENV_BOT_ID]
     assert env_raw["app_id"] == ""
-    assert env_raw["binding"] is None
+    assert env_raw["bindings"] == []
 
 
 def test_refused_environment_is_reported_as_invalid(tmp_path: Path) -> None:
@@ -189,7 +190,7 @@ def test_preexisting_duplicate_app_id_is_healed_on_first_sync(tmp_path: Path) ->
     stored_id = store.create_bot(name="Stored", config=_config("cli_B"), environ=env_a)
 
     state = _raw(store)
-    assert state["bots"][ENV_BOT_ID]["binding"] is not None
+    assert len(state["bots"][ENV_BOT_ID]["bindings"]) == 1
     state["bots"][ENV_BOT_ID]["app_id"] = "cli_B"
     before = state["bots"][ENV_BOT_ID]["generation"]
     store.path.write_text(json.dumps(state), encoding="utf-8")
@@ -198,7 +199,7 @@ def test_preexisting_duplicate_app_id_is_healed_on_first_sync(tmp_path: Path) ->
 
     healed = _raw(store)["bots"][ENV_BOT_ID]
     assert healed["app_id"] == ""
-    assert healed["binding"] is None
+    assert healed["bindings"] == []
     assert healed["generation"] > before
     assert _raw(store)["bots"][stored_id]["app_id"] == "cli_B"
 
@@ -251,7 +252,7 @@ def test_environment_change_into_a_conflict_revokes_the_binding(tmp_path: Path) 
 
     revoked = _raw(store)["bots"][ENV_BOT_ID]
     assert revoked["app_id"] == ""
-    assert revoked["binding"] is None
+    assert revoked["bindings"] == []
     assert revoked["generation"] > before
     assert store.effective(stored_id, environ=_env("cli_B")).app_id == "cli_B"
 

@@ -61,7 +61,9 @@ def test_group_binding_is_persisted_as_a_group(pool: FeishuBotPoolStore) -> None
     assert entry.binding.pairing_id == binding.pairing_id
     # An in-memory snapshot must survive its own serialization.
     raw = json.loads(pool.path.read_text())
-    stored = raw["bots"][bot_id]["binding"]
+    stored_list = raw["bots"][bot_id]["bindings"]
+    assert len(stored_list) == 1
+    stored = stored_list[0]
     assert stored["chat_type"] == "group"
     assert stored["chat_name"] == "Team"
 
