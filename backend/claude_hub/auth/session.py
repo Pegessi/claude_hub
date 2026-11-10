@@ -1,17 +1,15 @@
 """Session management for Claude Hub."""
 
-import json
 import logging
 import os
 import secrets
-import tempfile
-from contextlib import suppress
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from ..config import settings
 from ..models.schemas import LoginSession, User
+from ..services.local_storage import document_exists, read_document, write_document
 
 logger = logging.getLogger(__name__)
 
@@ -61,49 +59,26 @@ def _tighten_file_permissions() -> None:
 
 
 def _load_sessions() -> Dict[str, Any]:
-    """Load sessions from file."""
+    """Load sessions, importing the legacy file when first encountered."""
     _ensure_sessions_dir()
-    if not SESSIONS_FILE.exists():
+    if not document_exists(SESSIONS_FILE):
         return {}
     _tighten_file_permissions()
     try:
-        with open(SESSIONS_FILE, "r") as f:
-            result: Dict[str, Any] = json.load(f)
-            return result
-    except (json.JSONDecodeError, IOError) as e:
+        result: Dict[str, Any] = read_document(SESSIONS_FILE)
+        return result
+    except (ValueError, IOError) as e:
         logger.warning(f"Failed to load sessions: {e}")
         return {}
 
 
 def _save_sessions(sessions: Dict[str, Any]) -> None:
-    """Save sessions to file atomically with owner-only permissions."""
+    """Commit sessions to the owner-only SQLite database."""
     _ensure_sessions_dir()
     try:
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=f".{SESSIONS_FILE.name}.",
-            suffix=".tmp",
-            dir=str(SESSIONS_FILE.parent),
-        )
+        write_document(SESSIONS_FILE, sessions)
     except OSError as e:
         logger.error(f"Failed to save sessions: {e}")
-        return
-
-    replaced = False
-    try:
-        # mkstemp already creates the file 0600, but enforce it explicitly.
-        os.fchmod(fd, _SESSIONS_FILE_MODE)
-        with os.fdopen(fd, "w") as f:
-            json.dump(sessions, f)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_name, SESSIONS_FILE)
-        replaced = True
-    except OSError as e:
-        logger.error(f"Failed to save sessions: {e}")
-    finally:
-        if not replaced:
-            with suppress(OSError):
-                os.unlink(tmp_name)
 
 
 def _session_to_dict(session: LoginSession) -> Dict[str, Any]:

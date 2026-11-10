@@ -32,6 +32,7 @@ from claude_hub.models import (
     TerminalTabCreate,
     WorkspaceSessionRole,
 )
+from claude_hub.services.local_storage import document_exists, read_document, write_document
 from claude_hub.services.ttyd_manager import (
     DEFAULT_CLAUDE_LAUNCH_ENV,
     ScanEntry,
@@ -3373,7 +3374,7 @@ def test_agent_session_id_round_trips_through_state(monkeypatch: MonkeyPatch, tm
     assert original_id
 
     # Serialize and persist exactly as TTYDManager._save_state does.
-    state_file.write_text(json.dumps([process.to_dict()]), encoding="utf-8")
+    write_document(state_file, [process.to_dict()])
 
     manager = TTYDManager.__new__(TTYDManager)
     manager.processes = {}
@@ -3474,7 +3475,7 @@ def test_backfill_pins_unambiguous_session(monkeypatch: MonkeyPatch, tmp_path) -
 
     assert process.agent_session_id == "real-convo"
     # Pinned id persisted so a subsequent reboot can resume.
-    saved = json.loads((tmp_path / "tabs.json").read_text(encoding="utf-8"))
+    saved = read_document((tmp_path / "tabs.json"))
     assert saved["tabs"][0]["agent_session_id"] == "real-convo"
 
 
@@ -3956,8 +3957,8 @@ async def test_switch_env_manager_persists_state(monkeypatch: MonkeyPatch, tmp_p
 
     assert result.solo_mode is True
     assert result.env["ANTHROPIC_MODEL"] == "new-model"
-    assert state_file.exists()
-    saved = json.loads(state_file.read_text())["tabs"]
+    assert document_exists(state_file)
+    saved = read_document(state_file)["tabs"]
     assert len(saved) == 1
     assert saved[0]["id"] == process.tab_id
     assert saved[0]["solo_mode"] is True
@@ -4385,7 +4386,7 @@ def test_resume_quarantined_round_trips_through_state(monkeypatch: MonkeyPatch, 
     fresh = TTYDProcess(tab_id="tab-f", port=12404, name="Fresh", agent_type=AgentType.CODEX)
     assert fresh.resume_quarantined is False
 
-    state_file.write_text(json.dumps([quarantined.to_dict(), fresh.to_dict()]), encoding="utf-8")
+    write_document(state_file, [quarantined.to_dict(), fresh.to_dict()])
 
     manager = TTYDManager.__new__(TTYDManager)
     manager.processes = {}
@@ -4410,7 +4411,7 @@ def test_resume_quarantined_round_trips_through_state(monkeypatch: MonkeyPatch, 
             "agent_session_id": "legacy-sid",
         }
     ]
-    state_file.write_text(json.dumps(legacy_state), encoding="utf-8")
+    write_document(state_file, legacy_state)
     manager2 = TTYDManager.__new__(TTYDManager)
     manager2.processes = {}
     manager2._next_port = 10000
@@ -4482,7 +4483,7 @@ def test_legacy_missing_session_kind_reloads_as_terminal(
             "workspace_role": "worker",
         },
     ]
-    state_file.write_text(json.dumps(legacy_state), encoding="utf-8")
+    write_document(state_file, legacy_state)
 
     manager = TTYDManager.__new__(TTYDManager)
     manager.processes = {}
@@ -4530,7 +4531,7 @@ def test_agent_session_id_verified_round_trips_through_state(
         agent_session_id_verified=False,
     )
 
-    state_file.write_text(json.dumps([verified.to_dict(), unverified.to_dict()]), encoding="utf-8")
+    write_document(state_file, [verified.to_dict(), unverified.to_dict()])
 
     manager = TTYDManager.__new__(TTYDManager)
     manager.processes = {}
@@ -4557,7 +4558,7 @@ def test_agent_session_id_verified_round_trips_through_state(
             "agent_session_id": "legacy-sid",
         }
     ]
-    state_file.write_text(json.dumps(legacy_state), encoding="utf-8")
+    write_document(state_file, legacy_state)
     manager2 = TTYDManager.__new__(TTYDManager)
     manager2.processes = {}
     manager2._next_port = 10000
@@ -4991,7 +4992,7 @@ async def test_explicit_cursor_recovery_persists_rotated_sid_across_reload(
     assert tab is not None
     assert tab.is_active is True
     assert tab.agent_session_id not in {None, "stale-cursor-sid"}
-    assert state_file.exists()
+    assert document_exists(state_file)
 
     reloaded = TTYDManager()
     assert reloaded.processes[process.tab_id].agent_session_id == tab.agent_session_id
@@ -5294,7 +5295,7 @@ def test_legacy_state_without_shell_explicitly_provided_uses_agent_cli(
         # explicit override and must keep running the shell directly.
         _legacy_row("legacy-claude-override", AgentType.CLAUDE, "/bin/bash"),
     ]
-    state_file.write_text(json.dumps(rows), encoding="utf-8")
+    write_document(state_file, rows)
 
     manager = TTYDManager.__new__(TTYDManager)
     manager.processes = {}
@@ -5335,7 +5336,7 @@ def test_legacy_state_without_shell_explicitly_provided_uses_agent_cli(
     # Exercise the real manager save boundary (not just to_dict()) and verify
     # the persisted raw JSON contains the expected boolean for every row.
     manager._save_state()
-    saved_rows = json.loads(state_file.read_text(encoding="utf-8"))["tabs"]
+    saved_rows = read_document(state_file)["tabs"]
     saved_by_id = {row["id"]: row for row in saved_rows}
 
     expected_explicit = {
