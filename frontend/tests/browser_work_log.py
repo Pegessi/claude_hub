@@ -62,8 +62,16 @@ async def footer(page, case_id):
     failed_phrase = section.locator(".turn-working-counts-failed")
     has_counts = await counts_line.count() > 0
     has_failed = await failed_phrase.count() > 0
+    step_box = await section.locator(".turn-working-step").bounding_box() if await section.locator(".turn-working-step").count() else None
+    orb_box = await section.locator(".turn-working-orb").bounding_box()
     return {
         "word": await section.locator(".turn-working-label").all_inner_texts(),
+        "context": await section.locator(".turn-working-context").all_inner_texts(),
+        "hint": await section.locator(".turn-working-hint").all_inner_texts(),
+        "orb_centre_offset": (
+            round((orb_box["y"] + orb_box["height"] / 2) - (step_box["y"] + step_box["height"] / 2), 1)
+            if step_box and orb_box else None
+        ),
         "step": (await section.locator(".turn-working-step").inner_text()).strip(),
         "elapsed": (await section.locator(".turn-working-elapsed").inner_text()).strip(),
         "counts": await counts_line.all_inner_texts(),
@@ -206,6 +214,9 @@ async def main(browser_run: BrowserRun) -> None:
         assert STOPWATCH_PATTERN.match(busy["elapsed"]), busy["elapsed"]
         assert not busy["waiting_class"], "a busy turn must not use the blocked styling"
         assert busy["orb_animation"] != "none", "a busy turn keeps its pulse"
+        assert abs(busy["orb_centre_offset"]) <= 1.0, busy["orb_centre_offset"]
+        assert busy["hint"] == [], "a turn that is working needs no explanation"
+        assert busy["context"] == [], "the busy line names its step instead"
 
         # ── blocked on a sub-agent: waiting must not read as activity ─────────
         waiting_child = await footer(page, "waiting-subagent")
@@ -234,6 +245,26 @@ async def main(browser_run: BrowserRun) -> None:
         assert awaiting["step"] == "Waiting for the first response", awaiting["step"]
         assert STOPWATCH_PATTERN.match(awaiting["elapsed"]), awaiting["elapsed"]
         assert awaiting["counts"] == [], "there is no work to count yet"
+        # Who is being waited on belongs on this line: a bare state says nothing.
+        assert awaiting["context"] == ["MASO · gemini-4-argon · High"], awaiting["context"]
+        assert awaiting["hint"] == [], "an early wait needs no explanation"
+        # The light sits on the text's centre line, not on its baseline.
+        assert awaiting["orb_centre_offset"] is not None, awaiting
+        assert abs(awaiting["orb_centre_offset"]) <= 1.0, (
+            "the status light must be vertically centred with its label",
+            awaiting["orb_centre_offset"],
+        )
+
+        # ── a long silent start explains itself, and a dead stream says so ────
+        slow = await footer(page, "awaiting-first-slow")
+        observed["awaiting-first-slow"] = slow
+        assert slow["step"] == "Waiting for the first response", slow["step"]
+        assert slow["hint"], "a 45 s silence needs a reason"
+        assert "provider spinning up" in slow["hint"][0], slow["hint"]
+
+        offline = await footer(page, "awaiting-first-offline")
+        observed["awaiting-first-offline"] = offline
+        assert offline["hint"] == ["Reconnecting to the stream…"], offline["hint"]
         assert not awaiting["waiting_class"], "the turn is live, not blocked by the user"
         assert awaiting["orb_animation"] != "none", "a live turn keeps its pulse"
         assert await page.locator(".agent-waiting-card").count() == 0, (

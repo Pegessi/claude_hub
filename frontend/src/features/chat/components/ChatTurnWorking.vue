@@ -29,6 +29,10 @@
         v-if="step.label"
         class="turn-working-step"
       >{{ step.waiting || step.bare ? step.label : `· ${step.label}` }}</span>
+      <span
+        v-if="contextLabel && step.bare"
+        class="turn-working-context"
+      >{{ contextLabel }}</span>
       <time
         class="turn-working-elapsed"
         aria-hidden="true"
@@ -51,14 +55,29 @@
         >{{ `${countParts.prefix || countParts.failed ? ' · ' : ''}${countParts.suffix}` }}</template>
       </span>
     </div>
+    <!-- Nothing has come back yet: say why that can be, once it is worth saying.
+         A bare clock in an empty pane reads like a stall. -->
+    <div
+      v-if="hint"
+      class="turn-working-hint"
+    >
+      {{ hint }}
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, inject, onBeforeUnmount, onMounted, ref } from 'vue'
 import { formatStopwatch, parseTimestampMs } from '@/utils/duration'
-import { requireChatOwner, chatTimelineKey } from '../owners'
-import { countWorkLog, currentStep, emptyWorkLogCounts, workLogCountLabel, workLogCountParts } from '../worklog/workLog'
+import { chatIdentityKey, chatSettingsKey, requireChatOwner, chatTimelineKey } from '../owners'
+import {
+  countWorkLog,
+  currentStep,
+  emptyWorkLogCounts,
+  firstResponseHint,
+  workLogCountLabel,
+  workLogCountParts,
+} from '../worklog/workLog'
 
 const props = defineProps<{ startedAt: string | null }>()
 
@@ -66,6 +85,12 @@ const props = defineProps<{ startedAt: string | null }>()
 // the pane — reading it from the owner keeps ChatTurn.vue from having to pass
 // the whole part list down just for a label.
 const { turns } = requireChatOwner(chatTimelineKey)
+
+// The provider and the model are what a reader wants while nothing is happening:
+// "waiting for the first response" alone does not say from whom. Both owners are
+// optional so the footer still projects a turn outside a full pane (fixtures).
+const identity = inject(chatIdentityKey, null)
+const settings = inject(chatSettingsKey, null)
 
 /** The turn in flight is the newest turn of the pane. Read it straight from
  *  ``turns`` in each projection, never through an intermediate computed that
@@ -90,6 +115,13 @@ const countsLabel = computed(() => workLogCountLabel(counts.value))
  *  not repaint the whole summary, so only that phrase carries the warning tone. */
 const countParts = computed(() => workLogCountParts(counts.value))
 
+/** Who is being waited on: ``MASO · gemini-4-argon · High`` when known. */
+const contextLabel = computed(() => {
+  const provider = (identity?.currentTab?.value?.agent_type ?? '').toUpperCase()
+  const model = (settings?.combinedModelLabel?.value ?? '').trim()
+  return [provider, model].filter(Boolean).join(' · ')
+})
+
 const mountedAt = Date.now()
 const now = ref(Date.now())
 let timer: ReturnType<typeof setInterval> | null = null
@@ -103,10 +135,19 @@ onBeforeUnmount(() => {
 })
 
 // A future server timestamp (client clock behind) must not show negative time.
-const elapsedLabel = computed(() => {
+const elapsedMs = computed(() => {
   const parsed = parseTimestampMs(props.startedAt)
   const start = parsed === null ? mountedAt : Math.min(parsed, mountedAt)
-  return formatStopwatch(now.value - start)
+  return now.value - start
+})
+
+const elapsedLabel = computed(() => formatStopwatch(elapsedMs.value))
+
+/** Only the window before the first event gets an explanation: everywhere else
+ *  the step itself says what is happening. */
+const hint = computed(() => {
+  if (!step.value.bare) return ''
+  return firstResponseHint(elapsedMs.value, identity?.connectionState?.value ?? 'live')
 })
 </script>
 
@@ -124,25 +165,29 @@ const elapsedLabel = computed(() => {
   font-size: 12.5px;
 }
 
+/* Centre the dot on the text line, not on its baseline: at 12.5px the baseline
+   offset put the light 4-5px low and it read as misaligned. The fixed line-height
+   keeps the dot centred as the label word is swapped between states. */
 .turn-working-line {
   display: flex;
-  align-items: baseline;
-  gap: 7px;
+  align-items: center;
+  gap: 8px;
   max-width: 100%;
   min-width: 0;
   min-height: 22px;
+  line-height: 20px;
 }
 
 .turn-working-orb {
   position: relative;
   flex: 0 0 auto;
   align-self: center;
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--ch-color-accent);
   box-shadow: 0 0 0 0 var(--ch-color-accent-halo, var(--ch-color-accent-ring));
-  animation: turn-working-pulse 1.6s ease-out infinite;
+  animation: turn-working-pulse 1.8s ease-out infinite;
 }
 
 .turn-working-label {
@@ -185,6 +230,25 @@ const elapsedLabel = computed(() => {
   line-height: 1.45;
 }
 
+/* Which provider and model this turn is waiting on. Quiet, after the sentence,
+   so the state line still leads. */
+.turn-working-context {
+  flex: 0 0 auto;
+  color: var(--ch-color-text-subtle);
+  font-size: 11.5px;
+  opacity: 0.75;
+}
+
+/* The reason behind a silent start; one short sentence, never a second status. */
+.turn-working-hint {
+  max-width: 100%;
+  padding-left: 15px;
+  color: var(--ch-color-text-subtle);
+  font-size: 11.5px;
+  line-height: 1.45;
+  opacity: 0.8;
+}
+
 .turn-working-counts-text {
   color: var(--ch-color-text-subtle);
   opacity: 0.85;
@@ -207,7 +271,7 @@ const elapsedLabel = computed(() => {
 
 @keyframes turn-working-pulse {
   0% { box-shadow: 0 0 0 0 var(--ch-color-accent-halo, var(--ch-color-accent-ring)); }
-  70% { box-shadow: 0 0 0 7px transparent; }
+  70% { box-shadow: 0 0 0 4px transparent; }
   100% { box-shadow: 0 0 0 0 transparent; }
 }
 

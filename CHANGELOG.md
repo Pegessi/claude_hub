@@ -7,6 +7,25 @@
 
 ## Released
 
+### fix(ui): a choice card ends its turn instead of topping the answer
+
+- An agent usually asks before it explains, so arrival order put the question
+  card above the answer it belongs to. Cards now render last in every shape of
+  the turn — live, folded, expanded, and while its activity detail is still
+  unread — and a finished turn never hides them inside the fold: the answer is
+  the reasoning, the card is the thing to act on.
+- A folded header no longer counts "N approvals" for cards it leaves on screen.
+
+### fix(ui): centre the live footer's light and name who it is waiting on
+
+- The status light now sits on the label's centre line instead of its baseline
+  (it read as a few pixels low at 12.5px), and its pulse ring is tighter.
+- A turn that has not reported anything yet says who it is waiting on —
+  `Waiting for the first response · MASO · gemini-4-argon · High · 0:47` — and,
+  once the silence passes half a minute or the stream is not live, adds one
+  short sentence (provider still starting its session, or reconnecting), so a
+  bare clock in an empty pane no longer reads like a stall.
+
 ### fix(ui): one live footer for every turn, and a quieter failure mark
 
 - A turn that has just been sent no longer shows a bare three-dot "Waiting for

@@ -4,6 +4,7 @@ import type { TimelinePart, TimelineTool, TimelineTurn } from '../timeline/types
 import {
   foldTurnParts,
   splitTurnProcess,
+  withApprovalsLast,
   subagentRegionErrorCount,
   turnElapsedMs,
   turnProcessLabel,
@@ -69,7 +70,8 @@ function compactSummaryPart(part: TimelinePart): TimelinePart {
 }
 
 function summaryPartsForPendingDetail(turn: TimelineTurn): TimelinePart[] {
-  return turn.parts.filter(isSummaryVisiblePart).map(compactSummaryPart)
+  // Same reading order as a folded turn: the card ends the turn.
+  return withApprovalsLast(turn.parts.filter(isSummaryVisiblePart).map(compactSummaryPart))
 }
 
 export function presentTurnParts(
@@ -79,15 +81,20 @@ export function presentTurnParts(
   detail?: AgentStreamHistoryDetailEntry,
 ): ThinkingDisplayPart<TimelinePart>[] {
   const isExpanded = isTurnProcessExpanded(turn, latestTurnKey, overrides)
+  const folded = isTurnFoldable(turn, latestTurnKey)
   const parts = detail && detail.status !== 'loaded'
     ? [lazyProcessPart(turn, detail), ...summaryPartsForPendingDetail(turn)]
-    : isTurnFoldable(turn, latestTurnKey)
+    : folded
       ? foldTurnParts(turn, isExpanded)
       : turn.parts
+  // One reading order for every shape of the turn — folded, expanded or live:
+  // the answer is the reasoning and the card is the action, so the card ends
+  // the turn instead of sitting on top of the explanation it belongs to.
+  const ordered = withApprovalsLast(parts)
   const terminal: Exclude<ThinkingState, 'active'> | null =
     turn.errors.length > 0 || ['failed', 'cancelled', 'interrupted'].includes(turn.completionStatus ?? '')
       ? 'interrupted' : turn.completed ? 'done' : null
-  return presentThinkingParts(parts, terminal)
+  return presentThinkingParts(ordered, terminal)
 }
 
 /** Memoize unaffected turns while reflecting the visible fold/detail state and label. */
