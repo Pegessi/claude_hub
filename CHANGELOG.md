@@ -20,8 +20,10 @@
   transcript backups remain file-only and never create a Hub database.
 - Existing JSON/JSONL imports automatically and transactionally on first use.
   Original sources remain recovery evidence, malformed stream rows are retained,
-  and offline verified gzip archival is available after import. No production
-  cutover is performed by installing the branch alone.
+  non-destructive bulk pre-import and delta catch-up (`--pre-import` /
+  `--sync-legacy`) can populate `storage.sqlite3` ahead of cutover, and offline
+  verified gzip archival is available after import. No production cutover is
+  performed by installing the branch alone.
 - See [migration and benchmark evidence](docs/working-logs/2026-11-10-sqlite-storage.md)
   for measured costs, recovery, validation and rollout boundaries.
 
