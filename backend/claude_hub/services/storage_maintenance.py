@@ -18,6 +18,7 @@ from typing import Iterable
 
 from .backend_instance_lock import BackendInstanceLock
 from .local_storage import connection, has_stored_document, storage_location
+from .runtime_isolation import resolve_state_root
 
 TOP_LEVEL_DOCUMENTS = (
     "tabs.json",
@@ -29,18 +30,18 @@ TOP_LEVEL_DOCUMENTS = (
     "feishu_bot.json",
     "secrets/feishu_bot_pool.json",
     "secrets/feishu_bot.json",
-    "workspaces/index.json",
-    "workspaces/scheduled_tasks.json",
 )
 
 
-def legacy_sources(root: Path) -> list[Path]:
+def legacy_sources(root: Path, *, workspace_root: Path | None = None) -> list[Path]:
     """Bounded inventory of migrated stores, including old rotating backups."""
+    workspace_root = workspace_root or root / "workspaces"
     documents = [root / name for name in TOP_LEVEL_DOCUMENTS]
-    documents += sorted((root / "workspaces").glob("*/state.json"))
-    documents += sorted((root / "workspaces").glob("*/agent_streams/*.cursor.json"))
+    documents += [workspace_root / "index.json", workspace_root / "scheduled_tasks.json"]
+    documents += sorted(workspace_root.glob("*/state.json"))
+    documents += sorted(workspace_root.glob("*/agent_streams/*.cursor.json"))
     paths = documents + [path.with_name(path.name + ".bak") for path in documents]
-    paths += sorted((root / "workspaces").glob("*/agent_streams/*.jsonl"))
+    paths += sorted(workspace_root.glob("*/agent_streams/*.jsonl"))
     return [path for path in paths if path.is_file()]
 
 
@@ -110,8 +111,12 @@ def main() -> None:
     parser.add_argument("--root", type=Path, required=True)
     args = parser.parse_args()
     root = args.root.resolve()
+    os.environ["CLAUDE_HUB_HOME"] = str(root)
+    workspace_root = resolve_state_root()
     with BackendInstanceLock(root / "backend.lock"):
-        print(f"Archived bytes: {archive_sources(legacy_sources(root))}")
+        print(
+            f"Archived bytes: {archive_sources(legacy_sources(root, workspace_root=workspace_root))}"
+        )
 
 
 if __name__ == "__main__":

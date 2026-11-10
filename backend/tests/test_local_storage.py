@@ -205,3 +205,79 @@ def test_archive_refuses_conflicting_backup_without_deleting_source(tmp_path):
     with pytest.raises(ValueError, match="archive does not match"):
         archive_sources([path])
     assert path.read_text() == '{"value":1}'
+
+
+def test_external_workspace_roots_and_aliases_keep_independent_namespaces(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    from claude_hub.models import AgentStreamEvent
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+
+    home = tmp_path / "runtime"
+    root_a = tmp_path / "state-a"
+    root_b = tmp_path / "state-b"
+    monkeypatch.setenv("CLAUDE_HUB_HOME", str(home))
+    stores = {}
+    keys = {}
+    for label, root in (("A", root_a), ("B", root_b)):
+        root.mkdir()
+        monkeypatch.setenv("CLAUDE_HUB_STATE_ROOT", str(root))
+        (root / "index.json").write_text(json.dumps({"label": label}))
+        assert storage.read_document(root / "index.json") == {"label": label}
+        storage.write_document(root / "ws" / "state.json", {"label": label})
+        store = AgentStreamStore("ws", "same-session")
+        store._path = root / "ws" / "agent_streams" / "same-session.jsonl"
+        store._dir = store._path.parent
+        store._replace_rows(
+            [
+                AgentStreamEvent(
+                    stream_sequence=0,
+                    session_id="same-session",
+                    tab_id="tab",
+                    agent_type="codex",
+                    type="text_delta",
+                    payload={"text": label},
+                    created_at=datetime.now(timezone.utc),
+                )
+            ]
+        )
+        stores[label] = store
+        database, keys[label] = storage.storage_location(root / "index.json")
+        assert database == home / "storage.sqlite3"
+    assert keys["A"] != keys["B"]
+    monkeypatch.setenv("CLAUDE_HUB_STATE_ROOT", str(root_a))
+    assert storage.read_document(root_a / "index.json") == {"label": "A"}
+    assert stores["A"]._read_rows()[0].payload["text"] == "A"
+    alias = tmp_path / "state-alias"
+    alias.symlink_to(root_a, target_is_directory=True)
+    monkeypatch.setenv("CLAUDE_HUB_STATE_ROOT", str(alias))
+    assert storage.storage_location(alias / "index.json")[1] == keys["A"]
+    assert storage.storage_location(root_a / "index.json")[1] == keys["A"]
+    assert storage.read_document(alias / "index.json") == {"label": "A"}
+    storage.retire_namespace(alias / "ws")
+    assert stores["A"]._read_rows() == []
+    assert not storage.document_exists(alias / "ws" / "state.json")
+    monkeypatch.setenv("CLAUDE_HUB_STATE_ROOT", str(root_b))
+    assert storage.read_document(root_b / "index.json") == {"label": "B"}
+    assert storage.read_document(root_b / "ws" / "state.json") == {"label": "B"}
+    assert stores["B"]._read_rows()[0].payload["text"] == "B"
+
+
+def test_offline_archive_honors_external_workspace_root(tmp_path, monkeypatch):
+    from claude_hub.services import storage_maintenance
+
+    home = tmp_path / "runtime"
+    selected = tmp_path / "selected-state"
+    other = tmp_path / "other-state"
+    selected.mkdir()
+    other.mkdir()
+    monkeypatch.setenv("CLAUDE_HUB_HOME", str(home))
+    monkeypatch.setenv("CLAUDE_HUB_STATE_ROOT", str(selected))
+    for path in (selected / "index.json", other / "index.json"):
+        path.write_text('{"workspaces":[]}')
+    storage.read_document(selected / "index.json")
+    monkeypatch.setattr("sys.argv", ["storage_maintenance", "--root", str(home)])
+    storage_maintenance.main()
+    assert not (selected / "index.json").exists()
+    assert (selected / "index.json.gz").is_file()
+    assert (other / "index.json").read_text() == '{"workspaces":[]}'
