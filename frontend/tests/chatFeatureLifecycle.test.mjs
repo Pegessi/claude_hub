@@ -441,3 +441,68 @@ test('cached settings cannot mutate a Chat while hydration, reconciliation or fa
   await settings.selectModelAndEffort(model, '')
   assert.equal(mutations, 1)
 })
+
+test('a pane that joins a turn mid-flight reads its detail once and keeps the fold closed', async t => {
+  // The turn started before this pane existed, so its events were never reduced
+  // into parts: the transcript would show an empty fold and a footer with no
+  // step to name. One detail read restores the parts; opening the fold is the
+  // reader's call, not ours.
+  const h = await mount(t)
+  const stream = h.state.streams[0]
+  const timeline = h.owner(h.keys.chatTimelineKey)
+  const event = (sequence, type, payload = {}) => ({
+    stream_sequence: sequence, type, payload, session_id: 's', tab_id: 'one',
+    turn_id: 'joined', agent_type: 'claude', created_at: '2026-10-16T10:00:00Z', redacted: false,
+  })
+  stream.events.value = [event(1, 'turn_started', { summary: 'long turn already in flight' })]
+  await flush()
+  const turns = timeline.turns.value
+  assert.equal(turns.length, 1)
+  assert.deepEqual(turns[0].parts, [], 'the fixture is the mid-flight shape: a turn with no parts')
+  const reads = () => h.state.calls.filter(call => call[0] === 'loadHistoryDetail')
+
+  stream.historyDetails.value = {
+    joined: {
+      descriptor: { turn_id: 'joined', first_sequence: 1, last_sequence: 900, event_count: 900 },
+      status: 'idle',
+    },
+  }
+  await flush()
+  assert.deepEqual(reads(), [['loadHistoryDetail', 'joined']], 'the descriptor is read once')
+  assert.equal(timeline.processExpandedOverrides.value.size, 0, 'the fold stays closed')
+
+  // Leaving the tab and coming back must not re-read a turn this pane already
+  // restored: the descriptor keeps growing while the turn streams.
+  h.selected.value = 'two'
+  await flush()
+  h.selected.value = 'one'
+  await flush()
+  assert.equal(reads().length, 1, 'one read per turn, not one per tab visit')
+  assert.equal(timeline.timelineDisposed, false)
+})
+
+test('a turn that already has parts is never re-read behind the reader', async t => {
+  const h = await mount(t)
+  const stream = h.state.streams[0]
+  const event = (sequence, type, payload = {}) => ({
+    stream_sequence: sequence, type, payload, session_id: 's', tab_id: 'one',
+    turn_id: 'live', agent_type: 'claude', created_at: '2026-10-16T10:00:00Z', redacted: false,
+  })
+  stream.events.value = [
+    event(1, 'turn_started', { summary: 'streaming here' }),
+    event(2, 'tool_call_started', { tool_call_id: 'c1', name: 'Bash', args: { command: 'echo hi' } }),
+  ]
+  await flush()
+  stream.historyDetails.value = {
+    live: {
+      descriptor: { turn_id: 'live', first_sequence: 1, last_sequence: 2, event_count: 2 },
+      status: 'idle',
+    },
+  }
+  await flush()
+  assert.deepEqual(
+    h.state.calls.filter(call => call[0] === 'loadHistoryDetail'),
+    [],
+    'the live stream owns a turn it is already reducing',
+  )
+})
