@@ -170,3 +170,16 @@ separate namespaces derived from canonical directory identity within the same
 runtime database. A→B→A reads, stream identity, directory aliases and namespace
 retirement are tested together; retiring A cannot erase B's records. Offline
 archival also honors the configured external workspace root.
+
+
+## Workspace review round 2: provider snapshot ownership
+
+The reviewer reproduced an edit-resend cleanup bug: suffix-based dispatch treated
+a provider `*.jsonl.edit-bak` sidecar as a Hub SQLite document, creating a database
+next to provider transcripts. Cleanup now dispatches by explicit owner: the Hub
+store deletes its SQLite snapshot, while provider snapshot cleanup only unlinks
+its file. No filename heuristic remains. The real manager edit-resend regression
+covers both successful send and rollback after send failure, asserts the Hub
+snapshot is gone, and enumerates provider files to reject stray SQLite artifacts.
+The retired-session path already clears its Hub snapshot through store.clear; its
+remaining sidecar cleanup stays file-only. Final validation is attached to Task.

@@ -487,6 +487,11 @@ class AgentStreamStore:
             )
             return backup
 
+    async def discard_snapshot(self, backup: Optional[Path]) -> None:
+        """Delete this Hub store's SQLite snapshot, never a provider file."""
+        if backup is not None:
+            await _complete_io(delete_document, backup)
+
     async def restore(self, backup: Optional[Path]) -> None:
         if backup is None or not document_exists(backup):
             return
