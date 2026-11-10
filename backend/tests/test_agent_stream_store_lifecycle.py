@@ -93,27 +93,29 @@ async def test_cancelled_store_io_joins_and_recovers_sequence(
     target: Any
     operation_task: Callable[[], Coroutine[Any, Any, Any]]
     if operation == "append":
-        target, method = store, "_write_line"
+        target, method = store, "_insert"
         operation_task = lambda: store.append(event())
-        next_sequence = 3
+        next_sequence = 2 if fail else 3
     elif operation == "replace":
-        target, method = store, "_write_all"
+        target, method = store, "_replace_rows"
         operation_task = lambda: store.replace_all([event()])
         next_sequence = 1
     elif operation == "clear":
-        target, method = store, "_unlink_session_files"
+        target, method = store, "_clear_rows"
         operation_task = store.clear
         next_sequence = 0
     elif operation == "truncate":
-        target, method = store, "_write_all"
+        target, method = store, "_database"
         operation_task = lambda: store.truncate_before(1)
-        next_sequence = 1
+        next_sequence = 2 if fail else 1
+    elif operation == "restore":
+        target, method = store, "_insert"
+        operation_task = lambda: store.restore(backup)
+        next_sequence = 2
     else:
-        target = importlib.import_module("claude_hub.services.agent_stream.store").shutil
-        method = "copy2"
-        operation_task = (
-            (lambda: store.restore(backup)) if operation == "restore" else store.snapshot
-        )
+        target = importlib.import_module("claude_hub.services.agent_stream.store")
+        method = "write_document"
+        operation_task = store.snapshot
         next_sequence = 2
     blocked = BlockedIO(getattr(target, method), fail=fail)
     monkeypatch.setattr(target, method, blocked)
@@ -183,8 +185,8 @@ async def test_fence_joins_native_append_before_friendly_id_reuse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session, current, manager, tailer = native_owner()
-    blocked = BlockedIO(tailer._store._write_line)
-    monkeypatch.setattr(tailer._store, "_write_line", blocked)
+    blocked = BlockedIO(tailer._store._insert)
+    monkeypatch.setattr(tailer._store, "_insert", blocked)
     tailer._task = asyncio.create_task(tailer._persist_and_fanout(event()))
     fences: list[asyncio.Task[bool]] = []
     try:
@@ -199,7 +201,10 @@ async def test_fence_joins_native_append_before_friendly_id_reuse(
         current.clear()
         await discard_session_stream(session.workspace_id, session.id, provider_fenced=True)
         current[session.id] = session.model_copy(
-            update={"tab_id": "new-tab", "created_at": session.created_at + timedelta(seconds=1)}
+            update={
+                "tab_id": "new-tab",
+                "created_at": session.created_at + timedelta(seconds=1),
+            }
         )
         new_store = AgentStreamStore(session.workspace_id, session.id)
         await new_store.append(event("new-tab"))
@@ -219,8 +224,8 @@ async def test_stuck_disk_teardown_is_bounded_and_retains_retryable_owner(
     tailer_module = importlib.import_module("claude_hub.services.agent_stream.tailer")
     monkeypatch.setattr(tailer_module, "_STOP_JOIN_TIMEOUT_S", 0.02)
     session, current, manager, tailer = native_owner()
-    blocked = BlockedIO(tailer._store._write_line)
-    monkeypatch.setattr(tailer._store, "_write_line", blocked)
+    blocked = BlockedIO(tailer._store._insert)
+    monkeypatch.setattr(tailer._store, "_insert", blocked)
     tailer._task = asyncio.create_task(tailer._persist_and_fanout(event()))
     try:
         assert await asyncio.to_thread(blocked.entered.wait, 2)
@@ -246,46 +251,53 @@ async def test_stuck_disk_teardown_is_bounded_and_retains_retryable_owner(
 
 
 @pytest.mark.asyncio
-async def test_separate_store_instances_serialize_sequences() -> None:
-    import json
+@pytest.mark.parametrize("replace", [False, True])
+async def test_failed_sqlite_insert_rolls_back_event_and_sequence(
+    monkeypatch: pytest.MonkeyPatch, replace: bool
+) -> None:
+    store = AgentStreamStore("workspace", "worker-1")
+    original = await store.append(event("original-tab"))
+    insert = store._insert
 
+    def fail_after_insert(*args: Any) -> None:
+        insert(*args)
+        raise OSError("transaction aborted")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_insert", fail_after_insert)
+        with pytest.raises(OSError, match="transaction aborted"):
+            if replace:
+                await store.replace_all([event("replacement-tab")])
+            else:
+                await store.append(event("failed-tab"))
+    restarted = AgentStreamStore("workspace", "worker-1")
+    assert (await restarted.read_since()).events == [original]
+    committed = await restarted.append(event("committed-tab"))
+    assert committed.stream_sequence == 1
+
+
+@pytest.mark.asyncio
+async def test_distinct_store_owners_allocate_sequences_transactionally() -> None:
+    stores = [AgentStreamStore("workspace", "worker-1") for _ in range(8)]
+    committed = await asyncio.gather(*(store.append(event()) for store in stores))
+    assert sorted(item.stream_sequence for item in committed) == list(range(8))
+    assert [item.stream_sequence for item in (await stores[0].read_since()).events] == list(
+        range(8)
+    )
+
+
+@pytest.mark.asyncio
+async def test_separate_store_instances_serialize_sequences() -> None:
     stores = [AgentStreamStore("workspace", "worker-1") for _ in range(8)]
     written = await asyncio.gather(*(stores[i % 8].append(event()) for i in range(80)))
-    rows = [json.loads(line) for line in stores[0].path.read_text().splitlines()]
-    assert [row["stream_sequence"] for row in rows] == list(range(80))
+    rows = (await stores[0].read_since(-1, 100, compact=False)).events
+    assert [row.stream_sequence for row in rows] == list(range(80))
     assert sorted(item.stream_sequence for item in written) == list(range(80))
 
 
 @pytest.mark.asyncio
-async def test_partial_append_is_completed_or_rolled_back(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_store_appends_across_processes(tmp_path: Path) -> None:
     import os
-
-    store = AgentStreamStore("workspace", "worker-1")
-    original = os.write
-    calls = 0
-
-    def partial(fd: int, data: Any) -> int:
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise OSError("disk full")
-        return original(fd, data[:17])
-
-    with monkeypatch.context() as patch:
-        patch.setattr(os, "write", partial)
-        with pytest.raises(OSError, match="disk full"):
-            await store.append(event())
-    assert store.path.read_bytes() == b""
-    with monkeypatch.context() as patch:
-        patch.setattr(os, "write", lambda fd, data: original(fd, data[:17]))
-        result = await store.append(event())
-    assert result.stream_sequence == 0
-    assert len((await store.read_since()).events) == 1
-
-
-@pytest.mark.asyncio
-async def test_store_appends_across_processes() -> None:
-    import json
     import sys
 
     store = AgentStreamStore("workspace", "worker-1")
@@ -303,14 +315,22 @@ async def run():
         await store.append(event)
 asyncio.run(run())
 """
+    state_root = store.path.parents[2]
+    env = {
+        **os.environ,
+        "CLAUDE_HUB_HOME": str(state_root.parent),
+        "CLAUDE_HUB_STATE_ROOT": str(state_root),
+        "CLAUDE_HUB_TMUX_SOCKET": "test-store-appends-multiprocess",
+    }
     processes = await asyncio.gather(
         *(
             asyncio.create_subprocess_exec(
                 sys.executable,
                 "-c",
                 script,
-                str(store.path.parents[2]),
+                str(state_root),
                 event().model_dump_json(),
+                env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -320,5 +340,5 @@ asyncio.run(run())
     for process in processes:
         _, error = await process.communicate()
         assert process.returncode == 0, error.decode()
-    rows = [json.loads(line) for line in store.path.read_text().splitlines()]
-    assert [row["stream_sequence"] for row in rows] == list(range(60))
+    rows = (await store.read_since(-1, 100, compact=False)).events
+    assert [row.stream_sequence for row in rows] == list(range(60))
