@@ -57,7 +57,8 @@ async def seed_artifacts(subject: DirectChat) -> list[Path]:
         store.path.with_name(store.path.name + ".edit-bak"),
         seed_sidecar_path(store.workspace_id, store.session_id),
     ]
-    for path in paths[1:]:
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("private retired bytes", encoding="utf-8")
     cache = AgentStreamAttachmentStore(store.workspace_id, store.session_id)
     preview = await cache.save("image/png", PNG)
@@ -258,8 +259,8 @@ async def test_cancelled_cleanup_joins_disk_work_and_remains_replayable(
 ) -> None:
     manager, process, *_ = subject
     paths = await seed_artifacts(subject)
-    blocked = BlockedIO(AgentStreamStore._unlink_session_files)
-    monkeypatch.setattr(AgentStreamStore, "_unlink_session_files", lambda store: blocked(store))
+    blocked = BlockedIO(AgentStreamStore._clear_rows)
+    monkeypatch.setattr(AgentStreamStore, "_clear_rows", lambda store: blocked(store))
     deleting = asyncio.create_task(manager.delete_tab(process.tab_id))
     try:
         assert await asyncio.to_thread(blocked.entered.wait, 2)
@@ -515,7 +516,7 @@ async def test_navigation_tab_cleanup_never_deletes_managed_session_namespace(
     managed = AgentStreamStore("real-workspace", "managed-owner")
     await managed.append(turn_event("managed-owner", process.tab_id))
     assert await manager.delete_tab(process.tab_id)
-    assert managed.path.exists()
+    assert await managed.count() == 1
 
 
 @pytest.mark.asyncio
