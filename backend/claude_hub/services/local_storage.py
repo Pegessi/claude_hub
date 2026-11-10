@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -37,6 +38,9 @@ def storage_location(path: Path) -> tuple[Path, str]:
             break
     if root.name == "secrets":
         root = root.parent
+    # Apply the existing linked-worktree live-home guard to explicit legacy
+    # paths too; a forgotten caller override must not bootstrap production.
+    resolve_runtime_home(environ={**os.environ, "CLAUDE_HUB_HOME": str(root)})
     return root / "storage.sqlite3", str(path.relative_to(root))
 
 

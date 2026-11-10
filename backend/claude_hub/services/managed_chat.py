@@ -346,7 +346,7 @@ def _scan_durable_turn_state(
             ):
                 event = unpack(body, store._dictionary)
                 turn_id = event.get("turn_id")
-                key = turn_id if isinstance(turn_id, str) else f"epoch:{event.get('run_epoch', 0)}"
+                key = turn_id if isinstance(turn_id, str) else f"epoch:{event.get('run_epoch')}"
                 saw_lifecycle = True
                 if event["type"] == "turn_started":
                     unfinished.add(key)

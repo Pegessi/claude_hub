@@ -1074,3 +1074,22 @@ async def test_managed_stream_api_cancel_uses_workspace_stop_semantics(
     )
     assert result == {"ok": True, "cancelled": True, "outcome": "cancelled_matching"}
     assert calls == [(session.id, "turn-9")]
+
+
+def test_nullable_epoch_is_not_epoch_zero(isolated_bridge: _FakeManager) -> None:
+    session = _session()
+    store = AgentStreamStore(session.workspace_id, session.id)
+    store._replace_rows(
+        [
+            _stream_event(session, type="turn_started", turn_id=None, run_epoch=None),
+            _stream_event(session, type="turn_completed", turn_id=None, run_epoch=0),
+        ]
+    )
+    assert managed_chat._durable_turn_state(session) == "unfinished"
+    store._replace_rows(
+        [
+            _stream_event(session, type="turn_started", turn_id=None, run_epoch=None),
+            _stream_event(session, type="turn_completed", turn_id=None, run_epoch=None),
+        ]
+    )
+    assert managed_chat._durable_turn_state(session) == "terminal"

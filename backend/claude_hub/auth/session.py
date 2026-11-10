@@ -4,17 +4,17 @@ import logging
 import os
 import secrets
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 from ..config import settings
 from ..models.schemas import LoginSession, User
 from ..services.local_storage import document_exists, read_document, write_document
+from ..services.runtime_isolation import resolve_runtime_home
 
 logger = logging.getLogger(__name__)
 
 # Session storage file
-SESSIONS_FILE = Path.home() / ".claude_hub" / "sessions.json"
+SESSIONS_FILE = resolve_runtime_home() / "sessions.json"
 
 # The file holds bearer session ids and Feishu tokens, so it must be
 # readable/writable by the owner only.
