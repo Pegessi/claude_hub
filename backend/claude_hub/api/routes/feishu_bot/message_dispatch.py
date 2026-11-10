@@ -24,8 +24,8 @@ from claude_hub.api.routes.feishu_bot.queueing import TabDispatchItem as _TabDis
 from claude_hub.api.routes.feishu_bot.queueing import TabDispatchQueue as _TabDispatchQueue
 from claude_hub.services.agent_stream.attachments import preview_within_cache_bounds
 from claude_hub.services.agent_stream.turn_source import (
-    FEISHU_PROVIDER_TEXT_FORMAT_V2,
-    format_feishu_provider_text_v2,
+    FEISHU_PROVIDER_TEXT_FORMAT_V3,
+    format_feishu_provider_text_v3,
 )
 from claude_hub.services.feishu_bot import (
     FeishuBotClient,
@@ -111,13 +111,14 @@ class FeishuMessageDispatcher:
         match = _BIND_CODE_RE.fullmatch(text.strip())
         return match.group(1).upper() if match is not None else None
 
-    def _turn_metadata(self, effective: EffectiveBot, event: FeishuMessageEvent) -> dict[str, Any]:
-        """Additive only: ``bot_id`` joins the existing ``feishu`` sub-object so no
-        Task schema or frontend reader has to change."""
+    def _turn_metadata(
+        self, effective: EffectiveBot, event: FeishuMessageEvent, binding: BotBinding
+    ) -> dict[str, Any]:
+        """Snapshot the resolved channel for immutable provider-text reconstruction."""
 
         return {
             "origin": "feishu",
-            "provider_text_format": FEISHU_PROVIDER_TEXT_FORMAT_V2,
+            "provider_text_format": FEISHU_PROVIDER_TEXT_FORMAT_V3,
             "feishu": {
                 "bot_id": effective.bot_id,
                 "app_id": event.app_id,
@@ -127,6 +128,9 @@ class FeishuMessageDispatcher:
                 "message_id": event.message_id,
                 "sender_open_id": event.sender_open_id,
                 "chat_type": event.chat_type,
+                # A legacy group fallback resolves to the sender's DM binding;
+                # that binding's name must never be presented as the group name.
+                "chat_name": binding.chat_name if binding.chat_id == event.chat_id else None,
                 "thread_id": event.thread_id,
             },
         }
@@ -386,6 +390,7 @@ class FeishuMessageDispatcher:
             leader.binding.pairing_id,
             leader.event.chat_id,
             leader.event.thread_id,
+            leader.event.sender_open_id,
         )
         queue.dispatched_contexts[context] = None
         queue.dispatched_contexts.move_to_end(context)
@@ -584,7 +589,7 @@ class FeishuMessageDispatcher:
             except BaseException:
                 # Shutdown or a stop that hangs: give up on it, never on the batch.
                 stop.cancel()
-        queue.interrupted_text = ""
+        queue.interrupted_text.pop(batch[0].channel_key, None)
 
     def _interrupted_text(self, earlier: str, items: list[_TabDispatchItem]) -> str:
         messages = "\n\n".join(
@@ -596,14 +601,14 @@ class FeishuMessageDispatcher:
             f"[上一条]\n{earlier}\n\n{messages}"
         )
 
+    def _channel_matches(self, first: _TabDispatchItem, candidate: _TabDispatchItem) -> bool:
+        return candidate.channel_key == first.channel_key
+
     def _batch_matches(self, first: _TabDispatchItem, candidate: _TabDispatchItem) -> bool:
-        return (
-            candidate.bot_id == first.bot_id
-            and candidate.binding.pairing_id == first.binding.pairing_id
-            and candidate.effective.generation == first.effective.generation
-            and candidate.effective.revision == first.effective.revision
-            and candidate.event.chat_id == first.event.chat_id
-            and candidate.event.thread_id == first.event.thread_id
+        # Coalescing is narrower than interruption: do not attribute one person's
+        # message to another person, even within the same channel/topic.
+        return self._channel_matches(first, candidate) and (
+            candidate.event.sender_open_id == first.event.sender_open_id
         )
 
     async def _collect_tab_dispatch_batch(
@@ -654,6 +659,7 @@ class FeishuMessageDispatcher:
             leader.binding.pairing_id,
             leader.event.chat_id,
             leader.event.thread_id,
+            leader.event.sender_open_id,
         )
         return candidates, context in queue.dispatched_contexts
 
@@ -704,11 +710,12 @@ class FeishuMessageDispatcher:
                 visible_text = self._batch_visible_text(batch, followup=followup)
                 # The user's own words; a later stop carries these, without intros.
                 core_text = "\n\n".join(item.event.text for item in batch)
-                if queue.interrupted_text:
-                    # The answer in progress was stopped for these messages.
-                    visible_text = self._interrupted_text(queue.interrupted_text, batch)
-                    core_text = f"{queue.interrupted_text}\n\n{core_text}"
-                    queue.interrupted_text = ""
+                earlier = queue.interrupted_text.pop(leader.channel_key, "")
+                if earlier:
+                    # Other channels ahead of us in the FIFO must neither inherit
+                    # nor discard the words from this channel's stopped answer.
+                    visible_text = self._interrupted_text(earlier, batch)
+                    core_text = f"{earlier}\n\n{core_text}"
                 attachments: list[AgentStreamAttachment] = []
                 attachment_bytes = 0
                 omitted_images: list[str] = []
@@ -745,19 +752,23 @@ class FeishuMessageDispatcher:
                 )
                 for item in batch:
                     item.native_bridge_started = True
+                turn_metadata = self._turn_metadata(leader.effective, leader.event, leader.binding)
                 assistant_text = await self.bindings.dispatch_tab_chat_and_wait(
                     tab_id,
-                    format_feishu_provider_text_v2(
+                    format_feishu_provider_text_v3(
                         visible_text,
                         app_id=leader.event.app_id,
                         chat_id=leader.event.chat_id,
                         message_id=leader.event.message_id,
                         sender_open_id=leader.event.sender_open_id,
+                        chat_type=leader.event.chat_type,
+                        chat_name=turn_metadata["feishu"]["chat_name"],
+                        thread_id=leader.event.thread_id,
                     ),
                     turn_id_for(leader.bot_id, leader.event.message_id),
                     visible_text=visible_text,
                     turn_metadata={
-                        **self._turn_metadata(leader.effective, leader.event),
+                        **turn_metadata,
                         "feishu_message_ids": [item.event.message_id for item in batch],
                         "feishu_coalesced": len(batch) > 1,
                         "feishu_followup": followup,
@@ -768,7 +779,7 @@ class FeishuMessageDispatcher:
                 if await self._stopped_for_newer(batch) is not None:
                     # It ended before the stop took: this answer is sent, so the
                     # newer message follows it as usual.
-                    queue.interrupted_text = ""
+                    queue.interrupted_text.pop(leader.channel_key, None)
                 status = (
                     "completed"
                     if await self.bindings.reply_if_current(
