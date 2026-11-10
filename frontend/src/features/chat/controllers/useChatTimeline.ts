@@ -28,6 +28,10 @@ interface Dependencies {
   props: ChatPaneProps
 }
 
+/** A backfill read may be retired by a growing descriptor; this many tries is
+ *  enough to land one and few enough that a permanent failure stays quiet. */
+const BACKFILL_MAX_ATTEMPTS = 3
+
 export function useChatTimeline(deps: Dependencies) {
   // ── Timeline grouping ───────────────────────────────────────────────────────
   // The flat event stream is grouped into turns by the
@@ -208,7 +212,36 @@ export function useChatTimeline(deps: Dependencies) {
   function turnEventCount(turn: TimelineTurn): number | null {
     const detail = turn.turnId ? deps.historyDetails.value[turn.turnId] : undefined
     const count = detail?.descriptor.event_count
-    return typeof count === 'number' && count > 0 ? count : null
+    if (typeof count === 'number' && count > 0) return count
+    // A turn that began while this pane was open has no descriptor: hydration
+    // describes history, and the long-poll's raw page carries none. Its events
+    // are however all here, because this pane watched them arrive — so the
+    // count is known even when the backend never told us.
+    if (!turn.turnId) return null
+    const seen = observedTurnCounts.get(turn.turnId) ?? 0
+    return seen > 0 ? seen : null
+  }
+
+  /** Events per turn, counted as they arrive. Incremental: only the events this
+   *  pane has not counted yet are examined, so a long turn costs its own events
+   *  once rather than a rescan per batch. */
+  const observedTurnCounts = new Map<string, number>()
+  let countedThrough = 0
+
+  function countObservedTurnEvents(): void {
+    const events = deps.events.value
+    if (events.length < countedThrough) {
+      // The stream was rescanning (reset/replay): start over rather than
+      // double-count the same events.
+      observedTurnCounts.clear()
+      countedThrough = 0
+    }
+    for (let index = countedThrough; index < events.length; index += 1) {
+      const turnId = events[index].turn_id
+      if (!turnId) continue
+      observedTurnCounts.set(turnId, (observedTurnCounts.get(turnId) ?? 0) + 1)
+    }
+    countedThrough = events.length
   }
 
   const subthreadPartsFor = createSubthreadThinkingPresenter()
@@ -354,6 +387,7 @@ export function useChatTimeline(deps: Dependencies) {
 
   function activateViewport() {
     timelineDisposed = false
+    paneActiveSince = Date.now()
     timelineVisit++
     visibleHistoryStart.value = null
     resetActivation()
@@ -375,15 +409,19 @@ export function useChatTimeline(deps: Dependencies) {
    *  A descriptor keeps changing while a turn streams, and re-reading a growing
    *  turn on every batch would be quadratic. One read per turn is enough: from
    *  then on the live stream appends to the parts it produced. */
-  /** When this pane instance was created. A turn that started before this
+  /** When this pane last became visible. A turn that started before this
    *  moment cannot have all of its parts here — only events from after it were
-   *  reduced — which is what makes a mid-flight join recognisable. */
-  const paneOpenedAt = Date.now()
+   *  reduced — which is what makes a mid-flight join recognisable. It is
+   *  refreshed on activation, not fixed at construction: a turn that started
+   *  while the tab was hidden is joined mid-flight too. */
+  let paneActiveSince = Date.now()
 
   /** Reads this pane has already made on a turn's behalf, by reason: one to
    *  restore a turn it joined mid-flight, one more to repair a gap. Two separate
    *  flags, because a turn may owe both and neither may repeat. */
   const backfillReads = new Map<string, { join: number; repair: number }>()
+  /** Every attempt, landed or not, so a read that keeps being aborted cannot loop. */
+  const backfillAttempts = new Map<string, number>()
   /** Turns whose stream dropped while they were live. Their parts may be
    *  missing whatever the backend accepted during the gap. */
   const interruptedTurns = new Set<string>()
@@ -421,20 +459,34 @@ export function useChatTimeline(deps: Dependencies) {
     // of steps from before the mount never will. A live turn that started before
     // this pane was created is missing them by construction.
     const startedMs = parseTimestampMs(turn.startedAt)
-    const joinedMidTurn = startedMs !== null && startedMs <= paneOpenedAt
+    const joinedMidTurn = startedMs !== null && startedMs <= paneActiveSince
     const joinOwed = reads.join === 0 && (turn.parts.length === 0 || (!turn.completed && joinedMidTurn))
     const repairOwed = interruptedTurns.has(turnId) && turn.completed && reads.repair === 0
     if (!joinOwed && !repairOwed) return
-    backfillReads.set(turnId, {
-      join: reads.join + (joinOwed ? 1 : 0),
-      repair: reads.repair + (repairOwed ? 1 : 0),
-    })
+    // Attempts are bounded separately from successes: a read that is aborted by
+    // a newer descriptor (or fails) must be retried once, but a read that never
+    // lands must not become a loop.
+    const attempts = backfillAttempts.get(turnId) ?? 0
+    if (attempts >= BACKFILL_MAX_ATTEMPTS) return
+    backfillAttempts.set(turnId, attempts + 1)
     const visit = timelineVisit
     await deps.loadHistoryDetail(turnId)
     if (timelineDisposed || visit !== timelineVisit) return
+    // Charge the budget only once the range actually landed. A request retired
+    // because the turn grew underneath it leaves the entry unloaded, and the
+    // next activation deserves another try.
+    const landed = deps.historyDetails.value[turnId]?.status === 'loaded'
+    if (landed) {
+      backfillReads.set(turnId, {
+        join: reads.join + (joinOwed ? 1 : 0),
+        repair: reads.repair + (repairOwed ? 1 : 0),
+      })
+    }
   }
 
   function registerWatchers() {
+    watch(() => deps.events.value.length, countObservedTurnEvents, { immediate: true })
+
     watch(
       () => [deps.events.value.length, deps.pendingTurns.value.length],
       () => requestLatestAnchor(),

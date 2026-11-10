@@ -7,6 +7,19 @@
 
 ## Released
 
+### fix(ui): review round 2 follow-ups
+
+- `useAgentStream` now keeps a loaded detail's status when a growing descriptor
+  only appended to the range it covers (a rewritten range is still retired). A
+  streaming turn no longer collapses back to its fold summary on the next batch.
+- The mid-flight baseline is refreshed on activation, not fixed at construction,
+  so a turn that started while the tab was hidden is backfilled on return.
+- A backfill read is charged only once the range actually landed, and retried up
+  to three times when a growing descriptor retires it.
+- A turn that began in the open pane counts the events it watched arrive, so
+  `N events so far` grows there too: hydration is the only place the backend
+  describes history, and the long-poll's raw page carries no descriptor yet.
+
 ### fix(ui): keep a choice card an approval boundary, and backfill a pane's join
 
 - Cross-model review round 2, `H-1`: cards were moved to the end of the turn
