@@ -1,49 +1,42 @@
-"""Append-only per-session JSONL event store.
+"""Indexed SQLite event persistence, with one-time legacy JSONL import.
 
-Each managed session gets one ``{session_id}.jsonl`` file under
-``STATE_ROOT / workspace_id / agent_streams /``. Events are assigned a
-monotonic ``stream_sequence`` (session-local) on append; reads are paged by
-``since_sequence`` (exclusive).
-
-``STATE_ROOT`` is read at call time so tests can monkeypatch it.
+Sequences remain stable through lossless compression and raw-history paging.
+STATE_ROOT is resolved at call time to preserve isolated runtime ownership.
 """
 
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import importlib
-import json
-import os
-import shutil
-import weakref
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from itertools import groupby
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar
 
 from ...models import AgentStreamEvent, AgentStreamEventPage, AgentStreamEventType
-from .history import ConversationHistoryIndex
+from ..local_storage import (
+    connection,
+    delete_document,
+    document_exists,
+    pack,
+    read_document,
+    storage_location,
+    unpack,
+    write_document,
+)
+from .history import (
+    ConversationHistoryIndex,
+    conversation_event_visible,
+    replay_tool_identity,
+)
 
-_READ_INDEX_STRIDE = 256
 _COMPACTABLE_HISTORY_TYPES = frozenset(
     {AgentStreamEventType.TEXT_DELTA, AgentStreamEventType.THINKING_DELTA}
 )
 _HISTORY_CHUNK_COUNT_KEY = "_history_chunk_count"
 _IOResult = TypeVar("_IOResult")
-# Managers and temporary history readers can construct separate stores for one
-# path. Keep lifecycle operations serialized across those instances as well.
-_PATH_LOCKS: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
-
-
-def _path_lock(path: Path) -> asyncio.Lock:
-    key = str(path.resolve())
-    lock = _PATH_LOCKS.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _PATH_LOCKS[key] = lock
-    return lock
 
 
 async def _complete_io(operation: Callable[..., _IOResult], *args: Any) -> _IOResult:
@@ -137,267 +130,223 @@ def _state_root() -> Path:
 
 
 class AgentStreamStore:
-    """Append-only JSONL store for one managed session's structured events."""
+    """Indexed, losslessly compressed SQLite events with legacy JSONL import."""
 
     def __init__(self, workspace_id: str, session_id: str) -> None:
         self.workspace_id = workspace_id
         self.session_id = session_id
         self._dir = _state_root() / workspace_id / "agent_streams"
         self._path = self._dir / f"{session_id}.jsonl"
-        self._next_seq: Optional[int] = None
-        self._lock = _path_lock(self._path)
-        self._append_signature: Optional[Tuple[int, int, int]] = None
-        # Replayed history is commonly read through many consecutive pages.
-        # Keep a sparse in-memory sequence -> text-stream offset index so page
-        # N resumes near its cursor instead of parsing pages 0..N-1 again.
-        # The index is process-local and rebuilt lazily after a restart.
+        self._lock = asyncio.Lock()
         self._read_lock = asyncio.Lock()
-        self._read_offsets: Dict[int, int] = {-1: 0}
-        self._read_inode: Optional[int] = None
         self._history = ConversationHistoryIndex()
+        self._dictionary = b""
 
     @property
     def path(self) -> Path:
+        # Logical identity also anchors isolated cleanup and legacy cursors.
         return self._path
 
     @property
     def cursor_path(self) -> Path:
-        """Path for the paired tailer cursor checkpoint."""
         return self._path.with_name(self._path.stem + ".cursor.json")
 
-    def _ensure_dir(self) -> None:
-        self._dir.mkdir(parents=True, exist_ok=True)
+    def _insert(self, db: Any, name: int, event: AgentStreamEvent) -> None:
+        identity = replay_tool_identity(event)
+        replay = (
+            not event.turn_id
+            and identity
+            and db.execute(
+                "SELECT 1 FROM stream_events WHERE name=? AND identity=? AND turn_id IS NOT NULL LIMIT 1",
+                (name, identity),
+            ).fetchone()
+        )
+        db.execute(
+            "INSERT INTO stream_events VALUES (?,?,?,?,?,?,?)",
+            (
+                name,
+                event.stream_sequence,
+                event.turn_id,
+                event.type.value,
+                int(conversation_event_visible(event) and not replay),
+                identity,
+                pack(
+                    event.model_dump(mode="json", exclude_defaults=True, exclude_none=True),
+                    self._dictionary,
+                ),
+            ),
+        )
 
-    def _recover_next_seq(self) -> int:
-        """Scan the file for the max stream_sequence and return max + 1."""
-        if not self._path.exists():
-            return 0
-        max_seq = -1
-        try:
-            with self._path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
+    def _database(self) -> Any:
+        return connection(self._path)
+
+    def _import(self, db: Any) -> int:
+        _, logical_name = storage_location(self._path)
+        row = db.execute(
+            "SELECT id,dictionary FROM streams WHERE name=?", (logical_name,)
+        ).fetchone()
+        if row:
+            self._dictionary = row[1]
+            return int(row[0])
+        self._dictionary = self.session_id.encode()
+        if self._path.exists():
+            with self._path.open("rb") as source:
+                self._dictionary = source.read(32768)
+        name = int(
+            db.execute(
+                "INSERT INTO streams(name,dictionary) VALUES (?,?)",
+                (logical_name, self._dictionary),
+            ).lastrowid
+        )
+        # Caller owns BEGIN IMMEDIATE; events, malformed evidence and completion
+        # marker commit together. Sources are untouched for recovery/export.
+        if self._path.exists():
+            with self._path.open("rb") as handle:
+                for number, line in enumerate(handle, 1):
+                    if not line.strip():
                         continue
                     try:
-                        obj = json.loads(line)
-                        seq = obj.get("stream_sequence")
-                        if isinstance(seq, int) and seq > max_seq:
-                            max_seq = seq
-                    except (json.JSONDecodeError, ValueError):
-                        continue
-        except OSError:
-            return 0
-        return max_seq + 1
+                        event = AgentStreamEvent.model_validate_json(line)
+                        if event.stream_sequence < 0:
+                            raise ValueError("missing durable stream sequence")
+                        self._insert(db, name, event)
+                    except (ValueError, __import__("sqlite3").IntegrityError):
+                        db.execute(
+                            "INSERT INTO stream_errors VALUES (?,?,?)",
+                            (name, number, line),
+                        )
+        return name
+
+    @contextmanager
+    def _read_database(self) -> Iterator[Tuple[Any, int]]:
+        """Use WAL read snapshots; reserve the writer only for first import."""
+        _, logical_name = storage_location(self._path)
+        with self._database() as db:
+            db.execute("BEGIN")
+            row = db.execute(
+                "SELECT id,dictionary FROM streams WHERE name=?", (logical_name,)
+            ).fetchone()
+            if row is None:
+                db.rollback()
+                with db:
+                    db.execute("BEGIN IMMEDIATE")
+                    name = self._import(db)
+                db.execute("BEGIN")
+            else:
+                name = int(row[0])
+                self._dictionary = row[1]
+            yield db, name
+
+    def iter_events(
+        self,
+        since: int = -1,
+        limit: int | None = None,
+        turn_id: str | None = None,
+        through: int | None = None,
+        kind: str | None = None,
+    ) -> Iterator[AgentStreamEvent]:
+        with self._read_database() as (db, name):
+            query = "SELECT body FROM stream_events WHERE name=? AND sequence>?"
+            args: List[Any] = [name, since]
+            for column, value in (("turn_id", turn_id), ("kind", kind)):
+                if value is not None:
+                    query += f" AND {column}=?"
+                    args.append(value)
+            if through is not None:
+                query += " AND sequence<=?"
+                args.append(through)
+            query += " ORDER BY sequence"
+            if limit is not None:
+                query += " LIMIT ?"
+                args.append(limit)
+            for (body,) in db.execute(query, args):
+                yield AgentStreamEvent.model_validate(unpack(body, self._dictionary))
+
+    def _read_rows(
+        self,
+        since: int = -1,
+        limit: int | None = None,
+        turn_id: str | None = None,
+        through: int | None = None,
+        kind: str | None = None,
+    ) -> List[AgentStreamEvent]:
+        return list(self.iter_events(since, limit, turn_id, through, kind))
 
     async def append(self, event: AgentStreamEvent) -> AgentStreamEvent:
-        """Assign a monotonic sequence and append one event.
+        def write() -> AgentStreamEvent:
+            with self._database() as db, db:
+                db.execute("BEGIN IMMEDIATE")
+                name = self._import(db)
+                seq = db.execute(
+                    "SELECT coalesce(max(sequence),-1)+1 FROM stream_events WHERE name=?",
+                    (name,),
+                ).fetchone()[0]
+                result = event.model_copy(update={"stream_sequence": seq})
+                self._insert(db, name, result)
+                return result
 
-        Returns the event with ``stream_sequence`` set.
-        """
         async with self._lock:
-            self._ensure_dir()
-            try:
-                return await _complete_io(self._write_line, event)
-            except BaseException:
-                # Disk work can finish before cancellation reaches this caller.
-                self._next_seq = None
-                self._append_signature = None
-                raise
+            return await _complete_io(write)
+
+    def _clear_rows(self) -> None:
+        with self._database() as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            name = self._import(db)
+            db.execute("UPDATE streams SET generation=generation+1 WHERE id=?", (name,))
+            db.execute("DELETE FROM stream_events WHERE name=?", (name,))
+            db.execute("DELETE FROM stream_errors WHERE name=?", (name,))
+        delete_document(self.cursor_path)
+        delete_document(self._path.with_name(self._path.name + ".edit-bak"))
+        self._path.unlink(missing_ok=True)
 
     async def clear(self) -> None:
-        """Remove this session's event log and cursor checkpoint.
+        async with self._lock, self._read_lock:
+            await _complete_io(self._clear_rows)
+            self._history.reset()
 
-        Managed-session identifiers can be reused after an explicit delete, so
-        retaining either file would leak an old conversation into a new tab.
-        Missing files are an expected no-op.
-        """
-        async with self._lock:
-            async with self._read_lock:
-                try:
-                    await _complete_io(self._unlink_session_files)
-                finally:
-                    self._next_seq = None
-                    self._reset_read_index()
-
-    def _unlink_session_files(self) -> None:
-        for path in (self._path, self.cursor_path):
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                continue
-
-    def _write_line(self, event: AgentStreamEvent) -> AgentStreamEvent:
-        # A stable sidecar also fences writers in different backend processes.
-        # Hold it across sequence recovery and the complete record write.
-        with self._path.with_suffix(".append.lock").open("a+b") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            try:
-                try:
-                    stat = self._path.stat()
-                    signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns)
-                except FileNotFoundError:
-                    signature = None
-                if self._next_seq is None or signature != self._append_signature:
-                    self._next_seq = self._recover_next_seq()
-                event = event.model_copy(update={"stream_sequence": self._next_seq})
-                data = (event.model_dump_json() + "\n").encode("utf-8")
-                with self._path.open("ab", buffering=0) as output:
-                    start = output.tell()
-                    try:
-                        remaining = memoryview(data)
-                        while remaining:
-                            written = os.write(output.fileno(), remaining)
-                            if written <= 0:
-                                raise OSError("stream append made no progress")
-                            remaining = remaining[written:]
-                    except BaseException:
-                        # A failed partial record must not concatenate with the
-                        # next append. No cooperating writer can enter yet.
-                        output.truncate(start)
-                        raise
-                    stat = os.fstat(output.fileno())
-                self._append_signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns)
-                self._next_seq += 1
-                return event
-            finally:
-                fcntl.flock(lock, fcntl.LOCK_UN)
+    def _replace_rows(self, events: List[AgentStreamEvent]) -> None:
+        with self._database() as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            name = self._import(db)
+            db.execute("UPDATE streams SET generation=generation+1 WHERE id=?", (name,))
+            db.execute("DELETE FROM stream_events WHERE name=?", (name,))
+            db.execute("DELETE FROM stream_errors WHERE name=?", (name,))
+            for seq, event in enumerate(events):
+                self._insert(db, name, event.model_copy(update={"stream_sequence": seq}))
 
     async def replace_all(self, events: List[AgentStreamEvent]) -> None:
-        """Replace the entire store with ``events`` (snapshot sources)."""
-        async with self._lock:
-            async with self._read_lock:
-                self._ensure_dir()
-                lines: List[str] = []
-                for i, ev in enumerate(events):
-                    ev = ev.model_copy(update={"stream_sequence": i})
-                    lines.append(ev.model_dump_json())
-                try:
-                    await _complete_io(self._write_all, lines)
-                finally:
-                    self._next_seq = None
-                    self._reset_read_index()
-                self._next_seq = len(events)
-
-    def _write_all(self, lines: List[str]) -> None:
-        with self._path.open("w", encoding="utf-8") as f:
-            for line in lines:
-                f.write(line + "\n")
-
-    def _reset_read_index(self) -> None:
-        self._read_offsets = {-1: 0}
-        self._read_inode = None
-        self._history.reset()
-
-    def _prepare_read_index(self) -> None:
-        """Invalidate cached offsets if the append-only file was replaced."""
-
-        try:
-            stat = self._path.stat()
-        except OSError:
-            self._reset_read_index()
-            return
-        furthest_offset = max(self._read_offsets.values(), default=0)
-        if self._read_inode not in (None, stat.st_ino) or stat.st_size < furthest_offset:
-            self._reset_read_index()
-        self._read_inode = stat.st_ino
-
-    def _nearest_read_offset(self, since_sequence: int) -> Tuple[int, int]:
-        checkpoint = max(
-            (seq for seq in self._read_offsets if seq <= since_sequence),
-            default=-1,
-        )
-        return checkpoint, self._read_offsets[checkpoint]
-
-    def _remember_read_offset(self, sequence: int, offset: int, *, force: bool = False) -> None:
-        if sequence < 0:
-            return
-        if force or sequence % _READ_INDEX_STRIDE == 0:
-            self._read_offsets[sequence] = offset
+        async with self._lock, self._read_lock:
+            await _complete_io(self._replace_rows, events)
+            self._history.reset()
 
     async def read_since(
-        self,
-        since_sequence: int = -1,
-        limit: int = 500,
-        *,
-        compact: bool = False,
+        self, since_sequence: int = -1, limit: int = 500, *, compact: bool = False
     ) -> AgentStreamEventPage:
-        """Return events with ``stream_sequence > since_sequence``.
-
-        ``since_sequence=-1`` returns from the beginning.
-        """
-        if limit < 1:
-            limit = 1
-        async with self._read_lock:
-            events: List[AgentStreamEvent] = []
-            next_seq = since_sequence
-            has_more = False
-
-            def _read() -> None:
-                nonlocal next_seq, has_more
-                if not self._path.exists():
-                    return
-                self._prepare_read_index()
-                _, start_offset = self._nearest_read_offset(since_sequence)
-                next_offset = start_offset
-                with self._path.open("r", encoding="utf-8") as f:
-                    f.seek(start_offset)
-                    while True:
-                        line = f.readline()
-                        if not line:
-                            break
-                        after_offset = f.tell()
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            obj = json.loads(line)
-                            seq = obj.get("stream_sequence")
-                            if not isinstance(seq, int):
-                                continue
-                            self._remember_read_offset(seq, after_offset)
-                            if seq <= since_sequence:
-                                continue
-                            if len(events) >= limit:
-                                has_more = True
-                                break
-                            events.append(AgentStreamEvent.model_validate(obj))
-                            if seq > next_seq:
-                                next_seq = seq
-                                next_offset = after_offset
-                        except (json.JSONDecodeError, ValueError):
-                            continue
-                self._remember_read_offset(next_seq, next_offset, force=True)
-
-            await _complete_io(_read)
-            return AgentStreamEventPage(
-                events=compact_history_events(events) if compact else events,
-                next_sequence=next_seq,
-                has_more=has_more,
-            )
+        rows = await _complete_io(self._read_rows, since_sequence, max(1, limit) + 1)
+        events = rows[: max(1, limit)]
+        return AgentStreamEventPage(
+            events=compact_history_events(events) if compact else events,
+            next_sequence=events[-1].stream_sequence if events else since_sequence,
+            has_more=len(rows) > len(events),
+        )
 
     async def read_conversation(
-        self,
-        since_sequence: int = -1,
-        limit: int = 500,
-        *,
-        compact: bool = False,
+        self, since_sequence: int = -1, limit: int = 500, *, compact: bool = False
     ) -> AgentStreamEventPage:
-        """Read question/answer history without materializing process details."""
+        # Import before handing the durable SQLite index to the history projection.
+        await _complete_io(self._read_rows, -1, 0)
         async with self._read_lock:
-            try:
-                page = await _complete_io(
-                    self._history.conversation_page, self._path, since_sequence, max(1, limit)
-                )
-            except BaseException:
-                self._history.reset()
-                raise
+            page = await _complete_io(
+                self._history.conversation_page,
+                self._path,
+                since_sequence,
+                max(1, limit),
+            )
             if compact:
-                # Omitted events remain compaction barriers. A tool between two
-                # text runs must not change snapshot/replay recognition.
                 events = []
                 for _, run in groupby(
-                    enumerate(page.events), lambda item: item[1].stream_sequence - item[0]
+                    enumerate(page.events),
+                    lambda item: item[1].stream_sequence - item[0],
                 ):
                     events.extend(compact_history_events([event for _, event in run]))
                 page = page.model_copy(update={"events": events})
@@ -412,284 +361,150 @@ class AgentStreamStore:
         *,
         compact: bool = False,
     ) -> AgentStreamEventPage:
-        """Read one turn through a fixed raw cursor without scanning other turns."""
-        async with self._read_lock:
-            try:
-                page = await _complete_io(
-                    self._history.turn_page,
-                    self._path,
-                    turn_id,
-                    since_sequence,
-                    through_sequence,
-                    max(1, limit),
-                )
-            except BaseException:
-                self._history.reset()
-                raise
-            if compact:
-                page = page.model_copy(update={"events": compact_history_events(page.events)})
-            return page
+        rows = await _complete_io(
+            self._read_rows,
+            since_sequence,
+            max(1, limit) + 1,
+            turn_id,
+            through_sequence,
+        )
+        events = rows[: max(1, limit)]
+        return AgentStreamEventPage(
+            events=compact_history_events(events) if compact else events,
+            next_sequence=events[-1].stream_sequence if events else since_sequence,
+            has_more=len(rows) > len(events),
+        )
+
+    def has_events(self) -> bool:
+        with self._read_database() as (db, name):
+            return (
+                db.execute("SELECT 1 FROM stream_events WHERE name=? LIMIT 1", (name,)).fetchone()
+                is not None
+                or db.execute(
+                    "SELECT 1 FROM stream_errors WHERE name=? LIMIT 1", (name,)
+                ).fetchone()
+                is not None
+            )
 
     async def count(self) -> int:
-        """Return the number of persisted events."""
-        if not self._path.exists():
-            return 0
-        n = 0
-        try:
-            with self._path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    if line.strip():
-                        n += 1
-        except OSError:
-            return 0
-        return n
+        def count_rows() -> int:
+            with self._read_database() as (db, name):
+                return int(
+                    db.execute(
+                        "SELECT count(*) FROM stream_events WHERE name=?", (name,)
+                    ).fetchone()[0]
+                )
+
+        return await _complete_io(count_rows)
 
     async def inspect_turn_lifecycle(self, turn_id: str) -> TurnLifecycleSnapshot:
-        """Inspect one turn without conflating absence, progress, and completion.
-
-        External-channel shutdown uses this to decide whether a delivery claim
-        may be retried. Unlike ordinary history reads, this proof-oriented scan
-        fails closed on malformed or unreadable state: treating an unknown row
-        as "not started" could replay a turn that already ran tools.
-
-        The latest unfinished turn is returned from the same scan so callers do
-        not race two independent views of the append-only lifecycle.
-        """
         if not turn_id:
             raise ValueError("turn_id must not be empty")
 
-        async with self._read_lock:
+        def inspect() -> TurnLifecycleSnapshot:
+            with self._read_database() as (db, name):
+                if db.execute(
+                    "SELECT 1 FROM stream_errors WHERE name=? LIMIT 1", (name,)
+                ).fetchone():
+                    raise RuntimeError(f"cannot inspect corrupt agent stream {self._path}")
+                rows = list(
+                    db.execute(
+                        "SELECT body FROM stream_events WHERE name=? AND kind IN ('turn_started','turn_completed','error') ORDER BY sequence",
+                        (name,),
+                    )
+                )
             state = TurnLifecycleState.NOT_STARTED
-            latest_unfinished: Optional[AgentStreamEvent] = None
+            candidate = None
+            for (body,) in rows:
+                event = AgentStreamEvent.model_validate(unpack(body, self._dictionary))
+                if event.type == AgentStreamEventType.TURN_STARTED:
+                    candidate = event
+                    if event.turn_id == turn_id and state != TurnLifecycleState.TERMINAL:
+                        state = TurnLifecycleState.UNFINISHED
+                else:
+                    if event.turn_id == turn_id and state == TurnLifecycleState.UNFINISHED:
+                        state = TurnLifecycleState.TERMINAL
+                    if candidate is not None and (
+                        event.turn_id == candidate.turn_id
+                        if candidate.turn_id is not None
+                        else event.run_epoch == candidate.run_epoch
+                    ):
+                        candidate = None
+            return TurnLifecycleSnapshot(state=state, latest_unfinished=candidate)
 
-            def _read() -> None:
-                nonlocal state, latest_unfinished
-                if not self._path.exists():
-                    return
-                try:
-                    with self._path.open("r", encoding="utf-8") as f:
-                        for line in f:
-                            stripped = line.strip()
-                            if not stripped:
-                                continue
-                            try:
-                                obj = json.loads(stripped)
-                                event = AgentStreamEvent.model_validate(obj)
-                            except (json.JSONDecodeError, ValueError) as exc:
-                                raise RuntimeError(
-                                    f"cannot inspect corrupt agent stream {self._path}"
-                                ) from exc
-
-                            event_turn_id = event.turn_id
-                            if event.type == AgentStreamEventType.TURN_STARTED:
-                                latest_unfinished = event
-                                if (
-                                    event_turn_id == turn_id
-                                    and state != TurnLifecycleState.TERMINAL
-                                ):
-                                    state = TurnLifecycleState.UNFINISHED
-                                continue
-
-                            if event.type not in {
-                                AgentStreamEventType.TURN_COMPLETED,
-                                AgentStreamEventType.ERROR,
-                            }:
-                                continue
-                            if event_turn_id == turn_id and state == TurnLifecycleState.UNFINISHED:
-                                state = TurnLifecycleState.TERMINAL
-                            if latest_unfinished is not None:
-                                candidate_turn_id = latest_unfinished.turn_id
-                                same_turn = (
-                                    event_turn_id == candidate_turn_id
-                                    if candidate_turn_id is not None
-                                    else event.run_epoch == latest_unfinished.run_epoch
-                                )
-                                if same_turn:
-                                    latest_unfinished = None
-                except OSError as exc:
-                    raise RuntimeError(f"cannot inspect agent stream {self._path}") from exc
-
-            await _complete_io(_read)
-            return TurnLifecycleSnapshot(state=state, latest_unfinished=latest_unfinished)
+        return await _complete_io(inspect)
 
     async def latest_unfinished_turn(self) -> Optional[AgentStreamEvent]:
-        """Return the latest turn whose durable lifecycle has no terminal edge.
-
-        Native Chat runtime state is process-local, while this event log
-        survives backend reloads and crashes. A previous process can therefore
-        leave ``turn_started`` as the latest lifecycle edge even though the new
-        process has no provider turn to cancel. The Stop path uses this
-        bounded-purpose scan to repair that orphan on demand.
-
-        ``error`` is terminal here because the frontend uses the same rule to
-        unlock its composer when a provider fails without a following
-        ``turn_completed`` event.
-        """
-        async with self._read_lock:
-            candidate: Optional[AgentStreamEvent] = None
-
-            def _read() -> None:
-                nonlocal candidate
-                if not self._path.exists():
-                    return
-                try:
-                    with self._path.open("r", encoding="utf-8") as f:
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                obj = json.loads(line)
-                            except (json.JSONDecodeError, ValueError):
-                                continue
-                            event_type = obj.get("type")
-                            if event_type == "turn_started":
-                                try:
-                                    candidate = AgentStreamEvent.model_validate(obj)
-                                except ValueError:
-                                    candidate = None
-                                continue
-                            if candidate is None or event_type not in {
-                                "turn_completed",
-                                "error",
-                            }:
-                                continue
-                            candidate_turn_id = candidate.turn_id
-                            same_turn = (
-                                obj.get("turn_id") == candidate_turn_id
-                                if candidate_turn_id is not None
-                                else obj.get("run_epoch") == candidate.run_epoch
-                            )
-                            if same_turn:
-                                candidate = None
-                except OSError:
-                    candidate = None
-
-            await _complete_io(_read)
-            return candidate
+        return (await self.inspect_turn_lifecycle("__latest__")).latest_unfinished
 
     async def last_event_at(self) -> Optional[str]:
-        """Return the ``created_at`` of the last persisted event, or ``None``."""
-        if not self._path.exists():
-            return None
-        last: Optional[str] = None
-        try:
-            with self._path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                        ca = obj.get("created_at")
-                        if isinstance(ca, str):
-                            last = ca
-                    except (json.JSONDecodeError, ValueError):
-                        continue
-        except OSError:
-            return None
-        return last
+        return await self._last_time(None)
 
     async def latest_turn_completed_at(self) -> Optional[str]:
-        """Return the ``created_at`` of the last ``turn_completed`` event.
+        return await self._last_time("turn_completed")
 
-        Used to compute the unread flag: a turn that completed after the
-        user's ``last_viewed_at`` is unread. Returns ``None`` if no turn has
-        completed yet.
-        """
-        if not self._path.exists():
-            return None
-        last: Optional[str] = None
-        try:
-            with self._path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                    except (json.JSONDecodeError, ValueError):
-                        continue
-                    if obj.get("type") != "turn_completed":
-                        continue
-                    ca = obj.get("created_at")
-                    if isinstance(ca, str):
-                        last = ca
-        except OSError:
-            return None
-        return last
+    async def _last_time(self, kind: str | None) -> Optional[str]:
+        def last() -> Optional[str]:
+            with self._read_database() as (db, name):
+                query = "SELECT body FROM stream_events WHERE name=?"
+                args: List[Any] = [name]
+                if kind:
+                    query += " AND kind=?"
+                    args.append(kind)
+                row = db.execute(query + " ORDER BY sequence DESC LIMIT 1", args).fetchone()
+                return str(unpack(row[0], self._dictionary)["created_at"]) if row else None
+
+        return await _complete_io(last)
 
     async def truncate_before(self, sequence: int) -> int:
-        """Remove all events with ``stream_sequence >= sequence``.
+        def truncate() -> int:
+            with self._database() as db, db:
+                db.execute("BEGIN IMMEDIATE")
+                name = self._import(db)
+                db.execute("UPDATE streams SET generation=generation+1 WHERE id=?", (name,))
+                return int(
+                    db.execute(
+                        "DELETE FROM stream_events WHERE name=? AND sequence>=?",
+                        (name, sequence),
+                    ).rowcount
+                )
 
-        Used by edit-resend to discard the event suffix from the edited
-        turn onward.  Returns the number of events removed.
-        """
-        async with self._lock:
-            async with self._read_lock:
-                if not self._path.exists():
-                    self._next_seq = 0
-                    return 0
-
-                kept: List[str] = []
-                removed = 0
-
-                def _read() -> None:
-                    nonlocal removed
-                    with self._path.open("r", encoding="utf-8") as f:
-                        for line in f:
-                            stripped = line.strip()
-                            if not stripped:
-                                continue
-                            try:
-                                obj = json.loads(stripped)
-                                seq = obj.get("stream_sequence")
-                            except (json.JSONDecodeError, ValueError):
-                                continue
-                            if isinstance(seq, int) and seq >= sequence:
-                                removed += 1
-                                continue
-                            kept.append(stripped)
-
-                await _complete_io(_read)
-                try:
-                    await _complete_io(self._write_all, kept)
-                finally:
-                    self._next_seq = None
-                    self._reset_read_index()
-                self._next_seq = len(kept)
-                return removed
+        async with self._lock, self._read_lock:
+            result = await _complete_io(truncate)
+            self._history.reset()
+            return result
 
     async def snapshot(self) -> Optional[Path]:
-        """Create a ``.edit-bak`` sidecar copy of the event store for rollback.
-
-        Used by edit-resend to capture the pre-edit state so a failed
-        truncate/fork/send can be fully undone.  Returns the backup path, or
-        ``None`` if the store file does not exist (nothing to snapshot).
-        """
         async with self._lock:
-            if not self._path.exists():
+            events = await _complete_io(self._read_rows)
+            if not events:
                 return None
             backup = self._path.with_name(self._path.name + ".edit-bak")
-            await _complete_io(shutil.copy2, self._path, backup)
+            await _complete_io(
+                write_document,
+                backup,
+                [event.model_dump(mode="json") for event in events],
+            )
             return backup
 
     async def restore(self, backup: Optional[Path]) -> None:
-        """Restore the event store from a snapshot created by :meth:`snapshot`.
+        if backup is None or not document_exists(backup):
+            return
+        events = await _complete_io(read_document, backup)
 
-        After restoring, the in-memory sequence counter and read index are
-        reset so subsequent appends/reads observe the restored content rather
-        than stale cached state.
-        """
-        async with self._lock:
-            async with self._read_lock:
-                if backup is None or not backup.exists():
-                    return
-                try:
-                    await _complete_io(shutil.copy2, backup, self._path)
-                finally:
-                    self._next_seq = None
-                    self._reset_read_index()
+        # Preserve cursors, including gaps, across rollback.
+        def restore_rows() -> None:
+            with self._database() as db, db:
+                db.execute("BEGIN IMMEDIATE")
+                name = self._import(db)
+                db.execute("UPDATE streams SET generation=generation+1 WHERE id=?", (name,))
+                db.execute("DELETE FROM stream_events WHERE name=?", (name,))
+                for event in events:
+                    self._insert(db, name, AgentStreamEvent.model_validate(event))
+
+        async with self._lock, self._read_lock:
+            await _complete_io(restore_rows)
+            self._history.reset()
 
     async def find_turn(self, turn_id: str) -> Optional[Tuple[int, int, str, List[Dict[str, Any]]]]:
         """Locate a turn while preserving the established four-field contract."""
@@ -727,44 +542,23 @@ class AgentStreamStore:
 
         Returns ``None`` if no ``turn_started`` event carries ``turn_id``.
         """
-        if not self._path.exists():
-            return None
-        result: Optional[Tuple[int, int, str, List[Dict[str, Any]], Dict[str, Any]]] = None
-
-        def _read() -> None:
-            nonlocal result
-            turn_count = 0
-            with self._path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    try:
-                        obj = json.loads(stripped)
-                    except (json.JSONDecodeError, ValueError):
-                        continue
-                    if obj.get("type") != "turn_started":
-                        continue
-                    turn_count += 1
-                    if obj.get("turn_id") == turn_id:
-                        seq = obj.get("stream_sequence")
-                        if isinstance(seq, int):
-                            text = ""
-                            attachments: List[Dict[str, Any]] = []
-                            metadata: Dict[str, Any] = {}
-                            payload = obj.get("payload")
-                            if isinstance(payload, dict):
-                                summary = payload.get("summary")
-                                if isinstance(summary, str):
-                                    text = summary
-                                atts = payload.get("attachments")
-                                if isinstance(atts, list):
-                                    attachments = [a for a in atts if isinstance(a, dict)]
-                                raw_metadata = payload.get("metadata")
-                                if isinstance(raw_metadata, dict):
-                                    metadata = dict(raw_metadata)
-                            result = (seq, turn_count - 1, text, attachments, metadata)
-                        return
-
-        await _complete_io(_read)
-        return result
+        events = await _complete_io(self._read_rows, -1, None, None, None, "turn_started")
+        for index, event in enumerate(events):
+            if event.turn_id != turn_id:
+                continue
+            payload = event.payload
+            summary = payload.get("summary")
+            attachments = payload.get("attachments")
+            metadata = payload.get("metadata")
+            return (
+                event.stream_sequence,
+                index,
+                summary if isinstance(summary, str) else "",
+                (
+                    [item for item in attachments if isinstance(item, dict)]
+                    if isinstance(attachments, list)
+                    else []
+                ),
+                dict(metadata) if isinstance(metadata, dict) else {},
+            )
+        return None

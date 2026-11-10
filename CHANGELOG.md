@@ -7,6 +7,22 @@
 
 ## Released
 
+### refactor(storage): consolidate local persistence in SQLite WAL
+
+- Workspace boards, Task reports and Mailbox events, tabs/order, login sessions,
+  Chat delivery inbox, Goals, subagents and Feishu state share one runtime SQLite
+  database. Transactions update changed collection rows without rewriting JSON
+  snapshots and rotating complete backups on every mutation.
+- Structured streams use indexed, losslessly compressed events with per-stream
+  dictionaries. History, lifecycle receipts, image/attachment authorization and
+  feedback evidence read the same store; obsolete file indexes/caches are removed.
+- Existing JSON/JSONL imports automatically and transactionally on first use.
+  Original sources remain recovery evidence, malformed stream rows are retained,
+  and offline verified gzip archival is available after import. No production
+  cutover is performed by installing the branch alone.
+- See [migration and benchmark evidence](docs/working-logs/2026-11-10-sqlite-storage.md)
+  for measured costs, recovery, validation and rollout boundaries.
+
 ### fix(chat): retain persisted history when the live provider is unavailable
 
 - Native Chat retains its structured view and exposes live-provider failures
@@ -15,7 +31,6 @@
 - Stream appends serialize across Store instances and cooperating processes,
   recover sequence allocation after another writer, complete short writes and
   roll back failed partial records before allowing the next append.
-
 
 ### feat(feishu): serving modes — one Chat per conversation
 

@@ -5,6 +5,7 @@ from typing import Literal
 
 from claude_hub.services.task_transitions import apply_task_update
 
+from ..local_storage import read_document
 from ..task_dependencies import require_task_dependencies, validate_task_dependencies
 from ..task_graph import reparent_task
 from ._attachments import _PreparedWorkspaceAttachment
@@ -200,7 +201,9 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
 
     def _read_task_edit_state(self, workspace_id: str) -> bytes | None:
         try:
-            return self._workspace_state_file(workspace_id).read_bytes()
+            return json.dumps(
+                read_document(self._workspace_state_file(workspace_id)), indent=2
+            ).encode()
         except FileNotFoundError:
             return None
 
@@ -357,7 +360,8 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                             await ttyd_manager.delete_tab(tab_id)
                         except Exception:
                             logger.exception(
-                                "Failed to delete temporary reviewer tab tab_id=%s", tab_id
+                                "Failed to delete temporary reviewer tab tab_id=%s",
+                                tab_id,
                             )
                 if task.feedback_lesson_ids:
                     self._feedback_store().increment_lesson_usage(

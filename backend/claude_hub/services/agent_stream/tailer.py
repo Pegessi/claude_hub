@@ -664,8 +664,6 @@ async def discard_retired_session_artifacts(workspace_id: str, session_id: str) 
     Callers must retain their durable identity reservation until this finishes;
     replay does not infer permission from missing process-local fence state.
     """
-    from .. import managed_chat
-
     store = AgentStreamStore(workspace_id, session_id)
     configured_root = store.path.parent.parent.parent
     root = configured_root.resolve()
@@ -694,7 +692,6 @@ async def discard_retired_session_artifacts(workspace_id: str, session_id: str) 
         # ordinary seed helper is best effort and cannot authorize durable ACK.
         await _complete_io(discard_snapshot, store.path.with_suffix(suffix))
     await AgentStreamAttachmentStore(workspace_id, session_id).clear(strict=True)
-    managed_chat._turn_state_cache.pop(session_id, None)
     # Confirm unlinks even when a previous failed sync already removed files.
     await _complete_io(partial(_sync_existing_directory, trusted_root=root), stream_directory)
     _PROVIDER_FENCED_SESSION_IDS.discard(session_id)

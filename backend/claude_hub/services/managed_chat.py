@@ -24,7 +24,10 @@ from ..models import (
     WorkspaceAttachment,
     WorkspaceAttachmentCreate,
 )
-from .agent_stream.attachments import AgentStreamAttachmentStore, preview_within_cache_bounds
+from .agent_stream.attachments import (
+    AgentStreamAttachmentStore,
+    preview_within_cache_bounds,
+)
 from .agent_stream.base import NativeInputNotSubmittedError
 from .agent_stream.fork_seed import seed_sidecar_path
 from .agent_stream.native import _detect_image_mime
@@ -39,10 +42,6 @@ _ATTEMPT_VERSION = 1
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
 _IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 _session_locks: dict[str, asyncio.Lock] = {}
-_turn_state_cache: dict[
-    str,
-    tuple[Path, int, int, int, Literal["empty", "terminal", "unfinished", "unknown"]],
-] = {}
 
 
 class ManagedChatDeliveryUncertain(RuntimeError):
@@ -77,12 +76,12 @@ def has_residual_state(workspace_id: str, session_id: str) -> bool:
     store = AgentStreamStore(workspace_id, session_id)
     paths = (
         *_delivery_paths(workspace_id, session_id),
-        store.path,
         store.cursor_path,
         seed_sidecar_path(workspace_id, session_id),
     )
     return (
-        any(path.exists() for path in paths)
+        store.has_events()
+        or any(path.exists() for path in paths)
         or AgentStreamAttachmentStore(
             workspace_id,
             session_id,
@@ -176,7 +175,6 @@ def discard_delivery_state(workspace_id: str, session_id: str) -> None:
 
     for path in _delivery_paths(workspace_id, session_id):
         path.unlink(missing_ok=True)
-    _turn_state_cache.pop(session_id, None)
 
 
 def _read_attempts(session: ManagedSession) -> dict[str, Any]:
@@ -332,60 +330,43 @@ def delivery_state(session: ManagedSession, call_id: str) -> DeliveryState:
 
 
 def _scan_durable_turn_state(
-    path: Path,
+    store: AgentStreamStore,
 ) -> Literal["empty", "terminal", "unfinished", "unknown"]:
+    from .local_storage import unpack
+
     unfinished: set[str] = set()
     saw_lifecycle = False
     try:
-        with path.open("r", encoding="utf-8") as file:
-            for line in file:
-                if not line.strip():
-                    continue
-                event = json.loads(line)
-                if not isinstance(event, dict):
-                    raise ValueError("stream event must be an object")
-                event_type = event.get("type")
+        with store._read_database() as (db, name):
+            if db.execute("SELECT 1 FROM stream_errors WHERE name=? LIMIT 1", (name,)).fetchone():
+                return "unknown"
+            for (body,) in db.execute(
+                "SELECT body FROM stream_events WHERE name=? AND kind IN ('turn_started','turn_completed') ORDER BY sequence",
+                (name,),
+            ):
+                event = unpack(body, store._dictionary)
                 turn_id = event.get("turn_id")
-                run_epoch = event.get("run_epoch")
-                key = turn_id if isinstance(turn_id, str) else f"epoch:{run_epoch}"
-                if event_type == "turn_started":
-                    saw_lifecycle = True
+                key = turn_id if isinstance(turn_id, str) else f"epoch:{event.get('run_epoch', 0)}"
+                saw_lifecycle = True
+                if event["type"] == "turn_started":
                     unfinished.add(key)
-                elif event_type == "turn_completed":
-                    saw_lifecycle = True
+                else:
                     unfinished.discard(key)
         return "unfinished" if unfinished else ("terminal" if saw_lifecycle else "empty")
-    except FileNotFoundError:
-        return "empty"
-    except (OSError, json.JSONDecodeError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError):
         return "unknown"
 
 
 def _durable_turn_state_for_ids(
     workspace_id: str, session_id: str
 ) -> Literal["empty", "terminal", "unfinished", "unknown"]:
-    return _scan_durable_turn_state(AgentStreamStore(workspace_id, session_id).path)
+    return _scan_durable_turn_state(AgentStreamStore(workspace_id, session_id))
 
 
 def _durable_turn_state(
     session: ManagedSession,
 ) -> Literal["empty", "terminal", "unfinished", "unknown"]:
-    path = AgentStreamStore(session.workspace_id, session.id).path
-    try:
-        stat = path.stat()
-    except FileNotFoundError:
-        _turn_state_cache.pop(session.id, None)
-        return "empty"
-    except OSError:
-        return "unknown"
-    cached = _turn_state_cache.get(session.id)
-    identity = (path, stat.st_ino, stat.st_size, stat.st_mtime_ns)
-    if cached is not None and cached[:4] == identity:
-        return cached[4]
-
-    state = _scan_durable_turn_state(path)
-    _turn_state_cache[session.id] = (*identity, state)
-    return state
+    return _durable_turn_state_for_ids(session.workspace_id, session.id)
 
 
 def _runtime_snapshot(session: ManagedSession) -> Optional[NativeRuntimeSnapshot]:
