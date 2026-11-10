@@ -386,6 +386,9 @@ class FeishuMessageDispatcher:
             for item in batch:
                 self._validate_binding_dispatch(item.effective, item.binding, item.event)
             yield
+        # The native handoff inside the guard succeeded, so this channel's
+        # stopped-answer carryover has now been delivered with the new turn.
+        queue.interrupted_text.pop(leader.channel_key, None)
         context = self._dispatch_context_key(leader)
         queue.dispatched_contexts[context] = None
         queue.dispatched_contexts.move_to_end(context)
@@ -761,8 +764,6 @@ class FeishuMessageDispatcher:
                 )
                 for item in batch:
                     item.native_bridge_started = True
-                # The handoff is now certain, so this channel's carryover is spent.
-                queue.interrupted_text.pop(leader.channel_key, None)
                 turn_metadata = self._turn_metadata(leader.effective, leader.event, leader.binding)
                 assistant_text = await self.bindings.dispatch_tab_chat_and_wait(
                     tab_id,
@@ -787,6 +788,7 @@ class FeishuMessageDispatcher:
                     attachments=attachments,
                     admission_guard=lambda: self._admit_batch_dispatch(queue, batch),
                 )
+                queue.interrupted_text.pop(leader.channel_key, None)
                 if await self._stopped_for_newer(batch) is not None:
                     # It ended before the stop took: this answer is sent, so the
                     # newer message follows it as usual.
@@ -806,6 +808,9 @@ class FeishuMessageDispatcher:
                     else "reply_failed"
                 )
             except ExternalDispatchRetired:
+                if earlier and leader.channel_key not in queue.interrupted_text:
+                    queue.interrupted_text[leader.channel_key] = earlier
+                    queue.interrupted_text.move_to_end(leader.channel_key)
                 status = "retired"
             except FeishuMessageTimeRejected as exc:
                 for item in batch:
@@ -829,6 +834,7 @@ class FeishuMessageDispatcher:
                     ):
                         status = "pre_dispatch_rejected"
             except ExternalQuestionPending:
+                queue.interrupted_text.pop(leader.channel_key, None)
                 status = "completed"  # the durable question, not this waiter, owns continuation
             except ExternalInteractionRequired:
                 target = batch[-1] if batch else leader
