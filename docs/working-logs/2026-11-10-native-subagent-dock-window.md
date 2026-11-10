@@ -119,7 +119,10 @@ child — a native child has no Chat tab to jump to.
   failed/cancelled child from the shallow page (`conversation_event_visible`
   keeps that status), which projected a row whose window had nothing to show.
   The projection now takes a readiness predicate built from `historyDetails`,
-  mirroring `presentTurnParts`; the scenario's reload phase covers it.
+  mirroring `presentTurnParts`. The scenario's reload phase carries exactly
+  that shape (the failed child's status survives the shallow page, its prose
+  and the active sibling do not), so the phase is load-bearing: with the
+  predicate removed the "no row before the turn is opened" assertion fails.
 - BLOCKING (fixed): a top-layer `<dialog>` (the image/attachment lightbox opened
   from these rows) lost Escape to the window's document-level handler. A
   `dialog[open]` now owns both Escape and Tab. Gate is non-vacuous: with the

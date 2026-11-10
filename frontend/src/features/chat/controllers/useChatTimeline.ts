@@ -221,7 +221,9 @@ export function useChatTimeline(deps: Dependencies) {
     const ordinal = list.findIndex(turn => turn.key === turnKey)
     if (ordinal < 0) return
     const turn = list[ordinal]
-    if (ordinal < historyWindowStart.value) {
+    const wasFollowing = isFollowingLatest.value
+    const widenedWindow = ordinal < historyWindowStart.value
+    if (widenedWindow) {
       detachFromTail()
       visibleHistoryStart.value = ordinal
       await nextTick()
@@ -244,7 +246,7 @@ export function useChatTimeline(deps: Dependencies) {
     // it while the pane still follows the tail. Following rearms itself as soon
     // as the reader is near the bottom again (`handleTimelineScroll`).
     cancelScheduledTimelineScroll()
-    if (isFollowingLatest.value) detachFromTail()
+    if (wasFollowing) detachFromTail()
     await nextTick()
     if (timelineDisposed || visit !== timelineVisit) return
     const viewport = timelineEl.value
@@ -263,7 +265,23 @@ export function useChatTimeline(deps: Dependencies) {
       await nextFrame()
       if (timelineDisposed || visit !== timelineVisit) return
     }
-    if (!row) return
+    // A stepping stone for the settle below: the reveal detached the tail
+    // above, and scrolling is what normally rearms it (`handleTimelineScroll`).
+    const settleTail = () => {
+      if (!wasFollowing || widenedWindow) return
+      const el = timelineEl.value
+      if (!el || !isTimelineNearBottom(el)) return
+      // A short turn leaves nothing to scroll (`scrollIntoView` is a no-op), so
+      // no scroll event ever fires and nothing would rearm: put the reader back
+      // on the live tail instead of leaving a `Latest` pill over a footer they
+      // are already looking at.
+      visibleHistoryStart.value = null
+      rearmFollow()
+    }
+    if (!row) {
+      settleTail()
+      return
+    }
     // Every collapsed <details> between the child row and the transcript
     // (its inline region and, if the provider nests one, its child row).
     let node: HTMLElement | null = row
@@ -272,6 +290,7 @@ export function useChatTimeline(deps: Dependencies) {
       node = node.parentElement
     }
     row.scrollIntoView({ block: 'center' })
+    settleTail()
   }
 
   /** Parts to render for a turn, with its process folded away once it is history. */
