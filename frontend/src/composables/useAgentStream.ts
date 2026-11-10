@@ -308,6 +308,10 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
     // sequence cursor; otherwise the current generation's events would be
     // skipped because their stream_sequence is <= the stale cursor.
     if (!stateMachine.isCurrent(generationId)) return
+    // A page that carries descriptors describes the turns it touches. Hydration
+    // pages (`view=conversation`) always do; the long-poll's raw page does not
+    // today, so this is future-proofing rather than a live path.
+    recordHistoryDetails(page.history_details)
     const committed = sequenceBuffer.push(page.events)
     if (committed.length) enqueueEvents(filterLiveCommittedEvents(committed))
   }
@@ -340,14 +344,23 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
         next[descriptor.turn_id] = { descriptor, status: 'idle' }
         changed = true
       } else if (detailChanged(existing.descriptor, descriptor)) {
-        // A newer summary covers a different raw range. Previously fetched
-        // detail is no longer complete for this descriptor; make the next
-        // expansion read the fixed, current range and retire any in-flight
-        // request for the older range.
-        const request = historyDetailRequests.get(descriptor.turn_id)
-        request?.abort.abort()
-        historyDetailRequests.delete(descriptor.turn_id)
-        next[descriptor.turn_id] = { descriptor, status: 'idle' }
+        // A turn whose descriptor only grew kept its beginning: the detail that
+        // was already read is still valid, and the events after it arrive on the
+        // live stream. Resetting to 'idle' there would hide the parts a read had
+        // just produced, on every batch of a streaming turn. A descriptor whose
+        // start moved (a rewritten transcript) is a different range, so its
+        // detail is retired and the next expansion reads it again.
+        const appendOnly = existing.status === 'loaded' &&
+          descriptor.first_sequence === existing.descriptor.first_sequence &&
+          descriptor.last_sequence > existing.descriptor.last_sequence
+        if (appendOnly) {
+          next[descriptor.turn_id] = { ...existing, descriptor }
+        } else {
+          const request = historyDetailRequests.get(descriptor.turn_id)
+          request?.abort.abort()
+          historyDetailRequests.delete(descriptor.turn_id)
+          next[descriptor.turn_id] = { descriptor, status: 'idle' }
+        }
         changed = true
       }
     }

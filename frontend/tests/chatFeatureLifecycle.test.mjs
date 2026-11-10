@@ -130,7 +130,15 @@ const stubs = {
       const capabilities = ref({ available_models: [], current_model: null, current_reasoning_effort: null, available_modes: [], current_mode: null, supports_images: true, supports_goals: true })
       const start = async (id, source) => { globalThis.__chatLifecycleTest.calls.push(['start', id, source]); historyReady.value = true; connectionState.value = 'live' }
       const stop = () => globalThis.__chatLifecycleTest.calls.push(['stop'])
-      const loadHistoryDetail = async id => { globalThis.__chatLifecycleTest.calls.push(['loadHistoryDetail', id]) }
+      const loadHistoryDetail = async id => {
+        globalThis.__chatLifecycleTest.calls.push(['loadHistoryDetail', id])
+        // A read that lands marks the entry loaded in the real stream; the
+        // pane's backfill budget is charged on that landing, not on the request.
+        const entry = historyDetails.value[id]
+        if (entry && entry.status !== 'loaded') {
+          historyDetails.value = { ...historyDetails.value, [id]: { ...entry, status: 'loaded' } }
+        }
+      }
       const stream = { events, historyReady, historyDetails, historyDetailRevision, attributedToolIds, connectionState, errorMessage, capabilities, start, stop, loadHistoryDetail, retry: start, refreshCapabilities: async () => {}, setMode: async () => {}, nudge() {}, reset() {} }
       globalThis.__chatLifecycleTest.streams.push(stream)
       return stream
@@ -603,5 +611,75 @@ test('a pane that opens during a live turn still reads the steps it missed', asy
     h.state.calls.filter(call => call[0] === 'loadHistoryDetail').length,
     1,
     'one join read per turn',
+  )
+})
+
+test('a turn that began in this pane still reports how many events it has produced', async t => {
+  // Second cross-model review, H-3: hydration is the only place descriptors are
+  // recorded, so a turn started while the pane was open had no descriptor and
+  // "N events so far" never appeared. The pane watched every one of those
+  // events, so it can count them itself.
+  const h = await mount(t)
+  const stream = h.state.streams[0]
+  const timeline = h.owner(h.keys.chatTimelineKey)
+  const startedNow = new Date().toISOString()
+  const event = (sequence, type, payload = {}) => ({
+    stream_sequence: sequence, type, payload, session_id: 's', tab_id: 'one',
+    turn_id: 'in-pane', agent_type: 'claude', created_at: startedNow, redacted: false,
+  })
+  const countFor = () => timeline.turnEventCount(timeline.turns.value.at(-1))
+  stream.events.value = [event(1, 'turn_started', { summary: 'starts here' })]
+  await flush()
+  assert.equal(countFor(), 1, 'the first event is counted')
+  assert.equal(stream.historyDetails.value['in-pane'], undefined, 'and there is no descriptor to count with')
+
+  stream.events.value = [...stream.events.value, event(2, 'tool_call_started', { tool_call_id: 'c1', name: 'Bash', args: {} })]
+  await flush()
+  assert.equal(countFor(), 2, 'the count grows with the stream, from the pane itself')
+
+  // A replay/rescan must not double-count what was already seen.
+  stream.events.value = stream.events.value.map(item => ({ ...item }))
+  await flush()
+  assert.equal(countFor(), 2, 'a rescan of the same events is not a second count')
+})
+
+test('a turn that began while the tab was hidden is backfilled on return', async t => {
+  // H-2.1(a) of the second review: the "joined mid-flight" baseline was fixed at
+  // construction, so a turn that started while the pane was deactivated looked
+  // like one this pane had watched from its first event — and was never read.
+  const h = await mount(t)
+  const stream = h.state.streams[0]
+  const timeline = h.owner(h.keys.chatTimelineKey)
+  const event = (sequence, type, payload = {}) => ({
+    stream_sequence: sequence, type, payload, session_id: 's', tab_id: 'one',
+    turn_id: 'while-away', agent_type: 'claude', created_at: '2026-10-16T10:00:00Z', redacted: false,
+  })
+  const reads = () => h.state.calls.filter(call => call[0] === 'loadHistoryDetail')
+
+  h.selected.value = 'two'
+  await flush()
+  assert.equal(timeline.timelineDisposed, true, 'the pane is hidden')
+  // The backend accepts a whole turn while the reader is elsewhere.
+  stream.events.value = [
+    event(1, 'turn_started', { summary: 'began while hidden' }),
+    event(2, 'text_delta', { text: 'narration from the hidden window' }),
+  ]
+  await flush()
+  assert.deepEqual(reads(), [], 'a hidden pane does not read anything')
+
+  h.selected.value = 'one'
+  await flush()
+  assert.equal(timeline.timelineDisposed, false, 'the pane is visible again')
+  stream.historyDetails.value = {
+    'while-away': {
+      descriptor: { turn_id: 'while-away', first_sequence: 1, last_sequence: 700, event_count: 700 },
+      status: 'idle',
+    },
+  }
+  await flush()
+  assert.deepEqual(
+    reads(),
+    [['loadHistoryDetail', 'while-away']],
+    'returning to the tab backfills the turn that started while it was hidden',
   )
 })
