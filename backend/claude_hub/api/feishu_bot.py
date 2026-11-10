@@ -190,8 +190,13 @@ def _reserve_tab_dispatch(
 
 
 def _interrupt_dot_answer(tab_id: str, queue: _TabDispatchQueue, item: _TabDispatchItem) -> None:
-    """On the Dot Chat a newer message stops the answer in progress: the next
-    batch answers both. Other Chats keep queueing it as a follow-up."""
+    """On Dot, only a newer message in the same channel/topic may stop an answer.
+
+    Senders stay separate for coalescing, but may supersede each other in one
+    topic. Cross-channel messages keep their FIFO place without stopping work;
+    only a later same-channel batch inherits the stopped text. Other Chats keep
+    queueing every message as a follow-up.
+    """
     active = list(queue.active)
     try:
         from .routes.agent_stream.messages import get_inbox
@@ -209,7 +214,7 @@ def _interrupt_dot_answer(tab_id: str, queue: _TabDispatchQueue, item: _TabDispa
     if (
         not active
         or any(one.superseded or not one.native_bridge_started for one in active)
-        or not _message_dispatcher._batch_matches(active[0], item)
+        or not _message_dispatcher._channel_matches(active[0], item)
     ):
         return
     try:
@@ -236,7 +241,7 @@ async def _stop_superseded_answer(
     turn_id: str,
     text: str,
 ) -> bool:
-    """Stop the superseded turn; the next batch carries ``text`` only when it stopped."""
+    """Retain ``text`` for this channel only when the superseded turn stopped."""
     from claude_hub.api import agent_stream as stream_api
 
     stopped = False
@@ -247,7 +252,10 @@ async def _stop_superseded_answer(
     except Exception:
         logger.exception("Feishu Bot could not stop the Dot answer on tab %s", tab_id)
     if stopped:
-        queue.interrupted_text = text
+        queue.interrupted_text[active[0].channel_key] = text
+        queue.interrupted_text.move_to_end(active[0].channel_key)
+        while len(queue.interrupted_text) > _MAX_TAB_DISPATCH_CONTEXTS:
+            queue.interrupted_text.popitem(last=False)
     else:
         # It ended first (or could not be stopped): its answer or failure goes out
         # as usual, and the newer message follows it.
