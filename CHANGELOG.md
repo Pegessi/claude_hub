@@ -7,6 +7,36 @@
 
 ## Released
 
+### feat(feishu): serving modes — one Chat per conversation
+
+- A Bot now declares how it serves people. The default `single` mode is
+  unchanged: one Chat, reached by a private pairing code or by binding one group.
+  `per_channel` gives every conversation its own Chat — a DM from a new person
+  provisions a Chat on first message, and binding a group creates a Chat named
+  after the group. Up to 8 channels per Bot, one p2p channel per sender, and a
+  5 s floor between auto-creations; refusals answer instead of failing silently.
+- Pool state moves to version 4 with a `bindings` list (a v3 file migrates to a
+  one-element list and `mode="single"`); `binding` remains the first-element
+  projection for existing clients. `PATCH /bots/{id}` accepts `mode` under CAS and
+  refuses while any channel is bound (409 `bot_has_active_bindings`).
+- Several conversations already share one Chat today (group members, topics).
+  They now stay isolated: channel identity includes the event's `chat_id` and
+  `thread_id`, coalescing adds the sender so two people in a topic never merge,
+  and interruption stays limited to the same channel so another room can neither
+  stop nor inherit a running answer. The interrupted-text carryover is keyed the
+  same way, so A1 → B1 → A2 neither leaks nor gets lost.
+- Provider text gains `feishu-v3` with the event's `chat_type`, `thread_id` and
+  `chat_name` (name only when the binding really is that room); v1/v2 output is
+  untouched.
+- Frontend: per-Bot serving-mode control with the disabled/409 explanations, a
+  `Current channels N / 8` list in the binding panel where each channel has its
+  own release action (a bulk disconnect would drop all of them), and a group bind
+  that states it creates a new Chat (explaining the cap when it is reached).
+- Hardening from the review: nothing unvalidated can reach the pool file (an
+  over-long group name is truncated and a rejected write is a 400, not a
+  "damaged pool" 503), tab creation is bounded and rolled back on failure, and
+  `per_channel` keeps the legacy group→private fallback out of its routing.
+
 ### fix(chat): authorize out-of-cwd images only via completed image tools and add image retry
 
 - A legitimate image produced by a recognized native image-view tool outside

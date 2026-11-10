@@ -61,6 +61,10 @@ class TabDispatchItem:
         )
 
 
+#: Identity of one sender inside one channel: what a follow-up is compared against.
+DispatchContextKey = tuple[str, str, str, "str | None", str]
+
+
 @dataclass
 class TabDispatchQueue:
     pending: list[TabDispatchItem]
