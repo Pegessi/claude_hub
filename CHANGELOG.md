@@ -7,6 +7,17 @@
 
 ## Released
 
+### feat(antigravity): discover model catalog at runtime via `agyx models`
+
+- Switch Antigravity's `model_catalog` from `static_curated` to `cli_list_models`,
+  probing `agyx models` at runtime (`_probe_antigravity_models`) with a 10-minute
+  positive cache TTL and human-readable display labels (such as
+  `Gemini 4 Carbon (High)`).
+- Parse both tab-delimited pipe rows and space-padded TTY rows in
+  `parse_antigravity_models`, falling back to `_STATIC_MODELS["antigravity"]`
+  (updated with `gemini-4-carbon-high/medium/low`) and a 60-second negative TTL
+  when the CLI probe fails or times out.
+
 ### refactor(storage): consolidate local persistence in SQLite WAL
 
 - Workspace boards, Task reports and Mailbox events, tabs/order, login sessions,
