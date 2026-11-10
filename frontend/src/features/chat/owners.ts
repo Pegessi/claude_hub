@@ -1,5 +1,5 @@
 import { inject, type InjectionKey, type Ref, type ComputedRef } from 'vue'
-import type { TerminalTab, StreamCapabilities } from '@/types'
+import type { AgentRuntimeStatus, TerminalTab, StreamCapabilities } from '@/types'
 import type { useFeishuBotPoolStore } from '@/stores/feishuBotPoolStore'
 import type { useAppStore } from '@/stores/appStore'
 import type { ChatPaneProps } from './controllers/types'
@@ -27,6 +27,20 @@ export interface ChatIdentity {
   feishuBotPoolStore: ReturnType<typeof useFeishuBotPoolStore>
   appStore: ReturnType<typeof useAppStore>
   isPaneActivated: Ref<boolean>
+  /** What the Hub knows about this tab's provider right now, or ``null`` when
+   *  the polled sample is missing or too old to be worth repeating. The live
+   *  footer uses it to say whether a silent turn is still running or already
+   *  dead, instead of guessing. */
+  runtimeStatus: ComputedRef<ChatRuntimeStatus | null>
+}
+
+/** A fresh tab-status sample, reduced to what a footer sentence needs. */
+export interface ChatRuntimeStatus {
+  status: AgentRuntimeStatus
+  /** Backend activity label, e.g. ``Running pytest -q``; null when absent. */
+  activity: string | null
+  /** Age of the sample in ms, so a stale poll never reads as current. */
+  ageMs: number
 }
 
 export const chatIdentityKey: InjectionKey<ChatIdentity> = Symbol('chatIdentity')

@@ -155,30 +155,53 @@ function plural(count: number, singular: string, pluralForm?: string): string {
   return `${count} ${count === 1 ? singular : pluralForm ?? `${singular}s`}`
 }
 
-/** What the footer says beyond "still waiting", when it has anything to add.
+/** What the footer says when nothing has arrived yet, from facts, not guesses.
  *
- *  The first-event window can last a minute or more (the provider is starting a
- *  session, not thinking). A bare clock reads like a stall, so this names the
- *  two facts a reader can act on: the stream is not connected, or nothing has
- *  come back yet — and only after the wait is long enough to be worth saying.
+ *  A silent turn is ambiguous: the provider may be spinning up a session, or the
+ *  request may already be dead. The Hub polls each tab's runtime status every
+ *  five seconds, so the footer can report which of those it is instead of a
+ *  reassuring sentence that means nothing. Only when the sample is missing does
+ *  it fall back to saying the clock is the only information available.
  */
-export function firstResponseHint(
-  elapsedMs: number,
-  connectionState: string,
-): string {
-  if (connectionState !== 'live') {
-    return connectionState === 'failed'
-      ? 'The stream failed. Retry the turn to start it again.'
-      : 'Reconnecting to the stream…'
+export interface FirstResponseFacts {
+  elapsedMs: number
+  connectionState: string
+  /** Fresh tab-status sample, or null when it is missing or stale. */
+  runtime: { status: string; activity: string | null; ageMs: number } | null
+}
+
+export function firstResponseHint(facts: FirstResponseFacts): string {
+  const { elapsedMs, connectionState, runtime } = facts
+  // The transcript cannot arrive over a stream that is not connected, and that
+  // is the reader's actual problem in that case.
+  if (connectionState === 'failed') return 'The event stream failed — stop this turn and send it again.'
+  if (connectionState !== 'live') return 'Reconnecting to the event stream…'
+  switch (runtime?.status) {
+    case 'offline':
+      return 'The provider is offline, so nothing can arrive. Stop this turn and send it again once it is back.'
+    case 'attention':
+      return 'The provider reported a problem. Stop this turn and send it again.'
+    case 'idle':
+      // A turn is open while the provider says it is not doing anything.
+      return 'The provider is idle while this turn is open — it may have dropped the request.'
+    case 'working':
+      if (runtime.activity) return `The provider is ${runtime.activity.toLowerCase()} — nothing written yet.`
+      return elapsedMs >= FIRST_RESPONSE_STUCK_AFTER_MS
+        ? 'The provider is running but has written nothing for a while — usually a queued or stuck session.'
+        : 'The provider is running; it has not written anything yet.'
+    default:
+      if (elapsedMs >= FIRST_RESPONSE_HINT_AFTER_MS) {
+        return 'Nothing has come back yet, and the Hub has no fresh runtime status for this tab.'
+      }
+      return ''
   }
-  if (elapsedMs >= FIRST_RESPONSE_HINT_AFTER_MS) {
-    return 'Nothing has come back yet. A long start is usually the provider spinning up its session.'
-  }
-  return ''
 }
 
 /** Long enough that silence needs an explanation: half a minute. */
 export const FIRST_RESPONSE_HINT_AFTER_MS = 30_000
+
+/** Long enough that a running-but-silent provider is worth calling out. */
+export const FIRST_RESPONSE_STUCK_AFTER_MS = 120_000
 
 /** The quiet second line, split so a failure tints only its own phrase.
  *

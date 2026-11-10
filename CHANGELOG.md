@@ -7,6 +7,16 @@
 
 ## Released
 
+### feat(ui): the silent-start sentence reports what the tab is doing
+
+- The live footer no longer repeats the composer's model label. While nothing
+  has arrived it says what the Hub's own tab-status poll knows: the provider is
+  running (and what it is running, when it reports an activity), idle while the
+  turn is open, offline so nothing can arrive, or the event stream reconnecting
+  — each with the next step when there is one. A polled sample older than a
+  minute is discarded rather than presented as current, and `sampled_at` is
+  read as UTC so a non-UTC client cannot keep an eight-hour-old sample alive.
+
 ### fix(ui): a choice card ends its turn instead of topping the answer
 
 - An agent usually asks before it explains, so arrival order put the question
