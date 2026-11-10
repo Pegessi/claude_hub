@@ -7,6 +7,16 @@
 
 ## Released
 
+### feat(ui): backfill the newest turn's detail on activation
+
+- A pane that joined a turn mid-flight never reduced that turn's earlier events,
+  so the turn rendered as an empty fold with a footer that had no step to name.
+  Activating the pane now reads the newest turn's detail once, which restores
+  its parts, and leaves the fold closed: the reader gets content, not an
+  expanded transcript. Turns the live stream is already reducing are left
+  alone, and one read per turn keeps a growing descriptor from being re-fetched
+  on every batch.
+
 ### fix(ui): put the volume of work back on the live footer
 
 - A long working turn showed a stopwatch and nothing about how much had

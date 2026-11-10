@@ -356,6 +356,9 @@ export function useChatTimeline(deps: Dependencies) {
     timelineVisit++
     visibleHistoryStart.value = null
     resetActivation()
+    // Switching to the tab is what the reader asked for: backfill its live turn
+    // once the reactivation has settled.
+    void nextTick(() => void backfillNewestTurn())
   }
 
   function deactivateViewport() {
@@ -366,10 +369,53 @@ export function useChatTimeline(deps: Dependencies) {
     cancelScheduledTimelineScroll()
   }
 
+  /** Turns whose detail this pane has already asked for on its own behalf.
+   *
+   *  A descriptor keeps changing while a turn streams, and re-reading a growing
+   *  turn on every batch would be quadratic. One read per turn is enough: from
+   *  then on the live stream appends to the parts it produced. */
+  const backfilledTurns = new Set<string>()
+
+  /** Read the newest turn's detail so a turn the pane joined mid-flight has
+   *  parts, without opening its fold.
+   *
+   *  Events that arrived before the pane existed are not reduced into anything
+   *  (there was no turn to reduce them into), so such a turn renders as a fold
+   *  with nothing inside and a footer that has no step to name. The detail is
+   *  the record of those events, so one read restores them — and the fold stays
+   *  collapsed, because the reader asked for content, not for an expanded
+   *  transcript.
+   *
+   *  Scoped to the newest turn on purpose: it is the one whose state the reader
+   *  is looking at, and backfilling every historical turn would read thousands
+   *  of events for transcripts nobody has opened. */
+  async function backfillNewestTurn(): Promise<void> {
+    if (timelineDisposed) return
+    const turn = turns.value[turns.value.length - 1]
+    const turnId = turn?.turnId
+    if (!turnId) return
+    if (turn.parts.length > 0) return
+    const detail = deps.historyDetails.value[turnId]
+    if (!detail || detail.status === 'loading' || detail.status === 'loaded') return
+    if (backfilledTurns.has(turnId)) return
+    backfilledTurns.add(turnId)
+    const visit = timelineVisit
+    await deps.loadHistoryDetail(turnId)
+    if (timelineDisposed || visit !== timelineVisit) return
+  }
+
   function registerWatchers() {
     watch(
       () => [deps.events.value.length, deps.pendingTurns.value.length],
       () => requestLatestAnchor(),
+    )
+
+    // A descriptor for the newest turn can arrive after activation (the pane
+    // polls it with the stream), so watch it too. ``backfillNewestTurn`` keeps
+    // its own one-per-turn guard, which is what makes a per-batch watcher safe.
+    watch(
+      () => [turns.value.length, Object.keys(deps.historyDetails.value).length, deps.historyDetailRevision.value],
+      () => void backfillNewestTurn(),
     )
 
     // Activation gate: when cached or authoritative history becomes renderable,
