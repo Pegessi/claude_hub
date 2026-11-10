@@ -246,11 +246,16 @@ async def capabilities_for(
     from the transport. Transcript discovery is only used for TERMINAL
     sessions and Cursor's ``terminal_transcript`` fallback.
 
-    Fail-closed: if the native transport could not be created, return
-    ``structured=False`` rather than silently falling back to the transcript.
+    Structured history remains available when the live transport fails. Live
+    readiness is reported separately through ``unavailable_reason``.
     """
 
     manager = manager or get_default_manager()
+
+    def unavailable(reason: str) -> StreamCapabilities:
+        return StreamCapabilities(
+            structured=True, unavailable_reason=reason, metadata_cacheable=False
+        )
 
     if is_chat_native(session):
         # Ensure the tailer (and its native transport) exist. ``ensure_started``
@@ -258,33 +263,46 @@ async def capabilities_for(
         # have been sent.
         try:
             tailer = await manager.ensure_started(session)
-        except (ValueError, StructuredSourceUnavailable):
-            return StreamCapabilities()
+        except (ValueError, StructuredSourceUnavailable) as exc:
+            return unavailable(str(exc) or "Live provider unavailable")
         if tailer.native_error is not None:
-            # Native transport creation failed — fail closed.
-            return StreamCapabilities(structured=False)
+            return unavailable(tailer.native_error)
         transport = tailer.native_transport
         if transport is None:
-            return StreamCapabilities(structured=False)
+            return unavailable("Live provider transport unavailable")
         cache = cache_preparation and session.agent_type != AgentType.MASO
-        caps = await _capabilities_from_transport(
-            session,
-            transport,
-            cache_preparation=cache,
-            refresh=refresh,
-        )
+        try:
+            caps = await _capabilities_from_transport(
+                session,
+                transport,
+                cache_preparation=cache,
+                refresh=refresh,
+            )
+        except StructuredSourceUnavailable as exc:
+            return unavailable(str(exc) or "Live provider unavailable")
         if manager.hard_failed(session.id):
-            caps = caps.model_copy(update={"structured": False})
+            return unavailable(tailer.last_error or "Live provider unavailable")
+        if not caps.structured:
+            return unavailable(caps.unavailable_reason or "Live provider unavailable")
         return caps
 
     # TERMINAL sessions (and Cursor terminal_transcript fallback): use the
     # adapter's transcript-based discovery.
     adapter = adapter_for_session(session)
-    if adapter is None:
-        return StreamCapabilities()
-    caps = adapter.capabilities(session)
-    if manager.hard_failed(session.id):
-        caps = caps.model_copy(update={"structured": False})
+    caps = adapter.capabilities(session) if adapter is not None else StreamCapabilities()
+    failed = manager.hard_failed(session.id)
+    if failed or not caps.structured:
+        store = manager.get_store(session.workspace_id, session.id)
+        has_history = bool((await store.read_since(-1, 1)).events)
+        if has_history or failed:
+            return caps.model_copy(
+                update={
+                    "structured": has_history,
+                    "unavailable_reason": caps.unavailable_reason
+                    or "Structured live source unavailable",
+                    "metadata_cacheable": False,
+                }
+            )
     return caps
 
 

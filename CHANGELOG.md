@@ -7,6 +7,16 @@
 
 ## Released
 
+### fix(chat): retain persisted history when the live provider is unavailable
+
+- Native Chat retains its structured view and exposes live-provider failures
+  through `unavailable_reason`; persisted history reads no longer require a
+  successful provider handshake, including exhausted history pages.
+- Stream appends serialize across Store instances and cooperating processes,
+  recover sequence allocation after another writer, complete short writes and
+  roll back failed partial records before allowing the next append.
+
+
 ### feat(feishu): serving modes — one Chat per conversation
 
 - A Bot now declares how it serves people. The default `single` mode is
