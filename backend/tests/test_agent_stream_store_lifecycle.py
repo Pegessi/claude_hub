@@ -296,7 +296,7 @@ async def test_separate_store_instances_serialize_sequences() -> None:
 
 
 @pytest.mark.asyncio
-async def test_store_appends_across_processes(tmp_path: Path) -> None:
+async def test_store_appends_across_processes() -> None:
     import os
     import sys
 
@@ -316,12 +316,6 @@ async def run():
 asyncio.run(run())
 """
     state_root = store.path.parents[2]
-    env = {
-        **os.environ,
-        "CLAUDE_HUB_HOME": str(state_root.parent),
-        "CLAUDE_HUB_STATE_ROOT": str(state_root),
-        "CLAUDE_HUB_TMUX_SOCKET": "test-store-appends-multiprocess",
-    }
     processes = await asyncio.gather(
         *(
             asyncio.create_subprocess_exec(
@@ -330,7 +324,7 @@ asyncio.run(run())
                 script,
                 str(state_root),
                 event().model_dump_json(),
-                env=env,
+                env=dict(os.environ),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -342,3 +336,46 @@ asyncio.run(run())
         assert process.returncode == 0, error.decode()
     rows = (await store.read_since(-1, 100, compact=False)).events
     assert [row.stream_sequence for row in rows] == list(range(60))
+
+
+@pytest.mark.asyncio
+async def test_latest_unfinished_turn_tolerates_quarantined_legacy_corruption_while_inspect_fails_closed() -> (
+    None
+):
+    store = AgentStreamStore("workspace", "worker-1")
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    started = AgentStreamEvent(
+        session_id="worker-1",
+        tab_id="old-tab",
+        agent_type=AgentType.CLAUDE,
+        type=AgentStreamEventType.TURN_STARTED,
+        turn_id="turn-valid-orphan",
+        stream_sequence=0,
+        created_at=datetime.now(timezone.utc),
+        payload={"summary": "hello"},
+    )
+    store.path.write_text("not-valid-json-line\n" + started.model_dump_json() + "\n")
+    page = await store.read_since(-1, 10)
+    assert [item.turn_id for item in page.events] == ["turn-valid-orphan"]
+    with pytest.raises(RuntimeError, match="cannot inspect corrupt agent stream"):
+        await store.inspect_turn_lifecycle("turn-valid-orphan")
+    unfinished = await store.latest_unfinished_turn()
+    assert unfinished is not None
+    assert unfinished.turn_id == "turn-valid-orphan"
+
+
+@pytest.mark.asyncio
+async def test_clear_unimported_unreadable_stream_succeeds_without_reading_source() -> None:
+    store = AgentStreamStore("workspace", "worker-1")
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(event().model_dump_json() + "\n")
+    store.path.chmod(0o000)
+    try:
+        await store.clear()
+    finally:
+        if store.path.exists():
+            store.path.chmod(0o600)
+    assert not store.path.exists()
+    # Recreating a stale legacy file after clear must not resurrect deleted events.
+    store.path.write_text(event().model_dump_json() + "\n")
+    assert (await store.read_since(-1, 10)).events == []

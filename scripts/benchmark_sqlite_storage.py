@@ -20,16 +20,6 @@ from itertools import zip_longest
 from pathlib import Path
 from typing import Any, Callable
 
-from claude_hub.models import AgentStreamEvent
-from claude_hub.services.agent_stream.store import AgentStreamStore
-from claude_hub.services.local_storage import (
-    connection,
-    read_document,
-    storage_location,
-    write_document,
-)
-from claude_hub.services.storage_maintenance import archive_sources, legacy_sources
-
 
 def elapsed(operation: Callable[[], Any], repeats: int = 7) -> float:
     values = []
@@ -52,6 +42,18 @@ def main() -> None:
     destination = args.destination.resolve()
     if not destination.is_relative_to(Path("/tmp")) or destination.is_relative_to(source):
         parser.error("destination must be below /tmp outside source")
+    os.environ["CLAUDE_HUB_HOME"] = str(destination)
+    os.environ["CLAUDE_HUB_STATE_ROOT"] = str(destination / "workspaces")
+    from claude_hub.models import AgentStreamEvent
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+    from claude_hub.services.local_storage import (
+        connection,
+        read_document,
+        storage_location,
+        write_document,
+    )
+    from claude_hub.services.storage_maintenance import archive_sources, legacy_sources
+
     manifest_path = destination / "snapshot-manifest.json"
     copied = []
     if args.reuse_copy:

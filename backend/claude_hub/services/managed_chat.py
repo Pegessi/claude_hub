@@ -33,6 +33,7 @@ from .agent_stream.fork_seed import seed_sidecar_path
 from .agent_stream.native import _detect_image_mime
 from .agent_stream.store import AgentStreamStore
 from .agent_stream.tailer import NativeRuntimeSnapshot, TailerManager
+from .local_storage import document_exists
 from .ttyd_manager import ttyd_manager
 
 DeliveryState = Literal["not_sent", "sending", "accepted", "uncertain"]
@@ -76,11 +77,12 @@ def has_residual_state(workspace_id: str, session_id: str) -> bool:
     store = AgentStreamStore(workspace_id, session_id)
     paths = (
         *_delivery_paths(workspace_id, session_id),
-        store.cursor_path,
         seed_sidecar_path(workspace_id, session_id),
     )
     return (
         store.has_events()
+        or document_exists(store.cursor_path)
+        or document_exists(store.path.with_name(store.path.name + ".edit-bak"))
         or any(path.exists() for path in paths)
         or AgentStreamAttachmentStore(
             workspace_id,

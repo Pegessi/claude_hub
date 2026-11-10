@@ -24,9 +24,11 @@ def test_auth_storage_import_and_create_use_isolated_runtime(tmp_path):
     )
     environment.pop("CLAUDE_HUB_ALLOW_LIVE_RUNTIME", None)
     code = """
+import os
 from pathlib import Path
 from claude_hub.auth.session import SESSIONS_FILE, _load_sessions, create_session
 from claude_hub.models import User
+from claude_hub.services import runtime_isolation
 from claude_hub.services.runtime_isolation import resolve_runtime_home
 from claude_hub.services.local_storage import storage_location
 assert SESSIONS_FILE == resolve_runtime_home() / "sessions.json"
@@ -35,6 +37,10 @@ created = create_session(User(open_id="test", name="Test", email=""), "test-toke
 assert created.session_id in _load_sessions()
 assert (resolve_runtime_home() / "storage.sqlite3").exists()
 assert not (Path.home() / ".claude_hub" / "storage.sqlite3").exists()
+linked_repo = Path(os.environ["CLAUDE_HUB_HOME"]) / "linked-worktree-probe"
+linked_repo.mkdir(parents=True, exist_ok=True)
+(linked_repo / ".git").write_text("gitdir: /tmp/fake-gitdir\\n")
+runtime_isolation.infer_package_repo_root = lambda: linked_repo
 try:
     storage_location(Path.home() / ".claude_hub" / "sessions.json")
 except RuntimeError:

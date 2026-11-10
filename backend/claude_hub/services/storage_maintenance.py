@@ -40,7 +40,10 @@ def legacy_sources(root: Path, *, workspace_root: Path | None = None) -> list[Pa
     documents += [workspace_root / "index.json", workspace_root / "scheduled_tasks.json"]
     documents += sorted(workspace_root.glob("*/state.json"))
     documents += sorted(workspace_root.glob("*/agent_streams/*.cursor.json"))
-    paths = documents + [path.with_name(path.name + ".bak") for path in documents]
+    backups = [path.with_name(path.name + ".bak") for path in documents]
+    backups += sorted(workspace_root.glob("*/state.json.bak"))
+    backups += sorted(workspace_root.glob("*/agent_streams/*.cursor.json.bak"))
+    paths = list(dict.fromkeys([*documents, *backups]))
     paths += sorted(workspace_root.glob("*/agent_streams/*.jsonl"))
     return [path for path in paths if path.is_file()]
 

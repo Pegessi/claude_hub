@@ -1093,3 +1093,18 @@ def test_nullable_epoch_is_not_epoch_zero(isolated_bridge: _FakeManager) -> None
         ]
     )
     assert managed_chat._durable_turn_state(session) == "terminal"
+
+
+def test_has_residual_state_detects_sqlite_cursor_and_clears_on_delete(
+    isolated_bridge: _FakeManager,
+) -> None:
+    from claude_hub.services.local_storage import delete_document, write_document
+
+    session = _session()
+    store = AgentStreamStore(session.workspace_id, session.id)
+    assert managed_chat.has_residual_state(session.workspace_id, session.id) is False
+    write_document(store.cursor_path, {"offset": 42, "path": "/tmp/transcript.jsonl"})
+    assert not store.cursor_path.exists()
+    assert managed_chat.has_residual_state(session.workspace_id, session.id) is True
+    delete_document(store.cursor_path)
+    assert managed_chat.has_residual_state(session.workspace_id, session.id) is False
