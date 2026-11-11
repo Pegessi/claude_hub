@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import httpx
 import pytest
@@ -23,6 +22,7 @@ from claude_hub.services.feishu_bot_pool import (
 )
 from claude_hub.services.feishu_bot_websocket import message_event_from_sdk
 from claude_hub.services.feishu_message_format import build_feishu_question_card_payload
+from claude_hub.services.local_storage import storage_location
 
 
 def make_pool(path: Path) -> tuple[FeishuBotPoolStore, str]:
@@ -78,7 +78,7 @@ def test_callbacks_default_off_provision_rotation_and_restart(tmp_path: Path) ->
     assert "secret" not in repr(current.config)
     assert not pool.is_current(old, {})
     assert pool.snapshot({}).get(bot).binding == binding  # type: ignore[union-attr]
-    assert pool.path.stat().st_mode & 0o777 == 0o600
+    assert storage_location(pool.path)[0].stat().st_mode & 0o777 == 0o600
     restarted = FeishuBotPoolStore(pool.path, pool.legacy_path).effective(bot, {})
     assert restarted == current
     with pytest.raises(FeishuBotRevisionConflict):

@@ -23,6 +23,7 @@ from claude_hub.services.chat_message_inbox import (
     InboxEvidence,
     InboxTarget,
 )
+from claude_hub.services.local_storage import read_document, write_document
 
 
 class Harness:
@@ -191,14 +192,17 @@ async def test_answer_backpressure_does_not_claim_question(tmp_path: Path) -> No
     assert not h.inbox.messages
 
 
-def test_v1_migration_preserves_exact_backup_and_is_idempotent(tmp_path: Path) -> None:
+def test_v1_migration_preserves_exact_source_and_is_idempotent(tmp_path: Path) -> None:
     path = tmp_path / "inbox.json"
     original = '{"version":1,"messages":[],"conversations":{},"epochs":{}}'
     path.write_text(original)
     h = Harness(path)
-    assert json.loads(path.read_text())["version"] == 2
-    backup = path.with_suffix(".v1-backup.json")
-    assert backup.read_text() == original and backup.stat().st_mode & 0o777 == 0o600
+    assert read_document(path)["version"] == 2
+    backup = path  # The unchanged legacy source is the migration recovery artifact.
+    assert (
+        backup.read_text() == original
+        and (tmp_path / "storage.sqlite3").stat().st_mode & 0o777 == 0o600
+    )
     Harness(path)
     assert backup.read_text() == original and not h.inbox.messages
 
@@ -233,7 +237,7 @@ def test_corrupt_question_state_fails_closed_without_overwriting(
     path = tmp_path / "inbox.json"
     h = Harness(path)
     q = h.question()
-    data = json.loads(path.read_text())
+    data = read_document(path)
     if state == "unsupported-version":
         data["version"] = 99
     elif state == "duplicate-question":
@@ -241,10 +245,10 @@ def test_corrupt_question_state_fails_closed_without_overwriting(
     else:
         data["questions"][0].update(state="claimed", answer_id="missing-answer")
     original = json.dumps(data)
-    path.write_text(original)
+    write_document(path, data)
     with pytest.raises((RuntimeError, ValueError)):
         Harness(path)
-    assert path.read_text() == original
+    assert read_document(path) == json.loads(original)
 
 
 @pytest.mark.parametrize("call", ["", " "], ids=["empty", "blank"])

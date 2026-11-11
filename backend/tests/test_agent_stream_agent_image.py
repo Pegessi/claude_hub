@@ -128,14 +128,16 @@ def _write_image_reference(
 ) -> None:
     from claude_hub.services.agent_stream.store import AgentStreamStore
 
-    path = AgentStreamStore("terminal-tabs", f"terminal-tab-{tab_id}").path
-    path.parent.mkdir(parents=True, exist_ok=True)
+    store = AgentStreamStore("terminal-tabs", f"terminal-tab-{tab_id}")
     chunks = [text[: len(text) // 2], text[len(text) // 2 :]] if split else [text]
     events = [
         {
             "session_id": f"terminal-tab-{tab_id}",
             "tab_id": tab_id,
             "type": kind,
+            "agent_type": "claude",
+            "created_at": datetime.now(timezone.utc),
+            "stream_sequence": index,
             "turn_id": "turn-a",
             "message_id": f"turn-a:{role}",
             "run_epoch": 1,
@@ -145,9 +147,9 @@ def _write_image_reference(
                 "assistant_text" if kind == "turn_completed" else "text": chunk,
             },
         }
-        for chunk in chunks
+        for index, chunk in enumerate(chunks)
     ]
-    path.write_text("\n".join(json.dumps(event) for event in events) + "\n")
+    store._replace_rows([AgentStreamEvent.model_validate(event) for event in events])
 
 
 @pytest.mark.parametrize(
@@ -257,8 +259,7 @@ def _write_image_tool(path: Path, name: str = "Read", *, role: str = "assistant"
         created_at=datetime.now(timezone.utc),
     )
     store = AgentStreamStore("terminal-tabs", event.session_id)
-    store.path.parent.mkdir(parents=True, exist_ok=True)
-    store.path.write_text(event.model_dump_json() + "\n")
+    store._replace_rows([event])
     return event
 
 
@@ -1012,10 +1013,7 @@ def _write_tool_lifecycle(
             )
         )
     store = AgentStreamStore("terminal-tabs", f"terminal-tab-{tab_id}")
-    store.path.parent.mkdir(parents=True, exist_ok=True)
-    with store.path.open("w") as handle:
-        for event in events:
-            handle.write(event.model_dump_json() + "\n")
+    store._replace_rows(events)
 
 
 async def test_completed_image_tool_grants_out_of_cwd_non_temp_image(
@@ -1352,10 +1350,7 @@ def _write_lifecycle_full(
             )
         )
     store = AgentStreamStore("terminal-tabs", f"terminal-tab-{tab_id}")
-    store.path.parent.mkdir(parents=True, exist_ok=True)
-    with store.path.open("w") as handle:
-        for event in events:
-            handle.write(event.model_dump_json() + "\n")
+    store._replace_rows(events)
 
 
 async def test_b1_codex_transcript_hardcoded_completed_view_image_is_denied(
@@ -1488,7 +1483,7 @@ async def test_b4_truncated_grant_revokes_retained_bytes_and_grant_uses_no_store
     # Simulate stream truncation that removes the granting turn, then delete
     # the source so only the retained LRU could serve it.
     stream = AgentStreamStore("terminal-tabs", "terminal-tab-tab-a")
-    stream.path.write_text("")
+    stream._replace_rows([])
     evidence.unlink()
     second = await _get_image(client, "tab-a", str(evidence))
     assert second.status_code == 404

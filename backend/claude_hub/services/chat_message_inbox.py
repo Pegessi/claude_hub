@@ -11,7 +11,6 @@ import hashlib
 import json
 import logging
 import math
-import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -29,6 +28,7 @@ from ..models.chat_message import (
     QuestionAnswerCreate,
     utc_now,
 )
+from .local_storage import document_exists, read_document, write_document
 
 logger = logging.getLogger(__name__)
 
@@ -126,18 +126,10 @@ class ChatMessageInbox:
         self.redrain_seconds = 3.0
         self._closing = False
         self._committed = ""
-        if path.exists():
-            original = path.read_text(encoding="utf-8")
+        if document_exists(path):
+            original = json.dumps(read_document(path))
             self._restore(original)
             if json.loads(original).get("version") == 1:
-                # Never overwrite the only pre-migration evidence.
-                backup = path.with_suffix(".v1-backup.json")
-                if not backup.exists():
-                    with backup.open("x", encoding="utf-8") as stream:
-                        os.chmod(backup, 0o600)
-                        stream.write(original)
-                        stream.flush()
-                        os.fsync(stream.fileno())
                 self._committed = self._dump()
                 self._save()
         self._committed = self._dump()
@@ -212,21 +204,9 @@ class ChatMessageInbox:
     def _save(self) -> None:
         payload = self._dump()
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_suffix(".tmp")
-            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                stream.write(payload)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self.path)
-            directory = os.open(self.path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+            write_document(self.path, json.loads(payload))
         except BaseException:
-            # A post-replace failure may have committed. Fail closed until
+            # A failed commit may leave outcome uncertain. Fail closed until
             # process recovery, rather than ack/retry from divergent memory.
             self._closing = True
             self._restore(self._committed)

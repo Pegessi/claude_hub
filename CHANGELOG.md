@@ -7,6 +7,63 @@
 
 ## Released
 
+### feat(chat): list provider-native sub-agents in the Agents dock and read one in a window
+
+- The pane-chrome Agents pill now lists provider-native children (Claude
+  `Agent`, Cursor `Task`, TraeX `spawnAgent`) beside Hub children
+  (`claude-hub agent run`), using the same rail / popover / phone-sheet reveal,
+  the same Active/earlier grouping and the same dot states. Rows are projected
+  from each parent turn's `subagents` part (newest first, bounded at 30) with a
+  per-turn memo keyed on the reducer's render revision, so a folded turn still
+  lists its children and a stream batch only reprojects changed turns.
+- A native child has no Chat tab, so its row offers `View` and opens a
+  read-only window instead of jumping: a gutter panel on desktop and a bottom
+  sheet on phones, with `aria-modal`, a Tab trap, Esc (from inside and from
+  `<body>`), a backdrop tap, a body scroll lock and focus back on the pill.
+  The window renders `ChatSubthreadBody`, the same rows the inline region shows,
+  so the two cannot drift, and it offers `Show in transcript`, which widens the
+  rendered tail window, loads a lazy turn's execution detail, expands the fold,
+  opens every collapsed `<details>` on the way and scrolls to the child.
+- Hub child behaviour is unchanged (jump, archive restore, workspace
+  attribution). Backend, protocol and `/api/subagents` are untouched; a
+  historical turn's children still appear only once that turn's execution detail
+  has been requested, because the backend keeps child events behind it.
+- Validation: typecheck, lint, bundle, the whole frontend unit suite, a new
+  projection suite, a new mocked browser scenario
+  (`browser_native_subagent_dock.py`) plus the existing inline-region and dock
+  scenarios re-run against the same build.
+
+### feat(antigravity): discover model catalog at runtime via `agyx models`
+
+- Switch Antigravity's `model_catalog` from `static_curated` to `cli_list_models`,
+  probing `agyx models` at runtime (`_probe_antigravity_models`) with a 10-minute
+  positive cache TTL and human-readable display labels (such as
+  `Gemini 4 Carbon (High)`).
+- Parse both tab-delimited pipe rows and space-padded TTY rows in
+  `parse_antigravity_models`, falling back to `_STATIC_MODELS["antigravity"]`
+  (updated with `gemini-4-carbon-high/medium/low`) and a 60-second negative TTL
+  when the CLI probe fails or times out.
+
+### refactor(storage): consolidate local persistence in SQLite WAL
+
+- Workspace boards, Task reports and Mailbox events, tabs/order, login sessions,
+  Chat delivery inbox, Goals, subagents and Feishu state share one runtime SQLite
+  database. Transactions update changed collection rows without rewriting JSON
+  snapshots and rotating complete backups on every mutation.
+- Structured streams use indexed, losslessly compressed events with per-stream
+  dictionaries. History, lifecycle receipts, image/attachment authorization and
+  feedback evidence read the same store; obsolete file indexes/caches are removed.
+- Edit-resend cleans Hub SQLite snapshots through their owning store; provider
+  transcript backups remain file-only and never create a Hub database.
+- Existing JSON/JSONL imports automatically and transactionally on first use.
+  Original sources remain recovery evidence, malformed stream rows are retained,
+  non-destructive bulk pre-import and delta catch-up (`--pre-import` /
+  `--sync-legacy`) can populate `storage.sqlite3` ahead of cutover, and offline
+  verified gzip archival is available after import. No production cutover is
+  performed by installing the branch alone.
+- See [migration and benchmark evidence](docs/working-logs/2026-11-10-sqlite-storage.md)
+  for measured costs, recovery, validation and rollout boundaries.
+
 ### fix(chat): retain persisted history when the live provider is unavailable
 
 - Native Chat retains its structured view and exposes live-provider failures
@@ -15,7 +72,6 @@
 - Stream appends serialize across Store instances and cooperating processes,
   recover sequence allocation after another writer, complete short writes and
   roll back failed partial records before allowing the next append.
-
 
 ### feat(feishu): serving modes — one Chat per conversation
 

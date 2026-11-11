@@ -1,6 +1,5 @@
 """Select actual Markdown links from a Chat's canonical assistant text."""
 
-import json
 import os
 import re
 from html.parser import HTMLParser
@@ -108,42 +107,41 @@ def referenced_temporary_markdown(session: ManagedSession, raw_path: str) -> Opt
         return None
     buffers: dict[tuple[str, str, str], Optional[str]] = {}
     try:
-        with AgentStreamStore(session.workspace_id, session.id).path.open() as events:
-            for line in events:
-                try:
-                    event = json.loads(line)
-                except (ValueError, TypeError):
+        events = AgentStreamStore(session.workspace_id, session.id).iter_events()
+        for stored_event in events:
+            event = stored_event.model_dump(mode="json")
+            if not isinstance(event, dict) or event.get("session_id") != session.id:
+                continue
+            payload = event.get("payload")
+            if not isinstance(payload, dict) or payload.get("role", "assistant") != "assistant":
+                continue
+            message_id = str(event.get("message_id") or "")
+            if message_id.endswith(":user"):
+                continue
+            kind = event.get("type")
+            if kind == "turn_completed":
+                text = payload.get("assistant_text")
+                if isinstance(text, str) and _references_path(text, real, session.workspace_path):
+                    return real
+            elif kind == "text_delta":
+                text = payload.get("text")
+                if not isinstance(text, str):
                     continue
-                if not isinstance(event, dict) or event.get("session_id") != session.id:
-                    continue
-                payload = event.get("payload")
-                if not isinstance(payload, dict) or payload.get("role", "assistant") != "assistant":
-                    continue
-                message_id = str(event.get("message_id") or "")
-                if message_id.endswith(":user"):
-                    continue
-                kind = event.get("type")
-                if kind == "turn_completed":
-                    text = payload.get("assistant_text")
-                    if isinstance(text, str) and _references_path(
-                        text, real, session.workspace_path
-                    ):
-                        return real
-                elif kind == "text_delta":
-                    text = payload.get("text")
-                    if not isinstance(text, str):
+                key = (
+                    str(event.get("run_epoch")),
+                    str(event.get("turn_id")),
+                    message_id,
+                )
+                previous = buffers.get(key, "")
+                if payload.get("snapshot") is not True:
+                    if previous is None:
                         continue
-                    key = (str(event.get("run_epoch")), str(event.get("turn_id")), message_id)
-                    previous = buffers.get(key, "")
-                    if payload.get("snapshot") is not True:
-                        if previous is None:
-                            continue
-                        text = previous + text
-                    buffers[key] = text if len(text) <= _MAX_MESSAGE_CHARS else None
-                    if len(buffers) > 64:
-                        old = buffers.pop(next(iter(buffers)))
-                        if old is not None and _references_path(old, real, session.workspace_path):
-                            return real
+                    text = previous + text
+                buffers[key] = text if len(text) <= _MAX_MESSAGE_CHARS else None
+                if len(buffers) > 64:
+                    old = buffers.pop(next(iter(buffers)))
+                    if old is not None and _references_path(old, real, session.workspace_path):
+                        return real
     except (OSError, UnicodeError):
         return None
     return (

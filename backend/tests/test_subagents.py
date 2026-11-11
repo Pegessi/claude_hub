@@ -17,6 +17,7 @@ from claude_hub.api import subagents as subagents_api
 from claude_hub.auth.dependencies import get_current_user
 from claude_hub.models import AgentType, SessionKind, TerminalTab, User
 from claude_hub.services import subagents as subagents_service
+from claude_hub.services.local_storage import read_document, write_document
 from claude_hub.services.subagents import (
     SUBAGENT_PREAMBLE,
     SubagentInteractionRequired,
@@ -198,7 +199,7 @@ async def test_blocking_result_returns_final_answer_and_archives(env) -> None:
     assert record.close_reason == "turn completed"
     assert chats.tabs[started["tab_id"]].archived is True
     # The record survives on disk for later `agent result` calls.
-    stored = json.loads((tmp_path / "subagents.json").read_text())
+    stored = read_document((tmp_path / "subagents.json"))
     turn = stored["subagents"][started["subagent_id"]]["turns"][0]
     assert turn["status"] == "completed" and turn["final_text"] == "ANSWER: summarize X"
 
@@ -407,9 +408,9 @@ async def test_restart_fails_inflight_turns_and_closes(tmp_path: Path) -> None:
             }
         )
     )
-    stored = json.loads(path.read_text())
+    stored = read_document(path)
     stored["subagents"][record.id]["turns"][0]["status"] = "running"
-    path.write_text(json.dumps(stored))
+    write_document(path, stored)
     # An orphan tab from a crash between tab creation and record update.
     chats.add_tab("orphan", cwd=str(tmp_path), subagent_id="sa-unknown")
     second = SubagentService(path, chats.runtime())
@@ -724,7 +725,7 @@ async def test_stop_persists_state_one_last_time(env) -> None:
     record = service.get(started["subagent_id"])
     record.name = "renamed in memory only"
     await service.stop()
-    stored = json.loads((tmp_path / "subagents.json").read_text())
+    stored = read_document((tmp_path / "subagents.json"))
     assert stored["subagents"][record.id]["name"] == "renamed in memory only"
 
 
@@ -740,7 +741,7 @@ async def test_create_in_flight_during_shutdown_spawns_nothing(env) -> None:
     assert chats.tabs["sub-tab-1"].archived is True
     assert chats.sent == [] and service._background == set()
     assert service.list_subagents(include_closed=True) == []
-    stored = json.loads((tmp_path / "subagents.json").read_text())
+    stored = read_document((tmp_path / "subagents.json"))
     assert stored["subagents"] == {}
 
 
@@ -835,7 +836,7 @@ async def test_concurrent_saves_land_in_call_order(env, monkeypatch) -> None:
         await service._save()
 
     await asyncio.gather(*(rename(n) for n in names))
-    stored = json.loads((tmp_path / "subagents.json").read_text())
+    stored = read_document((tmp_path / "subagents.json"))
     assert stored["subagents"][record.id]["name"] == "d"
 
 
@@ -1140,9 +1141,9 @@ async def test_reconciliation_archives_orphans_but_keeps_detached_tabs(tmp_path:
     chats.add_tab("stale-owner", cwd=str(tmp_path), subagent_id="sa-real")
     path = tmp_path / "subagents.json"
     _seed_record(path, tmp_path)
-    stored = json.loads(path.read_text())
+    stored = read_document(path)
     stored["subagents"]["sa-real"]["tab_id"] = "detached"
-    path.write_text(json.dumps(stored))
+    write_document(path, stored)
     service = SubagentService(path, chats.runtime(), archive_grace_seconds=0)
     await service.start()
     assert chats.tabs["orphan"].archived is True

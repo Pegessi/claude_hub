@@ -50,6 +50,11 @@ from claude_hub.models.schemas import (
 )
 from claude_hub.services.agent_stream.local_images import ImageReferenceBuffer
 from claude_hub.services.agent_stream.tailer import SessionTailer
+from claude_hub.services.local_storage import (
+    connection,
+    read_document,
+    storage_location,
+)
 from claude_hub.services.workspace_manager import WorkspaceManager
 from claude_hub.services.workspace_manager._dispatch import _DispatchMixin
 from claude_hub.services.workspace_manager._reports import _ReportsMixin
@@ -57,6 +62,23 @@ from claude_hub.services.workspace_manager._task_execution import (
     TaskExecutionConflict,
     TaskReporterForbidden,
 )
+
+
+def _read_persisted_bytes(path: Path) -> bytes:
+    if path.suffix != ".json":
+        return path.read_bytes()
+    return json.dumps(read_document(path), indent=2).encode()
+
+
+def _seed_legacy_json(path: Path, text: str) -> None:
+    """Remove test-created SQLite authority to exercise a first legacy import."""
+    with connection(path) as db, db:
+        _, name = storage_location(path)
+        db.execute("DELETE FROM document_rows WHERE name=?", (name,))
+        db.execute("DELETE FROM documents WHERE name=?", (name,))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
 
 _wm = import_module("claude_hub.services.workspace_manager")
 _api = import_module("claude_hub.api.workspaces")
@@ -154,7 +176,7 @@ async def test_registration_is_scoped_idempotent_and_survives_restart(manager, w
     for changed in ({"title": "different"}, {"reporter_key": NEW_KEY}):
         with pytest.raises(TaskExecutionConflict, match="request_key_conflict"):
             await manager.register_task(workspace.id, creation(**changed), "actor-a")
-    state_text = manager._workspace_state_file(workspace.id).read_text()
+    state_text = _read_persisted_bytes(manager._workspace_state_file(workspace.id)).decode()
     assert KEY not in state_text
     assert hashlib.sha256(KEY.encode()).hexdigest() in state_text
     assert "reporter_key_hash" not in task.model_dump(mode="json")
@@ -260,7 +282,7 @@ async def test_restarted_initiator_epoch_rejects_old_writer(manager, workspace):
 @pytest.mark.asyncio
 async def test_save_failure_rolls_back_task_and_event(manager, workspace, monkeypatch):
     task = await register(manager, workspace)
-    before = manager._workspace_state_file(workspace.id).read_bytes()
+    before = _read_persisted_bytes(manager._workspace_state_file(workspace.id))
     original_save = manager._save_workspace_state
     monkeypatch.setattr(
         manager,
@@ -271,7 +293,7 @@ async def test_save_failure_rolls_back_task_and_event(manager, workspace, monkey
         await manager.record_task_progress(workspace.id, task.id, progress(task), KEY)
     assert manager.tasks[task.id].progress_revision == 0
     assert not manager.task_mailbox._events.get(workspace.id)
-    assert manager._workspace_state_file(workspace.id).read_bytes() == before
+    assert _read_persisted_bytes(manager._workspace_state_file(workspace.id)) == before
     monkeypatch.setattr(manager, "_save_workspace_state", original_save)
     result = await manager.record_task_progress(workspace.id, task.id, progress(task), KEY)
     assert result.task.progress_revision == 1
@@ -392,17 +414,18 @@ async def test_receipts_are_bounded_and_expired_retries_do_not_mutate(manager, w
 async def test_restart_rejects_managed_assignment_on_record_task(manager, workspace):
     task = await register(manager, workspace)
     path = manager._workspace_state_file(workspace.id)
-    good_bytes = path.read_bytes()
+    good_bytes = _read_persisted_bytes(path)
     data = json.loads(good_bytes)
     data["tasks"][0]["session_id"] = "forged-session"
     forged_text = json.dumps(data)
-    path.write_text(forged_text)
+    path.with_name("state.json.bak").write_bytes(good_bytes)
+    _seed_legacy_json(path, forged_text)
     # The tampered record is quarantined and the last good backup is restored;
     # the forged assignment must never enter in-memory state (the backup may be
     # one generation older, i.e. not yet contain the task).
     fresh = WorkspaceManager()
     assert all(task.session_id != "forged-session" for task in fresh.tasks.values())
-    assert path.read_bytes() == path.with_name("state.json.bak").read_bytes()
+    assert read_document(path) == json.loads(good_bytes)
     quarantined = list(path.parent.glob("state.json.corrupt-*"))
     assert len(quarantined) == 1
     assert quarantined[0].read_text() == forged_text
@@ -985,7 +1008,7 @@ async def test_delete_rejects_illegal_initiator_backref_before_any_mutation(
     )
     manager.sessions[session.id] = session
     before = [event.model_dump(mode="json") for event in manager.task_mailbox._events[workspace.id]]
-    disk = manager._workspace_state_file(workspace.id).read_bytes()
+    disk = _read_persisted_bytes(manager._workspace_state_file(workspace.id))
     with pytest.raises(TaskExecutionConflict, match="initiator_task_has_managed_session_reference"):
         manager.delete_task(task.id)
     assert manager.tasks[task.id] is task
@@ -993,7 +1016,7 @@ async def test_delete_rejects_illegal_initiator_backref_before_any_mutation(
     assert [
         event.model_dump(mode="json") for event in manager.task_mailbox._events[workspace.id]
     ] == before
-    assert manager._workspace_state_file(workspace.id).read_bytes() == disk
+    assert _read_persisted_bytes(manager._workspace_state_file(workspace.id)) == disk
 
 
 @pytest.mark.asyncio
@@ -1010,9 +1033,9 @@ async def test_register_nested_create_uses_one_explicit_workspace_commit(
     other = manager.create_workspace(WorkspaceCreate(name="Other register", path=str(other_dir)))
     other_task = await register(manager, other, request_key="other-create")
     state_a = manager._workspace_state_file(workspace.id)
-    before_state_a = state_a.read_bytes()
+    before_state_a = _read_persisted_bytes(state_a)
     untouched = {
-        path: path.read_bytes()
+        path: _read_persisted_bytes(path)
         for path in (
             _wm.INDEX_FILE,
             manager._workspace_state_file(other.id),
@@ -1042,7 +1065,7 @@ async def test_register_nested_create_uses_one_explicit_workspace_commit(
         with pytest.raises(OSError, match="register precommit"):
             await manager.register_task(workspace.id, payload, "actor-a")
         assert set(manager.tasks) == before_task_ids
-        assert state_a.read_bytes() == before_state_a
+        assert _read_persisted_bytes(state_a) == before_state_a
     created, replayed = await manager.register_task(workspace.id, payload, "actor-a")
     assert replayed is False
     again, replayed = await manager.register_task(workspace.id, payload, "actor-a")
@@ -1050,7 +1073,7 @@ async def test_register_nested_create_uses_one_explicit_workspace_commit(
     assert saves == [workspace.id] * (2 if fail_first else 1)
     assert len([task for task in manager.tasks.values() if task.workspace_id == workspace.id]) == 1
     for path, before in untouched.items():
-        assert path.read_bytes() == before
+        assert _read_persisted_bytes(path) == before
     assert manager.tasks[other_task.id].title == "other pending title"
     assert manager.workspaces[other.id].name == "other pending name"
     assert manager._workspace_mutation_held.get() is None

@@ -1,0 +1,342 @@
+<template>
+  <div class="subthread-body">
+    <div
+      v-if="thread.launchTool"
+      class="subthread-instruction subthread-launch"
+    >
+      <div class="subthread-instruction-head">
+        <span class="subthread-instruction-arrow">→ Original task</span>
+        <span
+          class="tool-status"
+          :class="thread.launchTool.status"
+        >{{ subagentDispatchLabel(thread.launchTool.status) }}</span>
+      </div>
+      <pre class="subthread-instruction-prompt">{{ subthreadInstructionText(thread.launchTool) }}</pre>
+      <details
+        v-if="thread.launchTool.resultText"
+        class="subthread-launch-result"
+      >
+        <summary>Dispatch result</summary>
+        <pre>{{ thread.launchTool.resultText }}</pre>
+      </details>
+    </div>
+
+    <template
+      v-for="sub in subthreadPartsFor(thread)"
+      :key="sub.key"
+    >
+      <div
+        v-if="sub.kind === 'instruction'"
+        class="subthread-instruction"
+      >
+        <div class="subthread-instruction-head">
+          <span class="subthread-instruction-arrow">→ Instruction</span>
+          <span
+            class="tool-status"
+            :class="sub.tool.status"
+          >{{ subagentDispatchLabel(sub.tool.status) }}</span>
+        </div>
+        <pre class="subthread-instruction-prompt">{{ subthreadInstructionText(sub.tool) }}</pre>
+      </div>
+
+      <ChatThinkingCard
+        v-else-if="sub.kind === 'thinking'"
+        class="subthread-thinking"
+        :part="sub"
+      />
+
+      <div
+        v-else-if="sub.kind === 'text'"
+        class="subthread-message"
+      >
+        <MarkdownContent
+          :text="renderAgentDirectives(sub.text, { complete: subthreadTerminal(thread) })"
+          :tab-id="markdownImageScope"
+          compact
+          :complete="subthreadTerminal(thread)"
+          @image-click="openImageLightbox"
+        />
+      </div>
+
+      <div
+        v-else-if="sub.kind === 'reasoning_status'"
+        class="reasoning-status"
+      >
+        <ThinkingIndicator :state="sub.state" />
+      </div>
+
+      <div
+        v-else-if="sub.kind === 'status'"
+        class="event-status subthread-status"
+      >
+        <span>{{ sub.text }}</span>
+      </div>
+
+      <!-- Child tool calls use the same activity line as the parent turn;
+           they share the turn's expanded-group state. -->
+      <ChatToolGroup
+        v-else-if="sub.kind === 'tool_group'"
+        :turn="turn"
+        :part="sub"
+      />
+
+      <div
+        v-else-if="sub.kind === 'agent_image'"
+        class="agent-image-card"
+      >
+        <div
+          v-if="isAgentImagePending(sub, thread.lifecycleStatus === 'active')"
+          class="turn-attachment-placeholder agent-image-pending"
+          role="status"
+        >
+          Loading image…
+        </div>
+        <button
+          v-else-if="!erroredAgentImages.has(sub.key)"
+          type="button"
+          class="turn-attachment-button agent-image-button"
+          :aria-label="`Open image ${agentImageBasename(sub.path)}`"
+          @click="openImageLightbox(agentImageUrl(sub.path, sub.key), agentImageBasename(sub.path), $event)"
+        >
+          <img
+            :src="agentImageUrl(sub.path, sub.key)"
+            class="turn-attachment-img"
+            :alt="agentImageBasename(sub.path)"
+            loading="lazy"
+            decoding="async"
+            @error="onAgentImageError($event, sub.key)"
+          >
+        </button>
+        <div
+          v-else
+          class="turn-attachment-placeholder agent-image-missing"
+        >
+          <span>Image unavailable</span>
+          <button
+            type="button"
+            class="agent-image-retry"
+            :aria-label="`Retry loading image ${agentImageBasename(sub.path)}`"
+            @click="retryAgentImage(sub.key)"
+          >
+            Retry
+          </button>
+        </div>
+        <div
+          class="agent-image-path"
+          :title="sub.path"
+        >
+          {{ agentImageBasename(sub.path) }}
+        </div>
+      </div>
+    </template>
+  </div>
+</template>
+<script setup lang="ts">
+import { requireChatOwner, chatTimelineKey, chatImagesKey, chatIdentityKey } from '../owners'
+import ThinkingIndicator from '@/components/ThinkingIndicator.vue'
+import MarkdownContent from '@/components/MarkdownContent.vue'
+import { renderAgentDirectives } from '@/utils/agentDirectives'
+import {
+  subagentDispatchLabel,
+  subthreadInstructionText,
+  subthreadTerminal,
+} from '@/features/chat/presentation/chatSubagentPresentation'
+import ChatToolGroup from './ChatToolGroup.vue'
+import ChatThinkingCard from './ChatThinkingCard.vue'
+import type { TimelineTurn, TimelineSubthread } from '../timeline/types'
+
+/** One child thread's rows, shared by the inline region (inside its
+ *  ``<details>``) and the dock's detail window. It needs the Chat pane owners
+ *  (timeline + images + markdown scope), so both call sites stay inside the
+ *  Chat pane subtree. */
+defineProps<{
+  turn: TimelineTurn
+  thread: TimelineSubthread
+}>()
+
+const { subthreadPartsFor } = requireChatOwner(chatTimelineKey)
+const { openImageLightbox, erroredAgentImages, agentImageBasename, agentImageUrl, isAgentImagePending, onAgentImageError, retryAgentImage } = requireChatOwner(chatImagesKey)
+const { markdownImageScope } = requireChatOwner(chatIdentityKey)
+</script>
+<style scoped>
+.tool-status {
+  flex: 0 0 auto;
+  font-size: 10px;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background-color: var(--ch-color-border);
+  color: var(--ch-color-text-muted);
+}
+
+.tool-status.completed {
+  background-color: var(--ch-color-success-bg, rgba(46, 160, 67, 0.12));
+  color: var(--ch-color-success-strong, #2ea043);
+}
+
+.tool-status.failed {
+  background-color: var(--ch-color-danger-bg, rgba(248, 81, 73, 0.12));
+  color: var(--ch-color-danger-strong, #f85149);
+}
+
+.tool-status.running {
+  background-color: var(--ch-color-warning-bg, rgba(224, 168, 0, 0.12));
+  color: var(--ch-color-warning, #e0a800);
+}
+
+.tool-status.cancelled {
+  background-color: var(--ch-color-surface-muted, rgba(139, 148, 158, 0.12));
+  color: var(--ch-color-text-muted, #8b949e);
+}
+
+.tool-status.unknown {
+  color: var(--ch-color-text-subtle);
+}
+
+.subthread-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.event-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ch-color-text-subtle);
+}
+
+.event-status {
+  padding: 2px 8px;
+}
+
+.subthread-launch {
+  background: var(--ch-color-surface-muted, rgba(139, 148, 158, 0.08));
+}
+
+.subthread-instruction {
+  border-left: 2px solid var(--ch-color-accent);
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-accent-soft);
+  padding: 6px 8px;
+}
+
+.subthread-instruction-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.subthread-instruction-arrow {
+  color: var(--ch-color-accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.subthread-instruction-prompt {
+  margin: 0;
+  color: var(--ch-color-text-code);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.subthread-message {
+  color: var(--ch-color-text-muted);
+  font-size: 12px;
+}
+
+.subthread-thinking {
+  margin: 0;
+}
+
+.reasoning-status {
+  display: inline-flex;
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 5px 10px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-soft);
+}
+
+.agent-image-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.agent-image-path {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--ch-font-mono);
+  font-size: var(--ch-font-size-xs);
+  color: var(--ch-color-text-muted);
+}
+
+.agent-image-missing {
+  width: clamp(72px, 8vw, 88px);
+  cursor: default;
+}
+
+.turn-attachment-button {
+  width: clamp(72px, 8vw, 88px);
+  aspect-ratio: 4 / 3;
+  display: block;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, #fff 34%, transparent);
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-surface-control);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 18%);
+  cursor: zoom-in;
+}
+
+.turn-attachment-button:hover {
+  border-color: color-mix(in srgb, #fff 70%, transparent);
+}
+
+.turn-attachment-button:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+
+.turn-attachment-img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  transition: transform 140ms ease;
+}
+
+.turn-attachment-button:hover .turn-attachment-img {
+  transform: scale(1.025);
+}
+
+.turn-attachment-placeholder {
+  width: clamp(72px, 8vw, 88px);
+  aspect-ratio: 4 / 3;
+  display: grid;
+  place-items: center;
+  padding: 10px;
+  border: 1px dashed var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-sm);
+  color: var(--ch-color-text-muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .turn-attachment-img {
+    transition: none;
+  }
+}
+</style>

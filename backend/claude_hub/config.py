@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     cursor_no_proxy: Optional[SecretStr] = Field(default=None, exclude=True, repr=False)
     traex_no_proxy: Optional[SecretStr] = Field(default=None, exclude=True, repr=False)
     cursor_models_probe_timeout_seconds: float = 5.0
+    antigravity_models_probe_timeout_seconds: float = 12.0
 
     @field_validator("claude_proxy_url", "codex_proxy_url", "cursor_proxy_url", "traex_proxy_url")
     @classmethod
@@ -100,6 +101,13 @@ class Settings(BaseSettings):
     def _cursor_probe_timeout(cls, value: float) -> float:
         if not math.isfinite(value) or value <= 0:
             raise ValueError("cursor_models_probe_timeout_seconds must be positive and finite")
+        return value
+
+    @field_validator("antigravity_models_probe_timeout_seconds")
+    @classmethod
+    def _antigravity_probe_timeout(cls, value: float) -> float:
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("antigravity_models_probe_timeout_seconds must be positive and finite")
         return value
 
     @field_validator("feishu_message_future_skew_seconds")
