@@ -53,7 +53,7 @@ async def test_direct_delete_waits_for_detached_edit_rollback(
     )
     monkeypatch.setattr(tailer_module, "snapshot_transcript", lambda *_: None)
     monkeypatch.setattr(tailer_module, "restore_transcript", lambda *_: None)
-    monkeypatch.setattr(tailer_module, "fork_transcript", lambda *_: None)
+    monkeypatch.setattr(tailer_module, "fork_transcript", lambda *_, **__: None)
     monkeypatch.setattr(tailer_module, "get_adapter_for_session", lambda *_: MagicMock())
     monkeypatch.setattr(
         manager,

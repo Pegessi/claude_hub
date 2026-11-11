@@ -30,14 +30,58 @@
         v-if="isEditingTurn(turn)"
         class="edit-resend-form"
       >
+        <p
+          v-if="storedCopyWarningText"
+          class="edit-resend-warning"
+          role="note"
+        >
+          {{ storedCopyWarningText }}
+        </p>
         <textarea
           v-model="editDraft"
           class="edit-resend-textarea"
           rows="3"
           placeholder="Edit your message..."
-          @keydown.enter.exact.prevent="submitEdit(turn)"
+          @paste="handleEditPaste"
+          @keydown.enter.exact="handleEditEnter($event, turn)"
+          @compositionstart="isEditComposing = true"
+          @compositionend="isEditComposing = false"
           @keydown.esc.prevent="cancelEdit"
         />
+        <!-- Images added while editing: pasted here, removable before send.
+           The original turn's own images are re-sent by the backend and stay
+           read-only below. -->
+        <div
+          v-if="editAttachments.length > 0"
+          class="turn-attachments edit-resend-additions"
+        >
+          <div
+            v-for="att in editAttachments"
+            :key="att.id"
+            class="edit-resend-addition"
+          >
+            <img
+              :src="att.preview_url"
+              class="turn-attachment-img"
+              :alt="`Added image: ${att.filename}`"
+            >
+            <button
+              type="button"
+              class="edit-resend-remove"
+              :disabled="isEditSending"
+              :aria-label="`Remove ${att.filename}`"
+              @click="removeEditAttachment(att)"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+        <p
+          v-if="editAttachments.length > 0"
+          class="edit-resend-note"
+        >
+          Pasted images are sent with the resent message.
+        </p>
         <!-- Preserved attachments: edit-resend re-sends the original
            images, so show them as read-only thumbnails so the user
            knows they are kept (not dropped) on resend. -->
@@ -67,17 +111,25 @@
         <div
           v-if="editError"
           class="edit-resend-error"
+          role="alert"
         >
           {{ editError }}
+        </div>
+        <div
+          v-else-if="editAttachmentError"
+          class="edit-resend-error"
+          role="alert"
+        >
+          {{ editAttachmentError }}
         </div>
         <div class="edit-resend-actions">
           <button
             type="button"
             class="edit-resend-btn edit-resend-btn--primary"
-            :disabled="isEditSending"
+            :disabled="isEditSending || isPreparingEditAttachments"
             @click="submitEdit(turn)"
           >
-            {{ isEditSending ? 'Sending...' : 'Resend' }}
+            {{ isEditSending ? 'Sending...' : (isPreparingEditAttachments ? 'Preparing image…' : 'Resend') }}
           </button>
           <button
             type="button"
@@ -145,12 +197,36 @@ import FeishuIdentityMark from '@/components/FeishuIdentityMark.vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import { messageSourceLabel, messageSourceScope } from '../timeline/eventValues'
 import type { TimelineTurn } from '../timeline/types'
-const { resolvedFeishuSourceAvatarUrl, feishuSourceIdentityKey, isEditingTurn, editDraft, submitEdit, cancelEdit, editError, isEditSending } = requireChatOwner(chatActionsKey)
+const { resolvedFeishuSourceAvatarUrl, feishuSourceIdentityKey, isEditingTurn, editDraft, submitEdit, cancelEdit, editError, isEditSending, isPreparingEditAttachments, editAttachments, editAttachmentError, handleEditPaste, removeEditAttachment } = requireChatOwner(chatActionsKey)
 const { erroredAttachments, attachmentUrl, onAttachmentError, openImageLightbox } = requireChatOwner(chatImagesKey)
 const { markdownImageScope } = requireChatOwner(chatIdentityKey)
-defineProps<{
+import { computed, ref, watch } from 'vue'
+import { storedCopyWarning } from '@/utils/chatEditResend'
+
+const props = defineProps<{
   turn: TimelineTurn
 }>()
+
+/** True while an IME candidate list is open.
+ *
+ *  Enter confirms a candidate in Chinese/Japanese input; without this guard the
+ *  confirmation would also resend the pre-composition text. The composer
+ *  guards the same way. */
+const isEditComposing = ref(false)
+
+const storedCopyWarningText = computed(() => storedCopyWarning(props.turn.storedTextIncomplete))
+
+/** The editor unmounts on Escape/cancel, and an unmounted textarea never fires
+ *  compositionend: latch the flag only while this editor is open. */
+watch(() => isEditingTurn(props.turn), editing => {
+  if (!editing) isEditComposing.value = false
+})
+
+function handleEditEnter(event: KeyboardEvent, turn: TimelineTurn) {
+  if (event.isComposing || isEditComposing.value) return
+  event.preventDefault()
+  void submitEdit(turn)
+}
 </script>
 
 <style scoped>
@@ -319,6 +395,65 @@ defineProps<{
   aspect-ratio: 4 / 3;
   border: 1px solid color-mix(in srgb, #fff 34%, transparent);
   border-radius: var(--ch-radius-sm);
+}
+
+.edit-resend-warning {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ch-color-message-user-text, inherit);
+  opacity: .85;
+}
+
+.edit-resend-additions .turn-attachment-img {
+  width: clamp(72px, 8vw, 88px);
+  aspect-ratio: 4 / 3;
+  border: 1px solid color-mix(in srgb, #fff 34%, transparent);
+  border-radius: var(--ch-radius-sm);
+}
+
+.edit-resend-addition {
+  position: relative;
+  display: block;
+}
+
+.edit-resend-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: grid;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, #fff 45%, transparent);
+  border-radius: 50%;
+  background: rgb(0 0 0 / 55%);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.edit-resend-remove:hover:not(:disabled) {
+  background: rgb(0 0 0 / 75%);
+}
+
+.edit-resend-remove:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+
+.edit-resend-remove:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+
+.edit-resend-note {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--ch-color-message-user-muted);
 }
 
 .edit-resend-btn {

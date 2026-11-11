@@ -24,7 +24,7 @@
           v-if="stopArmed"
           type="button"
           class="banner-stop"
-          :disabled="isCancelling"
+          :disabled="!canStop"
           title="Stop the current turn even while the conversation is reconnecting"
           @click="cancelActiveTurn"
         >
@@ -48,7 +48,7 @@
           v-if="stopArmed"
           type="button"
           class="banner-stop"
-          :disabled="isCancelling"
+          :disabled="!canStop"
           title="Stop the wedged turn and unlock the composer without waiting for reconnect"
           @click="cancelActiveTurn"
         >
@@ -318,6 +318,26 @@ const timeline = useChatTimeline({
   get pendingTurns() { return delivery.pendingTurns },
   get props() { return props },
 })
+const editAttachmentError = ref<string | null>(null)
+// The editor is busy while *either* send is open: a composer send or the resend
+// itself. Staging an image into a draft that is already on the wire would
+// silently drop it (or hand it to the next edit).
+const editBusy = computed(() => delivery.isSending.value || actions.isEditSending.value)
+// The resend editor stages its own images. It reuses the composer's attachment
+// pipeline (validation, size caps, bounded preview generation) through a second
+// instance so the two drafts never share an array: an edit must not consume the
+// composer's pending images, and a composer send must not consume the edit's.
+const editAttachmentsController = useChatAttachments({
+  get capabilities() { return capabilities },
+  get composerError() { return editAttachmentError },
+  get goalComposerReason() { return goalController.goalComposerReason },
+  get goalInputBlocked() { return goalController.goalInputBlocked },
+  get isGoalMutating() { return goalController.isGoalMutating },
+  // The editor is busy while *either* send is open: a composer send or the
+  // resend itself. Staging an image into a draft that is already on the wire
+  // would silently drop it (or hand it to the next edit).
+  get isSending() { return editBusy },
+})
 const actions = useChatActions({
   get composerError() { return delivery.composerError },
   get currentModeId() { return settings.currentModeId },
@@ -338,6 +358,19 @@ const actions = useChatActions({
   get terminalStore() { return terminalStore },
   get turnInFlight() { return delivery.turnInFlight },
   get turns() { return timeline.turns },
+  get supportsEditResend() { return supportsEditResend },
+  get editAttachments() { return editAttachmentsController.attachments },
+  get editAttachmentError() { return editAttachmentError },
+  get isPreparingEditAttachments() { return editAttachmentsController.isPreparingAttachments },
+  get handleEditPaste() { return editAttachmentsController.handlePaste },
+  get removeEditAttachment() { return editAttachmentsController.removeAttachment },
+  get resetEditAttachments() {
+    return () => {
+      editAttachmentsController.preparationEpoch.value++
+      editAttachmentsController.attachments.value = []
+    }
+  },
+  get optimisticCancelledTurnId() { return delivery.optimisticCancelledTurnId },
 })
 const queue = useChatQueue({
   get attachments() { return attachmentsController.attachments },
@@ -417,6 +450,7 @@ onUnmounted(() => {
   // Bump the epoch on unmount so any in-flight preparation batch aborts
   // instead of mutating state after the component is gone.
   attachmentsController.preparationEpoch.value++
+  editAttachmentsController.preparationEpoch.value++
   document.removeEventListener('keydown', composer.handleDocumentKeydown)
   document.removeEventListener('pointerdown', settings.handleModeOutsidePointer)
   document.removeEventListener('pointerdown', settings.handleModelOutsidePointer)
@@ -441,7 +475,7 @@ delivery.registerTerminalWatcher()
 timeline.registerWatchers()
 const { goal, goalError, isGoalMutating, hydrateGoal, pauseGoal, resumeGoal, completeGoal, clearGoal, isGoalSetupOpen, isGoalEditing } = goalController
 const { isFollowingLatest, timelineLoadingMessage, jumpToLatest } = timeline
-const { isCancelling, stopArmed, cancelActiveTurn } = delivery
+const { isCancelling, stopArmed, canStop, cancelActiveTurn } = delivery
 const { isDragOver, handleDragOver, handleDragLeave, handleDrop } = attachmentsController
 provide(chatIdentityKey, { connectionState, capabilities, props, isManagedChat, managedIdentityMissing, markdownImageScope, supportsEditResend, isHistoryVisible, currentTab, runtimeSample, feishuBotPoolStore, appStore, isPaneActivated })
 provide(chatGoalKey, goalController)

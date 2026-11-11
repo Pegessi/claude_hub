@@ -176,6 +176,15 @@ export interface TimelineTurn {
   userText: string
   /** Explicit server-authored message source. Missing legacy metadata stays unknown. */
   origin: TimelineTurnOrigin
+  /** Raw ``metadata.origin`` from ``turn_started`` (``web``, ``feishu``,
+   *  ``goal``, …), or ``null`` for a legacy turn recorded before origins
+   *  existed. Kept beside the projected ``origin`` because history rewriting
+   *  must refuse turns the Hub wrote, not only the ones a source badge shows. */
+  providerOrigin: string | null
+  /** The stored summary is not the text the provider received: redaction
+   *  truncated it (over 4000 characters) or masked a secret-looking token, so
+   *  the editor cannot prefill the whole message. */
+  storedTextIncomplete: boolean
   /** Verified Feishu callback identity, present only when origin is feishu. */
   feishu: TimelineFeishuProvenance | null
   hubMessage: TimelineHubMessageProvenance | null

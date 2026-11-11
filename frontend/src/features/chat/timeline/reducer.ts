@@ -122,6 +122,21 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
         turn.yieldsToUser = true
         mutated = true
       }
+      // History rewriting needs two facts the source badge does not carry: who
+      // actually wrote this turn, and whether the stored summary is the whole
+      // message. Read them from the same metadata payload.
+      const metadata = payloadRecord(event, 'metadata')
+      const providerOrigin = typeof metadata.origin === 'string' && metadata.origin.trim()
+        ? metadata.origin.trim() : null
+      if (turn.providerOrigin !== providerOrigin) {
+        turn.providerOrigin = providerOrigin
+        mutated = true
+      }
+      const storedTextIncomplete = metadata.stored_text_incomplete === true
+      if (turn.storedTextIncomplete !== storedTextIncomplete) {
+        turn.storedTextIncomplete = storedTextIncomplete
+        mutated = true
+      }
       const mode = event.payload.mode
       if ((mode === 'plan' || mode === 'default') && turn.mode !== mode) {
         turn.mode = mode

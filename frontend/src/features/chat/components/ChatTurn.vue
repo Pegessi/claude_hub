@@ -21,12 +21,12 @@
       class="turn-actions turn-actions--message"
     >
       <button
-        v-if="turn.turnId && supportsEditResend"
+        v-if="canEditTurn(turn)"
         type="button"
         class="edit-resend-hover-btn"
-        :disabled="turnInFlight || Boolean(goalEditReason)"
-        :title="turnInFlight ? 'A turn is currently running' : (goalEditReason || 'Edit message')"
-        :aria-label="turnInFlight ? 'Edit message (unavailable while a turn is running)' : (goalEditReason ? `Edit message (${goalEditReason})` : 'Edit message')"
+        :disabled="editReasonFor(turn) !== null"
+        :title="editReasonFor(turn) || 'Edit message'"
+        :aria-label="editReasonFor(turn) ? `Edit message (${editReasonFor(turn)})` : 'Edit message'"
         @click="startEdit(turn)"
       >
         ✎ 编辑
@@ -151,14 +151,34 @@ import ChatUserMessage from './ChatUserMessage.vue'
 import ChatTurnParts from './ChatTurnParts.vue'
 import ChatTurnWorking from './ChatTurnWorking.vue'
 import GoalPlanCard from '../goal-plan/GoalPlanCard.vue'
+import { canOfferEdit } from '@/utils/chatEditResend'
 import { GOAL_PLAN_APPROVAL_MESSAGE, GOAL_PLAN_REVISE_PREFIX, goalPlanApprovalDisabledReason, goalPlanCardMode, goalPlanHeadingId, goalPlanReviseDisabledReason, type GoalPlanCardMode } from '../goal-plan/planCard'
 import type { TimelineTurn } from '../timeline/types'
-const { isEditingTurn, startEdit, turnCopyText, copyFeedbackLabel, copyTurnButtonLabel, copyTurn, copyFeedbackState, completedPlanText, implementingPlanKey, implementPlan, forkingOrdinal, forkFromTurn } = requireChatOwner(chatActionsKey)
+const { isEditingTurn, startEdit, editReason, turnCopyText, copyFeedbackLabel, copyTurnButtonLabel, copyTurn, copyFeedbackState, completedPlanText, implementingPlanKey, implementPlan, forkingOrdinal, forkFromTurn } = requireChatOwner(chatActionsKey)
 const { turnInFlight, isSending, submit, draftMessage } = requireChatOwner(chatDeliveryKey)
-const { goalEditReason, goalComposerLocked, goalComposerReason, goal } = requireChatOwner(chatGoalKey)
+const { goalComposerLocked, goalComposerReason, goal } = requireChatOwner(chatGoalKey)
 const { turnPartsFor, latestTurnKey } = requireChatOwner(chatTimelineKey)
 const { composerTextareaEl, syncComposerTextareaHeight } = requireChatOwner(chatComposerKey)
 const { supportsEditResend, isManagedChat } = requireChatOwner(chatIdentityKey)
+/** Whether the history-rewrite editor may be offered for this turn.
+ *
+ *  Hidden for turns the Hub wrote itself (a Goal continuation, a restart
+ *  continuation, a workspace turn): their provider text is not the summary on
+ *  screen, so resending them as the reader's own message would rewrite history
+ *  with text that was never sent. ``utils/chatEditResend`` owns the rule. */
+function canEditTurn(turn: TimelineTurn): boolean {
+  return canOfferEdit({
+    supportsEditResend: supportsEditResend.value,
+    providerOrigin: turn.providerOrigin,
+    hasTurnId: Boolean(turn.turnId),
+  })
+}
+
+/** Why the editor cannot open yet, or ``null`` when it can. */
+function editReasonFor(turn: TimelineTurn): string | null {
+  return editReason(turn)
+}
+
 /** Live means still streaming now: the latest turn while one is in flight.
  *  An incomplete turn whose completion never arrived is history, not live. */
 function isLive(turn: TimelineTurn): boolean {

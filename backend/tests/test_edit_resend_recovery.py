@@ -23,8 +23,10 @@ truncate/fork/send/recovery logic without spawning real provider subprocesses.
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib
 import json
+import logging
 import struct
 import zlib
 from datetime import datetime, timezone
@@ -43,9 +45,12 @@ from claude_hub.models import (
     ManagedSessionStatus,
     WorkspaceSessionRole,
 )
+from claude_hub.models.chat_image import ChatImageAttachment
 from claude_hub.services.agent_stream.store import AgentStreamStore
 from claude_hub.services.agent_stream.tailer import SessionTailer, TailerManager
 from claude_hub.services.agent_stream.transcript_fork import TranscriptForkError
+from tests.test_agent_stream_attachments import _png as _attachment_png
+from tests.test_ttyd_stream_lifecycle import DirectChat, direct_chat  # noqa: F401
 
 # ``claude_hub.services.workspace_manager`` is shadowed on the package by the
 # ``workspace_manager`` singleton (see claude_hub/services/__init__.py), so the
@@ -81,9 +86,10 @@ async def _append_turn(
     event_type: AgentStreamEventType = AgentStreamEventType.TURN_STARTED,
     *,
     metadata: Optional[Dict[str, Any]] = None,
+    attachments: Optional[List[Dict[str, Any]]] = None,
 ) -> AgentStreamEvent:
     """Append one ``turn_started`` (or other) event to the Hub store."""
-    payload: Dict[str, Any] = {"summary": text, "attachments": []}
+    payload: Dict[str, Any] = {"summary": text, "attachments": list(attachments or [])}
     if metadata is not None:
         payload["metadata"] = dict(metadata)
     event = AgentStreamEvent(
@@ -428,10 +434,14 @@ async def test_edit_resend_preserves_attachments(
 
     manager, mock_tailer = _make_manager(session)
 
-    await manager.edit_resend(session, "edited msg1", "c-new", "t1")
+    removed = await manager.edit_resend(session, "edited msg1", "c-new", "t1")
+    assert removed == 1, "editing t1 removes the one turn after it"
 
     # The edited text was delivered WITH the original image re-sent and the
-    # original attachment metas re-referenced.
+    # original attachment metas re-referenced.  Under the current
+    # ``reuse_attachments`` rule only the leading images are reused; this edit
+    # adds no image, so ``images`` and the metas stay aligned one-to-one and
+    # nothing new is persisted.
     mock_tailer.send_message.assert_called_once_with(
         "edited msg1",
         [png_bytes],
@@ -476,7 +486,9 @@ async def test_concurrent_edits_are_serialized(
     send_started = asyncio.Event()
     send_proceed = asyncio.Event()
 
-    async def _blocking_send(text: str, images: List[bytes], client_turn_id: str) -> None:
+    async def _blocking_send(
+        text: str, images: List[bytes], client_turn_id: str, **kwargs: Any
+    ) -> None:
         events.append(f"send-start:{client_turn_id}")
         send_started.set()
         await send_proceed.wait()
@@ -704,3 +716,359 @@ async def test_edit_resend_cleans_hub_and_external_provider_snapshots(
         path.relative_to(provider_root) for path in provider_root.rglob("*") if path.is_file()
     ) == [Path("transcripts/conversation.jsonl")]
     assert not document_exists(store.path.with_name(store.path.name + ".edit-bak"))
+
+
+# ── 7. digest matching for redacted / long messages ─────────────────────────
+
+
+def _redacted_summary(text: str) -> str:
+    """The ``summary`` the Hub persists for ``text`` (masked, then truncated)."""
+    from claude_hub.services.agent_stream.redaction import MAX_FIELD_CHARS, mask_secrets
+
+    masked = mask_secrets(text)
+    marker = "…[truncated]"
+    if len(masked) > MAX_FIELD_CHARS:
+        return masked[: MAX_FIELD_CHARS - len(marker)] + marker
+    return masked
+
+
+@pytest.mark.asyncio
+async def test_edit_resend_matches_redacted_message_by_recorded_digest(
+    isolated_state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A long or secret-bearing message is matched by its recorded digest.
+
+    The stored ``summary`` is redacted (secret-masked and truncated at 4000
+    chars), so comparing it with the full provider text can never match.  The
+    digest recorded on ``turn_started`` identifies the real provider message;
+    a turn without one (historical) still fails cleanly and destructively-free.
+    """
+    from claude_hub.services.agent_stream.transcript_fork import hash_provider_text
+
+    provider_text = "sk-abcd1234efgh5678 " + ("x" * 4200)
+    stored_summary = _redacted_summary(provider_text)
+    assert stored_summary != provider_text, "precondition: the stored copy is redacted"
+
+    # Historical turn: no digest recorded, redacted summary cannot match.
+    legacy = _session("sess-legacy")
+    legacy_transcript = tmp_path / "legacy.jsonl"
+    _write_transcript(legacy_transcript, ["msg0", provider_text, "msg2"])
+    _patch_discovery(monkeypatch, legacy_transcript)
+    legacy_store = AgentStreamStore(legacy.workspace_id, legacy.id)
+    await _append_turn(legacy_store, "t0", "msg0")
+    await _append_turn(legacy_store, "t1", stored_summary)
+    await _append_turn(legacy_store, "t2", "msg2")
+    legacy_manager, _ = _make_manager(legacy)
+    with pytest.raises(TranscriptForkError, match="no matching provider user message"):
+        await legacy_manager.edit_resend(legacy, "edited", "c-new", "t1")
+    assert await legacy_store.count_turns() == 3, "legacy refusal must not truncate"
+
+    # Modern turn: the digest recorded at send time makes the edit matchable.
+    session = _session()
+    transcript_path = tmp_path / "transcript.jsonl"
+    _write_transcript(transcript_path, ["msg0", provider_text, "msg2"])
+    _patch_discovery(monkeypatch, transcript_path)
+    store = AgentStreamStore(session.workspace_id, session.id)
+    await _append_turn(store, "t0", "msg0")
+    await _append_turn(
+        store,
+        "t1",
+        stored_summary,
+        metadata={"provider_text_sha256": hash_provider_text(provider_text)},
+    )
+    await _append_turn(store, "t2", "msg2")
+    manager, mock_tailer = _make_manager(session)
+    removed = await manager.edit_resend(session, "edited", "c-new", "t1")
+    assert removed == 1
+    mock_tailer.send_message.assert_called_once_with("edited", [], "c-new")
+
+
+# ── 8. Hub-authored turns are not editable ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("origin", ["goal", "workspace", "restart_continuation"])
+async def test_hub_authored_turn_is_refused_before_truncating(
+    isolated_state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    origin: str,
+) -> None:
+    """Server-authored turns are refused with no truncation and no snapshot left."""
+    session = _session()
+    transcript_path = tmp_path / "transcript.jsonl"
+    provider_text = "Goal continuation instruction the user never typed"
+    _write_transcript(transcript_path, ["msg0", provider_text, "msg2"])
+    _patch_discovery(monkeypatch, transcript_path)
+
+    store = AgentStreamStore(session.workspace_id, session.id)
+    await _append_turn(store, "t0", "msg0")
+    await _append_turn(
+        store, "t1", "Continue active Goal", metadata={"origin": origin, "protocol": "p"}
+    )
+    await _append_turn(store, "t2", "msg2")
+    store_before = _read_bytes(store.path)
+    transcript_before = _read_bytes(transcript_path)
+
+    manager, mock_tailer = _make_manager(session)
+    with pytest.raises(TranscriptForkError, match="written by the Goal/Hub"):
+        await manager.edit_resend(session, "edited", "c-new", "t1")
+
+    mock_tailer.send_message.assert_not_called()
+    mock_tailer.stop.assert_not_called()
+    assert _read_bytes(store.path) == store_before, "event store was modified"
+    assert _read_bytes(transcript_path) == transcript_before, "transcript was modified"
+    assert not transcript_path.with_name(transcript_path.name + ".edit-bak").exists()
+    assert not store.path.with_name(store.path.name + ".edit-bak").exists()
+
+
+# ── 9. images added while editing ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_added_images_join_the_reused_prefix(
+    isolated_state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """New images ride past the reused prefix, one preview slot each.
+
+    ``send_message`` owns persisting their previews and building their metadata
+    (single writer for the merge rule), so this asserts the contract it is
+    handed: the original turn's metadata as the reused prefix, the added
+    originals after it, and a preview slot per image.
+    """
+    from claude_hub.services.agent_stream.attachments import AgentStreamAttachmentStore
+
+    session = _session()
+    transcript_path = tmp_path / "transcript.jsonl"
+    _write_transcript(transcript_path, ["msg0", "msg1", "msg2"])
+    _patch_discovery(monkeypatch, transcript_path)
+
+    att_store = AgentStreamAttachmentStore(session.workspace_id, session.id)
+    original_preview = _png(width=8, height=8)
+    original_meta = await att_store.save("image/png", original_preview)
+    added_original = _png(width=4, height=4)
+    added_preview = _png(width=3, height=3)
+
+    store = AgentStreamStore(session.workspace_id, session.id)
+    await _append_turn(store, "t0", "msg0")
+    await _append_turn(store, "t1", "msg1", attachments=[original_meta])
+    await _append_turn(store, "t2", "msg2")
+
+    manager, mock_tailer = _make_manager(session)
+    await manager.edit_resend(
+        session,
+        "edited msg1",
+        "c-new",
+        "t1",
+        added_images=[added_original],
+        added_previews=[added_preview],
+    )
+
+    kwargs = mock_tailer.send_message.call_args.kwargs
+    call_images = mock_tailer.send_message.call_args.args[1]
+    # Only the original turn's metadata is reused: the new image must not
+    # inherit an existing id.
+    assert kwargs["reuse_attachments"] == [original_meta]
+    # Images line up with the metadata: reused preview first, then the original
+    # bytes of the added image (the provider receives originals, not previews).
+    assert call_images == [original_preview, added_original]
+    # One preview slot per image; the reused slot is ignored, the added image
+    # brings its own bounded preview.
+    assert kwargs["previews"] == [None, added_preview]
+    # A rolled-back edit must not keep the previews it made the tailer persist.
+    assert kwargs["retain_previews_on_delivery_failure"] is False
+    # Nothing is persisted here: that happens inside ``send_message``.
+    assert await att_store.read(original_meta["id"]) == (original_preview, "image/png")
+
+
+@pytest.mark.asyncio
+async def test_added_image_rollback_leaves_the_cache_untouched(
+    isolated_state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed edit restores the store and persists no preview for the new image.
+
+    The added image's preview is written by ``send_message`` once the edit has
+    truncated both planes, so a failure before that point (this send fails)
+    leaves the cache exactly as it was; ``send_message`` owns deleting anything
+    it wrote itself.
+    """
+    from claude_hub.services.agent_stream.attachments import AgentStreamAttachmentStore
+
+    session = _session()
+    transcript_path = tmp_path / "transcript.jsonl"
+    _write_transcript(transcript_path, ["msg0", "msg1", "msg2"])
+    _patch_discovery(monkeypatch, transcript_path)
+
+    att_store = AgentStreamAttachmentStore(session.workspace_id, session.id)
+    original_preview = _png(width=8, height=8)
+    original_meta = await att_store.save("image/png", original_preview)
+    added_preview = _png(width=3, height=3)
+
+    store = AgentStreamStore(session.workspace_id, session.id)
+    await _append_turn(store, "t0", "msg0")
+    await _append_turn(store, "t1", "msg1", attachments=[original_meta])
+    await _append_turn(store, "t2", "msg2")
+
+    manager, _mock_tailer = _make_manager(session, send_side_effect=RuntimeError("send failed"))
+    with pytest.raises(RuntimeError, match="send failed"):
+        await manager.edit_resend(
+            session,
+            "edited msg1",
+            "c-new",
+            "t1",
+            added_images=[_png(width=4, height=4)],
+            added_previews=[added_preview],
+        )
+
+    # The edit was rolled back: every turn is still present.
+    assert await store.count_turns() == 3
+    # The reused preview is untouched and nothing was written for the new image.
+    assert await att_store.read(original_meta["id"]) == (original_preview, "image/png")
+    cached = {entry["id"] for entry in AgentStreamAttachmentStore._read_index()}
+    assert cached == {original_meta["id"]}, "a preview was persisted for an edit that failed"
+
+
+# ── 10. the resend reports what it removed ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_edit_resend_reports_removed_turn_count(
+    isolated_state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The caller learns how many Hub turns the rewrite discarded."""
+    session = _session()
+    transcript_path = tmp_path / "transcript.jsonl"
+    _write_transcript(transcript_path, ["msg0", "msg1", "msg2"])
+    _patch_discovery(monkeypatch, transcript_path)
+
+    store = AgentStreamStore(session.workspace_id, session.id)
+    await _append_turn(store, "t0", "msg0")
+    await _append_turn(store, "t1", "msg1")
+    await _append_turn(store, "t2", "msg2")
+    manager, _mock_tailer = _make_manager(session)
+
+    # Two turns follow the edited one.
+    assert await manager.edit_resend(session, "edited msg1", "c-new", "t1") == 1
+    # The edited turn is now the last one: nothing further is removed.
+    assert await manager.edit_resend(session, "edited msg0", "c-new-2", "t0") == 0
+
+
+# ── 11. shifted matches are visible ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_shifted_duplicate_match_logs_warning(
+    isolated_state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A duplicate/drifted match logs the requested and matched ordinals."""
+    session = _session()
+    transcript_path = tmp_path / "transcript.jsonl"
+    # The provider only saw one "dup", at ordinal 1; the Hub requested ordinal 2.
+    _write_transcript(transcript_path, ["msg0", "dup"])
+    _patch_discovery(monkeypatch, transcript_path)
+
+    store = AgentStreamStore(session.workspace_id, session.id)
+    await _append_turn(store, "t0", "msg0")
+    await _append_turn(store, "t1", "dup")
+    await _append_turn(store, "t2", "dup")
+    manager, _mock_tailer = _make_manager(session)
+
+    with caplog.at_level(logging.WARNING, logger="claude_hub"):
+        await manager.edit_resend(session, "edited dup", "c-new", "t2")
+
+    warnings = [
+        record.getMessage() for record in caplog.records if record.levelno == logging.WARNING
+    ]
+    shifted = [message for message in warnings if "shifted match" in message]
+    assert shifted, f"expected a shifted-match warning, got {warnings}"
+    assert "requested turn_index=2" in shifted[0]
+    assert "ordinal=1" in shifted[0]
+    assert "removed 1 transcript lines" in shifted[0]
+
+
+# ── 12. tab edit-resend route contract ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_tab_edit_resend_route_forwards_images_and_reports_removed_count(
+    direct_chat: DirectChat,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tab route validates images like a normal send and reports the rewrite."""
+    from claude_hub.api import agent_stream as stream_api
+    from claude_hub.models import StreamCapabilities
+
+    tabs, process, _manager, _tailer, _transport = direct_chat
+    monkeypatch.setattr(stream_api, "ttyd_manager", tabs)
+    goal = importlib.import_module("claude_hub.services.goal_run")
+    monkeypatch.setattr(goal, "get_goal_manager", lambda: MagicMock(current=lambda *_: None))
+
+    fake_manager = MagicMock()
+    fake_manager.edit_resend = AsyncMock(return_value=2)
+    monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: fake_manager)
+    monkeypatch.setattr(
+        stream_api,
+        "_capabilities_for",
+        AsyncMock(return_value=StreamCapabilities(supports_images=True)),
+    )
+    user = MagicMock()
+
+    png = _attachment_png(2, 2)
+    encoded = base64.b64encode(png).decode()
+    payload = stream_api.AgentStreamEditResendRequest(
+        text="edited",
+        client_turn_id="c-new",
+        turn_id="t1",
+        attachments=[
+            ChatImageAttachment(
+                filename="added.png",
+                mime_type="image/png",
+                data_url=f"data:image/png;base64,{encoded}",
+            )
+        ],
+    )
+    result = await stream_api.edit_resend_tab_stream(process.tab_id, payload, current_user=user)
+    assert result == {"ok": True, "removed_turn_count": 2}
+    kwargs = fake_manager.edit_resend.call_args.kwargs
+    assert kwargs["added_images"] == [png]
+    assert kwargs["turn_metadata"] == {"origin": "web"}
+    assert fake_manager.edit_resend.call_args.args[1] == "edited"
+
+    # Images the provider cannot accept are refused before any rewrite.
+    fake_manager.edit_resend.reset_mock()
+    monkeypatch.setattr(
+        stream_api,
+        "_capabilities_for",
+        AsyncMock(return_value=StreamCapabilities(supports_images=False)),
+    )
+    with pytest.raises(stream_api.HTTPException) as refused:
+        await stream_api.edit_resend_tab_stream(process.tab_id, payload, current_user=user)
+    assert refused.value.status_code == 400
+    fake_manager.edit_resend.assert_not_called()
+
+    # Malformed image data fails closed in decoding, before the manager runs.
+    bad = stream_api.AgentStreamEditResendRequest(
+        text="edited",
+        client_turn_id="c-new",
+        turn_id="t1",
+        attachments=[
+            ChatImageAttachment(
+                filename="bad.png", mime_type="image/png", data_url="data:image/png;base64,AAAA"
+            )
+        ],
+    )
+    with pytest.raises(stream_api.HTTPException) as malformed:
+        await stream_api.edit_resend_tab_stream(process.tab_id, bad, current_user=user)
+    assert malformed.value.status_code == 400
+    fake_manager.edit_resend.assert_not_called()

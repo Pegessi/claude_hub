@@ -125,6 +125,19 @@ export function useChatDelivery(deps: Dependencies) {
     return pending?.turnId ?? null
   })
 
+  /** Stop is enabled by the same rule that lets its request actually run.
+   *
+   *  It stays disabled while our own send POST is open. That is not laziness:
+   *  a direct-tab send holds the tab's goal-admission lock across provider
+   *  delivery, and ``POST /stream/cancel`` takes that same lock, so a Stop
+   *  clicked mid-send would only block behind the send (and could still
+   *  terminalize a turn the send had not registered yet). What used to be
+   *  wrong is the *other* half: the composer and the reconnect/failure banner
+   *  each hardcoded a different condition, so the banner offered Stop while
+   *  every click returned silently. Both now read this one gate, so an
+   *  unavailable Stop is visibly unavailable instead of inert-but-armed. */
+  const canStop = computed(() => !isCancelling.value && stopArmed.value && !isSending.value)
+
   const isSubmissionReady = computed(() => deps.connectionState.value === 'live' &&
     (!deps.goalImageRecovery.value || (!deps.isGoalHydrating.value && !deps.goalError.value)) &&
     !deps.isGoalMutating.value &&
@@ -156,8 +169,8 @@ export function useChatDelivery(deps: Dependencies) {
   async function cancelActiveTurn() {
     // Idempotent: a second click while Stop is in flight is a no-op. Stop stays
     // armed slightly wider than the composer lock (an unfinished turn after a
-    // terminal error), but is never allowed to race a send still in flight.
-    if (isCancelling.value || isSending.value || !stopArmed.value) return
+    // terminal error) but never races a send still in flight -- see ``canStop``.
+    if (!canStop.value) return
     const cancelledTurnId = stopTargetTurnId.value
     isCancelling.value = true
     composerError.value = null
@@ -452,6 +465,7 @@ export function useChatDelivery(deps: Dependencies) {
     composerTurnInFlight,
     modeInteractionLocked,
     stopArmed,
+    canStop,
     stopTargetTurnId,
     isSubmissionReady,
     canSend,

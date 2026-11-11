@@ -18,6 +18,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("claude_hub.services.agent_stream.tailer")
 
+# Turns whose provider text is authored by the Hub, not typed by the user.
+# Editing one is refused: the trusted wrapper (Goal protocol, workspace
+# dispatch, restart continuation, question answer, scheduled task) is part of
+# the provider contract, and resending it as an ordinary user message would
+# drop that wrapper and rewrite server-owned history.  A missing origin means
+# a legacy web turn and stays editable, as do the user-authored origins
+# (``web``, ``feishu``, ``hub_message``).
+HUB_AUTHORED_TURN_ORIGINS = frozenset(
+    {"goal", "workspace", "restart_continuation", "question_answer", "scheduled_task"}
+)
+_HUB_AUTHORED_EDIT_REFUSAL = (
+    "This turn was written by the Goal/Hub, not by you. Only your own messages can be edited."
+)
+
 
 class EditResendMixin(ManagerState):
     """Edit resend behavior on the sole manager owner."""
@@ -30,7 +44,9 @@ class EditResendMixin(ManagerState):
         turn_id: str,
         *,
         turn_metadata: Optional[Dict[str, Any]] = None,
-    ) -> None:
+        added_images: Optional[List[bytes]] = None,
+        added_previews: Optional[List[Optional[bytes]]] = None,
+    ) -> int:
         """Edit a previously sent message and rerun the conversation from there.
 
         Truncates both planes at the turn identified by ``turn_id``:
@@ -43,6 +59,14 @@ class EditResendMixin(ManagerState):
         The native transport is then restarted (it reads the forked
         transcript and resumes via ``--resume`` / ``thread/resume``) and the
         edited ``text`` is delivered as the new turn.
+
+        Images: the original turn's attachment previews are re-sent to the
+        provider and its attachment ids are re-referenced in the new turn.
+        ``added_images`` are NEW images the user attached while editing.  They
+        are delivered as images past the reused prefix with their own preview
+        slots, and ``send_message`` persists their previews and appends their
+        metadata after the reused ones, so ``images`` (reused previews then
+        added originals) always lines up one-to-one with the turn's metadata.
 
         Concurrency: a per-session lock (``self._lifecycle_locks``) is held across
         the entire sequence.  A concurrent ``edit_resend`` for the same
@@ -57,18 +81,34 @@ class EditResendMixin(ManagerState):
         restored from their snapshots so the conversation is byte-identical
         to before the edit was attempted, any tailer created during the
         failed attempt is discarded, and a fresh tailer is started on the
-        restored state.  The original error is then re-raised.
+        restored state.  The original error is then re-raised.  Previews
+        persisted for ``added_images`` are owned by ``send_message`` (it deletes
+        them when the turn cannot be published), so a rolled-back edit never
+        leaves them behind; reused previews belong to the original turn and are
+        never deleted.
 
         Args:
             session: The managed session.
             text: The edited message text.
             client_turn_id: Frontend-generated stable id for the new turn.
             turn_id: The ``turn_id`` of the original turn being edited.
+            turn_metadata: Optional metadata for the new turn.
+            added_images: Original bytes of images newly attached to the
+                edited turn (appended after the original turn's images).
+            added_previews: Display previews for ``added_images``; when
+                supplied it must hold exactly one slot per added image and a
+                ``None`` slot means "not persisted, placeholder metadata".
+
+        Returns:
+            The number of Hub turns after the edited turn that the truncation
+            removed (``0`` when the edited turn was the last one).
 
         Raises:
             EditResendTurnInFlightError: If a turn is currently running (mapped
                 to 409 by the API layer).
-            ValueError: If the turn is not found in the event store.
+            ValueError: If the turn is not found in the event store, the
+                added-preview count does not match, or the turn was authored
+                by the Hub (Goal/workspace/...) rather than the user.
             TranscriptForkError: If the provider transcript cannot be forked
                 or the turn cannot be mapped to a provider user message.
             RuntimeError: If no structured adapter exists for the session.
@@ -94,13 +134,15 @@ class EditResendMixin(ManagerState):
                 or session.id in self._deps._DELETION_FENCED_SESSION_IDS
             ):
                 raise StructuredSourceUnavailable("managed session was deleted or replaced")
-            await self._edit_resend_locked(
+            return await self._edit_resend_locked(
                 session,
                 text,
                 client_turn_id,
                 turn_id,
                 adapter,
                 turn_metadata=turn_metadata,
+                added_images=added_images,
+                added_previews=added_previews,
             )
 
     async def _stop_tailer_for_edit(self, tailer: SessionTailer) -> None:
@@ -142,7 +184,9 @@ class EditResendMixin(ManagerState):
         adapter: Any,
         *,
         turn_metadata: Optional[Dict[str, Any]] = None,
-    ) -> None:
+        added_images: Optional[List[bytes]] = None,
+        added_previews: Optional[List[Optional[bytes]]] = None,
+    ) -> int:
         """Inner edit-resend logic, executed under the per-session edit lock."""
         store = self.get_store(session.workspace_id, session.id)
         turn_info = await store.find_turn_with_metadata(turn_id)
@@ -150,16 +194,46 @@ class EditResendMixin(ManagerState):
             raise ValueError(f"turn {turn_id!r} not found in event store")
         stream_seq, turn_index, turn_text, attachment_metas, original_metadata = turn_info
 
+        # Authoritative and cheap: refuse Hub-authored turns before any
+        # attachment work, tailer stop, snapshot or truncation.  Their provider
+        # text is not the user's message, so resending it as one would rewrite
+        # server-owned history (and falsify the Goal/workspace protocol).
+        if original_metadata.get("origin") in HUB_AUTHORED_TURN_ORIGINS:
+            raise TranscriptForkError(_HUB_AUTHORED_EDIT_REFUSAL)
+
+        recorded_digest = original_metadata.get("provider_text_sha256")
+        digest_arg = (
+            recorded_digest if isinstance(recorded_digest, str) and recorded_digest else None
+        )
+
+        added = list(added_images or [])
+        if added_previews is not None and len(added_previews) != len(added):
+            raise ValueError(
+                f"preview count ({len(added_previews)}) must match added image count "
+                f"({len(added)})"
+            )
+        added_preview_slots: List[Optional[bytes]] = (
+            list(added_previews) if added_previews is not None else [None] * len(added)
+        )
+
+        # How many Hub turns the truncation will discard.  Computed from the
+        # store before truncating so the API can report it to the composer.
+        total_turns = await store.count_turns()
+        removed_turn_count = max(0, total_turns - (turn_index + 1))
+
         # Read the original turn's attachment preview bytes BEFORE truncating
         # so they can be re-sent to the provider.  The durable cache stores
         # the uploaded display image (the original when it fit the cache cap),
         # so the preview is what we re-send; the attachment IDs are re-referenced
         # in the new turn (via ``reuse_attachments`` below) so the same
         # thumbnails render.  A preview that was evicted/expired is skipped:
-        # its ID is still re-referenced (UI shows "Preview expired") but the
-        # provider does not receive that image.
+        # neither its id nor its bytes can be re-sent, so it is dropped from the
+        # new turn to keep ``images`` aligned one-to-one with the turn's
+        # attachment metadata (the id-based alignment the provider/cache
+        # contract requires).
         att_store = AgentStreamAttachmentStore(session.workspace_id, session.id)
         images: List[bytes] = []
+        turn_metas: List[Dict[str, Any]] = []
         for meta in attachment_metas:
             att_id = meta.get("id") if isinstance(meta, dict) else None
             if not isinstance(att_id, str) or not att_id:
@@ -169,6 +243,14 @@ class EditResendMixin(ManagerState):
             except KeyError:
                 continue
             images.append(data)
+            turn_metas.append(dict(meta))
+
+        # The NEW images are handed to ``send_message`` as extra images past the
+        # reused prefix: that one implementation owns persisting their previews,
+        # building their metadata and cleaning them up if the turn cannot be
+        # published.  Reusing it keeps a single writer for the merge rule, so
+        # the resent turn's image order and its metadata cannot drift apart.
+        all_images = images + added
 
         # Keep a failed/busy/timed-out owner registered; the lifecycle lock
         # reserves detached edit work until rollback and snapshot cleanup finish.
@@ -198,25 +280,41 @@ class EditResendMixin(ManagerState):
             await store.truncate_before(stream_seq)
 
             # Fork the provider transcript.  This matches the edited turn to
-            # a provider user message by content and raises if it cannot.
+            # a provider user message by its recorded digest (falling back
+            # to content for historical turns) and raises if it cannot.
             self._deps.fork_transcript(
                 session,
                 adapter,
                 turn_index,
                 self._deps.provider_text_for_stored_turn(turn_text, original_metadata),
+                provider_text_sha256=digest_arg,
             )
 
             # Restart the tailer with a fresh transport that reads the forked
             # transcript, then deliver the edited text (with the original
-            # turn's image attachments re-sent and re-referenced).
+            # turn's image attachments re-sent and re-referenced, plus any
+            # image added during this edit).
             self._deps.invalidate_source(session.id)
             tailer = await self._get_or_create(session)
             send_kwargs: Dict[str, Any] = {}
-            if attachment_metas:
-                send_kwargs["reuse_attachments"] = attachment_metas
+            if turn_metas:
+                # Reused metadata for the leading images (their preview slots
+                # are ignored: those ids already exist). Only an added image
+                # needs a preview slot, so an edit that adds none keeps the
+                # plain reuse call shape.
+                send_kwargs["reuse_attachments"] = turn_metas
+                if added:
+                    send_kwargs["previews"] = [None] * len(turn_metas) + added_preview_slots
+            elif added:
+                send_kwargs["previews"] = added_preview_slots
+            if added:
+                # Only this edit makes the tailer persist new previews, and this
+                # caller rolls the turn back on failure (store restore below),
+                # so those previews must not outlive it.
+                send_kwargs["retain_previews_on_delivery_failure"] = False
             if turn_metadata:
                 send_kwargs["turn_metadata"] = dict(turn_metadata)
-            await tailer.send_message(text, images, client_turn_id, **send_kwargs)
+            await tailer.send_message(text, all_images, client_turn_id, **send_kwargs)
         except BaseException:
             if not self.session_is_current(session):
                 retain_backups = True
@@ -275,3 +373,5 @@ class EditResendMixin(ManagerState):
             if not retain_backups:
                 await store.discard_snapshot(store_backup)
                 self._deps.discard_snapshot(transcript_backup)
+
+        return removed_turn_count
