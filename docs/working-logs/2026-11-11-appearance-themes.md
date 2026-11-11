@@ -250,3 +250,21 @@ reader DOM/one-read continuity and all phone/Workspace widths. Both visibility
 observations say `visible` in headless Chromium; the evidence supports restoring
 the interaction target, not a claim that `document.hidden` caused the delay.
 No product code, coverage, runner/CI limits or animation behavior was changed.
+
+On `cc74766`, strict `all` passed again and the browser owner passed 23/24,
+including Appearance. The unchanged image-quality scenario instead timed out
+waiting for the authored HTML external-link popup; an unchanged focused run
+reproduced it. Two task-local diagnostic runs preserved the native click and
+opened the link successfully, recording a shared native window and the retained
+iframe's header-height/scroll transition. They did not prove the original gate
+fixed or capture a failing event target; no sandbox/security change was justified.
+
+The test now explicitly scrolls the external link into view and asserts viewport
+visibility after source/preview restoration, before the original single native
+click and popup expectation. It adds no sleep, retry or timeout relaxation.
+`popup-readiness-01` runs the original uninstrumented scenario under 120s and
+passes in 42.447s, including one external navigation, noopener, retained frame
+DOM/scroll, sanitization and mobile checks, with complete cleanup. This establishes
+the visible input target, not statistically proven elimination of every Chromium
+hit-testing fluctuation. Final frozen gates run browser-first, then `all` and
+terminal-HMR serially, to fail fast at the affected boundary.
