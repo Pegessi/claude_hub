@@ -530,6 +530,8 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(dialog).not_to_be_visible()
             assert len(goal_creates[-1]["attachments"]) == 1
             assert goal_creates[-1]["objective"] == "Build from the attached reference"
+            # Nothing asked for approval, so nothing sends the gate either.
+            assert goal_creates[-1]["plan_first"] is False, goal_creates[-1]
             await page.set_viewport_size({"width": 390, "height": 844})
             await page.screenshot(path=str(output / "goal-controls-mobile.png"), full_page=True)
             report["screenshots"].append("goal-controls-mobile.png")
@@ -545,8 +547,14 @@ async def main(browser_run: BrowserRun) -> None:
             await page.get_by_role("menuitem", name="Set a Goal").click()
             dialog = page.get_by_role("dialog", name="Set a Goal", exact=True)
             plan_toggle = dialog.get_by_label("Plan first", exact=True)
-            await expect(plan_toggle).to_be_checked()
+            # No approval gate unless asked for: a new Goal starts working, so
+            # the option opens unchecked and says so.
+            await expect(plan_toggle).not_to_be_checked()
+            await expect(dialog.get_by_text("starts working immediately")).to_be_visible()
             await dialog.get_by_role("textbox").fill("Plan the cache before building it")
+            # Opting in is what turns the review gate (and its card) on.
+            await plan_toggle.check()
+            await expect(plan_toggle).to_be_checked()
             await expect(dialog.get_by_text("Nothing starts until you approve")).to_be_visible()
             # The dialog fade-in is a 220ms entrance animation; shoot after it.
             await page.wait_for_timeout(400)

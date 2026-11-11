@@ -52,9 +52,13 @@
             <template v-if="planFirstDisabledReason">
               {{ planFirstDisabledReason }}
             </template>
-            <template v-else>
+            <template v-else-if="planFirst">
               The first turn proposes the scope, steps and execution budget
               (sub-agents, models, parallelism). Nothing starts until you approve.
+            </template>
+            <template v-else>
+              The Goal starts working immediately. Tick this to review its plan
+              before any work begins.
             </template>
           </p>
         </div>
@@ -122,7 +126,7 @@ const emit = defineEmits<{
   paste: [event: ClipboardEvent]
 }>()
 const objective = ref('')
-const planFirst = ref(true)
+const planFirst = ref(false)
 const validationError = ref<string | null>(null)
 const objectiveEl = ref<HTMLTextAreaElement | null>(null)
 let returnFocusEl: HTMLElement | null = null
@@ -157,7 +161,7 @@ function trapFocus(event: KeyboardEvent) {
 watch(() => props.open, open => {
   if (open) {
     if (props.editing) objective.value = props.initialObjective ?? ''
-    planFirst.value = Boolean(props.initialPlanFirst ?? true) && !props.planFirstDisabledReason
+    planFirst.value = Boolean(props.initialPlanFirst ?? false) && !props.planFirstDisabledReason
     returnFocusEl = document.activeElement instanceof HTMLElement ? document.activeElement : null
     validationError.value = null
     void nextTick(() => objectiveEl.value?.focus())
