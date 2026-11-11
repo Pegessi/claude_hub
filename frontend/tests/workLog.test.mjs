@@ -7,6 +7,10 @@ const { countWorkLog, countWorkLogParts, currentStep, describeRunningTool, descr
   await loadChatFeature('worklog/workLog')
 const { groupEventsIntoTurns } = await loadChatUtility('agentStreamTimeline')
 const { RUNTIME_STATUS_MAX_AGE_MS, runtimeStatusFor } = await loadChatFeature('worklog/runtimeStatus')
+// The label helper lives in a utility module; load it the same way the other
+// utility tests do.
+const hl = await loadChatUtility('codeHighlight')
+const hlLabel = canonical => hl.languageLabel(canonical)
 
 /** Raw view of a component file for structural pins (the repo keeps these in
  *  unit tests rather than byte-asserting rendered HTML). */
@@ -314,4 +318,24 @@ test('a polled tab status is read as server time and dropped once it stales', ()
     { status: 'offline', activity: null, ageMs: 0 },
   )
   assert.equal(runtimeStatusFor(undefined, now), null)
+})
+
+test('a runtime activity keeps its paths and flags while reading as a sentence', () => {
+  // L-2 of review round 4: lowercasing the whole activity mangled identifiers a
+  // reader may be matching against (`pytest -k TestAuth` became `testauth`).
+  const hint = firstResponseHint({
+    elapsedMs: 5_000,
+    connectionState: 'live',
+    runtime: { status: 'working', activity: 'Running pytest -k TestAuth tests/Test_Auth.py', ageMs: 2000 },
+  })
+  assert.equal(hint, 'The provider is running pytest -k TestAuth tests/Test_Auth.py — nothing written yet.')
+})
+
+test('a language label reads the token that was named, not its grammar', () => {
+  // L-1: `vue`/`svg`/`xml` all highlight as XML, but a `.vue` file is not HTML.
+  assert.equal(hlLabel('vue'), 'Vue')
+  assert.equal(hlLabel('svg'), 'SVG')
+  assert.equal(hlLabel('xml'), 'XML')
+  assert.equal(hlLabel('HTML'), 'HTML')
+  assert.equal(hlLabel('py'), 'Python')
 })

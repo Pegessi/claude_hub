@@ -13,6 +13,7 @@ import type { useChatImages } from './controllers/useChatImages'
 import type { useChatSettings } from './controllers/useChatSettings'
 import type { useChatComposer } from './controllers/useChatComposer'
 import type { useChatReview } from './review/useChatReview'
+import type { RuntimeStatusSample } from './worklog/runtimeStatus'
 
 export interface ChatIdentity {
   connectionState: Ref<'idle' | 'hydrating' | 'live' | 'reconciling' | 'failed'>
@@ -27,11 +28,10 @@ export interface ChatIdentity {
   feishuBotPoolStore: ReturnType<typeof useFeishuBotPoolStore>
   appStore: ReturnType<typeof useAppStore>
   isPaneActivated: Ref<boolean>
-  /** What the Hub knows about this tab's provider right now, or ``null`` when
-   *  the polled sample is missing or too old to be worth repeating. The live
-   *  footer uses it to say whether a silent turn is still running or already
-   *  dead, instead of guessing. */
-  runtimeStatus: ComputedRef<ChatRuntimeStatus | null>
+  /** The last polled status for this tab, raw. The live footer projects it (and
+   *  decides whether it is stale) with its own clock, so a stalled poll ages out
+   *  on wall-clock time rather than on the next poll. */
+  runtimeSample: ComputedRef<RuntimeStatusSample | null>
 }
 
 /** A fresh tab-status sample, reduced to what a footer sentence needs. */

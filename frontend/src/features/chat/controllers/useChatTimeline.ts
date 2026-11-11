@@ -1,4 +1,4 @@
-import { type Ref, type ComputedRef, computed, nextTick, onMounted, onUnmounted, ref, shallowReactive, watch } from 'vue'
+import { type Ref, type ComputedRef, computed, nextTick, onMounted, onUnmounted, ref, shallowReactive, shallowRef, watch } from 'vue'
 import { type AgentStreamEvent } from '@/types'
 import { type AgentStreamHistoryDetailEntry } from '@/utils/agentStreamHistoryCache'
 import { type TimelineTurn } from '../timeline/types'
@@ -20,7 +20,9 @@ interface Dependencies {
   events: Ref<AgentStreamEvent[]>
   historyDetails: Ref<Record<string, AgentStreamHistoryDetailEntry>>
   historyDetailRevision: Ref<number>
-  loadHistoryDetail: (turnId: string) => Promise<void>
+  /** Read a turn's detail. ``force`` re-reads a range that is already loaded,
+   *  which only a gap repair has a reason to do. */
+  loadHistoryDetail: (turnId: string, options?: { force?: boolean }) => Promise<void>
   isApprovalResolved: ReturnType<typeof useQuestionAnswers>['isApprovalResolved']
   isEditingTurn: (turn: TimelineTurn) => boolean
   optimisticCancelledTurnId: Ref<string | null>
@@ -213,7 +215,7 @@ export function useChatTimeline(deps: Dependencies) {
     if (!turn.turnId) return null
     const detail = deps.historyDetails.value[turn.turnId]
     const described = detail?.descriptor.event_count
-    const seen = observedTurnCounts.get(turn.turnId) ?? 0
+    const seen = observedTurnCounts.value.get(turn.turnId)?.count ?? 0
     // The higher of the two: a hydration descriptor counts the whole turn, and
     // the pane's own tally keeps growing for a turn that began here (no page
     // describes it) — or for one whose descriptor was written before the events
@@ -229,19 +231,38 @@ export function useChatTimeline(deps: Dependencies) {
    *  something to show, and the footer would stop saying it is still waiting for
    *  a first response. Sequences already counted are skipped, so a replay or a
    *  history-detail insertion cannot count the same event twice. */
-  const observedTurnCounts = new Map<string, number>()
-  let countedThroughSequence = -2
+  /** Per turn: how many output events this pane watched, and the highest
+   *  sequence it has counted for that turn.
+   *
+   *  The mark is per turn, not global, so a different turn's events are never
+   *  mistaken for a replay — and a detail read that replays a turn's middle
+   *  (sequences below its mark) adds no count, because those events are already
+   *  represented by the summary the stream showed.
+   *
+   *  ``shallowRef`` + copy-on-write: a plain Map mutated in a watcher is invisible
+   *  to Vue, and a footer that reads the count would keep showing the number it
+   *  saw first. */
+  const observedTurnCounts = shallowRef(new Map<string, { count: number; through: number }>())
 
   function countObservedTurnEvents(): void {
-    const events = deps.events.value
-    for (const event of events) {
-      if (event.stream_sequence <= countedThroughSequence) continue
-      countedThroughSequence = event.stream_sequence
-      if (event.type === 'turn_started' || event.type === 'turn_completed') continue
+    const counted = new Map(observedTurnCounts.value)
+    let changed = false
+    for (const event of deps.events.value) {
       const turnId = event.turn_id
       if (!turnId) continue
-      observedTurnCounts.set(turnId, (observedTurnCounts.get(turnId) ?? 0) + 1)
+      const seen = counted.get(turnId)
+      if (seen && event.stream_sequence <= seen.through) continue
+      // The turn's opening and closing markers are punctuation, not output:
+      // counting them would make a turn with nothing on screen look productive
+      // and hide the waiting state.
+      const produced = event.type === 'turn_started' || event.type === 'turn_completed' ? 0 : 1
+      counted.set(turnId, {
+        count: (seen?.count ?? 0) + produced,
+        through: event.stream_sequence,
+      })
+      changed = true
     }
+    if (changed) observedTurnCounts.value = counted
   }
 
   const subthreadPartsFor = createSubthreadThinkingPresenter()
@@ -420,8 +441,11 @@ export function useChatTimeline(deps: Dependencies) {
    *  restore a turn it joined mid-flight, one more to repair a gap. Two separate
    *  flags, because a turn may owe both and neither may repeat. */
   const backfillReads = new Map<string, { join: number; repair: number }>()
-  /** Every attempt, landed or not, so a read that keeps being aborted cannot loop. */
-  const backfillAttempts = new Map<string, number>()
+  /** Every attempt by reason, landed or not, so a read that keeps being aborted
+   *  cannot loop and a repair is not starved by a spent join budget. */
+  const backfillAttempts = new Map<string, { join: number; repair: number }>()
+  /** Turns with a read in flight right now. */
+  const backfillInFlight = new Set<string>()
   /** Turns whose stream dropped while they were live. Their parts may be
    *  missing whatever the backend accepted during the gap. */
   const interruptedTurns = new Set<string>()
@@ -447,7 +471,7 @@ export function useChatTimeline(deps: Dependencies) {
     const turnId = turn?.turnId
     if (!turnId) return
     const detail = deps.historyDetails.value[turnId]
-    if (!detail || detail.status === 'loading' || detail.status === 'loaded') return
+    if (!detail || detail.status === 'loading') return
     const reads = backfillReads.get(turnId) ?? { join: 0, repair: 0 }
     // One read restores a turn the pane joined with nothing reduced. One more
     // repairs a turn whose stream dropped while it was live — and only once that
@@ -461,26 +485,32 @@ export function useChatTimeline(deps: Dependencies) {
     const startedMs = parseTimestampMs(turn.startedAt)
     const joinedMidTurn = startedMs !== null && startedMs <= paneActiveSince
     const joinOwed = reads.join === 0 && (turn.parts.length === 0 || (!turn.completed && joinedMidTurn))
+    // A repair re-reads a range that is already ``loaded`` on purpose: the loaded
+    // detail was fetched before the gap, so it cannot contain what the backend
+    // accepted while the stream was down.
     const repairOwed = interruptedTurns.has(turnId) && turn.completed && reads.repair === 0
     if (!joinOwed && !repairOwed) return
-    // Attempts are bounded separately from successes: a read that is aborted by
-    // a newer descriptor (or fails) must be retried once, but a read that never
-    // lands must not become a loop.
-    const attempts = backfillAttempts.get(turnId) ?? 0
-    if (attempts >= BACKFILL_MAX_ATTEMPTS) return
-    backfillAttempts.set(turnId, attempts + 1)
+    // Attempts are bounded per reason and separately from successes: a read that
+    // is aborted by a newer descriptor (or fails) must be retried once, but a
+    // read that never lands must not become a loop.
+    const attempts = backfillAttempts.get(turnId) ?? { join: 0, repair: 0 }
+    const reason = repairOwed ? 'repair' : 'join'
+    if (attempts[reason] >= BACKFILL_MAX_ATTEMPTS) return
+    // Two watcher ticks can land before the first read resolves; without this the
+    // budget would be spent twice on one request.
+    if (backfillInFlight.has(turnId)) return
+    backfillAttempts.set(turnId, { ...attempts, [reason]: attempts[reason] + 1 })
+    backfillInFlight.add(turnId)
     const visit = timelineVisit
-    await deps.loadHistoryDetail(turnId)
+    await deps.loadHistoryDetail(turnId, { force: repairOwed })
+    backfillInFlight.delete(turnId)
     if (timelineDisposed || visit !== timelineVisit) return
     // Charge the budget only once the range actually landed. A request retired
     // because the turn grew underneath it leaves the entry unloaded, and the
     // next activation deserves another try.
     const landed = deps.historyDetails.value[turnId]?.status === 'loaded'
     if (landed) {
-      backfillReads.set(turnId, {
-        join: reads.join + (joinOwed ? 1 : 0),
-        repair: reads.repair + (repairOwed ? 1 : 0),
-      })
+      backfillReads.set(turnId, { ...reads, [reason]: reads[reason] + 1 })
     }
   }
 

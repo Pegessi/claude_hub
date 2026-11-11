@@ -66,6 +66,7 @@
 import { computed, inject, onBeforeUnmount, onMounted, ref } from 'vue'
 import { formatStopwatch, parseTimestampMs } from '@/utils/duration'
 import { chatIdentityKey, requireChatOwner, chatTimelineKey } from '../owners'
+import { runtimeStatusFor } from '../worklog/runtimeStatus'
 import {
   countWorkLog,
   currentStep,
@@ -162,7 +163,7 @@ const hint = computed(() => {
   return firstResponseHint({
     elapsedMs: elapsedMs.value,
     connectionState: identity?.connectionState?.value ?? 'live',
-    runtime: identity?.runtimeStatus?.value ?? null,
+    runtime: runtimeStatusFor(identity?.runtimeSample?.value ?? null, now.value),
   })
 })
 </script>

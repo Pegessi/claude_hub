@@ -744,11 +744,14 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
     }
   }
 
-  async function loadHistoryDetail(turnId: string) {
+  async function loadHistoryDetail(turnId: string, options: { force?: boolean } = {}) {
     const sourceId = currentSessionId
     const streamPath = currentStreamPath
     const entry = historyDetails.value[turnId]
-    if (stopped || !sourceId || !streamPath || !entry || entry.status === 'loaded' || entry.status === 'loading') return
+    // ``force`` exists for one caller: a repair after a dropped stream has to
+    // read a range again because the detail it holds was fetched before the gap.
+    const loaded = entry?.status === 'loaded' && !options.force
+    if (stopped || !sourceId || !streamPath || !entry || loaded || entry.status === 'loading') return
 
     const requestId = nextHistoryDetailRequestId++
     const descriptor = entry.descriptor
