@@ -132,9 +132,9 @@
           <button
             type="button"
             class="mobile-app-menu-item"
-            @click="toggleColorScheme"
+            @click="openAppearance"
           >
-            {{ colorScheme === 'dark' ? 'Light Theme' : 'Dark Theme' }}
+            Appearance
           </button>
         </div>
       </details>
@@ -210,7 +210,7 @@ const appStore = useAppStore()
 const { isMobile } = useViewport()
 const { isPending, runPending } = usePendingActions()
 const { tabs, manualTabs, activeTabId, isLoading, agentStatuses, notifications } = storeToRefs(store)
-const { mode, colorScheme } = storeToRefs(appStore)
+const { mode } = storeToRefs(appStore)
 const { dismissNotification } = store
 const { getTabStatus, getTabStatusLabel } = useTabStatus(agentStatuses)
 
@@ -376,8 +376,8 @@ function setAppMode(nextMode: AppMode) {
   closeMobileAppMenu()
 }
 
-function toggleColorScheme() {
-  appStore.toggleColorScheme()
+function openAppearance() {
+  appStore.openAppearance()
   closeMobileAppMenu()
 }
 

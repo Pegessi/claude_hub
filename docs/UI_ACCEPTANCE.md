@@ -47,6 +47,7 @@ the existing dynamic scenario scripts are not claimed as strictly type-checked.
 
 | Scenario | Acceptance exercised |
 | --- | --- |
+| Appearance themes | Desktop and mobile Terminal/Workspace menus open the same Appearance dialog; six palettes in light/dark have matching real previews, readable core text/code/accent roles and a mode-independent selection; System follows OS changes, choices survive reload and synchronize to another open page/standalone reader; native radio keyboard interaction, focus containment/return, Done/Esc/backdrop dismissal, and narrow/short-screen overflow and 44px primary controls are checked with mocked APIs |
 | Task execution panel | Recording versus managed controls; progress/handoff and retry identity |
 | Workspace Task creation | Unknown outcome/replay; dialog closure and credential recovery; workspace changes; image paste, decoded preview, attachment-only payload and exact replay; managed Agent/Reviewer and Task Terminal/Chat selection, including MASO Chat and remote restrictions |
 | Workspace Task detail | At 390/720/1280px, open a task, expand/collapse Actions where applicable, perform Start through the real control and observe working status; verify overlays close without intercepting subsequent input |
