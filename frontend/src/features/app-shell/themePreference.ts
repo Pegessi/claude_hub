@@ -8,9 +8,9 @@ export const THEME_PALETTES = [
   { id: 'mono', name: 'Mono', description: 'Black, white, nothing extra', sample: 'Aa' },
   { id: 'studio', name: 'Studio', description: 'Quiet layers, softer edges', sample: 'Aa' },
   { id: 'carbon', name: 'Carbon', description: 'Graphite, raised surfaces', sample: 'Aa' },
-  { id: 'zenless', name: 'Zenless', description: 'Zenless Zone Zero · urban signal', sample: 'ZZ' },
-  { id: 'frontier', name: 'Frontier', description: 'Red Dead Redemption · western', sample: 'RDR' },
-  { id: 'los-santos', name: 'Los Santos', description: 'GTA V · city nights', sample: 'V' },
+  { id: 'zenless', name: 'Zenless', description: 'Zenless Zone Zero · street-pop', sample: 'ZZ' },
+  { id: 'frontier', name: 'Frontier', description: 'Red Dead · 1899 letterpress', sample: 'RDR' },
+  { id: 'los-santos', name: 'Los Santos', description: 'GTA V · telemetry HUD', sample: 'V' },
 ] as const
 export type ThemePalette = typeof THEME_PALETTES[number]['id']
 export type AppearanceMode = ColorScheme | 'system'

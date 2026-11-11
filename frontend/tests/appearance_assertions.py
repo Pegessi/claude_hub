@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -140,6 +141,215 @@ async def split_pane_themes(page: Page) -> list[dict[str, Any]]:
     return report
 
 
+async def _settle_styles(page: Page) -> None:
+    await page.evaluate("""async () => {
+      for (let pass = 0; pass < 5; pass++) {
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        const finite = document.getAnimations().filter(animation =>
+          animation.playState === 'running' &&
+          Number.isFinite(animation.effect?.getComputedTiming().endTime));
+        if (!finite.length) return;
+        await Promise.all(finite.map(animation => animation.finished.catch(() => {})));
+      }
+      throw new Error('Finite styles did not settle');
+    }""")
+
+
+def _rgba(color: str) -> list[float]:
+    values = [float(value) for value in re.findall(r"-?[\d.]+(?:e[-+]?\d+)?", color)]
+    assert len(values) in (3, 4), color
+    if color.startswith("rgb"):
+        values[:3] = [value / 255 for value in values[:3]]
+    else:
+        assert color.startswith("color(srgb "), color
+    return values if len(values) == 4 else [*values, 1]
+
+
+def _paint_contrast(rendered: dict[str, Any]) -> float:
+    # Composite nested hover fills onto the actual selected surface. For the
+    # opaque sidebar gradient, bound every channel by its computed stops rather
+    # than accidentally using the unrelated opaque ancestor behind the gradient.
+    backgrounds: list[list[float]] = []
+    for layer in reversed(rendered["layers"]):
+        assert layer["opacity"] == 1, rendered
+        color = _rgba(layer["color"])
+        if color[3] == 1:
+            backgrounds = [color[:3]]
+        elif color[3] > 0:
+            assert backgrounds, rendered
+            backgrounds = [
+                [color[i] * color[3] + base[i] * (1 - color[3]) for i in range(3)]
+                for base in backgrounds
+            ]
+        image = layer["image"]
+        if image != "none":
+            assert image.startswith("linear-gradient(") and image.count("gradient(") == 1, rendered
+            stops = re.findall(r"(?:rgba?\([^)]*\)|color\(srgb[^)]*\))", image)
+            assert len(stops) >= 2, rendered
+            colors = [_rgba(stop) for stop in stops]
+            assert all(color[3] == 1 for color in colors), rendered
+            backgrounds = [color[:3] for color in colors]
+    assert backgrounds, f"Selected consumer has no opaque paint: {rendered}"
+    foreground = _rgba(rendered["foreground"])
+    assert foreground[3] == 1, rendered
+    bounds = [
+        [bound(color[channel] for color in backgrounds) for channel in range(3)]
+        for bound in (min, max)
+    ]
+    rendered["background_bounds"] = [f"color(srgb {' '.join(map(str, color))})" for color in bounds]
+    low, high = (luminance(color) for color in rendered["background_bounds"])
+    if low <= luminance(rendered["foreground"]) <= high:
+        return 1  # Endpoints alone cannot certify a gradient crossing the ink.
+    return min(contrast(rendered["foreground"], color) for color in rendered["background_bounds"])
+
+
+async def _selected_chrome_contrast(page: Page) -> list[dict[str, Any]]:
+    samples: list[dict[str, Any]] = []
+    # Foregrounds belong to the real nested label/glyph, not the parent's color.
+    targets = (
+        (".mode-button.active", None, "color", 4.5),
+        (".tab.active", ".tab-name", "color", 4.5),
+        (".tab.active", ".pane-indicator", "color", 4.5),
+        (".tab.active", ".tab-close", "color", 3),
+        (".tab.active", ".tam-trigger", "color", 3),
+        (".chat-sidebar__item.active", ".chat-sidebar__item-name", "color", 4.5),
+        (".chat-sidebar__item.active", ".chat-sidebar__item-time", "color", 4.5),
+        (".chat-sidebar__item.active", ".tam-trigger", "color", 3),
+        (".layout-btn.active", ".layout-cell", "backgroundColor", 3),
+    )
+    for surface, child, foreground, minimum in targets:
+        parent = page.locator(surface).first
+        await expect(parent).to_be_visible()
+        element = parent.locator(child).first if child else parent
+        icon = child in (".tab-close", ".tam-trigger")
+        interactions: tuple[str, ...] = ("hover", "pressed") if icon else ("rest", "hover")
+        if child == ".chat-sidebar__item-time":
+            # The timestamp intentionally gives its slot to the hover menu.
+            interactions = ("rest",)
+        for interaction in interactions:
+            if interaction == "rest":
+                await page.mouse.move(0, 0)
+            else:
+                # Sidebar menus are hover-revealed; then hover the glyph itself.
+                await parent.hover()
+                await element.hover()
+            await expect(element).to_be_visible()
+            if interaction == "pressed":
+                await page.mouse.down()
+            try:
+                await _settle_styles(page)
+                rendered = await element.evaluate(
+                    """(el, {surface, foreground}) => {
+                  const parent = el.closest(surface);
+                  const style = getComputedStyle(el);
+                  const layers = [];
+                  for (let node = foreground === 'backgroundColor' ? el.parentElement : el;
+                    node; node = node.parentElement) {
+                    const s = getComputedStyle(node);
+                    layers.push({color: s.backgroundColor, image: s.backgroundImage,
+                      opacity: Number(s.opacity)});
+                    if (node === parent) break;
+                  }
+                  return {foreground: style[foreground], layers, pressed: el.matches(':active'),
+                    hovered: el.matches(':hover'), opacity: Number(style.opacity)};
+                }""",
+                    {"surface": surface, "foreground": foreground},
+                )
+                assert rendered["opacity"] == 1, rendered
+                assert rendered["pressed"] == (interaction == "pressed"), rendered
+                assert rendered["hovered"] == (interaction != "rest"), rendered
+                ratio = _paint_contrast(rendered)
+                samples.append(
+                    {
+                        "surface": surface,
+                        "child": child,
+                        "interaction": interaction,
+                        "minimum": minimum,
+                        "contrast": round(ratio, 3),
+                        "pass": ratio >= minimum,
+                        **rendered,
+                    }
+                )
+            finally:
+                if interaction == "pressed":
+                    await page.mouse.move(0, 0)
+                    await page.mouse.up()
+    await page.get_by_role("button", name="Appearance", exact=True).click()
+    dialog = page.get_by_role("dialog")
+    checked = dialog.locator(".appearance-mode input:checked + span")
+    for interaction in ("rest", "hover", "pressed"):
+        rendered = await rendered_button_state(checked, interaction, dialog.locator("h2"))
+        assert _rgba(rendered["background"])[3] == 1, rendered
+        ratio = contrast(rendered["foreground"], rendered["background"])
+        samples.append(
+            {
+                "surface": "checked appearance mode",
+                "interaction": interaction,
+                "minimum": 4.5,
+                "contrast": round(ratio, 3),
+                "pass": ratio >= 4.5,
+                **rendered,
+            }
+        )
+    await dialog.get_by_role("button", name="Done", exact=True).click()
+    await _settle_styles(page)
+    return samples
+
+
+async def _game_chat_cues(page: Page, palette: str) -> dict[str, Any]:
+    await _settle_styles(page)
+    rendered = await page.evaluate("""() => {
+      const selectors = {nav: '.mode-button.active', tab: '.tab.active',
+        sidebar: '.chat-sidebar__item.active', composer: '.composer-row',
+        plan: '.goal-plan-card', title: '.goal-plan-eyebrow'};
+      return Object.fromEntries(Object.entries(selectors).map(([name, selector]) => {
+        const el = document.querySelector(selector);
+        if (!el || !el.getClientRects().length) throw new Error(`Missing cue: ${selector}`);
+        const s = getComputedStyle(el);
+        const shadows = s.boxShadow.replace(/(?:rgba?\\([^)]*\\)|color\\([^)]*\\))/g, '').split(',')
+          .map(shadow => [...shadow.matchAll(/(-?[\\d.]+)px/g)].map(match => Number(match[1])));
+        return [name, {radii: ['TopLeft', 'TopRight', 'BottomRight', 'BottomLeft']
+            .map(corner => parseFloat(s[`border${corner}Radius`])),
+          topStyle: s.borderTopStyle, topWidth: parseFloat(s.borderTopWidth),
+          leftWidth: parseFloat(s.borderLeftWidth), rightWidth: parseFloat(s.borderRightWidth),
+          font: s.fontFamily, fontStyle: s.fontStyle, weight: Number(s.fontWeight),
+          transform: s.textTransform, stretch: s.fontStretch,
+          height: el.getBoundingClientRect().height,
+          hardOffset: shadows.some(values => values[0] > 0 && values[1] > 0 && values[2] === 0)}];
+      }));
+    }""")
+    nav, composer, plan = rendered["nav"], rendered["composer"], rendered["plan"]
+    if palette == "Zenless":
+        checks = {
+            "capsule_navigation": min(nav["radii"]) >= nav["height"] / 2,
+            "oblique_hierarchy": nav["fontStyle"] == "italic" and nav["weight"] >= 700,
+            "asymmetric_cards": all(
+                max(item["radii"]) > min(item["radii"]) for item in (composer, plan)
+            ),
+            "hard_offsets": composer["hardOffset"] and plan["hardOffset"],
+        }
+    elif palette == "Frontier":
+        checks = {
+            "square_bookplates": all(max(item["radii"]) <= 3 for item in (nav, composer, plan)),
+            "double_rules": all(
+                item["topStyle"] == "double" and item["topWidth"] >= 3 for item in (composer, plan)
+            ),
+            "serif_hierarchy": bool(re.search(r"(?:^|,)\s*serif$", nav["font"], re.I)),
+        }
+    else:
+        checks = {
+            "square_hud": all(max(item["radii"]) <= 2 for item in (nav, composer, plan)),
+            "leading_bars": all(
+                item["leftWidth"] > item["rightWidth"] and item["leftWidth"] >= 3
+                for item in (nav, composer, plan)
+            ),
+            "condensed_hierarchy": nav["transform"] == "uppercase"
+            and nav["weight"] >= 700
+            and ("condensed" in nav["stretch"] or float(nav["stretch"].removesuffix("%")) < 100),
+        }
+    return {"checks": checks, "rendered": rendered}
+
+
 async def filled_button_themes(
     page: Page,
     button: Locator,
@@ -159,6 +369,7 @@ async def filled_button_themes(
     report: list[dict[str, Any]] = []
     previous_viewport = page.viewport_size
     game_palettes = ("Zenless", "Frontier", "Los Santos")
+    game_report: list[dict[str, Any]] = []
 
     try:
         for mode in ("dark", "light"):
@@ -184,20 +395,57 @@ async def filled_button_themes(
                         {"palette": palette, "mode": mode, **rendered, "contrast": round(ratio, 3)}
                     )
                 if screenshot_dir is not None and palette in game_palettes:
+                    game_report.append(
+                        {
+                            "palette": palette,
+                            "mode": mode,
+                            "cues": await _game_chat_cues(page, palette),
+                            "selected_chrome": await _selected_chrome_contrast(page),
+                        }
+                    )
+                    print(f"Game chrome captured: {palette}/{mode}", flush=True)
                     screenshot = f"chat-game-{palette_id(palette)}-{mode}.png"
                     await page.screenshot(path=str(screenshot_dir / screenshot), full_page=True)
                     report[-1]["screenshot"] = screenshot
         if screenshot_dir is not None:
             await page.set_viewport_size({"width": 390, "height": 844})
-            for palette in game_palettes:
-                await select_appearance(page, "dark", palette)
+            # The actual phone shell is selected at boot, not just by CSS width.
+            await page.reload(wait_until="domcontentloaded")
+            await expect(button).to_be_enabled()
+            for variant in game_report:
+                await select_appearance(page, variant["mode"], variant["palette"])
                 await button.scroll_into_view_if_needed()
-                await page.screenshot(
-                    path=str(screenshot_dir / f"phone-game-{palette_id(palette)}-dark.png"),
-                    full_page=True,
-                )
+                await _settle_styles(page)
+                await expect(button).to_be_in_viewport()
+                box = await button.bounding_box()
+                assert box is not None and box["height"] >= 44, box
+                overflow = await page.evaluate("document.documentElement.scrollWidth - innerWidth")
+                assert overflow <= 1, (variant["palette"], variant["mode"], overflow)
+                screenshot = f"phone-game-{palette_id(variant['palette'])}-{variant['mode']}.png"
+                await page.screenshot(path=str(screenshot_dir / screenshot), full_page=True)
+                variant["phone"] = {
+                    "screenshot": screenshot,
+                    "primary_height": box["height"],
+                    "overflow": overflow,
+                }
     finally:
+        if screenshot_dir is not None:
+            (screenshot_dir / "chat-game-chrome.json").write_text(
+                json.dumps({"variants": game_report, "primary_buttons": report}, indent=2) + "\n",
+                encoding="utf-8",
+            )
         if previous_viewport is not None:
             await page.set_viewport_size(previous_viewport)
+        if screenshot_dir is not None:
+            await page.reload(wait_until="domcontentloaded")
+            await expect(button).to_be_enabled()
         await select_appearance(page, previous["mode"], previous["palette"])
+    failures = [
+        {"palette": variant["palette"], "mode": variant["mode"], "sample": sample}
+        for variant in game_report
+        for sample in variant["selected_chrome"]
+        if not sample["pass"]
+    ]
+    assert not failures, f"Selected chrome contrast: {failures}"
+    assert all(all(variant["cues"]["checks"].values()) for variant in game_report), game_report
     return report
