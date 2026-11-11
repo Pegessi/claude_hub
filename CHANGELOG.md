@@ -7,6 +7,21 @@
 
 ## Released
 
+### feat(theme): add studio and game-inspired visual themes
+
+- Keep Classic and Contrast; replace the rejected tinted palettes with Mono,
+  Studio and Carbon, and add Zenless (Zenless Zone Zero), Frontier (Red Dead
+  Redemption) and Los Santos (GTA V) inspired themes. All eight support light,
+  dark and System; retired palette IDs recover to Classic without changing mode.
+- Add scoped material, heading and chrome treatments, not just alternate hues:
+  neutral layers, urban signal stripes, western serif/double rules and HUD edges.
+  Body text/code remain readable; no game artwork or font assets are bundled.
+- Pair primary fills with `on-accent` foregrounds, and message surfaces with their
+  own text token, so white/yellow buttons and neutral bubbles work in both modes.
+  Preserve semantic danger/success colors and the original accepted themes.
+- Expand real browser and terminal regression coverage to the new palette set;
+  keep the user-requested IPv6 feature preview, without changing the main service.
+
 ### feat(theme): add curated palettes and responsive appearance controls
 
 - Replace the fixed light/dark switch with Classic, Slate, Sand, Forest, Dusk and

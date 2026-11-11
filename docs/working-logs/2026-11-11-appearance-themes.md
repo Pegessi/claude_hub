@@ -139,3 +139,60 @@ claimed. The appearance matrix covers token/reader rendering with mocked data;
 real rendered Goal/approval controls and the private ttyd terminal are checked
 separately. This is not an audit of every existing application's text contrast.
 No task server is retained for delivery.
+
+
+## Visual-feedback revision: studio and game-inspired themes
+
+The user accepted Classic and Contrast, rejected the four tinted alternatives,
+then explicitly requested integrating the three neutral studies into this branch
+and adding Zenless Zone Zero, Red Dead Redemption and GTA V inspired designs.
+The final set for this revision is Classic, Contrast, Mono, Studio, Carbon,
+Zenless, Frontier and Los Santos. The existing preference/store/terminal lifecycle
+is retained; old unshipped palette IDs fall back to Classic while preserving mode.
+
+**Change boundary:** `palettes.css` owns paired colors; `theme-treatments.css` owns
+scoped radii/materials/display headings and small chrome motifs. The normal text
+and code fonts stay shared. The eight-card picker uses four desktop columns and
+two phone columns with its existing scroll/focus handling. Classic and Contrast
+receive no new treatments. Bright fills use the existing `on-accent` token across
+all actual accent consumers; user bubbles get a separate `message-user-text`
+role. Danger/success foregrounds are intentionally not mechanically changed.
+
+**References:** neutral studies follow the Geist/Linear/Raycast sources above.
+Game references are the official [Zenless Zone Zero](https://zenless.hoyoverse.com/),
+[Red Dead Redemption 2](https://www.rockstargames.com/reddeadredemption2) and
+[GTA V](https://www.rockstargames.com/gta-v) sites. Hex values and CSS motifs are
+our own interpretation, not claimed to be official game design tokens. No logos,
+artwork, game fonts, audio, animations or full-canvas textures are imported.
+
+**Acceptance:** all 16 variants must preserve core text/code and on-fill contrast,
+show their material/font/edge differences, return to an unchanged Classic, keep
+retired-ID mode preferences, work at narrow/short mobile and 768px boundaries,
+and repaint an existing terminal without reconnecting. Actual rendered primary
+controls are checked at rest/hover, rather than accepting CSS token values alone.
+Final source SHA, full gates and independent review are recorded in the same Task
+`6e8a377f-403d-4738-9108-f24a6ec258f9` and revision evidence. The user explicitly
+requested a feature-branch push and retained `theme-preview-ipv6` on port 5358;
+this does not authorize a merge to main or a shared backend restart.
+
+
+Revision evidence before fixed-SHA review:
+
+- Full frontend unit suite: **1,460 passed**; types, lint and bundle passed.
+- Appearance scenario: all **16 variants**, both Classic switch-back snapshots,
+  retired-ID recovery, keyboard/storage/reader and mobile-boundary contracts pass.
+  Parent spotted a preview-only inheritance leak: Contrast's optional message
+  primitives inherited the selected root's values. Defaults now resolve locally
+  in each scope via `:where(:root, .theme-preview)`. The strengthened gate checks
+  **32 foreign-root tiles**, including their painted bubble and paired ink/fill,
+  rather than only the selected tile's canvas (`eight-palettes-fidelity`).
+- Actual Goal/approval primary controls: **64 rest/hover samples**, minimum hovered
+  contrast **4.615:1**; full game Chat/Goal desktop and phone captures inspected
+  (`tasks/theme-browser/eight-chat-01/`). No unknown API calls or page errors.
+- Full real terminal HMR gate: **13/13 passed**, including Mono dark → Zenless dark
+  → Zenless light on the same iframe/document/xterm/buffer, preserving output.
+  Evidence: `tasks/theme-game-evidence/claude-hub-verify.4kzjsj9b/`.
+- Final complete checks run only after the candidate is frozen. They run serially
+  (`all`, then `browser-mocks`) because the existing browser owner reserves a
+  fixed refusal port. Do not edit `verify.sh` or source while these checks run.
+  Independent review and final source/evidence identities stay in the same Task.

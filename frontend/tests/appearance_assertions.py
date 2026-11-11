@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
 
 from playwright.async_api import Locator, Page, expect
 
-PALETTES = ("Classic", "Slate", "Sand", "Forest", "Dusk", "Contrast")
+PALETTES = ("Classic", "Contrast", "Mono", "Studio", "Carbon", "Zenless", "Frontier", "Los Santos")
+
+
+def palette_id(name: str) -> str:
+    return name.lower().replace(" ", "-")
 
 
 def contrast(foreground: str, background: str) -> float:
@@ -35,13 +40,17 @@ async def choose_mode(page: Page, name: str) -> None:
 
 
 async def choose_palette(page: Page, name: str) -> None:
-    control = page.get_by_role("radio", name=re.compile(rf"^{name}\b"))
+    label = name.replace("-", " ").title()
+    control = page.get_by_role("radio", name=re.compile(rf"^{label}\b"))
     await control.locator("..").click()
     await expect(control).to_be_checked()
 
 
 async def filled_button_themes(
-    page: Page, button: Locator, secondary: Locator | None = None
+    page: Page,
+    button: Locator,
+    secondary: Locator | None = None,
+    screenshot_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Measure the real enabled button at rest/hover through every picker choice.
 
@@ -54,15 +63,20 @@ async def filled_button_themes(
       return {mode: preference?.mode ?? root.dataset.theme, palette: root.dataset.palette};
     }""")
     report: list[dict[str, Any]] = []
+    previous_viewport = page.viewport_size
+    game_palettes = ("Zenless", "Frontier", "Los Santos")
 
     async def select(mode: str, palette: str) -> None:
-        await page.get_by_role("button", name="Appearance", exact=True).click()
+        appearance = page.get_by_role("button", name="Appearance", exact=True)
+        if not await appearance.is_visible():
+            await page.get_by_label("App menu", exact=True).click()
+        await appearance.click()
         await choose_mode(page, mode.title())
         await choose_palette(page, palette.title())
         await page.get_by_role("dialog").get_by_role("button", name="Done", exact=True).click()
         if mode != "system":
             await expect(page.locator("html")).to_have_attribute("data-theme", mode)
-        await expect(page.locator("html")).to_have_attribute("data-palette", palette.lower())
+        await expect(page.locator("html")).to_have_attribute("data-palette", palette_id(palette))
 
     try:
         for mode in ("dark", "light"):
@@ -99,6 +113,21 @@ async def filled_button_themes(
                     report.append(
                         {"palette": palette, "mode": mode, **rendered, "contrast": round(ratio, 3)}
                     )
+                if screenshot_dir is not None and palette in game_palettes:
+                    screenshot = f"chat-game-{palette_id(palette)}-{mode}.png"
+                    await page.screenshot(path=str(screenshot_dir / screenshot), full_page=True)
+                    report[-1]["screenshot"] = screenshot
+        if screenshot_dir is not None:
+            await page.set_viewport_size({"width": 390, "height": 844})
+            for palette in game_palettes:
+                await select("dark", palette)
+                await button.scroll_into_view_if_needed()
+                await page.screenshot(
+                    path=str(screenshot_dir / f"phone-game-{palette_id(palette)}-dark.png"),
+                    full_page=True,
+                )
     finally:
+        if previous_viewport is not None:
+            await page.set_viewport_size(previous_viewport)
         await select(previous["mode"], previous["palette"])
     return report

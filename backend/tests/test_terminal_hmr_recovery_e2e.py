@@ -1000,7 +1000,7 @@ def test_palette_change_repaints_live_terminal_without_reconnect(
         if (event.data?.type === 'terminal-theme') probe.payloads.push(event.data.payload);
       });
     }""")
-    for mode, palette in [("dark", "forest"), ("dark", "sand"), ("light", "sand")]:
+    for mode, palette in [("dark", "mono"), ("dark", "zenless"), ("light", "zenless")]:
         prior_count = page.evaluate("() => window.__themeProbe.payloads.length")
         page.evaluate(
             """async ([mode, palette]) => {

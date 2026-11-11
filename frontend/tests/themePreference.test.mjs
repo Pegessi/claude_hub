@@ -74,11 +74,21 @@ test('existing users retain their original light/dark palette; invalid records r
     }
   }
   assert.deepEqual(parseThemePreference('{"mode":"system","palette":"deleted"}'), { mode: 'system', palette: 'classic' })
-  assert.deepEqual(parseThemePreference('{"mode":"unknown","palette":"sand"}', 'light'), { mode: 'light', palette: 'sand' })
+  assert.deepEqual(parseThemePreference('{"mode":"unknown","palette":"zenless"}', 'light'), { mode: 'light', palette: 'zenless' })
+})
+
+test('retired palette IDs recover to Classic without discarding the selected mode', () => {
+  for (const palette of ['slate', 'sand', 'forest', 'dusk']) {
+    for (const mode of ['system', 'light', 'dark']) {
+      assert.deepEqual(parseThemePreference(JSON.stringify({ mode, palette })), { mode, palette: 'classic' })
+    }
+  }
 })
 
 test('all shipped palettes are selectable independently of system/light/dark mode', () => {
-  assert.equal(new Set(THEME_PALETTES.map(p => p.id)).size, 6)
+  assert.deepEqual(THEME_PALETTES.map(p => p.id).sort(), [
+    'classic', 'contrast', 'mono', 'studio', 'carbon', 'zenless', 'frontier', 'los-santos',
+  ].sort())
   for (const { id: palette } of THEME_PALETTES) {
     for (const mode of ['system', 'light', 'dark']) {
       assert.deepEqual(parseThemePreference(JSON.stringify({ mode, palette })), { mode, palette })
@@ -92,21 +102,21 @@ test('the real store owns root appearance and migrates only when the user choose
   const f = fixture(t, { [LEGACY_THEME_STORAGE_KEY]: 'light' })
   assert.deepEqual(f.dataset, { theme: 'light', palette: 'classic' })
   assert.equal(f.values.has(THEME_STORAGE_KEY), false)
-  f.store.setAppearance('light', 'forest')
-  assert.deepEqual(JSON.parse(f.values.get(THEME_STORAGE_KEY)), { mode: 'light', palette: 'forest' })
-  assert.deepEqual(f.dataset, { theme: 'light', palette: 'forest' })
-  assert.equal(f.store.themePaletteName, 'Forest')
+  f.store.setAppearance('light', 'mono')
+  assert.deepEqual(JSON.parse(f.values.get(THEME_STORAGE_KEY)), { mode: 'light', palette: 'mono' })
+  assert.deepEqual(f.dataset, { theme: 'light', palette: 'mono' })
+  assert.equal(f.store.themePaletteName, 'Mono')
   assert.equal(f.chromeColor(), '#123456')
 })
 
 test('system changes follow only System mode, without rewriting preference or palette', t => {
   const f = fixture(t)
-  f.store.setAppearance('system', 'dusk')
+  f.store.setAppearance('system', 'carbon')
   assert.equal(f.store.colorScheme, 'light')
   const record = f.values.get(THEME_STORAGE_KEY)
   f.systemListeners.get('change')({ matches: true })
   assert.equal(f.store.colorScheme, 'dark')
-  assert.equal(f.store.themePalette, 'dusk')
+  assert.equal(f.store.themePalette, 'carbon')
   assert.equal(f.values.get(THEME_STORAGE_KEY), record)
   f.store.setAppearance('light')
   f.systemListeners.get('change')({ matches: false })
@@ -116,12 +126,12 @@ test('system changes follow only System mode, without rewriting preference or pa
 
 test('cross-tab updates and clear apply without writeback; listeners are disposed', t => {
   const f = fixture(t)
-  f.values.set(THEME_STORAGE_KEY, JSON.stringify({ mode: 'system', palette: 'slate' }))
+  f.values.set(THEME_STORAGE_KEY, JSON.stringify({ mode: 'system', palette: 'studio' }))
   const event = { key: THEME_STORAGE_KEY, storageArea: f.localStorage }
   f.windowListeners.get('storage')({ ...event, storageArea: {} })
   assert.equal(f.store.themePalette, 'classic')
   f.windowListeners.get('storage')(event)
-  assert.deepEqual(f.dataset, { theme: 'light', palette: 'slate' })
+  assert.deepEqual(f.dataset, { theme: 'light', palette: 'studio' })
   f.values.clear()
   f.windowListeners.get('storage')({ ...event, key: null })
   assert.deepEqual(f.dataset, { theme: 'dark', palette: 'classic' })
@@ -133,8 +143,8 @@ test('cross-tab updates and clear apply without writeback; listeners are dispose
 test('blocked persistence leaves the chosen palette usable and reports the limitation', t => {
   const f = fixture(t)
   f.localStorage.setItem = () => { throw new Error('quota or permission') }
-  f.store.setAppearance('light', 'sand')
-  assert.deepEqual(f.dataset, { theme: 'light', palette: 'sand' })
+  f.store.setAppearance('light', 'zenless')
+  assert.deepEqual(f.dataset, { theme: 'light', palette: 'zenless' })
   assert.equal(f.store.themePersistenceError, true)
   f.localStorage.setItem = () => {}
   f.store.setAppearance('dark')
