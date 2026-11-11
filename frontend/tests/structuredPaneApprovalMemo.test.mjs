@@ -82,9 +82,12 @@ test('turnApprovalSignature tracks answers, resolved state, and sending', () => 
 
 test('approval card options are wired to the composable selection helpers', () => {
   assert.match(approvalCard, /isQuestionOptionSelected\(\s*part\.approval\.key/)
+  // The click handler is one indirection away now (it also serves the number
+  // keys), so the card must still pass the same identity and multi-select flag.
   assert.match(
     approvalCard,
-    /toggleQuestionOption\(\s*part\.approval\.key,\s*question\.id,\s*option\.id,\s*question\.allowMultiple,?\s*\)/,
+    /function chooseOption\(question: TimelineQuestion, option: TimelineQuestionOption\): void \{\s*toggleQuestionOption\(\s*props\.part\.approval\.key,\s*question\.id,\s*option\.id,\s*question\.allowMultiple\s*\)/,
   )
+  assert.match(approvalCard, /@click="chooseOption\(question, option\)"/)
   assert.match(approvalCard, /canSubmitQuestion\(part\.approval\)/)
 })

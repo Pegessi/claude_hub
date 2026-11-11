@@ -130,7 +130,15 @@ const stubs = {
       const capabilities = ref({ available_models: [], current_model: null, current_reasoning_effort: null, available_modes: [], current_mode: null, supports_images: true, supports_goals: true })
       const start = async (id, source) => { globalThis.__chatLifecycleTest.calls.push(['start', id, source]); historyReady.value = true; connectionState.value = 'live' }
       const stop = () => globalThis.__chatLifecycleTest.calls.push(['stop'])
-      const loadHistoryDetail = async id => { globalThis.__chatLifecycleTest.calls.push(['loadHistoryDetail', id]) }
+      const loadHistoryDetail = async id => {
+        globalThis.__chatLifecycleTest.calls.push(['loadHistoryDetail', id])
+        // A read that lands marks the entry loaded in the real stream; the
+        // pane's backfill budget is charged on that landing, not on the request.
+        const entry = historyDetails.value[id]
+        if (entry && entry.status !== 'loaded') {
+          historyDetails.value = { ...historyDetails.value, [id]: { ...entry, status: 'loaded' } }
+        }
+      }
       const stream = { events, historyReady, historyDetails, historyDetailRevision, attributedToolIds, connectionState, errorMessage, capabilities, start, stop, loadHistoryDetail, retry: start, refreshCapabilities: async () => {}, setMode: async () => {}, nudge() {}, reset() {} }
       globalThis.__chatLifecycleTest.streams.push(stream)
       return stream
@@ -440,4 +448,257 @@ test('cached settings cannot mutate a Chat while hydration, reconciliation or fa
   assert.equal(delivery.modeInteractionLocked.value, false)
   await settings.selectModelAndEffort(model, '')
   assert.equal(mutations, 1)
+})
+
+test('a pane that joins a turn mid-flight reads its detail once and keeps the fold closed', async t => {
+  // The turn started before this pane existed, so its events were never reduced
+  // into parts: the transcript would show an empty fold and a footer with no
+  // step to name. One detail read restores the parts; opening the fold is the
+  // reader's call, not ours.
+  const h = await mount(t)
+  const stream = h.state.streams[0]
+  const timeline = h.owner(h.keys.chatTimelineKey)
+  const event = (sequence, type, payload = {}) => ({
+    stream_sequence: sequence, type, payload, session_id: 's', tab_id: 'one',
+    turn_id: 'joined', agent_type: 'claude', created_at: '2026-10-16T10:00:00Z', redacted: false,
+  })
+  stream.events.value = [event(1, 'turn_started', { summary: 'long turn already in flight' })]
+  await flush()
+  const turns = timeline.turns.value
+  assert.equal(turns.length, 1)
+  assert.deepEqual(turns[0].parts, [], 'the fixture is the mid-flight shape: a turn with no parts')
+  const reads = () => h.state.calls.filter(call => call[0] === 'loadHistoryDetail')
+
+  stream.historyDetails.value = {
+    joined: {
+      descriptor: { turn_id: 'joined', first_sequence: 1, last_sequence: 900, event_count: 900 },
+      status: 'idle',
+    },
+  }
+  await flush()
+  assert.deepEqual(reads(), [['loadHistoryDetail', 'joined']], 'the descriptor is read once')
+  assert.equal(timeline.processExpandedOverrides.value.size, 0, 'the fold stays closed')
+
+  // Leaving the tab and coming back must not re-read a turn this pane already
+  // restored: the descriptor keeps growing while the turn streams.
+  h.selected.value = 'two'
+  await flush()
+  h.selected.value = 'one'
+  await flush()
+  assert.equal(reads().length, 1, 'one read per turn, not one per tab visit')
+  assert.equal(timeline.timelineDisposed, false)
+})
+
+test('a turn that already has parts is never re-read behind the reader', async t => {
+  const h = await mount(t)
+  const stream = h.state.streams[0]
+  // This turn began after the pane opened, so nothing of it predates this pane:
+  // the live stream owns every part and a read would be work for nothing.
+  const startedNow = new Date().toISOString()
+  const event = (sequence, type, payload = {}) => ({
+    stream_sequence: sequence, type, payload, session_id: 's', tab_id: 'one',
+    turn_id: 'live', agent_type: 'claude', created_at: startedNow, redacted: false,
+  })
+  stream.events.value = [
+    event(1, 'turn_started', { summary: 'streaming here' }),
+    event(2, 'tool_call_started', { tool_call_id: 'c1', name: 'Bash', args: { command: 'echo hi' } }),
+  ]
+  await flush()
+  stream.historyDetails.value = {
+    live: {
+      descriptor: { turn_id: 'live', first_sequence: 1, last_sequence: 2, event_count: 2 },
+      status: 'idle',
+    },
+  }
+  await flush()
+  assert.deepEqual(
+    h.state.calls.filter(call => call[0] === 'loadHistoryDetail'),
+    [],
+    'the live stream owns a turn it is already reducing',
+  )
+})
+
+test('a turn whose stream dropped earns exactly one repair read when it stops', async t => {
+  const h = await mount(t)
+  const stream = h.state.streams[0]
+  const startedNow = new Date().toISOString()
+  const event = (sequence, type, payload = {}) => ({
+    stream_sequence: sequence, type, payload, session_id: 's', tab_id: 'one',
+    turn_id: 'gapped', agent_type: 'claude', created_at: startedNow, redacted: false,
+  })
+  const reads = () => h.state.calls.filter(call => call[0] === 'loadHistoryDetail')
+  stream.events.value = [
+    event(1, 'turn_started', { summary: 'streaming here' }),
+    event(2, 'tool_call_started', { tool_call_id: 'c1', name: 'Bash', args: { command: 'echo hi' } }),
+  ]
+  await flush()
+  stream.historyDetails.value = {
+    gapped: {
+      descriptor: { turn_id: 'gapped', first_sequence: 1, last_sequence: 2, event_count: 2 },
+      status: 'idle',
+    },
+  }
+  await flush()
+  assert.deepEqual(reads(), [], 'a turn the live stream is reducing is left alone')
+
+  // The connection drops while this turn is live: whatever the backend accepted
+  // in the gap never reached the parts.
+  stream.connectionState.value = 'reconciling'
+  await flush()
+  stream.connectionState.value = 'live'
+  await flush()
+  assert.deepEqual(reads(), [], 'a dropped stream alone does not trigger a read')
+
+  stream.events.value = [...stream.events.value, event(3, 'turn_completed', { status: 'completed' })]
+  await flush()
+  assert.deepEqual(reads(), [['loadHistoryDetail', 'gapped']], 'its completion earns the repair read')
+
+  // And no more: the descriptor keeps changing while history is written.
+  stream.historyDetails.value = {
+    gapped: {
+      descriptor: { turn_id: 'gapped', first_sequence: 1, last_sequence: 900, event_count: 900 },
+      status: 'idle',
+    },
+  }
+  await flush()
+  assert.equal(reads().length, 1, 'one repair read, not a polling loop')
+})
+
+test('a pane that opens during a live turn still reads the steps it missed', async t => {
+  // Second cross-model review, H-2: "nothing reduced yet" was too strict a test
+  // for "this pane joined mid-flight". A live turn almost always narrates once
+  // after the mount, so parts exist while everything from before the mount is
+  // still missing — and that is exactly the case the reader complains about.
+  const h = await mount(t)
+  const stream = h.state.streams[0]
+  const timeline = h.owner(h.keys.chatTimelineKey)
+  const event = (sequence, type, payload = {}) => ({
+    stream_sequence: sequence, type, payload, session_id: 's', tab_id: 'one',
+    turn_id: 'midflight', agent_type: 'claude', created_at: '2026-10-16T10:00:00Z', redacted: false,
+  })
+  stream.events.value = [
+    event(1, 'turn_started', { summary: 'long turn, already in flight' }),
+    event(2, 'text_delta', { text: 'Let me check the files...' }),
+  ]
+  await flush()
+  const turn = timeline.turns.value.at(-1)
+  assert.equal(turn.parts.length, 1, 'the fixture has narration from after the mount')
+  assert.equal(turn.completed, false, 'and the turn is still running')
+  stream.historyDetails.value = {
+    midflight: {
+      descriptor: { turn_id: 'midflight', first_sequence: 1, last_sequence: 900, event_count: 900 },
+      status: 'idle',
+    },
+  }
+  await flush()
+  const reads = h.state.calls.filter(call => call[0] === 'loadHistoryDetail')
+  assert.deepEqual(
+    reads,
+    [['loadHistoryDetail', 'midflight']],
+    'a live turn that began before this pane opened owes one read, even though narration arrived',
+  )
+  assert.equal(timeline.processExpandedOverrides.value.size, 0, 'and the fold stays closed')
+
+  // Read once, not once per batch: the descriptor keeps growing.
+  stream.historyDetails.value = {
+    midflight: {
+      descriptor: { turn_id: 'midflight', first_sequence: 1, last_sequence: 1500, event_count: 1500 },
+      status: 'idle',
+    },
+  }
+  await flush()
+  assert.equal(
+    h.state.calls.filter(call => call[0] === 'loadHistoryDetail').length,
+    1,
+    'one join read per turn',
+  )
+})
+
+test('a turn that began in this pane still reports how many events it has produced', async t => {
+  // Second cross-model review, H-3: hydration is the only place descriptors are
+  // recorded, so a turn started while the pane was open had no descriptor and
+  // "N events so far" never appeared. The pane watched every one of those
+  // events, so it can count them itself.
+  const h = await mount(t)
+  const stream = h.state.streams[0]
+  const timeline = h.owner(h.keys.chatTimelineKey)
+  const startedNow = new Date().toISOString()
+  const event = (sequence, type, payload = {}) => ({
+    stream_sequence: sequence, type, payload, session_id: 's', tab_id: 'one',
+    turn_id: 'in-pane', agent_type: 'claude', created_at: startedNow, redacted: false,
+  })
+  const countFor = () => timeline.turnEventCount(timeline.turns.value.at(-1))
+  stream.events.value = [event(1, 'turn_started', { summary: 'starts here' })]
+  await flush()
+  // The turn's opening marker is punctuation, not output: counting it would
+  // make the footer say "Working · 1 event so far" before the provider has
+  // produced anything, and the waiting state would never appear.
+  assert.equal(countFor(), null, 'a turn that has only started has produced nothing')
+  assert.equal(stream.historyDetails.value['in-pane'], undefined, 'and there is no descriptor to count with')
+
+  stream.events.value = [...stream.events.value, event(2, 'tool_call_started', { tool_call_id: 'c1', name: 'Bash', args: {} })]
+  await flush()
+  assert.equal(countFor(), 1, 'the count grows with the stream, from the pane itself')
+
+  stream.events.value = [...stream.events.value, event(3, 'text_delta', { text: 'writing' })]
+  await flush()
+  assert.equal(countFor(), 2, 'and keeps growing')
+
+  // A replay/rescan must not double-count what was already seen: sequences
+  // already counted are skipped, whether the array was rebuilt or extended.
+  stream.events.value = stream.events.value.map(item => ({ ...item }))
+  await flush()
+  assert.equal(countFor(), 2, 'a rescan of the same events is not a second count')
+
+  // A hydration descriptor is authoritative when it counts more than this pane
+  // watched: the pane must not shrink a whole turn to what it happened to see.
+  stream.historyDetails.value = {
+    'in-pane': {
+      descriptor: { turn_id: 'in-pane', first_sequence: 0, last_sequence: 3, event_count: 40 },
+      status: 'idle',
+    },
+  }
+  await flush()
+  assert.equal(countFor(), 40, 'the larger count wins')
+})
+
+test('a turn that began while the tab was hidden is backfilled on return', async t => {
+  // H-2.1(a) of the second review: the "joined mid-flight" baseline was fixed at
+  // construction, so a turn that started while the pane was deactivated looked
+  // like one this pane had watched from its first event — and was never read.
+  const h = await mount(t)
+  const stream = h.state.streams[0]
+  const timeline = h.owner(h.keys.chatTimelineKey)
+  const event = (sequence, type, payload = {}) => ({
+    stream_sequence: sequence, type, payload, session_id: 's', tab_id: 'one',
+    turn_id: 'while-away', agent_type: 'claude', created_at: '2026-10-16T10:00:00Z', redacted: false,
+  })
+  const reads = () => h.state.calls.filter(call => call[0] === 'loadHistoryDetail')
+
+  h.selected.value = 'two'
+  await flush()
+  assert.equal(timeline.timelineDisposed, true, 'the pane is hidden')
+  // The backend accepts a whole turn while the reader is elsewhere.
+  stream.events.value = [
+    event(1, 'turn_started', { summary: 'began while hidden' }),
+    event(2, 'text_delta', { text: 'narration from the hidden window' }),
+  ]
+  await flush()
+  assert.deepEqual(reads(), [], 'a hidden pane does not read anything')
+
+  h.selected.value = 'one'
+  await flush()
+  assert.equal(timeline.timelineDisposed, false, 'the pane is visible again')
+  stream.historyDetails.value = {
+    'while-away': {
+      descriptor: { turn_id: 'while-away', first_sequence: 1, last_sequence: 700, event_count: 700 },
+      status: 'idle',
+    },
+  }
+  await flush()
+  assert.deepEqual(
+    reads(),
+    [['loadHistoryDetail', 'while-away']],
+    'returning to the tab backfills the turn that started while it was hidden',
+  )
 })

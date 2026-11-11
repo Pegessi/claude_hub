@@ -50,6 +50,7 @@ from claude_hub.models import (
     WorkspaceTaskMode,
     WorkspaceTaskStatus,
 )
+from claude_hub.services.local_storage import document_exists, read_document
 from claude_hub.services.ttyd_manager import ttyd_manager
 from claude_hub.services.workspace_manager import WorkspaceManager
 from claude_hub.services.workspace_manager._constants import ScheduledChatLivenessResult
@@ -1191,7 +1192,7 @@ async def test_chat_turn_runs_persist_and_recover_from_stream(
     recovered = reloaded.scheduled_task_runs[run.id]
     assert recovered.status == ScheduledTaskRunStatus.COMPLETED
     assert reloaded.list_scheduled_task_runs(task.id)[0].id == run.id
-    assert (state_root / "scheduled_tasks.json").exists()
+    assert document_exists(state_root / "scheduled_tasks.json")
 
 
 async def test_chat_turn_recovery_queues_unstarted_and_marks_started_uncertain(
@@ -3731,7 +3732,7 @@ async def test_scheduled_evidence_read_error_retains_slot_until_successful_retry
     assert probes == []  # unknown transcript evidence cannot authorize a liveness decision
     await inbox.pump(chat.id)
     assert calls == []
-    persisted = {one["message_id"]: one for one in json.loads(inbox.path.read_text())["messages"]}
+    persisted = {one["message_id"]: one for one in read_document(inbox.path)["messages"]}
     assert persisted[run.id]["state"] == state
     # A normal coordinator pass must retain failed startup recovery semantics,
     # even for a fresh dispatch that has not reached the live stale grace.

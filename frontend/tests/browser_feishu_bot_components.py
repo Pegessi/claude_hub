@@ -38,10 +38,16 @@ def bot_summary(
     source: str,
     credentials_editable: bool,
     deletable: bool,
+    mode: str = "single",
     binding: dict | None = None,
+    bindings: list[dict] | None = None,
     feishu_name: str | None = None,
     feishu_avatar_url: str | None = None,
 ) -> dict:
+    active_bindings = (
+        list(bindings) if bindings is not None else ([binding] if binding is not None else [])
+    )
+    primary_binding = active_bindings[0] if active_bindings else binding
     return {
         "bot_id": bot_id,
         "name": name,
@@ -58,7 +64,9 @@ def bot_summary(
         "app_secret_configured": True,
         "connection_status": "connected",
         "updated_at": NOW,
-        "binding": binding,
+        "mode": mode,
+        "binding": primary_binding,
+        "bindings": active_bindings,
         "my_claims": [],
     }
 
@@ -287,7 +295,7 @@ async def main(browser_run: BrowserRun) -> None:
                     "expected_revision": bot["revision"],
                 }
                 bot["revision"] += 1
-                bot["binding"] = {
+                active_binding = {
                     "pairing_id": "pair-created",
                     "state": "active",
                     "tab_id": "tab-1",
@@ -300,6 +308,8 @@ async def main(browser_run: BrowserRun) -> None:
                     "expires_at": None,
                     "chat_id": "oc-created",
                 }
+                bot["binding"] = active_binding
+                bot["bindings"] = [active_binding]
                 bot["my_claims"] = []
                 pool_revision += 1
                 await fulfill_json(route, pool(bot["bot_id"]))
@@ -312,6 +322,7 @@ async def main(browser_run: BrowserRun) -> None:
                 assert submitted == {"expected_revision": bot["revision"]}
                 bot["revision"] += 1
                 bot["binding"] = None
+                bot["bindings"] = []
                 pool_revision += 1
                 await fulfill_json(route, pool(bot["bot_id"]))
                 return

@@ -541,7 +541,7 @@ async def test_archive_restore_retains_history_and_provider_identity(
             payload={"text": "Retain this conversation"},
         )
     )
-    history = store.path.read_bytes()
+    history = await store.read_since(-1, 5000)
     workspace_manager.workspaces[workspace["id"]] = workspace_manager.workspaces[
         workspace["id"]
     ].model_copy(
@@ -559,7 +559,7 @@ async def test_archive_restore_retains_history_and_provider_identity(
     assert archive_runtime == [f"archive:{session.tab_id}"]
     assert client.post(url + "/archive").json()["archived_at"] == archived_at
     assert len(archive_runtime) == 1
-    assert store.path.read_bytes() == history
+    assert await store.read_since(-1, 5000) == history
     assert workspace_manager.sessions_for_workspace(workspace["id"]) == []
     assert (
         len(workspace_manager.sessions_for_workspace(workspace["id"], include_archived=True)) == 1
@@ -602,7 +602,7 @@ async def test_archive_restore_retains_history_and_provider_identity(
     assert len(workspace_manager.sessions_for_workspace(workspace["id"])) == 1
     assert client.post(url + "/unarchive").status_code == 200
     assert archive_runtime.count("restart") == 1
-    assert store.path.read_bytes() == history
+    assert await store.read_since(-1, 5000) == history
 
 
 @pytest.mark.parametrize(
@@ -681,10 +681,10 @@ async def test_delete_archived_session_discards_retained_history(
 
     monkeypatch.setattr(workspace_module.ttyd_manager, "delete_tab", delete_tab)
     assert client.post(url + "/archive").status_code == 200
-    assert store.path.exists()
+    assert await store.count() > 0
     assert client.delete(f"/api/workspaces/sessions/{session.id}").status_code == 204
     assert session.id not in workspace_manager.sessions
-    assert not store.path.exists()
+    assert await store.count() == 0
 
 
 def test_archive_failure_retains_quarantined_owner(

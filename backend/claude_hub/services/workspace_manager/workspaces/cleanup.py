@@ -6,6 +6,8 @@ import claude_hub.services.managed_chat as managed_chat
 from claude_hub.services.workspace_manager._base import _WorkspaceManagerBase
 from claude_hub.services.workspace_manager._constants import *  # noqa: F401,F403
 
+from ...local_storage import retire_namespace
+
 
 class _WorkspaceCleanupMixin(_WorkspaceManagerBase):
     async def _cleanup_deleted_workspace(
@@ -32,6 +34,7 @@ class _WorkspaceCleanupMixin(_WorkspaceManagerBase):
             raise RuntimeError(
                 f"could not finish cleanup for deleted workspace {workspace_id}"
             ) from errors[0]
+        retire_namespace(self._runtime_state_root / workspace_id)
         try:
             shutil.rmtree(self._runtime_state_root / workspace_id)
         except FileNotFoundError:

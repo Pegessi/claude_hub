@@ -139,6 +139,34 @@ export interface ChatGoalCheckpoint {
   created_at: string
 }
 
+/** One implementation step of a ``plan_first`` Goal's plan. */
+export interface ChatGoalPlanStep {
+  title: string
+  detail?: string | null
+  acceptance?: string | null
+}
+
+/** One helper/sub-agent the approved plan proposes, with its model. */
+export interface ChatGoalPlanHelper {
+  provider: string
+  model: string
+  role?: string | null
+}
+
+/** The execution budget the user approves before any helper agent launches. */
+export interface ChatGoalPlanBudget {
+  helpers: ChatGoalPlanHelper[]
+  max_parallelism: number
+  duration_estimate?: string | null
+}
+
+/** Validated, Hub-managed plan for a ``plan_first`` Goal. */
+export interface ChatGoalPlan {
+  summary: string
+  steps: ChatGoalPlanStep[]
+  budget: ChatGoalPlanBudget
+}
+
 export interface ChatGoal {
   id: string
   tab_id: string
@@ -165,6 +193,18 @@ export interface ChatGoal {
   pending_image_count?: number
   pending_input?: string | null
   resume_after_turn?: boolean
+  /** Additive plan-scope approval; absent on Goals created before it shipped. */
+  plan_first?: boolean
+  plan_pending?: boolean
+  plan?: ChatGoalPlan | null
+  /** Turn that produced (or is producing) the plan; keys the plan card. */
+  plan_turn_id?: string | null
+  /**
+   * A dispatched turn carrying the user's own message answered the plan
+   * request. It does not distinguish approval from a change request.
+   */
+  plan_answered?: boolean
+  plan_warning?: string | null
   created_at: string
   updated_at: string
   paused_at?: string | null
@@ -175,6 +215,8 @@ export interface ChatGoalCreate {
   attachments?: (WorkspaceAttachmentCreate & { preview_is_original?: boolean })[]
   objective: string
   client_request_id: string
+  /** Optional: plan the scope and budget before the first implementing turn. */
+  plan_first?: boolean
 }
 
 export type AgentStreamEventType =

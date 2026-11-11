@@ -31,8 +31,11 @@ from claude_hub.models import (
     WorkspaceTaskCreate,
     WorkspaceTaskUpdate,
 )
+from claude_hub.services.local_storage import read_document
 from claude_hub.services.workspace_manager import WorkspaceManager
 from tests.test_task_execution_control import (
+    _read_persisted_bytes,
+    _seed_legacy_json,
     _wm,
     forbidden,
     manager,
@@ -150,12 +153,12 @@ def main_schedule(kind, workspace_id):
 
 def write_tasks(manager, workspace, tasks, *, migrate=False):
     path = manager._workspace_state_file(workspace.id)
-    data = json.loads(path.read_text())
+    data = read_document(path)
     data["tasks"] = tasks
     if migrate:
         data["agent_runs"] = []
         data["agent_events"] = []
-    path.write_text(json.dumps(data, indent=2))
+    _seed_legacy_json(path, json.dumps(data, indent=2))
     return path
 
 
@@ -235,7 +238,7 @@ def test_existing_agent_tree_migration_still_loads_valid_task(manager, workspace
     fresh = WorkspaceManager()
     assert row["id"] in fresh.tasks
     assert path.with_suffix(".json.pre-migration-backup").read_bytes() == original
-    migrated = json.loads(path.read_text())
+    migrated = read_document(path)
     assert "agent_runs" not in migrated
     assert "agent_run_id" not in migrated["tasks"][0]
 
@@ -325,7 +328,7 @@ def test_task_api_rejects_unknown_fields_before_mutation(manager, workspace, mon
     monkeypatch.setattr(manager, "register_task", create)
     monkeypatch.setattr(manager, "update_task", update)
     path = manager._workspace_state_file(workspace.id)
-    before = path.read_bytes()
+    before = _read_persisted_bytes(path)
     with TestClient(api_app(manager, monkeypatch)) as client:
         response = client.post(
             f"/api/workspaces/{workspace.id}/tasks",
@@ -346,7 +349,7 @@ def test_task_api_rejects_unknown_fields_before_mutation(manager, workspace, mon
         assert response.status_code == 422
     create.assert_not_awaited()
     update.assert_not_awaited()
-    assert path.read_bytes() == before
+    assert _read_persisted_bytes(path) == before
     assert not manager.tasks and not manager.sessions
 
 
@@ -492,14 +495,14 @@ async def test_fire_waiter_uses_edited_ordinary_message(manager, workspace, monk
 async def test_ordinary_schedule_save_failure_precedes_action(manager, workspace, monkeypatch):
     task = ordinary_schedule(manager, workspace)
     path = _wm._scheduling.SCHEDULED_TASKS_FILE
-    before = path.read_bytes()
+    before = _read_persisted_bytes(path)
     sent = AsyncMock(side_effect=forbidden)
     monkeypatch.setattr(manager, "_send_tab_message", sent)
     monkeypatch.setattr(manager, "_save_scheduled_tasks", Mock(side_effect=OSError("save failed")))
     with pytest.raises(OSError, match="save failed"):
         await manager._fire_scheduled_task(task, datetime.fromisoformat(STAMP), manual=True)
     sent.assert_not_awaited()
-    assert path.read_bytes() == before
+    assert _read_persisted_bytes(path) == before
 
 
 def test_ordinary_report_fingerprint_keeps_main_contract(manager, workspace):

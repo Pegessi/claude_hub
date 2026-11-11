@@ -39,6 +39,7 @@ from claude_hub.services.agent_stream.question_answers import answers
 from claude_hub.services.agent_stream.store import AgentStreamStore
 from claude_hub.services.agent_stream.tailer import SessionTailer, TailerManager
 from claude_hub.services.chat_message_inbox import ChatMessageInbox
+from claude_hub.services.local_storage import read_document
 from claude_hub.services.ttyd_manager import TTYDManager
 from claude_hub.services.workspace_manager import WorkspaceManager
 
@@ -1281,7 +1282,7 @@ async def test_question_claim_and_envelope_remain_consistent_on_save_failure(
     session, tailers, tailer, transport, send_text = await _idle_answer_card(
         manager, workspace, monkeypatch
     )
-    write = manager._atomic_write_text
+    write = manager._atomic_save_state_text
     attempted = []
 
     def fail_envelope_write(path: Path, text: str) -> None:
@@ -1290,7 +1291,7 @@ async def test_question_claim_and_envelope_remain_consistent_on_save_failure(
             raise OSError("state persistence failed")
         write(path, text)
 
-    monkeypatch.setattr(manager, "_atomic_write_text", fail_envelope_write)
+    monkeypatch.setattr(manager, "_atomic_save_state_text", fail_envelope_write)
     try:
         accepted = await _answer_request(session)
         item = await _pump_failed_handoff(accepted, RuntimeError())
@@ -1310,7 +1311,7 @@ async def test_question_claim_and_envelope_remain_consistent_on_save_failure(
             await _answer_request(session, "answer-B")
         send_text.assert_not_awaited()
         assert "question-card" in tailer._pending_approvals
-        monkeypatch.setattr(manager, "_atomic_write_text", write)
+        monkeypatch.setattr(manager, "_atomic_save_state_text", write)
         # An explicit existing-envelope recovery must persist and send exactly
         # the mailbox-owned call, not admit a fresh user answer.
         await manager.resume_existing_call(session.id, "answer-A")
@@ -1369,7 +1370,7 @@ async def test_question_processing_intent_save_failure_restores_pending_retry(
     manager.tasks[task.id] = task
     session = session.model_copy(update={"task_id": task.id})
     manager.sessions[session.id] = session
-    write = manager._atomic_write_text
+    write = manager._atomic_save_state_text
     failed = False
     admitted_session = None
 
@@ -1386,7 +1387,7 @@ async def test_question_processing_intent_save_failure_restores_pending_retry(
                 raise OSError("processing-intent persistence failed")
         write(path, text)
 
-    monkeypatch.setattr(manager, "_atomic_write_text", fail_processing_intent)
+    monkeypatch.setattr(manager, "_atomic_save_state_text", fail_processing_intent)
     try:
         accepted = await _answer_request(session)
         await _pump_failed_handoff(accepted, RuntimeError())
@@ -1401,14 +1402,12 @@ async def test_question_processing_intent_save_failure_restores_pending_retry(
         assert "question-card" in tailer._pending_approvals
         row = next(
             row
-            for row in json.loads(manager._workspace_state_file(workspace.id).read_text())[
-                "sessions"
-            ]
+            for row in read_document(manager._workspace_state_file(workspace.id))["sessions"]
             if row["id"] == session.id
         )
         assert row["chat_question_answer_calls"] == live.chat_question_answer_calls
         assert row["processing_call_ids"] == (["answer-A"] if committed_before_failure else [])
-        monkeypatch.setattr(manager, "_atomic_write_text", write)
+        monkeypatch.setattr(manager, "_atomic_save_state_text", write)
         await manager.resume_existing_call(session.id, "answer-A")
         assert (await _reconcile_managed_handoff(accepted)).state == "completed"
         send_text.assert_awaited_once()

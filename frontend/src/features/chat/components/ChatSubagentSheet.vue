@@ -38,6 +38,7 @@
             :chips="props.chips"
             :now-ms="props.nowMs"
             @jump="onJump"
+            @open="onOpen"
           />
         </div>
       </div>
@@ -48,7 +49,8 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 
-import type { SubagentJumpChip } from '../presentation/subagentJump'
+import type { SubagentDockRow, SubagentJumpChip } from '../presentation/subagentJump'
+import type { NativeSubagentRow } from '../presentation/nativeSubagentRows'
 import ChatSubagentList from './ChatSubagentList.vue'
 
 /** The mobile reveal for the Agents pill: a bottom sheet, the same native
@@ -57,13 +59,14 @@ import ChatSubagentList from './ChatSubagentList.vue'
 const props = defineProps<{
   /** Dialog id, so the owning pill can point `aria-controls` at it. */
   id: string
-  chips: SubagentJumpChip[]
+  chips: SubagentDockRow[]
   nowMs: number
 }>()
 
 const emit = defineEmits<{
   (event: 'close'): void
   (event: 'jump', chip: SubagentJumpChip): void
+  (event: 'open', chip: NativeSubagentRow, source: HTMLElement | null): void
 }>()
 
 const closeRef = ref<HTMLButtonElement | null>(null)
@@ -72,6 +75,10 @@ let previousBodyOverflow = ''
 
 function onJump(chip: SubagentJumpChip) {
   emit('jump', chip)
+}
+
+function onOpen(chip: NativeSubagentRow, source: HTMLElement | null) {
+  emit('open', chip, source)
 }
 
 // Keep Tab inside the modal sheet: without this, focus walks into the pane

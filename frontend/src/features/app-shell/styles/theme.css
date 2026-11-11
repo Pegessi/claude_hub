@@ -288,11 +288,11 @@
   --ch-terminal-bright-white: #fffefb;
 
   /* Syntax highlighting (highlight.js token colours). */
-  --ch-code-keyword: #cf222e;
+  --ch-code-keyword: #c31f2b;
   --ch-code-string: #0a3069;
-  --ch-code-function: #8250df;
+  --ch-code-function: #7342cb;
   --ch-code-number: #0550ae;
-  --ch-code-comment: #6e7781;
+  --ch-code-comment: #57606a;
   --ch-code-builtin: #953800;
   --ch-code-attr: #0550ae;
   --ch-code-selector: #116329;
@@ -302,7 +302,7 @@
   --ch-code-symbol: #0550ae;
   --ch-code-variable: #953800;
   --ch-code-template: #0a3069;
-  --ch-code-quote: #6e7781;
+  --ch-code-quote: #57606a;
   --ch-code-emphasis: #953800;
   --ch-code-strong: #953800;
 }

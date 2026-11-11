@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import importlib
 import json
 import os
@@ -127,14 +128,16 @@ def _write_image_reference(
 ) -> None:
     from claude_hub.services.agent_stream.store import AgentStreamStore
 
-    path = AgentStreamStore("terminal-tabs", f"terminal-tab-{tab_id}").path
-    path.parent.mkdir(parents=True, exist_ok=True)
+    store = AgentStreamStore("terminal-tabs", f"terminal-tab-{tab_id}")
     chunks = [text[: len(text) // 2], text[len(text) // 2 :]] if split else [text]
     events = [
         {
             "session_id": f"terminal-tab-{tab_id}",
             "tab_id": tab_id,
             "type": kind,
+            "agent_type": "claude",
+            "created_at": datetime.now(timezone.utc),
+            "stream_sequence": index,
             "turn_id": "turn-a",
             "message_id": f"turn-a:{role}",
             "run_epoch": 1,
@@ -144,9 +147,9 @@ def _write_image_reference(
                 "assistant_text" if kind == "turn_completed" else "text": chunk,
             },
         }
-        for chunk in chunks
+        for index, chunk in enumerate(chunks)
     ]
-    path.write_text("\n".join(json.dumps(event) for event in events) + "\n")
+    store._replace_rows([AgentStreamEvent.model_validate(event) for event in events])
 
 
 @pytest.mark.parametrize(
@@ -256,8 +259,7 @@ def _write_image_tool(path: Path, name: str = "Read", *, role: str = "assistant"
         created_at=datetime.now(timezone.utc),
     )
     store = AgentStreamStore("terminal-tabs", event.session_id)
-    store.path.parent.mkdir(parents=True, exist_ok=True)
-    store.path.write_text(event.model_dump_json() + "\n")
+    store._replace_rows([event])
     return event
 
 
@@ -949,3 +951,647 @@ async def test_tailer_image_capture_revalidates_session_incarnation(
         await asyncio.wait_for(publishing, timeout=1)
     assert fanned_out == []
     assert len(cache_calls) == (1 if blocked_phase == "capture" else 0)
+
+
+# ── Completed-tool grants for otherwise out-of-cwd images ─────────────────
+# A non-temp absolute image outside the tab cwd is readable only when a
+# recognized image-view tool (Read/view_image) successfully completed for
+# that exact path in this same session/incarnation. These tests pin the
+# contract of local_images.referenced_completed_tool_image.
+
+
+def _write_tool_lifecycle(
+    path: Path,
+    *,
+    name: str = "Read",
+    role: str = "assistant",
+    status: Optional[str] = "completed",
+    tab_id: str = "tab-a",
+    run_epoch: Optional[int] = 1,
+    turn_id: str = "turn-1",
+    call_id: str = "call-grant-1",
+    started_run_epoch: Optional[int] = None,
+    started_turn_id: Optional[str] = None,
+    include_started: bool = True,
+) -> None:
+    """Persist a started/completed tool pair (or one side) as canonical events."""
+    from claude_hub.models import AgentStreamEvent
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+
+    args = {"file_path" if name == "Read" else "path": str(path)}
+    seq = 0
+    events: list[AgentStreamEvent] = []
+    if include_started:
+        events.append(
+            AgentStreamEvent(
+                stream_sequence=seq,
+                tab_id=tab_id,
+                session_id=f"terminal-tab-{tab_id}",
+                agent_type=AgentType.CLAUDE,
+                type=AgentStreamEventType.TOOL_CALL_STARTED,
+                run_epoch=started_run_epoch if started_run_epoch is not None else run_epoch,
+                turn_id=started_turn_id if started_turn_id is not None else turn_id,
+                call_id=call_id,
+                payload={"name": name, "args": args, "role": role},
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        seq += 1
+    if status is not None:
+        events.append(
+            AgentStreamEvent(
+                stream_sequence=seq,
+                tab_id=tab_id,
+                session_id=f"terminal-tab-{tab_id}",
+                agent_type=AgentType.CLAUDE,
+                type=AgentStreamEventType.TOOL_CALL_COMPLETED,
+                run_epoch=run_epoch,
+                turn_id=turn_id,
+                call_id=call_id,
+                payload={"tool_call_id": call_id, "status": status, "result": ""},
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+    store = AgentStreamStore("terminal-tabs", f"terminal-tab-{tab_id}")
+    store._replace_rows(events)
+
+
+async def test_completed_image_tool_grants_out_of_cwd_non_temp_image(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red-then-green: a successful Read grants its exact out-of-cwd image."""
+    from claude_hub.services.agent_stream import local_images
+
+    # tmp_path itself is under the OS temp dir; isolate the temp grant so the
+    # target cannot be authorized through the /tmp exception.
+    temp_root = tmp_path / "temp-isolated"
+    temp_root.mkdir()
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (temp_root,))
+    evidence = tmp_path / "elsewhere" / "report.png"
+    evidence.parent.mkdir()
+    evidence.write_bytes(PNG_BYTES)
+
+    # Red: no completed tool record yet -> denied like any out-of-cwd file.
+    assert (await _get_image(client, "tab-a", str(evidence))).status_code == 404
+
+    _write_tool_lifecycle(evidence)
+    response = await _get_image(client, "tab-a", str(evidence))
+    assert response.status_code == 200
+    assert response.content == PNG_BYTES
+
+
+async def test_started_only_image_tool_does_not_grant_out_of_cwd_image(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream import local_images
+
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (tmp_path / "temp-isolated",))
+    evidence = tmp_path / "elsewhere" / "running.png"
+    evidence.parent.mkdir()
+    evidence.write_bytes(PNG_BYTES)
+    _write_tool_lifecycle(evidence, status=None)
+    assert (await _get_image(client, "tab-a", str(evidence))).status_code == 404
+
+
+async def test_failed_image_tool_does_not_grant_out_of_cwd_image(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream import local_images
+
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (tmp_path / "temp-isolated",))
+    evidence = tmp_path / "elsewhere" / "failed.png"
+    evidence.parent.mkdir()
+    evidence.write_bytes(PNG_BYTES)
+    _write_tool_lifecycle(evidence, status="failed")
+    assert (await _get_image(client, "tab-a", str(evidence))).status_code == 404
+
+
+@pytest.mark.parametrize("name,role", [("Bash", "assistant"), ("Read", "user")])
+async def test_non_image_tool_or_user_role_does_not_grant(
+    client: AsyncClient,
+    tab_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    role: str,
+) -> None:
+    from claude_hub.services.agent_stream import local_images
+
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (tmp_path / "temp-isolated",))
+    evidence = tmp_path / "elsewhere" / f"{name}.png"
+    evidence.parent.mkdir()
+    evidence.write_bytes(PNG_BYTES)
+    _write_tool_lifecycle(evidence, name=name, role=role)
+    assert (await _get_image(client, "tab-a", str(evidence))).status_code == 404
+
+
+async def test_completed_tool_grant_is_exact_path_not_basename(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream import local_images
+
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (tmp_path / "temp-isolated",))
+    evidence = tmp_path / "elsewhere" / "exact.png"
+    sibling = tmp_path / "elsewhere" / "sibling.png"
+    evidence.parent.mkdir()
+    evidence.write_bytes(PNG_BYTES)
+    sibling.write_bytes(PNG_BYTES)
+    _write_tool_lifecycle(evidence)
+    assert (await _get_image(client, "tab-a", str(evidence))).status_code == 200
+    assert (await _get_image(client, "tab-a", str(sibling))).status_code == 404
+
+
+async def test_completed_tool_grant_requires_matching_run_and_turn(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same call_id in another run/turn must not complete the grant."""
+    from claude_hub.services.agent_stream import local_images
+
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (tmp_path / "temp-isolated",))
+    evidence = tmp_path / "elsewhere" / "collision.png"
+    evidence.parent.mkdir()
+    evidence.write_bytes(PNG_BYTES)
+    # Started in run 1/turn-1, completed with the same call_id in run 2/turn-2.
+    _write_tool_lifecycle(
+        evidence,
+        run_epoch=2,
+        turn_id="turn-2",
+        started_run_epoch=1,
+        started_turn_id="turn-1",
+    )
+    assert (await _get_image(client, "tab-a", str(evidence))).status_code == 404
+
+
+async def test_completed_tool_grant_is_session_scoped(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream import local_images
+
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (tmp_path / "temp-isolated",))
+    evidence = tmp_path / "elsewhere" / "cross-session.png"
+    evidence.parent.mkdir()
+    evidence.write_bytes(PNG_BYTES)
+    _write_tool_lifecycle(evidence, tab_id="tab-a")
+    assert (await _get_image(client, "tab-b", str(evidence))).status_code == 404
+
+
+async def test_completed_tool_grant_rejects_symlink_and_non_image(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream import local_images
+
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (tmp_path / "temp-isolated",))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    linked = elsewhere / "linked.png"
+    real = elsewhere / "real.png"
+    real.write_bytes(PNG_BYTES)
+    linked.symlink_to(real)
+    _write_tool_lifecycle(linked)
+    assert (await _get_image(client, "tab-a", str(linked))).status_code == 404
+
+    plain = elsewhere / "plain.png"
+    plain.write_bytes(b"definitely not an image")
+    _write_tool_lifecycle(plain, call_id="call-grant-2")
+    assert (await _get_image(client, "tab-a", str(plain))).status_code == 404
+
+
+async def test_completed_tool_grant_keeps_invalid_replacement_rule(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a granted source is replaced by invalid bytes, the old image is not resurrected."""
+    from claude_hub.services.agent_stream import local_images
+
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (tmp_path / "temp-isolated",))
+    evidence = tmp_path / "elsewhere" / "replaceable.png"
+    evidence.parent.mkdir()
+    evidence.write_bytes(PNG_BYTES)
+    _write_tool_lifecycle(evidence)
+    assert (await _get_image(client, "tab-a", str(evidence))).status_code == 200
+    evidence.write_bytes(b"invalid replacement bytes")
+    assert (await _get_image(client, "tab-a", str(evidence))).status_code == 404
+
+
+def _buffer_event(
+    kind: AgentStreamEventType,
+    *,
+    path: Optional[str] = None,
+    call_id: str = "call-buffer-1",
+    status: Optional[str] = None,
+    run_epoch: Optional[int] = 7,
+    turn_id: str = "turn-buffer",
+    name: str = "Read",
+) -> AgentStreamEvent:
+    payload: dict[str, Any] = {"role": "assistant"}
+    if kind == AgentStreamEventType.TOOL_CALL_STARTED:
+        payload.update({"name": name, "args": {"file_path": path} if path else {}})
+        payload["tool_call_id"] = call_id
+    elif kind == AgentStreamEventType.TOOL_CALL_COMPLETED:
+        payload.update({"tool_call_id": call_id, "status": status or "completed", "result": ""})
+    return AgentStreamEvent(
+        stream_sequence=0,
+        tab_id="tab-a",
+        session_id="terminal-tab-tab-a",
+        agent_type=AgentType.CLAUDE,
+        type=kind,
+        run_epoch=run_epoch,
+        turn_id=turn_id,
+        call_id=call_id,
+        payload=payload,
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+def test_image_reference_buffer_retains_only_after_successful_completion() -> None:
+    from claude_hub.services.agent_stream.local_images import ImageReferenceBuffer
+
+    buffer = ImageReferenceBuffer()
+    started = _buffer_event(AgentStreamEventType.TOOL_CALL_STARTED, path="/elsewhere/shot.png")
+    # The start event still feeds the existing immediate cwd/temp capture path.
+    assert buffer.paths(started) == ["/elsewhere/shot.png"]
+    # A failed completion emits nothing, so failed output is never retained.
+    failed = _buffer_event(AgentStreamEventType.TOOL_CALL_COMPLETED, status="failed")
+    assert buffer.paths(failed) == []
+    # A completion for an unknown call cannot mint a grant either.
+    orphan = _buffer_event(AgentStreamEventType.TOOL_CALL_COMPLETED, call_id="call-unknown")
+    assert buffer.paths(orphan) == []
+
+
+def test_image_reference_buffer_completion_emits_started_paths_once() -> None:
+    from claude_hub.services.agent_stream.local_images import ImageReferenceBuffer
+
+    buffer = ImageReferenceBuffer()
+    started = _buffer_event(AgentStreamEventType.TOOL_CALL_STARTED, path="/elsewhere/shot.png")
+    buffer.paths(started)
+    completed = _buffer_event(AgentStreamEventType.TOOL_CALL_COMPLETED)
+    assert buffer.paths(completed) == ["/elsewhere/shot.png"]
+    # The pending entry is consumed: a re-delivered completion cannot retain twice.
+    assert buffer.paths(completed) == []
+
+
+def test_image_reference_buffer_requires_same_run_and_turn_for_completion() -> None:
+    from claude_hub.services.agent_stream.local_images import ImageReferenceBuffer
+
+    buffer = ImageReferenceBuffer()
+    buffer.paths(_buffer_event(AgentStreamEventType.TOOL_CALL_STARTED, path="/elsewhere/shot.png"))
+    foreign = _buffer_event(
+        AgentStreamEventType.TOOL_CALL_COMPLETED, run_epoch=8, turn_id="turn-other"
+    )
+    assert buffer.paths(foreign) == []
+    # And the original completion still resolves after the foreign one was ignored.
+    own = _buffer_event(AgentStreamEventType.TOOL_CALL_COMPLETED)
+    assert buffer.paths(own) == ["/elsewhere/shot.png"]
+
+
+def test_image_reference_buffer_prunes_pending_tools_when_turn_ends() -> None:
+    from claude_hub.services.agent_stream.local_images import ImageReferenceBuffer
+
+    buffer = ImageReferenceBuffer()
+    buffer.paths(_buffer_event(AgentStreamEventType.TOOL_CALL_STARTED, path="/elsewhere/shot.png"))
+    end = AgentStreamEvent(
+        stream_sequence=1,
+        tab_id="tab-a",
+        session_id="terminal-tab-tab-a",
+        agent_type=AgentType.CLAUDE,
+        type=AgentStreamEventType.TURN_COMPLETED,
+        run_epoch=7,
+        turn_id="turn-buffer",
+        payload={"role": "assistant", "assistant_text": "done", "status": "completed"},
+        created_at=datetime.now(timezone.utc),
+    )
+    assert buffer.paths(end) == []
+    assert buffer.paths(_buffer_event(AgentStreamEventType.TOOL_CALL_COMPLETED)) == []
+
+
+# ── Threat-review B1-B4 security dispositions ──────────────────────────────
+
+
+def _write_lifecycle_full(
+    path: Path,
+    *,
+    agent_type: AgentType = AgentType.CLAUDE,
+    tool_name: str = "Read",
+    tab_id: str = "tab-a",
+    run_epoch: Optional[int] = 1,
+    turn_id: str = "turn-1",
+    call_id: str = "call-grant-sec",
+    sub_thread: Optional[str] = None,
+    start_sub_thread: Optional[str] = None,
+    start_run_epoch: Optional[int] = None,
+    start_turn_id: Optional[str] = None,
+    completion_status: Optional[str] = "completed",
+    duplicate_start: bool = False,
+    include_started: bool = True,
+) -> None:
+    """Persist start/completion events with full producer/thread identity."""
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+
+    arg_key = "file_path" if tool_name == "Read" else "path"
+    seq = 0
+    events: list[AgentStreamEvent] = []
+
+    def _start(
+        sequence: int, *, run: Optional[int], turn: str, thread: Optional[str]
+    ) -> AgentStreamEvent:
+        payload: dict[str, Any] = {
+            "name": tool_name,
+            "args": {arg_key: str(path)},
+            "role": "assistant",
+            "tool_call_id": call_id,
+        }
+        if thread is not None:
+            payload["subagent_thread"] = thread
+        return AgentStreamEvent(
+            stream_sequence=sequence,
+            tab_id=tab_id,
+            session_id=f"terminal-tab-{tab_id}",
+            agent_type=agent_type,
+            type=AgentStreamEventType.TOOL_CALL_STARTED,
+            run_epoch=run,
+            turn_id=turn,
+            call_id=call_id,
+            payload=payload,
+            created_at=datetime.now(timezone.utc),
+        )
+
+    if include_started:
+        events.append(
+            _start(
+                seq,
+                run=start_run_epoch if start_run_epoch is not None else run_epoch,
+                turn=start_turn_id if start_turn_id is not None else turn_id,
+                thread=start_sub_thread if start_sub_thread is not None else sub_thread,
+            )
+        )
+        seq += 1
+        if duplicate_start:
+            events.append(_start(seq, run=run_epoch, turn=turn_id, thread=sub_thread))
+            seq += 1
+    if completion_status is not None:
+        payload: dict[str, Any] = {
+            "tool_call_id": call_id,
+            "status": completion_status,
+            "result": "",
+        }
+        if sub_thread is not None:
+            payload["subagent_thread"] = sub_thread
+        events.append(
+            AgentStreamEvent(
+                stream_sequence=seq,
+                tab_id=tab_id,
+                session_id=f"terminal-tab-{tab_id}",
+                agent_type=agent_type,
+                type=AgentStreamEventType.TOOL_CALL_COMPLETED,
+                run_epoch=run_epoch,
+                turn_id=turn_id,
+                call_id=call_id,
+                payload=payload,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+    store = AgentStreamStore("terminal-tabs", f"terminal-tab-{tab_id}")
+    store._replace_rows(events)
+
+
+async def test_b1_codex_transcript_hardcoded_completed_view_image_is_denied(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex transcript outputs hard-code status=completed even on errors."""
+    from claude_hub.services.agent_stream import local_images
+
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (tmp_path / "temp-isolated",))
+    evidence = tmp_path / "elsewhere" / "codex-shot.png"
+    evidence.parent.mkdir()
+    evidence.write_bytes(PNG_BYTES)
+    _write_lifecycle_full(evidence, agent_type=AgentType.CODEX, tool_name="view_image")
+    assert (await _get_image(client, "tab-a", str(evidence))).status_code == 404
+
+
+async def test_b1_maso_completed_without_success_evidence_is_denied(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream import local_images
+
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (tmp_path / "temp-isolated",))
+    evidence = tmp_path / "elsewhere" / "maso-shot.png"
+    evidence.parent.mkdir()
+    evidence.write_bytes(PNG_BYTES)
+    _write_lifecycle_full(evidence, agent_type=AgentType.MASO)
+    assert (await _get_image(client, "tab-a", str(evidence))).status_code == 404
+
+
+async def test_b2_grant_requires_matching_sub_thread(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream import local_images
+
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (tmp_path / "temp-isolated",))
+    evidence = tmp_path / "elsewhere" / "sub-shot.png"
+    evidence.parent.mkdir()
+    evidence.write_bytes(PNG_BYTES)
+    # Started in sub-thread A, completion arrives without the thread marker.
+    _write_lifecycle_full(evidence, sub_thread=None, start_sub_thread="child-thread-a")
+    assert (await _get_image(client, "tab-a", str(evidence))).status_code == 404
+
+    # Matching markers on both sides authorize.
+    _write_lifecycle_full(evidence, sub_thread="child-thread-a", call_id="call-grant-sec-2")
+    assert (await _get_image(client, "tab-a", str(evidence))).status_code == 200
+
+
+async def test_b2_duplicate_start_makes_provenance_ambiguous_and_denies(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream import local_images
+
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (tmp_path / "temp-isolated",))
+    evidence = tmp_path / "elsewhere" / "dup-shot.png"
+    evidence.parent.mkdir()
+    evidence.write_bytes(PNG_BYTES)
+    _write_lifecycle_full(evidence, duplicate_start=True)
+    assert (await _get_image(client, "tab-a", str(evidence))).status_code == 404
+
+
+async def test_b2_failed_completion_then_fresh_start_same_call_id_is_decided_fresh(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream import local_images
+
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (tmp_path / "temp-isolated",))
+    evidence = tmp_path / "elsewhere" / "retry-shot.png"
+    evidence.parent.mkdir()
+    evidence.write_bytes(PNG_BYTES)
+    # First attempt fails; a second start+successful completion with the same
+    # call id in a later run is a new, unambiguous occurrence.
+    _write_lifecycle_full(
+        evidence,
+        completion_status="failed",
+        run_epoch=1,
+        turn_id="turn-1",
+        call_id="call-same",
+    )
+    _write_lifecycle_full(
+        evidence,
+        run_epoch=2,
+        turn_id="turn-2",
+        call_id="call-same",
+    )
+    # Only the run-2 occurrence is a complete grant; run 1 alone would deny.
+    assert (await _get_image(client, "tab-a", str(evidence))).status_code == 200
+
+
+async def test_b3_parent_directory_symlink_swap_revokes_grant(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream import local_images
+
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (tmp_path / "temp-isolated",))
+    elsewhere = tmp_path / "elsewhere"
+    evidence = elsewhere / "swap.png"
+    evidence.parent.mkdir()
+    evidence.write_bytes(PNG_BYTES)
+    _write_lifecycle_full(evidence)
+    assert (await _get_image(client, "tab-a", str(evidence))).status_code == 200
+
+    # Replace a parent directory with a symlink to a different location that
+    # happens to contain a same-named image: the grant must not follow it.
+    decoy_root = tmp_path / "decoy"
+    decoy_root.mkdir()
+    (decoy_root / "swap.png").write_bytes(PNG_BYTES + b"different-inode-bytes")
+    os.rename(elsewhere, tmp_path / "elsewhere-real")
+    os.symlink(decoy_root, elsewhere)
+    assert (await _get_image(client, "tab-a", str(evidence))).status_code == 404
+
+
+async def test_b4_truncated_grant_revokes_retained_bytes_and_grant_uses_no_store(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream import local_images
+    from claude_hub.services.agent_stream.attachments import AgentStreamAttachmentStore
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (tmp_path / "temp-isolated",))
+    evidence = tmp_path / "elsewhere" / "retained.png"
+    evidence.parent.mkdir()
+    evidence.write_bytes(PNG_BYTES)
+    _write_lifecycle_full(evidence)
+
+    first = await _get_image(client, "tab-a", str(evidence))
+    assert first.status_code == 200
+    # B4: grant-served out-of-cwd images are never immutable-cached.
+    assert first.headers["cache-control"] == "no-store"
+
+    # Simulate stream truncation that removes the granting turn, then delete
+    # the source so only the retained LRU could serve it.
+    stream = AgentStreamStore("terminal-tabs", "terminal-tab-tab-a")
+    stream._replace_rows([])
+    evidence.unlink()
+    second = await _get_image(client, "tab-a", str(evidence))
+    assert second.status_code == 404
+    # The retained entry for the revoked source is gone from the manifest;
+    # the empty session directory itself is GC/clear lifecycle, not residual
+    # image state.
+    # The store hashes the absolute source path with the same _source_key
+    # rule; recompute it directly instead of importing the session factory.
+    source_key = hashlib.sha256(os.path.abspath(str(evidence)).encode("utf-8")).hexdigest()
+    leftover = [
+        entry
+        for entry in AgentStreamAttachmentStore("terminal-tabs", "terminal-tab-tab-a")._read_index()
+        if entry.get("source_key") == source_key
+    ]
+    assert leftover == []
+    # Repeated requests keep failing closed rather than re-creating state.
+    assert (await _get_image(client, "tab-a", str(evidence))).status_code == 404
+
+
+async def test_b3_parent_directory_symlink_swap_between_check_and_open_is_denied(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reproduce controller-parent-swap-red at the public route boundary.
+
+    A successful tool grants an exact out-of-cwd image. A concurrent swap of a
+    parent directory to a symlink pointing at a decoy directory (holding a
+    same-named different image) must not redirect the pinned read; the
+    descriptor-relative traversal fails closed instead of serving the decoy.
+    """
+    from claude_hub.services.agent_stream import local_images
+
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (tmp_path / "temp-isolated",))
+    granted_root = tmp_path / "elsewhere"
+    evidence = granted_root / "swap-race.png"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_bytes(PNG_BYTES)
+    _write_lifecycle_full(evidence)
+    assert (await _get_image(client, "tab-a", str(evidence))).status_code == 200
+
+    decoy_root = tmp_path / "decoy-tree"
+    decoy_dir = decoy_root / "elsewhere"
+    decoy_dir.mkdir(parents=True)
+    (decoy_dir / "swap-race.png").write_bytes(PNG_BYTES + b"decoy-bytes-must-not-serve")
+    real_root = tmp_path / "elsewhere-real"
+
+    original_pinned = local_images._open_regular_image_pinned
+
+    def swap_then_open(candidate: Path):
+        # Swap the parent directory for a symlink to the decoy immediately
+        # before the descriptor-pinned open, reproducing the controller's red.
+        os.rename(granted_root, real_root)
+        os.symlink(decoy_root, granted_root)
+        try:
+            return original_pinned(candidate)
+        finally:
+            # Restore for test teardown regardless of outcome.
+            if granted_root.is_symlink():
+                granted_root.unlink()
+            if real_root.exists() and not granted_root.exists():
+                os.rename(real_root, granted_root)
+
+    monkeypatch.setattr(local_images, "_open_regular_image_pinned", swap_then_open)
+    response = await _get_image(client, "tab-a", str(evidence))
+    assert response.status_code == 404
+    assert response.content != PNG_BYTES + b"decoy-bytes-must-not-serve"
+
+    # Restore only the opener (keep the isolated temp roots) and confirm the
+    # legitimate pinned read succeeds again.
+    monkeypatch.setattr(local_images, "_open_regular_image_pinned", original_pinned)
+    if granted_root.is_symlink():
+        granted_root.unlink()
+    if real_root.exists() and not granted_root.exists():
+        os.rename(real_root, granted_root)
+    assert (await _get_image(client, "tab-a", str(evidence))).status_code == 200
+
+
+async def test_b3_fifo_and_device_substitution_cannot_hang_or_serve(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """O_NONBLOCK + fstat S_ISREG reject FIFO/device before any read blocks."""
+    from claude_hub.services.agent_stream import local_images
+
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (tmp_path / "temp-isolated",))
+    fifo_root = tmp_path / "elsewhere-fifo"
+    fifo_root.mkdir()
+    fifo = fifo_root / "pipe.png"
+    os.mkfifo(fifo)
+    _write_lifecycle_full(fifo)
+    # Must return promptly with 404, not block on a reader-less FIFO.
+    response = await asyncio.wait_for(_get_image(client, "tab-a", str(fifo)), timeout=5)
+    assert response.status_code == 404
+
+    # A symlink leaf pointing at a device is rejected by the pinned traversal.
+    device_link = fifo_root / "device.png"
+    device_link.symlink_to("/dev/null")
+    _write_lifecycle_full(device_link, call_id="call-grant-fifo-2")
+    assert (await _get_image(client, "tab-a", str(device_link))).status_code == 404
+
+
+async def test_b2_orphan_completion_without_start_never_grants(
+    client: AsyncClient, tab_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A completion event with no matching started event cannot mint a grant."""
+    from claude_hub.services.agent_stream import local_images
+
+    monkeypatch.setattr(local_images, "_TEMP_IMAGE_ROOTS", (tmp_path / "temp-isolated",))
+    evidence = tmp_path / "elsewhere" / "orphan.png"
+    evidence.parent.mkdir()
+    evidence.write_bytes(PNG_BYTES)
+    _write_lifecycle_full(evidence, include_started=False)
+    assert (await _get_image(client, "tab-a", str(evidence))).status_code == 404

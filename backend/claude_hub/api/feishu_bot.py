@@ -37,9 +37,11 @@ from claude_hub.config import settings
 from claude_hub.models import ExecutionTarget, SessionKind, User
 from claude_hub.services import ttyd_manager, workspace_manager
 from claude_hub.services.agent_stream.attachments import preview_within_cache_bounds
-from claude_hub.services.agent_stream.turn_source import (
-    FEISHU_PROVIDER_TEXT_FORMAT_V2,
-    format_feishu_provider_text_v2,
+from claude_hub.services.bot_pool.common import BOT_MODE_PER_CHANNEL, BOT_MODE_SINGLE
+from claude_hub.services.feishu_auto_chat import (
+    AUTO_CHAT_CREATE_TIMEOUT_SECONDS,
+    FeishuAutoChatCreator,
+    FeishuAutoChatError,
 )
 from claude_hub.services.feishu_bot import (
     FeishuBotClient,
@@ -100,9 +102,11 @@ _BIND_CODE_RE = re.compile(r"^(?:bind\s+)?(CH-[A-Z0-9]{10})$", re.IGNORECASE)
 _pool = FeishuBotPoolStore()
 _dedup = FeishuMessageDedupStore()
 _now: Callable[[], float] = time.time
+_auto_chat = FeishuAutoChatCreator(now=lambda: _now())
 
 _BODY_BYTES = 16 * 1024
 _GATE_TIMEOUT_SECONDS = 20.0
+_AUTO_CHAT_CREATE_TIMEOUT_SECONDS = AUTO_CHAT_CREATE_TIMEOUT_SECONDS
 _OUTBOUND_POST_TIMEOUT_SECONDS = 20.0
 _REACTION_POST_TIMEOUT_SECONDS = 2.0
 _BATCH_RETIREMENT_WAIT_SECONDS = 12.0
@@ -141,7 +145,11 @@ def _promote_tab_dispatch(tab_id: str, queue: _TabDispatchQueue) -> None:
         if not queue.processor.start.done():
             queue.processor.start.set_result(None)
         queue.changed.set()
-    elif not queue.active and _tab_dispatch_queues.get(tab_id) is queue:
+    elif (
+        not queue.active
+        and not queue.interrupted_text
+        and _tab_dispatch_queues.get(tab_id) is queue
+    ):
         del _tab_dispatch_queues[tab_id]
 
 
@@ -156,6 +164,19 @@ def _reserve_tab_dispatch(
 ) -> _TabDispatchItem:
     queue = _tab_dispatch_queues.get(tab_id)
     if queue is None:
+        if len(_tab_dispatch_queues) >= _MAX_TAB_DISPATCH_QUEUES:
+            idle_tab = next(
+                (
+                    tid
+                    for tid, candidate in _tab_dispatch_queues.items()
+                    if not candidate.pending
+                    and not candidate.active
+                    and candidate.processor is None
+                ),
+                None,
+            )
+            if idle_tab is not None:
+                del _tab_dispatch_queues[idle_tab]
         if len(_tab_dispatch_queues) >= _MAX_TAB_DISPATCH_QUEUES:
             raise _TabDispatchQueueFull("Feishu tab dispatch registry is at capacity")
         queue = _TabDispatchQueue(
@@ -187,8 +208,13 @@ def _reserve_tab_dispatch(
 
 
 def _interrupt_dot_answer(tab_id: str, queue: _TabDispatchQueue, item: _TabDispatchItem) -> None:
-    """On the Dot Chat a newer message stops the answer in progress: the next
-    batch answers both. Other Chats keep queueing it as a follow-up."""
+    """On Dot, only a newer message in the same channel/topic may stop an answer.
+
+    Senders stay separate for coalescing, but may supersede each other in one
+    topic. Cross-channel messages keep their FIFO place without stopping work;
+    only a later same-channel batch inherits the stopped text. Other Chats keep
+    queueing every message as a follow-up.
+    """
     active = list(queue.active)
     try:
         from .routes.agent_stream.messages import get_inbox
@@ -206,7 +232,7 @@ def _interrupt_dot_answer(tab_id: str, queue: _TabDispatchQueue, item: _TabDispa
     if (
         not active
         or any(one.superseded or not one.native_bridge_started for one in active)
-        or not _message_dispatcher._batch_matches(active[0], item)
+        or not _message_dispatcher._channel_matches(active[0], item)
     ):
         return
     try:
@@ -233,7 +259,7 @@ async def _stop_superseded_answer(
     turn_id: str,
     text: str,
 ) -> bool:
-    """Stop the superseded turn; the next batch carries ``text`` only when it stopped."""
+    """Retain ``text`` for this channel only when the superseded turn stopped."""
     from claude_hub.api import agent_stream as stream_api
 
     stopped = False
@@ -244,7 +270,10 @@ async def _stop_superseded_answer(
     except Exception:
         logger.exception("Feishu Bot could not stop the Dot answer on tab %s", tab_id)
     if stopped:
-        queue.interrupted_text = text
+        queue.interrupted_text[active[0].channel_key] = text
+        queue.interrupted_text.move_to_end(active[0].channel_key)
+        while len(queue.interrupted_text) > _MAX_TAB_DISPATCH_CONTEXTS:
+            queue.interrupted_text.popitem(last=False)
     else:
         # It ended first (or could not be stopped): its answer or failure goes out
         # as usual, and the newer message follows it.
@@ -441,6 +470,9 @@ class _FeishuPoolBindings:
     def workspace_manager(self) -> Any:
         return workspace_manager
 
+    def auto_chat(self) -> Any:
+        return _auto_chat
+
 
 def _snapshot() -> PoolSnapshot:
     return pool_routes.get_pool_snapshot(_FeishuPoolBindings())
@@ -532,7 +564,6 @@ class _FeishuMessageBindings(_FeishuPoolBindings):
 
 _message_dispatcher = FeishuMessageDispatcher(_FeishuMessageBindings())
 _binding_code = _message_dispatcher._binding_code
-_turn_metadata = _message_dispatcher._turn_metadata
 _image_mime = _message_dispatcher._image_mime
 _event_attachments = _message_dispatcher._event_attachments
 _refresh_missing_profile = _message_dispatcher._refresh_missing_profile
@@ -556,6 +587,14 @@ _finish_tab_dispatch_batch = _message_dispatcher._finish_tab_dispatch_batch
 _dispatch_tab_batch = _message_dispatcher._dispatch_tab_batch
 
 
+def _entry_bindings(entry: Any) -> tuple[BotBinding, ...]:
+    bindings = getattr(entry, "bindings", None)
+    if bindings:
+        return tuple(bindings)
+    single = getattr(entry, "binding", None)
+    return (single,) if single is not None else ()
+
+
 def _bot_bound_to_tab(tab_id: str) -> BotEntry | None:
     return next(
         (
@@ -563,8 +602,7 @@ def _bot_bound_to_tab(tab_id: str) -> BotEntry | None:
             for bot in _pool.snapshot().bots
             if bot.enabled
             and bot.configured
-            and bot.binding is not None
-            and bot.binding.tab_id == tab_id
+            and any(binding.tab_id == tab_id for binding in _entry_bindings(bot))
         ),
         None,
     )
@@ -585,9 +623,14 @@ async def push_to_tab(
     coloured title when ``title`` is given (a post when Feishu refuses the card)."""
     try:
         entry = _bot_bound_to_tab(tab_id)
-        if entry is None or entry.binding is None:
+        if entry is None:
             return False
-        binding = entry.binding
+        binding = next(
+            (candidate for candidate in _entry_bindings(entry) if candidate.tab_id == tab_id),
+            entry.binding,
+        )
+        if binding is None:
+            return False
         effective = _pool.effective(entry.bot_id)
     except FeishuBotPoolError:
         return False
@@ -602,7 +645,9 @@ async def push_to_tab(
         await client.get_tenant_token()
         async with _gate(effective.bot_id):
             for index, payload in enumerate(payloads):
-                if not _pool.is_current(effective) or not _binding_still_routes(effective, binding):
+                if not _pool.is_current_for_delivery(effective) or not _binding_still_routes(
+                    effective, binding
+                ):
                     return False
                 try:
                     await asyncio.wait_for(
@@ -689,7 +734,7 @@ async def _handle_pairing_code(
 ) -> bool:
     try:
         async with _gate(bot_id):
-            if not _pool.is_current(effective):
+            if not _pool.is_current_for_delivery(effective):
                 return False
             claim, word = _pool.claim_code(
                 bot_id,
@@ -723,17 +768,106 @@ def _route_binding(bot_id: str, event: FeishuMessageEvent) -> BotBinding | None:
     """Which binding owns this inbound message.
 
     A group binding is addressed by the whole group, so any member's mention
-    routes to the Chat bound to that group. Bots bound to a private chat keep the
-    previous rule: the group only works for the person who paired privately.
+    routes to the Chat bound to that group. In ``single`` mode, a Bot bound to
+    a private chat keeps the legacy rule where a group mention from that same
+    paired sender routes to their private Chat; ``per_channel`` mode isolates
+    each channel and never falls back from a group to a sender's private DM.
     """
 
     if event.chat_type == "p2p":
         return _pool.routed_binding(
             bot_id, sender_open_id=event.sender_open_id, chat_id=event.chat_id
         )
-    return _pool.routed_binding_for_chat(bot_id, chat_id=event.chat_id) or (
-        _pool.routed_binding_for_sender(bot_id, sender_open_id=event.sender_open_id)
-    )
+    group_binding = _pool.routed_binding_for_chat(bot_id, chat_id=event.chat_id)
+    if group_binding is not None:
+        return group_binding
+    entry = _pool.snapshot().get(bot_id)
+    if entry is not None and entry.mode != BOT_MODE_SINGLE:
+        return None
+    return _pool.routed_binding_for_sender(bot_id, sender_open_id=event.sender_open_id)
+
+
+async def _provision_per_channel_binding(
+    bot_id: str,
+    event: FeishuMessageEvent,
+    effective: EffectiveBot,
+) -> tuple[BotBinding | None, EffectiveBot, str | None, str | None]:
+    """Auto-provision a new Chat tab and p2p binding for a ``per_channel`` Bot."""
+
+    async with _gate(bot_id):
+        if not _pool.is_current_for_delivery(effective):
+            return None, effective, None, None
+        existing = _route_binding(bot_id, event)
+        if existing is not None:
+            return existing, _pool.effective(bot_id), None, None
+        snapshot = _pool.snapshot()
+        entry = snapshot.get(bot_id)
+        if entry is None or not entry.enabled or entry.mode != BOT_MODE_PER_CHANNEL:
+            return None, effective, None, None
+        if any(bound.chat_id == event.chat_id for bot in snapshot.bots for bound in bot.bindings):
+            return (
+                None,
+                effective,
+                "chat_occupied",
+                "This bot could not open a new session because this chat is already bound.",
+            )
+        now_val = _now()
+        try:
+            _auto_chat.check_dm_limits(entry, event.sender_open_id, now=now_val, pool_key=id(_pool))
+            tab_name = _auto_chat.dm_tab_name(event.sender_open_id)
+            tab_id = await asyncio.wait_for(
+                _auto_chat.create_tab(
+                    tab_name,
+                    manager=ttyd_manager,
+                    timeout_seconds=_AUTO_CHAT_CREATE_TIMEOUT_SECONDS,
+                ),
+                timeout=_AUTO_CHAT_CREATE_TIMEOUT_SECONDS,
+            )
+        except FeishuAutoChatError as exc:
+            return None, effective, exc.reason, exc.user_message
+        except Exception as exc:
+            logger.warning("Feishu per_channel tab creation failed: %s", type(exc).__name__)
+            return (
+                None,
+                effective,
+                "tab_create_failed",
+                "This bot could not open a new session right now; please try again later.",
+            )
+        try:
+            workspace_id = _validate_bind_target(tab_id, None)
+            # Anchor created_at to the triggering message timestamp when earlier
+            # than now_val so feishu_message_time_status admits the message that
+            # opened this session (note: BotEntry.bindings sorts by created_at).
+            activated_at = min(now_val, max(0.0, event.message_created_at_ms / 1000.0))
+            binding = _pool.bind_p2p(
+                bot_id,
+                owner=OwnerIdentity(open_id="local", email="", kind=OWNER_KIND_LOCAL),
+                tab_id=tab_id,
+                workspace_id=workspace_id,
+                sender_open_id=event.sender_open_id,
+                chat_id=event.chat_id,
+                created_at=activated_at,
+            )
+            _auto_chat.record_auto_create(bot_id, now=now_val, pool_key=id(_pool))
+            refreshed = _pool.effective(bot_id)
+            return binding, refreshed, None, None
+        except FeishuPoolFull:
+            await _auto_chat.delete_tab(tab_id, manager=ttyd_manager)
+            return (
+                None,
+                effective,
+                "channel_limit_reached",
+                "This bot could not open a new session because its channel limit has been reached.",
+            )
+        except Exception as exc:
+            await _auto_chat.delete_tab(tab_id, manager=ttyd_manager)
+            logger.warning("Feishu per_channel bind failed: %s", type(exc).__name__)
+            return (
+                None,
+                effective,
+                "bind_failed",
+                "This bot could not open a new session right now; please try again later.",
+            )
 
 
 async def _handle_message_event(
@@ -751,7 +885,7 @@ async def _handle_message_event(
     item: _TabDispatchItem | None = None
     try:
         effective = await _refresh_missing_profile(effective, client)
-        if not _pool.is_current(effective):
+        if not _pool.is_current_for_delivery(effective):
             return
         code = _binding_code(event.text) if event.chat_type == "p2p" else None
         if code is not None:
@@ -760,25 +894,54 @@ async def _handle_message_event(
             return
         binding = _route_binding(bot_id, event)
         if binding is None:
+            entry = _pool.snapshot().get(bot_id)
             if event.chat_type == "group":
-                status_value = "pre_dispatch_rejected"
+                if entry is not None and entry.enabled and entry.mode == BOT_MODE_PER_CHANNEL:
+                    if await _reply_if_current(
+                        client,
+                        event,
+                        effective,
+                        "This group is not bound to a Claude Hub session yet; please bind it in Claude Hub first.",
+                    ):
+                        status_value = "pre_dispatch_rejected"
+                    else:
+                        status_value = "reply_failed"
+                else:
+                    status_value = "pre_dispatch_rejected"
                 status_stage = "pre_dispatch"
                 status_reason = "binding_missing"
                 return
-            if await _reply_if_current(
-                client,
-                event,
-                effective,
-                "本会话尚未连接 Claude Hub。请在 Hub 网页选择一个 Bot 和 Chat 生成配对码。",
-            ):
-                status_value = "pre_dispatch_rejected"
-                status_stage = "pre_dispatch"
-                status_reason = "binding_missing"
+            if entry is not None and entry.enabled and entry.mode == BOT_MODE_PER_CHANNEL:
+                binding, effective, reject_reason, reject_notice = (
+                    await _provision_per_channel_binding(bot_id, event, effective)
+                )
+                if binding is None:
+                    if reject_notice is None:
+                        return
+                    if await _reply_if_current(client, event, effective, reject_notice):
+                        status_value = "pre_dispatch_rejected"
+                    else:
+                        status_value = "reply_failed"
+                    status_stage = "pre_dispatch"
+                    status_reason = reject_reason or "binding_missing"
+                    return
+                if claimed_retry_context is None:
+                    claimed_retry_context = _dedup_retry_context(bot_id, event, binding)
             else:
-                status_value = "reply_failed"
-                status_stage = "pre_dispatch"
-                status_reason = "binding_missing"
-            return
+                if await _reply_if_current(
+                    client,
+                    event,
+                    effective,
+                    "本会话尚未连接 Claude Hub。请在 Hub 网页选择一个 Bot 和 Chat 生成配对码。",
+                ):
+                    status_value = "pre_dispatch_rejected"
+                    status_stage = "pre_dispatch"
+                    status_reason = "binding_missing"
+                else:
+                    status_value = "reply_failed"
+                    status_stage = "pre_dispatch"
+                    status_reason = "binding_missing"
+                return
         from .routes.feishu_bot.card_actions import intercept_reply
 
         try:

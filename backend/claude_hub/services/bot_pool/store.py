@@ -15,15 +15,23 @@ from claude_hub.services.bot_pool.common import (
     _RATE_MAX,
     _RESERVED_BOT_IDS,
     BINDING_CHAT_TYPE_GROUP,
+    BINDING_CHAT_TYPE_P2P,
+    BOT_MODE_SINGLE,
+    BOT_MODES,
     ENV_BOT_ID,
     MAX_BOTS,
+    Any,
     BotBinding,
     FeishuBindingCodeError,
     FeishuBotConfig,
+    FeishuBotInvalidValue,
+    FeishuBotModeSwitchBlocked,
     FeishuBotOccupied,
+    FeishuBotPoolStateError,
     FeishuBotRateLimited,
     FeishuBotReadOnly,
     FeishuBotRevoked,
+    FeishuChatOccupied,
     FeishuPairingMismatch,
     FeishuPairingNotFound,
     FeishuPairingNotOwned,
@@ -31,7 +39,9 @@ from claude_hub.services.bot_pool.common import (
     Mapping,
     OwnerIdentity,
     PairingClaim,
+    _as_float,
     _as_int,
+    _as_optional_text,
     _as_text,
     _code_digest,
     _confirm_digest,
@@ -39,12 +49,44 @@ from claude_hub.services.bot_pool.common import (
     _owner_to_dict,
     _safe_timestamp,
     binding_chat_type,
+    bot_mode,
     environment_config,
     environment_present,
     hmac,
     secrets,
 )
 from claude_hub.services.bot_pool.state import FeishuBotPoolStateStore
+
+
+def _write_text(value: Any, name: str, *, limit: int = _MAX_ID_CHARS) -> str:
+    try:
+        return _as_text(value, name, limit=limit)
+    except FeishuBotPoolStateError as exc:
+        raise FeishuBotInvalidValue(str(exc)) from exc
+
+
+def _write_optional_text(value: Any, name: str, *, limit: int = _MAX_ID_CHARS) -> str | None:
+    try:
+        return _as_optional_text(value, name, limit=limit)
+    except FeishuBotPoolStateError as exc:
+        raise FeishuBotInvalidValue(str(exc)) from exc
+
+
+def _write_float(value: Any, name: str) -> float:
+    try:
+        return _as_float(value, name)
+    except FeishuBotPoolStateError as exc:
+        raise FeishuBotInvalidValue(str(exc)) from exc
+
+
+def _write_owner(owner: Any, name: str) -> dict[str, Any]:
+    if not isinstance(owner, OwnerIdentity):
+        raise FeishuBotInvalidValue(f"Invalid Feishu Bot pool field {name!r}")
+    try:
+        validated = _owner_from_dict(_owner_to_dict(owner), name)
+    except FeishuBotPoolStateError as exc:
+        raise FeishuBotInvalidValue(str(exc)) from exc
+    return _owner_to_dict(validated)
 
 
 class FeishuBotPoolStore(FeishuBotPoolStateStore):
@@ -119,6 +161,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             raw["feishu_avatar_url"] = feishu_avatar_url
             raw["feishu_open_id"] = feishu_open_id
             self._touch(raw, now)
+            self._touch_transport(raw)
             self._save(state)
 
     def configure_callbacks(
@@ -164,6 +207,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             callbacks["callback_enabled"] = callback_enabled
             raw["callbacks"] = callbacks
             self._touch(raw, now)
+            self._touch_transport(raw)
             self._save(state)
 
     def update_profile(
@@ -204,8 +248,11 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
         expected_revision: int,
         name: str | None = None,
         enabled: bool | None = None,
+        mode: str | None = None,
         environ: Mapping[str, str] | None = None,
     ) -> None:
+        if mode is not None and mode not in BOT_MODES:
+            raise ValueError(f"invalid bot mode: {mode!r}")
         now = self._now()
         with self._lock:
             state = self._load()
@@ -213,14 +260,26 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             self._sync_env_entry(state, environ, now)
             raw = self._live_entry(state, bot_id)
             self._check_revision(raw, expected_revision)
+            current_mode = bot_mode(raw)
+            mode_changed = mode is not None and mode != current_mode
+            if mode_changed:
+                if self._active_raw_bindings(raw):
+                    raise FeishuBotModeSwitchBlocked(bot_id)
+                raw["mode"] = mode
+                self._advance_generation(raw)
+            elif mode is not None:
+                raw["mode"] = mode
             if name is not None:
                 raw["name"] = name
-            if enabled is not None and enabled != raw.get("enabled"):
+            enabled_changed = enabled is not None and enabled != raw.get("enabled")
+            if enabled_changed:
                 raw["enabled"] = enabled
                 if not enabled:
                     # Disabling revokes outstanding pairing state for this Bot.
                     self._advance_generation(raw)
             self._touch(raw, now)
+            if mode_changed or enabled_changed:
+                self._touch_transport(raw)
             self._save(state)
 
     def delete_bot(
@@ -274,9 +333,11 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             self._check_revision(raw, expected_revision)
             if not raw.get("enabled"):
                 raise FeishuBotRevoked(bot_id)
-            if raw.get("binding") is not None:
-                raise FeishuBotOccupied(bot_id)
-            self._require_tab_free(state, tab_id, exclude=bot_id)
+            self._require_bot_binding_slot(raw, bot_id)
+            validated_owner = _write_owner(owner, "pending")
+            validated_tab = _write_text(tab_id, "pending.tab_id", limit=_MAX_ID_CHARS)
+            validated_workspace = _write_optional_text(workspace_id, "pending.workspace_id")
+            self._require_tab_free(state, validated_tab)
             # Rate limiting is per Hub identity, not per Bot: otherwise picking a
             # different Bot would multiply the allowance.
             stamps = state["rate_limits"].setdefault(owner.open_id, [])
@@ -291,9 +352,9 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             )
             expires_at = now + _CODE_TTL_SECONDS
             raw["pending"][_code_digest(bot_id, code)] = {
-                **_owner_to_dict(owner),
-                "tab_id": tab_id,
-                "workspace_id": workspace_id,
+                **validated_owner,
+                "tab_id": validated_tab,
+                "workspace_id": validated_workspace,
                 "issued_at": now,
                 "expires_at": expires_at,
                 "generation": raw["generation"],
@@ -325,6 +386,10 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             raw = self._live_entry(state, bot_id)
             if not raw.get("enabled"):
                 raise FeishuBotRevoked(bot_id)
+            validated_sender = _write_text(
+                sender_open_id, "claims.sender_open_id", limit=_MAX_ID_CHARS
+            )
+            validated_chat = _write_text(chat_id, "claims.chat_id", limit=_MAX_ID_CHARS)
             digest = _code_digest(bot_id, code)
             value = raw["pending"].pop(digest, None)
             if not isinstance(value, dict):
@@ -340,12 +405,14 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
                 raise FeishuPoolFull("claims")
             pairing_id = secrets.token_hex(16)
             word = "".join(secrets.choice(_CONFIRM_ALPHABET) for _ in range(_CONFIRM_LENGTH))
-            raw["claims"][pairing_id] = {
+            claim_record = {
                 **_owner_to_dict(_owner_from_dict(value, "pending")),
-                "tab_id": value["tab_id"],
-                "workspace_id": value.get("workspace_id"),
-                "sender_open_id": sender_open_id,
-                "chat_id": chat_id,
+                "tab_id": _as_text(value.get("tab_id"), "pending.tab_id", limit=_MAX_ID_CHARS),
+                "workspace_id": _as_optional_text(
+                    value.get("workspace_id"), "pending.workspace_id"
+                ),
+                "sender_open_id": validated_sender,
+                "chat_id": validated_chat,
                 "created_at": now,
                 "expires_at": now + _CLAIM_TTL_SECONDS,
                 "generation": raw["generation"],
@@ -354,10 +421,20 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
                 "confirm_digest": _confirm_digest(bot_id, pairing_id, word),
                 "confirm_attempts": 0,
             }
+            claim = self._claim_from_dict(bot_id, pairing_id, claim_record)
+            raw["claims"][pairing_id] = claim_record
             self._touch(raw, now)
             self._save(state)
-            claim = self._claim_from_dict(bot_id, pairing_id, raw["claims"][pairing_id])
             return claim, word
+
+    @classmethod
+    def _require_sender_p2p_free(cls, raw: dict[str, object], sender_open_id: str) -> None:
+        for binding in cls._active_raw_bindings(raw):
+            if (
+                binding_chat_type(binding) == BINDING_CHAT_TYPE_P2P
+                and binding.get("sender_open_id") == sender_open_id
+            ):
+                raise FeishuChatOccupied(sender_open_id)
 
     def activate_claim(
         self,
@@ -394,36 +471,54 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
                 self._touch(raw, now)
                 self._save(state)
                 raise FeishuPairingMismatch(pairing_id)
-            if raw.get("binding") is not None:
-                raise FeishuBotOccupied(bot_id)
+            self._require_bot_binding_slot(raw, bot_id)
             tab_id = _as_text(value.get("tab_id"), "claim.tab_id", limit=_MAX_ID_CHARS)
-            self._require_tab_free(state, tab_id, exclude=bot_id)
+            workspace_id = _as_optional_text(value.get("workspace_id"), "claim.workspace_id")
+            chat_id = _as_text(value.get("chat_id"), "claim.chat_id", limit=_MAX_ID_CHARS)
+            sender_open_id = _as_text(
+                value.get("sender_open_id"), "claim.sender_open_id", limit=_MAX_ID_CHARS
+            )
+            self._require_tab_free(state, tab_id)
+            self._require_chat_free(state, chat_id)
+            self._require_sender_p2p_free(raw, sender_open_id)
             binding_id = secrets.token_hex(16)
-            raw["binding"] = {
+            new_binding = {
                 **_owner_to_dict(owner),
                 "pairing_id": binding_id,
                 "tab_id": tab_id,
-                "workspace_id": value.get("workspace_id"),
-                "sender_open_id": value["sender_open_id"],
-                "chat_id": value["chat_id"],
+                "workspace_id": workspace_id,
+                "sender_open_id": sender_open_id,
+                "chat_id": chat_id,
+                "chat_type": BINDING_CHAT_TYPE_P2P,
                 "created_at": now,
                 "generation": raw["generation"],
             }
-            raw["claims"] = {}
-            raw["pending"] = {}
+            binding = self._binding_from_dict(bot_id, new_binding)
+            raw["bindings"] = [*self._active_raw_bindings(raw), new_binding]
+            if bot_mode(raw) == BOT_MODE_SINGLE:
+                raw["claims"] = {}
+                raw["pending"] = {}
+            else:
+                raw["claims"].pop(pairing_id, None)
             self._touch(raw, now)
             self._save(state)
-            return self._binding_from_dict(bot_id, raw["binding"])
+            return binding
 
     def release_binding(
         self,
         bot_id: str,
         *,
         expected_revision: int,
+        pairing_id: str | None = None,
         environ: Mapping[str, str] | None = None,
     ) -> BotBinding | None:
-        """Unbind explicitly. Advancing the generation is what guarantees that
-        a message already in flight cannot land on a later binding."""
+        """Unbind explicitly.
+
+        When ``pairing_id`` is omitted, every binding on this Bot is released
+        and ``generation`` advances so a message already in flight cannot land
+        on a later binding. When ``pairing_id`` is given, only that one binding
+        is removed.
+        """
 
         now = self._now()
         with self._lock:
@@ -432,12 +527,29 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             self._sync_env_entry(state, environ, now)
             raw = self._live_entry(state, bot_id)
             self._check_revision(raw, expected_revision)
-            previous = raw.get("binding")
-            released = (
-                self._binding_from_dict(bot_id, previous) if isinstance(previous, dict) else None
+            active = self._active_raw_bindings(raw)
+            if pairing_id is None:
+                released = self._binding_from_dict(bot_id, active[0]) if active else None
+                self._advance_generation(raw)
+                self._touch(raw, now)
+                self._touch_transport(raw)
+                self._save(state)
+                return released
+            matched = next(
+                (item for item in active if item.get("pairing_id") == pairing_id),
+                None,
             )
-            self._advance_generation(raw)
-            self._touch(raw, now)
+            if matched is None:
+                raise FeishuPairingNotFound(pairing_id)
+            released = self._binding_from_dict(bot_id, matched)
+            remaining = [item for item in active if item.get("pairing_id") != pairing_id]
+            if remaining:
+                raw["bindings"] = remaining
+                self._touch(raw, now)
+            else:
+                self._advance_generation(raw)
+                self._touch(raw, now)
+                self._touch_transport(raw)
             self._save(state)
             return released
 
@@ -465,14 +577,16 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
         entry = self._entry_view(
             bot_id, raw, env_config, now, env_seen=environment_present(environ)
         )
-        binding = entry.binding
-        if binding is None or not entry.enabled:
+        if not entry.enabled:
             return None
-        if not hmac.compare_digest(binding.sender_open_id, sender_open_id):
-            return None
-        if not hmac.compare_digest(binding.chat_id, chat_id):
-            return None
-        return binding
+        for binding in entry.bindings:
+            if binding.is_group:
+                continue
+            if hmac.compare_digest(binding.sender_open_id, sender_open_id) and hmac.compare_digest(
+                binding.chat_id, chat_id
+            ):
+                return binding
+        return None
 
     def routed_binding_for_sender(
         self,
@@ -483,9 +597,8 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
     ) -> BotBinding | None:
         """Resolve a group mention through the sender's existing p2p binding.
 
-        A Bot has at most one active binding, so an exact sender match is
-        unambiguous. The group ``chat_id`` is deliberately not persisted or
-        trusted as pairing authority.
+        The group ``chat_id`` is deliberately not persisted or trusted as
+        pairing authority.
         """
 
         now = self._now()
@@ -498,12 +611,14 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
         entry = self._entry_view(
             bot_id, raw, env_config, now, env_seen=environment_present(environ)
         )
-        binding = entry.binding
-        if binding is None or not entry.enabled or binding.is_group:
+        if not entry.enabled:
             return None
-        if not hmac.compare_digest(binding.sender_open_id, sender_open_id):
-            return None
-        return binding
+        for binding in entry.bindings:
+            if binding.is_group:
+                continue
+            if hmac.compare_digest(binding.sender_open_id, sender_open_id):
+                return binding
+        return None
 
     def routed_binding_for_chat(
         self,
@@ -530,14 +645,79 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
         entry = self._entry_view(
             bot_id, raw, env_config, now, env_seen=environment_present(environ)
         )
-        binding = entry.binding
-        if binding is None or not entry.enabled:
+        if not entry.enabled:
             return None
-        if not binding.is_group:
-            return None
-        if not hmac.compare_digest(binding.chat_id, chat_id):
-            return None
-        return binding
+        for binding in entry.bindings:
+            if not binding.is_group:
+                continue
+            if hmac.compare_digest(binding.chat_id, chat_id):
+                return binding
+        return None
+
+    def bind_p2p(
+        self,
+        bot_id: str,
+        *,
+        owner: OwnerIdentity,
+        tab_id: str,
+        workspace_id: str | None,
+        sender_open_id: str,
+        chat_id: str,
+        chat_name: str | None = None,
+        created_at: float | None = None,
+        expected_revision: int | None = None,
+        environ: Mapping[str, str] | None = None,
+    ) -> BotBinding:
+        """Bind one private (p2p) conversation directly to a Chat tab."""
+
+        now = self._now()
+        with self._lock:
+            state = self._load()
+            self._prune(state, now)
+            self._sync_env_entry(state, environ, now)
+            raw = self._live_entry(state, bot_id)
+            if expected_revision is not None:
+                self._check_revision(raw, expected_revision)
+            if not raw.get("enabled"):
+                raise FeishuBotRevoked(bot_id)
+            self._require_bot_binding_slot(raw, bot_id)
+            validated_owner = _write_owner(owner, "binding")
+            validated_tab = _write_text(tab_id, "binding.tab_id", limit=_MAX_ID_CHARS)
+            validated_workspace = _write_optional_text(workspace_id, "binding.workspace_id")
+            validated_chat = _write_text(chat_id, "binding.chat_id", limit=_MAX_ID_CHARS)
+            validated_sender = _write_text(
+                sender_open_id, "binding.sender_open_id", limit=_MAX_ID_CHARS
+            )
+            validated_chat_name = (
+                _write_text(chat_name, "binding.chat_name", limit=_MAX_ID_CHARS)
+                if chat_name is not None
+                else None
+            )
+            self._require_tab_free(state, validated_tab)
+            self._require_chat_free(state, validated_chat)
+            self._require_sender_p2p_free(raw, validated_sender)
+            binding_id = secrets.token_hex(16)
+            stamp = now if created_at is None else _write_float(created_at, "binding.created_at")
+            new_binding = {
+                **validated_owner,
+                "pairing_id": binding_id,
+                "tab_id": validated_tab,
+                "workspace_id": validated_workspace,
+                "sender_open_id": validated_sender,
+                "chat_id": validated_chat,
+                "chat_name": validated_chat_name,
+                "chat_type": BINDING_CHAT_TYPE_P2P,
+                "created_at": stamp,
+                "generation": raw["generation"],
+            }
+            binding = self._binding_from_dict(bot_id, new_binding)
+            raw["bindings"] = [*self._active_raw_bindings(raw), new_binding]
+            if bot_mode(raw) == BOT_MODE_SINGLE:
+                raw["claims"] = {}
+                raw["pending"] = {}
+            self._touch(raw, now)
+            self._save(state)
+            return binding
 
     def bind_group(
         self,
@@ -568,35 +748,46 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             self._check_revision(raw, expected_revision)
             if not raw.get("enabled"):
                 raise FeishuBotRevoked(bot_id)
-            if raw.get("binding") is not None:
-                raise FeishuBotOccupied(bot_id)
-            self._require_tab_free(state, tab_id, exclude=bot_id)
+            self._require_bot_binding_slot(raw, bot_id)
+            validated_owner = _write_owner(owner, "binding")
+            validated_tab = _write_text(tab_id, "binding.tab_id", limit=_MAX_ID_CHARS)
+            validated_workspace = _write_optional_text(workspace_id, "binding.workspace_id")
+            validated_chat = _write_text(chat_id, "binding.chat_id", limit=_MAX_ID_CHARS)
+            validated_sender = _write_text(
+                owner.open_id, "binding.sender_open_id", limit=_MAX_ID_CHARS
+            )
+            validated_chat_name = (
+                _write_text(chat_name, "binding.chat_name", limit=_MAX_ID_CHARS)
+                if chat_name is not None
+                else None
+            )
+            self._require_tab_free(state, validated_tab)
+            self._require_chat_free(state, validated_chat)
             binding_id = secrets.token_hex(16)
             # Validate before writing: a rejected value must never reach the
             # file, or every later read of the pool would fail.
-            raw["binding"] = {
-                **_owner_to_dict(owner),
+            new_binding = {
+                **validated_owner,
                 "pairing_id": binding_id,
-                "tab_id": tab_id,
-                "workspace_id": workspace_id,
+                "tab_id": validated_tab,
+                "workspace_id": validated_workspace,
                 # Group bindings carry no single sender authority; the column
                 # stays schema-valid and records who bound it.
-                "sender_open_id": owner.open_id,
-                "chat_id": _as_text(chat_id, "binding.chat_id", limit=_MAX_ID_CHARS),
-                "chat_name": (
-                    _as_text(chat_name, "binding.chat_name", limit=_MAX_ID_CHARS)
-                    if chat_name is not None
-                    else None
-                ),
+                "sender_open_id": validated_sender,
+                "chat_id": validated_chat,
+                "chat_name": validated_chat_name,
                 "chat_type": BINDING_CHAT_TYPE_GROUP,
                 "created_at": now,
                 "generation": raw["generation"],
             }
-            raw["claims"] = {}
-            raw["pending"] = {}
+            binding = self._binding_from_dict(bot_id, new_binding)
+            raw["bindings"] = [*self._active_raw_bindings(raw), new_binding]
+            if bot_mode(raw) == BOT_MODE_SINGLE:
+                raw["claims"] = {}
+                raw["pending"] = {}
             self._touch(raw, now)
             self._save(state)
-            return self._binding_from_dict(bot_id, raw["binding"])
+            return binding
 
     def drop_binding(self, bot_id: str, pairing_id: str) -> bool:
         """Remove one specific binding without CAS.
@@ -612,10 +803,16 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             raw = state["bots"].get(bot_id)
             if not isinstance(raw, dict) or raw.get("revoked_at"):
                 return False
-            binding = raw.get("binding")
-            if not isinstance(binding, dict) or binding.get("pairing_id") != pairing_id:
+            active = self._active_raw_bindings(raw)
+            if not any(item.get("pairing_id") == pairing_id for item in active):
                 return False
-            self._advance_generation(raw)
-            self._touch(raw, now)
+            remaining = [item for item in active if item.get("pairing_id") != pairing_id]
+            if remaining:
+                raw["bindings"] = remaining
+                self._touch(raw, now)
+            else:
+                self._advance_generation(raw)
+                self._touch(raw, now)
+                self._touch_transport(raw)
             self._save(state)
             return True

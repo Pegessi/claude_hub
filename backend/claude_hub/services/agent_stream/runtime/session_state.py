@@ -144,6 +144,11 @@ class SessionState(ABC):
         # current provider turn while ``_pending_approvals`` retains answer
         # routing for late responses.
         self._active_tool_call_ids: Set[str] = set()
+        # Human label per active tool call ("Running pytest -q"), so a status
+        # poll can describe the turn without reading the event stream. Labels
+        # are pruned to the live call ids; the set above stays the authority
+        # for "is anything running".
+        self._active_tool_labels: Dict[str, str] = {}
         self._blocking_approval_call_ids: Set[str] = set()
         self._waiting_for_model_capacity = False
         # Capacity-queue waiting state (TraeX/Codex ``queue/status``). The turn

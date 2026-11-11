@@ -1,4 +1,4 @@
-import { type Ref, type ComputedRef, computed, nextTick, onMounted, onUnmounted, ref, shallowReactive, watch } from 'vue'
+import { type Ref, type ComputedRef, computed, nextTick, onMounted, onUnmounted, ref, shallowReactive, shallowRef, watch } from 'vue'
 import { type AgentStreamEvent } from '@/types'
 import { type AgentStreamHistoryDetailEntry } from '@/utils/agentStreamHistoryCache'
 import { type TimelineTurn } from '../timeline/types'
@@ -9,6 +9,7 @@ import { isQuietDotTurn } from '@/utils/dotApi'
 import { isTimelineNearBottom } from '@/utils/timelineFollow'
 import { createTimelineActivation, type TimelinePhase } from '@/utils/timelineActivation'
 import { TIMELINE_PAGE_SIZE, selectTimelineWindow, timelineWindowStart } from '@/utils/timelineWindow'
+import { parseTimestampMs } from '@/utils/duration'
 import { withOptimisticCancelled } from '@/utils/agentStreamStopReset'
 import { createSubthreadThinkingPresenter } from '@/utils/thinkingPresentation'
 import { isTurnProcessExpanded, presentTurnParts, turnProcessFoldSignature } from '@/features/chat/presentation/chatTurnPresentation'
@@ -19,13 +20,19 @@ interface Dependencies {
   events: Ref<AgentStreamEvent[]>
   historyDetails: Ref<Record<string, AgentStreamHistoryDetailEntry>>
   historyDetailRevision: Ref<number>
-  loadHistoryDetail: (turnId: string) => Promise<void>
+  /** Read a turn's detail. ``force`` re-reads a range that is already loaded,
+   *  which only a gap repair has a reason to do. */
+  loadHistoryDetail: (turnId: string, options?: { force?: boolean }) => Promise<void>
   isApprovalResolved: ReturnType<typeof useQuestionAnswers>['isApprovalResolved']
   isEditingTurn: (turn: TimelineTurn) => boolean
   optimisticCancelledTurnId: Ref<string | null>
   pendingTurns: ComputedRef<PendingTurn[]>
   props: ChatPaneProps
 }
+
+/** A backfill read may be retired by a growing descriptor; this many tries is
+ *  enough to land one and few enough that a permanent failure stays quiet. */
+const BACKFILL_MAX_ATTEMPTS = 3
 
 export function useChatTimeline(deps: Dependencies) {
   // ── Timeline grouping ───────────────────────────────────────────────────────
@@ -75,6 +82,9 @@ export function useChatTimeline(deps: Dependencies) {
     ordinal,
     turn: {
       ...turn,
+      // The turn exists but the provider has reported nothing yet; the live
+      // footer names that window from `currentStep`. The copy also keeps each
+      // recompute handing consumers a fresh object over an in-place-mutated turn.
       awaitingAgentActivity: !turn.completed &&
         turn.parts.length === 0 &&
         turn.errors.length === 0 &&
@@ -191,10 +201,170 @@ export function useChatTimeline(deps: Dependencies) {
     processExpandedOverrides.value = next
   }
 
+  /** Attribute-value escape for a provider thread id in a query selector. */
+  function attributeValue(value: string): string {
+    return value.replace(/["\\]/g, character => `\\${character}`)
+  }
+
+  /** One animation frame, or a macrotask where rAF is unavailable (tests). */
+  function nextFrame(): Promise<void> {
+    if (typeof requestAnimationFrame === 'function') {
+      return new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+    }
+    return new Promise<void>(resolve => setTimeout(resolve, 16))
+  }
+
+  /**
+   * Take the reader to a native child's inline region.
+   *
+   * The dock's detail window can show any child the timeline holds, but the
+   * transcript is where the conversation continues, so the window offers a
+   * jump. Three things must hold before the row exists in the DOM: the turn has
+   * to be inside the rendered tail window, its process has to be expanded, and
+   * a historical turn's child rows have to be requested from its detail
+   * stream. This attempts all three and gives up silently — the window already
+   * gave the reader the content, so nothing correctness-bearing depends on it.
+   */
+  async function revealSubthread(turnKey: string, threadId: string): Promise<void> {
+    const visit = timelineVisit
+    const list = turns.value
+    const ordinal = list.findIndex(turn => turn.key === turnKey)
+    if (ordinal < 0) return
+    const turn = list[ordinal]
+    const wasFollowing = isFollowingLatest.value
+    const widenedWindow = ordinal < historyWindowStart.value
+    if (widenedWindow) {
+      detachFromTail()
+      visibleHistoryStart.value = ordinal
+      await nextTick()
+    }
+    if (timelineDisposed || visit !== timelineVisit) return
+    const detail = turn.turnId ? deps.historyDetails.value[turn.turnId] : undefined
+    if (detail && detail.status !== 'loaded') {
+      await loadAndExpandHistoryDetail(turn)
+      // The read may have crossed a deactivation or failed outright; either way
+      // there is nothing in the DOM to reveal and the new visit owns the tail.
+      if (timelineDisposed || visit !== timelineVisit) return
+      if (turn.turnId && deps.historyDetails.value[turn.turnId]?.status !== 'loaded') return
+    } else if (!isTurnProcessExpanded(turn, latestTurnKey.value, processExpandedOverrides.value)) {
+      const expanded = new Map(processExpandedOverrides.value)
+      expanded.set(turn.key, true)
+      processExpandedOverrides.value = expanded
+    }
+    // The scroll below is deliberate, and both the resize observer (opening the
+    // region changes the content height) and the next stream batch would undo
+    // it while the pane still follows the tail. Following rearms itself as soon
+    // as the reader is near the bottom again (`handleTimelineScroll`).
+    cancelScheduledTimelineScroll()
+    if (wasFollowing) detachFromTail()
+    await nextTick()
+    if (timelineDisposed || visit !== timelineVisit) return
+    const viewport = timelineEl.value
+    if (!viewport) return
+    // The expanded region mounts a turn's worth of children (markdown, tool
+    // groups), so the row can arrive a frame or two after the fold changed.
+    // A bounded wait keeps this honest instead of guessing one frame. The
+    // lookup is scoped to this turn: a provider can address the same child
+    // thread id again in a later turn, and the first match would be that one.
+    let row: HTMLElement | null = null
+    for (let attempt = 0; attempt < 10 && !row; attempt += 1) {
+      row = viewport.querySelector<HTMLElement>(
+        `[data-turn-key="${attributeValue(turnKey)}"] [data-subagent-thread-id="${attributeValue(threadId)}"]`,
+      )
+      if (row || attempt === 9) break
+      await nextFrame()
+      if (timelineDisposed || visit !== timelineVisit) return
+    }
+    // A stepping stone for the settle below: the reveal detached the tail
+    // above, and scrolling is what normally rearms it (`handleTimelineScroll`).
+    const settleTail = () => {
+      if (!wasFollowing || widenedWindow) return
+      const el = timelineEl.value
+      if (!el || !isTimelineNearBottom(el)) return
+      // A short turn leaves nothing to scroll (`scrollIntoView` is a no-op), so
+      // no scroll event ever fires and nothing would rearm: put the reader back
+      // on the live tail instead of leaving a `Latest` pill over a footer they
+      // are already looking at.
+      visibleHistoryStart.value = null
+      rearmFollow()
+    }
+    if (!row) {
+      settleTail()
+      return
+    }
+    // Every collapsed <details> between the child row and the transcript
+    // (its inline region and, if the provider nests one, its child row).
+    let node: HTMLElement | null = row
+    while (node && node !== viewport) {
+      if (node.tagName === 'DETAILS') (node as HTMLDetailsElement).open = true
+      node = node.parentElement
+    }
+    row.scrollIntoView({ block: 'center' })
+    settleTail()
+  }
+
   /** Parts to render for a turn, with its process folded away once it is history. */
   function turnPartsFor(turn: TimelineTurn) {
     const detail = turn.turnId ? deps.historyDetails.value[turn.turnId] : undefined
     return presentTurnParts(turn, latestTurnKey.value, processExpandedOverrides.value, detail)
+  }
+
+  /** How many events the turn has produced so far, as the pane's descriptor
+   *  reports it. This is the one magnitude that exists before the detail is
+   *  read and keeps growing while a turn streams: without it a long working
+   *  turn shows a stopwatch and nothing about how much has happened. */
+  function turnEventCount(turn: TimelineTurn): number | null {
+    if (!turn.turnId) return null
+    const detail = deps.historyDetails.value[turn.turnId]
+    const described = detail?.descriptor.event_count
+    const seen = observedTurnCounts.value.get(turn.turnId)?.count ?? 0
+    // The higher of the two: a hydration descriptor counts the whole turn, and
+    // the pane's own tally keeps growing for a turn that began here (no page
+    // describes it) — or for one whose descriptor was written before the events
+    // this pane watched arrive.
+    const count = Math.max(typeof described === 'number' ? described : 0, seen)
+    return count > 0 ? count : null
+  }
+
+  /** Output events per turn, counted as they arrive.
+   *
+   *  ``turn_started``/``turn_completed`` are the turn's punctuation, not output:
+   *  counting them would make a turn with nothing on screen look like it had
+   *  something to show, and the footer would stop saying it is still waiting for
+   *  a first response. Sequences already counted are skipped, so a replay or a
+   *  history-detail insertion cannot count the same event twice. */
+  /** Per turn: how many output events this pane watched, and the highest
+   *  sequence it has counted for that turn.
+   *
+   *  The mark is per turn, not global, so a different turn's events are never
+   *  mistaken for a replay — and a detail read that replays a turn's middle
+   *  (sequences below its mark) adds no count, because those events are already
+   *  represented by the summary the stream showed.
+   *
+   *  ``shallowRef`` + copy-on-write: a plain Map mutated in a watcher is invisible
+   *  to Vue, and a footer that reads the count would keep showing the number it
+   *  saw first. */
+  const observedTurnCounts = shallowRef(new Map<string, { count: number; through: number }>())
+
+  function countObservedTurnEvents(): void {
+    const counted = new Map(observedTurnCounts.value)
+    let changed = false
+    for (const event of deps.events.value) {
+      const turnId = event.turn_id
+      if (!turnId) continue
+      const seen = counted.get(turnId)
+      if (seen && event.stream_sequence <= seen.through) continue
+      // The turn's opening and closing markers are punctuation, not output:
+      // counting them would make a turn with nothing on screen look productive
+      // and hide the waiting state.
+      const produced = event.type === 'turn_started' || event.type === 'turn_completed' ? 0 : 1
+      counted.set(turnId, {
+        count: (seen?.count ?? 0) + produced,
+        through: event.stream_sequence,
+      })
+      changed = true
+    }
+    if (changed) observedTurnCounts.value = counted
   }
 
   const subthreadPartsFor = createSubthreadThinkingPresenter()
@@ -340,9 +510,13 @@ export function useChatTimeline(deps: Dependencies) {
 
   function activateViewport() {
     timelineDisposed = false
+    paneActiveSince = Date.now()
     timelineVisit++
     visibleHistoryStart.value = null
     resetActivation()
+    // Switching to the tab is what the reader asked for: backfill its live turn
+    // once the reactivation has settled.
+    void nextTick(() => void backfillNewestTurn())
   }
 
   function deactivateViewport() {
@@ -353,10 +527,131 @@ export function useChatTimeline(deps: Dependencies) {
     cancelScheduledTimelineScroll()
   }
 
+  /** Turns whose detail this pane has already asked for on its own behalf.
+   *
+   *  A descriptor keeps changing while a turn streams, and re-reading a growing
+   *  turn on every batch would be quadratic. One read per turn is enough: from
+   *  then on the live stream appends to the parts it produced. */
+  /** When this pane last became visible. A turn that started before this
+   *  moment cannot have all of its parts here — only events from after it were
+   *  reduced — which is what makes a mid-flight join recognisable. It is
+   *  refreshed on activation, not fixed at construction: a turn that started
+   *  while the tab was hidden is joined mid-flight too. */
+  let paneActiveSince = Date.now()
+
+  /** Reads this pane has already made on a turn's behalf, by reason: one to
+   *  restore a turn it joined mid-flight, one more to repair a gap. Two separate
+   *  flags, because a turn may owe both and neither may repeat. */
+  const backfillReads = new Map<string, { join: number; repair: number }>()
+  /** Every attempt by reason, landed or not, so a read that keeps being aborted
+   *  cannot loop and a repair is not starved by a spent join budget. */
+  const backfillAttempts = new Map<string, { join: number; repair: number }>()
+  /** Turns with a read in flight right now. */
+  const backfillInFlight = new Set<string>()
+  /** Turns whose stream dropped while they were live. Their parts may be
+   *  missing whatever the backend accepted during the gap. */
+  const interruptedTurns = new Set<string>()
+
+  /** Read the newest turn's detail so a turn the pane joined mid-flight has
+   *  parts, without touching the fold's expansion state.
+   *
+   *  Events that arrived before the pane existed are not reduced into anything
+   *  (there was no turn to reduce them into), so such a turn renders as a fold
+   *  with nothing inside and a footer that has no step to name. The detail is
+   *  the record of those events, so one read restores them. It sets no
+   *  expansion override — the reader still decides whether to open a completed
+   *  turn's fold. A *live* turn is never foldable in the first place, so there
+   *  the read has the same end state as clicking its activity header today:
+   *  the steps render inline and the answer keeps streaming under them.
+   *
+   *  Scoped to the newest turn on purpose: it is the one whose state the reader
+   *  is looking at, and backfilling every historical turn would read thousands
+   *  of events for transcripts nobody has opened. */
+  async function backfillNewestTurn(): Promise<void> {
+    if (timelineDisposed) return
+    const turn = turns.value[turns.value.length - 1]
+    const turnId = turn?.turnId
+    if (!turnId) return
+    const detail = deps.historyDetails.value[turnId]
+    if (!detail || detail.status === 'loading') return
+    const reads = backfillReads.get(turnId) ?? { join: 0, repair: 0 }
+    // One read restores a turn the pane joined with nothing reduced. One more
+    // repairs a turn whose stream dropped while it was live — and only once that
+    // turn has stopped moving, because before then the read would chase the very
+    // stream it is trying to repair. Neither may repeat: a descriptor keeps
+    // changing as a turn streams, so an uncapped read is a polling loop.
+    // "Nothing reduced" is too strict: a turn in flight almost always emits some
+    // narration after this pane mounts, so those parts exist while the hundreds
+    // of steps from before the mount never will. A live turn that started before
+    // this pane was created is missing them by construction.
+    const startedMs = parseTimestampMs(turn.startedAt)
+    const joinedMidTurn = startedMs !== null && startedMs <= paneActiveSince
+    const joinOwed = reads.join === 0 && (turn.parts.length === 0 || (!turn.completed && joinedMidTurn))
+    // A repair re-reads a range that is already ``loaded`` on purpose: the loaded
+    // detail was fetched before the gap, so it cannot contain what the backend
+    // accepted while the stream was down.
+    const repairOwed = interruptedTurns.has(turnId) && turn.completed && reads.repair === 0
+    if (!joinOwed && !repairOwed) return
+    // Attempts are bounded per reason and separately from successes: a read that
+    // is aborted by a newer descriptor (or fails) must be retried once, but a
+    // read that never lands must not become a loop.
+    const attempts = backfillAttempts.get(turnId) ?? { join: 0, repair: 0 }
+    const reason = repairOwed ? 'repair' : 'join'
+    if (attempts[reason] >= BACKFILL_MAX_ATTEMPTS) return
+    // Two watcher ticks can land before the first read resolves; without this the
+    // budget would be spent twice on one request.
+    if (backfillInFlight.has(turnId)) return
+    backfillAttempts.set(turnId, { ...attempts, [reason]: attempts[reason] + 1 })
+    backfillInFlight.add(turnId)
+    const visit = timelineVisit
+    await deps.loadHistoryDetail(turnId, { force: repairOwed })
+    backfillInFlight.delete(turnId)
+    if (timelineDisposed || visit !== timelineVisit) return
+    // Charge the budget only once the range actually landed. A request retired
+    // because the turn grew underneath it leaves the entry unloaded, and the
+    // next activation deserves another try.
+    const landed = deps.historyDetails.value[turnId]?.status === 'loaded'
+    if (landed) {
+      backfillReads.set(turnId, { ...reads, [reason]: reads[reason] + 1 })
+    }
+  }
+
   function registerWatchers() {
+    watch(() => deps.events.value, countObservedTurnEvents, { immediate: true, deep: false })
+
     watch(
       () => [deps.events.value.length, deps.pendingTurns.value.length],
       () => requestLatestAnchor(),
+    )
+
+    // A drop from ``live`` is the only thing that means "events may be missing".
+    // The initial ``hydrating`` state is the pane starting up, not a gap.
+    watch(
+      () => deps.connectionState.value,
+      (state, previous) => {
+        if (previous !== 'live' || state === 'live') return
+        const turnId = turns.value[turns.value.length - 1]?.turnId
+        if (turnId) interruptedTurns.add(turnId)
+      },
+    )
+
+    // Ask again whenever the newest turn's own read state could have changed:
+    // a descriptor can arrive after activation, reset to ``idle`` after a retired
+    // read, grow, and the turn can complete — and ``backfillNewestTurn`` owns the
+    // budget that makes a per-batch watcher safe.
+    watch(
+      () => {
+        const turn = turns.value[turns.value.length - 1]
+        const detail = turn?.turnId ? deps.historyDetails.value[turn.turnId] : undefined
+        return [
+          turns.value.length,
+          turn?.completed === true ? 1 : 0,
+          detail?.status ?? '',
+          detail?.descriptor.last_sequence ?? -1,
+          deps.historyDetailRevision.value,
+        ].join('|')
+      },
+      () => void backfillNewestTurn(),
     )
 
     // Activation gate: when cached or authoritative history becomes renderable,
@@ -431,7 +726,9 @@ export function useChatTimeline(deps: Dependencies) {
     processExpandedOverrides,
     latestTurnKey,
     toggleTurnProcess,
+    revealSubthread,
     turnPartsFor,
+    turnEventCount,
     retryHistoryDetail,
     subthreadPartsFor,
     turnFoldSignature,

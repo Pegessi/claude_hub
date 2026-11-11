@@ -1,5 +1,4 @@
 import asyncio
-import json
 from pathlib import Path
 
 import pytest
@@ -16,6 +15,7 @@ from claude_hub.models import (
 from claude_hub.models.agent_stream import normalize_provider_usage
 from claude_hub.services.goal_run import GoalPolicyError, GoalRunController, GoalRunStore
 from claude_hub.services.goal_run.controller import build_continuation_prompt
+from claude_hub.services.local_storage import read_document, write_document
 
 
 def response_with_checkpoint(
@@ -114,6 +114,8 @@ def test_contract_validation_and_create_idempotency(tmp_path: Path) -> None:
     assert request().model_dump(exclude={"attachments"}) == {
         "objective": "Ship the requested feature",
         "client_request_id": "create-1",
+        # Additive plan scope approval stays off for every existing caller.
+        "plan_first": False,
     }
     with pytest.raises(ValidationError):
         GoalRunCreate(objective="x" * 4001, client_request_id="large")
@@ -728,7 +730,7 @@ async def test_legacy_limited_goal_migrates_without_autostart_and_can_resume(
     manager = controller(tmp_path)
     goal = manager.create("tab-1", request())
     path = tmp_path / "goal_runs.json"
-    snapshot = json.loads(path.read_text())
+    snapshot = read_document(path)
     snapshot["version"] = 1
     snapshot["goals"][0].update(
         status="budget_limited",
@@ -742,7 +744,7 @@ async def test_legacy_limited_goal_migrates_without_autostart_and_can_resume(
         snapshot["create_inputs"]["create-1"].update(token_budget=10, max_turns=20)
     else:
         snapshot.pop("create_inputs")
-    path.write_text(json.dumps(snapshot))
+    write_document(path, snapshot)
     dispatched = []
 
     def dispatch(goal, prompt):
@@ -767,7 +769,7 @@ async def test_legacy_limited_goal_migrates_without_autostart_and_can_resume(
     resumed = await cold.resume(goal.id, "resume")
     assert resumed.status == GoalRunStatus.ACTIVE
     assert len(dispatched) == 1
-    persisted = json.loads(path.read_text())
+    persisted = read_document(path)
     assert persisted["version"] == 2
     assert "token_budget" not in persisted["goals"][0]
     assert "max_turns" not in persisted["goals"][0]

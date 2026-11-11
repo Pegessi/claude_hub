@@ -36,6 +36,10 @@ def test_guidance_preserves_choices_and_explicit_tool_contracts() -> None:
     assert "Work like a secretary: reply fast" in TURN_RULES
     assert "Chat apps show only the last message of your turn" in TURN_RULES
     assert "Start agent work with `claude-hub dot delegate`" in TURN_RULES
+    # Decisions belong on the question card, not in a closing prose question.
+    assert "ask it with the question tool" in TURN_RULES
+    assert "2–4 concrete options" in TURN_RULES
+    assert "one-line tradeoff" in TURN_RULES
     assert "[--session <agent-session-id>]" in TOOL_GUIDE
     assert "--title" in TOOL_GUIDE and "--tone" in WAKE_MESSAGE
     assert "open gap" in BRIEF_TEMPLATE

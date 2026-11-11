@@ -51,9 +51,26 @@
 }
 
 .detail-section--collapsible > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   cursor: pointer;
   padding: 8px 2px;
   list-style: none;
+}
+
+/* A collapsed section must look like something you can open, not like an
+   empty header: the chevron is the only affordance it has. */
+.detail-section--collapsible > summary::after {
+  content: '▸';
+  flex: 0 0 auto;
+  color: var(--ch-color-text-subtle);
+  font-size: 9px;
+  line-height: 1;
+}
+
+.detail-section--collapsible[open] > summary::after {
+  content: '▾';
 }
 
 .detail-section--collapsible > summary::-webkit-details-marker {

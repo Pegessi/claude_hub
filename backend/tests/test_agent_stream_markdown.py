@@ -140,6 +140,9 @@ def _write_reference(
     chunks = [text[: len(text) // 2], text[len(text) // 2 :]] if split else [text]
     events = [
         {
+            "stream_sequence": index,
+            "agent_type": "codex",
+            "created_at": CREATED_AT.isoformat(),
             "session_id": event_session or store_session,
             "tab_id": TAB_ID,
             "type": kind,
@@ -152,9 +155,11 @@ def _write_reference(
                 **(extra_payload or {}),
             },
         }
-        for chunk in chunks
+        for index, chunk in enumerate(chunks)
     ]
-    store.path.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+    from claude_hub.models import AgentStreamEvent
+
+    store._replace_rows([AgentStreamEvent.model_validate(event) for event in events])
 
 
 @pytest.mark.parametrize("absolute", [False, True])

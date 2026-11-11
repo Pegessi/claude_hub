@@ -6,6 +6,7 @@
     :class="{ compact }"
     @click="handleClick"
     @error.capture="handleError"
+    @scroll.capture="handleCodeScroll"
   >
     <template
       v-for="block in blocks"
@@ -49,7 +50,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch, watchEffect } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { MarkdownBlockCache } from '@/utils/markdownBlocks'
 import { ensureHighlighter, highlightReady } from '@/utils/codeHighlight'
 import { ensureMathRenderer, mathVersion } from '@/utils/mathRendering'
@@ -89,6 +90,12 @@ const emit = defineEmits<{
 const blockCache = new MarkdownBlockCache()
 const contentRoot = ref<HTMLElement | null>(null)
 
+// B6: image URLs already known to fail in this component instance. v-html
+// re-creates <img> nodes on every streaming delta; without this set each
+// re-render would re-request a dead URL and loop. Failed URLs render the
+// placeholder directly until the user explicitly retries one.
+const failedImageUrls = new Set<string>()
+
 const blocks = computed(() => {
   // Depend on highlightReady so the computed re-evaluates when the
   // lazy-loaded highlighter finishes loading.
@@ -121,7 +128,11 @@ watchEffect(() => {
 // after streaming replacement/unmount; completed DOM nodes retain their diagrams.
 watch([blocks, contentRoot], (_, __, onCleanup) => {
   const root = contentRoot.value
-  if (!root || !blockCache.hasMermaid) return
+  if (!root) return
+  syncCodeScrollState(root)
+  // Failed images need recovery placeholders even in prose-only messages.
+  neutralizeKnownFailures(root)
+  if (!blockCache.hasMermaid) return
   let current = true
   let timer: ReturnType<typeof setTimeout>
   const render = () => {
@@ -152,19 +163,180 @@ watch([blocks, contentRoot], (_, __, onCleanup) => {
   })
 }, { flush: 'post' })
 
+// Code blocks scroll horizontally (``white-space: pre``), and a clipped line is
+// indistinguishable from a short one. The block is marked only when its content
+// really is wider than the box, so the fade and the scrollbar never suggest a
+// remainder that does not exist.
+function syncCodeScrollState(root: HTMLElement) {
+  const blocks = Array.from(root.querySelectorAll<HTMLElement>('.markdown-code-block'))
+  if (blocks.length === 0) return
+  // Measure every block before writing any attribute: interleaving reads and
+  // writes would force a layout per block on every streamed delta.
+  const measured = blocks.map((block) => {
+    const pre = block.querySelector('pre')
+    if (!pre) return { overflowing: false, atEnd: false }
+    return {
+      overflowing: pre.scrollWidth > pre.clientWidth + 1,
+      // Recomputed every sync: a block that grew wider (streamed code, a resize,
+      // enlarged text) is no longer at its end even though it was when the reader
+      // last scrolled, and the fade has to come back.
+      atEnd: pre.scrollLeft + pre.clientWidth >= pre.scrollWidth - 1,
+    }
+  })
+  blocks.forEach((block, index) => {
+    block.toggleAttribute('data-overflow-x', measured[index].overflowing)
+    block.toggleAttribute('data-scroll-end', measured[index].overflowing && measured[index].atEnd)
+  })
+}
+
+// The fade withdraws once the reader reaches the end of the line: an edge that
+// dims the last characters would hide the very content it points at. Scroll does
+// not bubble, so this is a capture-phase listener on the content root.
+function handleCodeScroll(event: Event) {
+  const target = event.target
+  if (!(target instanceof HTMLElement) || !target.matches('.markdown-code-block > pre')) return
+  const block = target.closest<HTMLElement>('.markdown-code-block')
+  if (!block) return
+  const atEnd = target.scrollLeft + target.clientWidth >= target.scrollWidth - 1
+  block.toggleAttribute('data-scroll-end', atEnd)
+}
+
+// Text changes arrive through ``blocks``; width changes (window resize, zoom,
+// enlarged text) arrive here, and a block that fits at one width can overflow at
+// another.
+let codeScrollObserver: ResizeObserver | null = null
+onMounted(() => {
+  const root = contentRoot.value
+  if (!root || typeof ResizeObserver === 'undefined') return
+  codeScrollObserver = new ResizeObserver(() => syncCodeScrollState(root))
+  codeScrollObserver.observe(root)
+})
+onBeforeUnmount(() => {
+  codeScrollObserver?.disconnect()
+  codeScrollObserver = null
+})
+
 // A proxied image that fails to load (404 / expired temporary file) is
 // replaced in place by a restrained text placeholder — never a broken-image
 // icon or a large error frame. The ``error`` event does not bubble, so the
-// capture-phase listener on the root is what sees it.
+// capture-phase listener on the root is what sees it. The placeholder keeps
+// an explicit, accessible Retry that rebuilds the same authorized image URL
+// (with a cache-busting nonce) without re-running any agent tool.
+function withFreshNonce(src: string): string {
+  // One stable identity: always strip any previous retry param before
+  // appending, so repeated retries never accumulate query parameters.
+  const identity = src.replace(/([?&])retry=\d+(?:&|$)/, (_, prefix: string, suffix: string) =>
+    prefix === '?' && suffix === '&' ? '?' : '',
+  ).replace(/[?&]$/, '')
+  const separator = identity.includes('?') ? '&' : '?'
+  return `${identity}${separator}retry=${Date.now()}`
+}
+
 function handleError(event: Event) {
   const target = event.target
   if (!(target instanceof HTMLImageElement)) return
   if (!target.dataset.quotedImg && !target.dataset.localImg) return
-  const placeholder = document.createElement('span')
-  placeholder.className = 'quoted-img-missing'
-  placeholder.textContent = target.alt ? `${target.alt} (image unavailable)` : '[image unavailable]'
-  const button = target.closest('button[data-image-preview]')
-  ;(button || target).replaceWith(placeholder)
+  if (target.closest('.quoted-img-missing')) return
+
+  // Preserve the original image's rendering contract (lazy load, async
+  // decode, dimensions, markers) and its preview wrapper: a Markdown image
+  // lives inside button[data-image-preview], and recovery must keep click and
+  // keyboard preview working (D1).
+  const original = {
+    src: target.getAttribute('src') || '',
+    alt: target.alt,
+    quoted: target.dataset.quotedImg || '',
+    local: target.dataset.localImg || '',
+    className: target.className,
+    width: target.getAttribute('width'),
+    height: target.getAttribute('height'),
+    loading: target.getAttribute('loading'),
+    decoding: target.getAttribute('decoding'),
+  }
+  const previewButton = target.closest('button[data-image-preview]')
+  // Remember the authorized URL (without the retry nonce) so later v-html
+  // re-renders during streaming go straight to the placeholder instead of
+  // issuing another failing request — including re-creation of the same block.
+  const identityUrl = original.src.replace(/[?&]retry=\d+$/, '')
+  failedImageUrls.add(identityUrl)
+
+  const buildImage = () => {
+    const img = document.createElement('img')
+    if (original.className) img.className = original.className
+    if (original.width) img.setAttribute('width', original.width)
+    if (original.height) img.setAttribute('height', original.height)
+    img.alt = original.alt
+    if (original.quoted) img.dataset.quotedImg = original.quoted
+    if (original.local) img.dataset.localImg = original.local
+    if (original.loading) img.setAttribute('loading', original.loading)
+    if (original.decoding) img.setAttribute('decoding', original.decoding)
+    img.src = withFreshNonce(original.src)
+    return img
+  }
+
+  // Rebuild the original preview wrapper so a recovered image keeps the same
+  // click/keyboard lightbox behavior as a never-failed image. The root-level
+  // delegated handleClick picks up the replacement automatically.
+  const buildPreviewButton = () => {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = previewButton?.className || 'markdown-image-preview'
+    button.dataset.imagePreview = '1'
+    button.setAttribute(
+      'aria-label',
+      original.alt ? `Open image ${original.alt}` : 'Open image',
+    )
+    button.append(buildImage())
+    return button
+  }
+
+  const buildPlaceholder = () => {
+    const placeholder = document.createElement('span')
+    placeholder.className = 'quoted-img-missing'
+
+    const label = document.createElement('span')
+    label.className = 'quoted-img-missing-text'
+    label.textContent = target.alt ? `${target.alt} (image unavailable)` : '[image unavailable]'
+    placeholder.append(label)
+
+    const retry = document.createElement('button')
+    retry.type = 'button'
+    retry.className = 'quoted-img-retry'
+    retry.textContent = 'Retry'
+    retry.setAttribute(
+      'aria-label',
+      target.alt ? `Retry loading image ${target.alt}` : 'Retry loading image',
+    )
+    retry.addEventListener('click', (clickEvent) => {
+      clickEvent.preventDefault()
+      clickEvent.stopPropagation()
+      // Manual retry: stop treating the URL as failed and rebuild the image
+      // (inside its preview wrapper when the original had one). One request
+      // per user action; a second failure re-enters this path.
+      failedImageUrls.delete(identityUrl)
+      placeholder.replaceWith(previewButton ? buildPreviewButton() : buildImage())
+    })
+    placeholder.append(retry)
+    return placeholder
+  }
+
+  // Replace the whole original node (img or preview button) with the
+  // placeholder; recovery restores the same wrapper structure.
+  const originalNode = previewButton ?? target
+  originalNode.replaceWith(buildPlaceholder())
+}
+
+// B6: after every v-html render, neutralize images whose URL already failed
+// in this component instance, so streaming deltas cannot re-request them.
+function neutralizeKnownFailures(root: HTMLElement) {
+  if (failedImageUrls.size === 0) return
+  root.querySelectorAll<HTMLImageElement>('img[data-quoted-img], img[data-local-img]').forEach((img) => {
+    const src = (img.getAttribute('src') || '').replace(/[?&]retry=\d+$/, '')
+    if (!failedImageUrls.has(src) || img.closest('.quoted-img-missing')) return
+    const synthetic = new Event('error', { bubbles: false, cancelable: true })
+    Object.defineProperty(synthetic, 'target', { value: img })
+    handleError(synthetic)
+  })
 }
 
 async function handleClick(event: MouseEvent) {
@@ -449,12 +621,34 @@ async function handleClick(event: MouseEvent) {
 /* Restrained fallback shown when a proxied quoted image cannot be loaded —
    muted inline text, not a broken-image frame. */
 .markdown-block :deep(.quoted-img-missing) {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 1px 6px;
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-sm);
   color: var(--ch-color-text-muted);
   font-size: 0.9em;
+  line-height: 1.4;
+}
+
+.markdown-block :deep(.quoted-img-retry) {
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: var(--ch-radius-sm);
+  background: transparent;
+  color: var(--ch-color-text);
+  font: inherit;
+  padding: 0 6px;
+  cursor: pointer;
+}
+
+.markdown-block :deep(.quoted-img-retry:hover) {
+  border-color: var(--ch-color-accent);
+}
+
+.markdown-block :deep(.quoted-img-retry:focus-visible) {
+  outline: 2px solid var(--ch-color-accent);
+  outline-offset: 1px;
 }
 
 .markdown-block :deep(table) {
@@ -507,7 +701,12 @@ async function handleClick(event: MouseEvent) {
   font-weight: 600;
 }
 
+/* Header and code share one grid column so the scroll hint can sit exactly
+   over the code area, below a header whose height depends on the theme. */
 .markdown-block :deep(.markdown-code-block) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto;
   overflow: hidden;
   margin-top: 8px;
   border: 1px solid var(--ch-color-surface-control-active);
@@ -516,6 +715,8 @@ async function handleClick(event: MouseEvent) {
 }
 
 .markdown-block :deep(.markdown-code-header) {
+  grid-row: 1;
+  grid-column: 1;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -525,6 +726,15 @@ async function handleClick(event: MouseEvent) {
   color: var(--ch-color-text-muted);
   font-family: var(--ch-font-mono);
   font-size: 11px;
+}
+
+/* An unknown info string can be arbitrarily long; the chip owns the space it
+   needs and the Copy button keeps its size. */
+.markdown-block :deep(.markdown-code-header .markdown-code-language) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .markdown-block :deep(.markdown-code-header button) {
@@ -539,9 +749,68 @@ async function handleClick(event: MouseEvent) {
 }
 
 .markdown-block :deep(.markdown-code-block pre) {
+  grid-row: 2;
+  grid-column: 1;
+  min-width: 0;
   margin: 0;
   border: 0;
   border-radius: 0;
+  /* Horizontal only: a vertical scrollbar inside a code block would trap the
+     reader's wheel in a few lines instead of scrolling the message. */
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* The scrollbar stays out of the way until the reader shows interest in the
+     block; the fade already says there is more to the right. The standard
+     properties cover Chrome and Firefox, the pseudo-element rules below cover
+     Safari, which only has that form. */
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+.markdown-block :deep(.markdown-code-block pre::-webkit-scrollbar) {
+  height: 8px;
+}
+
+.markdown-block :deep(.markdown-code-block pre::-webkit-scrollbar-track) {
+  background: transparent;
+}
+
+.markdown-block :deep(.markdown-code-block pre::-webkit-scrollbar-thumb) {
+  border-radius: var(--ch-radius-sm);
+  background: transparent;
+}
+
+/* Hovering the block, or focusing its Copy button, reveals the scrollbar — the
+   same two signals a reader already uses on the block. */
+.markdown-block :deep(.markdown-code-block:hover pre),
+.markdown-block :deep(.markdown-code-block:focus-within pre) {
+  scrollbar-color: var(--ch-color-border-strong) transparent;
+}
+
+.markdown-block :deep(.markdown-code-block:hover pre::-webkit-scrollbar-thumb),
+.markdown-block :deep(.markdown-code-block:focus-within pre::-webkit-scrollbar-thumb) {
+  background: var(--ch-color-border-strong);
+}
+
+/* The fade sits over the right edge of the code area and fades the line into
+   the block background, so a cut-off line looks cut off instead of finished. */
+.markdown-block :deep(.markdown-code-scroll-hint) {
+  grid-row: 2;
+  grid-column: 1;
+  justify-self: end;
+  align-self: stretch;
+  width: 28px;
+  /* The fade sits over the block's own background, so it blends into that and
+     not into the canvas: a canvas/surface mismatch would draw a visible band at
+     the right edge of the code. */
+  background: linear-gradient(to left, var(--ch-color-surface), transparent);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+
+.markdown-block :deep(.markdown-code-block[data-overflow-x]:not([data-scroll-end]) .markdown-code-scroll-hint) {
+  opacity: 1;
 }
 
 .markdown-block :deep(.markdown-table-scroll:focus-visible),
@@ -619,5 +888,12 @@ async function handleClick(event: MouseEvent) {
   padding: 6px 12px;
   color: var(--ch-color-text-muted);
   font-size: 12px;
+}
+
+/* The fade is a hint, not information: dropping its animation loses nothing. */
+@media (prefers-reduced-motion: reduce) {
+  .markdown-block :deep(.markdown-code-scroll-hint) {
+    transition: none;
+  }
 }
 </style>

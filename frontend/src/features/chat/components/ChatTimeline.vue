@@ -37,7 +37,7 @@
       <ChatTurn
         v-for="{ turn, ordinal } in visibleTurns"
         :key="turn.key"
-        v-memo="[turn.renderRevision, ordinal, latestTurnKey === turn.key && turnInFlight, feishuBotPoolStore.pool?.pool_revision, erroredAttachments.size, erroredAgentImages.size, turnApprovalSignature(turn), turnFoldSignature(turn), expandedToolGroups.get(turn.key), forkingOrdinal === ordinal, implementingPlanKey === turn.key, isEditingTurn(turn), isEditingTurn(turn) ? editError : null, isEditingTurn(turn) ? isEditSending : false, copyFeedback?.turnKey === turn.key ? copyFeedback.state : null]"
+        v-memo="[turn.renderRevision, ordinal, latestTurnKey === turn.key && turnInFlight, feishuBotPoolStore.pool?.pool_revision, erroredAttachments.size, erroredAgentImages.size, turnApprovalSignature(turn), turnFoldSignature(turn), expandedToolGroups.get(turn.key), forkingOrdinal === ordinal, implementingPlanKey === turn.key, isEditingTurn(turn), isEditingTurn(turn) ? editError : null, isEditingTurn(turn) ? isEditSending : false, copyFeedback?.turnKey === turn.key ? copyFeedback.state : null, goalPlanSignature(turn)]"
         :turn="turn"
         :ordinal="ordinal"
       />
@@ -53,8 +53,10 @@
 </template>
 
 <script setup lang="ts">
-import { requireChatOwner, chatTimelineKey, chatDeliveryKey, chatImagesKey, chatComposerKey, chatActionsKey, chatIdentityKey } from '../owners'
+import { requireChatOwner, chatTimelineKey, chatDeliveryKey, chatGoalKey, chatImagesKey, chatComposerKey, chatActionsKey, chatIdentityKey } from '../owners'
 import ChatTurn from './ChatTurn.vue'
+import { goalPlanSignature as goalPlanCardSignature } from '../goal-plan/planCard'
+import type { TimelineTurn } from '../timeline/types'
 import ChatPendingTurn from './ChatPendingTurn.vue'
 const { latestTurnKey, timelineEl, timelinePhase, timelineLoadingMessage, handleTimelineScroll, timelineContentEl, historyWindowStart, isLoadingEarlier, loadEarlierTurns, turns, visibleTurns, turnFoldSignature, expandedToolGroups } = requireChatOwner(chatTimelineKey)
 const { pendingDirectTurns, pendingTurns, turnInFlight } = requireChatOwner(chatDeliveryKey)
@@ -62,6 +64,9 @@ const { erroredAttachments, erroredAgentImages } = requireChatOwner(chatImagesKe
 const { turnApprovalSignature } = requireChatOwner(chatComposerKey)
 const { forkingOrdinal, implementingPlanKey, isEditingTurn, editError, isEditSending, copyFeedback } = requireChatOwner(chatActionsKey)
 const { isHistoryVisible, feishuBotPoolStore } = requireChatOwner(chatIdentityKey)
+const { goal } = requireChatOwner(chatGoalKey)
+/** A Goal snapshot arrives after the turn completes, so the memo must watch it. */
+const goalPlanSignature = (turn: TimelineTurn) => goalPlanCardSignature(goal.value, turn.turnId)
 </script>
 
 <style scoped>

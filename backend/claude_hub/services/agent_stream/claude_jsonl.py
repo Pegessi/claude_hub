@@ -100,7 +100,14 @@ def _normalize_ask_user_question_args(
             label = raw_option.get("label")
             if not isinstance(label, str) or not label.strip():
                 continue
-            options.append({"id": label, "label": label})
+            option = {"id": label, "label": label}
+            # Claude asks for a tradeoff per option; it is the line the card
+            # renders under the label, and dropping it here left the choice
+            # with no visible consequence.
+            description = raw_option.get("description")
+            if isinstance(description, str) and description.strip():
+                option["description"] = description.strip()
+            options.append(option)
         if not options:
             continue
         normalized.append(
