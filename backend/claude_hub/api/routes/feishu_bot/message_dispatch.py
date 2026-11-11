@@ -356,9 +356,9 @@ class FeishuMessageDispatcher:
         self, effective: EffectiveBot, binding: BotBinding, event: FeishuMessageEvent
     ) -> None:
         """Validate a message while the caller holds its bot's admission gate."""
-        if not self.bindings.pool().is_current(effective) or not self._binding_still_routes(
-            effective, binding
-        ):
+        if not self.bindings.pool().is_current_for_delivery(
+            effective
+        ) or not self._binding_still_routes(effective, binding):
             raise HTTPException(status_code=409, detail="bot_binding_revoked")
         time_status = self._message_time_status(event, binding)
         if time_status != FeishuMessageTimeStatus.VALID:
@@ -446,7 +446,7 @@ class FeishuMessageDispatcher:
                 and await _group_is_topic_mode(client, effective.bot_id, event.chat_id)
             )
             async with self.bindings.gate(effective.bot_id):
-                if not self.bindings.pool().is_current(effective):
+                if not self.bindings.pool().is_current_for_delivery(effective):
                     return False
                 if still_valid is not None and not still_valid():
                     return False
@@ -703,6 +703,7 @@ class FeishuMessageDispatcher:
     ) -> str:
         batch: list[_TabDispatchItem] = []
         status = "failed"
+        earlier = queue.interrupted_text.get(leader.channel_key, "")
         try:
             try:
                 candidates, followup = await self._collect_tab_dispatch_batch(queue, leader)
@@ -913,3 +914,7 @@ class FeishuMessageDispatcher:
                 await self._settle_stop(queue, batch)
             if batch:
                 self._finish_tab_dispatch_batch(tab_id, queue, batch, status)
+            else:
+                if queue.processor is leader:
+                    queue.processor = None
+                self.bindings.promote_tab_dispatch(tab_id, queue)

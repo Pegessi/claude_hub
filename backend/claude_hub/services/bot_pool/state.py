@@ -500,6 +500,32 @@ class FeishuBotPoolStateStore(object):
             and current.expected_tenant_key == effective.expected_tenant_key
         )
 
+    def is_current_for_delivery(
+        self, effective: EffectiveBot, environ: Mapping[str, str] | None = None
+    ) -> bool:
+        """Check whether a Bot's credentials, generation, and callback state still match.
+
+        Unlike ``is_current``, this delivery fence ignores ``revision`` so that
+        sibling channel mutations and Bot renames do not invalidate another
+        channel's in-flight turn, outbound reply, or question card while HTTP
+        mutations still advance ``revision`` for CAS. Channel-level authority is
+        fenced separately by ``pairing_id`` via ``_binding_still_routes``.
+        """
+
+        try:
+            current = self.effective(effective.bot_id, environ)
+        except FeishuBotPoolError:
+            return False
+        return (
+            current.app_id == effective.app_id
+            and current.generation == effective.generation
+            and current.config == effective.config
+            and current.callback_enabled == effective.callback_enabled
+            and current.verification_token == effective.verification_token
+            and current.encrypt_key == effective.encrypt_key
+            and current.expected_tenant_key == effective.expected_tenant_key
+        )
+
     # ------------------------------------------------------------ invariants
 
     def _prune(self, state: dict[str, Any], now: float) -> None:

@@ -259,8 +259,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             raw = self._live_entry(state, bot_id)
             self._check_revision(raw, expected_revision)
             current_mode = bot_mode(raw)
-            mode_changed = mode is not None and mode != current_mode
-            if mode_changed:
+            if mode is not None and mode != current_mode:
                 if self._active_raw_bindings(raw):
                     raise FeishuBotModeSwitchBlocked(bot_id)
                 raw["mode"] = mode
@@ -269,16 +268,12 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
                 raw["mode"] = mode
             if name is not None:
                 raw["name"] = name
-            enabled_changed = enabled is not None and enabled != raw.get("enabled")
-            if enabled_changed:
+            if enabled is not None and enabled != raw.get("enabled"):
                 raw["enabled"] = enabled
                 if not enabled:
                     # Disabling revokes outstanding pairing state for this Bot.
                     self._advance_generation(raw)
-            if mode_changed or enabled_changed:
-                self._touch(raw, now)
-            else:
-                raw["updated_at"] = now
+            self._touch(raw, now)
             self._save(state)
 
     def delete_bot(
@@ -358,7 +353,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
                 "expires_at": expires_at,
                 "generation": raw["generation"],
             }
-            raw["updated_at"] = now
+            self._touch(raw, now)
             self._save(state)
             return code, expires_at, _as_int(raw["revision"], "revision")
 
@@ -422,7 +417,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             }
             claim = self._claim_from_dict(bot_id, pairing_id, claim_record)
             raw["claims"][pairing_id] = claim_record
-            raw["updated_at"] = now
+            self._touch(raw, now)
             self._save(state)
             return claim, word
 
@@ -467,7 +462,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
                     del raw["claims"][pairing_id]
                 else:
                     value["confirm_attempts"] = attempts
-                raw["updated_at"] = now
+                self._touch(raw, now)
                 self._save(state)
                 raise FeishuPairingMismatch(pairing_id)
             self._require_bot_binding_slot(raw, bot_id)
@@ -499,7 +494,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
                 raw["pending"] = {}
             else:
                 raw["claims"].pop(pairing_id, None)
-            raw["updated_at"] = now
+            self._touch(raw, now)
             self._save(state)
             return binding
 
@@ -543,10 +538,9 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             remaining = [item for item in active if item.get("pairing_id") != pairing_id]
             if remaining:
                 raw["bindings"] = remaining
-                raw["updated_at"] = now
             else:
                 self._advance_generation(raw)
-                self._touch(raw, now)
+            self._touch(raw, now)
             self._save(state)
             return released
 
@@ -712,7 +706,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             if bot_mode(raw) == BOT_MODE_SINGLE:
                 raw["claims"] = {}
                 raw["pending"] = {}
-            raw["updated_at"] = now
+            self._touch(raw, now)
             self._save(state)
             return binding
 
@@ -782,7 +776,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             if bot_mode(raw) == BOT_MODE_SINGLE:
                 raw["claims"] = {}
                 raw["pending"] = {}
-            raw["updated_at"] = now
+            self._touch(raw, now)
             self._save(state)
             return binding
 
@@ -806,9 +800,8 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             remaining = [item for item in active if item.get("pairing_id") != pairing_id]
             if remaining:
                 raw["bindings"] = remaining
-                raw["updated_at"] = now
             else:
                 self._advance_generation(raw)
-                self._touch(raw, now)
+            self._touch(raw, now)
             self._save(state)
             return True
