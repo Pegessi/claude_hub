@@ -2,6 +2,7 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import '@/features/app-shell/styles/theme.css'
 import '@/features/app-shell/styles/palettes.css'
+import '@/features/app-shell/styles/theme-treatments.css'
 import TerminalHmrHarnessApp from './TerminalHmrHarnessApp.vue'
 import type { ClaudeHubNamespace } from '@/types'
 

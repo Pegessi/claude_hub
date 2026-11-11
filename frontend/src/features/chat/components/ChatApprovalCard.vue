@@ -649,7 +649,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', handleDocumentKeyd
   font: inherit;
   font-size: 12px;
   font-weight: 500;
-  color: var(--ch-color-text-inverse);
+  color: var(--ch-color-on-accent);
   background: var(--ch-color-accent-strong);
   border: none;
   border-radius: var(--ch-radius-md);

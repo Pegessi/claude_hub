@@ -14,7 +14,7 @@
           Make yourself at home
         </h2>
         <p id="appearance-description">
-          A quieter space, in your colors.
+          Quiet by default. Expressive by choice.
         </p>
       </div>
       <button
@@ -50,7 +50,7 @@
         </p>
       </fieldset>
       <fieldset class="appearance-fieldset">
-        <legend>Color palette</legend>
+        <legend>Theme</legend>
         <div class="appearance-palettes">
           <label
             v-for="palette in THEME_PALETTES"
@@ -71,7 +71,7 @@
               aria-hidden="true"
             >
               <span class="theme-preview-sidebar"><i /><i /><i /></span>
-              <span class="theme-preview-content"><i /><i /><b /><i /></span>
+              <span class="theme-preview-content"><span class="theme-preview-title">{{ palette.sample }}</span><i /><b /><i /></span>
             </span>
             <span class="appearance-card-title">{{ palette.name }}<span
               class="appearance-check"
@@ -126,7 +126,7 @@ onUnmounted(() => {
 .appearance-dialog {
   margin: auto;
   padding: 0;
-  width: min(560px, calc(100vw - 32px));
+  width: min(660px, calc(100vw - 32px));
   max-width: none;
   max-height: calc(100dvh - 48px);
   color: var(--ch-color-text);
@@ -153,7 +153,7 @@ onUnmounted(() => {
 .appearance-mode input:checked + span { border-color: var(--ch-color-border-selected); background: var(--ch-color-surface-selected); color: var(--ch-color-text-selected); }
 .appearance-mode input:focus-visible + span { outline: 2px solid var(--ch-color-accent-ring); outline-offset: 2px; }
 .appearance-hint { margin-top: 8px; color: var(--ch-color-text-subtle); font-size: 12px; line-height: 1.5; }
-.appearance-palettes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px 12px; }
+.appearance-palettes { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px 12px; }
 .appearance-card { display: flex; flex-direction: column; gap: 5px; }
 .appearance-card-title { display: flex; align-items: center; justify-content: space-between; gap: 4px; font-size: 13px; font-weight: 600; }
 .appearance-card-description { font-size: 11px; line-height: 1.45; color: var(--ch-color-text-muted); }
@@ -166,7 +166,7 @@ onUnmounted(() => {
 .theme-preview i { display: block; height: 3px; border-radius: 2px; background: var(--ch-color-text-subtle); opacity: 0.5; }
 .theme-preview-sidebar i:first-child { height: 5px; background: var(--ch-color-accent); opacity: 1; }
 .theme-preview-content { flex: 1; padding: 13px 9px; display: flex; flex-direction: column; gap: 7px; }
-.theme-preview-content i:first-child { width: 56%; opacity: 0.9; }
+.theme-preview-title { font-family: var(--ch-font-display); font-style: var(--ch-heading-style); font-size: 12px; line-height: 1; font-weight: 800; color: var(--ch-color-text); }
 .theme-preview-content i:last-child { width: 70%; }
 .theme-preview-content b { align-self: flex-end; width: 58%; height: 15px; border-radius: 4px; background: var(--ch-color-message-user-bg); }
 .appearance-footer { padding: 14px 24px; flex-shrink: 0; border-top: 1px solid var(--ch-color-border-muted); color: var(--ch-color-text-muted); font-size: 12px; line-height: 1.5; }

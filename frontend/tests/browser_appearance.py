@@ -19,7 +19,13 @@ from urllib.parse import urlencode, urlparse
 from playwright.async_api import Page, expect
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from appearance_assertions import PALETTES, choose_mode, choose_palette, contrast  # noqa: E402
+from appearance_assertions import (  # noqa: E402
+    PALETTES,
+    choose_mode,
+    choose_palette,
+    contrast,
+    palette_id,
+)
 from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
 
 STORAGE_KEY = "claude_hub_appearance"
@@ -52,7 +58,7 @@ async def theme_state(page: Page) -> dict[str, Any]:
       const tokens = ['color-app-bg', 'color-main-bg', 'color-sidebar-bg', 'color-surface',
         'color-surface-raised', 'color-canvas', 'color-text', 'color-text-muted',
         'color-text-subtle', 'color-accent', 'color-accent-ring', 'color-accent-strong',
-        'color-accent-fill-hover', 'color-text-inverse', 'color-message-user-bg',
+        'color-accent-fill-hover', 'color-on-accent', 'color-message-user-text', 'color-message-user-bg',
         'color-message-user-muted', 'color-text-selected', 'color-surface-selected',
         'color-border', 'color-border-strong', 'terminal-bg', 'terminal-fg'];
       const code = ['keyword', 'string', 'function', 'number', 'comment', 'builtin',
@@ -67,6 +73,69 @@ async def theme_state(page: Page) -> dict[str, Any]:
         appBackgroundToken: getComputedStyle(root).getPropertyValue('--ch-color-app-bg').trim(),
         values};
     }""")
+
+
+async def preview_color_roles(page: Page) -> list[dict[str, Any]]:
+    return await page.locator(".theme-preview").evaluate_all("""tiles => tiles.map(tile => {
+      const probe = document.createElement('span');
+      tile.appendChild(probe);
+      const values = {};
+      for (const token of ['color-message-user-bg', 'color-message-user-text',
+        'color-on-accent', 'color-accent-strong']) {
+        probe.style.color = `var(--ch-${token})`;
+        values[token] = getComputedStyle(probe).color;
+      }
+      probe.remove();
+      return {palette: tile.dataset.palette, values,
+        bubble: getComputedStyle(tile.querySelector('.theme-preview-content b')).backgroundColor};
+    })""")
+
+
+async def rendered_treatment(page: Page, palette: str) -> dict[str, Any]:
+    return await page.evaluate(
+        """palette => {
+      const style = (selector, pseudo) => getComputedStyle(document.querySelector(selector), pseudo);
+      const heading = style('.appearance-header h2');
+      const done = style('.appearance-done');
+      const header = style('.app-mode-bar');
+      const preview = style(`.theme-preview[data-palette="${palette}"]`);
+      const motif = style(`.theme-preview[data-palette="${palette}"]`, '::before');
+      return {heading: {font: heading.fontFamily, style: heading.fontStyle,
+          weight: heading.fontWeight, transform: heading.textTransform},
+        doneRadius: done.borderRadius,
+        header: {borderStyle: header.borderBottomStyle, borderImage: header.borderImageSource},
+        preview: {borderStyle: preview.borderBottomStyle, leadingWidth: preview.borderLeftWidth,
+          trailingWidth: preview.borderRightWidth, motif: motif.backgroundImage,
+          motifContent: motif.content, motifHeight: motif.height}};
+    }""",
+        palette_id(palette),
+    )
+
+
+async def reader_typography(page: Page) -> dict[str, str]:
+    return await page.evaluate("""() => {
+      const font = selector => getComputedStyle(document.querySelector(selector)).fontFamily;
+      return {body: font('.markdown-content p'), code: font('.markdown-content pre code'),
+        heading: font('.markdown-content h1')};
+    }""")
+
+
+def check_game_treatment(palette: str, treatment: dict[str, Any]) -> None:
+    heading, preview, header = treatment["heading"], treatment["preview"], treatment["header"]
+    if palette == "Zenless":
+        assert heading["style"] == "italic" and int(heading["weight"]) >= 700, treatment
+        assert "repeating-linear-gradient" in preview["motif"], treatment
+        assert preview["motifContent"] not in ("none", "normal"), treatment
+        assert float(preview["motifHeight"].removesuffix("px")) > 0, treatment
+        assert "repeating-linear-gradient" in header["borderImage"], treatment
+    elif palette == "Frontier":
+        assert "Georgia" in heading["font"], treatment
+        assert preview["borderStyle"] == "double" and header["borderStyle"] == "double", treatment
+    elif palette == "Los Santos":
+        assert heading["transform"] == "uppercase" and int(heading["weight"]) >= 700, treatment
+        assert float(preview["leadingWidth"].removesuffix("px")) > float(
+            preview["trailingWidth"].removesuffix("px")
+        ), treatment
 
 
 def check_contrast(state: dict[str, Any]) -> dict[str, float]:
@@ -87,8 +156,9 @@ def check_contrast(state: dict[str, Any]) -> dict[str, float]:
         require("color-text-subtle", surface, 4.5)
     require("color-accent-ring", "color-surface", 3)
     require("color-text-selected", "color-surface-selected", 4.5)
-    for fill in ("color-accent-strong", "color-accent-fill-hover", "color-message-user-bg"):
-        require("color-text-inverse", fill, 4.5)
+    for fill in ("color-accent-strong", "color-accent-fill-hover"):
+        require("color-on-accent", fill, 4.5)
+    require("color-message-user-text", "color-message-user-bg", 4.5)
     require("color-message-user-muted", "color-message-user-bg", 4.5)
     for token in values:
         if token.startswith("code-"):
@@ -99,7 +169,7 @@ def check_contrast(state: dict[str, Any]) -> dict[str, float]:
 
 
 async def assert_theme(page: Page, palette: str, mode: str) -> None:
-    await expect(page.locator("html")).to_have_attribute("data-palette", palette.lower())
+    await expect(page.locator("html")).to_have_attribute("data-palette", palette_id(palette))
     await expect(page.locator("html")).to_have_attribute("data-theme", mode)
     state = await theme_state(page)
     assert state["nativeScheme"] == mode, state
@@ -261,8 +331,17 @@ async def main(browser_run: BrowserRun) -> None:
             dialog = page.get_by_role("dialog")
             await expect(dialog).to_be_visible()
             await expect(dialog.get_by_role("button", name="Done")).to_be_focused()
+            await expect(page.locator('input[name="theme-palette"]')).to_have_count(len(PALETTES))
+            report["switch_back"] = []
+            report["preview_fidelity"] = []
             for mode in ("Dark", "Light"):
                 await choose_mode(page, mode)
+                await choose_palette(page, "Classic")
+                baseline_treatment = await rendered_treatment(page, "Classic")
+                baseline_tokens = (await theme_state(page))["values"]
+                baseline_typography = await reader_typography(reader)
+                actual_roots: dict[str, dict[str, str]] = {}
+                radii: set[str] = set()
                 canvases: set[str] = set()
                 for palette in PALETTES:
                     await choose_palette(page, palette)
@@ -270,13 +349,22 @@ async def main(browser_run: BrowserRun) -> None:
                     await assert_theme(reader, palette, mode.lower())
                     state = await theme_state(page)
                     ratios = check_contrast(state)
+                    actual_roots[palette_id(palette)] = state["values"]
+                    treatment = await rendered_treatment(page, palette)
+                    check_game_treatment(palette, treatment)
+                    radii.add(treatment["doneRadius"])
+                    typography = await reader_typography(reader)
+                    assert typography["body"] == baseline_typography["body"], typography
+                    assert typography["code"] == baseline_typography["code"], typography
+                    if palette == "Frontier":
+                        assert "Georgia" in typography["heading"], typography
                     reader_state = await theme_state(reader)
                     assert reader_state["values"] == state["values"], (palette, mode)
                     assert await article.evaluate("element => element.isConnected")
                     assert len(reads) == 1, reads
                     canvases.add(state["values"]["color-main-bg"])
                     selected_preview = page.locator(
-                        f'.theme-preview[data-palette="{palette.lower()}"]'
+                        f'.theme-preview[data-palette="{palette_id(palette)}"]'
                     )
                     assert (
                         await selected_preview.evaluate(
@@ -290,17 +378,49 @@ async def main(browser_run: BrowserRun) -> None:
                             "mode": mode,
                             "minimumContrast": min(ratios.values()),
                             "ratios": ratios,
+                            "treatment": treatment,
                         }
                     )
-                    await shot(f"palette-{palette.lower()}-{mode.lower()}.png")
+                    await shot(f"palette-{palette_id(palette)}-{mode.lower()}.png")
                 assert (
                     len(canvases) >= 5
                 ), f"palettes must change the canvas, not only an accent: {canvases}"
+                assert len(radii) >= 4, f"theme shape must affect real controls: {radii}"
+                # An unselected tile inherits from a foreign root. Optional
+                # palette primitives must not leak through that ancestor and
+                # recolor its bubble or foreground before a var() fallback.
+                for selected_root in ("Zenless", "Frontier"):
+                    await choose_palette(page, selected_root)
+                    previews = await preview_color_roles(page)
+                    assert len(previews) == len(PALETTES)
+                    for preview in previews:
+                        expected = actual_roots[preview["palette"]]
+                        for token, value in preview["values"].items():
+                            assert value == expected[token], (
+                                f"{mode} root={selected_root} tile={preview['palette']} "
+                                f"{token}: preview={value}, actual theme={expected[token]}"
+                            )
+                        assert preview["bubble"] == expected["color-message-user-bg"], preview
+                    report["preview_fidelity"].append(
+                        {
+                            "mode": mode,
+                            "foreign_root": selected_root,
+                            "tiles_match_actual_theme": len(previews),
+                        }
+                    )
+                await choose_palette(page, "Classic")
+                await assert_theme(reader, "Classic", mode.lower())
+                assert await rendered_treatment(page, "Classic") == baseline_treatment
+                assert (await theme_state(page))["values"] == baseline_tokens
+                assert await reader_typography(reader) == baseline_typography
+                report["switch_back"].append(
+                    {"mode": mode, "classic_tokens_and_treatment_restored": True}
+                )
             await article.dispose()
             report["standalone"] = {
                 "document_reads": len(reads),
                 "retained_article": True,
-                "live_cross_tab_updates": 12,
+                "live_cross_tab_updates": len(PALETTES) * 2,
             }
 
             # Native radio keyboard behavior, followed by native modal Tab containment.
@@ -311,7 +431,7 @@ async def main(browser_run: BrowserRun) -> None:
             classic = page.get_by_role("radio", name=re.compile(r"^Classic\b"))
             await classic.focus()
             await page.keyboard.press("ArrowRight")
-            await expect(page.get_by_role("radio", name=re.compile(r"^Slate\b"))).to_be_checked()
+            await expect(page.locator('input[name="theme-palette"]').nth(1)).to_be_checked()
             for _ in range(8):
                 await page.keyboard.press("Tab")
                 # Native dialogs allow a stop in browser chrome (activeElement
@@ -334,23 +454,23 @@ async def main(browser_run: BrowserRun) -> None:
 
             await trigger.click()
             await choose_mode(page, "System")
-            await choose_palette(page, "Forest")
-            await assert_theme(page, "Forest", "light")
+            await choose_palette(page, "Mono")
+            await assert_theme(page, "Mono", "light")
             await page.emulate_media(color_scheme="dark", reduced_motion="reduce")
-            await assert_theme(page, "Forest", "dark")
+            await assert_theme(page, "Mono", "dark")
             await page.emulate_media(color_scheme="light", reduced_motion="reduce")
-            await assert_theme(page, "Forest", "light")
+            await assert_theme(page, "Mono", "light")
             stored = await page.evaluate(
                 "key => JSON.parse(localStorage.getItem(key))", STORAGE_KEY
             )
-            assert stored == {"mode": "system", "palette": "forest"}, stored
+            assert stored == {"mode": "system", "palette": "mono"}, stored
             await choose_mode(page, "Dark")
             await page.emulate_media(color_scheme="light")
-            await assert_theme(page, "Forest", "dark")
+            await assert_theme(page, "Mono", "dark")
             await dialog.get_by_role("button", name="Done").click()
             await page.reload()
             await expect(trigger).to_be_visible()
-            await assert_theme(page, "Forest", "dark")
+            await assert_theme(page, "Mono", "dark")
             report["persistence"] = (
                 "System follows OS without rewriting preference; explicit mode wins; selection survives reload"
             )
@@ -368,11 +488,11 @@ async def main(browser_run: BrowserRun) -> None:
                 STORAGE_KEY,
             )
             await trigger.click()
-            await choose_palette(page, "Sand")
-            await assert_theme(page, "Sand", "dark")
+            await choose_palette(page, "Zenless")
+            await assert_theme(page, "Zenless", "dark")
             await expect(dialog.get_by_role("alert")).to_contain_text("could not save")
             await page.evaluate("() => window.restoreAppearanceStorage()")
-            await choose_palette(page, "Dusk")
+            await choose_palette(page, "Carbon")
             await expect(dialog.get_by_role("alert")).to_have_count(0)
             await dialog.get_by_role("button", name="Done").click()
             report["blocked_storage"] = (
@@ -391,6 +511,22 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(trigger).to_be_visible()
             await assert_theme(page, "Classic", "light")
             report["migration"] = "Malformed new storage falls back to the legacy light choice"
+
+            report["retired_palette_fallback"] = []
+            for retired in ("slate", "sand", "forest", "dusk"):
+                await page.evaluate(
+                    "([key, palette]) => localStorage.setItem(key, JSON.stringify({mode:'system', palette}))",
+                    [STORAGE_KEY, retired],
+                )
+                await page.reload()
+                await expect(trigger).to_be_visible()
+                await assert_theme(page, "Classic", "light")
+                await trigger.click()
+                await expect(page.get_by_role("radio", name="System", exact=True)).to_be_checked()
+                await dialog.get_by_role("button", name="Done").click()
+                report["retired_palette_fallback"].append(
+                    {"retired": retired, "mode_preserved": "system"}
+                )
 
             for width, height in ((390, 844), (320, 568), (568, 320)):
                 await page.set_viewport_size({"width": width, "height": height})
@@ -437,9 +573,9 @@ async def main(browser_run: BrowserRun) -> None:
                 await workspace_menu.click()
                 await page.get_by_role("button", name=re.compile(r"^Appearance")).click()
                 await expect(dialog).to_be_visible()
-                await choose_palette(page, "Forest")
+                await choose_palette(page, "Mono")
                 await choose_mode(page, "Dark")
-                await assert_theme(page, "Forest", "dark")
+                await assert_theme(page, "Mono", "dark")
                 await shot(f"workspace-boundary-{width}.png")
                 await page.keyboard.press("Escape")
                 await expect(workspace_menu).to_be_focused()

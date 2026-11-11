@@ -1,0 +1,159 @@
+/* Theme-specific materials and display typography. Functional layouts, body
+   text and syntax colors stay shared. No artwork, animation or texture sits
+   behind reading content, and switching data-palette removes every treatment. */
+:is(:root, .theme-preview)[data-palette='mono'] {
+  --ch-radius-sm: 4px;
+  --ch-radius-md: 6px;
+  --ch-radius-lg: 6px;
+  --ch-radius-xl: 8px;
+  --ch-radius-overlay: 10px;
+  --ch-radius-popover: 6px;
+  --ch-shadow-button: none;
+  --ch-shadow-button-primary: none;
+}
+:is(:root, .theme-preview)[data-palette='studio'] {
+  --ch-radius-sm: 6px;
+  --ch-radius-md: 8px;
+  --ch-radius-lg: 10px;
+  --ch-radius-xl: 12px;
+  --ch-radius-overlay: 16px;
+}
+:is(:root, .theme-preview)[data-palette='carbon'] {
+  --ch-radius-sm: 6px;
+  --ch-radius-md: 10px;
+  --ch-radius-lg: 12px;
+  --ch-radius-xl: 14px;
+  --ch-radius-overlay: 18px;
+}
+:is(:root, .theme-preview)[data-palette='zenless'] {
+  --ch-font-display: 'Arial Black', Impact, var(--ch-font-sans);
+  --ch-heading-style: italic;
+  --ch-radius-sm: 3px;
+  --ch-radius-md: 6px;
+  --ch-radius-lg: 4px;
+  --ch-radius-xl: 12px;
+  --ch-radius-overlay: 12px;
+}
+:is(:root, .theme-preview)[data-palette='frontier'] {
+  --ch-font-display: Georgia, 'Times New Roman', serif;
+  --ch-radius-sm: 2px;
+  --ch-radius-md: 2px;
+  --ch-radius-lg: 2px;
+  --ch-radius-xl: 3px;
+  --ch-radius-overlay: 4px;
+  --ch-radius-popover: 3px;
+}
+:is(:root, .theme-preview)[data-palette='los-santos'] {
+  --ch-font-display: 'Arial Narrow', Impact, var(--ch-font-sans);
+  --ch-radius-sm: 3px;
+  --ch-radius-md: 4px;
+  --ch-radius-lg: 4px;
+  --ch-radius-xl: 6px;
+  --ch-radius-overlay: 8px;
+  --ch-radius-popover: 4px;
+}
+
+:root:is([data-palette='mono'], [data-palette='studio'], [data-palette='carbon'],
+  [data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos']) {
+  & :is(.appearance-header h2, .workspace-title-block > h1, .markdown-content h1,
+    .markdown-content h2, .markdown-content h3) {
+    font-family: var(--ch-font-display);
+    font-style: var(--ch-heading-style);
+  }
+  & .conversation-bubble--user {
+    border: 1px solid var(--ch-color-border);
+  }
+  & .terminal-pane.active {
+    border-color: var(--ch-color-border);
+    box-shadow: none;
+  }
+  & .composer-row {
+    background: var(--ch-color-surface);
+  }
+}
+
+:root[data-palette='mono'] {
+  & .composer-row { border-radius: 6px; box-shadow: none; }
+  & .markdown-code-block { border-radius: 6px; box-shadow: none; }
+}
+:root[data-palette='studio'] {
+  & .composer-row { border-radius: 12px; box-shadow: var(--ch-shadow-soft); }
+  & .app-mode-bar { background: var(--ch-color-sidebar-bg); }
+}
+:root[data-palette='carbon'] {
+  & .composer-row {
+    border-radius: 15px;
+    background: linear-gradient(var(--ch-color-surface-raised), var(--ch-color-surface));
+    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--ch-color-text) 6%, transparent), var(--ch-shadow-md);
+  }
+  & .app-mode-bar { background: var(--ch-color-surface); }
+}
+
+/* Motifs live on chrome edges, never across the conversation or code. */
+:root[data-palette='zenless'] {
+  & .app-mode-bar {
+    border-bottom: 3px solid var(--ch-color-accent-strong);
+    border-image: repeating-linear-gradient(125deg, var(--ch-color-accent-strong) 0 10px,
+      var(--ch-color-on-accent) 10px 15px) 3;
+  }
+  & :is(.mode-button, .appearance-card-title, .appearance-header h2) {
+    font-weight: 800;
+    letter-spacing: 0.015em;
+  }
+  & .appearance-header h2 { text-transform: uppercase; }
+  & .composer-row {
+    border-radius: 12px 3px 12px 3px;
+    border-top: 3px solid var(--ch-color-accent-strong);
+    box-shadow: 3px 3px 0 var(--ch-color-border-muted);
+  }
+  & .composer-send-btn { font-weight: 800; border-radius: 3px 8px 3px 8px; }
+}
+:root[data-palette='frontier'] {
+  & .app-mode-bar { border-bottom: 3px double var(--ch-color-accent); }
+  & .appearance-header { border-bottom: 3px double var(--ch-color-border-strong); margin-bottom: 18px; }
+  & .appearance-header h2 { color: var(--ch-color-accent); letter-spacing: 0.02em; }
+  & .composer-row { border-style: double; border-width: 3px; box-shadow: none; }
+  & .markdown-code-block { border-radius: 2px; }
+}
+:root[data-palette='los-santos'] {
+  & .app-mode-bar { border-bottom: 3px solid var(--ch-color-accent); }
+  & :is(.appearance-header h2, .mode-button, .appearance-card-title) {
+    font-family: var(--ch-font-display);
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.035em;
+  }
+  & .composer-row {
+    border-left: 3px solid var(--ch-color-accent);
+    box-shadow: var(--ch-shadow-soft);
+  }
+}
+
+/* Tile accents reflect the same theme's material, not unrelated artwork. */
+.theme-preview { position: relative; }
+.theme-preview[data-palette='zenless']::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto;
+  height: 4px;
+  background: repeating-linear-gradient(125deg, var(--ch-color-accent-strong) 0 10px,
+    var(--ch-color-on-accent) 10px 15px);
+  pointer-events: none;
+}
+:root .theme-preview[data-palette='frontier'] { border-style: double; border-width: 3px; }
+:root .theme-preview[data-palette='los-santos'] { border-left: 4px solid var(--ch-color-accent); }
+
+@media (min-width: 769px) {
+  :root:is([data-palette='studio'], [data-palette='carbon']) .terminal-main-column {
+    margin: 6px 8px 8px 0;
+    border: 1px solid var(--ch-color-border-muted);
+    border-radius: var(--ch-radius-xl);
+    overflow: hidden;
+  }
+  :root[data-palette='carbon'] .terminal-main-column { box-shadow: var(--ch-shadow-soft); }
+}
+@media (max-width: 768px) {
+  :root[data-palette='zenless'] :is(.tab-bar, .workspace-header) { border-bottom: 2px solid var(--ch-color-accent-strong); }
+  :root[data-palette='frontier'] :is(.tab-bar, .workspace-header) { border-bottom: 3px double var(--ch-color-accent); }
+  :root[data-palette='los-santos'] :is(.tab-bar, .workspace-header) { border-bottom: 2px solid var(--ch-color-accent); }
+}

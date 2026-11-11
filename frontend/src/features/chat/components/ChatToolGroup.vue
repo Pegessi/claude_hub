@@ -1208,7 +1208,7 @@ watchEffect(() => {
 .activity-diff-editor-actions .activity-diff-editor-save {
   border-color: var(--ch-color-accent-strong);
   background: var(--ch-color-accent-strong);
-  color: var(--ch-color-text-inverse);
+  color: var(--ch-color-on-accent);
 }
 
 .activity-diff-editor-actions .activity-diff-editor-save:hover:not(:disabled) {

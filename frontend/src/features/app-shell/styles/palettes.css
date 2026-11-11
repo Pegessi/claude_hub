@@ -1,126 +1,243 @@
-/* Palette primitives are deliberately small; the existing semantic contract
-   remains the only interface consumed by Chat, Workspace, readers and ttyd.
-   Preview tiles use these same rules, not a second set of approximate swatches. */
-:is(:root, .theme-preview)[data-palette='slate'] {
-  --palette-chrome: #171d27;
-  --palette-main: #141922;
-  --palette-surface: #1c2330;
-  --palette-raised: #252e3c;
-  --palette-control: #303b4b;
-  --palette-border: #3b4758;
-  --palette-border-strong: #61728a;
-  --palette-text: #edf2fa;
-  --palette-muted: #b2c0d2;
-  --palette-subtle: #97a8be;
-  --palette-accent: #94bfff;
-  --palette-fill: #315fb1;
-  --palette-fill-hover: #284f95;
+/* Curated theme primitives. Treatments live in theme-treatments.css; all
+   consumers keep the same semantic contract. Previews use the real tokens.
+   Game-inspired themes use original CSS, not game artwork or proprietary fonts. */
+
+/* Reset optional primitives per scope: a preview must not inherit the selected
+   root's message fill/ink before its own palette fallback can take effect. */
+:where(:root, .theme-preview) {
+  --palette-on-fill: #ffffff;
+  --palette-message-bg: var(--palette-fill);
+  --palette-message-text: var(--palette-on-fill);
 }
-:is(:root, .theme-preview)[data-palette='slate'][data-theme='light'] {
-  --palette-chrome: #edf1f7;
-  --palette-main: #fafcff;
-  --palette-surface: #f4f7fc;
+
+:is(:root, .theme-preview)[data-palette='mono'] {
+  --palette-chrome: #090909;
+  --palette-main: #090909;
+  --palette-surface: #101010;
+  --palette-raised: #181818;
+  --palette-control: #202020;
+  --palette-border: #303030;
+  --palette-border-strong: #606060;
+  --palette-text: #eeeeee;
+  --palette-muted: #b7b7b7;
+  --palette-subtle: #999999;
+  --palette-accent: #dedede;
+  --palette-fill: #ededed;
+  --palette-fill-hover: #cccccc;
+  --palette-on-fill: #111111;
+  --palette-message-bg: #1c1c1c;
+  --palette-message-text: #ededed;
+}
+
+:is(:root, .theme-preview)[data-palette='mono'][data-theme='light'] {
+  --palette-chrome: #f5f5f5;
+  --palette-main: #ffffff;
+  --palette-surface: #fafafa;
   --palette-raised: #ffffff;
-  --palette-control: #e4ebf5;
-  --palette-border: #cbd5e4;
-  --palette-border-strong: #75849b;
-  --palette-text: #1c2a3e;
-  --palette-muted: #465a75;
-  --palette-subtle: #536782;
-  --palette-accent: #315fb1;
-  --palette-fill: #315fb1;
-  --palette-fill-hover: #284f95;
+  --palette-control: #ededed;
+  --palette-border: #d4d4d4;
+  --palette-border-strong: #777777;
+  --palette-text: #151515;
+  --palette-muted: #555555;
+  --palette-subtle: #666666;
+  --palette-accent: #292929;
+  --palette-fill: #171717;
+  --palette-fill-hover: #333333;
+  --palette-on-fill: #ffffff;
+  --palette-message-bg: #f0f0f0;
+  --palette-message-text: #202020;
 }
-:is(:root, .theme-preview)[data-palette='sand'] {
-  --palette-chrome: #211d1a;
-  --palette-main: #1c1916;
-  --palette-surface: #26211d;
-  --palette-raised: #302922;
-  --palette-control: #3b322a;
-  --palette-border: #4b3e33;
-  --palette-border-strong: #88705a;
-  --palette-text: #f5ede3;
-  --palette-muted: #c8b9a8;
-  --palette-subtle: #b4a18d;
-  --palette-accent: #eab38b;
-  --palette-fill: #925334;
-  --palette-fill-hover: #7c442a;
+
+:is(:root, .theme-preview)[data-palette='studio'] {
+  --palette-chrome: #111113;
+  --palette-main: #19191c;
+  --palette-surface: #1e1e21;
+  --palette-raised: #27272b;
+  --palette-control: #2d2d32;
+  --palette-border: #303036;
+  --palette-border-strong: #666670;
+  --palette-text: #eeeef0;
+  --palette-muted: #b8b8c0;
+  --palette-subtle: #a0a0aa;
+  --palette-accent: #aabfff;
+  --palette-fill: #e7e7ec;
+  --palette-fill-hover: #cbccd5;
+  --palette-on-fill: #17171b;
+  --palette-message-bg: #2b2b31;
+  --palette-message-text: #eeeef0;
 }
-:is(:root, .theme-preview)[data-palette='sand'][data-theme='light'] {
-  --palette-chrome: #f2ebe1;
-  --palette-main: #fffcf5;
-  --palette-surface: #f9f3e9;
-  --palette-raised: #fffdf8;
-  --palette-control: #ebe0d1;
-  --palette-border: #d8caba;
-  --palette-border-strong: #9c8067;
-  --palette-text: #33291f;
-  --palette-muted: #655342;
-  --palette-subtle: #74614f;
-  --palette-accent: #925334;
-  --palette-fill: #925334;
-  --palette-fill-hover: #7c442a;
+
+:is(:root, .theme-preview)[data-palette='studio'][data-theme='light'] {
+  --palette-chrome: #ededf0;
+  --palette-main: #fafafb;
+  --palette-surface: #f5f5f7;
+  --palette-raised: #ffffff;
+  --palette-control: #e7e7ec;
+  --palette-border: #d3d3da;
+  --palette-border-strong: #7c7c88;
+  --palette-text: #202025;
+  --palette-muted: #565663;
+  --palette-subtle: #666673;
+  --palette-accent: #485c9a;
+  --palette-fill: #282831;
+  --palette-fill-hover: #41414e;
+  --palette-on-fill: #ffffff;
+  --palette-message-bg: #e9e9ef;
+  --palette-message-text: #25252e;
 }
-:is(:root, .theme-preview)[data-palette='forest'] {
-  --palette-chrome: #17221f;
-  --palette-main: #141c19;
-  --palette-surface: #1c2823;
-  --palette-raised: #25332c;
-  --palette-control: #304238;
-  --palette-border: #3c5045;
-  --palette-border-strong: #668875;
-  --palette-text: #edf6ef;
-  --palette-muted: #b4cabb;
-  --palette-subtle: #96b3a0;
-  --palette-accent: #83d3b4;
-  --palette-fill: #256a55;
-  --palette-fill-hover: #1c5946;
+
+:is(:root, .theme-preview)[data-palette='carbon'] {
+  --palette-chrome: #0b0b0c;
+  --palette-main: #151516;
+  --palette-surface: #202023;
+  --palette-raised: #2b2b2f;
+  --palette-control: #323238;
+  --palette-border: #414147;
+  --palette-border-strong: #74747d;
+  --palette-text: #f1f1f3;
+  --palette-muted: #bcbcc5;
+  --palette-subtle: #a8a8b3;
+  --palette-accent: #b8c7e8;
+  --palette-fill: #e3e7ee;
+  --palette-fill-hover: #c3ccdc;
+  --palette-on-fill: #151820;
+  --palette-message-bg: #29292f;
+  --palette-message-text: #f1f1f3;
 }
-:is(:root, .theme-preview)[data-palette='forest'][data-theme='light'] {
-  --palette-chrome: #eaf1eb;
-  --palette-main: #fafffa;
-  --palette-surface: #f1f7f1;
-  --palette-raised: #fcfffc;
-  --palette-control: #dfeadf;
-  --palette-border: #c5d6c9;
-  --palette-border-strong: #6e8f79;
-  --palette-text: #20392b;
-  --palette-muted: #45654f;
-  --palette-subtle: #526e5b;
-  --palette-accent: #256a55;
-  --palette-fill: #256a55;
-  --palette-fill-hover: #1c5946;
+
+:is(:root, .theme-preview)[data-palette='carbon'][data-theme='light'] {
+  --palette-chrome: #e7e8eb;
+  --palette-main: #f7f8fa;
+  --palette-surface: #eff0f3;
+  --palette-raised: #ffffff;
+  --palette-control: #e0e3e8;
+  --palette-border: #c6cbd4;
+  --palette-border-strong: #747e8f;
+  --palette-text: #1c2028;
+  --palette-muted: #4f5969;
+  --palette-subtle: #596372;
+  --palette-accent: #425777;
+  --palette-fill: #26364d;
+  --palette-fill-hover: #364c6b;
+  --palette-on-fill: #ffffff;
+  --palette-message-bg: #e4e8ef;
+  --palette-message-text: #202b3b;
 }
-:is(:root, .theme-preview)[data-palette='dusk'] {
-  --palette-chrome: #24222e;
-  --palette-main: #201e29;
-  --palette-surface: #292633;
-  --palette-raised: #322e3e;
-  --palette-control: #3e384d;
-  --palette-border: #4c445e;
-  --palette-border-strong: #8c7aa7;
-  --palette-text: #f2eef9;
-  --palette-muted: #c7bdd8;
-  --palette-subtle: #ada1c0;
-  --palette-accent: #c7adf4;
-  --palette-fill: #7353a6;
-  --palette-fill-hover: #63458f;
+
+:is(:root, .theme-preview)[data-palette='zenless'] {
+  --palette-chrome: #0c0d0e;
+  --palette-main: #131415;
+  --palette-surface: #1b1c1e;
+  --palette-raised: #262729;
+  --palette-control: #323436;
+  --palette-border: #4e5054;
+  --palette-border-strong: #8c9095;
+  --palette-text: #f5f5f2;
+  --palette-muted: #bdbfbe;
+  --palette-subtle: #a5a9a7;
+  --palette-accent: #d6f300;
+  --palette-fill: #d6f300;
+  --palette-fill-hover: #bed900;
+  --palette-on-fill: #151800;
+  --palette-message-bg: #26282a;
+  --palette-message-text: #f5f5f2;
 }
-:is(:root, .theme-preview)[data-palette='dusk'][data-theme='light'] {
-  --palette-chrome: #f0ecf5;
-  --palette-main: #fdfaff;
-  --palette-surface: #f7f2fb;
-  --palette-raised: #fffcff;
-  --palette-control: #e8deef;
-  --palette-border: #d5c9df;
-  --palette-border-strong: #9580aa;
-  --palette-text: #352740;
-  --palette-muted: #665271;
-  --palette-subtle: #736080;
-  --palette-accent: #7353a6;
-  --palette-fill: #7353a6;
-  --palette-fill-hover: #63458f;
+
+:is(:root, .theme-preview)[data-palette='zenless'][data-theme='light'] {
+  --palette-chrome: #e8e9e6;
+  --palette-main: #fafbf7;
+  --palette-surface: #f0f1eb;
+  --palette-raised: #ffffff;
+  --palette-control: #dfe2d6;
+  --palette-border: #b6bd9b;
+  --palette-border-strong: #667336;
+  --palette-text: #171b11;
+  --palette-muted: #4e5840;
+  --palette-subtle: #5c664f;
+  --palette-accent: #4e6500;
+  --palette-fill: #d6f300;
+  --palette-fill-hover: #bed900;
+  --palette-on-fill: #151800;
+  --palette-message-bg: #e9eddf;
+  --palette-message-text: #202716;
 }
+
+:is(:root, .theme-preview)[data-palette='frontier'] {
+  --palette-chrome: #111010;
+  --palette-main: #191717;
+  --palette-surface: #211e1d;
+  --palette-raised: #2b2725;
+  --palette-control: #38322f;
+  --palette-border: #504641;
+  --palette-border-strong: #947e70;
+  --palette-text: #f4ebdf;
+  --palette-muted: #c6b9ab;
+  --palette-subtle: #b0a091;
+  --palette-accent: #f09087;
+  --palette-fill: #ad302c;
+  --palette-fill-hover: #942823;
+  --palette-on-fill: #ffffff;
+  --palette-message-bg: #2b2521;
+  --palette-message-text: #f4ebdf;
+}
+
+:is(:root, .theme-preview)[data-palette='frontier'][data-theme='light'] {
+  --palette-chrome: #eae3d6;
+  --palette-main: #fbf6ec;
+  --palette-surface: #f4ede0;
+  --palette-raised: #fffaf0;
+  --palette-control: #e5dbcc;
+  --palette-border: #cabeaa;
+  --palette-border-strong: #97816a;
+  --palette-text: #2d241d;
+  --palette-muted: #655548;
+  --palette-subtle: #715e4d;
+  --palette-accent: #9e2525;
+  --palette-fill: #9e2525;
+  --palette-fill-hover: #811c1c;
+  --palette-on-fill: #ffffff;
+  --palette-message-bg: #ebe1d1;
+  --palette-message-text: #34281e;
+}
+
+:is(:root, .theme-preview)[data-palette='los-santos'] {
+  --palette-chrome: #090b0b;
+  --palette-main: #121515;
+  --palette-surface: #1a1e1d;
+  --palette-raised: #242b28;
+  --palette-control: #2e3832;
+  --palette-border: #42534a;
+  --palette-border-strong: #759583;
+  --palette-text: #f0f5f1;
+  --palette-muted: #b7c9bf;
+  --palette-subtle: #9eb5a8;
+  --palette-accent: #78d99a;
+  --palette-fill: #80d99c;
+  --palette-fill-hover: #63c584;
+  --palette-on-fill: #102818;
+  --palette-message-bg: #23332a;
+  --palette-message-text: #eaf5ed;
+}
+
+:is(:root, .theme-preview)[data-palette='los-santos'][data-theme='light'] {
+  --palette-chrome: #e7eeea;
+  --palette-main: #f8fcf9;
+  --palette-surface: #eef5f0;
+  --palette-raised: #ffffff;
+  --palette-control: #dce9df;
+  --palette-border: #bed1c4;
+  --palette-border-strong: #6e8d79;
+  --palette-text: #172e21;
+  --palette-muted: #46634f;
+  --palette-subtle: #4f6b58;
+  --palette-accent: #226b41;
+  --palette-fill: #226b41;
+  --palette-fill-hover: #185632;
+  --palette-on-fill: #ffffff;
+  --palette-message-bg: #e0ece3;
+  --palette-message-text: #1c3928;
+}
+
 :is(:root, .theme-preview)[data-palette='contrast'] {
   --palette-chrome: #090909;
   --palette-main: #000000;
@@ -184,6 +301,7 @@
   --ch-color-accent-strong: var(--palette-fill);
   --ch-color-accent-hover: var(--palette-accent);
   --ch-color-accent-fill-hover: var(--palette-fill-hover);
+  --ch-color-on-accent: var(--palette-on-fill, #ffffff);
   --ch-color-accent-soft: color-mix(in srgb, var(--palette-accent) 14%, transparent);
   --ch-color-accent-ring: var(--palette-accent);
   --ch-color-accent-halo: color-mix(in srgb, var(--palette-accent) 25%, transparent);
@@ -192,9 +310,11 @@
   --ch-color-session-glow-strong: var(--palette-accent);
   --ch-color-session-star: var(--palette-text);
   --ch-color-session-star-halo: var(--ch-color-accent-halo);
-  --ch-color-message-user-bg: var(--palette-fill);
-  --ch-color-message-user-muted: #ffffff;
-  --ch-color-message-user-error: #ffffff;
+  --ch-color-message-user-bg: var(--palette-message-bg, var(--palette-fill));
+  --ch-color-message-user-text: var(--palette-message-text, var(--ch-color-on-accent));
+  --ch-color-message-user-muted: var(--ch-color-message-user-text);
+  --ch-color-message-user-error: var(--ch-color-message-user-text);
+  --ch-color-message-user-focus: var(--ch-color-message-user-text);
   --ch-color-chip-bg: color-mix(in srgb, var(--palette-text) 7%, transparent);
   --ch-color-chip-bg-muted: color-mix(in srgb, var(--palette-text) 4%, transparent);
   --ch-color-row-hover: color-mix(in srgb, var(--palette-text) 6%, transparent);

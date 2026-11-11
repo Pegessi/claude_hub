@@ -3,12 +3,14 @@ import type { ColorScheme } from '@/types'
 export const THEME_STORAGE_KEY = 'claude_hub_appearance'
 export const LEGACY_THEME_STORAGE_KEY = 'claude_hub_color_scheme'
 export const THEME_PALETTES = [
-  { id: 'classic', name: 'Classic', description: 'Original carbon & clay' },
-  { id: 'slate', name: 'Slate', description: 'Cool neutrals, clear blue' },
-  { id: 'sand', name: 'Sand', description: 'Warm paper, soft terracotta' },
-  { id: 'forest', name: 'Forest', description: 'Quiet greens, fresh teal' },
-  { id: 'dusk', name: 'Dusk', description: 'Soft charcoal, muted violet' },
-  { id: 'contrast', name: 'Contrast', description: 'Crisp edges, stronger contrast' },
+  { id: 'classic', name: 'Classic', description: 'Original carbon & clay', sample: 'CH' },
+  { id: 'contrast', name: 'Contrast', description: 'Crisp edges, clear focus', sample: 'Aa' },
+  { id: 'mono', name: 'Mono', description: 'Black, white, nothing extra', sample: 'Aa' },
+  { id: 'studio', name: 'Studio', description: 'Quiet layers, softer edges', sample: 'Aa' },
+  { id: 'carbon', name: 'Carbon', description: 'Graphite, raised surfaces', sample: 'Aa' },
+  { id: 'zenless', name: 'Zenless', description: 'Zenless Zone Zero · urban signal', sample: 'ZZ' },
+  { id: 'frontier', name: 'Frontier', description: 'Red Dead Redemption · western', sample: 'RDR' },
+  { id: 'los-santos', name: 'Los Santos', description: 'GTA V · city nights', sample: 'V' },
 ] as const
 export type ThemePalette = typeof THEME_PALETTES[number]['id']
 export type AppearanceMode = ColorScheme | 'system'

@@ -442,7 +442,7 @@ async function askAside() {
   padding: 0 14px;
   font-size: 13px;
   font-weight: 500;
-  color: #fff;
+  color: var(--ch-color-on-accent);
   background-color: var(--ch-color-accent-strong);
   border: none;
   border-radius: var(--ch-radius-md);

@@ -199,7 +199,7 @@ test('selected, focus, and primary-action roles remain separate in key controls'
   // Assistant output is unboxed prose; no avatar chip competes with the selected role.
   assert.doesNotMatch(chatTurn, /conversation-avatar/)
   assert.match(userBubble, /background: var\(--ch-color-message-user-bg\);/)
-  assert.match(userBubble, /color: var\(--ch-color-text-inverse\);/)
+  assert.match(userBubble, /color: var\(--ch-color-message-user-text\);/)
   assert.match(messageSource, /color: var\(--ch-color-message-user-muted\);/)
   assert.match(attachmentPlaceholder, /border: 1px dashed var\(--ch-color-border-strong\);/)
   assert.match(attachmentPlaceholder, /color: var\(--ch-color-text-muted\);/)
@@ -244,6 +244,22 @@ test('filled accent controls use contrast-safe fill roles', async () => {
     new URL('../src/features/chat/components/ChatApprovalCard.vue', import.meta.url),
     'utf8',
   )
+  const goalPlan = await readFile(
+    new URL('../src/features/chat/goal-plan/GoalPlanCard.vue', import.meta.url),
+    'utf8',
+  )
+  // Filled actions own their foreground: Mono and Zenless may use dark ink
+  // on a pale fill, so a generic white/inverse role is not this contract.
+  for (const [source, selector] of [
+    [appControls, '.ch-btn--primary'],
+    [chatApproval, '.approval-submit-btn'],
+    [goalPlan, '.goal-plan-actions .goal-plan-approve'],
+    [components[3], '.composer-send-btn'],
+  ]) {
+    const declarations = styleBlock(source, selector)
+    assert.match(declarations, /color: var\(--ch-color-on-accent(?:,\s*#fff)?\);/)
+    assert.doesNotMatch(declarations, /color: var\(--ch-color-text-inverse\);/)
+  }
   const vueSources = await loadVueSources()
 
   for (const { path, source } of vueSources) {

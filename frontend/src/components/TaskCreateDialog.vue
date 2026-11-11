@@ -467,7 +467,7 @@ const {
 .primary-button {
   background: var(--ch-color-accent-strong);
   border-color: var(--ch-color-accent-strong);
-  color: var(--ch-color-text-inverse);
+  color: var(--ch-color-on-accent);
   font-weight: 600;
   box-shadow: var(--ch-shadow-button);
 }

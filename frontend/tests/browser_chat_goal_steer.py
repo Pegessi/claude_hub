@@ -627,6 +627,7 @@ async def main(browser_run: BrowserRun) -> None:
                 page,
                 card.get_by_role("button", name="Approve & start", exact=True),
                 card.get_by_role("button", name="Revise", exact=True),
+                screenshot_dir=output,
             )
 
             # Reload at each width: the app chooses its mobile shell from the
