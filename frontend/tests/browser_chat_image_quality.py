@@ -944,6 +944,10 @@ async def check_html_preview(page, context, output: Path, report: dict) -> None:
     external = frame.get_by_role("link", name="External reference", exact=True)
     await expect(external).to_have_attribute("target", "_blank")
     assert "noopener" in (await external.get_attribute("rel") or "").split()
+    # Copy feedback changes header height while the scrolled iframe is hidden.
+    # Re-establish the restored link's visible position before native input.
+    await external.scroll_into_view_if_needed()
+    await expect(external).to_be_in_viewport()
     assert not report["html_explicit_external_requests"]
     async with context.expect_page() as opened:
         await external.click()
