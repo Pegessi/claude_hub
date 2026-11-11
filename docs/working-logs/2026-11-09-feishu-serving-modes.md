@@ -53,10 +53,14 @@ Several conversations can already reach one Chat today (a group's members,
 several topics, and soon several channels). Those now stay separated:
 
 - **Channel identity** = `(bot_id, binding.pairing_id, event.chat_type,
-  event.chat_id, event.thread_id)` plus generation/revision guards, driven by one
-  `_channel_matches` used by both the batch builder and the supersede decision.
-  `event.chat_id` is in the key because the legacy `single`-mode group fallback
-  resolves a group message to the sender's **p2p** binding.
+  event.chat_id, event.thread_id, generation, transport_revision)` — channel +
+  **authority watermark** — driven by one `_channel_matches` used by both the batch
+  builder and the supersede decision. `event.chat_id` is in the key because the
+  legacy `single`-mode group fallback resolves a group message to the sender's
+  **p2p** binding; `generation` covers control-plane changes and
+  `transport_revision` covers credential/callback epochs. Administrative
+  `revision` is deliberately absent: a rename or a sibling channel write must not
+  split a live conversation, while a credential change must.
 - **Batch/coalesce key** adds `event.sender_open_id`: two people in one topic no
   longer merge into a single turn. **Interruption** deliberately omits the sender,
   so a second person in the same topic may supersede, while another room or topic
@@ -103,6 +107,39 @@ several topics, and soon several channels). Those now stay separated:
   `im:message.send_as_user`). Neither the auto-provisioned tab nor the v3 prompt
   has been observed in production.
 
+## Fix rounds after the merge (2026-11-10/11)
+
+The first merge of this feature was reviewed post-hoc and found unsound in four
+rounds of independent probing; the fixes live on `codex/feishu-modes-fixes`. What
+each round changed, so a reader can judge the current code rather than the
+merged-then-fixed history:
+
+1. `6f1fb6e` — carryover survived a pre-handoff retirement (pop moved after the
+   admission guard, idle queue cleanup no longer drops it); write validation
+   extended to owner/claim fields before `_save`; the `binding` + `bindings: []`
+   legacy record no longer loses its binding; non-first-channel card/Dot lookups
+   resolve by `tab_id`/`pairing_id`.
+2. `cd9bad4` — undid the "suppress `revision`" shortcut and split the concerns:
+   every client-visible write advances the CAS `revision` again, and delivery
+   freshness became its own predicate (`is_current_for_delivery`); the empty-batch
+   `UnboundLocalError` was fixed.
+3. `b5b42e6` — question cards carry an explicit transport snapshot
+   (`QuestionMirror.tab_id` + `transport_digest`, bot `transport_revision`) and
+   every post-token send/patch gate re-validates it; `DispatchChannelKey` dropped
+   the administrative `revision`.
+4. `1f824c7` / `5f167fe` / `7eeadf6` — `transport_revision` is validated on read
+   (invalid values are state errors, missing values get a conservative baseline),
+   legacy mirrors fall back to **strict revision equality** instead of a wildcard
+   digest, the queue key is delimited by the authority watermark (a credential
+   epoch separates batches, an administrative rename does not), the branch was
+   merged onto main's SQLite document store, and finally
+   `is_current_for_delivery` compares `transport_revision` so an A→B→A rotation
+   cannot deliver a stale answer.
+
+The historical card incident is **a lost card plus a stalled external question
+for channels 2..N — not a card transmitted to another person's DM**: the tab guard
+ran before any HTTP client was constructed.
+
 ## Risks
 
 - `per_channel` creates Chat tabs from inbound messages. The cap (8/Bot), the
@@ -110,9 +147,10 @@ several topics, and soon several channels). Those now stay separated:
   memory (a restart clears it, and it is not shared across processes), and there
   is no idle reap yet: a Chat created for a stranger stays until someone archives
   or releases it, and releasing a channel does not delete its tab.
-- A DM channel is labelled by `open_id` (no display name is available to the Bot
-  without another scope), so the tab and the panel row show `ou…abcd` rather than
-  a person's name.
+- The auto-created tab is named by the sender `open_id` (`Feishu · DM ou…abcd`,
+  where `ou…abcd` is an abbreviated id — the Bot has no display name without
+  another scope); the panel row shows the channel's `chat_id` (`oc…`) instead, so
+  the two identifiers differ by design.
 - Mode switching requires zero bound channels, so moving an existing single
   binding to `per_channel` is: release → switch → re-bind. Deliberate; a silent
   migration would change who can reach which Chat.
