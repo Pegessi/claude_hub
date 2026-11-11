@@ -141,3 +141,28 @@ Cross-model caveat worth recording: this reviewer's *findings* were accurate
 (all three top ones were re-verified in code before fixing), but the commit
 hashes it cited for the branch history do not exist in this repository, so
 treat its bookkeeping as unreliable and its code claims as the evidence.
+
+## Merging into main (merge commit `1dc2c1e`)
+
+`main` had moved on (native sub-agent dock, Feishu bot work, the AI-native
+maintenance refactor), so the branch needed a real three-way merge. Five paths
+conflicted and eight needed a decision:
+
+| Path | Decision |
+| --- | --- |
+| `CHANGELOG.md` | Both Released entries kept, main's newer first |
+| `scripts/verify_browser_mocks.py` | Union of both new runners |
+| `frontend/src/features/chat/StructuredPane.vue` | Union of both import groups; main's native sub-agent dock block kept beside the review provide |
+| `backend/claude_hub/services/managed_chat.py` | Union of both import sets |
+| `backend/tests/test_managed_chat_runtime.py` | Both appended tests kept, once each |
+| `backend/claude_hub/services/agent_stream/store.py` | `import json` restored (main's import block dropped it; our legacy-JSONL reader still calls it) |
+| `frontend/tests/browser_agent_inbox.py`, `browser_work_log.py` | Formatted for the repository formatter |
+
+The record that binds these to the merge SHA lives in
+`docs/working-logs/2026-11-09-ui-upgrade-merge-decisions.json`
+(`./scripts/verify.sh merge-decisions --merge 1dc2c1e` reports complete coverage).
+
+Validation on the merged tree: frontend 1450 tests, backend 6513 passed / 10
+skipped, mypy clean over 626 files, frontend lint/types/build clean, browser
+scenarios 22 plus main's new one. `tests/test_ci_health.py` fails 6/11 on
+pristine `main` as well, so it is excluded from the merged-backend result.
