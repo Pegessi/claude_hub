@@ -399,3 +399,68 @@ annotation boundary without ignores or casts. This occurs after the focused
 browser runs, whose original tested hash is retained; final full gates must use
 the newly frozen helper. Standard backend types and format pass on that final
 source. No new scenario, runner, dependency or product state machine is added.
+
+### Native keyboard and inline rename follow-up
+
+`3f6800d` also passes the full serial gates, but independent review requests
+keyboard-focus and active-tab editor corrections. Real probes in
+`qa/keyboard-rename/` capture 62 native keyboard samples and six actual
+inline rename flows. Scope is narrowed from the static review: `.tab` is a plain
+div with no tabindex, not a native Tab stop. It must not be made artificially
+focusable for a test. Add-tab and the booted Zenless phone menu trigger acquire
+real focus shadows; those are not observed shadow-suppression failures.
+
+Active mode/layout controls have no measured focused-versus-rest paint change
+in the six game variants; parent also verifies identical Zenless navigation
+focus/rest PNGs. This describes the current candidate, not proof every layout
+case was newly introduced by the redesign. Some Workspace primary variants
+also lose focus paint. A separate failure affects actual tab/sidebar menu and
+close/main buttons: a ring can exist but blend into an accent-filled surface.
+Zenless/dark examples measure 1:1. The correction must address actual adjacent
+paint, not merely add another same-color ring or replace working controls.
+
+Actual active-tab editor text/outline contrast is 1.121/1.000 in Zenless dark,
+1.637/1.138 in Los Santos dark, 1.985/1.000 in Frontier light and 2.527/1.000 in
+Los Santos light. The raw stored name is preserved despite CSS uppercase in
+Los Santos; probes use `text_content`, not rendered `innerText`, for identity.
+Every flow types a temporary name then cancels with Escape, with zero PATCHes.
+
+This real interaction also exposes an existing `TabBar.vue` error present in
+`faf10bd`: a template ref inside `v-for` is treated as a scalar input, so the
+rename timer throws `focus is not a function`. The bounded correction models
+the collected ref array and focuses/selects its only editor; `editingTabId`
+already guarantees a single editor. Scheduling, markup and rename APIs remain
+unchanged. Frontend types and lint pass. Future committed coverage must require
+production autofocus before any test action that could focus the input, and
+must not suppress page errors. The baseline probe honestly retains six such
+errors and a failing collection status rather than calling that run clean.
+
+The same Gemini adds game-scoped focus outlines, contrast-paired tab descendant
+rings, Zenless sidebar rings and active rename ink/caret/boundary. Rest decoration
+and the five non-game styles remain scoped out of the change. Working add-tab
+and phone trigger rules are left intact. The shared native-Tab oracle accepts a
+changed, contrast-safe real outline, crisp shadow or border cue; it excludes
+unchanged shadow components and verifies four visible side midpoints, rather
+than requiring one exact token. An algebra negative rejects an unchanged inset
+plus an invisible new outer ring, while accepting a genuinely contrasting cue.
+
+Final focused results in `qa/keyboard-rename/fixed/HANDOFF.md`: Goal 73.544s,
+Workspace 33.912s, Inbox 25.212s, real-oracle negatives 7.135s and immutable
+comparison 31.622s, under unchanged 120s per-command budgets. Parent verifies
+all six product/test hashes and independently recomputes 62 native focus cases
+(minimum qualifying contrast 4.793:1 in Chat/phone, 5.079:1 in Workspace), six
+automatically focused/cancelled renames (text/boundary minimum 6.731:1, zero
+PATCHes), 32 stable pane handoffs and 10 direct/30 return complete-payload
+non-game equalities. Existing pointer/selected-chrome samples remain intact.
+All final page-error and unknown-request arrays are empty; the Workspace
+fixture's six intentionally injected resource-console errors remain unfiltered.
+
+Four browser-only faults are rejected by the actual oracles: missing navigation
+cue, same-color tab ring, old rename text ink and old rename boundary ink. Each
+restored positive passes. Sampled focus crops show readable menu/close glyphs
+and phone rings without visible clipping; style/sidepoint checks are not an
+exhaustive pixel or assistive-technology audit. Standard final backend types
+and formatting pass, and the temporary Vite/browser resources are closed.
+A discarded negative probe initially failed to create its output directory;
+its log is retained and the corrected probe passes without a tracked source
+change. Independent re-review must precede the next full frozen gate.

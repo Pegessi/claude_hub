@@ -221,7 +221,7 @@ const showCloseConfirm = ref(false)
 const tabToClose = ref<TerminalTab | null>(null)
 const editingTabId = ref<string | null>(null)
 const editingTabName = ref('')
-const renameInputRef = ref<HTMLInputElement | null>(null)
+const renameInputRef = ref<HTMLInputElement[]>([])
 const mobileAppMenuRef = ref<HTMLDetailsElement | null>(null)
 const tabsContainerRef = ref<HTMLDivElement | null>(null)
 const showLeftFade = ref(false)
@@ -329,10 +329,11 @@ function handleTabClose(tabId: string) {
 function startRename(tab: TerminalTab) {
   editingTabId.value = tab.id
   editingTabName.value = tab.name
-  // Focus the input after the next tick
   setTimeout(() => {
-    renameInputRef.value?.focus()
-    renameInputRef.value?.select()
+    // v-for collects refs even though editingTabId allows only one editor.
+    const input = renameInputRef.value[0]
+    input?.focus()
+    input?.select()
   }, 0)
 }
 
