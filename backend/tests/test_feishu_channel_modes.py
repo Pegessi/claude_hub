@@ -2077,3 +2077,411 @@ def test_card_delivery_and_patch_fenced_against_midflight_credential_or_binding_
             assert push_attempts == ["interactive"]
 
     asyncio.run(scenario())
+
+
+def test_legacy_mirror_without_transport_digest_uses_strict_revision_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U1: A legacy QuestionMirror deserialized without transport_digest/tab_id
+    must require mirror.revision == current bot revision (not act as a wildcard).
+    An untouched legacy mirror at the same revision stays usable and migrates
+    its digest; a legacy mirror whose Bot was rotated pre-deploy is rejected
+    with zero HTTP calls and without stamping the current digest."""
+    from datetime import timedelta
+
+    from claude_hub.api.routes.feishu_bot import card_actions
+    from claude_hub.models.chat_message import ChatQuestion, QuestionMirror, utc_now
+    from claude_hub.services.chat_message_inbox import ChatMessageInbox, InboxEvidence, InboxTarget
+
+    store = FeishuBotPoolStore(
+        path=tmp_path / "pool.json",
+        legacy_path=tmp_path / "legacy.json",
+    )
+    bot_id = store.create_bot(name="LegacyCardBot", config=_config("app-leg"), environ={})
+    eff = store.effective(bot_id, {})
+    store.configure_callbacks(
+        bot_id,
+        callback_enabled=True,
+        expected_revision=eff.revision,
+        verification_token="verify-leg",
+        encrypt_key="encrypt-leg",
+        expected_tenant_key="tenant-leg",
+        environ={},
+    )
+    bob_binding = store.bind_p2p(
+        bot_id,
+        owner=LOCAL,
+        tab_id="tab-bob",
+        workspace_id=None,
+        sender_open_id="ou-bob",
+        chat_id="oc-bob",
+        created_at=100.0,
+        environ={},
+    )
+    eff_at_mirror = store.effective(bot_id, {})
+    assert eff_at_mirror.revision == 2
+
+    monkeypatch.setattr(bot_api, "_pool", store)
+    monkeypatch.setattr(bot_api, "_validate_saved_target", lambda _b: None)
+
+    async def scenario() -> None:
+        async def ordinary(*_args: Any) -> None:
+            return None
+
+        async def evidence(*_args: Any) -> InboxEvidence:
+            return InboxEvidence("absent")
+
+        inbox = ChatMessageInbox(
+            tmp_path / "inbox.json", lambda _: InboxTarget("incarnation"), ordinary, evidence
+        )
+        monkeypatch.setattr(card_actions.answers, "inbox", lambda: inbox)
+        monkeypatch.setattr(card_actions.answers, "live", lambda _q: (None, None, None))
+
+        http_calls: list[str] = []
+
+        class RecordingClient:
+            def __init__(self, _config: Any) -> None:
+                pass
+
+            async def get_tenant_token(self) -> str:
+                http_calls.append("get_tenant_token")
+                return "t-token"
+
+            async def patch_message_card(self, *_args: Any, **_kwargs: Any) -> None:
+                http_calls.append("patch_message_card")
+
+        monkeypatch.setattr(card_actions, "FeishuBotClient", RecordingClient)
+
+        now = utc_now()
+        # 1. Untouched legacy mirror (revision=2 == bot revision=2, no transport_digest/tab_id).
+        q_untouched = ChatQuestion(
+            question_ref="q-legacy-ok",
+            tab_id="tab-bob",
+            session_id="terminal-tab-tab-bob",
+            incarnation="incarnation",
+            turn_id="turn-1",
+            call_id="call-1",
+            run_epoch=1,
+            question_id="0",
+            prompt="Legacy untouched?",
+            options=["Yes", "No"],
+            mode="native",
+            state="resolved",
+            created_at=now,
+            expires_at=now + timedelta(hours=24),
+            mirror=QuestionMirror(
+                bot_id=bot_id,
+                app_id="app-leg",
+                tenant_key="tenant-leg",
+                pairing_id=bob_binding.pairing_id,
+                generation=eff_at_mirror.generation,
+                revision=eff_at_mirror.revision,
+                chat_id="oc-bob",
+                sender_open_id="ou-bob",
+                send_uuid="uuid-leg-ok",
+                message_id="om-leg-ok",
+                state="sent",
+                displayed_state="open",
+            ),
+        )
+        assert q_untouched.mirror is not None
+        assert q_untouched.mirror.transport_digest == ""
+        assert q_untouched.mirror.tab_id == ""
+        inbox.questions[q_untouched.question_ref] = q_untouched
+        inbox._save()
+
+        assert await card_actions.mirror_question(q_untouched) is True
+        assert http_calls == ["get_tenant_token", "patch_message_card"]
+        assert q_untouched.mirror.displayed_state == "resolved"
+        assert q_untouched.mirror.transport_digest != ""
+        assert q_untouched.mirror.tab_id == "tab-bob"
+        http_calls.clear()
+
+        # 2. Legacy mirror created at rev=2, then Bot secret rotated pre-deploy to rev=3.
+        q_stale = ChatQuestion(
+            question_ref="q-legacy-stale",
+            tab_id="tab-bob",
+            session_id="terminal-tab-tab-bob",
+            incarnation="incarnation",
+            turn_id="turn-2",
+            call_id="call-2",
+            run_epoch=1,
+            question_id="0",
+            prompt="Legacy rotated pre-deploy?",
+            options=["Yes", "No"],
+            mode="native",
+            state="resolved",
+            created_at=now,
+            expires_at=now + timedelta(hours=24),
+            mirror=QuestionMirror(
+                bot_id=bot_id,
+                app_id="app-leg",
+                tenant_key="tenant-leg",
+                pairing_id=bob_binding.pairing_id,
+                generation=eff_at_mirror.generation,
+                revision=eff_at_mirror.revision,
+                chat_id="oc-bob",
+                sender_open_id="ou-bob",
+                send_uuid="uuid-leg-stale",
+                message_id="om-leg-stale",
+                state="sent",
+                displayed_state="open",
+            ),
+        )
+        inbox.questions[q_stale.question_ref] = q_stale
+        inbox._save()
+
+        store.rotate_secrets(
+            bot_id,
+            app_secret="rotated-pre-deploy-secret",
+            expected_revision=eff_at_mirror.revision,
+            environ={},
+        )
+        assert store.effective(bot_id, {}).revision == 3
+
+        assert await card_actions.mirror_question(q_stale) is False
+        assert http_calls == []
+        assert q_stale.mirror is not None
+        assert q_stale.mirror.state == "disabled"
+        assert q_stale.mirror.displayed_state == "open"
+        assert q_stale.mirror.transport_digest == ""
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "bad_transport_rev",
+    ["oops", True, False, -1, 1.5, 6, [], {}],
+)
+def test_transport_revision_rejects_invalid_persisted_values(
+    tmp_path: Path, bad_transport_rev: Any
+) -> None:
+    """U2: Invalid persisted transport_revision values must fail closed with
+    FeishuBotPoolStateError rather than silently downgrading to 0."""
+    from claude_hub.services.bot_pool.common import FeishuBotPoolStateError
+
+    path = tmp_path / "secrets" / "feishu_bot_pool.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": _STATE_VERSION,
+                "pool_revision": 1,
+                "bots": {
+                    "bot-1": {
+                        "bot_id": "bot-1",
+                        "name": "One",
+                        "app_id": "app-1",
+                        "mode": BOT_MODE_SINGLE,
+                        "credentials": {"app_secret": "secret-1"},
+                        "revision": 5,
+                        "generation": 1,
+                        "transport_revision": bad_transport_rev,
+                        "enabled": True,
+                        "created_at": 1_700_000_000.0,
+                        "updated_at": 1_700_000_000.0,
+                        "pending": {},
+                        "claims": {},
+                        "bindings": [],
+                        "revoked_at": None,
+                    }
+                },
+                "rate_limits": {},
+            }
+        )
+    )
+    store = FeishuBotPoolStore(path=path, legacy_path=tmp_path / "secrets" / "feishu_bot.json")
+    with pytest.raises(FeishuBotPoolStateError, match="bot.transport_revision"):
+        store.snapshot({})
+    with pytest.raises(FeishuBotPoolStateError, match="bot.transport_revision"):
+        store.effective("bot-1", {})
+    with pytest.raises(FeishuBotPoolStateError, match="bot.transport_revision"):
+        store.transport_revision("bot-1", {})
+
+
+def test_transport_revision_missing_baseline_and_authority_progression(tmp_path: Path) -> None:
+    """U2: A legacy Bot entry without transport_revision defaults conservatively
+    to its current revision, and subsequent mutations advance transport_revision
+    only on credential/callback/generation/enable/mode changes."""
+    path = tmp_path / "secrets" / "feishu_bot_pool.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "pool_revision": 1,
+                "bots": {
+                    "bot-leg": {
+                        "bot_id": "bot-leg",
+                        "name": "Legacy",
+                        "app_id": "app-leg",
+                        "credentials": {"app_secret": "secret-leg"},
+                        "revision": 5,
+                        "generation": 1,
+                        "enabled": True,
+                        "created_at": 1_700_000_000.0,
+                        "updated_at": 1_700_000_000.0,
+                        "pending": {},
+                        "claims": {},
+                        "binding": None,
+                        "revoked_at": None,
+                    }
+                },
+                "rate_limits": {},
+            }
+        )
+    )
+    store = FeishuBotPoolStore(path=path, legacy_path=tmp_path / "secrets" / "feishu_bot.json")
+    assert store.transport_revision("bot-leg", {}) == 5
+    assert store.effective("bot-leg", {}).transport_revision == 5
+    assert store.snapshot({}).get("bot-leg").transport_revision == 5  # type: ignore[union-attr]
+
+    # Rename advances revision (5 -> 6), keeps transport_revision at 5.
+    store.update_bot("bot-leg", expected_revision=5, name="Renamed", environ={})
+    eff = store.effective("bot-leg", {})
+    assert (eff.revision, eff.transport_revision) == (6, 5)
+
+    # Mode switch advances both revision and transport_revision (6 -> 7).
+    store.update_bot("bot-leg", expected_revision=6, mode=BOT_MODE_PER_CHANNEL, environ={})
+    eff = store.effective("bot-leg", {})
+    assert (eff.revision, eff.transport_revision) == (7, 7)
+
+    # Channel binds, pairing claims, and per-row releases advance revision only.
+    b1 = store.bind_p2p(
+        "bot-leg",
+        owner=LOCAL,
+        tab_id="tab-1",
+        workspace_id=None,
+        sender_open_id="ou-1",
+        chat_id="oc-1",
+        environ={},
+    )
+    b2 = store.bind_p2p(
+        "bot-leg",
+        owner=LOCAL,
+        tab_id="tab-2",
+        workspace_id=None,
+        sender_open_id="ou-2",
+        chat_id="oc-2",
+        environ={},
+    )
+    eff = store.effective("bot-leg", {})
+    assert (eff.revision, eff.transport_revision) == (9, 7)
+
+    store.release_binding("bot-leg", expected_revision=9, pairing_id=b1.pairing_id, environ={})
+    eff = store.effective("bot-leg", {})
+    assert (eff.revision, eff.transport_revision) == (10, 7)
+
+    # Rotating secrets and configuring callbacks advance transport_revision.
+    store.rotate_secrets("bot-leg", app_secret="sec-2", expected_revision=10, environ={})
+    eff = store.effective("bot-leg", {})
+    assert (eff.revision, eff.transport_revision) == (11, 11)
+
+    store.configure_callbacks(
+        "bot-leg",
+        callback_enabled=True,
+        expected_revision=11,
+        verification_token="v-tok",
+        encrypt_key="e-key",
+        expected_tenant_key="t-key",
+        environ={},
+    )
+    eff = store.effective("bot-leg", {})
+    assert (eff.revision, eff.transport_revision) == (12, 12)
+
+    # Releasing the last remaining binding advances generation and transport_revision.
+    store.release_binding("bot-leg", expected_revision=12, pairing_id=b2.pairing_id, environ={})
+    eff = store.effective("bot-leg", {})
+    assert (eff.revision, eff.transport_revision) == (13, 13)
+
+
+def test_secret_rotation_during_coalescing_window_splits_batches_and_delivers_new_event(
+    env_api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U3: Holding an old-secret event inside the coalescing window, rotating the
+    secret, and submitting a new-secret event for the same sender/chat must NOT
+    coalesce the two credential epochs: the old event retires at admission while
+    the new event is dispatched to the native bridge and answered."""
+
+    async def scenario() -> None:
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_QUIET_SECONDS", 0.15)
+        monkeypatch.setattr(bot_api, "_MESSAGE_COALESCE_MAX_WAIT_SECONDS", 0.30)
+
+        bot_id = env_api.pool.create_bot(
+            name="EpochBot",
+            config=_config("app-epoch"),
+            feishu_name="Epoch Bot",
+            feishu_open_id="ou-current-bot",
+            environ={},
+        )
+        env_api.pool.update_bot(bot_id, expected_revision=0, mode=BOT_MODE_PER_CHANNEL, environ={})
+        env_api.pool.bind_p2p(
+            bot_id,
+            owner=LOCAL,
+            tab_id="tab-alice",
+            workspace_id=None,
+            sender_open_id="ou_alice",
+            chat_id="oc-alice",
+            created_at=clock.value,
+            environ={},
+        )
+
+        submitted: list[tuple[str, str]] = []
+
+        async def fake_dispatch(
+            tab_id: str,
+            _text: str,
+            _turn_id: str,
+            *,
+            admission_guard: Any,
+            visible_text: str,
+            **_kwargs: Any,
+        ) -> str:
+            async with admission_guard():
+                submitted.append((tab_id, visible_text))
+            return f"answered:{visible_text}"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", fake_dispatch)
+
+        old_event = _sdk_dm(
+            "app-epoch",
+            "old-epoch-msg",
+            clock.value,
+            message_id="om-old-epoch",
+            chat_id="oc-alice",
+            sender_open_id="ou_alice",
+        )
+        old_task = asyncio.create_task(bot_api._handle_sdk_event(bot_id, old_event))
+
+        # Wait until old_event is waiting inside the coalescing window.
+        while "tab-alice" not in bot_api._tab_dispatch_queues:
+            await asyncio.sleep(0.005)
+        queue = bot_api._tab_dispatch_queues["tab-alice"]
+        assert queue.processor is not None
+
+        # Rotate the secret while old_event is still in the coalescing window.
+        rev = env_api.pool.effective(bot_id, {}).revision
+        env_api.pool.rotate_secrets(
+            bot_id,
+            app_secret="new-epoch-secret",
+            expected_revision=rev,
+            environ={},
+        )
+
+        # Submit new_event under the new secret before old_event's quiet window expires.
+        new_event = _sdk_dm(
+            "app-epoch",
+            "new-epoch-msg",
+            clock.value,
+            message_id="om-new-epoch",
+            chat_id="oc-alice",
+            sender_open_id="ou_alice",
+        )
+        new_task = asyncio.create_task(bot_api._handle_sdk_event(bot_id, new_event))
+
+        results = await asyncio.gather(old_task, new_task, return_exceptions=True)
+        assert results == [None, None]
+        assert submitted == [("tab-alice", "new-epoch-msg")]
+        assert env_api.wire.reply_texts() == ["answered:new-epoch-msg"]
+
+    asyncio.run(scenario())

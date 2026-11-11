@@ -8,6 +8,7 @@ import logging
 import re
 import time
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from typing import Any, AsyncIterator, Callable
 
 from fastapi import HTTPException
@@ -266,12 +267,8 @@ class FeishuMessageDispatcher:
                 ):
                     return effective
                 return current
-            return EffectiveBot(
-                bot_id=profile_target.bot_id,
-                app_id=profile_target.app_id,
-                config=profile_target.config,
-                revision=profile_target.revision,
-                generation=profile_target.generation,
+            return replace(
+                profile_target,
                 feishu_name=profile.name,
                 feishu_avatar_url=profile.avatar_url,
                 feishu_open_id=profile.open_id,
@@ -288,12 +285,13 @@ class FeishuMessageDispatcher:
             and fallback.config == effective.config
             and fallback.generation == effective.generation
         ):
-            return EffectiveBot(
-                bot_id=effective.bot_id,
+            return replace(
+                effective,
                 app_id=fallback.app_id,
                 config=fallback.config,
                 revision=fallback.revision,
                 generation=fallback.generation,
+                transport_revision=fallback.transport_revision,
                 feishu_name=fallback.feishu_name or fallback.name,
                 feishu_avatar_url=fallback.feishu_avatar_url,
                 feishu_open_id=fallback.feishu_open_id,
@@ -410,6 +408,8 @@ class FeishuMessageDispatcher:
             leader.event.chat_id,
             leader.event.thread_id,
             leader.event.sender_open_id,
+            leader.effective.generation,
+            leader.effective.transport_revision,
         )
 
     def _claim_still_live(self, bot_id: str, claim: PairingClaim) -> bool:
