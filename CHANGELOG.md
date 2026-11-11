@@ -7,6 +7,13 @@
 
 ## Released
 
+### fix(chat): surface native and MASO sub-agents on shallow conversation load and deduplicate cross-turn threads
+
+- Keep sub-agent lifecycle statuses (`active`, `completed`, `failed`, `cancelled`) and sub-agent delegation/directive tool events (`Agent`, `Task`, `Fork`, `spawnAgent`, `sendInput`, `SendMessage`) visible in `view=conversation` (`history.py`), including for pre-existing SQLite rows recorded before this change, while keeping ordinary tool calls and child streaming deltas lazy behind `history_details`.
+- Recognize MASO `Task` (single and fan-out batch), `Fork`, and `SendMessage` in `subagentTool.ts` and `reducer.ts`, binding spawned `<subagent_name>-<hex>` thread IDs to their per-task prompts and roles, preserving readable MASO thread IDs in `nativeSubagentRows.ts`, extracting child `SendMessage` reports in `subthreadHeadline`, and deduplicating/merging long-lived sub-agents across turns.
+- Project turns with real sub-agent launch/lifecycle data into the Agents dock on initial load without eagerly fetching turn execution details, and hydrate lazy turn details on demand when a sub-agent window is opened (`ensureSubthreadDetailsLoaded`).
+- Validation: `env -u FORCE_COLOR ./scripts/verify.sh all` (6,276 backend tests + 1,294 frontend tests; also replaced bare `asyncio.sleep(0)` in `test_cleanup_background_lifetime.py::wait_until` with `asyncio.sleep(0.002)` so coverage-traced `asyncio.to_thread` shutdown writes do not starve on the GIL) and `browser-mocks` (19/19 scenarios, including `browser_native_subagent_dock.py`).
+
 ### feat(chat): list provider-native sub-agents in the Agents dock and read one in a window
 
 - The pane-chrome Agents pill now lists provider-native children (Claude

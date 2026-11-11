@@ -1,8 +1,82 @@
 import type { AgentStreamEvent } from '@/types'
 import { agentImagePathFromTool } from '@/utils/agentImage'
+import { masoTaskMatchesThreadId, subagentViewForThread } from '@/utils/subagentTool'
 import type { TimelineTurn, TimelineSubthread, TimelineSubagentLifecycle, TimelineTool } from './types'
 import type { ReducerState, SubthreadState } from './state'
 import { payloadString, payloadRecord, statusText } from './eventValues'
+
+/** Create a per-thread TimelineTool view for a MASO Task/Fork call whose live
+ *  status and resultText stay synchronized with the underlying tool call. */
+export function bindLaunchToolForThread(
+  tool: TimelineTool,
+  threadId: string,
+  index = 0,
+): TimelineTool {
+  if (!tool.subagent) return tool
+  const subagent = subagentViewForThread(tool.subagent, threadId, index)
+  return {
+    key: tool.key,
+    callId: tool.callId,
+    name: tool.name,
+    get status() {
+      return tool.status
+    },
+    set status(value: TimelineTool['status']) {
+      tool.status = value
+    },
+    argsText: tool.argsText,
+    get resultText() {
+      return tool.resultText
+    },
+    set resultText(value: string) {
+      tool.resultText = value
+    },
+    ...(tool.imagePath !== undefined ? { imagePath: tool.imagePath } : {}),
+    subagent,
+  }
+}
+
+function countClaimedThreadsForTool(turn: TimelineTurn, toolKey: string): number {
+  let count = 0
+  for (const part of turn.parts) {
+    if (part.kind !== 'subagents') continue
+    for (const candidate of part.threads) {
+      if (candidate.launchTool?.key === toolKey) count += 1
+    }
+  }
+  return count
+}
+
+function attachPendingLaunchTool(turn: TimelineTurn, thread: TimelineSubthread): void {
+  if (thread.launchTool) return
+  for (let i = turn.tools.length - 1; i >= 0; i -= 1) {
+    const candidate = turn.tools[i]
+    if (!candidate.subagent || candidate.subagent.directive) continue
+    if (candidate.subagent.provider === 'claude' && candidate.callId === thread.threadId) {
+      detachToolFromMainParts(turn, candidate)
+      thread.launchTool = candidate
+      return
+    }
+    if (masoTaskMatchesThreadId(candidate.subagent, thread.threadId)) {
+      const resolvedIdx = candidate.subagent.threadIds.indexOf(thread.threadId)
+      const claimedCount = countClaimedThreadsForTool(turn, candidate.key)
+      if (
+        resolvedIdx < 0 &&
+        candidate.subagent.tasks &&
+        claimedCount >= candidate.subagent.tasks.length
+      ) {
+        continue
+      }
+      detachToolFromMainParts(turn, candidate)
+      thread.launchTool = bindLaunchToolForThread(
+        candidate,
+        thread.threadId,
+        resolvedIdx >= 0 ? resolvedIdx : claimedCount,
+      )
+      return
+    }
+  }
+}
 
 /** Provider thread id the backend stamped on a nested sub-agent event, or
  *  ``null`` for a main-thread event. The value comes from
@@ -48,9 +122,12 @@ export function ensureSubthread(
       lifecycleStatus: 'unknown',
       renderRevision: 0,
     }
+    attachPendingLaunchTool(turn, thread)
     child = { thread, tools: [], toolMap: new Map() }
     byThread.set(threadId, child)
     region.threads.push(thread)
+  } else if (!child.thread.launchTool) {
+    attachPendingLaunchTool(turn, child.thread)
   }
   return child
 }
@@ -127,6 +204,9 @@ export function applySubthreadEvent(
   const lifecycle = subagentLifecycleOf(event)
   if (!subthreadEventCanMount(event, lifecycle)) return false
   const child = ensureSubthread(state, turn, threadId, toolMapKey)
+  if (event.agent_type === 'maso' && !child.thread.provider) {
+    child.thread.provider = 'maso'
+  }
   let lifecycleChanged = false
   if (lifecycle !== null && child.thread.lifecycleStatus !== lifecycle) {
     child.thread.lifecycleStatus = lifecycle
@@ -260,6 +340,10 @@ export function applySubthreadEvent(
 export function detachToolFromMainParts(turn: TimelineTurn, tool: TimelineTool): void {
   for (let index = turn.parts.length - 1; index >= 0; index -= 1) {
     const part = turn.parts[index]
+    if (part.kind === 'subagent' && part.tool === tool) {
+      turn.parts.splice(index, 1)
+      return
+    }
     if (part.kind !== 'tool_group') continue
     const toolIndex = part.tools.indexOf(tool)
     if (toolIndex < 0) continue

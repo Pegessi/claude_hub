@@ -26,7 +26,9 @@ from tests.test_ttyd_stream_lifecycle import DirectChat, direct_chat  # noqa: F4
 
 async def wait_until(predicate: Any) -> None:
     while not predicate():
-        await asyncio.sleep(0)
+        # A bare sleep(0) keeps loop._ready non-empty and spins on the GIL,
+        # starving asyncio.to_thread workers when coverage traces Python.
+        await asyncio.sleep(0.002)
 
 
 @pytest.mark.asyncio

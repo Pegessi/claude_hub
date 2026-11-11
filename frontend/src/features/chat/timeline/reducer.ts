@@ -1,11 +1,11 @@
 import type { AgentStreamEvent } from '@/types'
 import { agentImagePathFromTool } from '@/utils/agentImage'
 import { parseStructuredQuestions } from '@/utils/chatQuestionResponse'
-import { parseSubagent, subagentResultText } from '@/utils/subagentTool'
+import { masoTaskMatchesThreadId, parseMasoSpawnedThreadIds, parseSubagent, subagentResultText } from '@/utils/subagentTool'
 import type { TimelineTurn, TimelineTool, TimelineApproval, TimelineAttachment, TimelinePart } from './types'
 import { createReducerState, type ReducerState } from './state'
 import { createTurn, payloadString, payloadRecord, statusText, turnProvenance, appendTextPart, trimSnapshotReplay } from './eventValues'
-import { subThreadIdOf, ensureSubthread, applySubthreadEvent, detachToolFromMainParts } from './subthreads'
+import { subThreadIdOf, ensureSubthread, applySubthreadEvent, bindLaunchToolForThread, detachToolFromMainParts } from './subthreads'
 
 function resolveTurn(state: ReducerState, event: AgentStreamEvent): TimelineTurn {
   if (event.turn_id) {
@@ -292,6 +292,9 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
             // exactly once.
             for (const tid of subagent.threadIds) {
               const child = ensureSubthread(state, turn, tid, toolMapKey)
+              if (subagent.provider === 'maso' && !child.thread.provider) {
+                child.thread.provider = 'maso'
+              }
               child.thread.parts.push({
                 kind: 'instruction',
                 key: `sub-instruction-${identity}-${tid}`,
@@ -304,6 +307,31 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
             // second standalone card. Tool status remains dispatch-only.
             for (const tid of subagent.threadIds) {
               ensureSubthread(state, turn, tid, toolMapKey).thread.launchTool = tool
+            }
+          } else if (subagent && subagent.provider === 'maso') {
+            // MASO Task/Fork assigns the random hex suffix of `<name>-<hex>`
+            // when the spawn completes (or when the first child event arrives).
+            // Attach immediately if the child thread already exists; otherwise
+            // stage in tool_group until completion or child events bind it.
+            const existingThreads = state.threadsByTurn.get(toolMapKey)
+            let attached = false
+            let matchIndex = 0
+            if (existingThreads) {
+              for (const [tid, child] of existingThreads.entries()) {
+                if (!child.thread.launchTool && masoTaskMatchesThreadId(subagent, tid)) {
+                  child.thread.launchTool = bindLaunchToolForThread(tool, tid, matchIndex)
+                  matchIndex += 1
+                  attached = true
+                }
+              }
+            }
+            if (!attached) {
+              const lastPart = turn.parts[turn.parts.length - 1]
+              if (lastPart && lastPart.kind === 'tool_group') {
+                lastPart.tools.push(tool)
+              } else {
+                turn.parts.push({ kind: 'tool_group', key: `tool-group-${event.stream_sequence}`, tools: [tool] })
+              }
             }
           } else if (subagent) {
             // Claude/Cursor calls in captured streams have no provider thread
@@ -405,6 +433,19 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
           }
           mutated = true
         }
+      } else if (tool.subagent.provider === 'maso' && !tool.subagent.directive) {
+        const spawnedIds = parseMasoSpawnedThreadIds(event.payload.result)
+        if (spawnedIds.length > 0) {
+          tool.subagent = { ...tool.subagent, threadIds: spawnedIds }
+          detachToolFromMainParts(turn, tool)
+          for (const [index, threadId] of spawnedIds.entries()) {
+            const child = ensureSubthread(state, turn, threadId, toolMapKey)
+            if (!child.thread.provider) child.thread.provider = 'maso'
+            child.thread.launchTool = bindLaunchToolForThread(tool, threadId, index)
+            child.thread.renderRevision += 1
+          }
+          mutated = true
+        }
       }
       let newStatus: TimelineTool['status'] =
         payloadString(event, 'status') === 'failed' ? 'failed' : 'completed'
@@ -417,6 +458,20 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
       // generic failed "tool" — pre-fix behavior, not a regression.
       if (newStatus === 'failed' && tool.name === 'AskUserQuestion') {
         newStatus = 'cancelled'
+      }
+      if (tool.subagent?.provider === 'claude' && tool.callId) {
+        const child = state.threadsByTurn.get(toolMapKey)?.get(tool.callId)
+        if (child) {
+          detachToolFromMainParts(turn, tool)
+          child.thread.launchTool = tool
+          const terminalLifecycle =
+            newStatus === 'failed' ? 'failed' : newStatus === 'cancelled' ? 'cancelled' : 'completed'
+          if (child.thread.lifecycleStatus !== terminalLifecycle) {
+            child.thread.lifecycleStatus = terminalLifecycle
+            child.thread.renderRevision += 1
+            mutated = true
+          }
+        }
       }
       const newResult = subagentResultText(tool.subagent, event.payload.result)
         ?? payloadString(event, 'result')

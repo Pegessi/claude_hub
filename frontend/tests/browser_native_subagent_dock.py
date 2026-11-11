@@ -161,6 +161,7 @@ OTHER_EVENTS = [
 # turn edges. Tool calls and child events stay behind the detail stream
 # (`conversation_event_visible`), which is what the descriptor below announces.
 SHALLOW_SEQUENCES = {0, 5, 6, 7}
+SHALLOW_WITH_LAUNCH_SEQUENCES = {0, 1, 2, 4, 5, 6, 7}
 DETAIL = {
     "turn_id": TURN,
     "first_sequence": 0,
@@ -318,11 +319,15 @@ async def main(browser_run: BrowserRun) -> None:
                     # than rewind it.
                     events, details = [], []
                 else:
+                    shallow = (
+                        SHALLOW_WITH_LAUNCH_SEQUENCES
+                        if state.get("shallow_launch")
+                        else SHALLOW_SEQUENCES
+                    )
                     events = [
                         row
                         for row in full
-                        if row["stream_sequence"] in SHALLOW_SEQUENCES
-                        and row["stream_sequence"] > since
+                        if row["stream_sequence"] in shallow and row["stream_sequence"] > since
                     ]
                     details = [dict(DETAIL)] if full is EVENTS and since < LAST_SEQUENCE else []
                 body = {
@@ -656,6 +661,24 @@ async def main(browser_run: BrowserRun) -> None:
             "Dispatch result"
         )
         await page.screenshot(path=str(output / "07-historical-window.png"))
+        await window.get_by_test_id("native-subagent-close").click()
+        await expect(page.get_by_test_id("native-subagent-overlay")).to_have_count(0)
+
+        # When `view=conversation` includes sub-agent launch/lifecycle events,
+        # the dock lists the child immediately on reload without eagerly reading
+        # the turn's detail stream; opening the row hydrates the detail on demand.
+        state["shallow_launch"] = True
+        detail_requests.clear()
+        await page.reload()
+        await expect(page.get_by_text("Parent answer.", exact=True)).to_have_count(1)
+        await expect(pill).to_be_visible()
+        await expect(pill).to_contain_text("1 running")
+        assert detail_requests == [], "shallow sub-agent dock must not eagerly fetch turn detail"
+        await pill.click()
+        await page.get_by_test_id("subagent-popover").get_by_test_id(ROW_ID).click()
+        await expect(overlay).to_be_visible()
+        await expect(window).to_contain_text("child report ready")
+        assert detail_requests == [TURN], detail_requests
         await window.get_by_test_id("native-subagent-close").click()
         await expect(page.get_by_test_id("native-subagent-overlay")).to_have_count(0)
 
