@@ -264,6 +264,7 @@ class FeishuMessageDispatcher:
                     current.app_id != effective.app_id
                     or current.config != effective.config
                     or current.generation != effective.generation
+                    or current.transport_revision != effective.transport_revision
                 ):
                     return effective
                 return current
@@ -284,6 +285,7 @@ class FeishuMessageDispatcher:
             and fallback.app_id == effective.app_id
             and fallback.config == effective.config
             and fallback.generation == effective.generation
+            and fallback.transport_revision == effective.transport_revision
         ):
             return replace(
                 effective,

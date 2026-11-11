@@ -2486,3 +2486,144 @@ def test_secret_rotation_during_coalescing_window_splits_batches_and_delivers_ne
         assert env_api.wire.reply_texts() == ["answered:new-epoch-msg"]
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("roundtrip_kind", ["app_secret", "verification_token"])
+def test_credential_or_callback_aba_roundtrip_fences_inflight_delivery_while_current_epoch_delivers(
+    env_api, clock: Clock, monkeypatch: pytest.MonkeyPatch, roundtrip_kind: str
+) -> None:
+    """U4: An A->B->A rotation of app_secret or verification_token advances
+    transport_revision even when the final value matches the initial value.
+    An in-flight turn from the first A epoch must be rejected by
+    is_current_for_delivery with zero outbound sends, while a new turn in the
+    restored A epoch delivers its answer normally."""
+
+    async def scenario() -> None:
+        bot_id = env_api.pool.create_bot(
+            name="AbaBot",
+            config=_config("app-aba"),
+            feishu_name="ABA Bot",
+            feishu_open_id="ou-current-bot",
+            environ={},
+        )
+        eff0 = env_api.pool.effective(bot_id, {})
+        env_api.pool.configure_callbacks(
+            bot_id,
+            callback_enabled=True,
+            expected_revision=eff0.revision,
+            verification_token="v-token-A",
+            encrypt_key="e-key-A",
+            expected_tenant_key="tenant-A",
+            environ={},
+        )
+        env_api.pool.bind_p2p(
+            bot_id,
+            owner=LOCAL,
+            tab_id="tab-aba",
+            workspace_id=None,
+            sender_open_id="ou_alice",
+            chat_id="oc-aba",
+            created_at=clock.value,
+            environ={},
+        )
+        old_effective = env_api.pool.effective(bot_id, {})
+        assert env_api.pool.is_current_for_delivery(old_effective, {})
+
+        admitted = asyncio.Event()
+        release_old = asyncio.Event()
+
+        async def gated_dispatch(
+            _tab_id: str,
+            _text: str,
+            _turn_id: str,
+            *,
+            admission_guard: Any,
+            visible_text: str,
+            **_kwargs: Any,
+        ) -> str:
+            async with admission_guard():
+                pass
+            if visible_text == "old-epoch-question":
+                admitted.set()
+                await release_old.wait()
+                return "old-epoch-answer"
+            return "current-epoch-answer"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", gated_dispatch)
+
+        old_task = asyncio.create_task(
+            bot_api._handle_sdk_event(
+                bot_id,
+                _sdk_dm(
+                    "app-aba",
+                    "old-epoch-question",
+                    clock.value,
+                    message_id="om-aba-old",
+                    chat_id="oc-aba",
+                    sender_open_id="ou_alice",
+                ),
+            )
+        )
+        await asyncio.wait_for(admitted.wait(), timeout=2.0)
+
+        # Perform A -> B -> A rotation while old_task is in flight.
+        if roundtrip_kind == "app_secret":
+            rev1 = env_api.pool.effective(bot_id, {}).revision
+            env_api.pool.rotate_secrets(
+                bot_id,
+                app_secret="secret-B",
+                expected_revision=rev1,
+                environ={},
+            )
+            rev2 = env_api.pool.effective(bot_id, {}).revision
+            env_api.pool.rotate_secrets(
+                bot_id,
+                app_secret=_config("app-aba").app_secret,
+                expected_revision=rev2,
+                environ={},
+            )
+        else:
+            rev1 = env_api.pool.effective(bot_id, {}).revision
+            env_api.pool.configure_callbacks(
+                bot_id,
+                callback_enabled=True,
+                expected_revision=rev1,
+                verification_token="v-token-B",
+                environ={},
+            )
+            rev2 = env_api.pool.effective(bot_id, {}).revision
+            env_api.pool.configure_callbacks(
+                bot_id,
+                callback_enabled=True,
+                expected_revision=rev2,
+                verification_token="v-token-A",
+                environ={},
+            )
+
+        restored_effective = env_api.pool.effective(bot_id, {})
+        assert restored_effective.config == old_effective.config
+        assert restored_effective.verification_token == old_effective.verification_token
+        assert restored_effective.transport_revision > old_effective.transport_revision
+        assert not env_api.pool.is_current_for_delivery(old_effective, {})
+        assert env_api.pool.is_current_for_delivery(restored_effective, {})
+
+        release_old.set()
+        await asyncio.wait_for(old_task, timeout=2.0)
+        # Old epoch answer must be suppressed with zero outbound replies.
+        assert env_api.wire.reply_texts() == []
+
+        # A turn in the current (restored A) epoch delivers normally.
+        await bot_api._handle_sdk_event(
+            bot_id,
+            _sdk_dm(
+                "app-aba",
+                "current-epoch-question",
+                clock.value,
+                message_id="om-aba-current",
+                chat_id="oc-aba",
+                sender_open_id="ou_alice",
+            ),
+        )
+        assert env_api.wire.reply_texts() == ["current-epoch-answer"]
+
+    asyncio.run(scenario())

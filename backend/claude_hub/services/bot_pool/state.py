@@ -502,6 +502,7 @@ class FeishuBotPoolStateStore(object):
         return (
             current.app_id == effective.app_id
             and current.generation == effective.generation
+            and current.transport_revision == effective.transport_revision
             and current.config == effective.config
             and current.callback_enabled == effective.callback_enabled
             and current.verification_token == effective.verification_token
