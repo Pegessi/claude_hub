@@ -161,7 +161,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             raw["feishu_avatar_url"] = feishu_avatar_url
             raw["feishu_open_id"] = feishu_open_id
             self._touch(raw, now)
-            raw["transport_revision"] = raw["revision"]
+            self._touch_transport(raw)
             self._save(state)
 
     def configure_callbacks(
@@ -207,7 +207,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             callbacks["callback_enabled"] = callback_enabled
             raw["callbacks"] = callbacks
             self._touch(raw, now)
-            raw["transport_revision"] = raw["revision"]
+            self._touch_transport(raw)
             self._save(state)
 
     def update_profile(
@@ -279,7 +279,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
                     self._advance_generation(raw)
             self._touch(raw, now)
             if mode_changed or enabled_changed:
-                raw["transport_revision"] = raw["revision"]
+                self._touch_transport(raw)
             self._save(state)
 
     def delete_bot(
@@ -532,6 +532,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
                 released = self._binding_from_dict(bot_id, active[0]) if active else None
                 self._advance_generation(raw)
                 self._touch(raw, now)
+                self._touch_transport(raw)
                 self._save(state)
                 return released
             matched = next(
@@ -544,9 +545,11 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             remaining = [item for item in active if item.get("pairing_id") != pairing_id]
             if remaining:
                 raw["bindings"] = remaining
+                self._touch(raw, now)
             else:
                 self._advance_generation(raw)
-            self._touch(raw, now)
+                self._touch(raw, now)
+                self._touch_transport(raw)
             self._save(state)
             return released
 
@@ -806,8 +809,10 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             remaining = [item for item in active if item.get("pairing_id") != pairing_id]
             if remaining:
                 raw["bindings"] = remaining
+                self._touch(raw, now)
             else:
                 self._advance_generation(raw)
-            self._touch(raw, now)
+                self._touch(raw, now)
+                self._touch_transport(raw)
             self._save(state)
             return True

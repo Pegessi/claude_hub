@@ -46,6 +46,7 @@ from claude_hub.services.bot_pool.common import (
     _validate_pool_numbers,
     binding_chat_type,
     bot_mode,
+    bot_transport_revision,
     deprecated_env_present,
     environment_config,
     environment_present,
@@ -104,6 +105,8 @@ class FeishuBotPoolStateStore(object):
         """Migrate v2/v3 single ``binding`` to ``bindings`` and normalize ``mode``."""
 
         if raw.get("revoked_at") is not None and "binding" not in raw and "bindings" not in raw:
+            if "transport_revision" in raw and raw["transport_revision"] is not None:
+                bot_transport_revision(raw)
             return
         existing = raw.get("bindings")
         if existing is not None and not isinstance(existing, list):
@@ -130,6 +133,7 @@ class FeishuBotPoolStateStore(object):
             raw["mode"] = BOT_MODE_SINGLE
         else:
             bot_mode(raw)
+        raw["transport_revision"] = bot_transport_revision(raw)
 
     def _load(self) -> dict[str, Any]:
         value = self._read_file(self.path)
@@ -213,6 +217,7 @@ class FeishuBotPoolStateStore(object):
             },
             "revision": revision,
             "generation": generation,
+            "transport_revision": revision,
             "enabled": True,
             "created_at": updated_at,
             "updated_at": updated_at,
@@ -304,6 +309,7 @@ class FeishuBotPoolStateStore(object):
             "credentials": None,
             "revision": 0,
             "generation": 0,
+            "transport_revision": 0,
             "enabled": True,
             "created_at": now,
             "updated_at": now,
@@ -429,6 +435,7 @@ class FeishuBotPoolStateStore(object):
             verification_token=verification_token,
             encrypt_key=encrypt_key,
             expected_tenant_key=expected_tenant_key,
+            transport_revision=bot_transport_revision(raw),
         )
 
     def snapshot(self, environ: Mapping[str, str] | None = None) -> PoolSnapshot:
@@ -480,6 +487,7 @@ class FeishuBotPoolStateStore(object):
             verification_token=entry.verification_token,
             encrypt_key=entry.encrypt_key,
             expected_tenant_key=entry.expected_tenant_key,
+            transport_revision=entry.transport_revision,
         )
 
     def is_current(self, effective: EffectiveBot, environ: Mapping[str, str] | None = None) -> bool:
@@ -535,8 +543,7 @@ class FeishuBotPoolStateStore(object):
             raw = state["bots"].get(bot_id)
             if not isinstance(raw, dict) or raw.get("revoked_at"):
                 raise FeishuBotNotFound(bot_id)
-            value = raw.get("transport_revision", 0)
-            return value if isinstance(value, int) and not isinstance(value, bool) else 0
+            return bot_transport_revision(raw)
 
     # ------------------------------------------------------------ invariants
 
@@ -614,7 +621,7 @@ class FeishuBotPoolStateStore(object):
         raw["feishu_open_id"] = None
         self._advance_generation(raw)
         self._touch(raw, now)
-        raw["transport_revision"] = raw["revision"]
+        self._touch_transport(raw)
         return True
 
     def _load_synced(self, environ: Mapping[str, str] | None, now: float) -> dict[str, Any]:
@@ -632,6 +639,10 @@ class FeishuBotPoolStateStore(object):
     def _touch(raw: dict[str, Any], now: float) -> None:
         raw["revision"] = _as_int(raw.get("revision"), "revision") + 1
         raw["updated_at"] = now
+
+    @staticmethod
+    def _touch_transport(raw: dict[str, Any]) -> None:
+        raw["transport_revision"] = _as_int(raw.get("revision"), "revision")
 
     @staticmethod
     def _advance_generation(raw: dict[str, Any]) -> None:

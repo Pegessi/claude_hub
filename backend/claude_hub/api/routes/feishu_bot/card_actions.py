@@ -91,7 +91,20 @@ def current_binding(q: ChatQuestion, *, expected_effective: Any | None = None) -
             None,
         )
         transport_rev_fn = getattr(bot._pool, "transport_revision", None)
-        transport_rev = transport_rev_fn(mirror.bot_id) if callable(transport_rev_fn) else 0
+        transport_rev = (
+            transport_rev_fn(mirror.bot_id)
+            if callable(transport_rev_fn)
+            else getattr(effective, "transport_revision", effective.revision)
+        )
+        if mirror.transport_digest:
+            transport_valid = (
+                transport_rev <= mirror.revision
+                and _transport_digest(effective) == mirror.transport_digest
+            )
+        else:
+            # Legacy mirrors created before transport_digest existed fall back
+            # to strict revision equality instead of acting as a wildcard.
+            transport_valid = effective.revision == mirror.revision
         expected_tab_id = mirror.tab_id or q.tab_id
         if (
             not effective.callback_enabled
@@ -99,8 +112,7 @@ def current_binding(q: ChatQuestion, *, expected_effective: Any | None = None) -
             or binding.is_group
             or not bot._owner_is_authorized(binding.owner)
             or not bot._binding_still_routes(effective, binding)
-            or transport_rev > mirror.revision
-            or (mirror.transport_digest and _transport_digest(effective) != mirror.transport_digest)
+            or not transport_valid
             or (
                 effective.app_id,
                 effective.generation,
@@ -205,10 +217,10 @@ async def _mirror_question(q: ChatQuestion, *, remirror: bool = False) -> bool:
         mirror.action_digests.clear()
         inbox._save()
         return False
-    if not mirror.transport_digest:
-        mirror.transport_digest = _transport_digest(effective)
-    if not mirror.tab_id:
-        mirror.tab_id = resolved_binding.tab_id
+    if not mirror.transport_digest or not mirror.tab_id:
+        mirror.transport_digest = mirror.transport_digest or _transport_digest(effective)
+        mirror.tab_id = mirror.tab_id or resolved_binding.tab_id
+        inbox._save()
     remote_state = "expired" if q.state == "open" and q.expires_at <= utc_now() else q.state
     if mirror.retry_at is not None and mirror.retry_at > utc_now():
         return mirror.state == "sent"

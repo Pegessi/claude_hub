@@ -202,7 +202,10 @@ async def test_same_sender_same_channel_coalesces_and_replies_once(dispatch):
     assert dispatch.reply.await_args.args[1].message_id == "a2"
 
 
-@pytest.mark.parametrize("boundary", ["room", "pairing", "type", "topic", "bot", "generation"])
+@pytest.mark.parametrize(
+    "boundary",
+    ["room", "pairing", "type", "topic", "bot", "generation", "transport_revision"],
+)
 async def test_channel_and_version_boundaries_neither_coalesce_nor_interrupt(dispatch, boundary):
     binding = dispatch.binding
     effective = dispatch.effective
@@ -218,8 +221,10 @@ async def test_channel_and_version_boundaries_neither_coalesce_nor_interrupt(dis
     elif boundary == "bot":
         effective = replace(effective, bot_id="another-bot")
         binding = replace(binding, bot_id=effective.bot_id)
-    else:
+    elif boundary == "generation":
         effective = replace(effective, generation=3)
+    else:
+        effective = replace(effective, transport_revision=4)
     dispatch.blocked.add("first")
     first = dispatch.reserve("first")
     queue = bot_api._tab_dispatch_queues["tab"]
@@ -527,10 +532,13 @@ async def test_sibling_rename_or_revision_bump_preserves_interruption_and_carryo
         bot_api._message_dispatcher, "_validate_binding_dispatch", lambda *_args: None
     )
     third = dispatch.reserve("a3", effective=replace(dispatch.effective, revision=5))
-    assert third.channel_key == first.channel_key
+    fourth = dispatch.reserve("a4", effective=replace(dispatch.effective, revision=6))
+    assert third.channel_key == first.channel_key == fourth.channel_key
     assert await dispatch.run(third, queue) == "completed"
+    assert fourth.outcome.result() == "completed"
     assert "[上一条]\na1" in dispatch.submitted[1]["visible"]
     assert "[新消息 1]\na3" in dispatch.submitted[1]["visible"]
+    assert "[新消息 2]\na4" in dispatch.submitted[1]["visible"]
     assert not queue.interrupted_text
     assert bot_api._tab_dispatch_queues == {}
 
