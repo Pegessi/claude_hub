@@ -128,9 +128,9 @@
                   <!-- The chip names the grammar the rows below really use; an
                        unknown file renders nothing rather than a guessed label. -->
                   <span
-                    v-if="diffFileLabel(line)"
+                    v-if="diffFileLabel(line, activity.diff)"
                     class="activity-diff-file-lang"
-                  >{{ diffFileLabel(line) }}</span>
+                  >{{ diffFileLabel(line, activity.diff) }}</span>
                 </div>
                 <div
                   v-else
@@ -283,7 +283,7 @@ import { toolGroupNames, toolStatusLabel } from '@/utils/toolPresentation'
 import { ACTIVITY_ICONS, describeToolActivity, toolGroupSummary, type ToolActivity, type ToolDiffLine, type ToolGroupSummary } from '@/utils/toolActivity'
 import { toolGroupStatus } from '@/features/chat/presentation/chatTurnPresentation'
 import { reviewCommentInRows, reviewLocation, reviewRangeLines, reviewRangeRows, reviewRowLine, reviewRowTapOpensEditor, type ReviewAnchor, type ReviewComment } from '@/features/chat/review/reviewComments'
-import { ensureHighlighter, highlightLine, highlightReady, highlightVersion, isLanguageRegistered, languageForPath, languageLabel } from '@/utils/codeHighlight'
+import { ensureHighlighter, highlightLine, highlightReady, highlightVersion, isKnownLanguage, isLanguageRegistered, languageForPath, languageLabel } from '@/utils/codeHighlight'
 import ChatHubSubagentLink from './ChatHubSubagentLink.vue'
 import type { TimelineTool, TimelineTurn } from '../timeline/types'
 import type { TimelinePart } from '../timeline/types'
@@ -448,9 +448,15 @@ function diffRowLanguage(line: ToolDiffLine): string {
 
 /** The chip shown next to a file name: the grammar those rows are highlighted
  *  as, and nothing at all when there is none. */
-function diffFileLabel(line: ToolDiffLine): string {
-  trackHighlighter()
+function diffFileLabel(line: ToolDiffLine, diff: readonly ToolDiffLine[] | undefined): string {
   const lang = languageForPath(line.file || line.text)
+  // Over the ceiling the rows stay plain text, so the chip names the file's
+  // language without subscribing to the highlighter or loading its chunk: the
+  // name is cheap, the colour is what is missing.
+  if (!diff || diff.length > DIFF_HIGHLIGHT_ROW_LIMIT) {
+    return lang && isKnownLanguage(lang) ? languageLabel(lang) : ''
+  }
+  trackHighlighter()
   return lang && isLanguageRegistered(lang) ? languageLabel(lang) : ''
 }
 
@@ -616,7 +622,13 @@ function expandedItems(): { tool: TimelineTool, activity: ToolActivity }[] {
 // chunk must be requested then as well, not only when the card first opened.
 watchEffect(() => {
   void props.turn.renderRevision
-  if (expandedItems().some(item => item.activity.diff)) ensureHighlighter().catch(() => {})
+  // Only a diff this card will actually tokenise is worth the chunk; a diff over
+  // the ceiling renders plain text, so it must not pull highlight.js in.
+  const wants = expandedItems().some(item => {
+    const diff = item.activity.diff
+    return !!diff && diff.length <= DIFF_HIGHLIGHT_ROW_LIMIT
+  })
+  if (wants) ensureHighlighter().catch(() => {})
 })
 </script>
 

@@ -197,8 +197,10 @@ const LANGUAGE_LABELS: Record<string, string> = {
   json: 'JSON',
   yaml: 'YAML',
   toml: 'TOML',
-  xml: 'HTML',
+  xml: 'XML',
   html: 'HTML',
+  vue: 'Vue',
+  svg: 'SVG',
   css: 'CSS',
   scss: 'SCSS',
   less: 'LESS',
@@ -223,9 +225,28 @@ const LANGUAGE_LABELS: Record<string, string> = {
   plaintext: 'Text',
 }
 
+/** Whether ``lang`` is a language we can name without loading the highlighter.
+ *
+ *  A label is cheap and needs no chunk (`py` → `Python`), while whether the rows
+ *  can actually be *coloured* depends on the highlighter being loaded. Surfaces
+ *  that intentionally render plain text (a diff over the size ceiling) still want
+ *  the name — and must not subscribe to the chunk just to get it. */
+export function isKnownLanguage(lang: string): boolean {
+  const token = (lang || '').toLowerCase().trim()
+  if (!token) return false
+  if (Object.prototype.hasOwnProperty.call(LANGUAGE_LABELS, token)) return true
+  return Object.prototype.hasOwnProperty.call(LANGUAGE_LABELS, normalizeLang(token))
+}
+
 export function languageLabel(lang: string): string {
-  const canonical = normalizeLang(lang || '')
-  if (!canonical) return ''
+  const token = (lang || '').toLowerCase().trim()
+  if (!token) return ''
+  // Several tokens share one grammar (``vue``/``svg``/``xml`` all highlight as
+  // XML), so the label reads the token the fence or file actually named: a
+  // ``.vue`` file is not an HTML file, even though the same highlighter paints it.
+  const own = LANGUAGE_LABELS[token]
+  if (own) return own
+  const canonical = normalizeLang(token)
   return LANGUAGE_LABELS[canonical] ?? canonical.replace(/^./, first => first.toUpperCase())
 }
 

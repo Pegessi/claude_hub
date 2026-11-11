@@ -307,3 +307,14 @@ test('at 400 rows the card still highlights; past 400 it does not', async t => {
   // The row text itself is unchanged: only the highlighting is skipped.
   assert.equal(textOf(bigRows[1].props.innerHTML), '    return compute(0)')
 })
+
+test('a diff over the ceiling promises no grammar and loads no chunk', () => {
+  // L-4 of review round 4: the header chip named a language whose rows would stay
+  // plain, and the card asked for a highlighter chunk it would not use.
+  const source = readFileSync(new URL('../src/features/chat/components/ChatToolGroup.vue', import.meta.url), 'utf8')
+  const label = source.match(/function diffFileLabel\([\s\S]*?\n\}/)?.[0] ?? ''
+  assert.match(label, /diff\.length > DIFF_HIGHLIGHT_ROW_LIMIT/, 'the chip knows about the ceiling')
+  assert.match(label, /isKnownLanguage\(lang\)/, 'and names the language without the chunk')
+  const effect = source.match(/watchEffect\(\(\) => \{[\s\S]*?\n\}\)/)?.[0] ?? ''
+  assert.match(effect, /diff\.length <= DIFF_HIGHLIGHT_ROW_LIMIT/, 'the chunk is only requested for a diff it will colour')
+})

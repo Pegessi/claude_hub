@@ -107,7 +107,8 @@
       const slowStartAt = new Date(Date.now() - 45 * 1000).toISOString()
       const stuckStartAt = new Date(Date.now() - 150 * 1000).toISOString()
       // What the Hub's status poll would report for this tab.
-      const status = (value, activity = null) => ({ status: value, activity, ageMs: 2000 })
+      // A fresh poll: the footer projects the sample against its own clock.
+      const status = (value, activity = null) => ({ status: value, activity, sampled_at: new Date().toISOString() })
       const runningStatus = status('working')
       const busyStatus = status('working', 'Running pytest -q')
       const offlineStatus = status('offline')
@@ -147,7 +148,7 @@
             markdownImageScope: computed(() => 'fixture-tab'),
             connectionState: computed(() => props.connectionState ?? 'live'),
             currentTab: computed(() => ({ id: 'fixture-tab', agent_type: 'maso' })),
-            runtimeStatus: computed(() => props.runtimeStatus ?? null),
+            runtimeSample: computed(() => props.runtimeStatus ?? null),
           })
           return () => h('section', { class: 'case', 'data-case': props.caseId }, [
             h('p', { class: 'case-label' }, props.label),

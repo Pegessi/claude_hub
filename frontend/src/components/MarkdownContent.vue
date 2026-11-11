@@ -172,14 +172,20 @@ function syncCodeScrollState(root: HTMLElement) {
   if (blocks.length === 0) return
   // Measure every block before writing any attribute: interleaving reads and
   // writes would force a layout per block on every streamed delta.
-  const overflowing = blocks.map((block) => {
+  const measured = blocks.map((block) => {
     const pre = block.querySelector('pre')
-    return !!pre && pre.scrollWidth > pre.clientWidth + 1
+    if (!pre) return { overflowing: false, atEnd: false }
+    return {
+      overflowing: pre.scrollWidth > pre.clientWidth + 1,
+      // Recomputed every sync: a block that grew wider (streamed code, a resize,
+      // enlarged text) is no longer at its end even though it was when the reader
+      // last scrolled, and the fade has to come back.
+      atEnd: pre.scrollLeft + pre.clientWidth >= pre.scrollWidth - 1,
+    }
   })
   blocks.forEach((block, index) => {
-    block.toggleAttribute('data-overflow-x', overflowing[index])
-    // A block that no longer overflows cannot be scrolled to its end either.
-    if (!overflowing[index]) block.removeAttribute('data-scroll-end')
+    block.toggleAttribute('data-overflow-x', measured[index].overflowing)
+    block.toggleAttribute('data-scroll-end', measured[index].overflowing && measured[index].atEnd)
   })
 }
 
@@ -794,7 +800,10 @@ async function handleClick(event: MouseEvent) {
   justify-self: end;
   align-self: stretch;
   width: 28px;
-  background: linear-gradient(to left, var(--ch-color-canvas), transparent);
+  /* The fade sits over the block's own background, so it blends into that and
+     not into the canvas: a canvas/surface mismatch would draw a visible band at
+     the right edge of the code. */
+  background: linear-gradient(to left, var(--ch-color-surface), transparent);
   pointer-events: none;
   opacity: 0;
   transition: opacity 120ms ease-out;

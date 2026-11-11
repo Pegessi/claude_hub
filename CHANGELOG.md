@@ -7,6 +7,25 @@
 
 ## Released
 
+### fix(ui): review round 4
+
+- A gap repair now re-reads a range that is already loaded: the detail it held
+  was fetched before the gap, so it cannot contain what arrived meanwhile. Join
+  and repair keep separate budgets, and a read already in flight is not asked for
+  twice.
+- Counts no longer stall or double-count: per-turn high-water marks replace a
+  global cursor, and the tally lives in a `shallowRef` so the footer actually sees
+  it change.
+- The tab-status sample is projected by the footer with its own one-second clock,
+  so a stalled poll ages out instead of being presented as current forever.
+- A block that grows wider after the reader reached its end shows the overflow
+  fade again, and the fade blends into the code block's own surface.
+- A language label reads the token that was named (`vue` → `Vue`, `svg` → `SVG`,
+  `xml` → `XML`), and a runtime activity keeps its paths and flags: only its
+  leading character is lowered.
+- A diff over the size ceiling names the language without subscribing to the
+  highlighter or loading its chunk.
+
 ### fix(ui): review round 3
 
 - Counting a turn's opening marker made it look productive: `turn_started` is

@@ -185,7 +185,13 @@ export function firstResponseHint(facts: FirstResponseFacts): string {
       // A turn is open while the provider says it is not doing anything.
       return 'The provider is idle while this turn is open — it may have dropped the request.'
     case 'working':
-      if (runtime.activity) return `The provider is ${runtime.activity.toLowerCase()} — nothing written yet.`
+      // Only the leading character is lowered: `activity` can carry a command
+      // (`Running pytest -q Tests/Auth`), and lowercasing the rest mangles paths
+      // and flags a reader may be matching against.
+      if (runtime.activity) {
+        const activity = runtime.activity.replace(/^./, first => first.toLowerCase())
+        return `The provider is ${activity} — nothing written yet.`
+      }
       return elapsedMs >= FIRST_RESPONSE_STUCK_AFTER_MS
         ? 'The provider is running but has written nothing for a while — usually a queued or stuck session.'
         : 'The provider is running; it has not written anything yet.'
