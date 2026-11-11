@@ -98,10 +98,17 @@
   `Current channels N / 8` list in the binding panel where each channel has its
   own release action (a bulk disconnect would drop all of them), and a group bind
   that states it creates a new Chat (explaining the cap when it is reached).
-- Hardening from the review: nothing unvalidated can reach the pool file (an
-  over-long group name is truncated and a rejected write is a 400, not a
-  "damaged pool" 503), tab creation is bounded and rolled back on failure, and
-  `per_channel` keeps the legacy group→private fallback out of its routing.
+- Hardening from the review: the binding/claim writers validate every persisted
+  field before the write lands (an over-long group name is truncated and a
+  rejected write is a 400, not a "damaged pool" 503); tab creation is bounded and
+  rolled back on failure; `per_channel` keeps the legacy group→private fallback
+  out of its routing; and the pool is the SQLite document store, not a JSON file.
+- Concurrency model after the fix rounds: `revision` is **administrative CAS only**
+  (concurrent edits still conflict), while delivery/batching/interruption/carryover
+  are fenced by channel identity plus the authority watermark (`generation` for
+  control-plane, `transport_revision` for credentials and callbacks), so a
+  sibling channel's write cannot suppress another channel's answer and a
+  credential epoch — even an A→B→A round-trip — cannot deliver an old answer.
 
 ### fix(chat): authorize out-of-cwd images only via completed image tools and add image retry
 
