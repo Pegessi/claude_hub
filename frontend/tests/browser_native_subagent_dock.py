@@ -319,8 +319,10 @@ async def main(browser_run: BrowserRun) -> None:
                     events, details = [], []
                 else:
                     events = [
-                        row for row in full
-                        if row["stream_sequence"] in SHALLOW_SEQUENCES and row["stream_sequence"] > since
+                        row
+                        for row in full
+                        if row["stream_sequence"] in SHALLOW_SEQUENCES
+                        and row["stream_sequence"] > since
                     ]
                     details = [dict(DETAIL)] if full is EVENTS and since < LAST_SEQUENCE else []
                 body = {
@@ -455,10 +457,13 @@ async def main(browser_run: BrowserRun) -> None:
             "'[data-testid=native-subagent-overlay]'))"
         ), "Shift+Tab must stay inside the window"
         await window.locator(".native-subagent-message, .native-subagent-meta").first.click()
-        assert await page.evaluate(
-            "Boolean(document.activeElement && document.activeElement.closest("
-            "'[data-testid=native-subagent-overlay]'))"
-        ) is False, "the tap must have moved focus out of the window"
+        assert (
+            await page.evaluate(
+                "Boolean(document.activeElement && document.activeElement.closest("
+                "'[data-testid=native-subagent-overlay]'))"
+            )
+            is False
+        ), "the tap must have moved focus out of the window"
         await page.keyboard.press("Tab")
         assert await page.evaluate(
             "Boolean(document.activeElement && document.activeElement.closest("
@@ -476,10 +481,13 @@ async def main(browser_run: BrowserRun) -> None:
         await row.click()
         await expect(overlay).to_be_visible()
         await window.locator(".native-subagent-badge").click()
-        assert await page.evaluate(
-            "Boolean(document.activeElement && document.activeElement.closest("
-            "'[data-testid=native-subagent-overlay]'))"
-        ) is False, "the tap must have moved focus out of the window"
+        assert (
+            await page.evaluate(
+                "Boolean(document.activeElement && document.activeElement.closest("
+                "'[data-testid=native-subagent-overlay]'))"
+            )
+            is False
+        ), "the tap must have moved focus out of the window"
         await page.keyboard.press("Escape")
         await expect(page.get_by_test_id("native-subagent-overlay")).to_have_count(0)
 
@@ -488,15 +496,13 @@ async def main(browser_run: BrowserRun) -> None:
         await pill.click()
         await row.click()
         await expect(overlay).to_be_visible()
-        await page.evaluate(
-            """() => {
+        await page.evaluate("""() => {
               const dialog = document.createElement('dialog')
               dialog.id = 'review-top-layer-dialog'
               dialog.textContent = 'preview'
               document.body.appendChild(dialog)
               dialog.showModal()
-            }"""
-        )
+            }""")
         await page.keyboard.press("Escape")
         await expect(overlay).to_be_visible()
         await page.evaluate("() => document.getElementById('review-top-layer-dialog').remove()")
@@ -528,9 +534,7 @@ async def main(browser_run: BrowserRun) -> None:
         # This turn is short enough that the reveal has nothing to scroll, so no
         # scroll event rearms the tail it detached: the reader must not be left
         # detached (with the Latest pill) at the bottom of the transcript.
-        await expect(
-            page.get_by_role("button", name="Scroll to latest message")
-        ).to_have_count(0)
+        await expect(page.get_by_role("button", name="Scroll to latest message")).to_have_count(0)
         await page.screenshot(path=str(output / "02-show-in-transcript.png"))
 
         # Wide panes rest the list in the gutter rail instead of a popover;
@@ -599,9 +603,7 @@ async def main(browser_run: BrowserRun) -> None:
         await pill.click()
         sheet = page.get_by_test_id("subagent-sheet")
         await expect(sheet).to_be_visible()
-        await expect(sheet.get_by_test_id(ROW_ID)).to_have_attribute(
-            "data-kind", "native"
-        )
+        await expect(sheet.get_by_test_id(ROW_ID)).to_have_attribute("data-kind", "native")
         await page.screenshot(path=str(output / "04-mobile-sheet-native.png"))
         await sheet.get_by_test_id(ROW_ID).click()
         await expect(sheet).to_have_count(0)
