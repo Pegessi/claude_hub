@@ -1795,3 +1795,285 @@ def test_card_actions_and_dot_execution_resolve_non_first_channel_binding(
             card_actions.current_binding(bob_question)
 
     asyncio.run(run_mirror_checks())
+
+
+@pytest.mark.parametrize(
+    "rotation_kind",
+    [
+        "app_secret",
+        "verification_token",
+        "encrypt_key",
+        "expected_tenant_key",
+        "callback_disabled",
+        "rebind",
+    ],
+)
+def test_card_delivery_and_patch_fenced_against_midflight_credential_or_binding_rotation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rotation_kind: str
+) -> None:
+    """Rotating credentials/callbacks or rebinding the channel during
+    get_tenant_token() (before bot._gate) must abort initial card send,
+    question-card resolution patch_message_card, question reply send, and
+    push_to_tab with zero outbound HTTP calls."""
+    from datetime import timedelta
+
+    from claude_hub.api.routes.feishu_bot import card_actions
+    from claude_hub.models.chat_message import ChatQuestion, utc_now
+    from claude_hub.services.chat_message_inbox import ChatMessageInbox, InboxEvidence, InboxTarget
+    from claude_hub.services.feishu_bot import FeishuBotError
+
+    store = FeishuBotPoolStore(
+        path=tmp_path / "pool.json",
+        legacy_path=tmp_path / "legacy.json",
+    )
+    bot_id = store.create_bot(name="CardFence", config=_config("app-cf"), environ={})
+    store.update_bot(bot_id, expected_revision=0, mode=BOT_MODE_PER_CHANNEL, environ={})
+    current = store.effective(bot_id, {})
+    store.configure_callbacks(
+        bot_id,
+        callback_enabled=True,
+        expected_revision=current.revision,
+        verification_token="verify-initial",
+        encrypt_key="encrypt-initial",
+        expected_tenant_key="tenant-initial",
+        environ={},
+    )
+    # Keep a sibling binding so per-row release does not advance generation.
+    store.bind_p2p(
+        bot_id,
+        owner=LOCAL,
+        tab_id="tab-sibling",
+        workspace_id=None,
+        sender_open_id="ou-sibling",
+        chat_id="oc-sibling",
+        created_at=100.0,
+        environ={},
+    )
+    bob_binding = store.bind_p2p(
+        bot_id,
+        owner=LOCAL,
+        tab_id="tab-bob",
+        workspace_id=None,
+        sender_open_id="ou-bob",
+        chat_id="oc-bob",
+        created_at=200.0,
+        environ={},
+    )
+    monkeypatch.setattr(bot_api, "_pool", store)
+    monkeypatch.setattr(bot_api, "_validate_saved_target", lambda _b: None)
+
+    counter = 0
+
+    def mutate_pool() -> None:
+        nonlocal bob_binding, counter
+        counter += 1
+        eff = store.effective(bot_id, {})
+        if rotation_kind == "app_secret":
+            store.rotate_secrets(
+                bot_id,
+                app_secret=f"rotated-secret-{counter}",
+                expected_revision=eff.revision,
+                environ={},
+            )
+        elif rotation_kind == "verification_token":
+            store.configure_callbacks(
+                bot_id,
+                callback_enabled=True,
+                expected_revision=eff.revision,
+                verification_token=f"verify-rotated-{counter}",
+                environ={},
+            )
+        elif rotation_kind == "encrypt_key":
+            store.configure_callbacks(
+                bot_id,
+                callback_enabled=True,
+                expected_revision=eff.revision,
+                encrypt_key=f"encrypt-rotated-{counter}",
+                environ={},
+            )
+        elif rotation_kind == "expected_tenant_key":
+            store.configure_callbacks(
+                bot_id,
+                callback_enabled=True,
+                expected_revision=eff.revision,
+                expected_tenant_key=f"tenant-rotated-{counter}",
+                environ={},
+            )
+        elif rotation_kind == "callback_disabled":
+            store.configure_callbacks(
+                bot_id,
+                callback_enabled=False,
+                expected_revision=eff.revision,
+                environ={},
+            )
+        else:
+            store.release_binding(
+                bot_id,
+                expected_revision=eff.revision,
+                pairing_id=bob_binding.pairing_id,
+                environ={},
+            )
+            bob_binding = store.bind_p2p(
+                bot_id,
+                owner=LOCAL,
+                tab_id="tab-bob",
+                workspace_id=None,
+                sender_open_id="ou-bob",
+                chat_id="oc-bob",
+                created_at=200.0 + counter,
+                environ={},
+            )
+
+    def restore_callbacks_if_disabled() -> None:
+        eff = store.effective(bot_id, {})
+        if not eff.callback_enabled:
+            store.configure_callbacks(
+                bot_id,
+                callback_enabled=True,
+                expected_revision=eff.revision,
+                verification_token=f"verify-restored-{counter}",
+                encrypt_key=f"encrypt-restored-{counter}",
+                expected_tenant_key=f"tenant-restored-{counter}",
+                environ={},
+            )
+
+    async def scenario() -> None:
+        async def ordinary(*_args: Any) -> None:
+            return None
+
+        async def evidence(*_args: Any) -> InboxEvidence:
+            return InboxEvidence("absent")
+
+        inbox = ChatMessageInbox(
+            tmp_path / "inbox.json", lambda _: InboxTarget("incarnation"), ordinary, evidence
+        )
+        monkeypatch.setattr(card_actions.answers, "inbox", lambda: inbox)
+        monkeypatch.setattr(card_actions.answers, "live", lambda _q: (None, None, None))
+
+        http_calls: list[str] = []
+        rotate_on_token = False
+
+        class MutatingCardClient:
+            def __init__(self, _config: Any) -> None:
+                pass
+
+            async def get_tenant_token(self) -> str:
+                if rotate_on_token:
+                    mutate_pool()
+                return "t-token"
+
+            async def send_message_with_identity(self, *_args: Any, **_kwargs: Any) -> str:
+                http_calls.append("send_message_with_identity")
+                return "om-sent-card"
+
+            async def patch_message_card(self, *_args: Any, **_kwargs: Any) -> None:
+                http_calls.append("patch_message_card")
+
+        monkeypatch.setattr(card_actions, "FeishuBotClient", MutatingCardClient)
+
+        now = utc_now()
+        # 1. Initial card send (mirror.state == "queued"): rotate during get_tenant_token().
+        q1 = ChatQuestion(
+            question_ref="q-initial",
+            tab_id="tab-bob",
+            session_id="terminal-tab-tab-bob",
+            incarnation="incarnation",
+            turn_id="turn-1",
+            call_id="call-1",
+            run_epoch=1,
+            question_id="0",
+            prompt="Initial send?",
+            options=["Yes", "No"],
+            mode="native",
+            created_at=now,
+            expires_at=now + timedelta(hours=24),
+        )
+        inbox.questions[q1.question_ref] = q1
+        inbox._save()
+        rotate_on_token = True
+        assert await card_actions.mirror_question(q1) is False
+        assert http_calls == []
+        assert q1.mirror is not None
+        assert q1.mirror.state == "disabled"
+        assert q1.mirror.action_digests == {}
+
+        restore_callbacks_if_disabled()
+
+        # 2. Card resolution patch (patch_message_card) & pending reply send:
+        # First send a valid card with no mid-flight rotation.
+        q2 = q1.model_copy(
+            update={
+                "question_ref": "q-patch",
+                "mirror": None,
+                "mirror_checked": False,
+            }
+        )
+        inbox.questions[q2.question_ref] = q2
+        inbox._save()
+        rotate_on_token = False
+        assert await card_actions.mirror_question(q2) is True
+        assert http_calls == ["send_message_with_identity"]
+        http_calls.clear()
+        assert q2.mirror is not None and q2.mirror.state == "sent"
+
+        # Now resolve q2 and rotate mid-flight during get_tenant_token() before patch_message_card.
+        q2.state = "resolved"
+        q2.mirror.retry_at = None
+        rotate_on_token = True
+        assert await card_actions.mirror_question(q2) is False
+        assert http_calls == []
+        assert q2.mirror.state == "disabled"
+        assert q2.mirror.displayed_state == "open"
+
+        restore_callbacks_if_disabled()
+
+        # 3. Pending question reply send: send valid card, then rotate mid-flight on reply_state='pending'.
+        q3 = q1.model_copy(
+            update={
+                "question_ref": "q-reply",
+                "mirror": None,
+                "mirror_checked": False,
+            }
+        )
+        inbox.questions[q3.question_ref] = q3
+        inbox._save()
+        rotate_on_token = False
+        assert await card_actions.mirror_question(q3) is True
+        http_calls.clear()
+        assert q3.mirror is not None and q3.mirror.state == "sent"
+
+        q3.reply_state = "pending"
+        q3.reply_text = "Thank you"
+        q3.mirror.retry_at = None
+        rotate_on_token = True
+        assert await card_actions.mirror_question(q3) is False
+        assert http_calls == []
+        assert q3.mirror.state == "disabled"
+        assert q3.reply_state == "pending"
+
+        restore_callbacks_if_disabled()
+
+        # 4. push_to_tab retry path: if card send fails with FeishuBotError and
+        # credentials/binding rotate before the post fallback retry, the retry is blocked.
+        if rotation_kind != "callback_disabled":
+            push_attempts: list[str] = []
+
+            class PushClient:
+                def __init__(self, _config: Any) -> None:
+                    pass
+
+                async def get_tenant_token(self) -> str:
+                    return "t-token"
+
+                async def send_message(
+                    self, _chat_id: str, msg_type: str, _content: dict[str, Any]
+                ) -> None:
+                    push_attempts.append(msg_type)
+                    mutate_pool()
+                    raise FeishuBotError("card refused by Feishu")
+
+            monkeypatch.setattr(bot_api, "FeishuBotClient", PushClient)
+            assert await bot_api.push_to_tab("tab-bob", "Body", title="Header") is False
+            assert push_attempts == ["interactive"]
+
+    asyncio.run(scenario())

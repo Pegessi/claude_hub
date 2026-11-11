@@ -161,6 +161,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             raw["feishu_avatar_url"] = feishu_avatar_url
             raw["feishu_open_id"] = feishu_open_id
             self._touch(raw, now)
+            raw["transport_revision"] = raw["revision"]
             self._save(state)
 
     def configure_callbacks(
@@ -206,6 +207,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             callbacks["callback_enabled"] = callback_enabled
             raw["callbacks"] = callbacks
             self._touch(raw, now)
+            raw["transport_revision"] = raw["revision"]
             self._save(state)
 
     def update_profile(
@@ -259,7 +261,8 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             raw = self._live_entry(state, bot_id)
             self._check_revision(raw, expected_revision)
             current_mode = bot_mode(raw)
-            if mode is not None and mode != current_mode:
+            mode_changed = mode is not None and mode != current_mode
+            if mode_changed:
                 if self._active_raw_bindings(raw):
                     raise FeishuBotModeSwitchBlocked(bot_id)
                 raw["mode"] = mode
@@ -268,12 +271,15 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
                 raw["mode"] = mode
             if name is not None:
                 raw["name"] = name
-            if enabled is not None and enabled != raw.get("enabled"):
+            enabled_changed = enabled is not None and enabled != raw.get("enabled")
+            if enabled_changed:
                 raw["enabled"] = enabled
                 if not enabled:
                     # Disabling revokes outstanding pairing state for this Bot.
                     self._advance_generation(raw)
             self._touch(raw, now)
+            if mode_changed or enabled_changed:
+                raw["transport_revision"] = raw["revision"]
             self._save(state)
 
     def delete_bot(
