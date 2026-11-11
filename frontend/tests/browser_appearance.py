@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlparse
@@ -198,6 +199,8 @@ async def dialog_geometry(page: Page) -> dict[str, Any]:
 
 
 async def main(browser_run: BrowserRun) -> None:
+    started = time.monotonic()
+    phase_started = started
     base = sys.argv[1].rstrip("/")
     parsed_base = urlparse(base)
     if (
@@ -218,6 +221,7 @@ async def main(browser_run: BrowserRun) -> None:
     reads: list[str] = []
     report: dict[str, Any] = {
         "result": "FAIL",
+        "timings": [],
         "screenshots": [],
         "palettes": [],
         "mobile": [],
@@ -227,6 +231,18 @@ async def main(browser_run: BrowserRun) -> None:
     }
     failure: BaseException | None = None
     page: Page | None = None
+
+    def record_phase(name: str) -> None:
+        nonlocal phase_started
+        now = time.monotonic()
+        timing = {
+            "phase": name,
+            "elapsed_s": round(now - started, 3),
+            "phase_s": round(now - phase_started, 3),
+        }
+        phase_started = now
+        report["timings"].append(timing)
+        print(json.dumps({"appearance_timing": timing}), flush=True)
 
     async with browser_run.context(viewport={"width": 1440, "height": 900}) as context:
 
@@ -325,6 +341,16 @@ async def main(browser_run: BrowserRun) -> None:
                 reader.get_by_role("heading", name="A space for focused work")
             ).to_be_visible()
             await expect(reader.locator(".hljs-string").first).to_be_visible()
+            report["interaction_page_visibility"] = {
+                "before": await page.evaluate("document.visibilityState"),
+            }
+            # Return input to the page that owns every click. The reader stays
+            # open for cross-tab storage and DOM-continuity checks.
+            await page.bring_to_front()
+            report["interaction_page_visibility"]["after"] = await page.evaluate(
+                "document.visibilityState"
+            )
+            record_phase("reader_ready")
             article = await reader.get_by_role("article").element_handle()
             assert article is not None
             await trigger.click()
@@ -416,6 +442,7 @@ async def main(browser_run: BrowserRun) -> None:
                 report["switch_back"].append(
                     {"mode": mode, "classic_tokens_and_treatment_restored": True}
                 )
+                record_phase(f"{mode.lower()}_palette_matrix")
             await article.dispose()
             report["standalone"] = {
                 "document_reads": len(reads),
@@ -451,6 +478,7 @@ async def main(browser_run: BrowserRun) -> None:
             report["keyboard_and_dismissal"] = (
                 "Native radios, Tab containment, Escape/backdrop and focus return pass"
             )
+            record_phase("keyboard_and_dismissal")
 
             await trigger.click()
             await choose_mode(page, "System")
@@ -474,6 +502,7 @@ async def main(browser_run: BrowserRun) -> None:
             report["persistence"] = (
                 "System follows OS without rewriting preference; explicit mode wins; selection survives reload"
             )
+            record_phase("system_and_persistence")
 
             # A blocked preference write must not stop the interaction or lie about saving.
             await page.evaluate(
@@ -498,6 +527,7 @@ async def main(browser_run: BrowserRun) -> None:
             report["blocked_storage"] = (
                 "Live selection remains usable, warning appears and a subsequent save recovers"
             )
+            record_phase("blocked_storage")
 
             # Legacy users keep their selected polarity; malformed new data is bounded.
             await page.evaluate(
@@ -511,6 +541,7 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(trigger).to_be_visible()
             await assert_theme(page, "Classic", "light")
             report["migration"] = "Malformed new storage falls back to the legacy light choice"
+            record_phase("legacy_migration")
 
             report["retired_palette_fallback"] = []
             for retired in ("slate", "sand", "forest", "dusk"):
@@ -527,6 +558,7 @@ async def main(browser_run: BrowserRun) -> None:
                 report["retired_palette_fallback"].append(
                     {"retired": retired, "mode_preserved": "system"}
                 )
+            record_phase("retired_ids")
 
             for width, height in ((390, 844), (320, 568), (568, 320)):
                 await page.set_viewport_size({"width": width, "height": height})
@@ -560,6 +592,7 @@ async def main(browser_run: BrowserRun) -> None:
                 await expect(dialog).to_have_count(0)
                 await expect(menu).to_be_focused()
                 report["mobile"].append(geometry)
+            record_phase("phone_layouts")
 
             # The Workspace mobile catch-all must reach the same appearance surface.
             await page.set_viewport_size({"width": 390, "height": 844})
@@ -582,6 +615,7 @@ async def main(browser_run: BrowserRun) -> None:
                 report["workspace_mobile"].append(
                     {"width": width, "appearance_reachable": True, "focus_returned": True}
                 )
+            record_phase("workspace_boundaries")
             assert not unknown, unknown
             assert not errors, errors
             report["result"] = "PASS"
@@ -589,9 +623,11 @@ async def main(browser_run: BrowserRun) -> None:
             failure = exc
             report["error_type"] = type(exc).__name__
             report["error"] = str(exc)
+            record_phase("failed")
             if page is not None:
                 await page.screenshot(path=str(output / "failure.png"), full_page=True)
 
+    record_phase("complete")
     (output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({key: value for key, value in report.items() if key != "palettes"}, indent=2))
     if failure is not None:

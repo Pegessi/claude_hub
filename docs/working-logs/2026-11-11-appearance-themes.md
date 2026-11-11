@@ -233,3 +233,20 @@ Browser-local negatives restore the reviewed defects and fail at 1.9719:1 on
 Mono's pressed Create Task or equal active/inactive gray pane borders. Source
 was not edited for negatives. All are in `tasks/theme-browser/`; the user preview
 on 5358 remains running by explicit request, while test Vite5318 is stopped.
+
+The frozen `9d056b3` passed strict `all` (6556 backend tests, 9 skips; 1460
+frontend tests) and 13 terminal-HMR cases. Its browser owner passed 18 scenarios,
+then stopped Appearance at the normal 120s deadline, leaving five scenarios
+unrun. Earlier focused Appearance passes had allowed 180s and actually exceeded
+138s, so they did not establish the CI-sized budget. That failed gate remains
+in `tasks/theme-game-evidence/final-9d056b3/` and is not relabeled as a full pass.
+
+The test now returns input to the main page after opening its separate reader,
+using `bring_to_front()` while keeping the reader open and every assertion.
+Small monotonic phase records make the scenario's cost inspectable. Under a
+real 120s outer deadline, `foreground-budget-01` completes in 16.014s (16.291s
+outer wall), retaining all 16 variants, 32 foreign-root preview tile checks,
+reader DOM/one-read continuity and all phone/Workspace widths. Both visibility
+observations say `visible` in headless Chromium; the evidence supports restoring
+the interaction target, not a claim that `document.hidden` caused the delay.
+No product code, coverage, runner/CI limits or animation behavior was changed.
