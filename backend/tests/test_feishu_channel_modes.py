@@ -40,7 +40,7 @@ from claude_hub.services.feishu_bot import (
     FeishuMessageDedupStore,
 )
 from claude_hub.services.feishu_bot_pool import FeishuBotPoolStore
-from claude_hub.services.local_storage import read_document
+from claude_hub.services.local_storage import read_document, write_document
 
 OWNER = OwnerIdentity(open_id="ou-owner", email="owner@example.test", kind=OWNER_KIND_OAUTH)
 LOCAL = OwnerIdentity(open_id="local", email="local@localhost", kind=OWNER_KIND_LOCAL)
@@ -1177,9 +1177,10 @@ def test_migration_preserves_legacy_binding_when_bindings_list_is_empty(tmp_path
     assert entry.bindings[0].pairing_id == "pair-preserved"
     assert entry.binding == entry.bindings[0]
 
-    # Persisting a subsequent mutation must keep the migrated binding on disk.
+    # Persisting a subsequent mutation must keep the migrated binding in SQLite authority.
     store.update_bot("bot-mixed", expected_revision=entry.revision, name="Mixed Saved", environ={})
-    persisted = json.loads(path.read_text())
+    persisted = read_document(path)
+    assert isinstance(persisted, dict)
     assert "binding" not in persisted["bots"]["bot-mixed"]
     assert len(persisted["bots"]["bot-mixed"]["bindings"]) == 1
     assert persisted["bots"]["bot-mixed"]["bindings"][0]["pairing_id"] == "pair-preserved"
@@ -1194,7 +1195,7 @@ def test_store_writers_validate_owner_and_claim_fields_before_saving(
     pool.update_bot(bot_id, expected_revision=entry.revision, mode=BOT_MODE_PER_CHANNEL, environ={})
     entry = pool.snapshot({}).get(bot_id)
     assert entry is not None
-    before_bytes = pool.path.read_bytes()
+    before_doc = json.dumps(read_document(pool.path), sort_keys=True)
 
     bad_owners = [
         OwnerIdentity(open_id="local", email="e" * 129, kind=OWNER_KIND_LOCAL),
@@ -1213,7 +1214,7 @@ def test_store_writers_validate_owner_and_claim_fields_before_saving(
                 chat_id="oc-alice",
                 environ={},
             )
-        assert pool.path.read_bytes() == before_bytes
+        assert json.dumps(read_document(pool.path), sort_keys=True) == before_doc
         assert pool.snapshot({}).get(bot_id) is not None
 
         with pytest.raises(FeishuBotInvalidValue):
@@ -1227,7 +1228,7 @@ def test_store_writers_validate_owner_and_claim_fields_before_saving(
                 expected_revision=entry.revision,
                 environ={},
             )
-        assert pool.path.read_bytes() == before_bytes
+        assert json.dumps(read_document(pool.path), sort_keys=True) == before_doc
         assert pool.snapshot({}).get(bot_id) is not None
 
         with pytest.raises(FeishuBotInvalidValue):
@@ -1239,7 +1240,7 @@ def test_store_writers_validate_owner_and_claim_fields_before_saving(
                 expected_revision=entry.revision,
                 environ={},
             )
-        assert pool.path.read_bytes() == before_bytes
+        assert json.dumps(read_document(pool.path), sort_keys=True) == before_doc
         assert pool.snapshot({}).get(bot_id) is not None
 
     code, _expires, _rev = pool.issue_code(
@@ -1250,7 +1251,7 @@ def test_store_writers_validate_owner_and_claim_fields_before_saving(
         expected_revision=entry.revision,
         environ={},
     )
-    after_issue_bytes = pool.path.read_bytes()
+    after_issue_doc = json.dumps(read_document(pool.path), sort_keys=True)
     for bad_sender, bad_chat in [
         ("s" * 129, "oc-valid"),
         ("", "oc-valid"),
@@ -1265,7 +1266,7 @@ def test_store_writers_validate_owner_and_claim_fields_before_saving(
                 chat_id=bad_chat,
                 environ={},
             )
-        assert pool.path.read_bytes() == after_issue_bytes
+        assert json.dumps(read_document(pool.path), sort_keys=True) == after_issue_doc
         assert pool.snapshot({}).get(bot_id) is not None
 
     # The valid code was not consumed by the rejected claim_code calls.
@@ -2261,34 +2262,32 @@ def test_transport_revision_rejects_invalid_persisted_values(
     from claude_hub.services.bot_pool.common import FeishuBotPoolStateError
 
     path = tmp_path / "secrets" / "feishu_bot_pool.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "version": _STATE_VERSION,
-                "pool_revision": 1,
-                "bots": {
-                    "bot-1": {
-                        "bot_id": "bot-1",
-                        "name": "One",
-                        "app_id": "app-1",
-                        "mode": BOT_MODE_SINGLE,
-                        "credentials": {"app_secret": "secret-1"},
-                        "revision": 5,
-                        "generation": 1,
-                        "transport_revision": bad_transport_rev,
-                        "enabled": True,
-                        "created_at": 1_700_000_000.0,
-                        "updated_at": 1_700_000_000.0,
-                        "pending": {},
-                        "claims": {},
-                        "bindings": [],
-                        "revoked_at": None,
-                    }
-                },
-                "rate_limits": {},
-            }
-        )
+    write_document(
+        path,
+        {
+            "version": _STATE_VERSION,
+            "pool_revision": 1,
+            "bots": {
+                "bot-1": {
+                    "bot_id": "bot-1",
+                    "name": "One",
+                    "app_id": "app-1",
+                    "mode": BOT_MODE_SINGLE,
+                    "credentials": {"app_secret": "secret-1"},
+                    "revision": 5,
+                    "generation": 1,
+                    "transport_revision": bad_transport_rev,
+                    "enabled": True,
+                    "created_at": 1_700_000_000.0,
+                    "updated_at": 1_700_000_000.0,
+                    "pending": {},
+                    "claims": {},
+                    "bindings": [],
+                    "revoked_at": None,
+                }
+            },
+            "rate_limits": {},
+        },
     )
     store = FeishuBotPoolStore(path=path, legacy_path=tmp_path / "secrets" / "feishu_bot.json")
     with pytest.raises(FeishuBotPoolStateError, match="bot.transport_revision"):
@@ -2304,42 +2303,44 @@ def test_transport_revision_missing_baseline_and_authority_progression(tmp_path:
     to its current revision, and subsequent mutations advance transport_revision
     only on credential/callback/generation/enable/mode changes."""
     path = tmp_path / "secrets" / "feishu_bot_pool.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "version": 3,
-                "pool_revision": 1,
-                "bots": {
-                    "bot-leg": {
-                        "bot_id": "bot-leg",
-                        "name": "Legacy",
-                        "app_id": "app-leg",
-                        "credentials": {"app_secret": "secret-leg"},
-                        "revision": 5,
-                        "generation": 1,
-                        "enabled": True,
-                        "created_at": 1_700_000_000.0,
-                        "updated_at": 1_700_000_000.0,
-                        "pending": {},
-                        "claims": {},
-                        "binding": None,
-                        "revoked_at": None,
-                    }
-                },
-                "rate_limits": {},
-            }
-        )
+    write_document(
+        path,
+        {
+            "version": 3,
+            "pool_revision": 1,
+            "bots": {
+                "bot-leg": {
+                    "bot_id": "bot-leg",
+                    "name": "Legacy",
+                    "app_id": "app-leg",
+                    "credentials": {"app_secret": "secret-leg"},
+                    "revision": 5,
+                    "generation": 1,
+                    "enabled": True,
+                    "created_at": 1_700_000_000.0,
+                    "updated_at": 1_700_000_000.0,
+                    "pending": {},
+                    "claims": {},
+                    "binding": None,
+                    "revoked_at": None,
+                }
+            },
+            "rate_limits": {},
+        },
     )
     store = FeishuBotPoolStore(path=path, legacy_path=tmp_path / "secrets" / "feishu_bot.json")
     assert store.transport_revision("bot-leg", {}) == 5
     assert store.effective("bot-leg", {}).transport_revision == 5
     assert store.snapshot({}).get("bot-leg").transport_revision == 5  # type: ignore[union-attr]
 
-    # Rename advances revision (5 -> 6), keeps transport_revision at 5.
+    # Rename advances revision (5 -> 6), keeps transport_revision at 5, and persists both via write_document.
     store.update_bot("bot-leg", expected_revision=5, name="Renamed", environ={})
     eff = store.effective("bot-leg", {})
     assert (eff.revision, eff.transport_revision) == (6, 5)
+    persisted = read_document(path)
+    assert isinstance(persisted, dict)
+    assert persisted["bots"]["bot-leg"]["revision"] == 6
+    assert persisted["bots"]["bot-leg"]["transport_revision"] == 5
 
     # Mode switch advances both revision and transport_revision (6 -> 7).
     store.update_bot("bot-leg", expected_revision=6, mode=BOT_MODE_PER_CHANNEL, environ={})
