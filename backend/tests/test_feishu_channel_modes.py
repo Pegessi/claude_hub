@@ -1341,9 +1341,11 @@ def test_per_channel_sibling_provisioning_and_mutations_keep_inflight_answer_ali
         assert env_api.wire.reply_texts() == ["reply-for-bob"]
 
         # Exercise sibling group bind, pairing issue/claim/mismatch/activate,
-        # sibling release/drop, and Bot rename while Alice is still in flight.
+        # sibling release/drop, and Bot rename while Alice is still in flight,
+        # verifying that every mutation advances revision for CAS.
         entry = env_api.pool.snapshot({}).get(bot_id)
         assert entry is not None
+        rev_before_group = entry.revision
         group_binding = env_api.pool.bind_group(
             bot_id,
             owner=LOCAL,
@@ -1351,47 +1353,91 @@ def test_per_channel_sibling_provisioning_and_mutations_keep_inflight_answer_ali
             workspace_id=None,
             chat_id="oc-sib-group",
             chat_name="Sibling Group",
-            expected_revision=entry.revision,
+            expected_revision=rev_before_group,
             environ={},
         )
-        code, _exp, rev = env_api.pool.issue_code(
+        rev_after_group = env_api.pool.effective(bot_id, {}).revision
+        assert rev_after_group == rev_before_group + 1
+
+        # Stale DELETE /pairing with pre-group revision must fail CAS with 409
+        # and leave the newly bound group channel intact.
+        stale_delete = env_api.client.request(
+            "DELETE",
+            f"/api/feishu/bot/bots/{bot_id}/pairing",
+            json={"expected_revision": rev_before_group},
+        )
+        assert stale_delete.status_code == 409
+        assert stale_delete.json()["detail"] == "bot_revision_conflict"
+        assert len(env_api.pool.snapshot({}).get(bot_id).bindings) == 3  # type: ignore[union-attr]
+
+        code, _exp, rev_after_issue = env_api.pool.issue_code(
             bot_id,
             owner=LOCAL,
             tab_id="tab-carol",
             workspace_id=None,
-            expected_revision=entry.revision,
+            expected_revision=rev_after_group,
             environ={},
         )
+        assert rev_after_issue == rev_after_group + 1
         claim, word = env_api.pool.claim_code(
             bot_id, code=code, sender_open_id="ou-carol", chat_id="oc-carol-dm", environ={}
         )
+        rev_after_claim = env_api.pool.effective(bot_id, {}).revision
+        assert rev_after_claim == rev_after_issue + 1
         with pytest.raises(FeishuPairingMismatch):
             env_api.pool.activate_claim(
                 bot_id,
                 pairing_id=claim.pairing_id,
                 confirm_word="WRONG9",
                 actor=LOCAL,
-                expected_revision=rev,
+                expected_revision=rev_after_claim,
                 environ={},
             )
+        rev_after_mismatch = env_api.pool.effective(bot_id, {}).revision
+        assert rev_after_mismatch == rev_after_claim + 1
         carol_binding = env_api.pool.activate_claim(
             bot_id,
             pairing_id=claim.pairing_id,
             confirm_word=word,
             actor=LOCAL,
-            expected_revision=rev,
+            expected_revision=rev_after_mismatch,
             environ={},
         )
+        rev_after_activate = env_api.pool.effective(bot_id, {}).revision
+        assert rev_after_activate == rev_after_mismatch + 1
         env_api.pool.release_binding(
             bot_id,
-            expected_revision=rev,
+            expected_revision=rev_after_activate,
             pairing_id=group_binding.pairing_id,
             environ={},
         )
+        rev_after_release = env_api.pool.effective(bot_id, {}).revision
+        assert rev_after_release == rev_after_activate + 1
         assert env_api.pool.drop_binding(bot_id, carol_binding.pairing_id) is True
-        env_api.pool.update_bot(
-            bot_id, expected_revision=rev, name="Renamed During Turn", environ={}
+        rev_after_drop = env_api.pool.effective(bot_id, {}).revision
+        assert rev_after_drop == rev_after_release + 1
+
+        # HTTP PATCH rename advances revision and rejects a second PATCH with the stale revision.
+        patch_ok = env_api.client.patch(
+            f"/api/feishu/bot/bots/{bot_id}",
+            json={"name": "Alice Edit", "expected_revision": rev_after_drop},
         )
+        assert patch_ok.status_code == 200
+        patch_stale = env_api.client.patch(
+            f"/api/feishu/bot/bots/{bot_id}",
+            json={"name": "Bob Stale Edit", "expected_revision": rev_after_drop},
+        )
+        assert patch_stale.status_code == 409
+        assert patch_stale.json()["detail"] == "bot_revision_conflict"
+        assert env_api.pool.snapshot({}).get(bot_id).name == "Alice Edit"  # type: ignore[union-attr]
+
+        # Stale PUT /secrets with pre-rename revision must also fail CAS with 409.
+        rotate_stale = env_api.client.put(
+            f"/api/feishu/bot/bots/{bot_id}/secrets",
+            json={"app_secret": "stale-rotated-secret", "expected_revision": rev_after_drop},
+        )
+        assert rotate_stale.status_code == 409
+        assert rotate_stale.json()["detail"] == "bot_revision_conflict"
 
         # Now release Alice's turn: her answer must still be delivered to Feishu.
         release_alice.set()
@@ -1406,6 +1452,163 @@ def test_per_channel_sibling_provisioning_and_mutations_keep_inflight_answer_ali
         # Replaying Alice's event is a duplicate no-op because her turn completed.
         await bot_api._handle_sdk_event(bot_id, alice_event)
         assert len(env_api.wire.reply_texts()) == 2
+
+    asyncio.run(scenario())
+
+
+def test_delivery_fence_refuses_rebound_channel_and_rotated_credentials(
+    env_api, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """1. Removing Alice's binding (while Bob remains) and rebinding Alice's
+    same chat/sender to a new tab fences both a completing and a failing
+    in-flight turn on Alice's old binding (zero outbound replies).
+    2. Rotating the Bot's credentials fences an in-flight turn's outbound reply."""
+
+    async def scenario() -> None:
+        bot_id = env_api.pool.create_bot(
+            name="Fence Bot",
+            config=_config("app-1"),
+            feishu_name="Test Bot",
+            feishu_open_id="ou-current-bot",
+            environ={},
+        )
+        env_api.pool.update_bot(bot_id, expected_revision=0, mode=BOT_MODE_PER_CHANNEL, environ={})
+        # Bind Bob so releasing Alice does not advance Bot generation.
+        env_api.pool.bind_p2p(
+            bot_id,
+            owner=LOCAL,
+            tab_id="tab-bob-stay",
+            workspace_id=None,
+            sender_open_id="ou_bob_stay",
+            chat_id="oc-bob-stay",
+            created_at=clock.value,
+            environ={},
+        )
+
+        for index, should_fail in enumerate((False, True), start=1):
+            admitted = asyncio.Event()
+            release_turn = asyncio.Event()
+            tab_name = f"tab-alice-old-{index}"
+            alice_binding = env_api.pool.bind_p2p(
+                bot_id,
+                owner=LOCAL,
+                tab_id=tab_name,
+                workspace_id=None,
+                sender_open_id="ou_alice_rebind",
+                chat_id="oc-alice-rebind",
+                created_at=clock.value,
+                environ={},
+            )
+
+            async def fake_dispatch(
+                _tab_id: str,
+                _text: str,
+                _turn_id: str,
+                *,
+                admission_guard: Any,
+                fail: bool = should_fail,
+                admitted_ev: asyncio.Event = admitted,
+                release_ev: asyncio.Event = release_turn,
+                **_kwargs: Any,
+            ) -> str:
+                async with admission_guard():
+                    pass
+                admitted_ev.set()
+                await release_ev.wait()
+                if fail:
+                    raise RuntimeError("boom after rebind")
+                return "stale-reply-after-rebind"
+
+            monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", fake_dispatch)
+            event = _sdk_dm(
+                "app-1",
+                f"alice turn {index}",
+                clock.value,
+                message_id=f"om-alice-rebind-{index}",
+                chat_id="oc-alice-rebind",
+                sender_open_id="ou_alice_rebind",
+            )
+            task = asyncio.create_task(bot_api._handle_sdk_event(bot_id, event))
+            await asyncio.wait_for(admitted.wait(), timeout=2.0)
+
+            # Unbind Alice (Bob stays, so generation is unchanged) and rebind the
+            # same chat/sender to a new tab.
+            rev = env_api.pool.effective(bot_id, {}).revision
+            env_api.pool.release_binding(
+                bot_id,
+                expected_revision=rev,
+                pairing_id=alice_binding.pairing_id,
+                environ={},
+            )
+            rebound = env_api.pool.bind_p2p(
+                bot_id,
+                owner=LOCAL,
+                tab_id=f"tab-alice-new-{index}",
+                workspace_id=None,
+                sender_open_id="ou_alice_rebind",
+                chat_id="oc-alice-rebind",
+                created_at=clock.value,
+                environ={},
+            )
+            assert rebound.pairing_id != alice_binding.pairing_id
+
+            release_turn.set()
+            await asyncio.wait_for(task, timeout=2.0)
+            assert env_api.wire.reply_texts() == []
+
+            # Clean up the rebound Alice channel before the next iteration.
+            rev = env_api.pool.effective(bot_id, {}).revision
+            env_api.pool.release_binding(
+                bot_id,
+                expected_revision=rev,
+                pairing_id=rebound.pairing_id,
+                environ={},
+            )
+
+        # Now verify credential rotation fences an in-flight turn on Bob's channel.
+        bob_admitted = asyncio.Event()
+        release_bob = asyncio.Event()
+
+        async def bob_dispatch(
+            _tab_id: str,
+            _text: str,
+            _turn_id: str,
+            *,
+            admission_guard: Any,
+            **_kwargs: Any,
+        ) -> str:
+            async with admission_guard():
+                pass
+            bob_admitted.set()
+            await release_bob.wait()
+            return "bob-reply-after-rotation"
+
+        monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", bob_dispatch)
+        old_effective = env_api.pool.effective(bot_id, {})
+        bob_task = asyncio.create_task(
+            bot_api._handle_sdk_event(
+                bot_id,
+                _sdk_dm(
+                    "app-1",
+                    "bob before rotation",
+                    clock.value,
+                    message_id="om-bob-rotate",
+                    chat_id="oc-bob-stay",
+                    sender_open_id="ou_bob_stay",
+                ),
+            )
+        )
+        await asyncio.wait_for(bob_admitted.wait(), timeout=2.0)
+        env_api.pool.rotate_secrets(
+            bot_id,
+            app_secret="rotated-secret-value",
+            expected_revision=old_effective.revision,
+            environ={},
+        )
+        assert not env_api.pool.is_current_for_delivery(old_effective, {})
+        release_bob.set()
+        await asyncio.wait_for(bob_task, timeout=2.0)
+        assert env_api.wire.reply_texts() == []
 
     asyncio.run(scenario())
 
@@ -1553,5 +1756,42 @@ def test_card_actions_and_dot_execution_resolve_non_first_channel_binding(
         assert bob_question.mirror.state == "sent"
         _, resolved_binding = card_actions.current_binding(bob_question)
         assert resolved_binding.pairing_id == bob_binding.pairing_id
+
+        # Sibling channel provisioning advances revision, but Bob's open card stays valid.
+        store.bind_p2p(
+            bot_id,
+            owner=LOCAL,
+            tab_id="tab-carol",
+            workspace_id=None,
+            sender_open_id="ou-carol",
+            chat_id="oc-carol-dm",
+            created_at=300.0,
+            environ={},
+        )
+        _, resolved_after_sibling = card_actions.current_binding(bob_question)
+        assert resolved_after_sibling.pairing_id == bob_binding.pairing_id
+
+        # Unbinding and rebinding Bob's channel fences Bob's old card.
+        from claude_hub.services.chat_message_inbox import InboxError
+
+        rev = store.effective(bot_id, {}).revision
+        store.release_binding(
+            bot_id,
+            expected_revision=rev,
+            pairing_id=bob_binding.pairing_id,
+            environ={},
+        )
+        store.bind_p2p(
+            bot_id,
+            owner=LOCAL,
+            tab_id="tab-bob",
+            workspace_id=None,
+            sender_open_id="ou-bob",
+            chat_id="oc-bob-dm",
+            created_at=400.0,
+            environ={},
+        )
+        with pytest.raises(InboxError, match="Question binding changed"):
+            card_actions.current_binding(bob_question)
 
     asyncio.run(run_mirror_checks())

@@ -645,7 +645,9 @@ async def push_to_tab(
         await client.get_tenant_token()
         async with _gate(effective.bot_id):
             for index, payload in enumerate(payloads):
-                if not _pool.is_current(effective) or not _binding_still_routes(effective, binding):
+                if not _pool.is_current_for_delivery(effective) or not _binding_still_routes(
+                    effective, binding
+                ):
                     return False
                 try:
                     await asyncio.wait_for(
@@ -732,7 +734,7 @@ async def _handle_pairing_code(
 ) -> bool:
     try:
         async with _gate(bot_id):
-            if not _pool.is_current(effective):
+            if not _pool.is_current_for_delivery(effective):
                 return False
             claim, word = _pool.claim_code(
                 bot_id,
@@ -793,7 +795,7 @@ async def _provision_per_channel_binding(
     """Auto-provision a new Chat tab and p2p binding for a ``per_channel`` Bot."""
 
     async with _gate(bot_id):
-        if not _pool.is_current(effective):
+        if not _pool.is_current_for_delivery(effective):
             return None, effective, None, None
         existing = _route_binding(bot_id, event)
         if existing is not None:
@@ -883,7 +885,7 @@ async def _handle_message_event(
     item: _TabDispatchItem | None = None
     try:
         effective = await _refresh_missing_profile(effective, client)
-        if not _pool.is_current(effective):
+        if not _pool.is_current_for_delivery(effective):
             return
         code = _binding_code(event.text) if event.chat_type == "p2p" else None
         if code is not None:

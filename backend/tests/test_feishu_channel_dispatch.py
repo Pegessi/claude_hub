@@ -464,6 +464,38 @@ async def test_carryover_survives_unsubmitted_batch_and_reaches_later_arrival(
     assert bot_api._tab_dispatch_queues == {}
 
 
+async def test_cancelled_leader_empty_batch_retires_cleanly_and_preserves_carryover(
+    dispatch: DispatchHarness,
+) -> None:
+    """When a batch leader is cancelled before collection so _collect_tab_dispatch_batch
+    returns no candidates, _dispatch_tab_batch must return 'retired' without
+    UnboundLocalError and leave any existing carryover intact."""
+
+    dispatch.blocked.add("a1")
+    first = dispatch.reserve("a1")
+    queue = bot_api._tab_dispatch_queues["tab"]
+    running_a1 = asyncio.create_task(dispatch.run(first, queue))
+    await dispatch.wait_started("a1")
+    second = dispatch.reserve("a2")
+    assert await running_a1 == "superseded"
+    assert dict(queue.interrupted_text) == {first.channel_key: "a1"}
+
+    # Cancel the promoted leader before _collect_tab_dispatch_batch claims it.
+    second.cancelled = True
+    queue.changed.set()
+    assert await dispatch.run(second, queue) == "retired"
+    assert [call["metadata"]["feishu_message_ids"] for call in dispatch.submitted] == [["a1"]]
+    assert dict(queue.interrupted_text) == {first.channel_key: "a1"}
+    assert bot_api._tab_dispatch_queues.get("tab") is queue
+
+    third = dispatch.reserve("a3")
+    assert await dispatch.run(third, queue) == "completed"
+    assert "[上一条]\na1" in dispatch.submitted[1]["visible"]
+    assert "[新消息 1]\na3" in dispatch.submitted[1]["visible"]
+    assert not queue.interrupted_text
+    assert bot_api._tab_dispatch_queues == {}
+
+
 @pytest.mark.parametrize("running", [False, True], ids=["coalescing", "active"])
 async def test_legacy_dm_binding_keeps_two_root_group_events_separate(dispatch, running):
     legacy = replace(dispatch.binding, chat_type="p2p", chat_id="dm", chat_name="Private DM")

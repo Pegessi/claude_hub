@@ -79,7 +79,6 @@ def current_binding(q: ChatQuestion) -> tuple[Any, Any]:
             or (
                 effective.app_id,
                 effective.generation,
-                effective.revision,
                 effective.expected_tenant_key,
                 binding.pairing_id,
                 binding.chat_id,
@@ -89,7 +88,6 @@ def current_binding(q: ChatQuestion) -> tuple[Any, Any]:
             != (
                 mirror.app_id,
                 mirror.generation,
-                mirror.revision,
                 mirror.tenant_key,
                 mirror.pairing_id,
                 mirror.chat_id,
