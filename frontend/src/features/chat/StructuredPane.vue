@@ -127,7 +127,7 @@
 
 <script setup lang="ts">
 import { provide } from 'vue'
-import { chatIdentityKey, chatGoalKey, chatTimelineKey, chatActionsKey, chatDeliveryKey, chatQueueKey, chatAttachmentsKey, chatImagesKey, chatSettingsKey, chatComposerKey } from './owners'
+import { chatIdentityKey, chatGoalKey, chatTimelineKey, chatActionsKey, chatDeliveryKey, chatQueueKey, chatAttachmentsKey, chatImagesKey, chatSettingsKey, chatComposerKey, chatReviewKey } from './owners'
 import ChatTimeline from './components/ChatTimeline.vue'
 import ChatNativeSubagentOverlay from './components/ChatNativeSubagentOverlay.vue'
 import ChatMessageInbox from './components/ChatMessageInbox.vue'
@@ -152,6 +152,7 @@ import { useChatTimeline } from '@/features/chat/controllers/useChatTimeline'
 import { useChatActions } from '@/features/chat/controllers/useChatActions'
 import { useChatQueue } from '@/features/chat/controllers/useChatQueue'
 import { useChatImages } from '@/features/chat/controllers/useChatImages'
+import { useChatReview } from '@/features/chat/review/useChatReview'
 import { useNativeSubagentDock } from '@/features/chat/controllers/nativeSubagentDock'
 import { nativeSubagentRows, type NativeSubagentRowMemo } from '@/features/chat/presentation/nativeSubagentRows'
 import type { TimelineTurn } from '@/features/chat/timeline/types'
@@ -171,7 +172,13 @@ const feishuBotPoolStore = useFeishuBotPoolStore()
 const currentTab = computed(() =>
   terminalStore.tabs.find(t => t.id === props.tabId) ?? null,
 )
-// TerminalPane owns the pane's single sub-agent poller and shows it in the pane
+// What the Hub last said about this tab's provider. The projection (and its
+// one-minute freshness window) belongs to the footer, which already ticks once a
+// second: ageing a sample out on a clock of its own would need a timer here and
+// would still be wrong whenever the pane is hidden.
+const runtimeSample = computed(() =>
+  terminalStore.agentStatuses.find(s => s.tab_id === props.tabId) ?? null,
+)// TerminalPane owns the pane's single sub-agent poller and shows it in the pane
 // chrome; the Chat body only contributes inline per-turn links.
 const capabilityConfiguration = computed(() => streamCapabilityConfiguration(currentTab.value))
 const {
@@ -359,6 +366,12 @@ const images = useChatImages({
   openPreview: preview.open,
   get streamBasePath() { return streamBasePath },
 })
+// Review comments are pane-local draft input: they belong to this Chat tab and
+// reach the agent through the same queue as a typed message.
+const review = useChatReview({
+  tabKey: props.tabId || props.managedSessionId || '',
+  get draftQueue() { return queue.draftQueue },
+})
 // The pane owns KeepAlive ordering; leaf components only borrow owner refs.
 onMounted(() => {
   composer.handleViewportResize()
@@ -430,7 +443,7 @@ const { goal, goalError, isGoalMutating, hydrateGoal, pauseGoal, resumeGoal, com
 const { isFollowingLatest, timelineLoadingMessage, jumpToLatest } = timeline
 const { isCancelling, stopArmed, cancelActiveTurn } = delivery
 const { isDragOver, handleDragOver, handleDragLeave, handleDrop } = attachmentsController
-provide(chatIdentityKey, { connectionState, capabilities, props, isManagedChat, managedIdentityMissing, markdownImageScope, supportsEditResend, isHistoryVisible, currentTab, feishuBotPoolStore, appStore, isPaneActivated })
+provide(chatIdentityKey, { connectionState, capabilities, props, isManagedChat, managedIdentityMissing, markdownImageScope, supportsEditResend, isHistoryVisible, currentTab, runtimeSample, feishuBotPoolStore, appStore, isPaneActivated })
 provide(chatGoalKey, goalController)
 provide(chatTimelineKey, timeline)
 provide(chatActionsKey, actions)
@@ -440,6 +453,7 @@ provide(chatAttachmentsKey, attachmentsController)
 provide(chatImagesKey, images)
 provide(chatSettingsKey, settings)
 provide(chatComposerKey, composer)
+provide(chatReviewKey, review)
 
 // Native sub-agent rows are a projection of this pane's timeline, and the
 // reducer bumps a turn's revision on every visible child mutation, so the memo

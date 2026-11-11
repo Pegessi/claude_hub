@@ -43,8 +43,8 @@ const tabActionsMenu = readFileSync(
   new URL('../src/features/terminal/components/TabActionsMenu.vue', import.meta.url),
   'utf8',
 )
-const agentStatusPanel = readFileSync(
-  new URL('../src/features/agent-status/AgentStatusFloatingPanel.vue', import.meta.url),
+const agentInboxPanel = readFileSync(
+  new URL('../src/features/agent-status/AgentInboxPanel.vue', import.meta.url),
   'utf8',
 )
 const useCwdHistory = readFileSync(
@@ -122,13 +122,24 @@ test('Maso sidebar text puts workspaces first and dims unselected sessions', () 
   assert.match(chatSidebarRow, /\n\.chat-sidebar__item\.active \.chat-sidebar__item-name \{[^}]*font-weight: 600;/)
 })
 
-test('Terminal Status follows the Chat workspace order before terminal-only groups', () => {
-  assert.ok(agentStatusPanel.includes(
-    'chatTabs.value.filter(tab => !pinnedChatIds.value.has(tab.id))',
-  ))
-  assert.ok(agentStatusPanel.includes(
-    'groupChatsByCwd(rows.value.map(row => row.tab), chatCwdOrder)',
-  ))
+test('the terminal status list is one Needs-you inbox, not two count pills', () => {
+  // The two permanent "Status N" / "Agents N" pills are gone: they counted
+  // every tab, so the number was never zero and never meant anything.
+  assert.doesNotMatch(tabBar, /AgentStatusFloatingPanel/)
+  assert.match(tabBar, /<AgentInboxPanel \/>/)
+  // One entry, and its badge counts only rows that need the user.
+  // The entry names the demand, not a mailbox: "Inbox" is the composer's
+  // message tray, a different surface entirely.
+  assert.match(agentInboxPanel, /class="inbox-trigger-label"[\s\S]{0,80}?Needs you/, 'the entry is labelled Needs you')
+  // On a phone the label is dropped for space; the hidden label must not take
+  // the accessible name with it.
+  assert.match(agentInboxPanel, /v-if="!isMobile"[\s\S]{0,80}?inbox-trigger-label/, 'the label is wide-only')
+  assert.match(agentInboxPanel, /:aria-label="triggerAriaLabel"/, 'the compact entry keeps a spoken name')
+  assert.match(agentInboxPanel, /class="inbox-trigger-tip"/, 'and a hover tip on a narrow mouse-capable window')
+  assert.match(agentInboxPanel, /v-if="needsCount > 0"/)
+  assert.match(agentInboxPanel, /needsYouCount\(/)
+  // Manual versus managed is a filter inside the panel, not two triggers.
+  assert.equal((agentInboxPanel.match(/class="inbox-trigger"/g) || []).length, 1)
 })
 
 test('preview Pin API can be isolated without desynchronizing live Hub APIs', () => {

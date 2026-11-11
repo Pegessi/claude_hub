@@ -104,7 +104,7 @@
       data-testid="history-details-toggle"
       :class="{ 'process-fold--open': part.expanded, 'process-fold--error': part.detailStatus === 'error' }"
       :aria-expanded="part.expanded"
-      aria-label="Execution details"
+      :aria-label="part.expanded ? 'Hide activity details' : 'Show activity details'"
       @click="toggleTurnProcess(turn)"
     >
       <span

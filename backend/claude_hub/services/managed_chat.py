@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import AbstractSet, Any, Callable, Literal, Optional, Sequence
 
@@ -24,6 +25,7 @@ from ..models import (
     WorkspaceAttachment,
     WorkspaceAttachmentCreate,
 )
+from .agent_stream.activity_labels import IDLE_DETAIL, WORKING_ACTIVITY
 from .agent_stream.attachments import (
     AgentStreamAttachmentStore,
     preview_within_cache_bounds,
@@ -32,7 +34,11 @@ from .agent_stream.base import NativeInputNotSubmittedError
 from .agent_stream.fork_seed import seed_sidecar_path
 from .agent_stream.native import _detect_image_mime
 from .agent_stream.store import AgentStreamStore
-from .agent_stream.tailer import NativeRuntimeSnapshot, TailerManager
+from .agent_stream.tailer import (
+    NativeRuntimeSnapshot,
+    TailerManager,
+    turn_activity_extras,
+)
 from .local_storage import document_exists
 from .ttyd_manager import ttyd_manager
 
@@ -376,22 +382,39 @@ def _runtime_snapshot(session: ManagedSession) -> Optional[NativeRuntimeSnapshot
     if tailer is None:
         return None
     transport = tailer.native_transport
+    pending_question = tailer.has_pending_question()
     if tailer.hard_failed or tailer.native_error is not None:
         return NativeRuntimeSnapshot(
             AgentRuntimeStatus.OFFLINE,
             tailer.native_error or tailer.last_error or "native provider unavailable",
+            pending_question=pending_question,
         )
     if transport is None:
         return None
     if transport.last_error is not None:
-        return NativeRuntimeSnapshot(AgentRuntimeStatus.OFFLINE, transport.last_error)
-    if tailer.native_terminal_status is not None:
-        return tailer.native_terminal_status
-    if transport.turn_in_flight:
         return NativeRuntimeSnapshot(
-            AgentRuntimeStatus.WORKING, "native provider turn is in flight"
+            AgentRuntimeStatus.OFFLINE,
+            transport.last_error,
+            pending_question=pending_question,
         )
-    return NativeRuntimeSnapshot(AgentRuntimeStatus.IDLE, "native provider is ready")
+    if tailer.native_terminal_status is not None:
+        # The captured terminal snapshot predates any later question card.
+        return replace(tailer.native_terminal_status, pending_question=pending_question)
+    if transport.turn_in_flight:
+        # Same activity contract as the tab status payload: what is running and
+        # since when, so a viewer can show elapsed time from one read.
+        extras = turn_activity_extras(tailer)
+        return NativeRuntimeSnapshot(
+            AgentRuntimeStatus.WORKING,
+            WORKING_ACTIVITY,
+            pending_question=pending_question,
+            **extras,
+        )
+    return NativeRuntimeSnapshot(
+        AgentRuntimeStatus.IDLE,
+        IDLE_DETAIL,
+        pending_question=pending_question,
+    )
 
 
 def _has_running_turn(session: ManagedSession, attempts: dict[str, Any]) -> bool:

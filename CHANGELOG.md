@@ -110,6 +110,465 @@
   sibling channel's write cannot suppress another channel's answer and a
   credential epoch — even an A→B→A round-trip — cannot deliver an old answer.
 
+### polish(ui): the needs-you panel does not repeat its own name, and the code palette is legible in both themes
+
+- The panel title, its phone sheet and the entry all say `Needs you`, so the
+  first group said it a second time. Groups now name the state of the rows
+  inside them: `Waiting on you` / `Working` / `Recently done`.
+- Four light-theme code tokens sat below 4.5:1 against the code block's own
+  background (`comment`/`quote` at 4.02, `function` at 4.46, `keyword` at 4.72).
+  They are darkened to 5.21–5.66:1, and `codeTokenContrast.test.mjs` now fails
+  the suite if any token in either theme drops below 4.5:1 or if the two themes
+  stop naming the same tokens.
+
+### fix(ui): review round 4
+
+- A gap repair now re-reads a range that is already loaded: the detail it held
+  was fetched before the gap, so it cannot contain what arrived meanwhile. Join
+  and repair keep separate budgets, and a read already in flight is not asked for
+  twice.
+- Counts no longer stall or double-count: per-turn high-water marks replace a
+  global cursor, and the tally lives in a `shallowRef` so the footer actually sees
+  it change.
+- The tab-status sample is projected by the footer with its own one-second clock,
+  so a stalled poll ages out instead of being presented as current forever.
+- A block that grows wider after the reader reached its end shows the overflow
+  fade again, and the fade blends into the code block's own surface.
+- A language label reads the token that was named (`vue` → `Vue`, `svg` → `SVG`,
+  `xml` → `XML`), and a runtime activity keeps its paths and flags: only its
+  leading character is lowered.
+- A diff over the size ceiling names the language without subscribing to the
+  highlighter or loading its chunk.
+
+### fix(ui): review round 3
+
+- Counting a turn's opening marker made it look productive: `turn_started` is
+  punctuation, not output, so a turn with nothing on screen reported "1 event
+  so far" and the footer stopped saying it was waiting for a first response. Only
+  content events are counted now.
+- The footer's count is `max(descriptor, what this pane watched)`: a hydration
+  descriptor counts a whole turn, and the pane's own tally keeps growing for a
+  turn that began here.
+- Sequences already counted are skipped, so a replay or a history-detail insertion
+  cannot count the same event twice.
+- Keeping a loaded detail across a grown descriptor was reverted: hydration pages
+  are the only pages that carry descriptors and they strip process events, so
+  preserving `loaded` left the suffix's steps fetchable by nobody.
+- The backfill is asked again when the newest turn's own read state changes —
+  descriptor arrived, retired, grew, or the turn completed — not only when the
+  number of turns or descriptors changes.
+
+### fix(ui): review round 2 follow-ups
+
+- `useAgentStream` now keeps a loaded detail's status when a growing descriptor
+  only appended to the range it covers (a rewritten range is still retired). A
+  streaming turn no longer collapses back to its fold summary on the next batch.
+- The mid-flight baseline is refreshed on activation, not fixed at construction,
+  so a turn that started while the tab was hidden is backfilled on return.
+- A backfill read is charged only once the range actually landed, and retried up
+  to three times when a growing descriptor retires it.
+- A turn that began in the open pane counts the events it watched arrive, so
+  `N events so far` grows there too: hydration is the only place the backend
+  describes history, and the long-poll's raw page carries no descriptor yet.
+
+### fix(ui): keep a choice card an approval boundary, and backfill a pane's join
+
+- Cross-model review round 2, `H-1`: cards were moved to the end of the turn
+  *before* `presentThinkingParts` grouped the parts, which made the card the last
+  part — so a live turn's trailing reasoning run flushed as `done` (a frozen
+  spinner), and two reasoning phases either side of a card merged into one
+  block. The reorder now runs over the grouped display parts.
+- Cross-model review round 2, `H-2`: "nothing reduced yet" was too strict a test
+  for "this pane joined mid-flight". A live turn almost always narrates once
+  after the mount, so the parts existed while everything from before the mount
+  did not — and the read never happened. A live turn that started before this
+  pane was created now owes one read, still never more than one.
+
+### feat(ui): put the needs-you entry before the phone's app menu
+
+- On a phone the ⋯ sheet sat to the left of the needs-you entry, so the
+  catch-all was the last thing in the bar. The order is now needs-you then ⋯:
+  the catch-all keeps the conventional far-right slot, and the entry that
+  changes without being looked for sits next to the code.
+
+### feat(ui): the needs-you entry becomes an icon on a phone
+
+- Every width now marks the entry with the same amber tray glyph: a bare dot
+  read as a status light rather than a control, and the two widths no longer
+  speak two visual languages.
+- At phone width the label is dropped for that glyph and the count badge — 55px
+  instead of 114px, which is a third of the top bar handed back to the tab
+  strip. The name survives as `aria-label` ("Needs you, 2 waiting") and as a
+  hover tip for a narrow window that does have a pointer.
+
+### feat(ui): language-aware code display
+
+- An edited-file diff card now highlights each row with the language of the file
+  it came from — the card a reader opens to see a Python change reads as
+  Python, with the `+`/`-` tint, sign column and line numbers intact. The header
+  carries a small language chip when the bundled highlighter has that grammar
+  and nothing at all for an unknown extension; rows are memoised per
+  (language, text), a diff over 400 rows stays plain text, and only escaped
+  text plus highlight.js spans is ever bound, so a tool argument cannot inject
+  markup.
+- A fenced code block's header now names the language a reader recognises
+  (`py` → `Python`, no info string → `Code`) instead of echoing the fence, and a
+  block whose lines overflow scrolls behind a themed right-edge fade that only
+  appears when it really overflows and withdraws at the scroll end — a long line
+  no longer looks like a short one that happens to stop.
+
+### feat(ui): name the top bar's Needs-you list after what it holds
+
+- The entry, its panel title and its mobile sheet say `Needs you` instead of
+  `Inbox`. The list holds sessions blocked on the user — the copy inside it
+  already said "Nothing needs you" — while `Inbox` names the composer's message
+  tray (`ChatMessageInbox`), a different surface with a different mailbox. One
+  word for two things was the confusion.
+
+### feat(ui): repair a turn whose stream dropped while it was live
+
+- A turn that was interrupted mid-stream now gets exactly one extra detail read
+  once it stops moving, so its parts include whatever the backend accepted
+  during the gap. Join-backfill and gap-repair are budgeted separately: each can
+  happen once per turn, and neither repeats — a descriptor keeps changing while
+  a turn streams, so an uncapped read would be a polling loop.
+
+### feat(ui): backfill the newest turn's detail on activation
+
+- A pane that joined a turn mid-flight never reduced that turn's earlier events,
+  so the turn rendered as an empty fold with a footer that had no step to name.
+  Activating the pane now reads the newest turn's detail once, which restores
+  its parts, and leaves the fold closed: the reader gets content, not an
+  expanded transcript. Turns the live stream is already reducing are left
+  alone, and one read per turn keeps a growing descriptor from being re-fetched
+  on every batch.
+
+### fix(ui): put the volume of work back on the live footer
+
+- A long working turn showed a stopwatch and nothing about how much had
+  happened. The turn's event count now rides on the counts line as
+  `N events so far` and grows with the stream, and a fold whose detail has not
+  been read inventories itself as `Activity · N events` instead of a bare
+  duration.
+- A turn with events but no reduced parts reads `Working`, not `Waiting for the
+  first response`: output behind an unopened fold is not a provider that has
+  said nothing.
+
+### feat(ui): the silent-start sentence reports what the tab is doing
+
+- The live footer no longer repeats the composer's model label. While nothing
+  has arrived it says what the Hub's own tab-status poll knows: the provider is
+  running (and what it is running, when it reports an activity), idle while the
+  turn is open, offline so nothing can arrive, or the event stream reconnecting
+  — each with the next step when there is one. A polled sample older than a
+  minute is discarded rather than presented as current, and `sampled_at` is
+  read as UTC so a non-UTC client cannot keep an eight-hour-old sample alive.
+
+### fix(ui): a choice card ends its turn instead of topping the answer
+
+- An agent usually asks before it explains, so arrival order put the question
+  card above the answer it belongs to. Cards now render last in every shape of
+  the turn — live, folded, expanded, and while its activity detail is still
+  unread — and a finished turn never hides them inside the fold: the answer is
+  the reasoning, the card is the thing to act on.
+- A folded header no longer counts "N approvals" for cards it leaves on screen.
+
+### fix(ui): centre the live footer's light and name who it is waiting on
+
+- The status light now sits on the label's centre line instead of its baseline
+  (it read as a few pixels low at 12.5px), and its pulse ring is tighter.
+- A turn that has not reported anything yet says who it is waiting on —
+  `Waiting for the first response · MASO · gemini-4-argon · High · 0:47` — and,
+  once the silence passes half a minute or the stream is not live, adds one
+  short sentence (provider still starting its session, or reconnecting), so a
+  bare clock in an empty pane no longer reads like a stall.
+
+### fix(ui): one live footer for every turn, and a quieter failure mark
+
+- A turn that has just been sent no longer shows a bare three-dot "Waiting for
+  response…" card with no clock: it gets the same footer as any live turn —
+  `Waiting for the first response` beside the stopwatch, pulsing while the
+  provider is still silent, with the counts line appearing as work arrives.
+- The counts line is no longer repainted red because one call failed: the
+  failure keeps its place in the line and takes the amber warning tone on its
+  own phrase, so `2 edits · 2 commands · 2 reads · 1 failed` reads as a turn that
+  mostly worked. The old placeholder card and its CSS are removed.
+
+### fix(ui): close the cross-model review's blocking and high findings
+
+A third review of the same batch, run on a different model, found a blocking
+defect plus two high ones that the previous two rounds missed. All are fixed.
+
+- The live work log no longer freezes on the first event of a streaming turn:
+  the projection reads the newest turn from the timeline array instead of
+  through a computed that returned the same in-place-mutated turn object, so a
+  long turn keeps updating its step and counts instead of showing
+  `Working · Thinking` forever. A streaming test and a harness case that appends
+  events after mount both fail if the old projection returns.
+- A `plan_first` Goal can no longer start work without approval: the pause is
+  owned by the Hub rather than trusted from the model, so a planning turn that
+  answers `continue`, and an objective edited mid-planning, both park (or re-plan)
+  instead of dispatching an implementation turn, and approval is refused when no
+  plan was parsed.
+- The inbox resolves each tab's event stream from where it actually lives, so
+  Workspace Chat agents in the `Agents` scope get their reply excerpt, reply
+  time, activity clock and unread state; the managed snapshot carries
+  `activity_since` like the tab one.
+- Smaller: review-link chips honour the executor's own label, approval option
+  note ids stay single valid tokens, `Ask aside` forks at the last completed
+  turn, diff taps open one editor and Shift ranges stay ordered and re-anchor
+  the note they edit, the review bar retires for a tall decision section, the
+  mobile inbox refreshes on open and keeps keyboard focus on the panel, and the
+  excerpt timestamp is UTC.
+
+### fix(chat): one tap opens one editor, and a widened range edits its own note
+
+- On a touch screen the gutter `+` button's click also bubbled to the row's tap
+  handler, so a tap whose target was the button's inner glyph started the
+  comment editor twice (re-focusing it and resetting the draft). The button now
+  stops propagation and the row handler ignores taps inside any nested control.
+- A Shift-click range now reports its span low-to-high: a removed row carries
+  only an original-file number and an added row only a new-file number, so an
+  earlier hunk that offsets the two sides could make the range read backwards
+  (`file.ts:45-42`).
+- A Shift-click that extends *over* an existing note edits that note (moved
+  onto the new range, replacing any note already on its first row) instead of
+  stacking a second overlapping comment; a first-row-only lookup missed every
+  note that was not the range's first row.
+
+### fix(inbox): every tab reads its own stream namespace; phone sheet opens focused
+
+- A Workspace Chat keeps its structured stream under its managed session, but
+  the inbox's reply excerpt and unread flag were reading the direct-Chat
+  namespace for every tab. Against a real backend that silently emptied the
+  whole Agents scope — no preview, no time, never unread, so it could never
+  enter "Needs you". The namespace is now derived per tab from the process,
+  and a live managed turn reports `activity_since` like the tab-status payload.
+- The phone sheet refreshes as soon as it opens instead of waiting up to five
+  seconds for the poll, and focus lands on the list container (not the Done
+  button), so the ↑/↓/Enter/Esc contract works as soon as the sheet appears.
+  A blocked row with no activity clock falls back to its reply time, and the
+  reply stamp is aware UTC like the rest of the API.
+
+### feat(ui): six-question UI upgrade batch — inbox, decision cards, evidence, diff comments, work log, plan-first
+
+One batch, six independently reviewed features, fanned out in parallel
+worktrees and merged through `feat/ui-upgrade-batch-20261109`. Design and the
+review's open items are recorded in
+`docs/working-logs/2026-11-09-ui-upgrade-batch.md`.
+
+- The top bar's always-on `Status N` / `Agents N` counts became one `Inbox`
+  control whose amber badge counts only what needs a human — a pending
+  question, a failed or offline turn, work parked on the user — grouped
+  Needs you / Working / Recently done with a workspace-aware All/Chats/Agents
+  filter, peek, inline reply, keyboard cursor and a phone sheet. The tab
+  status payload gained five optional fields (`pending_question`, `activity`,
+  `activity_since`, `last_reply_excerpt`, `last_reply_at`) and its internal
+  wording became "Responding" / "Ready" / "Last turn failed (reason)".
+- Approval cards now read as decisions: the question as the title, one
+  full-width row per option carrying the provider's tradeoff and a
+  "Recommended" marker, number-key answers, a multi-question stepper and a
+  collapsed "You chose: X · receipt". Claude's question normalizer stopped
+  dropping option descriptions, and the shared question-protocol guidance tells
+  agents to ask through the tool with 2–4 options instead of ending prose with
+  an open yes/no.
+- Workspace task detail opens with the outcome and the evidence (acceptance
+  criteria and their verdicts, validation, changed files, artifacts, risks,
+  review/CI chips) before the decision actions, with description and internal
+  bookkeeping after it and empty sections removed; the board sorts failures
+  first with a danger tint and collapses empty agent bands.
+- Diff cards gained a line-number gutter, one header per file, inline per-line
+  comments pinned under their row and a per-tab review tray that sends all
+  comments as one message through the existing composer queue.
+- A running turn shows the step it is on beside its stopwatch and counts the
+  work done so far including failures; waiting never reads as activity; finished
+  turns report `Activity · steps · failed · duration` instead of raw event
+  counts. "Ask aside" forks the Chat so a side question leaves the running turn
+  untouched.
+- A Goal can now plan first: an additive optional `plan_first` makes the first
+  turn plan scope and execution budget only and park on the existing
+  `needs_input` pause, with a plan card (budget block, Approve & start,
+  Revise) identified by the Goal snapshot rather than transcript text; callers
+  that omit the field keep the previous prompt byte for byte.
+
+### fix(ui): inbox keyboard, excerpt cost, reply time and phone sheet follow-ups
+
+- The panel's container keydown no longer swallows what its own controls do:
+  Enter on a filter segment, refresh, the Recently-done toggle, a row's expand
+  or the inline reply field keeps its native activation instead of jumping to
+  the cursor row (arrow keys stay inside a text field), and a reload never
+  re-opens the phone sheet by itself. A new `Needs-you inbox` mocked browser
+  scenario gates that, including the phone sheet, and it was shown to fail
+  when the old Enter behaviour is put back.
+- The reply excerpt no longer scans on the event loop and no longer runs for a
+  streaming turn (it would only be the previous answer): the stat and bounded
+  tail scan execute in a worker thread, and a run that ends before writing
+  text keeps the previous answer's text without borrowing its write time, so
+  a row cannot read "New reply · just now" for an old reply.
+
+### fix(chat): say when a saved review comment's diff line is gone
+
+- A review comment is anchored on the row it was written against, and a
+  warm-cache history reload renumbers a turn's part and tool keys. The tray now
+  checks the anchor against the live timeline when the entry is clicked: an
+  unreachable row marks the entry `Line no longer in this turn` (the note, file
+  and line stay readable and still go out with the review) instead of silently
+  doing nothing, and the mark clears as soon as the row resolves again.
+- The verdict is local to the current timeline: it is never persisted, a stored
+  comment without a row identity is dropped on load, and a fresh note on the
+  row resets it.
+
+### feat(chat): decisions arrive as cards, and agents ask through the question tool
+
+- A provider question now renders as a decision card: the question itself is
+  the title, every option is a full-width row with its tradeoff line under the
+  label, the provider's "(Recommended)" label suffix is peeled off into a
+  marker, and a multi-question card walks `Question 1 of 3` with Back/Next
+  instead of stacking every question at once. Options are 44px targets at
+  mobile/coarse-pointer widths.
+- The open decision in the conversation can be answered with the number keys
+  (1–9 while it is the latest pending card, and never while a field has focus).
+  Once answered it collapses to one quiet line — `You chose: X · receipt state`
+  — instead of a dead form, and the card's product strings (plus the receipt
+  and submit-error wording) are English.
+- Claude's `AskUserQuestion` option descriptions now survive normalization, so
+  the tradeoff line reaches the card (Codex and Cursor already carried them).
+- Dot and native Chat agents are told to put decisions on the card: 2–4
+  concrete options with a one-line tradeoff each, `(Recommended)` on the
+  suggestion, instead of ending a report with an open prose question.
+
+### feat(ui): needs-you Inbox replaces the permanent Status/Agents count pills
+
+- The top bar shows one **Inbox** entry whose amber badge counts only sessions
+  that actually need the user (a blocked provider question, an unread finished
+  turn, attention, or an agent that went offline); at zero it shows no number
+  at all, so a quiet Hub stops advertising "Status 36 / Agents 6". The panel
+  groups rows into **Needs you / Working / Recently done** (done stays collapsed
+  and drops out after 12 hours), keeps manual-versus-workspace as an
+  all/chats/agents filter, shows the newest reply as a two-line preview that
+  expands to the full text, and supports ↑/↓ move, Enter (open the session),
+  → (expand), Esc (close) plus a full-height sheet on phones.
+- `/api/tabs/status` gains additive `pending_question`, `activity`,
+  `activity_since`, `last_reply_excerpt` and `last_reply_at` (all optional, so
+  older producers and clients keep working) computed from state the tailer
+  already holds plus a cached bounded tail scan of the session stream; the
+  provider-jargon detail strings ("native provider turn is in flight",
+  "native provider is ready/completed") become "Responding"/"Ready", and the
+  running tool is named ("Running `pytest -q`"). Idle rows offer an inline
+  reply that posts the normal `/stream/send` body with a stable
+  `client_turn_id`, while a row blocked on a structured question links
+  "Answer in chat →" instead.
+
+### feat(chat): review comments on diff lines, sent as one message
+
+- Diff rows now carry the file they belong to and, when the hunk header
+  numbers them, their old/new line numbers: a quiet gutter plus one file
+  header row per file. Claude `old_string`/`new_string` edits name their file
+  and stay unnumbered, because the call states no line.
+- A `+` in the gutter (hover on desktop, the row itself on touch, Shift-click
+  for a range inside one file) opens a small inline editor and the note stays
+  pinned under its row. Per Chat tab, comments collect in a tray above the
+  composer ("N comments · Send to agent · Clear") where each entry jumps back
+  to its line, or is edited or removed; the list survives a pane remount
+  through sessionStorage until it is sent or cleared.
+- Send composes ONE message (`Review comments (N):` plus
+  `path:line — `code` — note` per item) and drops it into the existing
+  composer draft queue, so a busy turn queues it exactly like typed input and
+  the queue keeps owning delivery, retry identity and cancel.
+
+### feat(ui): live work log for running turns and human activity for finished ones
+
+- The footer of an in-flight turn now reads `Working · Reading 2 files · 21:16`
+  with a quiet second line of what it has done so far
+  (`12 edits · 4 commands · 1 failed · 3 sub-agents`), replacing the lone
+  `Working 21:15` that sat under an otherwise empty screen. Counts cover the
+  turn's own calls and its delegated child threads, plan-list rewrites are
+  excluded, and failures keep a count of their own so folding can never hide
+  them. A turn blocked on the user's answer or on a sub-agent drops the
+  "Working" word and the pulse instead of pretending to make progress. The
+  footer re-reads the turn on every streamed batch, so a long turn's label and
+  counts keep up with it rather than freezing on the first one.
+- Finished turns report `Activity · 18 steps · 1 failed · 21m` instead of the
+  raw `Execution details · 12782 events`, which said nothing about what
+  happened or whether anything broke. A turn whose detail has not been read yet
+  falls back to `Activity` plus its duration, and lazy detail loading,
+  pagination and retry are unchanged.
+- The composer gains **Ask aside**: it forks the current Chat and posts the
+  question into the fork as its first turn, so a running turn can be asked
+  about without queueing or steering it. Text only, local Chats only, and the
+  fork always cuts at the last **completed** turn — never inside the running
+  one, whose tool and question cards its fresh session could never finish.
+  Forking switches the pane to the new tab, so a follow-up
+  send failure returns the reader to the source Chat with the draft intact and
+  says so, instead of leaving them in an empty fork holding a question they can
+  no longer see; if they have switched to another tab in the meantime that
+  switch wins, and the message names the Chat whose composer still holds the
+  question.
+
+### feat(ui): let a Goal plan its scope and execution budget before it starts
+
+- Goal setup offers a remembered **Plan first** option (on by default) that
+  sends the additive, optional `plan_first` field. Callers that never send it
+  keep the previous start-immediately behaviour and prompt byte for byte.
+- With `plan_first`, the first Goal turn may only plan: steps, acceptance
+  checks and an execution budget (helpers with provider/model, maximum
+  parallelism, rough duration), taking no implementing actions, and it ends on
+  the existing `needs_input` pause. Nothing is launched until the user's next
+  message approves the plan; a request to revise produces a fresh plan.
+- A planning turn renders as a plan card identified by the Goal snapshot's
+  `plan_turn_id`, not by transcript text, with the highlighted budget block and
+  **Approve & start** / **Revise** actions. A plan block is accepted only from
+  the turn the Hub asked to plan or from a turn that parks for input, so an
+  implementing turn echoing it cannot rewrite the scope or re-open approval, and
+  the answered state says only that the Goal continued — once its turn settled —
+  rather than that the user approved. The pause belongs to the Hub: a planning
+  turn parks even if the model asks to continue, an objective edited
+  mid-planning is planned again instead of implemented, a card with no
+  reviewable plan refuses approval, and the trailing-envelope sanitizer hides a
+  plan block as well. Provider-native Goals cannot inject a Hub turn, so the
+  option is disabled there with the reason and is not remembered from that
+  Chat, and the API refuses the field instead of starting unapproved work.
+
+### feat(ui): make Workspace task detail and board evidence-first
+
+- The task detail dialog now opens with what a reviewer needs to decide: a
+  state pill, one-line outcome (latest progress summary or failure reason) and
+  updated time, then an **Evidence** section with the Goal Packet acceptance
+  criteria and the executor's per-criterion verdict, validation, changed files,
+  artifacts (inline attachment thumbnails, Markdown previews) and risks, plus
+  review/CI link chips detected from reported text. The existing decision
+  actions move directly after the evidence and are highlighted while a task
+  waits for review; description, Goal Packet and Assignment follow, and empty
+  Goal Packet, Assignment and Markdown-output sections are dropped instead of
+  rendering headers with nothing in them.
+- Internal bookkeeping (source, execution control, epoch, progress revision,
+  source Chat id, execution reference, runtime sampling) moves into a collapsed
+  **Debug info** fold inside Execution control, which keeps progress reporting,
+  handoff and reporter-credential actions reachable.
+- **Behaviour change**: the dialog's sticky action footer is gone. Decision
+  actions now scroll with the content as an inline section right after the
+  evidence. While a task waits for review, a compact bar stays pinned at the
+  panel edge and jumps to the decision (with focus moved there), then retires
+  itself once the decision is on screen — the always-reachable decision the
+  sticky footer used to provide is preserved where it matters, without
+  duplicating the action controls.
+- Evidence chips are no longer disabled buttons: only Markdown paths are
+  buttons that open the preview, while other changed files and artifact
+  references render as plain text chips (full path in the tooltip), so a
+  keyboard user is never given an unfocusable control that explains nothing.
+- Review/CI chips keep the executor's own Markdown label ("Release blocker MR")
+  instead of flattening it to a derived "MR 42"; only generic labels ("here")
+  fall back to the derived destination. The review bar now also retires for a
+  Decision section taller than the scroll viewport, and the mobile Actions
+  caret is decorative (aria-hidden) and points the way the drawer moves.
+- The board no longer lets a failed task read as work in progress: failed tasks
+  stay in the Working column (there is no Failed column) but sort first, carry a
+  danger-tinted card and a sentence-case `Failed` pill, and show the failure
+  reason as a clean two-line clamp. Cards clamp their description to two lines,
+  empty columns say what is missing ("Nothing waiting for your review"), and the
+  agents/reviewers/sub-agents band collapses to one line when all counts are
+  zero.
+
 ### fix(chat): authorize out-of-cwd images only via completed image tools and add image retry
 
 - A legitimate image produced by a recognized native image-view tool outside

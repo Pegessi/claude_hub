@@ -34,6 +34,54 @@ async def main(browser_run: BrowserRun) -> None:
         **task_fixture("held-task", "ws-1", "Held for a reviewer question"),
         "status": "review",
     }
+    # Review task whose evidence fills a phone screen: the decision must still
+    # be reachable without hunting for it.
+    deep = {
+        **task_fixture("deep-review-task", "ws-1", "Review the parser rewrite"),
+        "status": "review",
+        "goal_packet": {
+            "objective": "Rewrite the parser without changing behaviour",
+            "status": "approved",
+            "source": "human",
+            "acceptance_criteria": [
+                "Existing parser tests still pass",
+                "No new runtime dependency",
+                "Public parser API unchanged",
+                "Behaviour differences documented",
+                "Rollback path recorded",
+                "Windows line endings still parse identically",
+                "Streaming mode keeps the same memory ceiling",
+                "Error messages keep their original wording",
+                "Benchmarks do not regress by more than 2%",
+                "The published changelog names every user-visible change",
+                "No dead code or unused imports were introduced",
+                "The workspace snapshot path is recorded in the handoff",
+            ],
+            "validation_plan": ["pytest -q tests/parsers"],
+            "assumptions": [],
+            "out_of_scope": [],
+        },
+        "latest_progress": {
+            "state": "completed",
+            "summary": "Parser rewrite finished; waiting for a human decision.",
+            "validation": (
+                "pytest -q tests/parsers -> 118 passed, 0 failed.\n\n"
+                "Long-form regression matrix on both interpreter versions:\n"
+                "- corpus A: 42 fixtures, AST identical\n"
+                "- corpus B: 17 fixtures, AST identical\n"
+                "- corpus C: 9 fixtures, two deliberate diffs documented\n\n"
+                "Benchmarks: 3.1% faster on the hot path, no regressions."
+            ),
+            "risks": (
+                "One helper signature widened; every in-repo caller was updated "
+                "in the same commit, but out-of-tree consumers would notice."
+            ),
+            "artifact_refs": ["docs/parsers.md", "reports/parser-diff.md"],
+            "call_id": "call-deep",
+            "execution_epoch": 2,
+            "reported_at": "2026-10-24T09:30:00",
+        },
+    }
 
     def lifecycle(task_id: str, phase: str, reason: str, text: str, attention: bool) -> dict:
         return {
@@ -59,7 +107,7 @@ async def main(browser_run: BrowserRun) -> None:
     def board() -> dict:
         return {
             "workspace": WORKSPACES[0],
-            "tasks": [task, held],
+            "tasks": [task, held, deep],
             "sessions": [],
             "reports": [],
             "markdown_documents": [],
@@ -67,7 +115,7 @@ async def main(browser_run: BrowserRun) -> None:
             "tasks_pagination": {
                 "next_cursor": None,
                 "has_more": False,
-                "status_counts": {"todo": 1, "review": 1},
+                "status_counts": {"todo": 1, "review": 2},
             },
             "task_lifecycles": {
                 "detail-task": lifecycle(
@@ -128,6 +176,8 @@ async def main(browser_run: BrowserRun) -> None:
             elif method == "GET" and path in (
                 "/api/workspaces/ws-1/lessons",
                 "/api/workspaces/ws-1/tasks/detail-task/reports",
+                "/api/workspaces/ws-1/tasks/deep-review-task/reports",
+                "/api/workspaces/ws-1/tasks/held-task/reports",
             ):
                 body = []
             elif method == "POST" and path == "/api/workspaces/tasks/detail-task/start":
@@ -199,7 +249,9 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(start).to_be_enabled()
             await page.screenshot(path=str(output / f"detail-actions-{width}.png"), full_page=True)
             await start.click()
-            await expect(panel.locator(".detail-eyebrow")).to_have_text("working")
+            # The state pill renders sentence case ("Working"); the raw status
+            # string stays in the payload and the board badge dot carries tone.
+            await expect(panel.locator(".detail-eyebrow")).to_have_text("Working")
             await expect(start).to_be_hidden()
             if width <= 760:
                 await toggle.click()
@@ -217,6 +269,62 @@ async def main(browser_run: BrowserRun) -> None:
             await panel.get_by_role("button", name="Close task detail", exact=True).click()
             await expect(panel).to_be_hidden()
 
+        # A review task whose evidence fills the screen must still offer the
+        # decision without hunting for it: the compact bar appears while the
+        # Decision section is off screen, jumps to it, then retires itself.
+        await page.set_viewport_size({"width": 390, "height": 844})
+        await page.goto(url, wait_until="networkidle")
+        await page.locator(".task-card h3").filter(has_text=deep["title"]).click()
+        panel = page.locator(".task-detail-panel")
+        await expect(panel).to_be_visible()
+        decision = panel.locator(".decision-section")
+        review_bar = panel.locator(".detail-review-bar")
+        await expect(review_bar).to_be_visible()
+        await expect(review_bar.locator(".detail-review-text")).not_to_be_empty()
+        await page.screenshot(path=str(output / "review-deep-scroll-390.png"), full_page=True)
+        decision_box = await decision.bounding_box()
+        body_box = await panel.locator(".detail-body").bounding_box()
+        assert decision_box and body_box
+        assert decision_box["y"] >= body_box["y"] + body_box["height"] - 1, (
+            "the Decision section should start below the visible body, "
+            f"decision y={decision_box['y']} body bottom={body_box['y'] + body_box['height']}"
+        )
+        await review_bar.get_by_role("button", name="Review decision", exact=True).click()
+        await expect(decision).to_be_in_viewport()
+        await expect(review_bar).to_be_hidden()
+        # The decision affordance itself stays a real, enabled control once the
+        # reviewer is at the decision (the drawer is collapsed on mobile).
+        actions_toggle = panel.locator(".detail-footer-toggle")
+        await expect(actions_toggle).to_be_visible()
+        await actions_toggle.click()
+        drawer = panel.locator(".detail-action-drawer")
+        await expect(drawer).to_be_visible()
+        decision_buttons = drawer.locator("button:enabled")
+        assert await decision_buttons.count() >= 1, "the decision offers no enabled action"
+        decision_labels = [
+            (await decision_buttons.nth(index).inner_text()).strip()
+            for index in range(await decision_buttons.count())
+        ]
+        await page.screenshot(path=str(output / "review-decision-revealed-390.png"), full_page=True)
+        # The observer has to track both directions: a one-way latch would hide
+        # the bar forever after the first jump. Scrolling the decision away must
+        # bring the bar back, and the second jump must retire it again — with
+        # the drawer expanded, so the watched section is at its tallest.
+        await panel.locator(".detail-body").evaluate("element => { element.scrollTop = 0 }")
+        await expect(review_bar).to_be_visible()
+        await review_bar.get_by_role("button", name="Review decision", exact=True).click()
+        await expect(decision).to_be_in_viewport()
+        await expect(review_bar).to_be_hidden()
+        observations.append(
+            {
+                "review_bar": "visible while the decision was off screen",
+                "review_bar_jump": "revealed the decision and retired itself",
+                "review_bar_scroll_away": "reappeared and retired again (observer tracks both directions)",
+                "decision_actions": decision_labels,
+            }
+        )
+        await panel.get_by_role("button", name="Close task detail", exact=True).click()
+        await expect(panel).to_be_hidden()
         assert len(starts) == 3
         assert not page_errors, page_errors
         assert not console_errors, console_errors

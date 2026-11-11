@@ -98,8 +98,8 @@ const mocked = outputText
     'const DOMPurify = globalThis.__mockDOMPurify;',
   )
   .replace(
-    /import \{ highlightVersion, renderCodeBlockHtml \} from ['"]@\/utils\/codeHighlight['"];?/,
-    'const { highlightVersion, renderCodeBlockHtml } = globalThis.__codeHighlight;',
+    /import \{ highlightVersion, languageLabel, renderCodeBlockHtml \} from ['"]@\/utils\/codeHighlight['"];?/,
+    'const { highlightVersion, languageLabel, renderCodeBlockHtml } = globalThis.__codeHighlight;',
   )
   .replace(
     /import \{ resolveLocalImageUrl, rewriteQuotedImageSrcs \} from ['"]@\/utils\/quotedImage['"];?/,
@@ -121,7 +121,7 @@ globalThis.__mockDOMPurify = mockDOMPurify
 const mod = await import(
   `data:text/javascript;base64,${Buffer.from(mocked).toString('base64')}`
 )
-const { splitBlockTokens, MarkdownBlockCache, joinBlocks } = mod
+const { splitBlockTokens, MarkdownBlockCache, joinBlocks, codeChipLabel } = mod
 
 // Spy on marked.parser to count parse calls.
 let parserCalls = 0
@@ -275,6 +275,32 @@ test('multi-word info string uses first word for class and highlight lang', asyn
     `expected no class for empty info string, got: ${JSON.stringify(empty)}`,
   )
   assert.equal(capturedLang, '', `expected empty highlight lang, got ${JSON.stringify(capturedLang)}`)
+})
+
+// ── Code block header chip ──────────────────────────────────────────────
+
+/** Header chip text for one fence, walked the way the block decorator walks
+ *  it: the fence's info string becomes the ``language-…`` class on ``<code>``,
+ *  and the chip labels that class. */
+function chipForFence(fenceLanguage) {
+  const html = globalThis.__codeHighlight.renderCodeBlockHtml('x = 1', fenceLanguage)
+  const classAttribute = html.match(/<code([^>]*)>/)?.[1].match(/class="([^"]*)"/)?.[1] ?? ''
+  return codeChipLabel(classAttribute)
+}
+
+test('code block chip names the language a reader recognises, not the info string', () => {
+  assert.equal(chipForFence('py'), 'Python')
+  assert.equal(chipForFence('ts'), 'TypeScript')
+  assert.equal(chipForFence('bash'), 'Bash')
+  // An info string no label lists still reads as a name, never as an empty chip.
+  assert.equal(chipForFence('mermaid'), 'Mermaid')
+})
+
+test('code block chip says Code when the fence has no info string', () => {
+  assert.equal(chipForFence(''), 'Code')
+  // marked emits no ``language-…`` class at all in that case, so the chip is
+  // the only place a language could have been claimed.
+  assert.ok(!globalThis.__codeHighlight.renderCodeBlockHtml('x', '').includes('class='))
 })
 
 // ── Per-block caching: completed blocks parsed once ─────────────────────

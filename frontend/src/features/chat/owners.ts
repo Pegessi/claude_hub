@@ -1,5 +1,5 @@
 import { inject, type InjectionKey, type Ref, type ComputedRef } from 'vue'
-import type { TerminalTab, StreamCapabilities } from '@/types'
+import type { AgentRuntimeStatus, TerminalTab, StreamCapabilities } from '@/types'
 import type { useFeishuBotPoolStore } from '@/stores/feishuBotPoolStore'
 import type { useAppStore } from '@/stores/appStore'
 import type { ChatPaneProps } from './controllers/types'
@@ -12,6 +12,8 @@ import type { useChatAttachments } from './controllers/useChatAttachments'
 import type { useChatImages } from './controllers/useChatImages'
 import type { useChatSettings } from './controllers/useChatSettings'
 import type { useChatComposer } from './controllers/useChatComposer'
+import type { useChatReview } from './review/useChatReview'
+import type { RuntimeStatusSample } from './worklog/runtimeStatus'
 
 export interface ChatIdentity {
   connectionState: Ref<'idle' | 'hydrating' | 'live' | 'reconciling' | 'failed'>
@@ -26,6 +28,19 @@ export interface ChatIdentity {
   feishuBotPoolStore: ReturnType<typeof useFeishuBotPoolStore>
   appStore: ReturnType<typeof useAppStore>
   isPaneActivated: Ref<boolean>
+  /** The last polled status for this tab, raw. The live footer projects it (and
+   *  decides whether it is stale) with its own clock, so a stalled poll ages out
+   *  on wall-clock time rather than on the next poll. */
+  runtimeSample: ComputedRef<RuntimeStatusSample | null>
+}
+
+/** A fresh tab-status sample, reduced to what a footer sentence needs. */
+export interface ChatRuntimeStatus {
+  status: AgentRuntimeStatus
+  /** Backend activity label, e.g. ``Running pytest -q``; null when absent. */
+  activity: string | null
+  /** Age of the sample in ms, so a stale poll never reads as current. */
+  ageMs: number
 }
 
 export const chatIdentityKey: InjectionKey<ChatIdentity> = Symbol('chatIdentity')
@@ -38,6 +53,7 @@ export const chatAttachmentsKey: InjectionKey<ReturnType<typeof useChatAttachmen
 export const chatImagesKey: InjectionKey<ReturnType<typeof useChatImages>> = Symbol('chatImages')
 export const chatSettingsKey: InjectionKey<ReturnType<typeof useChatSettings>> = Symbol('chatSettings')
 export const chatComposerKey: InjectionKey<ReturnType<typeof useChatComposer>> = Symbol('chatComposer')
+export const chatReviewKey: InjectionKey<ReturnType<typeof useChatReview>> = Symbol('chatReview')
 
 export function requireChatOwner<T>(key: InjectionKey<T>): T {
   const owner = inject(key)

@@ -1,3 +1,4 @@
+<!-- eslint-disable vue/no-v-html -->
 <template>
   <div
     class="conversation-row conversation-row--assistant conversation-row--activity"
@@ -102,22 +103,127 @@
             </details>
           </template>
           <template v-else>
-            <!-- Edits read as a diff when the arguments carry one. -->
+            <!-- Edits read as a diff when the arguments carry one. Each row
+                 keeps a quiet line-number gutter, and a review comment can be
+                 pinned to any row so the tray can send the file and line back
+                 to the agent instead of a bare snippet. -->
             <div
               v-if="activity.diff"
+              :ref="(node) => bindDiffNode(tool.key, node)"
               class="activity-diff"
               role="region"
               tabindex="0"
               aria-label="Edit diff"
             >
-              <div
+              <template
                 v-for="(line, index) in activity.diff"
-                :key="index"
-                class="activity-diff-line"
-                :class="`activity-diff-line--${DIFF_CLASS[line.sign]}`"
+                :key="`${tool.key}-${index}`"
               >
-                <span class="activity-diff-sign">{{ line.sign === '@' || line.sign === ' ' ? '' : line.sign }}</span><span>{{ line.text }}</span>
-              </div>
+                <div
+                  v-if="line.fileHeader"
+                  class="activity-diff-file"
+                >
+                  <span aria-hidden="true">▸</span>
+                  <span class="activity-diff-file-name">{{ line.file || line.text }}</span>
+                  <!-- The chip names the grammar the rows below really use; an
+                       unknown file renders nothing rather than a guessed label. -->
+                  <span
+                    v-if="diffFileLabel(line, activity.diff)"
+                    class="activity-diff-file-lang"
+                  >{{ diffFileLabel(line, activity.diff) }}</span>
+                </div>
+                <div
+                  v-else
+                  class="activity-diff-line"
+                  :class="[`activity-diff-line--${DIFF_CLASS[line.sign]}`, { 'activity-diff-line--target': isFocusedRow(tool, index) }]"
+                  :data-diff-row="index"
+                  @click="onRowClick(tool, activity.diff, index, $event)"
+                >
+                  <button
+                    v-if="line.sign !== '@'"
+                    type="button"
+                    class="activity-diff-add"
+                    :aria-label="commentLabel(line)"
+                    :title="commentLabel(line)"
+                    @click.stop="startComment(tool, activity.diff, index, $event)"
+                  >
+                    <span aria-hidden="true">+</span>
+                  </button>
+                  <span
+                    v-else
+                    class="activity-diff-add activity-diff-add--muted"
+                    aria-hidden="true"
+                  />
+                  <span class="activity-diff-num">{{ reviewRowLine(line) ?? '' }}</span>
+                  <span class="activity-diff-sign">{{ line.sign === '@' || line.sign === ' ' ? '' : line.sign }}</span>
+                  <!-- A diff row is tool output: `diffRowHtml` returns escaped text
+                       unless the row is highlighted, and highlight.js only emits
+                       `<span class="hljs-…">`, so this cannot carry markup. -->
+                  <span
+                    class="activity-diff-text"
+                    v-html="diffRowHtml(activity.diff, line)"
+                  />
+                </div>
+                <div
+                  v-for="comment in commentsFor(tool, index)"
+                  :key="comment.id"
+                  class="activity-diff-note"
+                >
+                  <span class="activity-diff-note-text">{{ comment.text }}</span>
+                  <button
+                    type="button"
+                    class="activity-diff-note-action"
+                    :aria-label="`Edit the review comment on ${reviewLocation(comment)}`"
+                    @click="editNote(tool, index, comment)"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    class="activity-diff-note-action"
+                    :aria-label="`Remove the review comment on ${reviewLocation(comment)}`"
+                    @click="discardComment(comment.id)"
+                  >
+                    Remove
+                  </button>
+                </div>
+                <div
+                  v-if="isEditorRow(tool, index)"
+                  class="activity-diff-editor"
+                >
+                  <p class="activity-diff-editor-target">
+                    {{ editorLocation() }}
+                  </p>
+                  <textarea
+                    :ref="bindEditorTextarea"
+                    v-model="editorDraft"
+                    rows="2"
+                    :aria-label="`Review comment on ${editorLocation()}`"
+                    placeholder="What should change here?"
+                    @keydown.enter.exact.prevent="saveComment"
+                    @keydown.escape="cancelComment"
+                  />
+                  <div
+                    :ref="bindEditorActions"
+                    class="activity-diff-editor-actions"
+                  >
+                    <button
+                      type="button"
+                      class="activity-diff-editor-save"
+                      :disabled="!editorDraft.trim()"
+                      @click="saveComment"
+                    >
+                      {{ editor?.id ? 'Save' : 'Add comment' }}
+                    </button>
+                    <button
+                      type="button"
+                      @click="cancelComment"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </template>
             </div>
             <!-- The headline already names the target, so the arguments
                  become secondary evidence. -->
@@ -172,20 +278,321 @@
 </template>
 
 <script setup lang="ts">
-import { requireChatOwner, chatTimelineKey } from '../owners'
+import { requireChatOwner, chatTimelineKey, chatReviewKey } from '../owners'
 import { toolGroupNames, toolStatusLabel } from '@/utils/toolPresentation'
 import { ACTIVITY_ICONS, describeToolActivity, toolGroupSummary, type ToolActivity, type ToolDiffLine, type ToolGroupSummary } from '@/utils/toolActivity'
 import { toolGroupStatus } from '@/features/chat/presentation/chatTurnPresentation'
+import { reviewCommentInRows, reviewLocation, reviewRangeLines, reviewRangeRows, reviewRowLine, reviewRowTapOpensEditor, type ReviewAnchor, type ReviewComment } from '@/features/chat/review/reviewComments'
+import { ensureHighlighter, highlightLine, highlightReady, highlightVersion, isKnownLanguage, isLanguageRegistered, languageForPath, languageLabel } from '@/utils/codeHighlight'
 import ChatHubSubagentLink from './ChatHubSubagentLink.vue'
 import type { TimelineTool, TimelineTurn } from '../timeline/types'
 import type { TimelinePart } from '../timeline/types'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch, watchEffect } from 'vue'
 const { expandedToolGroups, onToolGroupToggle, collapseDetails } = requireChatOwner(chatTimelineKey)
+const { comments, addComment, reanchorComment, removeComment, setAnchorStale, focusTarget } = requireChatOwner(chatReviewKey)
 const props = defineProps<{
   turn: TimelineTurn
   part: Extract<TimelinePart, { kind: 'tool_group' }>
 }>()
 
 const DIFF_CLASS: Record<ToolDiffLine['sign'], string> = { '+': 'add', '-': 'del', ' ': 'ctx', '@': 'hunk' }
+
+/** Past this many rows a diff stops being something a reader scans line by line,
+ *  so the spans cost more than they read for and the card keeps plain text (the
+ *  +/- tint and the sign column still carry the change). The diff builder caps a
+ *  diff at 400 rows, so this ceiling is the full-size card, not a hypothetical. */
+const DIFF_HIGHLIGHT_ROW_LIMIT = 400
+
+/** Highlighted HTML per ``language\0text``. The timeline re-renders this card on
+ *  every visible revision, so a row would otherwise be re-highlighted each time
+ *  even though its text and file have not moved. */
+const diffHighlightCache = new Map<string, string>()
+/** The ``highlightVersion`` the cache was filled at; a new highlighter chunk
+ *  invalidates every entry once. */
+let diffHighlightVersion = 0
+
+/** Bumped when the document theme flips. Token colours are CSS variables and
+ *  repaint on their own; the bump makes the rows re-render through the cache so a
+ *  card can never keep markup that was built for the palette it is no longer in. */
+const themeEpoch = ref(0)
+let themeObserver: MutationObserver | null = null
+
+/** One comment per row keeps the diff readable; the row is its identity. */
+const commentIndex = computed(() => {
+  const index = new Map<string, ReviewComment>()
+  for (const comment of comments.value) index.set(comment.key, comment)
+  return index
+})
+
+interface CommentEditor {
+  toolKey: string
+  /** Row range the comment covers, in reading order. */
+  rows: number[]
+  /** Existing comment being edited, when the range already had one. */
+  id: string | null
+}
+
+const editor = ref<CommentEditor | null>(null)
+const editorDraft = ref('')
+const editorTextarea = ref<HTMLTextAreaElement | null>(null)
+const editorActions = ref<HTMLElement | null>(null)
+/** Shift-click extends from the row most recently commented or clicked. */
+const lastRow = ref<{ toolKey: string, row: number } | null>(null)
+const coarsePointer = ref(false)
+const focused = ref<{ toolKey: string, row: number } | null>(null)
+const diffNodes = new Map<string, Element>()
+let focusTimer: ReturnType<typeof setTimeout> | undefined
+
+onMounted(() => {
+  coarsePointer.value = typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(pointer: coarse)').matches
+  // The theme lives on the document element (``dataset.theme``), the same
+  // channel MarkdownContent watches; a card mounted before the flip still has to
+  // repaint its rows afterwards.
+  if (typeof MutationObserver === 'function' && typeof document !== 'undefined') {
+    themeObserver = new MutationObserver(() => { themeEpoch.value++ })
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
+  }
+})
+
+onUnmounted(() => {
+  clearTimeout(focusTimer)
+  themeObserver?.disconnect()
+  themeObserver = null
+})
+
+// The tray asks for a row by anchor; a folded card mounts only after the tray
+// expanded it, so the row is measured on the next tick.
+watch(() => focusTarget.value?.nonce, () => {
+  const key = focusTarget.value?.key
+  if (!key) return
+  // Every rendered card hears the same request; only the one that owns the
+  // anchor may judge it, and only that one can report it missing.
+  if (!key.startsWith(`${props.part.key}:`)) return
+  const split = key.lastIndexOf(':')
+  const row = Number(key.slice(split + 1))
+  const owner = key.slice(0, split)
+  const tool = props.part.tools.find(item => anchorOwner(item) === owner)
+  void nextTick(() => {
+    const node = tool && Number.isFinite(row)
+      ? queryRow(diffNodes.get(tool.key), `[data-diff-row="${row}"]`)
+      : null
+    if (!tool || !node) {
+      // The row this comment was saved against is gone (a history reload
+      // renumbers these keys): tell the tray instead of doing nothing.
+      setAnchorStale(key, true)
+      return
+    }
+    setAnchorStale(key, false)
+    if (typeof node.scrollIntoView === 'function') {
+      node.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    }
+    focused.value = { toolKey: tool.key, row }
+    clearTimeout(focusTimer)
+    focusTimer = setTimeout(() => { focused.value = null }, 1800)
+  })
+})
+
+function queryRow(node: Element | undefined, selector: string): Element | null {
+  const find = node?.querySelector
+  return typeof find === 'function' ? node!.querySelector(selector) : null
+}
+
+function bindDiffNode(toolKey: string, node: unknown): void {
+  if (node && typeof node === 'object') diffNodes.set(toolKey, node as Element)
+  else diffNodes.delete(toolKey)
+}
+
+function anchorOwner(tool: TimelineTool): string {
+  return `${props.part.key}:${tool.key}`
+}
+
+function anchorKey(tool: TimelineTool, row: number): string {
+  return `${anchorOwner(tool)}:${row}`
+}
+
+function rowLocation(line: ToolDiffLine): string {
+  const lineNumber = reviewRowLine(line)
+  if (!line.file) return lineNumber === null ? '' : `${lineNumber}`
+  return lineNumber === null ? line.file : `${line.file}:${lineNumber}`
+}
+
+function commentLabel(line: ToolDiffLine): string {
+  const where = rowLocation(line)
+  return where ? `Add a review comment at ${where}` : 'Add a review comment on this line'
+}
+
+/** Read the highlighter's reactive state. Anything that renders a token or a
+ *  language name has to depend on it, so rows painted before the chunk landed
+ *  are repainted with real highlighting instead of staying flat. */
+function trackHighlighter(): void {
+  void highlightReady.value
+  void highlightVersion.value
+  void themeEpoch.value
+}
+
+/** The language this row's code really is highlighted as, or ``''`` for
+ *  "plain text".
+ *
+ *  A row is one line lifted out of a file, so the file name is the only hint;
+ *  hunk and file-header rows are structure rather than code, and an extension
+ *  the bundled highlighter has no grammar for (``notes.log``) stays plain —
+ *  painting it with a neighbouring grammar would be a guess. */
+function diffRowLanguage(line: ToolDiffLine): string {
+  trackHighlighter()
+  if (line.sign === '@' || !line.file) return ''
+  const lang = languageForPath(line.file)
+  return lang && isLanguageRegistered(lang) ? lang : ''
+}
+
+/** The chip shown next to a file name: the grammar those rows are highlighted
+ *  as, and nothing at all when there is none. */
+function diffFileLabel(line: ToolDiffLine, diff: readonly ToolDiffLine[] | undefined): string {
+  const lang = languageForPath(line.file || line.text)
+  // Over the ceiling the rows stay plain text, so the chip names the file's
+  // language without subscribing to the highlighter or loading its chunk: the
+  // name is cheap, the colour is what is missing.
+  if (!diff || diff.length > DIFF_HIGHLIGHT_ROW_LIMIT) {
+    return lang && isKnownLanguage(lang) ? languageLabel(lang) : ''
+  }
+  trackHighlighter()
+  return lang && isLanguageRegistered(lang) ? languageLabel(lang) : ''
+}
+
+/** HTML for one row's code. Always escaped: ``highlightLine`` falls back to
+ *  escaped text when the chunk has not loaded or the language is unknown, and
+ *  highlight.js only ever emits ``<span class="hljs-…">``, so this is the one
+ *  shape of HTML the card may bind with ``v-html`` (the row text came from tool
+ *  arguments).
+ *
+ *  Highlighted HTML is memoised per (language, text): the card re-renders on
+ *  every visible revision, and a 400-row diff must not re-tokenise itself each
+ *  time. */
+function diffRowHtml(diff: readonly ToolDiffLine[] | undefined, line: ToolDiffLine): string {
+  if (!diff || diff.length > DIFF_HIGHLIGHT_ROW_LIMIT) return highlightLine(line.text, '')
+  const lang = diffRowLanguage(line)
+  if (!lang) return highlightLine(line.text, '')
+  if (diffHighlightVersion !== highlightVersion.value) {
+    diffHighlightCache.clear()
+    diffHighlightVersion = highlightVersion.value
+  }
+  const key = `${lang}\u0000${line.text}`
+  const cached = diffHighlightCache.get(key)
+  if (cached !== undefined) return cached
+  const html = highlightLine(line.text, lang)
+  diffHighlightCache.set(key, html)
+  return html
+}
+
+function commentsFor(tool: TimelineTool, row: number): ReviewComment[] {
+  const comment = commentIndex.value.get(anchorKey(tool, row))
+  return comment ? [comment] : []
+}
+
+function isFocusedRow(tool: TimelineTool, row: number): boolean {
+  return focused.value?.toolKey === tool.key && focused.value.row === row
+}
+
+function isEditorRow(tool: TimelineTool, row: number): boolean {
+  return editor.value?.toolKey === tool.key && editor.value.rows[0] === row
+}
+
+function openEditor(tool: TimelineTool, rows: number[], comment: ReviewComment | null): void {
+  const row = rows[0]
+  editor.value = { toolKey: tool.key, rows, id: comment?.id ?? null }
+  editorDraft.value = comment?.text ?? ''
+  lastRow.value = { toolKey: tool.key, row }
+  void nextTick(() => {
+    // Focus without scrolling, then bring the whole editor into view: a row
+    // near the bottom of a tall diff would otherwise leave its buttons below
+    // the fold.
+    editorTextarea.value?.focus({ preventScroll: true })
+    const actions = editorActions.value
+    if (actions && typeof actions.scrollIntoView === 'function') {
+      actions.scrollIntoView({ block: 'nearest' })
+    }
+  })
+}
+
+/** A string ref inside a ``v-for`` collects into an array, so the editor's
+ *  elements are bound explicitly. */
+function bindEditorTextarea(node: unknown): void {
+  editorTextarea.value = node && typeof node === 'object' ? node as HTMLTextAreaElement : null
+}
+
+function bindEditorActions(node: unknown): void {
+  editorActions.value = node && typeof node === 'object' ? node as HTMLElement : null
+}
+
+function startComment(tool: TimelineTool, diff: readonly ToolDiffLine[] | undefined, row: number, event: MouseEvent): void {
+  if (!diff || !diff[row] || diff[row].sign === '@') return
+  const previous = lastRow.value?.toolKey === tool.key ? lastRow.value.row : row
+  const rows = event.shiftKey ? reviewRangeRows(diff, previous, row) : [row]
+  // Shift-clicking upward from an existing note edits it instead of stacking a
+  // second one over it, so the whole range is searched.
+  const existing = reviewCommentInRows(comments.value, rows.map(item => anchorKey(tool, item)))
+  openEditor(tool, rows, existing)
+}
+
+/** Touch has no hover to reveal the gutter affordance: a tap on the row opens
+ *  the editor instead of pressing a fingertip-sized button. */
+function onRowClick(tool: TimelineTool, diff: readonly ToolDiffLine[] | undefined, row: number, event: MouseEvent): void {
+  if (!reviewRowTapOpensEditor(coarsePointer.value, event.target as Element | null)) return
+  startComment(tool, diff, row, event)
+}
+
+function editNote(tool: TimelineTool, row: number, comment: ReviewComment): void {
+  openEditor(tool, [row], comment)
+}
+
+function discardComment(id: string): void {
+  if (editor.value?.id === id) cancelComment()
+  removeComment(id)
+}
+
+function editorAnchor(): ReviewAnchor | null {
+  const state = editor.value
+  if (!state) return null
+  const tool = props.part.tools.find(item => item.key === state.toolKey)
+  if (!tool) return null
+  const diff = describeToolActivity(tool).diff ?? []
+  const first = diff[state.rows[0]]
+  const { line, endLine } = reviewRangeLines(diff, state.rows)
+  return {
+    key: anchorKey(tool, state.rows[0]),
+    turn: props.turn.key,
+    group: props.part.key,
+    tool: tool.key,
+    row: state.rows[0],
+    file: first?.file ?? '',
+    line,
+    endLine: endLine !== line ? endLine : null,
+    code: first?.text ?? '',
+  }
+}
+
+function editorLocation(): string {
+  const anchor = editorAnchor()
+  return anchor ? reviewLocation(anchor) : 'diff'
+}
+
+function saveComment(): void {
+  const state = editor.value
+  const anchor = editorAnchor()
+  if (!state || !anchor) return
+  // An edited note moves onto whatever range the editor now covers; a new note
+  // upserts by row so re-commenting one row never stacks a second entry.
+  if (state.id) reanchorComment(state.id, anchor, editorDraft.value)
+  else addComment(anchor, editorDraft.value)
+  editor.value = null
+  editorDraft.value = ''
+}
+
+function cancelComment(): void {
+  editor.value = null
+  editorDraft.value = ''
+}
 
 // Plain render-time functions, not computeds: the timeline mutates tool rows
 // in place and signals change through the turn's renderRevision, which a
@@ -208,6 +615,21 @@ function expandedItems(): { tool: TimelineTool, activity: ToolActivity }[] {
   if (!expandedToolGroups.get(props.turn.key)?.has(props.part.key)) return []
   return props.part.tools.map(tool => ({ tool, activity: describeToolActivity(tool) }))
 }
+
+// A card that shows code asks for the highlighting chunk — lazily, so a diff card
+// never pulls it into the first-load bundle. The turn's revision is read too:
+// a tool that is still running gains its diff after the card mounted, and the
+// chunk must be requested then as well, not only when the card first opened.
+watchEffect(() => {
+  void props.turn.renderRevision
+  // Only a diff this card will actually tokenise is worth the chunk; a diff over
+  // the ceiling renders plain text, so it must not pull highlight.js in.
+  const wants = expandedItems().some(item => {
+    const diff = item.activity.diff
+    return !!diff && diff.length <= DIFF_HIGHLIGHT_ROW_LIMIT
+  })
+  if (wants) ensureHighlighter().catch(() => {})
+})
 </script>
 
 <style scoped>
@@ -566,6 +988,9 @@ function expandedItems(): { tool: TimelineTool, activity: ToolActivity }[] {
 }
 
 .activity-diff {
+  /* A query container so the pinned comment and the editor can be exactly as
+   * wide as the visible diff while the code keeps scrolling sideways. */
+  container-type: inline-size;
   max-height: 320px;
   overflow: auto;
   overscroll-behavior: contain;
@@ -577,11 +1002,103 @@ function expandedItems(): { tool: TimelineTool, activity: ToolActivity }[] {
   line-height: 1.5;
 }
 
+.activity-diff-file {
+  position: sticky;
+  left: 0;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100cqw;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--ch-color-border-muted);
+  background: var(--ch-color-surface-soft);
+  color: var(--ch-color-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.activity-diff-file > span[aria-hidden='true'] {
+  color: var(--ch-color-text-subtle);
+}
+
+.activity-diff-file-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Which grammar the rows below are highlighted as. It never wraps and never
+   takes space from the path, which truncates instead. */
+.activity-diff-file-lang {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border: 1px solid var(--ch-color-border-muted);
+  border-radius: 999px;
+  color: var(--ch-color-text-subtle);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
 .activity-diff-line {
   display: flex;
+  align-items: center;
   min-width: max-content;
   padding-right: 10px;
   white-space: pre;
+}
+
+.activity-diff-line--target {
+  box-shadow: inset 2px 0 0 var(--ch-color-accent);
+}
+
+/* The gutter affordance is quiet until a pointer is near the row, and always
+ * present for touch and keyboard. */
+.activity-diff-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: none;
+  color: var(--ch-color-text-subtle);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.activity-diff-add:hover {
+  background: var(--ch-color-accent-soft);
+  color: var(--ch-color-accent);
+}
+
+.activity-diff-add--muted {
+  pointer-events: none;
+}
+
+.activity-diff-line:hover .activity-diff-add,
+.activity-diff-line:focus-within .activity-diff-add {
+  opacity: 1;
+}
+
+.activity-diff-num {
+  flex: 0 0 auto;
+  width: 34px;
+  padding-right: 6px;
+  color: var(--ch-color-text-subtle);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.65;
+  text-align: right;
+  user-select: none;
 }
 
 .activity-diff-sign {
@@ -590,6 +1107,120 @@ function expandedItems(): { tool: TimelineTool, activity: ToolActivity }[] {
   text-align: center;
   opacity: 0.7;
   user-select: none;
+}
+
+/* A pinned note and its editor sit under the row they belong to and stick to
+ * the left edge, so a horizontally scrolled diff still shows them. */
+.activity-diff-note,
+.activity-diff-editor {
+  position: sticky;
+  left: 0;
+  box-sizing: border-box;
+  width: 100cqw;
+  padding: 5px 8px 5px 24px;
+  border-left: 2px solid var(--ch-color-accent);
+  background: var(--ch-color-surface);
+  color: var(--ch-color-text);
+  font-family: var(--ch-font-sans, ui-sans-serif, system-ui, sans-serif);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: normal;
+}
+
+.activity-diff-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.activity-diff-note-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.activity-diff-note-action {
+  flex: 0 0 auto;
+  padding: 0 3px;
+  border: 0;
+  background: none;
+  color: var(--ch-color-text-subtle);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.activity-diff-note-action:hover {
+  color: var(--ch-color-text);
+}
+
+.activity-diff-editor {
+  display: grid;
+  gap: 4px;
+}
+
+.activity-diff-editor-target {
+  margin: 0;
+  overflow: hidden;
+  color: var(--ch-color-text-subtle);
+  font-family: var(--ch-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-diff-editor textarea {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 5px 7px;
+  resize: vertical;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-app-bg);
+  color: var(--ch-color-text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.activity-diff-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.activity-diff-editor-actions button {
+  padding: 3px 10px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-surface);
+  color: var(--ch-color-text);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.activity-diff-editor-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.activity-diff-editor-actions .activity-diff-editor-save {
+  border-color: var(--ch-color-accent-strong);
+  background: var(--ch-color-accent-strong);
+  color: var(--ch-color-text-inverse);
+}
+
+.activity-diff-editor-actions .activity-diff-editor-save:hover:not(:disabled) {
+  background: var(--ch-color-accent-fill-hover);
+}
+
+.activity-diff-add:focus-visible,
+.activity-diff-note-action:focus-visible,
+.activity-diff-editor textarea:focus-visible,
+.activity-diff-editor-actions button:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring);
+  outline-offset: 1px;
 }
 
 .activity-diff-line--add {
@@ -611,6 +1242,59 @@ function expandedItems(): { tool: TimelineTool, activity: ToolActivity }[] {
   padding-bottom: 3px;
   background: var(--ch-color-surface-soft);
   color: var(--ch-color-text-subtle);
+}
+
+/* ---- Token colours inside a diff row ----
+ * The row keeps the +/- tint on its background and the sign gutter; tokens take
+ * the shared code palette (the same variables the markdown blocks use), so a
+ * Python diff reads as Python while still showing which side of the change each
+ * row is on. ``:deep`` because the spans come from highlight.js via ``v-html``. */
+.activity-diff-text :deep(.hljs-keyword),
+.activity-diff-text :deep(.hljs-selector-tag),
+.activity-diff-text :deep(.hljs-built_in),
+.activity-diff-text :deep(.hljs-name),
+.activity-diff-text :deep(.hljs-tag) {
+  color: var(--ch-code-keyword);
+}
+
+.activity-diff-text :deep(.hljs-string),
+.activity-diff-text :deep(.hljs-regexp),
+.activity-diff-text :deep(.hljs-code),
+.activity-diff-text :deep(.hljs-template-variable) {
+  color: var(--ch-code-string);
+}
+
+.activity-diff-text :deep(.hljs-title),
+.activity-diff-text :deep(.hljs-section) {
+  color: var(--ch-code-function);
+}
+
+.activity-diff-text :deep(.hljs-number),
+.activity-diff-text :deep(.hljs-literal),
+.activity-diff-text :deep(.hljs-symbol),
+.activity-diff-text :deep(.hljs-bullet) {
+  color: var(--ch-code-number);
+}
+
+.activity-diff-text :deep(.hljs-comment),
+.activity-diff-text :deep(.hljs-quote),
+.activity-diff-text :deep(.hljs-link) {
+  color: var(--ch-code-comment);
+}
+
+.activity-diff-text :deep(.hljs-type),
+.activity-diff-text :deep(.hljs-class .hljs-title) {
+  color: var(--ch-code-builtin);
+}
+
+.activity-diff-text :deep(.hljs-attr),
+.activity-diff-text :deep(.hljs-attribute),
+.activity-diff-text :deep(.hljs-variable) {
+  color: var(--ch-code-attr);
+}
+
+.activity-diff-text :deep(.hljs-meta) {
+  color: var(--ch-code-meta);
 }
 
 .tool-block {
@@ -707,6 +1391,17 @@ function expandedItems(): { tool: TimelineTool, activity: ToolActivity }[] {
   .tool-block--raw > summary {
     padding: 6px 0;
   }
+
+  /* No hover to reveal the gutter: the row itself is the tap target. */
+  .activity-diff-add {
+    opacity: 1;
+  }
+
+  .activity-diff-note-action,
+  .activity-diff-editor-actions button {
+    min-height: 44px;
+    padding: 4px 8px;
+  }
 }
 
 @media (max-width: 640px) {
@@ -736,6 +1431,19 @@ function expandedItems(): { tool: TimelineTool, activity: ToolActivity }[] {
 
   .activity-diff {
     max-height: 260px;
+  }
+
+  .activity-diff-add {
+    width: 16px;
+  }
+
+  .activity-diff-num {
+    width: 26px;
+  }
+
+  .activity-diff-note,
+  .activity-diff-editor {
+    padding-left: 14px;
   }
 }
 

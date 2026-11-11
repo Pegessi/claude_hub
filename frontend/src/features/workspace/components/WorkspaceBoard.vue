@@ -46,7 +46,7 @@
           :class="[
             'task-column',
             {
-              'task-column--empty': tasksByStatus(column.status).length === 0,
+              'task-column--empty': columnTasks(column.status).length === 0,
               'task-column--collapsed': isMobileColumnCollapsed(column.status),
             },
           ]"
@@ -67,7 +67,7 @@
           </div>
           <div class="task-list">
             <article
-              v-for="task in tasksByStatus(column.status)"
+              v-for="task in columnTasks(column.status)"
               :key="task.id"
               :class="[
                 'task-card',
@@ -113,10 +113,10 @@
                   </span>
                   <span
                     v-else
-                    class="agent-badge"
+                    :class="['agent-badge', `agent-badge--${task.status}`]"
                   >
                     <span :class="['status-dot', `status-dot--${task.status}`]" />
-                    {{ task.status }}
+                    {{ taskStatusLabel(task.status) }}
                   </span>
                 </span>
               </div>
@@ -146,25 +146,27 @@
                 {{ task.dispatch_reason }}
               </div>
               <div
-                v-if="canUseManagedTaskActions(task) && task.status === 'failed' && task.failure_reason"
-                class="latest-report"
+                v-if="task.status === 'failed' && task.failure_reason"
+                class="latest-report latest-report--failure"
               >
-                <strong>failed</strong>
-                <span>{{ task.failure_reason }}</span>
+                <strong class="latest-report-state">Failed</strong>
+                <span class="latest-report-summary">{{ task.failure_reason }}</span>
               </div>
+              <!-- A failed card already states why it stopped; the last progress
+                   line would otherwise read "Working" on a stopped task. -->
               <div
-                v-if="task.latest_progress"
+                v-if="task.latest_progress && !(task.status === 'failed' && task.failure_reason)"
                 class="latest-report"
               >
-                <strong>{{ progressStateLabel(task.latest_progress.state) }}</strong>
-                <span>{{ task.latest_progress.summary }}</span>
+                <strong class="latest-report-state">{{ progressStateLabel(task.latest_progress.state) }}</strong>
+                <span class="latest-report-summary">{{ task.latest_progress.summary }}</span>
               </div>
               <div
                 v-else-if="canUseManagedTaskActions(task) && latestReportForTask(task)"
                 class="latest-report"
               >
-                <strong>{{ latestReportForTask(task)?.state }}</strong>
-                <span>{{ reportMessageForLang(latestReportForTask(task)!) }}</span>
+                <strong class="latest-report-state">{{ reportStateLabel(latestReportForTask(task)!.state) }}</strong>
+                <span class="latest-report-summary">{{ reportMessageForLang(latestReportForTask(task)!) }}</span>
               </div>
               <div class="session-meta">
                 <span>{{ taskSourceLabel(task.source) }}</span>
@@ -281,10 +283,10 @@
               </div>
             </article>
             <div
-              v-if="tasksByStatus(column.status).length === 0"
+              v-if="columnTasks(column.status).length === 0"
               class="column-empty"
             >
-              No tasks
+              {{ emptyColumnText(column.status) }}
             </div>
           </div>
           <footer
@@ -331,13 +333,21 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import LoadingButton from '@/components/LoadingButton.vue'
 import type { TaskLifecycle } from '@/types/workspaceBoard'
+import type { WorkspaceTask, WorkspaceTaskStatus } from '@/types'
 import {
   progressStateLabel,
   taskSourceLabel,
   taskExecutionLabel,
 } from '@/utils/taskExecution'
+import {
+  emptyColumnText,
+  orderedColumnTasks,
+  reportStateLabel,
+  taskStatusLabel,
+} from '../presentation/board'
 import {
   useWorkspaceRuntimeContext,
   useWorkspaceTaskActionsContext,
@@ -347,7 +357,6 @@ const {
   activeWorkspaceId,
   boardLoading,
   columns,
-  tasksByStatus,
   isMobileColumnCollapsed,
   taskCountByStatus,
   toggleMobileColumn,
@@ -378,6 +387,23 @@ const QUIET_LIFECYCLE_REASONS = new Set([
   'failed',
   'not_started',
 ])
+
+/**
+ * Failed tasks share the Working column (the board has no Failed column) but
+ * sort first so a stopped task cannot pass for work in progress. Ordering is
+ * memoized per board update: the template asks for each column several times.
+ */
+const tasksByColumn = computed(() => {
+  const byColumn: Partial<Record<WorkspaceTaskStatus, WorkspaceTask[]>> = {}
+  for (const column of columns) {
+    byColumn[column.status] = orderedColumnTasks(tasks.value, column.status)
+  }
+  return byColumn
+})
+
+function columnTasks(status: WorkspaceTaskStatus) {
+  return tasksByColumn.value[status] ?? []
+}
 
 function lifecycleFor(taskId: string): TaskLifecycle | undefined {
   return board.value?.task_lifecycles?.[taskId]
@@ -748,7 +774,7 @@ const {
   .task-card-description {
     display: -webkit-box;
     overflow: hidden;
-    -webkit-line-clamp: 4;
+    -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;
   }
 

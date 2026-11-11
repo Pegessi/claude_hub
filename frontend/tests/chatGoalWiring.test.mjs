@@ -58,10 +58,44 @@ test('active Goal guards manual history edits and start waits for an idle turn',
   assert.ok(goalController.includes('goalEditReason'))
 })
 
+test('plan cards take a per-turn heading id instead of one shared literal', () => {
+  const card = readChat('goal-plan/GoalPlanCard.vue')
+  const plan = readChat('goal-plan/planCard.ts')
+  assert.ok(card.includes(':aria-labelledby="headingId"'))
+  assert.ok(card.includes(':id="headingId"'))
+  assert.ok(!card.includes('id="goal-plan-heading"'), 'no fixed id attribute')
+  assert.ok(card.includes('headingId: string'))
+  assert.ok(plan.includes('export function goalPlanHeadingId'))
+  assert.ok(turn.includes(':heading-id="planHeadingId(turn)"'))
+})
+
+test('only a Chat that can offer Plan first changes the remembered choice', () => {
+  const preference = readChat('goal-plan/planPreference.ts')
+  const plan = readChat('goal-plan/planCard.ts')
+  assert.ok(preference.includes('export function planFirstChoice'))
+  assert.ok(goalController.includes('disabledReason: planFirstDisabledReason.value'))
+  assert.ok(goalController.includes('if (choice.remember !== null)'))
+  assert.ok(goalController.includes('plan_first: choice.effective'))
+  assert.ok(plan.includes('plan_answered'))
+  assert.ok(!plan.includes('plan_approved'))
+})
+
+test('a plan request with no reviewable plan cannot be approved from the card', () => {
+  const card = readChat('goal-plan/GoalPlanCard.vue')
+  const plan = readChat('goal-plan/planCard.ts')
+  assert.ok(plan.includes('No plan was proposed to approve'))
+  assert.ok(plan.includes('export function goalPlanReviseDisabledReason'))
+  // Approve is gated on the plan, Revise is not: it stays the way out.
+  assert.ok(card.includes(':disabled="Boolean(approveDisabledReason)"'))
+  assert.ok(card.includes(':disabled="Boolean(reviseDisabledReason)"'))
+  assert.ok(card.includes('v-if="!plan && mode === \'review\'"'))
+  assert.ok(turn.includes(':revise-disabled-reason="planReviseReason(turn)"'))
+})
+
 test('Goal setup and status have no budget or turn-limit controls', () => {
   const dialog = readFileSync(new URL('../src/components/GoalSetupDialog.vue', import.meta.url), 'utf8')
   assert.doesNotMatch(dialog + statusBar + composable, /token_budget|max_turns|updateBudget|budgetDraft/)
-  assert.ok(dialog.includes("emit('submit', { objective: trimmed })"))
+  assert.ok(dialog.includes("emit('submit', { objective: trimmed, planFirst: planFirst.value })"))
   assert.match(composer, /<ComposerAddMenu/)
   assert.doesNotMatch(composer, /composer-goal-btn|composer-attach-btn/)
 })

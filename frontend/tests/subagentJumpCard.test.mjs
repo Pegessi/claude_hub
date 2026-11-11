@@ -14,7 +14,7 @@ const toolGroup = readSrc('features/chat/components/ChatToolGroup.vue')
 const terminalPane = readSrc('components/TerminalPane.vue')
 const structuredPane = readSrc('features/chat/StructuredPane.vue')
 const controller = readSrc('features/chat/controllers/useParentSubagents.ts')
-const panel = readSrc('features/agent-status/AgentStatusFloatingPanel.vue')
+const panel = readSrc('features/agent-status/AgentInboxContent.vue')
 const workspaceStatus = readSrc('features/workspace/components/WorkspaceAgentStatus.vue')
 const workspaceRuntime = readSrc('features/workspace/composables/useWorkspaceRuntime.ts')
 const terminalTypes = readSrc('types/terminal.ts')
@@ -182,9 +182,11 @@ test('controller polls the durable subagent list and supports archived restore',
   assert.match(controller, /appStore\.setMode\('terminal'\)/)
 })
 
-test('Terminal Workspace Agents panel marks sub-agent rows', () => {
+test('the agent inbox marks sub-agent rows', () => {
+  // Same requirement as the old flat status panel: a child Chat started by
+  // another Chat must be recognizable in the list, not just in the Workspace.
   assert.match(panel, /v-if="row\.tab\.parent_tab_id"/)
-  assert.match(panel, /class="agent-sub-tag"/)
+  assert.match(panel, /class="inbox-row-sub"/)
 })
 
 test('Workspace mode has a Subagents view of attributed role-less child chats', () => {

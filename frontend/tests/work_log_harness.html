@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chat work log fixture</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      // Screenshot fixture for the live work log and the folded activity header.
+      // It mounts the production components with the same owner contracts the
+      // Chat pane provides, so the markup and CSS captured here are the real
+      // ones. The turn parts are synthetic — a live 20-minute turn cannot be
+      // staged on demand, and the backend must never be driven to produce one.
+      import { createApp, h, provide, ref } from 'vue'
+      import '@/features/app-shell/styles/theme.css'
+      import '@/features/app-shell/styles/controls.css'
+      import ChatTurnWorking from '@/features/chat/components/ChatTurnWorking.vue'
+      import ChatTurnParts from '@/features/chat/components/ChatTurnParts.vue'
+      import { computed } from 'vue'
+      import { chatIdentityKey, chatImagesKey, chatTimelineKey } from '@/features/chat/owners'
+      import { IncrementalTimelineReducer } from '@/features/chat/timeline/reducer'
+
+      const tool = (key, name, status, args) => ({
+        key, callId: null, name, status, argsText: JSON.stringify(args ?? {}), resultText: '',
+      })
+
+      const turn = (key, parts, extra = {}) => ({
+        key,
+        turnId: key,
+        userText: 'refactor the work log',
+        origin: 'web',
+        feishu: null,
+        hubMessage: null,
+        mode: 'default',
+        yieldsToUser: false,
+        attachments: [],
+        parts,
+        assistantText: '',
+        thinkingText: '',
+        tools: [],
+        approvals: [],
+        completed: false,
+        completionStatus: null,
+        startedAt: null,
+        completedAt: null,
+        errors: [],
+        statuses: [],
+        renderRevision: 1,
+        ...extra,
+      })
+
+      // A busy turn: finished work behind, parallel reads in front, one failure.
+      const active = turn('active', [
+        { kind: 'thinking', key: 'think', text: 'Trace the flaky test first.' },
+        {
+          kind: 'tool_group',
+          key: 'group',
+          tools: [
+            tool('a', 'Bash', 'completed', { command: 'pnpm test work-log' }),
+            tool('b', 'Edit', 'completed', { file_path: 'frontend/src/features/chat/worklog/workLog.ts' }),
+            tool('c', 'Edit', 'completed', { file_path: 'frontend/src/features/chat/components/ChatTurnWorking.vue' }),
+            tool('d', 'Bash', 'failed', { command: 'pnpm lint' }),
+            tool('e', 'Read', 'running', { file_path: 'frontend/src/features/chat/components/ChatTurnParts.vue' }),
+            tool('f', 'Read', 'running', { file_path: 'frontend/src/features/chat/timeline/turnProcess.ts' }),
+          ],
+        },
+      ])
+
+      // The parent is blocked on a delegated child, which is not activity.
+      const waitingChild = turn('waiting-child', [
+        {
+          kind: 'subagent',
+          key: 'spawn',
+          tool: {
+            ...tool('spawn', 'Agent', 'running', { description: 'audit the work log' }),
+            subagent: {
+              provider: 'claude', agentType: 'Explore', description: 'audit the work log',
+              prompt: 'p', threadIds: ['T1'], background: true, directive: false,
+            },
+          },
+        },
+        {
+          kind: 'subagents',
+          key: 'region',
+          threads: [{ key: 'th', threadId: 'T1', launchTool: null, lifecycleStatus: 'active', renderRevision: 0, parts: [] }],
+        },
+      ])
+
+      // A question only the user can answer.
+      const waitingAnswer = turn('waiting-answer', [
+        { kind: 'thinking', key: 'think', text: 'Need a decision.' },
+        {
+          kind: 'approval',
+          key: 'ask',
+          approval: { key: 'ask', callId: null, kind: 'question', title: 'Keep the old label?', questions: [], resolved: false },
+        },
+      ])
+
+      // The moment right after a message is sent: the turn exists and the clock
+      // runs, but the provider has not reported anything yet.
+      const awaitingFirst = turn('awaiting-first', [])
+      // A turn sent seconds ago: no explanation is due yet.
+      const freshStartAt = new Date(Date.now() - 5 * 1000).toISOString()
+      // Long starts are common: after half a minute the footer explains itself.
+      const slowStartAt = new Date(Date.now() - 45 * 1000).toISOString()
+      const stuckStartAt = new Date(Date.now() - 150 * 1000).toISOString()
+      // What the Hub's status poll would report for this tab.
+      // A fresh poll: the footer projects the sample against its own clock.
+      const status = (value, activity = null) => ({ status: value, activity, sampled_at: new Date().toISOString() })
+      const runningStatus = status('working')
+      const busyStatus = status('working', 'Running pytest -q')
+      const offlineStatus = status('offline')
+      const unknownStatus = null
+
+      const completedTurn = turn('done', [], {
+        completed: true,
+        completionStatus: 'completed',
+        startedAt: '2026-11-09T07:40:00Z',
+        completedAt: '2026-11-09T08:01:00Z',
+      })
+
+      /** Give each case its own owners: the live footer reads the turn from the
+       *  pane owner, exactly as it does in the app. */
+      const Case = {
+        props: {
+          caseId: String, label: String, component: Object,
+          currentTurn: Object, startedAt: String, part: Object, turnForParts: Object,
+          turnsRef: Object, connectionState: String, runtimeStatus: Object, eventCount: Number,
+        },
+        setup(props) {
+          provide(chatTimelineKey, {
+            // A streaming case owns its own ref so the gate can append events
+            // after mount, the way the pane receives live batches.
+            turns: props.turnsRef ?? ref([props.currentTurn ?? completedTurn]),
+            // The pane reports the turn's descriptor count; the gate sets it per
+            // case to model a turn whose events are not reduced into parts yet.
+            turnEventCount: () => props.eventCount ?? null,
+            latestTurnKey: ref(props.currentTurn?.key ?? completedTurn.key),
+            toggleTurnProcess: () => {},
+            retryHistoryDetail: () => {},
+          })
+          provide(chatImagesKey, { openImageLightbox: () => {} })
+          // The footer reports the Hub's own view of this tab, so the fixture
+          // supplies the same identity slices the pane does.
+          provide(chatIdentityKey, {
+            markdownImageScope: computed(() => 'fixture-tab'),
+            connectionState: computed(() => props.connectionState ?? 'live'),
+            currentTab: computed(() => ({ id: 'fixture-tab', agent_type: 'maso' })),
+            runtimeSample: computed(() => props.runtimeStatus ?? null),
+          })
+          return () => h('section', { class: 'case', 'data-case': props.caseId }, [
+            h('p', { class: 'case-label' }, props.label),
+            h(props.component, props.part
+              ? { turn: props.turnForParts ?? completedTurn, part: props.part }
+              : { startedAt: props.startedAt }),
+          ])
+        },
+      }
+
+      // A finished 21-minute turn started 21m15s ago, so the stopwatch reads
+      // 21:15 like the reported case instead of a 1970-scale number.
+      const liveStartedAt = new Date(Date.now() - (21 * 60 + 15) * 1000).toISOString()
+
+
+      // Live batches appended AFTER mount: the footer must follow them. This
+      // is the state a pre-populated fixture cannot reach — the pane mutates
+      // turns in place and hands back a fresh array per batch, which is exactly
+      // the reactivity the footer has to survive.
+      const streamReducer = new IncrementalTimelineReducer()
+      let streamEvents = []
+      const streamTurns = ref([])
+      window.__workLogStreamProbe = {
+        push: events => {
+          streamEvents = streamEvents.concat(events)
+          streamTurns.value = streamReducer.reduce(streamEvents)
+          return true
+        },
+        text: () => document.querySelector('[data-case="streaming"] .turn-working')?.innerText ?? '',
+      }
+
+      // ``caseId`` is what the browser gate selects on; the label is only text.
+      const cases = [
+        ['streaming', 'Live turn: batches appended after mount', ChatTurnWorking, { turnsRef: streamTurns, startedAt: liveStartedAt }],
+        ['busy', 'Live turn: work in progress', ChatTurnWorking, { currentTurn: active, startedAt: liveStartedAt, eventCount: 192 }],
+        ['waiting-subagent', 'Live turn: waiting on a sub-agent, pulse stopped', ChatTurnWorking, { currentTurn: waitingChild, startedAt: liveStartedAt }],
+        ['waiting-answer', 'Live turn: waiting for your answer', ChatTurnWorking, { currentTurn: waitingAnswer, startedAt: liveStartedAt }],
+        ['awaiting-first', 'Live turn: provider running, nothing written', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: freshStartAt, runtimeStatus: runningStatus }],
+        ['awaiting-first-activity', 'Live turn: provider reports its activity', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: freshStartAt, runtimeStatus: busyStatus }],
+        ['awaiting-first-slow', 'Live turn: running but silent for 45 s', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: slowStartAt, runtimeStatus: runningStatus }],
+        ['awaiting-first-stuck', 'Live turn: running, silent for 2.5 min', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: stuckStartAt, runtimeStatus: runningStatus }],
+        ['awaiting-first-provider-offline', 'Live turn: provider offline', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: freshStartAt, runtimeStatus: offlineStatus }],
+        ['awaiting-first-unknown', 'Live turn: no fresh runtime status', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: slowStartAt, runtimeStatus: unknownStatus }],
+        ['awaiting-first-offline', 'Live turn: stream reconnecting', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: freshStartAt, connectionState: 'reconnecting', runtimeStatus: runningStatus }],
+        ['events-unreduced', 'Live turn: 1021 events, parts not reduced yet', ChatTurnWorking, { currentTurn: awaitingFirst, startedAt: liveStartedAt, eventCount: 1021, runtimeStatus: runningStatus }],
+        ['completed-counts', 'Completed: counts loaded, failures kept', ChatTurnParts, {
+          part: { kind: 'process', key: 'p1', meta: 'Activity · 18 steps · 1 failed · 21m', expanded: false },
+        }],
+        ['completed-lazy', 'Completed: detail not read yet', ChatTurnParts, {
+          part: { kind: 'process', key: 'p2', meta: 'Activity · 21m', expanded: false, detailStatus: 'loading' },
+        }],
+        ['completed-none', 'Completed: no duration available', ChatTurnParts, {
+          part: { kind: 'process', key: 'p3', meta: 'Activity', expanded: false },
+        }],
+      ]
+
+      createApp({
+        render: () => h('div', { class: 'board' }, cases.map(([caseId, label, component, props]) => (
+          h(Case, { caseId, label, component, ...props })
+        ))),
+      }).mount('#app')
+    </script>
+    <style>
+      body { margin: 0; background: var(--ch-color-main-bg); color: var(--ch-color-text); font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+      .board { display: grid; gap: 22px; padding: 28px; max-width: 900px; }
+      .case { border: 1px solid var(--ch-color-border-muted); border-radius: 10px; padding: 12px 14px; background: var(--ch-color-surface); }
+      .case-label { margin: 0 0 8px; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--ch-color-text-subtle); }
+    </style>
+  </body>
+</html>

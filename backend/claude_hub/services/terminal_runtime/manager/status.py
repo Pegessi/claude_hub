@@ -6,7 +6,8 @@ import asyncio
 import hashlib
 import logging
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Iterable, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, Dict, Iterable, Optional, Tuple
 
 from ....models import AgentRuntimeStatus, AgentType, SessionKind, TerminalAgentStatus
 from ...agent_status_markers import codex_output_is_working
@@ -21,13 +22,68 @@ from ..defaults import (
     _WORKING_FRAME_STALE_SECONDS,
     _WORKING_TAIL_PATTERNS,
 )
+from ..records import _ReplyExcerptCacheEntry
 from .host import ManagerHost
 
 if TYPE_CHECKING:
+    from ...agent_stream.store import ReplyExcerpt
     from ...ttyd_manager import TTYDProcess
 
 
 logger = logging.getLogger("claude_hub.services.ttyd_manager")
+
+
+def tab_stream_identity(
+    tab_id: str,
+    workspace_id: Optional[str],
+    managed_session_id: Optional[str],
+) -> tuple[str, str]:
+    """Where this tab's structured stream actually lives.
+
+    A Workspace Chat persists its stream under its managed session
+    (``AgentStreamStore(workspace_id, managed_session_id)``, see
+    ``services/managed_chat``), while a direct Chat uses the terminal-tab
+    namespace. Reading the wrong namespace yields no events at all: no reply
+    excerpt, no unread flag, no activity time — which is exactly what the
+    Agents scope of the inbox would have shown.
+    """
+    managed = (managed_session_id or "").strip()
+    workspace = (workspace_id or "").strip()
+    if managed and workspace:
+        return workspace, managed
+    return "terminal-tabs", f"terminal-tab-{tab_id}"
+
+
+def _reply_excerpt_entry(
+    path: Path, cached: Optional[_ReplyExcerptCacheEntry]
+) -> Optional[_ReplyExcerptCacheEntry]:
+    """Stat the stream and rescan it only when it actually grew.
+
+    Runs in a worker thread: both the stat and the bounded tail scan are
+    blocking file I/O, and the status poll covers ~40 tabs every 5 seconds.
+    """
+    # Deferred import: the agent_stream package imports this module's graph.
+    from ...agent_stream.store import (
+        _REPLY_EXCERPT_MAX_CHARS,
+        _REPLY_EXCERPT_SCAN_BYTES,
+        read_reply_excerpt,
+    )
+
+    try:
+        stat_result = path.stat()
+    except OSError:
+        return None
+    if (
+        cached is not None
+        and cached.mtime_ns == stat_result.st_mtime_ns
+        and cached.size == stat_result.st_size
+    ):
+        return cached
+    return _ReplyExcerptCacheEntry(
+        mtime_ns=stat_result.st_mtime_ns,
+        size=stat_result.st_size,
+        excerpt=read_reply_excerpt(path, _REPLY_EXCERPT_MAX_CHARS, _REPLY_EXCERPT_SCAN_BYTES),
+    )
 
 
 class ManagerStatusMixin(ManagerHost):
@@ -195,6 +251,42 @@ class ManagerStatusMixin(ManagerHost):
         self._save_state()
         return True
 
+    async def _reply_excerpt(self, process: TTYDProcess) -> "Optional[ReplyExcerpt]":
+        """Newest assistant text for this tab, reused until the stream grows.
+
+        The status endpoint is polled for ~40 tabs every 5 seconds, so this
+        stays cheap and off the event loop: the stat and any tail scan run in a
+        worker thread, and a streaming turn does not reach here at all (see the
+        caller, which skips the read while the turn is working).
+        """
+        from ...agent_stream.store import AgentStreamStore
+
+        # Owners built without ``ManagerStateMixin.__init__`` (constructed
+        # directly in tests) have no cache yet; create it on first use instead
+        # of failing a best-effort status read.
+        cache: Optional[Dict[Tuple[str, str], _ReplyExcerptCacheEntry]] = getattr(
+            self, "_reply_excerpt_cache", None
+        )
+        if cache is None:
+            cache = {}
+            self._reply_excerpt_cache = cache
+
+        store = AgentStreamStore(
+            *tab_stream_identity(process.tab_id, process.workspace_id, process.managed_session_id)
+        )
+        cache_key = (process.tab_id, str(store.path))
+        cached = cache.get(cache_key)
+        try:
+            entry = await asyncio.to_thread(_reply_excerpt_entry, store.path, cached)
+        except Exception as e:  # pragma: no cover - defensive, best effort only
+            logger.debug(f"Unable to read reply excerpt for tab {process.tab_id}: {e}")
+            entry = None
+        if entry is None:
+            cache.pop(cache_key, None)
+            return None
+        cache[cache_key] = entry
+        return entry.excerpt
+
     async def compute_tab_unread(self, process: TTYDProcess) -> bool:
         """Return True when the tab's latest completed turn is unread.
 
@@ -205,7 +297,9 @@ class ManagerStatusMixin(ManagerHost):
         # sibling service; the fork code at the top of this file does the same).
         from ...agent_stream.store import AgentStreamStore
 
-        store = AgentStreamStore("terminal-tabs", f"terminal-tab-{process.tab_id}")
+        store = AgentStreamStore(
+            *tab_stream_identity(process.tab_id, process.workspace_id, process.managed_session_id)
+        )
         completed_at_str = await store.latest_turn_completed_at()
         if completed_at_str is None:
             return False
@@ -238,11 +332,21 @@ class ManagerStatusMixin(ManagerHost):
             process.session_kind == SessionKind.CHAT
             and process.cursor_transport != "terminal_transcript"
         ):
+            # Deferred import: the agent_stream package imports this manager's
+            # module graph, so a module-level import would be circular. The
+            # inbox wording lives next to the tool labels that use it.
+            from ...agent_stream.activity_labels import IDLE_DETAIL
+
             native = self._runtime.get_tab_native_runtime_snapshot(tab_id)
+            # Producers older than the inbox contract pass a bare snapshot, so
+            # read every new field defensively instead of assuming it exists.
+            pending_question = bool(getattr(native, "pending_question", False)) if native else False
+            activity = getattr(native, "activity", None) if native else None
+            activity_since = getattr(native, "activity_since", None) if native else None
             if native is None:
                 if self._runtime.native_provider_binary_available(process.agent_type):
                     native_runtime_status = AgentRuntimeStatus.IDLE
-                    native_detail = "native provider is ready"
+                    native_detail = IDLE_DETAIL
                 else:
                     native_runtime_status = AgentRuntimeStatus.OFFLINE
                     native_detail = "native provider binary is unavailable"
@@ -255,6 +359,16 @@ class ManagerStatusMixin(ManagerHost):
                 AgentRuntimeStatus.ATTENTION: "Needs attention",
                 AgentRuntimeStatus.OFFLINE: "Offline",
             }[native_runtime_status]
+            # A turn that is merely streaming shows the previous answer and
+            # would rescan a growing file on every poll, so its excerpt read is
+            # skipped and the activity line speaks for it. A turn that is ALSO
+            # blocked on a question is the top "Waiting for your answer" row:
+            # that row keeps its preview.
+            excerpt = (
+                None
+                if (native_runtime_status == AgentRuntimeStatus.WORKING and not pending_question)
+                else await self._reply_excerpt(process)
+            )
             return TerminalAgentStatus(
                 tab_id=process.tab_id,
                 tab_name=process.name,
@@ -265,6 +379,11 @@ class ManagerStatusMixin(ManagerHost):
                 tmux_session=process.tmux_session,
                 last_changed_at=None,
                 sampled_at=sampled_at,
+                pending_question=pending_question,
+                activity=activity if native is not None else None,
+                activity_since=activity_since,
+                last_reply_excerpt=excerpt.text if excerpt else None,
+                last_reply_at=excerpt.written_at if excerpt else None,
             )
 
         cached = self._status_cache.get(tab_id)
