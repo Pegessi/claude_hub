@@ -197,6 +197,33 @@ browser server used port 5391 and was stopped afterwards (no 5173/8173 access).
   (`subagentJumpCard.test.mjs`, `structuredPaneSubagentCard.test.mjs`,
   `toolPresentation.test.mjs`, `chatFeatureLifecycle.test.mjs`).
 
+## Delivery
+
+- Branch `codex/native-subagent-dock`: `9ce41c1` (feature), `77d501a` and
+  `3a2b889` (cross-review fixes), `2c5c47f` and `cbde6be` (integration merges),
+  `341d142` (formatter + merge-decision record).
+- Integrated `main` twice while it advanced: `2c5c47f` merged `a3692f8` with one
+  `CHANGELOG.md` conflict (recorded in
+  `2026-11-10-native-subagent-dock-merge-decisions.json`, `record_coverage:
+  complete`), `cbde6be` merged `1d1dbc5` (antigravity provider hardening) with no
+  conflicts and no decision paths. The two sides touched no common source file.
+- Merged into `main` as a fast-forward to `cbde6be` and pushed
+  (`d8316e7..cbde6be`, which also publishes the 19 commits other sessions had
+  already merged into local `main`).
+- Gates on the merged tree `cbde6be`: `./scripts/verify.sh all` exit 0 (docs,
+  checkout-safety, backend-format, backend-types, backend-tests 6276 passed /
+  9 skipped, frontend-lint, frontend-types, frontend-tests 1274, frontend-build);
+  `browser-mocks` exit 0 over all 19 registered scenarios; `check-staged`,
+  `merge-decisions` and `docs` PASS.
+- Environment artifacts, both reproduced on unmodified `main`, neither caused by
+  this change: (a) `backend-tests` fails
+  `tests/test_ci_health.py::test_payload_id_stops_before_execution_with_bounded_diagnostics`
+  only when the caller exports `FORCE_COLOR=3` — that wraps the nested pytest
+  diagnostic in ANSI codes; unset it (`env -u FORCE_COLOR`) and the whole suite is
+  green. (b) `terminal-hmr` cannot start its owned Vite because `corepack` wants
+  to download `pnpm-9.15.9.tgz` in this offline environment; it fails identically
+  in a throwaway worktree at `main`, so it is unrun rather than failed.
+
 ## Risks / not done
 
 - The rail is capped at 30 rows and shows 5 before "more"; a fan-out heavier
