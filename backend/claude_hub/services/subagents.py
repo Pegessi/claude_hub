@@ -134,6 +134,7 @@ class SubagentRuntime:
     list_tabs: Callable[[], Iterable[TerminalTab]]
     resolve_env: Callable[[Optional[str], Dict[str, str]], Dict[str, str]]
     resolve_workspace: ResolveWorkspace = _no_workspace_attribution
+    detach_tab: Callable[[str], Optional[TerminalTab]] = lambda _tab_id: None
 
 
 def _digest(payload: Dict[str, Any]) -> str:
@@ -820,6 +821,17 @@ class SubagentService:
     async def _close_after_grace(self, record: Subagent, reason: str) -> None:
         if self.archive_grace_seconds > 0:
             await asyncio.sleep(self.archive_grace_seconds)
+        if record.tab_id:
+            tab = self.runtime.get_tab(record.tab_id)
+            if (
+                tab is not None
+                and tab.subagent_id == record.id
+                and getattr(tab, "last_viewed_at", None) is not None
+            ):
+                # A user who opened the subagent tab in a pane keeps it as an
+                # ordinary Chat: detach instead of archiving out from under them.
+                self.runtime.detach_tab(record.tab_id)
+                reason = "subagent tab detached"
         await self._close(record, reason)
 
     async def _cancel_running(self, record: Subagent, *, turn_id: Optional[str] = None) -> None:
@@ -1000,6 +1012,7 @@ def _default_runtime() -> SubagentRuntime:
         list_tabs=list_tabs,
         resolve_env=lambda preset, env: merge_env_with_preset(preset=preset, explicit_env=env),
         resolve_workspace=_resolve_subagent_workspace,
+        detach_tab=ttyd_manager.detach_subagent_tab,
     )
 
 

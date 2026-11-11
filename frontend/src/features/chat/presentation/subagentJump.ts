@@ -36,8 +36,8 @@ export interface SubagentJumpChip {
   /** Running children are "active"; everything else is history ("earlier"). */
   group: 'active' | 'earlier'
   createdAt: string
-  /** Hub children open by jumping to their Chat tab, never in a window. */
-  canOpen: false
+  /** Both Hub and native children open in the unified detail window. */
+  canOpen: boolean
 }
 
 /** One dock row: a Hub child Chat that jumps, or a native child that opens a
@@ -97,7 +97,11 @@ export function toSubagentJumpChip(
 ): SubagentJumpChip {
   const live = summary.tab_id !== null && options.liveTabIds.has(summary.tab_id)
   const state = chipState(summary, live)
-  const archived = summary.tab_id !== null && options.archivedTabIds.has(summary.tab_id)
+  // A finished non-kept child is auto-archived on the backend even when the
+  // frontend has not opened the Archive modal (`archivedTabIds` still empty).
+  const archived =
+    summary.tab_id !== null &&
+    (options.archivedTabIds.has(summary.tab_id) || (!live && state === 'closed'))
   const tabId = summary.tab_id
   return {
     kind: 'hub',
@@ -112,7 +116,7 @@ export function toSubagentJumpChip(
     summary: cleanSubagentSummary(summary.last_summary) || FALLBACK_SUMMARY[state],
     archived,
     canJump: tabId !== null,
-    canOpen: false,
+    canOpen: tabId !== null,
     group: state === 'running' ? 'active' : 'earlier',
     createdAt: summary.created_at,
   }
@@ -187,5 +191,5 @@ const HUB_AGENT_RUN_RE = /claude-hub\s+agent\s+(?:run|send)\b/
  *  runs and `--json` print it; foreground runs may not, and then no link). */
 export function hubSubagentIdFromTool(argsText: string, resultText: string): string | null {
   if (!HUB_AGENT_RUN_RE.test(argsText)) return null
-  return HUB_SUBAGENT_ID_RE.exec(resultText)?.[0] ?? null
+  return HUB_SUBAGENT_ID_RE.exec(resultText)?.[0] ?? HUB_SUBAGENT_ID_RE.exec(argsText)?.[0] ?? null
 }

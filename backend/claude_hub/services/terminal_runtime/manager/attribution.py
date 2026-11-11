@@ -9,7 +9,7 @@ import os
 import time
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
-from ....models import AgentType, ExecutionTarget
+from ....models import AgentType, ExecutionTarget, SessionKind
 from ..defaults import (
     _BACKFILL_MATCH_WINDOW_S,
     _CODEX_FENCE_SILENCE_S,
@@ -117,6 +117,7 @@ class ManagerAttributionMixin(ManagerHost):
             try:
                 if not (
                     process.from_persisted_state
+                    and getattr(process, "session_kind", None) != SessionKind.CHAT
                     and process.agent_type == AgentType.CODEX
                     and process.target == ExecutionTarget.LOCAL
                     and process.cwd
@@ -215,6 +216,7 @@ class ManagerAttributionMixin(ManagerHost):
         # will assign a fresh uuid4 for codex just like it does for legacy
         # cursor tabs.
         tab.agent_session_id = None
+        tab.agent_session_id_verified = False
         tab._is_new_pin = None
         tab._pre_scan = None
         tab._launch_wall = None
@@ -492,6 +494,8 @@ class ManagerAttributionMixin(ManagerHost):
         because there is only one codex writing to disk at a time, so the
         legacy timestamp-window discovery is sufficient.
         """
+        if getattr(process, "session_kind", None) == SessionKind.CHAT:
+            return
         if process.agent_type != AgentType.CODEX:
             return
         if process.target != ExecutionTarget.LOCAL:
