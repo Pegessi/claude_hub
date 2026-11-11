@@ -344,23 +344,16 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
         next[descriptor.turn_id] = { descriptor, status: 'idle' }
         changed = true
       } else if (detailChanged(existing.descriptor, descriptor)) {
-        // A turn whose descriptor only grew kept its beginning: the detail that
-        // was already read is still valid, and the events after it arrive on the
-        // live stream. Resetting to 'idle' there would hide the parts a read had
-        // just produced, on every batch of a streaming turn. A descriptor whose
-        // start moved (a rewritten transcript) is a different range, so its
-        // detail is retired and the next expansion reads it again.
-        const appendOnly = existing.status === 'loaded' &&
-          descriptor.first_sequence === existing.descriptor.first_sequence &&
-          descriptor.last_sequence > existing.descriptor.last_sequence
-        if (appendOnly) {
-          next[descriptor.turn_id] = { ...existing, descriptor }
-        } else {
-          const request = historyDetailRequests.get(descriptor.turn_id)
-          request?.abort.abort()
-          historyDetailRequests.delete(descriptor.turn_id)
-          next[descriptor.turn_id] = { descriptor, status: 'idle' }
-        }
+        // A grown descriptor means the fetched detail no longer covers the whole
+        // range, so it is retired and read again. Keeping a loaded detail across
+        // growth was tried and is wrong: hydration pages are the only pages that
+        // carry descriptors, and they strip process events, so the suffix's steps
+        // would be fetched by nobody — not by the pane's own backfill, not by a
+        // manual expand.
+        const request = historyDetailRequests.get(descriptor.turn_id)
+        request?.abort.abort()
+        historyDetailRequests.delete(descriptor.turn_id)
+        next[descriptor.turn_id] = { descriptor, status: 'idle' }
         changed = true
       }
     }

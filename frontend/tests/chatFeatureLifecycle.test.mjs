@@ -630,17 +630,36 @@ test('a turn that began in this pane still reports how many events it has produc
   const countFor = () => timeline.turnEventCount(timeline.turns.value.at(-1))
   stream.events.value = [event(1, 'turn_started', { summary: 'starts here' })]
   await flush()
-  assert.equal(countFor(), 1, 'the first event is counted')
+  // The turn's opening marker is punctuation, not output: counting it would
+  // make the footer say "Working · 1 event so far" before the provider has
+  // produced anything, and the waiting state would never appear.
+  assert.equal(countFor(), null, 'a turn that has only started has produced nothing')
   assert.equal(stream.historyDetails.value['in-pane'], undefined, 'and there is no descriptor to count with')
 
   stream.events.value = [...stream.events.value, event(2, 'tool_call_started', { tool_call_id: 'c1', name: 'Bash', args: {} })]
   await flush()
-  assert.equal(countFor(), 2, 'the count grows with the stream, from the pane itself')
+  assert.equal(countFor(), 1, 'the count grows with the stream, from the pane itself')
 
-  // A replay/rescan must not double-count what was already seen.
+  stream.events.value = [...stream.events.value, event(3, 'text_delta', { text: 'writing' })]
+  await flush()
+  assert.equal(countFor(), 2, 'and keeps growing')
+
+  // A replay/rescan must not double-count what was already seen: sequences
+  // already counted are skipped, whether the array was rebuilt or extended.
   stream.events.value = stream.events.value.map(item => ({ ...item }))
   await flush()
   assert.equal(countFor(), 2, 'a rescan of the same events is not a second count')
+
+  // A hydration descriptor is authoritative when it counts more than this pane
+  // watched: the pane must not shrink a whole turn to what it happened to see.
+  stream.historyDetails.value = {
+    'in-pane': {
+      descriptor: { turn_id: 'in-pane', first_sequence: 0, last_sequence: 3, event_count: 40 },
+      status: 'idle',
+    },
+  }
+  await flush()
+  assert.equal(countFor(), 40, 'the larger count wins')
 })
 
 test('a turn that began while the tab was hidden is backfilled on return', async t => {

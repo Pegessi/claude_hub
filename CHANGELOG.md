@@ -7,6 +7,24 @@
 
 ## Released
 
+### fix(ui): review round 3
+
+- Counting a turn's opening marker made it look productive: `turn_started` is
+  punctuation, not output, so a turn with nothing on screen reported "1 event
+  so far" and the footer stopped saying it was waiting for a first response. Only
+  content events are counted now.
+- The footer's count is `max(descriptor, what this pane watched)`: a hydration
+  descriptor counts a whole turn, and the pane's own tally keeps growing for a
+  turn that began here.
+- Sequences already counted are skipped, so a replay or a history-detail insertion
+  cannot count the same event twice.
+- Keeping a loaded detail across a grown descriptor was reverted: hydration pages
+  are the only pages that carry descriptors and they strip process events, so
+  preserving `loaded` left the suffix's steps fetchable by nobody.
+- The backfill is asked again when the newest turn's own read state changes —
+  descriptor arrived, retired, grew, or the turn completed — not only when the
+  number of turns or descriptors changes.
+
 ### fix(ui): review round 2 follow-ups
 
 - `useAgentStream` now keeps a loaded detail's status when a growing descriptor
