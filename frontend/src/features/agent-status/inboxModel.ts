@@ -35,8 +35,11 @@ export interface InboxGroupData {
   rows: InboxRow[]
 }
 
+// The entry itself is called "Needs you", so its first group must not repeat
+// that name: the panel title says what the surface is, and each group says what
+// state those rows are in.
 const GROUP_TITLES: Record<InboxGroup, string> = {
-  needs: 'Needs you',
+  needs: 'Waiting on you',
   working: 'Working',
   done: 'Recently done',
 }
