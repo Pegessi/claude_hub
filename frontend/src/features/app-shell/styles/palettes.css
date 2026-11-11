@@ -125,117 +125,117 @@
 }
 
 :is(:root, .theme-preview)[data-palette='zenless'] {
-  --palette-chrome: #0c0d0e;
-  --palette-main: #131415;
-  --palette-surface: #1b1c1e;
-  --palette-raised: #262729;
-  --palette-control: #323436;
-  --palette-border: #4e5054;
-  --palette-border-strong: #8c9095;
-  --palette-text: #f5f5f2;
-  --palette-muted: #bdbfbe;
-  --palette-subtle: #a5a9a7;
-  --palette-accent: #d6f300;
-  --palette-fill: #d6f300;
-  --palette-fill-hover: #bed900;
-  --palette-on-fill: #151800;
-  --palette-message-bg: #26282a;
-  --palette-message-text: #f5f5f2;
+  --palette-chrome: #0b0c0e;
+  --palette-main: #111316;
+  --palette-surface: #191c20;
+  --palette-raised: #23272d;
+  --palette-control: #2d323a;
+  --palette-border: #4b525e;
+  --palette-border-strong: #9098a6;
+  --palette-text: #f5f7f0;
+  --palette-muted: #c0c6cf;
+  --palette-subtle: #a0a8b4;
+  --palette-accent: #d8f800;
+  --palette-fill: #d8f800;
+  --palette-fill-hover: #bfe000;
+  --palette-on-fill: #101300;
+  --palette-message-bg: #22272f;
+  --palette-message-text: #f5f7f0;
 }
 
 :is(:root, .theme-preview)[data-palette='zenless'][data-theme='light'] {
-  --palette-chrome: #e8e9e6;
-  --palette-main: #fafbf7;
-  --palette-surface: #f0f1eb;
+  --palette-chrome: #e3e6dd;
+  --palette-main: #f8faf4;
+  --palette-surface: #eef1e7;
   --palette-raised: #ffffff;
-  --palette-control: #dfe2d6;
-  --palette-border: #b6bd9b;
-  --palette-border-strong: #667336;
-  --palette-text: #171b11;
-  --palette-muted: #4e5840;
-  --palette-subtle: #5c664f;
-  --palette-accent: #4e6500;
+  --palette-control: #dde2d3;
+  --palette-border: #9aa482;
+  --palette-border-strong: #4d5733;
+  --palette-text: #14180f;
+  --palette-muted: #465038;
+  --palette-subtle: #566146;
+  --palette-accent: #496000;
   --palette-fill: #d6f300;
   --palette-fill-hover: #bed900;
-  --palette-on-fill: #151800;
-  --palette-message-bg: #e9eddf;
-  --palette-message-text: #202716;
+  --palette-on-fill: #121500;
+  --palette-message-bg: #e5ead9;
+  --palette-message-text: #171c10;
 }
 
 :is(:root, .theme-preview)[data-palette='frontier'] {
-  --palette-chrome: #111010;
-  --palette-main: #191717;
-  --palette-surface: #211e1d;
-  --palette-raised: #2b2725;
-  --palette-control: #38322f;
-  --palette-border: #504641;
-  --palette-border-strong: #947e70;
-  --palette-text: #f4ebdf;
-  --palette-muted: #c6b9ab;
-  --palette-subtle: #b0a091;
-  --palette-accent: #f09087;
-  --palette-fill: #ad302c;
-  --palette-fill-hover: #942823;
+  --palette-chrome: #110d0a;
+  --palette-main: #191410;
+  --palette-surface: #231c16;
+  --palette-raised: #2e251d;
+  --palette-control: #3b2f25;
+  --palette-border: #5c493a;
+  --palette-border-strong: #a38368;
+  --palette-text: #f6ecdc;
+  --palette-muted: #cebda8;
+  --palette-subtle: #b39f88;
+  --palette-accent: #f2977e;
+  --palette-fill: #a82a24;
+  --palette-fill-hover: #8e221d;
   --palette-on-fill: #ffffff;
-  --palette-message-bg: #2b2521;
-  --palette-message-text: #f4ebdf;
+  --palette-message-bg: #2d2119;
+  --palette-message-text: #f6ecdc;
 }
 
 :is(:root, .theme-preview)[data-palette='frontier'][data-theme='light'] {
-  --palette-chrome: #eae3d6;
-  --palette-main: #fbf6ec;
-  --palette-surface: #f4ede0;
-  --palette-raised: #fffaf0;
-  --palette-control: #e5dbcc;
-  --palette-border: #cabeaa;
-  --palette-border-strong: #97816a;
-  --palette-text: #2d241d;
-  --palette-muted: #655548;
-  --palette-subtle: #715e4d;
-  --palette-accent: #9e2525;
-  --palette-fill: #9e2525;
-  --palette-fill-hover: #811c1c;
+  --palette-chrome: #e6dbc9;
+  --palette-main: #fbf5e9;
+  --palette-surface: #f3ead8;
+  --palette-raised: #fffbf2;
+  --palette-control: #e3d5be;
+  --palette-border: #c2ab8c;
+  --palette-border-strong: #856a4d;
+  --palette-text: #281d14;
+  --palette-muted: #5c4a3a;
+  --palette-subtle: #6a5644;
+  --palette-accent: #96211e;
+  --palette-fill: #96211e;
+  --palette-fill-hover: #7c1a17;
   --palette-on-fill: #ffffff;
-  --palette-message-bg: #ebe1d1;
-  --palette-message-text: #34281e;
+  --palette-message-bg: #e8dac3;
+  --palette-message-text: #2c2016;
 }
 
 :is(:root, .theme-preview)[data-palette='los-santos'] {
-  --palette-chrome: #090b0b;
-  --palette-main: #121515;
-  --palette-surface: #1a1e1d;
-  --palette-raised: #242b28;
-  --palette-control: #2e3832;
-  --palette-border: #42534a;
-  --palette-border-strong: #759583;
-  --palette-text: #f0f5f1;
-  --palette-muted: #b7c9bf;
-  --palette-subtle: #9eb5a8;
-  --palette-accent: #78d99a;
-  --palette-fill: #80d99c;
-  --palette-fill-hover: #63c584;
-  --palette-on-fill: #102818;
-  --palette-message-bg: #23332a;
-  --palette-message-text: #eaf5ed;
+  --palette-chrome: #070b10;
+  --palette-main: #0e141d;
+  --palette-surface: #151e2b;
+  --palette-raised: #1d293a;
+  --palette-control: #253449;
+  --palette-border: #394f6b;
+  --palette-border-strong: #6a8cb5;
+  --palette-text: #eef5fc;
+  --palette-muted: #b3c5d9;
+  --palette-subtle: #94abc4;
+  --palette-accent: #5ce6a0;
+  --palette-fill: #4cd995;
+  --palette-fill-hover: #36c480;
+  --palette-on-fill: #062012;
+  --palette-message-bg: #192b3d;
+  --palette-message-text: #eaf4fc;
 }
 
 :is(:root, .theme-preview)[data-palette='los-santos'][data-theme='light'] {
-  --palette-chrome: #e7eeea;
-  --palette-main: #f8fcf9;
-  --palette-surface: #eef5f0;
+  --palette-chrome: #dfe6ee;
+  --palette-main: #f6f9fc;
+  --palette-surface: #ebf0f6;
   --palette-raised: #ffffff;
-  --palette-control: #dce9df;
-  --palette-border: #bed1c4;
-  --palette-border-strong: #6e8d79;
-  --palette-text: #172e21;
-  --palette-muted: #46634f;
-  --palette-subtle: #4f6b58;
-  --palette-accent: #226b41;
-  --palette-fill: #226b41;
-  --palette-fill-hover: #185632;
+  --palette-control: #d7e1ed;
+  --palette-border: #acc0d4;
+  --palette-border-strong: #546e8a;
+  --palette-text: #111d2b;
+  --palette-muted: #405368;
+  --palette-subtle: #50657c;
+  --palette-accent: #14693e;
+  --palette-fill: #14693e;
+  --palette-fill-hover: #0e5430;
   --palette-on-fill: #ffffff;
-  --palette-message-bg: #e0ece3;
-  --palette-message-text: #1c3928;
+  --palette-message-bg: #dce7f3;
+  --palette-message-text: #132336;
 }
 
 :is(:root, .theme-preview)[data-palette='contrast'] {

@@ -268,3 +268,83 @@ DOM/scroll, sanitization and mobile checks, with complete cleanup. This establis
 the visible input target, not statistically proven elimination of every Chromium
 hit-testing fluctuation. Final frozen gates run browser-first, then `all` and
 terminal-HMR serially, to fail fast at the affected boundary.
+
+## User-requested Gemini art-direction revision
+
+The user rejected the game collection's visual strength, specifically Zenless as
+only green frames, and requested MASO/Gemini review and optimization. Passing
+functional checks was not treated as visual acceptance. Gemini's independent
+critique found that the three grayscale silhouettes were nearly identical.
+The initial implementation attempt encountered GoogleGenAI HTTP 429; its failed
+owned Chat was archived without changing provider or pretending code was done.
+After the user explicitly requested continuation, the same
+`gemini-4-argon_reasoning_high` model completed a three-file product revision.
+
+The revision reuses the existing palette registry, semantic color pairs and
+`data-palette`-scoped CSS. It adds no preference mirror, runtime style engine,
+component fork, dependency, artwork or remote font. Zenless now uses solid volt
+capsules, asymmetric corners, oblique headings, halftone chrome and hard offset
+shadows. Frontier uses square bookplate frames, serif/small-caps chapter rules,
+ledger chrome and leather/vellum planes. Los Santos uses sharp HUD selections,
+leading bars, condensed display fallbacks, Pacific-navy/concrete surfaces and
+segmented emerald/cyan/amber accents. The picker uses the same grammar; body and
+code are not skewed or replaced with decorative artwork.
+
+Evidence is in `tasks/theme-gemini-style/candidate-02/`: actual desktop and phone
+Chat in dark/light, Appearance/Workspace entry points, and color/grayscale
+before-after sheets. The parent inspected representative rendered states rather
+than accepting CSS declarations as proof of style. Only game palette sections,
+game-scoped treatments and three descriptions changed in the product handoff.
+
+An immutable `faf10bd` baseline was captured separately before comparison:
+10 direct non-game states and 30 game-to-non-game return states. The first
+collector attempt caught intermediate transition values; its sole recapture
+awaited actual finite transitions without changing values or tolerances. The
+accepted reference includes 152 root tokens per page, 23 real main-view and 11
+reader components, their styles/pseudo-elements/dimensions, and retained reader
+DOM with one read. Parent verified collector/fixture hashes, complete payload
+equality and current stylesheet source hashes: the candidate's five non-game
+appearances match the reference exactly within that documented desktop scope.
+The temporary baseline checkout/server was removed; evidence remains retained.
+
+Gemini's existing focused Appearance, Goal/approval, Workspace creation and
+split-pane scenarios have passing reports and complete browser lifecycle
+closure. Parent reconciled the numeric scope: the primary-control minimum across
+all 16 variants remains 4.615:1; 6.731:1 is the game-only minimum, not the all-theme
+minimum. New filled selected-navigation consumers and all three live terminal
+palettes are receiving targeted coverage before the next frozen final gates.
+No new branch push or final acceptance is inferred from this focused handoff.
+
+The targeted extension subsequently passed: 120 real selected-navigation,
+nested action and checked-mode samples across six game variants (text threshold
+4.5, icon threshold 3). Parent independently recomputed all samples, including
+102 nested paint composites, from raw captured colors: minimum 4.871706:1. The
+suspected active-tab icon hover collision was not a product defect: the chip
+fill is a 7%-alpha overlay, not an opaque surface, and actual compositing retains
+contrast. The Los Santos sidebar gradient is bounded by its opaque computed
+stops rather than incorrectly sampling the ancestor behind it.
+
+The non-color identity negative keeps the actual Zenless palette, every root
+token and the Goal DOM, but neutralizes only geometry/type/shadow. The same cue
+assertion rejects capsule navigation, oblique hierarchy, asymmetric cards and
+hard offsets; restoring the styles restores the checks. All six booted 390px
+phone captures retain 44px primary controls and zero horizontal overflow. The
+existing live-terminal case now exercises eight updates through Mono, all three
+games in both modes and Mono restoration, preserving iframe/document/terminal/
+buffer identity, zero frame loads, marker text and the full xterm theme.
+
+Focused results and retained diagnostics are in `tasks/theme-gemini-style/qa/`.
+The Goal/Chat scenario completes in 63.4s under the unchanged 120s budget;
+Appearance, Inbox and Workspace creation also pass. The focused live-terminal
+case passes with its isolated runtime removed. Parent's pre-commit type check
+caught one fixed-length tuple inference in the test helper; an explicit variadic
+tuple annotation fixes typing without changing runtime behavior or assertions.
+
+Use `tasks/theme-gemini-style/parent-review/phone-dark-light-{color,grayscale}.png`
+for phone comparison: these are derived from the verified QA screenshots and
+the grayscale export checks equal R/G/B for every pixel. The original Gemini
+phone composite has a mislabeled color duplicate in its grayscale section and
+is not used as grayscale proof; the original desktop grayscale sheet is valid.
+These image derivatives do not alter the tested UI. Final acceptance remains
+bound to the next frozen SHA, independent review and full serial gates, with
+results retained in the same Task/artifact tree rather than inferred here.

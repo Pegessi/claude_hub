@@ -1000,7 +1000,19 @@ def test_palette_change_repaints_live_terminal_without_reconnect(
         if (event.data?.type === 'terminal-theme') probe.payloads.push(event.data.payload);
       });
     }""")
-    for mode, palette in [("dark", "mono"), ("dark", "zenless"), ("light", "zenless")]:
+    sequence = [
+        ("dark", "mono"),
+        ("dark", "zenless"),
+        ("light", "zenless"),
+        ("dark", "frontier"),
+        ("light", "frontier"),
+        ("dark", "los-santos"),
+        ("light", "los-santos"),
+        ("dark", "mono"),
+    ]
+    observed_backgrounds = []
+    restored_theme = None
+    for mode, palette in sequence:
         prior_count = page.evaluate("() => window.__themeProbe.payloads.length")
         page.evaluate(
             """async ([mode, palette]) => {
@@ -1010,16 +1022,17 @@ def test_palette_change_repaints_live_terminal_without_reconnect(
             [mode, palette],
         )
         page.wait_for_function(
-            """({ mode, priorCount }) => {
+            """({ mode, palette, priorCount }) => {
               const probe = window.__themeProbe;
               const payload = probe.payloads.at(-1);
               const expected = getComputedStyle(document.documentElement)
                 .getPropertyValue('--ch-terminal-bg').trim();
-              return probe.payloads.length > priorCount && payload.scheme === mode &&
+              return document.documentElement.dataset.palette === palette &&
+                probe.payloads.length > priorCount && payload.scheme === mode &&
                 payload.xterm.background === expected &&
                 probe.term.options.theme.background === expected;
             }""",
-            arg={"mode": mode, "priorCount": prior_count},
+            arg={"mode": mode, "palette": palette, "priorCount": prior_count},
             timeout=5000,
         )
         state = page.evaluate("""() => {
@@ -1032,7 +1045,7 @@ def test_palette_change_repaints_live_terminal_without_reconnect(
             sameBuffer: probe.term.buffer.active === probe.buffer,
             loads: probe.loads,
             contrast: probe.term.options.minimumContrastRatio,
-            backgrounds: probe.payloads.map(payload => payload.xterm.background),
+            theme: probe.term.options.theme,
           };
         }""")
         assert all(
@@ -1041,7 +1054,12 @@ def test_palette_change_repaints_live_terminal_without_reconnect(
         assert state["loads"] == 0, state
         assert state["contrast"] == (4.5 if mode == "light" else 3), state
         assert any("THEME_KEEP" in line for line in _read_harness_xterm_lines(page))
-    assert len(set(state["backgrounds"])) == 3, state
+        observed_backgrounds.append(state["theme"]["background"])
+        if restored_theme is None:
+            restored_theme = state["theme"]
+        print(f"palette update {mode}/{palette}: {state}")
+    assert len(set(observed_backgrounds[:3])) == 3, observed_backgrounds
+    assert state["theme"] == restored_theme, state
 
 
 def test_buffered_capture_coordinator_preserves_write_identity_and_finalizes(

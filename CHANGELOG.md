@@ -7,6 +7,20 @@
 
 ## Released
 
+### style(theme): distinguish the three game themes
+
+- Give Zenless solid street-pop capsules, oblique display type and hard offset
+  shadows; Frontier square letterpress bookplates, serif chapter rules and
+  leather/vellum surfaces; Los Santos sharp navy/concrete HUD blocks and segmented
+  radar-color accents. Apply the same visual grammar to navigation, Chat/Goal
+  chrome, Workspace and picker previews instead of relying on colored outlines.
+- Preserve all five non-game appearances, the eight palette IDs and existing
+  preference/reader/terminal behavior. Keep body/code readable and use original
+  CSS materials with local font fallbacks, not game artwork or remote assets.
+- Check actual nested selection controls with translucent/gradient backgrounds,
+  native hover/press and color-preserving geometry negatives. Exercise all three
+  game palettes in the live terminal loop and restore the prior non-game theme.
+
 ### feat(theme): add studio and game-inspired visual themes
 
 - Keep Classic and Contrast; replace the rejected tinted palettes with Mono,
