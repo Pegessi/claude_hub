@@ -7,6 +7,17 @@
 
 ## Released
 
+### polish(ui): the needs-you panel does not repeat its own name, and the code palette is legible in both themes
+
+- The panel title, its phone sheet and the entry all say `Needs you`, so the
+  first group said it a second time. Groups now name the state of the rows
+  inside them: `Waiting on you` / `Working` / `Recently done`.
+- Four light-theme code tokens sat below 4.5:1 against the code block's own
+  background (`comment`/`quote` at 4.02, `function` at 4.46, `keyword` at 4.72).
+  They are darkened to 5.21–5.66:1, and `codeTokenContrast.test.mjs` now fails
+  the suite if any token in either theme drops below 4.5:1 or if the two themes
+  stop naming the same tokens.
+
 ### fix(ui): review round 4
 
 - A gap repair now re-reads a range that is already loaded: the detail it held

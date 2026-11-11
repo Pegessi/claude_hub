@@ -375,3 +375,28 @@ test('a non-JSON failure still reports something actionable', async t => {
     /Reply failed \(HTTP 502\)/,
   )
 })
+
+test('the surface name is not repeated as a group name', () => {
+  // The entry, its panel and its phone sheet all say "Needs you", so the first
+  // group cannot say it too: the title names the surface, the groups name the
+  // state of the rows inside it.
+  const rows = flattenRows(
+    buildInbox(
+      [tab({ id: 'q', name: 'asked' }), tab({ id: 'w', name: 'busy' })],
+      [status({ tab_id: 'q', status: 'attention', pending_question: 'Which file?' }), status({ tab_id: 'w' })],
+      { nowMs: NOW },
+    ),
+  )
+  const groups = buildInbox(
+    [tab({ id: 'q', name: 'asked' }), tab({ id: 'w', name: 'busy' })],
+    [status({ tab_id: 'q', status: 'attention', pending_question: 'Which file?' }), status({ tab_id: 'w' })],
+    { nowMs: NOW },
+  )
+  const titles = groups.map(group => [group.key, group.title])
+  assert.deepEqual(titles, [
+    ['needs', 'Waiting on you'],
+    ['working', 'Working'],
+    ['done', 'Recently done'],
+  ])
+  assert.equal(rows.length, groups.reduce((sum, group) => sum + group.rows.length, 0))
+})
