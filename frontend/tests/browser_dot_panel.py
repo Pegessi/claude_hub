@@ -397,10 +397,14 @@ async def main(browser_run: BrowserRun) -> None:
                     box = await launcher.locator(button).bounding_box()
                     assert box is not None and box["height"] >= 24 and box["width"] >= 36, box
                     assert 0 <= box["x"] and box["x"] + box["width"] <= width, box
-                await expect(page.locator(".tab-bar .agent-status")).to_have_count(0)
+                # The phone keeps the inbox entry but never opens a surface by
+                # itself; the old hidden summary markup is gone with it.
+                await expect(page.locator(".tab-bar .inbox-trigger")).to_have_count(1)
+                await expect(page.locator(".tab-bar .inbox-panel")).to_have_count(0)
+                await expect(page.get_by_test_id("inbox-sheet")).to_have_count(0)
                 await shot(f"dot-mobile-toolbar-{width}.png")
             await page.set_viewport_size({"width": 390, "height": 844})
-            # Hiding summaries must not stop the shared status polling lifecycle.
+            # The phone's inbox entry must not stop the shared polling lifecycle.
             indicator = page.locator(".tab-bar .tab-indicator")
             await expect(indicator).to_have_attribute("data-status", "working")
             status_reads = report["api_requests"].count(["GET", "/api/tabs/status"])
@@ -408,7 +412,9 @@ async def main(browser_run: BrowserRun) -> None:
             agent_status = "attention"
             await expect(indicator).to_have_attribute("data-status", "attention", timeout=12000)
             assert report["api_requests"].count(["GET", "/api/tabs/status"]) > status_reads
-            await expect(page.locator(".tab-bar .agent-status")).to_have_count(0)
+            # A status transition must not pop the panel open on a phone.
+            await expect(page.locator(".tab-bar .inbox-panel")).to_have_count(0)
+            await expect(page.get_by_test_id("inbox-sheet")).to_have_count(0)
             await launcher.get_by_role("button", name="Talk to Dot", exact=True).click()
             await expect(
                 launcher.get_by_role("button", name="Talk to Dot", exact=True)
@@ -573,7 +579,7 @@ async def main(browser_run: BrowserRun) -> None:
                     page.locator(".app-mode-tools [data-testid=dot-launcher]")
                 ).to_be_visible()
                 await expect(page.locator(".tab-bar .dot-launcher")).to_have_count(0)
-                await expect(page.locator(".tab-bar .status-trigger")).to_be_visible()
+                await expect(page.locator(".tab-bar .inbox-trigger")).to_be_visible()
                 await expect(page.locator(".dot-launcher__name")).to_have_text("Jarvis")
             await shot("dot-desktop-home.png")
 

@@ -1,4 +1,5 @@
 import { formatClockTime, formatElapsedDuration, parseTimestampMs } from '@/utils/duration'
+import { countWorkLogParts } from '../worklog/workLog'
 import type { TimelinePart, TimelineTurn, TimelineTool } from './types'
 
 // ── process folding ─────────────────────────────────────────────────────
@@ -64,9 +65,11 @@ function hasFoldableProcess(parts: TimelinePart[]): boolean {
  *    would leave the tools and thinking on screen under a header claiming to
  *    have hidden them, because "the last text and everything after it" is only
  *    an answer when the turn actually stopped there;
- *  An approval card inside the region does not stop the fold — it goes with the
- *  rest of the record. An error is reported as ``pinned`` and stays visible
- *  beside the header: folding it would bury the reason the turn failed.
+ *  An approval card inside the region does not stop the fold: it stays visible so
+ *  a question is never buried, but it is rendered at the end of the turn instead
+ *  of on top of the answer (see ``withApprovalsLast``). An error is reported as
+ *  ``pinned`` and stays beside the header: folding it would bury the reason the
+ *  turn failed.
  */
 export function splitTurnProcess(turn: TimelineTurn): TurnProcessSplit | null {
   if (!turn.completed) return null
@@ -213,19 +216,44 @@ export function turnElapsedMs(turn: TimelineTurn): number | null {
   return elapsed >= 1000 ? elapsed : null
 }
 
-/** Label for the folded process line, e.g. ``过程 · 8 个工具调用 · 1m 23s``. */
+/** Label for the folded process line, e.g. ``Activity · 18 steps · 1 failed · 21m``.
+ *
+ *  Steps, never raw events: a turn's event count is a transport detail
+ *  (``12782 events``) that tells a reader nothing about what happened. Failures
+ *  stay on the header because folding is what would otherwise hide them. */
 export function turnProcessLabel(turn: TimelineTurn, process: TimelinePart[]): string {
-  const segments = ['过程']
+  const segments = ['Activity']
   const steps = countProcessSteps(process)
-  if (steps > 0) segments.push(`${steps} 个工具调用`)
+  if (steps > 0) segments.push(`${steps} step${steps === 1 ? '' : 's'}`)
   // The header is the only thing left on screen, so it has to say when a card
   // is folded in with the rest — otherwise a question the user may never have
   // answered disappears without a trace.
   const cards = process.filter(part => part.kind === 'approval').length
-  if (cards > 0) segments.push(`${cards} 张审批卡`)
+  if (cards > 0) segments.push(`${cards} approval${cards === 1 ? '' : 's'}`)
+  // A failed call inside the folded region is invisible once it is folded away.
+  const failed = countWorkLogParts(process).failed
+  if (failed > 0) segments.push(`${failed} failed`)
   const elapsed = turnElapsedMs(turn)
   if (elapsed !== null) segments.push(formatElapsedDuration(elapsed))
   return segments.join(' · ')
+}
+
+/** Move choice cards to the end of a rendered turn.
+ *
+ *  An agent often asks its question *before* it writes the explanation, so in
+ *  arrival order the card sits on top of the answer it belongs to. Read as a
+ *  page, that is backwards: the answer is the reasoning, and the card is the one
+ *  thing the reader has to act on. It runs over the *displayed* parts, after
+ *  ``presentThinkingParts`` has grouped them: reordering raw parts first would
+ *  drop the approval boundary between two thinking runs (merging them) and would
+ *  leave a live turn's trailing run looking finished, because the card became the
+ *  last part and ``presentThinkingParts`` then treats everything before it as
+ *  ended. */
+export function withApprovalsLast<T extends { kind: string }>(parts: readonly T[]): T[] {
+  if (!parts.some(part => part.kind === 'approval')) return parts as T[]
+  const cards = parts.filter(part => part.kind === 'approval')
+  const rest = parts.filter(part => part.kind !== 'approval')
+  return [...rest, ...cards]
 }
 
 /** Parts to render for a turn, with the working process folded away.
@@ -244,9 +272,12 @@ export function foldTurnParts(turn: TimelineTurn, expanded: boolean): TimelinePa
   const header: TimelinePart = {
     kind: 'process',
     key: `process-${turn.key}`,
-    meta: turnProcessLabel(turn, split.before),
+    meta: turnProcessLabel(turn, split.before.filter(part => part.kind !== 'approval')),
     expanded,
   }
+  // A pin is a reason to stay visible, not a place in the reading order: this
+  // list keeps arrival order, and the presenter moves cards to the end of the
+  // turn once the parts have been grouped (see ``withApprovalsLast`` there).
   const foldedBefore = split.before
     .filter(part => !isProcessPart(part) || isPinnedPart(part))
     .map(foldedPart)

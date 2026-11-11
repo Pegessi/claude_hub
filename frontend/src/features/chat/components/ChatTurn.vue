@@ -37,25 +37,6 @@
       >{{ messageClockLabel(turn) }}</time>
     </div>
 
-    <div
-      v-if="turn.awaitingAgentActivity"
-      class="conversation-row conversation-row--assistant"
-      role="status"
-      aria-live="polite"
-    >
-      <div class="agent-waiting-card">
-        <span
-          class="agent-waiting-pulse"
-          aria-hidden="true"
-        >
-          <i />
-          <i />
-          <i />
-        </span>
-        <span>Waiting for response…</span>
-      </div>
-    </div>
-
     <!-- Ordered parts: thinking, text, tool, error, and status render in
                the exact order the provider emitted them. Paseo does not defer
                protocol errors to the turn end, so neither do we. -->
@@ -66,8 +47,26 @@
       :part="part"
     />
 
+    <!-- A `plan_first` Goal's planning turn shows the scope and execution
+               budget for approval before any implementing turn runs. Identity
+               comes from the Goal snapshot (`plan_turn_id`), never from text. -->
+    <GoalPlanCard
+      v-if="planCardMode(turn)"
+      :plan="goal?.plan ?? null"
+      :mode="planCardMode(turn)!"
+      :heading-id="planHeadingId(turn)"
+      :warning="goal?.plan_warning ?? null"
+      :approve-disabled-reason="planApprovalReason(turn)"
+      :revise-disabled-reason="planReviseReason(turn)"
+      @approve="approvePlan(turn)"
+      @revise="revisePlan()"
+    />
+
+    <!-- Every live turn gets the same footer, including the moment before the
+         provider has reported anything: the clock and the state belong on one
+         line instead of a bare three-dot spinner. -->
     <ChatTurnWorking
-      v-if="isLive(turn) && !turn.awaitingAgentActivity"
+      v-if="isLive(turn)"
       :started-at="turn.startedAt"
     />
 
@@ -145,21 +144,71 @@
 </template>
 
 <script setup lang="ts">
-import { requireChatOwner, chatActionsKey, chatDeliveryKey, chatGoalKey, chatTimelineKey, chatIdentityKey } from '../owners'
+import { nextTick } from 'vue'
+import { requireChatOwner, chatActionsKey, chatComposerKey, chatDeliveryKey, chatGoalKey, chatTimelineKey, chatIdentityKey } from '../owners'
 import { messageClockLabel, turnClockLabel } from '../timeline/turnProcess'
 import ChatUserMessage from './ChatUserMessage.vue'
 import ChatTurnParts from './ChatTurnParts.vue'
 import ChatTurnWorking from './ChatTurnWorking.vue'
+import GoalPlanCard from '../goal-plan/GoalPlanCard.vue'
+import { GOAL_PLAN_APPROVAL_MESSAGE, GOAL_PLAN_REVISE_PREFIX, goalPlanApprovalDisabledReason, goalPlanCardMode, goalPlanHeadingId, goalPlanReviseDisabledReason, type GoalPlanCardMode } from '../goal-plan/planCard'
 import type { TimelineTurn } from '../timeline/types'
 const { isEditingTurn, startEdit, turnCopyText, copyFeedbackLabel, copyTurnButtonLabel, copyTurn, copyFeedbackState, completedPlanText, implementingPlanKey, implementPlan, forkingOrdinal, forkFromTurn } = requireChatOwner(chatActionsKey)
-const { turnInFlight } = requireChatOwner(chatDeliveryKey)
-const { goalEditReason, goalComposerLocked, goalComposerReason } = requireChatOwner(chatGoalKey)
+const { turnInFlight, isSending, submit, draftMessage } = requireChatOwner(chatDeliveryKey)
+const { goalEditReason, goalComposerLocked, goalComposerReason, goal } = requireChatOwner(chatGoalKey)
 const { turnPartsFor, latestTurnKey } = requireChatOwner(chatTimelineKey)
+const { composerTextareaEl, syncComposerTextareaHeight } = requireChatOwner(chatComposerKey)
 const { supportsEditResend, isManagedChat } = requireChatOwner(chatIdentityKey)
 /** Live means still streaming now: the latest turn while one is in flight.
  *  An incomplete turn whose completion never arrived is history, not live. */
 function isLive(turn: TimelineTurn): boolean {
   return !turn.completed && turn.key === latestTurnKey.value && turnInFlight.value
+}
+
+/** Which plan card this turn owns, if any. `null` for every ordinary turn. */
+function planCardMode(turn: TimelineTurn): GoalPlanCardMode | null {
+  return goalPlanCardMode(goal.value, turn.turnId)
+}
+
+/** Per-turn heading id: a fixed literal would collide across cards. */
+function planHeadingId(turn: TimelineTurn): string {
+  return goalPlanHeadingId(turn.turnId)
+}
+
+function planApprovalReason(turn: TimelineTurn): string | null {
+  return goalPlanApprovalDisabledReason(goal.value, planCardMode(turn), {
+    sending: isSending.value,
+    turnInFlight: turnInFlight.value,
+  })
+}
+
+/** Revise may still fix a request that proposed no reviewable plan. */
+function planReviseReason(turn: TimelineTurn): string | null {
+  return goalPlanReviseDisabledReason(goal.value, planCardMode(turn), {
+    sending: isSending.value,
+    turnInFlight: turnInFlight.value,
+  })
+}
+
+/** Approving is the user's next message, which resumes the parked Goal. */
+function approvePlan(turn: TimelineTurn) {
+  if (planApprovalReason(turn)) return
+  void submit('steer', GOAL_PLAN_APPROVAL_MESSAGE)
+}
+
+/** Revising only prepares the composer; the user still sends it. */
+function revisePlan() {
+  const draft = draftMessage.value
+  draftMessage.value = draft.startsWith(GOAL_PLAN_REVISE_PREFIX)
+    ? draft
+    : GOAL_PLAN_REVISE_PREFIX + draft
+  void nextTick(() => {
+    const el = composerTextareaEl.value
+    if (!el) return
+    el.focus()
+    el.setSelectionRange(el.value.length, el.value.length)
+    syncComposerTextareaHeight()
+  })
 }
 
 defineProps<{
@@ -320,77 +369,7 @@ defineProps<{
   cursor: not-allowed;
 }
 
-.agent-waiting-card {
-  min-height: 28px;
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  padding: 2px 2px;
-  color: var(--ch-color-text-subtle);
-  font-size: 13px;
-}
 
-.agent-waiting-card > span:last-child {
-  background: linear-gradient(
-    90deg,
-    var(--ch-color-text-subtle) 0%,
-    var(--ch-color-text-strong, var(--ch-color-text)) 50%,
-    var(--ch-color-text-subtle) 100%
-  );
-  background-size: 200% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  animation: agent-waiting-shimmer 1.8s linear infinite;
-}
-
-@keyframes agent-waiting-shimmer {
-  from { background-position: 100% 0; }
-  to { background-position: -100% 0; }
-}
-
-.agent-waiting-pulse {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-}
-
-.agent-waiting-pulse i {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--ch-color-accent);
-  animation: agent-waiting-dot 1.2s ease-in-out infinite;
-}
-
-.agent-waiting-pulse i:nth-child(2) {
-  animation-delay: 0.15s;
-}
-
-.agent-waiting-pulse i:nth-child(3) {
-  animation-delay: 0.3s;
-}
-
-@keyframes agent-waiting-dot {
-  0%,
-  60%,
-  100% {
-    opacity: 0.35;
-    transform: translateY(0);
-  }
-
-  30% {
-    opacity: 1;
-    transform: translateY(-2px);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .agent-waiting-pulse i,
-  .agent-waiting-card > span:last-child {
-    animation: none;
-  }
-}
 .turn-copy-result--copied { color: var(--ch-color-accent); }
 .turn-copy-result--error { color: var(--ch-color-danger, var(--ch-color-accent)); }
 </style>

@@ -139,20 +139,7 @@
         </div>
       </details>
     </div>
-    <AgentStatusFloatingPanel
-      v-if="manualTabs.length > 0"
-      :hide-summary="isMobile"
-      source="manual"
-      label="Status"
-      panel-title="Terminal Status"
-    />
-    <AgentStatusFloatingPanel
-      v-if="managedTabs.length > 0"
-      :hide-summary="isMobile"
-      source="managed"
-      label="Agents"
-      panel-title="Workspace Agents"
-    />
+    <AgentInboxPanel />
 
     <SessionCreator ref="sessionCreatorRef" />
     <CloseTabDialog
@@ -205,7 +192,7 @@ import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import AgentAvatar from '@/components/AgentAvatar.vue'
 import CloseTabDialog from './CloseTabDialog.vue'
-import AgentStatusFloatingPanel from '@/components/AgentStatusFloatingPanel.vue'
+import AgentInboxPanel from '@/features/agent-status/AgentInboxPanel.vue'
 import AppExtensionActions from '@/components/AppExtensionActions.vue'
 import DotLauncher from '@/components/DotLauncher.vue'
 import LayoutSelector from '@/components/LayoutSelector.vue'
@@ -222,7 +209,7 @@ const store = useTerminalStore()
 const appStore = useAppStore()
 const { isMobile } = useViewport()
 const { isPending, runPending } = usePendingActions()
-const { tabs, manualTabs, managedTabs, activeTabId, isLoading, agentStatuses, notifications } = storeToRefs(store)
+const { tabs, manualTabs, activeTabId, isLoading, agentStatuses, notifications } = storeToRefs(store)
 const { mode, colorScheme } = storeToRefs(appStore)
 const { dismissNotification } = store
 const { getTabStatus, getTabStatusLabel } = useTabStatus(agentStatuses)

@@ -15,6 +15,8 @@ GOAL_OBJECTIVE_MAX_LENGTH = 4000
 GOAL_STEER_INPUT_MAX_LENGTH = 32_000
 GOAL_CHECKPOINT_HISTORY_LIMIT = 10
 GOAL_RECENT_TURN_IDS_LIMIT = 100
+GOAL_PLAN_STEPS_LIMIT = 30
+GOAL_PLAN_HELPERS_LIMIT = 10
 
 
 def utc_now() -> datetime:
@@ -84,6 +86,50 @@ class GoalCheckpoint(BaseModel):
         return normalized
 
 
+class GoalPlanStep(BaseModel):
+    """One implementation step the user approves before a ``plan_first`` Goal runs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=200)
+    detail: str | None = Field(default=None, max_length=1000)
+    acceptance: str | None = Field(default=None, max_length=1000)
+
+
+class GoalPlanHelper(BaseModel):
+    """One helper/sub-agent the plan proposes, with its provider and model."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str = Field(min_length=1, max_length=80)
+    model: str = Field(min_length=1, max_length=120)
+    role: str | None = Field(default=None, max_length=200)
+
+
+class GoalPlanBudget(BaseModel):
+    """The execution budget the user approves: who runs, how wide, how long."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    helpers: list[GoalPlanHelper] = Field(default_factory=list, max_length=GOAL_PLAN_HELPERS_LIMIT)
+    max_parallelism: int = Field(default=1, ge=1, le=32)
+    duration_estimate: str | None = Field(default=None, max_length=200)
+
+
+class GoalPlan(BaseModel):
+    """Agent-authored plan for a ``plan_first`` Goal.
+
+    It is validated control-plane data, not an instruction: the Hub renders it
+    for approval and never executes anything it contains.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(min_length=1, max_length=1000)
+    steps: list[GoalPlanStep] = Field(default_factory=list, max_length=GOAL_PLAN_STEPS_LIMIT)
+    budget: GoalPlanBudget = Field(default_factory=GoalPlanBudget)
+
+
 class GoalRun(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     tab_id: str
@@ -117,6 +163,18 @@ class GoalRun(BaseModel):
     pending_input: str | None = Field(default=None, max_length=GOAL_STEER_INPUT_MAX_LENGTH)
     # Resumed while an ordinary Chat turn was running: dispatch once it ends.
     resume_after_turn: bool = False
+    # Additive ``plan_first`` scope approval. The first Goal turn plans only and
+    # parks on the existing needs_input pause; ``plan_pending`` says the next
+    # dispatched turn is still the planning turn. ``plan_answered`` records that
+    # a turn carrying the user's own message was dispatched after the plan
+    # existed, which is what ends the approval request; it deliberately says
+    # nothing about whether the user approved or asked for changes.
+    plan_first: bool = False
+    plan_pending: bool = False
+    plan: GoalPlan | None = None
+    plan_turn_id: str | None = None
+    plan_answered: bool = False
+    plan_warning: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     paused_at: datetime | None = None
@@ -136,6 +194,9 @@ class GoalRunCreate(BaseModel):
     attachments: list[ChatImageAttachment] = Field(default_factory=list, max_length=10)
     objective: str = Field(min_length=1, max_length=GOAL_OBJECTIVE_MAX_LENGTH)
     client_request_id: str = Field(min_length=1, max_length=128)
+    # Additive and optional: absent callers keep the previous start-immediately
+    # behaviour byte for byte.
+    plan_first: bool = False
 
     @field_validator("objective", "client_request_id")
     @classmethod

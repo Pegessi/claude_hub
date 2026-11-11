@@ -223,7 +223,13 @@ class TerminalTab(TerminalTabBase):
 
 
 class TerminalAgentStatus(BaseModel):
-    """Status summary for the floating terminal agent panel."""
+    """Status summary for the floating terminal agent panel.
+
+    The trailing fields exist so the Needs-you inbox can decide what actually
+    requires the user instead of re-deriving it from ``status`` alone. Every
+    one of them is optional and defaults to "unknown" so older clients (and
+    older producers) keep working unchanged.
+    """
 
     tab_id: str
     tab_name: str
@@ -234,6 +240,21 @@ class TerminalAgentStatus(BaseModel):
     tmux_session: str
     last_changed_at: Optional[datetime] = None
     sampled_at: datetime
+    # A provider question/approval card is waiting for the user's answer.
+    pending_question: bool = False
+    # Human label for what the agent is doing right now ("Running pytest -q"),
+    # never provider jargon. None when there is nothing to report.
+    activity: Optional[str] = None
+    # When the current activity started, so the inbox can show elapsed time
+    # without the client having to watch a transition.
+    activity_since: Optional[datetime] = None
+    # Last ~160 characters of the newest assistant reply, from the durable
+    # stream only when reading it stays cheap (see manager status cache).
+    last_reply_excerpt: Optional[str] = None
+    # When that reply landed, for the row's timestamp. None when the excerpt is
+    # a fallback to an earlier turn (the newest turn has written no text yet),
+    # so an old answer can never read as "just now".
+    last_reply_at: Optional[datetime] = None
 
 
 # SSH destinations are passed as an argv element, so a value beginning with

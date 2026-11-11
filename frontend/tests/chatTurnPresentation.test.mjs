@@ -93,8 +93,10 @@ test('pending lazy detail projection preserves approval, error, status and compa
     descriptor: { turn_id: 'turn', first_sequence: 1, last_sequence: 5, event_count: 5 },
     status: 'idle',
   })
-  assert.deepEqual(parts.map(part => part.kind), ['process', 'approval', 'subagents', 'error', 'text'])
-  assert.equal(parts[2].compact, true)
+  // The card ends the turn, the same reading order as a folded turn; the failed
+  // sub-agent summary stays compact and the error keeps its place.
+  assert.deepEqual(parts.map(part => part.kind), ['process', 'subagents', 'error', 'text', 'approval'])
+  assert.equal(parts[1].compact, true)
 })
 
 test('tool group status preserves running, failed and all-cancelled precedence', () => {

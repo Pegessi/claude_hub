@@ -397,8 +397,8 @@ def test_managed_chat_question_uses_managed_owner_and_hides_task_owned_controls(
     page.keyboard.press("Escape")
 
     page.get_by_role("group", name="Pick one").get_by_role("button", name="Red", exact=True).click()
-    page.get_by_role("button", name="提交选择", exact=True).click()
-    expect(page.get_by_text("已提交", exact=True)).to_be_visible()
+    page.get_by_role("button", name="Submit answer", exact=True).click()
+    expect(page.get_by_text("You chose: Red", exact=True)).to_be_visible()
 
     assert len(sent) == 1
     send_url, body = sent[0]

@@ -45,7 +45,7 @@ class GoalRunStore:
                 key: {
                     name: item
                     for name, item in value.items()
-                    if name in {"tab_id", "objective", "images"}
+                    if name in {"tab_id", "objective", "images", "plan_first"}
                 }
                 for key, value in payload.get("create_inputs", {}).items()
             }
@@ -123,6 +123,8 @@ class GoalRunStore:
             fingerprint = image_fingerprint(request.attachments)
             if fingerprint:
                 supplied["images"] = fingerprint
+            if request.plan_first:
+                supplied["plan_first"] = True
             if original != supplied:
                 raise ValueError("client_request_id was already used for another create")
             return prior.model_copy(deep=True)
@@ -158,6 +160,8 @@ class GoalRunStore:
             }
             if goal.pending_image_fingerprint:
                 self._create_inputs[client_request_id]["images"] = goal.pending_image_fingerprint
+            if goal.plan_first:
+                self._create_inputs[client_request_id]["plan_first"] = True
             try:
                 self._save()
             except Exception:

@@ -7,7 +7,6 @@ const source = path => readFile(new URL(`../src/${path}`, import.meta.url), 'utf
 const componentFacades = [
   ['components/ScheduledTasksPanel.vue', 'features/scheduled-tasks/ScheduledTasksPanel.vue'],
   ['components/DotPanel.vue', 'features/dot/DotPanel.vue'],
-  ['components/AgentStatusFloatingPanel.vue', 'features/agent-status/AgentStatusFloatingPanel.vue'],
   ['components/FeishuBotSettingsDialog.vue', 'features/feishu-bot/FeishuBotSettingsDialog.vue'],
 ]
 

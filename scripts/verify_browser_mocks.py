@@ -30,6 +30,7 @@ RUNNERS = (
     ("browser_workspace_picker_delete.py", "/tests/agent_workspace_task_create_harness.html"),
     ("browser_chat_subagent_region.py", ""),
     ("browser_subagent_jump_card.py", ""),
+    ("browser_agent_inbox.py", ""),
     ("browser_native_subagent_dock.py", ""),
     ("browser_chat_composer.py", ""),
     ("browser_managed_chat_question.py", ""),
@@ -43,6 +44,9 @@ RUNNERS = (
     ("browser_markdown_reader.py", ""),
     ("browser_dot_panel.py", ""),
     ("browser_service_restart.py", ""),
+    ("browser_diff_review.py", "/tests/diff_review_harness.html"),
+    ("browser_diff_code.py", "/tests/diff_code_harness.html"),
+    ("browser_work_log.py", "/tests/work_log_harness.html"),
 )
 
 # A scenario's entry page cannot be derived from its filename, so the table

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from typing import Any, Awaitable, Callable, Optional
 
@@ -24,10 +25,21 @@ class EditResendTurnInFlightError(RuntimeError):
 
 @dataclass(frozen=True)
 class NativeRuntimeSnapshot:
-    """Read-only runtime state derived from the sole native transport owner."""
+    """Read-only runtime state derived from the sole native transport owner.
+
+    ``detail`` stays the one mandatory field (existing producers may pass just
+    status + detail positionally). The optional fields below are the inbox
+    contract: they answer "does this row need me?" without reading history.
+    """
 
     status: AgentRuntimeStatus
     detail: str
+    # A question/approval card is blocked on the user's answer.
+    pending_question: bool = False
+    # Wall-clock friendly description of the current activity, and when it
+    # started, so the client can render elapsed time from one poll.
+    activity: Optional[str] = None
+    activity_since: Optional[datetime] = None
 
 
 class ExternalTurnRetirement(str, Enum):

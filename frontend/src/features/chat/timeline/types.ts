@@ -22,7 +22,12 @@ export interface TimelineTool {
 export interface TimelineQuestionOption {
   id: string
   label: string
+  /** The provider's one-line tradeoff note for this choice. */
   description?: string
+  /** The provider marked this option as its suggestion (label suffix
+   *  "(Recommended)", peeled off during parsing so it stays out of the
+   *  label the user reads back). */
+  recommended?: boolean
 }
 
 export interface TimelineQuestion {

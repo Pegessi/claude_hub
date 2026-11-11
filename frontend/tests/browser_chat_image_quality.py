@@ -1589,7 +1589,9 @@ async def check_mermaid(page, output: Path, report: dict) -> None:
     first = rich.locator(".markdown-code-block").first
     await expect(first.locator("svg")).to_be_visible()
     await expect(first.locator("pre")).to_be_hidden()
-    await expect(first.locator(".markdown-code-header")).to_contain_text("mermaid")
+    # The header chip names the language as a reader recognises it (Mermaid), not
+    # as the fence's info string spelled it (mermaid).
+    await expect(first.locator(".markdown-code-header")).to_contain_text("Mermaid")
     await expect(first.locator("svg .node")).to_have_count(11)
     label_bounds = await first.locator("svg .node").evaluate_all("""nodes => nodes.map(node => {
         const text = node.querySelector('text').getBoundingClientRect();

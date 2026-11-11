@@ -33,6 +33,14 @@ export interface ToolActivity {
 export interface ToolDiffLine {
   sign: '+' | '-' | ' ' | '@'
   text: string
+  /** File this row belongs to, when the call or its diff headers name one. */
+  file?: string
+  /** Line in the new file: added and unchanged rows of a numbered hunk. */
+  newLine?: number
+  /** Line in the original file: removed and unchanged rows. */
+  oldLine?: number
+  /** An ``@`` row that names a file rather than a hunk header. */
+  fileHeader?: boolean
 }
 
 /** Stroke-only 16px glyphs; rendered with ``fill: none; stroke: currentColor``. */
@@ -199,13 +207,21 @@ function shortPath(path: string): string {
 class DiffBuilder {
   readonly lines: ToolDiffLine[] = []
   truncated = false
+  /** File the rows below belong to; diff headers and change entries set it. */
+  file = ''
+  /** Line cursors, live only inside a hunk header that carried numbers. */
+  oldCursor = 0
+  newCursor = 0
+  numbered = false
 
   push(line: ToolDiffLine): boolean {
     if (this.lines.length >= DIFF_LINE_LIMIT) {
       this.truncated = true
       return false
     }
-    this.lines.push(line)
+    // Rows inherit the current file so a review comment can name it without
+    // every producer threading the path through.
+    this.lines.push(line.file || !this.file ? line : { ...line, file: this.file })
     return true
   }
 
@@ -215,8 +231,33 @@ class DiffBuilder {
   }
 }
 
+/** One content row, numbered when the enclosing ``@@`` hunk gave a range. */
+function diffRow(out: DiffBuilder, sign: '+' | '-' | ' ', text: string): boolean {
+  if (!out.numbered) return out.push({ sign, text })
+  const oldLine = sign === '+' ? undefined : out.oldCursor++
+  const newLine = sign === '-' ? undefined : out.newCursor++
+  return out.push({
+    sign,
+    text,
+    ...(oldLine ? { oldLine } : {}),
+    ...(newLine ? { newLine } : {}),
+  })
+}
+
+/** ``@@ -12,7 +12,9 @@``; Codex also emits ``@@`` / ``@@ def foo`` without counts. */
+const HUNK_HEADER = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/
+
+/** ``+++ b/path`` names the new file; a space means an ambiguous or
+ *  timestamped header, which is left unattributed. */
+function diffHeaderFile(line: string): string {
+  const path = line.slice(4).trim()
+  if (!path || /\s/.test(path) || path === '/dev/null') return ''
+  return path.replace(/^[ab]\//, '')
+}
+
 function pushLines(out: DiffBuilder, sign: '+' | '-', text: unknown): void {
   if (typeof text !== 'string') return
+  out.numbered = false
   for (const line of text.split('\n')) {
     if (!out.push({ sign, text: line })) return
   }
@@ -232,7 +273,9 @@ function unifiedDiffLines(text: string, out: DiffBuilder): void {
     const line = lines[index]
     const file = PATCH_FILE_HEADER.exec(line)
     if (file) {
-      if (!out.push({ sign: '@', text: file[2].trim() })) return
+      out.file = file[2].trim()
+      out.numbered = false
+      if (!out.push({ sign: '@', text: out.file, fileHeader: true })) return
       continue
     }
     if (line.startsWith('*** ')) continue
@@ -241,14 +284,23 @@ function unifiedDiffLines(text: string, out: DiffBuilder): void {
     // removed ``-- comment`` or Markdown rule stays content.
     if (line.startsWith('diff --git ') || line.startsWith('index ')) continue
     if (line.startsWith('--- ') && lines[index + 1]?.startsWith('+++ ')) {
+      out.file = diffHeaderFile(lines[index + 1]) || out.file
+      out.numbered = false
       index++
       continue
     }
     let pushed: boolean
-    if (line.startsWith('@@')) pushed = out.push({ sign: '@', text: line })
-    else if (line.startsWith('+')) pushed = out.push({ sign: '+', text: line.slice(1) })
-    else if (line.startsWith('-')) pushed = out.push({ sign: '-', text: line.slice(1) })
-    else pushed = out.push({ sign: ' ', text: line.startsWith(' ') ? line.slice(1) : line })
+    if (line.startsWith('@@')) {
+      const hunk = HUNK_HEADER.exec(line)
+      out.numbered = Boolean(hunk)
+      if (hunk) {
+        out.oldCursor = Number(hunk[1])
+        out.newCursor = Number(hunk[2])
+      }
+      pushed = out.push({ sign: '@', text: line })
+    } else if (line.startsWith('+')) pushed = diffRow(out, '+', line.slice(1))
+    else if (line.startsWith('-')) pushed = diffRow(out, '-', line.slice(1))
+    else pushed = diffRow(out, ' ', line.startsWith(' ') ? line.slice(1) : line)
     if (!pushed) return
   }
 }
@@ -276,8 +328,9 @@ function patchSource(args: Record<string, unknown> | null, argsText: string): st
   return args ? '' : argsText
 }
 
-function editDiff(args: Record<string, unknown> | null, argsText: string): ToolDiffLine[] | undefined {
+function editDiff(args: Record<string, unknown> | null, argsText: string, path: string): ToolDiffLine[] | undefined {
   const out = new DiffBuilder()
+  out.file = path
   if (args && ('old_string' in args || 'new_string' in args)) {
     pushLines(out, '-', args.old_string)
     pushLines(out, '+', args.new_string)
@@ -289,7 +342,9 @@ function editDiff(args: Record<string, unknown> | null, argsText: string): ToolD
     }
   } else if (args && args.changes) {
     for (const change of changeEntries(args.changes)) {
-      if (!out.push({ sign: '@', text: change.path })) break
+      out.file = change.path
+      out.numbered = false
+      if (!out.push({ sign: '@', text: change.path, fileHeader: true })) break
       if (typeof change.diff === 'string') unifiedDiffLines(change.diff, out)
     }
   } else {
@@ -365,7 +420,7 @@ function deriveToolActivity(tool: ToolLike): ToolActivity {
         kind,
         verb,
         target: path ? shortPath(path) : patchTarget(args, tool.argsText),
-        diff: editDiff(args, tool.argsText),
+        diff: editDiff(args, tool.argsText, path),
       }
     }
     case 'search': {

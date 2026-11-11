@@ -1,19 +1,15 @@
 <template>
-  <details class="detail-section detail-section--collapsible markdown-output-section">
+  <!-- No discovered documents: a zero-count header and an explanation block
+       was pure noise for a reader deciding on the task. -->
+  <details
+    v-if="selectedMarkdownDocuments.length > 0"
+    class="detail-section detail-section--collapsible markdown-output-section"
+  >
     <summary class="detail-section-title detail-section-title--with-count">
       <span>Markdown Outputs</span>
       <span>{{ selectedMarkdownDocuments.length }}</span>
     </summary>
-    <div
-      v-if="selectedMarkdownDocuments.length === 0"
-      class="empty-timeline"
-    >
-      No Markdown outputs discovered yet. Agents can report artifact_refs, or Markdown changed_files will appear here automatically.
-    </div>
-    <div
-      v-else
-      class="markdown-output-list"
-    >
+    <div class="markdown-output-list">
       <article
         v-for="document in selectedMarkdownDocuments"
         :key="document.id"

@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from itertools import groupby
 from pathlib import Path
@@ -75,6 +77,122 @@ class TurnLifecycleSnapshot:
 
     state: TurnLifecycleState
     latest_unfinished: Optional[AgentStreamEvent]
+
+
+@dataclass(frozen=True)
+class ReplyExcerpt:
+    """Newest assistant text, plus the identity of the file it came from.
+
+    ``mtime_ns``/``size`` let the caller reuse this excerpt on every status
+    poll until the stream actually grows, so the inbox never rescans history.
+    ``written_at`` is the write time **only** when the text belongs to the
+    newest turn; a fallback to an earlier turn's answer leaves it ``None`` so a
+    row cannot claim an old reply landed "just now".
+    """
+
+    text: str
+    written_at: Optional[datetime]
+    mtime_ns: int
+    size: int
+
+
+# A reply excerpt only needs the trailing slice of the stream. Scanning this
+# much from EOF covers the final answer of any realistic turn without ever
+# parsing the whole log per poll.
+_REPLY_EXCERPT_SCAN_BYTES = 128 * 1024
+_REPLY_EXCERPT_MAX_CHARS = 160
+_REPLY_EXCERPT_MAX_COLLECTED = 4096
+
+
+def read_reply_excerpt(path: Path, max_chars: int, max_scan_bytes: int) -> Optional[ReplyExcerpt]:
+    """Bounded tail scan of one session stream, blocking by design.
+
+    Callers run this off the event loop (``asyncio.to_thread`` or the manager's
+    status worker): it reads and JSON-parses up to ``max_scan_bytes``.
+    """
+    try:
+        stat_result = path.stat()
+    except OSError:
+        return None
+    size = stat_result.st_size
+    raw = b""
+    try:
+        with path.open("rb") as handle:
+            if size > max_scan_bytes:
+                # Start one byte early so a mid-line seek is dropped below.
+                handle.seek(size - max_scan_bytes - 1)
+                handle.readline()  # discard the partial first line
+            else:
+                handle.seek(0)
+            raw = handle.read()
+    except OSError:
+        return None
+
+    # Walk the scanned window forward and remember the newest turn that
+    # produced readable text. A forward pass is what makes the fallbacks work:
+    # a turn that announced itself but wrote no text yet leaves the previous
+    # turn's answer as the newest excerpt, and narration before a tool call is
+    # dropped in favour of the answer after it.
+    turn_id: Optional[str] = None
+    pieces: List[str] = []
+    # (text, the turn that produced it) so ``written_at`` can stay honest.
+    best: Optional[tuple[str, str]] = None
+    last_started: Optional[str] = None
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type")
+        event_turn = event.get("turn_id")
+        if not isinstance(event_turn, str):
+            continue
+        if kind == "turn_started":
+            last_started = event_turn
+            if pieces and turn_id is not None:
+                best = ("".join(pieces), turn_id)
+            turn_id = event_turn
+            pieces = []
+            continue
+        if event_turn != turn_id:
+            continue
+        if kind == "text_delta":
+            payload = event.get("payload")
+            text = payload.get("text") if isinstance(payload, dict) else None
+            if isinstance(text, str) and text:
+                pieces.append(text)
+                if sum(len(piece) for piece in pieces) >= _REPLY_EXCERPT_MAX_COLLECTED:
+                    # Past the readable budget: keep only the newest segment.
+                    pieces = [text]
+        elif kind == "tool_call_completed" and pieces:
+            # Text before the last tool call is narration; the answer after it
+            # is what the user wants to read in a row.
+            pieces = []
+    if pieces and turn_id is not None:
+        best = ("".join(pieces), turn_id)
+    if best is None:
+        return None
+    newest, source_turn = best
+    text = " ".join(newest.split())
+    if len(text) > max_chars:
+        text = text[: max_chars - 1].rstrip() + "…"
+    # The fallback case (a turn that started but wrote nothing yet) keeps the
+    # previous answer's text but must not borrow the newest write's timestamp.
+    is_newest_turn = last_started is not None and source_turn == last_started
+    return ReplyExcerpt(
+        text=text,
+        written_at=(
+            datetime.fromtimestamp(stat_result.st_mtime, tz=timezone.utc)
+            if is_newest_turn
+            else None
+        ),
+        mtime_ns=stat_result.st_mtime_ns,
+        size=size,
+    )
 
 
 def compact_history_events(events: List[AgentStreamEvent]) -> List[AgentStreamEvent]:
@@ -497,6 +615,22 @@ class AgentStreamStore:
                 return str(unpack(row[0], self._dictionary)["created_at"]) if row else None
 
         return await _complete_io(last)
+
+    async def reply_excerpt(
+        self,
+        max_chars: int = _REPLY_EXCERPT_MAX_CHARS,
+        max_scan_bytes: int = _REPLY_EXCERPT_SCAN_BYTES,
+    ) -> Optional[ReplyExcerpt]:
+        """Newest assistant text for this session, from a bounded tail scan.
+
+        Only the trailing ``max_scan_bytes`` of the stream are parsed, and the
+        answer after the turn's last tool call wins over earlier narration.
+        The scan is blocking file I/O, so it runs in a worker thread and the
+        caller caches the result by (mtime_ns, size).
+        """
+        if not self._path.exists():
+            return None
+        return await asyncio.to_thread(read_reply_excerpt, self._path, max_chars, max_scan_bytes)
 
     async def truncate_before(self, sequence: int) -> int:
         def truncate() -> int:

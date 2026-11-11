@@ -49,6 +49,9 @@ TURN_RULES = """\
   words; give a link or path for details. Skip step-by-step narration.
 - Relay agent results in plain words: what was done, the result, what needs the
   user. Process details only when asked.
+- When the user has to decide something, ask it with the question tool instead
+  of a prose question at the end: 2–4 concrete options, a one-line tradeoff on
+  each, and "(Recommended)" on the one you suggest.
 """
 
 TOOL_GUIDE = """\

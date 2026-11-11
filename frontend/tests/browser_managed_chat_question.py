@@ -61,8 +61,15 @@ EVENTS = [
                     "id": "color",
                     "prompt": "Pick one",
                     "options": [
-                        {"id": "red", "label": "Red"},
-                        {"id": "blue", "label": "Blue"},
+                        {"id": "red", "label": "Red", "description": "Warm; closes the task"},
+                        {"id": "blue", "label": "Blue", "description": "Cool; keeps it open"},
+                        # Claude and Codex reuse the label as the option id, so a
+                        # provider id can be ordinary prose with spaces.
+                        {
+                            "id": "deep blue",
+                            "label": "Deep blue",
+                            "description": "Coolest; still closes the task",
+                        },
                     ],
                 }
             ],
@@ -251,6 +258,23 @@ async def main(browser_run: BrowserRun) -> None:
         await page.goto(f"{base}{HARNESS_PATH}")
 
         await expect(page.get_by_text("Choose a color", exact=True)).to_be_visible()
+        # The provider's per-option tradeoff reaches the card, under its label.
+        await expect(page.get_by_text("Warm; closes the task", exact=True)).to_be_visible()
+        # Claude/Codex option ids are the labels, i.e. prose with spaces. The
+        # tradeoff reference must stay a single IDREF that resolves, or a
+        # screen reader announces a dangling pointer instead of the tradeoff.
+        prose_option = page.get_by_role("group", name="Pick one").get_by_role(
+            "button", name="Deep blue", exact=True
+        )
+        await expect(prose_option).to_have_attribute("aria-describedby", re.compile(r"^[^\s]+$"))
+        described = await prose_option.evaluate("""el => {
+              const ref = el.getAttribute('aria-describedby');
+              const matches = Array.from(document.querySelectorAll('[id]'))
+                .filter(node => node.id === ref).length;
+              return {ref, resolves: !!document.getElementById(ref), matches};
+            }""")
+        if not described["ref"] or not described["resolves"] or described["matches"] != 1:
+            raise AssertionError(f"option tradeoff reference does not resolve: {described!r}")
         await expect(page.get_by_role("button", name="Stop", exact=True)).to_be_visible()
         await expect(page.get_by_role("button", name=re.compile(r"Chat mode:"))).to_have_count(0)
 
@@ -278,29 +302,60 @@ async def main(browser_run: BrowserRun) -> None:
         choice = page.get_by_role("group", name="Pick one").get_by_role(
             "button", name="Red", exact=True
         )
-        submit = page.get_by_role("button", name="提交选择", exact=True)
+        submit = page.get_by_role("button", name="Submit answer", exact=True)
+
+        # Number keys answer the open decision without moving the pointer. A
+        # field keeps them: the composer must survive a "1" typed into it.
+        # The card is inert while the mailbox send above is in flight, so wait
+        # for it to accept input before asking the keyboard to do anything.
+        await expect(choice).to_be_enabled()
+        await page.evaluate("document.activeElement && document.activeElement.blur()")
+        await page.keyboard.press("1")
+        await expect(choice).to_have_attribute("aria-pressed", "true")
+        await expect(submit).to_be_enabled()
+        await page.keyboard.press("2")
+        blue = page.get_by_role("group", name="Pick one").get_by_role(
+            "button", name="Blue", exact=True
+        )
+        await expect(blue).to_have_attribute("aria-pressed", "true")
+        await expect(choice).to_have_attribute("aria-pressed", "false")
+        # A digit typed into a field is text, not a shortcut.
+        typing_field = page.get_by_placeholder("Send a message…")
+        await typing_field.click()
+        await page.keyboard.type("1")
+        await expect(typing_field).to_have_value("1")
+        await expect(blue).to_have_attribute("aria-pressed", "true")
+        await expect(choice).to_have_attribute("aria-pressed", "false")
+        await typing_field.fill("")
+
         await choice.click()
         await submit.click()
         await expect(page.get_by_role("alert")).to_contain_text(
             "response lost after provider accepted"
         )
-        await expect(page.get_by_text("已提交", exact=True)).to_have_count(0)
+        # Unconfirmed: the card must not claim the choice was delivered.
+        await expect(page.get_by_text("You chose: Red", exact=True)).to_have_count(0)
         await expect(submit).to_be_visible()
 
         await submit.click()
-        await expect(page.get_by_text("已提交", exact=True)).to_be_visible()
+        # Delivered: the form collapses to the one line that says what was
+        # decided, so there is no second submit button to press.
+        await expect(page.get_by_text("You chose: Red", exact=True)).to_be_visible()
+        await expect(page.get_by_role("button", name="Submit answer", exact=True)).to_have_count(0)
         await expect(page.get_by_role("alert")).to_have_count(0)
         await page.screenshot(path=output / "managed-question-recovered.png", full_page=True)
         remote_state = "claimed"
         await page.reload()
-        await expect(page.get_by_text("回答已接收，正在投递", exact=True)).to_be_visible()
-        await expect(page.get_by_role("button", name="提交选择", exact=True)).to_have_count(0)
+        await expect(page.get_by_text("Answer received — delivering", exact=True)).to_be_visible()
+        await expect(page.get_by_role("button", name="Submit answer", exact=True)).to_have_count(0)
         remote_state = "resolved"
-        await expect(page.get_by_text("已回答", exact=True)).to_be_visible(timeout=6000)
+        await expect(page.get_by_text("Answered", exact=True)).to_be_visible(timeout=6000)
         await page.screenshot(path=output / "feishu-answer-after-reload.png", full_page=True)
         remote_state = "stale"
         await page.reload()
-        await expect(page.get_by_text("问题已失效", exact=True)).to_be_visible()
+        await expect(
+            page.get_by_text("This question is no longer open", exact=True)
+        ).to_be_visible()
         rejected = await page.evaluate(
             """async ({url, body}) => (await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)})).status""",
             {"url": f"{base}{STREAM_BASE}/send", "body": sends[0]},
@@ -335,10 +390,14 @@ async def main(browser_run: BrowserRun) -> None:
     report = {
         "result": "PASS",
         "coverage": [
+            "provider option tradeoff renders under its label on the card",
+            "a prose option id still leaves one resolvable tradeoff reference",
+            "number keys answer the open decision and a typed digit stays text",
             "managed busy Enter posts immediately to the durable session mailbox",
             "managed question remains actionable while provider turn is busy",
             "lost answer response leaves the exact card unresolved",
             "explicit retry preserves client turn id and provider card identity",
+            "delivered card collapses to its resolved line",
             "managed surface hides Task-owned mode, Goal, and schedule controls",
             "cross-channel claimed and resolved projection survives reload",
             "stale card disabled and exact stale-click request rejected",

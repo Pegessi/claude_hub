@@ -19,7 +19,12 @@ from ....models import (
 )
 from ...local_storage import document_exists, read_document, write_document
 from ..defaults import _TABS_STATE_VERSION
-from ..records import TabStateError, _AgentStatusSnapshot, _PendingTabCleanup
+from ..records import (
+    TabStateError,
+    _AgentStatusSnapshot,
+    _PendingTabCleanup,
+    _ReplyExcerptCacheEntry,
+)
 from .host import ManagerHost
 
 if TYPE_CHECKING:
@@ -44,6 +49,7 @@ class ManagerStateMixin(ManagerHost):
         self._tab_order: List[str] = []
         self._status_snapshots: Dict[str, _AgentStatusSnapshot] = {}
         self._status_cache: Dict[str, TerminalAgentStatus] = {}
+        self._reply_excerpt_cache: Dict[Tuple[str, str], _ReplyExcerptCacheEntry] = {}
         self._start_locks: Dict[str, asyncio.Lock] = {}
         logger.info("=" * 60)
         logger.info("Initializing TTYDManager - tmux session persistence enabled")
