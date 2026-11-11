@@ -99,6 +99,18 @@ function activityLabel(status?: TerminalAgentStatus): string {
  * outranks everything (a turn can keep running while a card waits), then an
  * unread finished turn, then failures, then plain work.
  */
+/** The dot a row wears, from the same fields the row's text uses.
+ *
+ * A card waiting on the user is its own state (`needs`), but only where the
+ * provider is otherwise healthy: `pending_question` also rides on an
+ * `attention`/`offline` snapshot (see `useTabStatus`), and painting that amber
+ * would contradict the row's own reason and the sidebar light. */
+export function rowDotState(reported: TerminalAgentStatus | null | undefined, group: string): string {
+  const state = reported?.status
+  if (reported?.pending_question && state !== 'attention' && state !== 'offline') return 'needs'
+  return state ?? (group === 'working' ? 'working' : 'idle')
+}
+
 export function classifyRow(
   tab: TerminalTab,
   status: TerminalAgentStatus | undefined,
@@ -152,10 +164,18 @@ export function classifyRow(
 
   if (status?.pending_question) {
     // A blocked idle turn reports no activity clock; the newest reply is the
-    // only real timestamp it has, so the row keeps a time either way.
+    // only real timestamp it has, so the row keeps a time either way. The
+    // backend also keeps `pending_question` on an attention/offline snapshot,
+    // where an answer can be refused, so the reason names the failure too
+    // instead of hiding it behind "Waiting for your answer".
+    const failure = runtimeStatus === 'attention' || runtimeStatus === 'offline'
+    const failureReason = failure
+      ? (status?.detail ?? '').trim() ||
+        (runtimeStatus === 'attention' ? 'Needs attention' : 'Agent is offline')
+      : null
     return row(
       'needs',
-      'Waiting for your answer',
+      failureReason ? `${failureReason} — a question is waiting` : 'Waiting for your answer',
       replyExcerpt,
       activitySinceMs ?? replyAtMs,
       4,

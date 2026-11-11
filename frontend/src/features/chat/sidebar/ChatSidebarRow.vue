@@ -24,7 +24,8 @@
       <span
         class="chat-sidebar__item-status"
         :data-status="status"
-        :data-unread="tab.is_unread ? 'true' : 'false'"
+        :data-unread="tab.is_unread && !awaiting ? 'true' : 'false'"
+        :data-awaiting="awaiting ? 'true' : 'false'"
         role="img"
         :aria-label="statusLabel"
         :title="statusLabel"
@@ -67,6 +68,8 @@ defineProps<{
   dropPosition?: 'before' | 'after'
   status: string
   statusLabel: string
+  /** A question card is waiting for this user; not the same as unread work. */
+  awaiting?: boolean
   renaming: boolean
   setRenameInputRef: (element: unknown) => void
 }>()
@@ -215,6 +218,26 @@ const emit = defineEmits<{
 
 .chat-sidebar__item-status[data-status='offline'] {
   background: var(--ch-color-text-subtle);
+}
+
+/* A finished turn with a card waiting keeps the completed colour — the work
+   did stop — and adds a question mark in the same 8px slot, so it is not
+   mistaken for a quiet idle session that needs nothing. */
+.chat-sidebar__item-status[data-awaiting='true'] {
+  border: 1px solid var(--ch-color-success);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ch-color-success) 30%, transparent);
+}
+
+.chat-sidebar__item-status[data-awaiting='true']::before {
+  content: '?';
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--ch-color-sidebar-bg);
+  font-size: 7px;
+  font-weight: 900;
+  line-height: 1;
 }
 
 /* An unread completed turn keeps the explicit success treatment, but occupies

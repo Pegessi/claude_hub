@@ -53,6 +53,7 @@
             v-if="tab.session_kind === 'chat' || tab.is_active"
             class="tab-indicator"
             :data-status="getTabStatus(tab)"
+            :data-awaiting="isAwaitingAnswer(tab) ? 'true' : 'false'"
             role="img"
             :aria-label="getTabStatusLabel(tab)"
             :title="getTabStatusLabel(tab)"
@@ -212,7 +213,7 @@ const { isPending, runPending } = usePendingActions()
 const { tabs, manualTabs, activeTabId, isLoading, agentStatuses, notifications } = storeToRefs(store)
 const { mode, colorScheme } = storeToRefs(appStore)
 const { dismissNotification } = store
-const { getTabStatus, getTabStatusLabel } = useTabStatus(agentStatuses)
+const { getTabStatus, getTabStatusLabel, isAwaitingAnswer } = useTabStatus(agentStatuses)
 
 const draggedTabId = ref<string | null>(null)
 const dragOverIndex = ref<number | null>(null)

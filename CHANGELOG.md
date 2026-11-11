@@ -7,6 +7,32 @@
 
 ## Released
 
+### fix(ui): a session blocked on a question stops reading as working
+
+- A Chat whose provider holds its turn open on a question keeps
+  `pending_question` in the status poll while the Chat body shows the card.
+  The shared `useTabStatus` now presents that state as finished work that is
+  waiting: the sidebar row, its `data-runtime-status` attribute and the TabBar
+  indicator drop the working light and its pulse, and read
+  `Session status: Waiting for your answer` in the sidebar (`aria-label` and
+  tooltip) and `Waiting for your answer` on the TabBar indicator, instead of
+  "Working". The light keeps the completed colour and gains a `?` in the same
+  slot (`data-awaiting`, shared with the TabBar indicator), so a waiting
+  session is not mistaken for a quiet idle one; an unread row drops its
+  completion badge while the card waits, because answering — not reading —
+  is the action. The flag outranks the provider's own turn flag
+  (`working`/`idle`) but not a failed or dead provider: the backend decides
+  `offline` (hard failure, native or transport error) before `turn_in_flight` and
+  `attention` (a turn that exited non-zero) after it, so `pending_question` rides
+  on both; a dead transport cannot answer a native card at all, and a follow-up
+  answer is refused while the provider still owns the turn or once the turn
+  ended unsuccessfully. Those states keep their own colour and label and only add
+  `— a question is waiting`. The
+  Needs-you inbox names the same two facts for that case. Known limit, out of
+  scope here: while a follow-up turn is still in flight the body still renders
+  the card and `Submit` answers with `409 question_busy`, so the row and the
+  body agree on "waiting" a moment before the answer is deliverable.
+
 ### fix(chat): Resend rewrites history honestly, images paste where they were asked for, Ask aside removed
 
 Design notes and the deliberately-open items are in
