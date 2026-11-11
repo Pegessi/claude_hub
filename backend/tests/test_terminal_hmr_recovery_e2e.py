@@ -972,6 +972,78 @@ def isolated_hmr_stack(tmp_path: Path) -> Generator[dict[str, Any], None, None]:
         _kill_isolated_tmux(ctx["bindir"])
 
 
+def test_palette_change_repaints_live_terminal_without_reconnect(
+    isolated_hmr_stack: dict[str, Any],
+    page: Page,
+) -> None:
+    """A palette-only change reaches the existing xterm, not a replacement iframe."""
+    ctx = isolated_hmr_stack
+    response = ctx["session"].post(
+        f"{ctx['base_url']}/api/tabs", json={"name": "theme-live", "agent_type": "terminal"}
+    )
+    assert response.status_code == 201
+    tab_id = response.json()["id"]
+    session_name = _bootstrap_terminal_tab_private_tmux(
+        page, ctx["base_url"], tab_id, ctx["bindir"]
+    )
+    _seed_markers(session_name, ctx["bindir"], "THEME_KEEP", count=4)
+    _open_harness(page, ctx["harness_url"], tab_id)
+    page.evaluate("""() => {
+      const iframe = document.querySelector('.hmr-harness-terminal iframe.active');
+      const win = iframe.contentWindow;
+      const probe = window.__themeProbe = {
+        iframe, document: win.document, term: win.term, buffer: win.term.buffer.active,
+        loads: 0, payloads: [],
+      };
+      iframe.addEventListener('load', () => probe.loads++);
+      win.addEventListener('message', event => {
+        if (event.data?.type === 'terminal-theme') probe.payloads.push(event.data.payload);
+      });
+    }""")
+    for mode, palette in [("dark", "forest"), ("dark", "sand"), ("light", "sand")]:
+        prior_count = page.evaluate("() => window.__themeProbe.payloads.length")
+        page.evaluate(
+            """async ([mode, palette]) => {
+              const { useAppStore } = await import('/src/stores/appStore.ts');
+              useAppStore().setAppearance(mode, palette);
+            }""",
+            [mode, palette],
+        )
+        page.wait_for_function(
+            """({ mode, priorCount }) => {
+              const probe = window.__themeProbe;
+              const payload = probe.payloads.at(-1);
+              const expected = getComputedStyle(document.documentElement)
+                .getPropertyValue('--ch-terminal-bg').trim();
+              return probe.payloads.length > priorCount && payload.scheme === mode &&
+                payload.xterm.background === expected &&
+                probe.term.options.theme.background === expected;
+            }""",
+            arg={"mode": mode, "priorCount": prior_count},
+            timeout=5000,
+        )
+        state = page.evaluate("""() => {
+          const probe = window.__themeProbe;
+          const iframe = document.querySelector('.hmr-harness-terminal iframe.active');
+          return {
+            sameIframe: iframe === probe.iframe,
+            sameDocument: iframe.contentWindow.document === probe.document,
+            sameTerm: iframe.contentWindow.term === probe.term,
+            sameBuffer: probe.term.buffer.active === probe.buffer,
+            loads: probe.loads,
+            contrast: probe.term.options.minimumContrastRatio,
+            backgrounds: probe.payloads.map(payload => payload.xterm.background),
+          };
+        }""")
+        assert all(
+            state[key] for key in ("sameIframe", "sameDocument", "sameTerm", "sameBuffer")
+        ), state
+        assert state["loads"] == 0, state
+        assert state["contrast"] == (4.5 if mode == "light" else 3), state
+        assert any("THEME_KEEP" in line for line in _read_harness_xterm_lines(page))
+    assert len(set(state["backgrounds"])) == 3, state
+
+
 def test_buffered_capture_coordinator_preserves_write_identity_and_finalizes(
     isolated_hmr_stack: dict[str, Any],
     page: Page,

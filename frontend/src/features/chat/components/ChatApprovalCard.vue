@@ -657,7 +657,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', handleDocumentKeyd
 }
 
 .approval-submit-btn:hover:not(:disabled) {
-  background: var(--ch-color-accent-hover);
+  background: var(--ch-color-accent-fill-hover);
 }
 
 .approval-submit-btn:focus-visible {

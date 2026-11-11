@@ -416,7 +416,7 @@ async function handlePickerSelect(workspaceId: string) {
 <style scoped src="../styles/shared-task-cards.css"></style>
 
 <style scoped>
-@media (max-width: 760px) {
+@media (max-width: 768px) {
   .workspace-header {
     position: sticky;
     top: 0;

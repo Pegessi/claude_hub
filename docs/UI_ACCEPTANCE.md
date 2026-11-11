@@ -47,7 +47,7 @@ the existing dynamic scenario scripts are not claimed as strictly type-checked.
 
 | Scenario | Acceptance exercised |
 | --- | --- |
-| Appearance themes | Desktop and mobile Terminal/Workspace menus open the same Appearance dialog; six palettes in light/dark have matching real previews, readable core text/code/accent roles and a mode-independent selection; System follows OS changes, choices survive reload and synchronize to another open page/standalone reader; native radio keyboard interaction, focus containment/return, Done/Esc/backdrop dismissal, and narrow/short-screen overflow and 44px primary controls are checked with mocked APIs |
+| Appearance themes | Desktop and mobile Terminal/Workspace menus (including 760/761/768px boundary widths) open the same Appearance dialog; six palettes in light/dark have matching real previews, readable core text/code/accent roles and a mode-independent selection; System follows OS changes, choices survive reload and synchronize to another open page/standalone reader; native radio keyboard interaction, focus containment/return, Done/Esc/backdrop dismissal, and narrow/short-screen overflow and 44px primary controls are checked with mocked APIs |
 | Task execution panel | Recording versus managed controls; progress/handoff and retry identity |
 | Workspace Task creation | Unknown outcome/replay; dialog closure and credential recovery; workspace changes; image paste, decoded preview, attachment-only payload and exact replay; managed Agent/Reviewer and Task Terminal/Chat selection, including MASO Chat and remote restrictions |
 | Workspace Task detail | At 390/720/1280px, open a task, expand/collapse Actions where applicable, perform Start through the real control and observe working status; verify overlays close without intercepting subsequent input |
@@ -78,6 +78,10 @@ Terminal history/remount behavior has a separate blocking check:
 CLAUDE_HUB_BROWSER_EXECUTABLE=/absolute/path/to/chrome \
   ./scripts/verify.sh terminal-hmr
 ```
+
+This target also checks palette-only and light/dark changes against a real ttyd
+terminal: theme messages update xterm while the iframe/document/buffer and output
+remain intact, without reconnecting.
 
 This target requires the declared frontend tools/dependencies plus `tmux` and
 `ttyd`. It runs the entire `test_terminal_hmr_recovery_e2e.py` module against its

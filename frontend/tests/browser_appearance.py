@@ -19,9 +19,9 @@ from urllib.parse import urlencode, urlparse
 from playwright.async_api import Page, expect
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appearance_assertions import PALETTES, choose_mode, choose_palette, contrast  # noqa: E402
 from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
 
-PALETTES = ("Classic", "Slate", "Sand", "Forest", "Dusk", "Contrast")
 STORAGE_KEY = "claude_hub_appearance"
 DOCUMENT = "/fixture/appearance.md"
 MARKDOWN = """# A space for focused work
@@ -69,24 +69,6 @@ async def theme_state(page: Page) -> dict[str, Any]:
     }""")
 
 
-def contrast(foreground: str, background: str) -> float:
-    def luminance(color: str) -> float:
-        values = [float(value) for value in re.findall(r"[\d.]+", color)[:3]]
-        assert len(values) == 3, color
-        if color.startswith("rgb"):
-            values = [value / 255 for value in values]
-        else:
-            assert color.startswith("color(srgb "), color
-        channels = [
-            value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
-            for value in values
-        ]
-        return sum(value * weight for value, weight in zip(channels, (0.2126, 0.7152, 0.0722)))
-
-    bright, dark = sorted((luminance(foreground), luminance(background)), reverse=True)
-    return (bright + 0.05) / (dark + 0.05)
-
-
 def check_contrast(state: dict[str, Any]) -> dict[str, float]:
     values = state["values"]
     ratios: dict[str, float] = {}
@@ -122,18 +104,6 @@ async def assert_theme(page: Page, palette: str, mode: str) -> None:
     state = await theme_state(page)
     assert state["nativeScheme"] == mode, state
     assert state["browserChrome"] == state["appBackgroundToken"], state
-
-
-async def choose_mode(page: Page, name: str) -> None:
-    control = page.get_by_role("radio", name=name, exact=True)
-    await control.locator("..").click()
-    await expect(control).to_be_checked()
-
-
-async def choose_palette(page: Page, name: str) -> None:
-    control = page.get_by_role("radio", name=re.compile(rf"^{name}\b"))
-    await control.locator("..").click()
-    await expect(control).to_be_checked()
 
 
 async def dialog_geometry(page: Page) -> dict[str, Any]:
@@ -276,6 +246,8 @@ async def main(browser_run: BrowserRun) -> None:
             trigger = page.get_by_role("button", name="Appearance", exact=True)
             await expect(trigger).to_be_visible()
             await assert_theme(page, "Classic", "dark")
+            viewport = await page.locator('meta[name="viewport"]').get_attribute("content")
+            assert viewport is not None and "viewport-fit=cover" not in viewport
             await reader.goto(
                 base + "/?" + urlencode({"markdown": DOCUMENT, "scope": "theme-reader"})
             )
@@ -457,19 +429,23 @@ async def main(browser_run: BrowserRun) -> None:
             await page.set_viewport_size({"width": 390, "height": 844})
             await page.get_by_label("App menu", exact=True).click()
             await page.get_by_role("button", name="Agent Workspace", exact=True).click()
-            workspace_menu = page.get_by_label("Workspace menu", exact=True)
-            await expect(workspace_menu).to_be_visible()
-            await workspace_menu.click()
-            await page.get_by_role("button", name=re.compile(r"^Appearance")).click()
-            await expect(dialog).to_be_visible()
-            await choose_palette(page, "Forest")
-            await choose_mode(page, "Dark")
-            await assert_theme(page, "Forest", "dark")
-            await page.keyboard.press("Escape")
-            await expect(workspace_menu).to_be_focused()
-            report["workspace_mobile"] = (
-                "Appearance opens from Workspace menu and returns focus on dismissal"
-            )
+            report["workspace_mobile"] = []
+            for width in (390, 760, 761, 768):
+                await page.set_viewport_size({"width": width, "height": 844})
+                workspace_menu = page.get_by_label("Workspace menu", exact=True)
+                await expect(workspace_menu).to_be_visible()
+                await workspace_menu.click()
+                await page.get_by_role("button", name=re.compile(r"^Appearance")).click()
+                await expect(dialog).to_be_visible()
+                await choose_palette(page, "Forest")
+                await choose_mode(page, "Dark")
+                await assert_theme(page, "Forest", "dark")
+                await shot(f"workspace-boundary-{width}.png")
+                await page.keyboard.press("Escape")
+                await expect(workspace_menu).to_be_focused()
+                report["workspace_mobile"].append(
+                    {"width": width, "appearance_reachable": True, "focus_returned": True}
+                )
             assert not unknown, unknown
             assert not errors, errors
             report["result"] = "PASS"

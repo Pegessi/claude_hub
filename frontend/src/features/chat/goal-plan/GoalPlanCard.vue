@@ -215,12 +215,12 @@ const budgetSummary = computed(() => goalPlanBudgetSummary(props.plan))
   cursor: pointer;
 }
 .goal-plan-actions button:hover:not(:disabled) { background: var(--ch-color-surface-control-hover); }
-.goal-plan-approve {
+.goal-plan-actions .goal-plan-approve {
   color: var(--ch-color-on-accent, #fff);
   background: var(--ch-color-accent-strong);
   border-color: var(--ch-color-accent-strong);
 }
-.goal-plan-approve:hover:not(:disabled) { background: var(--ch-color-accent-hover); border-color: var(--ch-color-accent-hover); }
+.goal-plan-actions .goal-plan-approve:hover:not(:disabled) { background: var(--ch-color-accent-fill-hover); border-color: var(--ch-color-accent-fill-hover); }
 .goal-plan-actions button:disabled { cursor: default; opacity: 0.55; }
 .goal-plan-actions button:focus-visible { outline: 2px solid var(--ch-color-accent-ring); outline-offset: 2px; }
 .goal-plan-note { margin: 0; font-size: var(--ch-font-size-sm); color: var(--ch-color-text-subtle); }

@@ -16,6 +16,8 @@
 - Add real palette previews, keyboard-operable radio groups and a phone bottom
   sheet with safe-area spacing, scrollable content and 44px primary controls.
   Retain existing semantic status/code tokens and report blocked persistence.
+  Keep filled approval hover text readable and Workspace Appearance reachable
+  at the 768px layout boundary; verify live terminal repaint without reconnect.
 - Design references, acceptance scope and evidence:
   [appearance themes](docs/working-logs/2026-11-11-appearance-themes.md).
 
