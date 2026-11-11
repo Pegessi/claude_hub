@@ -222,11 +222,10 @@
 }
 :root[data-palette='zenless'] .terminal-pane {
   border-radius: 14px 4px 14px 4px;
-  border-width: 2px;
+  border-width: 4px 2px 2px;
 }
 :root[data-palette='zenless'] .terminal-pane.active {
   border-color: var(--ch-color-border-selected);
-  border-top-width: 4px;
   box-shadow: 4px 4px 0 color-mix(in srgb, var(--ch-color-border-selected) 36%, var(--ch-color-border));
 }
 :root[data-palette='zenless'] .pane-session-name {
@@ -721,11 +720,10 @@
 }
 :root[data-palette='los-santos'] .terminal-pane {
   border-radius: 1px;
+  border-width: 3px 1px 1px 4px;
 }
 :root[data-palette='los-santos'] .terminal-pane.active {
   border-color: var(--ch-color-border-selected);
-  border-top-width: 3px;
-  border-left: 4px solid var(--ch-color-border-selected);
   box-shadow:
     inset 0 1px 0 color-mix(in srgb, #38bdf8 35%, transparent),
     0 10px 28px var(--ch-shadow-color-soft);
