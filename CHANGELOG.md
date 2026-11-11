@@ -7,6 +7,88 @@
 
 ## Released
 
+### fix(chat): Resend rewrites history honestly, images paste where they were asked for, Ask aside removed
+
+Design notes and the deliberately-open items are in
+`docs/working-logs/2026-11-11-chat-resend-and-paste.md`.
+
+- **Ask aside is gone.** It forked the whole Chat into a new tab so a side
+  question left the running turn alone, but the aside model could not see that
+  turn, received only the copied *text* of earlier turns, cost a second provider
+  session and left a tab to close — a heavier "Fork from here" plus one message.
+  The composer control, its gate module and its suite are removed; the per-turn
+  fork action and the backend fork endpoint are untouched.
+- **Resend can no longer be offered where it must fail.** The editor used to
+  appear on any turn with a text summary and a turn id, including Goal
+  continuations, restart continuations and workspace/schedule turns — whose
+  provider text is a Hub-authored wrapper that differs from the summary on
+  screen, so every Resend returned 409. Those turns now hide the control and the
+  backend refuses them with "This turn was written by the Goal/Hub, not by you",
+  before any truncation or snapshot.
+- **Long and secret-bearing messages can be edited again.** `turn_started` is
+  persisted already redacted (4000-character truncation, secret masking), and
+  the transcript fork compared that summary with the full provider text, so any
+  such message could never match. The turn now records
+  `provider_text_sha256` (a digest of the provider-bound text, never the text
+  itself) and the fork matches on it, falling back to content for historical
+  turns. `stored_text_incomplete` records whether redaction changed the stored
+  summary, and the editor warns that the prefill is partial instead of silently
+  resending a truncated message. A shifted duplicate match is logged with the
+  removed line count rather than passing silently.
+- **A rewrite reports what it removed.** `POST /stream/edit-resend` returns
+  `removed_turn_count` and the composer says how many later turns went with it,
+  so a history deletion cannot read as a rendering bug. The local Stop optimism
+  is retired with the resend instead of minting a phantom "Stopped" row.
+- **One Stop rule instead of three.** The composer checked `isSending ||
+  isCancelling` while the reconnect and failure banners offered Stop
+  unconditionally, and `cancelActiveTurn` returned silently unless a send was
+  idle — so a banner Stop looked armed and did nothing. Both surfaces now read
+  one `canStop` gate that mirrors what the request can actually do, and an
+  unavailable Stop is visibly unavailable. A send that is still in flight still
+  blocks Stop on purpose: a direct-tab send holds the tab's goal-admission lock
+  across provider delivery and `/stream/cancel` takes that same lock, so a
+  mid-send Stop could only queue behind it. A hung send therefore remains
+  un-interruptible; that needs a bounded send, tracked below.
+- **Images paste where they were asked for.** The Resend editor accepts a pasted
+  image, stages it through the composer's attachment pipeline (same validation,
+  size caps and bounded preview), shows it as a removable chip and sends it as
+  `attachments` on `POST /stream/edit-resend` in the same wire form the composer
+  uses (a preview that *is* the original travels as `preview_is_original`
+  instead of uploading the same base64 twice and counting it twice against the
+  request cap); the backend re-sends the original turn's own images and persists
+  only the added ones' previews, in one place (`send_message`'s reuse rule).
+  Because edit-resend rolls the store back when the provider rejects the turn,
+  it asks that one writer to delete the previews it persisted on that path, so a
+  rolled-back edit leaves no orphaned cache entries. The Goal dialog forwards pastes to the same
+  pipeline `startGoal` already serializes, so a pasted image rides the first
+  Goal turn; while editing an existing Goal the paste is inert because that
+  dialog has no image field.
+- A question answer is no longer offered for editing either: the runtime answer
+  path now records `origin: question_answer`, so the editor cannot offer to
+  resend the `<<<HUB_QUESTION_RESPONSE_V1>>>` payload as if it were the reader's
+  own message.
+- Behavior change worth knowing: an original image whose cached preview was
+  evicted is now dropped from the resent turn instead of keeping a
+  "Preview expired" placeholder, because its bytes cannot be re-sent and an
+  unaligned id would attach the wrong thumbnail to an added image.
+- An independent cross-model review (a different model, given the diff and the
+  repo rules) raised one blocking defect the author introduced — an edit-resend
+  whose provider delivery fails would leak the previews it persisted once its
+  store rollback erased them — plus a duplicated-base64 bug in the resend body,
+  an over-eager Stop gate and three smaller items. All are fixed above, with
+  tests that exercise the real `send_message` instead of a mock.
+- Validation: backend format and types; the focused edit-resend, attachment,
+  preview and managed-control suites (218 passed); the default backend scope
+  excluding the machine-local `test_ci_health.py` failure (6558 passed, 9
+  skipped, plus 30 browser-backed cases that pass with
+  `PLAYWRIGHT_BROWSERS_PATH` set; the only remaining errors are the
+  explicit-only `terminal_hmr_recovery_e2e` harness needing a corepack download);
+  frontend
+  lint, types, bundle and the whole unit suite (1462 passed), including new
+  suites for the resend rules, the timeline metadata, the Stop gate and both
+  paste surfaces; and the mocked browser scenarios (23/23 runners passed, none
+  skipped) against the real build.
+
 ### feat(chat): list provider-native sub-agents in the Agents dock and read one in a window
 
 - The pane-chrome Agents pill now lists provider-native children (Claude

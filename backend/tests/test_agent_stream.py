@@ -4268,7 +4268,15 @@ async def test_feishu_turn_persists_source_while_provider_receives_context(
 
     assert transport.sent_messages == [(provider_text, [])]
     assert started.payload["summary"] == "visible question"
-    assert started.payload["metadata"] == metadata
+    # The source metadata is persisted untouched, plus the additive provider
+    # identity used by edit-resend (a digest of the provider text, never the
+    # text itself, and whether the stored copy is a redacted partial view).
+    stored_metadata = started.payload["metadata"]
+    assert stored_metadata["origin"] == "feishu"
+    assert stored_metadata["provider_text_format"] == metadata["provider_text_format"]
+    assert stored_metadata["feishu"] == metadata["feishu"]
+    assert stored_metadata["provider_text_sha256"] != provider_text
+    assert stored_metadata["stored_text_incomplete"] is False
     await tailer.stop()
 
 

@@ -21,33 +21,33 @@ const { useChatActions } = await loadChatFeature('controllers/useChatActions')
 // fallback; this keeps the UX in sync and avoids a pointless round-trip.
 // ---------------------------------------------------------------------------
 
-test('edit button is disabled while a turn is running', () => {
-  // The hover edit button must bind :disabled to turnInFlight so it cannot be
-  // clicked while a turn is streaming.
+test('edit button is offered only for turns the reader wrote', () => {
+  // The button used to appear on any turn with a text summary and a turn id,
+  // including Goal continuations whose provider text is a wrapper the reader
+  // never typed -- every Resend on those returned 409. The authored-origin
+  // rule now decides visibility, and the disablement reason decides enabledness.
   const btnMatch = structuredPane.match(
-    /class="edit-resend-hover-btn"[\s\S]*?@click="startEdit\(turn\)"/,
+    /<button\s+v-if="canEditTurn\(turn\)"[\s\S]*?@click="startEdit\(turn\)"/,
   )
   assert.ok(btnMatch, 'edit-resend hover button must exist')
   const btn = btnMatch[0]
 
+  assert.match(btn, /v-if="canEditTurn\(turn\)"/, 'visibility must come from the authored-origin rule')
   assert.match(
     btn,
-    /:disabled="turnInFlight \|\| Boolean\(goalEditReason\)"/,
-    'edit button must be disabled while a turn or Goal owns the conversation',
+    /:disabled="editReasonFor\(turn\) !== null"/,
+    'the button is disabled exactly when the rule states a reason',
   )
 })
 
 test('edit button explains why it is disabled via a tooltip', () => {
-  // A :title bound on turnInFlight gives the user a reason for the disabled
-  // state (e.g. "A turn is currently running").
   const btnMatch = structuredPane.match(
     /class="edit-resend-hover-btn"[\s\S]*?@click="startEdit\(turn\)"/,
   )
   assert.ok(btnMatch, 'edit-resend hover button must exist')
   const btn = btnMatch[0]
 
-  assert.match(btn, /:title="turnInFlight \?/, 'edit button must show a tooltip when disabled')
-  assert.match(btn, /turn is currently running/, 'tooltip must mention a running turn')
+  assert.match(btn, /:title="editReasonFor\(turn\) \|\| 'Edit message'"/, 'the tooltip is the rule\'s reason')
 })
 
 // ---------------------------------------------------------------------------
@@ -116,8 +116,12 @@ test('a disabled edit button looks disabled', () => {
   assert.match(rule[0], /cursor: not-allowed/, 'disabled must not claim to be clickable')
 })
 
-test('startEdit refuses to open the editor while a turn is running', () => {
-  const controller = useChatActions({
+/** The controller's dependency surface; every test here only exercises the
+ *  edit gate and the resend flow, so unrelated deps stay inert. Overrides are
+ *  applied on top, and the editor's own refs are wired to one reset helper so a
+ *  test that passes its own refs still sees them cleared. */
+function actionsController(overrides = {}) {
+  const deps = {
     composerError: ref(null),
     currentModeId: ref('default'),
     feishuBotPoolStore: { bots: [], activeBotForTab: () => null },
@@ -134,14 +138,177 @@ test('startEdit refuses to open the editor while a turn is running', () => {
     streamSource: computed(() => 'terminal-tab'),
     streamSourceId: ref('tab-a'),
     async submit() { return true },
-    terminalStore: { async forkTab() {} },
-    turnInFlight: ref(true),
+    terminalStore: { async forkTab() {}, pushNotification() {} },
+    turnInFlight: ref(false),
     turns: computed(() => []),
+    supportsEditResend: ref(true),
+    editAttachmentError: ref(null),
+    isPreparingEditAttachments: ref(false),
+    handleEditPaste() {},
+    removeEditAttachment() {},
+    optimisticCancelledTurnId: ref(null),
+    ...overrides,
+  }
+  deps.editAttachments = deps.editAttachments ?? ref([])
+  deps.resetEditAttachments = deps.resetEditAttachments ?? (() => {
+    deps.editAttachments.value = []
+    deps.editAttachmentError.value = null
   })
-  const turn = { key: 'turn-a', userText: 'original' }
+  return useChatActions(deps)
+}
+
+test('startEdit refuses to open the editor while a turn is running', () => {
+  const controller = actionsController({ turnInFlight: ref(true) })
+  const turn = { key: 'turn-a', userText: 'original', providerOrigin: 'web', turnId: 't-1' }
 
   controller.startEdit(turn)
 
   assert.equal(controller.editingTurnKey.value, null)
   assert.equal(controller.editDraft.value, '')
+  assert.equal(controller.editError.value, 'A turn is currently running')
+})
+
+test('startEdit never opens on a turn the Hub wrote', () => {
+  // A Goal continuation's provider text is a wrapper; resending it as the
+  // reader's own message is not a rewrite this surface can perform.
+  const controller = actionsController()
+  const turn = {
+    key: 'turn-goal',
+    userText: 'Continue active Goal',
+    providerOrigin: 'goal',
+    turnId: 't-1',
+  }
+
+  controller.startEdit(turn)
+
+  assert.equal(controller.editingTurnKey.value, null, 'no editor for a Hub-authored turn')
+})
+
+test('startEdit opens on an ordinary reader turn', () => {
+  const controller = actionsController()
+  const turn = { key: 'turn-a', userText: 'why is pytest failing?', providerOrigin: 'web', turnId: 't-1' }
+
+  controller.startEdit(turn)
+
+  assert.equal(controller.editingTurnKey.value, 'turn-a')
+  assert.equal(controller.editDraft.value, 'why is pytest failing?')
+  assert.equal(controller.editError.value, null)
+})
+
+
+/** A pasted image, in the editor's staged shape. */
+const SEEDED_IMAGE = {
+  id: 'att-1',
+  filename: 'clipboard.png',
+  mime_type: 'image/png',
+  data_url: 'data:image/png;base64,AA',
+  preview_url: 'data:image/png;base64,AA',
+  size_bytes: 1,
+}
+
+/** Install a stub ``fetch`` for the resend route and record what it saw. */
+function stubResend({ detail, status } = {}) {
+  const notifications = []
+  const calls = []
+  const fetchCalls = []
+  const optimisticCancelledTurnId = ref('t-stopped')
+  const editAttachments = ref([])
+  globalThis.fetch = async (path, init) => {
+    fetchCalls.push({ path, init })
+    if (detail) {
+      return new Response(JSON.stringify({ detail }), { status: status ?? 409 })
+    }
+    return new Response(JSON.stringify({ ok: true, removed_turn_count: 2 }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+  return { notifications, calls, fetchCalls, optimisticCancelledTurnId, editAttachments }
+}
+
+test('a successful resend retires the Stop optimism, clears the draft and reports what it removed', async () => {
+  // The rewrite truncates the store and restarts the stream. The local Stop
+  // optimism must die with the old turn (it names a turn that no longer
+  // exists), the staged images belong to the edit that sent them, and the
+  // removed-turn count must reach the reader.
+  const { notifications, calls, fetchCalls, optimisticCancelledTurnId, editAttachments } = stubResend()
+  const controller = actionsController({
+    optimisticCancelledTurnId,
+    editAttachments,
+    terminalStore: { async forkTab() {}, pushNotification: n => notifications.push(n) },
+    resetStream() { calls.push('reset') },
+    async start() { calls.push('start') },
+  })
+  const turn = { key: 'turn-a', userText: 'original', providerOrigin: 'web', turnId: 't-1' }
+
+  controller.startEdit(turn)
+  editAttachments.value = [{ ...SEEDED_IMAGE }]
+  controller.editDraft.value = 'edited text'
+  await controller.submitEdit(turn)
+
+  assert.equal(controller.isEditSending.value, false)
+  assert.equal(controller.editError.value, null)
+  assert.equal(controller.editingTurnKey.value, null, 'the editor closes on success')
+  assert.equal(optimisticCancelledTurnId.value, null, 'no phantom Stopped row survives the rewrite')
+  assert.deepEqual(editAttachments.value, [], 'staged images belong to the edit that sent them')
+  assert.deepEqual(calls, ['reset', 'start'], 'the stream is rehydrated from the truncated store')
+  assert.match(notifications.at(-1).message, /2 later turns were removed/)
+
+  assert.equal(fetchCalls.length, 1)
+  assert.equal(fetchCalls[0].path, '/api/workspaces/tabs/tab-a/stream/edit-resend')
+  const body = JSON.parse(fetchCalls[0].init.body)
+  assert.equal(body.turn_id, 't-1')
+  assert.equal(body.text, 'edited text')
+  assert.deepEqual(body.attachments, [{
+    filename: 'clipboard.png',
+    mime_type: 'image/png',
+    data_url: 'data:image/png;base64,AA',
+  }], 'the draft travels in the shared wire form, not copied verbatim')
+  globalThis.fetch = undefined
+})
+
+test('a failed resend keeps the draft, states the reason and touches nothing else', async () => {
+  const { notifications, calls, optimisticCancelledTurnId, editAttachments } = stubResend({
+    detail: 'This turn was written by the Goal/Hub, not by you. Only your own messages can be edited.',
+  })
+  const controller = actionsController({
+    optimisticCancelledTurnId,
+    editAttachments,
+    terminalStore: { async forkTab() {}, pushNotification: n => notifications.push(n) },
+    resetStream() { calls.push('reset') },
+  })
+  const turn = { key: 'turn-a', userText: 'original', providerOrigin: 'web', turnId: 't-1' }
+
+  controller.startEdit(turn)
+  editAttachments.value = [{ ...SEEDED_IMAGE }]
+  controller.editDraft.value = 'edited text'
+  await controller.submitEdit(turn)
+
+  assert.equal(controller.editingTurnKey.value, 'turn-a', 'the editor stays open with the draft')
+  assert.match(controller.editError.value, /Only your own messages can be edited/)
+  assert.equal(optimisticCancelledTurnId.value, 't-stopped', 'a failed rewrite keeps Stop optimism')
+  assert.deepEqual(editAttachments.value.length, 1, 'the staged image is not thrown away')
+  assert.deepEqual(calls, [], 'a failed rewrite does not rehydrate the stream')
+  globalThis.fetch = undefined
+})
+
+test('a resend waits for a pasted image to finish preparing', async () => {
+  // Sending before the image is read would drop it from the request while the
+  // reader still sees the chip on screen.
+  const { notifications, fetchCalls, optimisticCancelledTurnId, editAttachments } = stubResend()
+  const controller = actionsController({
+    optimisticCancelledTurnId,
+    editAttachments,
+    isPreparingEditAttachments: ref(true),
+    terminalStore: { async forkTab() {}, pushNotification: n => notifications.push(n) },
+  })
+  const turn = { key: 'turn-a', userText: 'original', providerOrigin: 'web', turnId: 't-1' }
+
+  controller.startEdit(turn)
+  controller.editDraft.value = 'edited text'
+  await controller.submitEdit(turn)
+
+  assert.equal(controller.editError.value, 'Wait for the image to finish preparing')
+  assert.equal(fetchCalls.length, 0, 'nothing is sent while an image is preparing')
+  globalThis.fetch = undefined
 })

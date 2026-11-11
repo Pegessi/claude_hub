@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from ....models import AgentStreamEventType, AgentType
 from ..base import NativeInputNotSubmittedError, NormalizeContext
 from ..redaction import redact_event
+from ..transcript_fork import hash_provider_text
 from .session_state import SessionState
 from .values import StructuredSourceUnavailable, _PendingApproval
 
@@ -157,6 +158,7 @@ class InputMixin(SessionState):
         before_delivery: Optional[Callable[[], None]] = None,
         delivery_guard: Optional[Callable[[], None]] = None,
         allow_question_answer: bool = True,
+        retain_previews_on_delivery_failure: bool = True,
     ) -> None:
         """Atomically deliver a user turn (text + images) to the native transport.
 
@@ -174,13 +176,31 @@ class InputMixin(SessionState):
         carries non-renderable placeholder metadata so the turn is still
         visible but no image bytes are persisted.
 
-        ``reuse_attachments`` (edit-resend only): when supplied, no new
-        previews are persisted — the supplied metadata (with its existing
-        attachment ids) is carried straight into the ``turn_started`` event so
-        the new turn re-references the original turn's image attachments
-        rather than dropping them.  The preview bytes are passed in as
-        ``images`` (the durable cache holds only previews, not originals) and
-        delivered to the provider.  Steps 3–4 are skipped for this path.
+        ``reuse_attachments`` (edit-resend): the leading
+        ``len(reuse_attachments)`` entries of ``images`` re-send the original
+        turn's images, and the supplied metadata (with its existing attachment
+        ids) is carried straight into the ``turn_started`` event so the new
+        turn re-references the original turn's image attachments rather than
+        dropping them.  Those preview slots are ignored and nothing is
+        persisted for them (``saved_ids`` stays empty, so a later failure never
+        deletes an existing preview).
+
+        Images beyond that prefix are *new* images the user added while editing
+        the turn.  They are persisted from their own ``previews`` slot exactly
+        like the normal path: a real preview gets a fresh attachment id and
+        joins ``saved_ids`` (so the failure cleanup covers it), a ``None``
+        preview slot gets non-renderable placeholder metadata.  The resulting
+        attachment metadata is therefore ``reused metas + new metas`` in the
+        order of ``images``.
+
+        ``retain_previews_on_delivery_failure`` (edit-resend only): an ordinary
+        send keeps the previews it persisted even when the provider rejects the
+        turn, because the durable ``turn_started`` stays in the store and must
+        render.  A caller that rolls the turn back instead (edit-resend restores
+        the pre-edit store) passes ``False``: the previews it persisted are then
+        deleted on that failure path, so a rolled-back edit leaves no orphaned
+        cache entries.  Only ids this call saved are ever deleted; reused
+        attachments belong to the original turn.
 
         Transaction ordering (all under ``self._send_lock``):
 
@@ -292,12 +312,43 @@ class InputMixin(SessionState):
             saved_ids: List[str] = []
             try:
                 if reuse_attachments is not None:
-                    # Edit-resend: re-reference the original turn's attachment
-                    # ids without persisting new previews.  The preview bytes
-                    # were passed in as ``images`` and are delivered to the
-                    # provider below.  ``saved_ids`` stays empty so a later
-                    # failure does not delete the (already-existing) previews.
+                    # Edit-resend: the leading ``len(reuse_attachments)`` images
+                    # re-reference the original turn's existing attachment ids
+                    # (their preview slots are ignored: the bytes were passed
+                    # in as ``images`` because the provider needs them).
+                    # ``saved_ids`` stays empty for those, so a later failure
+                    # never deletes an already-existing preview.
+                    #
+                    # Images beyond that prefix are NEW images the user added to
+                    # the edited turn. They are persisted from their own
+                    # ``previews`` slot exactly like the normal branch and their
+                    # ids join ``saved_ids`` so the existing cleanup covers them.
+                    reused_count = len(reuse_attachments)
                     attachment_metas = [dict(m) for m in reuse_attachments if isinstance(m, dict)]
+                    extra_images = images[reused_count:]
+                    extra_previews = (
+                        previews[reused_count:]
+                        if previews is not None and len(previews) > reused_count
+                        else None
+                    )
+                    for index, image in enumerate(extra_images):
+                        preview = extra_previews[index] if extra_previews is not None else None
+                        if preview is None:
+                            attachment_metas.append(
+                                {
+                                    "id": None,
+                                    "mime_type": self._deps._detect_image_mime(image)
+                                    or "image/png",
+                                    "bytes": len(image),
+                                    "width": None,
+                                    "height": None,
+                                }
+                            )
+                            continue
+                        mime = self._deps._detect_image_mime(preview) or "image/png"
+                        meta = await self.attachment_store.save(mime, preview)
+                        saved_ids.append(meta["id"])
+                        attachment_metas.append(meta)
                 elif previews is not None:
                     for image, preview in zip(images, previews):
                         if preview is None:
@@ -369,8 +420,9 @@ class InputMixin(SessionState):
             )
             # The event carries only opaque attachment metadata (id, mime_type,
             # bytes, width, height) — never raw bytes or local paths.
+            stored_summary = text if visible_text is None else visible_text
             turn_started_payload: Dict[str, Any] = {
-                "summary": text if visible_text is None else visible_text,
+                "summary": stored_summary,
                 "attachments": attachment_metas,
                 "mode": session.chat_mode.value,
             }
@@ -381,6 +433,26 @@ class InputMixin(SessionState):
                 turn_started_payload,
             )
             turn_started = redact_event(turn_started)
+            # The persisted ``summary`` is redacted (secret-masked and truncated
+            # at MAX_FIELD_CHARS), so it cannot identify the provider-bound text
+            # that edit-resend must match. Record a digest of the provider text
+            # (never the text itself) plus whether the stored copy is a partial
+            # view, so the composer can warn that its prefill is incomplete.
+            # Both keys are additive and keep any caller-supplied metadata.
+            provider_identity = {
+                "provider_text_sha256": hash_provider_text(text),
+                "stored_text_incomplete": (
+                    not isinstance(turn_started.payload.get("summary"), str)
+                    or turn_started.payload.get("summary") != stored_summary
+                ),
+            }
+            merged_metadata = dict(turn_started.payload.get("metadata") or {})
+            merged_metadata.update(provider_identity)
+            turn_started = turn_started.model_copy(
+                update={
+                    "payload": {**turn_started.payload, "metadata": merged_metadata},
+                }
+            )
             try:
                 await self._publish(turn_started)
             except Exception:
@@ -456,6 +528,19 @@ class InputMixin(SessionState):
             if submit_exception is not None:
                 delivery_uncertain = getattr(transport, "_delivery_uncertain", False)
                 outcome_uncertain = getattr(transport, "_submission_outcome_uncertain", False)
+                if not retain_previews_on_delivery_failure:
+                    # The caller rolls this turn back, which erases the
+                    # turn_started that referenced these previews: keeping them
+                    # would leave unreferenced cache entries (and any LRU
+                    # evictions they caused) behind. Only this call's own ids
+                    # are deleted; reused attachments are untouched.
+                    for att_id in saved_ids:
+                        try:
+                            await self.attachment_store._delete_by_id(att_id)
+                        except Exception:
+                            logger.exception(
+                                "failed to clean up preview %s after rejected delivery", att_id
+                            )
                 if delivery_uncertain or outcome_uncertain:
                     # The provider exposed a main turn before the request
                     # response failed. Keep its durable Hub turn active and

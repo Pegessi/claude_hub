@@ -31,6 +31,7 @@
             :readonly="busy"
             placeholder="Describe the outcome to achieve…"
             required
+            @paste="$emit('paste', $event)"
           />
         </label>
         <slot name="images" />
@@ -115,6 +116,10 @@ const props = defineProps<{
 const emit = defineEmits<{
   close: []
   submit: [value: { objective: string; planFirst: boolean }]
+  /** A paste inside the objective field. The parent decides whether the
+   *  clipboard carries images; the dialog only forwards the raw event so it
+   *  stays free of attachment state. */
+  paste: [event: ClipboardEvent]
 }>()
 const objective = ref('')
 const planFirst = ref(true)

@@ -1,5 +1,9 @@
 import { type Ref, type ComputedRef, ref } from 'vue'
 import { type TimelineTurn } from '../timeline/types'
+import { type DraftAttachment } from './types'
+import {
+  canOfferEdit, editResendBody, editUnavailableReason, removedTurnsNotice,
+} from '@/utils/chatEditResend'
 import { type ChatPaneProps, type QuestionIdentity } from './types'
 import { type QueuedChatDraft, type useTerminalStore } from '@/stores/terminalStore'
 import { type useAgentStream } from '@/composables/useAgentStream'
@@ -31,6 +35,20 @@ interface Dependencies {
   terminalStore: ReturnType<typeof useTerminalStore>
   turnInFlight: Ref<boolean>
   turns: ComputedRef<TimelineTurn[]>
+  /** Provider/session support for rewriting past turns; the pane derives it
+   *  from the session's agent type. */
+  supportsEditResend: Ref<boolean>
+  /** Images the reader added while editing. The backend re-sends the original
+   *  turn's own images, so this array carries additions only. */
+  editAttachments: Ref<DraftAttachment[]>
+  editAttachmentError: Ref<string | null>
+  isPreparingEditAttachments: Ref<boolean>
+  handleEditPaste: (event: ClipboardEvent) => void
+  removeEditAttachment: (att: DraftAttachment) => void
+  /** Drop the editor's staged images, aborting any batch still being read. */
+  resetEditAttachments: () => void
+  /** Local Stop optimism for a previous turn; resending history retires it. */
+  optimisticCancelledTurnId: Ref<string | null>
 }
 
 export function useChatActions(deps: Dependencies) {
@@ -146,6 +164,9 @@ export function useChatActions(deps: Dependencies) {
   // ── Edit-resend ──────────────────────────────────────────────────────────────
   // A user can edit one of their sent messages; after resending, the
   // conversation reruns from that point (truncating subsequent turns).
+  //
+  // This is a history rewrite, not a second send: the rules that decide when it
+  // may be offered live in ``utils/chatEditResend`` so they are testable.
 
   const editingTurnKey = ref<string | null>(null)
 
@@ -159,25 +180,60 @@ export function useChatActions(deps: Dependencies) {
     return editingTurnKey.value === turn.key
   }
 
+  /** Whether the reader's editor may open for this turn, and why not. */
+  function editGate(turn: TimelineTurn) {
+    return {
+      supportsEditResend: deps.supportsEditResend.value,
+      providerOrigin: turn.providerOrigin,
+      hasTurnId: Boolean(turn.turnId),
+      unfinished: deps.turnInFlight.value,
+      goalReason: deps.goalEditReason.value,
+      preparingAttachments: deps.isPreparingEditAttachments.value,
+    }
+  }
+
+  function editReason(turn: TimelineTurn): string | null {
+    return editUnavailableReason(editGate(turn))
+  }
+
   function startEdit(turn: TimelineTurn) {
     if (isEditSending.value) return
-    // Refuse to edit while a turn is running.  The backend guard is
-    // authoritative (409); this just avoids a round-trip and keeps the button
-    // and the action in sync.
-    if (deps.turnInFlight.value) return
-    if (deps.goalEditReason.value) {
-      editError.value = deps.goalEditReason.value
+    // Refuse locally what the backend refuses authoritatively (409): a Hub
+    // authored turn, a running turn, or a live Goal. The refusal is stated in
+    // the editor instead of being swallowed, so a click that opens nothing
+    // explains itself.
+    if (!canOfferEdit(editGate(turn))) return
+    const reason = editReason(turn)
+    if (reason) {
+      // Do not open an editor that cannot send. The hover button is already
+      // disabled with this text, so this path is the keyboard/other-caller
+      // backup; a notification keeps the refusal from being silent.
+      editError.value = reason
+      deps.terminalStore.pushNotification({
+        type: 'warning',
+        message: reason,
+        autoDismissMs: 5000,
+      })
       return
     }
     editingTurnKey.value = turn.key
     editDraft.value = turn.userText
+    clearEditAttachments()
     editError.value = null
+  }
+
+  function clearEditAttachments() {
+    // The controller bumps its own preparation epoch so a paste still being
+    // read cannot append into the next edit's draft.
+    deps.resetEditAttachments()
+    deps.editAttachmentError.value = null
   }
 
   function cancelEdit() {
     if (isEditSending.value) return
     editingTurnKey.value = null
     editDraft.value = ''
+    clearEditAttachments()
     editError.value = null
   }
 
@@ -192,6 +248,10 @@ export function useChatActions(deps: Dependencies) {
       editError.value = 'Cannot edit this turn (missing turn id)'
       return
     }
+    if (deps.isPreparingEditAttachments.value) {
+      editError.value = 'Wait for the image to finish preparing'
+      return
+    }
     isEditSending.value = true
     editError.value = null
     const clientTurnId = typeof crypto.randomUUID === 'function'
@@ -202,11 +262,12 @@ export function useChatActions(deps: Dependencies) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
-        body: JSON.stringify({
+        body: JSON.stringify(editResendBody({
           text,
-          client_turn_id: clientTurnId,
-          turn_id: turn.turnId,
-        }),
+          clientTurnId,
+          turnId: turn.turnId,
+          attachments: deps.editAttachments.value,
+        })),
       })
       if (!res.ok) {
         let detail = `HTTP ${res.status}`
@@ -218,12 +279,30 @@ export function useChatActions(deps: Dependencies) {
         }
         throw new Error(detail)
       }
+      const result: { removed_turn_count?: number } | null = await res
+        .json()
+        .catch(() => null)
       // Success: clear editing state and rehydrate the stream from the
       // truncated event store.
       editingTurnKey.value = null
       editDraft.value = ''
+      clearEditAttachments()
+      // The rewrite removed the old turns, so a Stop optimism about a turn that
+      // no longer exists would otherwise mint a phantom "Stopped" row on top of
+      // the refreshed timeline.
+      deps.optimisticCancelledTurnId.value = null
       deps.resetStream()
       void deps.start(deps.streamSourceId.value, deps.streamSource.value)
+      // A rewrite deletes every later turn; saying so keeps that deletion from
+      // reading as a rendering bug.
+      const notice = removedTurnsNotice(result?.removed_turn_count)
+      if (notice) {
+        deps.terminalStore.pushNotification({
+          type: 'success',
+          message: notice,
+          autoDismissMs: 6000,
+        })
+      }
     } catch (err) {
       editError.value = err instanceof Error ? err.message : 'Failed to resend message'
     } finally {
@@ -250,6 +329,13 @@ export function useChatActions(deps: Dependencies) {
     editDraft,
     isEditSending,
     editError,
+    editReason,
+    /** The editor's own draft images: pasted in, removable before send. */
+    editAttachments: deps.editAttachments,
+    editAttachmentError: deps.editAttachmentError,
+    isPreparingEditAttachments: deps.isPreparingEditAttachments,
+    handleEditPaste: deps.handleEditPaste,
+    removeEditAttachment: deps.removeEditAttachment,
     isEditingTurn,
     startEdit,
     cancelEdit,

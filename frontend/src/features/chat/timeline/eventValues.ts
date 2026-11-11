@@ -84,6 +84,8 @@ export function createTurn(key: string, turnId: string | null): TimelineTurn {
     turnId,
     userText: '',
     origin: 'unknown',
+    providerOrigin: null,
+    storedTextIncomplete: false,
     feishu: null,
     hubMessage: null,
     mode: null,
