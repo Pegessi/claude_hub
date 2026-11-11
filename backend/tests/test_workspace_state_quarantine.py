@@ -30,6 +30,12 @@ from claude_hub.models import (
     WorkspaceTaskCreate,
     WorkspaceTaskMode,
 )
+from claude_hub.services.local_storage import (
+    has_stored_document,
+    read_document,
+    storage_location,
+    write_document,
+)
 from claude_hub.services.ttyd_manager import ttyd_manager
 from claude_hub.services.workspace_manager import WorkspaceManager
 
@@ -77,6 +83,27 @@ def _make_task(manager: WorkspaceManager, workspace_id: str, title: str) -> Any:
     )
 
 
+def _seed_legacy_snapshot(manager: WorkspaceManager, root: Path) -> None:
+    """Build previous-release inputs before the new manager ever imports them."""
+    paths = [root / "index.json", root / "scheduled_tasks.json"]
+    paths.extend(root / workspace_id / "state.json" for workspace_id in manager.workspaces)
+    for path in paths:
+        try:
+            payload = read_document(path)
+        except FileNotFoundError:
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = json.dumps(payload)
+        path.write_text(text)
+        path.with_name(path.name + ".bak").write_text(text)
+    # All helper-owned connections have closed. Remove only this test database
+    # to model the pre-SQLite release; production state is never accessed.
+    database, _ = storage_location(root / "index.json")
+    database.unlink(missing_ok=True)
+    Path(str(database) + "-wal").unlink(missing_ok=True)
+    Path(str(database) + "-shm").unlink(missing_ok=True)
+
+
 def _quarantine_entries(root: Path) -> list[Path]:
     return sorted(root.glob("**/*.corrupt-*"))
 
@@ -112,6 +139,7 @@ def test_valid_state_loads_unchanged(
     workspace = _make_workspace(manager, tmp_path)
     task = _make_task(manager, workspace.id, "Persisted task")
     manager._save_state()
+    _seed_legacy_snapshot(manager, state_root)
 
     reloaded = WorkspaceManager()
     assert list(reloaded.workspaces) == [workspace.id]
@@ -206,6 +234,7 @@ def test_index_recovers_from_backup(state_root: Path, tmp_path: Path) -> None:
     manager = WorkspaceManager()
     workspace = _make_workspace(manager, tmp_path)
     manager._save_state()
+    _seed_legacy_snapshot(manager, state_root)
     index_file = state_root / "index.json"
     good_payload = json.loads(index_file.read_text(encoding="utf-8"))
 
@@ -214,12 +243,27 @@ def test_index_recovers_from_backup(state_root: Path, tmp_path: Path) -> None:
     reloaded = WorkspaceManager()
 
     assert list(reloaded.workspaces) == [workspace.id]
-    # Primary was restored from backup.
-    assert json.loads(index_file.read_text(encoding="utf-8")) == good_payload
+    # The validated backup becomes the SQLite authority.
+    assert read_document(index_file) == good_payload
     marker = _read_marker(state_root / "index.json.quarantined")["events"][0]
     assert marker["recovered_from_backup"] is True
     assert marker["backup_file"] == "index.json.bak"
     assert _quarantine_entries(state_root)[0].read_text() == '{"workspaces": [{"id": '
+
+
+def test_backup_recovery_is_imported_before_manager_returns(state_root: Path) -> None:
+    target = state_root / "index.json"
+    target.write_text("broken-primary")
+    target.with_name("index.json.bak").write_text(json.dumps({"workspaces": []}))
+    WorkspaceManager()
+    assert has_stored_document(target), "successful recovery must commit the SQLite authority"
+    # Old files can subsequently disappear or become stale without affecting
+    # the recovered authority or generating another recovery event.
+    target.write_text("stale-primary")
+    target.with_name("index.json.bak").write_text("stale-backup")
+    assert WorkspaceManager().workspaces == {}
+    events = _read_marker(target.with_name("index.json.quarantined"))["events"]
+    assert len(events) == 1
 
 
 def test_save_after_corrupt_index_preserves_evidence(
@@ -233,7 +277,7 @@ def test_save_after_corrupt_index_preserves_evidence(
     # Manager started empty; a later save must not destroy evidence.
     quarantined._save_state()
 
-    assert json.loads(index_file.read_text(encoding="utf-8")) == {"workspaces": []}
+    assert read_document(index_file) == {"workspaces": []}
     surviving = _quarantine_entries(state_root)
     assert len(surviving) == 1 and surviving[0].read_bytes() == corrupt
     assert (state_root / "index.json.quarantined").exists()
@@ -255,12 +299,14 @@ def test_corrupt_workspace_state_restores_truncated_write_from_backup(
     workspace = _make_workspace(manager, tmp_path)
     first = _make_task(manager, workspace.id, "First")
     manager._save_state()
+    _seed_legacy_snapshot(manager, state_root)
     state_file, backup_file = _state_paths(workspace.id, state_root)
     first_payload = json.loads(state_file.read_text(encoding="utf-8"))
 
     # Simulate a newer complete save followed by a torn primary write.
     _make_task(manager, workspace.id, "Second")
     manager._save_state()
+    _seed_legacy_snapshot(manager, state_root)
     # Force the backup to the known-good previous complete state.
     backup_file.write_text(json.dumps(first_payload), encoding="utf-8")
     truncated = '{"tasks": [{"id": "'
@@ -270,7 +316,7 @@ def test_corrupt_workspace_state_restores_truncated_write_from_backup(
 
     restored_ids = set(reloaded.tasks)
     assert restored_ids == {first.id}
-    assert json.loads(state_file.read_text(encoding="utf-8")) == first_payload
+    assert read_document(state_file) == first_payload
     marker = _read_marker(state_file.with_name("state.json.quarantined"))["events"][0]
     assert marker["label"] == f"workspace state ({workspace.id})"
     assert marker["recovered_from_backup"] is True
@@ -284,6 +330,7 @@ def test_corrupt_workspace_state_without_backup_starts_empty_and_preserves_evide
     workspace = _make_workspace(manager, tmp_path)
     _make_task(manager, workspace.id, "Doomed")
     manager._save_state()
+    _seed_legacy_snapshot(manager, state_root)
     state_file, backup_file = _state_paths(workspace.id, state_root)
     # Simulate corruption on the only complete copy (no good backup), e.g. a
     # torn first durable write.
@@ -301,7 +348,7 @@ def test_corrupt_workspace_state_without_backup_starts_empty_and_preserves_evide
 
     # Any subsequent save must keep the quarantined payload and marker.
     reloaded._save_state()
-    assert json.loads(state_file.read_text(encoding="utf-8"))["tasks"] == []
+    assert read_document(state_file)["tasks"] == []
     assert quarantined[0].exists()
     assert state_file.with_name("state.json.quarantined").exists()
 
@@ -311,6 +358,7 @@ def test_structural_workspace_state_failure_is_quarantined(
 ) -> None:
     workspace = _make_workspace(manager, tmp_path)
     manager._save_state()
+    _seed_legacy_snapshot(manager, state_root)
     state_file, _ = _state_paths(workspace.id, state_root)
     state_file.write_text(json.dumps({"tasks": "not-a-list"}))
 
@@ -327,6 +375,7 @@ def test_unknown_task_fields_quarantine_instead_of_crash(
 ) -> None:
     workspace = _make_workspace(manager, tmp_path)
     manager._save_state()
+    _seed_legacy_snapshot(manager, state_root)
     state_file, _ = _state_paths(workspace.id, state_root)
     payload = json.loads(state_file.read_text(encoding="utf-8"))
     payload["tasks"].append({"title": "x", "unknown_field_from_a_newer_build": True})
@@ -346,6 +395,7 @@ def test_unreadable_workspace_state_os_error_is_quarantined(
 
     workspace = _make_workspace(manager, tmp_path)
     manager._save_state()
+    _seed_legacy_snapshot(manager, state_root)
     state_file, _ = _state_paths(workspace.id, state_root)
     state_file.unlink()
     state_file.mkdir()
@@ -376,6 +426,7 @@ def test_corrupt_workspace_does_not_affect_unrelated_workspaces(
     good_task = _make_task(manager, good_ws.id, "Alive")
     _make_task(manager, bad_ws.id, "Doomed")
     manager._save_state()
+    _seed_legacy_snapshot(manager, state_root)
 
     bad_state, bad_backup = _state_paths(bad_ws.id, state_root)
     corrupt = b"{torn write"
@@ -408,20 +459,39 @@ def test_corrupt_workspace_does_not_affect_unrelated_workspaces(
 # ---------------------------------------------------------------------------
 
 
-def test_atomic_save_rotates_single_backup(manager: WorkspaceManager, state_root: Path) -> None:
+def test_sqlite_save_has_no_rotating_json_mirror(
+    manager: WorkspaceManager, state_root: Path
+) -> None:
     target = state_root / "rot.json"
-    manager._atomic_save_state_text(target, "first")
-    assert not target.with_name("rot.json.bak").exists()
+    for value in ("first", "second", "third"):
+        manager._atomic_save_state_text(target, json.dumps(value))
+        assert read_document(target) == value
+    assert not target.exists()
+    assert list(state_root.glob("rot.json.bak*")) == []
 
-    manager._atomic_save_state_text(target, "second")
-    assert target.read_text() == "second"
-    assert target.with_name("rot.json.bak").read_text() == "first"
 
-    manager._atomic_save_state_text(target, "third")
-    assert target.read_text() == "third"
-    assert target.with_name("rot.json.bak").read_text() == "second"
-    # Single rotating backup only.
-    assert list(state_root.glob("rot.json.bak*")) == [target.with_name("rot.json.bak")]
+def test_sqlite_authority_ignores_changed_legacy_primary_and_backup(state_root: Path) -> None:
+    target = state_root / "index.json"
+    target.write_text(json.dumps({"workspaces": []}))
+    WorkspaceManager()
+    target.write_text("stale corruption")
+    target.with_name("index.json.bak").write_text("stale backup")
+    reloaded = WorkspaceManager()
+    assert reloaded.workspaces == {}
+    assert read_document(target) == {"workspaces": []}
+    assert _quarantine_entries(state_root) == []
+
+
+def test_invalid_sqlite_authority_never_falls_back_to_stale_json(state_root: Path) -> None:
+    target = state_root / "index.json"
+    invalid = {"workspaces": "invalid-shape"}
+    write_document(target, invalid)
+    target.write_text(json.dumps({"workspaces": []}))
+    target.with_name("index.json.bak").write_text(json.dumps({"workspaces": []}))
+    with pytest.raises(ValueError):
+        WorkspaceManager()
+    assert read_document(target) == invalid
+    assert _quarantine_entries(state_root) == []
 
 
 def test_corrupt_backup_is_quarantined_and_store_starts_empty(state_root: Path) -> None:
@@ -453,7 +523,7 @@ def test_missing_index_primary_is_recovered_from_backup(state_root: Path) -> Non
 
     manager = WorkspaceManager()
 
-    assert json.loads(index_file.read_text(encoding="utf-8")) == payload
+    assert read_document(index_file) == payload
     marker = _read_marker(state_root / "index.json.quarantined")["events"][0]
     assert marker["recovered_from_backup"] is True
     assert "missing" in marker["reason"]
@@ -466,6 +536,7 @@ def test_missing_workspace_primary_is_recovered_from_backup(
     workspace = _make_workspace(manager, tmp_path)
     task = _make_task(manager, workspace.id, "Recovered")
     manager._save_state()
+    _seed_legacy_snapshot(manager, state_root)
     state_file, backup_file = _state_paths(workspace.id, state_root)
     good_payload = state_file.read_text(encoding="utf-8")
     assert backup_file.exists()
@@ -474,7 +545,7 @@ def test_missing_workspace_primary_is_recovered_from_backup(
     reloaded = WorkspaceManager()
 
     assert list(reloaded.tasks) == [task.id]
-    assert state_file.read_text(encoding="utf-8") == good_payload
+    assert read_document(state_file) == json.loads(good_payload)
     marker = _read_marker(state_file.with_name("state.json.quarantined"))["events"][0]
     assert marker["recovered_from_backup"] is True
     assert "missing" in marker["reason"]
@@ -523,7 +594,7 @@ def test_corrupt_scheduled_tasks_are_quarantined(
 
     # A later scheduled save must keep the evidence.
     reloaded._save_scheduled_tasks()
-    assert json.loads(sched_file.read_text(encoding="utf-8"))["scheduled_tasks"] == []
+    assert read_document(sched_file)["scheduled_tasks"] == []
     assert marker.exists()
     assert any(p.read_bytes() == corrupt for p in _quarantine_entries(state_root))
 
@@ -544,6 +615,7 @@ def test_scheduled_tasks_recover_from_backup(
         )
     )
     sched_file = state_root / "scheduled_tasks.json"
+    _seed_legacy_snapshot(manager, state_root)
     assert sched_file.exists()
     good_payload = sched_file.read_text(encoding="utf-8")
     sched_file.with_name("scheduled_tasks.json.bak").write_text(good_payload)

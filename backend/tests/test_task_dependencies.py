@@ -33,6 +33,7 @@ from claude_hub.models import (
     WorkspaceTaskStatus,
     WorkspaceTaskUpdate,
 )
+from claude_hub.services.local_storage import read_document, write_document
 from claude_hub.services.task_dependencies import TaskHasDependentsError, task_dependency_blockers
 from claude_hub.services.workspace_manager import WorkspaceManager
 
@@ -97,10 +98,10 @@ async def test_graph_roundtrip_rejects_cycle_and_keeps_tree_independent(manager,
     assert fresh.tasks[first.id].parent_task_id == root.id
     # Pre-feature records load unchanged without a migration or new controller.
     path = manager._workspace_state_file(workspace.id)
-    payload = json.loads(path.read_text())
+    payload = read_document(path)
     for item in payload["tasks"]:
         item.pop("depends_on_task_ids", None)
-    path.write_text(json.dumps(payload))
+    write_document(path, payload)
     assert all(not task.depends_on_task_ids for task in WorkspaceManager().tasks.values())
 
 
@@ -113,7 +114,7 @@ async def test_invalid_edges_have_no_mutation_and_active_edges_are_frozen(
     other_dir.mkdir()
     other_ws = manager.create_workspace(WorkspaceCreate(name="Other", path=str(other_dir)))
     other = create(manager, other_ws)
-    original_state = manager._workspace_state_file(workspace.id).read_bytes()
+    original_state = read_document(manager._workspace_state_file(workspace.id))
     for ids, message in [
         ([first.id], "cycle"),
         ([other.id], "different workspace"),
@@ -121,7 +122,7 @@ async def test_invalid_edges_have_no_mutation_and_active_edges_are_frozen(
     ]:
         with pytest.raises(ValueError, match=message):
             await manager.update_task(first.id, WorkspaceTaskUpdate(depends_on_task_ids=ids))
-    assert manager._workspace_state_file(workspace.id).read_bytes() == original_state
+    assert read_document(manager._workspace_state_file(workspace.id)) == original_state
     manager.tasks[first.id] = first.model_copy(update={"status": WorkspaceTaskStatus.WORKING})
     with pytest.raises(ValueError, match="Only todo"):
         await manager.update_task(first.id, WorkspaceTaskUpdate(depends_on_task_ids=[]))

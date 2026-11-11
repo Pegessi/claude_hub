@@ -20,12 +20,15 @@ const cases=[
   ['createFeishuBot',[{name:'A',app_id:'id',app_secret:'s'}], 'POST','/api/feishu/bot/bots',{name:'A',app_id:'id',app_secret:'s'},pool],
   ['replaceFeishuBotSecrets',['bot/1',{app_secret:'s2',expected_revision:3}], 'PUT','/api/feishu/bot/bots/bot%2F1/secrets',{app_secret:'s2',expected_revision:3},pool],
   ['updateFeishuBot',['b',{name:'B',enabled:false,expected_revision:4}], 'PATCH','/api/feishu/bot/bots/b',{name:'B',enabled:false,expected_revision:4},pool],
+  ['updateFeishuBot',['b',{mode:'per_channel',expected_revision:4}], 'PATCH','/api/feishu/bot/bots/b',{mode:'per_channel',expected_revision:4},pool],
   ['deleteFeishuBot',['b',5], 'DELETE','/api/feishu/bot/bots/b',{expected_revision:5},pool],
   ['startFeishuPairing',['b',{tab_id:'t',expected_revision:6}], 'POST','/api/feishu/bot/bots/b/pair/start',{tab_id:'t',expected_revision:6},{bot_id:'b',revision:7,code:'123456',expires_at:'2026-01-01T00:00:00Z'}],
   ['activateFeishuPairing',['b',{pairing_id:'p',confirm_word:'654321',expected_revision:7}], 'POST','/api/feishu/bot/bots/b/pair/activate',{pairing_id:'p',confirm_word:'654321',expected_revision:7},pool],
   ['disconnectFeishuPairing',['b',8], 'DELETE','/api/feishu/bot/bots/b/pairing',{expected_revision:8},pool],
+  ['disconnectFeishuPairing',['b',8,undefined,'pair-1'], 'DELETE','/api/feishu/bot/bots/b/pairing',{expected_revision:8,pairing_id:'pair-1'},pool],
   ['listBotChats',['bot/1'], 'GET','/api/feishu/bot/bots/bot%2F1/chats',undefined,chats],
   ['bindBotGroup',['b',{chat_id:'oc-group',tab_id:'t',expected_revision:9}], 'POST','/api/feishu/bot/bots/b/bindings/group',{chat_id:'oc-group',tab_id:'t',expected_revision:9},pool],
+  ['bindBotGroup',['b',{chat_id:'oc-group',expected_revision:9}], 'POST','/api/feishu/bot/bots/b/bindings/group',{chat_id:'oc-group',expected_revision:9},pool],
 ]
 for(const [name,args,method,url,body,result] of cases){
   test(`${name} uses the frozen pool contract`,async t=>{
@@ -49,6 +52,7 @@ test('known errors use fixed messages and unknown details never leak',async t=>{
 })
 
 for (const [status, code, fragment] of [
+  [409, 'pool_capacity_reached', '8 per Bot'],
   [409, 'pool_capacity_reached', 'capacity has been reached'],
   [409, 'chat_tab_workspace_changed', 'This Chat changed workspace'],
   [409, 'bot_credentials_read_only', 'environment credentials'],
@@ -58,8 +62,11 @@ for (const [status, code, fragment] of [
   [422, 'chat_not_group', 'Choose a group chat'],
   [422, 'chat_not_visible', 'cannot see that group'],
   [400, 'invalid_bot_request', 'Check the fields and try again'],
+  [409, 'bot_already_bound', 'Disconnect it before switching mode'],
+  [409, 'bot_has_active_bindings', 'Disconnect it before switching serving mode'],
   [409, 'bot_occupied', 'already connected to another Chat'],
   [409, 'tab_occupied', 'already connected to another Bot'],
+  [503, 'chat_tab_create_failed', 'could not create a new Chat'],
 ]) {
   test(`${code} keeps its specific recovery guidance`, async t => {
     const detail = code === 'feishu_access_control_denied'
@@ -71,3 +78,14 @@ for (const [status, code, fragment] of [
     ))
   })
 }
+
+test('botMode and botBindings read bindings[] with fallback to binding', () => {
+  const first = { pairing_id: 'p1', tab_id: 'tab-1' }
+  const second = { pairing_id: 'p2', tab_id: 'tab-2' }
+  assert.equal(api.botMode(null), 'single')
+  assert.equal(api.botMode({ mode: 'single' }), 'single')
+  assert.equal(api.botMode({ mode: 'per_channel' }), 'per_channel')
+  assert.deepEqual(api.botBindings({ binding: first, bindings: [first, second] }), [first, second])
+  assert.deepEqual(api.botBindings({ binding: first }), [first])
+  assert.deepEqual(api.botBindings({ binding: null, bindings: [] }), [])
+})

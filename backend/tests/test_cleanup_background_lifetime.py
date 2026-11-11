@@ -39,7 +39,7 @@ async def test_monitor_and_other_cleanup_progress_while_submitted_unlink_is_bloc
     good = replace(first, tab_id="unrelated-pending", token=uuid.uuid4().hex)
     manager._pending_stream_cleanup[good.tab_id] = good
     manager._persist_state()
-    original = AgentStreamStore._unlink_session_files
+    original = AgentStreamStore._clear_rows
     blocked = BlockedIO(original)
 
     def block_one(store: AgentStreamStore) -> None:
@@ -48,7 +48,7 @@ async def test_monitor_and_other_cleanup_progress_while_submitted_unlink_is_bloc
         else:
             original(store)
 
-    monkeypatch.setattr(AgentStreamStore, "_unlink_session_files", block_one)
+    monkeypatch.setattr(AgentStreamStore, "_clear_rows", block_one)
     workspace_module = importlib.import_module("claude_hub.services.workspace_manager._workspaces")
     monkeypatch.setattr(workspace_module, "ttyd_manager", manager)
     refreshed = asyncio.Event()
@@ -157,10 +157,14 @@ async def test_lifespan_joins_submitted_cleanup_through_repeated_cancellation(
     manager, process, *_ = subject
     await seed_artifacts(subject)
     first = await retire_pending(subject, monkeypatch)
-    blocked = BlockedIO(AgentStreamStore._unlink_session_files)
-    monkeypatch.setattr(AgentStreamStore, "_unlink_session_files", lambda store: blocked(store))
+    blocked = BlockedIO(AgentStreamStore._clear_rows)
+    monkeypatch.setattr(AgentStreamStore, "_clear_rows", lambda store: blocked(store))
     runtime_owned = False
-    providers_reached, yielded, shutdown = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    providers_reached, yielded, shutdown = (
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+    )
 
     @contextmanager
     def owner_lock(*_args: Any, **_kwargs: Any) -> Iterator[None]:
@@ -209,7 +213,8 @@ async def test_lifespan_joins_submitted_cleanup_through_repeated_cancellation(
     from types import SimpleNamespace
 
     monkeypatch.setattr(
-        "claude_hub.services.goal_run.get_goal_manager", lambda: SimpleNamespace(recover=lambda: 0)
+        "claude_hub.services.goal_run.get_goal_manager",
+        lambda: SimpleNamespace(recover=lambda: 0),
     )
 
     async def run_lifespan() -> None:

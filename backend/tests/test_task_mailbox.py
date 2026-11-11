@@ -12,8 +12,10 @@ from pytest import MonkeyPatch
 
 from claude_hub.models import AgentType, ExecutionTarget, WorkspaceCreate, WorkspaceTaskCreate
 from claude_hub.models.task_mailbox import TaskActorRole, TaskEventType
+from claude_hub.services.local_storage import read_document
 from claude_hub.services.task_graph import legacy_resident_consumer_key, make_task_consumer_key
 from claude_hub.services.workspace_manager import WorkspaceManager
+from tests.test_task_execution_control import _read_persisted_bytes
 
 _wm = import_module("claude_hub.services.workspace_manager")
 
@@ -431,13 +433,16 @@ def test_mailbox_commit_uses_explicit_workspace_and_leaves_other_files_unchanged
     state_b = manager._workspace_state_file(workspace_b)
     snapshot_a = manager.snapshot_path(workspace_a)
     snapshot_b = manager.snapshot_path(workspace_b)
-    untouched = {path: path.read_bytes() for path in (_wm.INDEX_FILE, state_b, snapshot_b)}
+    untouched = {
+        path: _read_persisted_bytes(path) for path in (_wm.INDEX_FILE, state_b, snapshot_b)
+    }
     manager.tasks[task_b.id] = task_b.model_copy(update={"title": "uncommitted other task"})
     manager.workspaces[workspace_b] = manager.workspaces[workspace_b].model_copy(
         update={"name": "uncommitted other workspace"}
     )
     original_save = manager._save_workspace_state
     original_write = manager._atomic_write_text
+    original_document_write = manager._atomic_save_state_text
     saves: list[str] = []
     writes: list[Path] = []
 
@@ -447,13 +452,17 @@ def test_mailbox_commit_uses_explicit_workspace_and_leaves_other_files_unchanged
 
     def record_write(path: Path, text: str) -> None:
         writes.append(path)
-        original_write(path, text)
+        if path.suffix == ".json":
+            original_document_write(path, text)
+        else:
+            original_write(path, text)
 
     def reject_bulk() -> None:
         pytest.fail("Mailbox commit must not use the full-state entry")
 
     monkeypatch.setattr(manager, "_save_workspace_state", save_one)
     monkeypatch.setattr(manager, "_atomic_write_text", record_write)
+    monkeypatch.setattr(manager, "_atomic_save_state_text", record_write)
     monkeypatch.setattr(manager, "_save_state", reject_bulk)
     if operation == "append":
         _new, created = mailbox.append_event(**{**arguments, "call_id": "new-call"})
@@ -469,9 +478,9 @@ def test_mailbox_commit_uses_explicit_workspace_and_leaves_other_files_unchanged
     assert saves == [workspace_a]
     assert writes == [state_a, snapshot_a]
     for path, before in untouched.items():
-        assert path.read_bytes() == before
+        assert _read_persisted_bytes(path) == before
     assert manager.tasks[task_b.id].title == "uncommitted other task"
-    saved = json.loads(state_a.read_text())
+    saved = read_document(state_a)
     assert len(saved["task_events"]) == (2 if operation == "append" else 1)
     if operation == "ack":
         assert (
@@ -499,12 +508,17 @@ def test_full_state_entry_still_writes_index_and_each_workspace(
     manager.tasks[task_b.id] = task_b.model_copy(update={"title": "saved task b"})
     writes: list[Path] = []
     original_write = manager._atomic_write_text
+    original_document_write = manager._atomic_save_state_text
 
     def record_write(path: Path, text: str) -> None:
         writes.append(path)
-        original_write(path, text)
+        if path.suffix == ".json":
+            original_document_write(path, text)
+        else:
+            original_write(path, text)
 
     monkeypatch.setattr(manager, "_atomic_write_text", record_write)
+    monkeypatch.setattr(manager, "_atomic_save_state_text", record_write)
     assert not hasattr(manager, "_report_intake_workspace")
     manager._save_state()
     assert writes == [
@@ -514,7 +528,7 @@ def test_full_state_entry_still_writes_index_and_each_workspace(
         manager._workspace_state_file(workspace_b),
         manager.snapshot_path(workspace_b),
     ]
-    index = json.loads(_wm.INDEX_FILE.read_text())
+    index = read_document(_wm.INDEX_FILE)
     names = {item["id"]: item["name"] for item in index["workspaces"]}
     assert names[workspace_a] == "saved workspace a"
     assert names[workspace_b] == "saved workspace b"
@@ -522,7 +536,7 @@ def test_full_state_entry_still_writes_index_and_each_workspace(
         (workspace_a, task_a.id, "saved task a"),
         (workspace_b, task_b.id, "saved task b"),
     ):
-        payload = json.loads(manager._workspace_state_file(workspace_id).read_text())
+        payload = read_document(manager._workspace_state_file(workspace_id))
         assert next(item for item in payload["tasks"] if item["id"] == task_id)["title"] == title
 
 

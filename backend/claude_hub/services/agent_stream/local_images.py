@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import html
-import json
 import logging
 import os
 import re
@@ -78,50 +77,47 @@ def referenced_temporary_image(session: ManagedSession, raw_path: str) -> Option
 
     buffers: Dict[Tuple[str, str, str], str] = {}
     try:
-        with AgentStreamStore(session.workspace_id, session.id).path.open() as events:
-            for line in events:
-                try:
-                    event = json.loads(line)
-                except (ValueError, TypeError):
-                    continue
-                if not isinstance(event, dict) or event.get("session_id") != session.id:
-                    continue
-                payload = event.get("payload")
-                if not isinstance(payload, dict) or payload.get("role", "assistant") != "assistant":
-                    continue
-                message_id = str(event.get("message_id") or "")
-                if message_id.endswith(":user"):
-                    continue
-                kind = event.get("type")
-                if kind == "tool_call_started":
-                    if image_tool_path(payload) == raw_path:
-                        return real
-                    continue
-                if kind == "turn_completed":
-                    text = payload.get("assistant_text")
-                elif kind == "text_delta":
-                    text = payload.get("text")
-                else:
-                    continue
-                if not isinstance(text, str):
-                    continue
-                if kind == "text_delta":
-                    key = (
-                        str(event.get("run_epoch")),
-                        str(event.get("turn_id")),
-                        message_id,
-                    )
-                    if payload.get("snapshot") is not True:
-                        text = buffers.get(key, "") + text
-                    # Preserve split destinations without retaining whole long
-                    # conversations. No chunks from different messages join.
-                    buffers[key] = text[-16384:]
-                    if len(buffers) > 64:
-                        del buffers[next(iter(buffers))]
-                for match in _IMAGE_REFERENCE.finditer(text):
-                    source = match.group(1) or match.group(2)
-                    if unquote(html.unescape(source)) == raw_path:
-                        return real
+        events = AgentStreamStore(session.workspace_id, session.id).iter_events()
+        for stored_event in events:
+            event = stored_event.model_dump(mode="json")
+            if not isinstance(event, dict) or event.get("session_id") != session.id:
+                continue
+            payload = event.get("payload")
+            if not isinstance(payload, dict) or payload.get("role", "assistant") != "assistant":
+                continue
+            message_id = str(event.get("message_id") or "")
+            if message_id.endswith(":user"):
+                continue
+            kind = event.get("type")
+            if kind == "tool_call_started":
+                if image_tool_path(payload) == raw_path:
+                    return real
+                continue
+            if kind == "turn_completed":
+                text = payload.get("assistant_text")
+            elif kind == "text_delta":
+                text = payload.get("text")
+            else:
+                continue
+            if not isinstance(text, str):
+                continue
+            if kind == "text_delta":
+                key = (
+                    str(event.get("run_epoch")),
+                    str(event.get("turn_id")),
+                    message_id,
+                )
+                if payload.get("snapshot") is not True:
+                    text = buffers.get(key, "") + text
+                # Preserve split destinations without retaining whole long
+                # conversations. No chunks from different messages join.
+                buffers[key] = text[-16384:]
+                if len(buffers) > 64:
+                    del buffers[next(iter(buffers))]
+            for match in _IMAGE_REFERENCE.finditer(text):
+                source = match.group(1) or match.group(2)
+                if unquote(html.unescape(source)) == raw_path:
+                    return real
     except (OSError, UnicodeError):
         return None
     return None
@@ -270,39 +266,36 @@ def referenced_completed_tool_image(session: ManagedSession, raw_path: str) -> O
     # provenance ambiguous and denies the whole key (B2).
     starts: Dict[Tuple[Optional[int], Optional[str], Optional[str], str], int] = {}
     try:
-        with AgentStreamStore(session.workspace_id, session.id).path.open() as events:
-            for line in events:
-                try:
-                    event = json.loads(line)
-                except (ValueError, TypeError):
-                    continue
-                if not isinstance(event, dict) or event.get("session_id") != session.id:
-                    continue
-                payload = event.get("payload")
-                if not isinstance(payload, dict):
-                    continue
-                kind = event.get("type")
-                call_id = payload.get("tool_call_id") or event.get("call_id")
-                if not isinstance(call_id, str) or not call_id:
-                    continue
-                identity = (
-                    event.get("run_epoch"),
-                    event.get("turn_id"),
-                    payload.get("subagent_thread"),
-                    call_id,
-                )
-                if kind == "tool_call_started":
-                    if _is_completed_tool_grant_candidate(event, raw_path):
-                        starts[identity] = starts.get(identity, 0) + 1
-                    continue
-                if kind != "tool_call_completed":
-                    continue
-                if payload.get("status") != _COMPLETED_TOOL_STATUS:
-                    continue
-                # The completion must be the unique matching start in the same
-                # run/turn/sub-thread; ordering is guaranteed by the event log.
-                if starts.get(identity) == 1:
-                    return candidate
+        events = AgentStreamStore(session.workspace_id, session.id).iter_events()
+        for stored_event in events:
+            event = stored_event.model_dump(mode="json")
+            if not isinstance(event, dict) or event.get("session_id") != session.id:
+                continue
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            kind = event.get("type")
+            call_id = payload.get("tool_call_id") or event.get("call_id")
+            if not isinstance(call_id, str) or not call_id:
+                continue
+            identity = (
+                event.get("run_epoch"),
+                event.get("turn_id"),
+                payload.get("subagent_thread"),
+                call_id,
+            )
+            if kind == "tool_call_started":
+                if _is_completed_tool_grant_candidate(event, raw_path):
+                    starts[identity] = starts.get(identity, 0) + 1
+                continue
+            if kind != "tool_call_completed":
+                continue
+            if payload.get("status") != _COMPLETED_TOOL_STATUS:
+                continue
+            # The completion must be the unique matching start in the same
+            # run/turn/sub-thread; ordering is guaranteed by the event log.
+            if starts.get(identity) == 1:
+                return candidate
     except (OSError, UnicodeError):
         return None
     return None

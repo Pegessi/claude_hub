@@ -16,6 +16,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .agent_stream.store import AgentStreamStore
+
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _TAIL_BYTES = 256 * 1024
 _HUMAN_TURN_ORIGINS = frozenset({"web", "feishu"})
@@ -98,21 +100,12 @@ class FeedbackAutomationStore:
         if not _ID.fullmatch(tab_id):
             raise ValueError("invalid tab_id")
         path = self.root / "terminal-tabs" / "agent_streams" / f"terminal-tab-{tab_id}.jsonl"
-        if not path.exists():
-            return []
-        with path.open("rb") as source:
-            source.seek(0, 2)
-            start = max(0, source.tell() - _TAIL_BYTES)
-            source.seek(start)
-            lines = source.read(_TAIL_BYTES).splitlines()
-            if start:
-                lines = lines[1:]  # omit the potentially partial first row
+        store = AgentStreamStore("terminal-tabs", f"terminal-tab-{tab_id}")
+        store._path = path
+        store._dir = path.parent
+        items = [event.model_dump(mode="json") for event in store._read_rows(kind="turn_started")]
         found: dict[str, dict[str, Any]] = {}
-        for line in lines:
-            try:
-                item = json.loads(line)
-            except (ValueError, UnicodeDecodeError):
-                continue
+        for item in items:
             if not isinstance(item, dict) or item.get("type") != "turn_started":
                 continue
             payload = item.get("payload")

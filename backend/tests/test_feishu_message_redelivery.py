@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +15,7 @@ from fastapi import HTTPException
 from claude_hub.api import feishu_bot as bot_api
 from claude_hub.services.feishu_bot import FeishuMessageDedupStore
 from claude_hub.services.feishu_bot_pool import dedup_key
+from claude_hub.services.local_storage import read_document
 from tests.test_feishu_bot_admission_guard import (
     activate,
     complete,
@@ -84,9 +84,7 @@ async def test_time_rejection_at_native_admission_is_visible_and_can_redeliver_o
     assert submitted == []
     assert len(env.replies) == 1
     assert "尚未执行" in env.replies[0][1]
-    record = json.loads(intake.path.read_text())["events"][
-        dedup_key(env.bot_id, intake.event.message_id)
-    ]
+    record = read_document(intake.path)["events"][dedup_key(env.bot_id, intake.event.message_id)]
     assert record["status"] == "pre_dispatch_rejected"
     assert record["stage"] == "pre_dispatch"
     assert record["reason"] == "message_future_over_skew"
@@ -121,7 +119,7 @@ async def test_provider_error_with_matching_headers_does_not_authorize_redeliver
     await bot_api._handle_sdk_event(intake.env.bot_id, intake.sdk_event)
     await bot_api._handle_sdk_event(intake.env.bot_id, intake.sdk_event)
     assert len(submitted) == 1
-    record = json.loads(intake.path.read_text())["events"][
+    record = read_document(intake.path)["events"][
         dedup_key(intake.env.bot_id, intake.event.message_id)
     ]
     assert record["status"] == "failed"

@@ -245,7 +245,7 @@ def _help_confirms_plan_mode(binary: str, flag: str) -> bool:
 # catalogs are cached per agent type with a TTL so we do not spawn a probe on
 # every capabilities fetch.
 
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _MARKER_RE = re.compile(r"\s*\((default|current)\)\s*$", re.IGNORECASE)
 _MODELS_POSITIVE_TTL_S = 600.0  # successful probe: 10 minutes
@@ -313,8 +313,11 @@ _STATIC_MODELS: Dict[str, List[str]] = {
         "cursor-grok-4.6-high",
     ],
     "antigravity": [
-        # Slugs as reported by ``agy models`` (1.4.x); the catalog is served
-        # by the signed-in Google account's Antigravity subscription.
+        # Fallback slugs when ``agyx models`` cannot be probed; at runtime the
+        # catalog is discovered via ``_probe_antigravity_models``.
+        "gemini-4-carbon-medium",
+        "gemini-4-carbon-high",
+        "gemini-4-carbon-low",
         "gemini-4-argon-high",
         "gemini-4-argon-medium",
         "gemini-4-argon-low",
@@ -348,6 +351,12 @@ def _claude_env_options(env: Dict[str, str]) -> List[StreamModelOption]:
 
 def _parse_list_models(raw: str) -> List[StreamModelOption]:
     return provider_model_options.parse_list_models(
+        raw, osc_re=_OSC_RE, ansi_re=_ANSI_RE, marker_re=_MARKER_RE
+    )
+
+
+def _parse_antigravity_models(raw: str) -> List[StreamModelOption]:
+    return provider_model_options.parse_antigravity_models(
         raw, osc_re=_OSC_RE, ansi_re=_ANSI_RE, marker_re=_MARKER_RE
     )
 
@@ -417,6 +426,41 @@ async def _probe_cursor_models() -> Tuple[List[StreamModelOption], bool]:
     )
 
 
+async def _probe_antigravity_models() -> Tuple[List[StreamModelOption], bool]:
+    """Run ``agyx models`` and return ``(options, is_fallback)``.
+
+    ``agyx`` owns its own Google sign-in, local bypass proxy and TLS environment,
+    so the probe inherits the backend process environment directly rather than
+    routing through ``provider_subprocess_env``. When the probe fails, exits
+    non-zero or times out, the static fallback list is returned with
+    ``is_fallback=True`` so the short negative TTL applies.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "agyx",
+            "models",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except (OSError, NotImplementedError):
+        return _static_options("antigravity"), True
+    try:
+        stdout, _ = await asyncio.wait_for(
+            proc.communicate(), timeout=settings.antigravity_models_probe_timeout_seconds
+        )
+    except asyncio.CancelledError:
+        _safe_kill(proc)
+        raise
+    except Exception:
+        _safe_kill(proc)
+        return _static_options("antigravity"), True
+    if proc.returncode not in (0, None):
+        return _static_options("antigravity"), True
+    parsed = _parse_antigravity_models(stdout.decode("utf-8", errors="replace"))
+    return (parsed, False) if parsed else (_static_options("antigravity"), True)
+
+
 @dataclass
 class _ModelsCacheEntry:
     options: List[StreamModelOption]
@@ -444,6 +488,10 @@ async def model_catalog_for(agent_type: str) -> ModelCatalog:
             options, is_fallback = await _probe_cursor_models()
             ttl = _MODELS_NEGATIVE_TTL_S if is_fallback else _MODELS_POSITIVE_TTL_S
             metadata_cacheable = not is_fallback
+        elif agent_type == "antigravity":
+            options, is_fallback = await _probe_antigravity_models()
+            ttl = _MODELS_NEGATIVE_TTL_S if is_fallback else _MODELS_POSITIVE_TTL_S
+            metadata_cacheable = not is_fallback
         else:
             options = _static_options(agent_type)
             ttl = _MODELS_POSITIVE_TTL_S
@@ -456,10 +504,10 @@ async def model_catalog_for(agent_type: str) -> ModelCatalog:
 async def available_models_for(agent_type: str) -> List[StreamModelOption]:
     """Return the available models for an agent type, cached with a TTL.
 
-    Cursor is discovered at runtime via ``agent --list-models``; other agent
-    types return the curated static list. A single global lock with
-    double-checked checking dedups concurrent probes (contention is negligible:
-    one probe per TTL per agent type).
+    Cursor is discovered at runtime via ``agent --list-models`` and Antigravity
+    via ``agyx models``; other agent types return the curated static list. A
+    single global lock with double-checked checking dedups concurrent probes
+    (contention is negligible: one probe per TTL per agent type).
     """
     return (await model_catalog_for(agent_type)).options
 
