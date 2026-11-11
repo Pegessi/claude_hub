@@ -26,6 +26,7 @@ from claude_hub.services.feishu_bot_pool import (
     FeishuBotUnavailable,
     OwnerIdentity,
 )
+from claude_hub.services.local_storage import read_document, write_document
 
 _T0 = 1_700_000_000.0
 _OWNER = OwnerIdentity(open_id="ou-owner", email="owner@example.com", kind=OWNER_KIND_OAUTH)
@@ -33,7 +34,8 @@ _OWNER = OwnerIdentity(open_id="ou-owner", email="owner@example.com", kind=OWNER
 
 class _RawBot(TypedDict):
     app_id: str
-    binding: object | None
+    bindings: list[object]
+    mode: str
     generation: int
     revision: int
     revoked_at: float | None
@@ -81,7 +83,7 @@ def _env(app_id: str) -> dict[str, str]:
 
 
 def _raw(store: FeishuBotPoolStore) -> _RawPool:
-    raw: object = json.loads(store.path.read_text(encoding="utf-8"))
+    raw: object = read_document(store.path)
     assert isinstance(raw, dict)
     return cast(_RawPool, raw)
 
@@ -136,7 +138,7 @@ def test_first_sync_refuses_a_conflicting_environment_app_id(tmp_path: Path) -> 
 
     env_raw = _raw(store)["bots"][ENV_BOT_ID]
     assert env_raw["app_id"] == ""
-    assert env_raw["binding"] is None
+    assert env_raw["bindings"] == []
 
 
 def test_refused_environment_is_reported_as_invalid(tmp_path: Path) -> None:
@@ -189,16 +191,16 @@ def test_preexisting_duplicate_app_id_is_healed_on_first_sync(tmp_path: Path) ->
     stored_id = store.create_bot(name="Stored", config=_config("cli_B"), environ=env_a)
 
     state = _raw(store)
-    assert state["bots"][ENV_BOT_ID]["binding"] is not None
+    assert len(state["bots"][ENV_BOT_ID]["bindings"]) == 1
     state["bots"][ENV_BOT_ID]["app_id"] = "cli_B"
     before = state["bots"][ENV_BOT_ID]["generation"]
-    store.path.write_text(json.dumps(state), encoding="utf-8")
+    write_document(store.path, state)
 
     store.snapshot(environ=_env("cli_B"))
 
     healed = _raw(store)["bots"][ENV_BOT_ID]
     assert healed["app_id"] == ""
-    assert healed["binding"] is None
+    assert healed["bindings"] == []
     assert healed["generation"] > before
     assert _raw(store)["bots"][stored_id]["app_id"] == "cli_B"
 
@@ -217,7 +219,7 @@ def test_conflicted_environment_is_idempotent_across_reads(tmp_path: Path) -> No
 
     settled = store.snapshot(environ=environ)
     settled_entry = _raw(store)["bots"][ENV_BOT_ID]
-    settled_bytes = store.path.read_bytes()
+    settled_bytes = json.dumps(read_document(store.path), sort_keys=True)
 
     for _ in range(3):
         again = store.snapshot(environ=environ)
@@ -225,7 +227,7 @@ def test_conflicted_environment_is_idempotent_across_reads(tmp_path: Path) -> No
         current = _raw(store)["bots"][ENV_BOT_ID]
         assert current["revision"] == settled_entry["revision"]
         assert current["generation"] == settled_entry["generation"]
-        assert store.path.read_bytes() == settled_bytes
+        assert json.dumps(read_document(store.path), sort_keys=True) == settled_bytes
 
 
 def test_environment_change_into_a_conflict_revokes_the_binding(tmp_path: Path) -> None:
@@ -251,7 +253,7 @@ def test_environment_change_into_a_conflict_revokes_the_binding(tmp_path: Path) 
 
     revoked = _raw(store)["bots"][ENV_BOT_ID]
     assert revoked["app_id"] == ""
-    assert revoked["binding"] is None
+    assert revoked["bindings"] == []
     assert revoked["generation"] > before
     assert store.effective(stored_id, environ=_env("cli_B")).app_id == "cli_B"
 

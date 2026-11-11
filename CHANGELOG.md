@@ -7,6 +7,102 @@
 
 ## Released
 
+### feat(chat): list provider-native sub-agents in the Agents dock and read one in a window
+
+- The pane-chrome Agents pill now lists provider-native children (Claude
+  `Agent`, Cursor `Task`, TraeX `spawnAgent`) beside Hub children
+  (`claude-hub agent run`), using the same rail / popover / phone-sheet reveal,
+  the same Active/earlier grouping and the same dot states. Rows are projected
+  from each parent turn's `subagents` part (newest first, bounded at 30) with a
+  per-turn memo keyed on the reducer's render revision, so a folded turn still
+  lists its children and a stream batch only reprojects changed turns.
+- A native child has no Chat tab, so its row offers `View` and opens a
+  read-only window instead of jumping: a gutter panel on desktop and a bottom
+  sheet on phones, with `aria-modal`, a Tab trap, Esc (from inside and from
+  `<body>`), a backdrop tap, a body scroll lock and focus back on the pill.
+  The window renders `ChatSubthreadBody`, the same rows the inline region shows,
+  so the two cannot drift, and it offers `Show in transcript`, which widens the
+  rendered tail window, loads a lazy turn's execution detail, expands the fold,
+  opens every collapsed `<details>` on the way and scrolls to the child.
+- Hub child behaviour is unchanged (jump, archive restore, workspace
+  attribution). Backend, protocol and `/api/subagents` are untouched; a
+  historical turn's children still appear only once that turn's execution detail
+  has been requested, because the backend keeps child events behind it.
+- Validation: typecheck, lint, bundle, the whole frontend unit suite, a new
+  projection suite, a new mocked browser scenario
+  (`browser_native_subagent_dock.py`) plus the existing inline-region and dock
+  scenarios re-run against the same build.
+
+### feat(antigravity): discover model catalog at runtime via `agyx models`
+
+- Switch Antigravity's `model_catalog` from `static_curated` to `cli_list_models`,
+  probing `agyx models` at runtime (`_probe_antigravity_models`) with a 10-minute
+  positive cache TTL and human-readable display labels (such as
+  `Gemini 4 Carbon (High)`).
+- Parse both tab-delimited pipe rows and space-padded TTY rows in
+  `parse_antigravity_models`, falling back to `_STATIC_MODELS["antigravity"]`
+  (updated with `gemini-4-carbon-high/medium/low`) and a 60-second negative TTL
+  when the CLI probe fails or times out.
+
+### refactor(storage): consolidate local persistence in SQLite WAL
+
+- Workspace boards, Task reports and Mailbox events, tabs/order, login sessions,
+  Chat delivery inbox, Goals, subagents and Feishu state share one runtime SQLite
+  database. Transactions update changed collection rows without rewriting JSON
+  snapshots and rotating complete backups on every mutation.
+- Structured streams use indexed, losslessly compressed events with per-stream
+  dictionaries. History, lifecycle receipts, image/attachment authorization and
+  feedback evidence read the same store; obsolete file indexes/caches are removed.
+- Edit-resend cleans Hub SQLite snapshots through their owning store; provider
+  transcript backups remain file-only and never create a Hub database.
+- Existing JSON/JSONL imports automatically and transactionally on first use.
+  Original sources remain recovery evidence, malformed stream rows are retained,
+  non-destructive bulk pre-import and delta catch-up (`--pre-import` /
+  `--sync-legacy`) can populate `storage.sqlite3` ahead of cutover, and offline
+  verified gzip archival is available after import. No production cutover is
+  performed by installing the branch alone.
+- See [migration and benchmark evidence](docs/working-logs/2026-11-10-sqlite-storage.md)
+  for measured costs, recovery, validation and rollout boundaries.
+
+### fix(chat): retain persisted history when the live provider is unavailable
+
+- Native Chat retains its structured view and exposes live-provider failures
+  through `unavailable_reason`; persisted history reads no longer require a
+  successful provider handshake, including exhausted history pages.
+- Stream appends serialize across Store instances and cooperating processes,
+  recover sequence allocation after another writer, complete short writes and
+  roll back failed partial records before allowing the next append.
+
+### feat(feishu): serving modes — one Chat per conversation
+
+- A Bot now declares how it serves people. The default `single` mode is
+  unchanged: one Chat, reached by a private pairing code or by binding one group.
+  `per_channel` gives every conversation its own Chat — a DM from a new person
+  provisions a Chat on first message, and binding a group creates a Chat named
+  after the group. Up to 8 channels per Bot, one p2p channel per sender, and a
+  5 s floor between auto-creations; refusals answer instead of failing silently.
+- Pool state moves to version 4 with a `bindings` list (a v3 file migrates to a
+  one-element list and `mode="single"`); `binding` remains the first-element
+  projection for existing clients. `PATCH /bots/{id}` accepts `mode` under CAS and
+  refuses while any channel is bound (409 `bot_has_active_bindings`).
+- Several conversations already share one Chat today (group members, topics).
+  They now stay isolated: channel identity includes the event's `chat_id` and
+  `thread_id`, coalescing adds the sender so two people in a topic never merge,
+  and interruption stays limited to the same channel so another room can neither
+  stop nor inherit a running answer. The interrupted-text carryover is keyed the
+  same way, so A1 → B1 → A2 neither leaks nor gets lost.
+- Provider text gains `feishu-v3` with the event's `chat_type`, `thread_id` and
+  `chat_name` (name only when the binding really is that room); v1/v2 output is
+  untouched.
+- Frontend: per-Bot serving-mode control with the disabled/409 explanations, a
+  `Current channels N / 8` list in the binding panel where each channel has its
+  own release action (a bulk disconnect would drop all of them), and a group bind
+  that states it creates a new Chat (explaining the cap when it is reached).
+- Hardening from the review: nothing unvalidated can reach the pool file (an
+  over-long group name is truncated and a rejected write is a 400, not a
+  "damaged pool" 503), tab creation is bounded and rolled back on failure, and
+  `per_channel` keeps the legacy group→private fallback out of its routing.
+
 ### polish(ui): the needs-you panel does not repeat its own name, and the code palette is legible in both themes
 
 - The panel title, its phone sheet and the entry all say `Needs you`, so the

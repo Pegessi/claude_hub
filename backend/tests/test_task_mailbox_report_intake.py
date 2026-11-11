@@ -354,7 +354,7 @@ async def test_precommit_save_failure_rolls_back_mailbox_and_same_call_retry(
         call_id=f"{task.id}-needs-input-cycle-1-1",
     )
     state_file = manager._workspace_state_file(workspace_id)
-    original_write = manager._atomic_write_text
+    original_write = manager._atomic_save_state_text
     failed = False
     staged_report_id: str | None = None
 
@@ -375,7 +375,7 @@ async def test_precommit_save_failure_rolls_back_mailbox_and_same_call_retry(
             raise OSError("pre-state atomic replace failed")
         original_write(path, text)
 
-    monkeypatch.setattr(manager, "_atomic_write_text", fail_target_state_once)
+    monkeypatch.setattr(manager, "_atomic_save_state_text", fail_target_state_once)
     with pytest.raises(OSError, match="pre-state"):
         await manager.create_report(session.id, payload)
 

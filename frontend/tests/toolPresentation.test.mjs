@@ -10,7 +10,10 @@ const js = ts.transpileModule(source, {
 }).outputText
 const { toolGroupNames, toolStatusLabel } = await import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`)
 const toolGroup = await readFile(new URL('../src/features/chat/components/ChatToolGroup.vue', import.meta.url), 'utf8')
-const subthread = await readFile(new URL('../src/features/chat/components/ChatSubthread.vue', import.meta.url), 'utf8')
+const subthreadBody = await readFile(
+  new URL('../src/features/chat/components/ChatSubthreadBody.vue', import.meta.url),
+  'utf8',
+)
 const timeline = await readFile(new URL('../src/features/chat/components/ChatTimeline.vue', import.meta.url), 'utf8')
 const controller = await readFile(new URL('../src/features/chat/controllers/useChatTimeline.ts', import.meta.url), 'utf8')
 
@@ -50,7 +53,12 @@ test('main and child tool bodies are gated by native details state', () => {
   assert.match(toolGroup, /@toggle="onToolGroupToggle\(turn, part\.key, \$event\)"/)
   assert.match(toolGroup, /<template v-if="expandedToolGroups\.get\(turn\.key\)\?\.has\(part\.key\)">/)
   // Child threads reuse the same gated card, keyed by the parent turn.
-  assert.match(subthread, /<ChatToolGroup\s+v-else-if="sub\.kind === 'tool_group'"\s+:turn="turn"\s+:part="sub"\s*\/>/)
+  // The child rows moved into their own component; the dock's window renders
+  // the same gated card as the inline region.
+  assert.match(
+    subthreadBody,
+    /<ChatToolGroup\s+v-else-if="sub\.kind === 'tool_group'"\s+:turn="turn"\s+:part="sub"\s*\/>/,
+  )
   const memo = timeline.match(/v-memo="\[([^\]]*)\]"/)[1]
   assert.match(memo, /expandedToolGroups\.get\(turn\.key\)/)
   assert.match(controller, /shallowReactive\(new Map<string, ReadonlySet<string>>\(\)\)/)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import errno
-import json
 import logging
 import os
 import socket
@@ -14,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from ...config import settings
 from ...models import AgentStreamEvent, AgentType
+from ..local_storage import write_document
 from ..provider_proxy import provider_subprocess_env
 from .bindings import RuntimeBindings
 from .defaults import _PORT_CHECK_TIMEOUT_SECONDS
@@ -69,35 +69,11 @@ def _parse_optional_iso(runtime: RuntimeBindings, value: Optional[str]) -> Optio
 
 
 def _write_tabs_snapshot(runtime: RuntimeBindings, payload: Dict[str, Any]) -> None:
-    """Persist one snapshot; distinguish failure before/after replacement."""
-    text = json.dumps(payload)
-    # The configured runtime home may be an alias. Capture one real parent so
-    # temporary creation, replacement and durability confirmation agree.
-    parent = runtime.STATE_FILE.parent.resolve()
-    destination = parent / runtime.STATE_FILE.name
-    parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=".tabs-", suffix=".tmp", dir=parent)
-    replaced = False
+    """Commit tab ownership and cleanup obligations atomically."""
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, destination)
-        replaced = True
-        directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        write_document(runtime.STATE_FILE, payload)
     except OSError as exc:
-        raise _TabStateCommitError(exc, replaced=replaced) from exc
-    finally:
-        if not replaced:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
+        raise _TabStateCommitError(exc, replaced=False) from exc
 
 
 def _event_turn_ordinals(runtime: RuntimeBindings, events: List[AgentStreamEvent]) -> List[int]:

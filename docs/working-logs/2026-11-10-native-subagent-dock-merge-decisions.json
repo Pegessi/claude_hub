@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "2c5c47fb0e0f0c3d7bf2f6d20a950cc971d58180",
+  "parents": [
+    "3a2b889755a31f0c6395280e6ea0eeb9175fee52",
+    "a3692f8d0708429cc1291c9317248c4749bfe09c"
+  ],
+  "base": "2192a50314ff616edaa3ee336592651ffac27cef",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "380f55a01a5d5224ecede891add1e69955993fe4",
+  "reconstructed_tree": "7490889a555c6aca4f9c2f4d1ee6ee9b329d78e7",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "650e574bce87650f1f1b6a2d993db008aa69db75"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "390a8dd636c5393572d127cb5a002f21554c017d"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d41c7762d067274a50bc84f175b5fe9dcf0cd587"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "4c20e40076e6a60e417e6110cd832da6f7dc0af4"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "355f96e9fcc0e775070e2a3028dd5dd141d7098e"
+      },
+      "reason": "Both parents prepend an entry to the Released section of the changelog, so git produced a content conflict in the shared heading region. The resolution keeps one '## Released' heading, places the feature entry above main's new antigravity and Feishu entries (newest first), and moves the file preamble blockquote back above the heading, where the feature commit had left it below the new entry.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

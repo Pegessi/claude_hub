@@ -1,8 +1,9 @@
 import { computed, ref, watch, type Ref } from 'vue'
 import { useFeishuBotPoolStore } from '@/stores/feishuBotPoolStore'
 import {
-  activateFeishuPairing, bindBotGroup, disconnectFeishuPairing, FeishuBotRequestError,
-  listBotChats, startFeishuPairing, type FeishuBotChat, type FeishuPairStartResponse,
+  activateFeishuPairing, bindBotGroup, botBindings, botMode, disconnectFeishuPairing,
+  FeishuBotRequestError, listBotChats, MAX_BOT_CHANNELS, startFeishuPairing,
+  type FeishuBotChat, type FeishuBotMode, type FeishuPairStartResponse,
 } from '@/utils/feishuBotConfig'
 
 export type FeishuBindingViewState='unbound'|'pending'|'claimed'|'bound-current'|'error'
@@ -43,8 +44,11 @@ export function useFeishuBinding(
   let groupEpoch=0,groupController:AbortController|null=null
 
   const currentBot=computed(()=>store.activeBotForTab(tabId.value))
-  const binding=computed(()=>currentBot.value?.binding??null)
+  const binding=computed(()=>store.activeBindingForTab(tabId.value))
   const selectedBot=computed(()=>store.botById(selectedBotId.value))
+  const activeBot=computed(()=>currentBot.value??selectedBot.value)
+  const mode=computed<FeishuBotMode>(()=>botMode(activeBot.value))
+  const bindings=computed(()=>botBindings(activeBot.value))
 const matchingClaims = computed(() => {
   const bot = selectedBot.value
   if (!bot) return []
@@ -55,7 +59,13 @@ const matchingClaims = computed(() => {
 const claim = computed(() =>
   matchingClaims.value.find(item => Date.parse(item.expires_at) > clockMs.value) ?? null,
 )
-  const bots=computed(()=>store.bots.map(bot=>({bot,disabled:!!bot.binding&&bot.binding.tab_id!==tabId.value})))
+  const bots=computed(()=>store.bots.map(bot=>{
+    const active=botBindings(bot)
+    const disabled=botMode(bot)==='single'
+      ? active.length>0&&!active.some(item=>item.tab_id===tabId.value)
+      : false
+    return {bot,disabled}
+  }))
   const viewState = computed<FeishuBindingViewState>(() => {
     if (needsLogin.value) return 'error'
     if (binding.value) return 'bound-current'
@@ -121,7 +131,7 @@ function schedulePoll() {
 }
 
   async function loadGroups(): Promise<boolean> {
-  const bot = selectedBot.value
+  const bot = selectedBot.value ?? currentBot.value
   if (!bot || isMutating.value || groupsLoading.value || needsLogin.value) return false
   const requestEpoch = ++groupEpoch
   groupController?.abort()
@@ -135,7 +145,7 @@ function schedulePoll() {
     if (requestEpoch !== groupEpoch || request.signal.aborted) return false
     // The reply describes the Bot and Chat that asked for it; a selection or
     // Chat change while it was in flight makes it useless, not merely stale.
-    if (selectedBotId.value !== requestBotId || tabId.value !== requestTabId) return false
+    if ((selectedBotId.value ?? currentBot.value?.bot_id) !== requestBotId || tabId.value !== requestTabId) return false
     // The endpoint lists groups only, so every returned chat is bindable; the
     // server refuses a private chat id itself (``chat_not_group``).
     groups.value = [...value.chats]
@@ -157,7 +167,7 @@ function schedulePoll() {
 /** Load the group list once per Bot; an explicit reload stays the user's choice after a failure. */
 function ensureGroups(): void {
   if (groupsLoaded.value || groupsLoading.value || groupsError.value) return
-  if (!selectedBot.value || needsLogin.value || isMutating.value) return
+  if (!(selectedBot.value ?? currentBot.value) || needsLogin.value || isMutating.value) return
   void loadGroups()
 }
   async function refresh(): Promise<boolean> {
@@ -178,7 +188,7 @@ function ensureGroups(): void {
     if (needsLogin.value) { clearPairingAttempt(); return false }
     if (!selectedBotId.value || !selectedBot.value) {
       const nextId = currentBot.value?.bot_id
-        ?? store.bots.find(bot => bot.enabled && bot.configured && !bot.binding)?.bot_id ?? null
+        ?? store.bots.find(bot => bot.enabled && bot.configured && (botMode(bot) === 'per_channel' || botBindings(bot).length === 0))?.bot_id ?? null
       if (nextId !== selectedBotId.value) { clearPairingAttempt(); resetGroups() }
       selectedBotId.value = nextId
     }
@@ -196,7 +206,8 @@ function ensureGroups(): void {
   function selectBot(botId: string) {
   if (isMutating.value) return
   const bot = store.botById(botId)
-  if (!bot || (bot.binding && bot.binding.tab_id !== tabId.value)) return
+  const active = botBindings(bot)
+  if (!bot || (botMode(bot) === 'single' && active.length > 0 && !active.some(item => item.tab_id === tabId.value))) return
   epoch += 1
   controller?.abort(); controller = null; isLoading.value = false
   selectedBotId.value = botId
@@ -208,7 +219,7 @@ function ensureGroups(): void {
 }
   async function generateCode(): Promise<boolean> {
   const bot = selectedBot.value
-  if (!bot || !bot.enabled || !bot.configured || bot.binding || isMutating.value || needsLogin.value) return false
+  if (!bot || !bot.enabled || !bot.configured || botMode(bot) !== 'single' || botBindings(bot).length > 0 || isMutating.value || needsLogin.value) return false
   const { requestEpoch, request } = beginMutation()
   try {
     const next = await startPairing(bot.bot_id, { tab_id: tabId.value, ...(workspaceId?.value ? { workspace_id: workspaceId.value } : {}), expected_revision: bot.revision }, request.signal)
@@ -248,13 +259,20 @@ function ensureGroups(): void {
   } finally { finishMutation(requestEpoch) }
 }
   async function bindGroup(chatId: string): Promise<boolean> {
-  const bot = selectedBot.value
-  if (!bot || !chatId || !bot.enabled || !bot.configured || bot.binding || isMutating.value || needsLogin.value) return false
+  const bot = selectedBot.value ?? currentBot.value
+  if (!bot || !chatId || !bot.enabled || !bot.configured || isMutating.value || needsLogin.value) return false
+  const isPerChannel = botMode(bot) === 'per_channel'
+  const active = botBindings(bot)
+  if (!isPerChannel && active.length > 0) return false
+  if (isPerChannel && active.length >= MAX_BOT_CHANNELS) return false
   const { requestEpoch, request } = beginMutation()
   try {
     // The mutation response is the authoritative pool snapshot: applyPool adopts
     // it and reconciles when the pool moved on while this request was open.
-    const next = await requestGroupBind(bot.bot_id, { chat_id: chatId, tab_id: tabId.value, expected_revision: bot.revision }, request.signal)
+    const input = isPerChannel
+      ? { chat_id: chatId, expected_revision: bot.revision }
+      : { chat_id: chatId, tab_id: tabId.value, expected_revision: bot.revision }
+    const next = await requestGroupBind(bot.bot_id, input, request.signal)
     if (requestEpoch !== epoch || request.signal.aborted) return false
     store.applyPool(next)
     groupsError.value = null
@@ -267,23 +285,32 @@ function ensureGroups(): void {
     return false
   } finally { finishMutation(requestEpoch) }
 }
-  async function disconnect(): Promise<boolean> {
-  const bot = currentBot.value
+  async function disconnect(pairingId?: string): Promise<boolean> {
+  const bot = pairingId ? (currentBot.value ?? selectedBot.value) : currentBot.value
   if (!bot || isMutating.value || needsLogin.value) return false
+  if (pairingId !== undefined && (!pairingId || !botBindings(bot).some(item => item.pairing_id === pairingId))) {
+    return false
+  }
   const { requestEpoch, request } = beginMutation()
   try {
-    const next = await disconnectPairing(bot.bot_id, bot.revision, request.signal)
+    const next = pairingId
+      ? await disconnectPairing(bot.bot_id, bot.revision, request.signal, pairingId)
+      : await disconnectPairing(bot.bot_id, bot.revision, request.signal)
     if (requestEpoch !== epoch || request.signal.aborted) return false
     store.applyPool(next)
-    selectedBotId.value = null
+    if (!pairingId) selectedBotId.value = null
+    else selectedBotId.value = bot.bot_id
     clearPairingAttempt()
     return true
   } catch (cause) {
     if (requestEpoch !== epoch || request.signal.aborted) return false
-    setFailure(cause, 'Failed to disconnect Feishu.')
+    setFailure(cause, pairingId ? 'Failed to release this channel.' : 'Failed to disconnect Feishu.')
     await reconcileAfterFailure(cause, request.signal)
     return false
   } finally { finishMutation(requestEpoch) }
+}
+  function releaseChannel(pairingId: string): Promise<boolean> {
+  return disconnect(pairingId)
 }
   async function resume() {
   polling = true
@@ -329,5 +356,5 @@ function finishMutation(requestEpoch: number) {
   schedulePoll()
 }
 
-  return{bots,binding,currentBot,selectedBotId,selectedBot,pendingCode,claim,confirmWord,error,needsLogin,isHydrated,isLoading,isMutating,viewState,statusText,groups,groupsLoaded,groupsLoading,groupsError,refresh,selectBot,generateCode,activate,bindGroup,loadGroups,ensureGroups,disconnect,resume,pause}
+  return{bots,binding,bindings,mode,currentBot,selectedBotId,selectedBot,pendingCode,claim,confirmWord,error,needsLogin,isHydrated,isLoading,isMutating,viewState,statusText,groups,groupsLoaded,groupsLoading,groupsError,refresh,selectBot,generateCode,activate,bindGroup,loadGroups,ensureGroups,disconnect,releaseChannel,resume,pause}
 }

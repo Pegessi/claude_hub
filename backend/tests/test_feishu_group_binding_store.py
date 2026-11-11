@@ -17,6 +17,7 @@ from claude_hub.services.feishu_bot_pool import (
     FeishuChatOccupied,
     OwnerIdentity,
 )
+from claude_hub.services.local_storage import read_document
 
 OWNER = OwnerIdentity(open_id="local", email="local@localhost", kind=OWNER_KIND_LOCAL)
 OTHER = OwnerIdentity(open_id="ou-other", email="other@example.test", kind=OWNER_KIND_LOCAL)
@@ -60,8 +61,10 @@ def test_group_binding_is_persisted_as_a_group(pool: FeishuBotPoolStore) -> None
     assert entry.binding is not None
     assert entry.binding.pairing_id == binding.pairing_id
     # An in-memory snapshot must survive its own serialization.
-    raw = json.loads(pool.path.read_text())
-    stored = raw["bots"][bot_id]["binding"]
+    raw = read_document(pool.path)
+    stored_list = raw["bots"][bot_id]["bindings"]
+    assert len(stored_list) == 1
+    stored = stored_list[0]
     assert stored["chat_type"] == "group"
     assert stored["chat_name"] == "Team"
 
@@ -288,6 +291,67 @@ def test_an_over_long_chat_name_cannot_corrupt_the_pool(pool: FeishuBotPoolStore
             environ={},
         )
     # The pool still reads and the Bot is still unbound.
+    entry = pool.snapshot({}).get(bot_id)
+    assert entry is not None
+    assert entry.binding is None
+
+
+@pytest.mark.parametrize(
+    ("bad_tab_id", "bad_workspace_id"),
+    [
+        ("t" * 500, None),
+        ("   ", None),
+        ("tab-1", "w" * 500),
+        ("tab-1", "   "),
+    ],
+    ids=["overlong_tab_id", "blank_tab_id", "overlong_workspace_id", "blank_workspace_id"],
+)
+def test_invalid_tab_or_workspace_in_bind_group_cannot_corrupt_the_pool(
+    pool: FeishuBotPoolStore, bad_tab_id: str, bad_workspace_id: str | None
+) -> None:
+    bot_id = pool.create_bot(name="One", config=_config(), environ={})
+    entry = pool.snapshot({}).get(bot_id)
+    assert entry is not None
+    with pytest.raises(FeishuBotPoolStateError):
+        pool.bind_group(
+            bot_id,
+            owner=OWNER,
+            tab_id=bad_tab_id,
+            workspace_id=bad_workspace_id,
+            chat_id="oc-group",
+            chat_name="Team",
+            expected_revision=entry.revision,
+            environ={},
+        )
+    entry = pool.snapshot({}).get(bot_id)
+    assert entry is not None
+    assert entry.binding is None
+
+
+@pytest.mark.parametrize(
+    ("bad_tab_id", "bad_workspace_id"),
+    [
+        ("t" * 500, None),
+        ("   ", None),
+        ("tab-1", "w" * 500),
+        ("tab-1", "   "),
+    ],
+    ids=["overlong_tab_id", "blank_tab_id", "overlong_workspace_id", "blank_workspace_id"],
+)
+def test_invalid_tab_or_workspace_in_bind_p2p_cannot_corrupt_the_pool(
+    pool: FeishuBotPoolStore, bad_tab_id: str, bad_workspace_id: str | None
+) -> None:
+    bot_id = pool.create_bot(name="One", config=_config(), environ={})
+    with pytest.raises(FeishuBotPoolStateError):
+        pool.bind_p2p(
+            bot_id,
+            owner=OWNER,
+            tab_id=bad_tab_id,
+            workspace_id=bad_workspace_id,
+            sender_open_id="ou-1",
+            chat_id="oc-1",
+            environ={},
+        )
     entry = pool.snapshot({}).get(bot_id)
     assert entry is not None
     assert entry.binding is None

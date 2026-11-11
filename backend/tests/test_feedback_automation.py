@@ -116,7 +116,14 @@ def _event(
         "tab_id": "tab-1",
         "turn_id": turn,
         "message_id": message_id if message_id is not None else f"{turn}:user",
-        "stream_sequence": 1,
+        "stream_sequence": (
+            len((directory / "terminal-tab-tab-1.jsonl").read_text().splitlines())
+            if (directory / "terminal-tab-tab-1.jsonl").exists()
+            else 0
+        ),
+        "session_id": "terminal-tab-tab-1",
+        "agent_type": "claude",
+        "created_at": "2026-11-10T00:00:00Z",
         "payload": payload,
         "redacted": redacted,
     }
