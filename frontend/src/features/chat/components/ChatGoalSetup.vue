@@ -116,6 +116,19 @@ function handleGoalPaste(event: ClipboardEvent) {
   cursor: pointer;
 }
 .goal-status-recovery button:disabled { opacity: 0.55; cursor: default; }
+/* The picker owns this row inside the Goal dialog: one line for the caption,
+   then the trigger and the chips side by side instead of stacked at zero gap. */
+.goal-image-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.goal-image-picker p {
+  flex: 1 1 100%;
+}
+
 .attachment-chip {
   position: relative;
   width: 48px;
