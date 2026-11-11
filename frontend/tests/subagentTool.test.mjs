@@ -18,10 +18,12 @@ const mod = await import(
 )
 const {
   isSubagentTool,
+  parseMasoSpawnedThreadIds,
   parseSubagent,
   subagentResultText,
   subagentStatusLabel,
   subagentProviderLabel,
+  subagentViewForThread,
 } = mod
 
 const CLAUDE_ARGS = {
@@ -39,11 +41,40 @@ const TRAEX_ARGS = {
   prompt: 'You are an independent read-only code reviewer. Review the diff.',
   receiverThreadIds: ['01a0bce6-af31-7ab1-b111-5d0b50967ae7'],
 }
+const MASO_TASK_ARGS = {
+  description: 'Research Feishu and audit Hub',
+  tasks: [
+    {
+      subagent_type: 'GeneralPurpose',
+      subagent_name: 'maso_feishu_research',
+      prompt: 'Inspect MASO Feishu channel architecture.',
+    },
+    {
+      subagent_type: 'Explorer',
+      subagent_name: 'hub_feishu_audit',
+      prompt: 'Audit Claude Hub Feishu implementation.',
+    },
+  ],
+}
+const MASO_FORK_ARGS = {
+  agent_name: 'colocate_config_check',
+  fork_from: 'self',
+  prompt: 'Verify colocate config in isolated worktree.',
+  workspace: 'isolated',
+}
+const MASO_SEND_ARGS = {
+  agent_id: 'posthoc_reviewer-a38c',
+  message: 'Re-review amended commit 7eeadf6.',
+  mode: 'notify',
+}
 
 test('matches the confirmed sub-agent tool for each provider', () => {
   assert.equal(isSubagentTool('Agent', CLAUDE_ARGS), true)
   assert.equal(isSubagentTool('Task', CURSOR_TASK_ARGS), true)
   assert.equal(isSubagentTool('spawnAgent', TRAEX_ARGS), true)
+  assert.equal(isSubagentTool('Task', MASO_TASK_ARGS), true)
+  assert.equal(isSubagentTool('Fork', MASO_FORK_ARGS), true)
+  assert.equal(isSubagentTool('SendMessage', MASO_SEND_ARGS), true)
 })
 
 test('ordinary tools never match, even with realistic args', () => {
@@ -159,4 +190,76 @@ test('status and provider labels use the product UI language and pass through un
   assert.equal(subagentProviderLabel('claude'), 'Claude sub-agent')
   assert.equal(subagentProviderLabel('cursor'), 'Cursor sub-agent')
   assert.equal(subagentProviderLabel('traex'), 'TraeX sub-agent')
+  assert.equal(subagentProviderLabel('maso'), 'MASO sub-agent')
+})
+
+test('parseSubagent projects MASO Task, Fork and SendMessage views and binds spawned ids', () => {
+  const taskView = parseSubagent('Task', MASO_TASK_ARGS)
+  assert.equal(taskView.provider, 'maso')
+  assert.equal(taskView.agentType, 'maso_feishu_research')
+  assert.equal(taskView.description, 'Research Feishu and audit Hub')
+  assert.equal(taskView.directive, false)
+  assert.equal(taskView.tasks.length, 2)
+
+  // Invalid MASO Task calls (missing description or subagent_type) fail closed.
+  assert.equal(parseSubagent('Task', { tasks: MASO_TASK_ARGS.tasks }), null)
+  assert.equal(
+    parseSubagent('Task', {
+      description: 'missing type',
+      tasks: [{ subagent_name: 'worker', prompt: 'work' }],
+    }),
+    null,
+  )
+
+  const spawned = parseMasoSpawnedThreadIds(
+    'Spawned 2/2 sub-agent(s) with IDs: maso_feishu_research-d313, hub_feishu_audit-5823\nModel: gpt',
+  )
+  assert.deepEqual(spawned, ['maso_feishu_research-d313', 'hub_feishu_audit-5823'])
+  const second = subagentViewForThread(taskView, 'hub_feishu_audit-5823', 1)
+  assert.equal(second.agentType, 'hub_feishu_audit')
+  assert.equal(second.prompt, 'Audit Claude Hub Feishu implementation.')
+  assert.deepEqual(second.threadIds, ['hub_feishu_audit-5823'])
+
+  const forkView = parseSubagent('Fork', MASO_FORK_ARGS)
+  assert.equal(forkView.provider, 'maso')
+  assert.equal(forkView.agentType, 'colocate_config_check')
+  assert.deepEqual(
+    parseMasoSpawnedThreadIds(
+      'Forked agent/session "f5c30eb0-ce4" into sub-agent "colocate_config_check-34c30cbc".',
+    ),
+    ['colocate_config_check-34c30cbc'],
+  )
+
+  const sendView = parseSubagent('SendMessage', MASO_SEND_ARGS)
+  assert.equal(sendView.provider, 'maso')
+  assert.equal(sendView.directive, true)
+  assert.deepEqual(sendView.threadIds, ['posthoc_reviewer-a38c'])
+  assert.equal(sendView.prompt, 'Re-review amended commit 7eeadf6.')
+
+  // Prefix-overlapping and duplicate subagent_names in one Task batch resolve
+  // each spawned thread to its own task prompt and role.
+  const overlapping = parseSubagent('Task', {
+    description: 'Security and general review',
+    tasks: [
+      { subagent_type: 'Explorer', subagent_name: 'reviewer', prompt: 'General review prompt' },
+      {
+        subagent_type: 'Explorer',
+        subagent_name: 'reviewer-security',
+        prompt: 'Security review prompt',
+      },
+    ],
+  })
+  const secBound = subagentViewForThread(overlapping, 'reviewer-security-3c4d', 1)
+  assert.equal(secBound.agentType, 'reviewer-security')
+  assert.equal(secBound.prompt, 'Security review prompt')
+
+  const duplicateNames = parseSubagent('Task', {
+    description: 'Parallel reviewers with same name',
+    tasks: [
+      { subagent_type: 'Explorer', subagent_name: 'reviewer', prompt: 'Prompt A' },
+      { subagent_type: 'Explorer', subagent_name: 'reviewer', prompt: 'Prompt B' },
+    ],
+  })
+  assert.equal(subagentViewForThread(duplicateNames, 'reviewer-aaaa', 0).prompt, 'Prompt A')
+  assert.equal(subagentViewForThread(duplicateNames, 'reviewer-bbbb', 1).prompt, 'Prompt B')
 })

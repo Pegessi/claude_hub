@@ -42,10 +42,20 @@ export function createNativeSubagentDock(): NativeSubagentDock {
       // stay open: its window would have nothing to resolve. This is a data
       // change, not a dismissal, so it must not move focus.
       const current = openRow.value
-      if (current && !next.some(row => row.key === current.key)) {
-        openRow.value = null
-        opener = null
-        fallback = null
+      if (current) {
+        const exact = next.find(row => row.key === current.key)
+        const moved =
+          exact ??
+          (current.agentType === 'MASO sub-agent'
+            ? next.find(row => row.threadId === current.threadId)
+            : undefined)
+        if (!moved) {
+          openRow.value = null
+          opener = null
+          fallback = null
+        } else if (moved !== current) {
+          openRow.value = moved
+        }
       }
     },
     open(row, source, chromeControl) {

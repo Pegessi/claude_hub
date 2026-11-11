@@ -103,9 +103,16 @@ import ChatSubthreadBody from './ChatSubthreadBody.vue'
  * pane chrome; the shared `NativeSubagentDock` state connects the two.
  */
 const dock = useNativeSubagentDock()
-const { turns, revealSubthread } = requireChatOwner(chatTimelineKey)
+const { turns, revealSubthread, ensureSubthreadDetailsLoaded } = requireChatOwner(chatTimelineKey)
 
 const row = computed(() => dock?.openRow.value ?? null)
+watch(
+  row,
+  current => {
+    if (current) ensureSubthreadDetailsLoaded?.(current.turnKey, current.threadId)
+  },
+  { immediate: true },
+)
 const lookup = computed(() => (row.value
   ? findNativeSubthread(turns.value, row.value.turnKey, row.value.threadId)
   : null))

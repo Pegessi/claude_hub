@@ -200,3 +200,99 @@ test('rows resolve back to the live child, with its transcript position', () => 
   assert.equal(findNativeSubthread([older, newer], 'turn-2', 'child-a'), null)
   assert.equal(findNativeSubthread([older, newer], 'turn-9', 'child-b'), null)
 })
+
+test('MASO sub-agents keep readable thread ids, use child SendMessage reports, and deduplicate across turns', () => {
+  const spawnTurn = turn({
+    key: 'turn-1',
+    turnId: 't-1',
+    parts: [
+      region([
+        thread({
+          threadId: 'posthoc_reviewer-a38c',
+          provider: 'maso',
+          lifecycleStatus: 'active',
+          launchTool: launchTool({
+            provider: 'maso',
+            agentType: 'posthoc_reviewer',
+            description: 'Post-hoc review of merged main',
+            prompt: 'Review merged commits on main.',
+            threadIds: ['posthoc_reviewer-a38c'],
+            background: true,
+            directive: false,
+          }),
+          parts: [],
+        }),
+      ]),
+    ],
+  })
+  const followupTurn = turn({
+    key: 'turn-2',
+    turnId: 't-2',
+    parts: [
+      region([
+        thread({
+          threadId: 'posthoc_reviewer-a38c',
+          provider: 'maso',
+          lifecycleStatus: 'completed',
+          launchTool: null,
+          parts: [
+            {
+              kind: 'tool_group',
+              key: 'sub-tg-1',
+              tools: [
+                {
+                  key: 'tool-send-1',
+                  callId: 'send-1',
+                  name: 'SendMessage',
+                  status: 'completed',
+                  argsText: JSON.stringify({
+                    agent_id: 'parent',
+                    message: 'Fix review GO: all 4 probes verified.\nDetails follow.',
+                  }),
+                  resultText: 'ok',
+                },
+              ],
+            },
+          ],
+        }),
+      ], 'subagents-turn-2'),
+    ],
+  })
+  const rows = nativeSubagentRows([spawnTurn, followupTurn])
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].key, 'turn-2:posthoc_reviewer-a38c')
+  assert.equal(rows[0].name, 'posthoc_reviewer-a38c')
+  assert.equal(rows[0].agentType, 'MASO sub-agent')
+  assert.equal(rows[0].state, 'completed')
+  assert.equal(rows[0].group, 'earlier')
+  assert.equal(rows[0].summary, 'Fix review GO: all 4 probes verified.')
+
+  const merged = findNativeSubthread([spawnTurn, followupTurn], 'turn-2', 'posthoc_reviewer-a38c')
+  assert.equal(merged?.ordinal, 2)
+  assert.equal(merged?.thread.launchTool?.subagent?.prompt, 'Review merged commits on main.')
+  assert.equal(merged?.thread.lifecycleStatus, 'completed')
+  assert.equal(merged?.thread.parts.length, 1)
+
+  // A standalone Claude Agent part (before nested child events hydrate) also
+  // projects into the dock and resolves in findNativeSubthread.
+  const standaloneClaudeTurn = turn({
+    key: 'turn-claude',
+    turnId: 't-claude',
+    parts: [
+      {
+        kind: 'subagent',
+        key: 'subagent-call-claude',
+        tool: launchTool(),
+      },
+    ],
+  })
+  const claudeRows = nativeSubagentRows([standaloneClaudeTurn])
+  assert.equal(claudeRows.length, 1)
+  assert.equal(claudeRows[0].threadId, 'call-1')
+  assert.equal(claudeRows[0].name, 'Explore')
+  assert.equal(claudeRows[0].agentType, 'Claude sub-agent')
+  assert.equal(
+    findNativeSubthread([standaloneClaudeTurn], 'turn-claude', 'call-1')?.thread.launchTool?.name,
+    'Agent',
+  )
+})

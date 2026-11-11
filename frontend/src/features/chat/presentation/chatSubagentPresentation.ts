@@ -121,20 +121,77 @@ export function subthreadTerminal(part: SubthreadPart): boolean {
     part.lifecycleStatus === 'cancelled'
 }
 
+function firstNonEmptyLine(text: string): string | null {
+  const first = text
+    .split(String.fromCharCode(10))
+    .map(line => line.trim())
+    .find(Boolean)
+  if (!first) return null
+  return first.length > 140 ? `${first.slice(0, 140)}…` : first
+}
+
+function childSendMessageText(tool: TimelineTool): string {
+  if (tool.name !== 'SendMessage' || !tool.argsText) return ''
+  try {
+    const parsed = JSON.parse(tool.argsText) as unknown
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      typeof (parsed as Record<string, unknown>).message === 'string'
+    ) {
+      return (parsed as Record<string, string>).message
+    }
+  } catch {
+    // Ignore malformed tool JSON.
+  }
+  return ''
+}
+
+/** Latest child-authored report line (text or child SendMessage), or ``null``. */
+export function subthreadReportHeadline(part: SubthreadPart): string | null {
+  for (let index = part.parts.length - 1; index >= 0; index -= 1) {
+    const child = part.parts[index]
+    if (child.kind === 'text') {
+      const line = firstNonEmptyLine(child.text)
+      if (line) return line
+    } else if (child.kind === 'tool_group') {
+      for (let tIndex = child.tools.length - 1; tIndex >= 0; tIndex -= 1) {
+        const msg = childSendMessageText(child.tools[tIndex])
+        const line = firstNonEmptyLine(msg)
+        if (line) return line
+      }
+    }
+  }
+  return null
+}
+
 /** Collapsed-row headline: the child's latest report or instruction, then the
  *  original delegated prompt, without using either as lifecycle evidence. */
 export function subthreadHeadline(part: SubthreadPart): string {
+  if (subthreadTerminal(part)) {
+    const report = subthreadReportHeadline(part)
+    if (report) return report
+  }
   for (let index = part.parts.length - 1; index >= 0; index -= 1) {
     const child = part.parts[index]
-    const text = child.kind === 'text'
-      ? child.text
-      : child.kind === 'instruction' ? (child.tool.subagent?.prompt ?? '') : ''
-    const first = text.split(String.fromCharCode(10)).map(line => line.trim()).find(Boolean)
-    if (first) return first.length > 140 ? `${first.slice(0, 140)}…` : first
+    if (child.kind === 'text') {
+      const line = firstNonEmptyLine(child.text)
+      if (line) return line
+    } else if (child.kind === 'instruction') {
+      const line = firstNonEmptyLine(child.tool.subagent?.prompt ?? '')
+      if (line) return line
+    } else if (child.kind === 'tool_group') {
+      for (let tIndex = child.tools.length - 1; tIndex >= 0; tIndex -= 1) {
+        const msg = childSendMessageText(child.tools[tIndex])
+        const line = firstNonEmptyLine(msg)
+        if (line) return line
+      }
+    }
   }
-  const prompt = part.launchTool?.subagent?.prompt ?? ''
-  const first = prompt.split(String.fromCharCode(10)).map(line => line.trim()).find(Boolean)
-  if (first) return first.length > 140 ? `${first.slice(0, 140)}…` : first
+  const promptLine = firstNonEmptyLine(part.launchTool?.subagent?.prompt ?? '')
+  if (promptLine) return promptLine
+  const descriptionLine = firstNonEmptyLine(part.launchTool?.subagent?.description ?? '')
+  if (descriptionLine) return descriptionLine
   return 'Waiting for sub-agent activity'
 }
 
