@@ -8,6 +8,7 @@ import logging
 import re
 import time
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from typing import Any, AsyncIterator, Callable
 
 from fastapi import HTTPException
@@ -263,15 +264,12 @@ class FeishuMessageDispatcher:
                     current.app_id != effective.app_id
                     or current.config != effective.config
                     or current.generation != effective.generation
+                    or current.transport_revision != effective.transport_revision
                 ):
                     return effective
                 return current
-            return EffectiveBot(
-                bot_id=profile_target.bot_id,
-                app_id=profile_target.app_id,
-                config=profile_target.config,
-                revision=profile_target.revision,
-                generation=profile_target.generation,
+            return replace(
+                profile_target,
                 feishu_name=profile.name,
                 feishu_avatar_url=profile.avatar_url,
                 feishu_open_id=profile.open_id,
@@ -287,13 +285,15 @@ class FeishuMessageDispatcher:
             and fallback.app_id == effective.app_id
             and fallback.config == effective.config
             and fallback.generation == effective.generation
+            and fallback.transport_revision == effective.transport_revision
         ):
-            return EffectiveBot(
-                bot_id=effective.bot_id,
+            return replace(
+                effective,
                 app_id=fallback.app_id,
                 config=fallback.config,
                 revision=fallback.revision,
                 generation=fallback.generation,
+                transport_revision=fallback.transport_revision,
                 feishu_name=fallback.feishu_name or fallback.name,
                 feishu_avatar_url=fallback.feishu_avatar_url,
                 feishu_open_id=fallback.feishu_open_id,
@@ -356,9 +356,9 @@ class FeishuMessageDispatcher:
         self, effective: EffectiveBot, binding: BotBinding, event: FeishuMessageEvent
     ) -> None:
         """Validate a message while the caller holds its bot's admission gate."""
-        if not self.bindings.pool().is_current(effective) or not self._binding_still_routes(
-            effective, binding
-        ):
+        if not self.bindings.pool().is_current_for_delivery(
+            effective
+        ) or not self._binding_still_routes(effective, binding):
             raise HTTPException(status_code=409, detail="bot_binding_revoked")
         time_status = self._message_time_status(event, binding)
         if time_status != FeishuMessageTimeStatus.VALID:
@@ -386,6 +386,9 @@ class FeishuMessageDispatcher:
             for item in batch:
                 self._validate_binding_dispatch(item.effective, item.binding, item.event)
             yield
+        # The native handoff inside the guard succeeded, so this channel's
+        # stopped-answer carryover has now been delivered with the new turn.
+        queue.interrupted_text.pop(leader.channel_key, None)
         context = self._dispatch_context_key(leader)
         queue.dispatched_contexts[context] = None
         queue.dispatched_contexts.move_to_end(context)
@@ -407,6 +410,8 @@ class FeishuMessageDispatcher:
             leader.event.chat_id,
             leader.event.thread_id,
             leader.event.sender_open_id,
+            leader.effective.generation,
+            leader.effective.transport_revision,
         )
 
     def _claim_still_live(self, bot_id: str, claim: PairingClaim) -> bool:
@@ -443,7 +448,7 @@ class FeishuMessageDispatcher:
                 and await _group_is_topic_mode(client, effective.bot_id, event.chat_id)
             )
             async with self.bindings.gate(effective.bot_id):
-                if not self.bindings.pool().is_current(effective):
+                if not self.bindings.pool().is_current_for_delivery(effective):
                     return False
                 if still_valid is not None and not still_valid():
                     return False
@@ -700,6 +705,7 @@ class FeishuMessageDispatcher:
     ) -> str:
         batch: list[_TabDispatchItem] = []
         status = "failed"
+        earlier = queue.interrupted_text.get(leader.channel_key, "")
         try:
             try:
                 candidates, followup = await self._collect_tab_dispatch_batch(queue, leader)
@@ -761,8 +767,6 @@ class FeishuMessageDispatcher:
                 )
                 for item in batch:
                     item.native_bridge_started = True
-                # The handoff is now certain, so this channel's carryover is spent.
-                queue.interrupted_text.pop(leader.channel_key, None)
                 turn_metadata = self._turn_metadata(leader.effective, leader.event, leader.binding)
                 assistant_text = await self.bindings.dispatch_tab_chat_and_wait(
                     tab_id,
@@ -787,6 +791,7 @@ class FeishuMessageDispatcher:
                     attachments=attachments,
                     admission_guard=lambda: self._admit_batch_dispatch(queue, batch),
                 )
+                queue.interrupted_text.pop(leader.channel_key, None)
                 if await self._stopped_for_newer(batch) is not None:
                     # It ended before the stop took: this answer is sent, so the
                     # newer message follows it as usual.
@@ -806,6 +811,9 @@ class FeishuMessageDispatcher:
                     else "reply_failed"
                 )
             except ExternalDispatchRetired:
+                if earlier and leader.channel_key not in queue.interrupted_text:
+                    queue.interrupted_text[leader.channel_key] = earlier
+                    queue.interrupted_text.move_to_end(leader.channel_key)
                 status = "retired"
             except FeishuMessageTimeRejected as exc:
                 for item in batch:
@@ -829,6 +837,7 @@ class FeishuMessageDispatcher:
                     ):
                         status = "pre_dispatch_rejected"
             except ExternalQuestionPending:
+                queue.interrupted_text.pop(leader.channel_key, None)
                 status = "completed"  # the durable question, not this waiter, owns continuation
             except ExternalInteractionRequired:
                 target = batch[-1] if batch else leader
@@ -907,3 +916,7 @@ class FeishuMessageDispatcher:
                 await self._settle_stop(queue, batch)
             if batch:
                 self._finish_tab_dispatch_batch(tab_id, queue, batch, status)
+            else:
+                if queue.processor is leader:
+                    queue.processor = None
+                self.bindings.promote_tab_dispatch(tab_id, queue)

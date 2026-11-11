@@ -167,6 +167,7 @@ class ManagerTabsMixin(ManagerHost):
         session_exists = await self._runtime._tmux_session_exists_async(process.tmux_session)
         is_local_codex = (
             not session_exists
+            and getattr(process, "session_kind", None) != SessionKind.CHAT
             and process.target == ExecutionTarget.LOCAL
             and process.agent_type == AgentType.CODEX
             and not process._shell_explicitly_provided

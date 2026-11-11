@@ -14,11 +14,11 @@
         :aria-label="`Sub-agent ${row.name}`"
       >
         <header class="native-subagent-head">
-          <span class="native-subagent-badge">Native sub-agent</span>
+          <span class="native-subagent-badge">{{ row.kind === 'hub' ? 'Hub sub-agent' : 'Native sub-agent' }}</span>
           <strong
             class="native-subagent-name"
-            :title="row.name"
-          >{{ row.name }}</strong>
+            :title="displayName"
+          >{{ displayName }}</strong>
           <span
             v-if="row.agentType !== 'Native sub-agent'"
             class="native-subagent-type"
@@ -40,11 +40,12 @@
         </header>
 
         <p class="native-subagent-meta">
-          <span v-if="lookup">Turn #{{ lookup.ordinal }}</span>
+          <span v-if="row.kind === 'native' && lookup">Turn #{{ lookup.ordinal }}</span>
+          <span v-else-if="row.kind === 'hub' && lookup">{{ lookup.ordinal }} {{ lookup.ordinal === 1 ? 'turn' : 'turns' }}</span>
           <span
             class="native-subagent-thread"
-            :title="row.threadId"
-          >{{ row.threadId }}</span>
+            :title="row.kind === 'hub' ? row.subagentId : row.threadId"
+          >{{ row.kind === 'hub' ? row.shortId : row.threadId }}</span>
         </p>
 
         <div class="native-subagent-body">
@@ -63,12 +64,21 @@
 
         <footer class="native-subagent-foot">
           <button
-            v-if="lookup"
+            v-if="row.kind === 'native' && lookup"
             type="button"
             class="native-subagent-locate"
             @click="locate"
           >
             Show in transcript
+          </button>
+          <button
+            v-else-if="liveHubChip && liveHubChip.canJump"
+            type="button"
+            class="native-subagent-locate"
+            data-testid="hub-subagent-open-session"
+            @click="openHubSession"
+          >
+            {{ liveHubChip.archived ? 'Restore & open' : 'Open session' }}
           </button>
           <button
             type="button"
@@ -83,41 +93,125 @@
   </Teleport>
 </template>
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 
+import { API_BASE } from '@/stores/terminal/helpers'
+import type { AgentStreamEvent } from '@/types'
 import { requireChatOwner, chatTimelineKey } from '../owners'
 import { useNativeSubagentDock } from '../controllers/nativeSubagentDock'
+import { useSubagentDock } from '../controllers/subagentDock'
+import { buildHubSubagentLookup } from '../presentation/hubSubagentThread'
 import { findNativeSubthread } from '../presentation/nativeSubagentRows'
+import { subagentDisplayName } from '../presentation/subagentJump'
 import { subthreadStatusClass, subthreadStatusLabel } from '../presentation/chatSubagentPresentation'
 import ChatSubthreadBody from './ChatSubthreadBody.vue'
 
 /**
- * The dock's detail window for a provider-native child.
+ * The dock's unified detail window for both provider-native and Hub sub-agents.
  *
- * A native child is not a Chat tab, so "open" means read: this renders the
- * exact rows the inline region shows (`ChatSubthreadBody`), and offers the
- * transcript as the place to continue (the pane keeps its inline region too).
- *
- * It is mounted by `StructuredPane` because that subtree owns the timeline and
- * image owners the body requires, while the pill that opens it lives in the
- * pane chrome; the shared `NativeSubagentDock` state connects the two.
+ * Native children render directly from the parent turn's timeline (`ChatSubthreadBody`)
+ * and offer `Show in transcript`. Hub children (`claude-hub agent run`) fetch
+ * their compacted stream events on demand, project into the same `ChatSubthreadBody`,
+ * and offer an optional `Open session` / `Restore & open` action to switch to
+ * the child Chat tab.
  */
 const dock = useNativeSubagentDock()
-const { turns, revealSubthread } = requireChatOwner(chatTimelineKey)
+const hubDock = useSubagentDock()
+const { turns, revealSubthread, ensureSubthreadDetailsLoaded } = requireChatOwner(chatTimelineKey)
 
 const row = computed(() => dock?.openRow.value ?? null)
-const lookup = computed(() => (row.value
-  ? findNativeSubthread(turns.value, row.value.turnKey, row.value.threadId)
-  : null))
+const liveHubChip = computed(() => {
+  const current = row.value
+  if (!current || current.kind !== 'hub') return null
+  return hubDock?.chips.value.find(chip => chip.subagentId === current.subagentId) ?? current
+})
+const displayName = computed(() => {
+  const current = row.value
+  if (!current) return ''
+  return current.kind === 'hub' ? subagentDisplayName(current.name) : current.name
+})
+
+const hubEvents = shallowRef<AgentStreamEvent[]>([])
+let hubFetchToken = 0
+let hubPollTimer: ReturnType<typeof setInterval> | null = null
+
+function stopHubPolling() {
+  if (hubPollTimer !== null) {
+    clearInterval(hubPollTimer)
+    hubPollTimer = null
+  }
+}
+
+async function fetchHubEvents(tabId: string, token: number) {
+  try {
+    const response = await fetch(
+      `${API_BASE}/workspaces/tabs/${encodeURIComponent(tabId)}/stream/events?since_sequence=-1&limit=2000&compact=true&persisted_only=true`,
+    )
+    if (!response.ok) return
+    const page = (await response.json()) as { events?: AgentStreamEvent[] }
+    if (token === hubFetchToken && Array.isArray(page.events)) {
+      hubEvents.value = page.events
+    }
+  } catch {
+    // Keep the summary fallback when the child stream cannot be read.
+  }
+}
+
+watch(
+  row,
+  current => {
+    stopHubPolling()
+    hubFetchToken += 1
+    hubEvents.value = []
+    if (!current) return
+    if (current.kind === 'native') {
+      ensureSubthreadDetailsLoaded?.(current.turnKey, current.threadId)
+      return
+    }
+    if (current.tabId) {
+      const token = hubFetchToken
+      const tabId = current.tabId
+      void fetchHubEvents(tabId, token)
+      if (current.state === 'running') {
+        hubPollTimer = setInterval(() => void fetchHubEvents(tabId, token), 2500)
+      }
+    }
+  },
+  { immediate: true },
+)
+
+watch(
+  () => liveHubChip.value?.state,
+  (state, previous) => {
+    const current = liveHubChip.value
+    if (!current?.tabId) return
+    if (state !== 'running') stopHubPolling()
+    if (previous && state !== previous) {
+      void fetchHubEvents(current.tabId, hubFetchToken)
+    }
+  },
+)
+
+const lookup = computed(() => {
+  const current = row.value
+  if (!current) return null
+  if (current.kind === 'hub') {
+    return liveHubChip.value ? buildHubSubagentLookup(liveHubChip.value, hubEvents.value) : null
+  }
+  return findNativeSubthread(turns.value, current.turnKey, current.threadId)
+})
 
 // Status is read from the live child, never from the row snapshot taken when
 // the window opened, so a running child finishes inside the open window.
 const liveState = computed(() => (lookup.value
   ? subthreadStatusClass(lookup.value.thread)
   : row.value?.state))
-const liveStateLabel = computed(() => (lookup.value
-  ? subthreadStatusLabel(lookup.value.thread)
-  : row.value?.stateLabel ?? ''))
+const liveStateLabel = computed(() => {
+  if (liveHubChip.value) return liveHubChip.value.stateLabel
+  return lookup.value
+    ? subthreadStatusLabel(lookup.value.thread)
+    : row.value?.stateLabel ?? ''
+})
 
 const windowRef = ref<HTMLElement | null>(null)
 const closeRef = ref<HTMLButtonElement | null>(null)
@@ -130,9 +224,16 @@ function close() {
 /** Hand the reader to the inline region: expand its turn/process and scroll. */
 function locate() {
   const target = row.value
-  if (!target) return
+  if (!target || target.kind !== 'native') return
   void revealSubthread(target.turnKey, target.threadId)
   close()
+}
+
+function openHubSession() {
+  const target = liveHubChip.value
+  if (!target) return
+  close()
+  void hubDock?.jump(target)
 }
 
 /** Whether another modal surface (the image/attachment lightbox is a real
@@ -202,6 +303,8 @@ if (typeof document?.addEventListener === 'function') {
 }
 
 onBeforeUnmount(() => {
+  stopHubPolling()
+  if (dock?.openRow.value) dock.openRow.value = null
   if (typeof document?.removeEventListener === 'function') {
     document.removeEventListener('keydown', onDocumentKey, true)
   }

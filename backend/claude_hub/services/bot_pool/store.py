@@ -79,6 +79,16 @@ def _write_float(value: Any, name: str) -> float:
         raise FeishuBotInvalidValue(str(exc)) from exc
 
 
+def _write_owner(owner: Any, name: str) -> dict[str, Any]:
+    if not isinstance(owner, OwnerIdentity):
+        raise FeishuBotInvalidValue(f"Invalid Feishu Bot pool field {name!r}")
+    try:
+        validated = _owner_from_dict(_owner_to_dict(owner), name)
+    except FeishuBotPoolStateError as exc:
+        raise FeishuBotInvalidValue(str(exc)) from exc
+    return _owner_to_dict(validated)
+
+
 class FeishuBotPoolStore(FeishuBotPoolStateStore):
 
     def _max_bots(self) -> int:
@@ -151,6 +161,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             raw["feishu_avatar_url"] = feishu_avatar_url
             raw["feishu_open_id"] = feishu_open_id
             self._touch(raw, now)
+            self._touch_transport(raw)
             self._save(state)
 
     def configure_callbacks(
@@ -196,6 +207,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             callbacks["callback_enabled"] = callback_enabled
             raw["callbacks"] = callbacks
             self._touch(raw, now)
+            self._touch_transport(raw)
             self._save(state)
 
     def update_profile(
@@ -249,7 +261,8 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             raw = self._live_entry(state, bot_id)
             self._check_revision(raw, expected_revision)
             current_mode = bot_mode(raw)
-            if mode is not None and mode != current_mode:
+            mode_changed = mode is not None and mode != current_mode
+            if mode_changed:
                 if self._active_raw_bindings(raw):
                     raise FeishuBotModeSwitchBlocked(bot_id)
                 raw["mode"] = mode
@@ -258,12 +271,15 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
                 raw["mode"] = mode
             if name is not None:
                 raw["name"] = name
-            if enabled is not None and enabled != raw.get("enabled"):
+            enabled_changed = enabled is not None and enabled != raw.get("enabled")
+            if enabled_changed:
                 raw["enabled"] = enabled
                 if not enabled:
                     # Disabling revokes outstanding pairing state for this Bot.
                     self._advance_generation(raw)
             self._touch(raw, now)
+            if mode_changed or enabled_changed:
+                self._touch_transport(raw)
             self._save(state)
 
     def delete_bot(
@@ -318,6 +334,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             if not raw.get("enabled"):
                 raise FeishuBotRevoked(bot_id)
             self._require_bot_binding_slot(raw, bot_id)
+            validated_owner = _write_owner(owner, "pending")
             validated_tab = _write_text(tab_id, "pending.tab_id", limit=_MAX_ID_CHARS)
             validated_workspace = _write_optional_text(workspace_id, "pending.workspace_id")
             self._require_tab_free(state, validated_tab)
@@ -335,7 +352,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             )
             expires_at = now + _CODE_TTL_SECONDS
             raw["pending"][_code_digest(bot_id, code)] = {
-                **_owner_to_dict(owner),
+                **validated_owner,
                 "tab_id": validated_tab,
                 "workspace_id": validated_workspace,
                 "issued_at": now,
@@ -369,6 +386,10 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             raw = self._live_entry(state, bot_id)
             if not raw.get("enabled"):
                 raise FeishuBotRevoked(bot_id)
+            validated_sender = _write_text(
+                sender_open_id, "claims.sender_open_id", limit=_MAX_ID_CHARS
+            )
+            validated_chat = _write_text(chat_id, "claims.chat_id", limit=_MAX_ID_CHARS)
             digest = _code_digest(bot_id, code)
             value = raw["pending"].pop(digest, None)
             if not isinstance(value, dict):
@@ -384,12 +405,14 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
                 raise FeishuPoolFull("claims")
             pairing_id = secrets.token_hex(16)
             word = "".join(secrets.choice(_CONFIRM_ALPHABET) for _ in range(_CONFIRM_LENGTH))
-            raw["claims"][pairing_id] = {
+            claim_record = {
                 **_owner_to_dict(_owner_from_dict(value, "pending")),
-                "tab_id": value["tab_id"],
-                "workspace_id": value.get("workspace_id"),
-                "sender_open_id": sender_open_id,
-                "chat_id": chat_id,
+                "tab_id": _as_text(value.get("tab_id"), "pending.tab_id", limit=_MAX_ID_CHARS),
+                "workspace_id": _as_optional_text(
+                    value.get("workspace_id"), "pending.workspace_id"
+                ),
+                "sender_open_id": validated_sender,
+                "chat_id": validated_chat,
                 "created_at": now,
                 "expires_at": now + _CLAIM_TTL_SECONDS,
                 "generation": raw["generation"],
@@ -398,9 +421,10 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
                 "confirm_digest": _confirm_digest(bot_id, pairing_id, word),
                 "confirm_attempts": 0,
             }
+            claim = self._claim_from_dict(bot_id, pairing_id, claim_record)
+            raw["claims"][pairing_id] = claim_record
             self._touch(raw, now)
             self._save(state)
-            claim = self._claim_from_dict(bot_id, pairing_id, raw["claims"][pairing_id])
             return claim, word
 
     @classmethod
@@ -469,6 +493,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
                 "created_at": now,
                 "generation": raw["generation"],
             }
+            binding = self._binding_from_dict(bot_id, new_binding)
             raw["bindings"] = [*self._active_raw_bindings(raw), new_binding]
             if bot_mode(raw) == BOT_MODE_SINGLE:
                 raw["claims"] = {}
@@ -477,7 +502,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
                 raw["claims"].pop(pairing_id, None)
             self._touch(raw, now)
             self._save(state)
-            return self._binding_from_dict(bot_id, new_binding)
+            return binding
 
     def release_binding(
         self,
@@ -507,6 +532,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
                 released = self._binding_from_dict(bot_id, active[0]) if active else None
                 self._advance_generation(raw)
                 self._touch(raw, now)
+                self._touch_transport(raw)
                 self._save(state)
                 return released
             matched = next(
@@ -519,9 +545,11 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             remaining = [item for item in active if item.get("pairing_id") != pairing_id]
             if remaining:
                 raw["bindings"] = remaining
+                self._touch(raw, now)
             else:
                 self._advance_generation(raw)
-            self._touch(raw, now)
+                self._touch(raw, now)
+                self._touch_transport(raw)
             self._save(state)
             return released
 
@@ -653,6 +681,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             if not raw.get("enabled"):
                 raise FeishuBotRevoked(bot_id)
             self._require_bot_binding_slot(raw, bot_id)
+            validated_owner = _write_owner(owner, "binding")
             validated_tab = _write_text(tab_id, "binding.tab_id", limit=_MAX_ID_CHARS)
             validated_workspace = _write_optional_text(workspace_id, "binding.workspace_id")
             validated_chat = _write_text(chat_id, "binding.chat_id", limit=_MAX_ID_CHARS)
@@ -670,7 +699,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             binding_id = secrets.token_hex(16)
             stamp = now if created_at is None else _write_float(created_at, "binding.created_at")
             new_binding = {
-                **_owner_to_dict(owner),
+                **validated_owner,
                 "pairing_id": binding_id,
                 "tab_id": validated_tab,
                 "workspace_id": validated_workspace,
@@ -681,13 +710,14 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
                 "created_at": stamp,
                 "generation": raw["generation"],
             }
+            binding = self._binding_from_dict(bot_id, new_binding)
             raw["bindings"] = [*self._active_raw_bindings(raw), new_binding]
             if bot_mode(raw) == BOT_MODE_SINGLE:
                 raw["claims"] = {}
                 raw["pending"] = {}
             self._touch(raw, now)
             self._save(state)
-            return self._binding_from_dict(bot_id, new_binding)
+            return binding
 
     def bind_group(
         self,
@@ -719,6 +749,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             if not raw.get("enabled"):
                 raise FeishuBotRevoked(bot_id)
             self._require_bot_binding_slot(raw, bot_id)
+            validated_owner = _write_owner(owner, "binding")
             validated_tab = _write_text(tab_id, "binding.tab_id", limit=_MAX_ID_CHARS)
             validated_workspace = _write_optional_text(workspace_id, "binding.workspace_id")
             validated_chat = _write_text(chat_id, "binding.chat_id", limit=_MAX_ID_CHARS)
@@ -736,7 +767,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             # Validate before writing: a rejected value must never reach the
             # file, or every later read of the pool would fail.
             new_binding = {
-                **_owner_to_dict(owner),
+                **validated_owner,
                 "pairing_id": binding_id,
                 "tab_id": validated_tab,
                 "workspace_id": validated_workspace,
@@ -749,13 +780,14 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
                 "created_at": now,
                 "generation": raw["generation"],
             }
+            binding = self._binding_from_dict(bot_id, new_binding)
             raw["bindings"] = [*self._active_raw_bindings(raw), new_binding]
             if bot_mode(raw) == BOT_MODE_SINGLE:
                 raw["claims"] = {}
                 raw["pending"] = {}
             self._touch(raw, now)
             self._save(state)
-            return self._binding_from_dict(bot_id, new_binding)
+            return binding
 
     def drop_binding(self, bot_id: str, pairing_id: str) -> bool:
         """Remove one specific binding without CAS.
@@ -777,8 +809,10 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             remaining = [item for item in active if item.get("pairing_id") != pairing_id]
             if remaining:
                 raw["bindings"] = remaining
+                self._touch(raw, now)
             else:
                 self._advance_generation(raw)
-            self._touch(raw, now)
+                self._touch(raw, now)
+                self._touch_transport(raw)
             self._save(state)
             return True

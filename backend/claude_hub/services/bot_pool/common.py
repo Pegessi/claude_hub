@@ -211,6 +211,24 @@ def bot_mode(value: Mapping[str, Any]) -> str:
     return raw
 
 
+def bot_transport_revision(value: Mapping[str, Any]) -> int:
+    """Read a persisted Bot's credential/callback/generation watermark.
+
+    When ``transport_revision`` is absent or ``None`` (legacy state before the
+    field existed), conservatively default to ``bot.revision`` so a pre-upgrade
+    rotation is never treated as revision 0. Any non-missing value must be a
+    valid non-negative integer in ``[0, bot.revision]``.
+    """
+
+    revision = _as_int(value.get("revision"), "bot.revision")
+    if "transport_revision" not in value or value.get("transport_revision") is None:
+        return revision
+    transport_rev = _as_int(value.get("transport_revision"), "bot.transport_revision")
+    if transport_rev > revision:
+        raise _state_error("bot.transport_revision")
+    return transport_rev
+
+
 @dataclass(frozen=True)
 class BotBinding:
     """One Bot channel bound to one Chat.
@@ -262,6 +280,7 @@ class BotEntry:
     verification_token: str | None = field(default=None, repr=False)
     encrypt_key: str | None = field(default=None, repr=False)
     expected_tenant_key: str | None = None
+    transport_revision: int = 0
 
     @property
     def binding(self) -> BotBinding | None:
@@ -300,6 +319,7 @@ class EffectiveBot:
     verification_token: str | None = field(default=None, repr=False)
     encrypt_key: str | None = field(default=None, repr=False)
     expected_tenant_key: str | None = None
+    transport_revision: int = 0
 
 
 def _state_error(name: str) -> FeishuBotPoolStateError:
@@ -363,6 +383,7 @@ def _validate_pool_numbers(bots: dict[str, Any], rate_limits: dict[str, Any]) ->
         raw = _as_mapping(raw, "bot")
         _as_int(raw.get("revision"), "bot.revision")
         _as_int(raw.get("generation"), "bot.generation")
+        bot_transport_revision(raw)
         for field in ("created_at", "updated_at", "revoked_at"):
             value = raw.get(field)
             if value is not None:

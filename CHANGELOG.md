@@ -89,6 +89,21 @@ Design notes and the deliberately-open items are in
   paste surfaces; and the mocked browser scenarios (23/23 runners passed, none
   skipped) against the real build.
 
+### feat(chat): unify Hub and native sub-agent preview window and fix switched Hub sub-agent interaction
+
+- Unify Hub sub-agent (`claude-hub agent run`) and provider-native sub-agent presentation: clicking any sub-agent row in the `Agents` dock (`ChatSubagentRow.vue`) or clicking `View` on an inline `ChatHubSubagentLink.vue` now opens the shared `ChatNativeSubagentOverlay.vue` detail window. Hub sub-agents fetch their compacted persisted stream events (`GET /api/workspaces/tabs/{tabId}/stream/events?compact=true&persisted_only=true`, polling while `running`) and project them via `buildHubSubagentLookup` (`hubSubagentThread.ts`, stripping `<claude_hub_subagent>` preambles) into `ChatSubthreadBody.vue`, with an explicit `Open session` / `Restore & open` action (`data-testid="hub-subagent-open-session"`) to switch to the child Chat session.
+- Fix auto-archived Hub sub-agents silently failing to open when `terminalStore.archivedTabs` has not been loaded yet: `toSubagentJumpChip` marks non-live `closed` sub-agents as `archived`, and `useParentSubagents.jump` falls back to `terminalStore.unarchiveTab` when a target `tabId` is absent from `terminalStore.tabs` after `fetchTabs()`.
+- Fix `SessionKind.CHAT` Codex tabs triggering terminal-rollout attribution/quarantine (`_quarantine_codex_tab`) on unarchive or cold start (`manager/tabs.py`, `startup.py`, `attribution.py`, `retirement.py`), which previously wiped `agent_session_id` and prevented resumed interaction when switching to a Codex Hub sub-agent Chat.
+- Centralize sub-agent tab detachment (`detach_subagent_tab` / `_detach_subagent_process` in `retirement.py`, startup healing in `state.py`, web-turn detachment in `dispatch.py`, and grace-window view check in `subagents.py`) so restored or user-adopted sub-agent tabs also clear display-only `workspace_id`/`workspace_name` and appear as normal top-level Chat sessions instead of vanishing from navigation lists.
+- Keep `Needs you` -> `Waiting on you` (`New reply`) scoped to manual user-created Terminal/Chat sessions (`isManualSessionTab` in `inboxModel.ts`), preventing finished `claude-hub agent run` sub-agents and Workspace `orchestrator`/`reviewer` sessions from polluting `Waiting on you` or the `Chats` (`manual`) filter.
+
+### fix(chat): surface native and MASO sub-agents on shallow conversation load and deduplicate cross-turn threads
+
+- Keep sub-agent lifecycle statuses (`active`, `completed`, `failed`, `cancelled`) and sub-agent delegation/directive tool events (`Agent`, `Task`, `Fork`, `spawnAgent`, `sendInput`, `SendMessage`) visible in `view=conversation` (`history.py`), including for pre-existing SQLite rows recorded before this change, while keeping ordinary tool calls and child streaming deltas lazy behind `history_details`.
+- Recognize MASO `Task` (single and fan-out batch), `Fork`, and `SendMessage` in `subagentTool.ts` and `reducer.ts`, binding spawned `<subagent_name>-<hex>` thread IDs to their per-task prompts and roles, preserving readable MASO thread IDs in `nativeSubagentRows.ts`, extracting child `SendMessage` reports in `subthreadHeadline`, and deduplicating/merging long-lived sub-agents across turns.
+- Project turns with real sub-agent launch/lifecycle data into the Agents dock on initial load without eagerly fetching turn execution details, and hydrate lazy turn details on demand when a sub-agent window is opened (`ensureSubthreadDetailsLoaded`).
+- Validation: `env -u FORCE_COLOR ./scripts/verify.sh all` (6,276 backend tests + 1,294 frontend tests; also replaced bare `asyncio.sleep(0)` in `test_cleanup_background_lifetime.py::wait_until` with `asyncio.sleep(0.002)` so coverage-traced `asyncio.to_thread` shutdown writes do not starve on the GIL) and `browser-mocks` (19/19 scenarios, including `browser_native_subagent_dock.py`).
+
 ### feat(chat): list provider-native sub-agents in the Agents dock and read one in a window
 
 - The pane-chrome Agents pill now lists provider-native children (Claude
@@ -180,10 +195,17 @@ Design notes and the deliberately-open items are in
   `Current channels N / 8` list in the binding panel where each channel has its
   own release action (a bulk disconnect would drop all of them), and a group bind
   that states it creates a new Chat (explaining the cap when it is reached).
-- Hardening from the review: nothing unvalidated can reach the pool file (an
-  over-long group name is truncated and a rejected write is a 400, not a
-  "damaged pool" 503), tab creation is bounded and rolled back on failure, and
-  `per_channel` keeps the legacy group→private fallback out of its routing.
+- Hardening from the review: the binding/claim writers validate every persisted
+  field before the write lands (an over-long group name is truncated and a
+  rejected write is a 400, not a "damaged pool" 503); tab creation is bounded and
+  rolled back on failure; `per_channel` keeps the legacy group→private fallback
+  out of its routing; and the pool is the SQLite document store, not a JSON file.
+- Concurrency model after the fix rounds: `revision` is **administrative CAS only**
+  (concurrent edits still conflict), while delivery/batching/interruption/carryover
+  are fenced by channel identity plus the authority watermark (`generation` for
+  control-plane, `transport_revision` for credentials and callbacks), so a
+  sibling channel's write cannot suppress another channel's answer and a
+  credential epoch — even an A→B→A round-trip — cannot deliver an old answer.
 
 ### polish(ui): the needs-you panel does not repeat its own name, and the code palette is legible in both themes
 

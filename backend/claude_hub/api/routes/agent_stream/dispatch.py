@@ -219,6 +219,10 @@ async def dispatch_tab_stream_input(
 
     async with nullcontext() if goal_locked else get_goal_admission_lock(tab_id):
         require_tab_input_available(tab_id)
+        if turn_metadata and turn_metadata.get("origin") == "web":
+            from claude_hub.services.ttyd_manager import ttyd_manager
+
+            ttyd_manager.detach_subagent_tab(tab_id)
         goal_manager = get_goal_manager()
         goal = await goal_manager.refresh_current(tab_id)
         session = bindings.terminal_tab_session_or_404(tab_id)

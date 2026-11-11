@@ -10,10 +10,13 @@ from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from fastapi import HTTPException
 
 from claude_hub.api import agent_stream as stream_api
 from claude_hub.api import feishu_bot as bot_api
+from claude_hub.api.agent_stream import ExternalDispatchRetired
 from claude_hub.api.routes.agent_stream import messages as messages_api
+from claude_hub.api.routes.feishu_bot.message_dispatch import FeishuMessageTimeRejected
 from claude_hub.api.routes.feishu_bot.queueing import TabDispatchItem, TabDispatchQueue
 from claude_hub.services import dot
 from claude_hub.services.agent_stream.turn_source import (
@@ -24,7 +27,12 @@ from claude_hub.services.agent_stream.turn_source import (
     is_feishu_provider_text,
     provider_text_for_stored_turn,
 )
-from claude_hub.services.feishu_bot import FeishuBotClient, FeishuBotConfig, FeishuMessageEvent
+from claude_hub.services.feishu_bot import (
+    FeishuBotClient,
+    FeishuBotConfig,
+    FeishuMessageEvent,
+    FeishuMessageTimeStatus,
+)
 from claude_hub.services.feishu_bot_pool import BotBinding, EffectiveBot, OwnerIdentity, turn_id_for
 
 
@@ -195,7 +203,8 @@ async def test_same_sender_same_channel_coalesces_and_replies_once(dispatch):
 
 
 @pytest.mark.parametrize(
-    "boundary", ["room", "pairing", "type", "topic", "bot", "generation", "revision"]
+    "boundary",
+    ["room", "pairing", "type", "topic", "bot", "generation", "transport_revision"],
 )
 async def test_channel_and_version_boundaries_neither_coalesce_nor_interrupt(dispatch, boundary):
     binding = dispatch.binding
@@ -215,7 +224,7 @@ async def test_channel_and_version_boundaries_neither_coalesce_nor_interrupt(dis
     elif boundary == "generation":
         effective = replace(effective, generation=3)
     else:
-        effective = replace(effective, revision=4)
+        effective = replace(effective, transport_revision=4)
     dispatch.blocked.add("first")
     first = dispatch.reserve("first")
     queue = bot_api._tab_dispatch_queues["tab"]
@@ -374,6 +383,164 @@ async def test_two_channels_can_each_retain_stopped_text(dispatch):
     assert "[上一条]\nb1" in dispatch.submitted[3]["visible"]
     assert "a1" not in dispatch.submitted[3]["visible"]
     assert not queue.interrupted_text
+
+
+@pytest.mark.parametrize(
+    "failure,expected_status",
+    [
+        ("admission_retired", "retired"),
+        ("time_rejected", "pre_dispatch_rejected"),
+        ("http_rejected", "failed"),
+        ("cancelled_before_handoff", "retired"),
+    ],
+)
+async def test_carryover_survives_unsubmitted_batch_and_reaches_later_arrival(
+    dispatch: DispatchHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    expected_status: str,
+) -> None:
+    """When A2 fails or retires before native handoff with no A3 queued yet,
+    the stopped words from A1 must survive both the failed admission and the
+    idle queue cleanup so an A3 arriving later still answers A1 + A3."""
+
+    dispatch.blocked.add("a1")
+    first = dispatch.reserve("a1")
+    queue = bot_api._tab_dispatch_queues["tab"]
+    running_a1 = asyncio.create_task(dispatch.run(first, queue))
+    await dispatch.wait_started("a1")
+    second = dispatch.reserve("a2")
+    assert await running_a1 == "superseded"
+    assert dict(queue.interrupted_text) == {first.channel_key: "a1"}
+
+    if failure == "cancelled_before_handoff":
+        monkeypatch.setattr(
+            bot_api._message_dispatcher.bindings,
+            "event_attachments",
+            AsyncMock(side_effect=asyncio.CancelledError()),
+        )
+    else:
+
+        def fail_admission(*_args: Any) -> None:
+            if failure == "admission_retired":
+                raise ExternalDispatchRetired(turn_id_for("bot", "a2"))
+            if failure == "time_rejected":
+                raise FeishuMessageTimeRejected(FeishuMessageTimeStatus.MESSAGE_BEFORE_BINDING)
+            raise HTTPException(
+                status_code=409,
+                detail="busy",
+                headers={"X-Claude-Hub-Error-Reason": "chat_busy"},
+            )
+
+        monkeypatch.setattr(
+            bot_api._message_dispatcher, "_validate_binding_dispatch", fail_admission
+        )
+
+    assert await dispatch.run(second, queue) == expected_status
+    # Only a1 was ever submitted to the native bridge; a2 never reached it.
+    assert [call["metadata"]["feishu_message_ids"] for call in dispatch.submitted] == [["a1"]]
+    assert queue.pending == []
+    assert queue.active == []
+    assert dict(queue.interrupted_text) == {first.channel_key: "a1"}
+    assert bot_api._tab_dispatch_queues.get("tab") is queue
+
+    # Restore normal admission; A3 arrives AFTER A2 has already retired/failed.
+    monkeypatch.setattr(
+        bot_api._message_dispatcher, "_validate_binding_dispatch", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        bot_api._message_dispatcher.bindings,
+        "event_attachments",
+        AsyncMock(return_value=([], 0, [])),
+    )
+    third = dispatch.reserve("a3")
+    assert await dispatch.run(third, queue) == "completed"
+    assert [call["metadata"]["feishu_message_ids"] for call in dispatch.submitted] == [
+        ["a1"],
+        ["a3"],
+    ]
+    assert "[上一条]\na1" in dispatch.submitted[1]["visible"]
+    assert "[新消息 1]\na3" in dispatch.submitted[1]["visible"]
+    assert not queue.interrupted_text
+    assert bot_api._tab_dispatch_queues == {}
+
+
+async def test_cancelled_leader_empty_batch_retires_cleanly_and_preserves_carryover(
+    dispatch: DispatchHarness,
+) -> None:
+    """When a batch leader is cancelled before collection so _collect_tab_dispatch_batch
+    returns no candidates, _dispatch_tab_batch must return 'retired' without
+    UnboundLocalError and leave any existing carryover intact."""
+
+    dispatch.blocked.add("a1")
+    first = dispatch.reserve("a1")
+    queue = bot_api._tab_dispatch_queues["tab"]
+    running_a1 = asyncio.create_task(dispatch.run(first, queue))
+    await dispatch.wait_started("a1")
+    second = dispatch.reserve("a2")
+    assert await running_a1 == "superseded"
+    assert dict(queue.interrupted_text) == {first.channel_key: "a1"}
+
+    # Cancel the promoted leader before _collect_tab_dispatch_batch claims it.
+    second.cancelled = True
+    queue.changed.set()
+    assert await dispatch.run(second, queue) == "retired"
+    assert [call["metadata"]["feishu_message_ids"] for call in dispatch.submitted] == [["a1"]]
+    assert dict(queue.interrupted_text) == {first.channel_key: "a1"}
+    assert bot_api._tab_dispatch_queues.get("tab") is queue
+
+    third = dispatch.reserve("a3")
+    assert await dispatch.run(third, queue) == "completed"
+    assert "[上一条]\na1" in dispatch.submitted[1]["visible"]
+    assert "[新消息 1]\na3" in dispatch.submitted[1]["visible"]
+    assert not queue.interrupted_text
+    assert bot_api._tab_dispatch_queues == {}
+
+
+async def test_sibling_rename_or_revision_bump_preserves_interruption_and_carryover(
+    dispatch: DispatchHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Administrative CAS revision bumps (Bot rename, sibling channel bind/release)
+    between two messages of the same channel must not change channel_key: A2 still
+    interrupts A1, and if A2 retires before handoff, A3 at yet another revision
+    still inherits A1's stopped carryover text."""
+
+    dispatch.blocked.add("a1")
+    first = dispatch.reserve("a1", effective=replace(dispatch.effective, revision=3))
+    queue = bot_api._tab_dispatch_queues["tab"]
+    running_a1 = asyncio.create_task(dispatch.run(first, queue))
+    await dispatch.wait_started("a1")
+
+    # Sibling rename / bind advances revision from 3 -> 4 before A2 arrives.
+    second = dispatch.reserve("a2", effective=replace(dispatch.effective, revision=4))
+    assert second.channel_key == first.channel_key
+    assert first.superseded
+    assert await running_a1 == "superseded"
+    assert dict(queue.interrupted_text) == {first.channel_key: "a1"}
+
+    # Make A2 retire before handoff, then advance revision again (4 -> 5) before A3.
+    monkeypatch.setattr(
+        bot_api._message_dispatcher,
+        "_validate_binding_dispatch",
+        lambda *_args: (_ for _ in ()).throw(ExternalDispatchRetired(turn_id_for("bot", "a2"))),
+    )
+    assert await dispatch.run(second, queue) == "retired"
+    assert dict(queue.interrupted_text) == {first.channel_key: "a1"}
+
+    monkeypatch.setattr(
+        bot_api._message_dispatcher, "_validate_binding_dispatch", lambda *_args: None
+    )
+    third = dispatch.reserve("a3", effective=replace(dispatch.effective, revision=5))
+    fourth = dispatch.reserve("a4", effective=replace(dispatch.effective, revision=6))
+    assert third.channel_key == first.channel_key == fourth.channel_key
+    assert await dispatch.run(third, queue) == "completed"
+    assert fourth.outcome.result() == "completed"
+    assert "[上一条]\na1" in dispatch.submitted[1]["visible"]
+    assert "[新消息 1]\na3" in dispatch.submitted[1]["visible"]
+    assert "[新消息 2]\na4" in dispatch.submitted[1]["visible"]
+    assert not queue.interrupted_text
+    assert bot_api._tab_dispatch_queues == {}
 
 
 @pytest.mark.parametrize("running", [False, True], ids=["coalescing", "active"])

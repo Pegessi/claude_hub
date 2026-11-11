@@ -137,6 +137,8 @@ def terminal_tab_stream_session(
         agent_type=tab.agent_type,
         session_kind=tab.session_kind,
         chat_mode=getattr(tab, "chat_mode", ChatMode.DEFAULT),
+        archived=bool(getattr(tab, "archived", False)),
+        archived_at=getattr(tab, "archived_at", None),
         status=ManagedSessionStatus.IDLE,
         runtime_status=AgentRuntimeStatus.IDLE,
         title=tab.name,

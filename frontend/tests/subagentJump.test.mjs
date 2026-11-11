@@ -106,6 +106,19 @@ test('finished child missing from the live tab list is treated as closed', () =>
   })
   assert.equal(chip.state, 'closed')
   assert.equal(chip.archived, true)
+  assert.equal(chip.canOpen, true)
+})
+
+test('auto-archived child is marked archived even before archivedTabs is loaded', () => {
+  const chip = toSubagentJumpChip(summary({ closed: true, last_status: 'completed' }), {
+    liveTabIds: new Set(),
+    archivedTabIds: new Set(),
+    statusByTabId: {},
+  })
+  assert.equal(chip.state, 'closed')
+  assert.equal(chip.archived, true)
+  assert.equal(chip.canJump, true)
+  assert.equal(chip.canOpen, true)
 })
 
 test('running record stays running even before its tab reaches the store', () => {

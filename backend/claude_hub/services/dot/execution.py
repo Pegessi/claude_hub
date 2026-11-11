@@ -53,9 +53,13 @@ def execution_pending_for(service: DotSessionService, tab_id: str) -> bool:
 def _check_switchable(service: DotSessionService, tab_id: str) -> None:
     # Pairing generations and queued Feishu deliveries belong to the binding owner.
     # This operation never rewrites them as a side effect of changing provider.
-    from claude_hub.api.feishu_bot import _pool
+    from claude_hub.api.feishu_bot import _entry_bindings, _pool
 
-    if any(bot.binding and bot.binding.tab_id == tab_id for bot in _pool.snapshot().bots):
+    if any(
+        binding.tab_id == tab_id
+        for bot in _pool.snapshot().bots
+        for binding in _entry_bindings(bot)
+    ):
         raise DotExecutionConflict(
             "Unbind the Feishu Bot before switching Dot's backend, then bind it to the new Dot chat."
         )

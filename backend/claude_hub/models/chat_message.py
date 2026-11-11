@@ -90,6 +90,8 @@ class QuestionMirror(BaseModel):
     revision: int
     chat_id: str
     sender_open_id: str
+    tab_id: str = ""
+    transport_digest: str = ""
     send_uuid: str
     message_id: str | None = None
     state: Literal["queued", "sending", "sent", "uncertain", "disabled"] = "queued"

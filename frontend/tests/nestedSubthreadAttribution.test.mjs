@@ -542,3 +542,58 @@ test('empty or unsupported child events do not mount a phantom region', () => {
   assert.equal(childThreads(turn).length, 0)
   assert.equal(turn.parts.some((part) => part.kind === 'subagents'), false)
 })
+
+test('MASO Task fan-out, Fork, and SendMessage directives bind to their child threads', () => {
+  seq = 0
+  const [turn] = groupEventsIntoTurns([
+    ev('turn_started', { summary: 'MASO delegation' }, { message_id: `${TURN}:user`, agent_type: 'maso' }),
+    ev('tool_call_started', {
+      tool_call_id: 'maso-task-1',
+      name: 'Task',
+      args: {
+        description: 'Research and audit',
+        tasks: [
+          { subagent_type: 'GeneralPurpose', subagent_name: 'maso_feishu_research', prompt: 'Inspect MASO' },
+          { subagent_type: 'Explorer', subagent_name: 'hub_feishu_audit', prompt: 'Audit Hub' },
+        ],
+      },
+    }, { call_id: 'maso-task-1', agent_type: 'maso' }),
+    sub('status', 'maso_feishu_research-d313', {
+      text: 'MASO sub-agent active',
+      provider_status: 'subagent_lifecycle',
+      subagent_status: 'active',
+    }, { agent_type: 'maso' }),
+    ev('tool_call_completed', {
+      tool_call_id: 'maso-task-1',
+      name: 'Task',
+      status: 'completed',
+      result: 'Spawned 2/2 sub-agent(s) with IDs: maso_feishu_research-d313, hub_feishu_audit-5823',
+    }, { call_id: 'maso-task-1', agent_type: 'maso' }),
+    ev('tool_call_started', {
+      tool_call_id: 'maso-send-1',
+      name: 'SendMessage',
+      args: { agent_id: 'hub_feishu_audit-5823', message: 'Focus on group bindings.' },
+    }, { call_id: 'maso-send-1', agent_type: 'maso' }),
+    sub('status', 'maso_feishu_research-d313', {
+      text: 'MASO sub-agent completed',
+      provider_status: 'subagent_lifecycle',
+      subagent_status: 'completed',
+    }, { agent_type: 'maso' }),
+    sub('status', 'hub_feishu_audit-5823', {
+      text: 'MASO sub-agent completed',
+      provider_status: 'subagent_lifecycle',
+      subagent_status: 'completed',
+    }, { agent_type: 'maso' }),
+    ev('turn_completed', { status: 'completed' }, { message_id: TURN, agent_type: 'maso' }),
+  ])
+  const children = childThreads(turn)
+  assert.deepEqual(
+    children.map(c => c.threadId),
+    ['maso_feishu_research-d313', 'hub_feishu_audit-5823'],
+  )
+  assert.equal(children[0].launchTool?.subagent?.prompt, 'Inspect MASO')
+  assert.equal(children[1].launchTool?.subagent?.prompt, 'Audit Hub')
+  assert.equal(children[1].parts.some(p => p.kind === 'instruction'), true)
+  // Detached from generic main-thread tool_group.
+  assert.equal(turn.parts.some(p => p.kind === 'tool_group'), false)
+})

@@ -88,15 +88,18 @@ test('wide panes rest the list in the right gutter; narrow panes fold it', () =>
   assert.match(dockPill, /\.subagent-dock \{\s+position: relative;\s+display: flex;/)
 })
 
-test('list shows Active first and a collapsible Earlier with restore wording', () => {
+test('list shows Active first and a collapsible Earlier with unified View action', () => {
+  const overlay = readSrc('features/chat/components/ChatNativeSubagentOverlay.vue')
   assert.ok(list.indexOf('Active') < list.indexOf('Earlier'))
   assert.match(list, /:aria-expanded="earlierOpen"/)
   assert.match(list, /chip\.group === 'active'/)
-  assert.match(rows, /Restore & open/)
+  assert.match(rows, /if \(props\.chip\.canOpen\) return 'View'/)
+  assert.match(overlay, /Restore & open/)
+  assert.match(overlay, /Open session/)
   assert.match(rows, /:data-state="chip\.state"/)
   assert.match(rows, /\{\{ chip\.summary \}\}/)
-  // A row is inert only when neither action exists: Hub children jump to their
-  // tab, native children open the pane's detail window.
+  // A row is inert only when neither action exists: both Hub and native
+  // children open the pane's unified detail window.
   assert.match(rows, /:disabled="!chip\.canJump && !chip\.canOpen"/)
 })
 
