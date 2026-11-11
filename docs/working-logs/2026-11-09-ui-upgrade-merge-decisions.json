@@ -1,0 +1,256 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "1dc2c1e709a71eba0415d8e3fabf97eb4327d4bc",
+  "parents": [
+    "c37e3b32c9d5b46c92145389b60c4126121e83c2",
+    "ecf82df43e54bd5fd72e03c65fc946352b0dc858"
+  ],
+  "base": "2192a50314ff616edaa3ee336592651ffac27cef",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "8aa761e9dafab1cd5989d793b8ed530d89da7aec",
+  "reconstructed_tree": "3533c3594078f01ae40f0dd7a7e00ace3684017d",
+  "conflicts": [
+    "CHANGELOG.md",
+    "backend/claude_hub/services/managed_chat.py",
+    "backend/tests/test_managed_chat_runtime.py",
+    "frontend/src/features/chat/StructuredPane.vue",
+    "scripts/verify_browser_mocks.py"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "650e574bce87650f1f1b6a2d993db008aa69db75"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "6175d1874397c581649eade8a51e30b6e6bbc2a1"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "355f96e9fcc0e775070e2a3028dd5dd141d7098e"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "4106808eeb2a8d8138afa0b7891da85a8d5dba3e"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "07472bfef6b1eee7a91f2e256f8179c3c6c7883a"
+      },
+      "reason": "Both parents appended a Released entry; git could not order them.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/services/agent_stream/store.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "5534650199944bf46190b3b586f56cd2ba2dfe99"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3a90cd52771a41f205bb479f3f12a5f95480106b"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "f1e032587394f3eb1d3d1735780857b59e28d620"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "1a1fae962fd452c5561da2a7732096bf24ee8ac0"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3a8682253b72af898b068945be9cdc15ddda2a5e"
+      },
+      "reason": "Automatic merge took main's import block, which no longer imports json, while this branch's legacy-JSONL reader still calls json.loads.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/services/managed_chat.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2061326cd4d7b57327dbc287eee3e471c21b7eec"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "1de23a0e12d07f4869b7dc05c9baa3fbd4215a6f"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c5540627526624c96fdac526f88266502df9682b"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d97f8f2b9f865ccb211a37c75ea35b579a9e71cc"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c9ddf125b9ae613efec2f67f9391d566bede5d67"
+      },
+      "reason": "Both parents added imports at the same offsets.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/tests/test_managed_chat_runtime.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "6a7dad2589a2d1313422b6988fc48309d4301c6e"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "4ae05472e7734cd62ac622ff848c13713b7a906f"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "acec6c3a8514418a97d4cbb225e586e996f90261"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3a575cb95e223e28f6b804472a59f4f794e38fb5"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "4718554e214f2a50fad02c9a8f684bf14cb48a04"
+      },
+      "reason": "Both parents appended a test at the end of the file.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/src/features/chat/StructuredPane.vue",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "811b5bf466fd403a0144f29955ea4356f4f2b74e"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "6fc88f756562e41dcf749da24f03d1531d659504"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "784158415017c50a9b039b302bd9b21075bfb8d1"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3c9b5905b934f6970b2cb284ccd39f8481303ab6"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "69ee5c5be4e4f45c3cb297f2ba7da42d5364b1d7"
+      },
+      "reason": "Both parents added imports after the review controller and a block after the provides.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/tests/browser_agent_inbox.py",
+      "base": null,
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "90a1931dab8bcc3d39dc1afd656252d4922a517b"
+      },
+      "parent2": null,
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "90a1931dab8bcc3d39dc1afd656252d4922a517b"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8cfb38e2c65f2462d1acca059ff0dbf19c86000a"
+      },
+      "reason": "The file this branch added needs the repository formatter differently from how git reconstructed it.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/tests/browser_work_log.py",
+      "base": null,
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "4877412e3059cbf8fe7b989f67c29e7dc7d1ca03"
+      },
+      "parent2": null,
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "4877412e3059cbf8fe7b989f67c29e7dc7d1ca03"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "76d13ec29f45de6b93d65794d2aa57655aa7f929"
+      },
+      "reason": "The file this branch added needs the repository formatter differently from how git reconstructed it.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "scripts/verify_browser_mocks.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "bacabf6c0a9a97a31dbc95ed95325412308452d1"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "89a25fa51dec67474617732114ddc175e2d92fa9"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "24798b0584e20e11b2869b1264a5d1380b53b0e8"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b31e7741ae78e64972a04fea3e2622f25c7ca4f5"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c7591d6a36c958808495c9859a8affdbcafbc485"
+      },
+      "reason": "Both parents registered a new browser scenario at the same spot in the runner list.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

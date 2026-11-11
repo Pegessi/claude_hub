@@ -26,9 +26,15 @@ from typing import Any, Mapping
 from claude_hub.services.feishu_bot import FeishuBotConfig
 from claude_hub.services.runtime_isolation import resolve_runtime_home
 
-_STATE_VERSION = 3
-_PREVIOUS_STATE_VERSION = 2
+_STATE_VERSION = 4
+_PREVIOUS_STATE_VERSION = 3
+_V2_STATE_VERSION = 2
 _LEGACY_STATE_VERSION = 1
+
+BOT_MODE_SINGLE = "single"
+BOT_MODE_PER_CHANNEL = "per_channel"
+BOT_MODES = (BOT_MODE_SINGLE, BOT_MODE_PER_CHANNEL)
+MAX_CHANNELS_PER_BOT = 8
 
 ENV_BOT_ID = "env"
 LEGACY_BOT_ID = "legacy"
@@ -82,6 +88,10 @@ class FeishuBotPoolStateError(FeishuBotPoolError):
     """Raised when the persisted pool record cannot be read or trusted."""
 
 
+class FeishuBotInvalidValue(FeishuBotPoolStateError):
+    """Raised when a caller-supplied write value fails validation before saving."""
+
+
 class FeishuBotNotFound(FeishuBotPoolError):
     """Raised when no live or tombstoned entry exists for a bot_id."""
 
@@ -112,6 +122,10 @@ class FeishuBotAppIdImmutable(FeishuBotPoolError):
 
 class FeishuBotOccupied(FeishuBotPoolError):
     """Raised when the Bot already has an active binding."""
+
+
+class FeishuBotModeSwitchBlocked(FeishuBotOccupied):
+    """Raised when switching a Bot's serving mode while it has active bindings."""
 
 
 class FeishuChatOccupied(FeishuBotPoolError):
@@ -186,6 +200,35 @@ def binding_chat_type(value: Any) -> str:
     return raw
 
 
+def bot_mode(value: Mapping[str, Any]) -> str:
+    """Read a persisted Bot's serving mode, defaulting legacy entries to single."""
+
+    raw = value.get("mode")
+    if raw is None:
+        return BOT_MODE_SINGLE
+    if not isinstance(raw, str) or raw not in BOT_MODES:
+        raise _state_error("bot.mode")
+    return raw
+
+
+def bot_transport_revision(value: Mapping[str, Any]) -> int:
+    """Read a persisted Bot's credential/callback/generation watermark.
+
+    When ``transport_revision`` is absent or ``None`` (legacy state before the
+    field existed), conservatively default to ``bot.revision`` so a pre-upgrade
+    rotation is never treated as revision 0. Any non-missing value must be a
+    valid non-negative integer in ``[0, bot.revision]``.
+    """
+
+    revision = _as_int(value.get("revision"), "bot.revision")
+    if "transport_revision" not in value or value.get("transport_revision") is None:
+        return revision
+    transport_rev = _as_int(value.get("transport_revision"), "bot.transport_revision")
+    if transport_rev > revision:
+        raise _state_error("bot.transport_revision")
+    return transport_rev
+
+
 @dataclass(frozen=True)
 class BotBinding:
     """One Bot channel bound to one Chat.
@@ -231,11 +274,20 @@ class BotEntry:
     updated_at: float | None
     config: FeishuBotConfig | None
     claims: tuple[PairingClaim, ...]
-    binding: BotBinding | None
+    bindings: tuple[BotBinding, ...] = ()
+    mode: str = BOT_MODE_SINGLE
     callback_enabled: bool = False
     verification_token: str | None = field(default=None, repr=False)
     encrypt_key: str | None = field(default=None, repr=False)
     expected_tenant_key: str | None = None
+    transport_revision: int = 0
+
+    @property
+    def binding(self) -> BotBinding | None:
+        """First binding in ``bindings`` (ordered by ``binding.created_at``, which
+        for auto-provisioned DM channels may be backdated to the triggering
+        message timestamp so ``feishu_message_time_status`` admits that message)."""
+        return self.bindings[0] if self.bindings else None
 
 
 @dataclass(frozen=True)
@@ -267,6 +319,7 @@ class EffectiveBot:
     verification_token: str | None = field(default=None, repr=False)
     encrypt_key: str | None = field(default=None, repr=False)
     expected_tenant_key: str | None = None
+    transport_revision: int = 0
 
 
 def _state_error(name: str) -> FeishuBotPoolStateError:
@@ -330,6 +383,7 @@ def _validate_pool_numbers(bots: dict[str, Any], rate_limits: dict[str, Any]) ->
         raw = _as_mapping(raw, "bot")
         _as_int(raw.get("revision"), "bot.revision")
         _as_int(raw.get("generation"), "bot.generation")
+        bot_transport_revision(raw)
         for field in ("created_at", "updated_at", "revoked_at"):
             value = raw.get(field)
             if value is not None:
@@ -346,11 +400,21 @@ def _validate_pool_numbers(bots: dict[str, Any], rate_limits: dict[str, Any]) ->
                 _as_int(value.get("generation"), f"{collection}.generation")
                 if collection == "claims":
                     _as_int(value.get("confirm_attempts", 0), "claims.confirm_attempts")
-        binding = raw.get("binding")
-        if binding is not None:
-            binding = _as_mapping(binding, "binding")
-            _as_float(binding.get("created_at"), "binding.created_at")
-            _as_int(binding.get("generation"), "binding.generation")
+        if "mode" in raw and raw.get("mode") is not None:
+            bot_mode(raw)
+        bindings = raw.get("bindings")
+        if bindings is not None:
+            if not isinstance(bindings, list):
+                raise _state_error("bot.bindings")
+            for item in bindings:
+                mapped_binding = _as_mapping(item, "binding")
+                _as_float(mapped_binding.get("created_at"), "binding.created_at")
+                _as_int(mapped_binding.get("generation"), "binding.generation")
+        legacy_binding = raw.get("binding")
+        if legacy_binding is not None:
+            mapped_legacy = _as_mapping(legacy_binding, "binding")
+            _as_float(mapped_legacy.get("created_at"), "binding.created_at")
+            _as_int(mapped_legacy.get("generation"), "binding.generation")
 
 
 def _owner_from_dict(value: dict[str, Any], name: str) -> OwnerIdentity:

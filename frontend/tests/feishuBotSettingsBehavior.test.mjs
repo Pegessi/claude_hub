@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { bot, deferred, flush, harness, mountSettings, pool, response } from './feishuBotUiTestHarness.mjs'
+import { activeBinding, bot, deferred, flush, harness, mountSettings, pool, response } from './feishuBotUiTestHarness.mjs'
 
 const emptyCreate = { name: '', app_id: '', app_secret: '' }
 const input = { name: 'Created', app_id: 'app-c', app_secret: 'create-secret' }
@@ -105,4 +105,90 @@ test('bot_operation_busy keeps the entered credentials and does not re-read the 
   assert.equal(state.busy, false)
   assert.equal(reads(h), beforeReads)
   assert.match(state.error, /progress|wait/i)
+})
+
+test('selecting per_channel mode on an unbound Bot submits mode in PATCH and updates the Bot', async t => {
+  const h = harness(t)
+  const updated = pool(2, [bot('a', { mode: 'per_channel', revision: 2 }), bot('b')], 'a')
+  h.setTransport(async (_url, init) => init.method === 'PATCH'
+    ? response(updated) : response(h.server()))
+  const state = await mountSettings(t, h)
+  state.select(h.store.botById('a'))
+  assert.equal(state.editMode, 'single')
+  assert.equal(state.modeSwitchDisabled, false)
+  assert.equal(state.modeSwitchDisabledReason, null)
+  state.selectMode('per_channel')
+  assert.equal(state.editMode, 'per_channel')
+  assert.equal(await state.saveMetadata(), true)
+  const patch = h.calls.find(call => call.init.method === 'PATCH')
+  assert.deepEqual(JSON.parse(patch.init.body), {
+    name: 'Bot a',
+    enabled: true,
+    mode: 'per_channel',
+    expected_revision: 1,
+  })
+  assert.equal(h.store.botById('a').mode, 'per_channel')
+  assert.equal(state.editMode, 'per_channel')
+  assert.equal(state.success, 'Bot details saved.')
+})
+
+test('mode switching is disabled and explained when the Bot has active channels, and a 409 conflict reconciles with an explanation', async t => {
+  const h = harness(t)
+  const boundBot = bot('b', {
+    mode: 'single',
+    bindings: [activeBinding('tab-active', { bot_id: 'b', app_id: 'app-b' })],
+  })
+  const initial = pool(1, [bot('a'), boundBot])
+  h.store.applyPool(initial)
+  h.setServer(initial)
+  const state = await mountSettings(t, h)
+
+  state.select(h.store.botById('b'))
+  assert.equal(state.modeSwitchDisabled, true)
+  assert.match(state.modeSwitchDisabledReason, /no active channels|Disconnect/i)
+  state.selectMode('per_channel')
+  assert.equal(state.editMode, 'single', 'disabled mode control cannot switch mode')
+
+  // Now select unbound Bot a, switch mode locally, and simulate a 409 because a
+  // channel became active on the server before Save was processed.
+  state.select(h.store.botById('a'))
+  state.selectMode('per_channel')
+  const occupiedServer = pool(2, [
+    bot('a', { mode: 'single', revision: 2, bindings: [activeBinding('tab-1')] }),
+    boundBot,
+  ])
+  h.setServer(occupiedServer)
+  h.setTransport(async (_url, init) => init.method === 'PATCH'
+    ? response({ detail: 'bot_has_active_bindings' }, 409)
+    : response(h.server()))
+  assert.equal(await state.saveMetadata(), false)
+  assert.match(state.error, /active.*channel|Disconnect.*before switching/i)
+  assert.equal(state.editMode, 'single')
+  assert.equal(state.selectedRevision, 2)
+  assert.equal(state.modeSwitchDisabled, true)
+})
+
+test('renaming or toggling enabled on a Bot with active channels omits mode from PATCH', async t => {
+  const h = harness(t)
+  const active = activeBinding('tab-1')
+  const initial = pool(1, [bot('a', { mode: 'per_channel', bindings: [active] }), bot('b')])
+  const updated = pool(2, [bot('a', { name: 'Renamed Bot', mode: 'per_channel', revision: 2, bindings: [active] }), bot('b')], 'a')
+  h.store.applyPool(initial)
+  h.setServer(initial)
+  h.setTransport(async (_url, init) => init.method === 'PATCH'
+    ? response(updated) : response(h.server()))
+  const state = await mountSettings(t, h)
+  state.select(h.store.botById('a'))
+  assert.equal(state.modeSwitchDisabled, true)
+  state.editName = 'Renamed Bot'
+  assert.equal(await state.saveMetadata(), true)
+  const patch = h.calls.find(call => call.init.method === 'PATCH')
+  const payload = JSON.parse(patch.init.body)
+  assert.deepEqual(payload, {
+    name: 'Renamed Bot',
+    enabled: true,
+    expected_revision: 1,
+  })
+  assert.equal('mode' in payload, false)
+  assert.equal(state.success, 'Bot details saved.')
 })

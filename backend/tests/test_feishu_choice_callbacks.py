@@ -25,6 +25,7 @@ from claude_hub.models.chat_message import ChatQuestion, QuestionMirror, utc_now
 from claude_hub.services.chat_message_inbox import ChatMessageInbox, InboxEvidence, InboxTarget
 from claude_hub.services.feishu_bot import FeishuBotConfig, FeishuMessageEvent
 from claude_hub.services.feishu_bot_pool import FeishuBotPoolStore, OwnerIdentity
+from claude_hub.services.local_storage import read_document
 
 TOKEN = "test-verification-token"
 KEY = "test-encrypt-key"
@@ -201,14 +202,14 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
 
 @pytest.mark.asyncio
 async def test_encrypted_url_challenge_under_one_second_never_claims(harness: Harness) -> None:
-    before = harness.inbox.path.read_bytes()
+    before = json.dumps(read_document(harness.inbox.path), sort_keys=True)
     start = time.perf_counter()
     response = await harness.post(
         {"type": "url_verification", "challenge": "challenge-test", "token": TOKEN}
     )
     assert time.perf_counter() - start < 1
     assert response.status_code == 200 and response.json() == {"challenge": "challenge-test"}
-    assert harness.inbox.path.read_bytes() == before
+    assert json.dumps(read_document(harness.inbox.path), sort_keys=True) == before
     assert not harness.inbox.messages and not harness.inbox.callback_receipts
 
 
@@ -231,7 +232,7 @@ async def test_https_click_is_durable_before_three_second_receipt_and_slow_provi
     assert response.status_code == 200
     question = harness.question
     assert question.state == "claimed" and question.answer_id
-    on_disk = json.loads(harness.inbox.path.read_text())
+    on_disk = read_document(harness.inbox.path)
     assert on_disk["questions"][0]["answer_id"] == question.answer_id
     assert on_disk["messages"][0]["kind"] == "question_answer"
     task = asyncio.create_task(harness.inbox.pump_answer(question.answer_id))
@@ -622,7 +623,7 @@ async def test_mirror_send_stores_only_digests_and_terminal_patch_has_no_actions
     controls = [e for e in sent[0][2]["body"]["elements"] if e["tag"] == "button"]
     tokens = [e["behaviors"][0]["value"]["hub_token"] for e in controls]
     assert len(set(tokens)) == 3
-    assert all(token not in harness.inbox.path.read_text() for token in tokens)
+    assert all(token not in json.dumps(read_document(harness.inbox.path)) for token in tokens)
     q.state = "resolved"
     assert await card_actions.mirror_question(q)
     assert patched[0][0] == "om-new-card"

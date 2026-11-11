@@ -33,7 +33,7 @@ Task / report transaction using the existing mutation lock
   → validate
   → stage Task, session, report and Mailbox changes
   → _save_workspace_state(workspace_id)
-      → replace that workspace's state.json (authoritative)
+      → commit changed workspace document rows in storage.sqlite3 (authoritative)
       → refresh its Markdown snapshot (derived)
   → existing post-commit wake / review / dispatch behavior
 ```
@@ -328,7 +328,7 @@ Subsequent requests:
 | | `_feedback.py` — Feedback lesson generation + catalog storage from completed task journeys | feedback_lessons service, _persistence |
 | | `_normalize.py` — Workspace/task JSON in-place migration (schema evolution) | — |
 | | `_state.py` — In-memory workspace board state cache, dirty tracking, index | _persistence |
-| | `_persistence.py` — JSON on-disk format: index.json, per-workspace state.json, snapshots, atomic writes | _state, _normalize |
+| | `_persistence.py` — SQLite document persistence, one-time legacy import, derived snapshots and quarantine | _state, _normalize |
 | | `_attachments.py` — Task image attachments storage, filename sanitization, upload → workspace storage | _tasks |
 | | `_artifacts.py` — Changed-file report rendering, goal packet/REVIEW.md rendering, export file path helpers | — |
 | | `_prompts.py` — Prompt templates: agent system context injection, goal packet format, review rubric | — |
@@ -355,13 +355,13 @@ Subsequent requests:
 | `components/TerminalPane.vue` | Single pane: iframe loading `/api/terminal/proxy/{id}/`, lifecycle, postMessage bridge |
 | `components/TerminalView.vue` | Terminal interaction glue: postMessage key dispatch, clipboard-image upload, context-menu, mobile controls bridge |
 | `components/MobileControls.vue` | Mobile-specific soft-buttons (Ctrl, Alt, Esc, arrow keys, paste, etc.) |
+| `features/agent-status/AgentInboxPanel.vue` | Needs-you inbox popover: Needs you / Working / Recently done groups, filters, peek, inline reply (`inboxModel.ts`, `inboxReply.ts`) |
 | **Workspace components** | |
 | `components/AgentWorkspaceView.vue` | Task board/detail, report/review rendering, workspace/agent/edit forms; owns the Task creation flow lifetime |
 | `components/TaskCreateDialog.vue` | Task creation presentation and responsive styles; no independent request/recovery state |
 | `composables/useTaskCreateFlow.ts` | Task creation form, frozen requests, capability gating, credential recovery and late-response guards |
 | `utils/draftAttachments.ts` | Shared draft attachment conversion and preview cleanup, with caller-owned lists |
 | `components/AgentAvatar.vue` | Small agent/caller badge: type icon + name |
-| `components/AgentStatusFloatingPanel.vue` | Per-agent floating status chip grid: idle/working/attention/offline |
 | `components/LoadingButton.vue` | Generic button with loading + success/error state |
 | `components/MarkdownContent.vue` | Markdown rendering (marked + DOMPurify), inline path mention linking |
 | `components/EnvPresetManager.vue` | Launch-env preset CRUD, hide/unhide, workspace-level assignment |
@@ -377,13 +377,13 @@ Subsequent requests:
 
 | File | Location | Content |
 |------|----------|---------|
-| `tabs.json` | `~/.claude_hub/tabs.json` | Array of tab configs (id, name, port, shell, cwd, solo_mode, agent_type, created_at, env_preset) |
-| `tab_order.json` | `~/.claude_hub/tab_order.json` | Ordered array of tab IDs |
+| Tabs document | `~/.claude_hub/storage.sqlite3` | Array of tab configs (id, name, port, shell, cwd, solo_mode, agent_type, created_at, env_preset) |
+| Tab order document | Same SQLite database | Ordered array of tab IDs |
 | tmux sessions | tmux server | Session `claude-hub-{id[:8]}` per tab; survives backend restart |
-| session store | `~/.claude_hub/sessions.json` | File-backed `LoginSession` dict (keyed by random session_id) — Feishu tokens + user info |
+| session store | Same SQLite database | Durable `LoginSession` dict (keyed by random session_id) — Feishu tokens + user info |
 | `launch_env_settings.json` | `~/.claude_hub/launch_env_settings.json` | Agent launch env per tab (tunnel scripts, profile paths) |
-| Workspace index | `~/.claude_hub/workspaces/index.json` | ID → workspace metadata mapping |
-| Per-workspace state | `~/.claude_hub/workspaces/<id>/state.json` | Full workspace board: tasks, sessions, dispatch plan |
+| Workspace index | Same SQLite database | ID → workspace metadata mapping |
+| Per-workspace state | Same SQLite database | Full workspace board: tasks, sessions, dispatch plan |
 | Per-workspace artifacts | `~/.claude_hub/workspaces/<id>/` | `snapshot.md`, `goal_packet.md`, `REVIEW_*.md`, agent report files |
 | Task attachments | `~/.claude_hub/workspaces/<id>/attachments/` | Pasted images / uploaded files referenced by tasks |
 | Feedback lessons | `~/.claude_hub/workspaces/<id>/lessons.json` | Scored, context-tagged lessons learned from this workspace's runs |
@@ -393,13 +393,22 @@ Subsequent requests:
 | launch env presets | `localStorage` (browser) | Custom/hidden preset state + user-created profiles |
 | terminal tab ordering (UI cache) | `localStorage` (browser) | Per-workspace cached order, reconciled with backend on load |
 
+SQLite resolves from `CLAUDE_HUB_HOME`; an explicit `CLAUDE_HUB_STATE_ROOT` maps
+workspace keys into that same database. Legacy file paths identify logical
+namespaces and are import sources, not dual-write destinations. Agent streams
+store integer sequence/turn indexes and compressed bodies; the SQLite index also
+serves history and lifecycle consumers. Configuration, derived Markdown, provider
+transcripts, attachments, feedback artifacts and delivery-attempt evidence retain
+their distinct file lifecycles. Offline archival and recovery are documented in
+[the storage working log](docs/working-logs/2026-11-10-sqlite-storage.md).
+
 **Lifecycle**:
 - Backend startup (lifespan):
-  - `TTYDManager._load_state()` from `tabs.json` → `_load_order()` → `start_all_tabs()` (reattaches existing tmux sessions; starts a fresh ttyd for each)
+  - `TTYDManager._load_state()` from the SQLite tabs document → `_load_order()` → `start_all_tabs()` (reattaches existing tmux sessions; starts a fresh ttyd for each)
   - `WorkspaceManager.initialize()`: load workspace index → migrate each state via `_normalize` → build in-memory board cache → start monitor loop
-- Tab creation: append to `processes` dict → atomically save `tabs.json` → append to `tab_order` → save `tab_order.json`
-- Tab deletion: `process.stop(kill_tmux=True)` → remove from dict → atomic rewrite both JSON files
-- Workspace/task mutation: update in-memory cache (mark dirty) → `_persistence` layer atomic write + fsync
+- Tab creation: append to `processes` dict → transactionally save the tabs document → append to `tab_order` → save the tab order document
+- Tab deletion: `process.stop(kill_tmux=True)` → remove from dict → commit the tabs/order documents
+- Workspace/task mutation: update in-memory cache (mark dirty) → `_persistence` layer SQLite transaction (`synchronous=FULL`)
 - Backend shutdown:
   - `TTYDManager.cleanup()`: stop all ttyd processes — keep tmux sessions alive (for persistence across restart)
   - `WorkspaceManager.shutdown()`: cancel monitor loop, flush pending writes, close all background async tasks

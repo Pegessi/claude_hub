@@ -47,6 +47,14 @@ async def _dispatch_goal_turn(goal: GoalRun, prompt: str) -> str:
     # A steered turn shows the user's message and may replace whatever Chat
     # turn is still running; a plain continuation never interrupts anything.
     steered = goal.pending_input is not None
+    if steered:
+        visible_text = goal.pending_input
+    elif goal.plan_first and goal.plan_pending:
+        # The first ``plan_first`` turn plans only; label it as such rather
+        # than as an ordinary continuation.
+        visible_text = "Plan this Goal before starting"
+    else:
+        visible_text = "Continue active Goal"
     await _send_to_native(
         session,
         AgentStreamSendRequest(
@@ -56,7 +64,7 @@ async def _dispatch_goal_turn(goal: GoalRun, prompt: str) -> str:
             delivery="steer" if steered else "normal",
         ),
         _get_tab_tailer_manager(),
-        visible_text=goal.pending_input if steered else "Continue active Goal",
+        visible_text=visible_text,
         turn_metadata={"origin": "goal", "protocol": "goal-continuation-v1"},
     )
     return turn_id

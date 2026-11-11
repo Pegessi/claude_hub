@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Diff code highlighting harness</title>
+    <link rel="icon" href="data:," />
+    <style>
+      body { margin: 0; background: var(--ch-color-main-bg); color: var(--ch-color-text); font-family: var(--ch-font-sans); font-size: 13px; }
+      #app { display: grid; gap: 18px; max-width: 900px; padding: 18px 28px; }
+      [data-case] { min-width: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      import '/src/features/app-shell/styles/theme.css'
+      import { createApp, defineComponent, h, provide, reactive, ref, shallowReactive } from 'vue'
+      import ChatToolGroup from '/src/features/chat/components/ChatToolGroup.vue'
+      import { chatReviewKey, chatTimelineKey } from '/src/features/chat/owners'
+      import { useChatReview } from '/src/features/chat/review/useChatReview'
+      import { highlightReady } from '/src/utils/codeHighlight'
+
+      // The app sets this on boot; pinning it here keeps the token colours
+      // deterministic for the gate's computed-colour reads.
+      document.documentElement.dataset.theme = 'dark'
+
+      // A Python patch: a hunk with context, a removal and additions, a row whose
+      // text is a script tag (tool arguments are untrusted), and a second file
+      // whose extension the bundled highlighter has no grammar for.
+      const pythonPatch = [
+        '*** Begin Patch',
+        '*** Update File: backend/claude_hub/services/terminal_runtime/manager/status.py',
+        '@@ -236,8 +236,11 @@ def native_runtime_snapshot(runtime):',
+        '     if runtime is None:',
+        '         return {"state": "offline", "detail": None}',
+        '-    return {"state": runtime.state, "detail": runtime.detail}',
+        '+    snapshot = {"state": runtime.state, "detail": runtime.detail}',
+        '+    snapshot["pending_question"] = runtime.has_pending_question()',
+        '+    return snapshot',
+        ' ',
+        ' ',
+        ' def effective_status(runtime):',
+        '     snapshot = native_runtime_snapshot(runtime)',
+        // Split in two so the closing tag of the payload cannot end this page's
+        // own script block; the row must still render it as inert text.
+        '+    label = f"<script>alert(1)<' + '/script>"',
+        '+    return label',
+        '*** Update File: /tmp/claude_hub/run.log',
+        '@@ -1,2 +1,2 @@',
+        '-migrate: start',
+        '-migrate: idle',
+        '+migrate: done',
+        '+migrate: clean',
+        '*** End Patch',
+      ].join('\n')
+
+      // The diff builder caps a diff at 400 rows and appends one truncation
+      // row, so this patch lands at 401 rows: the first size past the card's
+      // highlighting ceiling.
+      const bigPatch = [
+        '*** Begin Patch',
+        '*** Update File: backend/claude_hub/services/terminal_runtime/manager/status.py',
+        '@@ -1,1 +1,400 @@',
+        ...Array.from({ length: 399 }, (_, index) => `+    return compute(${index})`),
+        '*** End Patch',
+      ].join('\n')
+
+      const toolFor = (key, patch) => [{
+        key,
+        name: 'apply_patch',
+        status: 'completed',
+        argsText: JSON.stringify({ input: patch }),
+        resultText: 'Done',
+      }]
+
+      const pythonPart = reactive({ key: 'part-python', kind: 'tool_group', tools: toolFor('tool-python', pythonPatch) })
+      const bigPart = reactive({ key: 'part-big', kind: 'tool_group', tools: toolFor('tool-big', bigPatch) })
+      const turn = reactive({ key: 'turn-1', parts: [pythonPart, bigPart], renderRevision: 0 })
+      const turns = ref([turn])
+      const draftQueue = ref([])
+
+      const Host = defineComponent({
+        setup() {
+          const expandedToolGroups = shallowReactive(
+            new Map([[turn.key, new Set([pythonPart.key, bigPart.key])]]),
+          )
+          provide(chatTimelineKey, {
+            expandedToolGroups,
+            turns,
+            onToolGroupToggle() {},
+            collapseDetails() {},
+          })
+          const review = useChatReview({ tabKey: 'harness', draftQueue, storage: null })
+          provide(chatReviewKey, review)
+          window.__DIFF_CODE__ = {
+            // The gate waits on this instead of guessing how long a chunk takes.
+            ready: highlightReady,
+            pythonPatch,
+            bigPatch,
+            review,
+            draftQueue,
+            turn,
+            pythonPart,
+            bigPart,
+            expandedToolGroups,
+          }
+          return () => h('div', { id: 'app' }, [
+            h('div', { 'data-case': 'python' }, [h(ChatToolGroup, { turn, part: pythonPart })]),
+            h('div', { 'data-case': 'big' }, [h(ChatToolGroup, { turn, part: bigPart })]),
+          ])
+        },
+      })
+
+      createApp(Host).mount('#app')
+    </script>
+  </body>
+</html>

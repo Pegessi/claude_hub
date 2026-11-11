@@ -41,7 +41,13 @@ QUESTION_PROTOCOL_GUIDANCE = (
     "NOT re-ask, choose a default, or proceed without the answer; (3) end "
     "your turn with one short neutral line such as 'I've made my selection "
     "above — waiting for your choice.' and stop. The user's real answer will "
-    "arrive as a follow-up message; continue from it then."
+    "arrive as a follow-up message; continue from it then. "
+    "Prefer this tool over an open question in prose: when the user has to "
+    "decide something (which approach, which scope, whether to proceed), "
+    "call it with 2–4 concrete options, give each option a one-line "
+    "description of its tradeoff, and put '(Recommended)' at the end of the "
+    "option you suggest. Do not end a report with a prose question the card "
+    "could carry."
 )
 
 _HUB_QUESTION_PROTOCOL_START = "<<<HUB_QUESTION_PROTOCOL_V1>>>"

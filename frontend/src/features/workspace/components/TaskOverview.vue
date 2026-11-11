@@ -1,7 +1,7 @@
 <template>
   <section class="detail-section">
     <div class="detail-section-title">
-      Task description
+      Description
     </div>
     <MarkdownContent
       class="detail-copy"
@@ -38,18 +38,16 @@
     </div>
   </section>
 
-  <details class="detail-section detail-section--collapsible">
+  <!-- An empty Goal Packet header used to render no information at all, so it
+       only appears once a packet exists. -->
+  <details
+    v-if="selectedTask.goal_packet"
+    class="detail-section detail-section--collapsible"
+  >
     <summary class="detail-section-title">
       Goal Packet
     </summary>
     <div
-      v-if="!selectedTask.goal_packet"
-      class="empty-timeline"
-    >
-      No goal packet recorded yet.
-    </div>
-    <div
-      v-else
       class="goal-packet"
     >
       <div class="goal-packet-objective">
@@ -102,7 +100,7 @@
       </div>
       <div>
         <span>Task stage</span>
-        <strong>{{ selectedTask.status }}</strong>
+        <strong>{{ taskStatusLabel(selectedTask.status) }}</strong>
       </div>
       <div v-if="canUseManagedTaskActions(selectedTask)">
         <span>Agent runtime</span>
@@ -151,13 +149,8 @@
     </div>
   </details>
 
-  <TaskExecutionPanel
-    v-if="activeWorkspaceId"
-    :key="`${activeWorkspaceId}:${selectedTask.id}`"
-    :workspace-id="activeWorkspaceId"
-    :task="selectedTask"
-    :capabilities="taskCapabilities"
-  />
+  <!-- Execution control, progress reporting and debug facts live in the
+       dialog's own Execution section; this component stays description-only. -->
 
   <details
     v-if="selectedTask.task_mode === 'autonomous'"
@@ -243,7 +236,7 @@
 
 <script setup lang="ts">
 import MarkdownContent from '@/components/MarkdownContent.vue'
-import TaskExecutionPanel from '@/components/TaskExecutionPanel.vue'
+import { taskStatusLabel } from '@/features/workspace/presentation/board'
 import {
   goalPacketStatusLabel,
   goalPacketSections,
@@ -266,8 +259,6 @@ const {
   persistedAttachmentMeta,
   reviewerTitle,
   board,
-  activeWorkspaceId,
-  taskCapabilities,
 } = useWorkspaceRuntimeContext()
 const {
   taskModeLabel,

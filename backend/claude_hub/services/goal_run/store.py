@@ -1,10 +1,7 @@
-"""Atomic JSON snapshot persistence for Chat Goals."""
+"""SQLite snapshot persistence for Chat Goals."""
 
 from __future__ import annotations
 
-import json
-import os
-import tempfile
 import threading
 from pathlib import Path
 
@@ -16,6 +13,7 @@ from ...models.goal_run import (
     GoalRunStatus,
     utc_now,
 )
+from ..local_storage import document_exists, read_document, write_document
 
 
 class GoalRunStore:
@@ -29,9 +27,9 @@ class GoalRunStore:
 
     def load(self) -> None:
         with self._lock:
-            if not self.path.exists():
+            if not document_exists(self.path):
                 return
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            payload = read_document(self.path)
             if payload.get("version") not in {1, 2}:
                 raise ValueError("unsupported goal snapshot version")
             # Retire old limits without starting previously stopped work. The
@@ -47,7 +45,7 @@ class GoalRunStore:
                 key: {
                     name: item
                     for name, item in value.items()
-                    if name in {"tab_id", "objective", "images"}
+                    if name in {"tab_id", "objective", "images", "plan_first"}
                 }
                 for key, value in payload.get("create_inputs", {}).items()
             }
@@ -60,16 +58,7 @@ class GoalRunStore:
             "create_requests": self._create_requests,
             "create_inputs": self._create_inputs,
         }
-        fd, raw_tmp = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=self.path.parent)
-        tmp = Path(raw_tmp)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=2)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp, self.path)
-        finally:
-            tmp.unlink(missing_ok=True)
+        write_document(self.path, payload)
 
     @staticmethod
     def _persisted_goal(goal: GoalRun) -> dict[str, object]:
@@ -134,6 +123,8 @@ class GoalRunStore:
             fingerprint = image_fingerprint(request.attachments)
             if fingerprint:
                 supplied["images"] = fingerprint
+            if request.plan_first:
+                supplied["plan_first"] = True
             if original != supplied:
                 raise ValueError("client_request_id was already used for another create")
             return prior.model_copy(deep=True)
@@ -169,6 +160,8 @@ class GoalRunStore:
             }
             if goal.pending_image_fingerprint:
                 self._create_inputs[client_request_id]["images"] = goal.pending_image_fingerprint
+            if goal.plan_first:
+                self._create_inputs[client_request_id]["plan_first"] = True
             try:
                 self._save()
             except Exception:

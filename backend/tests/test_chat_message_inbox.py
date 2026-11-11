@@ -18,6 +18,7 @@ from claude_hub.services.chat_message_inbox import (
     InboxEvidence,
     InboxTarget,
 )
+from claude_hub.services.local_storage import read_document
 
 
 class Harness:
@@ -57,7 +58,7 @@ async def test_durable_reload_and_concurrent_idempotency(tmp_path):
     h = Harness(tmp_path / "inbox.json")
     receipts = await asyncio.gather(*(h.enqueue() for _ in range(20)))
     assert len({r.message_id for r in receipts}) == 1
-    assert json.loads(h.inbox.path.read_text())["messages"][0]["message"] == "hello"
+    assert read_document(h.inbox.path)["messages"][0]["message"] == "hello"
     clone = Harness(h.inbox.path)
     assert (await clone.enqueue()).message_id == receipts[0].message_id
     with pytest.raises(InboxError) as exc:
@@ -225,7 +226,8 @@ async def test_target_fences(tmp_path, change, expected):
 async def test_save_failure_does_not_ack_and_fails_closed(tmp_path, monkeypatch):
     h = Harness(tmp_path / "store.json")
     monkeypatch.setattr(
-        "claude_hub.services.chat_message_inbox.os.replace", Mock(side_effect=OSError("disk full"))
+        "claude_hub.services.chat_message_inbox.write_document",
+        Mock(side_effect=OSError("disk full")),
     )
     with pytest.raises(OSError):
         await h.enqueue()
@@ -271,6 +273,7 @@ def test_corrupt_or_unknown_store_fails_closed(tmp_path):
     path.write_text('{"version":999}')
     with pytest.raises(RuntimeError):
         Harness(path)
+    path = path.with_name("corrupt.json")
     path.write_text("not-json")
     with pytest.raises(json.JSONDecodeError):
         Harness(path)

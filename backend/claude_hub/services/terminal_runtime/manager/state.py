@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from dataclasses import asdict
 from functools import cached_property
@@ -18,8 +17,14 @@ from ....models import (
     TerminalAgentStatus,
     WorkspaceSessionRole,
 )
+from ...local_storage import document_exists, read_document, write_document
 from ..defaults import _TABS_STATE_VERSION
-from ..records import TabStateError, _AgentStatusSnapshot, _PendingTabCleanup
+from ..records import (
+    TabStateError,
+    _AgentStatusSnapshot,
+    _PendingTabCleanup,
+    _ReplyExcerptCacheEntry,
+)
 from .host import ManagerHost
 
 if TYPE_CHECKING:
@@ -44,6 +49,7 @@ class ManagerStateMixin(ManagerHost):
         self._tab_order: List[str] = []
         self._status_snapshots: Dict[str, _AgentStatusSnapshot] = {}
         self._status_cache: Dict[str, TerminalAgentStatus] = {}
+        self._reply_excerpt_cache: Dict[Tuple[str, str], _ReplyExcerptCacheEntry] = {}
         self._start_locks: Dict[str, asyncio.Lock] = {}
         logger.info("=" * 60)
         logger.info("Initializing TTYDManager - tmux session persistence enabled")
@@ -72,109 +78,106 @@ class ManagerStateMixin(ManagerHost):
         return {}
 
     def _load_state(self) -> None:
-        if self._runtime.STATE_FILE.exists():
+        if document_exists(self._runtime.STATE_FILE):
             try:
-                with open(self._runtime.STATE_FILE, "r") as f:
-                    data, pending = self._runtime._parse_tabs_snapshot(json.load(f))
-                    loaded: Dict[str, TTYDProcess] = {}
-                    max_port = self._next_port
-                    for tab_data in data:
-                        agent_type_str = tab_data.get("agent_type", "claude")
-                        agent_type = (
-                            AgentType(agent_type_str)
-                            if agent_type_str in [e.value for e in AgentType]
-                            else AgentType.CLAUDE
-                        )
-                        session_kind_str = tab_data.get("session_kind")
-                        if session_kind_str == "agent":
-                            session_kind = SessionKind.CHAT
-                        elif session_kind_str in [e.value for e in SessionKind]:
-                            session_kind = SessionKind(session_kind_str)
-                        else:
-                            # Legacy rows (no session_kind) are raw TUI task
-                            # runners (dispatcher / reviewer / worker) on the
-                            # managed control plane. They must keep TERMINAL
-                            # semantics — only an explicit persisted
-                            # session_kind=chat marks a direct-user native
-                            # Chat surface.
-                            session_kind = SessionKind.TERMINAL
-                        chat_mode_str = tab_data.get("chat_mode", ChatMode.DEFAULT.value)
-                        chat_mode = (
-                            ChatMode(chat_mode_str)
-                            if chat_mode_str in [e.value for e in ChatMode]
-                            else ChatMode.DEFAULT
-                        )
-                        target_str = tab_data.get("target", "local")
-                        target = (
-                            ExecutionTarget(target_str)
-                            if target_str in [e.value for e in ExecutionTarget]
-                            else ExecutionTarget.LOCAL
-                        )
-                        workspace_role_str = tab_data.get("workspace_role")
-                        workspace_role = (
-                            WorkspaceSessionRole(workspace_role_str)
-                            if workspace_role_str in [e.value for e in WorkspaceSessionRole]
-                            else None
-                        )
-                        process = self._runtime.TTYDProcess(
-                            tab_id=tab_data["id"],
-                            port=tab_data["port"],
-                            name=tab_data["name"],
-                            shell=tab_data.get("shell"),
-                            cwd=tab_data.get("cwd"),
-                            created_at=self._runtime.datetime.fromisoformat(tab_data["created_at"]),
-                            solo_mode=tab_data.get("solo_mode", False),
-                            agent_type=agent_type,
-                            session_kind=session_kind,
-                            chat_mode=chat_mode,
-                            target=target,
-                            remote_profile_id=tab_data.get("remote_profile_id"),
-                            remote_cwd=tab_data.get("remote_cwd"),
-                            remote_reconnect=tab_data.get("remote_reconnect", True),
-                            remote_forward_port=tab_data.get("remote_forward_port"),
-                            env=tab_data.get("env", {}),
-                            workspace_id=tab_data.get("workspace_id"),
-                            workspace_name=tab_data.get("workspace_name"),
-                            workspace_role=workspace_role,
-                            managed_session_id=tab_data.get("managed_session_id"),
-                            agent_session_id=tab_data.get("agent_session_id"),
-                            agent_session_id_verified=tab_data.get(
-                                "agent_session_id_verified", False
-                            ),
-                            from_persisted_state=True,
-                            resume_quarantined=tab_data.get("resume_quarantined", False),
-                            shell_explicitly_provided=tab_data.get("shell_explicitly_provided"),
-                            cursor_transport=self._runtime._promote_cursor_chat_transport(
-                                session_kind,
-                                agent_type,
-                                target,
-                                tab_data.get("cursor_transport", "terminal"),
-                            ),
-                            cursor_data_dir=tab_data.get("cursor_data_dir"),
-                            cursor_cli_version=tab_data.get("cursor_cli_version"),
-                            cursor_transcript_path=tab_data.get("cursor_transcript_path"),
-                            cursor_transcript_schema=tab_data.get("cursor_transcript_schema"),
-                            forked_from_tab_id=tab_data.get("forked_from_tab_id"),
-                            forked_from_ordinal=tab_data.get("forked_from_ordinal"),
-                            parent_tab_id=tab_data.get("parent_tab_id"),
-                            subagent_id=tab_data.get("subagent_id"),
-                            archived=tab_data.get("archived", False),
-                            archived_at=self._runtime._parse_optional_iso(
-                                tab_data.get("archived_at")
-                            ),
-                            last_viewed_at=self._runtime._parse_optional_iso(
-                                tab_data.get("last_viewed_at")
-                            ),
-                        )
-                        loaded[process.tab_id] = process
-                        if process.port > max_port:
-                            max_port = process.port
-                    self.processes = loaded
-                    self._pending_stream_cleanup = pending
-                    # A prior process may have replaced this snapshot without
-                    # syncing its directory. Reading it is not durability proof.
-                    self._state_confirmed = not pending
-                    self._next_port = max_port + 1
+                data, pending = self._runtime._parse_tabs_snapshot(
+                    read_document(self._runtime.STATE_FILE)
+                )
+                loaded: Dict[str, TTYDProcess] = {}
+                max_port = self._next_port
+                for tab_data in data:
+                    agent_type_str = tab_data.get("agent_type", "claude")
+                    agent_type = (
+                        AgentType(agent_type_str)
+                        if agent_type_str in [e.value for e in AgentType]
+                        else AgentType.CLAUDE
+                    )
+                    session_kind_str = tab_data.get("session_kind")
+                    if session_kind_str == "agent":
+                        session_kind = SessionKind.CHAT
+                    elif session_kind_str in [e.value for e in SessionKind]:
+                        session_kind = SessionKind(session_kind_str)
+                    else:
+                        # Legacy rows (no session_kind) are raw TUI task
+                        # runners (dispatcher / reviewer / worker) on the
+                        # managed control plane. They must keep TERMINAL
+                        # semantics — only an explicit persisted
+                        # session_kind=chat marks a direct-user native
+                        # Chat surface.
+                        session_kind = SessionKind.TERMINAL
+                    chat_mode_str = tab_data.get("chat_mode", ChatMode.DEFAULT.value)
+                    chat_mode = (
+                        ChatMode(chat_mode_str)
+                        if chat_mode_str in [e.value for e in ChatMode]
+                        else ChatMode.DEFAULT
+                    )
+                    target_str = tab_data.get("target", "local")
+                    target = (
+                        ExecutionTarget(target_str)
+                        if target_str in [e.value for e in ExecutionTarget]
+                        else ExecutionTarget.LOCAL
+                    )
+                    workspace_role_str = tab_data.get("workspace_role")
+                    workspace_role = (
+                        WorkspaceSessionRole(workspace_role_str)
+                        if workspace_role_str in [e.value for e in WorkspaceSessionRole]
+                        else None
+                    )
+                    process = self._runtime.TTYDProcess(
+                        tab_id=tab_data["id"],
+                        port=tab_data["port"],
+                        name=tab_data["name"],
+                        shell=tab_data.get("shell"),
+                        cwd=tab_data.get("cwd"),
+                        created_at=self._runtime.datetime.fromisoformat(tab_data["created_at"]),
+                        solo_mode=tab_data.get("solo_mode", False),
+                        agent_type=agent_type,
+                        session_kind=session_kind,
+                        chat_mode=chat_mode,
+                        target=target,
+                        remote_profile_id=tab_data.get("remote_profile_id"),
+                        remote_cwd=tab_data.get("remote_cwd"),
+                        remote_reconnect=tab_data.get("remote_reconnect", True),
+                        remote_forward_port=tab_data.get("remote_forward_port"),
+                        env=tab_data.get("env", {}),
+                        workspace_id=tab_data.get("workspace_id"),
+                        workspace_name=tab_data.get("workspace_name"),
+                        workspace_role=workspace_role,
+                        managed_session_id=tab_data.get("managed_session_id"),
+                        agent_session_id=tab_data.get("agent_session_id"),
+                        agent_session_id_verified=tab_data.get("agent_session_id_verified", False),
+                        from_persisted_state=True,
+                        resume_quarantined=tab_data.get("resume_quarantined", False),
+                        shell_explicitly_provided=tab_data.get("shell_explicitly_provided"),
+                        cursor_transport=self._runtime._promote_cursor_chat_transport(
+                            session_kind,
+                            agent_type,
+                            target,
+                            tab_data.get("cursor_transport", "terminal"),
+                        ),
+                        cursor_data_dir=tab_data.get("cursor_data_dir"),
+                        cursor_cli_version=tab_data.get("cursor_cli_version"),
+                        cursor_transcript_path=tab_data.get("cursor_transcript_path"),
+                        cursor_transcript_schema=tab_data.get("cursor_transcript_schema"),
+                        forked_from_tab_id=tab_data.get("forked_from_tab_id"),
+                        forked_from_ordinal=tab_data.get("forked_from_ordinal"),
+                        parent_tab_id=tab_data.get("parent_tab_id"),
+                        subagent_id=tab_data.get("subagent_id"),
+                        archived=tab_data.get("archived", False),
+                        archived_at=self._runtime._parse_optional_iso(tab_data.get("archived_at")),
+                        last_viewed_at=self._runtime._parse_optional_iso(
+                            tab_data.get("last_viewed_at")
+                        ),
+                    )
+                    loaded[process.tab_id] = process
+                    if process.port > max_port:
+                        max_port = process.port
+                self.processes = loaded
+                self._pending_stream_cleanup = pending
+                # A prior process may have replaced this snapshot without
+                # syncing its directory. Reading it is not durability proof.
+                self._state_confirmed = not pending
+                self._next_port = max_port + 1
                 logger.info(f"Loaded {len(self.processes)} tabs from {self._runtime.STATE_FILE}")
                 for tab_id, process in self.processes.items():
                     logger.info(
@@ -217,10 +220,9 @@ class ManagerStateMixin(ManagerHost):
 
     def _load_order(self) -> None:
         """Load tab order from file."""
-        if self._runtime.ORDER_FILE.exists():
+        if document_exists(self._runtime.ORDER_FILE):
             try:
-                with open(self._runtime.ORDER_FILE, "r") as f:
-                    self._tab_order = json.load(f)
+                self._tab_order = read_document(self._runtime.ORDER_FILE)
                 logger.info(f"Loaded tab order: {self._tab_order}")
             except Exception as e:
                 logger.error(f"Failed to load tab order: {e}")
@@ -233,9 +235,7 @@ class ManagerStateMixin(ManagerHost):
     def _save_order(self) -> None:
         """Save tab order to file."""
         try:
-            self._runtime.ORDER_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._runtime.ORDER_FILE, "w") as f:
-                json.dump(self._tab_order, f)
+            write_document(self._runtime.ORDER_FILE, self._tab_order)
             logger.info(f"Saved tab order to {self._runtime.ORDER_FILE}: {self._tab_order}")
         except Exception as e:
             logger.error(f"Failed to save tab order: {e}")

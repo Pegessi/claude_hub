@@ -20,6 +20,7 @@
             :chip="chip"
             :now-ms="nowMs"
             @jump="emit('jump', $event)"
+            @open="onOpen"
           />
         </li>
       </ul>
@@ -57,6 +58,7 @@
             :chip="chip"
             :now-ms="nowMs"
             @jump="emit('jump', $event)"
+            @open="onOpen"
           />
         </li>
       </ul>
@@ -67,17 +69,23 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 
-import type { SubagentJumpChip } from '../presentation/subagentJump'
+import type { SubagentDockRow, SubagentJumpChip } from '../presentation/subagentJump'
+import type { NativeSubagentRow } from '../presentation/nativeSubagentRows'
 import ChatSubagentRow from './ChatSubagentRow.vue'
 
 const props = defineProps<{
-  chips: SubagentJumpChip[]
+  chips: SubagentDockRow[]
   nowMs: number
 }>()
 
 const emit = defineEmits<{
   (event: 'jump', chip: SubagentJumpChip): void
+  (event: 'open', chip: NativeSubagentRow, source: HTMLElement | null): void
 }>()
+
+function onOpen(chip: NativeSubagentRow, source: HTMLElement | null) {
+  emit('open', chip, source)
+}
 
 const earlierId = `subagent-earlier-${Math.random().toString(36).slice(2, 8)}`
 

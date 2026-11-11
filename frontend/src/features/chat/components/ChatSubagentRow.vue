@@ -3,11 +3,12 @@
     type="button"
     class="subagent-row"
     :data-testid="`subagent-row-${chip.key}`"
+    :data-kind="chip.kind"
     :data-state="chip.state"
-    :disabled="!chip.canJump"
+    :disabled="!chip.canJump && !chip.canOpen"
     :aria-label="`${actionLabel} ${chip.name}, ${chip.stateLabel}`"
-    :title="chip.canJump ? `${actionLabel} ${chip.name}` : 'The sub-agent Chat tab is unavailable'"
-    @click="emit('jump', chip)"
+    :title="unavailableTitle"
+    @click="activate"
   >
     <span
       class="subagent-dot"
@@ -26,7 +27,7 @@
       <span class="subagent-summary">{{ chip.summary }}</span>
     </span>
     <span
-      v-if="chip.canJump"
+      v-if="chip.canJump || chip.canOpen"
       class="subagent-action"
     >{{ actionLabel }}<span aria-hidden="true"> ›</span></span>
   </button>
@@ -35,20 +36,39 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-import { relativeSubagentTime, subagentDisplayName, type SubagentJumpChip } from '../presentation/subagentJump'
+import { relativeSubagentTime, subagentDisplayName, type SubagentDockRow, type SubagentJumpChip } from '../presentation/subagentJump'
+import type { NativeSubagentRow } from '../presentation/nativeSubagentRows'
 
+/** One dock row. Hub children jump to their own Chat tab; native children
+ *  have no tab, so the row opens the pane's read-only detail window instead. */
 const props = defineProps<{
-  chip: SubagentJumpChip
+  chip: SubagentDockRow
   nowMs: number
 }>()
 
 const emit = defineEmits<{
   (event: 'jump', chip: SubagentJumpChip): void
+  (event: 'open', chip: NativeSubagentRow, source: HTMLElement | null): void
 }>()
 
 const time = computed(() => relativeSubagentTime(props.chip.createdAt, props.nowMs))
 const displayName = computed(() => subagentDisplayName(props.chip.name))
-const actionLabel = computed(() => (props.chip.archived ? 'Restore & open' : 'Open'))
+const actionLabel = computed(() => {
+  if (props.chip.kind === 'native') return 'View'
+  return props.chip.archived ? 'Restore & open' : 'Open'
+})
+const unavailableTitle = computed(() => {
+  if (props.chip.kind === 'native') return `View ${props.chip.name}`
+  return props.chip.canJump ? `Open ${props.chip.name}` : 'The sub-agent Chat tab is unavailable'
+})
+
+function activate(event: MouseEvent) {
+  if (props.chip.kind === 'native') {
+    emit('open', props.chip, event.currentTarget as HTMLElement | null)
+    return
+  }
+  emit('jump', props.chip)
+}
 </script>
 
 <style scoped>

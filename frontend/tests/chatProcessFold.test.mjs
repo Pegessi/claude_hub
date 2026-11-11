@@ -4,7 +4,7 @@ import test from 'node:test'
 
 import { loadChatUtility, loadChatFeature } from './chatPresentationTestHarness.mjs'
 
-const { isTurnFoldable, turnProcessFoldSignature } = await loadChatFeature('presentation/chatTurnPresentation')
+const { isTurnFoldable, presentTurnParts, turnProcessFoldSignature } = await loadChatFeature('presentation/chatTurnPresentation')
 
 // ---------------------------------------------------------------------------
 // The fold helpers are pure functions over a finished turn, so they are tested
@@ -114,15 +114,22 @@ test('an approval card stays visible while tool/thinking process folds', () => {
   assert.deepEqual(split.pinned, [], 'approval cards fold with the process')
   assert.deepEqual(split.before.map(p => p.kind), ['thinking', 'approval', 'tool_group'])
 
+  // The fold keeps arrival order and keeps the card out of the collapsed
+  // region; the presenter is what ends the turn with it.
   assert.deepEqual(
     foldTurnParts(turn, false).map(p => p.kind),
     ['process', 'approval', 'text'],
-    'folded, the approval and answer stay visible',
+    'folded, the card stays visible and is not hidden by the fold',
+  )
+  assert.deepEqual(
+    presentTurnParts(turn, null, new Map()).map(p => p.kind),
+    ['process', 'text', 'approval'],
+    'presented, the turn ends with its card',
   )
   assert.deepEqual(
     foldTurnParts(turn, true).map(p => p.kind),
     ['process', 'thinking', 'approval', 'tool_group', 'text'],
-    'expanded, the card is still in its place in the record',
+    'expanded keeps the record order',
   )
 })
 
@@ -146,6 +153,11 @@ test('an answered approval card remains visible while process folds', () => {
     foldTurnParts(turn, false).map(p => p.kind),
     ['process', 'approval', 'text'],
     'approval stays visible while surrounding process folds',
+  )
+  assert.deepEqual(
+    presentTurnParts(turn, null, new Map()).map(p => p.kind),
+    ['process', 'text', 'approval'],
+    'and presented, it ends the turn',
   )
   assert.deepEqual(
     foldTurnParts(turn, true).map(p => p.kind),
@@ -325,12 +337,12 @@ test('elapsed time is omitted when it cannot be trusted', () => {
   assert.equal(turnElapsedMs({ ...turn, completedAt: null }), null)
 })
 
-test('the folded label reads as process, work done, and time taken', () => {
+test('the folded label reads as activity, work done, and time taken', () => {
   const turn = completedTurn()
   const split = splitTurnProcess(turn)
   // 83s floors to "1m": the shared formatter is deliberately coarse so the
   // Chat timeline and the workspace progress timeline read the same way.
-  assert.equal(turnProcessLabel(turn, split.before), '过程 · 1 个工具调用 · 1m')
+  assert.equal(turnProcessLabel(turn, split.before), 'Activity · 1 step · 1m')
 
   const noTools = groupEventsIntoTurns([
     makeEvent(1, 'turn_started', { summary: 'go' }),
@@ -340,7 +352,7 @@ test('the folded label reads as process, work done, and time taken', () => {
       created_at: '2026-01-01T00:00:05Z',
     }),
   ])[0]
-  assert.equal(turnProcessLabel(noTools, splitTurnProcess(noTools).before), '过程 · 5s')
+  assert.equal(turnProcessLabel(noTools, splitTurnProcess(noTools).before), 'Activity · 5s')
 })
 
 // ── foldTurnParts ───────────────────────────────────────────────────────
@@ -350,7 +362,7 @@ test('folding replaces the process with one line ahead of the answer', () => {
   const folded = foldTurnParts(turn, false)
   assert.equal(folded.length, 2)
   assert.equal(folded[0].kind, 'process')
-  assert.equal(folded[0].meta, '过程 · 1 个工具调用 · 1m')
+  assert.equal(folded[0].meta, 'Activity · 1 step · 1m')
   assert.equal(folded[1].kind, 'text')
   assert.equal(folded[1].text, 'the answer')
 })
@@ -512,9 +524,9 @@ test('sticky summary keeps its scrolling ancestor intact', () => {
 })
 
 
-test('the folded header says when a card is folded in with it', () => {
-  // The header is the only thing left on screen, so a card inside must not
-  // vanish without a trace.
+test('the folded header does not count a card it leaves on screen', () => {
+  // The card is kept visible at the end of the turn, so counting it in the
+  // folded header would claim something is hidden that the reader can see.
   const turn = groupEventsIntoTurns([
     makeEvent(1, 'turn_started', { summary: 'go' }),
     makeEvent(2, 'thinking_delta', { text: 'hmm' }),
@@ -525,7 +537,9 @@ test('the folded header says when a card is folded in with it', () => {
   const split = splitTurnProcess(turn)
   const folded = foldTurnParts(turn, false)
   assert.equal(folded[0].kind, 'process')
-  assert.match(folded[0].meta, /1 张审批卡/, 'the header must count the card inside')
+  assert.doesNotMatch(folded[0].meta, /approval/, 'the card is on screen, so it is not folded')
+  assert.equal(folded.filter(part => part.kind === 'approval').length, 1, 'the card is on screen')
+  assert.equal(presentTurnParts(turn, null, new Map()).at(-1).kind, 'approval', 'the card ends the turn')
 
   const plain = groupEventsIntoTurns([
     makeEvent(1, 'turn_started', { summary: 'go' }),
@@ -535,10 +549,25 @@ test('the folded header says when a card is folded in with it', () => {
   ])[0]
   assert.doesNotMatch(
     foldTurnParts(plain, false)[0].meta,
-    /审批卡/,
+    /approval/,
     'a turn without one must not claim to have one',
   )
   assert.ok(split)
+})
+
+test('the folded header reports a failure it is about to hide', () => {
+  // A failed call is not pinned, so once the region folds the header is the
+  // reader's only warning that the turn hit one.
+  const turn = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }),
+    makeEvent(2, 'tool_call_started', { tool_call_id: 'c1', name: 'Bash', args: { command: 'pnpm lint' } }),
+    makeEvent(3, 'tool_call_completed', { tool_call_id: 'c1', status: 'failed' }),
+    makeEvent(4, 'text_delta', { text: 'the answer' }),
+    makeEvent(5, 'turn_completed', { status: 'completed' }),
+  ])[0]
+  const folded = foldTurnParts(turn, false)
+  assert.match(folded[0].meta, /1 failed/, 'a hidden failure must still be counted')
+  assert.equal(folded.length, 2, 'the failed call itself folds with the rest')
 })
 
 test('a subagent region with dispatch or child errors stays pinned when process folds', () => {
@@ -569,4 +598,26 @@ test('a subagent region with dispatch or child errors stays pinned when process 
     foldTurnParts(turn, false).map(part => part.kind),
     ['process', 'subagents', 'text'],
   )
+})
+
+test('cards move last without dissolving the thinking they separated', () => {
+  // Regression guard from the second cross-model review: reordering raw parts
+  // *before* presentThinkingParts made an approval card the last part, so the
+  // run before it flushed as `done` (a live turn's spinner froze) and two
+  // reasoning phases either side of the card merged into one block.
+  const turn = groupEventsIntoTurns([
+    makeEvent(1, 'turn_started', { summary: 'go' }),
+    makeEvent(2, 'thinking_delta', { text: 'first phase' }),
+    makeEvent(3, 'approval_required', { tool_call_id: 'q1', kind: 'question', title: 'Pick' }),
+    makeEvent(4, 'thinking_delta', { text: 'second phase' }),
+  ])[0]
+  const presented = presentTurnParts(turn, null, new Map())
+  const kinds = presented.map(part => part.kind)
+  assert.equal(kinds[kinds.length - 1], 'approval', 'the card still ends the turn')
+  const thinking = presented.filter(part => part.kind === 'thinking')
+  assert.equal(thinking.length, 2, 'the two phases stay two blocks, not one merged run')
+  assert.equal(thinking[0].text, 'first phase')
+  assert.equal(thinking[1].text, 'second phase')
+  // A live turn is still thinking: the trailing run must animate, not read as done.
+  assert.equal(thinking[1].state, 'active', 'the trailing run keeps animating')
 })

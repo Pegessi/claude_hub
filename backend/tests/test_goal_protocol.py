@@ -72,12 +72,54 @@ def test_trailing_only_drops_a_status_without_checkpoint_and_keeps_text_before_i
     assert sanitizer.feed("  \n", final=True) == ""
 
 
+_PLAN_ENVELOPE = (
+    '<goal-plan>{"summary":"x","steps":[],"budget":{"helpers":[],"max_parallelism":1}}'
+    "</goal-plan>"
+)
+
+
+@pytest.mark.parametrize("split", range(1, len(_PLAN_ENVELOPE + _ENVELOPE) + 1))
+def test_trailing_only_drops_a_trailing_plan_envelope(split: int) -> None:
+    """A plan block is part of the trailing envelope, not visible output."""
+    source = "Scope summary.\n" + _PLAN_ENVELOPE + _ENVELOPE
+    sanitizer = _GoalProtocolSanitizer(trailing_only=True)
+    visible = sanitizer.feed(source[:split]) + sanitizer.feed(source[split:], final=True)
+    assert visible == "Scope summary.\n"
+
+
+@pytest.mark.parametrize(
+    ("text", "state"),
+    [
+        (_PLAN_ENVELOPE + _ENVELOPE, "complete"),
+        (_PLAN_ENVELOPE + '<goal-status state="needs_input">ok</goal-status>', "complete"),
+        (_PLAN_ENVELOPE, "partial"),
+        (_PLAN_ENVELOPE + "trailing prose", "no"),
+        ("<goal-plan", "partial"),
+        ("<goal-plan>not json</goal-plan>", "no"),
+        ("<goal-plan>{}</goal-plan><goal-plan>", "no"),
+    ],
+    ids=[
+        "plan-checkpoint-status",
+        "plan-status-without-checkpoint",
+        "plan-only",
+        "plan-then-prose",
+        "partial-plan-opener",
+        "plan-not-json",
+        "nested-plan",
+    ],
+)
+def test_trailing_envelope_recognises_an_optional_plan_block(text: str, state: str) -> None:
+    assert goal_protocol._trailing_envelope_state(text) == state
+    assert tailer._trailing_envelope_state(text) == state
+
+
 @pytest.mark.parametrize(
     "name",
     [
         "_GOAL_STATUS_TERMINAL_RE",
         "_GOAL_TAIL_SCAN_CHARS",
         "_STRICT_STATUS_OPENER_RE",
+        "_PLAN_OPENER",
         "_CHECKPOINT_OPENER",
         "_MAX_STATUS_BODY_CHARS",
     ],
@@ -197,7 +239,11 @@ def test_legacy_opener_patch_affects_existing_sanitizer(
         monkeypatch.setattr(tailer._GoalProtocolSanitizer, "_OPENERS", ("<custom",))
 
     assert sanitizer.feed("") == "<goal-sta"
-    assert goal_protocol._GoalProtocolSanitizer._OPENERS == ("<goal-checkpoint", "<goal-status")
+    assert goal_protocol._GoalProtocolSanitizer._OPENERS == (
+        "<goal-checkpoint",
+        "<goal-plan",
+        "<goal-status",
+    )
 
 
 def test_goal_helper_does_not_own_runtime_state() -> None:

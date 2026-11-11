@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { FeishuBotRequestError, loadFeishuBotPool, type FeishuActiveBinding, type FeishuBotPoolResponse, type FeishuBotSummary } from '@/utils/feishuBotConfig'
+import { botBindings, FeishuBotRequestError, loadFeishuBotPool, type FeishuActiveBinding, type FeishuBotPoolResponse, type FeishuBotSummary } from '@/utils/feishuBotConfig'
 
 export const useFeishuBotPoolStore = defineStore('feishuBotPool', () => {
   const pool=ref<FeishuBotPoolResponse|null>(null),loading=ref(false),error=ref<string|null>(null),errorStatus=ref<number|null>(null)
@@ -55,8 +55,14 @@ export const useFeishuBotPoolStore = defineStore('feishuBotPool', () => {
     return consider(value,true)
   }
   function botById(id:string|null|undefined):FeishuBotSummary|null{return id?bots.value.find(bot=>bot.bot_id===id)??null:null}
-  function activeBotForTab(tabId:string):FeishuBotSummary|null{return bots.value.find(bot=>bot.binding?.tab_id===tabId)??null}
-  function activeBindingForTab(tabId:string):FeishuActiveBinding|null{return activeBotForTab(tabId)?.binding??null}
+  function activeBotForTab(tabId:string):FeishuBotSummary|null{return bots.value.find(bot=>botBindings(bot).some(item=>item.tab_id===tabId))??null}
+  function activeBindingForTab(tabId:string):FeishuActiveBinding|null{
+    for(const bot of bots.value){
+      const match=botBindings(bot).find(item=>item.tab_id===tabId)
+      if(match)return match
+    }
+    return null
+  }
   async function refresh(signal?:AbortSignal):Promise<FeishuBotPoolResponse|null>{
     const epoch=++refreshEpoch;loading.value=true;error.value=null;errorStatus.value=null
     try{

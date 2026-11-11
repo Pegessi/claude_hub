@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -13,6 +12,7 @@ import pytest
 from claude_hub.api import feishu_bot as bot_api
 from claude_hub.services.feishu_bot import FeishuMessageEvent
 from claude_hub.services.feishu_bot_pool import dedup_key
+from claude_hub.services.local_storage import read_document
 from tests.test_feishu_bot_admission_guard import complete, env, install_stream, no_live_http
 from tests.test_feishu_message_redelivery import intake
 
@@ -104,7 +104,7 @@ async def test_every_batch_member_is_rechecked_before_handoff(
                 job.cancel()
         await asyncio.gather(*jobs, return_exceptions=True)
 
-    records = json.loads(intake.path.read_text())["events"]
+    records = read_document(intake.path)["events"]
     if rollback:
         assert submitted == []
         assert len(env.replies) == 1
@@ -125,7 +125,7 @@ async def test_every_batch_member_is_rechecked_before_handoff(
     assert len(submitted) == 1
     assert all(event.text in submitted[0] for event in events)
     assert len(env.replies) == (2 if rollback else 1)
-    records = json.loads(intake.path.read_text())["events"]
+    records = read_document(intake.path)["events"]
     for event in events:
         record = records[dedup_key(env.bot_id, event.message_id)]
         assert record["status"] == "completed"
@@ -177,7 +177,7 @@ async def test_cancelled_batch_rejection_notice_does_not_allow_redelivery(
                 job.cancel()
         await asyncio.gather(*jobs, return_exceptions=True)
 
-    records = json.loads(intake.path.read_text())["events"]
+    records = read_document(intake.path)["events"]
     assert [records[dedup_key(env.bot_id, event.message_id)]["status"] for event in events] == [
         "reply_failed",
         "reply_failed",

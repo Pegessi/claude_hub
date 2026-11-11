@@ -11,6 +11,9 @@ from claude_hub.services.feishu_bot import (
 )
 from claude_hub.services.feishu_bot_pool import BotBinding, EffectiveBot
 
+# Bot + channel/topic identity, fenced by the resolved binding and authority watermark.
+DispatchChannelKey = tuple[str, str, str, str, str | None, int, int]
+
 
 class TabDispatchQueueFull(RuntimeError):
     """The bounded Feishu-only queue cannot retain another message."""
@@ -40,6 +43,29 @@ class TabDispatchItem:
     # The stop asked for by that newer message; its result says whether it took.
     stop_task: asyncio.Task[bool] | None = None
 
+    @property
+    def channel_key(self) -> DispatchChannelKey:
+        # Interruption deliberately excludes the sender: another person in the
+        # same topic may supersede an answer, but must never coalesce with it.
+        # Pairing, generation, and transport_revision fences keep stale work out
+        # of a rebound or credential-rotated channel, while administrative CAS
+        # revisions do not split an active channel.
+        # Legacy group fallback returns a DM binding: only the event identifies
+        # the actual room, so two groups must not share that binding's chat ID.
+        return (
+            self.bot_id,
+            self.binding.pairing_id,
+            self.event.chat_type,
+            self.event.chat_id,
+            self.event.thread_id,
+            self.effective.generation,
+            self.effective.transport_revision,
+        )
+
+
+#: Identity of one sender inside one channel: what a follow-up is compared against.
+DispatchContextKey = tuple[str, str, str, "str | None", str, int, int]
+
 
 @dataclass
 class TabDispatchQueue:
@@ -47,13 +73,11 @@ class TabDispatchQueue:
     active: list[TabDispatchItem]
     processor: TabDispatchItem | None
     changed: asyncio.Event
-    dispatched_contexts: OrderedDict[tuple[str, str, str, str | None], None] = field(
-        default_factory=OrderedDict
-    )
-    # What the active batch sent, and what a stopped batch sent: the next batch
-    # answers that again together with the newer messages.
+    dispatched_contexts: OrderedDict[DispatchContextKey, None] = field(default_factory=OrderedDict)
+    # A stopped batch's text belongs to its channel, not whichever channel is
+    # next in the FIFO. Multiple channels can have a stopped answer to resume.
     active_text: str = ""
-    interrupted_text: str = ""
+    interrupted_text: OrderedDict[DispatchChannelKey, str] = field(default_factory=OrderedDict)
 
     @property
     def waiters(self) -> list[asyncio.Future[None]]:

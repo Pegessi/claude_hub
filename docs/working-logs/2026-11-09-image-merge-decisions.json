@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "82ed969a6c37445b4d92d6b0c2bcbf1a60b350ee",
+  "parents": [
+    "91cf6510cede7af3abbac11b41a6c350f37a46c0",
+    "6b012eb0e87afec1568bfcd3510f11510a3a0eae"
+  ],
+  "base": "356d07a0dfe0eb9efeaac1369ce4e81cafc77d40",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "b2e6442b48c540e3a407c8242e3f01d44f9b7557",
+  "reconstructed_tree": "a4d9945d49ed2204575ebcbdbd28f0434c1bcf50",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "85f51b907207adaddd1812dc0cfddb452334fa9a"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "04eab5bf2601a94c42efe78b009ae1c4177b03b4"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c78a5a690c0a801f0e1fc1959bd947ee6ba66f7b"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "6b3ef627d7369d6ea77a37e52463d7641cc1797c"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "303e6ecfc45ea23dbb770361ecf40822514ca262"
+      },
+      "reason": "Both parents add independent Released entries at the same insertion point. Retain the complete image-fix entry first, then the complete main Feishu group/topic entry; all older entries remain unchanged.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

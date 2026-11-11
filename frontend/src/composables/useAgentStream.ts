@@ -308,6 +308,10 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
     // sequence cursor; otherwise the current generation's events would be
     // skipped because their stream_sequence is <= the stale cursor.
     if (!stateMachine.isCurrent(generationId)) return
+    // A page that carries descriptors describes the turns it touches. Hydration
+    // pages (`view=conversation`) always do; the long-poll's raw page does not
+    // today, so this is future-proofing rather than a live path.
+    recordHistoryDetails(page.history_details)
     const committed = sequenceBuffer.push(page.events)
     if (committed.length) enqueueEvents(filterLiveCommittedEvents(committed))
   }
@@ -340,10 +344,12 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
         next[descriptor.turn_id] = { descriptor, status: 'idle' }
         changed = true
       } else if (detailChanged(existing.descriptor, descriptor)) {
-        // A newer summary covers a different raw range. Previously fetched
-        // detail is no longer complete for this descriptor; make the next
-        // expansion read the fixed, current range and retire any in-flight
-        // request for the older range.
+        // A grown descriptor means the fetched detail no longer covers the whole
+        // range, so it is retired and read again. Keeping a loaded detail across
+        // growth was tried and is wrong: hydration pages are the only pages that
+        // carry descriptors, and they strip process events, so the suffix's steps
+        // would be fetched by nobody — not by the pane's own backfill, not by a
+        // manual expand.
         const request = historyDetailRequests.get(descriptor.turn_id)
         request?.abort.abort()
         historyDetailRequests.delete(descriptor.turn_id)
@@ -738,11 +744,14 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
     }
   }
 
-  async function loadHistoryDetail(turnId: string) {
+  async function loadHistoryDetail(turnId: string, options: { force?: boolean } = {}) {
     const sourceId = currentSessionId
     const streamPath = currentStreamPath
     const entry = historyDetails.value[turnId]
-    if (stopped || !sourceId || !streamPath || !entry || entry.status === 'loaded' || entry.status === 'loading') return
+    // ``force`` exists for one caller: a repair after a dropped stream has to
+    // read a range again because the detail it holds was fetched before the gap.
+    const loaded = entry?.status === 'loaded' && !options.force
+    if (stopped || !sourceId || !streamPath || !entry || loaded || entry.status === 'loading') return
 
     const requestId = nextHistoryDetailRequestId++
     const descriptor = entry.descriptor

@@ -213,7 +213,17 @@ async def main(browser_run: BrowserRun) -> None:
             await summary.click()
             sheet = page.get_by_role("dialog", name="Chat Goal details")
             await expect(sheet).to_be_visible()
+            initial_sheet_box = await sheet.bounding_box()
+            # Visibility can precede the end of the sheet's translateY entrance.
+            # Keep the original viewport bound; wait for real settled geometry.
+            await page.wait_for_function(
+                """el => el.getAnimations().every(animation => animation.playState === 'finished')
+                    && el.getBoundingClientRect().bottom <= innerHeight + 1""",
+                arg=await sheet.element_handle(),
+                timeout=2000,
+            )
             sheet_box = await sheet.bounding_box()
+            report["sheet_geometry"] = {"initial": initial_sheet_box, "settled": sheet_box}
             assert sheet_box and sheet_box["y"] + sheet_box["height"] <= PHONE["height"] + 1
             assert sheet_box["height"] <= PHONE["height"] * 0.86 + 1, sheet_box
             # Every action is on screen and easy to tap, however long the Goal is.

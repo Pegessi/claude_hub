@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from ....models import AgentStreamEventType, ManagedSession
+from ...local_storage import read_document, write_document
 from ..base import NormalizeContext
 from ..redaction import redact_event
 from .session_state import SessionState
@@ -348,7 +349,7 @@ class TranscriptConsumerMixin(SessionState):
 
     def _load_cursor(self, path: Path) -> None:
         try:
-            data = json.loads(self._cursor_path.read_text(encoding="utf-8"))
+            data = read_document(self._cursor_path)
         except (OSError, json.JSONDecodeError, ValueError):
             return
         if not isinstance(data, dict) or data.get("path") != str(path):
@@ -391,10 +392,7 @@ class TranscriptConsumerMixin(SessionState):
             "snapshot_digest": self._snapshot_digest,
         }
         try:
-            self._cursor_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._cursor_path.with_suffix(".cursor.json.tmp")
-            tmp.write_text(json.dumps(payload), encoding="utf-8")
-            os.replace(tmp, self._cursor_path)
+            write_document(self._cursor_path, payload)
         except OSError:
             logger.exception(
                 "agent_stream tailer: failed to persist cursor for session %s",

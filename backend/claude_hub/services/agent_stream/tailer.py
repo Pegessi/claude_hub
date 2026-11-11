@@ -39,7 +39,8 @@ import time
 import uuid
 import weakref
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from enum import Enum
 from functools import partial
 from pathlib import Path
@@ -66,6 +67,7 @@ from ...models import (
     ManagedSession,
     SessionKind,
 )
+from .activity_labels import IDLE_DETAIL, WORKING_ACTIVITY
 from .attachments import AgentStreamAttachmentStore, _sync_existing_directory
 from .base import (
     AgentStreamAdapter,
@@ -92,6 +94,7 @@ from .runtime.goal_protocol import _CHECKPOINT_OPENER as _CHECKPOINT_OPENER
 from .runtime.goal_protocol import _GOAL_STATUS_TERMINAL_RE as _GOAL_STATUS_TERMINAL_RE
 from .runtime.goal_protocol import _GOAL_TAIL_SCAN_CHARS as _GOAL_TAIL_SCAN_CHARS
 from .runtime.goal_protocol import _MAX_STATUS_BODY_CHARS as _MAX_STATUS_BODY_CHARS
+from .runtime.goal_protocol import _PLAN_OPENER as _PLAN_OPENER
 from .runtime.goal_protocol import _STRICT_STATUS_OPENER_RE as _STRICT_STATUS_OPENER_RE
 from .runtime.manager import TailerManager as _RuntimeTailerManager
 from .runtime.session import SessionTailer as _RuntimeSessionTailer
@@ -279,6 +282,7 @@ def _trailing_envelope_state(text: str) -> str:
     return _goal_protocol._trailing_envelope_state(
         text,
         tail_scan_chars=_GOAL_TAIL_SCAN_CHARS,
+        plan_opener=_PLAN_OPENER,
         checkpoint_opener=_CHECKPOINT_OPENER,
         status_opener_re=_STRICT_STATUS_OPENER_RE,
         max_status_body_chars=_MAX_STATUS_BODY_CHARS,
@@ -561,11 +565,30 @@ class TailerManager(_RuntimeTailerManager):
         _TAILER_MANAGERS.add(self)
 
 
+def turn_activity_extras(tailer: _RuntimeSessionTailer) -> dict[str, Any]:
+    """Inbox extras for a live turn: what it is doing and since when.
+
+    Reads only state the tailer already keeps (the current tool call's label
+    and the turn clock), so a status poll for ~40 tabs never reaches the
+    provider or the event stream.
+    """
+    started = tailer.turn_started_monotonic
+    since = None
+    if started is not None:
+        since = datetime.now() - timedelta(seconds=max(0.0, time.monotonic() - started))
+    return {
+        "activity": tailer.active_tool_label or WORKING_ACTIVITY,
+        "activity_since": since,
+    }
+
+
 def _native_runtime_snapshot(tailer: _RuntimeSessionTailer) -> Optional[NativeRuntimeSnapshot]:
+    pending_question = tailer.has_pending_question()
     if tailer.hard_failed or tailer.native_error is not None:
         return NativeRuntimeSnapshot(
             status=AgentRuntimeStatus.OFFLINE,
             detail=tailer.native_error or tailer.last_error or "native provider unavailable",
+            pending_question=pending_question,
         )
     transport = tailer.native_transport
     if transport is None:
@@ -574,23 +597,33 @@ def _native_runtime_snapshot(tailer: _RuntimeSessionTailer) -> Optional[NativeRu
         return NativeRuntimeSnapshot(
             status=AgentRuntimeStatus.OFFLINE,
             detail=transport.last_error,
+            pending_question=pending_question,
         )
     terminal_status = tailer.native_terminal_status
     if terminal_status is not None:
-        return terminal_status
+        # The terminal snapshot was captured at turn end, before a later
+        # question card could appear, so only the question flag is refreshed.
+        return replace(terminal_status, pending_question=pending_question)
     if transport.turn_in_flight:
+        extras = turn_activity_extras(tailer)
         return NativeRuntimeSnapshot(
             status=AgentRuntimeStatus.WORKING,
-            detail="native provider turn is in flight",
+            # ``detail`` stays the plain state sentence ("Working — Responding")
+            # and ``activity`` names the concrete step for the inbox row.
+            detail=WORKING_ACTIVITY,
+            pending_question=pending_question,
+            **extras,
         )
     if transport.exit_error is not None:
         return NativeRuntimeSnapshot(
             status=AgentRuntimeStatus.ATTENTION,
             detail=transport.exit_error,
+            pending_question=pending_question,
         )
     return NativeRuntimeSnapshot(
         status=AgentRuntimeStatus.IDLE,
-        detail="native provider is ready",
+        detail=IDLE_DETAIL,
+        pending_question=pending_question,
     )
 
 
@@ -703,8 +736,6 @@ async def discard_retired_session_artifacts(workspace_id: str, session_id: str) 
     Callers must retain their durable identity reservation until this finishes;
     replay does not infer permission from missing process-local fence state.
     """
-    from .. import managed_chat
-
     store = AgentStreamStore(workspace_id, session_id)
     configured_root = store.path.parent.parent.parent
     root = configured_root.resolve()
@@ -733,7 +764,6 @@ async def discard_retired_session_artifacts(workspace_id: str, session_id: str) 
         # ordinary seed helper is best effort and cannot authorize durable ACK.
         await _complete_io(discard_snapshot, store.path.with_suffix(suffix))
     await AgentStreamAttachmentStore(workspace_id, session_id).clear(strict=True)
-    managed_chat._turn_state_cache.pop(session_id, None)
     # Confirm unlinks even when a previous failed sync already removed files.
     await _complete_io(partial(_sync_existing_directory, trusted_root=root), stream_directory)
     _PROVIDER_FENCED_SESSION_IDS.discard(session_id)

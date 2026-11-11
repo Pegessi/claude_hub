@@ -35,6 +35,7 @@ from claude_hub.services.feishu_bot_pool import (
     FeishuBotPoolStore,
     FeishuBotRevisionConflict,
 )
+from claude_hub.services.local_storage import document_exists, read_document, storage_location
 
 _TEST_NOW = 1_700_000_000.0
 _SECRET = "app-secret-do-not-echo"
@@ -117,12 +118,12 @@ def test_pool_file_permissions_and_tombstone_leaves_no_secret(pool) -> None:
     bot_id = pool.create_bot(name="Bot", config=_config(), environ={})
 
     assert stat.S_IMODE(pool.path.parent.stat().st_mode) == 0o700
-    assert stat.S_IMODE(pool.path.stat().st_mode) == 0o600
-    assert _SECRET in pool.path.read_text(encoding="utf-8")
+    assert stat.S_IMODE(storage_location(pool.path)[0].stat().st_mode) == 0o600
+    assert _SECRET in json.dumps(read_document(pool.path))
 
     pool.delete_bot(bot_id, expected_revision=0, environ={})
 
-    raw = pool.path.read_text(encoding="utf-8")
+    raw = json.dumps(read_document(pool.path))
     assert _SECRET not in raw
     assert _TOKEN not in raw and _ENCRYPT not in raw
     assert json.loads(raw)["bots"][bot_id]["revoked_at"] is not None
@@ -144,7 +145,7 @@ def test_stale_expected_revision_is_a_conflict(pool) -> None:
             expected_revision=0,
             environ={},
         )
-    assert "third" not in pool.path.read_text(encoding="utf-8")
+    assert "third" not in json.dumps(read_document(pool.path))
 
 
 @pytest.mark.asyncio
@@ -195,7 +196,7 @@ async def test_rejected_credentials_never_create_a_bot(pool, monkeypatch) -> Non
 
     assert response.status_code == 502
     assert response.json()["detail"] == "feishu_credentials_rejected"
-    assert not pool.path.exists()
+    assert not document_exists(pool.path)
 
 
 @pytest.mark.asyncio
@@ -233,7 +234,7 @@ async def test_access_control_rejection_is_actionable_and_never_persisted(
         "request_id": "support-log-id",
     }
     assert _SECRET not in response.text
-    assert not pool.path.exists()
+    assert not document_exists(pool.path)
 
 
 @pytest.mark.asyncio
@@ -261,7 +262,7 @@ async def test_created_bot_persists_official_feishu_profile(pool, monkeypatch) -
     summary = response.json()["bots"][0]
     assert summary["feishu_name"] == "Hub 助手"
     assert summary["feishu_avatar_url"] == "https://example.test/bot.png"
-    persisted = json.loads(pool.path.read_text(encoding="utf-8"))["bots"]
+    persisted = read_document(pool.path)["bots"]
     raw = next(iter(persisted.values()))
     assert raw["feishu_name"] == "Hub 助手"
     assert raw["feishu_avatar_url"] == "https://example.test/bot.png"
@@ -270,7 +271,7 @@ async def test_created_bot_persists_official_feishu_profile(pool, monkeypatch) -
 @pytest.mark.asyncio
 async def test_rejected_credentials_never_rotate_an_existing_bot(pool, monkeypatch) -> None:
     bot_id = pool.create_bot(name="Bot", config=_config(), environ={})
-    before = pool.path.read_bytes()
+    before = json.dumps(read_document(pool.path), sort_keys=True)
     monkeypatch.setattr(bot_api, "FeishuBotClient", _Rejecting)
 
     async with _client() as client:
@@ -283,8 +284,8 @@ async def test_rejected_credentials_never_rotate_an_existing_bot(pool, monkeypat
         )
 
     assert response.status_code == 502
-    assert pool.path.read_bytes() == before
-    assert "rotated-secret" not in pool.path.read_text(encoding="utf-8")
+    assert json.dumps(read_document(pool.path), sort_keys=True) == before
+    assert "rotated-secret" not in json.dumps(read_document(pool.path))
 
 
 # ----------------------------------------------------------- request bodies
@@ -328,7 +329,7 @@ async def test_unreadable_admin_body_is_rejected(pool, body: bytes) -> None:
 
     assert response.status_code == 400
     assert response.json()["detail"] == "invalid_bot_request"
-    assert not pool.path.exists()
+    assert not document_exists(pool.path)
 
 
 @pytest.mark.parametrize(
@@ -369,7 +370,7 @@ async def test_admin_body_must_carry_exactly_the_expected_keys(pool, payload) ->
 
     assert response.status_code == 400
     assert response.json()["detail"] == "invalid_bot_request"
-    assert not pool.path.exists()
+    assert not document_exists(pool.path)
 
 
 # -------------------------------------------------------------------- CAS
@@ -396,7 +397,7 @@ async def test_stale_revision_is_rejected_by_mutating_routes(
     pool, accepting, method: str, suffix: str, payload: dict
 ) -> None:
     bot_id = pool.create_bot(name="Bot", config=_config(), environ={})
-    before = pool.path.read_bytes()
+    before = json.dumps(read_document(pool.path), sort_keys=True)
 
     async with _client() as client:
         response = await client.request(
@@ -407,7 +408,7 @@ async def test_stale_revision_is_rejected_by_mutating_routes(
 
     assert response.status_code == 409
     assert response.json()["detail"] == "bot_revision_conflict"
-    assert pool.path.read_bytes() == before
+    assert json.dumps(read_document(pool.path), sort_keys=True) == before
 
 
 # ------------------------------------------------------------- reply gate
@@ -605,7 +606,7 @@ async def test_a_change_during_credential_validation_loses_the_cas(pool, monkeyp
 
     assert response.status_code == 409
     assert response.json()["detail"] == "bot_revision_conflict"
-    assert "rotated-secret" not in pool.path.read_text(encoding="utf-8")
+    assert "rotated-secret" not in json.dumps(read_document(pool.path))
 
 
 @pytest.mark.asyncio

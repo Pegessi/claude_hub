@@ -14,6 +14,7 @@ from claude_hub.models import (
     WorkspaceTaskStatus,
     WorkspaceTaskUpdate,
 )
+from claude_hub.services.local_storage import read_document
 from claude_hub.services.workspace_manager import WorkspaceManager
 from claude_hub.services.workspace_snapshot import MAX_SNAPSHOT_TASKS
 from tests.test_task_dependencies import create
@@ -55,7 +56,9 @@ def test_snapshot_has_committed_hash_goal_report_evidence_and_safe_bounds(manage
         )
         manager.tasks[old.id] = old
     manager._save_state()
-    state = manager._workspace_state_file(workspace.id).read_bytes()
+    state = json.dumps(
+        read_document(manager._workspace_state_file(workspace.id)), indent=2
+    ).encode()
     snapshot = manager.snapshot_path(workspace.id).read_text()
     assert hashlib.sha256(state).hexdigest() in snapshot
     assert "evidence-report" in snapshot
@@ -89,34 +92,44 @@ async def test_snapshot_failure_does_not_rollback_committed_update_and_restart_r
     await manager.update_task(task.id, WorkspaceTaskUpdate(title="committed title"))
     assert path.read_bytes() == old_snapshot
     assert manager.tasks[task.id].title == "committed title"
-    saved = manager._workspace_state_file(workspace.id).read_bytes()
+    saved = json.dumps(
+        read_document(manager._workspace_state_file(workspace.id)), indent=2
+    ).encode()
     assert json.loads(saved)["tasks"][0]["title"] == "committed title"
     fresh = WorkspaceManager()
     assert fresh.tasks[task.id].title == "committed title"
     assert "committed title" in path.read_text()
     assert hashlib.sha256(saved).hexdigest() in path.read_text()
-    assert manager._workspace_state_file(workspace.id).read_bytes() == saved
+    assert (
+        json.dumps(read_document(manager._workspace_state_file(workspace.id)), indent=2).encode()
+        == saved
+    )
 
 
 @pytest.mark.asyncio
 async def test_state_commit_failure_preserves_dependency_contract(manager, workspace, monkeypatch):
     prerequisite = create(manager, workspace)
     task = create(manager, workspace)
-    saved = manager._workspace_state_file(workspace.id).read_bytes()
-    original = manager._atomic_write_text
+    saved = json.dumps(
+        read_document(manager._workspace_state_file(workspace.id)), indent=2
+    ).encode()
+    original = manager._atomic_save_state_text
 
     def fail_state(path, text):
         if path == manager._workspace_state_file(workspace.id):
             raise OSError("state commit failed")
         original(path, text)
 
-    monkeypatch.setattr(manager, "_atomic_write_text", fail_state)
+    monkeypatch.setattr(manager, "_atomic_save_state_text", fail_state)
     with pytest.raises(OSError, match="state commit"):
         await manager.update_task(
             task.id, WorkspaceTaskUpdate(depends_on_task_ids=[prerequisite.id])
         )
     assert manager.tasks[task.id].depends_on_task_ids == []
-    assert manager._workspace_state_file(workspace.id).read_bytes() == saved
+    assert (
+        json.dumps(read_document(manager._workspace_state_file(workspace.id)), indent=2).encode()
+        == saved
+    )
 
 
 def test_direct_refresh_ignores_uncommitted_memory_and_cold_start_repairs_missing_snapshot(
@@ -124,7 +137,9 @@ def test_direct_refresh_ignores_uncommitted_memory_and_cold_start_repairs_missin
 ):
     task = create(manager, workspace)
     path = manager.snapshot_path(workspace.id)
-    state = manager._workspace_state_file(workspace.id).read_bytes()
+    state = json.dumps(
+        read_document(manager._workspace_state_file(workspace.id)), indent=2
+    ).encode()
     manager.tasks[task.id] = task.model_copy(update={"title": "NOT COMMITTED"})
     manager._write_snapshot(workspace.id)
     assert "NOT COMMITTED" not in path.read_text()
@@ -132,7 +147,10 @@ def test_direct_refresh_ignores_uncommitted_memory_and_cold_start_repairs_missin
     WorkspaceManager()
     assert path.exists()
     assert hashlib.sha256(state).hexdigest() in path.read_text()
-    assert manager._workspace_state_file(workspace.id).read_bytes() == state
+    assert (
+        json.dumps(read_document(manager._workspace_state_file(workspace.id)), indent=2).encode()
+        == state
+    )
 
 
 def test_snapshot_orders_mixed_legacy_naive_and_aware_timestamps(manager, workspace):

@@ -1,9 +1,10 @@
 """Full-app Hub sub-agent jump card smoke with every API request mocked.
 
 Covers InfoWall d2627d2f: a Hub sub-agent (`claude-hub agent run`) attributed
-to its parent workspace groups under the Workspace Agents panel instead of
-the manual tab strip, and the parent Chat shows an Agents pill/popover that
-focuses the live child or restores an archived child in one click.
+to its parent workspace groups under its workspace in the inbox's Agents view
+instead of the manual tab strip, and the parent Chat shows an Agents
+pill/popover that focuses the live child or restores an archived child in one
+click.
 
 Run only with a dedicated Vite server, never 5173/8173:
   python tests/browser_subagent_jump_card.py http://127.0.0.1:5291 /tmp/subagent-jump-ui [browser]
@@ -330,23 +331,29 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(page.locator(".tab-bar .tab")).to_have_count(1)
         await expect(page.locator(".tab-bar .tab").first).to_have_attribute("data-tab-id", PARENT)
 
-        # Workspace Agents floating panel groups it under "Repo" with a sub tag.
-        agents_trigger = page.locator(".status-trigger", has_text="Agents").first
-        await agents_trigger.click()
-        managed_panel = page.locator(".status-panel", has_text="Workspace Agents")
-        await expect(managed_panel).to_be_visible()
-        await expect(
-            managed_panel.locator(".agent-group-header span", has_text="Repo")
-        ).to_have_count(1)
-        managed_row = managed_panel.locator(".agent-row", has_text="analyze parser")
-        await expect(managed_row).to_have_count(1)
-        await expect(managed_row.locator(".agent-sub-tag")).to_have_text("sub")
-        await page.screenshot(path=str(output / "01-workspace-grouped.png"))
-        await agents_trigger.click()
-        await expect(managed_panel).to_be_hidden()
-
-        # One click focuses the live child tab (its Chat pane hydrates).
+        # The Needs-you inbox is the single top-bar status entry. Its Agents
+        # view still groups the workspace-attributed child under its workspace
+        # and keeps the sub marker, and one click opens the child Chat.
         assert LIVE not in event_tabs
+        inbox_trigger = page.locator(".inbox-trigger").first
+        await inbox_trigger.click()
+        inbox_panel = page.locator(".inbox-panel")
+        await expect(inbox_panel).to_be_visible()
+        await inbox_panel.locator(".inbox-scope button", has_text="Agents").click()
+        await expect(
+            inbox_panel.locator(".inbox-workspace-header span", has_text="Repo")
+        ).to_have_count(1)
+        managed_row = inbox_panel.locator(".inbox-row", has_text="analyze parser")
+        await expect(managed_row).to_have_count(1)
+        await expect(managed_row.locator(".inbox-row-sub")).to_have_text("sub")
+        await page.screenshot(path=str(output / "01-workspace-grouped.png"))
+        await managed_row.locator(".inbox-row-main").click()
+        await expect(inbox_panel).to_be_hidden()
+        await wait_until(lambda: LIVE in event_tabs)
+        # Back on the parent for the pane-chrome flows below.
+        await page.locator(".tab-bar .tab", has_text="Parent Chat").click()
+
+        # The pane-chrome pill keeps its own one-click jump.
         await pill.click()
         await live_row.click()
         await wait_until(lambda: LIVE in event_tabs)
@@ -480,7 +487,7 @@ async def main(browser_run: BrowserRun) -> None:
         "coverage": [
             "desktop Agents pill + popover: Active first, collapsible Earlier, Esc closes",
             "workspace-attributed child excluded from manual tab strip",
-            "child grouped under workspace in Workspace Agents panel with sub marker",
+            "child grouped under its workspace in the inbox Agents view, with sub marker",
             "one-click jump focuses live child Chat",
             "archived child click restores (unarchive) then focuses it",
             "mobile keeps the pill in the pane chrome (no composer bar); sheet closes via Esc"

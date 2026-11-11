@@ -624,7 +624,13 @@ async def persistent_native(
     spawn_mock = AsyncMock(side_effect=spawn)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn_mock)
     native_module = importlib.import_module("claude_hub.services.agent_stream.native")
+    monkeypatch.setattr(native_module, "_models_cache", {})
     monkeypatch.setattr(native_module, "_help_confirms_plan_mode", lambda _binary, _flag: True)
+    monkeypatch.setattr(
+        native_module,
+        "_probe_antigravity_models",
+        AsyncMock(return_value=(native_module._static_options("antigravity"), False)),
+    )
     native = AntigravityNativeSession(_session())
     monkeypatch.setattr(native, "_prepare_turn_context", AsyncMock(return_value=""))
     try:
@@ -1531,3 +1537,171 @@ async def test_persistent_image_attachments_cleaned_on_cancel_and_reject_invalid
     assert not native.turn_in_flight
     assert not staged_files[0].exists()
     assert len(processes) == 2
+
+
+_SAMPLE_AGYX_MODELS = (
+    "\x1b[?25l\r⠋ Fetching available models...\rLoading  models...\r\x1b[?25h"
+    "gemini-4-carbon-medium\tGemini 4 Carbon (Medium)\n"
+    "gemini-4-carbon-high\tGemini 4 Carbon (High)\r\x1b[?25h\n"
+    "gemini-4-carbon-low  Gemini 4 Carbon (Low) (default)\n"
+    "gemini-4-argon-high\tGemini 4 Argon (High)\n"
+    "gemini-4-carbon-high\tDuplicate Ignored\n"
+    "Loading  models...\n"
+    "Fetching available models...\n"
+    "bad id\tInvalid Slug\n"
+)
+
+
+def test_parse_antigravity_models_handles_pipe_and_tty_rows() -> None:
+    native_module = importlib.import_module("claude_hub.services.agent_stream.native")
+    options = native_module._parse_antigravity_models(_SAMPLE_AGYX_MODELS)
+    assert [(m.id, m.label) for m in options] == [
+        ("gemini-4-carbon-medium", "Gemini 4 Carbon (Medium)"),
+        ("gemini-4-carbon-high", "Gemini 4 Carbon (High)"),
+        ("gemini-4-carbon-low", "Gemini 4 Carbon (Low)"),
+        ("gemini-4-argon-high", "Gemini 4 Argon (High)"),
+    ]
+
+
+async def test_antigravity_prepare_capabilities_probes_agyx_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native_module = importlib.import_module("claude_hub.services.agent_stream.native")
+    monkeypatch.setattr(native_module, "_models_cache", {})
+    monkeypatch.setattr(native_module, "_help_confirms_plan_mode", lambda _binary, _flag: True)
+
+    class _FakeModelsProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return _SAMPLE_AGYX_MODELS.encode("utf-8"), b"Fetching available models...\n"
+
+        def kill(self) -> None:
+            pass
+
+    spawn = AsyncMock(return_value=_FakeModelsProc())
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+
+    session = AntigravityNativeSession(_session())
+    await session.prepare_capabilities()
+    caps = session.capabilities()
+
+    assert spawn.await_count == 1
+    assert spawn.await_args is not None
+    assert spawn.await_args.args == ("agyx", "models")
+    assert caps.metadata_cacheable is True
+    assert [(m.id, m.label) for m in caps.available_models] == [
+        ("gemini-4-carbon-medium", "Gemini 4 Carbon (Medium)"),
+        ("gemini-4-carbon-high", "Gemini 4 Carbon (High)"),
+        ("gemini-4-carbon-low", "Gemini 4 Carbon (Low)"),
+        ("gemini-4-argon-high", "Gemini 4 Argon (High)"),
+    ]
+
+
+async def test_antigravity_models_probe_fallback_includes_carbon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native_module = importlib.import_module("claude_hub.services.agent_stream.native")
+    monkeypatch.setattr(native_module, "_models_cache", {})
+
+    class _FailedModelsProc:
+        returncode = 1
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b"error"
+
+        def kill(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        asyncio, "create_subprocess_exec", AsyncMock(return_value=_FailedModelsProc())
+    )
+    catalog = await native_module.model_catalog_for("antigravity")
+    assert catalog.metadata_cacheable is False
+    ids = [m.id for m in catalog.options]
+    assert "gemini-4-carbon-high" in ids
+    assert "gemini-4-carbon-medium" in ids
+    assert "gemini-4-carbon-low" in ids
+
+    monkeypatch.setattr(native_module, "_models_cache", {})
+    monkeypatch.setattr(
+        asyncio, "create_subprocess_exec", AsyncMock(side_effect=FileNotFoundError("agyx"))
+    )
+    missing_catalog = await native_module.model_catalog_for("antigravity")
+    assert missing_catalog.metadata_cacheable is False
+    assert [m.id for m in missing_catalog.options] == ids
+
+
+async def test_antigravity_models_probe_timeout_and_cancel_kill_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native_module = importlib.import_module("claude_hub.services.agent_stream.native")
+    monkeypatch.setattr(native_module, "_models_cache", {})
+    monkeypatch.setattr(native_module.settings, "antigravity_models_probe_timeout_seconds", 0.05)
+
+    class _HungModelsProc:
+        returncode: int | None = None
+        killed = False
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            await asyncio.sleep(10)
+            return b"", b""
+
+        def kill(self) -> None:
+            self.killed = True
+
+    timed_out_proc = _HungModelsProc()
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=timed_out_proc))
+    catalog = await native_module.model_catalog_for("antigravity")
+    assert timed_out_proc.killed is True
+    assert catalog.metadata_cacheable is False
+    assert "gemini-4-carbon-high" in [m.id for m in catalog.options]
+
+    monkeypatch.setattr(native_module, "_models_cache", {})
+    monkeypatch.setattr(native_module.settings, "antigravity_models_probe_timeout_seconds", 10.0)
+    cancelled_proc = _HungModelsProc()
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=cancelled_proc))
+    task = asyncio.create_task(native_module.model_catalog_for("antigravity"))
+    await asyncio.sleep(0.02)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancelled_proc.killed is True
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan")])
+def test_antigravity_models_probe_timeout_setting_requires_positive_finite(timeout: float) -> None:
+    from claude_hub.config import Settings
+
+    with pytest.raises(ValueError, match="antigravity_models_probe_timeout_seconds"):
+        Settings(_env_file=None, antigravity_models_probe_timeout_seconds=timeout)
+
+
+async def test_cursor_and_antigravity_cold_probes_run_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native_module = importlib.import_module("claude_hub.services.agent_stream.native")
+    monkeypatch.setattr(native_module, "_models_cache", {})
+    monkeypatch.setattr(native_module, "_models_locks", {})
+    cursor_entered = asyncio.Event()
+    agy_entered = asyncio.Event()
+
+    async def _probe_cursor():
+        cursor_entered.set()
+        await asyncio.wait_for(agy_entered.wait(), timeout=1.0)
+        return native_module._static_options("cursor"), False
+
+    async def _probe_agy():
+        agy_entered.set()
+        await asyncio.wait_for(cursor_entered.wait(), timeout=1.0)
+        return native_module._static_options("antigravity"), False
+
+    monkeypatch.setattr(native_module, "_probe_cursor_models", _probe_cursor)
+    monkeypatch.setattr(native_module, "_probe_antigravity_models", _probe_agy)
+
+    cursor_catalog, agy_catalog = await asyncio.gather(
+        native_module.model_catalog_for("cursor"),
+        native_module.model_catalog_for("antigravity"),
+    )
+    assert cursor_catalog.options
+    assert agy_catalog.options

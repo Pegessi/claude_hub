@@ -393,6 +393,14 @@
   .mobile-app-menu {
     display: flex;
     flex: 0 0 auto;
+    /* The ⋯ sheet is the catch-all, and every phone toolbar keeps the catch-all
+       in the far-right slot; the needs-you entry is the one thing that changes
+       without the user looking for it, so it sits next to the code instead. */
+    order: 2;
+  }
+
+  .agent-inbox {
+    order: 1;
   }
 }
 

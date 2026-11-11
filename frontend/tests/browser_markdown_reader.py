@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from playwright.async_api import Page, expect
+from playwright.async_api import Locator, Page, expect
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
@@ -55,6 +55,10 @@ This synthetic report checks the reading experience across desktop and narrow sc
 report = {{"sample": True, "status": "ready"}}
 for section in ["Summary", "Findings", "Method"]:
     print(f"{{section}}: {{report['status']}}")
+```
+
+```bash
+curl --fail --silent --show-error --header 'Accept: application/json' --header 'X-Claude-Hub-Scope: reader-review-tab' 'http://[::1]:8173/api/workspaces/tabs/reader-review-tab/stream/markdown?path=/fixture/reports/阅读体验验证.md' | head -c 4096
 ```
 
 ### 后续检查 / Follow-up
@@ -220,6 +224,145 @@ async def check_source_retention(page: Page, reads: list[str]) -> dict[str, Any]
     }
 
 
+CODE_BLOCK_STATE = """blocks => blocks.map(block => {
+  const pre = block.querySelector('pre');
+  const hint = block.querySelector('.markdown-code-scroll-hint');
+  const preBox = pre.getBoundingClientRect();
+  const hintBox = hint ? hint.getBoundingClientRect() : null;
+  const preStyle = getComputedStyle(pre);
+  return {
+    overflow_flagged: block.hasAttribute('data-overflow-x'),
+    scroll_end_flagged: block.hasAttribute('data-scroll-end'),
+    overflows: pre.scrollWidth > pre.clientWidth + 1,
+    scroll_width: pre.scrollWidth,
+    client_width: pre.clientWidth,
+    vertical_overflow: pre.scrollHeight - pre.clientHeight,
+    overflow_x: preStyle.overflowX,
+    overflow_y: preStyle.overflowY,
+    scrollbar_width: preStyle.scrollbarWidth,
+    scrollbar_color: preStyle.scrollbarColor,
+    border_token: getComputedStyle(document.documentElement)
+      .getPropertyValue('--ch-color-border-strong').trim(),
+    code_white_space: getComputedStyle(pre.querySelector('code')).whiteSpace,
+    hint_opacity: hint ? parseFloat(getComputedStyle(hint).opacity) : null,
+    hint_right: hintBox ? hintBox.right : null,
+    hint_top: hintBox ? hintBox.top : null,
+    hint_bottom: hintBox ? hintBox.bottom : null,
+    pre_right: preBox.right,
+    pre_top: preBox.top,
+    pre_bottom: preBox.bottom,
+  };
+})"""
+
+
+def thumb_alpha(scrollbar_color: str) -> float:
+    """Alpha of the thumb in a computed ``scrollbar-color`` value."""
+    match = re.search(r"rgba?\(([^)]+)\)", scrollbar_color)
+    assert match, scrollbar_color
+    parts = [float(part) for part in re.findall(r"[\d.]+", match.group(1))]
+    return parts[3] if len(parts) > 3 else 1.0
+
+
+def rgb_triplet(color: str) -> tuple[int, int, int]:
+    """``#3a3a40`` or ``rgb(58, 58, 64)`` -> ``(58, 58, 64)``."""
+    hex_match = re.fullmatch(r"#([0-9a-fA-F]{6})", color.strip())
+    if hex_match:
+        digits = hex_match.group(1)
+        channels = [int(digits[index : index + 2], 16) for index in (0, 2, 4)]
+    else:
+        channels = [int(float(value)) for value in re.findall(r"[\d.]+", color)[:3]]
+    return channels[0], channels[1], channels[2]
+
+
+async def wait_code_block_state(
+    page: Page, blocks: Locator, expected_opacity: list[float]
+) -> list[dict[str, Any]]:
+    """Read the affordance state once the fade transition has settled."""
+    state: list[dict[str, Any]] = []
+    for _ in range(24):
+        state = await blocks.evaluate_all(CODE_BLOCK_STATE)
+        measured = [round(row["hint_opacity"] or 0, 2) for row in state]
+        if measured == expected_opacity:
+            return state
+        await page.wait_for_timeout(50)
+    raise AssertionError(f"code block fade did not settle on {expected_opacity}: {state}")
+
+
+async def check_code_block_chrome(page: Page, article: Locator) -> dict[str, Any]:
+    """Header chip labels and the horizontal-scroll affordance of code blocks.
+
+    The first block fits its box, the second carries one deliberately long line:
+    only the second may advertise a remainder, and neither may grow a vertical
+    scrollbar or lose the code it shows.
+    """
+    blocks = article.locator(".markdown-code-block")
+    await expect(blocks).to_have_count(2)
+    await expect(blocks.nth(0).locator(".markdown-code-language")).to_have_text("Python")
+    await expect(blocks.nth(1).locator(".markdown-code-language")).to_have_text("Bash")
+    for index in (0, 1):
+        block = blocks.nth(index)
+        await expect(block.locator("pre code")).to_have_count(1)
+        await expect(block.get_by_role("button", name="Copy code")).to_be_visible()
+        await expect(block.get_by_role("button", name="Copy code")).to_have_text("Copy")
+
+    state = await wait_code_block_state(page, blocks, [0, 1])
+    short, long = state
+    assert not short["overflows"] and not short["overflow_flagged"], short
+    assert short["hint_opacity"] == 0, short
+    assert long["overflows"] and long["overflow_flagged"], long
+    assert long["hint_opacity"] == 1, long
+    for row in state:
+        # One axis only: a vertical scrollbar inside a code block traps the wheel.
+        assert row["vertical_overflow"] <= 0, row
+        assert row["overflow_x"] == "auto", row
+        assert row["overflow_y"] == "hidden", row
+        # Content is scrolled, never clipped or wrapped.
+        assert row["code_white_space"] == "pre", row
+        # The fade sits on the code area's right edge, not over the header.
+        assert row["hint_right"] <= row["pre_right"] + 1, row
+        assert row["hint_right"] >= row["pre_right"] - 1, row
+        assert row["hint_top"] >= row["pre_top"] - 1, row
+        assert row["hint_top"] <= row["pre_top"] + 2, row
+        assert row["hint_bottom"] <= row["pre_bottom"] + 1, row
+        # The scrollbar is themed, thin, and out of the way until asked for.
+        assert row["scrollbar_width"] == "thin", row
+        assert thumb_alpha(row["scrollbar_color"]) == 0, row
+
+    # Hovering the block reveals the scrollbar in the border-strong token, so
+    # both themes carry it and nothing is hardcoded.
+    await blocks.nth(1).hover()
+    hovered = await wait_code_block_state(page, blocks, [0, 1])
+    assert thumb_alpha(hovered[1]["scrollbar_color"]) == 1, hovered[1]
+    assert rgb_triplet(hovered[1]["scrollbar_color"]) == rgb_triplet(
+        hovered[1]["border_token"]
+    ), hovered[1]
+    # So does keyboard focus on the block's Copy button, with the pointer away.
+    await page.mouse.move(0, 0)
+    await blocks.nth(1).get_by_role("button", name="Copy code").focus()
+    focused = await wait_code_block_state(page, blocks, [0, 1])
+    assert thumb_alpha(focused[1]["scrollbar_color"]) == 1, focused[1]
+    await blocks.nth(1).get_by_role("button", name="Copy code").evaluate("el => el.blur()")
+    rested = await wait_code_block_state(page, blocks, [0, 1])
+    assert thumb_alpha(rested[1]["scrollbar_color"]) == 0, rested[1]
+
+    # Reaching the end withdraws the fade: it must not dim the last characters.
+    await blocks.nth(1).locator("pre").evaluate("el => { el.scrollLeft = el.scrollWidth }")
+    ended = await wait_code_block_state(page, blocks, [0, 0])
+    assert ended[1]["scroll_end_flagged"] and ended[1]["hint_opacity"] == 0, ended[1]
+    await blocks.nth(1).locator("pre").evaluate("el => { el.scrollLeft = 0 }")
+    back = await wait_code_block_state(page, blocks, [0, 1])
+    assert not back[1]["scroll_end_flagged"] and back[1]["hint_opacity"] == 1, back[1]
+    return {
+        "chips": ["Python", "Bash"],
+        "short_block": short,
+        "long_block": long,
+        "scrollbar_visible_on_hover": True,
+        "scrollbar_visible_on_focus": True,
+        "fade_withdrawn_at_end": True,
+        "fade_restored_at_start": True,
+    }
+
+
 async def main(browser_run: BrowserRun) -> None:
     base = sys.argv[1].rstrip("/")
     parsed = urlparse(base)
@@ -374,7 +517,7 @@ async def main(browser_run: BrowserRun) -> None:
                 await expect(article.locator("blockquote")).to_have_count(1)
                 await expect(article.locator("table")).to_have_count(1)
                 await expect(article.locator("table th")).to_have_count(6)
-                await expect(article.locator("pre code")).to_have_count(1)
+                await expect(article.locator("pre code")).to_have_count(2)
                 await expect(article.locator("li")).to_have_count(3)
                 svg_link = article.locator("svg a")
                 await expect(svg_link).to_have_count(1)
@@ -432,6 +575,10 @@ async def main(browser_run: BrowserRun) -> None:
                     report["geometry"]["desktop-dark"]["main"]["background"]
                     != report["geometry"]["desktop-light"]["main"]["background"]
                 )
+
+                # Code-block chrome: the header chip and the horizontal-scroll
+                # affordance, read at desktop width where the first block fits.
+                report["code_chrome"] = await check_code_block_chrome(page, article)
 
                 for width in (390, 320):
                     await page.set_viewport_size({"width": width, "height": 844})

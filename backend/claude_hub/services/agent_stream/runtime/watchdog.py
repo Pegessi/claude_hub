@@ -7,6 +7,11 @@ import time
 from typing import Any, Dict, Optional
 
 from ....models import AgentRuntimeStatus, AgentStreamEvent, AgentStreamEventType
+from ..activity_labels import (
+    FAILED_TURN_DETAIL,
+    IDLE_DETAIL,
+    tool_activity_label,
+)
 from ..base import NormalizeContext, is_substantive_answer
 from ..native import ProviderSession
 from ..redaction import redact_event
@@ -50,12 +55,16 @@ class WatchdogMixin(SessionState):
         if status == "completed":
             self._native_terminal_status = NativeRuntimeSnapshot(
                 status=AgentRuntimeStatus.IDLE,
-                detail="native provider turn completed",
+                detail=IDLE_DETAIL,
             )
             return
+        # Provider wording ("error", "interrupted", "cancelled") is worth
+        # keeping, but only next to a human sentence.
+        reason = status.strip() if isinstance(status, str) and status.strip() else "failed"
+        detail = FAILED_TURN_DETAIL if reason == "failed" else f"{FAILED_TURN_DETAIL} ({reason})"
         self._native_terminal_status = NativeRuntimeSnapshot(
             status=AgentRuntimeStatus.ATTENTION,
-            detail=f"native provider turn {status or 'failed'}",
+            detail=detail,
         )
 
     def _waiting_for_external_activity(self) -> bool:
@@ -488,8 +497,20 @@ class WatchdogMixin(SessionState):
             return
         if event.type == AgentStreamEventType.TOOL_CALL_STARTED:
             self._active_tool_call_ids.add(call_id)
+            label = tool_activity_label(event.payload)
+            if label is not None:
+                # Prune first: live ids are the authority, so a label whose
+                # call already completed (cleared outside this method) cannot
+                # pile up turn after turn.
+                self._active_tool_labels = {
+                    key: value
+                    for key, value in self._active_tool_labels.items()
+                    if key in self._active_tool_call_ids
+                }
+                self._active_tool_labels[call_id] = label
         elif event.type == AgentStreamEventType.TOOL_CALL_COMPLETED:
             self._active_tool_call_ids.discard(call_id)
+            self._active_tool_labels.pop(call_id, None)
 
     def _note_raw_provider_wait(self, record: Any) -> bool:
         """Track provider-level capacity queueing from a raw JSON-RPC record.

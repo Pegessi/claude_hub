@@ -20,7 +20,9 @@ from claude_hub.auth.dependencies import get_current_user
 from claude_hub.cli.main import cli
 from claude_hub.main import app
 from claude_hub.models import TerminalTab, User, WorkspaceTask
+from claude_hub.services.local_storage import read_document
 from claude_hub.services.workspace_manager import WorkspaceManager, workspace_manager
+from tests.test_task_execution_control import _seed_legacy_json
 
 _wm = import_module("claude_hub.services.workspace_manager")
 _tm = import_module("claude_hub.services.ttyd_manager")
@@ -240,7 +242,7 @@ def test_normal_persistence_payload_excludes_legacy_agent_tree_keys(
 
     manager._save_state()
     state_file = state_root / workspace_id / "state.json"
-    disk = json.loads(state_file.read_text(encoding="utf-8"))
+    disk = read_document(state_file)
 
     assert "agent_runs" not in disk
     assert "agent_events" not in disk
@@ -253,7 +255,7 @@ def test_normal_persistence_payload_excludes_legacy_agent_tree_keys(
         for token in _LEGACY_FIELD_TOKENS:
             assert token not in item
 
-    index = json.loads((state_root / "index.json").read_text(encoding="utf-8"))
+    index = read_document(state_root / "index.json")
     index_blob = json.dumps(index)
     assert "resident_ack_sequence" not in index_blob
     assert "resident_root" not in index_blob

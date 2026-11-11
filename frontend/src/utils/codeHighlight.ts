@@ -170,6 +170,108 @@ export function renderCodeBlockHtml(text: string, lang: string): string {
   return `<pre><code${langAttr}>${highlightCode(normalized, firstWord)}</code></pre>\n`
 }
 
+/** Language of a file path, for surfaces that show code they did not author.
+ *
+ *  A diff row has no info string — the only language hint is the file name —
+ *  so the extension is the contract here. Unknown or extension-less paths
+ *  return ``''``, which every caller must treat as "render as plain text" rather
+ *  than guessing. */
+export function languageForPath(path: string): string {
+  const name = (path || '').split(/[?#]/)[0].split('/').pop() ?? ''
+  const raw = name.includes('.') ? name.split('.').pop() ?? '' : ''
+  if (!raw) return ''
+  const candidate = normalizeLang(raw)
+  return LANG_ALIASES[raw.toLowerCase()] ?? candidate
+}
+
+/** Display name for a language identifier: ``python`` -> ``Python``.
+ *
+ *  Shown as a chip on a code block header, where the fence's ``py`` has to read
+ *  as the language a reader recognises, not as the info-string they typed. */
+const LANGUAGE_LABELS: Record<string, string> = {
+  javascript: 'JavaScript',
+  typescript: 'TypeScript',
+  python: 'Python',
+  bash: 'Bash',
+  shell: 'Bash',
+  json: 'JSON',
+  yaml: 'YAML',
+  toml: 'TOML',
+  xml: 'XML',
+  html: 'HTML',
+  vue: 'Vue',
+  svg: 'SVG',
+  css: 'CSS',
+  scss: 'SCSS',
+  less: 'LESS',
+  markdown: 'Markdown',
+  sql: 'SQL',
+  go: 'Go',
+  rust: 'Rust',
+  java: 'Java',
+  kotlin: 'Kotlin',
+  swift: 'Swift',
+  ruby: 'Ruby',
+  php: 'PHP',
+  cpp: 'C++',
+  c: 'C',
+  csharp: 'C#',
+  objectivec: 'Objective-C',
+  protobuf: 'Protobuf',
+  graphql: 'GraphQL',
+  dockerfile: 'Dockerfile',
+  nginx: 'Nginx',
+  diff: 'Diff',
+  plaintext: 'Text',
+}
+
+/** Whether ``lang`` is a language we can name without loading the highlighter.
+ *
+ *  A label is cheap and needs no chunk (`py` → `Python`), while whether the rows
+ *  can actually be *coloured* depends on the highlighter being loaded. Surfaces
+ *  that intentionally render plain text (a diff over the size ceiling) still want
+ *  the name — and must not subscribe to the chunk just to get it. */
+export function isKnownLanguage(lang: string): boolean {
+  const token = (lang || '').toLowerCase().trim()
+  if (!token) return false
+  if (Object.prototype.hasOwnProperty.call(LANGUAGE_LABELS, token)) return true
+  return Object.prototype.hasOwnProperty.call(LANGUAGE_LABELS, normalizeLang(token))
+}
+
+export function languageLabel(lang: string): string {
+  const token = (lang || '').toLowerCase().trim()
+  if (!token) return ''
+  // Several tokens share one grammar (``vue``/``svg``/``xml`` all highlight as
+  // XML), so the label reads the token the fence or file actually named: a
+  // ``.vue`` file is not an HTML file, even though the same highlighter paints it.
+  const own = LANGUAGE_LABELS[token]
+  if (own) return own
+  const canonical = normalizeLang(token)
+  return LANGUAGE_LABELS[canonical] ?? canonical.replace(/^./, first => first.toUpperCase())
+}
+
+/** Highlight ONE line of code for an inline surface (a diff row).
+ *
+ *  ``highlightCode`` is built for fenced blocks where the whole snippet is at
+ *  hand. A diff row is a single line lifted out of its file, so it is
+ *  highlighted on its own: grammar state from the surrounding lines is missing,
+ *  which costs precision inside multi-line strings and block comments, but every
+ *  row stays independent — no span can cross a row boundary and swallow the
+ *  next row's tint or line number.
+ *
+ *  Returns HTML-escaped text when the highlighter has not loaded or the
+ *  language is unknown, exactly like ``highlightCode``. */
+export function highlightLine(text: string, lang: string): string {
+  if (!text || !hljsInstance) return escapeHtml(text)
+  const normalized = normalizeLang(lang || '')
+  if (!normalized || !hljsInstance.getLanguage(normalized)) return escapeHtml(text)
+  try {
+    return hljsInstance.highlight(text, { language: normalized, ignoreIllegals: true }).value
+  } catch {
+    return escapeHtml(text)
+  }
+}
+
 /** ``true`` if ``lang`` is registered with the loaded highlighter. */
 export function isLanguageRegistered(lang: string): boolean {
   if (!hljsInstance) return false

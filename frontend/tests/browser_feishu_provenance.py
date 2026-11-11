@@ -604,9 +604,9 @@ async def main(browser_run: BrowserRun) -> None:
                 await expect(
                     group_badge.locator(".conversation-message-source__label")
                 ).to_have_text("Hub 助手")
-                await expect(
-                    group_badge.get_by_test_id("conversation-message-scope")
-                ).to_have_text("· group topic")
+                await expect(group_badge.get_by_test_id("conversation-message-scope")).to_have_text(
+                    "· group topic"
+                )
 
                 hub_bubble = page.locator(
                     '.conversation-bubble--user[data-message-origin="hub_message"]'

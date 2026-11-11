@@ -6,6 +6,8 @@
     :error="goalError || (!isGoalEditing ? composerError : null)"
     :editing="isGoalEditing"
     :initial-objective="goal?.objective"
+    :initial-plan-first="planFirstPreferred"
+    :plan-first-disabled-reason="planFirstDisabledReason"
     @close="isGoalSetupOpen = false"
     @submit="startGoal"
   >
@@ -79,7 +81,7 @@
 <script setup lang="ts">
 import { requireChatOwner, chatGoalKey, chatAttachmentsKey, chatDeliveryKey, chatImagesKey } from '../owners'
 import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
-const { isGoalSetupOpen, isGoalMutating, isGoalHydrating, hydrateGoal, goalError, isGoalEditing, goal, startGoal } = requireChatOwner(chatGoalKey)
+const { isGoalSetupOpen, isGoalMutating, isGoalHydrating, hydrateGoal, goalError, isGoalEditing, goal, startGoal, planFirstPreferred, planFirstDisabledReason } = requireChatOwner(chatGoalKey)
 const { isPreparingAttachments, attachmentDisabledReason, triggerFilePicker, attachments, removeAttachment } = requireChatOwner(chatAttachmentsKey)
 const { composerError } = requireChatOwner(chatDeliveryKey)
 const { openImageLightbox } = requireChatOwner(chatImagesKey)
