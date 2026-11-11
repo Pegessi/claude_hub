@@ -69,7 +69,10 @@ test('desktop TabBar is merged into the app-mode-bar, terminal-mode only', () =>
 test('a status light in the sidebar shows working, idle, attention, and offline', () => {
   assert.match(chatSidebarRow, /class="chat-sidebar__item-status"/)
   // the sidebar uses the shared useTabStatus composable (no duplicated logic)
-  assert.match(chatSidebar, /const \{ getTabStatus, getTabStatusLabel \} = useTabStatus\(agentStatuses\)/)
+  assert.match(
+    chatSidebar,
+    /const \{ getTabStatus, getTabStatusLabel, isAwaitingAnswer \} = useTabStatus\(agentStatuses\)/
+  )
   // the status logic lives in the composable
   assert.match(useTabStatus, /const tabStatusById = computed/)
   assert.match(useTabStatus, /function getTabStatus\(tab: TerminalTab\)/)
@@ -83,8 +86,11 @@ test('a status light in the sidebar shows working, idle, attention, and offline'
 })
 
 test('an unread completed turn shows a compact completion badge and tight unread pulse', () => {
-  // the status light carries an unread flag
-  assert.match(chatSidebarRow, /:data-unread="tab\.is_unread \? 'true' : 'false'"/)
+  // the status light carries an unread flag, except while a question waits:
+  // answering is the action there, not reading a finished turn
+  assert.match(chatSidebarRow, /:data-unread="tab\.is_unread && !awaiting \? 'true' : 'false'"/)
+  assert.match(chatSidebarRow, /awaiting\?: boolean/)
+  assert.match(chatSidebar, /:awaiting="isAwaitingAnswer\(tab\)"/)
   // Completion is legible from a checkmark and persistent outline; animation
   // only reinforces that the result is still unread.
   assert.match(chatSidebarRow, /:aria-label="statusLabel"/)

@@ -121,7 +121,12 @@ test('Chat tab status is backend-derived, accessible, and independent from pane 
   assert.match(tabBar, /:aria-label="getTabStatusLabel\(tab\)"/)
   assert.match(tabBar, /:title="getTabStatusLabel\(tab\)"/)
   // status logic is shared via useTabStatus (no duplicated fallback in TabBar)
-  assert.match(tabBar, /const \{ getTabStatus, getTabStatusLabel \} = useTabStatus\(agentStatuses\)/)
+  // The indicator's own awaiting marker comes from the shared composable too.
+  assert.match(
+    tabBar,
+    /const \{ getTabStatus, getTabStatusLabel, isAwaitingAnswer \} = useTabStatus\(agentStatuses\)/
+  )
+  assert.match(tabBar, /:data-awaiting="isAwaitingAnswer\(tab\) \? 'true' : 'false'"/)
   assert.match(tabBar, /class="pane-indicator"/)
 })
 

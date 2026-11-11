@@ -31,6 +31,7 @@ RUNNERS = (
     ("browser_chat_subagent_region.py", ""),
     ("browser_subagent_jump_card.py", ""),
     ("browser_agent_inbox.py", ""),
+    ("browser_sidebar_status.py", ""),
     ("browser_native_subagent_dock.py", ""),
     ("browser_chat_composer.py", ""),
     ("browser_managed_chat_question.py", ""),
