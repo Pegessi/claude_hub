@@ -840,6 +840,43 @@
 }
 
 /* ==========================================================================
+   Keyboard focus & active inline tab rename — game palettes
+   ========================================================================== */
+:root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
+  .tab.active .tab-name-input {
+  color: var(--ch-color-on-accent);
+  caret-color: var(--ch-color-on-accent);
+  outline-color: var(--ch-color-on-accent);
+}
+:root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
+  .tab.active :is(.tam-trigger, .tab-close):focus-visible {
+  box-shadow: 0 0 0 2px var(--ch-color-on-accent);
+}
+:root[data-palette='zenless'] .chat-sidebar__item.active .chat-sidebar__item-main:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--ch-color-on-accent);
+}
+:root[data-palette='zenless'] .chat-sidebar__item.active .tam-trigger:focus-visible {
+  box-shadow: 0 0 0 2px var(--ch-color-on-accent);
+}
+:root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
+  .mode-button:focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring);
+  outline-offset: 1px;
+}
+:root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
+  :is(.layout-btn, .goal-plan-actions .goal-plan-approve, .ch-btn--primary, .primary-button, .composer-send-btn, .approval-submit-btn):focus-visible {
+  outline: 2px solid var(--ch-color-accent-ring);
+  outline-offset: 2px;
+}
+:root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
+  :is(.goal-plan-actions .goal-plan-approve, .ch-btn--primary, .primary-button, .composer-send-btn, .approval-submit-btn):focus-visible {
+  border-color: var(--ch-color-accent-strong);
+}
+:root[data-palette='los-santos'] :is(.ch-btn--primary, .primary-button):focus-visible {
+  box-shadow: var(--ch-shadow-button);
+}
+
+/* ==========================================================================
    Picker preview tiles — isolated per data-palette under any selected root
    ========================================================================== */
 .theme-preview {

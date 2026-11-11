@@ -14,7 +14,14 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
-from appearance_assertions import PALETTES, contrast, luminance, palette_id, rendered_button_state
+from appearance_assertions import (
+    PALETTES,
+    contrast,
+    keyboard_focus_controls,
+    luminance,
+    palette_id,
+    rendered_button_state,
+)
 from browser_lifecycle import BrowserRun, run_browser_main
 from playwright.async_api import expect
 
@@ -660,6 +667,7 @@ async def main(browser_run: BrowserRun) -> None:
           await import('/src/features/app-shell/styles/theme-treatments.css');
         }""")
         pressed_theme_samples = []
+        keyboard_theme_samples = []
 
         async def primary_press_themes(button, release_target):
             previous = await page.evaluate("""async () => {
@@ -698,6 +706,17 @@ async def main(browser_run: BrowserRun) -> None:
                                     "mode": mode,
                                     **rendered,
                                     "contrast": round(ratio, 3),
+                                }
+                            )
+                        if palette in ("Zenless", "Frontier", "Los Santos"):
+                            keyboard_theme_samples.append(
+                                {
+                                    "palette": palette,
+                                    "mode": mode,
+                                    "label": (await button.text_content() or "").strip(),
+                                    "focus": await keyboard_focus_controls(
+                                        page, {"primary": button}
+                                    ),
                                 }
                             )
             finally:
@@ -1148,6 +1167,7 @@ async def main(browser_run: BrowserRun) -> None:
         "result": "PASS",
         "create_requests": len(create_calls),
         "primary_theme_press_samples": pressed_theme_samples,
+        "primary_keyboard_focus_samples": keyboard_theme_samples,
         "blocked_requests": blocked_requests,
         "unknown_requests": unknown_requests,
         "page_errors": page_errors,

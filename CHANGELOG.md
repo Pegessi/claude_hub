@@ -21,6 +21,8 @@
   native hover/press and color-preserving geometry negatives. Exercise all three
   game palettes in the live terminal loop and restore the prior non-game theme.
 - Keep styled split-pane focus indicators from changing inner viewport dimensions.
+  Restore visible game-theme keyboard cues and readable inline tab rename fields;
+  handle the loop-backed editor ref correctly so native rename actually focuses.
 
 ### feat(theme): add studio and game-inspired visual themes
 

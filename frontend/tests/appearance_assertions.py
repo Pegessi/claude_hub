@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from playwright.async_api import Locator, Page, expect
+from playwright.async_api import ElementHandle, Locator, Page, Request, expect
 
 PALETTES = ("Classic", "Contrast", "Mono", "Studio", "Carbon", "Zenless", "Frontier", "Los Santos")
 
@@ -193,33 +193,36 @@ def _rgba(color: str) -> list[float]:
     return values if len(values) == 4 else [*values, 1]
 
 
+def _over_backgrounds(color: list[float], backgrounds: list[list[float]]) -> list[list[float]]:
+    if color[3] == 1:
+        return [color[:3]]
+    if color[3] == 0:
+        return backgrounds
+    assert backgrounds, f"Translucent paint has no opaque backing: {color}"
+    return [
+        [color[i] * color[3] + base[i] * (1 - color[3]) for i in range(3)] for base in backgrounds
+    ]
+
+
 def _paint_contrast(rendered: dict[str, Any]) -> float:
-    # Composite nested hover fills onto the actual selected surface. For the
-    # opaque sidebar gradient, bound every channel by its computed stops rather
-    # than accidentally using the unrelated opaque ancestor behind the gradient.
+    # Include alpha overlays and gradient stops, not the unrelated flat ancestor
+    # behind them. Channel bounds conservatively cover the sampled materials.
     backgrounds: list[list[float]] = []
     for layer in reversed(rendered["layers"]):
         assert layer["opacity"] == 1, rendered
-        color = _rgba(layer["color"])
-        if color[3] == 1:
-            backgrounds = [color[:3]]
-        elif color[3] > 0:
-            assert backgrounds, rendered
-            backgrounds = [
-                [color[i] * color[3] + base[i] * (1 - color[3]) for i in range(3)]
-                for base in backgrounds
-            ]
+        backgrounds = _over_backgrounds(_rgba(layer["color"]), backgrounds)
         image = layer["image"]
         if image != "none":
-            assert image.startswith("linear-gradient(") and image.count("gradient(") == 1, rendered
+            assert image.startswith(("linear-gradient(", "radial-gradient(")), rendered
+            assert image.count("gradient(") == 1, rendered
             stops = re.findall(r"(?:rgba?\([^)]*\)|color\(srgb[^)]*\))", image)
             assert len(stops) >= 2, rendered
-            colors = [_rgba(stop) for stop in stops]
-            assert all(color[3] == 1 for color in colors), rendered
-            backgrounds = [color[:3] for color in colors]
+            gradient: list[list[float]] = []
+            for stop in stops:
+                gradient.extend(_over_backgrounds(_rgba(stop), backgrounds))
+            backgrounds = gradient
     assert backgrounds, f"Selected consumer has no opaque paint: {rendered}"
     foreground = _rgba(rendered["foreground"])
-    assert foreground[3] == 1, rendered
     bounds = [
         [bound(color[channel] for color in backgrounds) for channel in range(3)]
         for bound in (min, max)
@@ -228,7 +231,246 @@ def _paint_contrast(rendered: dict[str, Any]) -> float:
     low, high = (luminance(color) for color in rendered["background_bounds"])
     if low <= luminance(rendered["foreground"]) <= high:
         return 1  # Endpoints alone cannot certify a gradient crossing the ink.
-    return min(contrast(rendered["foreground"], color) for color in rendered["background_bounds"])
+    ratios = []
+    for background, serialized in zip(bounds, rendered["background_bounds"]):
+        ink = _over_backgrounds(foreground, [background])[0]
+        ratios.append(contrast(f"color(srgb {' '.join(map(str, ink))})", serialized))
+    return min(ratios)
+
+
+async def _focus_state(control: Locator) -> dict[str, Any]:
+    state: dict[str, Any] = await control.evaluate("""el => {
+      const rgba = color => color.match(/-?[\\d.]+(?:e[-+]?\\d+)?/g).map(Number);
+      const alpha = color => { const values = rgba(color); return values.length === 4 ? values[3] : 1; };
+      const layers = start => {
+        const result = [];
+        for (let node = start; node; node = node.parentElement) {
+          const s = getComputedStyle(node);
+          result.push({color:s.backgroundColor, image:s.backgroundImage, opacity:Number(s.opacity)});
+          const stops = s.backgroundImage.match(/(?:rgba?\\([^)]*\\)|color\\(srgb[^)]*\\))/g) || [];
+          if (alpha(s.backgroundColor) === 1 || (stops.length >= 2 && stops.every(c => alpha(c) === 1))) break;
+        }
+        return result;
+      };
+      const clip = {left:0, top:0, right:innerWidth, bottom:innerHeight};
+      for (let node = el.parentElement; node; node = node.parentElement) {
+        const s = getComputedStyle(node), r = node.getBoundingClientRect();
+        if (s.overflowX !== 'visible') {
+          clip.left = Math.max(clip.left, r.x + node.clientLeft);
+          clip.right = Math.min(clip.right, r.x + node.clientLeft + node.clientWidth);
+        }
+        if (s.overflowY !== 'visible') {
+          clip.top = Math.max(clip.top, r.y + node.clientTop);
+          clip.bottom = Math.min(clip.bottom, r.y + node.clientTop + node.clientHeight);
+        }
+      }
+      const s = getComputedStyle(el), r = el.getBoundingClientRect();
+      return {focused:document.activeElement === el, focusVisible:el.matches(':focus-visible'),
+        palette:document.documentElement.dataset.palette, mode:document.documentElement.dataset.theme,
+        rect:{x:r.x,y:r.y,width:r.width,height:r.height}, clip,
+        foreground:s.color, inside:layers(el), outside:layers(el.parentElement),
+        outline:{color:s.outlineColor, style:s.outlineStyle, width:parseFloat(s.outlineWidth), offset:parseFloat(s.outlineOffset)},
+        shadow:s.boxShadow, borders:['Top','Right','Bottom','Left'].map(side => ({
+          color:s[`border${side}Color`], style:s[`border${side}Style`], width:parseFloat(s[`border${side}Width`])}))};
+    }""")
+    return state
+
+
+def _shadow_parts(value: str) -> list[tuple[str, tuple[float, ...], bool]]:
+    colors: list[str] = []
+
+    def color_token(match: re.Match[str]) -> str:
+        colors.append(match.group(0))
+        return f"@{len(colors) - 1}@"
+
+    normalized = re.sub(r"(?:rgba?\([^)]*\)|color\(srgb[^)]*\))", color_token, value)
+    parts: list[tuple[str, tuple[float, ...], bool]] = []
+    for shadow in normalized.split(","):
+        token = re.search(r"@(\d+)@", shadow)
+        dimensions = tuple(float(value) for value in re.findall(r"(-?[\d.]+)px", shadow))
+        if token and len(dimensions) == 4:
+            parts.append((colors[int(token[1])], dimensions, "inset" in shadow))
+    return parts
+
+
+def _assert_focus_indicator(
+    name: str, rest: dict[str, Any], focused: dict[str, Any]
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    rect, clip = focused["rect"], focused["clip"]
+
+    def add_cue(kind: str, color: str, gap: float, width: float, inside: bool) -> None:
+        points = (
+            (rect["x"] - gap, rect["y"] + rect["height"] / 2),
+            (rect["x"] + rect["width"] + gap, rect["y"] + rect["height"] / 2),
+            (rect["x"] + rect["width"] / 2, rect["y"] - gap),
+            (rect["x"] + rect["width"] / 2, rect["y"] + rect["height"] + gap),
+        )
+        visible_sides = sum(
+            clip["left"] <= x <= clip["right"] and clip["top"] <= y <= clip["bottom"]
+            for x, y in points
+        )
+        paint = {"foreground": color, "layers": focused["inside" if inside else "outside"]}
+        ratio = _paint_contrast(paint)
+        candidates.append(
+            {
+                "kind": kind,
+                "width": width,
+                "visibleSides": visible_sides,
+                "contrast": round(ratio, 3),
+                "color": color,
+                "backgroundBounds": paint["background_bounds"],
+                "pass": width >= 1 and visible_sides == 4 and ratio >= 3,
+            }
+        )
+
+    outline = focused["outline"]
+    if (
+        outline != rest["outline"]
+        and outline["style"] not in ("none", "hidden")
+        and outline["width"] >= 1
+    ):
+        gap = outline["offset"] + outline["width"] / 2
+        add_cue("outline", outline["color"], gap, outline["width"], gap < 0)
+    if focused["shadow"] != rest["shadow"]:
+        unchanged = {
+            (tuple(_rgba(color)), dimensions, inset)
+            for color, dimensions, inset in _shadow_parts(rest["shadow"])
+        }
+        for color, dimensions, inset in _shadow_parts(focused["shadow"]):
+            # A newly added weak ring cannot borrow an unchanged decorative
+            # inset's contrast merely because the whole shadow string changed.
+            if (tuple(_rgba(color)), dimensions, inset) in unchanged:
+                continue
+            if dimensions[:3] == (0, 0, 0) and dimensions[3] >= 1:
+                gap = dimensions[3] / 2 * (-1 if inset else 1)
+                add_cue("inset-shadow" if inset else "shadow", color, gap, dimensions[3], inset)
+    borders = focused["borders"]
+    if all(
+        new != old and new["width"] >= 1 and new["style"] not in ("none", "hidden")
+        for new, old in zip(borders, rest["borders"])
+    ):
+        for new in borders:
+            add_cue("border", new["color"], -new["width"] / 2, new["width"], True)
+        if not all(candidate["pass"] for candidate in candidates[-4:]):
+            for candidate in candidates[-4:]:
+                candidate["pass"] = False
+    assert any(candidate["pass"] for candidate in candidates), (
+        "Keyboard focus indicator",
+        name,
+        focused["palette"],
+        focused["mode"],
+        {
+            "candidates": candidates,
+            "restOutline": rest["outline"],
+            "focusOutline": outline,
+            "restShadow": rest["shadow"],
+            "focusShadow": focused["shadow"],
+        },
+    )
+    return candidates
+
+
+async def keyboard_focus_controls(page: Page, controls: dict[str, Locator]) -> list[dict[str, Any]]:
+    """Reach real controls by Tab and require a visible, contrast-safe focus cue."""
+    handles: dict[str, ElementHandle] = {}
+    samples: list[dict[str, Any]] = []
+    try:
+        for name, control in controls.items():
+            handle = await control.element_handle()
+            assert handle is not None, name
+            handles[name] = handle
+        remaining = dict(handles)
+        await page.mouse.move(0, 0)
+        for _ in range(100):
+            await page.keyboard.press("Tab")
+            focused_name: str | None = await page.evaluate(
+                "targets => Object.keys(targets).find(key => targets[key] === document.activeElement) || null",
+                remaining,
+            )
+            if focused_name is None:
+                continue
+            control = controls[focused_name]
+            await expect(control).to_be_focused()
+            await _settle_styles(page)
+            focused = await _focus_state(control)
+            assert focused["focused"] and focused["focusVisible"], (focused_name, focused)
+            await page.keyboard.press("Shift+Tab")
+            await _settle_styles(page)
+            rest = await _focus_state(control)
+            assert not rest["focused"] and not rest["focusVisible"], (focused_name, rest)
+            candidates = _assert_focus_indicator(focused_name, rest, focused)
+            samples.append(
+                {
+                    "control": focused_name,
+                    "palette": focused["palette"],
+                    "mode": focused["mode"],
+                    "cues": candidates,
+                }
+            )
+            remaining.pop(focused_name)
+            # Browser chrome can occupy a stop: continue Tab traversal rather
+            # than synthesizing focus or assuming one Tab returns to the target.
+            if not remaining:
+                return samples
+        raise AssertionError(f"Keyboard controls not reached: {list(remaining)}")
+    finally:
+        for handle in handles.values():
+            await handle.dispose()
+
+
+async def inline_tab_rename(page: Page) -> dict[str, Any]:
+    """Check real auto-focused rename ink/boundary and cancel without a PATCH."""
+    tab = page.locator(".tab.active")
+    label = tab.locator(".tab-name")
+    original = (await label.text_content() or "").strip()
+    editor = tab.locator(".tab-name-input")
+    patches: list[str] = []
+    rendered: dict[str, Any] = {}
+
+    def observe_patch(request: Request) -> None:
+        if request.method == "PATCH" and "/api/tabs/" in request.url:
+            patches.append(request.url)
+
+    page.on("request", observe_patch)
+    try:
+        await label.dblclick()
+        # No editor click/Locator.press/focus may repair failed automatic focus.
+        await expect(editor).to_be_focused()
+        await expect(editor).to_have_value(original)
+        await page.keyboard.press("Control+A")
+        await page.keyboard.type("Unsubmitted keyboard probe")
+        await expect(editor).to_have_value("Unsubmitted keyboard probe")
+        await _settle_styles(page)
+        rendered = await _focus_state(editor)
+    finally:
+        if await editor.count() and await editor.evaluate("el => document.activeElement === el"):
+            await page.keyboard.press("Escape")
+        await _settle_styles(page)
+        page.remove_listener("request", observe_patch)
+    await expect(editor).to_have_count(0)
+    await expect(label).to_have_text(original)
+    assert not patches, patches
+    text = _paint_contrast({"foreground": rendered["foreground"], "layers": rendered["inside"]})
+    outline = rendered["outline"]
+    boundary = _paint_contrast({"foreground": outline["color"], "layers": rendered["inside"]})
+    assert text >= 4.5, ("Inline rename text", rendered["palette"], rendered["mode"], text)
+    assert outline["style"] not in ("none", "hidden") and outline["width"] >= 1 and boundary >= 3, (
+        "Inline rename boundary",
+        rendered["palette"],
+        rendered["mode"],
+        outline,
+        boundary,
+    )
+    return {
+        "original": original,
+        "typed": "Unsubmitted keyboard probe",
+        "cancelled": original,
+        "automaticFocus": True,
+        "patchRequests": len(patches),
+        "textContrast": round(text, 3),
+        "boundaryContrast": round(boundary, 3),
+    }
 
 
 async def _selected_chrome_contrast(page: Page) -> list[dict[str, Any]]:
@@ -429,6 +671,24 @@ async def filled_button_themes(
                             "mode": mode,
                             "cues": await _game_chat_cues(page, palette),
                             "selected_chrome": await _selected_chrome_contrast(page),
+                            "keyboard_focus": await keyboard_focus_controls(
+                                page,
+                                {
+                                    "nav": page.locator(".mode-button.active"),
+                                    "layout": page.locator(".layout-btn.active").first,
+                                    "tab-menu": page.locator(".tab.active .tam-trigger"),
+                                    "tab-close": page.locator(".tab.active .tab-close"),
+                                    "sidebar-main": page.locator(
+                                        ".chat-sidebar__item.active .chat-sidebar__item-main"
+                                    ),
+                                    "sidebar-menu": page.locator(
+                                        ".chat-sidebar__item.active .tam-trigger"
+                                    ),
+                                    "add-tab": page.locator(".add-tab"),
+                                    "goal-primary": button,
+                                },
+                            ),
+                            "rename": await inline_tab_rename(page),
                         }
                     )
                     print(f"Game chrome captured: {palette}/{mode}", flush=True)
@@ -445,6 +705,13 @@ async def filled_button_themes(
                 await button.scroll_into_view_if_needed()
                 await _settle_styles(page)
                 await expect(button).to_be_in_viewport()
+                if variant["palette"] == "Zenless":
+                    variant["phone_keyboard_focus"] = await keyboard_focus_controls(
+                        page,
+                        {
+                            "mobile-trigger": page.get_by_label("App menu", exact=True),
+                        },
+                    )
                 box = await button.bounding_box()
                 assert box is not None and box["height"] >= 44, box
                 overflow = await page.evaluate("document.documentElement.scrollWidth - innerWidth")
