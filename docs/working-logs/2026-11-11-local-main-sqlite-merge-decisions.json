@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.50.1 (Apple Git-155)",
+  "merge": "6fe7f2f209e23ca19ac6a8d389e7f7a705f8eadb",
+  "parents": [
+    "945d06546def0123090651b734e90dca3aecfa75",
+    "87802e6ae0eb2e9ba37ea4d5b04aa5b71ae42cdd"
+  ],
+  "base": "91cf6510cede7af3abbac11b41a6c350f37a46c0",
+  "shallow_boundaries": [],
+  "tree": "a4ac8ad71046fb8f8a47a4296a4f82a567dce3a3",
+  "reconstructed_tree": "360e5ae0df3a553f53305be9baedfcef687cce27",
+  "conflicts": [
+    "backend/claude_hub/services/agent_stream/runtime/watchdog.py"
+  ],
+  "decisions": [
+    {
+      "path": "backend/claude_hub/services/agent_stream/runtime/watchdog.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3b84bb59abb67fdb7284d4e08d19100ab80d3382"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "e4bd96f5eca483532209956481419c469abb9d6e"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "90070b09a3f877d7246e05203439163f5cbc39ac"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "35e2d74a6d58b4c106c746d200e9c5238f604871"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0ce0c1fdd51971980a5e8d935ea4a85ff69ed8f5"
+      },
+      "reason": "Keep upstream human activity labels and local substantive-answer validation in the combined watchdog imports; both call paths remain in the merged file.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
