@@ -193,7 +193,7 @@ test('a provider-native Chat cannot overwrite the remembered preference', () => 
 })
 
 test('the remembered choice survives a native Goal and a storage failure', () => {
-  const store = new Map([['claude-hub.goal-plan-first', 'true']])
+  const store = new Map([['claude-hub.goal-plan-first.v2', 'true']])
   const storage = {
     getItem: key => (store.has(key) ? store.get(key) : null),
     setItem: (key, value) => store.set(key, value),
@@ -210,19 +210,31 @@ test('the remembered choice survives a native Goal and a storage failure', () =>
   assert.equal(preference.readPlanFirstPreference(storage), false)
 })
 
-test('plan-first defaults on and survives a round trip, including storage failures', () => {
+test('plan-first defaults off and survives a round trip, including storage failures', () => {
   const store = new Map()
   const storage = {
     getItem: key => (store.has(key) ? store.get(key) : null),
     setItem: (key, value) => store.set(key, value),
   }
-  assert.equal(preference.readPlanFirstPreference(storage), true)
-  preference.writePlanFirstPreference(storage, false)
+  // Absent means no approval gate: the Goal starts its first turn at once.
   assert.equal(preference.readPlanFirstPreference(storage), false)
   preference.writePlanFirstPreference(storage, true)
   assert.equal(preference.readPlanFirstPreference(storage), true)
+  preference.writePlanFirstPreference(storage, false)
+  assert.equal(preference.readPlanFirstPreference(storage), false)
   // A blocked or absent store must not break Goal setup.
-  assert.equal(preference.readPlanFirstPreference({ getItem: () => { throw new Error('denied') } }), true)
-  preference.writePlanFirstPreference({ setItem: () => { throw new Error('denied') } }, false)
-  assert.equal(preference.readPlanFirstPreference(null), true)
+  assert.equal(preference.readPlanFirstPreference({ getItem: () => { throw new Error('denied') } }), false)
+  preference.writePlanFirstPreference({ setItem: () => { throw new Error('denied') } }, true)
+  assert.equal(preference.readPlanFirstPreference(null), false)
+})
+
+test('a value remembered while the option was on by default is not carried over', () => {
+  // The old key was written whenever a Goal started, so "true" there means
+  // "the dialog was on", not "the user asked to approve plans".
+  const legacy = {
+    getItem: key => (key === 'claude-hub.goal-plan-first' ? 'true' : null),
+    setItem: () => {},
+  }
+  assert.equal(preference.readPlanFirstPreference(legacy), false)
+  assert.equal(preference.planFirstChoice({ requested: false, disabledReason: null }).effective, false)
 })
