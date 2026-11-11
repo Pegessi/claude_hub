@@ -23,7 +23,9 @@ from claude_hub.models.schemas import (
     WorkspaceTaskUpdate,
     normalize_agent_tag,
 )
+from claude_hub.services.local_storage import read_document
 from claude_hub.services.workspace_manager import WorkspaceManager, workspace_manager
+from tests.test_task_execution_control import _seed_legacy_json
 
 _wm = import_module("claude_hub.services.workspace_manager")
 
@@ -156,7 +158,7 @@ def test_untagged_task_state_json_omits_agent_tag_key(
     task_id = create.json()["id"]
 
     manager._save_state()
-    on_disk = json.loads((state_root / workspace_id / "state.json").read_text(encoding="utf-8"))
+    on_disk = read_document(state_root / workspace_id / "state.json")
     saved = next(item for item in on_disk["tasks"] if item["id"] == task_id)
     assert "agent_tag" not in saved
 
@@ -187,16 +189,15 @@ def test_legacy_state_json_without_agent_tag_round_trips(
     }
     state_file = state_root / workspace_id / "state.json"
     state_file.parent.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(
-        json.dumps({"tasks": [legacy], "sessions": [], "reports": []}, indent=2),
-        encoding="utf-8",
+    _seed_legacy_json(
+        state_file, json.dumps({"tasks": [legacy], "sessions": [], "reports": []}, indent=2)
     )
 
     _reset_singleton()
     reloaded = WorkspaceManager()
     assert reloaded.tasks[task_id].agent_tag is None
     reloaded._save_state()
-    saved = next(item for item in json.loads(state_file.read_text(encoding="utf-8"))["tasks"])
+    saved = next(item for item in read_document(state_file)["tasks"])
     assert saved["id"] == task_id
     assert "agent_tag" not in saved
 
@@ -221,7 +222,7 @@ def test_agent_tag_persistence_save_and_reload(
 
     manager._save_state()
     state_file = state_root / workspace_id / "state.json"
-    on_disk = json.loads(state_file.read_text(encoding="utf-8"))
+    on_disk = read_document(state_file)
     saved = next(item for item in on_disk["tasks"] if item["id"] == task_id)
     assert saved["agent_tag"] == "orchestrator"
 
@@ -283,7 +284,7 @@ def test_agent_tag_api_board_tree_and_update_clear(
 
     workspace_manager._save_state()
     state_root = persist_api[1]
-    on_disk = json.loads((state_root / workspace_id / "state.json").read_text(encoding="utf-8"))
+    on_disk = read_document(state_root / workspace_id / "state.json")
     cleared_saved = next(item for item in on_disk["tasks"] if item["id"] == tagged_id)
     assert "agent_tag" not in cleared_saved
 

@@ -31,9 +31,16 @@ from claude_hub.models import (
     WorkspaceTaskUpdate,
 )
 from claude_hub.models.schemas import TaskExecutionControl, TaskExecutionHandoffRequest
+from claude_hub.services.local_storage import read_document, write_document
 from claude_hub.services.workspace_manager import WorkspaceManager
 from claude_hub.services.workspace_manager._task_execution import TaskExecutionConflict
-from tests.test_task_execution_control import _wm, manager, no_default_http, workspace
+from tests.test_task_execution_control import (
+    _read_persisted_bytes,
+    _wm,
+    manager,
+    no_default_http,
+    workspace,
+)
 
 _api = import_module("claude_hub.api.workspaces")
 _attachments = import_module("claude_hub.services.workspace_manager._attachments")
@@ -103,7 +110,7 @@ async def edit(task: WorkspaceTask, **updates: Any) -> WorkspaceTask:
 
 
 def persisted(manager: WorkspaceManager, workspace: Workspace) -> dict[str, Any]:
-    value = json.loads(manager._workspace_state_file(workspace.id).read_text())
+    value = read_document(manager._workspace_state_file(workspace.id))
     assert isinstance(value, dict)
     return value
 
@@ -117,7 +124,7 @@ def assert_original(
 ) -> None:
     assert manager.tasks[task.id].model_dump() == task.model_dump()
     assert manager.tasks[task.id].reporter_key_hash == task.reporter_key_hash
-    assert manager._workspace_state_file(workspace.id).read_bytes() == before_state
+    assert _read_persisted_bytes(manager._workspace_state_file(workspace.id)) == before_state
     assert Path(task.attachments[0].path).read_bytes() == PNG
     assert files(task) == before_files
     assert not manager._task_execution_operations
@@ -152,7 +159,7 @@ async def test_invalid_edit_preserves_task_and_original_image(
     manager: WorkspaceManager, workspace: Workspace, invalid: str
 ) -> None:
     task = await make_task(manager, workspace)
-    before_state = manager._workspace_state_file(workspace.id).read_bytes()
+    before_state = _read_persisted_bytes(manager._workspace_state_file(workspace.id))
     before_files = files(task)
     changes: dict[str, Any]
     if invalid == "empty":
@@ -183,7 +190,7 @@ async def test_partial_attachment_batch_failure_removes_only_new_files(
     manager: WorkspaceManager, workspace: Workspace, monkeypatch: MonkeyPatch
 ) -> None:
     task = await make_task(manager, workspace)
-    before_state = manager._workspace_state_file(workspace.id).read_bytes()
+    before_state = _read_persisted_bytes(manager._workspace_state_file(workspace.id))
     before_files = files(task)
     original_fsync = _attachments.os.fsync
     calls = 0
@@ -207,7 +214,7 @@ async def test_attachment_name_collision_never_overwrites_or_deletes_original(
     manager: WorkspaceManager, workspace: Workspace, monkeypatch: MonkeyPatch
 ) -> None:
     task = await make_task(manager, workspace)
-    before_state = manager._workspace_state_file(workspace.id).read_bytes()
+    before_state = _read_persisted_bytes(manager._workspace_state_file(workspace.id))
     before_files = files(task)
     monkeypatch.setattr(
         _attachments.uuid, "uuid4", lambda: SimpleNamespace(hex=task.attachments[0].id)
@@ -229,21 +236,21 @@ async def test_precommit_failure_restores_record_and_only_cleans_new_images(
 ) -> None:
     task = await make_task(manager, workspace, control)
     state_path = manager._workspace_state_file(workspace.id)
-    before_state = state_path.read_bytes()
+    before_state = _read_persisted_bytes(state_path)
     before_files = files(task)
     if failure == "save":
         monkeypatch.setattr(
             manager, "_save_workspace_state", Mock(side_effect=OSError("before commit"))
         )
     else:
-        original = manager._atomic_write_text
+        original = manager._atomic_save_state_text
 
         def fail_replace(path: Path, text: str) -> None:
             if path == state_path:
                 raise OSError("before commit")
             original(path, text)
 
-        monkeypatch.setattr(manager, "_atomic_write_text", fail_replace)
+        monkeypatch.setattr(manager, "_atomic_save_state_text", fail_replace)
     with pytest.raises(OSError, match="before commit"):
         await edit(task)
     assert_original(manager, workspace, task, before_state, before_files)
@@ -257,14 +264,14 @@ async def test_confirmed_commit_survives_late_save_and_snapshot_errors(
     task = await make_task(manager, workspace)
     state_path = manager._workspace_state_file(workspace.id)
     if failure == "after-replace":
-        original_atomic = manager._atomic_write_text
+        original_atomic = manager._atomic_save_state_text
 
         def replace_then_fail(path: Path, text: str) -> None:
             original_atomic(path, text)
             if path == state_path:
                 raise OSError("after replacement")
 
-        monkeypatch.setattr(manager, "_atomic_write_text", replace_then_fail)
+        monkeypatch.setattr(manager, "_atomic_save_state_text", replace_then_fail)
     elif failure == "after-save":
         original_save = manager._save_workspace_state
 
@@ -293,7 +300,7 @@ async def test_interrupt_preserves_its_type_and_respects_commit_boundary(
     after_commit: bool,
 ) -> None:
     task = await make_task(manager, workspace)
-    before_state = manager._workspace_state_file(workspace.id).read_bytes()
+    before_state = _read_persisted_bytes(manager._workspace_state_file(workspace.id))
     before_files = files(task)
     original_save = manager._save_workspace_state
 
@@ -319,7 +326,7 @@ async def test_unknown_commit_keeps_candidate_and_both_sets_of_files(
 ) -> None:
     task = await make_task(manager, workspace)
     state_path = manager._workspace_state_file(workspace.id)
-    before = state_path.read_bytes()
+    before = _read_persisted_bytes(state_path)
     expected_disk = before
     if failure == "unreadable":
         original_read = manager._read_task_edit_state
@@ -337,10 +344,12 @@ async def test_unknown_commit_keeps_candidate_and_both_sets_of_files(
             manager, "_save_workspace_state", Mock(side_effect=OSError("save interrupted"))
         )
     else:
-        expected_disk = before + b"\n"
+        other_state = json.loads(before)
+        other_state["test_external_revision"] = 1
+        expected_disk = json.dumps(other_state, indent=2).encode()
 
         def write_other_version(target_workspace_id: str) -> None:
-            state_path.write_bytes(expected_disk)
+            write_document(state_path, json.loads(expected_disk))
             raise OSError("different version")
 
         monkeypatch.setattr(manager, "_save_workspace_state", write_other_version)
@@ -351,7 +360,7 @@ async def test_unknown_commit_keeps_candidate_and_both_sets_of_files(
     assert current.attachments[0].id != task.attachments[0].id
     assert Path(current.attachments[0].path).read_bytes() == PNG
     assert Path(task.attachments[0].path).read_bytes() == PNG
-    assert state_path.read_bytes() == expected_disk
+    assert _read_persisted_bytes(state_path) == expected_disk
     saved = next(item for item in json.loads(expected_disk)["tasks"] if item["id"] == task.id)
     assert saved["attachments"] == [a.model_dump(mode="json") for a in task.attachments]
     assert not manager._task_execution_operations
@@ -386,7 +395,7 @@ async def test_reparent_and_attachments_rollback_together_before_commit(
     )
     target = manager.create_task(workspace.id, WorkspaceTaskCreate(title="target", prompt="target"))
     before_tasks = {key: value.model_dump() for key, value in manager.tasks.items()}
-    before_state = manager._workspace_state_file(workspace.id).read_bytes()
+    before_state = _read_persisted_bytes(manager._workspace_state_file(workspace.id))
     before_files = files(task)
     monkeypatch.setattr(
         manager, "_save_workspace_state", Mock(side_effect=OSError("before tree commit"))
@@ -483,7 +492,7 @@ async def test_precommit_failure_restores_authoritative_session_and_report_maps(
     status: WorkspaceTaskStatus,
 ) -> None:
     task, worker, reviewer = await configured_task(manager, workspace, status)
-    before_state = manager._workspace_state_file(workspace.id).read_bytes()
+    before_state = _read_persisted_bytes(manager._workspace_state_file(workspace.id))
     before_files = files(task)
     before_sessions = {key: item.model_dump() for key, item in manager.sessions.items()}
     before_reports = {key: item.model_dump() for key, item in manager.reports.items()}
@@ -682,21 +691,26 @@ async def test_attachment_edit_writes_only_its_workspace(
     other = manager.create_workspace(WorkspaceCreate(name="other", path=str(other_path)))
     task = await make_task(manager, workspace)
     other_file = manager._workspace_state_file(other.id)
-    before_other = other_file.read_bytes()
+    before_other = _read_persisted_bytes(other_file)
     writes: list[Path] = []
     original_atomic = manager._atomic_write_text
+    original_document = manager._atomic_save_state_text
 
     def capture_write(path: Path, text: str) -> None:
         writes.append(path)
-        original_atomic(path, text)
+        if path.suffix == ".json":
+            original_document(path, text)
+        else:
+            original_atomic(path, text)
 
     monkeypatch.setattr(manager, "_atomic_write_text", capture_write)
+    monkeypatch.setattr(manager, "_atomic_save_state_text", capture_write)
     await edit(task)
     assert writes == [
         manager._workspace_state_file(workspace.id),
         manager.snapshot_path(workspace.id),
     ]
-    assert other_file.read_bytes() == before_other
+    assert _read_persisted_bytes(other_file) == before_other
     assert_committed(manager, workspace, task)
 
 
@@ -721,7 +735,7 @@ async def test_failed_readback_cannot_downgrade_an_interrupt(
 ) -> None:
     task = await make_task(manager, workspace)
     state_path = manager._workspace_state_file(workspace.id)
-    before = state_path.read_bytes()
+    before = _read_persisted_bytes(state_path)
     saved_error, read_error = save_type("save"), read_type("readback")
     original_read = manager._read_task_edit_state
     calls = 0
@@ -739,7 +753,7 @@ async def test_failed_readback_cannot_downgrade_an_interrupt(
     with pytest.raises(type(expected)) as caught:
         await edit(task)
     assert caught.value is expected
-    assert state_path.read_bytes() == before
+    assert _read_persisted_bytes(state_path) == before
     current = manager.tasks[task.id]
     assert current.attachments[0].id != task.attachments[0].id
     assert Path(current.attachments[0].path).read_bytes() == PNG

@@ -205,7 +205,9 @@ async def main(browser_run: BrowserRun) -> None:
             elif path.endswith("/live"):
                 try:
                     await route.fulfill(
-                        status=200, content_type="text/event-stream", body=": fixture\n\n"
+                        status=200,
+                        content_type="text/event-stream",
+                        body=": fixture\n\n",
                     )
                 except Exception:
                     pass
@@ -333,9 +335,9 @@ async def main(browser_run: BrowserRun) -> None:
             inbox_box = await page.locator(".agent-inbox").first.bounding_box()
             menu_box = await page.locator(".mobile-app-menu").first.bounding_box()
             assert inbox_box and menu_box, "both trailing entries are laid out"
-            assert inbox_box["x"] < menu_box["x"], (
-                f"needs-you must precede the app menu: inbox x={inbox_box['x']} menu x={menu_box['x']}"
-            )
+            assert (
+                inbox_box["x"] < menu_box["x"]
+            ), f"needs-you must precede the app menu: inbox x={inbox_box['x']} menu x={menu_box['x']}"
             await trigger.hover()
             tip = trigger.locator(".inbox-trigger-tip")
             await expect(tip).to_be_visible()

@@ -1,5 +1,6 @@
 """Feishu Bot pool administration and pairing routes."""
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -12,6 +13,18 @@ from pydantic import BaseModel
 from claude_hub.api.agent_stream import CHAT_ERROR_REASON_HEADER
 from claude_hub.api.routes.feishu_bot.bindings import FeishuPoolRouteBindings
 from claude_hub.models import ExecutionTarget, SessionKind, User
+from claude_hub.services.bot_pool.common import (
+    _MAX_ID_CHARS,
+    BOT_MODE_SINGLE,
+    BOT_MODES,
+    MAX_CHANNELS_PER_BOT,
+    FeishuBotInvalidValue,
+    FeishuBotModeSwitchBlocked,
+)
+from claude_hub.services.feishu_auto_chat import (
+    AUTO_CHAT_CREATE_TIMEOUT_SECONDS,
+    format_group_tab_name,
+)
 from claude_hub.services.feishu_bot import FeishuBotConfig, FeishuBotProfile, FeishuBotRemoteError
 from claude_hub.services.feishu_bot_pool import (
     MAX_BOTS,
@@ -82,6 +95,7 @@ class FeishuBotSummary(BaseModel):
     feishu_avatar_url: str | None
     app_id: str
     source: str
+    mode: str = BOT_MODE_SINGLE
     enabled: bool
     credentials_editable: bool
     deletable: bool
@@ -95,6 +109,7 @@ class FeishuBotSummary(BaseModel):
     connection_status: str
     updated_at: datetime | None
     binding: FeishuPairingView | None
+    bindings: list[FeishuPairingView] = []
     my_claims: list[FeishuPairingView]
 
 
@@ -125,6 +140,7 @@ def pool_http_error(exc: FeishuBotPoolError) -> HTTPException:
         (FeishuBotReadOnly, 409, "bot_credentials_read_only"),
         (FeishuBotRevisionConflict, 409, "bot_revision_conflict"),
         (FeishuBotAppIdConflict, 409, "app_id_already_in_pool"),
+        (FeishuBotModeSwitchBlocked, 409, "bot_has_active_bindings"),
         (FeishuBotOccupied, 409, "bot_already_bound"),
         (FeishuChatOccupied, 409, "chat_already_bound"),
         (FeishuPairingNotFound, 409, "pairing_not_claimed"),
@@ -133,6 +149,7 @@ def pool_http_error(exc: FeishuBotPoolError) -> HTTPException:
         (FeishuBindingCodeError, 409, "pairing_expired"),
         (FeishuBotRateLimited, 429, "pair_code_rate_limited"),
         (FeishuPoolFull, 409, "pool_capacity_reached"),
+        (FeishuBotInvalidValue, 400, "invalid_bot_request"),
         (FeishuBotPoolStateError, 503, "bot_pool_unavailable"),
     ]
     for error_type, code, detail in mapping:
@@ -185,14 +202,16 @@ def summary(
     entry: BotEntry, actor: OwnerIdentity, bindings: FeishuPoolRouteBindings
 ) -> FeishuBotSummary:
     config = entry.config
-    binding = None
-    if entry.binding is not None:
-        binding = pairing_view(
+    binding_views = [
+        pairing_view(
             entry,
-            entry.binding,
+            item,
             state="active",
-            is_mine=is_mine(entry.binding.owner, actor),
+            is_mine=is_mine(item.owner, actor),
         )
+        for item in entry.bindings
+    ]
+    binding = binding_views[0] if binding_views else None
     claims = [
         pairing_view(entry, claim, state="claimed", is_mine=True, expires_at=claim.expires_at)
         for claim in entry.claims
@@ -205,6 +224,7 @@ def summary(
         feishu_avatar_url=entry.feishu_avatar_url,
         app_id=entry.app_id,
         source=entry.source,
+        mode=entry.mode,
         enabled=entry.enabled,
         credentials_editable=entry.credentials_editable,
         deletable=entry.deletable,
@@ -220,6 +240,7 @@ def summary(
         connection_status=bindings.websocket_supervisor().status(entry.bot_id),
         updated_at=utc(entry.updated_at),
         binding=binding,
+        bindings=binding_views,
         my_claims=claims,
     )
 
@@ -280,6 +301,22 @@ def parse_name(value: dict[str, Any], key: str) -> str:
     if not isinstance(raw, str) or not raw.strip() or len(raw.strip()) > 64:
         raise HTTPException(status_code=400, detail="invalid_bot_request")
     return raw.strip()
+
+
+def parse_mode(value: dict[str, Any], key: str) -> str:
+    raw = value.get(key)
+    if not isinstance(raw, str) or raw not in BOT_MODES:
+        raise HTTPException(status_code=400, detail="invalid_bot_request")
+    return raw
+
+
+def normalize_chat_name(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    return stripped[:_MAX_ID_CHARS]
 
 
 def parse_revision(value: dict[str, Any]) -> int:
@@ -556,23 +593,35 @@ def register_pool_routes(
         """
 
         value = await read_json(request)
-        exact_keys(value, {"chat_id", "tab_id", "expected_revision"})
+        if not set(value) <= {"chat_id", "tab_id", "expected_revision"} or not {
+            "chat_id",
+            "expected_revision",
+        } <= set(value):
+            raise HTTPException(status_code=400, detail="invalid_bot_request")
         chat_id = parse_secret(value, "chat_id")
-        tab_id = parse_secret(value, "tab_id")
+        raw_tab_id = value.get("tab_id")
+        tab_id = parse_secret(value, "tab_id") if raw_tab_id is not None else None
         expected_revision = parse_revision(value)
         owner = bindings.owner_identity(user)
-        entry = get_pool_snapshot(bindings).get(bot_id)
+        snapshot = get_pool_snapshot(bindings)
+        entry = snapshot.get(bot_id)
         if entry is None:
             raise HTTPException(status_code=404, detail="bot_not_found")
+        if entry.mode == BOT_MODE_SINGLE and tab_id is None:
+            raise HTTPException(status_code=400, detail="invalid_bot_request")
         if not entry.configured:
             raise HTTPException(status_code=503, detail="bot_pool_unavailable")
         if not bindings.owner_is_authorized(owner):
             raise HTTPException(status_code=403, detail="hub_identity_revoked")
-        if entry.binding is not None:
+        if entry.mode == BOT_MODE_SINGLE and entry.binding is not None:
             raise HTTPException(status_code=409, detail="bot_occupied")
+        if entry.mode != BOT_MODE_SINGLE and len(entry.bindings) >= MAX_CHANNELS_PER_BOT:
+            raise HTTPException(status_code=409, detail="pool_capacity_reached")
+        if any(existing.chat_id == chat_id for bot in snapshot.bots for existing in bot.bindings):
+            raise HTTPException(status_code=409, detail="chat_already_bound")
         # Reading the chat reaches Feishu, so it happens before the Bot gate:
         # occupancy and revision are re-checked by the store under the gate.
-        workspace_id = bindings.validate_bind_target(tab_id, None)
+        workspace_id = bindings.validate_bind_target(tab_id, None) if tab_id is not None else None
         if entry.config is None:
             raise HTTPException(status_code=503, detail="bot_pool_unavailable")
         client = bindings.bot_client_class()(entry.config)
@@ -587,18 +636,67 @@ def register_pool_routes(
             raise HTTPException(status_code=422, detail="chat_not_visible")
         if not info.is_group:
             raise HTTPException(status_code=422, detail="chat_not_group")
+        chat_name = normalize_chat_name(info.name)
         async with bindings.gate(bot_id):
-            await in_pool(
-                lambda: bindings.pool().bind_group(
-                    bot_id,
-                    owner=owner,
-                    tab_id=tab_id,
-                    workspace_id=workspace_id,
-                    chat_id=chat_id,
-                    chat_name=info.name,
-                    expected_revision=expected_revision,
+            if tab_id is None:
+                gated_snapshot = get_pool_snapshot(bindings)
+                gated_entry = gated_snapshot.get(bot_id)
+                if gated_entry is None:
+                    raise HTTPException(status_code=404, detail="bot_not_found")
+                if not gated_entry.enabled:
+                    raise HTTPException(status_code=409, detail="bot_disabled")
+                if gated_entry.revision != expected_revision:
+                    raise HTTPException(status_code=409, detail="bot_revision_conflict")
+                if gated_entry.mode == BOT_MODE_SINGLE:
+                    raise HTTPException(status_code=400, detail="invalid_bot_request")
+                if len(gated_entry.bindings) >= MAX_CHANNELS_PER_BOT:
+                    raise HTTPException(status_code=409, detail="pool_capacity_reached")
+                if any(
+                    existing.chat_id == chat_id
+                    for bot in gated_snapshot.bots
+                    for existing in bot.bindings
+                ):
+                    raise HTTPException(status_code=409, detail="chat_already_bound")
+                auto_chat = bindings.auto_chat()
+                try:
+                    created_tab_id = await asyncio.wait_for(
+                        auto_chat.create_tab(
+                            format_group_tab_name(chat_name, chat_id),
+                            manager=bindings.ttyd_manager(),
+                        ),
+                        timeout=AUTO_CHAT_CREATE_TIMEOUT_SECONDS,
+                    )
+                except Exception as exc:
+                    raise HTTPException(status_code=503, detail="chat_tab_create_failed") from exc
+                try:
+                    workspace_id = bindings.validate_bind_target(created_tab_id, None)
+                    await in_pool(
+                        lambda: bindings.pool().bind_group(
+                            bot_id,
+                            owner=owner,
+                            tab_id=created_tab_id,
+                            workspace_id=workspace_id,
+                            chat_id=chat_id,
+                            chat_name=chat_name,
+                            expected_revision=expected_revision,
+                        )
+                    )
+                except Exception as exc:
+                    await auto_chat.delete_tab(created_tab_id, manager=bindings.ttyd_manager())
+                    raise HTTPException(status_code=503, detail="chat_tab_create_failed") from exc
+            else:
+                target_tab_id = tab_id
+                await in_pool(
+                    lambda: bindings.pool().bind_group(
+                        bot_id,
+                        owner=owner,
+                        tab_id=target_tab_id,
+                        workspace_id=workspace_id,
+                        chat_id=chat_id,
+                        chat_name=chat_name,
+                        expected_revision=expected_revision,
+                    )
                 )
-            )
         return pool_response(user, bindings, focus_bot_id=bot_id)
 
     @router.patch("/bots/{bot_id}", response_model=FeishuBotPoolResponse)
@@ -607,7 +705,7 @@ def register_pool_routes(
     ) -> FeishuBotPoolResponse:
         value = await read_json(request)
         if (
-            not set(value) <= {"name", "enabled", "expected_revision"}
+            not set(value) <= {"name", "enabled", "mode", "expected_revision"}
             or "expected_revision" not in value
         ):
             raise HTTPException(status_code=400, detail="invalid_bot_request")
@@ -616,12 +714,17 @@ def register_pool_routes(
         enabled = value.get("enabled")
         if enabled is not None and not isinstance(enabled, bool):
             raise HTTPException(status_code=400, detail="invalid_bot_request")
+        mode = parse_mode(value, "mode") if "mode" in value else None
         if get_pool_snapshot(bindings).get(bot_id) is None:
             raise HTTPException(status_code=404, detail="bot_not_found")
         async with bindings.gate(bot_id):
             await in_pool(
                 lambda: bindings.pool().update_bot(
-                    bot_id, expected_revision=expected_revision, name=name, enabled=enabled
+                    bot_id,
+                    expected_revision=expected_revision,
+                    name=name,
+                    enabled=enabled,
+                    mode=mode,
                 )
             )
         await reconcile_ws(bindings)
@@ -729,14 +832,29 @@ def register_pool_routes(
         """
 
         value = await read_json(request)
-        exact_keys(value, {"expected_revision"})
+        if (
+            not set(value) <= {"expected_revision", "pairing_id"}
+            or "expected_revision" not in value
+        ):
+            raise HTTPException(status_code=400, detail="invalid_bot_request")
         expected_revision = parse_revision(value)
+        pairing_id = (
+            parse_secret(value, "pairing_id")
+            if "pairing_id" in value and value["pairing_id"] is not None
+            else None
+        )
         async with bindings.gate(bot_id):
             await in_pool(
-                lambda: bindings.pool().release_binding(bot_id, expected_revision=expected_revision)
+                lambda: bindings.pool().release_binding(
+                    bot_id,
+                    expected_revision=expected_revision,
+                    pairing_id=pairing_id,
+                )
             )
-            # A released Bot keeps no ownership over the messages it sent.
-            bindings.forget_sent_messages(bot_id)
+            after = get_pool_snapshot(bindings).get(bot_id)
+            if after is None or not after.bindings:
+                # A released Bot keeps no ownership over the messages it sent.
+                bindings.forget_sent_messages(bot_id)
         return pool_response(user, bindings, focus_bot_id=bot_id)
 
     @router.api_route("/config/status", methods=["GET"])

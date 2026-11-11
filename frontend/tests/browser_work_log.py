@@ -62,24 +62,35 @@ async def footer(page, case_id):
     failed_phrase = section.locator(".turn-working-counts-failed")
     has_counts = await counts_line.count() > 0
     has_failed = await failed_phrase.count() > 0
-    step_box = await section.locator(".turn-working-step").bounding_box() if await section.locator(".turn-working-step").count() else None
+    step_box = (
+        await section.locator(".turn-working-step").bounding_box()
+        if await section.locator(".turn-working-step").count()
+        else None
+    )
     orb_box = await section.locator(".turn-working-orb").bounding_box()
     return {
         "word": await section.locator(".turn-working-label").all_inner_texts(),
         "context": await section.locator(".turn-working-context").all_inner_texts(),
         "hint": await section.locator(".turn-working-hint").all_inner_texts(),
         "orb_centre_offset": (
-            round((orb_box["y"] + orb_box["height"] / 2) - (step_box["y"] + step_box["height"] / 2), 1)
-            if step_box and orb_box else None
+            round(
+                (orb_box["y"] + orb_box["height"] / 2) - (step_box["y"] + step_box["height"] / 2),
+                1,
+            )
+            if step_box and orb_box
+            else None
         ),
-        "step": ((await section.locator(".turn-working-step").all_inner_texts()) or [""])[0].strip(),
+        "step": ((await section.locator(".turn-working-step").all_inner_texts()) or [""])[
+            0
+        ].strip(),
         "elapsed": (await section.locator(".turn-working-elapsed").inner_text()).strip(),
         "counts": await counts_line.all_inner_texts(),
-        "counts_class": await counts_line.first.get_attribute("class") if has_counts else None,
-        "failed_phrase": (await failed_phrase.inner_text()).strip() if has_failed else None,
+        "counts_class": (await counts_line.first.get_attribute("class") if has_counts else None),
+        "failed_phrase": ((await failed_phrase.inner_text()).strip() if has_failed else None),
         "failed_colour": (
             await failed_phrase.evaluate("element => getComputedStyle(element).color")
-            if has_failed else None
+            if has_failed
+            else None
         ),
         "orb_animation": await section.locator(".turn-working-orb").evaluate(
             "element => getComputedStyle(element).animationName"
@@ -198,14 +209,18 @@ async def main(browser_run: BrowserRun) -> None:
         assert busy["word"] == ["Working"], busy["word"]
         assert busy["step"] == "· Reading 2 files", busy["step"]
         assert len(busy["counts"]) == 1, busy["counts"]
-        assert busy["counts"][0] == "2 edits · 2 commands · 2 reads · 1 failed · 192 events so far", busy["counts"][0]
+        assert (
+            busy["counts"][0] == "2 edits · 2 commands · 2 reads · 1 failed · 192 events so far"
+        ), busy["counts"][0]
         # A partial failure marks the phrase that names it; the summary line is
         # not repainted, so one failed call cannot read as a stalled turn.
         assert "failed" not in (busy["counts_class"] or ""), busy["counts_class"]
         assert busy["failed_phrase"] == "· 1 failed", busy["failed_phrase"]
-        neutral_colour = await case(page, "busy").locator(
-            ".turn-working-counts-text"
-        ).evaluate("element => getComputedStyle(element).color")
+        neutral_colour = (
+            await case(page, "busy")
+            .locator(".turn-working-counts-text")
+            .evaluate("element => getComputedStyle(element).color")
+        )
         assert busy["failed_colour"] != neutral_colour, (
             "the failure must be visibly distinct from the neutral counts",
             busy["failed_colour"],
@@ -219,12 +234,16 @@ async def main(browser_run: BrowserRun) -> None:
         assert busy["context"] == [], "the busy line names its step instead"
         # Volume of work rides on the counts line, so a long turn never shows a
         # stopwatch alone.
-        assert busy["counts"] == ["2 edits · 2 commands · 2 reads · 1 failed · 192 events so far"], busy["counts"]
+        assert busy["counts"] == [
+            "2 edits · 2 commands · 2 reads · 1 failed · 192 events so far"
+        ], busy["counts"]
 
         # ── events exist but the pane has not reduced them into parts ────────
         unreduced = await footer(page, "events-unreduced")
         observed["events-unreduced"] = unreduced
-        assert unreduced["step"] == "", "output is arriving, so it is not waiting for a first response"
+        assert (
+            unreduced["step"] == ""
+        ), "output is arriving, so it is not waiting for a first response"
         assert unreduced["word"] == ["Working"], unreduced["word"]
         assert unreduced["counts"] == ["1021 events so far"], unreduced["counts"]
         assert unreduced["hint"] == [], "there is nothing to explain"
@@ -258,7 +277,9 @@ async def main(browser_run: BrowserRun) -> None:
         assert awaiting["counts"] == [], "there is no work to count yet"
         # Who is being waited on belongs on this line: a bare state says nothing.
         assert awaiting["context"] == [], "the model belongs to the composer, not here"
-        assert awaiting["hint"] == ["The provider is running; it has not written anything yet."], awaiting["hint"]
+        assert awaiting["hint"] == [
+            "The provider is running; it has not written anything yet."
+        ], awaiting["hint"]
         # The light sits on the text's centre line, not on its baseline.
         assert awaiting["orb_centre_offset"] is not None, awaiting
         assert abs(awaiting["orb_centre_offset"]) <= 1.0, (
@@ -269,7 +290,9 @@ async def main(browser_run: BrowserRun) -> None:
         # ── the sentence is a fact about this tab, not a reassurance ─────────
         activity = await footer(page, "awaiting-first-activity")
         observed["awaiting-first-activity"] = activity
-        assert activity["hint"] == ["The provider is running pytest -q — nothing written yet."], activity["hint"]
+        assert activity["hint"] == [
+            "The provider is running pytest -q — nothing written yet."
+        ], activity["hint"]
 
         stuck = await footer(page, "awaiting-first-stuck")
         observed["awaiting-first-stuck"] = stuck
@@ -293,9 +316,9 @@ async def main(browser_run: BrowserRun) -> None:
         assert offline["hint"] == ["Reconnecting to the event stream…"], offline["hint"]
         assert not awaiting["waiting_class"], "the turn is live, not blocked by the user"
         assert awaiting["orb_animation"] != "none", "a live turn keeps its pulse"
-        assert await page.locator(".agent-waiting-card").count() == 0, (
-            "the old three-dot placeholder must be gone"
-        )
+        assert (
+            await page.locator(".agent-waiting-card").count() == 0
+        ), "the old three-dot placeholder must be gone"
 
         # ── finished turns: human activity, never a raw event count ───────────
         counts_header = case(page, "completed-counts")
@@ -338,7 +361,10 @@ async def main(browser_run: BrowserRun) -> None:
         assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
         mobile_busy = await footer(page, "busy")
         assert mobile_busy["step"] == "· Reading 2 files", mobile_busy["step"]
-        assert mobile_busy["counts"][0] == "2 edits · 2 commands · 2 reads · 1 failed · 192 events so far"
+        assert (
+            mobile_busy["counts"][0]
+            == "2 edits · 2 commands · 2 reads · 1 failed · 192 events so far"
+        )
         await page.screenshot(path=str(output / "work-log-fixture-mobile.png"), full_page=True)
 
         assert not api_requests, api_requests

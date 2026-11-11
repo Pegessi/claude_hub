@@ -10,6 +10,7 @@ const turnParts = read('ChatTurnParts')
 const standalone = read('ChatSubagentCard')
 const region = read('ChatSubagentRegion')
 const subthread = read('ChatSubthread')
+const subthreadBody = read('ChatSubthreadBody')
 
 test('uncorrelated Agent and Task calls retain a clearly scoped fallback card', () => {
   assert.match(turnParts, /<ChatSubagentCard[\s\S]*?v-else-if="part\.kind === 'subagent'"/)
@@ -33,17 +34,22 @@ test('one turn-level region renders one keyed row per complete provider id', () 
 })
 
 test('dispatch status and child-turn lifecycle are rendered separately', () => {
-  assert.match(subthread, /subagentDispatchLabel\(thread\.launchTool\.status\)/)
+  // The dispatch badge belongs to the delegated task; the lifecycle badge
+  // belongs to the child itself, and they are never folded into one.
+  assert.match(subthreadBody, /subagentDispatchLabel\(thread\.launchTool\.status\)/)
   assert.match(subthread, /subthreadStatusLabel\(thread\)/)
 })
 
 test('expanding a child retains prompt, prose, thinking, tools and images', () => {
-  assert.match(subthread, /subthreadInstructionText\(thread\.launchTool\)/)
-  assert.match(subthread, /v-for="sub in subthreadPartsFor\(thread\)"/)
+  // Body rows live in their own component so the dock's window renders exactly
+  // what the inline region renders.
+  assert.match(subthread, /<ChatSubthreadBody/)
+  assert.match(subthreadBody, /subthreadInstructionText\(thread\.launchTool\)/)
+  assert.match(subthreadBody, /v-for="sub in subthreadPartsFor\(thread\)"/)
   for (const kind of ['instruction', 'thinking', 'reasoning_status', 'text', 'status', 'tool_group', 'agent_image']) {
-    assert.match(subthread, new RegExp(`sub\\.kind === '${kind}'`))
+    assert.match(subthreadBody, new RegExp(`sub\\.kind === '${kind}'`))
   }
-  assert.match(subthread, /:complete="subthreadTerminal\(thread\)"/)
+  assert.match(subthreadBody, /:complete="subthreadTerminal\(thread\)"/)
 })
 
 test('native region uses theme tokens and keeps narrow viewport rules', () => {

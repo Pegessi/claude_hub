@@ -40,6 +40,17 @@ _PNG = (
 )
 
 
+def _stream_event(session: ManagedSession, **fields: Any) -> AgentStreamEvent:
+    return AgentStreamEvent(
+        stream_sequence=fields.pop("stream_sequence", 1),
+        session_id=session.id,
+        tab_id=session.tab_id,
+        agent_type=session.agent_type,
+        created_at=datetime.now(),
+        **fields,
+    )
+
+
 class _MemoryProvider(ProviderSession):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -536,13 +547,9 @@ async def test_cold_restart_accepted_unfinished_turn_requires_attention(
     attempt_path.write_text(json.dumps(evidence), encoding="utf-8")
     stream_path = managed_chat.AgentStreamStore(session.workspace_id, session.id).path
     stream_path.write_text(
-        json.dumps(
-            {
-                "type": "turn_started",
-                "turn_id": "call-orphan",
-                "run_epoch": 1,
-            }
-        )
+        _stream_event(
+            session, type="turn_started", turn_id="call-orphan", run_epoch=1
+        ).model_dump_json()
         + "\n",
         encoding="utf-8",
     )
@@ -626,7 +633,8 @@ async def test_reset_rotates_both_identities_and_keeps_history(
     monkeypatch.setattr(managed_chat, "_workspace_manager", lambda: fake_workspace_manager)
     store_path = managed_chat.AgentStreamStore(session.workspace_id, session.id).path
     store_path.parent.mkdir(parents=True)
-    store_path.write_text("{}\n", encoding="utf-8")
+    original_event = _stream_event(session, type="turn_completed", turn_id="prior-turn")
+    store_path.write_text(original_event.model_dump_json() + "\n", encoding="utf-8")
 
     await managed_chat.reset_context(session)
 
@@ -635,7 +643,9 @@ async def test_reset_rotates_both_identities_and_keeps_history(
     assert session.agent_session_id_verified is False
     assert tab.agent_session_id is None
     assert tab.agent_session_id_verified is False
-    assert store_path.read_text(encoding="utf-8") == "{}\n"
+    assert (await AgentStreamStore(session.workspace_id, session.id).read_since()).events == [
+        original_event
+    ]
 
 
 def test_runtime_reads_attempt_sidecar_once(
@@ -657,7 +667,7 @@ def test_runtime_reads_attempt_sidecar_once(
     assert reads == 1
 
 
-def test_durable_lifecycle_scan_is_cached_until_file_changes(
+def test_durable_lifecycle_reads_sqlite_without_reopening_legacy_file(
     isolated_bridge: _FakeManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -665,16 +675,30 @@ def test_durable_lifecycle_scan_is_cached_until_file_changes(
     stream_path = managed_chat.AgentStreamStore(session.workspace_id, session.id).path
     stream_path.parent.mkdir(parents=True)
     stream_path.write_text(
-        json.dumps({"type": "turn_completed", "turn_id": "done", "run_epoch": 1}) + "\n",
+        _stream_event(session, type="turn_completed", turn_id="done", run_epoch=1).model_dump_json()
+        + "\n",
         encoding="utf-8",
     )
     assert managed_chat._durable_turn_state(session) == "terminal"
 
     def fail_open(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("cached lifecycle should not reopen an unchanged event log")
+        raise AssertionError("SQLite lifecycle should not reopen an imported legacy event log")
 
     monkeypatch.setattr(Path, "open", fail_open)
     assert managed_chat._durable_turn_state(session) == "terminal"
+    AgentStreamStore(session.workspace_id, session.id)._replace_rows(
+        [_stream_event(session, type="turn_started", turn_id="new-turn", run_epoch=2)]
+    )
+    assert managed_chat._durable_turn_state(session) == "unfinished"
+
+
+def test_malformed_legacy_lifecycle_remains_unknown(isolated_bridge: _FakeManager) -> None:
+    session = _session()
+    stream_path = AgentStreamStore(session.workspace_id, session.id).path
+    stream_path.parent.mkdir(parents=True)
+    stream_path.write_text("{}\n", encoding="utf-8")
+    assert managed_chat._durable_turn_state(session) == "unknown"
+    assert managed_chat.is_turn_running(session) is True
 
 
 @pytest.mark.asyncio
@@ -700,10 +724,13 @@ async def test_stream_error_does_not_terminalize_unfinished_turn(
     stream_path.parent.mkdir(parents=True)
     stream_path.write_text(
         "\n".join(
-            json.dumps(event)
-            for event in (
-                {"type": "turn_started", "turn_id": "call-error", "run_epoch": 1},
-                {"type": "error", "turn_id": "call-error", "run_epoch": 1},
+            _stream_event(session, stream_sequence=index, **event).model_dump_json()
+            for index, event in enumerate(
+                (
+                    {"type": "turn_started", "turn_id": "call-error", "run_epoch": 1},
+                    {"type": "error", "turn_id": "call-error", "run_epoch": 1},
+                ),
+                start=1,
             )
         )
         + "\n",
@@ -724,10 +751,13 @@ async def test_cold_terminal_turn_overrides_stale_working_status(
     stream_path.parent.mkdir(parents=True)
     stream_path.write_text(
         "\n".join(
-            json.dumps(event)
-            for event in (
-                {"type": "turn_started", "turn_id": "call-done", "run_epoch": 1},
-                {"type": "turn_completed", "turn_id": "call-done", "run_epoch": 1},
+            _stream_event(session, stream_sequence=index, **event).model_dump_json()
+            for index, event in enumerate(
+                (
+                    {"type": "turn_started", "turn_id": "call-done", "run_epoch": 1},
+                    {"type": "turn_completed", "turn_id": "call-done", "run_epoch": 1},
+                ),
+                start=1,
             )
         )
         + "\n",
@@ -796,7 +826,11 @@ async def test_reset_stop_failure_preserves_old_provider_identity(
     monkeypatch.setattr(managed_chat.ttyd_manager, "_save_state", lambda: None)
     evidence_path = managed_chat.AgentStreamStore(session.workspace_id, session.id).path
     evidence_path.parent.mkdir(parents=True)
-    evidence_path.write_text("{}\n", encoding="utf-8")
+    evidence_path.write_text(
+        _stream_event(session, type="turn_completed", turn_id="prior-turn").model_dump_json()
+        + "\n",
+        encoding="utf-8",
+    )
     isolated_bridge.forget_error = RuntimeError("provider teardown failed")
 
     with pytest.raises(RuntimeError, match="provider teardown failed"):
@@ -839,25 +873,19 @@ async def test_explicit_discard_removes_receipts_before_reusing_session_id(
 ) -> None:
     session = _session()
     await managed_chat.send_message(session, "old payload", [], "reused-call")
-    stream_path = managed_chat.AgentStreamStore(session.workspace_id, session.id).path
-    stream_path.write_text(
-        "\n".join(
-            json.dumps(event)
-            for event in (
-                {"type": "turn_started", "turn_id": "reused-call", "run_epoch": 1},
-                {"type": "turn_completed", "turn_id": "reused-call", "run_epoch": 1},
+    await AgentStreamStore(session.workspace_id, session.id).replace_all(
+        [
+            _stream_event(
+                session, stream_sequence=index, type=kind, turn_id="reused-call", run_epoch=1
             )
-        )
-        + "\n",
-        encoding="utf-8",
+            for index, kind in enumerate(("turn_started", "turn_completed"), start=1)
+        ]
     )
     assert managed_chat._durable_turn_state(session) == "terminal"
-    assert session.id in managed_chat._turn_state_cache
 
     await discard_session_stream(session.workspace_id, session.id)
 
     assert managed_chat.delivery_state(session, "reused-call") == "not_sent"
-    assert session.id not in managed_chat._turn_state_cache
     isolated_bridge.calls.clear()
     await managed_chat.send_message(session, "new payload", [], "reused-call")
     assert len(isolated_bridge.calls) == 1
@@ -1080,3 +1108,46 @@ def test_managed_working_snapshot_carries_what_and_since_when(
     assert snapshot.activity_since is not None
     elapsed = (datetime.now() - snapshot.activity_since).total_seconds()
     assert 89 <= elapsed <= 92
+
+
+def test_nullable_epoch_is_not_epoch_zero(isolated_bridge: _FakeManager) -> None:
+    session = _session()
+    store = AgentStreamStore(session.workspace_id, session.id)
+    store._replace_rows(
+        [
+            _stream_event(session, type="turn_started", turn_id=None, run_epoch=None),
+            _stream_event(session, type="turn_completed", turn_id=None, run_epoch=0),
+        ]
+    )
+    assert managed_chat._durable_turn_state(session) == "unfinished"
+    store._replace_rows(
+        [
+            _stream_event(session, type="turn_started", turn_id=None, run_epoch=None),
+            _stream_event(session, type="turn_completed", turn_id=None, run_epoch=None),
+        ]
+    )
+    assert managed_chat._durable_turn_state(session) == "terminal"
+
+
+def test_has_residual_state_detects_sqlite_cursor_and_clears_on_delete(
+    isolated_bridge: _FakeManager,
+) -> None:
+    from claude_hub.services.local_storage import delete_document, write_document
+
+    session = _session()
+    store = AgentStreamStore(session.workspace_id, session.id)
+    assert managed_chat.has_residual_state(session.workspace_id, session.id) is False
+    write_document(store.cursor_path, {"offset": 42, "path": "/tmp/transcript.jsonl"})
+    assert not store.cursor_path.exists()
+    assert managed_chat.has_residual_state(session.workspace_id, session.id) is True
+    delete_document(store.cursor_path)
+    assert managed_chat.has_residual_state(session.workspace_id, session.id) is False
+    edit_bak = store.path.with_name(store.path.name + ".edit-bak")
+    write_document(
+        edit_bak,
+        [event.model_dump(mode="json") for event in [_stream_event(session, type="turn_started")]],
+    )
+    assert not edit_bak.exists()
+    assert managed_chat.has_residual_state(session.workspace_id, session.id) is True
+    delete_document(edit_bak)
+    assert managed_chat.has_residual_state(session.workspace_id, session.id) is False

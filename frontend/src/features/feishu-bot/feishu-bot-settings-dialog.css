@@ -189,6 +189,36 @@
 .field { display: grid; min-width: 0; gap: 6px; }
 .field-label { color: var(--ch-color-text-muted); font-size: var(--ch-font-size-sm); font-weight: 500; }
 .field small { color: var(--ch-color-text-subtle); font-size: var(--ch-font-size-xs); }
+.mode-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.mode-card {
+  display: grid;
+  align-content: start;
+  justify-items: start;
+  gap: 5px;
+  width: 100%;
+  height: auto;
+  min-height: 68px;
+  padding: 10px 12px;
+  border: 1px solid var(--ch-color-border);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-sunken);
+  text-align: left;
+  white-space: normal;
+}
+.mode-card.is-selected {
+  border-color: var(--ch-color-accent-ring-strong);
+  background: var(--ch-color-surface-selected);
+}
+.mode-card__header { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; }
+.mode-card__header strong { color: var(--ch-color-text-strong); font-size: var(--ch-font-size-sm); font-weight: 600; }
+.mode-card__header code {
+  padding: 1px 5px;
+  border-radius: var(--ch-radius-sm);
+  background: var(--ch-color-chip-bg-muted);
+  color: var(--ch-color-text-subtle);
+  font: 10px/1.4 var(--ch-font-mono);
+}
+.mode-card small { color: var(--ch-color-text-muted); font-size: var(--ch-font-size-xs); font-weight: 400; line-height: 1.4; }
 .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 12px; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-md); background: var(--ch-color-surface-sunken); }
 .toggle-row > span { display: grid; gap: 2px; }
 .toggle-row strong { color: var(--ch-color-text); font-size: var(--ch-font-size-sm); font-weight: 500; }
@@ -246,6 +276,7 @@
   .list { grid-auto-flow: column; grid-auto-columns: minmax(180px, 72vw); overflow-x: auto; overflow-y: hidden; }
   .bot-sidebar__hint { display: none; }
   .detail { min-height: auto; padding: 18px 14px 24px; overflow: visible; }
+  .mode-grid,
   .secret-grid,
   .create-grid { grid-template-columns: 1fr; }
   .field--wide { grid-column: auto; }
