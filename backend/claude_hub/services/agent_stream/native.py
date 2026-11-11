@@ -470,6 +470,11 @@ class _ModelsCacheEntry:
 
 _models_cache: Dict[str, _ModelsCacheEntry] = {}
 _models_lock = asyncio.Lock()
+_models_locks: Dict[str, asyncio.Lock] = {}
+
+
+def _models_lock_for(agent_type: str) -> asyncio.Lock:
+    return _models_locks.setdefault(agent_type, asyncio.Lock())
 
 
 async def model_catalog_for(agent_type: str) -> ModelCatalog:
@@ -478,7 +483,7 @@ async def model_catalog_for(agent_type: str) -> ModelCatalog:
     now = time.monotonic()
     if entry is not None and entry.expires_at > now:
         return ModelCatalog(entry.options, metadata_cacheable=entry.metadata_cacheable)
-    async with _models_lock:
+    async with _models_lock_for(agent_type):
         entry = _models_cache.get(agent_type)
         now = time.monotonic()
         if entry is not None and entry.expires_at > now:
@@ -496,7 +501,7 @@ async def model_catalog_for(agent_type: str) -> ModelCatalog:
             options = _static_options(agent_type)
             ttl = _MODELS_POSITIVE_TTL_S
         _models_cache[agent_type] = _ModelsCacheEntry(
-            options, now + ttl, metadata_cacheable=metadata_cacheable
+            options, time.monotonic() + ttl, metadata_cacheable=metadata_cacheable
         )
         return ModelCatalog(options, metadata_cacheable=metadata_cacheable)
 
@@ -505,9 +510,9 @@ async def available_models_for(agent_type: str) -> List[StreamModelOption]:
     """Return the available models for an agent type, cached with a TTL.
 
     Cursor is discovered at runtime via ``agent --list-models`` and Antigravity
-    via ``agyx models``; other agent types return the curated static list. A
-    single global lock with double-checked checking dedups concurrent probes
-    (contention is negligible: one probe per TTL per agent type).
+    via ``agyx models``; other agent types return the curated static list.
+    Per-provider locks with double-checked locking dedup concurrent probes for
+    the same agent type without serializing independent providers.
     """
     return (await model_catalog_for(agent_type)).options
 
