@@ -210,38 +210,38 @@ export function useChatTimeline(deps: Dependencies) {
    *  read and keeps growing while a turn streams: without it a long working
    *  turn shows a stopwatch and nothing about how much has happened. */
   function turnEventCount(turn: TimelineTurn): number | null {
-    const detail = turn.turnId ? deps.historyDetails.value[turn.turnId] : undefined
-    const count = detail?.descriptor.event_count
-    if (typeof count === 'number' && count > 0) return count
-    // A turn that began while this pane was open has no descriptor: hydration
-    // describes history, and the long-poll's raw page carries none. Its events
-    // are however all here, because this pane watched them arrive — so the
-    // count is known even when the backend never told us.
     if (!turn.turnId) return null
+    const detail = deps.historyDetails.value[turn.turnId]
+    const described = detail?.descriptor.event_count
     const seen = observedTurnCounts.get(turn.turnId) ?? 0
-    return seen > 0 ? seen : null
+    // The higher of the two: a hydration descriptor counts the whole turn, and
+    // the pane's own tally keeps growing for a turn that began here (no page
+    // describes it) — or for one whose descriptor was written before the events
+    // this pane watched arrive.
+    const count = Math.max(typeof described === 'number' ? described : 0, seen)
+    return count > 0 ? count : null
   }
 
-  /** Events per turn, counted as they arrive. Incremental: only the events this
-   *  pane has not counted yet are examined, so a long turn costs its own events
-   *  once rather than a rescan per batch. */
+  /** Output events per turn, counted as they arrive.
+   *
+   *  ``turn_started``/``turn_completed`` are the turn's punctuation, not output:
+   *  counting them would make a turn with nothing on screen look like it had
+   *  something to show, and the footer would stop saying it is still waiting for
+   *  a first response. Sequences already counted are skipped, so a replay or a
+   *  history-detail insertion cannot count the same event twice. */
   const observedTurnCounts = new Map<string, number>()
-  let countedThrough = 0
+  let countedThroughSequence = -2
 
   function countObservedTurnEvents(): void {
     const events = deps.events.value
-    if (events.length < countedThrough) {
-      // The stream was rescanning (reset/replay): start over rather than
-      // double-count the same events.
-      observedTurnCounts.clear()
-      countedThrough = 0
-    }
-    for (let index = countedThrough; index < events.length; index += 1) {
-      const turnId = events[index].turn_id
+    for (const event of events) {
+      if (event.stream_sequence <= countedThroughSequence) continue
+      countedThroughSequence = event.stream_sequence
+      if (event.type === 'turn_started' || event.type === 'turn_completed') continue
+      const turnId = event.turn_id
       if (!turnId) continue
       observedTurnCounts.set(turnId, (observedTurnCounts.get(turnId) ?? 0) + 1)
     }
-    countedThrough = events.length
   }
 
   const subthreadPartsFor = createSubthreadThinkingPresenter()
@@ -485,7 +485,7 @@ export function useChatTimeline(deps: Dependencies) {
   }
 
   function registerWatchers() {
-    watch(() => deps.events.value.length, countObservedTurnEvents, { immediate: true })
+    watch(() => deps.events.value, countObservedTurnEvents, { immediate: true, deep: false })
 
     watch(
       () => [deps.events.value.length, deps.pendingTurns.value.length],
@@ -503,11 +503,22 @@ export function useChatTimeline(deps: Dependencies) {
       },
     )
 
-    // A descriptor for the newest turn can arrive after activation (the pane
-    // polls it with the stream), so watch it too. ``backfillNewestTurn`` keeps
-    // its own one-per-turn guard, which is what makes a per-batch watcher safe.
+    // Ask again whenever the newest turn's own read state could have changed:
+    // a descriptor can arrive after activation, reset to ``idle`` after a retired
+    // read, grow, and the turn can complete — and ``backfillNewestTurn`` owns the
+    // budget that makes a per-batch watcher safe.
     watch(
-      () => [turns.value.length, Object.keys(deps.historyDetails.value).length, deps.historyDetailRevision.value],
+      () => {
+        const turn = turns.value[turns.value.length - 1]
+        const detail = turn?.turnId ? deps.historyDetails.value[turn.turnId] : undefined
+        return [
+          turns.value.length,
+          turn?.completed === true ? 1 : 0,
+          detail?.status ?? '',
+          detail?.descriptor.last_sequence ?? -1,
+          deps.historyDetailRevision.value,
+        ].join('|')
+      },
       () => void backfillNewestTurn(),
     )
 
