@@ -30,6 +30,7 @@ RUNNERS = (
     ("browser_workspace_picker_delete.py", "/tests/agent_workspace_task_create_harness.html"),
     ("browser_chat_subagent_region.py", ""),
     ("browser_subagent_jump_card.py", ""),
+    ("browser_native_subagent_dock.py", ""),
     ("browser_chat_composer.py", ""),
     ("browser_managed_chat_question.py", ""),
     ("browser_feishu_provenance.py", ""),

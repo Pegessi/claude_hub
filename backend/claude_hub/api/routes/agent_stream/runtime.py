@@ -13,7 +13,6 @@ from claude_hub.models import (
     ChatMode,
     ManagedSession,
     ManagedSessionStatus,
-    SessionKind,
     StreamCapabilities,
     WorkspaceSessionRole,
 )
@@ -252,7 +251,15 @@ async def capabilities_for(
 
     manager = manager or get_default_manager()
 
-    def unavailable(reason: str) -> StreamCapabilities:
+    def unavailable(reason: str, base: Optional[StreamCapabilities] = None) -> StreamCapabilities:
+        if base is not None:
+            return base.model_copy(
+                update={
+                    "structured": True,
+                    "unavailable_reason": reason,
+                    "metadata_cacheable": False,
+                }
+            )
         return StreamCapabilities(
             structured=True, unavailable_reason=reason, metadata_cacheable=False
         )
@@ -281,9 +288,9 @@ async def capabilities_for(
         except StructuredSourceUnavailable as exc:
             return unavailable(str(exc) or "Live provider unavailable")
         if manager.hard_failed(session.id):
-            return unavailable(tailer.last_error or "Live provider unavailable")
+            return unavailable(tailer.last_error or "Live provider unavailable", caps)
         if not caps.structured:
-            return unavailable(caps.unavailable_reason or "Live provider unavailable")
+            return unavailable(caps.unavailable_reason or "Live provider unavailable", caps)
         return caps
 
     # TERMINAL sessions (and Cursor terminal_transcript fallback): use the

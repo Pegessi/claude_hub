@@ -56,6 +56,7 @@ from claude_hub.services.feishu_bot_pool import (
     dedup_key,
     turn_id_for,
 )
+from claude_hub.services.local_storage import document_exists, read_document, write_document
 
 CONFIRM_RE = re.compile(r"[A-HJ-NP-Z2-9]{6}")
 
@@ -288,7 +289,7 @@ def test_create_rejects_the_environment_app_id_before_any_pool_write(
     duplicate it."""
 
     environ = _env("env-app")
-    assert not pool.path.exists()
+    assert not document_exists(pool.path)
     with pytest.raises(FeishuBotAppIdConflict):
         pool.create_bot(name="Clash", config=_config("env-app"), environ=environ)
 
@@ -372,10 +373,10 @@ def test_environment_removal_revokes_the_binding(pool: FeishuBotPoolStore) -> No
 def test_environment_sync_is_idempotent(pool: FeishuBotPoolStore) -> None:
     environ = _env("env-app")
     pool.snapshot(environ)
-    first = pool.path.read_bytes()
+    first = json.dumps(read_document(pool.path), sort_keys=True)
     pool.snapshot(environ)
     pool.snapshot(environ)
-    assert pool.path.read_bytes() == first
+    assert json.dumps(read_document(pool.path), sort_keys=True) == first
 
 
 # ---------------------------------------------------------------- D. pairing
@@ -542,7 +543,7 @@ def test_drop_binding_ignores_a_superseded_pairing_id(pool: FeishuBotPoolStore) 
 
 def test_non_finite_timestamps_are_rejected(pool: FeishuBotPoolStore) -> None:
     bot_id = pool.create_bot(name="One", config=_config(), environ={})
-    state = json.loads(pool.path.read_text())
+    state = read_document(pool.path)
     state["bots"][bot_id]["bindings"] = [
         {
             "pairing_id": "p-1",
@@ -557,7 +558,7 @@ def test_non_finite_timestamps_are_rejected(pool: FeishuBotPoolStore) -> None:
             "generation": 0,
         }
     ]
-    pool.path.write_text(json.dumps(state))
+    write_document(pool.path, state)
     with pytest.raises(FeishuBotPoolStateError):
         pool.snapshot({})
 
@@ -577,13 +578,13 @@ def test_infinite_claim_expiry_does_not_make_a_claim_immortal(
         environ={},
     )
     claim, _word = pool.claim_code(bot_id, code=code, sender_open_id="ou-s", chat_id="oc-1")
-    state = json.loads(pool.path.read_text())
+    state = read_document(pool.path)
     state["bots"][bot_id]["claims"][claim.pairing_id]["expires_at"] = math.inf
-    pool.path.write_text(json.dumps(state).replace("Infinity", "1e999"))
-    before = pool.path.read_bytes()
+    write_document(pool.path, json.loads(json.dumps(state).replace("Infinity", "1e999")))
+    before = json.dumps(read_document(pool.path), sort_keys=True)
     with pytest.raises(FeishuBotPoolStateError):
         pool.snapshot({})
-    assert pool.path.read_bytes() == before
+    assert json.dumps(read_document(pool.path), sort_keys=True) == before
 
 
 # ------------------------------------------------------------ H. migration
@@ -2743,7 +2744,7 @@ def test_websocket_message_time_respects_latest_binding_activation(
     binding = _pair(api.pool, bot_id, owner=LOCAL, tab_id="tab-new", environ={})
     assert binding.created_at == base + 10
     clock.value = base + 15
-    assert not bot_api._dedup.path.exists(), "this event has never reached intake before"
+    assert not document_exists(bot_api._dedup.path), "this event has never reached intake before"
 
     submitted: list[str] = []
 

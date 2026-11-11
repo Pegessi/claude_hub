@@ -456,7 +456,9 @@ async def test_managed_handoff_requires_persisted_exact_fingerprint(runtime, tmp
     assert service.managed_handoff_persisted(q, item)
     altered = owner.model_copy(deep=True)
     altered.call_payload_fingerprints[item.call_id] = "different-payload"
-    path.write_text(json.dumps({"sessions": [altered.model_dump(mode="json")]}))
+    from claude_hub.services.local_storage import write_document
+
+    write_document(path, {"sessions": [altered.model_dump(mode="json")]})
     assert not service.managed_handoff_persisted(q, item)
 
 

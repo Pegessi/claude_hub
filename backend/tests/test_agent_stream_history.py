@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -64,7 +63,9 @@ def event(kind: str, turn_id: Optional[str] = "turn", **payload: Any) -> AgentSt
     )
 
 
-def test_summary_preserves_questions_answers_controls_and_raw_log(store: AgentStreamStore) -> None:
+def test_summary_preserves_questions_answers_controls_and_raw_log(
+    store: AgentStreamStore,
+) -> None:
     async def run() -> None:
         source = [
             event("turn_started", summary="Question", attachments=[{"id": "image"}]),
@@ -78,7 +79,7 @@ def test_summary_preserves_questions_answers_controls_and_raw_log(store: AgentSt
             event("turn_completed", status="cancelled"),
         ]
         await store.replace_all(source)
-        before = store.path.read_bytes()
+        before = await store.read_since(-1, 5000)
         summary = await store.read_conversation(-1, 5000, compact=True)
         assert [item.stream_sequence for item in summary.events] == [0, 4, 5, 6, 7, 8]
         assert summary.events[0].payload["attachments"] == [{"id": "image"}]
@@ -91,12 +92,11 @@ def test_summary_preserves_questions_answers_controls_and_raw_log(store: AgentSt
         }
         assert summary.next_sequence == 8 and not summary.has_more
         assert "large result" not in summary.model_dump_json()
-        assert store.path.read_bytes() == before
+        assert await store.read_since(-1, 5000) == before
         raw = await store.read_since(-1, 5000)
         assert len(raw.events) == 9 and raw.history_details == []
         details = await store.read_turn_since("turn", -1, 8, 5000)
         assert details.events == raw.events
-        assert store._history.rows[3].visible is None
 
     asyncio.run(run())
 
@@ -187,78 +187,13 @@ def test_summary_compaction_keeps_omitted_boundaries(store: AgentStreamStore) ->
     asyncio.run(run())
 
 
-def test_index_only_parses_appended_lines(
-    store: AgentStreamStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    indexed: list[int] = []
-    original = ConversationHistoryIndex._index_line
-
-    def track(self: ConversationHistoryIndex, line: bytes, offset: int) -> None:
-        indexed.append(offset)
-        original(self, line, offset)
-
-    monkeypatch.setattr(ConversationHistoryIndex, "_index_line", track)
-
-    async def run() -> None:
-        await store.replace_all(
-            [
-                event("turn_started", summary="Question"),
-                *[event("tool_call_completed", result="large" * 1000) for _ in range(25)],
-                event("text_delta", text="Answer"),
-            ]
-        )
-        await store.read_conversation(-1, 1)
-        assert len(indexed) == 27
-        old_size = store.path.stat().st_size
-        indexed.clear()
-        await store.read_conversation(0, 1)
-        await store.read_conversation(-1, 5000)
-        assert indexed == []
-        await store.append(event("thinking_delta", text="new hidden tail"))
-        page = await store.read_conversation(26, 5000)
-        assert indexed == [old_size]
-        assert page.events == [] and page.next_sequence == 27
-        assert page.history_details[0].event_count == 28
-
-    asyncio.run(run())
-
-
-def test_partial_append_waits_for_complete_line(store: AgentStreamStore) -> None:
-    async def run() -> None:
-        await store.replace_all([event("turn_started", summary="Question")])
-        await store.read_conversation()
-        new = event("text_delta", text="Answer").model_copy(update={"stream_sequence": 1})
-        line = new.model_dump_json().encode()
-        with store.path.open("ab") as handle:
-            handle.write(line[: len(line) // 2])
-        page = await store.read_conversation(0)
-        assert page.events == [] and page.next_sequence == 0
-        with store.path.open("ab") as handle:
-            handle.write(line[len(line) // 2 :] + b"\n")
-        complete = await store.read_conversation(0)
-        assert complete.events == [new] and complete.next_sequence == 1
-
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize("replacement", ["replace_all", "inode", "same_size", "shrink"])
-def test_index_invalidates_after_replacement(store: AgentStreamStore, replacement: str) -> None:
+@pytest.mark.parametrize("text", ["new answer", "new"])
+def test_history_sees_committed_replacement(store: AgentStreamStore, text: str) -> None:
     async def run() -> None:
         await store.replace_all([event("text_delta", text="old answer")])
         assert (await store.read_conversation()).events[0].payload["text"] == "old answer"
-        updated = event("text_delta", text="new answer")
-        if replacement == "replace_all":
-            await store.replace_all([updated])
-        elif replacement == "inode":
-            other = store.path.with_suffix(".replacement")
-            other.write_text(updated.model_dump_json() + "\n")
-            other.replace(store.path)
-        else:
-            if replacement == "shrink":
-                updated = event("text_delta", text="new")
-            old_mtime = store.path.stat().st_mtime_ns
-            store.path.write_text(updated.model_dump_json() + "\n")
-            os.utime(store.path, ns=(old_mtime + 1, old_mtime + 1))
+        updated = event("text_delta", text=text)
+        await store.replace_all([updated])
         assert (await store.read_conversation()).events == [updated]
 
     asyncio.run(run())

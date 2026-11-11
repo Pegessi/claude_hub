@@ -12,6 +12,7 @@ from claude_hub.services.feishu_bot_pool import (
     FeishuBotPoolStore,
     OwnerIdentity,
 )
+from claude_hub.services.local_storage import document_exists, read_document, write_document
 
 _T0 = 1_700_000_000.0
 _OWNER = OwnerIdentity(open_id="ou-hub", email="hub@example.test", kind=OWNER_KIND_OAUTH)
@@ -73,7 +74,7 @@ def test_env_config_change_invalidates_snapshot_without_revoking_binding(tmp_pat
     pending, word = _claim(store, ENV_BOT_ID, _ENV)
     binding = _activate(store, ENV_BOT_ID, pending, word, _ENV)
     old = store.effective(ENV_BOT_ID, environ=_ENV)
-    before = store.path.read_bytes()
+    before = json.dumps(read_document(store.path), sort_keys=True)
     assert store.is_current(old, environ=dict(_ENV))
 
     changed = dict(_ENV)
@@ -86,7 +87,7 @@ def test_env_config_change_invalidates_snapshot_without_revoking_binding(tmp_pat
     assert current.generation == old.generation
     assert store.snapshot(environ=changed).get(ENV_BOT_ID).binding == binding
     assert store.is_current(current, environ=changed)
-    assert store.path.read_bytes() == before
+    assert json.dumps(read_document(store.path), sort_keys=True) == before
 
 
 @pytest.mark.parametrize("version", [True, False, 2.0, "2", None])
@@ -103,28 +104,28 @@ def test_invalid_pool_version_is_not_rewritten(tmp_path, version):
         ),
         encoding="utf-8",
     )
-    before = store.path.read_bytes()
+    before = json.dumps(read_document(store.path), sort_keys=True)
     with pytest.raises(FeishuBotPoolStateError):
         store.create_bot(name="new", config=_CONFIG, environ={})
-    assert store.path.read_bytes() == before
+    assert json.dumps(read_document(store.path), sort_keys=True) == before
 
 
 def test_v2_pool_drops_callback_secrets_on_next_write(tmp_path):
     store = _store(tmp_path)
     bot_id = store.create_bot(name="test", config=_CONFIG, environ={})
-    state = json.loads(store.path.read_text(encoding="utf-8"))
+    state = read_document(store.path)
     state["version"] = 2
     state["bots"][bot_id]["credentials"].update(
         verification_token="legacy-token", encrypt_key="legacy-key"
     )
-    store.path.write_text(json.dumps(state), encoding="utf-8")
+    write_document(store.path, state)
 
     entry = store.snapshot(environ={}).get(bot_id)
     assert entry is not None
     assert entry.config == _CONFIG
     store.update_bot(bot_id, expected_revision=entry.revision, name="migrated", environ={})
 
-    migrated = json.loads(store.path.read_text(encoding="utf-8"))
+    migrated = read_document(store.path)
     assert migrated["version"] == 4
     assert migrated["bots"][bot_id]["credentials"] == {"app_secret": "test-secret"}
     assert migrated["bots"][bot_id]["mode"] == "single"
@@ -137,12 +138,12 @@ def test_v3_pool_migrates_single_binding_to_one_element_bindings_list(tmp_path):
     bot_id = store.create_bot(name="test", config=_CONFIG, environ={})
     pending, word = _claim(store, bot_id, {})
     binding = _activate(store, bot_id, pending, word, {})
-    state = json.loads(store.path.read_text(encoding="utf-8"))
+    state = read_document(store.path)
     v3_binding = state["bots"][bot_id].pop("bindings")[0]
     state["version"] = 3
     state["bots"][bot_id].pop("mode", None)
     state["bots"][bot_id]["binding"] = v3_binding
-    store.path.write_text(json.dumps(state), encoding="utf-8")
+    write_document(store.path, state)
 
     entry = store.snapshot(environ={}).get(bot_id)
     assert entry is not None
@@ -152,7 +153,7 @@ def test_v3_pool_migrates_single_binding_to_one_element_bindings_list(tmp_path):
     assert entry.binding == binding
 
     store.update_bot(bot_id, expected_revision=entry.revision, name="migrated-v4", environ={})
-    migrated = json.loads(store.path.read_text(encoding="utf-8"))
+    migrated = read_document(store.path)
     assert migrated["version"] == 4
     assert migrated["bots"][bot_id]["mode"] == "single"
     assert migrated["bots"][bot_id]["bindings"] == [v3_binding]
@@ -177,7 +178,7 @@ def test_invalid_legacy_version_cannot_create_a_pool(tmp_path, version):
     before = store.legacy_path.read_bytes()
     with pytest.raises(FeishuBotPoolStateError):
         store.create_bot(name="new", config=_CONFIG, environ={})
-    assert not store.path.exists()
+    assert not document_exists(store.path)
     assert store.legacy_path.read_bytes() == before
 
 
@@ -219,7 +220,7 @@ def test_invalid_persisted_time_fails_before_read_or_mutation(tmp_path, bad, fie
             expected_revision=_revision(store, bot_id, {}),
             environ={},
         )
-    state = json.loads(store.path.read_text(encoding="utf-8"))
+    state = read_document(store.path)
     row = state["bots"][bot_id]
     if field == "rate_limits":
         state["rate_limits"][_OWNER.open_id] = [bad]
@@ -231,12 +232,12 @@ def test_invalid_persisted_time_fails_before_read_or_mutation(tmp_path, bad, fie
             row["bindings"][0] if collection == "binding" else next(iter(row[collection].values()))
         )
         record[name] = bad
-    store.path.write_text(json.dumps(state), encoding="utf-8")
-    before = store.path.read_bytes()
+    write_document(store.path, state)
+    before = json.dumps(read_document(store.path), sort_keys=True)
 
     with pytest.raises(FeishuBotPoolStateError):
         store.snapshot(environ={})
-    assert store.path.read_bytes() == before
+    assert json.dumps(read_document(store.path), sort_keys=True) == before
     with pytest.raises(FeishuBotPoolStateError):
         store.create_bot(
             name="unrelated",
@@ -246,7 +247,7 @@ def test_invalid_persisted_time_fails_before_read_or_mutation(tmp_path, bad, fie
             ),
             environ={},
         )
-    assert store.path.read_bytes() == before
+    assert json.dumps(read_document(store.path), sort_keys=True) == before
 
 
 @pytest.mark.parametrize("location", ["pool", "legacy"])
@@ -258,7 +259,7 @@ def test_invalid_utf8_is_controlled_and_preserved(tmp_path, location):
         store.create_bot(name="test", config=_CONFIG, environ={})
     assert path.read_bytes() == b"\xff"
     if location == "legacy":
-        assert not store.path.exists()
+        assert not document_exists(store.path)
 
 
 @pytest.mark.parametrize(
@@ -285,5 +286,5 @@ def test_invalid_legacy_timestamp_is_controlled_and_preserved(tmp_path, bad):
     before = store.legacy_path.read_bytes()
     with pytest.raises(FeishuBotPoolStateError):
         store.snapshot(environ={})
-    assert not store.path.exists()
+    assert not document_exists(store.path)
     assert store.legacy_path.read_bytes() == before

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime
@@ -35,6 +36,7 @@ from claude_hub.services.feishu_bot_pool import (
     FeishuBotPoolStore,
     OwnerIdentity,
 )
+from claude_hub.services.local_storage import read_document
 
 
 @pytest.fixture(autouse=True)
@@ -456,7 +458,7 @@ async def test_pairing_rechecks_target_after_waiting_for_gate(env, monkeypatch, 
             "confirm_word": word,
             "expected_revision": revision(env),
         }
-    before = env.pool.path.read_bytes()
+    before = json.dumps(read_document(env.pool.path), sort_keys=True)
     original_gate = bot_api._gate
     queued = asyncio.Event()
 
@@ -486,7 +488,7 @@ async def test_pairing_rechecks_target_after_waiting_for_gate(env, monkeypatch, 
             response = await asyncio.wait_for(request_task, 2)
             assert response.status_code == 404
             assert response.json() == {"detail": "chat_tab_not_found"}
-            assert env.pool.path.read_bytes() == before
+            assert json.dumps(read_document(env.pool.path), sort_keys=True) == before
             assert env.pool.snapshot().get(env.bot_id).binding is None
         finally:
             if request_task is not None and not request_task.done():

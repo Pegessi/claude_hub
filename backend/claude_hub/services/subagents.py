@@ -7,9 +7,8 @@ result. Delivery reuses the external-conversation adapter
 (``dispatch_tab_chat_and_wait``) and lifecycle reuses ordinary tab archive.
 
 Turns run in server-owned asyncio tasks, so a result survives the request or
-CLI process that started it. Records live in ``<runtime home>/subagents.json``
-(single backend owner via ``BackendInstanceLock``), written atomically off the
-event loop. A turn still ``running`` when the backend starts again is marked
+CLI process that started it. Records use the shared SQLite store under the logical ``subagents.json`` key
+(single backend owner via ``BackendInstanceLock``), committed off the event loop. A turn still ``running`` when the backend starts again is marked
 failed, never left pending.
 """
 
@@ -20,11 +19,10 @@ import hashlib
 import json
 import logging
 import os
-import tempfile
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -42,6 +40,7 @@ from ..models.subagent import (
     utc_now,
 )
 from .agent_stream.providers.spec import all_specs
+from .local_storage import read_document, write_document
 
 logger = logging.getLogger(__name__)
 
@@ -218,7 +217,7 @@ class SubagentService:
 
     def _load(self) -> None:
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            payload = read_document(self.path)
         except FileNotFoundError:
             return
         except (OSError, ValueError):
@@ -246,7 +245,7 @@ class SubagentService:
 
         Saves are serialized in call order and coalesced: a save whose state a
         later write already covered returns at once. The JSON is built on the
-        loop (a consistent snapshot); the write and fsync run in a thread and
+        loop (a consistent snapshot); the SQLite commit runs in a thread and
         are never abandoned midway, so a cancelled caller cannot let an older
         snapshot land after a newer one.
         """
@@ -280,17 +279,7 @@ class SubagentService:
                 self._save_written = max(self._save_written, covered)
 
     def _write_state(self, state: Dict[str, Any]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd, raw_tmp = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=self.path.parent)
-        tmp = Path(raw_tmp)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(state, handle, indent=1, ensure_ascii=False)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp, self.path)
-        finally:
-            tmp.unlink(missing_ok=True)
+        write_document(self.path, state)
 
     def _prune(self) -> None:
         for record in self._subagents.values():

@@ -34,36 +34,37 @@ def turn_event(session_id: str, tab_id: str) -> AgentStreamEvent:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("delete_times_out", [False, True])
 async def test_direct_delete_waits_for_detached_edit_rollback(
-    direct_chat: DirectChat, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, delete_times_out: bool
+    direct_chat: DirectChat,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    delete_times_out: bool,
 ) -> None:
     tabs, process, manager, tailer, transport = direct_chat
     tailer_module = importlib.import_module("claude_hub.services.agent_stream.tailer")
-    store_module = importlib.import_module("claude_hub.services.agent_stream.store")
     session = stream_api._terminal_tab_stream_session(process.tab_id)
     assert session is not None
     transport.turn_in_flight = False
     original = turn_event(session.id, process.tab_id)
     await tailer.store.append(original)
     monkeypatch.setattr(
-        tailer_module, "discover_source_cached", lambda *_: tmp_path / "transcript.jsonl"
+        tailer_module,
+        "discover_source_cached",
+        lambda *_: tmp_path / "transcript.jsonl",
     )
     monkeypatch.setattr(tailer_module, "snapshot_transcript", lambda *_: None)
     monkeypatch.setattr(tailer_module, "restore_transcript", lambda *_: None)
     monkeypatch.setattr(tailer_module, "fork_transcript", lambda *_: None)
     monkeypatch.setattr(tailer_module, "get_adapter_for_session", lambda *_: MagicMock())
     monkeypatch.setattr(
-        manager, "_get_or_create", AsyncMock(side_effect=RuntimeError("provider restart failed"))
+        manager,
+        "_get_or_create",
+        AsyncMock(side_effect=RuntimeError("provider restart failed")),
     )
     monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: manager)
     goal = importlib.import_module("claude_hub.services.goal_run")
     monkeypatch.setattr(goal, "get_goal_manager", lambda: MagicMock(current=lambda *_: None))
-    copy = store_module.shutil.copy2
-    blocked = BlockedIO(copy)
-
-    def block_restore(src: Any, dst: Any) -> Any:
-        return blocked(src, dst) if str(src).endswith(".edit-bak") else copy(src, dst)
-
-    monkeypatch.setattr(store_module.shutil, "copy2", block_restore)
+    blocked = BlockedIO(AgentStreamStore._insert)
+    monkeypatch.setattr(AgentStreamStore, "_insert", lambda store, *args: blocked(store, *args))
     payload = stream_api.AgentStreamEditResendRequest(
         text="edited", client_turn_id="client", turn_id="old-turn"
     )
@@ -93,7 +94,7 @@ async def test_direct_delete_waits_for_detached_edit_rollback(
         else:
             assert await deleting
         assert tabs.get_tab(process.tab_id) is None
-        assert not tailer.store.path.exists()
+        assert await tailer.store.count() == 0
         fresh = AgentStreamStore(session.workspace_id, session.id)
         await fresh.append(original.model_copy(update={"tab_id": "replacement-tab"}))
         page = await fresh.read_since(-1, 100)
@@ -116,8 +117,8 @@ async def test_real_retry_keeps_pending_terminal_writer_owned(
     tailer_module = importlib.import_module("claude_hub.services.agent_stream.tailer")
     monkeypatch.setattr(tailer_module, "_STOP_JOIN_TIMEOUT_S", 0.05)
     monkeypatch.setattr(stream_api, "_get_tab_tailer_manager", lambda: manager)
-    blocked = BlockedIO(tailer.store._write_line)
-    monkeypatch.setattr(tailer.store, "_write_line", blocked)
+    blocked = BlockedIO(tailer.store._insert)
+    monkeypatch.setattr(tailer.store, "_insert", blocked)
     writer = tailer._task = asyncio.create_task(
         tailer._persist_and_fanout(turn_event(tailer.session_id, process.tab_id))
     )
@@ -150,7 +151,7 @@ async def test_real_retry_keeps_pending_terminal_writer_owned(
         blocked.release.set()
         await asyncio.gather(writer, return_exceptions=True)
         assert await tabs.delete_tab(process.tab_id)
-        assert not tailer.store.path.exists()
+        assert await tailer.store.count() == 0
     finally:
         blocked.release.set()
         await asyncio.gather(writer, *([retrying] if retrying else []), return_exceptions=True)
@@ -178,7 +179,7 @@ async def test_archive_api_cannot_forget_a_failed_provider_stop(
     assert archived.archived
     assert manager.get_tailer(tailer.session_id) is tailer
     assert tailer._retirement_pending
-    assert tailer.store.path.exists()
+    assert await tailer.store.count() > 0
     with pytest.raises(RuntimeError, match="could not safely stop"):
         await tabs.delete_tab(process.tab_id)
     assert tabs.get_tab(process.tab_id) is not None
@@ -186,7 +187,7 @@ async def test_archive_api_cannot_forget_a_failed_provider_stop(
     transport.stop.side_effect = None
     assert await tabs.delete_tab(process.tab_id)
     assert manager.get_tailer(tailer.session_id) is None
-    assert not tailer.store.path.exists()
+    assert await tailer.store.count() == 0
 
 
 @pytest.mark.asyncio

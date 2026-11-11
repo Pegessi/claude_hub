@@ -50,17 +50,16 @@ from claude_hub.services.bot_pool.common import (
     deprecated_env_present,
     environment_config,
     environment_present,
-    json,
     os,
     resolve_runtime_home,
-    secrets,
     threading,
     time,
 )
+from claude_hub.services.local_storage import read_document, write_document
 
 
 class FeishuBotPoolStateStore(object):
-    """Single-writer JSON pool guarded by one process lock."""
+    """Single-writer SQLite pool guarded by one process lock."""
 
     def __init__(
         self,
@@ -87,13 +86,11 @@ class FeishuBotPoolStateStore(object):
 
     def _read_file(self, path: Path) -> dict[str, Any] | None:
         try:
-            text = path.read_text(encoding="utf-8")
+            value = read_document(path)
         except FileNotFoundError:
             return None
         except (OSError, UnicodeDecodeError) as exc:
             raise FeishuBotPoolStateError("Cannot read Feishu Bot pool state") from exc
-        try:
-            value = json.loads(text)
         except ValueError as exc:
             raise FeishuBotPoolStateError("Invalid Feishu Bot pool state") from exc
         if not isinstance(value, dict):
@@ -232,29 +229,7 @@ class FeishuBotPoolStateStore(object):
         state["pool_revision"] = _as_int(state.get("pool_revision", 0), "pool_revision") + 1
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.path.parent, 0o700)
-        temporary = self.path.with_name(f".{self.path.name}.{secrets.token_hex(6)}.tmp")
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                descriptor = -1
-                json.dump(state, handle, sort_keys=True, separators=(",", ":"))
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, self.path)
-            os.chmod(self.path, 0o600)
-            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-            directory_fd = os.open(self.path.parent, flags)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
+        write_document(self.path, state)
 
     # ------------------------------------------------------------- read model
 

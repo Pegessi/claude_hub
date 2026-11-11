@@ -15,6 +15,7 @@ from ..legacy_state_migration import (
     migrate_raw_workspace_state,
     state_has_legacy_orchestration_keys,
 )
+from ..local_storage import document_exists, write_document
 from ..task_lifecycle import TaskNotifier
 from ..task_mailbox import TaskMailbox
 from ._base import _WorkspaceManagerBase
@@ -171,7 +172,7 @@ class _StateMixin(_WorkspaceManagerBase):
         return self._workspace_dir(workspace_id) / "snapshot.md"
 
     def _load_state(self) -> None:
-        if INDEX_FILE.exists() or self._backup_path_for(INDEX_FILE).exists():
+        if document_exists(INDEX_FILE) or self._backup_path_for(INDEX_FILE).exists():
             # An orphan backup with no primary is an anomaly; the durable
             # loader recovers/quarantines it instead of silently starting empty.
             self._load_nested_state()
@@ -206,7 +207,7 @@ class _StateMixin(_WorkspaceManagerBase):
         # A snapshot may be absent/stale after a crash or a derived-output failure.
         # Rebuild from committed files only; never save mutable state to refresh a cache.
         for workspace_id in self.workspaces:
-            if self._workspace_state_file(workspace_id).exists():
+            if document_exists(self._workspace_state_file(workspace_id)):
                 self._refresh_snapshot_best_effort(workspace_id)
 
     def _recover_uncertain_deliveries(self) -> None:
@@ -320,7 +321,7 @@ class _StateMixin(_WorkspaceManagerBase):
         backup = state_file.with_suffix(".json.pre-migration-backup")
         if not backup.exists():
             backup.write_text(json.dumps(raw, indent=2), encoding="utf-8")
-        self._atomic_write_text(state_file, json.dumps(migrated, indent=2))
+        write_document(state_file, migrated)
         if index_copy is not None and index_item is not None:
             index_item.clear()
             index_item.update(index_copy)

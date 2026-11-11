@@ -1278,76 +1278,26 @@ def test_history_api_requests_compacted_store_page(
     asyncio.run(run())
 
 
-def test_store_sequential_pages_resume_from_cached_file_offset(
+def test_store_sequential_pages_do_not_reopen_legacy_jsonl(
     store: AgentStreamStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A later page must not scan and parse the JSONL prefix again."""
+    """Indexed pages resume without reopening or rescanning the legacy file."""
 
     async def run() -> None:
         for i in range(8):
             await store.append(_event(text=str(i)))
-
         original_open = Path.open
-        readers: List[Any] = []
-
-        class CountingReader:
-            def __init__(self, handle: Any) -> None:
-                self.handle = handle
-                self.lines_read = 0
-                self.seek_offsets: List[int] = []
-
-            def __enter__(self) -> "CountingReader":
-                self.handle.__enter__()
-                return self
-
-            def __exit__(self, *args: Any) -> Any:
-                return self.handle.__exit__(*args)
-
-            def __iter__(self) -> "CountingReader":
-                return self
-
-            def __next__(self) -> str:
-                line = next(self.handle)
-                assert isinstance(line, str)
-                self.lines_read += 1
-                return line
-
-            def readline(self, *args: Any) -> str:
-                line = self.handle.readline(*args)
-                assert isinstance(line, str)
-                if line:
-                    self.lines_read += 1
-                return line
-
-            def seek(self, offset: int, *args: Any) -> int:
-                self.seek_offsets.append(offset)
-                result = self.handle.seek(offset, *args)
-                assert isinstance(result, int)
-                return result
-
-            def __getattr__(self, name: str) -> Any:
-                return getattr(self.handle, name)
 
         def tracked_open(path: Path, *args: Any, **kwargs: Any) -> Any:
-            handle = original_open(path, *args, **kwargs)
-            mode = args[0] if args else kwargs.get("mode", "r")
-            if path == store.path and mode == "r":
-                reader = CountingReader(handle)
-                readers.append(reader)
-                return reader
-            return handle
+            assert path != store.path, "SQLite pages must not reopen legacy JSONL"
+            return original_open(path, *args, **kwargs)
 
         monkeypatch.setattr(Path, "open", tracked_open)
-
         first = await store.read_since(-1, limit=2)
         second = await store.read_since(first.next_sequence, limit=2)
-
         assert [event.payload["text"] for event in second.events] == ["2", "3"]
-        assert len(readers) == 2
-        assert readers[1].seek_offsets and readers[1].seek_offsets[0] > 0
-        # Two returned rows plus one look-ahead row for has_more.
-        assert readers[1].lines_read == 3
+        assert second.next_sequence == 3 and second.has_more
 
     asyncio.run(run())
 
@@ -1429,6 +1379,7 @@ def test_store_recovers_sequence_after_restart(store: AgentStreamStore):
 def test_store_clear_removes_event_log_and_cursor_checkpoint(store: AgentStreamStore):
     async def run() -> None:
         await store.append(_event(text="old"))
+        store.cursor_path.parent.mkdir(parents=True, exist_ok=True)
         store.cursor_path.write_text("{}", encoding="utf-8")
 
         await store.clear()

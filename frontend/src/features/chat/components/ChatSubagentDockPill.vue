@@ -53,6 +53,7 @@
             :chip="chip"
             :now-ms="nowMs"
             @jump="emit('jump', $event)"
+            @open="onNativeOpen"
           />
         </li>
       </ul>
@@ -85,6 +86,7 @@
           :chips="chips"
           :now-ms="nowMs"
           @jump="onJump"
+          @open="onNativeOpen"
         />
       </div>
     </div>
@@ -98,6 +100,7 @@
       :now-ms="nowMs"
       @close="close(true)"
       @jump="onJump"
+      @open="onNativeOpen"
     />
   </div>
 </template>
@@ -106,13 +109,15 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { useViewport } from '@/composables/useViewport'
-import { subagentDockCounts, type SubagentJumpChip } from '../presentation/subagentJump'
+import { subagentDockCounts, type SubagentDockRow, type SubagentJumpChip } from '../presentation/subagentJump'
+import { useNativeSubagentDock } from '../controllers/nativeSubagentDock'
+import type { NativeSubagentRow } from '../presentation/nativeSubagentRows'
 import ChatSubagentList from './ChatSubagentList.vue'
 import ChatSubagentRow from './ChatSubagentRow.vue'
 import ChatSubagentSheet from './ChatSubagentSheet.vue'
 
 const props = defineProps<{
-  chips: SubagentJumpChip[]
+  chips: SubagentDockRow[]
 }>()
 
 const emit = defineEmits<{
@@ -133,6 +138,7 @@ const sheetId = `subagent-sheet-${uid}`
 // One pill for every pane size; only the reveal differs (gutter rail or
 // popover on desktop, bottom sheet on phones).
 const { isMobile } = useViewport()
+const nativeDock = useNativeSubagentDock()
 const open = ref(false)
 const showAll = ref(false)
 const nowMs = ref(Date.now())
@@ -210,6 +216,15 @@ function onEscape(event: KeyboardEvent) {
 function onJump(chip: SubagentJumpChip) {
   close(false)
   emit('jump', chip)
+}
+
+// A native child has no Chat tab: the pane's Chat body renders the detail
+// window (it owns the timeline), so this chrome control only requests it.
+// The window is rendered by the Chat body, so the dock owns focus restoration
+// on dismissal: the row that opened it when still mounted, else this pill.
+function onNativeOpen(chip: NativeSubagentRow, source: HTMLElement | null) {
+  close(false)
+  nativeDock?.open(chip, source, triggerRef.value)
 }
 
 function onOutsidePointer(event: PointerEvent) {

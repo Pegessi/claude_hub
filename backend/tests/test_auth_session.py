@@ -14,6 +14,7 @@ from pytest import MonkeyPatch
 
 from claude_hub.auth import session as session_store
 from claude_hub.models.schemas import User
+from claude_hub.services.local_storage import storage_location
 
 
 @pytest.fixture(autouse=True)
@@ -115,7 +116,7 @@ def test_load_sessions_tolerates_corrupt_file() -> None:
 def test_saved_sessions_file_is_owner_only() -> None:
     session_store.create_session(_user(), "access", "refresh")
 
-    mode = stat.S_IMODE(session_store.SESSIONS_FILE.stat().st_mode)
+    mode = stat.S_IMODE(storage_location(session_store.SESSIONS_FILE)[0].stat().st_mode)
     assert mode == 0o600
 
 
@@ -126,7 +127,7 @@ def test_loading_tightens_loose_pre_existing_file() -> None:
 
     assert session_store._load_sessions() == {}
 
-    mode = stat.S_IMODE(session_store.SESSIONS_FILE.stat().st_mode)
+    mode = stat.S_IMODE(storage_location(session_store.SESSIONS_FILE)[0].stat().st_mode)
     assert mode == 0o600
 
 
@@ -139,7 +140,7 @@ def test_save_replaces_loose_file_with_owner_only_permissions() -> None:
 
     session_store.create_session(_user(), "access", "refresh")
 
-    mode = stat.S_IMODE(session_store.SESSIONS_FILE.stat().st_mode)
+    mode = stat.S_IMODE(storage_location(session_store.SESSIONS_FILE)[0].stat().st_mode)
     assert mode == 0o600
 
 

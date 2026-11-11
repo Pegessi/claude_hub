@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import secrets
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -17,6 +16,7 @@ from urllib.parse import quote
 
 import httpx
 
+from claude_hub.services.local_storage import document_exists, read_document, write_document
 from claude_hub.services.proxy_rules import create_async_client
 from claude_hub.services.runtime_isolation import resolve_runtime_home
 
@@ -783,8 +783,8 @@ def _validate_dedup_events(value: Any, *, namespaced: bool) -> dict[str, Any]:
         attempts = record.get("attempts", 1)
         if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
             raise FeishuBotError("Invalid Feishu message claim attempts")
-        for field in ("stage", "reason"):
-            raw = record.get(field)
+        for field_name in ("stage", "reason"):
+            raw = record.get(field_name)
             if raw is not None and (not isinstance(raw, str) or not raw.strip()):
                 raise FeishuBotError("Invalid Feishu message claim metadata")
         if "retry_context" in record:
@@ -810,10 +810,10 @@ class FeishuMessageDedupStore:
         return {"version": 2, "events": {}, "legacy_events": {}}
 
     def _load(self) -> dict[str, Any]:
-        if not self.path.exists():
+        if not document_exists(self.path):
             return self._empty()
         try:
-            value = json.loads(self.path.read_text(encoding="utf-8"))
+            value = read_document(self.path)
         except (OSError, ValueError) as exc:
             # ValueError also covers invalid UTF-8 and JSON integer limits.
             raise FeishuBotError("Cannot read Feishu message deduplication state") from exc
@@ -831,20 +831,7 @@ class FeishuMessageDedupStore:
         return {"version": 2, "events": events, "legacy_events": legacy}
 
     def _save(self, state: dict[str, Any]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_name(f".{self.path.name}.{secrets.token_hex(6)}.tmp")
-        try:
-            with temporary.open("x", encoding="utf-8") as file_handle:
-                os.chmod(temporary, 0o600)
-                json.dump(state, file_handle, sort_keys=True, separators=(",", ":"))
-                file_handle.flush()
-                os.fsync(file_handle.fileno())
-            os.replace(temporary, self.path)
-        finally:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
+        write_document(self.path, state)
 
     def claim(self, key: str, *, retry_context: Mapping[str, str] | None = None) -> bool:
         message_id = _dedup_message_id(key)
