@@ -7,6 +7,50 @@
 
 ## Released
 
+### style(ui): rebuild the Goal setup dialog on the app's dialog language
+
+- Shared overlay rules (`overlays.css`) already supplied the scrim, radius and
+  elevation, but the Goal form itself had no structure: one flat block of
+  controls, unscoped `h2`/`p`/`label`/`button` selectors styling every child
+  below it, and three loose sentences of guidance. It now has the same
+  structure as the rest of the Hub's dialogs: an eyebrow/title/subtitle header,
+  labelled sections on the app's own surfaces, a scrolling body and a footer
+  that owns the decision.
+- The Objective field carries a live `n/4000` counter (amber near the limit)
+  and a hint, so the bound is visible instead of silent. The Plan-first option
+  is a state card (accent tint plus a `Review first`/`Off` badge) rather than a
+  floating checkbox, and the guidance is two factual bullets instead of a
+  paragraph block.
+- Phones keep the sheet that `overlays.css` already gave this backdrop, now
+  with a scrolling body and 44px actions; the shared sheet rule now bounds the
+  generic backdrop dialogs' height by `--visual-viewport-height` instead of
+  `100dvh` and lifts every phone sheet by the keyboard height the app already
+  computes (`--keyboard-height`, zoom- and scroll-safe), so a keyboard moves the
+  sheet and its footer instead of covering them; the two native `<dialog>` sheets
+  (`restart-dialog`, `bot-pool`) are lifted the same way and their heights are
+  bounded too, so a lifted full-height sheet cannot push its header and close
+  button off the top; it also no longer adds a second safe-area pad under a
+  footer that owns its own inset.
+- Cross-review fixes: the attachment-row rule targets only the picker's
+  trigger (a bare `button` selector also restyled the chip preview and its
+  remove badge), the row is laid out as caption + trigger + chips instead of
+  stacking at zero gap, and the field hint is linked to the textarea with
+  `aria-describedby` so the auto-focused field describes itself.
+- Behaviour is unchanged: same props, events, labels, focus trap,
+  Escape/Cancel/return-focus and `plan_first` payload; the attachment picker
+  and the recovery slot keep their own components.
+- Validation: `browser_chat_goal_steer.py` now measures real computed
+  contrast in both themes, alpha-compositing the translucent card tint (title,
+  label, hint, note and tips ≥4.5 — the 12–13px copy is normal text, so AA
+  applies), asserts the counter's near-limit state before the hard cap, pins the
+  attachment chip and remove-badge geometry and the row's caption-above /
+  chips-on-trigger-line layout, checks the field hint's `aria-describedby`, and
+  asserts a phone sheet under a shrunk visual viewport whose actions end above
+  the keyboard; `browser_service_restart.py` pins the same lift-and-bound for a
+  native `<dialog>` sheet. The goal-steer, goal-mobile, native-goal and restart
+  scenarios pass against the new surface, together with typecheck, lint and the
+  frontend unit suite.
+
 ### fix(goal): Plan-first opens off so a Goal no longer parks for approval unasked
 
 - A Goal that had no request for a plan review could open on `blocked` with an
