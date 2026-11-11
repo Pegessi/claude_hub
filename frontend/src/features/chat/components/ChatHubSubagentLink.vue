@@ -13,12 +13,21 @@
     <span class="hub-subagent-name">{{ chip.name }}</span>
     <span class="hub-subagent-state">{{ chip.stateLabel }}</span>
     <button
+      v-if="chip.canOpen"
+      type="button"
+      class="hub-subagent-open"
+      data-testid="hub-subagent-view"
+      @click="nativeDock?.open(chip, $event.currentTarget as HTMLElement | null)"
+    >
+      View
+    </button>
+    <button
       v-if="chip.canJump"
       type="button"
       class="hub-subagent-open"
       @click="dock?.jump(chip)"
     >
-      {{ chip.archived ? 'Restore & open' : 'Open' }}
+      {{ chip.archived ? 'Restore & open' : 'Open session' }}
     </button>
   </div>
 </template>
@@ -27,6 +36,7 @@
 import { computed } from 'vue'
 
 import { findDockChip, useSubagentDock } from '../controllers/subagentDock'
+import { useNativeSubagentDock } from '../controllers/nativeSubagentDock'
 import { hubSubagentIdFromTool } from '../presentation/subagentJump'
 
 const props = defineProps<{
@@ -35,6 +45,7 @@ const props = defineProps<{
 }>()
 
 const dock = useSubagentDock()
+const nativeDock = useNativeSubagentDock()
 // Only a `claude-hub agent run/send` call whose output names a sub-agent id
 // that this Chat's own list also contains is linked; anything else stays a
 // plain command block.

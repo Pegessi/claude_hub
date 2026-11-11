@@ -126,6 +126,8 @@ export interface TimelineSubthread {
   lifecycleStatus: TimelineSubagentLifecycle
   /** Child-local revision so sibling stream updates can reuse display projections. */
   renderRevision: number
+  /** Stream provider when known from child events before launchTool is attached. */
+  provider?: SubagentView['provider']
 }
 
 export type TimelinePart =

@@ -37,7 +37,6 @@
 import { computed } from 'vue'
 
 import { relativeSubagentTime, subagentDisplayName, type SubagentDockRow, type SubagentJumpChip } from '../presentation/subagentJump'
-import type { NativeSubagentRow } from '../presentation/nativeSubagentRows'
 
 /** One dock row. Hub children jump to their own Chat tab; native children
  *  have no tab, so the row opens the pane's read-only detail window instead. */
@@ -48,26 +47,29 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (event: 'jump', chip: SubagentJumpChip): void
-  (event: 'open', chip: NativeSubagentRow, source: HTMLElement | null): void
+  (event: 'open', chip: SubagentDockRow, source: HTMLElement | null): void
 }>()
 
 const time = computed(() => relativeSubagentTime(props.chip.createdAt, props.nowMs))
 const displayName = computed(() => subagentDisplayName(props.chip.name))
 const actionLabel = computed(() => {
   if (props.chip.kind === 'native') return 'View'
+  if (props.chip.canOpen) return 'View'
   return props.chip.archived ? 'Restore & open' : 'Open'
 })
 const unavailableTitle = computed(() => {
-  if (props.chip.kind === 'native') return `View ${props.chip.name}`
+  if (props.chip.kind === 'native' || props.chip.canOpen) return `View ${props.chip.name}`
   return props.chip.canJump ? `Open ${props.chip.name}` : 'The sub-agent Chat tab is unavailable'
 })
 
 function activate(event: MouseEvent) {
-  if (props.chip.kind === 'native') {
+  if (props.chip.canOpen) {
     emit('open', props.chip, event.currentTarget as HTMLElement | null)
     return
   }
-  emit('jump', props.chip)
+  if (props.chip.kind === 'hub') {
+    emit('jump', props.chip)
+  }
 }
 </script>
 

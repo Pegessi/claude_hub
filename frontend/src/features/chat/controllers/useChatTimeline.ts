@@ -373,6 +373,38 @@ export function useChatTimeline(deps: Dependencies) {
     void loadAndExpandHistoryDetail(turn)
   }
 
+  /** Hydrate any lazy turn detail for a native sub-agent opened in the detail window. */
+  function ensureSubthreadDetailsLoaded(turnKey: string, threadId: string): void {
+    const list = turns.value
+    let firstIdx = -1
+    let lastIdx = -1
+    for (let i = 0; i < list.length; i += 1) {
+      const candidate = list[i]
+      const hasThread =
+        candidate.key === turnKey ||
+        candidate.parts.some(
+          part =>
+            (part.kind === 'subagent' &&
+              Boolean(part.tool.subagent) &&
+              (part.tool.callId || part.tool.key) === threadId) ||
+            (part.kind === 'subagents' &&
+              part.threads.some(thread => thread.threadId === threadId)),
+        )
+      if (!hasThread) continue
+      if (firstIdx < 0) firstIdx = i
+      lastIdx = i
+    }
+    if (firstIdx < 0) return
+    for (let i = firstIdx; i <= lastIdx; i += 1) {
+      const candidate = list[i]
+      if (!candidate.turnId) continue
+      const detail = deps.historyDetails.value[candidate.turnId]
+      if (detail && (detail.status === 'idle' || detail.status === 'error')) {
+        void deps.loadHistoryDetail(candidate.turnId)
+      }
+    }
+  }
+
   function turnFoldSignature(turn: TimelineTurn): string {
     void deps.historyDetailRevision.value
     const detail = turn.turnId ? deps.historyDetails.value[turn.turnId] : undefined
@@ -727,6 +759,7 @@ export function useChatTimeline(deps: Dependencies) {
     latestTurnKey,
     toggleTurnProcess,
     revealSubthread,
+    ensureSubthreadDetailsLoaded,
     turnPartsFor,
     turnEventCount,
     retryHistoryDetail,

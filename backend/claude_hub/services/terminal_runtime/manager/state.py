@@ -123,6 +123,22 @@ class ManagerStateMixin(ManagerHost):
                         if workspace_role_str in [e.value for e in WorkspaceSessionRole]
                         else None
                     )
+                    parent_tab_id = tab_data.get("parent_tab_id")
+                    subagent_id = tab_data.get("subagent_id")
+                    managed_session_id = tab_data.get("managed_session_id")
+                    workspace_id = tab_data.get("workspace_id")
+                    workspace_name = tab_data.get("workspace_name")
+                    if (
+                        workspace_id
+                        and workspace_role is None
+                        and not managed_session_id
+                        and not parent_tab_id
+                        and not subagent_id
+                    ):
+                        # Heal previously detached subagent tabs that retained
+                        # display-only workspace attribution after unarchive.
+                        workspace_id = None
+                        workspace_name = None
                     process = self._runtime.TTYDProcess(
                         tab_id=tab_data["id"],
                         port=tab_data["port"],
@@ -140,14 +156,18 @@ class ManagerStateMixin(ManagerHost):
                         remote_reconnect=tab_data.get("remote_reconnect", True),
                         remote_forward_port=tab_data.get("remote_forward_port"),
                         env=tab_data.get("env", {}),
-                        workspace_id=tab_data.get("workspace_id"),
-                        workspace_name=tab_data.get("workspace_name"),
+                        workspace_id=workspace_id,
+                        workspace_name=workspace_name,
                         workspace_role=workspace_role,
-                        managed_session_id=tab_data.get("managed_session_id"),
+                        managed_session_id=managed_session_id,
                         agent_session_id=tab_data.get("agent_session_id"),
                         agent_session_id_verified=tab_data.get("agent_session_id_verified", False),
                         from_persisted_state=True,
-                        resume_quarantined=tab_data.get("resume_quarantined", False),
+                        resume_quarantined=(
+                            False
+                            if session_kind == SessionKind.CHAT
+                            else tab_data.get("resume_quarantined", False)
+                        ),
                         shell_explicitly_provided=tab_data.get("shell_explicitly_provided"),
                         cursor_transport=self._runtime._promote_cursor_chat_transport(
                             session_kind,
@@ -161,8 +181,8 @@ class ManagerStateMixin(ManagerHost):
                         cursor_transcript_schema=tab_data.get("cursor_transcript_schema"),
                         forked_from_tab_id=tab_data.get("forked_from_tab_id"),
                         forked_from_ordinal=tab_data.get("forked_from_ordinal"),
-                        parent_tab_id=tab_data.get("parent_tab_id"),
-                        subagent_id=tab_data.get("subagent_id"),
+                        parent_tab_id=parent_tab_id,
+                        subagent_id=subagent_id,
                         archived=tab_data.get("archived", False),
                         archived_at=self._runtime._parse_optional_iso(tab_data.get("archived_at")),
                         last_viewed_at=self._runtime._parse_optional_iso(

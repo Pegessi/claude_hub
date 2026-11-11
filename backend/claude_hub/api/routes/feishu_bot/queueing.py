@@ -11,7 +11,7 @@ from claude_hub.services.feishu_bot import (
 )
 from claude_hub.services.feishu_bot_pool import BotBinding, EffectiveBot
 
-# Bot + channel/topic identity, fenced by the resolved configuration version.
+# Bot + channel/topic identity, fenced by the resolved binding and authority watermark.
 DispatchChannelKey = tuple[str, str, str, str, str | None, int, int]
 
 
@@ -47,7 +47,9 @@ class TabDispatchItem:
     def channel_key(self) -> DispatchChannelKey:
         # Interruption deliberately excludes the sender: another person in the
         # same topic may supersede an answer, but must never coalesce with it.
-        # Pairing/version fences also keep stale work out of a rebound channel.
+        # Pairing, generation, and transport_revision fences keep stale work out
+        # of a rebound or credential-rotated channel, while administrative CAS
+        # revisions do not split an active channel.
         # Legacy group fallback returns a DM binding: only the event identifies
         # the actual room, so two groups must not share that binding's chat ID.
         return (
@@ -57,12 +59,12 @@ class TabDispatchItem:
             self.event.chat_id,
             self.event.thread_id,
             self.effective.generation,
-            self.effective.revision,
+            self.effective.transport_revision,
         )
 
 
 #: Identity of one sender inside one channel: what a follow-up is compared against.
-DispatchContextKey = tuple[str, str, str, "str | None", str]
+DispatchContextKey = tuple[str, str, str, "str | None", str, int, int]
 
 
 @dataclass
@@ -71,9 +73,7 @@ class TabDispatchQueue:
     active: list[TabDispatchItem]
     processor: TabDispatchItem | None
     changed: asyncio.Event
-    dispatched_contexts: OrderedDict[tuple[str, str, str, str | None, str], None] = field(
-        default_factory=OrderedDict
-    )
+    dispatched_contexts: OrderedDict[DispatchContextKey, None] = field(default_factory=OrderedDict)
     # A stopped batch's text belongs to its channel, not whichever channel is
     # next in the FIFO. Multiple channels can have a stopped answer to resume.
     active_text: str = ""

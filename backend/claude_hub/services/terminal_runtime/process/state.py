@@ -154,7 +154,7 @@ class ProcessStateMixin(ProcessHost):
         # ``--session-id``. Persisted alongside ``agent_session_id`` so a cold
         # restart does not infer verification merely from the presence of a
         # UUID.
-        self.agent_session_id_verified: bool = agent_session_id_verified
+        self.agent_session_id_verified: bool = bool(agent_session_id and agent_session_id_verified)
         # True only when an explicit session id was supplied at construction
         # time (e.g. the user selected a specific Codex session to resume in
         # the create-tab UI). A generated uuid4 placeholder (above) is used

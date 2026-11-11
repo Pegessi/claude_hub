@@ -85,12 +85,24 @@ test('a blocked question keeps a timestamp even without an activity clock', () =
   assert.equal(empty.sinceMs, null)
 })
 
-test('an unread finished turn needs you, a read one does not', () => {
+test('an unread finished turn needs you on manual Chats, while agent-managed turns do not', () => {
   const unread = classifyRow(tab({ is_unread: true }), status({ last_reply_at: '2026-11-09T11:50:00Z' }), NOW)
   const read = classifyRow(tab({ is_unread: false }), status(), NOW)
+  const workspaceUnread = classifyRow(
+    tab({ id: 'ws-orch', is_unread: true, workspace_id: 'ws-1', workspace_role: 'orchestrator' }),
+    status({ tab_id: 'ws-orch', last_reply_at: '2026-11-09T11:50:00Z' }),
+    NOW,
+  )
+  const subagentUnread = classifyRow(
+    tab({ id: 'sub-1', is_unread: true, parent_tab_id: 'tab-1', subagent_id: 'sa-1' }),
+    status({ tab_id: 'sub-1', last_reply_at: '2026-11-09T11:50:00Z' }),
+    NOW,
+  )
   assert.equal(unread.group, 'needs')
   assert.equal(unread.reason, 'New reply')
   assert.equal(read.group, 'done')
+  assert.equal(workspaceUnread.group, 'done')
+  assert.equal(subagentUnread.group, 'done')
 })
 
 test('a still-running turn with an older unread reply stays in Working', () => {
@@ -165,18 +177,22 @@ test('stale finished rows drop out of Recently done', () => {
   assert.equal(only(rows, 'done').length, 0)
 })
 
-test('the manual/agent filter is a filter, not a second list', () => {
-  const tabs = [tab({ id: 'm', name: 'Manual' }), tab({ id: 'w', name: 'Workspace', workspace_id: 'ws-1' })]
-  const statuses = [status({ tab_id: 'm' }), status({ tab_id: 'w' })]
+test('the manual/agent filter keeps sub-agents and workspace roles out of manual Chats', () => {
+  const tabs = [
+    tab({ id: 'm', name: 'Manual' }),
+    tab({ id: 'w', name: 'Workspace', workspace_id: 'ws-1' }),
+    tab({ id: 's', name: 'Subagent', parent_tab_id: 'm', subagent_id: 'sa-1' }),
+  ]
+  const statuses = [status({ tab_id: 'm' }), status({ tab_id: 'w' }), status({ tab_id: 's' })]
   assert.deepEqual(
     flattenRows(buildInbox(tabs, statuses, { nowMs: NOW, scope: 'manual' })).map(row => row.tab.id),
     ['m'],
   )
   assert.deepEqual(
     flattenRows(buildInbox(tabs, statuses, { nowMs: NOW, scope: 'workspace' })).map(row => row.tab.id),
-    ['w'],
+    ['w', 's'],
   )
-  assert.equal(flattenRows(buildInbox(tabs, statuses, { nowMs: NOW, scope: 'all' })).length, 2)
+  assert.equal(flattenRows(buildInbox(tabs, statuses, { nowMs: NOW, scope: 'all' })).length, 3)
 })
 
 test('archived sessions never enter the inbox', () => {

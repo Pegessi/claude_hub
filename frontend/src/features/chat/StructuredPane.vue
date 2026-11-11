@@ -155,7 +155,7 @@ import { useChatImages } from '@/features/chat/controllers/useChatImages'
 import { useChatReview } from '@/features/chat/review/useChatReview'
 import { useNativeSubagentDock } from '@/features/chat/controllers/nativeSubagentDock'
 import { nativeSubagentRows, type NativeSubagentRowMemo } from '@/features/chat/presentation/nativeSubagentRows'
-import type { TimelineTurn } from '@/features/chat/timeline/types'
+import type { TimelineSubthread, TimelineTurn } from '@/features/chat/timeline/types'
 const props = defineProps<ChatPaneProps>()
 const preview = provideAttachmentPreview()
 const isManagedChat = computed(() => Boolean(props.managedChat))
@@ -494,13 +494,53 @@ provide(chatReviewKey, review)
 // keeps the chrome's list O(changed turns) per stream batch.
 const nativeSubagentDock = useNativeSubagentDock()
 const nativeRowMemo: Map<string, NativeSubagentRowMemo> = new Map()
+function isDirectReadableThread(thread: TimelineSubthread): boolean {
+  return (
+    thread.launchTool !== null ||
+    thread.lifecycleStatus === 'active' ||
+    thread.lifecycleStatus === 'completed' ||
+    thread.parts.some(child => child.kind !== 'status')
+  )
+}
+function hasEarlierReadableThread(targetTurn: TimelineTurn, threadId: string): boolean {
+  for (const candidate of timeline.turns.value) {
+    if (candidate === targetTurn) break
+    for (const part of candidate.parts) {
+      if (
+        part.kind === 'subagent' &&
+        part.tool.subagent &&
+        (part.tool.callId || part.tool.key) === threadId
+      ) {
+        return true
+      }
+      if (
+        part.kind === 'subagents' &&
+        part.threads.some(t => t.threadId === threadId && isDirectReadableThread(t))
+      ) {
+        return true
+      }
+    }
+  }
+  return false
+}
+function hasReadableSubagentThread(turn: TimelineTurn): boolean {
+  return turn.parts.some(
+    part =>
+      (part.kind === 'subagent' && Boolean(part.tool.subagent)) ||
+      (part.kind === 'subagents' &&
+        part.threads.some(
+          thread =>
+            isDirectReadableThread(thread) || hasEarlierReadableThread(turn, thread.threadId),
+        )),
+  )
+}
 // A lazy turn (its execution detail still unread) can already carry a stub
 // failed/cancelled child from the shallow page; projecting it would offer a
 // window with nothing in it. Gate on the same condition `presentTurnParts`
-// uses, so a turn's children appear exactly when its detail is readable.
+// uses unless the shallow page already includes real sub-agent launch/lifecycle data.
 function nativeChildrenReadable(turn: TimelineTurn): boolean {
   const detail = turn.turnId ? historyDetails.value[turn.turnId] : undefined
-  return !(detail && detail.status !== 'loaded')
+  return !(detail && detail.status !== 'loaded') || hasReadableSubagentThread(turn)
 }
 const nativeDockRows = computed(() => nativeSubagentRows(
   timeline.turns.value,

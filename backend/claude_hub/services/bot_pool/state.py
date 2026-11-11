@@ -46,6 +46,7 @@ from claude_hub.services.bot_pool.common import (
     _validate_pool_numbers,
     binding_chat_type,
     bot_mode,
+    bot_transport_revision,
     deprecated_env_present,
     environment_config,
     environment_present,
@@ -101,22 +102,35 @@ class FeishuBotPoolStateStore(object):
         """Migrate v2/v3 single ``binding`` to ``bindings`` and normalize ``mode``."""
 
         if raw.get("revoked_at") is not None and "binding" not in raw and "bindings" not in raw:
+            if "transport_revision" in raw and raw["transport_revision"] is not None:
+                bot_transport_revision(raw)
             return
+        existing = raw.get("bindings")
+        if existing is not None and not isinstance(existing, list):
+            raise _state_error("bot.bindings")
         if "binding" in raw:
             legacy_binding = raw.pop("binding")
-            if "bindings" not in raw or raw["bindings"] is None:
-                if legacy_binding is None:
-                    raw["bindings"] = []
+            if legacy_binding is not None:
+                mapped_legacy = _as_mapping(legacy_binding, "binding")
+                if not existing:
+                    raw["bindings"] = [mapped_legacy]
                 else:
-                    raw["bindings"] = [_as_mapping(legacy_binding, "binding")]
-        elif "bindings" not in raw or raw["bindings"] is None:
+                    existing_ids = {
+                        item.get("pairing_id")
+                        for item in existing
+                        if isinstance(item, dict) and item.get("pairing_id") is not None
+                    }
+                    if mapped_legacy.get("pairing_id") not in existing_ids:
+                        raw["bindings"] = [mapped_legacy, *existing]
+            elif existing is None:
+                raw["bindings"] = []
+        elif existing is None:
             raw["bindings"] = []
-        elif not isinstance(raw["bindings"], list):
-            raise _state_error("bot.bindings")
         if "mode" not in raw or raw["mode"] is None:
             raw["mode"] = BOT_MODE_SINGLE
         else:
             bot_mode(raw)
+        raw["transport_revision"] = bot_transport_revision(raw)
 
     def _load(self) -> dict[str, Any]:
         value = self._read_file(self.path)
@@ -200,6 +214,7 @@ class FeishuBotPoolStateStore(object):
             },
             "revision": revision,
             "generation": generation,
+            "transport_revision": revision,
             "enabled": True,
             "created_at": updated_at,
             "updated_at": updated_at,
@@ -269,6 +284,7 @@ class FeishuBotPoolStateStore(object):
             "credentials": None,
             "revision": 0,
             "generation": 0,
+            "transport_revision": 0,
             "enabled": True,
             "created_at": now,
             "updated_at": now,
@@ -321,9 +337,12 @@ class FeishuBotPoolStateStore(object):
                 claims.append(claim)
         mode = bot_mode(raw)
         raw_bindings = raw.get("bindings")
-        if raw_bindings is None:
+        if raw_bindings is None or raw_bindings == []:
             raw_binding = raw.get("binding")
-            raw_bindings = [] if raw_binding is None else [raw_binding]
+            if raw_binding is not None:
+                raw_bindings = [raw_binding]
+            elif raw_bindings is None:
+                raw_bindings = []
         if not isinstance(raw_bindings, list):
             raise _state_error("bot.bindings")
         indexed_bindings: list[tuple[float, int, BotBinding]] = []
@@ -391,6 +410,7 @@ class FeishuBotPoolStateStore(object):
             verification_token=verification_token,
             encrypt_key=encrypt_key,
             expected_tenant_key=expected_tenant_key,
+            transport_revision=bot_transport_revision(raw),
         )
 
     def snapshot(self, environ: Mapping[str, str] | None = None) -> PoolSnapshot:
@@ -442,6 +462,7 @@ class FeishuBotPoolStateStore(object):
             verification_token=entry.verification_token,
             encrypt_key=entry.encrypt_key,
             expected_tenant_key=entry.expected_tenant_key,
+            transport_revision=entry.transport_revision,
         )
 
     def is_current(self, effective: EffectiveBot, environ: Mapping[str, str] | None = None) -> bool:
@@ -456,7 +477,49 @@ class FeishuBotPoolStateStore(object):
             and current.revision == effective.revision
             and current.generation == effective.generation
             and current.config == effective.config
+            and current.callback_enabled == effective.callback_enabled
+            and current.verification_token == effective.verification_token
+            and current.encrypt_key == effective.encrypt_key
+            and current.expected_tenant_key == effective.expected_tenant_key
         )
+
+    def is_current_for_delivery(
+        self, effective: EffectiveBot, environ: Mapping[str, str] | None = None
+    ) -> bool:
+        """Check whether a Bot's credentials, generation, and callback state still match.
+
+        Unlike ``is_current``, this delivery fence ignores ``revision`` so that
+        sibling channel mutations and Bot renames do not invalidate another
+        channel's in-flight turn, outbound reply, or question card while HTTP
+        mutations still advance ``revision`` for CAS. Channel-level authority is
+        fenced separately by ``pairing_id`` via ``_binding_still_routes``.
+        """
+
+        try:
+            current = self.effective(effective.bot_id, environ)
+        except FeishuBotPoolError:
+            return False
+        return (
+            current.app_id == effective.app_id
+            and current.generation == effective.generation
+            and current.transport_revision == effective.transport_revision
+            and current.config == effective.config
+            and current.callback_enabled == effective.callback_enabled
+            and current.verification_token == effective.verification_token
+            and current.encrypt_key == effective.encrypt_key
+            and current.expected_tenant_key == effective.expected_tenant_key
+        )
+
+    def transport_revision(self, bot_id: str, environ: Mapping[str, str] | None = None) -> int:
+        """Return the revision at which credentials, callbacks, or generation last changed."""
+
+        now = self._now()
+        with self._lock:
+            state = self._load_synced(environ, now)
+            raw = state["bots"].get(bot_id)
+            if not isinstance(raw, dict) or raw.get("revoked_at"):
+                raise FeishuBotNotFound(bot_id)
+            return bot_transport_revision(raw)
 
     # ------------------------------------------------------------ invariants
 
@@ -534,6 +597,7 @@ class FeishuBotPoolStateStore(object):
         raw["feishu_open_id"] = None
         self._advance_generation(raw)
         self._touch(raw, now)
+        self._touch_transport(raw)
         return True
 
     def _load_synced(self, environ: Mapping[str, str] | None, now: float) -> dict[str, Any]:
@@ -553,6 +617,10 @@ class FeishuBotPoolStateStore(object):
         raw["updated_at"] = now
 
     @staticmethod
+    def _touch_transport(raw: dict[str, Any]) -> None:
+        raw["transport_revision"] = _as_int(raw.get("revision"), "revision")
+
+    @staticmethod
     def _advance_generation(raw: dict[str, Any]) -> None:
         """Invalidate every outstanding code, claim, and binding for this Bot."""
 
@@ -566,9 +634,12 @@ class FeishuBotPoolStateStore(object):
     def _active_raw_bindings(raw: dict[str, Any]) -> list[dict[str, Any]]:
         generation = raw.get("generation")
         items = raw.get("bindings")
-        if not isinstance(items, list):
+        if not isinstance(items, list) or not items:
             single = raw.get("binding")
-            items = [single] if isinstance(single, dict) else []
+            if isinstance(single, dict):
+                items = [single]
+            elif not isinstance(items, list):
+                items = []
         return [
             item
             for item in items
