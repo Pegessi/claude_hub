@@ -19,6 +19,7 @@
 - Pair primary fills with `on-accent` foregrounds, and message surfaces with their
   own text token, so white/yellow buttons and neutral bubbles work in both modes.
   Preserve semantic danger/success colors and the original accepted themes.
+  Keep bright primary presses readable and selected panes distinct in split layouts.
 - Expand real browser and terminal regression coverage to the new palette set;
   keep the user-requested IPv6 feature preview, without changing the main service.
 

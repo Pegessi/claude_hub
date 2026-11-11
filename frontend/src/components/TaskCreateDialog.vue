@@ -482,10 +482,16 @@ const {
   flex: 1;
 }
 
-.tool-button:active,
-.primary-button:active {
+.tool-button:active {
   transform: translateY(1px);
   background: var(--ch-color-surface-pressed);
+}
+
+.primary-button:active:not(:disabled) {
+  transform: translateY(1px);
+  background: var(--ch-color-accent-fill-hover);
+  border-color: var(--ch-color-accent-fill-hover);
+  color: var(--ch-color-on-accent);
 }
 
 .icon-button {
