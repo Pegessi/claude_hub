@@ -52,85 +52,103 @@
   --ch-radius-overlay: 8px;
   --ch-radius-popover: 4px;
 }
-
 :root:is([data-palette='mono'], [data-palette='studio'], [data-palette='carbon'],
-  [data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos']) {
-  & :is(.appearance-header h2, .workspace-title-block > h1, .markdown-content h1,
+  [data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos']) :is(.appearance-header h2, .workspace-title-block > h1, .markdown-content h1,
     .markdown-content h2, .markdown-content h3) {
-    font-family: var(--ch-font-display);
-    font-style: var(--ch-heading-style);
-  }
-  & .conversation-bubble--user {
-    border: 1px solid var(--ch-color-border);
-  }
-  & .terminal-pane.active {
-    border-color: var(--ch-color-border);
-    box-shadow: none;
-  }
-  & .composer-row {
-    background: var(--ch-color-surface);
-  }
+  font-family: var(--ch-font-display);
+  font-style: var(--ch-heading-style);
 }
-
-:root[data-palette='mono'] {
-  & .composer-row { border-radius: 6px; box-shadow: none; }
-  & .markdown-code-block { border-radius: 6px; box-shadow: none; }
+:root:is([data-palette='mono'], [data-palette='studio'], [data-palette='carbon'],
+  [data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos']) .conversation-bubble--user {
+  border: 1px solid var(--ch-color-border);
 }
-:root[data-palette='studio'] {
-  & .composer-row { border-radius: 12px; box-shadow: var(--ch-shadow-soft); }
-  & .app-mode-bar { background: var(--ch-color-sidebar-bg); }
+:root:is([data-palette='mono'], [data-palette='studio'], [data-palette='carbon'],
+  [data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos']) .composer-row {
+  background: var(--ch-color-surface);
 }
-:root[data-palette='carbon'] {
-  & .composer-row {
-    border-radius: 15px;
-    background: linear-gradient(var(--ch-color-surface-raised), var(--ch-color-surface));
-    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--ch-color-text) 6%, transparent), var(--ch-shadow-md);
-  }
-  & .app-mode-bar { background: var(--ch-color-surface); }
+:root[data-palette='mono'] .composer-row {
+  border-radius: 6px;
+  box-shadow: none;
+}
+:root[data-palette='mono'] .markdown-code-block {
+  border-radius: 6px;
+  box-shadow: none;
+}
+:root[data-palette='studio'] .composer-row {
+  border-radius: 12px;
+  box-shadow: var(--ch-shadow-soft);
+}
+:root[data-palette='studio'] .app-mode-bar {
+  background: var(--ch-color-sidebar-bg);
+}
+:root[data-palette='carbon'] .composer-row {
+  border-radius: 15px;
+  background: linear-gradient(var(--ch-color-surface-raised), var(--ch-color-surface));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--ch-color-text) 6%, transparent), var(--ch-shadow-md);
+}
+:root[data-palette='carbon'] .app-mode-bar {
+  background: var(--ch-color-surface);
 }
 
 /* Motifs live on chrome edges, never across the conversation or code. */
-:root[data-palette='zenless'] {
-  & .app-mode-bar {
-    border-bottom: 3px solid var(--ch-color-accent-strong);
-    border-image: repeating-linear-gradient(125deg, var(--ch-color-accent-strong) 0 10px,
+:root[data-palette='zenless'] .app-mode-bar {
+  border-bottom: 3px solid var(--ch-color-accent-strong);
+  border-image: repeating-linear-gradient(125deg, var(--ch-color-accent-strong) 0 10px,
       var(--ch-color-on-accent) 10px 15px) 3;
-  }
-  & :is(.mode-button, .appearance-card-title, .appearance-header h2) {
-    font-weight: 800;
-    letter-spacing: 0.015em;
-  }
-  & .appearance-header h2 { text-transform: uppercase; }
-  & .composer-row {
-    border-radius: 12px 3px 12px 3px;
-    border-top: 3px solid var(--ch-color-accent-strong);
-    box-shadow: 3px 3px 0 var(--ch-color-border-muted);
-  }
-  & .composer-send-btn { font-weight: 800; border-radius: 3px 8px 3px 8px; }
 }
-:root[data-palette='frontier'] {
-  & .app-mode-bar { border-bottom: 3px double var(--ch-color-accent); }
-  & .appearance-header { border-bottom: 3px double var(--ch-color-border-strong); margin-bottom: 18px; }
-  & .appearance-header h2 { color: var(--ch-color-accent); letter-spacing: 0.02em; }
-  & .composer-row { border-style: double; border-width: 3px; box-shadow: none; }
-  & .markdown-code-block { border-radius: 2px; }
+:root[data-palette='zenless'] :is(.mode-button, .appearance-card-title, .appearance-header h2) {
+  font-weight: 800;
+  letter-spacing: 0.015em;
 }
-:root[data-palette='los-santos'] {
-  & .app-mode-bar { border-bottom: 3px solid var(--ch-color-accent); }
-  & :is(.appearance-header h2, .mode-button, .appearance-card-title) {
-    font-family: var(--ch-font-display);
-    font-weight: 800;
-    text-transform: uppercase;
-    letter-spacing: 0.035em;
-  }
-  & .composer-row {
-    border-left: 3px solid var(--ch-color-accent);
-    box-shadow: var(--ch-shadow-soft);
-  }
+:root[data-palette='zenless'] .appearance-header h2 {
+  text-transform: uppercase;
+}
+:root[data-palette='zenless'] .composer-row {
+  border-radius: 12px 3px 12px 3px;
+  border-top: 3px solid var(--ch-color-accent-strong);
+  box-shadow: 3px 3px 0 var(--ch-color-border-muted);
+}
+:root[data-palette='zenless'] .composer-send-btn {
+  font-weight: 800;
+  border-radius: 3px 8px 3px 8px;
+}
+:root[data-palette='frontier'] .app-mode-bar {
+  border-bottom: 3px double var(--ch-color-accent);
+}
+:root[data-palette='frontier'] .appearance-header {
+  border-bottom: 3px double var(--ch-color-border-strong);
+  margin-bottom: 18px;
+}
+:root[data-palette='frontier'] .appearance-header h2 {
+  color: var(--ch-color-accent);
+  letter-spacing: 0.02em;
+}
+:root[data-palette='frontier'] .composer-row {
+  border-style: double;
+  border-width: 3px;
+  box-shadow: none;
+}
+:root[data-palette='frontier'] .markdown-code-block {
+  border-radius: 2px;
+}
+:root[data-palette='los-santos'] .app-mode-bar {
+  border-bottom: 3px solid var(--ch-color-accent);
+}
+:root[data-palette='los-santos'] :is(.appearance-header h2, .mode-button, .appearance-card-title) {
+  font-family: var(--ch-font-display);
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.035em;
+}
+:root[data-palette='los-santos'] .composer-row {
+  border-left: 3px solid var(--ch-color-accent);
+  box-shadow: var(--ch-shadow-soft);
 }
 
 /* Tile accents reflect the same theme's material, not unrelated artwork. */
-.theme-preview { position: relative; }
+.theme-preview {
+  position: relative;
+}
 .theme-preview[data-palette='zenless']::before {
   content: '';
   position: absolute;
@@ -140,8 +158,13 @@
     var(--ch-color-on-accent) 10px 15px);
   pointer-events: none;
 }
-:root .theme-preview[data-palette='frontier'] { border-style: double; border-width: 3px; }
-:root .theme-preview[data-palette='los-santos'] { border-left: 4px solid var(--ch-color-accent); }
+:root .theme-preview[data-palette='frontier'] {
+  border-style: double;
+  border-width: 3px;
+}
+:root .theme-preview[data-palette='los-santos'] {
+  border-left: 4px solid var(--ch-color-accent);
+}
 
 @media (min-width: 769px) {
   :root:is([data-palette='studio'], [data-palette='carbon']) .terminal-main-column {
@@ -150,10 +173,18 @@
     border-radius: var(--ch-radius-xl);
     overflow: hidden;
   }
-  :root[data-palette='carbon'] .terminal-main-column { box-shadow: var(--ch-shadow-soft); }
+  :root[data-palette='carbon'] .terminal-main-column {
+    box-shadow: var(--ch-shadow-soft);
+  }
 }
 @media (max-width: 768px) {
-  :root[data-palette='zenless'] :is(.tab-bar, .workspace-header) { border-bottom: 2px solid var(--ch-color-accent-strong); }
-  :root[data-palette='frontier'] :is(.tab-bar, .workspace-header) { border-bottom: 3px double var(--ch-color-accent); }
-  :root[data-palette='los-santos'] :is(.tab-bar, .workspace-header) { border-bottom: 2px solid var(--ch-color-accent); }
+  :root[data-palette='zenless'] :is(.tab-bar, .workspace-header) {
+    border-bottom: 2px solid var(--ch-color-accent-strong);
+  }
+  :root[data-palette='frontier'] :is(.tab-bar, .workspace-header) {
+    border-bottom: 3px double var(--ch-color-accent);
+  }
+  :root[data-palette='los-santos'] :is(.tab-bar, .workspace-header) {
+    border-bottom: 2px solid var(--ch-color-accent);
+  }
 }

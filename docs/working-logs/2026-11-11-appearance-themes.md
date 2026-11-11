@@ -196,3 +196,40 @@ Revision evidence before fixed-SHA review:
   (`all`, then `browser-mocks`) because the existing browser owner reserves a
   fixed refusal port. Do not edit `verify.sh` or source while these checks run.
   Independent review and final source/evidence identities stay in the same Task.
+
+
+The revision review found two interaction regressions before the requested push.
+Generic `.primary-button:active` rules in the TaskCreate dialog and shared
+Workspace cards retained dark on-accent ink while replacing a bright fill with a
+neutral dark pressed surface. Those rules now keep the accent fill/ink pair at
+rest, hover and press. The new material override also removed the active-pane
+border/halo; it was deleted so the original semantic selected-pane indicator
+survives every theme, rather than trading keyboard ownership clarity for styling.
+
+Real pointer-down coverage now samples the Goal/approval buttons in all three
+states, plus the enabled Workspace header and valid TaskCreate submit controls;
+release moves outside the action so the probe cannot submit. The Workspace
+harness loads the actual production CSS and proves bright fills/dark ink before
+sampling, rather than validating its old fallback colors. A real two-Chat split
+view checks 32 ordinary pane handoffs across all 16 variants and contrast of the
+selected border. Browser-local negative controls and exact final results are
+retained in the revision evidence/Task.
+
+The source treatment selectors were also flattened for the development preview;
+the existing Vite production build already flattened them. Base per-tile font,
+radius and shadow resets were verified, so no redundant reset was introduced.
+The pre-fix aggregate check was intentionally cancelled after review; its retained
+runtime identified a child that was confirmed exited. Only final frozen-source
+checks count toward push acceptance. No shared service or user preview was stopped.
+
+
+Focused closure evidence: `workspace-press-01` passed 64 real rest/pressed samples
+across Add Task and Create Task, while `goal-approval-press-01` passed 96 real
+rest/hover/pressed samples across Goal approve and approval Submit. Minimum
+pressed contrast is 4.615:1. `split-handoff-01` passed 32 ordinary two-Chat pane
+handoffs, minimum selected-border contrast 3.763:1. Parent reconciled the reports
+and lifecycle closure; the Workspace/Goal scenarios completed in about 30/36s.
+Browser-local negatives restore the reviewed defects and fail at 1.9719:1 on
+Mono's pressed Create Task or equal active/inactive gray pane borders. Source
+was not edited for negatives. All are in `tasks/theme-browser/`; the user preview
+on 5358 remains running by explicit request, while test Vite5318 is stopped.
