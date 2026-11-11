@@ -95,6 +95,22 @@ async def rendered_button_state(
             await page.mouse.up()
 
 
+async def _pane_content_geometry(panes: Locator) -> list[dict[str, Any]]:
+    geometry: list[dict[str, Any]] = await panes.evaluate_all("""els => els.map(el => {
+      const rect = selector => {
+        const content = el.querySelector(selector);
+        if (!content || !content.getClientRects().length) {
+          throw new Error(`Missing visible pane content: ${selector}`);
+        }
+        const box = content.getBoundingClientRect();
+        return {x: box.x, y: box.y, width: box.width, height: box.height};
+      };
+      return {label: el.querySelector('.pane-session-name').textContent.trim(),
+        wrapper: rect('.pane-structured'), chat: rect('.structured-pane')};
+    })""")
+    return geometry
+
+
 async def split_pane_themes(page: Page) -> list[dict[str, Any]]:
     previous = await page.evaluate("""() => {
       const root = document.documentElement;
@@ -109,12 +125,23 @@ async def split_pane_themes(page: Page) -> list[dict[str, Any]]:
         for mode in ("dark", "light"):
             for palette in PALETTES:
                 await select_appearance(page, mode, palette)
+                # Compare focus only, after the palette's layout has settled.
+                await _settle_styles(page)
                 for selected in (0, 1):
+                    before_geometry = await _pane_content_geometry(panes)
                     await panes.nth(selected).locator(".pane-session-name").click()
                     await expect(panes.nth(selected)).to_have_class(re.compile(r"\bactive\b"))
                     await expect(page.locator(".terminal-pane.active")).to_have_count(1)
                     await panes.evaluate_all(
                         "els => Promise.all(els.flatMap(el => el.getAnimations().map(animation => animation.finished)))"
+                    )
+                    after_geometry = await _pane_content_geometry(panes)
+                    assert after_geometry == before_geometry, (
+                        "Focus changed inner pane geometry",
+                        palette,
+                        mode,
+                        selected,
+                        {"before": before_geometry, "after": after_geometry},
                     )
                     rendered = await panes.evaluate_all("""els => els.map(el => {
                       const style = getComputedStyle(el);
@@ -134,6 +161,7 @@ async def split_pane_themes(page: Page) -> list[dict[str, Any]]:
                             "selected": selected,
                             "borderContrast": round(ratio, 3),
                             "panes": rendered,
+                            "contentGeometry": after_geometry,
                         }
                     )
     finally:

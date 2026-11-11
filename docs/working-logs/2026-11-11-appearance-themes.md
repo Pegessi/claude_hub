@@ -348,3 +348,54 @@ is not used as grayscale proof; the original desktop grayscale sheet is valid.
 These image derivatives do not alter the tested UI. Final acceptance remains
 bound to the next frozen SHA, independent review and full serial gates, with
 results retained in the same Task/artifact tree rather than inferred here.
+
+### Focus-layout finding after the frozen gates
+
+Frozen `6e4d382` passes strict `browser-mocks` (24 scenarios), `all` (6,556
+backend tests, 9 skips, 1,460 frontend tests) and `terminal-hmr` (13 cases), with
+all five runtime owners stopped and disposable runtimes removed. This is not
+acceptance of that candidate: a subsequent bounded real two-Chat App probe found
+a focus-layout invariant missing from those checks.
+
+At 1440×900, native pane-name 0→1→0 clicks retain both pane/Chat DOM nodes and
+tab assignments. All outer panes stay 594×793. Classic and Frontier controls
+retain inner rectangles and emit no observed resize entries. Zenless activation
+changes content 590×789→590×787 and moves it down 2px; Los Santos changes
+592×791→589×789 and moves it right 3px/down 2px. Both directions reproduce,
+with six ResizeObserver entries per handoff across the two panes, their content
+wrappers and Chat roots. Parent independently recomputed all raw deltas and
+entry counts. Evidence and the bounded replay are in
+`tasks/theme-gemini-style/qa/focus-geometry/`.
+
+The cause is active-only border-width changes in the game treatments. The real
+terminal observes its container and schedules iframe resize, but this probe
+renders mocked Chat panes, not ttyd: terminal row/column changes, reconnect or
+data loss were not measured and are not claimed. The existing live-terminal
+harness mounts TerminalView directly, bypassing TerminalPane's styled frame,
+so its passing result does not cover this invariant. The follow-up must keep
+focus geometry constant while preserving the active appearance and selection
+contrast, extend the existing all-palette handoffs, and re-freeze/review/validate
+before delivery; passing the original gates alone is insufficient.
+
+The same retained Gemini made the minimal correction: move Zenless's top/right/
+bottom/left widths `4/2/2/2` and Los Santos's `3/1/1/4` into the base pane rule,
+removing the active-only width overrides. Active border colors and shadows stay
+unchanged. The existing handoff helper now compares both actual wrapper and
+Chat-root rectangles before/after each native focus click, with exact equality,
+no tolerance and the original 32 selection/contrast checks retained.
+
+Focused Inbox passes in 26.208s. Browser-only negatives restore each game's old
+width rules and the actual shared helper rejects `Focus changed inner pane
+geometry`; removing the overrides restores all 32 passing handoffs. Fifteen
+active computed properties match in both games' dark-mode comparisons; this
+is not pixel-byte identity. The immutable non-game collector re-runs in 31.645s
+and again yields 10 direct/30 return states with zero differences; parent checks
+complete payload equality and current stylesheet hashes independently.
+`qa/focus-geometry/fixed-summary.json` preserves these results and the cleanup.
+
+A post-run mypy check catches the browser API's `Any` return in the new geometry
+helper. Assigning it to an explicitly typed local before returning fixes the
+annotation boundary without ignores or casts. This occurs after the focused
+browser runs, whose original tested hash is retained; final full gates must use
+the newly frozen helper. Standard backend types and format pass on that final
+source. No new scenario, runner, dependency or product state machine is added.

@@ -20,6 +20,7 @@
 - Check actual nested selection controls with translucent/gradient backgrounds,
   native hover/press and color-preserving geometry negatives. Exercise all three
   game palettes in the live terminal loop and restore the prior non-game theme.
+- Keep styled split-pane focus indicators from changing inner viewport dimensions.
 
 ### feat(theme): add studio and game-inspired visual themes
 
