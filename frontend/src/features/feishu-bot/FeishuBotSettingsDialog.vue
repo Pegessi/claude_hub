@@ -151,7 +151,7 @@
             <code class="app-id">{{ selected.app_id }}</code>
           </div>
           <span
-            v-if="selected.binding"
+            v-if="selectedBindings.length"
             class="occupancy-chip"
           >Connected</span>
         </div>
@@ -171,14 +171,24 @@
           </div>
         </div>
         <p
-          v-if="selected.binding"
+          v-if="selectedBindings.length === 1 && selectedMode === 'single'"
           class="binding-card"
         >
           <span
             class="binding-card__dot"
             aria-hidden="true"
           />
-          <span>In use by Chat <code>{{ selected.binding.tab_id }}</code><span v-if="selected.binding.owner_kind === 'local'"> · Trusted local operator</span></span>
+          <span>In use by Chat <code>{{ selectedBindings[0].tab_id }}</code><span v-if="selectedBindings[0].owner_kind === 'local'"> · Trusted local operator</span></span>
+        </p>
+        <p
+          v-else-if="selectedBindings.length"
+          class="binding-card"
+        >
+          <span
+            class="binding-card__dot"
+            aria-hidden="true"
+          />
+          <span>{{ selectedBindings.length === 1 ? '1 active channel' : `${selectedBindings.length} active channels` }} · <code>{{ selectedBindings.map(item => item.tab_id).join(', ') }}</code></span>
         </p>
 
         <form
@@ -189,7 +199,7 @@
           <div class="section-heading">
             <div>
               <h4>Bot details</h4>
-              <p>Update the display name and availability.</p>
+              <p>Update the display name, availability, and serving mode.</p>
             </div>
           </div>
           <label class="field">
@@ -201,6 +211,53 @@
               required
             >
           </label>
+          <div
+            class="field"
+            role="group"
+            aria-label="Serving mode"
+            data-testid="feishu-bot-mode-control"
+          >
+            <span class="field-label">Serving mode</span>
+            <div class="mode-grid">
+              <button
+                type="button"
+                class="ch-btn mode-card"
+                :class="{ 'is-selected': editMode === 'single' }"
+                :aria-pressed="editMode === 'single'"
+                :disabled="busy || modeSwitchDisabled"
+                data-testid="feishu-bot-mode-single"
+                @click="selectMode('single')"
+              >
+                <span class="mode-card__header">
+                  <strong>Single Chat</strong>
+                  <code>single</code>
+                </span>
+                <small>This Bot serves one Chat</small>
+              </button>
+              <button
+                type="button"
+                class="ch-btn mode-card"
+                :class="{ 'is-selected': editMode === 'per_channel' }"
+                :aria-pressed="editMode === 'per_channel'"
+                :disabled="busy || modeSwitchDisabled"
+                data-testid="feishu-bot-mode-per-channel"
+                @click="selectMode('per_channel')"
+              >
+                <span class="mode-card__header">
+                  <strong>Per channel</strong>
+                  <code>per_channel</code>
+                </span>
+                <small>Everyone who talks to this Bot gets their own Chat</small>
+              </button>
+            </div>
+            <p
+              v-if="modeSwitchDisabledReason"
+              class="inline-notice inline-notice--warning"
+              data-testid="feishu-bot-mode-disabled-reason"
+            >
+              {{ modeSwitchDisabledReason }}
+            </p>
+          </div>
           <label class="toggle-row">
             <span>
               <strong>Enabled</strong>
@@ -427,9 +484,9 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useFeishuBotPoolStore } from '@/stores/feishuBotPoolStore'
 import {
-  createFeishuBot, deleteFeishuBot, FeishuBotRequestError,
+  botBindings, botMode, createFeishuBot, deleteFeishuBot, FeishuBotRequestError,
   replaceFeishuBotSecrets, updateFeishuBot,
-  type FeishuBotPoolResponse, type FeishuBotSummary,
+  type FeishuBotMode, type FeishuBotPoolResponse, type FeishuBotSummary,
 } from '@/utils/feishuBotConfig'
 
 const emit = defineEmits<{ close: [] }>()
@@ -439,9 +496,16 @@ const selectedId = ref<string | null>(null)
 const selectedRevision = ref<number | null>(null)
 const busy = ref(false), error = ref<string | null>(null), success = ref<string | null>(null)
 const confirmDelete = ref(false), editName = ref(''), editEnabled = ref(true)
+const editMode = ref<FeishuBotMode>('single')
 const appSecret = ref('')
 const create = reactive({ name: '', app_id: '', app_secret: '' })
 const selected = computed(() => store.botById(selectedId.value))
+const selectedBindings = computed(() => botBindings(selected.value))
+const selectedMode = computed(() => botMode(selected.value))
+const modeSwitchDisabled = computed(() => selectedBindings.value.length > 0)
+const modeSwitchDisabledReason = computed(() => (modeSwitchDisabled.value
+  ? 'Switching mode requires no active channels. Disconnect active Feishu channels before switching.'
+  : null))
 const secretComplete = computed(() => !!appSecret.value)
 const createComplete = computed(() => Object.values(create).every(Boolean))
 const CONNECTION_REFRESH_MS = 2_000
@@ -499,7 +563,13 @@ watch(
 )
 
 function occupancy(bot: FeishuBotSummary) {
-  if (bot.binding) return `In use by Chat ${bot.binding.tab_id}`
+  const active = botBindings(bot)
+  if (botMode(bot) === 'per_channel' && active.length > 0) {
+    return active.length === 1
+      ? `1 active channel (${active[0].tab_id})`
+      : `${active.length} active channels`
+  }
+  if (active[0]) return `In use by Chat ${active[0].tab_id}`
   if (!bot.enabled) return 'Disabled'
   if (!bot.configured) return 'Needs configuration'
   if (bot.connection_status === 'failed') return 'Connection failed'
@@ -525,8 +595,13 @@ function fillSelection(bot: FeishuBotSummary | null, clear = true) {
   selectedRevision.value = bot?.revision ?? null
   editName.value = bot?.name ?? ''
   editEnabled.value = bot?.enabled ?? true
+  editMode.value = botMode(bot)
   confirmDelete.value = false
   if (clear) clearSecrets()
+}
+function selectMode(mode: FeishuBotMode) {
+  if (busy.value || closed || modeSwitchDisabled.value) return
+  editMode.value = mode
 }
 function select(bot: FeishuBotSummary) {
   if (busy.value || closed) return
@@ -552,12 +627,12 @@ async function refresh() {
 function shouldReconcile(cause: unknown): boolean {
   if (!(cause instanceof FeishuBotRequestError)) return true
   if (cause.code === 'bot_operation_busy') return false
-  return cause.status === 500 || cause.code === 'bot_revision_conflict' || cause.code === 'bot_already_bound'
-    || cause.code === 'chat_already_bound'
+  return cause.status === 500 || cause.status === 409
 }
 async function mutate(
   run: () => Promise<FeishuBotPoolResponse>, message: string,
   onSuccess: () => void = () => undefined,
+  options: { switchingMode?: boolean } = {},
 ): Promise<boolean> {
   if (busy.value || closed) return false
   const current = ++viewEpoch
@@ -582,7 +657,17 @@ async function mutate(
       fillSelection(store.botById(selectedId.value), requestError?.code === 'bot_revision_conflict')
     }
     // Refresh must not erase the explanation for the failed mutation.
-    error.value = requestError?.message ?? 'The Bot operation failed. Check the refreshed pool before trying again.'
+    if (
+      options.switchingMode
+      && requestError?.status === 409
+      && requestError.code !== 'bot_revision_conflict'
+      && requestError.code !== 'bot_credentials_read_only'
+      && requestError.code === null
+    ) {
+      error.value = 'This Bot has an active Feishu channel. Disconnect it before switching serving mode.'
+    } else {
+      error.value = requestError?.message ?? 'The Bot operation failed. Check the refreshed pool before trying again.'
+    }
     return false
   } finally {
     if (current === viewEpoch) busy.value = false
@@ -595,8 +680,14 @@ async function createBot() {
 async function saveMetadata() {
   const botId = selectedId.value, revision = selectedRevision.value
   if (!botId || revision === null) return false
-  const input = { name: editName.value.trim(), enabled: editEnabled.value, expected_revision: revision }
-  return mutate(() => updateFeishuBot(botId, input), 'Bot details saved.')
+  const switchingMode = !!selected.value && editMode.value !== botMode(selected.value)
+  const input = {
+    name: editName.value.trim(),
+    enabled: editEnabled.value,
+    ...(switchingMode ? { mode: editMode.value } : {}),
+    expected_revision: revision,
+  }
+  return mutate(() => updateFeishuBot(botId, input), 'Bot details saved.', () => undefined, { switchingMode })
 }
 async function saveSecrets() {
   const botId = selectedId.value, revision = selectedRevision.value

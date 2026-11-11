@@ -643,7 +643,9 @@ async def test_capability_preparation_does_not_cache_unstructured_result() -> No
         cache_preparation=True,
     )
 
-    assert first.structured is False
+    assert first.structured is True
+    assert first.unavailable_reason == "Live provider unavailable"
+    assert first.metadata_cacheable is False
     assert second.structured is True
     assert transport.prepare_count == 2
 
@@ -875,6 +877,9 @@ async def test_tab_capability_keeps_empty_claude_composer_available(
     )
     manager = MagicMock()
     manager.hard_failed.return_value = False
+    manager.get_store.return_value.read_since = AsyncMock(
+        return_value=AgentStreamEventPage(events=[], next_sequence=-1, has_more=False)
+    )
     monkeypatch.setattr(agent_stream_api, "get_adapter_for_session", lambda _session: adapter)
 
     caps = await agent_stream_api._tab_capabilities_for(session, manager)
@@ -1267,81 +1272,32 @@ def test_history_api_requests_compacted_store_page(
         result = await agent_stream_api._stream_events_for(session, manager, -1, 5000, compact=True)
 
         assert result is page
-        store.read_since.assert_awaited_once_with(-1, 5000, compact=True)
+        store.read_since.assert_awaited_with(-1, 5000, compact=True)
+        assert store.read_since.await_count == 2
 
     asyncio.run(run())
 
 
-def test_store_sequential_pages_resume_from_cached_file_offset(
+def test_store_sequential_pages_do_not_reopen_legacy_jsonl(
     store: AgentStreamStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A later page must not scan and parse the JSONL prefix again."""
+    """Indexed pages resume without reopening or rescanning the legacy file."""
 
     async def run() -> None:
         for i in range(8):
             await store.append(_event(text=str(i)))
-
         original_open = Path.open
-        readers: List[Any] = []
-
-        class CountingReader:
-            def __init__(self, handle: Any) -> None:
-                self.handle = handle
-                self.lines_read = 0
-                self.seek_offsets: List[int] = []
-
-            def __enter__(self) -> "CountingReader":
-                self.handle.__enter__()
-                return self
-
-            def __exit__(self, *args: Any) -> Any:
-                return self.handle.__exit__(*args)
-
-            def __iter__(self) -> "CountingReader":
-                return self
-
-            def __next__(self) -> str:
-                line = next(self.handle)
-                assert isinstance(line, str)
-                self.lines_read += 1
-                return line
-
-            def readline(self, *args: Any) -> str:
-                line = self.handle.readline(*args)
-                assert isinstance(line, str)
-                if line:
-                    self.lines_read += 1
-                return line
-
-            def seek(self, offset: int, *args: Any) -> int:
-                self.seek_offsets.append(offset)
-                result = self.handle.seek(offset, *args)
-                assert isinstance(result, int)
-                return result
-
-            def __getattr__(self, name: str) -> Any:
-                return getattr(self.handle, name)
 
         def tracked_open(path: Path, *args: Any, **kwargs: Any) -> Any:
-            handle = original_open(path, *args, **kwargs)
-            mode = args[0] if args else kwargs.get("mode", "r")
-            if path == store.path and mode == "r":
-                reader = CountingReader(handle)
-                readers.append(reader)
-                return reader
-            return handle
+            assert path != store.path, "SQLite pages must not reopen legacy JSONL"
+            return original_open(path, *args, **kwargs)
 
         monkeypatch.setattr(Path, "open", tracked_open)
-
         first = await store.read_since(-1, limit=2)
         second = await store.read_since(first.next_sequence, limit=2)
-
         assert [event.payload["text"] for event in second.events] == ["2", "3"]
-        assert len(readers) == 2
-        assert readers[1].seek_offsets and readers[1].seek_offsets[0] > 0
-        # Two returned rows plus one look-ahead row for has_more.
-        assert readers[1].lines_read == 3
+        assert second.next_sequence == 3 and second.has_more
 
     asyncio.run(run())
 
@@ -1423,6 +1379,7 @@ def test_store_recovers_sequence_after_restart(store: AgentStreamStore):
 def test_store_clear_removes_event_log_and_cursor_checkpoint(store: AgentStreamStore):
     async def run() -> None:
         await store.append(_event(text="old"))
+        store.cursor_path.parent.mkdir(parents=True, exist_ok=True)
         store.cursor_path.write_text("{}", encoding="utf-8")
 
         await store.clear()
@@ -7151,3 +7108,102 @@ async def test_managed_archive_fences_native_owner_and_restores_conversation(
         )
     finally:
         await tailers.forget_session(session.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["startup", "native_error", "hard_failed", "prepare"])
+async def test_native_failure_preserves_structured_history(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str
+) -> None:
+    from claude_hub.api.routes.agent_stream import observation, runtime
+    from claude_hub.services.agent_stream import StructuredSourceUnavailable
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    session = _native_session(AgentType.CODEX).model_copy(update={"session_kind": SessionKind.CHAT})
+    store = AgentStreamStore(session.workspace_id, session.id)
+    saved = await store.append(
+        AgentStreamEvent(
+            session_id=session.id,
+            tab_id=session.tab_id or "",
+            stream_sequence=-1,
+            created_at=datetime.now(timezone.utc),
+            agent_type=session.agent_type,
+            type=AgentStreamEventType.TEXT_DELTA,
+            payload={"text": "persisted reply"},
+        )
+    )
+    transport = _CapabilityTransport()
+    manager = _capability_manager(session, transport)
+    manager.get_store.return_value = store
+    tailer = manager.ensure_started.return_value
+    tailer.last_error = "provider handshake failed"
+    if failure == "startup":
+        manager.ensure_started.side_effect = StructuredSourceUnavailable(
+            "provider handshake failed"
+        )
+    elif failure == "native_error":
+        tailer.native_error = "provider handshake failed"
+    elif failure == "prepare":
+        transport.prepare_capabilities = AsyncMock(  # type: ignore[method-assign]
+            side_effect=StructuredSourceUnavailable("provider handshake failed")
+        )
+    else:
+        manager.hard_failed.return_value = True
+    caps = await runtime.capabilities_for(
+        lambda: manager, lambda _: True, lambda _: None, session, manager
+    )
+    assert caps.structured
+    assert caps.unavailable_reason == "provider handshake failed"
+    bindings = MagicMock()
+    bindings.capabilities_for = AsyncMock(
+        side_effect=AssertionError("history must not start provider")
+    )
+    page = await observation.stream_events_for(session, manager, -1, 100, bindings)
+    assert page.events == [saved]
+    exhausted = await observation.stream_events_for(
+        session, manager, saved.stream_sequence, 100, bindings
+    )
+    assert exhausted.events == []
+    assert exhausted.next_sequence == saved.stream_sequence
+    bindings.capabilities_for.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native,with_history", [(True, False), (False, True), (False, False)])
+async def test_failed_capabilities_distinguish_history_from_live_readiness(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, native: bool, with_history: bool
+) -> None:
+    from claude_hub.api.routes.agent_stream import observation, runtime
+    from claude_hub.services.agent_stream import StructuredSourceUnavailable
+
+    _isolate_state_root(monkeypatch, tmp_path)
+    session = _native_session().model_copy(
+        update={"session_kind": SessionKind.CHAT if native else SessionKind.TERMINAL}
+    )
+    store = AgentStreamStore(session.workspace_id, session.id)
+    if with_history:
+        await store.append(
+            AgentStreamEvent(
+                session_id=session.id,
+                tab_id=session.tab_id or "",
+                stream_sequence=-1,
+                created_at=datetime.now(timezone.utc),
+                agent_type=session.agent_type,
+                type=AgentStreamEventType.TEXT_DELTA,
+                payload={"text": "old reply"},
+            )
+        )
+    manager = MagicMock()
+    manager.get_store.return_value = store
+    manager.hard_failed.return_value = True
+    manager.ensure_started = AsyncMock(side_effect=StructuredSourceUnavailable("handshake failed"))
+    caps = await runtime.capabilities_for(
+        lambda: manager, lambda _: native, lambda _: None, session, manager
+    )
+    assert caps.structured is (native or with_history)
+    assert caps.unavailable_reason
+    bindings = MagicMock()
+    bindings.capabilities_for = AsyncMock(return_value=caps)
+    page = await observation.stream_events_for(session, manager, -1, 100, bindings)
+    assert len(page.events) == int(with_history)

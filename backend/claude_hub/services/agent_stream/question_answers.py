@@ -24,6 +24,7 @@ from ...models.chat_message import (
     utc_now,
 )
 from ..chat_message_inbox import ChatMessageInbox, InboxError
+from ..local_storage import read_document
 from .providers.questions import parse_ask_question_response
 
 
@@ -164,7 +165,9 @@ class QuestionAnswers:
                     inbox = self.inbox()
                     # Recheck trusted external binding at the winner's admission boundary.
                     if source == "feishu":
-                        from ...api.routes.feishu_bot.card_actions import current_binding
+                        from ...api.routes.feishu_bot.card_actions import (
+                            current_binding,
+                        )
 
                         current_binding(q)
                         if (
@@ -368,7 +371,9 @@ class QuestionAnswers:
                 async with AsyncExitStack() as admission:
                     if item.turn_metadata.get("answer_source") == "feishu":
                         from ...api import feishu_bot as bot
-                        from ...api.routes.feishu_bot.card_actions import current_binding
+                        from ...api.routes.feishu_bot.card_actions import (
+                            current_binding,
+                        )
 
                         if q.mirror is None:
                             raise InboxError(409, "Question mirror unavailable")
@@ -376,7 +381,9 @@ class QuestionAnswers:
                         current_binding(q)
                     session, manager, _ = self.live(q)
                     if q.mirror is not None and item.turn_metadata.get("answer_source") == "feishu":
-                        from ...api.routes.feishu_bot.card_actions import current_binding
+                        from ...api.routes.feishu_bot.card_actions import (
+                            current_binding,
+                        )
 
                         current_binding(q)
                     if q.mode == "followup" and await manager.turn_in_flight(session):
@@ -394,7 +401,10 @@ class QuestionAnswers:
                         if q.mode == "native":
                             before()
                             if not await manager.answer_pending_question(
-                                session, item.message, q.turn_id, expected_call_id=q.call_id
+                                session,
+                                item.message,
+                                q.turn_id,
+                                expected_call_id=q.call_id,
                             ):
                                 raise InboxError(409, "Question no longer pending")
                         else:
@@ -519,7 +529,7 @@ class QuestionAnswers:
 
         manager = stream.workspace_manager
         try:
-            state = json.loads(manager._workspace_state_file(q.owner_workspace_id).read_text())
+            state = read_document(manager._workspace_state_file(q.owner_workspace_id))
             row = next(row for row in state["sessions"] if row["id"] == q.session_id)
             owner = ManagedSession.model_validate(row)
             key = json.dumps([q.turn_id, q.call_id], separators=(",", ":"))

@@ -51,8 +51,8 @@ class EditResendMixin(ManagerState):
         operations. Retirement also waits on this lock, including while the
         edit has no registered tailer and is restoring its snapshot.
 
-        Failure recovery: before truncating either plane, both files are
-        snapshotted to ``.edit-bak`` sidecars.  If any step after the
+        Failure recovery: before truncating either plane, the Hub store is
+        snapshotted in SQLite and the provider file to a ``.edit-bak`` sidecar.  If any step after the
         snapshot fails (truncate, fork, restart, or send), both files are
         restored from their snapshots so the conversation is byte-identical
         to before the edit was attempted, any tailer created during the
@@ -273,5 +273,5 @@ class EditResendMixin(ManagerState):
             raise
         finally:
             if not retain_backups:
-                self._deps.discard_snapshot(store_backup)
+                await store.discard_snapshot(store_backup)
                 self._deps.discard_snapshot(transcript_backup)

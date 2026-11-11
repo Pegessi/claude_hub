@@ -41,7 +41,7 @@
     ],
     "id": "antigravity",
     "images": "prompt_file_ref",
-    "model_catalog": "static_curated",
+    "model_catalog": "cli_list_models",
     "model_configurable_in_managed": false,
     "model_env_key": "ANTIGRAVITY_MODEL",
     "plan_mode": "cli_flag_probed",

@@ -58,6 +58,45 @@ def parse_list_models(
     return options
 
 
+_ANTIGRAVITY_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def parse_antigravity_models(
+    raw: str, *, osc_re: re.Pattern[str], ansi_re: re.Pattern[str], marker_re: re.Pattern[str]
+) -> List[StreamModelOption]:
+    """Parse ``agyx models`` output into model options.
+
+    Each non-empty catalog row is ``<id>\\t<label>`` (when piped) or
+    ``<id>  <label>`` (two or more spaces in TTY mode), with optional ANSI
+    sequences or carriage-return spinner frames. Malformed lines are skipped;
+    ids are deduped. An empty result signals the caller to fall back.
+    """
+    options: List[StreamModelOption] = []
+    seen: set[str] = set()
+    for raw_line in raw.split("\n"):
+        raw_line = raw_line.rstrip("\r")
+        if "\r" in raw_line:
+            raw_line = raw_line.rsplit("\r", 1)[-1]
+        line = osc_re.sub("", raw_line)
+        line = ansi_re.sub("", line).strip()
+        if not line:
+            continue
+        if "\t" in line:
+            model_id, label = line.split("\t", 1)
+        else:
+            parts = re.split(r"\s{2,}", line, maxsplit=1)
+            if len(parts) != 2:
+                continue
+            model_id, label = parts
+        model_id = model_id.strip()
+        label = marker_re.sub("", label.strip()).strip()
+        if not model_id or not _ANTIGRAVITY_MODEL_ID_RE.fullmatch(model_id) or model_id in seen:
+            continue
+        seen.add(model_id)
+        options.append(StreamModelOption(id=model_id, label=label or model_id, description=""))
+    return options
+
+
 def group_cursor_model_options(
     options: Sequence[StreamModelOption],
     *,
