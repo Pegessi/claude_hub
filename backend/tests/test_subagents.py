@@ -1112,6 +1112,9 @@ async def test_unarchived_subagent_tab_is_detached_and_never_re_archived(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     manager = _real_manager(monkeypatch, tmp_path)
+    manager.processes["child"].workspace_id = "ws-display"
+    manager.processes["child"].workspace_name = "Display WS"
+    manager.processes["child"].resume_quarantined = True
     path = tmp_path / "subagents.json"
     _seed_record(path, tmp_path)
     service = SubagentService(path, _manager_runtime(manager), archive_grace_seconds=0)
@@ -1122,6 +1125,8 @@ async def test_unarchived_subagent_tab_is_detached_and_never_re_archived(
     restored = await manager.unarchive_tab("child")
     assert restored is not None and restored.archived is False
     assert restored.subagent_id is None and restored.parent_tab_id is None
+    assert restored.workspace_id is None and restored.workspace_name is None
+    assert manager.processes["child"].resume_quarantined is False
     assert "CLAUDE_HUB_SUBAGENT_ID" not in restored.env
     # Neither parent closure nor startup reconciliation re-archives it.
     await manager.archive_tab("parent")
@@ -1131,6 +1136,93 @@ async def test_unarchived_subagent_tab_is_detached_and_never_re_archived(
     await again.start()
     assert manager.get_tab("child").archived is False
     await again.stop()
+
+
+async def test_viewed_non_kept_subagent_detaches_instead_of_archiving_on_grace(
+    tmp_path: Path,
+) -> None:
+    chats = FakeChats()
+    chats.add_tab(
+        "parent", cwd=str(tmp_path), workspace_id="ws-display", workspace_name="Display WS"
+    )
+
+    def detach_tab(tab_id: str) -> Optional[TerminalTab]:
+        tab = chats.tabs.get(tab_id)
+        if tab is None:
+            return None
+        updated = tab.model_copy(
+            update={
+                "subagent_id": None,
+                "parent_tab_id": None,
+                "workspace_id": None,
+                "workspace_name": None,
+            }
+        )
+        chats.tabs[tab_id] = updated
+        return updated
+
+    runtime = dataclasses.replace(
+        chats.runtime(),
+        resolve_workspace=lambda _parent, _cwd: ("ws-display", "Display WS"),
+        detach_tab=detach_tab,
+    )
+    service = SubagentService(tmp_path / "subagents.json", runtime, archive_grace_seconds=0.1)
+    await service.start()
+    record, turn = await service.create(
+        subagents_service.SubagentCreate(
+            agent_type=AgentType.CODEX, prompt="p", parent_tab_id="parent"
+        )
+    )
+    await service.wait_turn(record.id, turn.turn_id, 5)
+    assert record.tab_id is not None
+    # User switches to the subagent tab during the grace window.
+    chats.tabs[record.tab_id] = chats.tabs[record.tab_id].model_copy(
+        update={"last_viewed_at": datetime.now(timezone.utc)}
+    )
+    await _eventually(lambda: record.closed)
+    assert record.close_reason == "subagent tab detached"
+    tab = chats.tabs[record.tab_id]
+    assert tab.archived is False
+    assert tab.subagent_id is None and tab.parent_tab_id is None
+    assert tab.workspace_id is None and tab.workspace_name is None
+    await service.stop()
+
+
+async def test_codex_chat_tab_cold_start_skips_terminal_rollout_quarantine(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import importlib
+
+    from claude_hub.services.ttyd_manager import TTYDProcess
+
+    ttyd_manager_module = importlib.import_module("claude_hub.services.ttyd_manager")
+    manager = _real_manager(monkeypatch, tmp_path)
+    started_tabs: list[str] = []
+
+    async def fake_start(self: TTYDProcess) -> None:
+        started_tabs.append(self.tab_id)
+
+    async def fake_tmux_exists(_name: str) -> bool:
+        return False
+
+    monkeypatch.setattr(TTYDProcess, "start", fake_start)
+    monkeypatch.setattr(ttyd_manager_module, "_tmux_session_exists_async", fake_tmux_exists)
+    codex_chat = TTYDProcess(
+        tab_id="codex-chat",
+        port=14010,
+        name="codex-chat",
+        agent_type=AgentType.CODEX,
+        session_kind=SessionKind.CHAT,
+        cwd=str(tmp_path),
+        agent_session_id="01a1c99c-47a0-7190-8056-8a8c1da435ac",
+        agent_session_id_verified=True,
+    )
+    manager.processes["codex-chat"] = codex_chat
+    await manager._start_missing_tab_identity_safe(codex_chat)
+    assert started_tabs == ["codex-chat"]
+    assert codex_chat.agent_session_id == "01a1c99c-47a0-7190-8056-8a8c1da435ac"
+    assert codex_chat.agent_session_id_verified is True
+    assert codex_chat.resume_quarantined is False
 
 
 async def test_reconciliation_archives_orphans_but_keeps_detached_tabs(tmp_path: Path) -> None:

@@ -7,6 +7,14 @@
 
 ## Released
 
+### feat(chat): unify Hub and native sub-agent preview window and fix switched Hub sub-agent interaction
+
+- Unify Hub sub-agent (`claude-hub agent run`) and provider-native sub-agent presentation: clicking any sub-agent row in the `Agents` dock (`ChatSubagentRow.vue`) or clicking `View` on an inline `ChatHubSubagentLink.vue` now opens the shared `ChatNativeSubagentOverlay.vue` detail window. Hub sub-agents fetch their compacted persisted stream events (`GET /api/workspaces/tabs/{tabId}/stream/events?compact=true&persisted_only=true`, polling while `running`) and project them via `buildHubSubagentLookup` (`hubSubagentThread.ts`, stripping `<claude_hub_subagent>` preambles) into `ChatSubthreadBody.vue`, with an explicit `Open session` / `Restore & open` action (`data-testid="hub-subagent-open-session"`) to switch to the child Chat session.
+- Fix auto-archived Hub sub-agents silently failing to open when `terminalStore.archivedTabs` has not been loaded yet: `toSubagentJumpChip` marks non-live `closed` sub-agents as `archived`, and `useParentSubagents.jump` falls back to `terminalStore.unarchiveTab` when a target `tabId` is absent from `terminalStore.tabs` after `fetchTabs()`.
+- Fix `SessionKind.CHAT` Codex tabs triggering terminal-rollout attribution/quarantine (`_quarantine_codex_tab`) on unarchive or cold start (`manager/tabs.py`, `startup.py`, `attribution.py`, `retirement.py`), which previously wiped `agent_session_id` and prevented resumed interaction when switching to a Codex Hub sub-agent Chat.
+- Centralize sub-agent tab detachment (`detach_subagent_tab` / `_detach_subagent_process` in `retirement.py`, startup healing in `state.py`, web-turn detachment in `dispatch.py`, and grace-window view check in `subagents.py`) so restored or user-adopted sub-agent tabs also clear display-only `workspace_id`/`workspace_name` and appear as normal top-level Chat sessions instead of vanishing from navigation lists.
+- Keep `Needs you` -> `Waiting on you` (`New reply`) scoped to manual user-created Terminal/Chat sessions (`isManualSessionTab` in `inboxModel.ts`), preventing finished `claude-hub agent run` sub-agents and Workspace `orchestrator`/`reviewer` sessions from polluting `Waiting on you` or the `Chats` (`manual`) filter.
+
 ### fix(chat): surface native and MASO sub-agents on shallow conversation load and deduplicate cross-turn threads
 
 - Keep sub-agent lifecycle statuses (`active`, `completed`, `failed`, `cancelled`) and sub-agent delegation/directive tool events (`Agent`, `Task`, `Fork`, `spawnAgent`, `sendInput`, `SendMessage`) visible in `view=conversation` (`history.py`), including for pre-existing SQLite rows recorded before this change, while keeping ordinary tool calls and child streaming deltas lazy behind `history_details`.

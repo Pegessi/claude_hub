@@ -195,6 +195,28 @@ test('jump to an archived child restores it first', async () => {
   ])
 })
 
+test('jump to a child that auto-archived before archivedTabs loaded still restores it', async () => {
+  const harness = makeHarness()
+  stubFetch([
+    {
+      prefix: '/api/subagents',
+      rows: [summaryRow({ closed: false, last_status: 'running' })],
+    },
+  ])
+  const controller = useParentSubagents(vue.ref('parent-tab'))
+  await controller.refresh()
+  // Even if the chip was still running on the last poll tick and archived
+  // right before jump(), missing from terminalStore.tabs triggers unarchiveTab.
+  const chip = controller.chips.value[0]
+  assert.equal(chip.archived, false)
+  await controller.jump(chip)
+  assert.deepEqual(harness.calls, [
+    'fetchTabs',
+    ['unarchiveTab', 'child-tab'],
+    ['setMode', 'terminal'],
+  ])
+})
+
 test('switching parent tab resets and refetches rows', async () => {
   makeHarness()
   const requests = stubFetch([
