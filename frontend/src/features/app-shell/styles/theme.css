@@ -4,6 +4,7 @@
   box-sizing: border-box;
 }
 
+.theme-preview,
 :root {
   color-scheme: dark;
   --visual-viewport-height: 100dvh;
@@ -169,6 +170,7 @@
   --ch-code-strong: #ffa657;
 }
 
+.theme-preview[data-theme='light'],
 :root[data-theme='light'] {
   color-scheme: light;
   /* Light keeps the same neutral geometry with a muted clay-orange

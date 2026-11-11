@@ -7,6 +7,18 @@
 
 ## Released
 
+### feat(theme): add curated palettes and responsive appearance controls
+
+- Replace the fixed light/dark switch with Classic, Slate, Sand, Forest, Dusk and
+  Contrast palettes, each with light/dark variants and optional system following.
+  Preserve existing preferences and synchronize appearance across browser tabs
+  and standalone readers, including terminal repaint and browser chrome color.
+- Add real palette previews, keyboard-operable radio groups and a phone bottom
+  sheet with safe-area spacing, scrollable content and 44px primary controls.
+  Retain existing semantic status/code tokens and report blocked persistence.
+- Design references, acceptance scope and evidence:
+  [appearance themes](docs/working-logs/2026-11-11-appearance-themes.md).
+
 ### fix(chat): surface native and MASO sub-agents on shallow conversation load and deduplicate cross-turn threads
 
 - Keep sub-agent lifecycle statuses (`active`, `completed`, `failed`, `cancelled`) and sub-agent delegation/directive tool events (`Agent`, `Task`, `Fork`, `spawnAgent`, `sendInput`, `SendMessage`) visible in `view=conversation` (`history.py`), including for pre-existing SQLite rows recorded before this change, while keeping ordinary tool calls and child streaming deltas lazy behind `history_details`.

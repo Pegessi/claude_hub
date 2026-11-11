@@ -72,15 +72,32 @@
           <AppExtensionsMenu v-if="!isMobile" />
           <button
             type="button"
-            class="theme-switch"
-            role="switch"
-            :aria-checked="colorScheme === 'light'"
-            :title="colorScheme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'"
-            @click="appStore.toggleColorScheme()"
+            class="appearance-trigger"
+            aria-label="Appearance"
+            title="Appearance"
+            aria-haspopup="dialog"
+            @click="appStore.openAppearance()"
           >
-            <span class="theme-switch-label">Dark</span>
-            <span class="theme-switch-label">Light</span>
-            <span class="theme-switch-thumb" />
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              aria-hidden="true"
+            >
+              <circle
+                cx="12"
+                cy="12"
+                r="8.5"
+              /><path
+                d="M12 3.5v17A8.5 8.5 0 0 1 12 3.5Z"
+                fill="currentColor"
+                stroke="none"
+              />
+            </svg>
+            <span>{{ appStore.themePaletteName }}</span>
           </button>
         </div>
       </div>
@@ -140,6 +157,7 @@
         v-if="feishuBotSettingsVisible"
         @close="appStore.closeFeishuBotSettings()"
       />
+      <AppearanceDialog v-if="appStore.appearanceVisible" />
       <ServiceRestartDialog
         v-if="appStore.restartDialogVisible"
         @close="appStore.restartDialogVisible = false"
@@ -161,6 +179,7 @@ import ChatSidebar from '@/components/ChatSidebar.vue'
 import ArchivedSessionsPanel from '@/components/ArchivedSessionsPanel.vue'
 import AppExtensionsMenu from '@/components/AppExtensionsMenu.vue'
 import DotLauncher from '@/components/DotLauncher.vue'
+import AppearanceDialog from '@/components/AppearanceDialog.vue'
 import ServiceRestartDialog from '@/components/ServiceRestartDialog.vue'
 import FeishuBotSettingsDialog from '@/components/FeishuBotSettingsDialog.vue'
 import ScheduledTasksPanel from '@/components/ScheduledTasksPanel.vue'
@@ -178,7 +197,6 @@ const authStore = useAuthStore()
 const { tabs, error, activePane, activePaneIsChat } = storeToRefs(store)
 const {
   mode,
-  colorScheme,
   feishuBotSettingsVisible,
   scheduledTasksVisible,
   scheduledTaskCreateTargetTabId,
@@ -208,10 +226,6 @@ watch(() => activePane.value?.tabId || null, (tabId) => {
   if (typeof window !== 'undefined') {
     window.__claudeHub.activePaneTabId = tabId
   }
-}, { immediate: true })
-
-watch(colorScheme, (scheme) => {
-  document.documentElement.dataset.theme = scheme
 }, { immediate: true })
 
 // ---- Mobile viewport sync with visualViewport API ----

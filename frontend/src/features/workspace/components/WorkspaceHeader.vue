@@ -138,9 +138,9 @@
           <button
             type="button"
             class="workspace-mobile-menu-item workspace-mobile-menu-item--theme"
-            @click="toggleThemeFromMenu"
+            @click="openAppearanceFromMenu"
           >
-            <span>{{ colorScheme === 'dark' ? 'Switch to Light' : 'Switch to Dark' }}</span>
+            <span>Appearance</span>
             <strong>{{ colorScheme }}</strong>
           </button>
         </div>
@@ -190,7 +190,7 @@ const {
   openLessonsModalFromMenu,
   openAgentOptionsModalFromMenu,
   refreshAgentStatusesFromMenu,
-  toggleThemeFromMenu,
+  openAppearanceFromMenu,
   workspaceMobileMenuRef,
 } = useWorkspaceNavigationContext()
 
