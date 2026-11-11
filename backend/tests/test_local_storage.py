@@ -294,12 +294,36 @@ def test_storage_maintenance_cli_does_not_eagerly_initialize_default_runtime(tmp
     (default_runtime / "tabs.json").write_text(
         '{"version":2,"tabs":[],"pending_stream_cleanup":[]}'
     )
+    repo_slug = Path(__file__).resolve().parents[2].name
+    worktree_runtime = default_runtime / "worktrees" / repo_slug
+    worktree_runtime.mkdir(parents=True, exist_ok=True)
+    (worktree_runtime / "tabs.json").write_text(
+        '{"version":2,"tabs":[],"pending_stream_cleanup":[]}'
+    )
     target_copy = tmp_path / "copy-runtime"
     (target_copy / "workspaces").mkdir(parents=True)
     (target_copy / "sessions.json").write_text('{"s1":{"value":1}}')
     env = dict(os.environ, HOME=str(fake_home))
     env.pop("CLAUDE_HUB_HOME", None)
     env.pop("CLAUDE_HUB_STATE_ROOT", None)
+    # Importing storage_maintenance must not import heavy runtime managers or agent_stream.
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys, claude_hub.services.storage_maintenance; "
+                "assert 'claude_hub.services.ttyd_manager' not in sys.modules; "
+                "assert 'claude_hub.services.workspace_manager' not in sys.modules; "
+                "assert 'claude_hub.services.agent_stream' not in sys.modules"
+            ),
+        ],
+        env=env,
+        cwd=Path(__file__).parents[1],
+        check=True,
+        timeout=30,
+    )
+    assert list(fake_home.rglob("storage.sqlite3")) == []
     # Import sessions.json in target_copy first in an isolated subprocess
     subprocess.run(
         [
@@ -317,6 +341,7 @@ def test_storage_maintenance_cli_does_not_eagerly_initialize_default_runtime(tmp
         timeout=30,
     )
     assert not (default_runtime / "storage.sqlite3").exists()
+    assert list(fake_home.rglob("storage.sqlite3")) == []
     result = subprocess.run(
         [
             sys.executable,
@@ -333,7 +358,9 @@ def test_storage_maintenance_cli_does_not_eagerly_initialize_default_runtime(tmp
     )
     assert result.returncode == 0, result.stderr
     assert not (default_runtime / "storage.sqlite3").exists()
+    assert list(fake_home.rglob("storage.sqlite3")) == []
     assert (default_runtime / "tabs.json").exists()
+    assert (worktree_runtime / "tabs.json").exists()
     assert not (target_copy / "sessions.json").exists()
     assert (target_copy / "sessions.json.gz").is_file()
 
