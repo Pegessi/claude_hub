@@ -1542,10 +1542,11 @@ async def test_persistent_image_attachments_cleaned_on_cancel_and_reject_invalid
 _SAMPLE_AGYX_MODELS = (
     "\x1b[?25l\r⠋ Fetching available models...\rLoading  models...\r\x1b[?25h"
     "gemini-4-carbon-medium\tGemini 4 Carbon (Medium)\n"
-    "gemini-4-carbon-high\tGemini 4 Carbon (High)\n"
+    "gemini-4-carbon-high\tGemini 4 Carbon (High)\r\x1b[?25h\n"
     "gemini-4-carbon-low  Gemini 4 Carbon (Low) (default)\n"
     "gemini-4-argon-high\tGemini 4 Argon (High)\n"
     "gemini-4-carbon-high\tDuplicate Ignored\n"
+    "Loading  models...\n"
     "Fetching available models...\n"
     "bad id\tInvalid Slug\n"
 )
@@ -1674,3 +1675,33 @@ def test_antigravity_models_probe_timeout_setting_requires_positive_finite(timeo
 
     with pytest.raises(ValueError, match="antigravity_models_probe_timeout_seconds"):
         Settings(_env_file=None, antigravity_models_probe_timeout_seconds=timeout)
+
+
+async def test_cursor_and_antigravity_cold_probes_run_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native_module = importlib.import_module("claude_hub.services.agent_stream.native")
+    monkeypatch.setattr(native_module, "_models_cache", {})
+    monkeypatch.setattr(native_module, "_models_locks", {})
+    cursor_entered = asyncio.Event()
+    agy_entered = asyncio.Event()
+
+    async def _probe_cursor():
+        cursor_entered.set()
+        await asyncio.wait_for(agy_entered.wait(), timeout=1.0)
+        return native_module._static_options("cursor"), False
+
+    async def _probe_agy():
+        agy_entered.set()
+        await asyncio.wait_for(cursor_entered.wait(), timeout=1.0)
+        return native_module._static_options("antigravity"), False
+
+    monkeypatch.setattr(native_module, "_probe_cursor_models", _probe_cursor)
+    monkeypatch.setattr(native_module, "_probe_antigravity_models", _probe_agy)
+
+    cursor_catalog, agy_catalog = await asyncio.gather(
+        native_module.model_catalog_for("cursor"),
+        native_module.model_catalog_for("antigravity"),
+    )
+    assert cursor_catalog.options
+    assert agy_catalog.options
