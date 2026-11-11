@@ -11,8 +11,8 @@ from claude_hub.services.feishu_bot import (
 )
 from claude_hub.services.feishu_bot_pool import BotBinding, EffectiveBot
 
-# Bot + channel/topic identity, fenced by the resolved configuration version.
-DispatchChannelKey = tuple[str, str, str, str, str | None, int, int]
+# Bot + channel/topic identity, fenced by the resolved binding and generation.
+DispatchChannelKey = tuple[str, str, str, str, str | None, int]
 
 
 class TabDispatchQueueFull(RuntimeError):
@@ -47,7 +47,8 @@ class TabDispatchItem:
     def channel_key(self) -> DispatchChannelKey:
         # Interruption deliberately excludes the sender: another person in the
         # same topic may supersede an answer, but must never coalesce with it.
-        # Pairing/version fences also keep stale work out of a rebound channel.
+        # Pairing/generation fences keep stale work out of a rebound channel,
+        # while administrative CAS revisions do not split an active channel.
         # Legacy group fallback returns a DM binding: only the event identifies
         # the actual room, so two groups must not share that binding's chat ID.
         return (
@@ -57,7 +58,6 @@ class TabDispatchItem:
             self.event.chat_id,
             self.event.thread_id,
             self.effective.generation,
-            self.effective.revision,
         )
 
 

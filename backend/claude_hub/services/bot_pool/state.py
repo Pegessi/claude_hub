@@ -526,6 +526,18 @@ class FeishuBotPoolStateStore(object):
             and current.expected_tenant_key == effective.expected_tenant_key
         )
 
+    def transport_revision(self, bot_id: str, environ: Mapping[str, str] | None = None) -> int:
+        """Return the revision at which credentials, callbacks, or generation last changed."""
+
+        now = self._now()
+        with self._lock:
+            state = self._load_synced(environ, now)
+            raw = state["bots"].get(bot_id)
+            if not isinstance(raw, dict) or raw.get("revoked_at"):
+                raise FeishuBotNotFound(bot_id)
+            value = raw.get("transport_revision", 0)
+            return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
     # ------------------------------------------------------------ invariants
 
     def _prune(self, state: dict[str, Any], now: float) -> None:
@@ -602,6 +614,7 @@ class FeishuBotPoolStateStore(object):
         raw["feishu_open_id"] = None
         self._advance_generation(raw)
         self._touch(raw, now)
+        raw["transport_revision"] = raw["revision"]
         return True
 
     def _load_synced(self, environ: Mapping[str, str] | None, now: float) -> dict[str, Any]:

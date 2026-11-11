@@ -53,13 +53,33 @@ def _tab_binding(entry: Any, tab_id: str) -> Any:
     return next((item for item in _entry_bindings(entry) if item.tab_id == tab_id), None)
 
 
-def current_binding(q: ChatQuestion) -> tuple[Any, Any]:
+def _transport_digest(effective: Any) -> str:
+    config = getattr(effective, "config", None)
+    payload = {
+        "app_id": getattr(effective, "app_id", ""),
+        "api_base_url": getattr(config, "api_base_url", "") if config else "",
+        "app_secret": getattr(config, "app_secret", "") if config else "",
+        "callback_enabled": bool(getattr(effective, "callback_enabled", False)),
+        "verification_token": getattr(effective, "verification_token", None) or "",
+        "encrypt_key": getattr(effective, "encrypt_key", None) or "",
+        "expected_tenant_key": getattr(effective, "expected_tenant_key", None) or "",
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def current_binding(q: ChatQuestion, *, expected_effective: Any | None = None) -> tuple[Any, Any]:
     from ... import feishu_bot as bot
 
     mirror = q.mirror
     if mirror is None:
         raise InboxError(409, "Question has no Feishu mirror")
     try:
+        if expected_effective is not None:
+            is_delivery_current = getattr(bot._pool, "is_current_for_delivery", None)
+            if callable(is_delivery_current) and not is_delivery_current(expected_effective):
+                raise InboxError(409, "Question binding changed")
         effective = bot._pool.effective(mirror.bot_id)
         entry = bot._pool.snapshot().get(mirror.bot_id)
         binding = next(
@@ -70,12 +90,17 @@ def current_binding(q: ChatQuestion) -> tuple[Any, Any]:
             ),
             None,
         )
+        transport_rev_fn = getattr(bot._pool, "transport_revision", None)
+        transport_rev = transport_rev_fn(mirror.bot_id) if callable(transport_rev_fn) else 0
+        expected_tab_id = mirror.tab_id or q.tab_id
         if (
             not effective.callback_enabled
             or not binding
             or binding.is_group
             or not bot._owner_is_authorized(binding.owner)
             or not bot._binding_still_routes(effective, binding)
+            or transport_rev > mirror.revision
+            or (mirror.transport_digest and _transport_digest(effective) != mirror.transport_digest)
             or (
                 effective.app_id,
                 effective.generation,
@@ -92,7 +117,7 @@ def current_binding(q: ChatQuestion) -> tuple[Any, Any]:
                 mirror.pairing_id,
                 mirror.chat_id,
                 mirror.sender_open_id,
-                q.tab_id,
+                expected_tab_id,
             )
         ):
             raise InboxError(409, "Question binding changed")
@@ -165,6 +190,8 @@ async def _mirror_question(q: ChatQuestion, *, remirror: bool = False) -> bool:
             revision=effective.revision,
             chat_id=binding.chat_id,
             sender_open_id=binding.sender_open_id,
+            tab_id=binding.tab_id,
+            transport_digest=_transport_digest(effective),
             send_uuid=str(uuid.uuid4()),
         )
         if remirror:
@@ -172,12 +199,16 @@ async def _mirror_question(q: ChatQuestion, *, remirror: bool = False) -> bool:
         inbox._save()
     mirror = q.mirror
     try:
-        effective, _ = current_binding(q)
+        effective, resolved_binding = current_binding(q)
     except InboxError:
         mirror.state = "disabled"
         mirror.action_digests.clear()
         inbox._save()
         return False
+    if not mirror.transport_digest:
+        mirror.transport_digest = _transport_digest(effective)
+    if not mirror.tab_id:
+        mirror.tab_id = resolved_binding.tab_id
     remote_state = "expired" if q.state == "open" and q.expires_at <= utc_now() else q.state
     if mirror.retry_at is not None and mirror.retry_at > utc_now():
         return mirror.state == "sent"
@@ -215,8 +246,14 @@ async def _mirror_question(q: ChatQuestion, *, remirror: bool = False) -> bool:
         # Token acquisition outside gate; recheck exact binding before side effect.
         await client.get_tenant_token()
         async with bot._gate(effective.bot_id):
-            current_binding(q)
-            answers.live(q)
+            try:
+                current_binding(q, expected_effective=effective)
+                answers.live(q)
+            except InboxError:
+                mirror.state = "disabled"
+                mirror.action_digests.clear()
+                inbox._save()
+                return False
             if q.state != "open":
                 return False
             mirror.state = "sending"
@@ -254,7 +291,13 @@ async def _mirror_question(q: ChatQuestion, *, remirror: bool = False) -> bool:
         client = FeishuBotClient(effective.config)
         await client.get_tenant_token()
         async with bot._gate(effective.bot_id):
-            current_binding(q)
+            try:
+                current_binding(q, expected_effective=effective)
+            except InboxError:
+                mirror.state = "disabled"
+                mirror.action_digests.clear()
+                inbox._save()
+                return False
             async with asyncio.timeout(15):
                 await client.patch_message_card(str(mirror.message_id), card.content)
             mirror.displayed_state = remote_state
@@ -267,7 +310,13 @@ async def _mirror_question(q: ChatQuestion, *, remirror: bool = False) -> bool:
         client = FeishuBotClient(effective.config)
         await client.get_tenant_token()
         async with bot._gate(effective.bot_id):
-            current_binding(q)
+            try:
+                current_binding(q, expected_effective=effective)
+            except InboxError:
+                mirror.state = "disabled"
+                mirror.action_digests.clear()
+                inbox._save()
+                return False
             q.reply_state = "sending"
             inbox._save()
             try:

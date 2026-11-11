@@ -202,9 +202,7 @@ async def test_same_sender_same_channel_coalesces_and_replies_once(dispatch):
     assert dispatch.reply.await_args.args[1].message_id == "a2"
 
 
-@pytest.mark.parametrize(
-    "boundary", ["room", "pairing", "type", "topic", "bot", "generation", "revision"]
-)
+@pytest.mark.parametrize("boundary", ["room", "pairing", "type", "topic", "bot", "generation"])
 async def test_channel_and_version_boundaries_neither_coalesce_nor_interrupt(dispatch, boundary):
     binding = dispatch.binding
     effective = dispatch.effective
@@ -220,10 +218,8 @@ async def test_channel_and_version_boundaries_neither_coalesce_nor_interrupt(dis
     elif boundary == "bot":
         effective = replace(effective, bot_id="another-bot")
         binding = replace(binding, bot_id=effective.bot_id)
-    elif boundary == "generation":
-        effective = replace(effective, generation=3)
     else:
-        effective = replace(effective, revision=4)
+        effective = replace(effective, generation=3)
     dispatch.blocked.add("first")
     first = dispatch.reserve("first")
     queue = bot_api._tab_dispatch_queues["tab"]
@@ -489,6 +485,49 @@ async def test_cancelled_leader_empty_batch_retires_cleanly_and_preserves_carryo
     assert bot_api._tab_dispatch_queues.get("tab") is queue
 
     third = dispatch.reserve("a3")
+    assert await dispatch.run(third, queue) == "completed"
+    assert "[上一条]\na1" in dispatch.submitted[1]["visible"]
+    assert "[新消息 1]\na3" in dispatch.submitted[1]["visible"]
+    assert not queue.interrupted_text
+    assert bot_api._tab_dispatch_queues == {}
+
+
+async def test_sibling_rename_or_revision_bump_preserves_interruption_and_carryover(
+    dispatch: DispatchHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Administrative CAS revision bumps (Bot rename, sibling channel bind/release)
+    between two messages of the same channel must not change channel_key: A2 still
+    interrupts A1, and if A2 retires before handoff, A3 at yet another revision
+    still inherits A1's stopped carryover text."""
+
+    dispatch.blocked.add("a1")
+    first = dispatch.reserve("a1", effective=replace(dispatch.effective, revision=3))
+    queue = bot_api._tab_dispatch_queues["tab"]
+    running_a1 = asyncio.create_task(dispatch.run(first, queue))
+    await dispatch.wait_started("a1")
+
+    # Sibling rename / bind advances revision from 3 -> 4 before A2 arrives.
+    second = dispatch.reserve("a2", effective=replace(dispatch.effective, revision=4))
+    assert second.channel_key == first.channel_key
+    assert first.superseded
+    assert await running_a1 == "superseded"
+    assert dict(queue.interrupted_text) == {first.channel_key: "a1"}
+
+    # Make A2 retire before handoff, then advance revision again (4 -> 5) before A3.
+    monkeypatch.setattr(
+        bot_api._message_dispatcher,
+        "_validate_binding_dispatch",
+        lambda *_args: (_ for _ in ()).throw(ExternalDispatchRetired(turn_id_for("bot", "a2"))),
+    )
+    assert await dispatch.run(second, queue) == "retired"
+    assert dict(queue.interrupted_text) == {first.channel_key: "a1"}
+
+    monkeypatch.setattr(
+        bot_api._message_dispatcher, "_validate_binding_dispatch", lambda *_args: None
+    )
+    third = dispatch.reserve("a3", effective=replace(dispatch.effective, revision=5))
+    assert third.channel_key == first.channel_key
     assert await dispatch.run(third, queue) == "completed"
     assert "[上一条]\na1" in dispatch.submitted[1]["visible"]
     assert "[新消息 1]\na3" in dispatch.submitted[1]["visible"]
