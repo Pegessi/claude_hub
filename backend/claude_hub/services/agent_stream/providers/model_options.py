@@ -58,7 +58,7 @@ def parse_list_models(
     return options
 
 
-_ANTIGRAVITY_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_ANTIGRAVITY_MODEL_ID_RE = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)+$")
 
 
 def parse_antigravity_models(
@@ -74,13 +74,11 @@ def parse_antigravity_models(
     options: List[StreamModelOption] = []
     seen: set[str] = set()
     for raw_line in raw.split("\n"):
-        raw_line = raw_line.rstrip("\r")
-        if "\r" in raw_line:
-            raw_line = raw_line.rsplit("\r", 1)[-1]
-        line = osc_re.sub("", raw_line)
-        line = ansi_re.sub("", line).strip()
-        if not line:
+        cleaned = ansi_re.sub("", osc_re.sub("", raw_line))
+        segments = [seg.strip() for seg in cleaned.split("\r") if seg.strip()]
+        if not segments:
             continue
+        line = segments[-1]
         if "\t" in line:
             model_id, label = line.split("\t", 1)
         else:
