@@ -98,8 +98,44 @@ retain the saved choice and restore focus to the visible opener.
   browser owner refused occupied `:5317`; that unrelated listener was left
   untouched and the retry uses checked-free `:5357`.
 
+## Independent review and closure
+
+The first fixed-SHA review (`e3f1d8e`) found two substantive design issues and one
+mobile reachability gap; passing the first browser matrix did not catch them.
+
+1. Filled approval hover consumers used the pale accent intended for text/rings.
+   Both Chat approval Submit and Goal plan Approve now use the existing dedicated
+   `--ch-color-accent-fill-hover` role. A rendered follow-up also exposed Goal's
+   primary selector losing to its generic button selector; the primary rule now
+   wins in normal/hover states. Tests distinguish the primary from secondary
+   buttons and measure actual foreground/background, not only a token table.
+   The full-SPA Goal/approval scenario passed 48 rest/hover samples (minimum
+   hovered contrast 4.615:1) in `tasks/theme-browser/review-hover-02/`. Restoring
+   the old hover CSS in the browser makes both controls' negative checks fail
+   at 3.43:1. The shared helper is included in format and type verification.
+2. Removed `viewport-fit=cover`: this feature must not opt the entire app and
+   standalone readers into edge-to-edge iPhone layout without an all-edge policy.
+   Existing safe-area-aware sheet spacing remains, within the browser's safe
+   viewport. Physical notch/Safari acceptance is still not claimed.
+3. Aligned the Workspace mobile header with the shell's 768px breakpoint, closing
+   the 761–768px band where neither Appearance entry was reachable. The browser
+   gate now checks 760, 761 and 768px, not just a conventional phone width.
+
+Added a real terminal palette regression to the existing HMR suite. It changes
+Classic → Forest dark → Sand dark → Sand light through the real store and checks
+received `terminal-theme` payloads and live xterm options. The iframe, document,
+xterm instance and buffer remain identical; no iframe load occurs and seeded
+terminal content survives. The full expanded HMR target passed **13/13**, evidence
+`tasks/theme-evidence/claude-hub-verify.9hzrqr6h/`.
+
+The complete standard gate on the initial candidate passed **6,556 backend tests
+(9 explicit skips)** and **1,459 frontend tests**, plus types, format, lint and
+build; all **24 mocked browser scenarios** also passed. Final post-review gates
+and the delta review are retained under `tasks/theme-evidence/` and attached to
+the same Task, rather than counting the earlier candidate as final evidence.
+
 No real provider, OAuth/Bot, physical mobile device or Safari acceptance is
-claimed. The new browser scenario validates token/reader rendering with empty
-mocked Chat/Workspace data, not every existing application's text contrast or
-live terminal theme transport. The existing terminal HMR gate verifies the
-terminal lifecycle independently. No task server is retained for delivery.
+claimed. The appearance matrix covers token/reader rendering with mocked data;
+real rendered Goal/approval controls and the private ttyd terminal are checked
+separately. This is not an audit of every existing application's text contrast.
+No task server is retained for delivery.

@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlparse
 from playwright.async_api import expect
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appearance_assertions import filled_button_themes  # noqa: E402
 from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
 
 TAB = "goal-steer-tab"
@@ -208,6 +209,7 @@ async def main(browser_run: BrowserRun) -> None:
     current_goal = dict(GOAL)
     idle_fixture = False
     plan_fixture = False
+    approval_fixture = False
     fail_next_send = False
     goal_updates = []
     goal_creates = []
@@ -320,6 +322,37 @@ async def main(browser_run: BrowserRun) -> None:
                                 PLAN_TURN,
                             )
                         )
+                    if approval_fixture:
+                        fixture_events.extend(
+                            [
+                                event(
+                                    8,
+                                    "turn_started",
+                                    "theme-approval",
+                                    {"summary": "Confirm implementation scope"},
+                                    "theme-approval:user",
+                                ),
+                                event(
+                                    9,
+                                    "approval_required",
+                                    "theme-approval",
+                                    {
+                                        "tool_call_id": "theme-approval-call",
+                                        "kind": "ask_question",
+                                        "questions": [
+                                            {
+                                                "id": "scope",
+                                                "prompt": "Choose the implementation scope",
+                                                "options": [
+                                                    {"id": "bounded", "label": "Keep scope bounded"}
+                                                ],
+                                            }
+                                        ],
+                                    },
+                                    "theme-approval:question",
+                                ),
+                            ]
+                        )
                     rows = [item for item in fixture_events if item["stream_sequence"] > since]
                     next_sequence = rows[-1]["stream_sequence"] if rows else since
                     body = {
@@ -327,6 +360,8 @@ async def main(browser_run: BrowserRun) -> None:
                         "next_sequence": next_sequence,
                         "has_more": False,
                     }
+                elif request.method == "GET" and path == f"/api/workspaces/tabs/{TAB}/questions":
+                    body = {"questions": []}
                 elif path.endswith("/wait"):
                     since = int(parse_qs(parsed.query).get("since_sequence", ["-1"])[0])
                     await asyncio.sleep(0.2)
@@ -588,6 +623,11 @@ async def main(browser_run: BrowserRun) -> None:
             await card.scroll_into_view_if_needed()
             await page.screenshot(path=str(output / "goal-plan-card-desktop.png"), full_page=True)
             report["screenshots"].append("goal-plan-card-desktop.png")
+            report["plan_button_theme_contrast"] = await filled_button_themes(
+                page,
+                card.get_by_role("button", name="Approve & start", exact=True),
+                card.get_by_role("button", name="Revise", exact=True),
+            )
 
             # Reload at each width: the app chooses its mobile shell from the
             # viewport it boots in, so resizing alone would keep the desktop one.
@@ -654,6 +694,24 @@ async def main(browser_run: BrowserRun) -> None:
                 path.endswith("/resume") or path.endswith("/pause")
                 for _, path in report["api_requests"]
             )
+
+            # The same full SPA renders the provider's approval-required event
+            # through ChatApprovalCard; exercise its real submit fill, not tokens.
+            current_goal = None
+            approval_fixture = True
+            await page.reload(wait_until="domcontentloaded")
+            choice = page.get_by_role("button", name="Keep scope bounded", exact=True)
+            await expect(choice).to_be_enabled()
+            await choice.click()
+            submit = page.get_by_role("button", name="Submit answer", exact=True)
+            await expect(submit).to_be_enabled()
+            sends_before_theme_check = len(send_payloads)
+            report["approval_button_theme_contrast"] = await filled_button_themes(page, submit)
+            assert len(send_payloads) == sends_before_theme_check, "hover must not submit an answer"
+            await page.screenshot(
+                path=str(output / "approval-card-theme-hover.png"), full_page=True
+            )
+            report["screenshots"].append("approval-card-theme-hover.png")
 
             assert not report["unknown_requests"], report["unknown_requests"]
             assert not report["page_errors"], report["page_errors"]
