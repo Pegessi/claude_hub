@@ -461,6 +461,16 @@
   margin-top: 24px;
 }
 
+/* Keep focus on editable/selectable fields from triggering iOS auto-zoom.
+   The autofocus name field needs the same size as the directory combobox. */
+@media (any-pointer: coarse) {
+  .form-group input,
+  .form-group select,
+  .current-path-input {
+    font-size: 16px;
+  }
+}
+
 @media (max-width: 640px) {
   .modal-overlay {
     align-items: flex-start;

@@ -777,6 +777,46 @@ async def main(browser_run: BrowserRun) -> None:
         await page.keyboard.press("Escape")
         await page.set_viewport_size({"width": 1280, "height": 900})
 
+        # Small editable picker text causes iOS Safari's native focus zoom.
+        # Chromium cannot reproduce that native zoom, but can enforce its
+        # typography prerequisite on touch phones/tablets and exercise the
+        # actual search/custom-model controls without disabling user zoom.
+        touch = await context.new_cdp_session(page)
+        await touch.send("Emulation.setTouchEmulationEnabled", {"enabled": True})
+        assert await page.evaluate("matchMedia('(any-pointer: coarse)').matches")
+        for width, height in ((390, 844), (844, 390), (1024, 768)):
+            await page.set_viewport_size({"width": width, "height": height})
+            await trigger.click()
+            await page.screenshot(path=str(output / f"model-picker-open-{width}.png"))
+            bounds = await menu.bounding_box()
+            assert bounds and bounds["x"] >= 0 and bounds["y"] >= 0, bounds
+            assert bounds["x"] + bounds["width"] <= width, bounds
+            assert bounds["y"] + bounds["height"] <= height, bounds
+            search = page.get_by_role("textbox", name="Search models", exact=True)
+            custom = page.get_by_placeholder("custom model id…", exact=True)
+            for field in (search, custom):
+                size = await field.evaluate("el => parseFloat(getComputedStyle(el).fontSize)")
+                assert size >= 16, (width, height, size)
+                await field.click()
+                await expect(field).to_be_focused()
+            await search.fill("no-such-model")
+            await expect(menu.get_by_text("No matching models", exact=True)).to_be_visible()
+            await search.fill("seed")
+            await expect(menu.get_by_role("option", name="seed", exact=True)).to_be_visible()
+            await custom.fill("my-custom-model")
+            await expect(custom).to_have_value("my-custom-model")
+            await page.screenshot(path=str(output / f"model-picker-touch-{width}.png"))
+            await page.keyboard.press("Escape")
+        viewport_meta = await page.locator('meta[name="viewport"]').get_attribute("content")
+        assert viewport_meta and "user-scalable=no" not in viewport_meta
+        assert "maximum-scale" not in viewport_meta
+        await touch.send("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        await page.set_viewport_size({"width": 1280, "height": 900})
+        await trigger.click()
+        desktop_size = await search.evaluate("el => parseFloat(getComputedStyle(el).fontSize)")
+        assert desktop_size < 16, desktop_size  # Desktop retains its compact style.
+        await page.keyboard.press("Escape")
+
         # An empty composer cannot send: the control is disabled rather than
         # accepting a click that silently does nothing.
         await expect(send_button).to_be_disabled()
@@ -1678,8 +1718,12 @@ async def main(browser_run: BrowserRun) -> None:
         await page.screenshot(path=str(output / "create-session-choices.png"), full_page=True)
 
         await page.set_viewport_size({"width": 390, "height": 844})
+        await touch.send("Emulation.setTouchEmulationEnabled", {"enabled": True})
         await page.locator(".add-tab").click()
         await expect(cwd).to_have_value("/fixture/recent")
+        assert await cwd.evaluate("el => parseFloat(getComputedStyle(el).fontSize)") >= 16
+        for field in await page.locator(".modal .acf-select").all():
+            assert await field.evaluate("el => parseFloat(getComputedStyle(el).fontSize)") >= 16
         await page.get_by_label("Chat Provider").select_option("codex")
         toggle = page.locator(".codex-session-selector__toggle")
         await expect(toggle).to_have_attribute("aria-expanded", "false")
@@ -1692,6 +1736,8 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(choices).to_have_count(10)
         await choices.last.click()
         await expect(cwd).to_have_value("/fixture/workspace")
+        await touch.send("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        await touch.detach()
 
         # A failed provider remains diagnosable without treating its text as HTML
         # or resending the old task when the user explicitly replaces the process.
@@ -1775,7 +1821,7 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(page.get_by_text("First answer.", exact=True)).to_be_in_viewport(ratio=1)
             await expect(composer).to_be_in_viewport(ratio=1)
             await details.focus()
-            await details.press("Control+End")
+            await details.press("Meta+ArrowDown" if sys.platform == "darwin" else "Control+End")
             await page.wait_for_function("""() => {
               const details = document.querySelector('.banner-message')
               return details.scrollTop + details.clientHeight >= details.scrollHeight - 2

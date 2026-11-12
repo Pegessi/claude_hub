@@ -374,6 +374,22 @@ const { modeInteractionLocked } = requireChatOwner(chatDeliveryKey)
   border-color: transparent;
   box-shadow: none;
 }
+
+/* iOS zooms focused small text fields. Cover touch tablets/landscape as well
+   as phones, without changing the viewport or disabling manual zoom. */
+@media (any-pointer: coarse) {
+  .composer-mode-search-input,
+  .composer-mode-custom .composer-textarea {
+    font-size: 16px;
+  }
+
+  .composer-model-menu {
+    width: min(420px, calc(100vw - 32px));
+    /* Leave room for the app toolbar and composer on landscape phones. */
+    max-height: min(420px, calc(100dvh - 200px));
+  }
+}
+
 @media (max-width: 640px) {
 
   .composer-mode-trigger {

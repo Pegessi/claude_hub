@@ -7,6 +7,17 @@
 
 ## Released
 
+### fix(ui): prevent touch picker inputs from triggering Safari focus zoom
+
+- Model search and custom-model inputs, plus the session creation fields and
+  directory combobox, use readable 16px text on touch devices, including wide
+  tablets and landscape phones. Desktop controls keep their compact styling;
+  the viewport remains unrestricted for manual zoom.
+- Browser acceptance checks touch search/edit/focus at phone, landscape and
+  tablet widths, directory selection, and desktop styling. These checks verify
+  the focus-zoom typography prerequisite; native iOS keyboard/zoom behavior
+  still requires a physical Safari check.
+
 ### fix(quota): name MASO quota rows after their model, not the endpoint id
 
 - MASO's `/api/llm-quota` reports one row per upstream endpoint and names it
