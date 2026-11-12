@@ -610,3 +610,137 @@ CI-aligned check. Final Task/artifact records carry those exact-SHA outcomes.
 The existing IPv6 preview on 5358 is deliberately retained, with no main merge
 or shared-service restart. Mocked rendering is not physical-device, exhaustive
 assistive-technology, live-provider or final user aesthetic acceptance.
+
+## 2026-11-12: borderless composition and game-specific subjects
+
+The previous candidate was subsequently delivered as `b155141`: independent
+review, full `all`, 24 browser scenarios, 13 terminal-HMR checks and 29 terminal
+replay checks passed on that SHA. Its environment-corrected and interrupted
+attempts remain documented under `tasks/theme-rich-skins/final-b155141/`.
+Those results do not validate the new changes below.
+
+The user accepts the richer direction but asks for a less boxed interface,
+subdued/blurred wallpaper, and classic game elements or characters. They clarify
+that the previous art is not wrong so much as insufficiently tied to the games.
+The red rectangle in their screenshot annotates the composer; it is not an app
+border. The same initiator-owned Task is continued at epoch 5 on the existing
+feature branch, without a main merge or shared-service operation.
+
+The requested Gemini model first removed the heavy composer, Goal and chrome
+frames and drew original Bangboo, outlaw/rider and GTA-trio compositions.
+Its ad-hoc capture attempt timed out before producing screenshots. That wrapper
+also replaced output folders/logs on retries; its missing evidence is not a pass.
+The producer was stopped, all 13 product hashes were frozen, and the existing
+native QA owner used the known browser fixtures instead of copying another UI.
+
+Actual first-candidate evidence is in `tasks/theme-immersive/qa/`: original Goal
+FAIL at 63.216s, original Queue PASS at 28.604s, and a diagnostic failure collector
+FAIL at 66.722s. The collector preserved failed assertions while producing all
+six desktop and six phone screenshots. It did not change product/test source,
+relax thresholds or turn the run green. The parent inspected the images: large
+opaque turn slabs still covered the character heads, and on phone the pictures
+were mostly behind the Goal/footer area. This was a composition failure despite
+the passing intermediate Queue reading checks.
+
+Before viewing that new artwork, a subdued-paint proxy was fixed: retain the
+existing exposed-ROI floor of 5% pixels with max RGB delta >=12, and require the
+nearest-rank p95 among those changed-pixel deltas to be <=76. Actual first-candidate
+measurements found eight salience failures and one visibility failure (Zenless
+phone/dark, 1733/47616 = 3.63953%). This proxy accompanies human inspection of
+identity and composition; it is not a claim that an opacity value guarantees
+good design. Failure records, source hashes and native-resolution occlusion
+crops are retained in `qa/CAPTURE-HANDOFF-01.md` and its linked directories.
+
+The second product revision gives the scene to `.structured-timeline`, directly
+above the variable-height footer, instead of a magic 108px offset from the full
+pane. It restores the baseline 42px bottom padding rather than creating a large
+spacer to expose the picture. Outer turn/assistant/action slabs are transparent;
+functional controls retain their own appropriate surfaces. The primary subjects
+are recomposed into the lower scene band with phone-specific scaling. A single
+SVG drawing-group opacity controls overall attenuation; unbacked game text
+roles are adjusted without touching the five neutral palettes.
+
+These are original stylized fan interpretations, not traced official rasters,
+logos, official endorsements or a claim to the underlying game IP. Public
+promotional/press-kit access was not treated as redistribution permission.
+Recognition must be reviewed in the actual rendered viewport, not asserted from
+a filename, character name or asset comment.
+
+The old decorative-box and opaque-per-turn expectations are superseded by the
+user's new goal, not by a desire to make a failing check pass. Native keyboard,
+rename, press, pane geometry, 4.5:1 text and 3:1 focus/selection guards remain.
+Readability keeps the valid opaque-backing fast path and otherwise inspects the
+actual composed backdrop with proper ink/alpha treatment. Scene negatives and
+stale-layer checks follow the real paint owner. The immutable neutral collector
+and its reference are not rebaselined. Browser scenario limits remain 120s.
+
+The second product's first real six-desktop/six-phone renders pass the fixed
+artwork visibility and salience proxies; its minimum visible fraction is
+47.4693% and maximum changed-pixel p95 is 54. The diagnostic still fails the
+obsolete decorative-box assertion, so it is not reported as a suite pass. Phone
+subjects are now visible, but parent inspection still finds the desktop Goal
+card overlapping the top of the outlaw portrait. After the QA runner and its
+port were closed, a one-value correction reduces desktop scene width from
+1140px to 760px to fit complete subject profiles in the existing lower margin.
+Phone framing, bottom padding, ROI and thresholds are unchanged; no spacer is
+added to game the image measurement.
+
+The third snapshot (`tasks/theme-immersive/product-frozen-03.json`) corrects
+subject framing, but its strict revised Queue check finds a real readability
+failure: Zenless dark status ink `(186,169,154)` over actual background
+`(80,68,56)` is 4.1480566:1, independently recomputed by the parent. A separate
+36.173s diagnostic preserves the FAIL while collecting all six surface and six
+pending variants: 14 conservative failures, 13 also below 4.5 at nominal RGB;
+Los Santos dark status is nominally 4.53038 but conservatively 4.46052 and must
+not be described as a nominal failure. Four negative controls fail as intended
+and restore; no prerequisites are skipped. The prior unsupported decorative-dot
+attempt remains separate. Text walking excludes aria-hidden descendants, not
+an aria-hidden target such as the visually readable elapsed label.
+
+Independent product review requests changes for contrast and an unscoped
+`.empty-state` wallpaper selector that also matches the Feishu no-bots callout.
+It also identifies toy-like horses, a detached revolver, near-identical avatar
+heads, barcode-like landmark lettering and a stale opaque-backing comment.
+Its first turn times out after saving the report; the bounded handoff then
+completes and confirms REQUEST CHANGES. This is not fixed-SHA release approval.
+The collision is confirmed in both actual Vue consumers; the review's numeric
+specificity tuple is not relied on (the root/is chain is class specificity).
+
+After the QA runtime closes and all 13 product hashes are confirmed unchanged,
+the next revision strengthens game-only secondary tokens, removes extra live
+label opacity in both modes and composes alert tint over a solid canvas base.
+Normal prose remains unbacked. Shell empty-state wallpaper is scoped to the
+terminal main column, and phone empty panes share explicit scene sizing without
+inheriting board-only padding. Gemini owns only the two SVG craft corrections;
+CSS/tokens, tests and docs have separate writers. Gemini completes the craft
+follow-up, including distinct head/shoulder profiles, connected hand/forearm,
+equine silhouettes, readable letter strokes and a radial character-switch motif.
+Parent removes unsupported per-pixel/RGB-bound claims from all SVG comments:
+actual channel bounds include 42 and 224, and antialiased edge pixels cannot be
+certified by opacity alone. The art's XML, single attenuation group and locality
+are checked; only actual rendering can establish visibility and salience.
+`product-frozen-04.json` binds the corrected 13 product files. Strict focused
+Queue (38.323s), Goal (82.775s), Appearance (41.844s), Inbox (33.159s) and Workspace
+(34.121s) pass, together with the immutable neutral comparison (10 direct and
+30 return samples, zero differences). Parent independently recomputes all 84
+sampled-backdrop conservative bounds among 144 Queue reading positives; the
+minimum is 4.5890803:1. The initial new Appearance selector typo is a test failure
+and is retained separately; only `.terminal-area` is corrected to the actual
+`.terminal-main-column`. Real no-bots callouts retain their surface on desktop
+and phone; actual shell/pane empty states use 520px phone scenes without extra
+board padding. All owned runtimes close before further source edits.
+
+Parent image inspection catches the final letters of VINEWOOD behind the center
+portrait. A small translation moves the sign above Chop within the same panel,
+without changing scene size, opacity, colors or subject framing. Frozen05 Queue
+(38.199s) and Goal (82.643s) then pass with the same 4.5890803 minimum text bound;
+12 real scene samples retain at least 36.80996% visible pixels and maximum p95
+54. Parent confirms the whole landmark name is now unobscured in desktop/phone
+captures. Four readability and nine rich-art/icon/frame negatives reject and
+restore correctly. Source/test/reference hashes match and the owned port closes.
+Other focused/canonical results remain explicitly source04-only; the subsequent
+complete committed-SHA browser gate must cover every consumer again. Full gates
+and complete fixed-SHA independent review remain pending at this record update.
+Their actual results must be recorded before delivery. The user-authorized IPv6
+preview on 5358 remains available; temporary reviewer/test servers retain
+separate owners.

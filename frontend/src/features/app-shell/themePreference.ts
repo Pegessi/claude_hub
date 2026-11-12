@@ -8,9 +8,9 @@ export const THEME_PALETTES = [
   { id: 'mono', name: 'Mono', description: 'Black, white, nothing extra', sample: 'Aa' },
   { id: 'studio', name: 'Studio', description: 'Quiet layers, softer edges', sample: 'Aa' },
   { id: 'carbon', name: 'Carbon', description: 'Graphite, raised surfaces', sample: 'Aa' },
-  { id: 'zenless', name: 'Zenless', description: 'Zenless · orange/CRT street-pop', sample: 'ZZ' },
-  { id: 'frontier', name: 'Frontier', description: 'Red Dead · 1899 frontier print', sample: 'RDR' },
-  { id: 'los-santos', name: 'Los Santos', description: 'GTA V · coast & telemetry HUD', sample: 'V' },
+  { id: 'zenless', name: 'Zenless', description: 'Zenless · Eous & Random Play H.D.D.', sample: 'ZZ' },
+  { id: 'frontier', name: 'Frontier', description: 'Red Dead · Arthur & outlaw horizon', sample: 'RDR' },
+  { id: 'los-santos', name: 'Los Santos', description: 'GTA V · Los Santos trio & Vinewood', sample: 'V' },
 ] as const
 export type ThemePalette = typeof THEME_PALETTES[number]['id']
 export const GAME_THEME_PALETTES = ['zenless', 'frontier', 'los-santos'] as const

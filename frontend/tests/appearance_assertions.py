@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import base64
 import colorsys
+import hashlib
 import json
 import re
 from collections.abc import AsyncIterator, Awaitable
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ PALETTES = ("Classic", "Contrast", "Mono", "Studio", "Carbon", "Zenless", "Front
 GAME_PALETTES = ("Zenless", "Frontier", "Los Santos")
 ART_PIXEL_DELTA = 12
 ART_VISIBLE_FRACTION = 0.05
+ART_MAX_CHANGED_P95 = 76
 ICON_MIN_PIXELS = 8
 ICON_MASK_SIZE = 24
 ICON_FAMILY_DISAGREEMENT = 0.03
@@ -543,10 +545,11 @@ async def _paint_difference(
       const on = await decode(painted), off = await decode(hidden);
       if (on.width !== off.width || on.height !== off.height) throw new Error('Paint ROI resized');
       let changed = 0;
+      const histogram = Array(256).fill(0);
       const nativeMask = [];
       for (let p = 0; p < on.data.length; p += 4) {
         const difference = Math.max(...[0,1,2].map(c => Math.abs(on.data[p+c] - off.data[p+c])));
-        if (difference >= delta) changed++;
+        if (difference >= delta) { changed++; histogram[difference]++; }
         if (ink) {
           const fullInk = Math.max(...[0,1,2].map(c => Math.abs(ink[c]*255 - off.data[p+c]))) * ink[3];
           // Preserve fractional coverage: rounding an RGB edge from 0.500
@@ -560,8 +563,14 @@ async def _paint_difference(
         const sy = Math.min(on.height-1, Math.floor((y+0.5)*on.height/size));
         mask.push(nativeMask[sy*on.width+sx]);
       }
+      let cumulative = 0, p95 = 0;
+      if (changed) for (let value = 0; value < histogram.length; value++) {
+        cumulative += histogram[value];
+        if (cumulative >= Math.ceil(changed * .95)) { p95 = value; break; }
+      }
       return {width:on.width, height:on.height, changed, pixels:on.width*on.height,
-        fraction:changed/(on.width*on.height), mask, maskEncoding:ink ? 'fractional-coverage-v1' : null};
+        fraction:changed/(on.width*on.height), changed_delta_p95:p95,
+        mask, maskEncoding:ink ? 'fractional-coverage-v1' : null};
     }""",
         {
             "painted": base64.b64encode(painted).decode("ascii"),
@@ -575,8 +584,14 @@ async def _paint_difference(
 
 
 async def chat_artwork(page: Page, output: Path, name: str) -> dict[str, Any]:
-    """Prove local scene decoding and the approved visible timeline paint floor."""
-    host = page.locator(".structured-pane:visible").first
+    return await rendered_scene_artwork(
+        page.locator(".structured-timeline:visible").first, output, name
+    )
+
+
+async def rendered_scene_artwork(host: Locator, output: Path, name: str) -> dict[str, Any]:
+    """Measure the actual owner's fixed bottom-128px viewport scene region."""
+    page = host.page
     await expect(host).to_be_visible()
     source: dict[str, Any] = await host.evaluate(r"""async el => {
       const style = getComputedStyle(el), scene = style.getPropertyValue('--palette-scene').trim();
@@ -596,7 +611,7 @@ async def chat_artwork(page: Page, output: Path, name: str) -> dict[str, Any]:
     assert source["local"] and source["decoded"], ("Local artwork decode", source)
     await _settle_styles(page)
     geometry: dict[str, Any] = await host.evaluate("""el => {
-      const rect = el.getBoundingClientRect(), timeline = el.querySelector('.structured-timeline').getBoundingClientRect();
+      const rect = el.getBoundingClientRect(), timeline = rect;
       const left = Math.ceil(Math.max(0, timeline.left) + 4);
       const right = Math.floor(Math.min(innerWidth, timeline.right) - 4);
       const bottom = Math.floor(Math.min(innerHeight, timeline.bottom));
@@ -609,7 +624,7 @@ async def chat_artwork(page: Page, output: Path, name: str) -> dict[str, Any]:
     painted = await _region_png(page, geometry["clip"])
     async with _inline_styles(host, {"--palette-scene": "none"}):
         off_geometry = await host.evaluate("""el => ({host:el.getBoundingClientRect().toJSON(),
-          timeline:el.querySelector('.structured-timeline').getBoundingClientRect().toJSON(),
+          timeline:el.getBoundingClientRect().toJSON(),
           glow:getComputedStyle(el).getPropertyValue('--palette-scene-glow')})""")
         assert off_geometry == {key: geometry[key] for key in ("host", "timeline", "glow")}, (
             "Artwork toggle changed glow or layout",
@@ -627,12 +642,68 @@ async def chat_artwork(page: Page, output: Path, name: str) -> dict[str, Any]:
         difference,
         geometry,
     )
+    assert difference["changed_delta_p95"] <= ART_MAX_CHANGED_P95, (
+        "Artwork salience",
+        name,
+        difference,
+        geometry,
+    )
     return {
         "source": source,
         "geometry": geometry,
         "paint": difference,
         "screenshots": [painted_name, hidden_name],
     }
+
+
+async def empty_pane_phone_themes(
+    page: Page, pane: Locator, output: Path, return_focus: Locator
+) -> list[dict[str, Any]]:
+    """Exercise the existing empty pane, restoring viewport, theme and active pane."""
+    viewport = page.viewport_size
+    assert viewport is not None
+    previous: dict[str, Any] = await page.evaluate("""() => {
+      const preference = JSON.parse(localStorage.getItem('claude_hub_appearance') || 'null');
+      return {mode:preference?.mode ?? document.documentElement.dataset.theme,
+        palette:document.documentElement.dataset.palette,
+        active:[...document.querySelectorAll('.terminal-pane')].findIndex(el => el.classList.contains('active'))};
+    }""")
+    assert previous["active"] >= 0
+    results = []
+    style = """el => ({padding:getComputedStyle(el).padding,size:getComputedStyle(el).backgroundSize,
+      image:getComputedStyle(el).backgroundImage,rect:el.getBoundingClientRect().toJSON(),
+      overflow:el.scrollWidth-el.clientWidth})"""
+    try:
+        await pane.click()
+        await page.set_viewport_size({"width": 390, "height": 844})
+        await select_appearance(page, "dark", "Classic")
+        baseline_padding = await pane.evaluate("el => getComputedStyle(el).padding")
+        for mode in ("dark", "light"):
+            for palette in GAME_PALETTES:
+                await select_appearance(page, mode, palette)
+                await expect(pane).to_be_in_viewport()
+                observed = await pane.evaluate(style)
+                assert (
+                    observed["padding"] == baseline_padding and observed["overflow"] <= 1
+                ), observed
+                assert observed["size"].split(",")[0].strip().split()[0] == "520px", observed
+                art = await rendered_scene_artwork(
+                    pane, output, f"empty-pane-{palette_id(palette)}-{mode}"
+                )
+                hint = await artwork_text_contrast(
+                    pane.locator(".empty-hint"), ".pane-empty", output
+                )
+                results.append(
+                    {"palette": palette, "mode": mode, "style": observed, "art": art, "hint": hint}
+                )
+    finally:
+        await page.set_viewport_size(viewport)
+        await select_appearance(page, previous["mode"], previous["palette"])
+        prior = page.locator(".terminal-pane").nth(previous["active"])
+        await prior.locator(".pane-session-name, .pane-empty").first.click()
+        await _native_tab_to(return_focus)
+        await expect(prior).to_have_class(re.compile(r"(^|\s)active(\s|$)"))
+    return results
 
 
 async def _native_tab_to(control: Locator) -> None:
@@ -711,73 +782,319 @@ def _over_rgba(ink: list[float], backing: list[float]) -> list[float]:
     ] + [alpha]
 
 
-def _backed_text_contrast(proof: dict[str, Any]) -> float:
-    path = proof["path"][: proof["plateIndex"] + 1]
+def _gradient_ink_bounds(colors: list[list[float]]) -> list[list[float]]:
+    """Bound sRGB/default-Oklab interpolation, including interior channel extrema."""
+    assert colors and all(
+        c[3] == colors[0][3] for c in colors
+    ), "Unsupported varying gradient alpha"
+    to_lms = (
+        (0.4122214708, 0.5363325363, 0.0514459929),
+        (0.2119034982, 0.6806995451, 0.1073969566),
+        (0.0883024619, 0.2817188376, 0.6299787005),
+    )
+    to_lab = (
+        (0.2104542553, 0.7936177850, -0.0040720468),
+        (1.9779984951, -2.4285922050, 0.4505937099),
+        (0.0259040371, 0.7827717662, -0.8086757660),
+    )
+    from_lab = (
+        (1.0, 0.3963377774, 0.2158037573),
+        (1.0, -0.1055613458, -0.0638541728),
+        (1.0, -0.0894841775, -1.2914855480),
+    )
+    from_lms = (
+        (4.0767416621, -3.3077115913, 0.2309699292),
+        (-1.2684380046, 2.6097574011, -0.3413193965),
+        (-0.0041960863, -0.7034186147, 1.7076147010),
+    )
+
+    def multiply(matrix: tuple[tuple[float, ...], ...], vector: list[float]) -> list[float]:
+        return [sum(a * b for a, b in zip(row, vector)) for row in matrix]
+
+    labs = []
+    for color in colors:
+        linear = [x / 12.92 if x <= 0.04045 else ((x + 0.055) / 1.055) ** 2.4 for x in color[:3]]
+        labs.append(multiply(to_lab, [x ** (1 / 3) for x in multiply(to_lms, linear)]))
+    lows = [min(c[k] for c in colors) for k in range(3)]
+    highs = [max(c[k] for c in colors) for k in range(3)]
+    for start, end in zip(labs, labs[1:]):
+        u = multiply(from_lab, start)
+        v = multiply(from_lab, [b - a for a, b in zip(start, end)])
+        cubics = [[a**3, 3 * a * a * b, 3 * a * b * b, b**3] for a, b in zip(u, v)]
+        for channel, row in enumerate(from_lms):
+            c = [sum(row[k] * cubics[k][power] for k in range(3)) for power in range(4)]
+            points = [0.0, 1.0]
+            a, b, d = 3 * c[3], 2 * c[2], c[1]
+            if abs(a) < 1e-12:
+                if abs(b) >= 1e-12:
+                    points.append(-d / b)
+            elif (discriminant := b * b - 4 * a * d) >= 0:
+                points.extend(
+                    ((-b - discriminant**0.5) / (2 * a), (-b + discriminant**0.5) / (2 * a))
+                )
+            for t in points:
+                if 0 <= t <= 1:
+                    value = max(
+                        0.0,
+                        min(
+                            1.0, sum(coefficient * t**power for power, coefficient in enumerate(c))
+                        ),
+                    )
+                    value = (
+                        12.92 * value if value <= 0.0031308 else 1.055 * value ** (1 / 2.4) - 0.055
+                    )
+                    lows[channel] = min(lows[channel], max(0.0, value - 1e-6))
+                    highs[channel] = max(highs[channel], min(1.0, value + 1e-6))
+    return [lows + [colors[0][3]], highs + [colors[0][3]]]
+
+
+def _text_paints(proof: dict[str, Any]) -> list[dict[str, list[float]]]:
+    path = (
+        proof["path"][: proof["plateIndex"] + 1] if proof["plateIndex"] >= 0 else proof["path"][:-1]
+    )
     leaf = path[0]
     if "text" in leaf["clip"] and leaf["image"] != "none":
-        stops = re.findall(r"(?:rgba?\([^)]*\)|color\(srgb[^)]*\))", leaf["image"])
-        assert len(stops) >= 2, ("Unsupported clipped text paint", leaf)
-        inks = [_rgba(stop) for stop in stops]
+        image = leaf["image"]
+        assert image.startswith("linear-gradient(") and not re.search(
+            r"\bin\s+(?!srgb\b|oklab\b)", image
+        ), ("Unsupported gradient interpolation", leaf)
+        assert _rgba(proof["foreground"])[3] == 0, (
+            "Unsupported gradient and solid ink overlap",
+            leaf,
+        )
+        assert not re.search(r"\b(?:oklab|oklch|lab|lch|hsla?)\(|color\((?!srgb\b)", image), (
+            "Unsupported gradient color space",
+            leaf,
+        )
+        colors = [
+            _rgba(stop) for stop in re.findall(r"(?:rgba?\([^)]*\)|color\(srgb[^)]*\))", image)
+        ]
+        assert len(colors) >= 2, ("Unsupported clipped text paint", leaf)
+        inks = _gradient_ink_bounds(colors)
     else:
         inks = [_rgba(proof["foreground"])]
-    ratios: list[float] = []
+    states = []
     for ink in inks:
         background = [0.0, 0.0, 0.0, 0.0]
-        for node in path:
-            assert node["blend"] == "normal" and node["filter"] == node["mask"] == "none", node
+        for index, node in enumerate(path):
+            assert node["blend"] == "normal" and node["filter"] == node["mask"] == "none", (
+                "Unsupported text composition",
+                node,
+            )
+            assert node["textShadow"] == "none" and node["stroke"] == 0, (
+                "Unsupported text outline",
+                node,
+            )
             clipped = "text" in node["clip"]
-            assert node["image"] == "none" or clipped, ("Unmodelled ink backdrop", node)
             paint = [0.0, 0.0, 0.0, 0.0] if clipped else _rgba(node["background"])
+            if node["image"] != "none" and not (index == 0 and clipped):
+                # Only the alert's two identical stops are a provably uniform tint.
+                color = r"(?:rgba?\([^)]*\)|color\(srgb[^)]*\))"
+                uniform = re.fullmatch(
+                    rf"linear-gradient\(\s*({color})\s*,\s*({color})\s*\)", node["image"]
+                )
+                assert uniform and _rgba(uniform[1]) == _rgba(uniform[2]), (
+                    "Unmodelled ink backdrop",
+                    node,
+                )
+                paint = _over_rgba(_rgba(uniform[1]), paint)
             ink, background = _over_rgba(ink, paint), _over_rgba(background, paint)
             ink[3] *= node["opacity"]
             background[3] *= node["opacity"]
-        assert ink[3] == background[3] == 1, proof
-        ratios.append(
-            contrast(
-                f"color(srgb {' '.join(map(str, ink[:3]))})",
-                f"color(srgb {' '.join(map(str, background[:3]))})",
-            )
-        )
-    return min(ratios)
+        states.append({"ink": ink, "off": background})
+    return states
 
 
-async def opaque_artwork_backing(control: Locator, host_selector: str) -> dict[str, Any]:
-    """Find a plate before artwork, then prove opacity on its outward chain."""
+def _backed_text_contrast(proof: dict[str, Any]) -> float:
+    states = _text_paints(proof)
+    assert all(s["ink"][3] == s["off"][3] == 1 for s in states), proof
+    inks = [luminance(f"color(srgb {' '.join(map(str, s['ink'][:3]))})") for s in states]
+    background = luminance(f"color(srgb {' '.join(map(str, states[0]['off'][:3]))})")
+    if min(inks) <= background <= max(inks):
+        return 1.0
+    return min((max(ink, background) + 0.05) / (min(ink, background) + 0.05) for ink in inks)
+
+
+async def _reading_paint(control: Locator, host_selector: str) -> dict[str, Any]:
+    result: dict[str, Any] = await control.evaluate(
+        r"""(el, hostSelector) => {
+      const entry = node => {
+        const s = getComputedStyle(node);
+        return {tag:node.tagName, classes:node.getAttribute('class') || '',
+          background:s.backgroundColor, image:s.backgroundImage, opacity:Number(s.opacity),
+          blend:s.mixBlendMode, mask:s.maskImage, filter:s.filter, clip:s.backgroundClip,
+          textShadow:s.textShadow, stroke:parseFloat(s.webkitTextStrokeWidth),
+          fill:s.webkitTextFillColor, decoration:s.textDecorationLine};
+      };
+      const path = []; let plate = -1, reachedHost = false;
+      for (let node = el; node; node = node.parentElement) {
+        const s = entry(node), values = s.background.match(/-?[\d.]+(?:e[-+]?\d+)?/g).map(Number);
+        const alpha = values.length === 4 ? values[3] : 1;
+        path.push(s);
+        const interrupts = s.opacity !== 1 || s.blend !== 'normal' || s.mask !== 'none' || s.filter !== 'none';
+        if (interrupts) plate = -1;
+        if (node.matches(hostSelector)) { reachedHost = true; break; }
+        if (plate < 0 && !interrupts && alpha === 1 && !s.image.includes('url(') && !s.clip.includes('text')) plate = path.length - 1;
+      }
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT), fragments = [], unsupported = [];
+      let text;
+      while ((text = walker.nextNode())) if (text.textContent.trim()) {
+        const parent = text.parentElement, hidden = parent.closest('[aria-hidden="true"]');
+        if (hidden && hidden !== el && el.contains(hidden)) continue;
+        const paint = entry(parent);
+        if (paint.fill !== path[0].fill || paint.image !== path[0].image || paint.decoration !== 'none') unsupported.push(paint);
+        for (let node = parent; node && node !== el; node = node.parentElement) {
+          const s = entry(node);
+          if (s.background !== 'rgba(0, 0, 0, 0)' || s.image !== 'none' || s.opacity !== 1 || s.filter !== 'none' || s.mask !== 'none' || s.blend !== 'normal') unsupported.push(s);
+        }
+        const range = document.createRange(); range.selectNodeContents(text);
+        for (const rect of range.getClientRects()) if (rect.width && rect.height) fragments.push(rect.toJSON());
+      }
+      let outerSafe = true;
+      for (let node = el.closest(hostSelector); node; node = node.parentElement) {
+        const s = entry(node);
+        outerSafe &&= s.opacity === 1 && s.filter === 'none' && s.mask === 'none' && s.blend === 'normal';
+      }
+      const x = Math.floor(Math.min(...fragments.map(r => r.left)));
+      const y = Math.floor(Math.min(...fragments.map(r => r.top)));
+      const right = Math.ceil(Math.max(...fragments.map(r => r.right)));
+      const bottom = Math.ceil(Math.max(...fragments.map(r => r.bottom)));
+      const unobscured = fragments.every(r => {
+        const hit = document.elementFromPoint(r.left + r.width/2, r.top + r.height/2);
+        return hit && (el.contains(hit) || hit.contains(el));
+      });
+      return {path, plateIndex:plate, reachedHost, foreground:path[0].fill,
+        fragments, unsupported, outerSafe, unobscured,
+        clip:{x,y,width:right-x,height:bottom-y},
+        inViewport:x >= 0 && y >= 0 && right <= innerWidth && bottom <= innerHeight};
+    }""",
+        host_selector,
+    )
+    return result
+
+
+async def artwork_text_contrast(
+    control: Locator, host_selector: str, evidence: Path | None = None
+) -> dict[str, Any]:
+    """Prove text against its actual backdrop, retaining the opaque fast path."""
     await expect(control).to_be_visible()
     await control.scroll_into_view_if_needed()
     await control.page.mouse.move(0, 0)
     await _settle_styles(control.page)
-    proof: dict[str, Any] = await control.evaluate(
-        r"""(el, hostSelector) => {
-      const path = []; let plate = -1, reachedHost = false;
-      for (let node = el; node; node = node.parentElement) {
-        const s = getComputedStyle(node), values = s.backgroundColor.match(/-?[\d.]+(?:e[-+]?\d+)?/g).map(Number);
-        const alpha = values.length === 4 ? values[3] : 1;
-        const entry = {tag:node.tagName, classes:node.getAttribute('class') || '',
-          background:s.backgroundColor, image:s.backgroundImage, opacity:Number(s.opacity),
-          blend:s.mixBlendMode, mask:s.maskImage, filter:s.filter, clip:s.backgroundClip};
-        path.push(entry);
-        const interrupts = entry.opacity !== 1 || entry.blend !== 'normal' ||
-          entry.mask !== 'none' || entry.filter !== 'none';
-        // Opacity below a plate dims ink, not the subsequently found backing.
-        if (interrupts) plate = -1;
-        if (node.matches(hostSelector)) { reachedHost = true; break; }
-        if (plate < 0 && !interrupts && alpha === 1 && !s.backgroundImage.includes('url(')) {
-          plate = path.length - 1;
-        }
-      }
-      return {path, plateIndex:plate, reachedHost, foreground:getComputedStyle(el).color,
-        descendantOpacity:plate < 0 ? null : path.slice(0, plate).reduce((p, n) => p*n.opacity, 1)};
-    }""",
-        host_selector,
-    )
-    assert proof["reachedHost"] and proof["plateIndex"] >= 0, (
-        "Opaque artwork backing",
-        host_selector,
+    proof = await _reading_paint(control, host_selector)
+    assert proof["reachedHost"] and proof["fragments"] and not proof["unsupported"], (
+        "Unsupported reading sample",
         proof,
     )
-    proof["textContrast"] = _backed_text_contrast(proof)
-    assert proof["textContrast"] >= 4.5, ("Backed text contrast", host_selector, proof)
+    assert proof["inViewport"] and proof["unobscured"], (
+        "Reading sample clipped or obscured",
+        proof,
+    )
+    if proof["plateIndex"] >= 0:
+        proof["method"] = "opaque-front-backing"
+        proof["textContrast"] = _backed_text_contrast(proof)
+    else:
+        assert proof["outerSafe"], ("Unsupported outer text composition", proof)
+        states = _text_paints(proof)
+        assert all(s["off"][3] < 1 - 1e-6 for s in states), (
+            "Ill-conditioned backdrop recovery",
+            states,
+        )
+        painted = await _region_png(control.page, proof["clip"])
+        saved = await control.evaluate_handle(r"""el => {
+          const parents = new Set(), walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+          let text;
+          while ((text = walker.nextNode())) if (text.textContent.trim()) {
+            const parent = text.parentElement, hidden = parent.closest('[aria-hidden="true"]');
+            if (!hidden || hidden === el || !el.contains(hidden)) parents.add(parent);
+          }
+          return [...parents].map(node => {
+            const values = {'-webkit-text-fill-color':'transparent'};
+            if (getComputedStyle(node).backgroundClip.includes('text')) {
+              values['background-image'] = 'none'; values['background-color'] = 'transparent';
+            }
+            const previous = Object.fromEntries(Object.keys(values).map(key => [key,
+              [node.style.getPropertyValue(key),node.style.getPropertyPriority(key)]]));
+            for (const [key,value] of Object.entries(values)) node.style.setProperty(key,value,'important');
+            return {node,previous};
+          });
+        }""")
+        try:
+            await _settle_styles(control.page)
+            backdrop = await _region_png(control.page, proof["clip"])
+        finally:
+            await control.page.evaluate(
+                """saved => {
+              for (const {node,previous} of saved) for (const [key,[value,priority]] of Object.entries(previous)) {
+                if (value) node.style.setProperty(key,value,priority); else node.style.removeProperty(key);
+              }
+            }""",
+                saved,
+            )
+            await saved.dispose()
+            await _settle_styles(control.page)
+        restored = await _reading_paint(control, host_selector)
+        assert all(restored[key] == proof[key] for key in ("path", "fragments", "clip")), (
+            "Reading paint restoration",
+            proof,
+            restored,
+        )
+        sampled: dict[str, Any] = await control.page.evaluate(
+            """async ({png, clip, fragments, states}) => {
+          const bytes = Uint8Array.from(atob(png), c => c.charCodeAt(0));
+          const image = await createImageBitmap(new Blob([bytes], {type:'image/png'}));
+          const canvas = new OffscreenCanvas(image.width,image.height), ctx = canvas.getContext('2d');
+          ctx.drawImage(image,0,0); image.close();
+          const data = ctx.getImageData(0,0,canvas.width,canvas.height).data;
+          const lum = rgb => rgb.reduce((sum,x,k) => sum+[.2126,.7152,.0722][k]*(x<=.04045 ? x/12.92 : ((x+.055)/1.055)**2.4),0);
+          const clamp = x => Math.max(0,Math.min(1,x));
+          let minimum = Infinity, pixels = 0, worst = null;
+          for (let p=0;p<data.length;p+=4) {
+            const x = clip.x+((p/4)%canvas.width+.5)*clip.width/canvas.width;
+            const y = clip.y+(Math.floor(p/4/canvas.width)+.5)*clip.height/canvas.height;
+            if (!fragments.some(r => x>=r.left && x<r.right && y>=r.top && y<r.bottom)) continue;
+            if (data[p+3] !== 255) throw new Error('Backdrop PNG is not opaque');
+            pixels++;
+            // One RGB unit conservatively includes PNG quantization/rounding.
+            const low = [0,1,2].map(k => clamp((data[p+k]-1)/255));
+            const high = [0,1,2].map(k => clamp((data[p+k]+1)/255));
+            const bounds = states.map(({ink,off}) => [low,high].map(background => background.map((b,k) => {
+              const underlay = clamp((b-off[k]*off[3])/(1-off[3]));
+              return clamp(ink[k]*ink[3]+underlay*(1-ink[3]));
+            })));
+            const inkLow = [0,1,2].map(k => Math.min(...bounds.map(b => b[0][k])));
+            const inkHigh = [0,1,2].map(k => Math.max(...bounds.map(b => b[1][k])));
+            const il=lum(inkLow), ih=lum(inkHigh), bl=lum(low), bh=lum(high);
+            const ratio = il>bh ? (il+.05)/(bh+.05) : bl>ih ? (bl+.05)/(ih+.05) : 1;
+            if (ratio<minimum) { minimum=ratio; worst={x,y,background:[data[p],data[p+1],data[p+2]],inkLow,inkHigh}; }
+          }
+          return {minimum,pixels,worst};
+        }""",
+            {
+                "png": base64.b64encode(backdrop).decode("ascii"),
+                "clip": proof["clip"],
+                "fragments": proof["fragments"],
+                "states": states,
+            },
+        )
+        assert sampled["pixels"] > 0, ("Empty reading backdrop", proof)
+        if evidence is not None:
+            for kind, pixels in (("painted", painted), ("backdrop", backdrop)):
+                filename = f"reading-{kind}-{hashlib.sha256(pixels).hexdigest()[:16]}.png"
+                target = evidence / filename
+                if target.exists():
+                    assert target.read_bytes() == pixels, "Reading artifact hash collision"
+                else:
+                    target.write_bytes(pixels)
+                proof[f"{kind}Screenshot"] = filename
+        proof.update(
+            method="sampled-rendered-backdrop",
+            textContrast=sampled["minimum"],
+            sample=sampled,
+            paintStates=states,
+            restored=True,
+        )
+    assert proof["textContrast"] >= 4.5, ("Artwork text contrast", host_selector, proof)
     return proof
 
 
@@ -788,7 +1105,7 @@ async def no_stale_skin_chrome(page: Page) -> dict[str, Any]:
       const icons = [...document.querySelectorAll('svg[data-theme-icon][data-icon-family]')]
         .filter(el => visible(el) && !el.closest('.theme-preview'))
         .map(el => ({slot:el.dataset.themeIcon, family:el.dataset.iconFamily}));
-      const scenes = [...document.querySelectorAll('.structured-pane, .chat-sidebar__body, .workspace-view .board, .workspace-view .empty-board, .empty-state, .pane-empty')]
+      const scenes = [...document.querySelectorAll('.structured-pane, .structured-timeline, .chat-sidebar__body, .workspace-view .board, .workspace-view .empty-board, .empty-state, .pane-empty')]
         .filter(visible).map(el => ({classes:el.className, image:getComputedStyle(el).backgroundImage,
           scene:getComputedStyle(el).getPropertyValue('--palette-scene').trim()}));
       return {icons, scenes};
@@ -818,43 +1135,28 @@ async def _expect_probe_failure(check: Awaitable[Any], oracle: str) -> dict[str,
     raise AssertionError(f"Negative control incorrectly passed: {oracle}; observed={observed!r}")
 
 
-async def backing_fault_controls(control: Locator, host: str) -> list[dict[str, Any]]:
-    proof = await opaque_artwork_backing(control, host)
+async def readability_fault_controls(
+    control: Locator, host: str, evidence: Path | None = None
+) -> list[dict[str, Any]]:
+    original = await artwork_text_contrast(control, host, evidence)
     results = []
-    async with AsyncExitStack() as stack:
-        for index, node in enumerate(proof["path"][:-1]):
-            if _rgba(node["background"])[3] == 1 and "text" not in node["clip"]:
-                await stack.enter_async_context(
-                    _inline_styles(
-                        control,
-                        {"background-color": "transparent", "background-image": "none"},
-                        index,
-                    )
+    faults = [{"-webkit-text-fill-color": "rgba(0,0,0,0.01)"}, {"opacity": "0.05"}]
+    if "text" in original["path"][0]["clip"]:
+        faults[0].update({"background-image": "none", "background-color": "transparent"})
+    for fault in faults:
+        async with _inline_styles(control, fault):
+            results.append(
+                await _expect_probe_failure(
+                    artwork_text_contrast(control, host, evidence), "Artwork text contrast"
                 )
-        results.append(
-            await _expect_probe_failure(
-                opaque_artwork_backing(control, host),
-                "Opaque artwork backing",
             )
+        restored = await artwork_text_contrast(control, host)
+        assert restored["path"] == original["path"], (
+            "Readability fault restoration",
+            original,
+            restored,
         )
-    await opaque_artwork_backing(control, host)
-    # The outermost child of the art host contains every possible inner plate.
-    async with _inline_styles(control, {"opacity": "0.5"}, len(proof["path"]) - 2):
-        results.append(
-            await _expect_probe_failure(
-                opaque_artwork_backing(control, host),
-                "Opaque artwork backing",
-            )
-        )
-    await opaque_artwork_backing(control, host)
-    async with _inline_styles(control, {"color": proof["path"][proof["plateIndex"]]["background"]}):
-        results.append(
-            await _expect_probe_failure(
-                opaque_artwork_backing(control, host),
-                "Backed text contrast",
-            )
-        )
-    await opaque_artwork_backing(control, host)
+        results[-1]["restoredContrast"] = restored["textContrast"]
     return results
 
 
@@ -935,7 +1237,7 @@ async def _rich_desktop_chrome(
         prior.append({"paint": sample, "markup": markup})
         result["icons"].append(sample)
     if palette == "Zenless" and mode == "dark":
-        host = page.locator(".structured-pane:visible").first
+        host = page.locator(".structured-timeline:visible").first
         async with _inline_styles(host, {"background-image": "var(--palette-scene-glow)"}):
             result["negatives"].append(
                 await _expect_probe_failure(
@@ -962,6 +1264,7 @@ async def _rich_desktop_chrome(
             else:
                 raise AssertionError("Old lime primary was accepted")
         assert_zenless_orange(await rendered_button_state(button, "rest"))
+        result["negatives"].extend(await immersive_fault_controls(page, output, name))
     # Activate the real native tab controls, not their decorative SVG nodes.
     workspace = page.get_by_role("tab", name="Agent Workspace", exact=True)
     await _native_tab_to(workspace)
@@ -1075,58 +1378,89 @@ async def _selected_chrome_contrast(page: Page) -> list[dict[str, Any]]:
     return samples
 
 
-async def _game_chat_cues(page: Page, palette: str) -> dict[str, Any]:
+async def quiet_chat_surfaces(page: Page) -> dict[str, Any]:
+    """Reject resting decorative frames without banning functional focus cues."""
     await _settle_styles(page)
-    rendered = await page.evaluate("""() => {
-      const selectors = {nav: '.mode-button.active', tab: '.tab.active',
-        sidebar: '.chat-sidebar__item.active', composer: '.composer-row',
-        plan: '.goal-plan-card', title: '.goal-plan-eyebrow'};
-      return Object.fromEntries(Object.entries(selectors).map(([name, selector]) => {
-        const el = document.querySelector(selector);
-        if (!el || !el.getClientRects().length) throw new Error(`Missing cue: ${selector}`);
-        const s = getComputedStyle(el);
-        const shadows = s.boxShadow.replace(/(?:rgba?\\([^)]*\\)|color\\([^)]*\\))/g, '').split(',')
-          .map(shadow => [...shadow.matchAll(/(-?[\\d.]+)px/g)].map(match => Number(match[1])));
-        return [name, {radii: ['TopLeft', 'TopRight', 'BottomRight', 'BottomLeft']
-            .map(corner => parseFloat(s[`border${corner}Radius`])),
-          topStyle: s.borderTopStyle, topWidth: parseFloat(s.borderTopWidth),
-          leftWidth: parseFloat(s.borderLeftWidth), rightWidth: parseFloat(s.borderRightWidth),
-          font: s.fontFamily, fontStyle: s.fontStyle, weight: Number(s.fontWeight),
-          transform: s.textTransform, stretch: s.fontStretch,
-          height: el.getBoundingClientRect().height,
-          hardOffset: shadows.some(values => values[0] > 0 && values[1] > 0 && values[2] === 0)}];
-      }));
+    rendered: list[dict[str, Any]] = await page.evaluate("""() => {
+      const selectors = ['.structured-composer','.composer-row','.structured-turn',
+        '.conversation-bubble--assistant','.turn-actions'];
+      return selectors.flatMap(selector => [...document.querySelectorAll(selector)]
+        .filter(el => el.getClientRects().length).map(el => {
+          const s = getComputedStyle(el);
+          return {selector,rect:el.getBoundingClientRect().toJSON(),background:s.backgroundColor,
+            image:s.backgroundImage,shadow:s.boxShadow,
+            borders:['Top','Right','Bottom','Left'].map(side => ({width:parseFloat(s[`border${side}Width`]),style:s[`border${side}Style`]})),
+            pseudo:['::before','::after'].map(pseudo => {
+              const p = getComputedStyle(el,pseudo);
+              return {content:p.content,shadow:p.boxShadow,widths:['Top','Right','Bottom','Left'].map(side => parseFloat(p[`border${side}Width`]))};
+            })};
+        }));
     }""")
-    nav, composer, plan = rendered["nav"], rendered["composer"], rendered["plan"]
-    if palette == "Zenless":
-        checks = {
-            "capsule_navigation": min(nav["radii"]) >= nav["height"] / 2,
-            "oblique_hierarchy": nav["fontStyle"] == "italic" and nav["weight"] >= 700,
-            "asymmetric_cards": all(
-                max(item["radii"]) > min(item["radii"]) for item in (composer, plan)
-            ),
-            "hard_offsets": composer["hardOffset"] and plan["hardOffset"],
-        }
-    elif palette == "Frontier":
-        checks = {
-            "square_bookplates": all(max(item["radii"]) <= 3 for item in (nav, composer, plan)),
-            "double_rules": all(
-                item["topStyle"] == "double" and item["topWidth"] >= 3 for item in (composer, plan)
-            ),
-            "serif_hierarchy": bool(re.search(r"(?:^|,)\s*serif$", nav["font"], re.I)),
-        }
-    else:
-        checks = {
-            "square_hud": all(max(item["radii"]) <= 2 for item in (nav, composer, plan)),
-            "leading_bars": all(
-                item["leftWidth"] > item["rightWidth"] and item["leftWidth"] >= 3
-                for item in (nav, composer, plan)
-            ),
-            "condensed_hierarchy": nav["transform"] == "uppercase"
-            and nav["weight"] >= 700
-            and ("condensed" in nav["stretch"] or float(nav["stretch"].removesuffix("%")) < 100),
-        }
+    assert {".structured-composer", ".composer-row", ".structured-turn"} <= {
+        item["selector"] for item in rendered
+    }, ("Missing quiet surfaces", rendered)
+    checks = {"no_heavy_frames": True, "no_turn_slabs": True}
+    for item in rendered:
+        checks["no_heavy_frames"] &= all(
+            b["width"] <= 1 and b["style"] != "double" for b in item["borders"]
+        )
+        for _, dimensions, _ in _shadow_parts(item["shadow"]):
+            checks["no_heavy_frames"] &= dimensions[3] <= 0 and (
+                dimensions[2] > 0 or dimensions[0] == dimensions[1] == 0
+            )
+        for pseudo in item["pseudo"]:
+            if pseudo["content"] not in ("none", "normal"):
+                checks["no_heavy_frames"] &= (
+                    max(pseudo["widths"]) <= 1 and pseudo["shadow"] == "none"
+                )
+        if item["selector"] in (
+            ".structured-turn",
+            ".conversation-bubble--assistant",
+            ".turn-actions",
+        ):
+            checks["no_turn_slabs"] &= (
+                _rgba(item["background"])[3] == 0
+                and item["image"] == "none"
+                and item["shadow"] == "none"
+            )
+    assert all(checks.values()), ("Quiet chat surfaces", checks, rendered)
     return {"checks": checks, "rendered": rendered}
+
+
+async def immersive_fault_controls(page: Page, output: Path, name: str) -> list[dict[str, Any]]:
+    original = await quiet_chat_surfaces(page)
+    async with _inline_styles(
+        page.locator(".composer-row"),
+        {"border": "4px double #ff6f0f", "box-shadow": "6px 6px 0 #777"},
+    ):
+        frame = await _expect_probe_failure(quiet_chat_surfaces(page), "Quiet chat surfaces")
+    assert await quiet_chat_surfaces(page) == original, "Old frame restoration"
+    frame["restored"] = True
+    owner = page.locator(".structured-timeline:visible").first
+    snapshot = """el => ({rect:el.getBoundingClientRect().toJSON(),image:getComputedStyle(el).backgroundImage,
+      position:getComputedStyle(el).backgroundPosition,size:getComputedStyle(el).backgroundSize,
+      opacity:getComputedStyle(el).opacity,filter:getComputedStyle(el).filter,mask:getComputedStyle(el).maskImage,
+      glow:getComputedStyle(el).getPropertyValue('--palette-scene-glow')})"""
+    state = await owner.evaluate(snapshot)
+    svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320"><path fill="white" d="M0 0h1200v320H0z"/><path fill="black" d="M0 0h200v320H0zm400 0h200v320H400zm400 0h200v320H800z"/></svg>'
+    scene = (
+        'url("data:image/svg+xml;base64,' + base64.b64encode(svg.encode()).decode("ascii") + '")'
+    )
+    async with _inline_styles(owner, {"--palette-scene": scene}):
+        changed = await owner.evaluate(snapshot)
+        assert all(changed[k] == state[k] for k in state if k != "image"), (
+            "Strong art changed layout/glow",
+            state,
+            changed,
+        )
+        strong = await _expect_probe_failure(
+            chat_artwork(page, output, f"{name}-strong"), "Artwork salience"
+        )
+    assert await owner.evaluate(snapshot) == state, "Strong art computed-style restoration"
+    restored = await chat_artwork(page, output, f"{name}-strong-restored")
+    strong["restored"] = True
+    strong["restoredPaint"] = restored["paint"]
+    return [frame, strong]
 
 
 async def filled_button_themes(
@@ -1181,7 +1515,7 @@ async def filled_button_themes(
                         {
                             "palette": palette,
                             "mode": mode,
-                            "cues": await _game_chat_cues(page, palette),
+                            "cues": await quiet_chat_surfaces(page),
                             "selected_chrome": await _selected_chrome_contrast(page),
                             "keyboard_focus": await keyboard_focus_controls(
                                 page,
@@ -1236,6 +1570,7 @@ async def filled_button_themes(
                 assert box is not None and box["height"] >= 44, box
                 overflow = await page.evaluate("document.documentElement.scrollWidth - innerWidth")
                 assert overflow <= 1, (variant["palette"], variant["mode"], overflow)
+                variant["phone_quiet"] = await quiet_chat_surfaces(page)
                 variant["phone_art"] = await chat_artwork(
                     page,
                     screenshot_dir,

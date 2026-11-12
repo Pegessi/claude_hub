@@ -1,169 +1,160 @@
 <!-- Original static SVG scene illustration authored for Claude Hub (zenless palette).
-     Motif: Orange/obsidian analog electronics, CRT monitor stack, twin-reel cassette
-     silhouette, comic halftones, cut-paper stickers, and industrial street signage.
-     No third-party logos, proprietary fonts, or external asset dependencies. -->
+     Subject: Eous (伊埃斯, Bangboo No. 01 — pear-shaped body, mismatched rabbit ears with
+     pivot bolts, rounded oval CRT visor with glowing circular LED eyes, cropped staff vest,
+     and red-orange '01' neckerchief) in the Random Play video store / H.D.D. multi-monitor
+     workbench with Fairy's camera-lens iris and Bangboo 18.
+     Attenuation: one root drawing group keeps the scene subordinate to readable text.
+     Visibility and salience are checked in rendered app viewports, not inferred from opacity. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" fill="none">
-  <defs>
-    <pattern id="zzz-dots" width="14" height="14" patternUnits="userSpaceOnUse" patternTransform="rotate(-14)">
-      <circle cx="4" cy="4" r="1.8" fill="#ff6f0f" fill-opacity="0.32" />
-      <circle cx="11" cy="11" r="1.1" fill="#ff9a3d" fill-opacity="0.22" />
-    </pattern>
-    <pattern id="zzz-hazard" width="28" height="28" patternUnits="userSpaceOnUse" patternTransform="rotate(35)">
-      <rect width="14" height="28" fill="#ff6f0f" />
-      <rect x="14" width="14" height="28" fill="#14100d" />
-    </pattern>
-    <pattern id="zzz-scan" width="8" height="6" patternUnits="userSpaceOnUse">
-      <line x1="0" y1="2" x2="8" y2="2" stroke="#ff8533" stroke-width="1" stroke-opacity="0.35" />
-    </pattern>
-    <linearGradient id="zzz-horizon-glow" x1="600" y1="20" x2="600" y2="320" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#ff6f0f" stop-opacity="0" />
-      <stop offset="0.58" stop-color="#ff6f0f" stop-opacity="0.12" />
-      <stop offset="1" stop-color="#ff6f0f" stop-opacity="0.28" />
-    </linearGradient>
-    <linearGradient id="zzz-orange-slab" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#ff8c2e" />
-      <stop offset="1" stop-color="#e65500" />
-    </linearGradient>
-  </defs>
+  <g opacity="0.29">
+    <!-- Soft ambient horizon band across lower timeline (y=176..320) -->
+    <path d="M40 318 C180 218 420 194 600 194 C780 194 1020 218 1160 318 Z" fill="#59473a" />
 
-  <!-- Ambient horizon glow & diagonal comic halftone bands -->
-  <rect width="1200" height="320" fill="url(#zzz-horizon-glow)" />
-  <polygon points="0,120 430,36 390,310 0,310" fill="url(#zzz-dots)" />
-  <polygon points="760,24 1200,98 1200,310 710,310" fill="url(#zzz-dots)" />
+    <!-- OUTER LEFT & RIGHT FLANKS: Random Play VHS Archive Shelving (visible on wide desktop & empty states) -->
+    <g fill="#59473a" stroke="#9e826b" stroke-width="2">
+      <!-- Left VHS rack (x=42..186, y=118..314) -->
+      <rect x="42" y="118" width="144" height="196" rx="6" />
+      <line x1="42" y1="164" x2="186" y2="164" />
+      <line x1="42" y1="212" x2="186" y2="212" />
+      <line x1="42" y1="260" x2="186" y2="260" />
+      <rect x="58" y="128" width="16" height="30" rx="2" fill="#d4682a" />
+      <rect x="80" y="128" width="16" height="30" rx="2" fill="#b89f88" />
+      <rect x="102" y="128" width="16" height="30" rx="2" fill="#634f40" />
+      <rect x="132" y="174" width="16" height="32" rx="2" fill="#d4682a" />
+      <rect x="154" y="174" width="16" height="32" rx="2" fill="#ccb59e" />
+      <rect x="64" y="222" width="18" height="32" rx="2" fill="#b89f88" />
+      <rect x="88" y="222" width="18" height="32" rx="2" fill="#d4682a" />
 
-  <!-- Overhead urban utility cables & signal lines -->
-  <path d="M-20 74 Q 290 132 580 62 T 1220 88" stroke="#ff7a1f" stroke-width="2" stroke-opacity="0.55" fill="none" />
-  <path d="M-20 92 Q 310 154 610 82 T 1220 108" stroke="#3b3028" stroke-width="2.5" stroke-opacity="0.75" fill="none" />
-  <path d="M180 50 L 520 112 M 720 96 L 1060 44" stroke="#ff9a3d" stroke-width="1.5" stroke-dasharray="6 6" stroke-opacity="0.5" />
-
-  <!-- Background urban silhouettes (Sixth Street industrial blocks & truss towers) -->
-  <g fill="#1c1613" stroke="#59493e" stroke-width="2">
-    <rect x="18" y="138" width="96" height="166" rx="4" />
-    <rect x="126" y="106" width="118" height="198" rx="4" />
-    <rect x="256" y="152" width="84" height="152" rx="4" />
-    <rect x="842" y="128" width="104" height="176" rx="4" />
-    <rect x="958" y="96" width="124" height="208" rx="4" />
-    <rect x="1092" y="144" width="92" height="160" rx="4" />
-  </g>
-
-  <!-- Steel signal tower & rooftop parabolic dish (left-midground) -->
-  <g stroke="#ff7a1f" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M168 106 L184 42 L200 106 M172 84 H196 M176 62 H192" />
-    <path d="M206 54 A 20 20 0 0 1 228 82" fill="none" stroke-width="3" />
-    <line x1="214" y1="68" x2="232" y2="58" />
-    <circle cx="234" cy="57" r="3.5" fill="#ff6f0f" />
-  </g>
-
-  <!-- CENTERPIECE: Giant oblique cassette-deck module & twin tape reels -->
-  <g transform="translate(600, 186) rotate(-5) translate(-600, -186)">
-    <!-- Hard offset comic sticker shadow -->
-    <rect x="378" y="84" width="456" height="214" rx="22" fill="#0d0a08" fill-opacity="0.9" />
-    <!-- Outer obsidian cassette casing with high-contrast orange frame -->
-    <rect x="370" y="76" width="456" height="214" rx="22" fill="#1e1814" stroke="#ff6f0f" stroke-width="3.5" />
-    <!-- Top chamfered orange header stripe & sticker tag -->
-    <path d="M392 94 H804 L792 128 H384 Z" fill="url(#zzz-orange-slab)" />
-    <rect x="400" y="101" width="68" height="14" rx="7" fill="#14100d" />
-    <rect x="478" y="101" width="28" height="14" rx="3" fill="#fff4e8" />
-    <rect x="716" y="100" width="70" height="16" rx="3" fill="#14100d" />
-    <!-- Tape window bridge -->
-    <rect x="412" y="140" width="372" height="98" rx="16" fill="#120e0b" stroke="#ff9a3d" stroke-width="2.5" />
-    <rect x="552" y="156" width="92" height="66" rx="6" fill="#261c15" stroke="#ff6f0f" stroke-width="2" />
-    <line x1="564" y1="172" x2="632" y2="172" stroke="#ff8533" stroke-width="3" />
-    <line x1="564" y1="188" x2="618" y2="188" stroke="#fff4e8" stroke-width="2.5" />
-    <line x1="564" y1="204" x2="626" y2="204" stroke="#ff6f0f" stroke-width="2.5" />
-
-    <!-- Left Cassette Reel -->
-    <g transform="translate(486, 189)">
-      <circle r="38" fill="#1c1511" stroke="#ff6f0f" stroke-width="3.5" />
-      <circle r="26" fill="#120e0b" stroke="#fff4e8" stroke-width="2" stroke-dasharray="10 6" />
-      <circle r="13" fill="#ff6f0f" stroke="#14100d" stroke-width="2.5" />
-      <path d="M0 -26 V-13 M0 13 V26 M-26 0 H-13 M13 0 H26 M-18 -18 L-9 -9 M9 9 L18 18" stroke="#ff9a3d" stroke-width="3" stroke-linecap="round" />
+      <!-- Right VHS rack (x=1014..1158, y=118..314) -->
+      <rect x="1014" y="118" width="144" height="196" rx="6" />
+      <line x1="1014" y1="164" x2="1158" y2="164" />
+      <line x1="1014" y1="212" x2="1158" y2="212" />
+      <line x1="1014" y1="260" x2="1158" y2="260" />
+      <rect x="1030" y="128" width="16" height="30" rx="2" fill="#ccb59e" />
+      <rect x="1052" y="128" width="16" height="30" rx="2" fill="#d4682a" />
+      <rect x="1096" y="174" width="16" height="32" rx="2" fill="#b89f88" />
+      <rect x="1118" y="174" width="16" height="32" rx="2" fill="#d4682a" />
+      <rect x="1040" y="222" width="18" height="32" rx="2" fill="#d4682a" />
+      <rect x="1064" y="222" width="18" height="32" rx="2" fill="#ccb59e" />
     </g>
 
-    <!-- Right Cassette Reel -->
-    <g transform="translate(710, 189)">
-      <circle r="38" fill="#1c1511" stroke="#ff6f0f" stroke-width="3.5" />
-      <circle r="26" fill="#120e0b" stroke="#fff4e8" stroke-width="2" stroke-dasharray="10 6" />
-      <circle r="13" fill="#ff6f0f" stroke="#14100d" stroke-width="2.5" />
-      <path d="M0 -26 V-13 M0 13 V26 M-26 0 H-13 M13 0 H26 M-18 18 L-9 9 M9 -9 L18 -18" stroke="#ff9a3d" stroke-width="3" stroke-linecap="round" />
+    <!-- CENTER-LEFT (x=216..502, y=174..316): Bangboo 18 & H.D.D. Primary Monitor with Fairy AI Lens -->
+    <!-- Companion Store Bangboo 18 (x=218..312, y=176..314) -->
+    <g transform="translate(266, 256)">
+      <!-- Rabbit ears -->
+      <path d="M-18 -38 C-26 -72 -10 -80 -5 -44 Z" fill="#ccb59e" stroke="#8c725c" stroke-width="2" />
+      <path d="M18 -38 C26 -72 10 -80 5 -44 Z" fill="#59473a" stroke="#9e826b" stroke-width="2" />
+      <circle cx="-11" cy="-40" r="4.5" fill="#634f40" stroke="#ccb59e" stroke-width="1.5" />
+      <circle cx="11" cy="-40" r="4.5" fill="#634f40" stroke="#ccb59e" stroke-width="1.5" />
+      <!-- Pear body -->
+      <path d="M-38 42 C-42 6 -30 -44 0 -44 C30 -44 42 6 38 42 C32 56 -32 56 -38 42 Z"
+            fill="#b89f88" stroke="#7a624f" stroke-width="2.2" />
+      <!-- Oval CRT visor & circular eyes -->
+      <rect x="-26" y="-34" width="52" height="30" rx="14" fill="#59473a" stroke="#ccb59e" stroke-width="2" />
+      <circle cx="-11" cy="-19" r="6" fill="#634f40" stroke="#d4682a" stroke-width="2.6" />
+      <circle cx="11" cy="-19" r="6" fill="#634f40" stroke="#d4682a" stroke-width="2.6" />
+      <circle cx="-11" cy="-19" r="2.2" fill="#d6984b" />
+      <circle cx="11" cy="-19" r="2.2" fill="#d6984b" />
+      <!-- Store neckerchief ('18') -->
+      <path d="M-32 -2 Q0 12 32 -2 L24 18 Q0 26 -24 18 Z" fill="#d4682a" stroke="#ccb59e" stroke-width="1.5" />
+      <path d="M-6 5 V15 M4 6 C1 6 1 10 4 10 C1 10 1 15 4 15 C7 15 7 10 4 10 C7 10 7 6 4 6 Z"
+            stroke="#ccb59e" stroke-width="1.8" stroke-linecap="round" />
     </g>
 
-    <!-- Bottom trapezoid head shield -->
-    <polygon points="462,288 484,252 712,252 734,288" fill="#2a211b" stroke="#ff7a1f" stroke-width="2.5" />
-    <circle cx="516" cy="270" r="5" fill="#fff4e8" />
-    <circle cx="680" cy="270" r="5" fill="#fff4e8" />
-    <rect x="546" y="264" width="104" height="12" rx="4" fill="#ff6f0f" />
+    <!-- H.D.D. Monitor with Fairy's Iconic Single Iris Lens (x=326..500, y=184..314) -->
+    <g transform="translate(414, 250) rotate(-2)">
+      <rect x="-86" y="-62" width="172" height="118" rx="12" fill="#59473a" stroke="#b89f88" stroke-width="2.4" />
+      <rect x="-74" y="-50" width="148" height="92" rx="8" fill="#634f40" stroke="#d4682a" stroke-width="1.8" />
+      <!-- Fairy AI concentric camera-lens iris -->
+      <circle cx="0" cy="-4" r="31" stroke="#6cb2d6" stroke-width="2" stroke-dasharray="6 4" />
+      <circle cx="0" cy="-4" r="21" fill="#4a90b8" stroke="#ccb59e" stroke-width="2.2" />
+      <circle cx="0" cy="-4" r="9.5" fill="#d4682a" />
+      <circle cx="-3" cy="-7" r="3" fill="#ccb59e" />
+      <!-- Fairy waveform bars -->
+      <path d="M-62 -4 H-38 M38 -4 H62 M0 -42 V-36 M0 28 V34" stroke="#6cb2d6" stroke-width="2.2" stroke-linecap="round" />
+      <rect x="-64" y="-42" width="34" height="8" rx="2" fill="#d4682a" />
+    </g>
+
+    <!-- HERO CENTERPIECE: EOUS (伊埃斯, Bangboo No. 01) — Complete Ears, Visor Eyes & '01' Scarf in y=166..316 -->
+    <g transform="translate(600, 252)">
+      <!-- H.D.D. synchronization pad under Eous -->
+      <ellipse cx="0" cy="58" rx="86" ry="11" fill="#634f40" stroke="#d4682a" stroke-width="2" stroke-dasharray="10 5" />
+
+      <!-- Eous Left Ear (Sand/cream shell + orange inner groove + pivot bolt, y=-86..-34 => viewBox y=166..218) -->
+      <g transform="translate(-28, -42) rotate(-10)">
+        <path d="M-14 8 C-21 -32 -11 -64 3 -64 C15 -64 19 -32 12 8 Z"
+              fill="#ccb59e" stroke="#7a624f" stroke-width="2.4" />
+        <path d="M-5 2 C-9 -24 -4 -48 2 -48 C8 -48 10 -24 6 2 Z" fill="#d4682a" />
+        <circle cx="-1" cy="2" r="7.5" fill="#59473a" stroke="#ccb59e" stroke-width="2" />
+        <line x1="-5" y1="2" x2="3" y2="2" stroke="#d4682a" stroke-width="2" />
+      </g>
+
+      <!-- Eous Right Ear (Mismatched dark bronze-umber shell + orange inner groove + pivot bolt) -->
+      <g transform="translate(28, -42) rotate(10)">
+        <path d="M-12 8 C-19 -32 -15 -64 -3 -64 C11 -64 21 -32 14 8 Z"
+              fill="#59473a" stroke="#b89f88" stroke-width="2.4" />
+        <path d="M-6 2 C-10 -24 -8 -48 -2 -48 C4 -48 9 -24 5 2 Z" fill="#d4682a" />
+        <circle cx="1" cy="2" r="7.5" fill="#634f40" stroke="#ccb59e" stroke-width="2" />
+        <line x1="-3" y1="2" x2="5" y2="2" stroke="#d4682a" stroke-width="2" />
+      </g>
+
+      <!-- Eous Pear-Shaped Body (viewBox y=200..312) -->
+      <path d="M-62 32 C-68 -10 -48 -54 0 -54 C48 -54 68 -10 62 32 C56 56 32 62 0 62 C-32 62 -56 56 -62 32 Z"
+            fill="#ccb59e" stroke="#7a624f" stroke-width="2.6" />
+      <!-- Stubby feet -->
+      <ellipse cx="-25" cy="58" rx="16" ry="6.5" fill="#59473a" stroke="#b89f88" stroke-width="2" />
+      <ellipse cx="25" cy="58" rx="16" ry="6.5" fill="#59473a" stroke="#b89f88" stroke-width="2" />
+
+      <!-- Eous Cropped Dark Staff Vest & Stubby Arms -->
+      <path d="M-60 12 C-64 -12 -50 -38 -32 -44 L32 -44 C50 -38 64 -12 60 12 L48 30 C30 35 16 36 8 32 L5 10 L-5 10 L-8 32 C-16 36 -30 35 -48 30 Z"
+            fill="#59473a" stroke="#b89f88" stroke-width="2.2" />
+      <path d="M-56 -10 C-74 0 -78 20 -64 28 C-56 31 -50 20 -52 6 Z"
+            fill="#59473a" stroke="#b89f88" stroke-width="2" />
+      <path d="M56 -10 C74 0 78 20 64 28 C56 31 50 20 52 6 Z"
+            fill="#59473a" stroke="#b89f88" stroke-width="2" />
+      <!-- Random Play staff pocket patch -->
+      <rect x="-42" y="16" width="22" height="8" rx="2" fill="#d4682a" />
+
+      <!-- Eous Rounded-Oval CRT Visor Faceplate & Glowing Circular LED Eyes (viewBox y=206..248) -->
+      <rect x="-42" y="-46" width="84" height="44" rx="21" fill="#59473a" stroke="#ccb59e" stroke-width="2.4" />
+      <!-- Left Circular LED Eye -->
+      <circle cx="-17" cy="-25" r="10" fill="#634f40" stroke="#d4682a" stroke-width="3.4" />
+      <circle cx="-17" cy="-25" r="4.2" fill="#d6984b" />
+      <!-- Right Circular LED Eye -->
+      <circle cx="17" cy="-25" r="10" fill="#634f40" stroke="#d4682a" stroke-width="3.4" />
+      <circle cx="17" cy="-25" r="4.2" fill="#d6984b" />
+      <!-- Expressive visor smile arc -->
+      <path d="M-6 -12 Q0 -8 6 -12" stroke="#d6984b" stroke-width="2.2" stroke-linecap="round" />
+
+      <!-- Eous Iconic Red-Orange Neckerchief with Stenciled '01' (viewBox y=246..284) -->
+      <path d="M-44 -4 Q0 10 44 -4 L36 16 Q16 29 0 32 Q-16 29 -36 16 Z"
+            fill="#c4492b" stroke="#ccb59e" stroke-width="1.8" />
+      <path d="M30 8 L46 18 L38 27 L24 17 Z" fill="#c4492b" stroke="#ccb59e" stroke-width="1.5" />
+      <!-- Stenciled '01' -->
+      <rect x="-12" y="7" width="9" height="14" rx="4" stroke="#ccb59e" stroke-width="2.4" />
+      <path d="M3 10 L7 7 V21 M3 21 H11" stroke="#ccb59e" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
+    </g>
+
+    <!-- CENTER-RIGHT (x=700..982, y=180..316): H.D.D. Hollow Route Telemetry Console & Dual Reel Deck -->
+    <g transform="translate(792, 252) rotate(2)">
+      <rect x="-82" y="-60" width="164" height="116" rx="12" fill="#59473a" stroke="#b89f88" stroke-width="2.4" />
+      <rect x="-70" y="-48" width="140" height="90" rx="8" fill="#634f40" stroke="#d4682a" stroke-width="1.8" />
+      <!-- Hollow navigation route graph -->
+      <polyline points="-54,18 -24,-8 6,6 36,-24 56,-12" stroke="#d4682a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+      <circle cx="-24" cy="-8" r="5" fill="#d6984b" />
+      <circle cx="6" cy="6" r="5" fill="#6cb2d6" />
+      <circle cx="36" cy="-24" r="5.5" fill="#d4682a" />
+      <rect x="-54" y="-36" width="48" height="8" rx="2" fill="#b89f88" />
+      <rect x="-54" y="26" width="108" height="6" rx="2" fill="#9e826b" />
+    </g>
+
+    <!-- Twin-Reel Tape Module on Right (x=890..982, y=194..312) -->
+    <g transform="translate(936, 256)">
+      <rect x="-42" y="-54" width="84" height="108" rx="10" fill="#59473a" stroke="#b89f88" stroke-width="2.2" />
+      <circle cx="0" cy="-20" r="21" fill="#634f40" stroke="#d4682a" stroke-width="2.6" />
+      <circle cx="0" cy="-20" r="7" fill="#ccb59e" />
+      <circle cx="0" cy="24" r="21" fill="#634f40" stroke="#d4682a" stroke-width="2.6" />
+      <circle cx="0" cy="24" r="7" fill="#ccb59e" />
+    </g>
   </g>
-
-  <!-- LEFT CLUSTER: Stacked Analog CRT Monitors & Waveform Oscilloscope -->
-  <g>
-    <!-- Lower Wide CRT Monitor -->
-    <rect x="64" y="182" width="188" height="122" rx="14" fill="#0d0a08" />
-    <rect x="58" y="176" width="188" height="122" rx="14" fill="#221b16" stroke="#ff6f0f" stroke-width="3.2" />
-    <rect x="72" y="190" width="132" height="92" rx="10" fill="#140f0c" stroke="#ff9a3d" stroke-width="2" />
-    <rect x="72" y="190" width="132" height="92" rx="10" fill="url(#zzz-scan)" />
-    <!-- CRT Oscilloscope Signal Wave -->
-    <polyline points="82,238 102,238 112,212 124,262 138,204 152,252 164,226 176,238 194,238" stroke="#ff6f0f" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round" fill="none" />
-    <circle cx="224" cy="206" r="9" fill="#ff6f0f" stroke="#14100d" stroke-width="2" />
-    <circle cx="224" cy="232" r="9" fill="#3b3028" stroke="#fff4e8" stroke-width="2" />
-    <rect x="214" y="252" width="20" height="6" rx="2" fill="#ff9a3d" />
-    <rect x="214" y="264" width="20" height="6" rx="2" fill="#ff9a3d" />
-
-    <!-- Upper Tilted Street-Pop CRT TV (Bangboo-inspired analog monitor head) -->
-    <g transform="translate(174, 128) rotate(6) translate(-174, -128)">
-      <rect x="112" y="78" width="136" height="98" rx="18" fill="#0d0a08" />
-      <rect x="106" y="72" width="136" height="98" rx="18" fill="#ff6f0f" stroke="#14100d" stroke-width="3.5" />
-      <rect x="118" y="84" width="112" height="74" rx="12" fill="#16110e" stroke="#fff4e8" stroke-width="2.2" />
-      <!-- Dual circular CRT eyes & signal grin -->
-      <circle cx="150" cy="116" r="13" fill="#ff6f0f" />
-      <circle cx="150" cy="116" r="5" fill="#fff4e8" />
-      <circle cx="198" cy="116" r="13" fill="#ff6f0f" />
-      <circle cx="198" cy="116" r="5" fill="#fff4e8" />
-      <path d="M158 140 H190" stroke="#fff4e8" stroke-width="3.5" stroke-linecap="round" />
-      <!-- V-Antenna ears -->
-      <path d="M148 72 L128 38 M196 72 L218 34" stroke="#ff6f0f" stroke-width="3.5" stroke-linecap="round" />
-      <circle cx="128" cy="38" r="5" fill="#fff4e8" stroke="#14100d" stroke-width="2" />
-      <circle cx="218" cy="34" r="5" fill="#ff6f0f" stroke="#14100d" stroke-width="2" />
-    </g>
-
-    <!-- Cut-paper lightning sticker badge -->
-    <polygon points="312,126 284,174 308,174 294,218 344,162 318,162" fill="#fff4e8" stroke="#14100d" stroke-width="3" />
-    <polygon points="308,122 280,170 304,170 290,214 340,158 314,158" fill="#ff6f0f" stroke="#14100d" stroke-width="2.5" />
-  </g>
-
-  <!-- RIGHT CLUSTER: Industrial Exhaust Turbine, VHS Rack & Cut-Paper Signage -->
-  <g>
-    <!-- Industrial Fan Housing -->
-    <rect x="882" y="156" width="144" height="142" rx="16" fill="#0d0a08" />
-    <rect x="876" y="150" width="144" height="142" rx="16" fill="#211a15" stroke="#ff6f0f" stroke-width="3.2" />
-    <circle cx="948" cy="221" r="52" fill="#120e0b" stroke="#ff9a3d" stroke-width="2.5" />
-    <!-- 6-Blade Turbine Silhouette -->
-    <g transform="translate(948, 221)" fill="#ff6f0f" stroke="#14100d" stroke-width="1.8">
-      <path d="M0 0 L-14 -44 L12 -44 Z" />
-      <path d="M0 0 L44 -14 L34 14 Z" />
-      <path d="M0 0 L28 38 L0 46 Z" />
-      <path d="M0 0 L-28 38 L-42 14 Z" />
-      <path d="M0 0 L-44 -14 L-24 -38 Z" />
-      <circle r="14" fill="#fff4e8" stroke="#14100d" stroke-width="3" />
-      <circle r="5" fill="#14100d" />
-    </g>
-
-    <!-- Tilted Street-Pop Warning Sign & VHS Spines -->
-    <g transform="translate(1086, 196) rotate(-7) translate(-1086, -196)">
-      <rect x="1038" y="118" width="108" height="168" rx="14" fill="#0d0a08" />
-      <rect x="1032" y="112" width="108" height="168" rx="14" fill="#ff6f0f" stroke="#14100d" stroke-width="3.5" />
-      <rect x="1046" y="128" width="80" height="26" rx="6" fill="#14100d" />
-      <circle cx="1062" cy="141" r="6" fill="#ff6f0f" />
-      <rect x="1076" y="137" width="38" height="8" rx="3" fill="#fff4e8" />
-      <rect x="1046" y="166" width="80" height="18" rx="4" fill="#fff4e8" stroke="#14100d" stroke-width="2" />
-      <rect x="1046" y="192" width="80" height="18" rx="4" fill="#1e1814" stroke="#14100d" stroke-width="2" />
-      <rect x="1046" y="218" width="80" height="18" rx="4" fill="#fff4e8" stroke="#14100d" stroke-width="2" />
-      <polygon points="1056,262 1116,262 1086,242" fill="#14100d" />
-    </g>
-  </g>
-
-  <!-- Bottom Full-Width Industrial Caution Plinth -->
-  <rect x="0" y="296" width="1200" height="24" fill="url(#zzz-hazard)" />
-  <line x1="0" y1="296" x2="1200" y2="296" stroke="#ff6f0f" stroke-width="3" />
-  <line x1="0" y1="319" x2="1200" y2="319" stroke="#14100d" stroke-width="2" />
 </svg>

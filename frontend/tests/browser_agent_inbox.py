@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
-from appearance_assertions import split_pane_themes
+from appearance_assertions import empty_pane_phone_themes, split_pane_themes
 from playwright.async_api import ViewportSize, expect
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -378,6 +378,12 @@ async def main(browser_run: BrowserRun) -> None:
             await page.get_by_title("Two Columns", exact=True).click()
             panes = page.locator(".terminal-pane")
             await expect(panes).to_have_count(2)
+            report["empty_pane_phone"] = await empty_pane_phone_themes(
+                page,
+                panes.nth(1).locator(".pane-empty"),
+                output,
+                page.get_by_title("Two Columns", exact=True),
+            )
             await panes.nth(0).locator(".pane-session-name").click()
             await page.locator(f'.tab-bar .tab[data-tab-id="{NEEDS}"]').click()
             await panes.nth(1).locator(".pane-empty").click()

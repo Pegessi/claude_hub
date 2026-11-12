@@ -19,50 +19,56 @@
     aria-hidden="true"
   >
     <!-- ====================================================================
-         ZENLESS (ZZZ) — Analog CRT, cassette reels, halftone & signal stickers
+         ZENLESS (ZZZ) — Eous Bangboo ears/visor & Random Play H.D.D.
          ==================================================================== -->
     <template v-if="gamePalette === 'zenless'">
       <template v-if="kind === 'appearance'">
-        <rect
-          x="2.5"
-          y="5"
-          width="19"
-          height="14"
-          rx="3.5"
-          stroke="currentColor"
-          stroke-width="2.1"
-        />
-        <circle
-          cx="8.5"
-          cy="12"
-          r="2.6"
-          fill="currentColor"
-        />
-        <circle
-          cx="15.5"
-          cy="12"
-          r="2.6"
-          fill="currentColor"
-        />
         <path
-          d="M7 5L4.5 2M17 5L19.5 2M6.5 16.5h11"
+          d="M7.5 6.5C6.5 2.5 9.5 1.8 10.2 6.2M16.5 6.5C17.5 2.5 14.5 1.8 13.8 6.2"
           stroke="currentColor"
           stroke-width="2"
           stroke-linecap="round"
         />
+        <rect
+          x="3"
+          y="6.2"
+          width="18"
+          height="13.5"
+          rx="6.5"
+          stroke="currentColor"
+          stroke-width="2.1"
+        />
+        <circle
+          cx="9"
+          cy="12.8"
+          r="2.4"
+          fill="currentColor"
+        />
+        <circle
+          cx="15"
+          cy="12.8"
+          r="2.4"
+          fill="currentColor"
+        />
       </template>
       <template v-else-if="kind === 'terminal'">
+        <path
+          d="M8 6C7 2.4 9.8 1.8 10.5 5.8M16 6C17 2.4 14.2 1.8 13.5 5.8"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+        />
         <rect
           x="2.5"
-          y="5.5"
+          y="5.8"
           width="19"
-          height="14.5"
-          rx="3.5"
+          height="14.2"
+          rx="4.5"
           stroke="currentColor"
           stroke-width="2.1"
         />
         <path
-          d="M8.5 5.5L6 2.2M15.5 5.5L18 2.2M6.8 10.2l3.2 2.5-3.2 2.5M12.2 15.2h4.6"
+          d="M6.8 10.4l3.2 2.5-3.2 2.5M12.2 15.4h4.6"
           stroke="currentColor"
           stroke-width="2.1"
           stroke-linecap="round"
@@ -168,31 +174,31 @@
         />
       </template>
       <template v-else>
-        <!-- spark / emblem / pane-empty: Street-pop CRT head with lightning antenna -->
-        <rect
-          x="3"
-          y="6.5"
-          width="18"
-          height="13.5"
-          rx="3.5"
-          stroke="currentColor"
-          stroke-width="2.1"
-        />
+        <!-- spark / emblem / pane-empty: Eous Bangboo rabbit ears & oval LED visor -->
         <path
-          d="M8.5 6.5 6 2.8M15.5 6.5 18 2.8"
+          d="M7.5 7C6.5 2.6 9.5 2 10.2 6.5M16.5 7C17.5 2.6 14.5 2 13.8 6.5"
           stroke="currentColor"
           stroke-width="2"
           stroke-linecap="round"
         />
+        <rect
+          x="3"
+          y="6.8"
+          width="18"
+          height="13.2"
+          rx="6.2"
+          stroke="currentColor"
+          stroke-width="2.1"
+        />
         <circle
           cx="9"
-          cy="13"
+          cy="13.2"
           r="2.2"
           fill="currentColor"
         />
         <circle
           cx="15"
-          cy="13"
+          cy="13.2"
           r="2.2"
           fill="currentColor"
         />

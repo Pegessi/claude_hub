@@ -1,156 +1,176 @@
 <!-- Original static SVG scene illustration authored for Claude Hub (frontier palette).
-     Motif: 1899 Western print/poster craft, flat-topped desert mesas and canyon buttes,
-     receding telegraph poles, Ponderosa pine ridge, wagon wheel, and an engraved
-     carmine/brass compass-rose sunburst within a double-ruled bookplate frame.
-     No third-party logos, proprietary fonts, or external asset dependencies. -->
+     Subject: Red Dead Redemption 2 key-art composition — weathered outlaw silhouette in a
+     pinched Stalker gambler hat, shadowed brow and downturned moustache/beard profile,
+     knotted crimson neckerchief, rugged duster coat, diagonal cartridge bandolier, and
+     anatomically connected raised forearm/hand gripping a revolver alongside the seven
+     outlaw riders on tapered horses silhouetted across a crimson/amber ridge.
+     Attenuation: one root drawing group keeps the scene subordinate to readable text.
+     Visibility and salience are checked in rendered app viewports, not inferred from opacity. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" fill="none">
-  <defs>
-    <pattern id="rdr-hatch" width="10" height="8" patternUnits="userSpaceOnUse">
-      <line x1="0" y1="4" x2="10" y2="4" stroke="#c99658" stroke-width="0.9" stroke-opacity="0.28" />
-    </pattern>
-    <pattern id="rdr-strata" width="18" height="12" patternUnits="userSpaceOnUse">
-      <path d="M0 4 H18 M3 9 H15" stroke="#dfc49e" stroke-width="1.1" stroke-opacity="0.38" />
-    </pattern>
-    <linearGradient id="rdr-sky" x1="600" y1="0" x2="600" y2="320" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#a82a24" stop-opacity="0" />
-      <stop offset="0.55" stop-color="#c99658" stop-opacity="0.1" />
-      <stop offset="1" stop-color="#a82a24" stop-opacity="0.24" />
-    </linearGradient>
-  </defs>
+  <g opacity="0.29">
+    <!-- Crimson & amber sunset horizon dome across lower timeline (y=172..320) -->
+    <path d="M30 318 C190 206 430 182 620 182 C810 182 1020 206 1170 318 Z" fill="#b53f32" />
+    <ellipse cx="520" cy="252" rx="260" ry="62" fill="#c9643b" />
 
-  <!-- Engraved parchment/carmine wash & woodblock horizontal sky hatching -->
-  <rect width="1200" height="320" fill="url(#rdr-sky)" />
-  <rect x="24" y="18" width="1152" height="280" fill="url(#rdr-hatch)" />
+    <!-- OUTER LEFT & RIGHT FLANKS: Heartlands Flat-Topped Mesa, Telegraph Line & Pine Ridge -->
+    <g fill="#5c4335" stroke="#c79860" stroke-width="2" stroke-linejoin="round">
+      <!-- Left mesa & telegraph poles (x=28..204, y=124..316) -->
+      <path d="M28 316 L28 224 L74 208 L98 148 L178 148 L204 212 L204 316 Z" />
+      <line x1="72" y1="124" x2="72" y2="314" stroke="#d6b07e" stroke-width="2.4" />
+      <line x1="52" y1="138" x2="92" y2="138" stroke="#d6b07e" stroke-width="2.2" />
+      <line x1="148" y1="158" x2="148" y2="314" stroke="#d6b07e" stroke-width="2" />
+      <line x1="132" y1="170" x2="164" y2="170" stroke="#d6b07e" stroke-width="1.8" />
 
-  <!-- Outer 1899 Double-Ruled Bookplate Frame & Corner Filigree -->
-  <rect x="14" y="12" width="1172" height="294" stroke="#c99658" stroke-width="2" stroke-opacity="0.7" />
-  <rect x="20" y="18" width="1160" height="282" stroke="#a82a24" stroke-width="1.4" stroke-opacity="0.75" />
-  <!-- Left & Right Corner Diamonds -->
-  <polygon points="14,32 34,12 42,20 22,40" fill="#a82a24" stroke="#dfc49e" stroke-width="1.2" />
-  <polygon points="1186,32 1166,12 1158,20 1178,40" fill="#a82a24" stroke="#dfc49e" stroke-width="1.2" />
-
-  <!-- CENTERPIECE: Engraved 16-Point Western Compass Rose & Carmine Sunburst -->
-  <g transform="translate(600, 152)">
-    <!-- Radiating woodcut sun-rays -->
-    <g stroke="#c99658" stroke-width="1.5" stroke-opacity="0.55" stroke-dasharray="10 5">
-      <line x1="-260" y1="0" x2="260" y2="0" />
-      <line x1="-220" y1="-95" x2="220" y2="95" />
-      <line x1="-220" y1="95" x2="220" y2="-95" />
-      <line x1="-130" y1="-130" x2="130" y2="130" />
-      <line x1="-130" y1="130" x2="130" y2="-130" />
+      <!-- Right twin butte & Ponderosa pines (x=986..1172, y=132..316) -->
+      <path d="M986 316 L1012 162 L1088 162 L1118 214 L1172 228 L1172 316 Z" />
+      <polygon points="1048,184 1022,232 1036,232 1014,274 1082,274 1060,232 1074,232" fill="#63493b" />
+      <polygon points="1124,168 1096,220 1110,220 1086,268 1162,268 1138,220 1152,220" fill="#63493b" />
     </g>
-    <!-- Concentric engraved seal rings -->
-    <circle r="92" fill="#261b13" fill-opacity="0.35" stroke="#c99658" stroke-width="2" />
-    <circle r="84" stroke="#a82a24" stroke-width="2.5" stroke-dasharray="6 4" />
-    <circle r="66" fill="#2b1e16" stroke="#dfc49e" stroke-width="1.8" />
-    <!-- 8 Minor Brass Points -->
-    <g fill="#c99658" stroke="#231811" stroke-width="1.5">
-      <polygon points="0,-78 12,-24 0,-34 -12,-24" transform="rotate(45)" />
-      <polygon points="0,-78 12,-24 0,-34 -12,-24" transform="rotate(135)" />
-      <polygon points="0,-78 12,-24 0,-34 -12,-24" transform="rotate(225)" />
-      <polygon points="0,-78 12,-24 0,-34 -12,-24" transform="rotate(315)" />
+
+    <!-- Sloping Dusty Outlaw Ridge across Center (x=140..1060, y=266..318) -->
+    <path d="M140 318 Q360 264 580 272 Q820 280 1060 318 Z"
+          fill="#5c4335" stroke="#d6b07e" stroke-width="2.2" />
+
+    <!-- CENTER-LEFT (x=218..672, y=214..296): Seven Outlaw Riders on Tapered Equine Profiles -->
+    <!-- Rider 1 -->
+    <g transform="translate(238, 265) scale(0.88)" fill="#5c4335" stroke="#d6b07e" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round">
+      <!-- Unified equine profile: croup, saddle, arched neck, pointed ears, tapered downward muzzle, chest, 4 legs & tail -->
+      <path d="M-20 3 C-14 0 -6 2 3 1 L12 -13 L14 -19 L17 -14 L25 -8 L23 -4 L16 -6 L12 4 L15 17 L19 26 L16 27 L11 17 L9 10 L6 27 L3 27 L4 11 C-2 12 -9 11 -13 10 L-12 27 L-15 27 L-16 13 L-21 27 L-24 27 L-20 13 L-23 6 C-27 11 -29 17 -32 21 C-31 12 -27 5 -20 3 Z" />
+      <!-- Seated rider in saddle with bent leg in stirrup, coat tail & reins to muzzle -->
+      <path d="M-7 2 L-12 10 L-4 8 L-1 15 L2 15 L2 5 L6 1 L4 -14 L-4 -14 Z" fill="#63493b" />
+      <path d="M3 -9 L10 -5 L22 -6" fill="none" stroke-width="1.4" />
+      <circle cx="0" cy="-18" r="3.4" />
+      <path d="M-8 -19 C-3 -21 4 -21 9 -18 C4 -17 -3 -17 -8 -19 Z" />
     </g>
-    <!-- 4 Cardinal Carmine Wax Points -->
-    <g fill="#a82a24" stroke="#f3e6d0" stroke-width="1.8">
-      <polygon points="0,-96 15,-22 0,-34 -15,-22" />
-      <polygon points="0,96 15,22 0,34 -15,22" />
-      <polygon points="-96,0 -22,15 -34,0 -22,-15" />
-      <polygon points="96,0 22,15 34,0 22,-15" />
+
+    <!-- Rider 2 -->
+    <g transform="translate(304, 259) scale(0.93)" fill="#5c4335" stroke="#d6b07e" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round">
+      <path d="M-20 3 C-14 0 -6 2 3 1 L12 -13 L14 -19 L17 -14 L25 -8 L23 -4 L16 -6 L12 4 L14 17 L17 27 L14 27 L10 16 L8 10 L5 27 L2 27 L4 11 C-2 12 -9 11 -13 10 L-11 27 L-14 27 L-15 13 L-20 27 L-23 27 L-19 13 L-23 6 C-27 11 -29 17 -31 20 C-30 12 -27 5 -20 3 Z" />
+      <path d="M-7 2 L-12 10 L-4 8 L-1 15 L2 15 L2 5 L6 1 L4 -14 L-4 -14 Z" fill="#63493b" />
+      <path d="M3 -9 L10 -5 L22 -6" fill="none" stroke-width="1.4" />
+      <circle cx="0" cy="-18" r="3.4" />
+      <path d="M-8 -19 C-3 -21 4 -21 9 -18 C4 -17 -3 -17 -8 -19 Z" />
     </g>
-    <!-- Center Wax Medallion -->
-    <circle r="22" fill="#a82a24" stroke="#f3e6d0" stroke-width="2.2" />
-    <polygon points="0,-12 12,0 0,12 -12,0" fill="#dfc49e" stroke="#231811" stroke-width="1.5" />
-    <circle r="4" fill="#231811" />
-  </g>
 
-  <!-- High-Desert Birds (Engraved V-Silhouettes) -->
-  <g stroke="#c99658" stroke-width="2.2" stroke-linecap="round" fill="none">
-    <path d="M412 68 Q420 58 428 66 Q436 58 444 68" />
-    <path d="M448 52 Q454 44 460 50 Q466 44 472 52" />
-    <path d="M736 60 Q744 50 752 58 Q760 50 768 60" />
-  </g>
-
-  <!-- DISTANT LAYER: Stepped Castleton Mesas & Canyon Buttes -->
-  <!-- Left Mesa Range -->
-  <path d="M14 298 L14 204 L68 188 L98 126 L216 126 L246 176 L312 176 L338 142 L428 142 L468 216 L548 248 L588 298 Z"
-        fill="#2b1f16" stroke="#c99658" stroke-width="2.5" stroke-linejoin="round" />
-  <path d="M98 126 L216 126 L246 176 L312 176 L338 142 L428 142 L468 216 L98 216 Z"
-        fill="url(#rdr-strata)" />
-  <!-- Engraved cliff vertical ridge lines (left) -->
-  <path d="M124 126 L116 196 M156 126 L152 204 M192 126 L198 192 M358 142 L352 212 M398 142 L406 214"
-        stroke="#dfc49e" stroke-width="1.6" stroke-opacity="0.65" />
-
-  <!-- Right Mesa & Twin Buttes Range -->
-  <path d="M612 298 L656 244 L732 212 L774 136 L868 136 L894 182 L948 182 L982 114 L1088 114 L1122 184 L1186 202 L1186 298 Z"
-        fill="#2b1f16" stroke="#c99658" stroke-width="2.5" stroke-linejoin="round" />
-  <path d="M774 136 L868 136 L894 182 L948 182 L982 114 L1088 114 L1122 184 L750 212 Z"
-        fill="url(#rdr-strata)" />
-  <!-- Engraved cliff vertical ridge lines (right) -->
-  <path d="M798 136 L792 204 M838 136 L844 202 M1008 114 L1000 198 M1042 114 L1046 196 M1070 114 L1078 192"
-        stroke="#dfc49e" stroke-width="1.6" stroke-opacity="0.65" />
-
-  <!-- FOREGROUND LEFT: Receding Timber Telegraph Poles, Catenary Wires & Saguaro -->
-  <g stroke="#f3e6d0" stroke-width="2.2" stroke-linecap="round">
-    <!-- Pole 1 (tallest) -->
-    <line x1="86" y1="88" x2="86" y2="296" stroke="#3d2c20" stroke-width="6" />
-    <line x1="86" y1="88" x2="86" y2="296" stroke="#dfc49e" stroke-width="1.8" />
-    <line x1="58" y1="106" x2="114" y2="106" stroke="#dfc49e" stroke-width="3.5" />
-    <line x1="64" y1="126" x2="108" y2="126" stroke="#dfc49e" stroke-width="3" />
-    <circle cx="64" cy="102" r="2.5" fill="#a82a24" />
-    <circle cx="108" cy="102" r="2.5" fill="#a82a24" />
-
-    <!-- Pole 2 (mid) -->
-    <line x1="264" y1="134" x2="264" y2="296" stroke="#3d2c20" stroke-width="4.5" />
-    <line x1="264" y1="134" x2="264" y2="296" stroke="#dfc49e" stroke-width="1.5" />
-    <line x1="242" y1="148" x2="286" y2="148" stroke="#dfc49e" stroke-width="2.8" />
-    <line x1="248" y1="164" x2="280" y2="164" stroke="#dfc49e" stroke-width="2.2" />
-
-    <!-- Pole 3 (distant) -->
-    <line x1="418" y1="176" x2="418" y2="296" stroke="#dfc49e" stroke-width="2.2" />
-    <line x1="404" y1="186" x2="432" y2="186" stroke="#dfc49e" stroke-width="2" />
-
-    <!-- Sagging Telegraph Wires -->
-    <path d="M14 96 Q50 116 64 106 Q164 156 244 148 Q334 190 406 186 Q490 222 570 256"
-          stroke="#c99658" stroke-width="1.6" fill="none" />
-    <path d="M14 114 Q50 132 108 106 Q188 158 284 148 Q356 192 430 186"
-          stroke="#a82a24" stroke-width="1.4" fill="none" />
-  </g>
-
-  <!-- Desert Saguaro Cactus Silhouette (left foreground) -->
-  <g fill="#231811" stroke="#dfc49e" stroke-width="2" stroke-linejoin="round">
-    <path d="M168 296 V192 A6 6 0 0 1 180 192 V232 H194 V204 A5 5 0 0 1 204 204 V242 H180 V296 Z" />
-    <path d="M168 248 H154 V214 A5 5 0 0 1 164 214 V238 H168 Z" />
-  </g>
-
-  <!-- FOREGROUND RIGHT: Ponderosa Pine Ridge & Spoked Frontier Wagon Wheel -->
-  <g fill="#231811" stroke="#c99658" stroke-width="1.8" stroke-linejoin="round">
-    <!-- Pine 1 -->
-    <polygon points="884,186 858,232 872,232 850,268 868,268 846,296 922,296 900,268 918,268 896,232 910,232" />
-    <!-- Pine 2 (taller) -->
-    <polygon points="1132,158 1102,210 1118,210 1094,254 1112,254 1088,296 1176,296 1152,254 1170,254 1146,210 1162,210" />
-  </g>
-
-  <!-- Engraved Spoked Wagon Wheel resting on the ridge -->
-  <g transform="translate(996, 256)">
-    <circle r="38" fill="#1e150f" fill-opacity="0.65" stroke="#dfc49e" stroke-width="4" />
-    <circle r="31" stroke="#a82a24" stroke-width="2" />
-    <g stroke="#c99658" stroke-width="2.2">
-      <line x1="0" y1="-36" x2="0" y2="36" />
-      <line x1="-36" y1="0" x2="36" y2="0" />
-      <line x1="-25" y1="-25" x2="25" y2="25" />
-      <line x1="-25" y1="25" x2="25" y2="-25" />
+    <!-- Rider 3 (Duster coat flaring back, rifle across saddle) -->
+    <g transform="translate(372, 254) scale(0.98)" fill="#5c4335" stroke="#d6b07e" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round">
+      <path d="M-20 3 C-14 0 -6 2 3 1 L13 -14 L15 -20 L18 -15 L26 -8 L24 -4 L17 -6 L12 4 L15 17 L20 26 L17 27 L12 17 L9 10 L6 27 L3 27 L4 11 C-2 12 -9 11 -13 10 L-12 27 L-15 27 L-16 13 L-22 27 L-25 27 L-20 13 L-23 6 C-27 11 -30 17 -32 21 C-31 12 -27 5 -20 3 Z" />
+      <path d="M-8 2 L-15 11 L-4 9 L-1 16 L2 16 L2 5 L6 1 L4 -15 L-5 -15 Z" fill="#63493b" />
+      <path d="M3 -10 L10 -5 L23 -6" fill="none" stroke-width="1.4" />
+      <circle cx="0" cy="-19" r="3.5" />
+      <path d="M-9 -20 C-3 -22 4 -22 10 -19 C4 -18 -3 -18 -9 -20 Z" />
     </g>
-    <circle r="9" fill="#a82a24" stroke="#f3e6d0" stroke-width="2.2" />
-  </g>
 
-  <!-- Bottom Double-Ruled Letterpress Plinth & Bookplate Ornaments -->
-  <rect x="0" y="296" width="1200" height="24" fill="#1e150f" />
-  <line x1="0" y1="296" x2="1200" y2="296" stroke="#a82a24" stroke-width="3" />
-  <line x1="0" y1="302" x2="1200" y2="302" stroke="#c99658" stroke-width="1.5" />
-  <line x1="0" y1="316" x2="1200" y2="316" stroke="#c99658" stroke-width="1.5" />
-  <g fill="#a82a24" stroke="#dfc49e" stroke-width="1.2">
-    <polygon points="300,303 308,309 300,315 292,309" />
-    <polygon points="600,302 610,309 600,316 590,309" />
-    <polygon points="900,303 908,309 900,315 892,309" />
+    <!-- Rider 4 (Central Lead Rider on Horseback with repeater rifle) -->
+    <g transform="translate(444, 249) scale(1.05)" fill="#5c4335" stroke="#d6b07e" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round">
+      <path d="M-21 3 C-14 0 -6 2 3 1 L13 -14 L15 -21 L18 -15 L27 -8 L24 -4 L17 -6 L13 4 L16 17 L21 26 L18 27 L12 17 L9 10 L6 27 L3 27 L4 11 C-2 12 -9 11 -13 10 L-12 27 L-15 27 L-16 13 L-22 27 L-25 27 L-20 13 L-24 6 C-28 11 -31 17 -33 21 C-32 12 -28 5 -21 3 Z" />
+      <path d="M-8 2 L-15 11 L-4 9 L-1 16 L2 16 L2 5 L6 1 L4 -15 L-5 -15 Z" fill="#63493b" />
+      <line x1="-14" y1="-4" x2="18" y2="-16" stroke="#d6b07e" stroke-width="1.8" />
+      <path d="M3 -10 L11 -5 L24 -6" fill="none" stroke-width="1.4" />
+      <circle cx="0" cy="-19" r="3.6" />
+      <path d="M-9 -20 C-3 -22 5 -22 10 -19 C4 -18 -3 -18 -9 -20 Z" />
+    </g>
+
+    <!-- Rider 5 -->
+    <g transform="translate(516, 253) scale(0.98)" fill="#5c4335" stroke="#d6b07e" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round">
+      <path d="M-20 3 C-14 0 -6 2 3 1 L12 -13 L14 -19 L17 -14 L25 -8 L23 -4 L16 -6 L12 4 L15 17 L19 26 L16 27 L11 17 L9 10 L6 27 L3 27 L4 11 C-2 12 -9 11 -13 10 L-12 27 L-15 27 L-16 13 L-21 27 L-24 27 L-20 13 L-23 6 C-27 11 -29 17 -32 21 C-31 12 -27 5 -20 3 Z" />
+      <path d="M-7 2 L-13 10 L-4 8 L-1 15 L2 15 L2 5 L6 1 L4 -14 L-4 -14 Z" fill="#63493b" />
+      <path d="M3 -9 L10 -5 L22 -6" fill="none" stroke-width="1.4" />
+      <circle cx="0" cy="-18" r="3.5" />
+      <path d="M-8 -19 C-3 -21 4 -21 9 -18 C4 -17 -3 -17 -8 -19 Z" />
+    </g>
+
+    <!-- Rider 6 -->
+    <g transform="translate(584, 258) scale(0.93)" fill="#5c4335" stroke="#d6b07e" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round">
+      <path d="M-20 3 C-14 0 -6 2 3 1 L12 -13 L14 -19 L17 -14 L25 -8 L23 -4 L16 -6 L12 4 L14 17 L17 27 L14 27 L10 16 L8 10 L5 27 L2 27 L4 11 C-2 12 -9 11 -13 10 L-11 27 L-14 27 L-15 13 L-20 27 L-23 27 L-19 13 L-23 6 C-27 11 -29 17 -31 20 C-30 12 -27 5 -20 3 Z" />
+      <path d="M-7 2 L-12 10 L-4 8 L-1 15 L2 15 L2 5 L6 1 L4 -14 L-4 -14 Z" fill="#63493b" />
+      <path d="M3 -9 L10 -5 L22 -6" fill="none" stroke-width="1.4" />
+      <circle cx="0" cy="-18" r="3.4" />
+      <path d="M-8 -19 C-3 -21 4 -21 9 -18 C4 -17 -3 -17 -8 -19 Z" />
+    </g>
+
+    <!-- Rider 7 -->
+    <g transform="translate(648, 264) scale(0.88)" fill="#5c4335" stroke="#d6b07e" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round">
+      <path d="M-20 3 C-14 0 -6 2 3 1 L12 -13 L14 -19 L17 -14 L25 -8 L23 -4 L16 -6 L12 4 L15 17 L19 26 L16 27 L11 17 L9 10 L6 27 L3 27 L4 11 C-2 12 -9 11 -13 10 L-12 27 L-15 27 L-16 13 L-21 27 L-24 27 L-20 13 L-23 6 C-27 11 -29 17 -32 21 C-31 12 -27 5 -20 3 Z" />
+      <path d="M-7 2 L-12 10 L-4 8 L-1 15 L2 15 L2 5 L6 1 L4 -14 L-4 -14 Z" fill="#63493b" />
+      <path d="M3 -9 L10 -5 L22 -6" fill="none" stroke-width="1.4" />
+      <circle cx="0" cy="-18" r="3.4" />
+      <path d="M-8 -19 C-3 -21 4 -21 9 -18 C4 -17 -3 -17 -8 -19 Z" />
+    </g>
+
+    <!-- HERO SUBJECT: WEATHERED OUTLAW SILHOUETTE (y=166..316) -->
+    <g transform="translate(836, 236)">
+      <!-- Glowing crimson sun disc framing head & shoulders -->
+      <circle cx="-6" cy="4" r="68" fill="#c9643b" />
+
+      <!-- Anatomically Connected Right Arm, Bent Elbow, Duster Sleeve, Cuff, Gloved Hand & Revolver -->
+      <g stroke-linejoin="round" stroke-linecap="round">
+        <!-- Upper arm & bent forearm sleeve extending from right shoulder (-56, 8) to wrist (-88, 26) -->
+        <path d="M-50 4 L-76 18 L-92 14 L-96 28 L-74 44 L-44 24 Z"
+              fill="#5c4335" stroke="#c79860" stroke-width="2.2" />
+        <!-- Sleeve cuff fold -->
+        <path d="M-90 12 L-82 32" stroke="#d6b07e" stroke-width="1.8" />
+        <!-- Gloved hand gripping revolver handle -->
+        <path d="M-99 12 C-95 8 -88 10 -86 16 L-90 25 C-96 25 -101 19 -99 12 Z"
+              fill="#63493b" stroke="#d6b07e" stroke-width="1.8" />
+        <!-- Connected single-action revolver held in hand (barrel angled left-upward) -->
+        <g transform="translate(-96, 12) rotate(-14)" fill="#5c4335" stroke="#d6b07e" stroke-width="1.8">
+          <path d="M0 -2 L10 15 L0 18 L-6 2 Z" fill="#63493b" />
+          <rect x="-14" y="-10" width="16" height="11" rx="2" fill="#63493b" />
+          <rect x="-46" y="-9" width="32" height="5.5" rx="1.2" />
+          <rect x="-36" y="-3.5" width="22" height="3" />
+          <path d="M2 -10 L6 -13" stroke-width="2" />
+          <circle cx="-5" cy="-5" r="2.2" fill="#b53f32" />
+        </g>
+      </g>
+
+      <!-- Rugged Duster Coat & Shoulders (viewBox y=226..316) -->
+      <path d="M-86 80 C-80 34 -64 4 -36 -10 L38 -10 C70 2 90 34 96 80 Z"
+            fill="#5c4335" stroke="#c79860" stroke-width="2.4" />
+      <!-- Coat lapels -->
+      <path d="M-36 -10 L-16 32 L0 14 L16 32 L38 -10"
+            fill="#63493b" stroke="#d6b07e" stroke-width="1.8" stroke-linejoin="round" />
+
+      <!-- Knotted Crimson Neckerchief at Throat (viewBox y=224..256) -->
+      <path d="M-24 -12 Q0 4 24 -12 L16 12 L0 22 L-16 12 Z"
+            fill="#b53f32" stroke="#d6b07e" stroke-width="1.6" />
+
+      <!-- Diagonal Leather Bandolier with Brass Cartridge Loops across Chest -->
+      <path d="M-56 76 L32 -8 L48 -2 L-38 80 Z"
+            fill="#63493b" stroke="#d6b07e" stroke-width="1.8" />
+      <g stroke="#d6b07e" stroke-width="2.2" stroke-linecap="round">
+        <line x1="-30" y1="58" x2="-19" y2="63" />
+        <line x1="-19" y1="44" x2="-8" y2="49" />
+        <line x1="-8" y1="30" x2="3" y2="35" />
+        <line x1="3" y1="16" x2="14" y2="21" />
+        <line x1="14" y1="2" x2="25" y2="7" />
+      </g>
+
+      <!-- Serious Weathered Face, Brow, Nose Bridge & Downturned Moustache/Beard (viewBox y=194..233) -->
+      <!-- Upper face & cheekbones -->
+      <path d="M-22 -42 L-23 -20 L-16 -6 L0 -3 L16 -6 L23 -20 L22 -42 Z"
+            fill="#63493b" stroke="#d6b07e" stroke-width="1.9" stroke-linejoin="round" />
+      <!-- Full angular beard mass with flat/downturned moustache top (NO upward smile curve) -->
+      <path d="M-22 -22 L-14 -21 L-7 -24 L0 -23 L7 -24 L14 -21 L22 -22 L16 -6 L0 -3 L-16 -6 Z"
+            fill="#5c4335" stroke="#c79860" stroke-width="1.5" stroke-linejoin="round" />
+      <!-- Downturned western moustache & serious straight mouth shadow line -->
+      <path d="M-13 -16 L-5 -19 L0 -18 L5 -19 L13 -16"
+            stroke="#d6b07e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+      <line x1="-6" y1="-13" x2="6" y2="-13" stroke="#c79860" stroke-width="1.6" stroke-linecap="round" />
+      <!-- Shadowed brow & straight nose bridge under hat brim -->
+      <path d="M-15 -34 L-4 -33 M4 -33 L15 -34 M0 -34 V-24"
+            stroke="#d6b07e" stroke-width="2" stroke-linecap="round" />
+
+      <!-- Pinched Stalker/Gambler Hat (viewBox y=166..200) -->
+      <g transform="translate(0, -44)">
+        <path d="M-32 2 L-25 -24 C-20 -29 -10 -25 0 -22 C10 -25 20 -29 25 -24 L32 2 Z"
+              fill="#5c4335" stroke="#d6b07e" stroke-width="2.2" stroke-linejoin="round" />
+        <path d="M-15 -18 C-10 -10 -5 -10 0 -16 C5 -10 10 -10 15 -18"
+              stroke="#c79860" stroke-width="1.6" />
+        <path d="M-31 -1 Q0 4 31 -1" stroke="#c79860" stroke-width="3" stroke-dasharray="5 3" />
+        <path d="M-58 3 C-38 -5 -15 7 0 7 C15 7 40 -3 60 5 C38 12 -38 12 -58 3 Z"
+              fill="#5c4335" stroke="#d6b07e" stroke-width="2.2" />
+      </g>
+    </g>
   </g>
 </svg>
