@@ -7,6 +7,17 @@
 
 ## Released
 
+### style(theme): replace geometric game figures with painted scene artwork
+
+- Replace the three hand-drawn SVG wallpapers with local, reference-conditioned
+  generated illustrations: the classic GTA trio, Arthur's western poster scene,
+  and Eous at an orange/black retro-electronic workbench.
+- Keep character heads intact in responsive bust compositions. Bake subtle
+  opacity and four-edge feathering into WebP assets so painted backgrounds fade
+  into both modes without adding poster boxes or fading foreground controls.
+- Reuse the existing scene consumers, theme state, icons and five neutral themes;
+  no runtime image-generation service, hotlink, new preference or dependency.
+
 ### style(theme): refine game scenes from visual references
 
 - Replace abstract wireframe-like subjects with richer original illustrations

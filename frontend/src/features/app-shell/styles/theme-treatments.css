@@ -39,7 +39,7 @@
   --ch-radius-lg: 10px;
   --ch-radius-xl: 14px;
   --ch-radius-overlay: 16px;
-  --palette-scene: url('../assets/zenless-scene.svg');
+  --palette-scene: url('../assets/zenless-scene.webp');
   --palette-scene-glow: linear-gradient(
     180deg,
     transparent 0%,
@@ -54,7 +54,7 @@
   --ch-radius-xl: 8px;
   --ch-radius-overlay: 10px;
   --ch-radius-popover: 5px;
-  --palette-scene: url('../assets/frontier-scene.svg');
+  --palette-scene: url('../assets/frontier-scene.webp');
   --palette-scene-glow: linear-gradient(
     180deg,
     transparent 0%,
@@ -69,7 +69,7 @@
   --ch-radius-xl: 8px;
   --ch-radius-overlay: 10px;
   --ch-radius-popover: 5px;
-  --palette-scene: url('../assets/los-santos-scene.svg');
+  --palette-scene: url('../assets/los-santos-scene.webp');
   --palette-scene-glow: linear-gradient(
     180deg,
     transparent 0%,
