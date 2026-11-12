@@ -79,10 +79,10 @@ export function useWorkspaceRuntime() {
     : null
   const isStyleDemoOpen = ref(Boolean(initialDemoParam))
   const initialDemoStyle = (
-    initialDemoParam === 'walkthrough_board' || initialDemoParam === 'command_center'
+    initialDemoParam === 'focused_inbox' || initialDemoParam === 'precision_grid'
       ? initialDemoParam
-      : 'triage_timeline'
-  ) as 'triage_timeline' | 'walkthrough_board' | 'command_center'
+      : 'linear_zen'
+  ) as 'linear_zen' | 'focused_inbox' | 'precision_grid'
   function toggleStyleDemo() {
     isStyleDemoOpen.value = !isStyleDemoOpen.value
   }

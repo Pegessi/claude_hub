@@ -1,64 +1,57 @@
 /**
- * Realistic multi-workspace dataset and style descriptors for comparing three
- * Agent Workspace UX directions side-by-side in a live Vue/Pinia demo.
+ * Realistic multi-workspace dataset for three clean, low-noise Agent Workspace
+ * design paradigms:
+ *  1. linear_zen     — Borderless hairline list + editorial vertical spine
+ *  2. focused_inbox  — Centered 740px calm single-column reader (Things 3 / Pulse)
+ *  3. precision_grid — Swiss-grid deployment ledger with inline stage blocks (Vercel)
  */
 
-export type DemoStyleId = 'triage_timeline' | 'walkthrough_board' | 'command_center'
+export type DemoStyleId = 'linear_zen' | 'focused_inbox' | 'precision_grid'
 
 export interface DemoStyleOption {
   id: DemoStyleId
-  code: string
-  name: string
-  inspiration: string
-  tagline: string
+  label: string
+  reference: string
 }
 
 export const DEMO_STYLES: readonly DemoStyleOption[] = [
   {
-    id: 'triage_timeline',
-    code: 'Style A',
-    name: 'Triage Feed + Run Timeline',
-    inspiration: 'Linear + GitHub Agent HQ',
-    tagline: 'Cross-workspace triage list (Waiting on you / Working / Done) paired with a zero-clutter 3-section Run Timeline drawer and archived-chat deep links.',
+    id: 'linear_zen',
+    label: '1 · Linear Split',
+    reference: 'Linear / GitHub PR Spine',
   },
   {
-    id: 'walkthrough_board',
-    code: 'Style B',
-    name: 'Compact Board + Walkthrough Card',
-    inspiration: 'Antigravity + Cursor 2.2',
-    tagline: '3-column scannable board (Needs Review / In Progress / Done) whose detail opens as a structured Deliverable Walkthrough with consensus review rounds.',
+    id: 'focused_inbox',
+    label: '2 · Calm Reader',
+    reference: 'Things 3 / Superhuman',
   },
   {
-    id: 'command_center',
-    code: 'Style C',
-    name: 'Live Command Center',
-    inspiration: 'Devin 2.0 + Warp',
-    tagline: 'Unified Task + Session cards showing live 2-line activity previews, inline milestone dots, and a side-by-side Timeline + Read-only Transcript split pane.',
+    id: 'precision_grid',
+    label: '3 · Trace Ledger',
+    reference: 'Vercel / Raycast',
   },
 ]
 
 export interface DemoExternalLink {
   label: string
-  kind: 'mr' | 'doc' | 'arena' | 'infowall'
   url: string
 }
 
 export interface DemoTimelineNode {
   id: string
   stage: string
+  shortStage: string
   actor: string
-  modelBadge: string
-  tone: 'start' | 'work' | 'review_block' | 'review_pass' | 'done' | 'live'
+  tone: 'neutral' | 'warn' | 'pass' | 'live'
   timeLabel: string
   deltaLabel: string
   summary: string
-  verification?: string
+  receipt?: string
   sessionTabId?: string
   sessionArchived?: boolean
 }
 
 export interface DemoTranscriptLine {
-  role: 'user' | 'agent' | 'tool' | 'reviewer'
   speaker: string
   time: string
   text: string
@@ -70,448 +63,397 @@ export interface DemoTaskRecord {
   workspace: string
   branch: string
   bucket: 'needs_you' | 'working' | 'done'
-  statusBadge: string
-  statusTone: 'attention' | 'working' | 'done' | 'failed'
-  decisionPrompt?: string
-  outcomeHeadline: string
-  liveActivityLine?: string
-  liveStepCounts?: string
+  statusLabel: string
+  statusTone: 'attention' | 'working' | 'done'
+  decisionLine?: string
+  outcomeSummary: string
+  liveStep?: string
   elapsed: string
   updatedAgo: string
+  diffStat?: { added: number; removed: number }
+  checksLabel: string
   links: DemoExternalLink[]
-  acceptancePassed: number
-  acceptanceTotal: number
-  changedFiles: string[]
-  reviewRoundsSummary: string
   timeline: DemoTimelineNode[]
-  transcriptPreview: DemoTranscriptLine[]
-  rawInternalMeta: {
-    executionControl: string
+  transcriptExcerpt: DemoTranscriptLine[]
+  internalMeta: {
+    control: string
     epoch: number
-    taskMode: string
-    sessionSeat: string
-    rawPromptPreview: string
+    mode: string
+    seat: string
   }
 }
 
 export const DEMO_TASKS: readonly DemoTaskRecord[] = [
   {
     id: '47e984bf',
-    title: 'MR !3953 细粒度生命周期打点：补齐同 session_id 跨轮次串联与多模态实测',
+    title: 'MR !3953 细粒度生命周期打点与同 session 串联实测',
     workspace: 'evo_workspace',
     branch: 'wzh/request-lifecycle-events',
     bucket: 'needs_you',
-    statusBadge: 'Awaiting acceptance · Consensus 2/2',
+    statusLabel: 'Ready · 2/2 review',
     statusTone: 'attention',
-    decisionPrompt: 'Astra 交叉复审已通过（0 P0/P1）：+57 行补齐 session_id、Duplex 多轮帧与 ForkSession 血缘，H20 真机 700 条事件零丢失。确认是否合入 Draft MR !3953？',
-    outcomeHeadline: '已完成 Hub→Server 25 类全阶段事件打点，OMNI 多模态与 6.6K Prefix-Cache 实测开销 ~0%，两轮异构审查全绿。',
+    decisionLine: 'Astra 第 2 轮复审已通过（0 P0/P1），m13_tiny 700 条多模态与长文事件零丢失。',
+    outcomeSummary: '补齐 Hub → Server 全阶段 25 类事件打点及 ForkSession / 粘性重放血缘串联；4.6K Prefix-Cache 与 3 图 ViT AOTI 实测稳态零额外开销。',
     elapsed: '38m',
-    updatedAgo: '4m ago',
+    updatedAgo: '4m',
+    diffStat: { added: 498, removed: 31 },
+    checksLabel: '729 passed',
     links: [
-      { label: 'llmserver MR !3953', kind: 'mr', url: 'https://code.byted.org/seed/llmserver/merge_requests/3953' },
-      { label: '飞书全链路瀑布图报告', kind: 'doc', url: 'https://bytedance.larkoffice.com/docx/TzbmdyYlioujByxeHPUcSSUCnAf' },
-      { label: 'InfoWall · P0 需求', kind: 'infowall', url: 'https://26ya5x44im.merlin-devbox.bytedance.net' },
+      { label: 'MR !3953', url: 'https://code.byted.org/seed/llmserver/merge_requests/3953' },
+      { label: '飞书瀑布图报告', url: 'https://bytedance.larkoffice.com/docx/TzbmdyYlioujByxeHPUcSSUCnAf' },
     ],
-    acceptancePassed: 5,
-    acceptanceTotal: 5,
-    changedFiles: [
-      'llmhub/router/session_trace.cc',
-      'llmserver/core/lifecycle_events.py',
-      'llmserver/omni/embed_tracer.py',
-      'tests/test_lifecycle_session_lineage.py',
-    ],
-    reviewRoundsSummary: 'Round 1 (GPT-6-Astra): BLOCK (1 P1 missing ForkSession lineage) → Fixed → Round 2: PASS',
     timeline: [
       {
         id: 't1',
-        stage: 'Dispatched in isolated worktree',
-        actor: 'Ted (Dot)',
-        modelBadge: 'orchestrator',
-        tone: 'start',
+        stage: '创建隔离工作树并拉起执行会话',
+        shortStage: 'Init',
+        actor: 'Ted',
+        tone: 'neutral',
         timeLabel: '12:21',
         deltaLabel: '0m',
-        summary: 'Created worktree operator-trace-20261111 from master and bound ephemeral chat worker.',
+        summary: '基于最新 master 建立 operator-trace-20261111，绑定 ephemeral 会话。',
       },
       {
         id: 't2',
-        stage: 'Round 1 · Implementation & m13_tiny live verification',
-        actor: 'Worker',
-        modelBadge: 'MASO · Argon High',
-        tone: 'work',
+        stage: '首轮实现与本机 m13_tiny 真机压测',
+        shortStage: 'Impl R1',
+        actor: 'Argon High',
+        tone: 'neutral',
         timeLabel: '12:41',
         deltaLabel: '+20m',
-        summary: 'Implemented +441 net LOC event hooks; ran 160 normal + KV eviction requests and published Feishu report.',
-        verification: 'pytest tests/test_lifecycle*.py (717 passed) · local m13_tiny GPU MIX verified',
+        summary: '完成核心单行 Hook 收敛（+441 LOC），实测正常流、KV 抢占与重放并产出飞书报告。',
+        receipt: 'pytest 717 passed · GPU memory cleanly released',
         sessionTabId: '6364744d',
         sessionArchived: true,
       },
       {
         id: 't3',
-        stage: 'Cross-Review Round 1 · Blocking gap found',
-        actor: 'Reviewer',
-        modelBadge: 'Codex · GPT-6-Astra',
-        tone: 'review_block',
+        stage: '异构交叉审查（第 1 轮）· 拦截 1 项 P1',
+        shortStage: 'Astra R1',
+        actor: 'GPT-6-Astra',
+        tone: 'warn',
         timeLabel: '12:52',
         deltaLabel: '+11m',
-        summary: 'BLOCK (1 P1): sticky route retries and ForkSession did not propagate parent session_id in envelope.',
+        summary: '指出粘性路由重试与 ForkSession 未透传父 session_id，跨轮生命周期会断链。',
         sessionTabId: '67e8ab53',
         sessionArchived: true,
       },
       {
         id: 't4',
-        stage: 'Round 2 · Lineage fix + Multimodal/8K scaling',
-        actor: 'Worker',
-        modelBadge: 'MASO · Argon High',
-        tone: 'work',
+        stage: '补齐 Session 血缘并加测 8K 长文与多模态',
+        shortStage: 'Fix R2',
+        actor: 'Argon High',
+        tone: 'neutral',
         timeLabel: '13:02',
         deltaLabel: '+10m',
-        summary: 'Added +57 LOC session_id & ForkSession propagation; verified 4.6K prefix-cache hit (222ms -> 99.4ms) and 3-image ViT AOTI.',
-        verification: 'pytest 729 passed · 0 lost events across 700 captured frames',
+        summary: '新增 +57 行透传 session_id 与 Fork 血缘；验证 Prefix-Cache 命中（TTFT 222ms → 99ms）。',
+        receipt: 'pytest 729 passed · 700/700 events matched',
         sessionTabId: '6364744d',
         sessionArchived: true,
       },
       {
         id: 't5',
-        stage: 'Cross-Review Round 2 · Consensus PASS',
-        actor: 'Reviewer',
-        modelBadge: 'Codex · GPT-6-Astra',
-        tone: 'review_pass',
+        stage: '异构交叉审查（第 2 轮）· 共识通过',
+        shortStage: 'Astra R2',
+        actor: 'GPT-6-Astra',
+        tone: 'pass',
         timeLabel: '13:06',
         deltaLabel: '+4m',
-        summary: 'PASS (0 P0, 0 P1): verified C++/Python envelope parity and clean GPU process teardown.',
+        summary: '确认 C++/Python 契约一致、无遗留阻塞项，准予交付验收。',
         sessionTabId: '67e8ab53',
         sessionArchived: true,
       },
     ],
-    transcriptPreview: [
-      { role: 'user', speaker: 'Goal Controller', time: '12:52', text: 'Address strict cross-review round 1: propagate session_id across sticky retries and ForkSession.' },
-      { role: 'tool', speaker: 'Edit · session_trace.cc', time: '12:55', text: '+28 -4 lines · attach parent_session_id on fork & replay headers' },
-      { role: 'tool', speaker: 'Bash · pytest', time: '13:00', text: 'tests/test_lifecycle_session_lineage.py .... 12 passed in 1.84s' },
-      { role: 'reviewer', speaker: 'GPT-6-Astra (R2)', time: '13:06', text: 'Verdict: PASS. All 5 acceptance criteria verified against git diff b2c4fe1.' },
+    transcriptExcerpt: [
+      { speaker: 'Goal Gate', time: '12:52', text: 'Round 1 blocked: propagate session_id across sticky retries and ForkSession.' },
+      { speaker: 'Argon High', time: '12:56', text: 'Updated session_trace.cc (+28 -4) and added 12 lineage regression tests.' },
+      { speaker: 'GPT-6-Astra', time: '13:06', text: 'Verdict PASS (0 P0, 0 P1). Verified against commit b2c4fe1.' },
     ],
-    rawInternalMeta: {
-      executionControl: 'workspace',
+    internalMeta: {
+      control: 'workspace',
       epoch: 2,
-      taskMode: 'reviewed',
-      sessionSeat: 'ephemeral (auto-release on accept)',
-      rawPromptPreview: '# Task brief from Dot\nGoal: Verify MR !3953 on local m13_tiny and ensure full session_id lifecycle...',
+      mode: 'strict_review',
+      seat: 'ephemeral · auto-release',
     },
   },
   {
     id: 'ce4513f8',
-    title: 'EVO 接入 USM Audio Encoder（MR1 迁移打平 + MR2 H20 算子融合加速）',
+    title: 'EVO 接入 USM Audio Encoder（迁移打平 + 算子融合双 MR）',
     workspace: 'evo_workspace',
     branch: 'codex/evo-usm-encoder',
     bucket: 'needs_you',
-    statusBadge: 'Needs decision · Stacked MRs ready',
+    statusLabel: 'Ready · Stacked MRs',
     statusTone: 'attention',
-    decisionPrompt: '双叠栈 MR 已就绪且 AudioProcessor 41 项单测 0.0 逐位对齐。是否直接将两个 Draft MR 转为 Ready 并通知群内评审？',
-    outcomeHeadline: 'MR !1379 实现 Eager/AOTI 0.0 误差打平；MR !1385 在 H20 上取得 1.81x–5.58x 端到端加速。',
+    decisionLine: 'AudioProcessor 41 项单测与 xperf_gpt_triton 0.0 误差对齐，H20 端到端提速 1.8x–5.6x。',
+    outcomeSummary: '已完成叠栈双 MR：MR !1379 负责权重加载、预处理逐位打平与 AOTI 导出；MR !1385 完成 Attention/Norm 融合加速。',
     elapsed: '54m',
-    updatedAgo: '19m ago',
+    updatedAgo: '19m',
+    diffStat: { added: 612, removed: 44 },
+    checksLabel: '41 parity passed',
     links: [
-      { label: 'xperf_evo MR !1379 (Parity)', kind: 'mr', url: 'https://code.byted.org/seed/xperf_evo/merge_requests/1379' },
-      { label: 'xperf_evo MR !1385 (Perf)', kind: 'mr', url: 'https://code.byted.org/seed/xperf_evo/merge_requests/1385' },
+      { label: 'MR !1379', url: 'https://code.byted.org/seed/xperf_evo/merge_requests/1379' },
+      { label: 'MR !1385', url: 'https://code.byted.org/seed/xperf_evo/merge_requests/1385' },
     ],
-    acceptancePassed: 4,
-    acceptanceTotal: 4,
-    changedFiles: [
-      'xperf_evo/models/audio/usm_encoder.py',
-      'xperf_evo/models/audio/audio_processor.py',
-      'tests/audio/test_usm_triton_parity.py',
-    ],
-    reviewRoundsSummary: 'Round 1 (Argon High): PASS (0 P0/P1, added H20 latency table to MR !1379)',
     timeline: [
       {
         id: 'u1',
-        stage: 'MR 1 · Migration, weight loader & AudioProcessor parity',
-        actor: 'Worker',
-        modelBadge: 'MASO · Argon High',
-        tone: 'work',
+        stage: 'MR 1 · 权重迁移与 AudioProcessor 0.0 对拍',
+        shortStage: 'MR 1 Parity',
+        actor: 'Argon High',
+        tone: 'neutral',
         timeLabel: '18:53',
         deltaLabel: '+24m',
-        summary: 'Aligned CMVN, padding and frame downsampling bitwise (max diff 0.0) with xperf_gpt_triton; exported AOTI bundle.',
-        verification: '41 parity unit tests passed on H20',
+        summary: '对齐 CMVN、Padding 与下采样帧长计算，完成 AOTI 无权重导出。',
+        receipt: 'max_abs_diff = 0.0 across 41 cases',
         sessionTabId: '3b3f8742',
         sessionArchived: true,
       },
       {
         id: 'u2',
-        stage: 'MR 2 · Fused Attention/Norm & CUDA Graph optimization',
-        actor: 'Helper Subagent',
-        modelBadge: 'Codex · GPT-6-Astra',
-        tone: 'work',
+        stage: 'MR 2 · H20 算子融合与 CUDA Graph 调优',
+        shortStage: 'MR 2 Perf',
+        actor: 'GPT-6-Astra',
+        tone: 'neutral',
         timeLabel: '19:21',
         deltaLabel: '+28m',
-        summary: 'Rebased perf branch onto MR !1379; benchmarked 0.6B rope_usm & 0.8B p6dense_usm (1.81x-5.58x speedup).',
-        verification: 'H20 benchmark suite + full audio test suite green',
+        summary: 'p6dense_usm B=16 延迟由 41.2ms 降至 7.38ms（5.58x），同步补充性能基线表。',
         sessionTabId: '57ad2f2d',
         sessionArchived: true,
       },
       {
         id: 'u3',
-        stage: 'Independent Cross-Review · PASS',
-        actor: 'Reviewer',
-        modelBadge: 'MASO · Argon High',
-        tone: 'review_pass',
+        stage: '独立交叉审查 · 通过',
+        shortStage: 'Review Pass',
+        actor: 'Argon High',
+        tone: 'pass',
         timeLabel: '19:32',
         deltaLabel: '+11m',
-        summary: 'Verified zero steady-state AOTI memory overhead and exact tensor shapes across batch sizes.',
+        summary: '核实 AOTI 稳态常驻零增量、双分支 rebase 干净。',
         sessionTabId: '8598b9fc',
         sessionArchived: true,
       },
     ],
-    transcriptPreview: [
-      { role: 'agent', speaker: 'Argon High', time: '19:18', text: 'AudioProcessor bitwise parity confirmed: max_abs_diff = 0.000000 across all 41 mel/CMVN edge cases.' },
-      { role: 'tool', speaker: 'Bash · bench_usm_h20.py', time: '19:26', text: 'p6dense_usm B=16: Eager 41.2ms -> Fused AOTI 7.38ms (5.58x speedup)' },
-      { role: 'reviewer', speaker: 'Reviewer', time: '19:32', text: 'Both stacked MRs are clean, minimal, and ready for human sign-off.' },
+    transcriptExcerpt: [
+      { speaker: 'Argon High', time: '19:18', text: 'Confirmed 0.000000 max diff against xperf_gpt_triton across all mel/CMVN shapes.' },
+      { speaker: 'GPT-6-Astra', time: '19:26', text: 'H20 benchmark: 0.6B rope_usm 2.41x, 0.8B p6dense_usm 5.58x.' },
     ],
-    rawInternalMeta: {
-      executionControl: 'workspace',
+    internalMeta: {
+      control: 'workspace',
       epoch: 1,
-      taskMode: 'reviewed',
-      sessionSeat: 'evo-workspace-agent-4 (archived)',
-      rawPromptPreview: 'Integrate USM Audio Encoder into xperf_evo following EVO ViT conventions in two stacked MRs...',
+      mode: 'reviewed',
+      seat: 'ephemeral · archived',
     },
   },
   {
     id: '9d6fb26a',
-    title: '拉起 LF M15.3 DSA 256卡 H20 Arena 评估并产出 Perf Toolkit 对比报告',
+    title: 'LF M15.3 DSA 256×H20 Arena 评估与 Perf 报告',
     workspace: 'evo_workspace',
-    branch: 'eval/m15-3-dsa-arena',
+    branch: 'eval/m15-3-dsa',
     bucket: 'working',
-    statusBadge: 'Working · Step 3/4',
+    statusLabel: '73% · 4,820/6,585',
     statusTone: 'working',
-    outcomeHeadline: 'Serving 256×H20 已就绪并完成 4,820 / 6,585 样本（73.2%），正在并发采集 P/D 阶段 SM 与 KV 水位曲线。',
-    liveActivityLine: 'Sampling Grafana QPM/P99 & KV cache utilization on trial 449604337 (73% done)',
-    liveStepCounts: '9 commands · 4 reads · 0 failed · 1 sub-agent',
+    outcomeSummary: 'Serving 256 卡 H20 稳定运行（GPU 利用率 84.6%，KV 水位 <78%），待尾段跑完自动生成飞书对比报告。',
+    liveStep: 'Sampling Grafana QPM & P99 on trial 449604337',
     elapsed: '26m',
-    updatedAgo: 'just now',
+    updatedAgo: 'now',
+    checksLabel: '84.6% GPU util',
     links: [
-      { label: 'Arena · pfas5zxr1l6af2f5ed', kind: 'arena', url: 'https://seed.bytedance.net/evaluation/arena/zvz2jc18yk67f66043' },
+      { label: 'Arena Task', url: 'https://seed.bytedance.net/evaluation/arena/zvz2jc18yk67f66043' },
     ],
-    acceptancePassed: 2,
-    acceptanceTotal: 4,
-    changedFiles: ['outputs/m15-3-dsa/perf_summary.json'],
-    reviewRoundsSummary: 'Pending completion before final verification',
     timeline: [
       {
         id: 'w1',
-        stage: 'Configuration readback & 256×H20 launch',
-        actor: 'Worker',
-        modelBadge: 'MASO · Argon High',
-        tone: 'start',
+        stage: '基线继承校验与 256×H20 实例拉起',
+        shortStage: 'Launch',
+        actor: 'Argon High',
+        tone: 'pass',
         timeLabel: '22:18',
         deltaLabel: '0m',
-        summary: 'Cloned baseline 8bi4ulgf3n6aeec0d4 with zero unintended diff; Serving job a0c9a489e1af587a entered RUNNING.',
+        summary: 'configuration_readback 零非预期差异，推理侧进入 RUNNING。',
         sessionTabId: '62506836',
       },
       {
         id: 'w2',
-        stage: 'Mid-run health & tail-latency probe',
-        actor: 'Worker',
-        modelBadge: 'MASO · Argon High',
+        stage: '持续采样吞吐与长尾样本进度',
+        shortStage: 'Sampling',
+        actor: 'Argon High',
         tone: 'live',
         timeLabel: '22:44',
         deltaLabel: '+26m',
-        summary: 'GPU utilization steady at 84.6% (above 30% kill line); 0 CUDA OOMs; 4,820/6,585 samples scored.',
+        summary: '已完成 4,820/6,585 题，0 OOM，QPM 148.4。',
         sessionTabId: '62506836',
       },
     ],
-    transcriptPreview: [
-      { role: 'tool', speaker: 'merlin-cli arena get', time: '22:42', text: 'status=RUNNING progress=4820/6585 (73.2%) qpm=148.4 gpu_util_avg=84.6%' },
-      { role: 'agent', speaker: 'Argon High', time: '22:44', text: 'Throughput is healthy and KV slots stay below 78%; waiting for final 26% tail before generating Feishu perf report.' },
+    transcriptExcerpt: [
+      { speaker: 'merlin-cli', time: '22:44', text: 'progress=4820/6585 (73.2%) qpm=148.4 gpu_util_avg=84.6% oom=0' },
     ],
-    rawInternalMeta: {
-      executionControl: 'initiator',
+    internalMeta: {
+      control: 'initiator',
       epoch: 1,
-      taskMode: 'subagent',
-      sessionSeat: 'ephemeral chat',
-      rawPromptPreview: 'Launch LF M15.3 DSA evaluation against baseline and generate evoserver-perf-toolkit comparison...',
+      mode: 'subagent',
+      seat: 'ephemeral chat',
     },
   },
   {
     id: '43cedad4',
-    title: 'GB200 SM100 算子级异步指标采集与开销实测（Nsight Perf SDK / CUPTI）',
-    workspace: 'llmserver-evo-workspace',
-    branch: 'feat/gb200-async-op-metrics',
+    title: 'GB200 SM100 算子级异步指标采集与开销实测',
+    workspace: 'llmserver-evo',
+    branch: 'feat/gb200-cupti',
     bucket: 'working',
-    statusBadge: 'Cross-reviewing · Round 1/3',
+    statusLabel: 'Reviewing · R1/3',
     statusTone: 'working',
-    outcomeHeadline: 'Worker 已完成 4×GB200 实机单 Pass 计数器采集验证（开销 0.4%），当前异构 Reviewer 正在核对 CUDA Graph 兼容性。',
-    liveActivityLine: 'Subagent Argon High reviewing git diff (328 LOC) & GB200 benchmark logs…',
-    liveStepCounts: '14 edits · 11 commands · 0 failed · Reviewer active',
+    outcomeSummary: '4×GB200 真机单 Pass CUPTI 采样已跑通（延迟开销 +0.4%），当前异构 Reviewer 正在审查 CUDA Graph 捕获路径。',
+    liveStep: 'Argon High reviewing cupti_range_sampler.py (328 LOC)',
     elapsed: '19m',
-    updatedAgo: '1m ago',
+    updatedAgo: '1m',
+    diffStat: { added: 328, removed: 19 },
+    checksLabel: '28 passed',
     links: [
-      { label: 'llmserver Draft MR !3961', kind: 'mr', url: 'https://code.byted.org/seed/llmserver/merge_requests/3961' },
+      { label: 'Draft MR !3961', url: 'https://code.byted.org/seed/llmserver/merge_requests/3961' },
     ],
-    acceptancePassed: 3,
-    acceptanceTotal: 4,
-    changedFiles: [
-      'llmserver/profiler/cupti_range_sampler.py',
-      'llmserver/profiler/gb200_counters.yaml',
-      'tests/profiler/test_cupti_graph_replay.py',
-    ],
-    reviewRoundsSummary: 'Round 1 in progress (MASO · Argon High)',
     timeline: [
       {
         id: 'g1',
-        stage: 'Implementation & 4×GB200 SSH live probe',
-        actor: 'Worker',
-        modelBadge: 'Codex · GPT-6.1-Sol',
-        tone: 'work',
+        stage: '实现单 Pass 采集器并完成 4×GB200 实测',
+        shortStage: 'Impl',
+        actor: 'Codex Sol',
+        tone: 'pass',
         timeLabel: '22:31',
         deltaLabel: '+16m',
-        summary: 'Implemented single-pass CUPTI periodic sampler on n125-154-036 (driver 580.167); measured +0.4% latency delta.',
-        verification: 'ssh tiger@gb200 pytest tests/profiler -> 28 passed',
+        summary: '在 n125-154-036（Driver 580.167）实测开销 0.4%，28 项单测通过。',
         sessionTabId: 'a4c8a1ed',
       },
       {
         id: 'g2',
-        stage: 'Strict Cross-Review Gate (Round 1/3)',
-        actor: 'Reviewer',
-        modelBadge: 'MASO · Argon High',
+        stage: '严格交叉审查第 1 轮进行中',
+        shortStage: 'Review R1',
+        actor: 'Argon High',
         tone: 'live',
         timeLabel: '22:47',
         deltaLabel: '+3m',
-        summary: 'Checking multi-stream serialization and container privilege fallback paths.',
+        summary: '核查多流并发串行化与容器权限降级逻辑。',
         sessionTabId: 'sa-91bc04',
       },
     ],
-    transcriptPreview: [
-      { role: 'agent', speaker: 'Codex Worker', time: '22:46', text: 'Emitted <goal-status state="complete"> after verifying 0.4% overhead on 4xGB200.' },
-      { role: 'reviewer', speaker: 'Argon High (R1)', time: '22:47', text: 'Inspecting cupti_range_sampler.py:142 for unguarded context teardown during CUDA Graph capture...' },
+    transcriptExcerpt: [
+      { speaker: 'Argon High', time: '22:47', text: 'Checking context teardown safety during CUDA Graph capture in cupti_range_sampler.py:142…' },
     ],
-    rawInternalMeta: {
-      executionControl: 'workspace',
+    internalMeta: {
+      control: 'workspace',
       epoch: 1,
-      taskMode: 'reviewed',
-      sessionSeat: 'llmserver-agent-2',
-      rawPromptPreview: 'Implement async operator metrics on GB200 and measure overhead...',
+      mode: 'strict_review',
+      seat: 'llmserver-agent-2',
     },
   },
   {
     id: 'd212d01c',
-    title: '[飞书自动答疑] 10B eval干活群 @提及：伴生评测 step 1000-4000 失败双根因排查',
+    title: '飞书 @答疑 · 10B 伴生评测 step 1000–4000 失败根因排查',
     workspace: 'evo_workspace',
-    branch: 'read-only-triage',
+    branch: 'feishu-triage',
     bucket: 'done',
-    statusBadge: 'Auto-accepted · Ephemeral cleaned',
+    statusLabel: 'Auto-archived',
     statusTone: 'done',
-    outcomeHeadline: '自动定位双根因（kvheads=1 量化压成 1D 致权重加载断言失败 + v948 模板 tp=1 端口仅分配 16 个），已留档 InfoWall 并推送飞书回复草稿。',
+    outcomeSummary: '定位 kvheads=1 一维权重挤压断言失败与 v948 模板端口不足双根因；已写入 InfoWall 并将 140 字回复草稿发至飞书私聊。',
     elapsed: '6m',
-    updatedAgo: '1h ago',
+    updatedAgo: '1h',
+    checksLabel: 'InfoWall synced',
     links: [
-      { label: 'InfoWall · 10B 伴生排障记录', kind: 'infowall', url: 'https://26ya5x44im.merlin-devbox.bytedance.net' },
-      { label: '飞书原话题消息', kind: 'doc', url: 'https://bytedance.larkoffice.com' },
+      { label: 'InfoWall 记录', url: 'https://26ya5x44im.merlin-devbox.bytedance.net' },
     ],
-    acceptancePassed: 3,
-    acceptanceTotal: 3,
-    changedFiles: [],
-    reviewRoundsSummary: 'Read-only triage verified by Dot · session auto-archived',
     timeline: [
       {
         id: 'd1',
-        stage: 'Feishu @-mention patrol triggered ephemeral task',
-        actor: 'Ted (Dot)',
-        modelBadge: 'patrol',
-        tone: 'start',
+        stage: '飞书巡检捕获未回话题 @提及',
+        shortStage: 'Patrol',
+        actor: 'Ted',
+        tone: 'neutral',
         timeLabel: '18:24',
         deltaLabel: '0m',
-        summary: 'Detected unanswered @-mention in thread of「10B eval干活群」; spawned read-only ephemeral worker.',
+        summary: '「10B eval干活群」话题内检测到异常求助，自动拉起只读 ephemeral 排查任务。',
       },
       {
         id: 'd2',
-        stage: 'Log + HDFS checkpoint header + template root-cause',
-        actor: 'Worker',
-        modelBadge: 'MASO · Argon High',
-        tone: 'work',
+        stage: 'HDFS 权重头与模板参数双根因取证',
+        shortStage: 'Diagnose',
+        actor: 'Argon High',
+        tone: 'pass',
         timeLabel: '18:29',
         deltaLabel: '+5m',
-        summary: 'Verified 1D (128,) kv_chunk shape in HDFS safetensors header and 16-vs-20 port gap in EVO_SERVER:v948.',
+        summary: '核实 safetensors 形状 (128,) 及 v948 模板 16 端口限制，生成群回复草稿。',
         sessionTabId: '4cd82e90',
         sessionArchived: true,
       },
       {
         id: 'd3',
-        stage: 'InfoWall archived + Feishu draft sent + Session cleaned',
-        actor: 'Ted (Dot)',
-        modelBadge: 'auto-close',
-        tone: 'done',
+        stage: 'InfoWall 留档 + 飞书私聊推送 + 自动结项回收',
+        shortStage: 'Closed',
+        actor: 'Ted',
+        tone: 'pass',
         timeLabel: '18:30',
         deltaLabel: '+1m',
-        summary: 'Recorded progress to InfoWall demand, sent 140-char Chinese reply draft to user DM, and cleaned up ephemeral session.',
+        summary: '自动执行 task accept --cleanup-session，零残留会话。',
       },
     ],
-    transcriptPreview: [
-      { role: 'tool', speaker: 'merlin-cli job logs', time: '18:26', text: 'AssertionError: expected 2D kv_chunk [num_kv_heads, head_dim], got shape (128,)' },
-      { role: 'agent', speaker: 'Dot Summary', time: '18:30', text: 'Draft sent to Feishu DM & task auto-accepted (--cleanup-session).' },
+    transcriptExcerpt: [
+      { speaker: 'Ted', time: '18:30', text: 'Synced to InfoWall & sent reply draft to Feishu DM; ephemeral session released.' },
     ],
-    rawInternalMeta: {
-      executionControl: 'workspace',
+    internalMeta: {
+      control: 'workspace',
       epoch: 1,
-      taskMode: 'subagent',
-      sessionSeat: 'ephemeral (cleaned up)',
-      rawPromptPreview: 'Read-only triage of Feishu @-mention in 10B eval group...',
+      mode: 'subagent',
+      seat: 'cleaned',
     },
   },
   {
     id: '65bba110',
-    title: 'Claude Hub SQLite WAL 统一存储收敛 + InfoWall 增量水位无缝切换',
+    title: 'Claude Hub SQLite WAL 存储收敛与 InfoWall 无损切流',
     workspace: 'claude_hub',
     branch: 'codex/sqlite-storage',
     bucket: 'done',
-    statusBadge: 'Done · Merged 65bba11',
+    statusLabel: 'Merged · 65bba11',
     statusTone: 'done',
-    outcomeHeadline: '活跃体积 -46.1%（1997MB→1076MB），单次任务保存快 4 倍、流尾读取快 191 倍，1,698 条 InfoWall 增量记录 0 误差对齐。',
+    outcomeSummary: '活跃数据体积下降 46.1%，单次任务保存提速 4 倍、流尾读取快 191 倍；InfoWall 1,698 条记录 0 误差衔接。',
     elapsed: '42m',
-    updatedAgo: '3h ago',
+    updatedAgo: '3h',
+    diffStat: { added: 1120, removed: 684 },
+    checksLabel: '7,539 passed',
     links: [
-      { label: 'Working Log · sqlite-storage', kind: 'doc', url: 'https://github.com/Pegessi/claude_hub' },
+      { label: 'Commit 65bba11', url: 'https://github.com/Pegessi/claude_hub' },
     ],
-    acceptancePassed: 6,
-    acceptanceTotal: 6,
-    changedFiles: [
-      'backend/claude_hub/services/local_storage.py',
-      'backend/claude_hub/services/storage_maintenance.py',
-    ],
-    reviewRoundsSummary: 'Round 1 (Argon High): fixed 1 P1 + 6 P2s → Round 2: MERGE (6,260 backend + 1,279 frontend tests green)',
     timeline: [
       {
         id: 's1',
-        stage: 'SQLite WAL implementation & benchmark on 2.22M events',
-        actor: 'Worker',
-        modelBadge: 'Codex · GPT-6.1-Sol',
-        tone: 'work',
+        stage: '统一 SQLite WAL 存储实现与 222 万条事件压测',
+        shortStage: 'Impl',
+        actor: 'Codex Sol',
+        tone: 'neutral',
         timeLabel: '00:05',
         deltaLabel: '+26m',
-        summary: 'Consolidated 353 streams and 16 state documents into storage.sqlite3 with zstd/zlib compression.',
+        summary: '收敛 353 条流与 16 份状态文档，移除双写包装层。',
         sessionTabId: 'fd83a1cb',
         sessionArchived: true,
       },
       {
         id: 's2',
-        stage: 'Adversarial Cross-Review + Fix + Fast-forward merge',
-        actor: 'Reviewer',
-        modelBadge: 'MASO · Argon High',
-        tone: 'done',
+        stage: '异构审查修复 1 P1 + 快进合入 main',
+        shortStage: 'Merged',
+        actor: 'Argon High',
+        tone: 'pass',
         timeLabel: '00:31',
         deltaLabel: '+16m',
-        summary: 'Fixed eager runtime import bug (P1) and SHA-256 row cache; fast-forwarded main and auto-cleaned sessions.',
+        summary: '修复顶层导入触碰默认库问题，6,260 后端 + 1,279 前端单测全绿后自动关单。',
         sessionTabId: 'd092ac57',
         sessionArchived: true,
       },
     ],
-    transcriptPreview: [
-      { role: 'reviewer', speaker: 'Argon High', time: '00:28', text: 'Verified 6,260 backend + 1,279 frontend tests pass; cold workspace read improved 165.5ms -> 58.4ms.' },
+    transcriptExcerpt: [
+      { speaker: 'Argon High', time: '00:31', text: 'Fast-forwarded main to 65bba11; worker and reviewer sessions archived.' },
     ],
-    rawInternalMeta: {
-      executionControl: 'workspace',
+    internalMeta: {
+      control: 'workspace',
       epoch: 1,
-      taskMode: 'reviewed',
-      sessionSeat: 'claude-hub-agent-4 (cleaned up)',
-      rawPromptPreview: 'Consolidate JSON and JSONL persistence into SQLite WAL...',
+      mode: 'reviewed',
+      seat: 'cleaned',
     },
   },
 ]
