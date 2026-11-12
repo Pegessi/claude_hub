@@ -611,8 +611,10 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(dialog).not_to_be_visible()
             assert len(goal_creates[-1]["attachments"]) == 1
             assert goal_creates[-1]["objective"] == "Build from the attached reference"
-            # Nothing asked for approval, so nothing sends the gate either.
+            # Nothing asked for approval, so nothing sends the gate either;
+            # Strict cross-review opens checked by default.
             assert goal_creates[-1]["plan_first"] is False, goal_creates[-1]
+            assert goal_creates[-1]["strict_review"] is True, goal_creates[-1]
             await page.set_viewport_size({"width": 390, "height": 844})
             await page.screenshot(path=str(output / "goal-controls-mobile.png"), full_page=True)
             report["screenshots"].append("goal-controls-mobile.png")
@@ -628,9 +630,12 @@ async def main(browser_run: BrowserRun) -> None:
             await page.get_by_role("menuitem", name="Set a Goal").click()
             dialog = page.get_by_role("dialog", name="Set a Goal", exact=True)
             plan_toggle = dialog.get_by_label("Plan first", exact=True)
+            strict_toggle = dialog.get_by_label("Strict cross-review", exact=True)
             # No approval gate unless asked for: a new Goal starts working, so
-            # the option opens unchecked and says so.
+            # the option opens unchecked and says so. Strict cross-review opens checked.
             await expect(plan_toggle).not_to_be_checked()
+            await expect(strict_toggle).to_be_checked()
+            await expect(dialog.get_by_text("Consensus gate", exact=True)).to_be_visible()
             await expect(dialog.get_by_text("starts working immediately")).to_be_visible()
             await dialog.get_by_role("textbox").fill("Plan the cache before building it")
             # Opting in is what turns the review gate (and its card) on.
@@ -729,9 +734,13 @@ async def main(browser_run: BrowserRun) -> None:
                 }""")
             report["screenshots"].append("goal-setup-plan-first-mobile.png")
             await page.set_viewport_size({"width": 1440, "height": 900})
+            strict_toggle = dialog.get_by_label("Strict cross-review", exact=True)
+            await strict_toggle.uncheck()
+            await expect(strict_toggle).not_to_be_checked()
             await dialog.get_by_role("button", name="Start Goal", exact=True).click()
             await expect(dialog).not_to_be_visible()
             assert goal_creates[-1]["plan_first"] is True, goal_creates[-1]
+            assert goal_creates[-1]["strict_review"] is False, goal_creates[-1]
             assert goal_creates[-1]["objective"] == "Plan the cache before building it"
 
             # A planning turn that parked on needs_input renders the approval

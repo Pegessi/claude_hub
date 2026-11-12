@@ -45,7 +45,7 @@ class GoalRunStore:
                 key: {
                     name: item
                     for name, item in value.items()
-                    if name in {"tab_id", "objective", "images", "plan_first"}
+                    if name in {"tab_id", "objective", "images", "plan_first", "strict_review"}
                 }
                 for key, value in payload.get("create_inputs", {}).items()
             }
@@ -125,6 +125,8 @@ class GoalRunStore:
                 supplied["images"] = fingerprint
             if request.plan_first:
                 supplied["plan_first"] = True
+            if request.strict_review:
+                supplied["strict_review"] = True
             if original != supplied:
                 raise ValueError("client_request_id was already used for another create")
             return prior.model_copy(deep=True)
@@ -139,6 +141,8 @@ class GoalRunStore:
                 or GoalRunCreate(
                     objective=goal.objective,
                     client_request_id=client_request_id,
+                    plan_first=goal.plan_first,
+                    strict_review=goal.strict_review,
                 ),
             )
             if replay is not None:
@@ -162,6 +166,8 @@ class GoalRunStore:
                 self._create_inputs[client_request_id]["images"] = goal.pending_image_fingerprint
             if goal.plan_first:
                 self._create_inputs[client_request_id]["plan_first"] = True
+            if goal.strict_review:
+                self._create_inputs[client_request_id]["strict_review"] = True
             try:
                 self._save()
             except Exception:

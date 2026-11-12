@@ -7,6 +7,18 @@
 
 ## Released
 
+### feat(goal): add optional Strict cross-review consensus gate to Chat Goals
+
+- `GoalSetupDialog` adds a `Strict cross-review` option card alongside `Plan first`
+  (defaulting on and remembered under `claude-hub.goal-strict-review.v1`), while
+  callers omitting `strict_review` preserve existing behavior unchanged.
+- When `strict_review` is enabled, Goal creation routes through `hub_managed`
+  execution (including on Codex Chats) and intercepts `<goal-status state="complete">`
+  to run a read-only cross-model reviewer subagent via `SubagentService`.
+- Zero `P0`/`P1` findings (`PASS`) completes the Goal; blocking findings
+  automatically feed into the next continuation round (up to 3 rounds before
+  parking on `blocked`), with round history exposed in `GoalStatusBar`.
+
 ### fix(ui): keep Safari Chat in view and open attachments on touch
 
 - Active mobile Chat follows the visual viewport's position as well as height,

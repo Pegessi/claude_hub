@@ -40,6 +40,9 @@ export function goalObservationVersion(goal: ChatGoal | null): string {
     goal.provider_goal_created_at ?? '',
     goal.provider_updated_at ?? '',
     goal.provider_status ?? '',
+    goal.strict_review ? '1' : '0',
+    goal.strict_review_rounds ?? 0,
+    goal.strict_review_in_progress ? '1' : '0',
   ].join('\u0000')
 }
 
@@ -49,6 +52,7 @@ export function goalTurnCompletionReflected(
   baselineVersion: string,
 ): boolean {
   if (!goal || goal.status !== 'active') return true
+  if (goal.strict_review_in_progress) return false
   if (turnId && (goal.completed_turn_ids?.includes(turnId) || goal.checkpoint?.turn_id === turnId)) return true
   if (goal.execution_owner === 'provider_native') return goalObservationVersion(goal) !== baselineVersion
   return turnId ? false : goalObservationVersion(goal) !== baselineVersion
