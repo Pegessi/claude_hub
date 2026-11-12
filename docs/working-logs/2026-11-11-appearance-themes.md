@@ -744,3 +744,79 @@ and complete fixed-SHA independent review remain pending at this record update.
 Their actual results must be recorded before delivery. The user-authorized IPv6
 preview on 5358 remains available; temporary reviewer/test servers retain
 separate owners.
+
+## 2026-11-12: reference-led illustration fidelity
+
+The preceding candidate was delivered as `fe396b3`: the complete fixed-SHA
+Gemini review approved it without actionable findings, and serial `all`, all24
+browser scenarios,13terminal-HMR and29terminal-replay checks passed. It was
+pushed to the existing branch, both owned Hub children closed and the same Task
+completed/released at epoch5/revision44. Those results do not validate this new
+artwork iteration.
+
+The user now likes the UI but finds the figures/elements too abstract and asks
+for reference images and Gemini Argon to bring them closer to game original
+art. The accepted borderless layout, subdued background, primary UI colors,
+neutral themes and appearance lifecycle remain the baseline. This continues
+the same initiator-owned Task at epoch6; it is not a new settings feature or a
+main-service operation.
+
+Actual downloaded/viewed references are recorded with source links and hashes
+under `tasks/theme-reference-fidelity/references/`. They include an Eous portrait
+from the game wiki's static mirror, RDR2 key art from official Steam CDNs and a
+classic2013 Rockstar trio illustration mirrored by GTA BOOM and tied to its
+May2013 official release. The Steam RDR landscape and GTA street-map assets are
+background-only references, not proof of character appearance. Failed TLS/proxy
+downloads and a missing optional `file` utility are not reported as image checks;
+successful images were opened and inspected. Public reference access is not a
+license to bundle those images or reproduce their watermarks/logos.
+
+Viewing the Eous image corrects an earlier text-only claim about a lime vest:
+the reference actually has a charcoal staff jacket, large orange01 neckerchief,
+white egg-shaped body, bent orange-inset ears and lime oval-ring eyes. Classic
+2013 GTA references replace a mistakenly suggested2025GTAOnline Michael image.
+Image content, not labels or metadata alone, guides the illustration decisions.
+
+A fresh MASO `gemini-4-argon_reasoning_high` designer first draws an original
+Eous study under the ignored research directory. Parent renders it beside the
+reference on light/dark backgrounds and at reduced sizes; its three-quarter
+proportions, clothing layers and lit/shadow masses materially improve on the
+previous diagram-like treatment. This is only an illustration proof, not actual
+app acceptance. Production scope is restricted to the three existing scene SVGs.
+The first production render uses fuller tonal ranges and a 0.24 outer drawing
+group. Its original strict Goal scenario passes in 82.738s with all 12 actual
+views and nine original artwork/icon/frame negatives; visible area is at least
+11.2561% and maximum changed-pixel p95 is 57. Parent inspection confirms the
+reference-derived clothing, lit/shadow masses, character pose and equipment
+volumes instead of the earlier wireframe-like figures. This remains stylized
+vector art, not an exact official portrait reproduction.
+
+That same snapshot fails the original Queue reading check in 27.387s. Frontier
+light status ink `(87,69,53)` over actual sampled background `(190,178,170)` is
+4.392748558:1 by the parent's independent sRGB recomputation; an actual painted
+glyph witness also fails. It is not merely quantization margin or an unsupported
+paint stop. The Goal PASS does not override this failure. A separate all-colors /
+glow-stop calculation flags similar possible overlaps elsewhere, but is recorded
+as a conservative risk bound, not a measured failure.
+
+After QA closes its runtime and verifies all source/test hashes, the parent
+reduces only the three outer drawing groups from 0.24 to 0.20. Reverse-restoring
+those values reproduces the exact first snapshot hashes; drawing geometry,
+colors, UI tokens and tests remain unchanged. The fixed visibility/salience and
+4.5:1 reading requirements are not weakened. Frozen02 then passes the original
+strict Queue (38.393s) and Goal (83.031s): 132 reading plus 12 pending positives,
+minimum conservative contrast 4.780306560:1, minimum pending 5.554106596:1,
+12 actual scene pairs with at least 7.87529% visible area and maximum p95 of 48.
+All four reading and nine original artwork/icon/frame negatives reject and
+restore. Parent independently recomputes all 84 sampled-backdrop bounds among
+the 144 positives and verifies all 20 bound product/test hashes. Non-SVG source
+and all tests still match the accepted baseline byte-for-byte.
+
+Parent inspects final actual desktop/phone imagery against the viewed references:
+material volume, characteristic clothing, poses and shadow masses replace the
+old abstract outlines; main subjects and landmark lettering remain visible.
+This is a qualitative judgment of an original vector interpretation, not an
+exact likeness certificate. Owned QA contexts/browser/driver and port5366 are
+closed; its inner process-tree limit remains explicit. Complete fixed-SHA
+independent review and serial all/browser/HMR/replay gates remain pending at
+this record update and must be recorded before branch delivery.
