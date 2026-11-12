@@ -820,3 +820,129 @@ exact likeness certificate. Owned QA contexts/browser/driver and port5366 are
 closed; its inner process-tree limit remains explicit. Complete fixed-SHA
 independent review and serial all/browser/HMR/replay gates remain pending at
 this record update and must be recorded before branch delivery.
+
+## 2026-11-12: native painted artwork instead of geometric avatars
+
+The preceding reference-led SVG revision shipped as `c60f742` with fixed-SHA
+independent approval, all24browser,13HMR,29replay and standard checks passing.
+Those checks established technical behavior, not user aesthetic acceptance:
+the user still finds the character drawing unattractive. The requested helper
+changes from Pai Claude to **Cursor Carbon** before any Pai Claude dispatch.
+The same initiator-controlled Task continues at epoch7; no main merge or shared
+service operation is authorized.
+
+The local Cursor catalog omitted Carbon, but an explicit `carbon` launch failed
+and advertised the actual `gemini-4-carbon-high` family. That failed probe is
+closed; the retained artist uses the exact advertised high model, not Auto.
+It can use native `cursor:GenerateImage`, unlike the prior path-only approach.
+The image generator's underlying model is not separately reported by that tool;
+Carbon is the selected drawing agent, not an assertion about that hidden backend.
+
+Two first human-character studies demonstrate natural adult anatomy and painted
+or print-style values. Parent and an independent visual critic actually view
+them against the references. The studies are not accepted unchanged: Michael
+looks too generic, Arthur's hand/gun is muddy, and the synthetic UI composite
+still shows rectangular image windows. Its opacity/pixel calculations are not
+real UI acceptance. Findings: `tasks/theme-art-redraw/study-independent-review.md`.
+
+A bounded follow-up uses the actual named game characters and the already viewed
+reference images as native generator inputs. The selected masters depict the
+classic Michael/Franklin/Trevor trio with distinct clothing and faces, Arthur
+with sun/revolver/seven riders, and Eous with orange01 scarf, staff jacket and
+retro electronics. Generation prompts, input paths, variants and limitations
+are preserved in `tasks/theme-art-redraw/production-art/HANDOFF.md`. These are
+reference-conditioned generated interpretations, not official licensed artwork,
+proof of independent originality or exact likeness. No raw reference file or
+runtime remote image request is introduced into the app.
+
+Parent rejects the artist's1200x480 derivative crops: the GTA hair/scalps meet
+the top boundary and Eous's lower body is cut. Instead, the complete1280x720
+masters are proportionally reduced to1200x675 with no source crop. True alpha
+feathering covers all four image edges, including painted backgrounds; it does
+not affect foreground UI descendants. The first candidate bakes opacity0.16
+and verifies all decoded outer-edge alpha values are zero. This asset probe and
+a viewed light/dark edge composite only validate compositing, not in-app text
+contrast. Compositing code/records: `tasks/theme-art-redraw/compose_art.py` and
+`composited-01/` under the same evidence root.
+
+Only the three `--palette-scene` URLs change in treatment CSS. The old SVG files
+are removed rather than kept beside duplicate loaders or base64 wrappers. The
+existing Timeline, Workspace/empty, Sidebar and picker consumers decode direct
+local WebP assets; layout, theme IDs/state, icons and all palette tokens remain
+unchanged. Reversing the three URL suffix changes reproduces the baseline CSS
+byte-for-byte, preserving all five neutral themes. No dependency or component
+is added.
+
+`product-frozen-01.json` binds13product and7test files for original strict Queue
+and Goal checks. Actual desktop/phone framing and every real backdrop remain
+acceptance gates: larger decorative wallpaper can sit beneath semantic cards,
+but it must remain useful and identifiable in ordinary reading/empty contexts
+without forcing art-only spacing or weakening text/visibility requirements.
+Source-bound real UI review and complete final fixed-SHA gates are pending at
+this update; no passing suite or master-image review is presented as proof of
+human taste, exhaustive accessibility, physical-device or provider integration.
+
+The first native-raster snapshot passes strict Queue in38.676s (144 reading
+samples, minimum5.2475761:1) but fails Goal's first Zenless/dark artwork guard:
+only2281/151296 exposed pixels change by at least12 (1.50764065%, below5%).
+The exact pair shows feet/lower image below the opaque plan card. Actual short
+Queue screenshots also show the full16:9 image exceeding the timeline height
+and clipping heads at the viewport top. A readable image is not an accepted
+composition; this failure remains in `qa/attempt-01/`.
+
+Snapshot02 recomposes the native art into a shallow1200x320 transparent canvas,
+using proportional, head-safe bust crops rather than cropping the top of the
+artist's masters. It changes only the three WebP files, not CSS/layout or tests.
+Strict Queue again passes (38.089s, minimum5.5448667:1); Goal still fails on
+Zenless/dark (3840/151296,2.5380711%, p9534). No full game matrix was reached or
+fabricated after either strict failure. Both attempts close their owned
+runtimes and preserve exact source-before/after and failure evidence.
+
+Snapshot03 retains the02GTA/Frontier compositions and makes Eous a larger
+upper-body portrait at nominalalpha0.18. This deliberately trims the lower body,
+not the ears/head; it is no longer claimed to show a complete figure. Native
+painting is preserved, while the limited bottom band receives the character's
+face/scarf rather than just feet. An asset-only geometry comparison against the
+previous OFF image guides this placement, but is explicitly not an actual UI
+pass. Source/test binding is `product-frozen-03.json`; original120s limits and
+all visibility, salience, contrast and negative-control requirements remain.
+The Cursor artist's two completed turns are closed with reports/master images
+retained; parent owns composition, final checks, review and delivery.
+
+Snapshot03 passes original strict Queue (38.409s) and Goal (82.590s), with all12
+actual desktop/phone images,144reading positives and13negative/restoration
+checks. Parent independently recomputes all84sampled contrast bounds and checks
+their worst RGB against the saved PNG pixels, plus all12actual artwork ON/OFF
+pairs: minimum5.467051326:1, visible area at least5.637954738%, maximum p9545.
+All20bound product/test hashes match. These are scoped results, not final gates.
+
+Independent precommit review inspects all18actual Goal/Queue views, representative
+baseline images, and the bounded nine-file candidate. It confirms materially
+better character recognition and no visible must-fix anatomy/text-control issue,
+but identifies a remaining straight-topped colored field in light Queue views.
+Alpha-zero outer edges alone do not guarantee a seamless-looking background.
+Borderlessness is a user requirement, so this is fixed rather than deferred as
+an unresolved taste question.
+
+Snapshot04 extends only the upper background fade from6% to30% of each prepared
+image, using soft spatial head/hat/ear regions to preserve subject values. Native
+painting, crops, placement, maximum opacity and all UI/CSS/tests stay unchanged;
+only the three WebP assets are regenerated. Source binding is
+`tasks/theme-art-redraw/product-frozen-04.json`; compositing records include the
+precise regions and decoded alpha bounds. New actual rendering and narrow visual
+follow-up must confirm this repair before commit/final verification. Dense Goal
+cards may cover upper decorative art; ordinary reading views are the stronger
+character/edge evidence, and no claim of always-visible complete figures is made.
+
+Snapshot04 passes original Queue (38.473s) and Goal (82.993s), retaining all18
+requested real views. Parent independently checks84worst backdrop pixels and
+contrast bounds and recomputes all12image pairs: minimum5.467051326:1, visible
+area at least5.638615694%, maximum p9545. All144reading positives and13original
+negative/restoration checks pass; source hashes match and the owned5366runtime
+closes. Independent follow-up confirms the straight-topped fields now dissolve
+into diffuse washes with the characters preserved, with no new material visual
+finding. Soft local halos and some upper-art occlusion under dense Goal cards
+remain explicit, nonblocking limits. The favorable precommit review does not
+stand in for the subsequent committed-SHA all/browser/HMR/replay gates or final
+human aesthetic acceptance. Full evidence: `qa/attempt-04/HANDOFF.md`,
+`parent-proof-check-04.json` and `precommit-review-04.md` under the redraw root.
