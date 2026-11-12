@@ -26,6 +26,10 @@
         aria-hidden="true"
       />
       <strong>{{ statusText }}</strong>
+      <span
+        v-if="goal.strict_review"
+        class="goal-strict-pill"
+      >{{ strictPillText }}</span>
       <span class="goal-objective">{{ goal.objective }}</span>
       <span
         class="goal-status-chevron"
@@ -88,6 +92,7 @@
           </p>
           <div class="goal-status-meta">
             <span>{{ goal.execution_owner === 'provider_native' ? 'Managed by provider' : 'Managed by Claude Hub' }}</span>
+            <span v-if="goal.strict_review">Strict cross-review ({{ goal.strict_review_rounds ?? 0 }}/{{ goal.strict_review_max_rounds ?? 3 }})</span>
             <span>Started {{ formatTime(goal.created_at) }}</span>
             <span>Updated {{ formatTime(goal.updated_at) }}</span>
           </div>
@@ -127,6 +132,37 @@
           >
             Checkpoint was not updated: {{ goal.checkpoint_warning }}
           </p>
+          <div
+            v-if="goal.strict_review && goal.strict_review_history?.length"
+            class="goal-checkpoint goal-strict-history"
+          >
+            <strong>Cross-review rounds</strong>
+            <div
+              v-for="round in goal.strict_review_history"
+              :key="round.round_number"
+              class="goal-strict-round"
+            >
+              <p>
+                <b>Round {{ round.round_number }} · {{ round.verdict }}</b>
+                ({{ formatReviewerLabel(round.reviewer_provider, round.reviewer_model) }}):
+                {{ round.summary }}
+              </p>
+              <ul
+                v-if="round.findings?.length"
+                class="goal-strict-findings"
+              >
+                <li
+                  v-for="(finding, idx) in round.findings"
+                  :key="idx"
+                >
+                  <b>[{{ finding.severity }}]</b>
+                  <span v-if="finding.file"> {{ finding.file }} —</span>
+                  {{ finding.summary }}
+                  <span v-if="finding.fix"> (Fix: {{ finding.fix }})</span>
+                </li>
+              </ul>
+            </div>
+          </div>
           <p
             v-if="error"
             class="goal-status-error"
@@ -199,8 +235,22 @@ function retryStop() {
   else emit('clear')
 }
 const detailsId = computed(() => `goal-status-details-${props.goal.id}`)
-const statusText = computed(() => needsReconciliation.value ? 'Stop unconfirmed' : goalStatusLabel(props.goal.status))
-const liveStatus = computed(() => `Goal ${needsReconciliation.value ? 'stop unconfirmed' : goalStatusLabel(props.goal.status)}`)
+const statusText = computed(() => {
+  if (needsReconciliation.value) return 'Stop unconfirmed'
+  if (props.goal.strict_review_in_progress) return 'Cross-reviewing'
+  return goalStatusLabel(props.goal.status)
+})
+const strictPillText = computed(() => {
+  const rounds = props.goal.strict_review_rounds ?? 0
+  const max = props.goal.strict_review_max_rounds ?? 3
+  if (props.goal.strict_review_in_progress) return `Review ${rounds + 1}/${max}`
+  if (rounds > 0) return `Strict ${rounds}/${max}`
+  return 'Strict'
+})
+const liveStatus = computed(() => `Goal ${statusText.value.toLowerCase()}`)
+function formatReviewerLabel(provider: string, model?: string | null): string {
+  return model ? `${provider}/${model}` : provider
+}
 function formatTime(value: string): string { return new Date(value).toLocaleString() }
 
 interface GoalAction { key: string; label: string; disabled: boolean; run: () => void; tone?: 'primary' | 'danger' }
@@ -301,6 +351,7 @@ watch([expanded, isPhone], ([open, phone], [wasOpen, wasPhone]) => {
 [data-status='complete'] .goal-status-dot { background: var(--ch-color-success, #30a46c); }
 [data-status='cancelled'] .goal-status-dot, [data-status='failed'] .goal-status-dot { background: var(--ch-color-danger, #e5484d); }
 .goal-objective { min-width: 0; overflow: hidden; color: var(--ch-color-text-muted); text-overflow: ellipsis; white-space: nowrap; }
+.goal-strict-pill { flex: 0 0 auto; padding: 1px 7px; border: 1px solid var(--ch-color-accent-ring-strong); border-radius: 999px; background: var(--ch-color-accent-soft); color: var(--ch-color-text-selected); font-size: 11px; font-weight: 600; line-height: 1.35; }
 .goal-status-chevron { flex: 0 0 auto; margin-left: auto; color: var(--ch-color-text-muted); }
 .goal-status-actions { display: flex; gap: 5px; }
 .goal-status-actions button, .goal-status-quick, .goal-sheet-actions button { padding: 3px 8px; color: var(--ch-color-text); background: transparent; border: 1px solid var(--ch-color-border); border-radius: var(--ch-radius-sm); cursor: pointer; }
@@ -318,6 +369,8 @@ watch([expanded, isPhone], ([open, phone], [wasOpen, wasPhone]) => {
 .goal-status-error--summary { max-width: 260px; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .goal-checkpoint { padding-top: 8px; border-top: 1px solid var(--ch-color-border-muted); }
 .goal-checkpoint p { margin: 5px 0 0; color: var(--ch-color-text-muted); }
+.goal-strict-findings { margin: 4px 0 6px 16px; padding: 0; color: var(--ch-color-text-muted); font-size: 11.5px; }
+.goal-strict-findings li { margin: 2px 0; }
 .goal-checkpoint-warning { color: var(--ch-color-warning, #e0a800); }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 @media (pointer: coarse) { .goal-status-summary, .goal-status-actions button, .goal-status-details-close { min-height: 44px; } .goal-status-actions button, .goal-status-details-close { min-width: 44px; } }

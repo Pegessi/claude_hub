@@ -17,12 +17,14 @@ from ...models.goal_run import (
     GOAL_PLAN_STEPS_LIMIT,
     GOAL_RECENT_TURN_IDS_LIMIT,
     GOAL_STEER_INPUT_MAX_LENGTH,
+    GOAL_STRICT_REVIEW_MAX_ROUNDS,
     GoalCheckpoint,
     GoalDispatchState,
     GoalPlan,
     GoalRun,
     GoalRunCreate,
     GoalRunStatus,
+    GoalStrictReviewRound,
     GoalTurnUsage,
     GoalUsageQuality,
     utc_now,
@@ -31,6 +33,11 @@ from .images import image_fingerprint
 from .native import NativeGoalCoordinator
 from .policy import GoalPolicyError, ensure_unfinished
 from .store import GoalRunStore
+from .strict_review import (
+    StrictReviewerCallback,
+    format_strict_review_feedback,
+    run_subagent_strict_review,
+)
 
 DispatchCallback = Callable[[GoalRun, str], Awaitable[str | None] | str | None]
 CancelCallback = Callable[[GoalRun], Awaitable[None] | None]
@@ -65,7 +72,7 @@ Before claiming progress or completion, verify relevant repository, runtime, tes
 state with available tools. You may use provider-native subagents when useful, while remaining
 responsible for their results and staying within the user's existing authority.
 
-{_plan_revision_prompt(goal)}Before the final status, emit this bounded JSON working-memory block:
+{_plan_revision_prompt(goal)}{_strict_review_prompt(goal)}Before the final status, emit this bounded JSON working-memory block:
 <goal-checkpoint>
 {{
   "verified_progress": [{{"item": "...", "evidence": "..."}}],
@@ -169,6 +176,24 @@ def _plan_revision_prompt(goal: GoalRun) -> str:
     )
 
 
+def _strict_review_prompt(goal: GoalRun) -> str:
+    if not goal.strict_review:
+        return ""
+    if goal.strict_review_feedback:
+        return (
+            "Strict cross-model review is enabled for this Goal. Your previous completion "
+            "claim did not pass independent review:\n"
+            f"{goal.strict_review_feedback}\n"
+            "End of independent review feedback.\n\n"
+        )
+    return (
+        "Strict cross-model review is enabled for this Goal: when you emit "
+        '<goal-status state="complete">, Claude Hub automatically runs an independent '
+        "cross-model reviewer against your changes and verification evidence before "
+        "completing the Goal.\n\n"
+    )
+
+
 def _pending_input_prompt(goal: GoalRun) -> str:
     if not goal.pending_input:
         return ""
@@ -229,16 +254,19 @@ class GoalRunController:
         store: GoalRunStore,
         dispatch: DispatchCallback | None = None,
         cancel: CancelCallback | None = None,
+        strict_reviewer: StrictReviewerCallback | None = None,
     ) -> None:
         self.store = store
         self.native = NativeGoalCoordinator(store)
         self.dispatch = dispatch
         self.cancel = cancel
+        self.strict_reviewer: StrictReviewerCallback | None = strict_reviewer
         self._locks: dict[str, asyncio.Lock] = {}
         self._mutation_locks: dict[str, asyncio.Lock] = {}
         # Claim each durable step once. Cancellation waits only for provider
         # acceptance, never for the HTTP/observer task that called dispatch.
         self._acceptances: dict[str, asyncio.Future[None]] = {}
+        self._strict_review_tasks: dict[str, asyncio.Task[Any]] = {}
 
     def _lock_for(self, goal_id: str) -> asyncio.Lock:
         return self._locks.setdefault(goal_id, asyncio.Lock())
@@ -252,6 +280,9 @@ class GoalRunController:
     def set_cancel_callback(self, cancel: CancelCallback | None) -> None:
         self.cancel = cancel
 
+    def set_strict_reviewer_callback(self, reviewer: StrictReviewerCallback | None) -> None:
+        self.strict_reviewer = reviewer
+
     def create(self, tab_id: str, request: GoalRunCreate) -> GoalRun:
         return self.store.create(
             GoalRun(
@@ -262,6 +293,7 @@ class GoalRunController:
                 plan_first=request.plan_first,
                 # A ``plan_first`` start spends its first turn on the plan.
                 plan_pending=request.plan_first,
+                strict_review=request.strict_review,
             ),
             request.client_request_id,
             request,
@@ -316,7 +348,35 @@ class GoalRunController:
         goal.idempotency[client_request_id] = operation
         return self.store.put(goal)
 
+    async def _cancel_strict_review(self, goal_id: str) -> None:
+        task = self._strict_review_tasks.pop(goal_id, None)
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def _cancel_current(self, goal: GoalRun) -> GoalRun:
+        was_reviewing = goal.strict_review_in_progress
+        await self._cancel_strict_review(goal.id)
+        if was_reviewing:
+            async with self._lock_for(goal.id):
+                latest = self.store.get(goal.id)
+                changed = False
+                if latest.strict_review_in_progress:
+                    latest.strict_review_in_progress = False
+                    latest.strict_review_subagent_id = None
+                    changed = True
+                if (
+                    latest.dispatch_state == GoalDispatchState.DISPATCHED
+                    and latest.current_turn_id is None
+                ):
+                    latest.dispatch_state = GoalDispatchState.IDLE
+                    changed = True
+                if latest.status_message and latest.status_message.startswith(
+                    "Running strict cross-model review"
+                ):
+                    latest.status_message = "strict cross-model review was stopped"
+                    changed = True
+                goal = self.store.put(latest) if changed else latest
         if goal.current_turn_id is None and goal.dispatch_state not in {
             GoalDispatchState.PENDING,
             GoalDispatchState.DISPATCHED,
@@ -455,6 +515,8 @@ class GoalRunController:
 
         def apply(goal: GoalRun) -> None:
             ensure_unfinished(goal)
+            if goal.strict_review and goal.strict_review_rounds >= goal.strict_review_max_rounds:
+                goal.strict_review_rounds = 0
             goal.status = GoalRunStatus.ACTIVE
             goal.paused_at = None
             deferred = after_current_turn and goal.dispatch_state == GoalDispatchState.IDLE
@@ -529,6 +591,11 @@ class GoalRunController:
                     goal.pending_image_count = image_count
                     goal.pending_image_fingerprint = image_digest
                     goal.resume_after_turn = False
+                    if (
+                        goal.strict_review
+                        and goal.strict_review_rounds >= goal.strict_review_max_rounds
+                    ):
+                        goal.strict_review_rounds = 0
 
                 goal = self._mutate_once(goal_id, client_request_id, operation, apply)
             goal = await self._cancel_current(goal)
@@ -566,6 +633,9 @@ class GoalRunController:
                     if goal.objective != objective:
                         goal.objective = objective
                         goal.objective_revision += 1
+                        if goal.strict_review:
+                            goal.strict_review_rounds = 0
+                            goal.strict_review_feedback = None
 
                 return self._mutate_once(goal_id, client_request_id, operation, apply)
 
@@ -655,9 +725,127 @@ class GoalRunController:
             return None
         async with self._lock_for(goal.id):
             result = self._on_turn_completed_locked(tab_id, turn_id, status, assistant_text, usage)
+        if result is not None and result.strict_review_in_progress:
+            return await self._execute_strict_review(
+                result.id,
+                worker_turn_id=turn_id,
+                assistant_text=assistant_text,
+            )
         if result is not None and result.dispatch_state == GoalDispatchState.PENDING:
             return await self._dispatch_prepared(result)
         return result
+
+    async def _execute_strict_review(
+        self,
+        goal_id: str,
+        *,
+        worker_turn_id: str,
+        assistant_text: str,
+    ) -> GoalRun:
+        current = self.store.get(goal_id)
+        if not current.strict_review_in_progress or current.status != GoalRunStatus.ACTIVE:
+            return current
+        round_number = current.strict_review_rounds + 1
+        reviewer_cb = self.strict_reviewer or run_subagent_strict_review
+
+        async def _invoke_reviewer() -> Any:
+            return await reviewer_cb(current, assistant_text, round_number)
+
+        task: asyncio.Task[Any] = asyncio.create_task(_invoke_reviewer())
+        self._strict_review_tasks[goal_id] = task
+        try:
+            outcome = await task
+        except asyncio.CancelledError:
+            async with self._lock_for(goal_id):
+                latest = self.store.get(goal_id)
+                if latest.strict_review_in_progress:
+                    latest.strict_review_in_progress = False
+                    latest.strict_review_subagent_id = None
+                    if (
+                        latest.dispatch_state == GoalDispatchState.DISPATCHED
+                        and latest.current_turn_id is None
+                    ):
+                        latest.dispatch_state = GoalDispatchState.IDLE
+                    latest = self.store.put(latest)
+            caller = asyncio.current_task()
+            if caller is not None and caller.cancelling() > 0:
+                raise
+            return latest
+        except Exception as exc:
+            async with self._lock_for(goal_id):
+                latest = self.store.get(goal_id)
+                if not latest.strict_review_in_progress or latest.status != GoalRunStatus.ACTIVE:
+                    return latest
+                latest.strict_review_in_progress = False
+                latest.strict_review_subagent_id = None
+                latest.dispatch_state = GoalDispatchState.IDLE
+                latest.status = GoalRunStatus.BLOCKED
+                latest.status_message = f"Strict cross-review could not complete: {exc}"
+                return self.store.put(latest)
+        finally:
+            if self._strict_review_tasks.get(goal_id) is task:
+                self._strict_review_tasks.pop(goal_id, None)
+
+        prepared: GoalRun | None = None
+        async with self._lock_for(goal_id):
+            latest = self.store.get(goal_id)
+            if not latest.strict_review_in_progress or latest.status != GoalRunStatus.ACTIVE:
+                return latest
+            latest.strict_review_in_progress = False
+            latest.strict_review_rounds = round_number
+            latest.strict_review_subagent_id = outcome.reviewer_subagent_id
+            round_record = GoalStrictReviewRound(
+                round_number=round_number,
+                worker_turn_id=worker_turn_id,
+                reviewer_subagent_id=outcome.reviewer_subagent_id,
+                reviewer_provider=outcome.reviewer_provider,
+                reviewer_model=outcome.reviewer_model,
+                verdict="PASS" if outcome.verdict == "PASS" else "BLOCK",
+                summary=outcome.summary,
+                findings=outcome.findings,
+            )
+            latest.strict_review_history.append(round_record)
+            latest.strict_review_history = latest.strict_review_history[
+                -GOAL_STRICT_REVIEW_MAX_ROUNDS:
+            ]
+            latest.dispatch_state = GoalDispatchState.IDLE
+            if latest.dispatched_objective_revision != latest.objective_revision:
+                # Objective changed while reviewer ran: continue against updated objective.
+                latest.strict_review_feedback = None
+                self.store.put(latest)
+                prepared = self._prepare_dispatch_locked(latest.id)
+            elif round_record.verdict == "PASS":
+                latest.strict_review_feedback = None
+                latest.status = GoalRunStatus.COMPLETE
+                latest.completed_at = utc_now()
+                latest.status_message = (
+                    f"Passed strict cross-review (round {round_number}, "
+                    f"{round_record.reviewer_provider}): {round_record.summary[:240]}"
+                )
+                return self.store.put(latest)
+            elif round_number >= latest.strict_review_max_rounds:
+                latest.strict_review_feedback = format_strict_review_feedback(round_record)
+                latest.status = GoalRunStatus.BLOCKED
+                latest.status_message = (
+                    f"Strict cross-review blocked after {round_number}/"
+                    f"{latest.strict_review_max_rounds} rounds: {round_record.summary[:240]}"
+                )
+                return self.store.put(latest)
+            else:
+                latest.strict_review_feedback = format_strict_review_feedback(round_record)
+                latest.status_message = (
+                    f"Cross-review round {round_number} requested fixes "
+                    f"({round_record.reviewer_provider}); continuing…"
+                )
+                if self.dispatch is None:
+                    latest.status = GoalRunStatus.PAUSED
+                    latest.status_message = "automatic continuation is not connected"
+                    return self.store.put(latest)
+                self.store.put(latest)
+                prepared = self._prepare_dispatch_locked(latest.id)
+        if prepared is not None and prepared.dispatch_state == GoalDispatchState.PENDING:
+            return await self._dispatch_prepared(prepared)
+        return self.store.get(goal_id)
 
     def _on_turn_completed_locked(
         self,
@@ -808,6 +996,22 @@ class GoalRunController:
             self.store.put(goal)
             return self._prepare_dispatch_locked(goal.id)
         if signal == "complete":
+            if goal.strict_review and not planning_turn:
+                next_round = goal.strict_review_rounds + 1
+                if next_round > goal.strict_review_max_rounds:
+                    goal.status = GoalRunStatus.BLOCKED
+                    goal.status_message = (
+                        f"Strict cross-review reached the {goal.strict_review_max_rounds}-round "
+                        "limit without consensus; inspect findings and steer or complete manually"
+                    )
+                    return self.store.put(goal)
+                goal.strict_review_in_progress = True
+                goal.dispatch_state = GoalDispatchState.DISPATCHED
+                goal.status_message = (
+                    f"Running strict cross-model review (round {next_round}/"
+                    f"{goal.strict_review_max_rounds})…"
+                )
+                return self.store.put(goal)
             goal.status = GoalRunStatus.COMPLETE
             goal.completed_at = utc_now()
             return self.store.put(goal)
@@ -940,6 +1144,8 @@ class GoalRunController:
                     goal.plan_answered = True
                 if goal.pending_input == prepared.pending_input:
                     goal.pending_input = None
+                if goal.strict_review_feedback == prepared.strict_review_feedback:
+                    goal.strict_review_feedback = None
                 if goal.pending_image_fingerprint == prepared.pending_image_fingerprint:
                     goal.pending_image_count = 0
                     goal.pending_image_fingerprint = ""
@@ -972,20 +1178,26 @@ class GoalRunController:
             if goal.execution_owner == "provider_native":
                 continue
             was_active = goal.status == GoalRunStatus.ACTIVE
-            if was_active:
+            was_reviewing = goal.strict_review_in_progress
+            if was_active or was_reviewing:
                 goal.status = GoalRunStatus.PAUSED
                 goal.paused_at = utc_now()
                 goal.resume_after_turn = False
+                goal.strict_review_in_progress = False
+                goal.strict_review_subagent_id = None
                 goal.status_message = "backend restarted; resume the Goal explicitly"
             if goal.dispatch_state in {
                 GoalDispatchState.PENDING,
                 GoalDispatchState.DISPATCHED,
             }:
-                goal.dispatch_state = GoalDispatchState.UNCERTAIN
-                goal.status_message = (
-                    "restart occurred during continuation dispatch; resume explicitly"
-                )
+                if was_reviewing and goal.current_turn_id is None:
+                    goal.dispatch_state = GoalDispatchState.IDLE
+                else:
+                    goal.dispatch_state = GoalDispatchState.UNCERTAIN
+                    goal.status_message = (
+                        "restart occurred during continuation dispatch; resume explicitly"
+                    )
                 recovered.append(self.store.put(goal))
-            elif was_active:
+            elif was_active or was_reviewing:
                 recovered.append(self.store.put(goal))
         return recovered

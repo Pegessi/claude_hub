@@ -167,6 +167,25 @@ export interface ChatGoalPlan {
   budget: ChatGoalPlanBudget
 }
 
+export interface ChatGoalStrictReviewFinding {
+  severity: 'P0' | 'P1' | 'P2' | 'P3'
+  file?: string | null
+  summary: string
+  fix?: string | null
+}
+
+export interface ChatGoalStrictReviewRound {
+  round_number: number
+  worker_turn_id: string
+  reviewer_subagent_id?: string | null
+  reviewer_provider: string
+  reviewer_model?: string | null
+  verdict: 'PASS' | 'BLOCK'
+  summary: string
+  findings: ChatGoalStrictReviewFinding[]
+  created_at: string
+}
+
 export interface ChatGoal {
   id: string
   tab_id: string
@@ -205,6 +224,13 @@ export interface ChatGoal {
    */
   plan_answered?: boolean
   plan_warning?: string | null
+  strict_review?: boolean
+  strict_review_rounds?: number
+  strict_review_max_rounds?: number
+  strict_review_in_progress?: boolean
+  strict_review_subagent_id?: string | null
+  strict_review_feedback?: string | null
+  strict_review_history?: ChatGoalStrictReviewRound[]
   created_at: string
   updated_at: string
   paused_at?: string | null
@@ -217,6 +243,8 @@ export interface ChatGoalCreate {
   client_request_id: string
   /** Optional: plan the scope and budget before the first implementing turn. */
   plan_first?: boolean
+  /** Optional: require an independent cross-model review gate before completing. */
+  strict_review?: boolean
 }
 
 export type AgentStreamEventType =
