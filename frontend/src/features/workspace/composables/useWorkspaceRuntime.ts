@@ -74,6 +74,19 @@ export function useWorkspaceRuntime() {
 
   const taskCreateFlow = useTaskCreateFlow()
 
+  const initialDemoParam = typeof window !== 'undefined' && window.location?.search
+    ? new URLSearchParams(window.location.search).get('ws_demo')
+    : null
+  const isStyleDemoOpen = ref(Boolean(initialDemoParam))
+  const initialDemoStyle = (
+    initialDemoParam === 'walkthrough_board' || initialDemoParam === 'command_center'
+      ? initialDemoParam
+      : 'triage_timeline'
+  ) as 'triage_timeline' | 'walkthrough_board' | 'command_center'
+  function toggleStyleDemo() {
+    isStyleDemoOpen.value = !isStyleDemoOpen.value
+  }
+
   const {
     colorScheme,
   } = storeToRefs(appStore)
@@ -575,6 +588,9 @@ export function useWorkspaceRuntime() {
     envPresets,
     workspaceNotifications,
     dismissToast,
+    isStyleDemoOpen,
+    initialDemoStyle,
+    toggleStyleDemo,
     taskCreateFlow,
     defaultPresetTextForAgent,
     workspaceStore,
