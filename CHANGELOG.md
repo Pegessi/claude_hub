@@ -17,6 +17,12 @@
   tablet widths, directory selection, and desktop styling. These checks verify
   the focus-zoom typography prerequisite; native iOS keyboard/zoom behavior
   still requires a physical Safari check.
+- Follow-up iPhone WebKit review adds a touch text-size floor for related Chat
+  editors, keeps the active Chat above the keyboard, and uses a scrollable
+  top-layer model menu in very short keyboard viewports. Model updates restore
+  focus only if the user has not moved elsewhere; cached panes close their menu.
+  WebKit phone/rotation/keyboard/selection/dismissal checks and Chromium
+  regression pass; this does not claim a native iOS keyboard test.
 
 ### fix(quota): name MASO quota rows after their model, not the endpoint id
 

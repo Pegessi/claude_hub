@@ -11,6 +11,7 @@
   --visual-viewport-offset-top: 0px;
   --mobile-controls-viewport-shift: 0px;
   --keyboard-height: 0px;
+  --ch-editable-font-min: 0px;
   /* Maso-inspired carbon chrome: surfaces stay close and quiet, while the
      current context uses the same clear blue family as Maso's main theme. */
   --ch-color-app-bg: #1b1b1c;
@@ -334,6 +335,12 @@ input,
 select,
 textarea {
   font: inherit;
+}
+
+/* iPhone Safari may zoom focused small editable text. Components opt into a
+   minimum so their original larger type and normal user zoom remain intact. */
+@media (any-pointer: coarse) {
+  :root { --ch-editable-font-min: 16px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

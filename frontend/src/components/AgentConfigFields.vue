@@ -328,7 +328,7 @@ function onAgentTypeChange(value: string) {
 /* Parent scoped form rules do not reach these native selects. */
 @media (any-pointer: coarse) {
   .agent-config-fields .acf-select {
-    font-size: 16px;
+    font-size: max(var(--ch-font-size-md), var(--ch-editable-font-min, 16px));
   }
 }
 

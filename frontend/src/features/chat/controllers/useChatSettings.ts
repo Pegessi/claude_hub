@@ -1,4 +1,4 @@
-import { type Ref, type ComputedRef, computed, nextTick, ref, watch } from 'vue'
+import { type Ref, type ComputedRef, computed, nextTick, onDeactivated, ref, watch } from 'vue'
 import { type StreamCapabilities, type TerminalTab, StreamModelOption } from '@/types'
 import { type useAgentStream } from '@/composables/useAgentStream'
 import { type useTerminalStore } from '@/stores/terminalStore'
@@ -96,6 +96,14 @@ export function useChatSettings(deps: Dependencies) {
     const tab = deps.currentTab.value
     if (!tab) return
     const epoch = deps.preparationEpoch.value
+    let restoreTriggerFocus = true
+    const cancelFocusRestore = () => { restoreTriggerFocus = false }
+    const onOtherFocus = (event: FocusEvent) => {
+      if (event.target !== modelTriggerEl.value) cancelFocusRestore()
+    }
+    window.addEventListener('pointerdown', cancelFocusRestore, true)
+    window.addEventListener('keydown', cancelFocusRestore, true)
+    window.addEventListener('focusin', onOtherFocus, true)
     isUpdatingModel.value = true
     isUpdatingReasoningEffort.value = true
     try {
@@ -120,7 +128,19 @@ export function useChatSettings(deps: Dependencies) {
       if (deps.preparationEpoch.value === epoch) {
         isUpdatingModel.value = false
         isUpdatingReasoningEffort.value = false
+        // Disabling the trigger during the request blurs it in WebKit. Restore
+        // focus after Vue re-enables it, unless the user moved to another input.
+        await nextTick()
+        if (restoreTriggerFocus && deps.preparationEpoch.value === epoch && !isModelMenuOpen.value
+          && deps.terminalStore.activePane?.tabId === tab.id) {
+          if (document.activeElement === document.body || document.activeElement === modelTriggerEl.value) {
+            modelTriggerEl.value?.focus({ preventScroll: true })
+          }
+        }
       }
+      window.removeEventListener('pointerdown', cancelFocusRestore, true)
+      window.removeEventListener('keydown', cancelFocusRestore, true)
+      window.removeEventListener('focusin', onOtherFocus, true)
     }
   }
 
@@ -139,6 +159,10 @@ export function useChatSettings(deps: Dependencies) {
     modelSearch.value = ''
     if (focusTrigger) modelTriggerEl.value?.focus()
   }
+
+  // A cached pane leaves the document (and native popover top layer). Do not
+  // retain an open-but-hidden menu when the user returns to that Chat.
+  onDeactivated(() => closeModelMenu(false))
 
   function toggleModelMenu() {
     if (
