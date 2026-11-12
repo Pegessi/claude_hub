@@ -44,7 +44,16 @@ export function statusesEqual(a: TerminalAgentStatus[], b: TerminalAgentStatus[]
       x.detail !== y.detail ||
       x.tmux_session !== y.tmux_session ||
       x.last_changed_at !== y.last_changed_at ||
-      x.sampled_at !== y.sampled_at
+      x.sampled_at !== y.sampled_at ||
+      // Row state that the poll can change without changing the provider's
+      // status: a card opening or resolving, and the activity/reply lines the
+      // inbox and sidebar print. Dropping these made the row stale for a whole
+      // turn when the status code itself stayed the same.
+      Boolean(x.pending_question) !== Boolean(y.pending_question) ||
+      x.activity !== y.activity ||
+      x.activity_since !== y.activity_since ||
+      x.last_reply_excerpt !== y.last_reply_excerpt ||
+      x.last_reply_at !== y.last_reply_at
     ) {
       return false
     }
