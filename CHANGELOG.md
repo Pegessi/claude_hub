@@ -17,6 +17,10 @@
   Preserve the five non-game themes, palette IDs, semantic status/provider
   identities and existing appearance persistence. No remote artwork service or
   extra appearance-preference model is introduced.
+- Verify rendered artwork and icon differences with browser-only negative
+  controls, and protect sidebar/non-prose/pending text with opaque group/turn
+  backplates. Use paired error ink and avoid double-dimming small live-work
+  labels in light game themes.
 
 ### style(theme): distinguish the three game themes
 

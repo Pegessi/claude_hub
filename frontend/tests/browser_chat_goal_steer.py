@@ -251,7 +251,12 @@ async def main(browser_run: BrowserRun) -> None:
                     body = {"messages": []}
                 elif path == "/api/tabs":
                     body = tabs
-                elif path in {"/api/tabs/status", "/api/tabs/archived"}:
+                elif path in {
+                    "/api/tabs/status",
+                    "/api/tabs/archived",
+                    "/api/workspaces",
+                    "/api/remote/profiles",
+                }:
                     body = []
                 elif path.startswith("/api/tabs/sidebar-preferences"):
                     body = {"pinned_tab_ids": []}
@@ -623,11 +628,16 @@ async def main(browser_run: BrowserRun) -> None:
             await card.scroll_into_view_if_needed()
             await page.screenshot(path=str(output / "goal-plan-card-desktop.png"), full_page=True)
             report["screenshots"].append("goal-plan-card-desktop.png")
+            off_origin_before_themes = list(report["blocked_external_requests"])
             report["plan_button_theme_contrast"] = await filled_button_themes(
                 page,
                 card.get_by_role("button", name="Approve & start", exact=True),
                 card.get_by_role("button", name="Revise", exact=True),
                 screenshot_dir=output,
+            )
+            assert set(report["blocked_external_requests"]) <= set(off_origin_before_themes), (
+                "Theme assets attempted new off-origin requests",
+                report["blocked_external_requests"],
             )
 
             # Reload at each width: the app chooses its mobile shell from the

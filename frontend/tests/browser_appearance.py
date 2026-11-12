@@ -21,11 +21,14 @@ from playwright.async_api import Page, expect
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from appearance_assertions import (  # noqa: E402
+    GAME_PALETTES,
     PALETTES,
     choose_mode,
     choose_palette,
     contrast,
+    no_stale_skin_chrome,
     palette_id,
+    select_appearance,
 )
 from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
 
@@ -479,6 +482,25 @@ async def main(browser_run: BrowserRun) -> None:
                 "Native radios, Tab containment, Escape/backdrop and focus return pass"
             )
             record_phase("keyboard_and_dismissal")
+
+            # Inspect actual shell consumers after closing the picker; its game
+            # preview tiles intentionally retain their own illustration/icons.
+            report["game_chrome_returns"] = []
+            for return_mode in ("dark", "light"):
+                for game in GAME_PALETTES:
+                    for neutral in PALETTES[:5]:
+                        await select_appearance(page, return_mode, game)
+                        await select_appearance(page, return_mode, neutral)
+                        report["game_chrome_returns"].append(
+                            {
+                                "from": game,
+                                "to": neutral,
+                                "mode": return_mode,
+                                "chrome": await no_stale_skin_chrome(page),
+                            }
+                        )
+            assert len(report["game_chrome_returns"]) == 30
+            record_phase("game_chrome_returns")
 
             await trigger.click()
             await choose_mode(page, "System")

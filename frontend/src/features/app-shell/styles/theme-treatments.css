@@ -959,6 +959,16 @@
   background-color: var(--ch-color-main-bg);
   border-radius: var(--ch-radius-sm);
 }
+/* Status fills are not text ink; secondary text already has a muted token,
+   so fading small live-work labels again loses contrast on light surfaces. */
+:root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
+  :is(.event-error, .history-details-error) {
+  color: var(--ch-color-danger-text);
+}
+:root[data-theme='light']:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
+  :is(.turn-working-elapsed, .turn-working-counts-text, .turn-working-hint) {
+  opacity: 1;
+}
 :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
   :is(.structured-composer, .message-inbox, .subagent-rail) {
   background-color: var(--ch-color-surface);

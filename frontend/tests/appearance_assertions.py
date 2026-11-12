@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+import base64
+import colorsys
 import json
 import re
+from collections.abc import AsyncIterator, Awaitable
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from playwright.async_api import ElementHandle, Locator, Page, Request, expect
 
 PALETTES = ("Classic", "Contrast", "Mono", "Studio", "Carbon", "Zenless", "Frontier", "Los Santos")
+GAME_PALETTES = ("Zenless", "Frontier", "Los Santos")
+ART_PIXEL_DELTA = 12
+ART_VISIBLE_FRACTION = 0.05
+ICON_MIN_PIXELS = 8
+ICON_MASK_SIZE = 24
+ICON_FAMILY_DISAGREEMENT = 0.03
 
 
 def palette_id(name: str) -> str:
@@ -473,6 +483,505 @@ async def inline_tab_rename(page: Page) -> dict[str, Any]:
     }
 
 
+@asynccontextmanager
+async def _inline_styles(
+    element: Locator, values: dict[str, str], ancestor_index: int = 0
+) -> AsyncIterator[None]:
+    previous = await element.evaluate(
+        """(el, {values, index}) => {
+      for (let i = 0; i < index; i++) el = el.parentElement;
+      const previous = {};
+      for (const [name, value] of Object.entries(values)) {
+        previous[name] = [el.style.getPropertyValue(name), el.style.getPropertyPriority(name)];
+        el.style.setProperty(name, value, 'important');
+      }
+      return previous;
+    }""",
+        {"values": values, "index": ancestor_index},
+    )
+    try:
+        await _settle_styles(element.page)
+        yield
+    finally:
+        await element.evaluate(
+            """(el, {previous, index}) => {
+          for (let i = 0; i < index; i++) el = el.parentElement;
+          for (const [name, [value, priority]] of Object.entries(previous)) {
+            if (value) el.style.setProperty(name, value, priority);
+            else el.style.removeProperty(name);
+          }
+        }""",
+            {"previous": previous, "index": ancestor_index},
+        )
+        await _settle_styles(element.page)
+
+
+async def _region_png(page: Page, rect: dict[str, Any]) -> bytes:
+    return await page.screenshot(
+        clip={"x": rect["x"], "y": rect["y"], "width": rect["width"], "height": rect["height"]},
+        animations="disabled",
+        caret="hide",
+    )
+
+
+async def _paint_difference(
+    page: Page, painted: bytes, hidden: bytes, ink: str | None = None
+) -> dict[str, Any]:
+    # Decode screenshots in the browser; no image-processing dependency or
+    # SVG-source fingerprint can substitute for the pixels actually painted.
+    result: dict[str, Any] = await page.evaluate(
+        """async ({painted, hidden, ink, delta, size}) => {
+      const decode = async value => {
+        const bytes = Uint8Array.from(atob(value), c => c.charCodeAt(0));
+        const image = await createImageBitmap(new Blob([bytes], {type:'image/png'}));
+        const canvas = new OffscreenCanvas(image.width, image.height);
+        const ctx = canvas.getContext('2d', {willReadFrequently:true});
+        ctx.drawImage(image, 0, 0); image.close();
+        return {width:canvas.width, height:canvas.height,
+          data:ctx.getImageData(0, 0, canvas.width, canvas.height).data};
+      };
+      const on = await decode(painted), off = await decode(hidden);
+      if (on.width !== off.width || on.height !== off.height) throw new Error('Paint ROI resized');
+      let changed = 0;
+      const nativeMask = [];
+      for (let p = 0; p < on.data.length; p += 4) {
+        const difference = Math.max(...[0,1,2].map(c => Math.abs(on.data[p+c] - off.data[p+c])));
+        if (difference >= delta) changed++;
+        if (ink) {
+          const fullInk = Math.max(...[0,1,2].map(c => Math.abs(ink[c]*255 - off.data[p+c]))) * ink[3];
+          // Preserve fractional coverage: rounding an RGB edge from 0.500
+          // to 0.497 must not flip an entire row into a different silhouette.
+          nativeMask.push(fullInk >= delta ? Math.min(1, difference / fullInk) : 0);
+        }
+      }
+      const mask = [];
+      if (ink) for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+        const sx = Math.min(on.width-1, Math.floor((x+0.5)*on.width/size));
+        const sy = Math.min(on.height-1, Math.floor((y+0.5)*on.height/size));
+        mask.push(nativeMask[sy*on.width+sx]);
+      }
+      return {width:on.width, height:on.height, changed, pixels:on.width*on.height,
+        fraction:changed/(on.width*on.height), mask, maskEncoding:ink ? 'fractional-coverage-v1' : null};
+    }""",
+        {
+            "painted": base64.b64encode(painted).decode("ascii"),
+            "hidden": base64.b64encode(hidden).decode("ascii"),
+            "ink": _rgba(ink) if ink is not None else None,
+            "delta": ART_PIXEL_DELTA,
+            "size": ICON_MASK_SIZE,
+        },
+    )
+    return result
+
+
+async def chat_artwork(page: Page, output: Path, name: str) -> dict[str, Any]:
+    """Prove local scene decoding and the approved visible timeline paint floor."""
+    host = page.locator(".structured-pane:visible").first
+    await expect(host).to_be_visible()
+    source: dict[str, Any] = await host.evaluate(r"""async el => {
+      const style = getComputedStyle(el), scene = style.getPropertyValue('--palette-scene').trim();
+      const match = /^url\((.*)\)$/.exec(scene);
+      if (!match) return {scene, local:false, decoded:false};
+      const url = new URL(match[1].trim().replace(/^['"]|['"]$/g, ''), location.href);
+      const local = url.origin === location.origin || url.protocol === 'data:';
+      if (!local) return {scene, url:url.href, local, decoded:false};
+      const image = new Image(); image.src = url.href;
+      try {
+        await Promise.race([image.decode(), new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Artwork decode timeout')), 5000))]);
+      } catch (error) { return {scene, url:url.href, local, decoded:false, error:String(error)}; }
+      return {scene, url:url.href, local, decoded:image.naturalWidth > 0 && image.naturalHeight > 0,
+        width:image.naturalWidth, height:image.naturalHeight};
+    }""")
+    assert source["local"] and source["decoded"], ("Local artwork decode", source)
+    await _settle_styles(page)
+    geometry: dict[str, Any] = await host.evaluate("""el => {
+      const rect = el.getBoundingClientRect(), timeline = el.querySelector('.structured-timeline').getBoundingClientRect();
+      const left = Math.ceil(Math.max(0, timeline.left) + 4);
+      const right = Math.floor(Math.min(innerWidth, timeline.right) - 4);
+      const bottom = Math.floor(Math.min(innerHeight, timeline.bottom));
+      const top = Math.ceil(Math.max(0, timeline.top, bottom - 128));
+      return {host:rect.toJSON(), timeline:timeline.toJSON(),
+        glow:getComputedStyle(el).getPropertyValue('--palette-scene-glow'),
+        clip:{x:left,y:top,width:right-left,height:bottom-top}};
+    }""")
+    assert geometry["clip"]["width"] > 0 and geometry["clip"]["height"] > 0, geometry
+    painted = await _region_png(page, geometry["clip"])
+    async with _inline_styles(host, {"--palette-scene": "none"}):
+        off_geometry = await host.evaluate("""el => ({host:el.getBoundingClientRect().toJSON(),
+          timeline:el.querySelector('.structured-timeline').getBoundingClientRect().toJSON(),
+          glow:getComputedStyle(el).getPropertyValue('--palette-scene-glow')})""")
+        assert off_geometry == {key: geometry[key] for key in ("host", "timeline", "glow")}, (
+            "Artwork toggle changed glow or layout",
+            geometry,
+            off_geometry,
+        )
+        hidden = await _region_png(page, geometry["clip"])
+    painted_name, hidden_name = f"{name}-art-on.png", f"{name}-art-off.png"
+    (output / painted_name).write_bytes(painted)
+    (output / hidden_name).write_bytes(hidden)
+    difference = await _paint_difference(page, painted, hidden)
+    assert difference["fraction"] >= ART_VISIBLE_FRACTION, (
+        "Artwork visible area",
+        name,
+        difference,
+        geometry,
+    )
+    return {
+        "source": source,
+        "geometry": geometry,
+        "paint": difference,
+        "screenshots": [painted_name, hidden_name],
+    }
+
+
+async def _native_tab_to(control: Locator) -> None:
+    for _ in range(100):
+        await control.page.keyboard.press("Tab")
+        if await control.evaluate("el => document.activeElement === el"):
+            await expect(control).to_be_focused()
+            return
+    raise AssertionError(f"Native Tab did not reach {control}")
+
+
+async def rendered_theme_icon(control: Locator, output: Path, name: str) -> dict[str, Any]:
+    icon = control.locator("svg[data-theme-icon][data-icon-family]")
+    await expect(icon).to_be_visible()
+    await expect(icon).to_have_attribute("aria-hidden", "true")
+    await _settle_styles(control.page)
+    state: dict[str, Any] = await icon.evaluate("""el => ({
+      rect:el.getBoundingClientRect().toJSON(), ink:getComputedStyle(el).color,
+      family:el.dataset.iconFamily, slot:el.dataset.themeIcon})""")
+    painted = await _region_png(control.page, state["rect"])
+    async with _inline_styles(icon, {"opacity": "0"}):
+        hidden = await _region_png(control.page, state["rect"])
+        assert await icon.evaluate("el => el.getBoundingClientRect().toJSON()") == state["rect"]
+    difference = await _paint_difference(control.page, painted, hidden, state["ink"])
+    (output / f"{name}-icon-on.png").write_bytes(painted)
+    (output / f"{name}-icon-off.png").write_bytes(hidden)
+    result = {**state, **difference}
+    (output / f"{name}-icon.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    assert difference["changed"] >= ICON_MIN_PIXELS and any(difference["mask"]), (
+        "Icon painted contribution",
+        name,
+        state,
+        difference,
+    )
+    return result
+
+
+def assert_icon_families(first: dict[str, Any], second: dict[str, Any]) -> float:
+    assert first["slot"] == second["slot"] and first["family"] != second["family"]
+    a: list[float] = first["mask"]
+    b: list[float] = second["mask"]
+    assert len(a) == len(b) == ICON_MASK_SIZE**2
+    assert all(0 <= coverage <= 1 for coverage in [*a, *b])
+    disagreement = sum(abs(left - right) for left, right in zip(a, b)) / len(a)
+    assert disagreement >= ICON_FAMILY_DISAGREEMENT, (
+        "Theme icon family shape",
+        first["slot"],
+        first["family"],
+        second["family"],
+        disagreement,
+    )
+    return disagreement
+
+
+def assert_zenless_orange(rendered: dict[str, Any]) -> dict[str, float]:
+    fill = _rgba(rendered["background"])
+    hue, saturation, _ = colorsys.rgb_to_hsv(*fill[:3])
+    assert fill[3] == 1 and 12 <= hue * 360 <= 50 and saturation >= 0.65, (
+        "Zenless orange primary",
+        rendered,
+        {"hue": hue * 360, "saturation": saturation},
+    )
+    assert luminance(rendered["foreground"]) < luminance(rendered["background"]), (
+        "Zenless dark paired ink",
+        rendered,
+    )
+    return {"hue": hue * 360, "saturation": saturation}
+
+
+def _over_rgba(ink: list[float], backing: list[float]) -> list[float]:
+    alpha = ink[3] + backing[3] * (1 - ink[3])
+    if not alpha:
+        return [0, 0, 0, 0]
+    return [
+        (ink[c] * ink[3] + backing[c] * backing[3] * (1 - ink[3])) / alpha for c in range(3)
+    ] + [alpha]
+
+
+def _backed_text_contrast(proof: dict[str, Any]) -> float:
+    path = proof["path"][: proof["plateIndex"] + 1]
+    leaf = path[0]
+    if "text" in leaf["clip"] and leaf["image"] != "none":
+        stops = re.findall(r"(?:rgba?\([^)]*\)|color\(srgb[^)]*\))", leaf["image"])
+        assert len(stops) >= 2, ("Unsupported clipped text paint", leaf)
+        inks = [_rgba(stop) for stop in stops]
+    else:
+        inks = [_rgba(proof["foreground"])]
+    ratios: list[float] = []
+    for ink in inks:
+        background = [0.0, 0.0, 0.0, 0.0]
+        for node in path:
+            assert node["blend"] == "normal" and node["filter"] == node["mask"] == "none", node
+            clipped = "text" in node["clip"]
+            assert node["image"] == "none" or clipped, ("Unmodelled ink backdrop", node)
+            paint = [0.0, 0.0, 0.0, 0.0] if clipped else _rgba(node["background"])
+            ink, background = _over_rgba(ink, paint), _over_rgba(background, paint)
+            ink[3] *= node["opacity"]
+            background[3] *= node["opacity"]
+        assert ink[3] == background[3] == 1, proof
+        ratios.append(
+            contrast(
+                f"color(srgb {' '.join(map(str, ink[:3]))})",
+                f"color(srgb {' '.join(map(str, background[:3]))})",
+            )
+        )
+    return min(ratios)
+
+
+async def opaque_artwork_backing(control: Locator, host_selector: str) -> dict[str, Any]:
+    """Find a plate before artwork, then prove opacity on its outward chain."""
+    await expect(control).to_be_visible()
+    await control.scroll_into_view_if_needed()
+    await control.page.mouse.move(0, 0)
+    await _settle_styles(control.page)
+    proof: dict[str, Any] = await control.evaluate(
+        r"""(el, hostSelector) => {
+      const path = []; let plate = -1, reachedHost = false;
+      for (let node = el; node; node = node.parentElement) {
+        const s = getComputedStyle(node), values = s.backgroundColor.match(/-?[\d.]+(?:e[-+]?\d+)?/g).map(Number);
+        const alpha = values.length === 4 ? values[3] : 1;
+        const entry = {tag:node.tagName, classes:node.getAttribute('class') || '',
+          background:s.backgroundColor, image:s.backgroundImage, opacity:Number(s.opacity),
+          blend:s.mixBlendMode, mask:s.maskImage, filter:s.filter, clip:s.backgroundClip};
+        path.push(entry);
+        const interrupts = entry.opacity !== 1 || entry.blend !== 'normal' ||
+          entry.mask !== 'none' || entry.filter !== 'none';
+        // Opacity below a plate dims ink, not the subsequently found backing.
+        if (interrupts) plate = -1;
+        if (node.matches(hostSelector)) { reachedHost = true; break; }
+        if (plate < 0 && !interrupts && alpha === 1 && !s.backgroundImage.includes('url(')) {
+          plate = path.length - 1;
+        }
+      }
+      return {path, plateIndex:plate, reachedHost, foreground:getComputedStyle(el).color,
+        descendantOpacity:plate < 0 ? null : path.slice(0, plate).reduce((p, n) => p*n.opacity, 1)};
+    }""",
+        host_selector,
+    )
+    assert proof["reachedHost"] and proof["plateIndex"] >= 0, (
+        "Opaque artwork backing",
+        host_selector,
+        proof,
+    )
+    proof["textContrast"] = _backed_text_contrast(proof)
+    assert proof["textContrast"] >= 4.5, ("Backed text contrast", host_selector, proof)
+    return proof
+
+
+async def no_stale_skin_chrome(page: Page) -> dict[str, Any]:
+    await _settle_styles(page)
+    state: dict[str, Any] = await page.evaluate("""() => {
+      const visible = el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden' && Number(getComputedStyle(el).opacity) > 0;
+      const icons = [...document.querySelectorAll('svg[data-theme-icon][data-icon-family]')]
+        .filter(el => visible(el) && !el.closest('.theme-preview'))
+        .map(el => ({slot:el.dataset.themeIcon, family:el.dataset.iconFamily}));
+      const scenes = [...document.querySelectorAll('.structured-pane, .chat-sidebar__body, .workspace-view .board, .workspace-view .empty-board, .empty-state, .pane-empty')]
+        .filter(visible).map(el => ({classes:el.className, image:getComputedStyle(el).backgroundImage,
+          scene:getComputedStyle(el).getPropertyValue('--palette-scene').trim()}));
+      return {icons, scenes};
+    }""")
+    assert not state["icons"] and all(
+        item["scene"] in ("", "none") and "url(" not in item["image"] for item in state["scenes"]
+    ), (
+        "Stale game chrome",
+        state,
+    )
+    return state
+
+
+async def _expect_probe_failure(check: Awaitable[Any], oracle: str) -> dict[str, Any]:
+    try:
+        observed = await check
+    except AssertionError as exc:
+        detail = exc.args[0]
+        assert isinstance(detail, tuple) and detail[0] == oracle, exc
+        return {"oracle": oracle, "detail": detail}
+    if isinstance(observed, dict):
+        observed = {
+            key: observed[key]
+            for key in ("slot", "family", "changed", "fraction")
+            if key in observed
+        }
+    raise AssertionError(f"Negative control incorrectly passed: {oracle}; observed={observed!r}")
+
+
+async def backing_fault_controls(control: Locator, host: str) -> list[dict[str, Any]]:
+    proof = await opaque_artwork_backing(control, host)
+    results = []
+    async with AsyncExitStack() as stack:
+        for index, node in enumerate(proof["path"][:-1]):
+            if _rgba(node["background"])[3] == 1 and "text" not in node["clip"]:
+                await stack.enter_async_context(
+                    _inline_styles(
+                        control,
+                        {"background-color": "transparent", "background-image": "none"},
+                        index,
+                    )
+                )
+        results.append(
+            await _expect_probe_failure(
+                opaque_artwork_backing(control, host),
+                "Opaque artwork backing",
+            )
+        )
+    await opaque_artwork_backing(control, host)
+    # The outermost child of the art host contains every possible inner plate.
+    async with _inline_styles(control, {"opacity": "0.5"}, len(proof["path"]) - 2):
+        results.append(
+            await _expect_probe_failure(
+                opaque_artwork_backing(control, host),
+                "Opaque artwork backing",
+            )
+        )
+    await opaque_artwork_backing(control, host)
+    async with _inline_styles(control, {"color": proof["path"][proof["plateIndex"]]["background"]}):
+        results.append(
+            await _expect_probe_failure(
+                opaque_artwork_backing(control, host),
+                "Backed text contrast",
+            )
+        )
+    await opaque_artwork_backing(control, host)
+    return results
+
+
+async def common_icon_negative(
+    control: Locator, output: Path, name: str, reference: dict[str, Any], original: dict[str, Any]
+) -> dict[str, Any]:
+    """Use the same visible common-icon injection in focused and full checks."""
+    icon = control.locator("svg[data-theme-icon][data-icon-family]")
+    original_nodes = await icon.evaluate_handle("el => Array.from(el.childNodes)")
+    try:
+        await icon.evaluate("(el, markup) => { el.innerHTML = markup }", reference["markup"])
+
+        async def compare_common_icon() -> float:
+            substituted = await rendered_theme_icon(control, output, name)
+            return assert_icon_families(reference["paint"], substituted)
+
+        result = await _expect_probe_failure(compare_common_icon(), "Theme icon family shape")
+    finally:
+        # Restore Vue's actual nodes, not lookalike markup with stale vnode references.
+        await icon.evaluate("(el, nodes) => el.replaceChildren(...nodes)", original_nodes)
+        await original_nodes.dispose()
+        await _settle_styles(control.page)
+    restored = await rendered_theme_icon(control, output, f"{name}-restored")
+    assert restored["mask"] == original["mask"] and restored["rect"] == original["rect"], (
+        "Common-icon restoration",
+        name,
+    )
+    result["restored_mask_matches"] = True
+    result["restored_family_disagreement"] = assert_icon_families(reference["paint"], restored)
+    return result
+
+
+async def _rich_desktop_chrome(
+    page: Page,
+    button: Locator,
+    output: Path,
+    palette: str,
+    mode: str,
+    icon_samples: dict[tuple[str, str], list[dict[str, Any]]],
+) -> dict[str, Any]:
+    name = f"rich-{palette_id(palette)}-{mode}"
+    result: dict[str, Any] = {
+        "art": await chat_artwork(page, output, name),
+        "icons": [],
+        "negatives": [],
+    }
+    for slot, label in (("terminal", "Terminal"), ("workspace", "Agent Workspace")):
+        control = page.get_by_role("tab", name=label, exact=True)
+        icon = control.locator("svg[data-theme-icon][data-icon-family]")
+        sample = await rendered_theme_icon(control, output, f"{name}-{slot}")
+        assert sample["slot"] == slot and sample["family"] == palette_id(palette), sample
+        prior = icon_samples.setdefault((mode, slot), [])
+        sample["family_disagreements"] = [
+            assert_icon_families(item["paint"], sample) for item in prior
+        ]
+        markup = await icon.inner_html()
+        if palette == "Zenless" and mode == "dark":
+            async with _inline_styles(icon, {"opacity": "0"}):
+                result["negatives"].append(
+                    await _expect_probe_failure(
+                        rendered_theme_icon(control, output, f"{name}-{slot}-hidden"),
+                        "Icon painted contribution",
+                    )
+                )
+            restored = await rendered_theme_icon(control, output, f"{name}-{slot}-unhidden")
+            assert restored["mask"] == sample["mask"], ("Hidden-icon restoration", slot)
+            result["negatives"][-1]["restored_mask_matches"] = True
+        if palette == "Frontier" and mode == "dark":
+            result["negatives"].append(
+                await common_icon_negative(
+                    control,
+                    output,
+                    f"{name}-{slot}-common",
+                    prior[0],
+                    sample,
+                )
+            )
+        prior.append({"paint": sample, "markup": markup})
+        result["icons"].append(sample)
+    if palette == "Zenless" and mode == "dark":
+        host = page.locator(".structured-pane:visible").first
+        async with _inline_styles(host, {"background-image": "var(--palette-scene-glow)"}):
+            result["negatives"].append(
+                await _expect_probe_failure(
+                    chat_artwork(page, output, f"{name}-hidden"),
+                    "Artwork visible area",
+                )
+            )
+        async with _inline_styles(host, {"--palette-scene": "none"}):
+            result["negatives"].append(
+                await _expect_probe_failure(
+                    chat_artwork(page, output, f"{name}-missing"),
+                    "Local artwork decode",
+                )
+            )
+        result["art_restored"] = await chat_artwork(page, output, f"{name}-restored")
+        async with _inline_styles(button, {"background-color": "#d6f300"}):
+            try:
+                assert_zenless_orange(await rendered_button_state(button, "rest"))
+            except AssertionError as exc:
+                assert exc.args[0][0] == "Zenless orange primary", exc
+                result["negatives"].append(
+                    {"oracle": "Zenless orange primary", "detail": exc.args[0]}
+                )
+            else:
+                raise AssertionError("Old lime primary was accepted")
+        assert_zenless_orange(await rendered_button_state(button, "rest"))
+    # Activate the real native tab controls, not their decorative SVG nodes.
+    workspace = page.get_by_role("tab", name="Agent Workspace", exact=True)
+    await _native_tab_to(workspace)
+    await page.keyboard.press("Enter")
+    await expect(workspace).to_have_attribute("aria-selected", "true")
+    await expect(page.locator(".workspace-view")).to_be_visible()
+    terminal = page.get_by_role("tab", name="Terminal", exact=True)
+    await _native_tab_to(terminal)
+    await page.keyboard.press("Space")
+    await expect(terminal).to_have_attribute("aria-selected", "true")
+    await expect(button).to_be_visible()
+    await _settle_styles(page)
+    result["resting_navigation"] = await terminal.evaluate("""el => ({
+      background:getComputedStyle(el).backgroundColor,
+      accent:getComputedStyle(el).getPropertyValue('--ch-color-accent-strong').trim(),
+      rect:el.getBoundingClientRect().toJSON()})""")
+    result["native_activation"] = ["Agent Workspace:Enter", "Terminal:Space"]
+    return result
+
+
 async def _selected_chrome_contrast(page: Page) -> list[dict[str, Any]]:
     samples: list[dict[str, Any]] = []
     # Foregrounds belong to the real nested label/glyph, not the parent's color.
@@ -638,8 +1147,9 @@ async def filled_button_themes(
     }""")
     report: list[dict[str, Any]] = []
     previous_viewport = page.viewport_size
-    game_palettes = ("Zenless", "Frontier", "Los Santos")
+    game_palettes = GAME_PALETTES
     game_report: list[dict[str, Any]] = []
+    icon_samples: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
     try:
         for mode in ("dark", "light"):
@@ -661,6 +1171,8 @@ async def filled_button_themes(
                         f"{rendered['label']} {palette}/{mode} interaction={interaction}: "
                         f"{ratio:.2f}:1 < 4.5:1 ({rendered})"
                     )
+                    if palette == "Zenless":
+                        rendered["orange"] = assert_zenless_orange(rendered)
                     report.append(
                         {"palette": palette, "mode": mode, **rendered, "contrast": round(ratio, 3)}
                     )
@@ -689,6 +1201,14 @@ async def filled_button_themes(
                                 },
                             ),
                             "rename": await inline_tab_rename(page),
+                            "rich_chrome": await _rich_desktop_chrome(
+                                page,
+                                button,
+                                screenshot_dir,
+                                palette,
+                                mode,
+                                icon_samples,
+                            ),
                         }
                     )
                     print(f"Game chrome captured: {palette}/{mode}", flush=True)
@@ -716,6 +1236,11 @@ async def filled_button_themes(
                 assert box is not None and box["height"] >= 44, box
                 overflow = await page.evaluate("document.documentElement.scrollWidth - innerWidth")
                 assert overflow <= 1, (variant["palette"], variant["mode"], overflow)
+                variant["phone_art"] = await chat_artwork(
+                    page,
+                    screenshot_dir,
+                    f"rich-phone-{palette_id(variant['palette'])}-{variant['mode']}",
+                )
                 screenshot = f"phone-game-{palette_id(variant['palette'])}-{variant['mode']}.png"
                 await page.screenshot(path=str(screenshot_dir / screenshot), full_page=True)
                 variant["phone"] = {
