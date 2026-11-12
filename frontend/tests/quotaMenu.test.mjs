@@ -137,6 +137,34 @@ test('reported warnings keep their severity even with missing or contradictory p
   assert.deepEqual(view.rows.map(row => row.tone), ['low', 'critical', 'low', 'critical', 'neutral'])
 })
 
+test('a label that describes a limit keeps the identifier in its tooltip', () => {
+  // MASO labels an endpoint its catalog does not list as "Unlisted endpoint ·
+  // <code>"; the tooltip still has to name the endpoint the provider reported.
+  const provider = {
+    provider: 'maso',
+    as_of: at(-30_000),
+    enforcing: true,
+    limits: [
+      limit({
+        scope: 'ep-20261020185502-b8c6q',
+        label: 'Unlisted endpoint · b8c6q',
+        used_percent: 49,
+        remaining_percent: 51,
+      }),
+      limit({ scope: 'ep-20260815235131-vfr5s', label: 'seed-stable', used_percent: 0, remaining_percent: 100 }),
+    ],
+  }
+  const rows = rowsOf(viewOf({ providers: [provider] })[0])
+
+  assert.equal(rows['ep-20261020185502-b8c6q'].label, 'Unlisted endpoint · b8c6q')
+  assert.equal(
+    rows['ep-20261020185502-b8c6q'].labelTitle,
+    'Unlisted endpoint · b8c6q (ep-20261020185502-b8c6q)',
+  )
+  // A model name and its endpoint both appear, so either identity is readable.
+  assert.equal(rows['ep-20260815235131-vfr5s'].labelTitle, 'seed-stable (ep-20260815235131-vfr5s)')
+})
+
 test('a missing percentage never renders as zero and keeps its reason', () => {
   const [, maso] = viewOf(fullPayload)
   const rows = rowsOf(maso)

@@ -15,6 +15,14 @@
  */
 import type { ProviderQuota, QuotaLimit, QuotaResponse } from '@/types'
 
+/** The tooltip for a limit's label: the label plus the identifier behind it. */
+function labelTitleFor(limit: QuotaLimit | undefined): string {
+  const label = limit?.label?.trim()
+  const scope = limit?.scope?.trim()
+  if (!scope || scope === label) return label || scope || 'Unnamed limit'
+  return label ? `${label} (${scope})` : scope
+}
+
 /** Display states; any unrecognized backend state collapses into `unknown`. */
 export type QuotaDisplayState =
   | 'within'
@@ -39,6 +47,8 @@ export type QuotaBalanceTone = 'healthy' | 'caution' | 'low' | 'critical' | 'neu
 export interface QuotaLimitRow {
   key: string
   label: string
+  /** Tooltip for the label: the label plus the identifier it describes. */
+  labelTitle: string
   state: QuotaDisplayState
   tone: QuotaBalanceTone
   /** Primary text: a real percentage, or why there is no percentage. */
@@ -241,6 +251,10 @@ function buildLimitRow(limit: QuotaLimit, index: number, now: number): QuotaLimi
   return {
     key: limit?.scope || `limit-${index}`,
     label: limit?.label || limit?.scope || 'Unnamed limit',
+    // A label may describe the limit rather than name it (MASO labels an
+    // endpoint its catalog does not list as "Unlisted endpoint · <code>"); the
+    // tooltip keeps the identifier the provider actually reported.
+    labelTitle: labelTitleFor(limit),
     state,
     tone: balanceTone(state, remaining),
     value,
