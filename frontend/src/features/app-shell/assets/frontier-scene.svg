@@ -1,0 +1,156 @@
+<!-- Original static SVG scene illustration authored for Claude Hub (frontier palette).
+     Motif: 1899 Western print/poster craft, flat-topped desert mesas and canyon buttes,
+     receding telegraph poles, Ponderosa pine ridge, wagon wheel, and an engraved
+     carmine/brass compass-rose sunburst within a double-ruled bookplate frame.
+     No third-party logos, proprietary fonts, or external asset dependencies. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" fill="none">
+  <defs>
+    <pattern id="rdr-hatch" width="10" height="8" patternUnits="userSpaceOnUse">
+      <line x1="0" y1="4" x2="10" y2="4" stroke="#c99658" stroke-width="0.9" stroke-opacity="0.28" />
+    </pattern>
+    <pattern id="rdr-strata" width="18" height="12" patternUnits="userSpaceOnUse">
+      <path d="M0 4 H18 M3 9 H15" stroke="#dfc49e" stroke-width="1.1" stroke-opacity="0.38" />
+    </pattern>
+    <linearGradient id="rdr-sky" x1="600" y1="0" x2="600" y2="320" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#a82a24" stop-opacity="0" />
+      <stop offset="0.55" stop-color="#c99658" stop-opacity="0.1" />
+      <stop offset="1" stop-color="#a82a24" stop-opacity="0.24" />
+    </linearGradient>
+  </defs>
+
+  <!-- Engraved parchment/carmine wash & woodblock horizontal sky hatching -->
+  <rect width="1200" height="320" fill="url(#rdr-sky)" />
+  <rect x="24" y="18" width="1152" height="280" fill="url(#rdr-hatch)" />
+
+  <!-- Outer 1899 Double-Ruled Bookplate Frame & Corner Filigree -->
+  <rect x="14" y="12" width="1172" height="294" stroke="#c99658" stroke-width="2" stroke-opacity="0.7" />
+  <rect x="20" y="18" width="1160" height="282" stroke="#a82a24" stroke-width="1.4" stroke-opacity="0.75" />
+  <!-- Left & Right Corner Diamonds -->
+  <polygon points="14,32 34,12 42,20 22,40" fill="#a82a24" stroke="#dfc49e" stroke-width="1.2" />
+  <polygon points="1186,32 1166,12 1158,20 1178,40" fill="#a82a24" stroke="#dfc49e" stroke-width="1.2" />
+
+  <!-- CENTERPIECE: Engraved 16-Point Western Compass Rose & Carmine Sunburst -->
+  <g transform="translate(600, 152)">
+    <!-- Radiating woodcut sun-rays -->
+    <g stroke="#c99658" stroke-width="1.5" stroke-opacity="0.55" stroke-dasharray="10 5">
+      <line x1="-260" y1="0" x2="260" y2="0" />
+      <line x1="-220" y1="-95" x2="220" y2="95" />
+      <line x1="-220" y1="95" x2="220" y2="-95" />
+      <line x1="-130" y1="-130" x2="130" y2="130" />
+      <line x1="-130" y1="130" x2="130" y2="-130" />
+    </g>
+    <!-- Concentric engraved seal rings -->
+    <circle r="92" fill="#261b13" fill-opacity="0.35" stroke="#c99658" stroke-width="2" />
+    <circle r="84" stroke="#a82a24" stroke-width="2.5" stroke-dasharray="6 4" />
+    <circle r="66" fill="#2b1e16" stroke="#dfc49e" stroke-width="1.8" />
+    <!-- 8 Minor Brass Points -->
+    <g fill="#c99658" stroke="#231811" stroke-width="1.5">
+      <polygon points="0,-78 12,-24 0,-34 -12,-24" transform="rotate(45)" />
+      <polygon points="0,-78 12,-24 0,-34 -12,-24" transform="rotate(135)" />
+      <polygon points="0,-78 12,-24 0,-34 -12,-24" transform="rotate(225)" />
+      <polygon points="0,-78 12,-24 0,-34 -12,-24" transform="rotate(315)" />
+    </g>
+    <!-- 4 Cardinal Carmine Wax Points -->
+    <g fill="#a82a24" stroke="#f3e6d0" stroke-width="1.8">
+      <polygon points="0,-96 15,-22 0,-34 -15,-22" />
+      <polygon points="0,96 15,22 0,34 -15,22" />
+      <polygon points="-96,0 -22,15 -34,0 -22,-15" />
+      <polygon points="96,0 22,15 34,0 22,-15" />
+    </g>
+    <!-- Center Wax Medallion -->
+    <circle r="22" fill="#a82a24" stroke="#f3e6d0" stroke-width="2.2" />
+    <polygon points="0,-12 12,0 0,12 -12,0" fill="#dfc49e" stroke="#231811" stroke-width="1.5" />
+    <circle r="4" fill="#231811" />
+  </g>
+
+  <!-- High-Desert Birds (Engraved V-Silhouettes) -->
+  <g stroke="#c99658" stroke-width="2.2" stroke-linecap="round" fill="none">
+    <path d="M412 68 Q420 58 428 66 Q436 58 444 68" />
+    <path d="M448 52 Q454 44 460 50 Q466 44 472 52" />
+    <path d="M736 60 Q744 50 752 58 Q760 50 768 60" />
+  </g>
+
+  <!-- DISTANT LAYER: Stepped Castleton Mesas & Canyon Buttes -->
+  <!-- Left Mesa Range -->
+  <path d="M14 298 L14 204 L68 188 L98 126 L216 126 L246 176 L312 176 L338 142 L428 142 L468 216 L548 248 L588 298 Z"
+        fill="#2b1f16" stroke="#c99658" stroke-width="2.5" stroke-linejoin="round" />
+  <path d="M98 126 L216 126 L246 176 L312 176 L338 142 L428 142 L468 216 L98 216 Z"
+        fill="url(#rdr-strata)" />
+  <!-- Engraved cliff vertical ridge lines (left) -->
+  <path d="M124 126 L116 196 M156 126 L152 204 M192 126 L198 192 M358 142 L352 212 M398 142 L406 214"
+        stroke="#dfc49e" stroke-width="1.6" stroke-opacity="0.65" />
+
+  <!-- Right Mesa & Twin Buttes Range -->
+  <path d="M612 298 L656 244 L732 212 L774 136 L868 136 L894 182 L948 182 L982 114 L1088 114 L1122 184 L1186 202 L1186 298 Z"
+        fill="#2b1f16" stroke="#c99658" stroke-width="2.5" stroke-linejoin="round" />
+  <path d="M774 136 L868 136 L894 182 L948 182 L982 114 L1088 114 L1122 184 L750 212 Z"
+        fill="url(#rdr-strata)" />
+  <!-- Engraved cliff vertical ridge lines (right) -->
+  <path d="M798 136 L792 204 M838 136 L844 202 M1008 114 L1000 198 M1042 114 L1046 196 M1070 114 L1078 192"
+        stroke="#dfc49e" stroke-width="1.6" stroke-opacity="0.65" />
+
+  <!-- FOREGROUND LEFT: Receding Timber Telegraph Poles, Catenary Wires & Saguaro -->
+  <g stroke="#f3e6d0" stroke-width="2.2" stroke-linecap="round">
+    <!-- Pole 1 (tallest) -->
+    <line x1="86" y1="88" x2="86" y2="296" stroke="#3d2c20" stroke-width="6" />
+    <line x1="86" y1="88" x2="86" y2="296" stroke="#dfc49e" stroke-width="1.8" />
+    <line x1="58" y1="106" x2="114" y2="106" stroke="#dfc49e" stroke-width="3.5" />
+    <line x1="64" y1="126" x2="108" y2="126" stroke="#dfc49e" stroke-width="3" />
+    <circle cx="64" cy="102" r="2.5" fill="#a82a24" />
+    <circle cx="108" cy="102" r="2.5" fill="#a82a24" />
+
+    <!-- Pole 2 (mid) -->
+    <line x1="264" y1="134" x2="264" y2="296" stroke="#3d2c20" stroke-width="4.5" />
+    <line x1="264" y1="134" x2="264" y2="296" stroke="#dfc49e" stroke-width="1.5" />
+    <line x1="242" y1="148" x2="286" y2="148" stroke="#dfc49e" stroke-width="2.8" />
+    <line x1="248" y1="164" x2="280" y2="164" stroke="#dfc49e" stroke-width="2.2" />
+
+    <!-- Pole 3 (distant) -->
+    <line x1="418" y1="176" x2="418" y2="296" stroke="#dfc49e" stroke-width="2.2" />
+    <line x1="404" y1="186" x2="432" y2="186" stroke="#dfc49e" stroke-width="2" />
+
+    <!-- Sagging Telegraph Wires -->
+    <path d="M14 96 Q50 116 64 106 Q164 156 244 148 Q334 190 406 186 Q490 222 570 256"
+          stroke="#c99658" stroke-width="1.6" fill="none" />
+    <path d="M14 114 Q50 132 108 106 Q188 158 284 148 Q356 192 430 186"
+          stroke="#a82a24" stroke-width="1.4" fill="none" />
+  </g>
+
+  <!-- Desert Saguaro Cactus Silhouette (left foreground) -->
+  <g fill="#231811" stroke="#dfc49e" stroke-width="2" stroke-linejoin="round">
+    <path d="M168 296 V192 A6 6 0 0 1 180 192 V232 H194 V204 A5 5 0 0 1 204 204 V242 H180 V296 Z" />
+    <path d="M168 248 H154 V214 A5 5 0 0 1 164 214 V238 H168 Z" />
+  </g>
+
+  <!-- FOREGROUND RIGHT: Ponderosa Pine Ridge & Spoked Frontier Wagon Wheel -->
+  <g fill="#231811" stroke="#c99658" stroke-width="1.8" stroke-linejoin="round">
+    <!-- Pine 1 -->
+    <polygon points="884,186 858,232 872,232 850,268 868,268 846,296 922,296 900,268 918,268 896,232 910,232" />
+    <!-- Pine 2 (taller) -->
+    <polygon points="1132,158 1102,210 1118,210 1094,254 1112,254 1088,296 1176,296 1152,254 1170,254 1146,210 1162,210" />
+  </g>
+
+  <!-- Engraved Spoked Wagon Wheel resting on the ridge -->
+  <g transform="translate(996, 256)">
+    <circle r="38" fill="#1e150f" fill-opacity="0.65" stroke="#dfc49e" stroke-width="4" />
+    <circle r="31" stroke="#a82a24" stroke-width="2" />
+    <g stroke="#c99658" stroke-width="2.2">
+      <line x1="0" y1="-36" x2="0" y2="36" />
+      <line x1="-36" y1="0" x2="36" y2="0" />
+      <line x1="-25" y1="-25" x2="25" y2="25" />
+      <line x1="-25" y1="25" x2="25" y2="-25" />
+    </g>
+    <circle r="9" fill="#a82a24" stroke="#f3e6d0" stroke-width="2.2" />
+  </g>
+
+  <!-- Bottom Double-Ruled Letterpress Plinth & Bookplate Ornaments -->
+  <rect x="0" y="296" width="1200" height="24" fill="#1e150f" />
+  <line x1="0" y1="296" x2="1200" y2="296" stroke="#a82a24" stroke-width="3" />
+  <line x1="0" y1="302" x2="1200" y2="302" stroke="#c99658" stroke-width="1.5" />
+  <line x1="0" y1="316" x2="1200" y2="316" stroke="#c99658" stroke-width="1.5" />
+  <g fill="#a82a24" stroke="#dfc49e" stroke-width="1.2">
+    <polygon points="300,303 308,309 300,315 292,309" />
+    <polygon points="600,302 610,309 600,316 590,309" />
+    <polygon points="900,303 908,309 900,315 892,309" />
+  </g>
+</svg>

@@ -125,41 +125,41 @@
 }
 
 :is(:root, .theme-preview)[data-palette='zenless'] {
-  --palette-chrome: #0b0c0e;
-  --palette-main: #111316;
-  --palette-surface: #191c20;
-  --palette-raised: #23272d;
-  --palette-control: #2d323a;
-  --palette-border: #4b525e;
-  --palette-border-strong: #9098a6;
-  --palette-text: #f5f7f0;
-  --palette-muted: #c0c6cf;
-  --palette-subtle: #a0a8b4;
-  --palette-accent: #d8f800;
-  --palette-fill: #d8f800;
-  --palette-fill-hover: #bfe000;
-  --palette-on-fill: #101300;
-  --palette-message-bg: #22272f;
-  --palette-message-text: #f5f7f0;
+  --palette-chrome: #0a0908;
+  --palette-main: #11100e;
+  --palette-surface: #191715;
+  --palette-raised: #23201d;
+  --palette-control: #2d2824;
+  --palette-border: #54473e;
+  --palette-border-strong: #a38f80;
+  --palette-text: #faf5f0;
+  --palette-muted: #d1c5b8;
+  --palette-subtle: #b0a192;
+  --palette-accent: #ff7a1f;
+  --palette-fill: #ff6f0f;
+  --palette-fill-hover: #ff8533;
+  --palette-on-fill: #120802;
+  --palette-message-bg: #291c14;
+  --palette-message-text: #faf5f0;
 }
 
 :is(:root, .theme-preview)[data-palette='zenless'][data-theme='light'] {
-  --palette-chrome: #e3e6dd;
-  --palette-main: #f8faf4;
-  --palette-surface: #eef1e7;
+  --palette-chrome: #e8dfd5;
+  --palette-main: #faf7f2;
+  --palette-surface: #f2ece2;
   --palette-raised: #ffffff;
-  --palette-control: #dde2d3;
-  --palette-border: #9aa482;
-  --palette-border-strong: #4d5733;
-  --palette-text: #14180f;
-  --palette-muted: #465038;
-  --palette-subtle: #566146;
-  --palette-accent: #496000;
-  --palette-fill: #d6f300;
-  --palette-fill-hover: #bed900;
-  --palette-on-fill: #121500;
-  --palette-message-bg: #e5ead9;
-  --palette-message-text: #171c10;
+  --palette-control: #e3d9cc;
+  --palette-border: #ab9886;
+  --palette-border-strong: #544335;
+  --palette-text: #17120e;
+  --palette-muted: #524235;
+  --palette-subtle: #635040;
+  --palette-accent: #ad3d00;
+  --palette-fill: #ff6f0f;
+  --palette-fill-hover: #f05f00;
+  --palette-on-fill: #120802;
+  --palette-message-bg: #f2ded0;
+  --palette-message-text: #1c1108;
 }
 
 :is(:root, .theme-preview)[data-palette='frontier'] {

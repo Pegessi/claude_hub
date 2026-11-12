@@ -110,7 +110,10 @@
       <span
         class="pane-session-name"
         :title="tabName"
-      >{{ tabName }}</span>
+      ><ThemeChromeIcon
+        kind="emblem"
+        :size="12"
+      />{{ tabName }}</span>
       <FeishuBindingPanel
         v-if="isChatSession && !isManagedChat"
         :tab-id="pane.tabId"
@@ -126,25 +129,30 @@
         class="empty-icon"
         aria-hidden="true"
       >
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
+        <ThemeChromeIcon
+          kind="pane-empty"
+          :size="24"
         >
-          <rect
-            x="3.5"
-            y="4.5"
-            width="17"
-            height="15"
-            rx="2.5"
-            stroke="currentColor"
-            stroke-width="1.5"
-          />
-          <path
-            d="M8.5 4.5v15M8.5 9h12"
-            stroke="currentColor"
-            stroke-width="1.5"
-          />
-        </svg>
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+          >
+            <rect
+              x="3.5"
+              y="4.5"
+              width="17"
+              height="15"
+              rx="2.5"
+              stroke="currentColor"
+              stroke-width="1.5"
+            />
+            <path
+              d="M8.5 4.5v15M8.5 9h12"
+              stroke="currentColor"
+              stroke-width="1.5"
+            />
+          </svg>
+        </ThemeChromeIcon>
       </div>
       <p>Click a tab to assign to this pane</p>
       <p class="empty-hint">
@@ -203,6 +211,7 @@ import { createNativeSubagentDock, nativeSubagentDockKey } from '@/features/chat
 import { useParentSubagents } from '@/features/chat/controllers/useParentSubagents'
 import type { SubagentDockRow } from '@/features/chat/presentation/subagentJump'
 import FeishuBindingPanel from '@/components/FeishuBindingPanel.vue'
+import ThemeChromeIcon from '@/features/app-shell/components/ThemeChromeIcon.vue'
 import TerminalView from '@/components/TerminalView.vue'
 import StructuredPane from '@/components/StructuredPane.vue'
 import QueuedChatObserver from '@/components/QueuedChatObserver.vue'

@@ -7,6 +7,17 @@
 
 ## Released
 
+### feat(theme): add illustrated game skins and themed chrome icons
+
+- Recast Zenless in orange and black, and give all three game themes original,
+  locally bundled scene illustrations: analog urban electronics, a western
+  wilderness print, and a Los Santos coastal skyline.
+- Carry the visual identity into Chat, Workspace, empty states and picker
+  previews, with theme-specific chrome icons and protected reading surfaces.
+  Preserve the five non-game themes, palette IDs, semantic status/provider
+  identities and existing appearance persistence. No remote artwork service or
+  extra appearance-preference model is introduced.
+
 ### style(theme): distinguish the three game themes
 
 - Give Zenless solid street-pop capsules, oblique display type and hard offset
