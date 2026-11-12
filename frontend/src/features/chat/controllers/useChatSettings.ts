@@ -157,7 +157,7 @@ export function useChatSettings(deps: Dependencies) {
   function closeModelMenu(focusTrigger: boolean) {
     isModelMenuOpen.value = false
     modelSearch.value = ''
-    if (focusTrigger) modelTriggerEl.value?.focus()
+    if (focusTrigger) modelTriggerEl.value?.focus({ preventScroll: true })
   }
 
   // A cached pane leaves the document (and native popover top layer). Do not
@@ -177,7 +177,7 @@ export function useChatSettings(deps: Dependencies) {
     isModelMenuOpen.value = true
     selectedMenuModelId.value = currentModelOption.value?.id ?? filteredModelOptions.value[0]?.id ?? ''
     void nextTick(() => {
-      modelSearchEl.value?.focus()
+      modelSearchEl.value?.focus({ preventScroll: true })
     })
   }
 
@@ -209,7 +209,7 @@ export function useChatSettings(deps: Dependencies) {
   function closeModeMenu(restoreFocus: boolean) {
     if (!isModeMenuOpen.value) return
     isModeMenuOpen.value = false
-    if (restoreFocus) void nextTick(() => modeTriggerEl.value?.focus())
+    if (restoreFocus) void nextTick(() => modeTriggerEl.value?.focus({ preventScroll: true }))
   }
 
   function toggleModeMenu() {
@@ -223,7 +223,7 @@ export function useChatSettings(deps: Dependencies) {
       const currentItem = modeMenuEl.value?.querySelector<HTMLButtonElement>('[aria-checked="true"]')
       const firstItem = modeMenuEl.value?.querySelector<HTMLButtonElement>('[role="menuitemradio"]')
       const focusTarget = currentItem ?? firstItem
-      focusTarget?.focus()
+      focusTarget?.focus({ preventScroll: true })
     })
   }
 
