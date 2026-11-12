@@ -1,7 +1,8 @@
 /* Theme-specific materials, display typography, and locally bundled game-scene
    illustrations. Functional layouts, body text and syntax colors stay shared.
-   Reading blocks use solid opaque surfaces so scene artwork never sits under
-   unprotected prose, and switching data-palette removes every treatment. */
+   Game palettes place unbacked prose over attenuated scenes, while semantic
+   callouts and inputs retain their own reading surfaces. Switching data-palette
+   removes every treatment. */
 :where(:root, .theme-preview) {
   --palette-scene: none;
   --palette-scene-glow: none;
@@ -33,47 +34,47 @@
 :is(:root, .theme-preview)[data-palette='zenless'] {
   --ch-font-display: 'Arial Black', Impact, 'Liberation Sans', 'DejaVu Sans', var(--ch-font-sans);
   --ch-heading-style: italic;
-  --ch-radius-sm: 3px;
-  --ch-radius-md: 6px;
-  --ch-radius-lg: 4px;
+  --ch-radius-sm: 5px;
+  --ch-radius-md: 8px;
+  --ch-radius-lg: 10px;
   --ch-radius-xl: 14px;
   --ch-radius-overlay: 16px;
   --palette-scene: url('../assets/zenless-scene.svg');
   --palette-scene-glow: linear-gradient(
     180deg,
     transparent 0%,
-    color-mix(in srgb, var(--ch-color-accent-strong) 12%, transparent) 100%
+    color-mix(in srgb, var(--ch-color-accent-strong) 7%, transparent) 100%
   );
 }
 :is(:root, .theme-preview)[data-palette='frontier'] {
   --ch-font-display: Georgia, 'Bitstream Charter', 'Liberation Serif', 'DejaVu Serif', 'Times New Roman', serif;
-  --ch-radius-sm: 1px;
-  --ch-radius-md: 2px;
-  --ch-radius-lg: 2px;
-  --ch-radius-xl: 2px;
-  --ch-radius-overlay: 3px;
-  --ch-radius-popover: 2px;
+  --ch-radius-sm: 3px;
+  --ch-radius-md: 5px;
+  --ch-radius-lg: 6px;
+  --ch-radius-xl: 8px;
+  --ch-radius-overlay: 10px;
+  --ch-radius-popover: 5px;
   --palette-scene: url('../assets/frontier-scene.svg');
   --palette-scene-glow: linear-gradient(
     180deg,
     transparent 0%,
-    color-mix(in srgb, var(--ch-color-accent) 12%, transparent) 100%
+    color-mix(in srgb, var(--ch-color-accent) 8%, transparent) 100%
   );
 }
 :is(:root, .theme-preview)[data-palette='los-santos'] {
   --ch-font-display: 'Arial Narrow', 'Liberation Sans Narrow', Impact, 'DejaVu Sans Condensed', 'Liberation Sans', var(--ch-font-sans);
-  --ch-radius-sm: 1px;
-  --ch-radius-md: 2px;
-  --ch-radius-lg: 1px;
-  --ch-radius-xl: 2px;
-  --ch-radius-overlay: 4px;
-  --ch-radius-popover: 2px;
+  --ch-radius-sm: 3px;
+  --ch-radius-md: 5px;
+  --ch-radius-lg: 6px;
+  --ch-radius-xl: 8px;
+  --ch-radius-overlay: 10px;
+  --ch-radius-popover: 5px;
   --palette-scene: url('../assets/los-santos-scene.svg');
   --palette-scene-glow: linear-gradient(
     180deg,
     transparent 0%,
-    color-mix(in srgb, #38bdf8 10%, transparent) 68%,
-    color-mix(in srgb, #f59e0b 12%, transparent) 100%
+    color-mix(in srgb, #38bdf8 6%, transparent) 68%,
+    color-mix(in srgb, #f59e0b 8%, transparent) 100%
   );
 }
 :root:is([data-palette='mono'], [data-palette='studio'], [data-palette='carbon'],
@@ -82,12 +83,10 @@
   font-family: var(--ch-font-display);
   font-style: var(--ch-heading-style);
 }
-:root:is([data-palette='mono'], [data-palette='studio'], [data-palette='carbon'],
-  [data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos']) .conversation-bubble--user {
+:root:is([data-palette='mono'], [data-palette='studio'], [data-palette='carbon']) .conversation-bubble--user {
   border: 1px solid var(--ch-color-border);
 }
-:root:is([data-palette='mono'], [data-palette='studio'], [data-palette='carbon'],
-  [data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos']) .composer-row {
+:root:is([data-palette='mono'], [data-palette='studio'], [data-palette='carbon']) .composer-row {
   background: var(--ch-color-surface);
 }
 :root[data-palette='mono'] .composer-row {
@@ -115,37 +114,25 @@
 }
 
 /* ==========================================================================
-   ZENLESS (ZZZ) — Inter-Knot / HDD analog electronics & orange/obsidian street-pop
-   Asymmetric chamfered capsules, solid blaze-orange navigation slabs, heavy
-   oblique display typography, halftone dot-matrix chrome and hard offset shadows.
+   ZENLESS (ZZZ) — Random Play / H.D.D. & Eous (Bangboo 01)
+   Restrained orange-and-obsidian UI with oblique display typography, capsule
+   navigation, and a calm borderless conversation workspace.
    ========================================================================== */
 :root[data-palette='zenless'] :is(.app-mode-bar, .workspace-header) {
   background-color: var(--ch-color-surface);
-  background-image: radial-gradient(
-    circle,
-    color-mix(in srgb, var(--ch-color-text) 10%, transparent) 1px,
-    transparent 1.3px
-  );
-  background-size: 8px 8px;
-  border-bottom: 4px solid var(--ch-color-accent-strong);
-  border-image: repeating-linear-gradient(
-    125deg,
-    var(--ch-color-accent-strong) 0 10px,
-    var(--ch-color-on-accent) 10px 15px
-  ) 4;
+  border-bottom: 1px solid color-mix(in srgb, var(--ch-color-accent-strong) 38%, var(--ch-color-border));
 }
 :root[data-palette='zenless'] :is(.mode-button, .appearance-card-title, .appearance-header h2, .chat-sidebar__title, .workspace-title-block > h1) {
   font-family: var(--ch-font-display);
   font-style: italic;
-  font-weight: 900;
+  font-weight: 800;
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.025em;
 }
 :root[data-palette='zenless'] .mode-switch {
   border-radius: 999px;
-  border: 2px solid var(--ch-color-border-strong);
+  border: 1px solid var(--ch-color-border);
   background: var(--ch-color-main-bg);
-  box-shadow: 2px 2px 0 var(--ch-color-border);
 }
 :root[data-palette='zenless'] .mode-button {
   border-radius: 999px;
@@ -153,25 +140,22 @@
 :root[data-palette='zenless'] .mode-button.active {
   background: var(--ch-color-accent-strong);
   color: var(--ch-color-on-accent);
-  border: 2px solid var(--ch-color-on-accent);
-  box-shadow: 2px 2px 0 var(--ch-color-border-strong);
+  border-color: transparent;
 }
 :root[data-palette='zenless'] .tab {
-  border-radius: 14px 3px 14px 3px;
-  border: 1.5px solid var(--ch-color-border);
+  border-radius: 8px;
 }
 :root[data-palette='zenless'] .tab.active {
   background-color: var(--ch-color-accent-strong);
-  border: 2px solid var(--ch-color-on-accent);
-  border-radius: 14px 3px 14px 3px;
-  box-shadow: 3px 3px 0 var(--ch-color-border-strong);
+  border-color: transparent;
+  border-radius: 8px;
 }
 :root[data-palette='zenless'] .tab.active .tab-name {
   color: var(--ch-color-on-accent);
   font-family: var(--ch-font-display);
   font-style: italic;
-  font-weight: 900;
-  letter-spacing: 0.025em;
+  font-weight: 800;
+  letter-spacing: 0.02em;
 }
 :root[data-palette='zenless'] .tab.active :is(.tab-close, .tam-trigger) {
   color: var(--ch-color-on-accent);
@@ -184,44 +168,23 @@
 :root[data-palette='zenless'] .tab.active .tab-indicator {
   box-shadow: 0 0 0 1.5px var(--ch-color-on-accent);
 }
-:root[data-palette='zenless'] :is(.appearance-trigger, .add-tab, .mobile-app-menu-trigger, .workspace-mobile-menu-trigger) {
-  border-radius: 12px 3px 12px 3px;
-  border: 1.5px solid var(--ch-color-border-strong);
-  font-weight: 800;
-  box-shadow: 2px 2px 0 var(--ch-color-border);
-}
-:root[data-palette='zenless'] .chat-sidebar {
-  border-right: 2px solid var(--ch-color-border-strong);
-}
-:root[data-palette='zenless'] .chat-sidebar__header {
-  background-image: radial-gradient(
-    circle,
-    color-mix(in srgb, var(--ch-color-text) 8%, transparent) 1px,
-    transparent 1.2px
-  );
-  background-size: 7px 7px;
-  border-bottom: 1.5px solid var(--ch-color-border);
-}
 :root[data-palette='zenless'] .chat-sidebar__search {
   border-radius: 999px;
-  border: 1.5px solid var(--ch-color-border-strong);
-  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--ch-color-text) 8%, transparent);
 }
 :root[data-palette='zenless'] .chat-sidebar__item {
-  border-radius: 14px 3px 14px 3px;
+  border-radius: 8px;
 }
 :root[data-palette='zenless'] .chat-sidebar__item.active {
   background: var(--ch-color-accent-strong);
   color: var(--ch-color-on-accent);
-  border: 2px solid var(--ch-color-on-accent);
-  border-radius: 14px 3px 14px 3px;
-  box-shadow: 3px 3px 0 var(--ch-color-border-strong);
+  border-color: transparent;
+  border-radius: 8px;
 }
 :root[data-palette='zenless'] .chat-sidebar__item.active .chat-sidebar__item-name {
   color: var(--ch-color-on-accent);
   font-family: var(--ch-font-display);
   font-style: italic;
-  font-weight: 900;
+  font-weight: 800;
   letter-spacing: 0.02em;
 }
 :root[data-palette='zenless'] .chat-sidebar__item.active :is(.chat-sidebar__item-time, .tam-trigger) {
@@ -231,147 +194,57 @@
 :root[data-palette='zenless'] .chat-sidebar__item.active .chat-sidebar__item-status {
   box-shadow: 0 0 0 1.5px var(--ch-color-on-accent);
 }
-:root[data-palette='zenless'] .layout-btn {
-  border-radius: 10px 2px 10px 2px;
-  border: 1.5px solid var(--ch-color-border);
-}
 :root[data-palette='zenless'] .layout-btn.active {
   background-color: var(--ch-color-accent-strong);
-  border: 2px solid var(--ch-color-on-accent);
-  border-radius: 10px 2px 10px 2px;
-  box-shadow: 2px 2px 0 var(--ch-color-border-strong);
+  border-color: transparent;
 }
 :root[data-palette='zenless'] .layout-btn.active .layout-cell {
   background-color: var(--ch-color-on-accent);
 }
-:root[data-palette='zenless'] .terminal-pane {
-  border-radius: 14px 4px 14px 4px;
-  border-width: 4px 2px 2px;
-}
-:root[data-palette='zenless'] .terminal-pane.active {
-  border-color: var(--ch-color-border-selected);
-  box-shadow: 4px 4px 0 color-mix(in srgb, var(--ch-color-border-selected) 36%, var(--ch-color-border));
-}
-:root[data-palette='zenless'] .pane-session-name {
-  border: 1.5px solid var(--ch-color-border-strong);
-  border-radius: 999px;
-  font-family: var(--ch-font-display);
-  font-style: italic;
-  font-weight: 900;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  box-shadow: 2px 2px 0 var(--ch-color-border);
-}
-:root[data-palette='zenless'] .conversation-bubble--user {
-  border-radius: 16px 3px 16px 14px;
-  border: 2px solid var(--ch-color-accent-strong);
-  box-shadow: 4px 4px 0 var(--ch-color-accent-strong);
-}
-:root[data-palette='zenless'] .goal-plan-card {
-  padding: 9px 12px;
-  gap: 8px;
-  border-radius: 16px 4px 16px 4px;
-  border: 2px solid var(--ch-color-border-strong);
-  border-top: 5px solid var(--ch-color-accent-strong);
-  box-shadow: 5px 5px 0 color-mix(in srgb, var(--ch-color-border-strong) 45%, transparent);
-}
 :root[data-palette='zenless'] .goal-plan-eyebrow {
   display: inline-block;
   width: fit-content;
-  padding: 1px 10px;
+  padding: 1px 9px;
   line-height: 1.25;
   border-radius: 999px;
-  background: var(--ch-color-accent-strong);
-  color: var(--ch-color-on-accent);
-  border: 1.5px solid var(--ch-color-on-accent);
+  background: color-mix(in srgb, var(--ch-color-accent-strong) 18%, var(--ch-color-surface));
+  color: var(--ch-color-accent);
   font-family: var(--ch-font-display);
   font-style: italic;
-  font-weight: 900;
-  letter-spacing: 0.05em;
-  box-shadow: 2px 2px 0 var(--ch-color-border-strong);
-}
-:root[data-palette='zenless'] .goal-plan-budget {
-  border-radius: 10px 3px 10px 3px;
-  border: 1.5px solid var(--ch-color-border);
-  border-left: 4px solid var(--ch-color-accent-strong);
+  font-weight: 800;
+  letter-spacing: 0.04em;
 }
 :root[data-palette='zenless'] :is(.goal-plan-actions .goal-plan-approve, .ch-btn--primary, .primary-button, .composer-send-btn, .approval-submit-btn) {
-  border-radius: 12px 3px 12px 3px;
-  border-width: 2px;
   font-family: var(--ch-font-display);
   font-style: italic;
-  font-weight: 900;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  box-shadow: 3px 3px 0 var(--ch-color-border-strong);
-}
-:root[data-palette='zenless'] :is(.goal-plan-actions .goal-plan-revise, .goal-status-actions button, .goal-status-quick, .appearance-done) {
-  border-radius: 10px 3px 10px 3px;
-  border: 1.5px solid var(--ch-color-border-strong);
   font-weight: 800;
-  box-shadow: 2px 2px 0 var(--ch-color-border);
-}
-:root[data-palette='zenless'] .goal-status {
-  border-top: 2px solid var(--ch-color-border-strong);
-  border-bottom: 2px solid var(--ch-color-border-strong);
-  background-image: radial-gradient(
-    circle,
-    color-mix(in srgb, var(--ch-color-text) 7%, transparent) 1px,
-    transparent 1.2px
-  );
-  background-size: 8px 8px;
-}
-:root[data-palette='zenless'] .composer-row {
-  border-radius: 16px 4px 16px 4px;
-  border: 2px solid var(--ch-color-border-strong);
-  border-top: 4px solid var(--ch-color-accent-strong);
-  box-shadow: 4px 4px 0 var(--ch-color-border-strong);
-}
-:root[data-palette='zenless'] .task-card {
-  border-radius: 14px 3px 14px 3px;
-  border-width: 1.5px;
-  box-shadow: 3px 3px 0 var(--ch-color-border);
-}
-:root[data-palette='zenless'] .appearance-dialog {
-  border-radius: 18px 4px 18px 4px;
-  border: 2px solid var(--ch-color-border-strong);
-  box-shadow: 6px 6px 0 var(--ch-color-accent-strong), var(--ch-shadow-lg);
+  text-transform: uppercase;
+  letter-spacing: 0.025em;
 }
 :root[data-palette='zenless'] .appearance-modes {
   border-radius: 999px;
-  border: 2px solid var(--ch-color-border-strong);
 }
 :root[data-palette='zenless'] .appearance-mode > span {
   border-radius: 999px;
-  font-weight: 800;
+  font-weight: 700;
 }
 :root[data-palette='zenless'] .appearance-mode input:checked + span {
   background: var(--ch-color-accent-strong);
   color: var(--ch-color-on-accent);
-  border: 2px solid var(--ch-color-on-accent);
+  border-color: transparent;
   font-style: italic;
-  font-weight: 900;
+  font-weight: 800;
   text-transform: uppercase;
 }
 
 /* ==========================================================================
-   FRONTIER (RDR2) — 1899 letterpress ledger, woodblock, saddle leather & vellum
-   Square bookplate corners, double-ruled borders, inset framing lines,
-   classical serif small-caps hierarchy and embossed carmine wax-seal stamps.
+   FRONTIER (RDR2) — Arthur Morgan & Outlaw Horizon
+   Warm carmine, aged vellum & classical serif small-caps hierarchy without
+   heavy double-ruled box frames.
    ========================================================================== */
 :root[data-palette='frontier'] :is(.app-mode-bar, .workspace-header) {
   background-color: var(--ch-color-surface);
-  background-image: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--ch-color-accent) 7%, transparent) 0%,
-    transparent 100%
-  );
-  border-bottom: 4px double var(--ch-color-accent);
-  box-shadow: inset 0 -1px 0 var(--ch-color-border-strong);
-}
-:root[data-palette='frontier'] .appearance-header {
-  border-bottom: 3px double var(--ch-color-border-strong);
-  margin-bottom: 18px;
+  border-bottom: 1px solid color-mix(in srgb, var(--ch-color-accent) 34%, var(--ch-color-border));
 }
 :root[data-palette='frontier'] .appearance-header h2 {
   color: var(--ch-color-accent);
@@ -382,40 +255,25 @@
   font-family: var(--ch-font-display);
   font-variant-caps: small-caps;
   font-weight: 700;
-  letter-spacing: 0.06em;
-}
-:root[data-palette='frontier'] .mode-switch {
-  border-radius: 2px;
-  border: 3px double var(--ch-color-border-strong);
-  background: var(--ch-color-main-bg);
-}
-:root[data-palette='frontier'] .mode-button {
-  border-radius: 1px;
+  letter-spacing: 0.05em;
 }
 :root[data-palette='frontier'] .mode-button.active {
   background: var(--ch-color-accent-strong);
   color: var(--ch-color-on-accent);
-  border: 1px solid var(--ch-color-border-strong);
-  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--ch-color-on-accent) 32%, transparent);
+  border-color: transparent;
 }
 :root[data-palette='frontier'] .tab {
-  border-radius: 2px;
-  border: 1px solid var(--ch-color-border);
   font-family: var(--ch-font-display);
 }
 :root[data-palette='frontier'] .tab.active {
   background-color: var(--ch-color-accent-strong);
-  border: 1px solid var(--ch-color-border-strong);
-  border-radius: 2px;
-  box-shadow:
-    inset 0 0 0 2px color-mix(in srgb, var(--ch-color-on-accent) 30%, transparent),
-    0 2px 4px var(--ch-shadow-color-soft);
+  border-color: transparent;
 }
 :root[data-palette='frontier'] .tab.active .tab-name {
   color: var(--ch-color-on-accent);
   font-family: var(--ch-font-display);
   font-weight: 700;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.025em;
 }
 :root[data-palette='frontier'] .tab.active :is(.tab-close, .tam-trigger) {
   color: var(--ch-color-on-accent);
@@ -423,244 +281,80 @@
 :root[data-palette='frontier'] .tab.active .pane-indicator {
   background-color: var(--ch-color-on-accent);
   color: var(--ch-color-accent-strong);
-  border-radius: 1px;
 }
 :root[data-palette='frontier'] .tab.active .tab-indicator {
   box-shadow: 0 0 0 1.5px var(--ch-color-on-accent);
 }
-:root[data-palette='frontier'] :is(.appearance-trigger, .add-tab, .mobile-app-menu-trigger, .workspace-mobile-menu-trigger) {
-  border-radius: 2px;
-  border: 3px double var(--ch-color-border-strong);
-  font-family: var(--ch-font-display);
-}
-:root[data-palette='frontier'] .chat-sidebar {
-  border-right: 3px double var(--ch-color-border-strong);
-  background-image: repeating-linear-gradient(
-    180deg,
-    transparent 0 27px,
-    color-mix(in srgb, var(--ch-color-border) 22%, transparent) 27px 28px
-  );
-}
-:root[data-palette='frontier'] .chat-sidebar__header {
-  border-bottom: 3px double var(--ch-color-border);
-}
 :root[data-palette='frontier'] .chat-sidebar__title {
   color: var(--ch-color-accent);
-  letter-spacing: 0.12em;
-}
-:root[data-palette='frontier'] .chat-sidebar__search {
-  border-radius: 2px;
-  border: 3px double var(--ch-color-border-strong);
-}
-:root[data-palette='frontier'] .chat-sidebar__item {
-  border-radius: 2px;
+  letter-spacing: 0.09em;
 }
 :root[data-palette='frontier'] .chat-sidebar__item.active {
-  background: color-mix(in srgb, var(--ch-color-surface-raised), var(--ch-color-accent) 16%);
-  border: 3px double var(--ch-color-border-selected);
-  border-left: 5px solid var(--ch-color-accent-strong);
-  border-radius: 2px;
-  box-shadow:
-    inset 0 1px 0 color-mix(in srgb, var(--ch-color-text) 10%, transparent),
-    0 2px 6px var(--ch-shadow-color-soft);
+  background: var(--ch-color-surface-selected);
+  border: 1px solid color-mix(in srgb, var(--ch-color-border-selected) 50%, transparent);
 }
 :root[data-palette='frontier'] .chat-sidebar__item.active .chat-sidebar__item-name {
   font-family: var(--ch-font-display);
   font-weight: 700;
   letter-spacing: 0.02em;
 }
-:root[data-palette='frontier'] .layout-btn {
-  border-radius: 2px;
-  border: 1px solid var(--ch-color-border);
-}
 :root[data-palette='frontier'] .layout-btn.active {
   background-color: var(--ch-color-accent-strong);
-  border: 1px solid var(--ch-color-border-strong);
-  border-radius: 2px;
-  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--ch-color-on-accent) 30%, transparent);
+  border-color: transparent;
 }
 :root[data-palette='frontier'] .layout-btn.active .layout-cell {
   background-color: var(--ch-color-on-accent);
 }
-:root[data-palette='frontier'] .terminal-pane {
-  border-radius: 2px;
-  border: 3px double var(--ch-color-border);
-}
-:root[data-palette='frontier'] .terminal-pane.active {
-  border: 3px double var(--ch-color-border-selected);
-  box-shadow:
-    inset 0 0 0 3px var(--ch-color-main-bg),
-    inset 0 0 0 4px var(--ch-color-border),
-    0 8px 24px var(--ch-shadow-color-soft);
-}
-:root[data-palette='frontier'] .pane-session-name {
-  border-radius: 2px;
-  border: 3px double var(--ch-color-border-strong);
-  font-family: var(--ch-font-display);
-  font-variant-caps: small-caps;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-}
-:root[data-palette='frontier'] .conversation-bubble--user {
-  border-radius: 2px;
-  border: 3px double var(--ch-color-border-strong);
-  box-shadow:
-    inset 0 0 0 2px color-mix(in srgb, var(--ch-color-accent) 18%, transparent),
-    0 3px 8px var(--ch-shadow-color-soft);
-}
-:root[data-palette='frontier'] .goal-plan-card {
-  padding: 6px 12px;
-  gap: 6px;
-  border-radius: 2px;
-  border: 4px double var(--ch-color-border-strong);
-  background-image: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--ch-color-accent) 6%, transparent) 0,
-    transparent 44px
-  );
-  box-shadow:
-    inset 0 0 0 2px var(--ch-color-surface),
-    inset 0 0 0 3px var(--ch-color-border-muted),
-    0 6px 18px var(--ch-shadow-color-soft);
-}
 :root[data-palette='frontier'] .goal-plan-eyebrow {
   font-family: var(--ch-font-display);
   font-size: 12px;
-  line-height: 1.15;
+  line-height: 1.2;
   font-weight: 700;
-  letter-spacing: 0.16em;
+  letter-spacing: 0.12em;
   color: var(--ch-color-accent);
-  text-align: center;
-  border-bottom: 3px double var(--ch-color-border-strong);
-  padding: 1px 0 3px;
-}
-:root[data-palette='frontier'] .goal-plan-budget {
-  padding: 6px 10px;
-  border-radius: 2px;
-  border: 3px double var(--ch-color-border);
 }
 :root[data-palette='frontier'] :is(.goal-plan-actions .goal-plan-approve, .ch-btn--primary, .primary-button, .composer-send-btn, .approval-submit-btn) {
-  border-radius: 2px;
-  font-family: var(--ch-font-display);
-  font-variant-caps: small-caps;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  box-shadow:
-    inset 0 0 0 2px color-mix(in srgb, var(--ch-color-on-accent) 28%, transparent),
-    0 2px 5px var(--ch-shadow-color-soft);
-}
-:root[data-palette='frontier'] :is(.goal-plan-actions .goal-plan-revise, .goal-status-actions button, .goal-status-quick, .appearance-done) {
-  border-radius: 2px;
-  border: 3px double var(--ch-color-border-strong);
-  font-family: var(--ch-font-display);
-  font-variant-caps: small-caps;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-}
-:root[data-palette='frontier'] .goal-status {
-  border-top: 3px double var(--ch-color-border-strong);
-  border-bottom: 3px double var(--ch-color-border-strong);
-  font-family: var(--ch-font-display);
-}
-:root[data-palette='frontier'] .composer-row {
-  border-style: double;
-  border-width: 4px;
-  border-color: var(--ch-color-border-strong);
-  border-radius: 2px;
-  box-shadow:
-    inset 0 0 0 2px var(--ch-color-surface),
-    inset 0 0 0 3px var(--ch-color-border-muted),
-    0 4px 12px var(--ch-shadow-color-soft);
-}
-:root[data-palette='frontier'] .markdown-code-block {
-  border-radius: 2px;
-  border: 3px double var(--ch-color-border);
-}
-:root[data-palette='frontier'] .task-card {
-  border-radius: 2px;
-  border: 3px double var(--ch-color-border);
-}
-:root[data-palette='frontier'] .appearance-dialog {
-  border-radius: 3px;
-  border: 4px double var(--ch-color-border-strong);
-  box-shadow:
-    inset 0 0 0 3px var(--ch-color-surface),
-    inset 0 0 0 4px var(--ch-color-border),
-    var(--ch-shadow-lg);
-}
-:root[data-palette='frontier'] .appearance-modes {
-  border-radius: 2px;
-  border: 3px double var(--ch-color-border-strong);
-}
-:root[data-palette='frontier'] .appearance-mode > span {
-  border-radius: 1px;
   font-family: var(--ch-font-display);
   font-variant-caps: small-caps;
   font-weight: 700;
   letter-spacing: 0.05em;
 }
+:root[data-palette='frontier'] .appearance-mode > span {
+  font-family: var(--ch-font-display);
+  font-variant-caps: small-caps;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
 :root[data-palette='frontier'] .appearance-mode input:checked + span {
   background: var(--ch-color-accent-strong);
   color: var(--ch-color-on-accent);
-  border-color: var(--ch-color-border-strong);
-  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--ch-color-on-accent) 30%, transparent);
+  border-color: transparent;
 }
 
 /* ==========================================================================
-   LOS SANTOS (GTA V) — West Coast telemetry, pause-menu HUD & Pacific slate
-   Razor-sharp 90-degree HUD blocks, tri-segment telemetry bars (emerald /
-   radar cyan / highway amber), condensed uppercase type and heavy leading bars.
+   LOS SANTOS (GTA V) — Michael, Franklin & Chop, Trevor Triptych
+   Pacific dusk slate, condensed uppercase display hierarchy, and quiet
+   borderless surfaces without stacked multi-color HUD bars.
    ========================================================================== */
 :root[data-palette='los-santos'] :is(.app-mode-bar, .workspace-header) {
   background-color: var(--ch-color-surface);
-  background-image: linear-gradient(
-    90deg,
-    color-mix(in srgb, var(--ch-color-accent) 9%, transparent) 0%,
-    color-mix(in srgb, #38bdf8 7%, transparent) 64%,
-    color-mix(in srgb, #f59e0b 6%, transparent) 100%
-  );
-  border-bottom: 3px solid var(--ch-color-accent);
-  border-image: linear-gradient(
-    90deg,
-    var(--ch-color-accent) 0 58%,
-    #38bdf8 58% 84%,
-    #f59e0b 84% 100%
-  ) 1;
+  border-bottom: 1px solid color-mix(in srgb, var(--ch-color-accent) 34%, var(--ch-color-border));
 }
 :root[data-palette='los-santos'] :is(.appearance-header h2, .mode-button, .appearance-card-title, .chat-sidebar__title, .workspace-title-block > h1) {
   font-family: var(--ch-font-display);
   font-stretch: condensed;
   font-weight: 800;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-:root[data-palette='los-santos'] .mode-switch {
-  border-radius: 1px;
-  border: 1px solid var(--ch-color-border-strong);
-  border-left: 3px solid #38bdf8;
-  background: var(--ch-color-main-bg);
-}
-:root[data-palette='los-santos'] .mode-button {
-  border-radius: 1px;
+  letter-spacing: 0.05em;
 }
 :root[data-palette='los-santos'] .mode-button.active {
   background: var(--ch-color-accent-strong);
   color: var(--ch-color-on-accent);
-  border: 1px solid var(--ch-color-accent-strong);
-  border-left: 4px solid #38bdf8;
-  box-shadow: none;
-}
-:root[data-palette='los-santos'] .tab {
-  border-radius: 1px;
-  border: 1px solid var(--ch-color-border);
-  border-left: 3px solid var(--ch-color-border-strong);
+  border-color: transparent;
 }
 :root[data-palette='los-santos'] .tab.active {
   background-color: var(--ch-color-accent-strong);
-  border: 1px solid var(--ch-color-accent-strong);
-  border-left: 5px solid #38bdf8;
-  border-radius: 1px;
-  box-shadow: 0 2px 8px var(--ch-shadow-color-soft);
+  border-color: transparent;
 }
 :root[data-palette='los-santos'] .tab.active .tab-name {
   color: var(--ch-color-on-accent);
@@ -668,7 +362,7 @@
   font-stretch: condensed;
   font-weight: 800;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.04em;
 }
 :root[data-palette='los-santos'] .tab.active :is(.tab-close, .tam-trigger) {
   color: var(--ch-color-on-accent);
@@ -676,191 +370,53 @@
 :root[data-palette='los-santos'] .tab.active .pane-indicator {
   background-color: var(--ch-color-on-accent);
   color: var(--ch-color-accent-strong);
-  border-radius: 1px;
 }
 :root[data-palette='los-santos'] .tab.active .tab-indicator {
   box-shadow: 0 0 0 1.5px var(--ch-color-on-accent);
 }
-:root[data-palette='los-santos'] :is(.appearance-trigger, .add-tab, .mobile-app-menu-trigger, .workspace-mobile-menu-trigger) {
-  border-radius: 1px;
-  border: 1px solid var(--ch-color-border-strong);
-  border-left: 3px solid var(--ch-color-accent);
-  font-family: var(--ch-font-display);
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-:root[data-palette='los-santos'] .chat-sidebar {
-  border-right: 1px solid var(--ch-color-border-strong);
-  background-image: linear-gradient(
-    180deg,
-    color-mix(in srgb, #38bdf8 6%, transparent) 0,
-    transparent 96px
-  );
-}
-:root[data-palette='los-santos'] .chat-sidebar__header {
-  border-bottom: 2px solid var(--ch-color-border);
-  box-shadow: inset 4px 0 0 #38bdf8;
-}
-:root[data-palette='los-santos'] .chat-sidebar__search {
-  border-radius: 1px;
-  border: 1px solid var(--ch-color-border-strong);
-  border-left: 3px solid #38bdf8;
-}
-:root[data-palette='los-santos'] .chat-sidebar__item {
-  border-radius: 1px;
-}
 :root[data-palette='los-santos'] .chat-sidebar__item.active {
-  background: linear-gradient(
-    90deg,
-    color-mix(in srgb, var(--ch-color-accent) 22%, var(--ch-color-surface-raised)) 0%,
-    var(--ch-color-surface-raised) 100%
-  );
-  border: 1px solid var(--ch-color-border-selected);
-  border-left: 6px solid var(--ch-color-accent);
-  border-right: 3px solid #38bdf8;
-  border-radius: 1px;
-  box-shadow: 0 2px 8px var(--ch-shadow-color-soft);
+  background: var(--ch-color-surface-selected);
+  border: 1px solid color-mix(in srgb, var(--ch-color-border-selected) 50%, transparent);
 }
 :root[data-palette='los-santos'] .chat-sidebar__item.active .chat-sidebar__item-name {
   font-family: var(--ch-font-display);
   font-stretch: condensed;
   font-weight: 800;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-:root[data-palette='los-santos'] .layout-btn {
-  border-radius: 1px;
-  border: 1px solid var(--ch-color-border);
+  letter-spacing: 0.04em;
 }
 :root[data-palette='los-santos'] .layout-btn.active {
   background-color: var(--ch-color-accent-strong);
-  border: 1px solid var(--ch-color-accent-strong);
-  border-left: 3px solid #38bdf8;
-  border-radius: 1px;
+  border-color: transparent;
 }
 :root[data-palette='los-santos'] .layout-btn.active .layout-cell {
   background-color: var(--ch-color-on-accent);
 }
-:root[data-palette='los-santos'] .terminal-pane {
-  border-radius: 1px;
-  border-width: 3px 1px 1px 4px;
-}
-:root[data-palette='los-santos'] .terminal-pane.active {
-  border-color: var(--ch-color-border-selected);
-  box-shadow:
-    inset 0 1px 0 color-mix(in srgb, #38bdf8 35%, transparent),
-    0 10px 28px var(--ch-shadow-color-soft);
-}
-:root[data-palette='los-santos'] .pane-session-name {
-  border-radius: 1px;
-  border: 1px solid var(--ch-color-border-strong);
-  border-left: 4px solid var(--ch-color-accent);
-  font-family: var(--ch-font-display);
-  font-stretch: condensed;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-:root[data-palette='los-santos'] .conversation-bubble--user {
-  border-radius: 1px;
-  border: 1px solid var(--ch-color-border-strong);
-  border-left: 5px solid var(--ch-color-accent);
-  border-top: 2px solid #38bdf8;
-}
-:root[data-palette='los-santos'] .goal-plan-card {
-  padding: 9px 12px;
-  gap: 8px;
-  border-radius: 1px;
-  border: 1px solid var(--ch-color-border-strong);
-  border-left: 6px solid var(--ch-color-accent);
-  border-top: 2px solid #38bdf8;
-  background-image: linear-gradient(
-    180deg,
-    color-mix(in srgb, #38bdf8 6%, transparent) 0,
-    transparent 42px
-  );
-  box-shadow: 0 8px 24px var(--ch-shadow-color-soft);
-}
 :root[data-palette='los-santos'] .goal-plan-eyebrow {
-  padding: 2px 10px;
-  line-height: 1.25;
-  background: var(--ch-color-surface-sunken);
-  border-left: 4px solid #f59e0b;
-  border-right: 3px solid #38bdf8;
-  color: var(--ch-color-text);
   font-family: var(--ch-font-display);
   font-stretch: condensed;
   font-weight: 800;
-  letter-spacing: 0.1em;
-}
-:root[data-palette='los-santos'] .goal-plan-budget {
-  border-radius: 1px;
-  border: 1px solid var(--ch-color-border);
-  border-left: 4px solid #38bdf8;
+  letter-spacing: 0.08em;
+  color: var(--ch-color-accent);
 }
 :root[data-palette='los-santos'] :is(.goal-plan-actions .goal-plan-approve, .ch-btn--primary, .primary-button, .composer-send-btn, .approval-submit-btn) {
-  border-radius: 1px;
-  font-family: var(--ch-font-display);
-  font-stretch: condensed;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-:root[data-palette='los-santos'] :is(.goal-plan-actions .goal-plan-revise, .goal-status-actions button, .goal-status-quick, .appearance-done) {
-  border-radius: 1px;
-  border: 1px solid var(--ch-color-border-strong);
-  border-left: 3px solid #38bdf8;
   font-family: var(--ch-font-display);
   font-stretch: condensed;
   font-weight: 800;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-}
-:root[data-palette='los-santos'] .goal-status {
-  border-top: 2px solid var(--ch-color-accent);
-  border-bottom: 1px solid var(--ch-color-border-strong);
-  box-shadow: inset 4px 0 0 #38bdf8;
-}
-:root[data-palette='los-santos'] .composer-row {
-  border-radius: 1px;
-  border: 1px solid var(--ch-color-border-strong);
-  border-left: 6px solid var(--ch-color-accent);
-  border-top: 2px solid #38bdf8;
-  box-shadow: 0 6px 20px var(--ch-shadow-color-soft);
-}
-:root[data-palette='los-santos'] .markdown-code-block {
-  border-radius: 1px;
-  border-left: 3px solid #38bdf8;
-}
-:root[data-palette='los-santos'] .task-card {
-  border-radius: 1px;
-  border: 1px solid var(--ch-color-border-strong);
-}
-:root[data-palette='los-santos'] .appearance-dialog {
-  border-radius: 2px;
-  border: 1px solid var(--ch-color-border-strong);
-  border-top: 3px solid var(--ch-color-accent);
-  border-left: 5px solid #38bdf8;
-}
-:root[data-palette='los-santos'] .appearance-modes {
-  border-radius: 1px;
-  border: 1px solid var(--ch-color-border-strong);
-  border-left: 3px solid #38bdf8;
 }
 :root[data-palette='los-santos'] .appearance-mode > span {
-  border-radius: 1px;
   font-family: var(--ch-font-display);
   font-stretch: condensed;
   font-weight: 800;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.04em;
 }
 :root[data-palette='los-santos'] .appearance-mode input:checked + span {
   background: var(--ch-color-accent-strong);
   color: var(--ch-color-on-accent);
-  border-color: var(--ch-color-accent-strong);
-  border-left: 4px solid #38bdf8;
+  border-color: transparent;
 }
 
 /* ==========================================================================
@@ -892,16 +448,9 @@
   outline: 2px solid var(--ch-color-accent-ring);
   outline-offset: 2px;
 }
-:root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
-  :is(.goal-plan-actions .goal-plan-approve, .ch-btn--primary, .primary-button, .composer-send-btn, .approval-submit-btn):focus-visible {
-  border-color: var(--ch-color-accent-strong);
-}
-:root[data-palette='los-santos'] :is(.ch-btn--primary, .primary-button):focus-visible {
-  box-shadow: var(--ch-shadow-button);
-}
 
 /* ==========================================================================
-   Scene illustrations, solid reading plates & theme-aware chrome icon slots
+   Borderless workspace, atmospheric scene illustrations & unobtrusive backing
    ========================================================================== */
 :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
   :is(.mode-button, .chat-sidebar__title, .pane-session-name, .workspace-title-block > h1, .workspace-mobile-identity > span) {
@@ -915,25 +464,22 @@
 }
 :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
   .structured-pane {
-  background-color: var(--ch-color-main-bg);
-  background-image: var(--palette-scene), var(--palette-scene-glow);
-  background-repeat: no-repeat, no-repeat;
-  background-position: center calc(100% - 118px), center top;
-  background-size: min(100%, 1180px) auto, 100% 100%;
+  background: var(--ch-color-main-bg);
 }
+/* Timeline-bound scene layer: anchored to the actual bottom of .structured-timeline
+   directly above any variable-height Goal status bar, inbox, or composer footer. */
 :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
   .structured-timeline {
   padding-bottom: 42px;
+  background-color: var(--ch-color-main-bg);
+  background-image: var(--palette-scene), var(--palette-scene-glow);
+  background-repeat: no-repeat, no-repeat;
+  background-position: center bottom, center top;
+  background-size: min(100%, 760px) auto, 100% 100%;
 }
 :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
   .structured-turn {
   gap: 5px;
-  background-color: var(--ch-color-main-bg);
-  border-radius: var(--ch-radius-md);
-  box-shadow:
-    0 0 0 6px var(--ch-color-main-bg),
-    0 0 0 7px var(--ch-color-border-muted),
-    0 6px 18px var(--ch-shadow-color-soft);
 }
 :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
   .turn-actions--turn {
@@ -943,11 +489,6 @@
 :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
   .structured-turn--pending {
   opacity: 1;
-  background-color: var(--ch-color-surface);
-  box-shadow:
-    0 0 0 6px var(--ch-color-surface),
-    0 0 0 7px var(--ch-color-border),
-    0 6px 18px var(--ch-shadow-color-soft);
 }
 :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
   .structured-turn--pending .conversation-bubble--user {
@@ -955,23 +496,63 @@
   color: color-mix(in srgb, var(--ch-color-message-user-text) 88%, var(--ch-color-surface));
 }
 :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
-  :is(.conversation-bubble--assistant, .turn-actions) {
-  background-color: var(--ch-color-main-bg);
+  .conversation-bubble--user {
+  border: 1px solid color-mix(in srgb, var(--ch-color-accent) 26%, var(--ch-color-border-muted));
+  border-radius: var(--ch-radius-lg);
+  box-shadow: none;
+}
+:root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
+  .goal-plan-card {
+  padding: 9px 12px;
+  gap: 8px;
+  border: 1px solid color-mix(in srgb, var(--ch-color-border) 68%, transparent);
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface);
+  box-shadow: none;
+}
+:root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
+  .goal-plan-budget {
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--ch-color-border-muted) 75%, transparent);
   border-radius: var(--ch-radius-sm);
 }
-/* Status fills are not text ink; secondary text already has a muted token,
-   so fading small live-work labels again loses contrast on light surfaces. */
+/* Keep semantic alert tint on a solid canvas base instead of mixing it with
+   artwork. Secondary ink already has a muted token; do not fade it a second time. */
 :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
   :is(.event-error, .history-details-error) {
+  background:
+    linear-gradient(var(--ch-color-danger-bg), var(--ch-color-danger-bg))
+    var(--ch-color-main-bg);
   color: var(--ch-color-danger-text);
 }
-:root[data-theme='light']:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
+:root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
   :is(.turn-working-elapsed, .turn-working-counts-text, .turn-working-hint) {
   opacity: 1;
 }
+/* Borderless unified footer: transcript, Goal status bar, inbox, and composer
+   share the main canvas background without stacked horizontal frames. */
+:root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
+  .goal-status {
+  background-color: var(--ch-color-main-bg);
+  border-top: 1px solid color-mix(in srgb, var(--ch-color-border-muted) 42%, transparent);
+  border-bottom: 0;
+}
 :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
   :is(.structured-composer, .message-inbox, .subagent-rail) {
-  background-color: var(--ch-color-surface);
+  background-color: var(--ch-color-main-bg);
+  border-top-color: color-mix(in srgb, var(--ch-color-border-muted) 42%, transparent);
+}
+:root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
+  .composer-row {
+  background: var(--ch-color-surface);
+  border: 1px solid color-mix(in srgb, var(--ch-color-border) 68%, transparent);
+  border-radius: var(--ch-radius-lg);
+  box-shadow: 0 2px 10px var(--ch-shadow-color-soft);
+}
+:root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
+  .composer-row:focus-within {
+  border-color: var(--ch-color-accent);
+  box-shadow: 0 0 0 1px var(--ch-color-accent-halo), 0 4px 14px var(--ch-shadow-color-soft);
 }
 :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
   .structured-load-earlier:disabled {
@@ -979,7 +560,7 @@
   color: var(--ch-color-text-subtle);
 }
 :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
-  :is(.workspace-view .board, .empty-state, .pane-empty) {
+  :is(.workspace-view .board, .terminal-main-column > .empty-state, .pane-empty) {
   background-color: var(--ch-color-main-bg);
   background-image: var(--palette-scene), var(--palette-scene-glow);
   background-repeat: no-repeat, no-repeat;
@@ -987,38 +568,30 @@
   background-size: min(100%, 1200px) auto, 100% 100%;
 }
 :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
-  :is(.workspace-view .empty-board, .empty-state > h2, .empty-state > p, .pane-empty > p, .structured-empty > strong, .structured-empty > p, .chat-sidebar__empty) {
-  background-color: var(--ch-color-surface);
-  border: 1px solid var(--ch-color-border-muted);
-  border-radius: var(--ch-radius-sm);
-  padding: 3px 10px;
-}
-:root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
   .workspace-view .empty-board {
   align-self: center;
   justify-self: center;
-  padding: 8px 16px;
+  padding: 6px 14px;
 }
 :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
   .empty-state__emblem {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 48px;
-  height: 48px;
+  width: 44px;
+  height: 44px;
   margin-bottom: 10px;
-  border: 2px solid var(--ch-color-accent-strong);
+  border: 1px solid color-mix(in srgb, var(--ch-color-accent) 45%, var(--ch-color-border));
   border-radius: var(--ch-radius-lg);
   background-color: var(--ch-color-surface);
   color: var(--ch-color-accent);
-  box-shadow: var(--ch-shadow-soft);
 }
 :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
   .chat-sidebar__body:not(.chat-sidebar__body--icons) {
   background-image: var(--palette-scene);
   background-repeat: no-repeat;
-  background-position: center bottom 6px;
-  background-size: 380px auto;
+  background-position: center bottom 8px;
+  background-size: 360px auto;
 }
 :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
   .chat-sidebar__group {
@@ -1050,36 +623,13 @@
   gap: 3px;
 }
 :root .theme-preview[data-palette='zenless'] {
-  border-radius: 12px 3px 12px 3px;
-  border: 2px solid var(--ch-color-border-strong);
-  box-shadow: 2px 2px 0 var(--ch-color-accent-strong);
-}
-.theme-preview[data-palette='zenless']::before {
-  content: '';
-  position: absolute;
-  inset: 0 0 auto;
-  height: 5px;
-  background: repeating-linear-gradient(
-    125deg,
-    var(--ch-color-accent-strong) 0 9px,
-    var(--ch-color-on-accent) 9px 14px
-  );
-  pointer-events: none;
-}
-:root .theme-preview[data-palette='zenless'] .theme-preview-sidebar {
-  border-right: 2px solid var(--ch-color-border-strong);
-  background-image: radial-gradient(
-    circle,
-    color-mix(in srgb, var(--ch-color-text) 12%, transparent) 1px,
-    transparent 1.2px
-  );
-  background-size: 6px 6px;
+  border-radius: 10px;
+  border: 1px solid var(--ch-color-border-strong);
 }
 :root .theme-preview[data-palette='zenless'] .theme-preview-sidebar i:first-child {
   height: 7px;
   border-radius: 999px;
   background: var(--ch-color-accent-strong);
-  border: 1px solid var(--ch-color-on-accent);
 }
 :root .theme-preview[data-palette='zenless'] .theme-preview-title {
   width: fit-content;
@@ -1087,88 +637,38 @@
   border-radius: 999px;
   background: var(--ch-color-accent-strong);
   color: var(--ch-color-on-accent);
-  border: 1px solid var(--ch-color-on-accent);
   font-style: italic;
-  font-weight: 900;
-}
-:root .theme-preview[data-palette='zenless'] .theme-preview-content b {
-  border-radius: 9px 2px 9px 7px;
-  border: 1.5px solid var(--ch-color-accent-strong);
-  box-shadow: 2px 2px 0 var(--ch-color-accent-strong);
+  font-weight: 800;
 }
 
 :root .theme-preview[data-palette='frontier'] {
-  border-style: double;
-  border-width: 3px;
-  border-color: var(--ch-color-border-strong);
-  border-radius: 2px;
-  box-shadow: inset 0 0 0 1px var(--ch-color-border);
-}
-:root .theme-preview[data-palette='frontier'] .theme-preview-sidebar {
-  border-right: 3px double var(--ch-color-border-strong);
-  background-image: repeating-linear-gradient(
-    180deg,
-    transparent 0 8px,
-    color-mix(in srgb, var(--ch-color-border) 28%, transparent) 8px 9px
-  );
+  border: 1px solid var(--ch-color-border-strong);
+  border-radius: 6px;
 }
 :root .theme-preview[data-palette='frontier'] .theme-preview-sidebar i:first-child {
   height: 7px;
-  border-radius: 1px;
+  border-radius: 3px;
   background: var(--ch-color-accent-strong);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ch-color-on-accent) 40%, transparent);
 }
 :root .theme-preview[data-palette='frontier'] .theme-preview-title {
   width: fit-content;
   color: var(--ch-color-accent);
-  letter-spacing: 0.1em;
-  border-bottom: 3px double var(--ch-color-border-strong);
-  padding-bottom: 2px;
-}
-:root .theme-preview[data-palette='frontier'] .theme-preview-content b {
-  border-radius: 1px;
-  border: 3px double var(--ch-color-border-strong);
+  letter-spacing: 0.08em;
 }
 
 :root .theme-preview[data-palette='los-santos'] {
   border: 1px solid var(--ch-color-border-strong);
-  border-left: 5px solid var(--ch-color-accent);
-  border-radius: 1px;
-}
-.theme-preview[data-palette='los-santos']::before {
-  content: '';
-  position: absolute;
-  inset: 0 0 auto;
-  height: 3px;
-  background: linear-gradient(
-    90deg,
-    var(--ch-color-accent) 0 58%,
-    #38bdf8 58% 84%,
-    #f59e0b 84% 100%
-  );
-  pointer-events: none;
-}
-:root .theme-preview[data-palette='los-santos'] .theme-preview-sidebar {
-  border-right: 1px solid var(--ch-color-border-strong);
+  border-radius: 6px;
 }
 :root .theme-preview[data-palette='los-santos'] .theme-preview-sidebar i:first-child {
   height: 7px;
-  border-radius: 0;
+  border-radius: 3px;
   background: var(--ch-color-accent-strong);
-  border-left: 3px solid #38bdf8;
 }
 :root .theme-preview[data-palette='los-santos'] .theme-preview-title {
   width: fit-content;
-  padding: 1px 5px;
-  border-radius: 1px;
-  background: var(--ch-color-surface-sunken);
-  border-left: 3px solid #f59e0b;
-  letter-spacing: 0.08em;
-}
-:root .theme-preview[data-palette='los-santos'] .theme-preview-content b {
-  border-radius: 1px;
-  border: 1px solid var(--ch-color-border-strong);
-  border-left: 3px solid var(--ch-color-accent);
+  color: var(--ch-color-accent);
+  letter-spacing: 0.06em;
 }
 
 @media (min-width: 769px) {
@@ -1184,39 +684,16 @@
 }
 @media (max-width: 768px) {
   :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
-    .structured-pane {
-    background-position: center calc(100% - 114px), center top;
+    .structured-timeline {
+    background-position: center bottom, center top;
+    background-size: 580px auto, 100% 100%;
+  }
+  :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
+    :is(.workspace-view .board, .terminal-main-column > .empty-state, .pane-empty) {
     background-size: 520px auto, 100% 100%;
   }
   :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
     .workspace-view .board {
     padding-bottom: 120px;
-    background-size: 560px auto, 100% 100%;
-  }
-  :root[data-palette='zenless'] :is(.tab-bar, .workspace-header) {
-    background-image: radial-gradient(
-      circle,
-      color-mix(in srgb, var(--ch-color-text) 10%, transparent) 1px,
-      transparent 1.3px
-    );
-    background-size: 8px 8px;
-    border-bottom: 3px solid var(--ch-color-accent-strong);
-    border-image: repeating-linear-gradient(
-      125deg,
-      var(--ch-color-accent-strong) 0 10px,
-      var(--ch-color-on-accent) 10px 15px
-    ) 3;
-  }
-  :root[data-palette='frontier'] :is(.tab-bar, .workspace-header) {
-    border-bottom: 4px double var(--ch-color-accent);
-  }
-  :root[data-palette='los-santos'] :is(.tab-bar, .workspace-header) {
-    border-bottom: 3px solid var(--ch-color-accent);
-    border-image: linear-gradient(
-      90deg,
-      var(--ch-color-accent) 0 58%,
-      #38bdf8 58% 84%,
-      #f59e0b 84% 100%
-    ) 1;
   }
 }

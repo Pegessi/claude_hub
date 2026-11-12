@@ -21,8 +21,9 @@ from playwright.async_api import expect
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from appearance_assertions import (  # noqa: E402
     GAME_PALETTES,
-    backing_fault_controls,
-    opaque_artwork_backing,
+    artwork_text_contrast,
+    quiet_chat_surfaces,
+    readability_fault_controls,
     select_appearance,
 )
 from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
@@ -193,8 +194,8 @@ async def main(browser_run: BrowserRun) -> None:
         "page_errors": [],
         "send_payloads": send_payloads,
         "surface_send_payloads": surface_send_payloads,
-        "surface_backing": [],
-        "pending_backing": [],
+        "surface_readability": [],
+        "pending_readability": [],
         "screenshots": [],
         "boundary": "Real SPA rendering with mocked APIs; no backend or provider traffic.",
     }
@@ -340,6 +341,8 @@ async def main(browser_run: BrowserRun) -> None:
 
             composer = page.locator(".composer-textarea").first
             await expect(composer).to_be_enabled()
+            await composer.click()
+            await expect(composer).to_be_focused()
             await composer.fill("Queued after the first turn")
             await composer.press("Enter")
             await expect(page.locator(".draft-queue .queue-heading")).to_contain_text(
@@ -426,56 +429,53 @@ async def main(browser_run: BrowserRun) -> None:
                         ("inactive-name", inactive.locator(".chat-sidebar__item-name")),
                         ("inactive-time", inactive.locator(".chat-sidebar__item-time")),
                     ):
-                        samples[label] = await opaque_artwork_backing(
-                            control, ".chat-sidebar__body"
+                        samples[label] = await artwork_text_contrast(
+                            control, ".chat-sidebar__body", output
                         )
                     await more.click()
                     await expect(more).to_contain_text("Show less")
-                    samples["expanded-last-row"] = await opaque_artwork_backing(
+                    samples["expanded-last-row"] = await artwork_text_contrast(
                         group.locator(
                             ".chat-sidebar__item:not(.active) .chat-sidebar__item-name"
                         ).last,
                         ".chat-sidebar__body",
+                        output,
                     )
                     process = history.get_by_test_id("history-details-toggle")
                     if await process.get_attribute("aria-expanded") == "true":
                         await process.click()
-                    samples["process-closed"] = await opaque_artwork_backing(
-                        process.locator(".process-fold-meta"),
-                        ".structured-pane",
+                    samples["process-closed"] = await artwork_text_contrast(
+                        process.locator(".process-fold-meta"), ".structured-timeline", output
                     )
                     await process.click()
                     await expect(process).to_have_attribute("aria-expanded", "true")
-                    samples["process-open"] = await opaque_artwork_backing(
-                        process.locator(".process-fold-meta"),
-                        ".structured-pane",
+                    samples["process-open"] = await artwork_text_contrast(
+                        process.locator(".process-fold-meta"), ".structured-timeline", output
                     )
                     thinking = history.locator(".thinking-card")
                     summary = thinking.locator("summary")
                     if await thinking.get_attribute("open") is not None:
                         await summary.click()
-                    samples["thinking-closed"] = await opaque_artwork_backing(
+                    samples["thinking-closed"] = await artwork_text_contrast(
                         summary.locator(".thinking-label > span:last-child"),
-                        ".structured-pane",
+                        ".structured-timeline",
+                        output,
                     )
                     await summary.click()
-                    samples["thinking-open"] = await opaque_artwork_backing(
-                        thinking.locator(".thinking-body"),
-                        ".structured-pane",
+                    samples["thinking-open"] = await artwork_text_contrast(
+                        thinking.locator(".thinking-body"), ".structured-timeline", output
                     )
                     await summary.click()
                     tools = history.locator(".tool-card--group")
                     tool_summary = tools.locator(":scope > summary")
                     if await tools.get_attribute("open") is not None:
                         await tool_summary.click()
-                    samples["tool-closed"] = await opaque_artwork_backing(
-                        tool_summary.locator(".activity-verb"),
-                        ".structured-pane",
+                    samples["tool-closed"] = await artwork_text_contrast(
+                        tool_summary.locator(".activity-verb"), ".structured-timeline", output
                     )
                     await tool_summary.click()
-                    samples["tool-open"] = await opaque_artwork_backing(
-                        tool_summary.locator(".activity-verb"),
-                        ".structured-pane",
+                    samples["tool-open"] = await artwork_text_contrast(
+                        tool_summary.locator(".activity-verb"), ".structured-timeline", output
                     )
                     await tool_summary.click()
                     for label, control in (
@@ -496,21 +496,37 @@ async def main(browser_run: BrowserRun) -> None:
                             live.locator(".reasoning-status .thinking-label > span:last-child"),
                         ),
                     ):
-                        samples[label] = await opaque_artwork_backing(control, ".structured-pane")
+                        samples[label] = await artwork_text_contrast(
+                            control, ".structured-timeline", output
+                        )
                     if palette == "Zenless" and mode == "dark":
-                        report["backing_negatives"] = await backing_fault_controls(
+                        report["readability_negatives"] = await readability_fault_controls(
                             inactive.locator(".chat-sidebar__item-name"),
                             ".chat-sidebar__body",
+                            output,
                         )
-                    report["surface_backing"].append(
-                        {"palette": palette, "mode": mode, "samples": samples}
+                        report["readability_negatives"].extend(
+                            await readability_fault_controls(
+                                live.locator(".turn-working-elapsed"),
+                                ".structured-timeline",
+                                output,
+                            )
+                        )
+                    assert {"opaque-front-backing", "sampled-rendered-backdrop"} <= {
+                        sample["method"] for sample in samples.values()
+                    }
+                    report["surface_readability"].append(
+                        {
+                            "palette": palette,
+                            "mode": mode,
+                            "samples": samples,
+                            "quiet": await quiet_chat_surfaces(page),
+                        }
                     )
-                    screenshot = (
-                        f"reading-backplates-{palette.lower().replace(' ', '-')}-{mode}.png"
-                    )
+                    screenshot = f"reading-surface-{palette.lower().replace(' ', '-')}-{mode}.png"
                     await page.screenshot(path=str(output / screenshot), full_page=True)
                     report["screenshots"].append(screenshot)
-                    print(f"Reading backplates captured: {palette}/{mode}", flush=True)
+                    print(f"Reading contrast captured: {palette}/{mode}", flush=True)
 
             surface_rows.append(
                 {
@@ -528,24 +544,27 @@ async def main(browser_run: BrowserRun) -> None:
                 for mode in ("dark", "light"):
                     for palette in GAME_PALETTES:
                         await select_appearance(page, mode, palette)
-                        report["pending_backing"].append(
+                        report["pending_readability"].append(
                             {
                                 "palette": palette,
                                 "mode": mode,
-                                "status": await opaque_artwork_backing(
+                                "quiet": await quiet_chat_surfaces(page),
+                                "status": await artwork_text_contrast(
                                     pending.locator(".event-status--pending > span"),
-                                    ".structured-pane",
+                                    ".structured-timeline",
+                                    output,
                                 ),
-                                "message": await opaque_artwork_backing(
+                                "message": await artwork_text_contrast(
                                     pending.locator(
                                         ".conversation-bubble--user .markdown-content p"
                                     ),
-                                    ".structured-pane",
+                                    ".structured-timeline",
+                                    output,
                                 ),
                             }
                         )
                         screenshot = (
-                            f"pending-backplate-{palette.lower().replace(' ', '-')}-{mode}.png"
+                            f"pending-surface-{palette.lower().replace(' ', '-')}-{mode}.png"
                         )
                         await page.screenshot(path=str(output / screenshot), full_page=True)
                         report["screenshots"].append(screenshot)
@@ -574,10 +593,10 @@ async def main(browser_run: BrowserRun) -> None:
                 **{
                     key: value
                     for key, value in report.items()
-                    if key not in ("surface_backing", "pending_backing")
+                    if key not in ("surface_readability", "pending_readability")
                 },
-                "surface_backing_variants": len(report["surface_backing"]),
-                "pending_backing_variants": len(report["pending_backing"]),
+                "surface_readability_variants": len(report["surface_readability"]),
+                "pending_readability_variants": len(report["pending_readability"]),
             },
             indent=2,
         )

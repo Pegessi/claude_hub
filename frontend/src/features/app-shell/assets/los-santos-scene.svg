@@ -1,164 +1,202 @@
 <!-- Original static SVG scene illustration authored for Claude Hub (los-santos palette).
-     Motif: Southern California coast, curved Washingtonia palm boulevard, downtown
-     high-rise skyline, warm sliced sunset disc, Pacific wave horizon, and isometric
-     street-map/radar telemetry HUD detailing.
-     No third-party logos, proprietary fonts, or external asset dependencies. -->
+     Subject: Grand Theft Auto V stylized triptych & HUD composition — three distinct protagonist
+     silhouettes (left: square-jawed swept-hair figure in aviator sunglasses and structured
+     open-collar suit with Maze Bank Tower; center: close-fade figure with boxed goatee and
+     broad hooded sweatshirt alongside a Rottweiler companion below legible VINEWOOD hillside
+     lettering; right: gaunt angular figure with receding hairline, side tufts, deep scowl, and
+     worn V-neck tee beside a circular 4-sector radial character-switch wheel and tri-color bar).
+     Attenuation: one root drawing group keeps the scene subordinate to readable text.
+     Visibility and salience are checked in rendered app viewports, not inferred from opacity. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" fill="none">
-  <defs>
-    <linearGradient id="ls-sunset-disc" x1="600" y1="44" x2="600" y2="244" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#f59e0b" />
-      <stop offset="0.52" stop-color="#f97316" />
-      <stop offset="1" stop-color="#e11d48" />
-    </linearGradient>
-    <linearGradient id="ls-coast-glow" x1="600" y1="10" x2="600" y2="320" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#38bdf8" stop-opacity="0" />
-      <stop offset="0.5" stop-color="#f59e0b" stop-opacity="0.11" />
-      <stop offset="1" stop-color="#38bdf8" stop-opacity="0.24" />
-    </linearGradient>
-    <clipPath id="ls-sun-bands">
-      <rect x="490" y="42" width="220" height="58" />
-      <rect x="490" y="106" width="220" height="22" />
-      <rect x="490" y="134" width="220" height="18" />
-      <rect x="490" y="158" width="220" height="14" />
-      <rect x="490" y="178" width="220" height="11" />
-      <rect x="490" y="195" width="220" height="9" />
-      <rect x="490" y="210" width="220" height="8" />
-    </clipPath>
-  </defs>
+  <g opacity="0.29">
+    <!-- OUTER LEFT & RIGHT FLANKS: Downtown Maze Bank Skyline & Del Perro Pier / Palms -->
+    <g fill="#3d546e" stroke="#479bc9" stroke-width="2" stroke-linejoin="round">
+      <!-- Left skyline & stepped Maze Bank crown tower (x=42..202, y=88..316) -->
+      <rect x="42" y="168" width="42" height="148" />
+      <rect x="94" y="118" width="54" height="198" stroke="#72bce0" stroke-width="2.2" />
+      <rect x="104" y="102" width="34" height="16" stroke="#72bce0" />
+      <polygon points="110,102 121,88 132,102" fill="#479bc9" />
+      <rect x="158" y="152" width="44" height="164" />
 
-  <!-- Coastal sunset ambient wash -->
-  <rect width="1200" height="320" fill="url(#ls-coast-glow)" />
+      <!-- Right Del Perro Ferris wheel & coastal palms (x=1016..1154, y=122..316) -->
+      <circle cx="1054" cy="242" r="38" fill="#4a627d" stroke="#d6a052" stroke-width="2.4" />
+      <circle cx="1054" cy="242" r="24" stroke="#72bce0" stroke-width="1.6" stroke-dasharray="5 4" />
+      <path d="M1032 314 L1054 242 L1076 314" stroke="#d6a052" stroke-width="2.4" />
+      <path d="M1134 314 Q1122 232 1098 152" stroke="#3da876" stroke-width="4" stroke-linecap="round" />
+      <path d="M1098 152 Q1064 136 1044 156 M1098 152 Q1132 134 1154 156 M1098 152 Q1074 122 1052 128 M1098 152 Q1124 122 1146 128"
+            stroke="#68c99b" stroke-width="2.4" stroke-linecap="round" />
+    </g>
 
-  <!-- Tactical Street-Map & Radar Sector Grid (Upper Sky & Flanks) -->
-  <g stroke="#38bdf8" stroke-width="1.2" stroke-opacity="0.38">
-    <!-- Perspective coastal map grid lines -->
-    <line x1="0" y1="268" x2="1200" y2="268" />
-    <line x1="0" y1="282" x2="1200" y2="282" />
-    <line x1="600" y1="180" x2="40" y2="300" />
-    <line x1="600" y1="180" x2="240" y2="300" />
-    <line x1="600" y1="180" x2="420" y2="300" />
-    <line x1="600" y1="180" x2="780" y2="300" />
-    <line x1="600" y1="180" x2="960" y2="300" />
-    <line x1="600" y1="180" x2="1160" y2="300" />
-    <!-- Radar range rings -->
-    <circle cx="600" cy="150" r="128" stroke-dasharray="8 6" />
-    <circle cx="600" cy="150" r="168" stroke="#4cd995" stroke-opacity="0.32" stroke-dasharray="4 8" />
-  </g>
+    <!-- ======================================================================
+         PANEL 1 (LEFT-CENTER, x=214..462, y=172..316):
+         Square-jawed, swept-hair, aviator-sunglasses & structured tailored suit
+         ====================================================================== -->
+    <g>
+      <polygon points="228,172 462,172 444,316 214,316" fill="#3d546e" stroke="#479bc9" stroke-width="2.2" />
+      <!-- Stepped Maze Bank silhouette in left background -->
+      <path d="M234 314 V196 L250 184 L266 196 V314" fill="#4a627d" stroke="#72bce0" stroke-width="1.5" />
 
-  <!-- HUD Corner Target Reticles & Heading Ticks -->
-  <g stroke="#4cd995" stroke-width="2" stroke-opacity="0.75">
-    <path d="M26 48 V26 H48 M1174 48 V26 H1152" />
-    <line x1="540" y1="24" x2="660" y2="24" stroke="#38bdf8" />
-    <line x1="560" y1="18" x2="560" y2="24" />
-    <line x1="600" y1="15" x2="600" y2="24" stroke="#f59e0b" stroke-width="2.5" />
-    <line x1="640" y1="18" x2="640" y2="24" />
-  </g>
+      <g transform="translate(354, 244)" stroke-linejoin="round" stroke-linecap="round">
+        <!-- Structured angular padded suit shoulders & tailored jacket (distinct from rounded hoodie) -->
+        <path d="M-76 72 L-68 14 L-24 -6 L24 -6 L68 14 L76 72 Z"
+              fill="#4a627d" stroke="#72bce0" stroke-width="2.2" />
+        <!-- Peaked suit lapels & open-collar dress shirt (no tie) -->
+        <polygon points="-24,-6 -36,14 -12,48 0,48 -14,-6" fill="#3d546e" stroke="#72bce0" stroke-width="1.7" />
+        <polygon points="24,-6 36,14 12,48 0,48 14,-6" fill="#3d546e" stroke="#72bce0" stroke-width="1.7" />
+        <polygon points="-14,-6 -6,28 0,46 6,28 14,-6" fill="#479bc9" stroke="#72bce0" stroke-width="1.6" />
+        <!-- Breast pocket square -->
+        <polygon points="26,24 42,19 40,28 24,28" fill="#72bce0" />
 
-  <!-- CENTERPIECE: Warm Southern California Sliced Sunset Disc -->
-  <g clip-path="url(#ls-sun-bands)">
-    <circle cx="600" cy="144" r="92" fill="url(#ls-sunset-disc)" />
-  </g>
-  <circle cx="600" cy="144" r="93" stroke="#f59e0b" stroke-width="2" stroke-opacity="0.65" />
+        <!-- Neck & wide chiseled square jawline -->
+        <rect x="-11" y="-14" width="22" height="10" fill="#4a627d" />
+        <path d="M-24 -48 L-24 -22 L-16 -8 L0 -6 L16 -8 L24 -22 L24 -48 Z"
+              fill="#4a627d" stroke="#72bce0" stroke-width="2.2" />
+        <!-- Ears -->
+        <path d="M-24 -40 L-28 -36 L-24 -26 M24 -40 L28 -36 L24 -26" stroke="#72bce0" stroke-width="1.8" />
+        <!-- Voluminous side-parted swept-back hair crest (asymmetric high left part) -->
+        <path d="M-26 -44 C-28 -64 -14 -72 8 -70 C24 -68 28 -58 26 -42 C18 -53 2 -56 -12 -51 L-24 -42 Z"
+              fill="#3d546e" stroke="#72bce0" stroke-width="2" />
+        <path d="M-14 -60 C-2 -64 12 -62 20 -55" stroke="#479bc9" stroke-width="1.6" />
+        <!-- Teardrop dual-bridge aviator sunglasses with lens reflection -->
+        <path d="M-20 -42 H-3 L-4 -31 C-9 -29 -18 -31 -20 -36 Z" fill="#3d546e" stroke="#72bce0" stroke-width="2" />
+        <path d="M3 -42 H20 L20 -36 C18 -31 9 -29 4 -31 Z" fill="#3d546e" stroke="#72bce0" stroke-width="2" />
+        <line x1="-4" y1="-41" x2="4" y2="-41" stroke="#72bce0" stroke-width="2" />
+        <line x1="-15" y1="-34" x2="-9" y2="-39" stroke="#72bce0" stroke-width="1.5" />
+        <line x1="8" y1="-34" x2="14" y2="-39" stroke="#72bce0" stroke-width="1.5" />
+        <!-- Nose bridge, nasolabial creases & firm set mouth -->
+        <path d="M0 -39 V-23 L-3 -22 M-13 -21 L-9 -14 M13 -21 L9 -14 M-8 -15 L0 -16 L8 -15"
+              stroke="#72bce0" stroke-width="1.8" />
+      </g>
+    </g>
 
-  <!-- Coastal Suspension Bridge & Santa Monica / Del Perro Pier Silhouette (Mid-Left & Mid-Right) -->
-  <g stroke="#38bdf8" stroke-width="2" stroke-opacity="0.65">
-    <!-- Suspension Bridge Tower & Cables (Left Coast) -->
-    <path d="M220 268 V162 L232 162 V268 M220 188 H232 M220 220 H232" fill="#132030" />
-    <path d="M130 256 Q175 218 220 168 Q265 224 320 256" fill="none" />
-    <!-- Pier Ferris Wheel Silhouette (Right Coast) -->
-    <circle cx="936" cy="218" r="34" stroke="#f59e0b" stroke-width="2.2" />
-    <circle cx="936" cy="218" r="24" stroke="#38bdf8" stroke-width="1.4" stroke-dasharray="4 4" />
-    <path d="M916 268 L936 218 L956 268" stroke="#f59e0b" stroke-width="2.5" />
-  </g>
+    <!-- ======================================================================
+         PANEL 2 (CENTER, x=458..738, y=172..316):
+         Legible VINEWOOD sign, close-fade broad hoodie profile + Chop Rottweiler
+         ====================================================================== -->
+    <g>
+      <polygon points="476,172 738,172 720,316 458,316" fill="#3d546e" stroke="#3da876" stroke-width="2.2" />
 
-  <!-- DOWNTOWN LOS SANTOS HIGH-RISE SKYLINE (Center Architectural Cluster) -->
-  <g fill="#121e2d" stroke="#38bdf8" stroke-width="2.2" stroke-linejoin="round">
-    <!-- West Wing Towers -->
-    <rect x="332" y="168" width="52" height="128" />
-    <polygon points="394,296 394,132 446,112 446,296" />
-    <rect x="456" y="146" width="48" height="150" stroke="#4cd995" />
-    <!-- Iconic Central Crown Skyscraper (Maze Bank-inspired stepped cylindrical tower) -->
-    <rect x="562" y="86" width="76" height="210" fill="#0f1926" stroke="#f59e0b" stroke-width="2.6" />
-    <rect x="572" y="68" width="56" height="18" fill="#162538" stroke="#f59e0b" stroke-width="2.2" />
-    <polygon points="582,68 600,48 618,68" fill="#f59e0b" stroke="#0f1926" stroke-width="1.5" />
-    <!-- East Wing Modernist High-Rises -->
-    <polygon points="650,296 650,124 704,142 704,296" stroke="#4cd995" />
-    <rect x="716" y="152" width="58" height="144" />
-    <rect x="784" y="178" width="48" height="118" />
-  </g>
+      <!-- Keep the sign above Chop, clear of the central portrait (x=604..712, y=177..194). -->
+      <g transform="translate(126, 0)" stroke="#68c99b" stroke-width="2.1" stroke-linecap="square" stroke-linejoin="miter" fill="none">
+        <!-- V -->
+        <polyline points="481,179 485,190 489,179" />
+        <!-- I -->
+        <line x1="494" y1="179" x2="494" y2="190" />
+        <!-- N -->
+        <polyline points="500,190 500,179 507,190 507,179" />
+        <!-- E -->
+        <path d="M518 179 H512 V190 H518 M512 184.5 H517" />
+        <!-- W -->
+        <polyline points="523,179 525.5,190 529,181 532.5,190 535,179" />
+        <!-- O -->
+        <rect x="540" y="179" width="7.5" height="11" rx="1.5" />
+        <!-- O -->
+        <rect x="552" y="179" width="7.5" height="11" rx="1.5" />
+        <!-- D -->
+        <path d="M564 179 H568.5 C571 179 572 181 572 184.5 C572 188 571 190 568.5 190 H564 Z" />
+        <!-- Hillside ridge line under sign -->
+        <path d="M477 193 Q526 190 577 193" stroke="#3da876" stroke-width="1.6" />
+      </g>
 
-  <!-- High-Rise Illuminated Window Grids & Telemetry Edge Bars -->
-  <g stroke-width="2" stroke-linecap="square">
-    <!-- Crown tower vertical neon/amber struts -->
-    <line x1="578" y1="98" x2="578" y2="280" stroke="#f59e0b" stroke-opacity="0.7" />
-    <line x1="600" y1="98" x2="600" y2="280" stroke="#38bdf8" stroke-opacity="0.75" />
-    <line x1="622" y1="98" x2="622" y2="280" stroke="#f59e0b" stroke-opacity="0.7" />
-    <!-- Adjacent tower horizontal window bands -->
-    <path d="M404 148 H436 M404 166 H436 M404 184 H436 M404 202 H436 M404 220 H436" stroke="#38bdf8" stroke-opacity="0.75" />
-    <path d="M466 164 H494 M466 182 H494 M466 200 H494 M466 218 H494" stroke="#4cd995" stroke-opacity="0.8" />
-    <path d="M662 152 H692 M662 170 H692 M662 188 H692 M662 206 H692 M662 224 H692" stroke="#4cd995" stroke-opacity="0.8" />
-    <path d="M728 172 H762 M728 190 H762 M728 208 H762 M728 226 H762" stroke="#f59e0b" stroke-opacity="0.75" />
-  </g>
+      <!-- Broad-shouldered hooded figure with close-fade & boxed goatee (x=478..630, y=176..316) -->
+      <g transform="translate(556, 244)" stroke-linejoin="round" stroke-linecap="round">
+        <!-- Broad athletic sloped shoulders & heavy bunched hoodie silhouette -->
+        <path d="M-78 72 C-74 32 -58 6 -34 -4 L34 -4 C58 6 74 32 78 72 Z"
+              fill="#4a627d" stroke="#68c99b" stroke-width="2.2" />
+        <!-- Thick layered hood collar bunched around neck -->
+        <path d="M-38 -2 C-32 -16 -18 -18 0 -14 C18 -18 32 -16 38 -2 C28 14 -28 14 -38 -2 Z"
+              fill="#3d546e" stroke="#68c99b" stroke-width="2" />
+        <!-- Center zip seam, drawstrings & chain -->
+        <line x1="0" y1="10" x2="0" y2="70" stroke="#3da876" stroke-width="1.6" />
+        <line x1="-11" y1="8" x2="-11" y2="38" stroke="#68c99b" stroke-width="2.2" />
+        <line x1="11" y1="8" x2="11" y2="38" stroke="#68c99b" stroke-width="2.2" />
+        <path d="M-16 4 Q0 20 16 4" stroke="#d6a052" stroke-width="1.8" />
 
-  <!-- FOREGROUND LEFT & RIGHT: Iconic Southern California Curved Palm Trees -->
-  <!-- Left Outer Tall Palm -->
-  <g>
-    <path d="M78 296 Q92 208 126 108" stroke="#0d1520" stroke-width="11" stroke-linecap="round" fill="none" />
-    <path d="M78 296 Q92 208 126 108" stroke="#f59e0b" stroke-width="2.4" stroke-linecap="round" fill="none" />
-    <!-- Radiating Palm Fronds -->
-    <g transform="translate(126, 108)" fill="#0f1824" stroke="#4cd995" stroke-width="2" stroke-linejoin="round">
-      <path d="M0 0 Q-48 -24 -82 6 Q-42 -4 0 0 Z" />
-      <path d="M0 0 Q-56 4 -76 42 Q-38 18 0 0 Z" />
-      <path d="M0 0 Q-28 -46 -64 -38 Q-30 -24 0 0 Z" stroke="#f59e0b" />
-      <path d="M0 0 Q12 -52 54 -36 Q22 -24 0 0 Z" stroke="#f59e0b" />
-      <path d="M0 0 Q48 -26 84 4 Q42 -6 0 0 Z" />
-      <path d="M0 0 Q54 6 72 44 Q36 18 0 0 Z" stroke="#38bdf8" />
+        <!-- Tapered athletic jaw, ears & tight high-and-tight fade haircut -->
+        <path d="M-20 -50 L-20 -26 C-20 -14 -12 -6 0 -6 C12 -6 20 -14 20 -26 L20 -50 Z"
+              fill="#4a627d" stroke="#68c99b" stroke-width="2.2" />
+        <path d="M-20 -38 L-24 -35 L-20 -26 M20 -38 L24 -35 L20 -26" stroke="#68c99b" stroke-width="1.8" />
+        <!-- Flat-top close temple fade hairline -->
+        <path d="M-20 -48 L-19 -63 C-10 -67 10 -67 19 -63 L20 -48 C11 -53 -11 -53 -20 -48 Z"
+              fill="#3d546e" stroke="#68c99b" stroke-width="2" />
+        <!-- Brows, eyes, broader nose & sculpted boxed goatee -->
+        <path d="M-14 -40 L-4 -39 M4 -39 L14 -40" stroke="#68c99b" stroke-width="2.2" />
+        <circle cx="-8.5" cy="-34" r="2" fill="#68c99b" />
+        <circle cx="8.5" cy="-34" r="2" fill="#68c99b" />
+        <path d="M0 -34 V-24 M-4 -23 H4" stroke="#68c99b" stroke-width="1.8" />
+        <path d="M-8 -19 H8 L7 -8 C3 -6 -3 -6 -7 -8 Z" fill="#3d546e" stroke="#68c99b" stroke-width="1.8" />
+        <line x1="-4" y1="-14" x2="4" y2="-14" stroke="#68c99b" stroke-width="1.6" />
+      </g>
+
+      <!-- Chop the Rottweiler (x=634..720, y=204..316) -->
+      <g transform="translate(676, 260)" stroke-linejoin="round" stroke-linecap="round">
+        <!-- Broad Rottweiler chest, forelegs & rust-tan chest markings -->
+        <path d="M-31 56 C-33 26 -22 6 0 6 C22 6 33 26 31 56 Z"
+              fill="#3d546e" stroke="#68c99b" stroke-width="2" />
+        <path d="M-16 20 L0 28 L16 20 L11 40 L0 46 L-11 40 Z" fill="#cc8433" />
+        <!-- Heavy gold/amber chain collar -->
+        <path d="M-21 8 Q0 17 21 8" stroke="#d6a052" stroke-width="3.4" stroke-dasharray="4 3" />
+        <!-- Broad Rottweiler skull, drop ears, tan brow pips & tapered muzzle/jowls -->
+        <path d="M-19 -20 C-18 -34 18 -34 19 -20 L21 -2 C21 8 11 11 0 11 C-11 11 -21 8 -21 -2 Z"
+              fill="#4a627d" stroke="#68c99b" stroke-width="2" />
+        <polygon points="-18,-24 -30,-8 -18,-4" fill="#3d546e" stroke="#68c99b" stroke-width="1.7" />
+        <polygon points="18,-24 30,-8 18,-4" fill="#3d546e" stroke="#68c99b" stroke-width="1.7" />
+        <circle cx="-7.5" cy="-15" r="2.4" fill="#d6a052" />
+        <circle cx="7.5" cy="-15" r="2.4" fill="#d6a052" />
+        <path d="M-11 -7 C-8 -11 8 -11 11 -7 L9 5 C4 8 -4 8 -9 5 Z"
+              fill="#3d546e" stroke="#d6a052" stroke-width="1.6" />
+        <path d="M-3 -4 H3 L0 -1 Z" fill="#d6a052" />
+      </g>
+    </g>
+
+    <!-- ======================================================================
+         PANEL 3 (RIGHT-CENTER, x=734..986, y=172..316):
+         Gaunt angular receding-hair figure in worn V-neck & radial 4-sector switch wheel
+         ====================================================================== -->
+    <g>
+      <polygon points="752,172 986,172 968,316 734,316" fill="#3d546e" stroke="#cc8433" stroke-width="2.2" />
+
+      <g transform="translate(830, 244)" stroke-linejoin="round" stroke-linecap="round">
+        <!-- Gaunt, narrower asymmetric slouched shoulders & sagging stretched V-neck tee -->
+        <path d="M-64 72 L-56 20 L-34 2 L-16 -6 L18 -4 L38 6 L56 24 L62 72 Z"
+              fill="#4a627d" stroke="#d6a052" stroke-width="2.2" />
+        <!-- Deep sagging V-neck collar & exposed clavicles/neck tattoo -->
+        <polygon points="-20,-6 0,28 20,-4 12,-6 0,14 -12,-6" fill="#3d546e" stroke="#d6a052" stroke-width="1.8" />
+        <path d="M-11 -2 Q0 4 11 -2" stroke="#d6a052" stroke-width="1.6" stroke-dasharray="3 2" />
+        <path d="M-38 22 L-18 32 M36 24 L18 34 M-28 46 L-10 52" stroke="#d6a052" stroke-width="1.6" />
+
+        <!-- Gaunt angular skull with hollow cheeks, narrow pointed chin & bare high forehead dome -->
+        <path d="M-18 -50 C-17 -68 17 -68 18 -50 L20 -36 L14 -19 L6 -6 L-6 -6 L-14 -19 L-20 -36 Z"
+              fill="#4a627d" stroke="#d6a052" stroke-width="2.2" />
+        <!-- Jagged filled unkempt side hair tufts jutting from temples around bare crown -->
+        <polygon points="-18,-38 -31,-45 -23,-51 -29,-59 -16,-54" fill="#3d546e" stroke="#d6a052" stroke-width="1.9" />
+        <polygon points="18,-38 31,-45 23,-51 29,-59 16,-54" fill="#3d546e" stroke="#d6a052" stroke-width="1.9" />
+        <!-- Hollow cheekbone creases, deep V-scowl brow, wide eyes, crooked nose & scruffy moustache/stubble -->
+        <path d="M-15 -42 L-3 -35 M15 -42 L3 -35" stroke="#d6a052" stroke-width="2.5" />
+        <circle cx="-8" cy="-32" r="2.1" fill="#d6a052" />
+        <circle cx="8" cy="-32" r="2.1" fill="#d6a052" />
+        <path d="M0 -34 L-2 -23 L2 -22 M-14 -28 L-10 -18 M14 -28 L10 -18" stroke="#d6a052" stroke-width="1.7" />
+        <path d="M-9 -15 L-3 -18 L0 -17 L3 -18 L9 -15" stroke="#d6a052" stroke-width="2.1" />
+      </g>
+
+      <!-- Subordinate Circular 4-Sector Radial Character-Switch Wheel & Tri-Segment Bar (cx=932, cy=214) -->
+      <g transform="translate(932, 214)">
+        <circle cx="0" cy="0" r="26" fill="#3d546e" stroke="#72bce0" stroke-width="1.6" />
+        <!-- 4 radial wedge sectors: Top (green), Left (blue), Right (amber), Bottom (slate) -->
+        <path d="M-16 -16 A22.6 22.6 0 0 1 16 -16 L6 -6 A8.5 8.5 0 0 0 -6 -6 Z"
+              fill="#3da876" stroke="#68c99b" stroke-width="1.4" />
+        <path d="M-16 16 A22.6 22.6 0 0 1 -16 -16 L-6 -6 A8.5 8.5 0 0 0 -6 6 Z"
+              fill="#479bc9" stroke="#72bce0" stroke-width="1.4" />
+        <path d="M16 -16 A22.6 22.6 0 0 1 16 16 L6 6 A8.5 8.5 0 0 0 6 -6 Z"
+              fill="#cc8433" stroke="#d6a052" stroke-width="1.4" />
+        <path d="M16 16 A22.6 22.6 0 0 1 -16 16 L-6 6 A8.5 8.5 0 0 0 6 6 Z"
+              fill="#4a627d" stroke="#72bce0" stroke-width="1.4" />
+        <circle cx="0" cy="0" r="6" fill="#3d546e" stroke="#d6a052" stroke-width="1.4" />
+        <!-- Tri-segment HUD health/armor/special bar under wheel -->
+        <rect x="-24" y="32" width="22" height="4.5" fill="#3da876" />
+        <rect x="0" y="32" width="13" height="4.5" fill="#479bc9" />
+        <rect x="15" y="32" width="9" height="4.5" fill="#d6a052" />
+      </g>
     </g>
   </g>
-
-  <!-- Left Inner Mid Palm -->
-  <g>
-    <path d="M168 296 Q178 228 202 154" stroke="#0d1520" stroke-width="8.5" stroke-linecap="round" fill="none" />
-    <path d="M168 296 Q178 228 202 154" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" fill="none" />
-    <g transform="translate(202, 154)" fill="#0f1824" stroke="#38bdf8" stroke-width="1.8" stroke-linejoin="round">
-      <path d="M0 0 Q-38 -18 -64 6 Q-32 -2 0 0 Z" />
-      <path d="M0 0 Q-42 6 -56 34 Q-28 14 0 0 Z" />
-      <path d="M0 0 Q-14 -38 24 -36 Q4 -18 0 0 Z" stroke="#f59e0b" />
-      <path d="M0 0 Q38 -18 66 8 Q32 -4 0 0 Z" stroke="#4cd995" />
-      <path d="M0 0 Q42 8 54 36 Q26 14 0 0 Z" />
-    </g>
-  </g>
-
-  <!-- Right Outer Tall Palm -->
-  <g>
-    <path d="M1122 296 Q1108 208 1074 108" stroke="#0d1520" stroke-width="11" stroke-linecap="round" fill="none" />
-    <path d="M1122 296 Q1108 208 1074 108" stroke="#f59e0b" stroke-width="2.4" stroke-linecap="round" fill="none" />
-    <g transform="translate(1074, 108)" fill="#0f1824" stroke="#4cd995" stroke-width="2" stroke-linejoin="round">
-      <path d="M0 0 Q48 -24 82 6 Q42 -4 0 0 Z" />
-      <path d="M0 0 Q56 4 76 42 Q38 18 0 0 Z" />
-      <path d="M0 0 Q28 -46 64 -38 Q30 -24 0 0 Z" stroke="#f59e0b" />
-      <path d="M0 0 Q-12 -52 -54 -36 Q-22 -24 0 0 Z" stroke="#f59e0b" />
-      <path d="M0 0 Q-48 -26 -84 4 Q-42 -6 0 0 Z" />
-      <path d="M0 0 Q-54 6 -72 44 Q-36 18 0 0 Z" stroke="#38bdf8" />
-    </g>
-  </g>
-
-  <!-- Right Inner Mid Palm -->
-  <g>
-    <path d="M1028 296 Q1016 228 994 156" stroke="#0d1520" stroke-width="8.5" stroke-linecap="round" fill="none" />
-    <path d="M1028 296 Q1016 228 994 156" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" fill="none" />
-    <g transform="translate(994, 156)" fill="#0f1824" stroke="#38bdf8" stroke-width="1.8" stroke-linejoin="round">
-      <path d="M0 0 Q38 -18 64 6 Q32 -2 0 0 Z" />
-      <path d="M0 0 Q42 6 56 34 Q28 14 0 0 Z" />
-      <path d="M0 0 Q14 -38 -24 -36 Q-4 -18 0 0 Z" stroke="#f59e0b" />
-      <path d="M0 0 Q-38 -18 -66 8 Q-32 -4 0 0 Z" stroke="#4cd995" />
-    </g>
-  </g>
-
-  <!-- Pacific Ocean Reflection Shimmer & Tri-Segment Telemetry HUD Plinth -->
-  <rect x="0" y="294" width="1200" height="26" fill="#0b131d" />
-  <rect x="0" y="294" width="696" height="5" fill="#4cd995" />
-  <rect x="696" y="294" width="312" height="5" fill="#38bdf8" />
-  <rect x="1008" y="294" width="192" height="5" fill="#f59e0b" />
-  <line x1="24" y1="308" x2="1176" y2="308" stroke="#38bdf8" stroke-width="2" stroke-dasharray="28 18" stroke-opacity="0.75" />
 </svg>

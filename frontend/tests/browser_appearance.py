@@ -28,6 +28,7 @@ from appearance_assertions import (  # noqa: E402
     contrast,
     no_stale_skin_chrome,
     palette_id,
+    rendered_scene_artwork,
     select_appearance,
 )
 from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
@@ -61,7 +62,7 @@ async def theme_state(page: Page) -> dict[str, Any]:
       };
       const tokens = ['color-app-bg', 'color-main-bg', 'color-sidebar-bg', 'color-surface',
         'color-surface-raised', 'color-canvas', 'color-text', 'color-text-muted',
-        'color-text-subtle', 'color-accent', 'color-accent-ring', 'color-accent-strong',
+        'color-text-subtle', 'color-surface-sunken', 'color-accent', 'color-accent-ring', 'color-accent-strong',
         'color-accent-fill-hover', 'color-on-accent', 'color-message-user-text', 'color-message-user-bg',
         'color-message-user-muted', 'color-text-selected', 'color-surface-selected',
         'color-border', 'color-border-strong', 'terminal-bg', 'terminal-fg'];
@@ -122,24 +123,6 @@ async def reader_typography(page: Page) -> dict[str, str]:
       return {body: font('.markdown-content p'), code: font('.markdown-content pre code'),
         heading: font('.markdown-content h1')};
     }""")
-
-
-def check_game_treatment(palette: str, treatment: dict[str, Any]) -> None:
-    heading, preview, header = treatment["heading"], treatment["preview"], treatment["header"]
-    if palette == "Zenless":
-        assert heading["style"] == "italic" and int(heading["weight"]) >= 700, treatment
-        assert "repeating-linear-gradient" in preview["motif"], treatment
-        assert preview["motifContent"] not in ("none", "normal"), treatment
-        assert float(preview["motifHeight"].removesuffix("px")) > 0, treatment
-        assert "repeating-linear-gradient" in header["borderImage"], treatment
-    elif palette == "Frontier":
-        assert "Georgia" in heading["font"], treatment
-        assert preview["borderStyle"] == "double" and header["borderStyle"] == "double", treatment
-    elif palette == "Los Santos":
-        assert heading["transform"] == "uppercase" and int(heading["weight"]) >= 700, treatment
-        assert float(preview["leadingWidth"].removesuffix("px")) > float(
-            preview["trailingWidth"].removesuffix("px")
-        ), treatment
 
 
 def check_contrast(state: dict[str, Any]) -> dict[str, float]:
@@ -370,7 +353,6 @@ async def main(browser_run: BrowserRun) -> None:
                 baseline_tokens = (await theme_state(page))["values"]
                 baseline_typography = await reader_typography(reader)
                 actual_roots: dict[str, dict[str, str]] = {}
-                radii: set[str] = set()
                 canvases: set[str] = set()
                 for palette in PALETTES:
                     await choose_palette(page, palette)
@@ -380,8 +362,6 @@ async def main(browser_run: BrowserRun) -> None:
                     ratios = check_contrast(state)
                     actual_roots[palette_id(palette)] = state["values"]
                     treatment = await rendered_treatment(page, palette)
-                    check_game_treatment(palette, treatment)
-                    radii.add(treatment["doneRadius"])
                     typography = await reader_typography(reader)
                     assert typography["body"] == baseline_typography["body"], typography
                     assert typography["code"] == baseline_typography["code"], typography
@@ -414,7 +394,6 @@ async def main(browser_run: BrowserRun) -> None:
                 assert (
                     len(canvases) >= 5
                 ), f"palettes must change the canvas, not only an accent: {canvases}"
-                assert len(radii) >= 4, f"theme shape must affect real controls: {radii}"
                 # An unselected tile inherits from a foreign root. Optional
                 # palette primitives must not leak through that ancestor and
                 # recolor its bubble or foreground before a var() fallback.
@@ -482,6 +461,73 @@ async def main(browser_run: BrowserRun) -> None:
                 "Native radios, Tab containment, Escape/backdrop and focus return pass"
             )
             record_phase("keyboard_and_dismissal")
+
+            # The Bot dialog and shell share a class name, not wallpaper ownership.
+            empty_style = """el => ({image:getComputedStyle(el).backgroundImage,
+              background:getComputedStyle(el).backgroundColor,padding:getComputedStyle(el).padding,
+              size:getComputedStyle(el).backgroundSize,overflow:el.scrollWidth-el.clientWidth})"""
+            await select_appearance(page, "dark", "Classic")
+            await page.set_viewport_size({"width": 390, "height": 844})
+            shell_empty = page.locator(".terminal-main-column > .empty-state")
+            await expect(
+                shell_empty.get_by_role("heading", name="No Terminal Tabs")
+            ).to_be_visible()
+            baseline_padding = await shell_empty.evaluate("el => getComputedStyle(el).padding")
+            await page.set_viewport_size({"width": 1440, "height": 900})
+            report["empty_consumers"] = []
+            for empty_mode in ("dark", "light"):
+                for game in GAME_PALETTES:
+                    await expect(trigger).to_be_visible()
+                    await select_appearance(page, empty_mode, game)
+                    expected_background = (await theme_state(page))["values"][
+                        "color-surface-sunken"
+                    ]
+                    await page.get_by_label("Extensions", exact=True).click()
+                    await page.get_by_role("button", name="Feishu Bot settings", exact=True).click()
+                    bot_dialog = page.get_by_test_id("feishu-bot-settings-dialog")
+                    await expect(
+                        bot_dialog.get_by_text("No Bots configured", exact=True)
+                    ).to_be_visible()
+                    observed = {}
+                    for kind, width in (("desktop", 1440), ("phone", 390)):
+                        await page.set_viewport_size(
+                            {"width": width, "height": 844 if width == 390 else 900}
+                        )
+                        bot_empty = bot_dialog.locator(".empty-state")
+                        await expect(bot_empty).to_be_visible()
+                        state = await bot_empty.evaluate(empty_style)
+                        assert (
+                            state["image"] == "none" and state["background"] == expected_background
+                        ), state
+                        assert state["padding"] == "13px" and state["overflow"] <= 1, state
+                        observed[kind] = state
+                    await shot(f"bot-empty-{palette_id(game)}-{empty_mode}.png")
+                    await bot_dialog.get_by_role(
+                        "button", name="Close Feishu Bot settings", exact=True
+                    ).click()
+                    await expect(bot_dialog).to_have_count(0)
+                    shell_state = await shell_empty.evaluate(empty_style)
+                    assert (
+                        shell_state["padding"] == baseline_padding and shell_state["overflow"] <= 1
+                    ), shell_state
+                    assert (
+                        shell_state["size"].split(",")[0].strip().split()[0] == "520px"
+                    ), shell_state
+                    art = await rendered_scene_artwork(
+                        shell_empty, output, f"shell-empty-{palette_id(game)}-{empty_mode}"
+                    )
+                    report["empty_consumers"].append(
+                        {
+                            "palette": game,
+                            "mode": empty_mode,
+                            "bot": observed,
+                            "shell": shell_state,
+                            "art": art,
+                        }
+                    )
+                    await shot(f"shell-empty-{palette_id(game)}-{empty_mode}.png")
+                    await page.set_viewport_size({"width": 1440, "height": 900})
+            record_phase("empty_consumers")
 
             # Inspect actual shell consumers after closing the picker; its game
             # preview tiles intentionally retain their own illustration/icons.

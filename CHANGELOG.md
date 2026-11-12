@@ -7,6 +7,19 @@
 
 ## Released
 
+### style(theme): soften game themes and make room for iconic imagery
+
+- Remove stacked composer and transcript frames, hard offset shadows and the
+  large turn backplates. Keep real input, selection and keyboard-focus cues.
+- Replace generic genre props with original game-inspired character and landmark
+  compositions. Attenuate the complete artwork and anchor Chat wallpaper to the
+  timeline above the actual footer, including responsive phone framing.
+- Preserve orange/black Zenless and the five non-game themes. Verify visible but
+  subdued artwork, unobscured subjects and readable text on the actual composed
+  background rather than requiring the previous opaque-box implementation.
+- Keep secondary/live text readable over artwork and semantic alerts on their
+  own canvas base. Scope empty-state wallpaper to the shell, not inline dialogs.
+
 ### feat(theme): add illustrated game skins and themed chrome icons
 
 - Recast Zenless in orange and black, and give all three game themes original,
