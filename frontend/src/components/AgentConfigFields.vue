@@ -325,6 +325,13 @@ function onAgentTypeChange(value: string) {
   border-color: var(--ch-color-border-hover);
 }
 
+/* Parent scoped form rules do not reach these native selects. */
+@media (any-pointer: coarse) {
+  .agent-config-fields .acf-select {
+    font-size: 16px;
+  }
+}
+
 .agent-config-fields .acf-select:focus,
 .agent-config-fields .acf-select:focus-visible {
   outline: none;
