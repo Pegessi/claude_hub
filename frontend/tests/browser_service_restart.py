@@ -469,6 +469,24 @@ async def main(browser_run: BrowserRun) -> None:
             ).to_be_in_viewport()
             await page.screenshot(path=str(output / "restart-mobile.png"), full_page=True)
             report["screenshots"].extend(["restart-desktop.png", "restart-mobile.png"])
+            # This native <dialog> is a phone sheet. With the keyboard open the
+            # shared overlay rule must lift it above the keyboard and keep its
+            # header inside the viewport; a lift without a bound pushes the top
+            # off-screen instead.
+            keyboard = await dialog.evaluate("""el => {
+                    const root = document.documentElement
+                    root.style.setProperty('--visual-viewport-height', '480px')
+                    root.style.setProperty('--keyboard-height', '364px')
+                    const box = el.getBoundingClientRect()
+                    return { top: box.top, bottom: box.bottom, height: box.height }
+                }""")
+            assert keyboard["top"] >= -1, keyboard
+            assert keyboard["bottom"] <= 480 + 1, keyboard
+            await dialog.evaluate("""() => {
+                    const root = document.documentElement
+                    root.style.removeProperty('--visual-viewport-height')
+                    root.style.removeProperty('--keyboard-height')
+                }""")
             await page.set_viewport_size({"width": 1280, "height": 900})
             await dialog.get_by_role("button", name="Build and restart", exact=True).click()
             for _ in range(30):

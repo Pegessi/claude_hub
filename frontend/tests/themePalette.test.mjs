@@ -265,7 +265,10 @@ test('filled accent controls use contrast-safe fill roles', async () => {
   }
 
   assert.match(components[0], /\.lang-toggle-btn\.active[\s\S]*?background: var\(--ch-color-accent-strong\);/)
-  assert.match(components[1], /button\.primary \{[^}]*background: var\(--ch-color-accent-strong\);/)
+  assert.match(
+    components[1],
+    /\.goal-dialog-button--primary \{[^}]*background: var\(--ch-color-accent-strong\);/,
+  )
   assert.match(components[2], /\.user-avatar-fallback[\s\S]*?background-color: var\(--ch-color-accent-strong\);/)
   assert.match(components[3], /\.composer-send-btn[\s\S]*?background-color: var\(--ch-color-accent-strong\);/)
   assert.match(chatApproval, /\.approval-submit-btn[\s\S]*?background: var\(--ch-color-accent-strong\);/)

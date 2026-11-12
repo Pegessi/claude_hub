@@ -28,6 +28,62 @@ DONE_TURN = "goal-turn-1"
 LIVE_TURN = "goal-turn-2"
 PLAN_TURN = "goal-plan-turn"
 NOW = "2026-10-12T08:00:00Z"
+
+CONTRAST_SCRIPT = """() => {
+  const parse = value => (value.match(/[\d.]+/g) || []).slice(0, 3).map(Number)
+  const luminance = channels => {
+    const [r, g, b] = channels.map(v => {
+      const c = v / 255
+      return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.03928) / 1.055, 2.4)
+    })
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+  }
+  const ratio = (fg, bg) => {
+    const a = luminance(parse(fg))
+    const b = luminance(parse(bg))
+    const high = Math.max(a, b)
+    const low = Math.min(a, b)
+    return (high + 0.05) / (low + 0.05)
+  }
+  const effectiveBackground = element => {
+    // Translucent card tints sit on the dialog surface: blend the layers down
+    // to the first opaque one so contrast is measured on the colour the eye
+    // actually sees.
+    let node = element
+    const layers = []
+    while (node) {
+      const raw = getComputedStyle(node).backgroundColor
+      const parts = (raw.match(/[\d.]+/g) || []).map(Number)
+      if (parts.length >= 3) {
+        const alpha = parts.length > 3 ? parts[3] : 1
+        if (alpha > 0) layers.push([parts[0], parts[1], parts[2], alpha])
+        if (alpha === 1) break
+      }
+      node = node.parentElement
+    }
+    if (!layers.length) return 'rgb(255, 255, 255)'
+    const base = layers[layers.length - 1].slice(0, 3)
+    let out = base.slice()
+    for (let i = layers.length - 2; i >= 0; i--) {
+      const [r, g, b, a] = layers[i]
+      out = [r * a + out[0] * (1 - a), g * a + out[1] * (1 - a), b * a + out[2] * (1 - a)]
+    }
+    return `rgb(${Math.round(out[0])}, ${Math.round(out[1])}, ${Math.round(out[2])})`
+  }
+  const out = {}
+  for (const [key, selector] of Object.entries({
+    title: '#goal-dialog-title',
+    label: '.goal-dialog-field-label',
+    hint: '.goal-dialog-field-hint',
+    note: '.goal-dialog-plan-note',
+    tips: '.goal-dialog-tips',
+  })) {
+    const element = document.querySelector(selector)
+    if (!element) continue
+    out[key] = ratio(getComputedStyle(element).color, effectiveBackground(element))
+  }
+  return out
+}"""
 # The browser receives sanitized stream text: the backend removes the
 # <goal-plan> block before publishing deltas, so the fixture omits it too.
 PLAN_TEXT = (
@@ -512,6 +568,9 @@ async def main(browser_run: BrowserRun) -> None:
             await page.get_by_role("button", name="Add to chat", exact=True).click()
             await page.get_by_role("menuitem", name="Set a Goal").click()
             dialog = page.get_by_role("dialog", name="Set a Goal", exact=True)
+            described_by = await dialog.get_by_role("textbox").get_attribute("aria-describedby")
+            assert described_by, "the objective field lost its hint association"
+            assert await dialog.locator(f"#{described_by}").count() == 1, described_by
             await dialog.get_by_role("textbox").fill("Build from the attached reference")
             await page.locator('input[type="file"]').set_input_files(
                 {
@@ -523,6 +582,28 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(
                 dialog.get_by_role("button", name="View goal-reference.png")
             ).to_be_visible()
+            # The attachment row is the parent's; the dialog may frame it but
+            # must not restyle the chip preview or its remove badge.
+            chip = await dialog.locator(".attachment-chip").first.bounding_box()
+            remove = await dialog.locator(".attachment-remove").first.bounding_box()
+            trigger = await dialog.get_by_role("button", name="Add images").bounding_box()
+            assert chip and chip["width"] <= 48.5 and chip["height"] <= 48.5, chip
+            assert remove and remove["height"] <= 19, f"remove badge was restyled: {remove}"
+            assert remove["width"] <= 19, remove
+            assert trigger and trigger["height"] >= 30, f"the picker trigger shrank: {trigger}"
+            # The row's composition is the picker's own: caption above, trigger
+            # and chips side by side. Reverting that layout must fail here.
+            caption = await dialog.locator(".goal-image-picker > p").first.bounding_box()
+            assert caption, "the picker caption is missing"
+            assert caption["y"] + caption["height"] <= trigger["y"] + 2, (caption, trigger)
+            assert (
+                abs((chip["y"] + chip["height"] / 2) - (trigger["y"] + trigger["height"] / 2)) <= 6
+            ), (
+                chip,
+                trigger,
+            )
+            await page.screenshot(path=str(output / "goal-setup-attachment.png"), full_page=True)
+            report["screenshots"].append("goal-setup-attachment.png")
             await expect(
                 dialog.get_by_role("button", name="Start Goal", exact=True)
             ).to_be_enabled()
@@ -560,6 +641,61 @@ async def main(browser_run: BrowserRun) -> None:
             await page.wait_for_timeout(400)
             await page.screenshot(path=str(output / "goal-setup-plan-first.png"), full_page=True)
             report["screenshots"].append("goal-setup-plan-first.png")
+            # Both themes must stay readable — a restyled surface that only
+            # works in the dark palette is not usable. Contrast is measured on
+            # the real computed colours, walking up for the effective
+            # background. The theme switch sits behind the modal backdrop, so
+            # each pass closes the dialog before flipping it.
+            dark_ratio = await dialog.evaluate(CONTRAST_SCRIPT)
+            assert dark_ratio["title"] >= 4.5, dark_ratio
+            assert dark_ratio["label"] >= 4.5, dark_ratio
+            assert dark_ratio["hint"] >= 4.5, dark_ratio
+            assert dark_ratio["note"] >= 4.5, dark_ratio
+            assert dark_ratio["tips"] >= 4.5, dark_ratio
+            await dialog.get_by_role("button", name="Cancel", exact=True).click()
+            await expect(dialog).not_to_be_visible()
+            await page.locator(".theme-switch").click()
+            await page.get_by_role("button", name="Add to chat", exact=True).click()
+            await page.get_by_role("menuitem", name="Set a Goal").click()
+            dialog = page.get_by_role("dialog", name="Set a Goal", exact=True)
+            plan_toggle = dialog.get_by_label("Plan first", exact=True)
+            # A cancelled dialog remembered nothing, so the light pass starts
+            # from the same resting state.
+            await expect(plan_toggle).not_to_be_checked()
+            await dialog.get_by_role("textbox").fill("Plan the cache before building it")
+            await plan_toggle.check()
+            await page.wait_for_timeout(300)
+            light_ratio = await dialog.evaluate(CONTRAST_SCRIPT)
+            assert light_ratio["title"] >= 4.5, light_ratio
+            assert light_ratio["label"] >= 4.5, light_ratio
+            assert light_ratio["hint"] >= 4.5, light_ratio
+            assert light_ratio["note"] >= 4.5, light_ratio
+            assert light_ratio["tips"] >= 4.5, light_ratio
+            await page.screenshot(
+                path=str(output / "goal-setup-plan-first-light.png"), full_page=True
+            )
+            report["screenshots"].append("goal-setup-plan-first-light.png")
+            await dialog.get_by_role("button", name="Cancel", exact=True).click()
+            await expect(dialog).not_to_be_visible()
+            await page.locator(".theme-switch").click()
+            await page.get_by_role("button", name="Add to chat", exact=True).click()
+            await page.get_by_role("menuitem", name="Set a Goal").click()
+            dialog = page.get_by_role("dialog", name="Set a Goal", exact=True)
+            plan_toggle = dialog.get_by_label("Plan first", exact=True)
+            await expect(plan_toggle).not_to_be_checked()
+            await dialog.get_by_role("textbox").fill("Plan the cache before building it")
+            await expect(dialog.locator(".goal-dialog-count")).to_have_attribute(
+                "data-near-limit", "false"
+            )
+            # The counter warns before the hard limit, not only at it.
+            await dialog.get_by_role("textbox").fill("x" * 3700)
+            await expect(dialog.locator(".goal-dialog-count")).to_have_attribute(
+                "data-near-limit", "true"
+            )
+            await expect(dialog.locator(".goal-dialog-count")).to_have_text("3700/4000")
+            await dialog.get_by_role("textbox").fill("Plan the cache before building it")
+            await plan_toggle.check()
+            await page.wait_for_timeout(300)
             # The same open dialog reflows to a phone width.
             await page.set_viewport_size({"width": 390, "height": 844})
             await page.wait_for_timeout(200)
@@ -567,6 +703,30 @@ async def main(browser_run: BrowserRun) -> None:
             await page.screenshot(
                 path=str(output / "goal-setup-plan-first-mobile.png"), full_page=True
             )
+            # The phone sheet is bounded by the shared overlay rule, which reads
+            # the visual viewport so an on-screen keyboard shrinks it instead of
+            # hiding the footer. A desktop-only `100dvh` must fail this.
+            sheet_hint = await dialog.evaluate("""el => {
+                    const root = document.documentElement
+                    root.style.setProperty('--visual-viewport-height', '480px')
+                    root.style.setProperty('--keyboard-height', '364px')
+                    const box = el.getBoundingClientRect()
+                    return { height: box.height, bottom: box.bottom, top: box.top }
+                }""")
+            assert sheet_hint["height"] <= 480 - 24 + 1, sheet_hint
+            assert sheet_hint["bottom"] <= 480 + 1, sheet_hint
+            start_button = await dialog.get_by_role(
+                "button", name="Start Goal", exact=True
+            ).bounding_box()
+            assert start_button, "the sheet footer lost its actions"
+            assert start_button["y"] + start_button["height"] <= 480 + 1, start_button
+            await page.screenshot(path=str(output / "goal-setup-keyboard-sheet.png"))
+            report["screenshots"].append("goal-setup-keyboard-sheet.png")
+            await dialog.evaluate("""() => {
+                    const root = document.documentElement
+                    root.style.removeProperty('--visual-viewport-height')
+                    root.style.removeProperty('--keyboard-height')
+                }""")
             report["screenshots"].append("goal-setup-plan-first-mobile.png")
             await page.set_viewport_size({"width": 1440, "height": 900})
             await dialog.get_by_role("button", name="Start Goal", exact=True).click()
