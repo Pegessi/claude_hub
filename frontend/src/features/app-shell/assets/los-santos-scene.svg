@@ -1,202 +1,462 @@
 <!-- Original static SVG scene illustration authored for Claude Hub (los-santos palette).
-     Subject: Grand Theft Auto V stylized triptych & HUD composition — three distinct protagonist
-     silhouettes (left: square-jawed swept-hair figure in aviator sunglasses and structured
-     open-collar suit with Maze Bank Tower; center: close-fade figure with boxed goatee and
-     broad hooded sweatshirt alongside a Rottweiler companion below legible VINEWOOD hillside
-     lettering; right: gaunt angular figure with receding hairline, side tufts, deep scowl, and
-     worn V-neck tee beside a circular 4-sector radial character-switch wheel and tri-color bar).
-     Attenuation: one root drawing group keeps the scene subordinate to readable text.
-     Visibility and salience are checked in rendered app viewports, not inferred from opacity. -->
+     Subject: Grand Theft Auto V classic 2013 trio loading-screen / editorial-poster triptych —
+     three distinct cel-shaded chest-up portraits differentiated by anatomy, skin tone, hair,
+     garments, and lighting planes:
+       1. Left panel (Michael): swept dark espresso hair, square weathered Caucasian face with
+          furrowed brow and deep nasolabial folds (no sunglasses), deep burgundy polo shirt, and
+          diagonal black duffel-bag strap before downtown Maze Bank skyline.
+       2. Center panel (Franklin + Chop): closely cropped dark buzz/fade, clean-shaven strong
+          warm-brown face, dark slate-blue collared overshirt layered over crisp white long
+          sleeves, with Chop the Rottweiler (black/mahogany-tan markings & gold chain) beneath
+          an unobscured VINEWOOD hillside sign.
+       3. Right panel (Trevor): bare sunburned forehead with unkempt receding temple hair tufts,
+          sallow gaunt face with hollow cheeks and deep scowl creases, worn pale V-neck tee, and
+          wooden baseball bat held across his left shoulder beside a compact 4-sector HUD wheel.
+     Attenuation: one outer drawing group at opacity 0.20 keeps the scene subordinate to text. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" fill="none">
-  <g opacity="0.29">
-    <!-- OUTER LEFT & RIGHT FLANKS: Downtown Maze Bank Skyline & Del Perro Pier / Palms -->
-    <g fill="#3d546e" stroke="#479bc9" stroke-width="2" stroke-linejoin="round">
-      <!-- Left skyline & stepped Maze Bank crown tower (x=42..202, y=88..316) -->
-      <rect x="42" y="168" width="42" height="148" />
-      <rect x="94" y="118" width="54" height="198" stroke="#72bce0" stroke-width="2.2" />
-      <rect x="104" y="102" width="34" height="16" stroke="#72bce0" />
-      <polygon points="110,102 121,88 132,102" fill="#479bc9" />
-      <rect x="158" y="152" width="44" height="164" />
+  <defs>
+    <!-- Triptych Panel Poster Backdrop Gradients -->
+    <linearGradient id="ls-panelLeftSky" x1="338" y1="168" x2="338" y2="316" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#bad8c0" />
+      <stop offset="55%" stop-color="#82b5a8" />
+      <stop offset="100%" stop-color="#3c6e78" />
+    </linearGradient>
+    <linearGradient id="ls-panelCenterSky" x1="598" y1="168" x2="598" y2="316" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#f5ce6c" />
+      <stop offset="58%" stop-color="#df9f3e" />
+      <stop offset="100%" stop-color="#945520" />
+    </linearGradient>
+    <linearGradient id="ls-panelRightSky" x1="860" y1="168" x2="860" y2="316" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#7ebad4" />
+      <stop offset="55%" stop-color="#b4d6e4" />
+      <stop offset="100%" stop-color="#6c8fa6" />
+    </linearGradient>
 
-      <!-- Right Del Perro Ferris wheel & coastal palms (x=1016..1154, y=122..316) -->
-      <circle cx="1054" cy="242" r="38" fill="#4a627d" stroke="#d6a052" stroke-width="2.4" />
-      <circle cx="1054" cy="242" r="24" stroke="#72bce0" stroke-width="1.6" stroke-dasharray="5 4" />
-      <path d="M1032 314 L1054 242 L1076 314" stroke="#d6a052" stroke-width="2.4" />
-      <path d="M1134 314 Q1122 232 1098 152" stroke="#3da876" stroke-width="4" stroke-linecap="round" />
-      <path d="M1098 152 Q1064 136 1044 156 M1098 152 Q1132 134 1154 156 M1098 152 Q1074 122 1052 128 M1098 152 Q1124 122 1146 128"
-            stroke="#68c99b" stroke-width="2.4" stroke-linecap="round" />
+    <!-- Michael Skin & Burgundy Polo Gradients -->
+    <linearGradient id="ls-michaelSkin" x1="330" y1="180" x2="386" y2="246" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#f2c4a2" />
+      <stop offset="58%" stop-color="#d89872" />
+      <stop offset="100%" stop-color="#a46242" />
+    </linearGradient>
+    <linearGradient id="ls-michaelPolo" x1="280" y1="242" x2="430" y2="316" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#821a2c" />
+      <stop offset="55%" stop-color="#5c101e" />
+      <stop offset="100%" stop-color="#360811" />
+    </linearGradient>
+
+    <!-- Franklin Skin & Blue Overshirt Gradients -->
+    <linearGradient id="ls-franklinSkin" x1="516" y1="180" x2="578" y2="244" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#b86e44" />
+      <stop offset="55%" stop-color="#8f4e2a" />
+      <stop offset="100%" stop-color="#5c2e16" />
+    </linearGradient>
+    <linearGradient id="ls-franklinShirt" x1="480" y1="238" x2="624" y2="316" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#486580" />
+      <stop offset="55%" stop-color="#2f465c" />
+      <stop offset="100%" stop-color="#1b2a38" />
+    </linearGradient>
+
+    <!-- Trevor Skin, Worn Tee & Bat Gradients -->
+    <linearGradient id="ls-trevorSkin" x1="788" y1="176" x2="852" y2="246" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#e5a67e" />
+      <stop offset="55%" stop-color="#c47c54" />
+      <stop offset="100%" stop-color="#884628" />
+    </linearGradient>
+    <linearGradient id="ls-trevorTee" x1="756" y1="242" x2="890" y2="316" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#ebe7de" />
+      <stop offset="58%" stop-color="#c9c4b6" />
+      <stop offset="100%" stop-color="#969184" />
+    </linearGradient>
+    <linearGradient id="ls-woodBat" x1="860" y1="180" x2="914" y2="310" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#e6b670" />
+      <stop offset="55%" stop-color="#b5803c" />
+      <stop offset="100%" stop-color="#784e1e" />
+    </linearGradient>
+
+    <!-- Panel Clip Paths so Chest-Up Portraits & Details Stay Crisp Inside Poster Borders -->
+    <clipPath id="ls-clipLeft">
+      <polygon points="226,168 464,168 446,316 212,316" />
+    </clipPath>
+    <clipPath id="ls-clipCenter">
+      <polygon points="476,168 738,168 720,316 460,316" />
+    </clipPath>
+    <clipPath id="ls-clipRight">
+      <polygon points="750,168 988,168 970,316 734,316" />
+    </clipPath>
+  </defs>
+
+  <g opacity="0.20">
+    <!-- ======================================================================
+         OUTER LEFT & RIGHT FLANKS: LOS SANTOS SKYLINE & DEL PERRO PIER / PALMS
+         ====================================================================== -->
+    <!-- Left Downtown Skyline & Stepped Maze Bank Tower (x=36..204, y=88..316) -->
+    <g id="flank-left-skyline">
+      <!-- Far left high-rise -->
+      <rect x="38" y="164" width="44" height="152" fill="#26384a" stroke="#16202b" stroke-width="2.4" />
+      <rect x="44" y="172" width="12" height="138" fill="#3a556e" />
+      <!-- Stepped Maze Bank Crown Tower -->
+      <rect x="92" y="118" width="56" height="198" fill="#2c4257" stroke="#16202b" stroke-width="2.6" />
+      <rect x="96" y="122" width="22" height="190" fill="#466885" />
+      <rect x="102" y="102" width="36" height="16" fill="#3a5770" stroke="#16202b" stroke-width="2.2" />
+      <polygon points="108,102 120,86 132,102" fill="#eab854" stroke="#16202b" stroke-width="2" />
+      <!-- Horizontal sunlit window bands -->
+      <path d="M100 136 H140 M100 154 H140 M100 172 H140 M100 190 H140 M100 208 H140 M100 226 H140"
+            stroke="#8ed2eb" stroke-width="2.2" stroke-dasharray="6 4" />
+      <!-- Right-flank office tower -->
+      <rect x="158" y="148" width="44" height="168" fill="#233445" stroke="#16202b" stroke-width="2.4" />
+      <rect x="163" y="154" width="14" height="156" fill="#365068" />
+    </g>
+
+    <!-- Right Del Perro Ferris Wheel & Coastal Palm Silhouettes (x=996..1164, y=118..316) -->
+    <g id="flank-right-pier">
+      <!-- Ferris Wheel -->
+      <circle cx="1050" cy="242" r="40" fill="#233445" fill-opacity="0.55" stroke="#eab854" stroke-width="3" />
+      <circle cx="1050" cy="242" r="27" stroke="#64c4ed" stroke-width="2" stroke-dasharray="6 4" />
+      <path d="M1050 202 V282 M1010 242 H1090 M1022 214 L1078 270 M1078 214 L1022 270"
+            stroke="#3a556e" stroke-width="1.6" />
+      <path d="M1026 316 L1050 242 L1074 316" stroke="#eab854" stroke-width="3" stroke-linejoin="round" />
+      <circle cx="1050" cy="242" r="5.5" fill="#f5ce6c" stroke="#16202b" stroke-width="2" />
+      <!-- Coastal Palm Tree -->
+      <path d="M1136 316 Q1124 230 1098 148" stroke="#263832" stroke-width="5.5" stroke-linecap="round" />
+      <path d="M1134 316 Q1122 230 1096 148" stroke="#489e76" stroke-width="2.5" stroke-linecap="round" />
+      <path d="M1098 148 Q1062 130 1040 154 M1098 148 Q1134 128 1158 154 M1098 148 Q1072 116 1048 124 M1098 148 Q1126 116 1150 124"
+            stroke="#5ec494" stroke-width="3.2" stroke-linecap="round" />
     </g>
 
     <!-- ======================================================================
-         PANEL 1 (LEFT-CENTER, x=214..462, y=172..316):
-         Square-jawed, swept-hair, aviator-sunglasses & structured tailored suit
+         PANEL 1 (LEFT-CENTER, x=212..464, y=168..316):
+         MICHAEL — Swept Dark Hair, Weathered Square Face, Burgundy Polo & Strap
          ====================================================================== -->
-    <g>
-      <polygon points="228,172 462,172 444,316 214,316" fill="#3d546e" stroke="#479bc9" stroke-width="2.2" />
-      <!-- Stepped Maze Bank silhouette in left background -->
-      <path d="M234 314 V196 L250 184 L266 196 V314" fill="#4a627d" stroke="#72bce0" stroke-width="1.5" />
+    <g id="panel-michael">
+      <polygon points="226,168 464,168 446,316 212,316" fill="url(#ls-panelLeftSky)" />
 
-      <g transform="translate(354, 244)" stroke-linejoin="round" stroke-linecap="round">
-        <!-- Structured angular padded suit shoulders & tailored jacket (distinct from rounded hoodie) -->
-        <path d="M-76 72 L-68 14 L-24 -6 L24 -6 L68 14 L76 72 Z"
-              fill="#4a627d" stroke="#72bce0" stroke-width="2.2" />
-        <!-- Peaked suit lapels & open-collar dress shirt (no tie) -->
-        <polygon points="-24,-6 -36,14 -12,48 0,48 -14,-6" fill="#3d546e" stroke="#72bce0" stroke-width="1.7" />
-        <polygon points="24,-6 36,14 12,48 0,48 14,-6" fill="#3d546e" stroke="#72bce0" stroke-width="1.7" />
-        <polygon points="-14,-6 -6,28 0,46 6,28 14,-6" fill="#479bc9" stroke="#72bce0" stroke-width="1.6" />
-        <!-- Breast pocket square -->
-        <polygon points="26,24 42,19 40,28 24,28" fill="#72bce0" />
+      <g clip-path="url(#ls-clipLeft)">
+        <!-- Subtle sunlit coastal clouds & downtown skyline silhouette on far left of panel -->
+        <path d="M214 236 C250 224 290 222 330 228 L460 218 V246 H214 Z" fill="#d8ead6" fill-opacity="0.45" />
+        <path d="M224 316 V196 L240 182 L256 196 V316 Z" fill="#46727c" stroke="#284852" stroke-width="1.8" />
+        <rect x="260" y="214" width="22" height="102" fill="#385e68" />
 
-        <!-- Neck & wide chiseled square jawline -->
-        <rect x="-11" y="-14" width="22" height="10" fill="#4a627d" />
-        <path d="M-24 -48 L-24 -22 L-16 -8 L0 -6 L16 -8 L24 -22 L24 -48 Z"
-              fill="#4a627d" stroke="#72bce0" stroke-width="2.2" />
+        <!-- Dark leather/canvas duffel bag mass slung behind Michael's right shoulder/hip -->
+        <path d="M254 268 C264 256 282 256 296 264 L292 318 H248 Z"
+              fill="#22262a" stroke="#14171a" stroke-width="2.6" stroke-linejoin="round" />
+        <path d="M262 272 C272 268 282 270 288 278" stroke="#4c545c" stroke-width="2.2" stroke-linecap="round" />
+
+        <!-- Michael's Broad Shoulders & Deep Burgundy Short-Sleeve Polo Shirt (y=236..318) -->
+        <path d="M268 318 C272 276 286 248 318 238 L392 238 C422 248 438 276 444 318 Z"
+              fill="url(#ls-michaelPolo)" stroke="#181214" stroke-width="3" stroke-linejoin="round" />
+        <!-- Sunlit left shoulder & upper chest fold planes on burgundy polo -->
+        <path d="M272 316 C276 278 288 252 316 240 L334 256 C312 272 298 294 294 316 Z"
+              fill="#9c2238" />
+        <!-- Deep cel-shaded cloth folds across right chest & under collar -->
+        <path d="M368 242 L404 244 C424 256 436 282 442 316 H398 C394 288 382 262 368 242 Z"
+              fill="#380710" />
+        <path d="M312 282 C338 276 368 280 396 292 M318 298 C346 292 374 296 398 306"
+              stroke="#32060e" stroke-width="3" stroke-linecap="round" />
+
+        <!-- Thick sunlit neck, throat shadow & sternocleidomastoid tendons -->
+        <path d="M332 228 L330 250 L354 268 L378 248 L376 228 Z"
+              fill="url(#ls-michaelSkin)" stroke="#181214" stroke-width="2.4" />
+        <path d="M336 234 L354 246 L374 232 L374 226 L336 226 Z" fill="#8f4e32" />
+
+        <!-- Burgundy Polo Spread Collar & Open V-Placket -->
+        <polygon points="326,232 312,252 338,262 352,268 334,242"
+                 fill="#8e1e32" stroke="#181214" stroke-width="2.4" stroke-linejoin="round" />
+        <polygon points="382,232 396,252 370,262 354,268 374,242"
+                 fill="#4f0d19" stroke="#181214" stroke-width="2.4" stroke-linejoin="round" />
+
+        <!-- Diagonal Black Duffel-Bag Strap Across Chest (from left shoulder 406,240 to 292,318) -->
+        <polygon points="394,238 414,244 316,318 292,318"
+                 fill="#1c2024" stroke="#101214" stroke-width="2.6" stroke-linejoin="round" />
+        <line x1="398" y1="241" x2="300" y2="315" stroke="#525a63" stroke-width="2" />
+        <!-- Metallic strap buckle slide -->
+        <polygon points="346,272 362,260 374,268 358,280"
+                 fill="#363c42" stroke="#98a2ab" stroke-width="2" stroke-linejoin="round" />
+
+        <!-- Michael's Weathered Square Face & Swept Dark Espresso Hair (x=316..392, y=170..246) -->
         <!-- Ears -->
-        <path d="M-24 -40 L-28 -36 L-24 -26 M24 -40 L28 -36 L24 -26" stroke="#72bce0" stroke-width="1.8" />
-        <!-- Voluminous side-parted swept-back hair crest (asymmetric high left part) -->
-        <path d="M-26 -44 C-28 -64 -14 -72 8 -70 C24 -68 28 -58 26 -42 C18 -53 2 -56 -12 -51 L-24 -42 Z"
-              fill="#3d546e" stroke="#72bce0" stroke-width="2" />
-        <path d="M-14 -60 C-2 -64 12 -62 20 -55" stroke="#479bc9" stroke-width="1.6" />
-        <!-- Teardrop dual-bridge aviator sunglasses with lens reflection -->
-        <path d="M-20 -42 H-3 L-4 -31 C-9 -29 -18 -31 -20 -36 Z" fill="#3d546e" stroke="#72bce0" stroke-width="2" />
-        <path d="M3 -42 H20 L20 -36 C18 -31 9 -29 4 -31 Z" fill="#3d546e" stroke="#72bce0" stroke-width="2" />
-        <line x1="-4" y1="-41" x2="4" y2="-41" stroke="#72bce0" stroke-width="2" />
-        <line x1="-15" y1="-34" x2="-9" y2="-39" stroke="#72bce0" stroke-width="1.5" />
-        <line x1="8" y1="-34" x2="14" y2="-39" stroke="#72bce0" stroke-width="1.5" />
-        <!-- Nose bridge, nasolabial creases & firm set mouth -->
-        <path d="M0 -39 V-23 L-3 -22 M-13 -21 L-9 -14 M13 -21 L9 -14 M-8 -15 L0 -16 L8 -15"
-              stroke="#72bce0" stroke-width="1.8" />
+        <path d="M322 204 C315 204 315 220 323 224 M386 204 C393 204 393 220 385 224"
+              fill="#d89872" stroke="#181214" stroke-width="2.2" />
+        <!-- Chiseled square skull & jawline -->
+        <path d="M322 186 L323 218 L334 238 L354 244 L374 238 L385 218 L386 186 Z"
+              fill="url(#ls-michaelSkin)" stroke="#181214" stroke-width="2.6" stroke-linejoin="round" />
+        <!-- Sunlit left forehead & cheekbone plane -->
+        <path d="M325 188 L354 188 L352 222 L334 228 L325 214 Z" fill="#f6cfb2" fill-opacity="0.65" />
+        <!-- Right-side facial cel-shadow & subtle weathered 5-o'clock jaw stubble -->
+        <path d="M366 190 L384 190 L383 218 L373 237 L354 243 L354 234 C366 232 372 222 372 208 Z"
+              fill="#9e5c3e" fill-opacity="0.65" />
+        <path d="M326 220 L335 237 L354 243 L373 237 L382 220 C372 228 364 230 354 230 C344 230 336 228 326 220 Z"
+              fill="#94624a" fill-opacity="0.42" />
+
+        <!-- Swept-Back Dark Espresso Hair with M-Shaped Temple Contour -->
+        <path d="M320 204 C316 184 328 170 354 170 C380 170 392 184 388 204 L384 192 C376 182 368 186 354 186 C340 186 332 182 324 192 Z"
+              fill="#221713" stroke="#140e0c" stroke-width="2.4" stroke-linejoin="round" />
+        <path d="M332 176 C346 172 364 172 376 178" stroke="#4d372e" stroke-width="2.2" stroke-linecap="round" />
+
+        <!-- Furrowed Brow Ridge, Deep-Set Eyes (No Sunglasses!), Straight Nose & Nasolabial Creases -->
+        <!-- Furrowed eyebrows & glabella frown lines -->
+        <path d="M329 201 L347 204 M379 201 L361 204" stroke="#221713" stroke-width="3" stroke-linecap="round" />
+        <path d="M351 198 V205 M357 198 V205" stroke="#8c4c30" stroke-width="1.6" stroke-linecap="round" />
+        <!-- Deep eye-socket shadows & intense eyes -->
+        <ellipse cx="339" cy="207" rx="6.5" ry="3.2" fill="#7a422a" />
+        <ellipse cx="369" cy="207" rx="6.5" ry="3.2" fill="#7a422a" />
+        <ellipse cx="339" cy="207" rx="4.8" ry="2.1" fill="#f0eae4" />
+        <ellipse cx="369" cy="207" rx="4.8" ry="2.1" fill="#f0eae4" />
+        <circle cx="339" cy="207" r="2" fill="#2b3a40" />
+        <circle cx="369" cy="207" r="2" fill="#2b3a40" />
+        <path d="M333 206 Q339 204 345 206 M363 206 Q369 204 375 206" stroke="#181214" stroke-width="1.8" fill="none" />
+        <!-- Straight nose bridge & nostril shadow -->
+        <path d="M353 204 L351 220 L358 221" stroke="#f7d8be" stroke-width="2.2" stroke-linecap="round" fill="none" />
+        <path d="M348 221 L354 223 L360 221" stroke="#7a422a" stroke-width="2.2" stroke-linecap="round" fill="none" />
+        <!-- Pronounced weathered nasolabial folds & firm set mouth -->
+        <path d="M342 218 L336 230 M366 218 L372 230" stroke="#85482e" stroke-width="2" stroke-linecap="round" />
+        <path d="M343 230 Q354 228 365 230" stroke="#5e2c1d" stroke-width="2.4" stroke-linecap="round" fill="none" />
+        <path d="M347 233 H361" stroke="#b56e50" stroke-width="1.8" stroke-linecap="round" />
       </g>
+
+      <!-- Crisp Poster Panel Border -->
+      <polygon points="226,168 464,168 446,316 212,316" stroke="#161b20" stroke-width="3.2" stroke-linejoin="round" />
     </g>
 
     <!-- ======================================================================
-         PANEL 2 (CENTER, x=458..738, y=172..316):
-         Legible VINEWOOD sign, close-fade broad hoodie profile + Chop Rottweiler
+         PANEL 2 (CENTER, x=460..738, y=168..316):
+         FRANKLIN — Short Fade, Clean-Shaven Strong Face, Blue Overshirt over
+         White Long Sleeves + Chop the Rottweiler & Unobscured VINEWOOD Sign
          ====================================================================== -->
-    <g>
-      <polygon points="476,172 738,172 720,316 458,316" fill="#3d546e" stroke="#3da876" stroke-width="2.2" />
+    <g id="panel-franklin">
+      <polygon points="476,168 738,168 720,316 460,316" fill="url(#ls-panelCenterSky)" />
 
-      <!-- Keep the sign above Chop, clear of the central portrait (x=604..712, y=177..194). -->
-      <g transform="translate(126, 0)" stroke="#68c99b" stroke-width="2.1" stroke-linecap="square" stroke-linejoin="miter" fill="none">
-        <!-- V -->
-        <polyline points="481,179 485,190 489,179" />
-        <!-- I -->
-        <line x1="494" y1="179" x2="494" y2="190" />
-        <!-- N -->
-        <polyline points="500,190 500,179 507,190 507,179" />
-        <!-- E -->
-        <path d="M518 179 H512 V190 H518 M512 184.5 H517" />
-        <!-- W -->
-        <polyline points="523,179 525.5,190 529,181 532.5,190 535,179" />
-        <!-- O -->
-        <rect x="540" y="179" width="7.5" height="11" rx="1.5" />
-        <!-- O -->
-        <rect x="552" y="179" width="7.5" height="11" rx="1.5" />
-        <!-- D -->
-        <path d="M564 179 H568.5 C571 179 572 181 572 184.5 C572 188 571 190 568.5 190 H564 Z" />
-        <!-- Hillside ridge line under sign -->
-        <path d="M477 193 Q526 190 577 193" stroke="#3da876" stroke-width="1.6" />
+      <g clip-path="url(#ls-clipCenter)">
+        <!-- Warm South Los Santos architectural eaves & sunlit wall band in background -->
+        <path d="M462 214 H602 L596 316 H462 Z" fill="#d48c32" fill-opacity="0.35" />
+
+        <!-- Unobscured VINEWOOD Hillside Sign on Upper-Right Ridge (x=608..724, y=175..194) -->
+        <g id="vinewood-sign" transform="translate(130, 0)">
+          <path d="M474 194 Q526 189 582 194 L586 204 H470 Z" fill="#824c1e" />
+          <g stroke="#fbf8f0" stroke-width="2.2" stroke-linecap="square" stroke-linejoin="miter" fill="none">
+            <polyline points="481,178 485,190 489,178" />
+            <line x1="494" y1="178" x2="494" y2="190" />
+            <polyline points="500,190 500,178 507,190 507,178" />
+            <path d="M518 178 H512 V190 H518 M512 184 H517" />
+            <polyline points="523,178 525.5,190 529,180 532.5,190 535,178" />
+            <rect x="540" y="178" width="7.5" height="12" rx="1.2" />
+            <rect x="552" y="178" width="7.5" height="12" rx="1.2" />
+            <path d="M564 178 H568.5 C571 178 572 180 572 184 C572 188 571 190 568.5 190 H564 Z" />
+          </g>
+        </g>
+
+        <!-- Franklin's 3/4 Shoulders, Slate-Blue Work Overshirt & White Long Sleeves (x=470..634, y=232..318) -->
+        <path d="M472 318 C474 274 488 244 516 234 L584 236 C612 246 626 274 632 318 Z"
+              fill="url(#ls-franklinShirt)" stroke="#14181d" stroke-width="3" stroke-linejoin="round" />
+        <!-- Sunlit left shoulder & upper sleeve plane on slate-blue overshirt -->
+        <path d="M474 316 C476 276 490 248 516 236 L538 258 C518 274 508 294 504 316 Z"
+              fill="#587a99" />
+        <!-- Deep navy cel-shadow folds under arm & across chest -->
+        <path d="M558 242 L586 238 C610 248 624 274 630 316 H584 C576 286 568 262 558 242 Z"
+              fill="#182634" />
+        <path d="M502 272 L546 284 M510 260 L548 274"
+              stroke="#16222e" stroke-width="2.8" stroke-linecap="round" />
+
+        <!-- Crisp White Long Thermal Forearm Sleeve Emerging Across Chest (from gtav-trio-2013) -->
+        <path d="M506 296 C532 284 568 282 602 292 L610 318 H498 Z"
+              fill="#f2f0ea" stroke="#14181d" stroke-width="2.6" stroke-linejoin="round" />
+        <!-- Cel-shaded grey-blue fold creases on white long sleeve -->
+        <path d="M512 306 C538 296 568 296 598 304 L604 316 H506 Z" fill="#c5ccd2" />
+        <!-- Franklin's warm-brown right hand tucked at opposite elbow -->
+        <path d="M490 288 C498 282 512 284 518 292 L512 308 C500 308 490 300 490 288 Z"
+              fill="#9e5a34" stroke="#14181d" stroke-width="2.2" />
+
+        <!-- Neck, White Crew Undershirt Triangle & Pointed Blue Overshirt Collar -->
+        <path d="M526 224 L524 244 L552 254 L572 242 L570 224 Z"
+              fill="url(#ls-franklinSkin)" stroke="#14181d" stroke-width="2.4" />
+        <polygon points="540,242 560,242 552,256" fill="#f2f0ea" stroke="#14181d" stroke-width="1.8" />
+        <polygon points="520,228 508,248 538,258 548,244"
+                 fill="#4f6f8c" stroke="#14181d" stroke-width="2.4" stroke-linejoin="round" />
+        <polygon points="574,230 586,248 560,258 552,244"
+                 fill="#24384a" stroke="#14181d" stroke-width="2.4" stroke-linejoin="round" />
+
+        <!-- Franklin's Strong Clean-Shaven Face & Tight Buzz/Fade Haircut (x=510..582, y=170..242) -->
+        <!-- Ear on left (3/4 turn facing slightly right) -->
+        <path d="M514 202 C507 202 507 218 515 222"
+              fill="#9e5a34" stroke="#14181d" stroke-width="2.2" />
+        <!-- Strong clean-shaven square jaw & cranial contour -->
+        <path d="M514 184 L515 216 C516 228 526 238 548 241 C566 239 577 228 579 214 L578 184 Z"
+              fill="url(#ls-franklinSkin)" stroke="#14181d" stroke-width="2.6" stroke-linejoin="round" />
+        <!-- Warm sunlit left forehead, cheekbone & jaw highlight plane -->
+        <path d="M517 186 L550 186 L548 222 L536 234 L518 216 Z"
+              fill="#c97e50" fill-opacity="0.58" />
+        <!-- Sculpted right-side cheek & under-jaw cel-shadow (clean-shaven, NO goatee) -->
+        <path d="M562 188 L577 188 L577 214 C575 228 564 238 548 240 L548 232 C560 230 566 220 564 204 Z"
+              fill="#4d2410" fill-opacity="0.65" />
+
+        <!-- Tight Closely Cropped Black Buzz/Fade Haircut -->
+        <path d="M514 194 C513 176 526 169 547 169 C568 169 579 176 578 194 C568 184 526 184 514 194 Z"
+              fill="#171312" stroke="#100d0c" stroke-width="2.2" stroke-linejoin="round" />
+        <path d="M526 174 C538 171 554 171 566 175" stroke="#362c28" stroke-width="2" stroke-linecap="round" />
+
+        <!-- Focused Brows, Dark Eyes, Broad Nose & Sculpted Full Lips -->
+        <path d="M524 199 L542 200 M556 200 L573 199" stroke="#171312" stroke-width="2.8" stroke-linecap="round" />
+        <ellipse cx="534" cy="205" rx="5" ry="2.3" fill="#f2ece4" />
+        <ellipse cx="564" cy="205" rx="4.6" ry="2.3" fill="#f2ece4" />
+        <circle cx="535" cy="205" r="2.1" fill="#1f140e" />
+        <circle cx="564" cy="205" r="2.1" fill="#1f140e" />
+        <path d="M528 204 Q534 202 540 204 M558 204 Q564 202 570 204" stroke="#14100e" stroke-width="1.8" fill="none" />
+        <!-- Broad nose bridge highlight & nostril wings -->
+        <path d="M550 202 L552 217 L545 219" stroke="#d48a5c" stroke-width="2.4" stroke-linecap="round" fill="none" />
+        <path d="M542 219 C546 222 554 222 558 219" stroke="#4a2210" stroke-width="2.4" stroke-linecap="round" fill="none" />
+        <!-- Full clean-shaven lips -->
+        <path d="M539 227 C545 225 553 225 559 227" stroke="#4a2212" stroke-width="2.8" stroke-linecap="round" fill="none" />
+        <path d="M541 230 C546 233 552 233 557 230" stroke="#a65a3e" stroke-width="2.6" stroke-linecap="round" fill="none" />
+
+        <!-- Chop the Rottweiler Companion (x=638..722, y=220..316, Black & Mahogany-Rust Coatings) -->
+        <g id="chop-rottweiler" transform="translate(680, 266)">
+          <!-- Broad muscular Rottweiler chest & shoulders -->
+          <path d="M-34 52 C-36 22 -24 2 0 2 C24 2 36 22 34 52 Z"
+                fill="#1e1d1c" stroke="#121110" stroke-width="2.6" stroke-linejoin="round" />
+          <path d="M-32 48 C-32 24 -22 8 -6 4 L-12 48 Z" fill="#33312f" />
+          <!-- Authentic mahogany-rust tan chest patch -->
+          <polygon points="-18,18 0,26 18,18 12,40 0,46 -12,40" fill="#c96828" />
+          <!-- Heavy gold link chain collar -->
+          <path d="M-22 6 Q0 16 22 6" stroke="#f0ba48" stroke-width="4" stroke-linecap="round" stroke-dasharray="5 3" />
+          <!-- Broad Rottweiler skull & pendant drop ears -->
+          <path d="M-20 -20 C-19 -35 19 -35 20 -20 L22 -2 C22 8 12 11 0 11 C-12 11 -22 8 -22 -2 Z"
+                fill="#242220" stroke="#121110" stroke-width="2.6" stroke-linejoin="round" />
+          <polygon points="-19,-24 -32,-8 -19,-4" fill="#181716" stroke="#121110" stroke-width="2.2" stroke-linejoin="round" />
+          <polygon points="19,-24 32,-8 19,-4" fill="#181716" stroke="#121110" stroke-width="2.2" stroke-linejoin="round" />
+          <!-- Rust-tan brow pips & warm amber eyes -->
+          <ellipse cx="-8" cy="-19" rx="3.2" ry="2" fill="#d97832" />
+          <ellipse cx="8" cy="-19" rx="3.2" ry="2" fill="#d97832" />
+          <circle cx="-8" cy="-14" r="2.3" fill="#f0a838" />
+          <circle cx="8" cy="-14" r="2.3" fill="#f0a838" />
+          <!-- Rust-tan muzzle cheeks & black nose leather -->
+          <path d="M-13 -6 C-9 -11 9 -11 13 -6 L11 6 C5 9 -5 9 -11 6 Z"
+                fill="#c96828" stroke="#121110" stroke-width="2" />
+          <polygon points="-5,-6 5,-6 0,0" fill="#141312" />
+          <path d="M-7 3 Q0 6 7 3" stroke="#141312" stroke-width="2" stroke-linecap="round" fill="none" />
+        </g>
       </g>
 
-      <!-- Broad-shouldered hooded figure with close-fade & boxed goatee (x=478..630, y=176..316) -->
-      <g transform="translate(556, 244)" stroke-linejoin="round" stroke-linecap="round">
-        <!-- Broad athletic sloped shoulders & heavy bunched hoodie silhouette -->
-        <path d="M-78 72 C-74 32 -58 6 -34 -4 L34 -4 C58 6 74 32 78 72 Z"
-              fill="#4a627d" stroke="#68c99b" stroke-width="2.2" />
-        <!-- Thick layered hood collar bunched around neck -->
-        <path d="M-38 -2 C-32 -16 -18 -18 0 -14 C18 -18 32 -16 38 -2 C28 14 -28 14 -38 -2 Z"
-              fill="#3d546e" stroke="#68c99b" stroke-width="2" />
-        <!-- Center zip seam, drawstrings & chain -->
-        <line x1="0" y1="10" x2="0" y2="70" stroke="#3da876" stroke-width="1.6" />
-        <line x1="-11" y1="8" x2="-11" y2="38" stroke="#68c99b" stroke-width="2.2" />
-        <line x1="11" y1="8" x2="11" y2="38" stroke="#68c99b" stroke-width="2.2" />
-        <path d="M-16 4 Q0 20 16 4" stroke="#d6a052" stroke-width="1.8" />
-
-        <!-- Tapered athletic jaw, ears & tight high-and-tight fade haircut -->
-        <path d="M-20 -50 L-20 -26 C-20 -14 -12 -6 0 -6 C12 -6 20 -14 20 -26 L20 -50 Z"
-              fill="#4a627d" stroke="#68c99b" stroke-width="2.2" />
-        <path d="M-20 -38 L-24 -35 L-20 -26 M20 -38 L24 -35 L20 -26" stroke="#68c99b" stroke-width="1.8" />
-        <!-- Flat-top close temple fade hairline -->
-        <path d="M-20 -48 L-19 -63 C-10 -67 10 -67 19 -63 L20 -48 C11 -53 -11 -53 -20 -48 Z"
-              fill="#3d546e" stroke="#68c99b" stroke-width="2" />
-        <!-- Brows, eyes, broader nose & sculpted boxed goatee -->
-        <path d="M-14 -40 L-4 -39 M4 -39 L14 -40" stroke="#68c99b" stroke-width="2.2" />
-        <circle cx="-8.5" cy="-34" r="2" fill="#68c99b" />
-        <circle cx="8.5" cy="-34" r="2" fill="#68c99b" />
-        <path d="M0 -34 V-24 M-4 -23 H4" stroke="#68c99b" stroke-width="1.8" />
-        <path d="M-8 -19 H8 L7 -8 C3 -6 -3 -6 -7 -8 Z" fill="#3d546e" stroke="#68c99b" stroke-width="1.8" />
-        <line x1="-4" y1="-14" x2="4" y2="-14" stroke="#68c99b" stroke-width="1.6" />
-      </g>
-
-      <!-- Chop the Rottweiler (x=634..720, y=204..316) -->
-      <g transform="translate(676, 260)" stroke-linejoin="round" stroke-linecap="round">
-        <!-- Broad Rottweiler chest, forelegs & rust-tan chest markings -->
-        <path d="M-31 56 C-33 26 -22 6 0 6 C22 6 33 26 31 56 Z"
-              fill="#3d546e" stroke="#68c99b" stroke-width="2" />
-        <path d="M-16 20 L0 28 L16 20 L11 40 L0 46 L-11 40 Z" fill="#cc8433" />
-        <!-- Heavy gold/amber chain collar -->
-        <path d="M-21 8 Q0 17 21 8" stroke="#d6a052" stroke-width="3.4" stroke-dasharray="4 3" />
-        <!-- Broad Rottweiler skull, drop ears, tan brow pips & tapered muzzle/jowls -->
-        <path d="M-19 -20 C-18 -34 18 -34 19 -20 L21 -2 C21 8 11 11 0 11 C-11 11 -21 8 -21 -2 Z"
-              fill="#4a627d" stroke="#68c99b" stroke-width="2" />
-        <polygon points="-18,-24 -30,-8 -18,-4" fill="#3d546e" stroke="#68c99b" stroke-width="1.7" />
-        <polygon points="18,-24 30,-8 18,-4" fill="#3d546e" stroke="#68c99b" stroke-width="1.7" />
-        <circle cx="-7.5" cy="-15" r="2.4" fill="#d6a052" />
-        <circle cx="7.5" cy="-15" r="2.4" fill="#d6a052" />
-        <path d="M-11 -7 C-8 -11 8 -11 11 -7 L9 5 C4 8 -4 8 -9 5 Z"
-              fill="#3d546e" stroke="#d6a052" stroke-width="1.6" />
-        <path d="M-3 -4 H3 L0 -1 Z" fill="#d6a052" />
-      </g>
+      <!-- Crisp Poster Panel Border -->
+      <polygon points="476,168 738,168 720,316 460,316" stroke="#161b20" stroke-width="3.2" stroke-linejoin="round" />
     </g>
 
     <!-- ======================================================================
-         PANEL 3 (RIGHT-CENTER, x=734..986, y=172..316):
-         Gaunt angular receding-hair figure in worn V-neck & radial 4-sector switch wheel
+         PANEL 3 (RIGHT-CENTER, x=734..988, y=168..316):
+         TREVOR — Receding Hair, Gaunt Hollow Cheeks, Worn Pale V-Neck &
+         Baseball Bat + Compact 4-Sector Radial HUD Switch Wheel
          ====================================================================== -->
-    <g>
-      <polygon points="752,172 986,172 968,316 734,316" fill="#3d546e" stroke="#cc8433" stroke-width="2.2" />
+    <g id="panel-trevor">
+      <polygon points="750,168 988,168 970,316 734,316" fill="url(#ls-panelRightSky)" />
 
-      <g transform="translate(830, 244)" stroke-linejoin="round" stroke-linecap="round">
-        <!-- Gaunt, narrower asymmetric slouched shoulders & sagging stretched V-neck tee -->
-        <path d="M-64 72 L-56 20 L-34 2 L-16 -6 L18 -4 L38 6 L56 24 L62 72 Z"
-              fill="#4a627d" stroke="#d6a052" stroke-width="2.2" />
-        <!-- Deep sagging V-neck collar & exposed clavicles/neck tattoo -->
-        <polygon points="-20,-6 0,28 20,-4 12,-6 0,14 -12,-6" fill="#3d546e" stroke="#d6a052" stroke-width="1.8" />
-        <path d="M-11 -2 Q0 4 11 -2" stroke="#d6a052" stroke-width="1.6" stroke-dasharray="3 2" />
-        <path d="M-38 22 L-18 32 M36 24 L18 34 M-28 46 L-10 52" stroke="#d6a052" stroke-width="1.6" />
+      <g clip-path="url(#ls-clipRight)">
+        <!-- Sun-bleached white camper side panel & red stripe in background (from gtav-trio-2013) -->
+        <polygon points="736,184 912,232 902,316 734,316" fill="#e8ecee" fill-opacity="0.55" />
+        <line x1="736" y1="194" x2="908" y2="242" stroke="#364859" stroke-width="2.4" />
+        <polygon points="740,218 784,230 780,248 736,236" fill="#c43828" fill-opacity="0.65" />
 
-        <!-- Gaunt angular skull with hollow cheeks, narrow pointed chin & bare high forehead dome -->
-        <path d="M-18 -50 C-17 -68 17 -68 18 -50 L20 -36 L14 -19 L6 -6 L-6 -6 L-14 -19 L-20 -36 Z"
-              fill="#4a627d" stroke="#d6a052" stroke-width="2.2" />
-        <!-- Jagged filled unkempt side hair tufts jutting from temples around bare crown -->
-        <polygon points="-18,-38 -31,-45 -23,-51 -29,-59 -16,-54" fill="#3d546e" stroke="#d6a052" stroke-width="1.9" />
-        <polygon points="18,-38 31,-45 23,-51 29,-59 16,-54" fill="#3d546e" stroke="#d6a052" stroke-width="1.9" />
-        <!-- Hollow cheekbone creases, deep V-scowl brow, wide eyes, crooked nose & scruffy moustache/stubble -->
-        <path d="M-15 -42 L-3 -35 M15 -42 L3 -35" stroke="#d6a052" stroke-width="2.5" />
-        <circle cx="-8" cy="-32" r="2.1" fill="#d6a052" />
-        <circle cx="8" cy="-32" r="2.1" fill="#d6a052" />
-        <path d="M0 -34 L-2 -23 L2 -22 M-14 -28 L-10 -18 M14 -28 L10 -18" stroke="#d6a052" stroke-width="1.7" />
-        <path d="M-9 -15 L-3 -18 L0 -17 L3 -18 L9 -15" stroke="#d6a052" stroke-width="2.1" />
+        <!-- Trevor's Slouched Shoulders & Worn Pale V-Neck Tee (x=746..912, y=236..318) -->
+        <!-- Peek of dark red under-sleeve at right arm cuff -->
+        <path d="M748 292 L772 296 L768 316 H744 Z" fill="#7d221c" stroke="#181514" stroke-width="2.2" />
+        <!-- Main worn off-white/grey V-neck t-shirt -->
+        <path d="M748 318 C750 278 762 248 788 238 L856 240 C882 250 896 278 902 318 Z"
+              fill="url(#ls-trevorTee)" stroke="#181514" stroke-width="3" stroke-linejoin="round" />
+        <!-- Grimy cel-shaded fold planes & diagonal creases across stretched V-neck -->
+        <path d="M838 242 L858 240 C882 252 894 278 900 316 H852 C846 288 842 262 838 242 Z"
+              fill="#8f8a7c" />
+        <path d="M776 266 L818 292 M784 284 L832 308 M846 264 L824 288"
+              stroke="#7d786b" stroke-width="2.4" stroke-linecap="round" />
+
+        <!-- Gaunt Corded Neck, Exposed Clavicles, Collar Tattoo & Sagging V-Neck Collar -->
+        <polygon points="794,234 822,274 848,236 838,228 804,228"
+                 fill="url(#ls-trevorSkin)" stroke="#181514" stroke-width="2.4" stroke-linejoin="round" />
+        <!-- Deep sternocleidomastoid & clavicle hollow shadows -->
+        <path d="M804 234 L821 264 L838 234" stroke="#7a3b20" stroke-width="2.8" fill="none" />
+        <!-- Dotted collar-line tattoo mark -->
+        <path d="M802 242 Q821 252 840 242" stroke="#4f2818" stroke-width="2" stroke-dasharray="2.5 2.5" fill="none" />
+        <!-- Stretched ribbing of V-neck collar -->
+        <polyline points="790,238 822,278 852,238" stroke="#d8d3c6" stroke-width="3.6" stroke-linejoin="round" fill="none" />
+        <polyline points="790,238 822,278 852,238" stroke="#181514" stroke-width="2" stroke-linejoin="round" fill="none" />
+
+        <!-- Wooden Baseball Bat Angled Across Left Shoulder & Gripping Hand (x=854..920, y=178..318) -->
+        <g id="trevor-baseball-bat">
+          <path d="M856 318 L902 184 C905 176 918 180 916 190 L870 318 Z"
+                fill="url(#ls-woodBat)" stroke="#181514" stroke-width="2.8" stroke-linejoin="round" />
+          <line x1="904" y1="186" x2="862" y2="314" stroke="#f6d496" stroke-width="2.2" stroke-linecap="round" />
+          <!-- Sinewy sun-tanned left hand gripping the bat barrel -->
+          <path d="M876 232 C890 228 906 234 908 248 C908 260 894 266 880 262 L872 248 Z"
+                fill="url(#ls-trevorSkin)" stroke="#181514" stroke-width="2.4" stroke-linejoin="round" />
+          <path d="M880 240 L904 244 M878 248 L904 252 M880 256 L900 259"
+                stroke="#6e321a" stroke-width="2" stroke-linecap="round" />
+        </g>
+
+        <!-- Trevor's Receding Hair, Bare Forehead Dome, Gaunt Hollow Cheeks & Deep Scowl (x=780..860, y=170..246) -->
+        <!-- Unkempt wiry dark-brown receding hair tufts flaring from both temples -->
+        <path d="M788 206 L774 198 L782 190 L776 180 L792 182 Z"
+              fill="#261b16" stroke="#140e0c" stroke-width="2.2" stroke-linejoin="round" />
+        <path d="M852 206 L866 198 L858 190 L864 180 L848 182 Z"
+              fill="#261b16" stroke="#140e0c" stroke-width="2.2" stroke-linejoin="round" />
+        <!-- Thinning top-back hair arch behind bare forehead -->
+        <path d="M790 184 C802 170 838 170 850 184"
+              stroke="#261b16" stroke-width="3.4" stroke-linecap="round" />
+
+        <!-- Ears -->
+        <path d="M788 204 C781 204 781 220 789 224 M852 204 C859 204 859 220 851 224"
+              fill="#c47c54" stroke="#181514" stroke-width="2.2" />
+
+        <!-- Gaunt angular skull, high bare forehead dome & narrow chin -->
+        <path d="M790 184 C792 171 848 171 850 184 L852 208 L843 228 L831 243 L809 243 L797 228 L788 208 Z"
+              fill="url(#ls-trevorSkin)" stroke="#181514" stroke-width="2.6" stroke-linejoin="round" />
+        <!-- Sunburned high forehead highlight -->
+        <ellipse cx="820" cy="184" rx="20" ry="8" fill="#f5c29e" fill-opacity="0.65" />
+        <!-- Gaunt sunken hollow cheek shadows on both sides of jaw -->
+        <polygon points="791,212 804,216 806,232 797,228" fill="#7a3b20" fill-opacity="0.75" />
+        <polygon points="849,212 836,216 834,232 843,228" fill="#6b3018" fill-opacity="0.82" />
+        <!-- Heavy unshaven jaw stubble & chin shadow -->
+        <path d="M798 224 L809 242 L831 242 L842 224 C834 231 828 232 820 232 C812 232 806 231 798 224 Z"
+              fill="#784832" fill-opacity="0.52" />
+
+        <!-- Violently Furrowed Scowl Brows, Sunken Eye Bags, Crooked Nose & Deep Creases -->
+        <path d="M804 186 Q820 189 836 186 M806 191 Q820 194 834 191"
+              stroke="#8c4828" stroke-width="1.6" stroke-linecap="round" fill="none" />
+        <!-- Deep V-scowl eyebrows -->
+        <path d="M794 196 L815 203 M846 196 L825 203" stroke="#241914" stroke-width="3.2" stroke-linecap="round" />
+        <!-- Dark sunken eye sockets & staring eyes -->
+        <ellipse cx="806" cy="206" rx="6.5" ry="3.8" fill="#592412" />
+        <ellipse cx="834" cy="206" rx="6.5" ry="3.8" fill="#592412" />
+        <ellipse cx="806" cy="206" rx="4.5" ry="2.2" fill="#efe8e0" />
+        <ellipse cx="834" cy="206" rx="4.5" ry="2.2" fill="#efe8e0" />
+        <circle cx="806" cy="206" r="2" fill="#241812" />
+        <circle cx="834" cy="206" r="2" fill="#241812" />
+        <!-- Crooked nose bridge & deep nasolabial trenches -->
+        <path d="M820 202 L817 216 L824 219" stroke="#f2bfa0" stroke-width="2.2" stroke-linecap="round" fill="none" />
+        <path d="M808 216 L802 230 M832 216 L838 230" stroke="#6b2e18" stroke-width="2.4" stroke-linecap="round" />
+        <!-- Grimacing downturned mouth -->
+        <path d="M809 229 L816 226 L824 226 L831 229" stroke="#4f1e10" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+
+        <!-- Subordinate Compact 4-Sector Radial HUD Switch Wheel (Upper-Right, cx=944, cy=204) -->
+        <g id="hud-switch-wheel" transform="translate(944, 204)">
+          <circle cx="0" cy="0" r="22" fill="#1b2836" stroke="#101720" stroke-width="2.2" />
+          <!-- Top sector (Franklin green) -->
+          <path d="M-13.5 -13.5 A19 19 0 0 1 13.5 -13.5 L5.5 -5.5 A7.5 7.5 0 0 0 -5.5 -5.5 Z"
+                fill="#3da876" stroke="#101720" stroke-width="1.4" />
+          <!-- Left sector (Michael blue) -->
+          <path d="M-13.5 13.5 A19 19 0 0 1 -13.5 -13.5 L-5.5 -5.5 A7.5 7.5 0 0 0 -5.5 5.5 Z"
+                fill="#479bc9" stroke="#101720" stroke-width="1.4" />
+          <!-- Right sector (Trevor orange/amber) -->
+          <path d="M13.5 -13.5 A19 19 0 0 1 13.5 13.5 L5.5 5.5 A7.5 7.5 0 0 0 5.5 -5.5 Z"
+                fill="#e08834" stroke="#f7d288" stroke-width="1.6" />
+          <!-- Bottom sector (Online slate) -->
+          <path d="M13.5 13.5 A19 19 0 0 1 -13.5 13.5 L-5.5 5.5 A7.5 7.5 0 0 0 5.5 5.5 Z"
+                fill="#4a627d" stroke="#101720" stroke-width="1.4" />
+          <circle cx="0" cy="0" r="5.5" fill="#1b2836" stroke="#eab854" stroke-width="1.5" />
+          <!-- Compact tri-segment HUD status bar under wheel -->
+          <rect x="-20" y="26" width="18" height="4" fill="#3da876" stroke="#101720" stroke-width="0.8" />
+          <rect x="0" y="26" width="11" height="4" fill="#479bc9" stroke="#101720" stroke-width="0.8" />
+          <rect x="13" y="26" width="7" height="4" fill="#eab854" stroke="#101720" stroke-width="0.8" />
+        </g>
       </g>
 
-      <!-- Subordinate Circular 4-Sector Radial Character-Switch Wheel & Tri-Segment Bar (cx=932, cy=214) -->
-      <g transform="translate(932, 214)">
-        <circle cx="0" cy="0" r="26" fill="#3d546e" stroke="#72bce0" stroke-width="1.6" />
-        <!-- 4 radial wedge sectors: Top (green), Left (blue), Right (amber), Bottom (slate) -->
-        <path d="M-16 -16 A22.6 22.6 0 0 1 16 -16 L6 -6 A8.5 8.5 0 0 0 -6 -6 Z"
-              fill="#3da876" stroke="#68c99b" stroke-width="1.4" />
-        <path d="M-16 16 A22.6 22.6 0 0 1 -16 -16 L-6 -6 A8.5 8.5 0 0 0 -6 6 Z"
-              fill="#479bc9" stroke="#72bce0" stroke-width="1.4" />
-        <path d="M16 -16 A22.6 22.6 0 0 1 16 16 L6 6 A8.5 8.5 0 0 0 6 -6 Z"
-              fill="#cc8433" stroke="#d6a052" stroke-width="1.4" />
-        <path d="M16 16 A22.6 22.6 0 0 1 -16 16 L-6 6 A8.5 8.5 0 0 0 6 6 Z"
-              fill="#4a627d" stroke="#72bce0" stroke-width="1.4" />
-        <circle cx="0" cy="0" r="6" fill="#3d546e" stroke="#d6a052" stroke-width="1.4" />
-        <!-- Tri-segment HUD health/armor/special bar under wheel -->
-        <rect x="-24" y="32" width="22" height="4.5" fill="#3da876" />
-        <rect x="0" y="32" width="13" height="4.5" fill="#479bc9" />
-        <rect x="15" y="32" width="9" height="4.5" fill="#d6a052" />
-      </g>
+      <!-- Crisp Poster Panel Border -->
+      <polygon points="750,168 988,168 970,316 734,316" stroke="#161b20" stroke-width="3.2" stroke-linejoin="round" />
     </g>
   </g>
 </svg>

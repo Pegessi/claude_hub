@@ -7,6 +7,16 @@
 
 ## Released
 
+### style(theme): refine game scenes from visual references
+
+- Replace abstract wireframe-like subjects with richer original illustrations
+  informed by viewed game references: rounded material volumes for Eous,
+  red/black poster shading for Frontier, and differentiated classic-era GTA
+  character anatomy, clothing and light/shadow planes.
+- Keep the accepted borderless UI, orange/black Zenless, existing appearance
+  state and neutral palettes. Reference images remain research inputs rather
+  than bundled third-party wallpaper or runtime hotlinks.
+
 ### style(theme): soften game themes and make room for iconic imagery
 
 - Remove stacked composer and transcript frames, hard offset shadows and the
