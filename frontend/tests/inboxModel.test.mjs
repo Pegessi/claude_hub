@@ -22,6 +22,7 @@ const {
   needsYouCount,
   RECENT_DONE_WINDOW_MS,
   resolveInboxKey,
+  rowDotState,
   statusLabel,
 } = await load('features/agent-status/inboxModel.ts')
 const { buildInboxReplyBody, canReplyInline, inlineReplyPath, sendInboxReply } = await load(
@@ -63,6 +64,34 @@ test('a pending question is the top reason to show the inbox at all', () => {
   const row = classifyRow(tab(), status({ status: 'working', pending_question: true }), NOW)
   assert.equal(row.group, 'needs')
   assert.equal(row.reason, 'Waiting for your answer')
+})
+
+test('a card behind a failed provider names the failure, not just the wait', () => {
+  // The backend keeps pending_question on an attention/offline snapshot, where
+  // an answer can be refused; the row must not pretend the session is healthy.
+  const attention = classifyRow(
+    tab(),
+    status({ status: 'attention', detail: 'provider exited unexpectedly', pending_question: true }),
+    NOW,
+  )
+  assert.equal(attention.group, 'needs')
+  assert.equal(attention.reason, 'provider exited unexpectedly — a question is waiting')
+
+  const offline = classifyRow(tab(), status({ status: 'offline', pending_question: true }), NOW)
+  assert.equal(offline.group, 'needs')
+  assert.equal(offline.reason, 'Agent is offline — a question is waiting')
+})
+
+test('the dot follows the same failure rule as the row text', () => {
+  // pending_question also rides on an attention/offline snapshot; the amber
+  // needs dot must not repaint a provider that failed or went away.
+  assert.equal(rowDotState(status({ status: 'working', pending_question: true }), 'needs'), 'needs')
+  assert.equal(rowDotState(status({ status: 'idle', pending_question: true }), 'needs'), 'needs')
+  assert.equal(rowDotState(status({ status: 'attention', pending_question: true }), 'needs'), 'attention')
+  assert.equal(rowDotState(status({ status: 'offline', pending_question: true }), 'needs'), 'offline')
+  assert.equal(rowDotState(status({ status: 'attention' }), 'needs'), 'attention')
+  assert.equal(rowDotState(null, 'working'), 'working')
+  assert.equal(rowDotState(undefined, 'done'), 'idle')
 })
 
 test('a blocked question keeps a timestamp even without an activity clock', () => {

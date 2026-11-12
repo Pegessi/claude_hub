@@ -231,6 +231,7 @@ import {
   keyTargetKind,
   moveSelection,
   resolveInboxKey,
+  rowDotState,
   statusLabel,
   type InboxGroupData,
   type InboxRow,
@@ -353,11 +354,9 @@ function setScope(next: InboxScope) {
 }
 
 function rowState(row: InboxRow): string {
-  // A blocked question is its own state: the turn may still report "working"
-  // while the provider is really waiting for the user.
-  if (row.status?.pending_question) return 'needs'
-  const status = row.status?.status ?? (row.group === 'working' ? 'working' : 'idle')
-  return ROW_STATE[status] ?? 'idle'
+  // The dot follows the same rule as the row's text and the sidebar light; it
+  // lives in the model so a unit test can pin it.
+  return ROW_STATE[rowDotState(row.status, row.group)] ?? 'idle'
 }
 
 function elapsedLabel(row: InboxRow): string {
