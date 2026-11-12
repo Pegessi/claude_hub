@@ -2,11 +2,19 @@
   <section class="workspace-view">
     <WorkspaceHeader />
 
-    <WorkspaceSummary />
+    <WorkspaceStyleShowcase
+      v-if="runtime.isStyleDemoOpen.value"
+      :initial-style="runtime.initialDemoStyle"
+      @exit="runtime.isStyleDemoOpen.value = false"
+    />
 
-    <WorkspaceAgentStatus />
+    <template v-else>
+      <WorkspaceSummary />
 
-    <WorkspaceBoard />
+      <WorkspaceAgentStatus />
+
+      <WorkspaceBoard />
+    </template>
 
     <TaskDetailDialog />
 
@@ -39,6 +47,7 @@ import WorkspaceHeader from './components/WorkspaceHeader.vue'
 import WorkspaceSummary from './components/WorkspaceSummary.vue'
 import WorkspaceAgentStatus from './components/WorkspaceAgentStatus.vue'
 import WorkspaceBoard from './components/WorkspaceBoard.vue'
+import WorkspaceStyleShowcase from './demo/WorkspaceStyleShowcase.vue'
 import TaskDetailDialog from './components/TaskDetailDialog.vue'
 import ArtifactPreviewDialogs from './components/ArtifactPreviewDialogs.vue'
 import WorkspaceEditorDialog from './components/WorkspaceEditorDialog.vue'
@@ -251,6 +260,9 @@ provideWorkspaceRuntimeContext({
   envPresets: runtime.envPresets,
   workspaceNotifications: runtime.workspaceNotifications,
   dismissToast: runtime.dismissToast,
+  isStyleDemoOpen: runtime.isStyleDemoOpen,
+  initialDemoStyle: runtime.initialDemoStyle,
+  toggleStyleDemo: runtime.toggleStyleDemo,
 })
 provideWorkspaceEditorContext({
   openWorkspaceModal: editor.openWorkspaceModal,

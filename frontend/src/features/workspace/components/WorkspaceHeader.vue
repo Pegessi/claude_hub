@@ -61,6 +61,13 @@
       </button>
       <button
         type="button"
+        class="tool-button workspace-desktop-action workspace-demo-toggle"
+        @click="toggleStyleDemo"
+      >
+        {{ isStyleDemoOpen ? 'Classic Board' : 'Style Demos (3)' }}
+      </button>
+      <button
+        type="button"
         class="primary-button"
         :disabled="!activeWorkspaceId"
         @click="openTaskModal"
@@ -171,6 +178,8 @@ const {
   activeWorkspaceId,
   openTaskModal,
   colorScheme,
+  isStyleDemoOpen,
+  toggleStyleDemo,
 } = useWorkspaceRuntimeContext()
 const {
   openWorkspaceModal,

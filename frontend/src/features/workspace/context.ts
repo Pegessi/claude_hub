@@ -83,6 +83,9 @@ type WorkspaceRuntimeContext = Pick<ReturnType<typeof useWorkspaceRuntime>,
   | 'envPresets'
   | 'workspaceNotifications'
   | 'dismissToast'
+  | 'isStyleDemoOpen'
+  | 'initialDemoStyle'
+  | 'toggleStyleDemo'
 >
 const runtimeKey: InjectionKey<WorkspaceRuntimeContext> = Symbol('WorkspaceRuntimeContext')
 export function provideWorkspaceRuntimeContext(value: WorkspaceRuntimeContext) { provide(runtimeKey, value) }
