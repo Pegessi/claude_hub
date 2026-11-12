@@ -330,6 +330,10 @@ function applyKeyboardOpenState(open: boolean) {
 }
 
 function updateViewportMetrics(vv?: VisualViewport) {
+  // Pinch zoom also resizes/pans the visual viewport. Preserve the layout and
+  // keyboard baseline while zoomed so the page remains freely pannable rather
+  // than following the user's fingers or treating zoom as a keyboard opening.
+  if (vv && Math.abs(vv.scale - 1) > 0.01) return
   const root = document.documentElement
   const viewportHeight = vv?.height ?? window.innerHeight
   const viewportWidth = vv?.width ?? window.innerWidth

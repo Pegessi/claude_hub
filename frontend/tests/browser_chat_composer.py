@@ -102,12 +102,157 @@ EVENTS = [
 ]
 
 
+async def iphone_composer_paths(page, output, state) -> None:
+    """Real touch activation of the chooser, plus explicit viewport-pan stubs.
+
+    Playwright opens WebKit's chooser but cannot operate iOS's native Photos UI
+    or show its software keyboard. File contents and visual viewport are fixtures.
+    """
+    composer = page.locator(".composer-textarea")
+    add = page.get_by_role("button", name="Add to chat", exact=True)
+    attachment = page.get_by_role("menuitem", name="Add attachment", exact=True)
+    await composer.fill("Keep this draft while attaching")
+    await composer.tap()
+    await add.tap()
+    await expect(attachment).to_be_visible()
+    async with page.expect_file_chooser(timeout=3000) as chooser:
+        # This must be a real tap. set_input_files on a hidden input bypasses
+        # Safari's null-relatedTarget focusout before the menu item's click.
+        await attachment.tap()
+    await (await chooser.value).set_files(
+        [{"name": "iphone-photo.png", "mimeType": "image/png", "buffer": PNG_IMAGE}]
+    )
+    await expect(page.locator(".attachment-chip")).to_have_count(1)
+    await expect(page.locator(".attachment-thumb")).to_be_visible()
+    await expect(composer).to_have_value("Keep this draft while attaching")
+    await expect(attachment).to_have_count(0)
+    await page.screenshot(path=str(output / "webkit-attachment-picked.png"))
+    async with page.expect_request(
+        lambda r: r.method == "POST" and r.url.endswith(f"{BASE}/send")
+    ) as sent:
+        await page.locator(".composer-send-btn").tap()
+    payload = (await sent.value).post_data_json
+    assert payload["text"] == "Keep this draft while attaching", payload
+    assert payload["attachments"][0]["filename"] == "iphone-photo.png", payload
+    assert base64.b64decode(payload["attachments"][0]["data_url"].split(",", 1)[1]) == PNG_IMAGE
+    await expect(page.locator(".attachment-chip")).to_have_count(0)
+    await page.locator(".composer-stop-btn").tap()
+    await expect(page.locator(".composer-stop-btn")).to_have_count(0)
+    await composer.fill("Keep this draft while attaching")
+
+    # Cancellation leaves the same draft, and a second tap can pick again.
+    for _ in range(2):
+        await add.tap()
+        async with page.expect_file_chooser(timeout=3000) as chooser:
+            await attachment.tap()
+        await (await chooser.value).set_files([])
+        await expect(composer).to_have_value("Keep this draft while attaching")
+        await expect(page.locator(".attachment-chip")).to_have_count(0)
+    await composer.fill("")
+
+    # Outside taps, known external focus, Tab and Escape still dismiss. A null
+    # focus destination alone must not destroy a pending touch activation.
+    for dismiss in ("outside", "focus", "Tab", "Escape"):
+        await add.tap()
+        await expect(attachment).to_be_visible()
+        if dismiss == "outside":
+            await composer.tap(position={"x": (await composer.bounding_box())["width"] - 5, "y": 5})
+        elif dismiss == "focus":
+            await composer.focus()
+        else:
+            await page.keyboard.press(dismiss)
+        await expect(attachment).to_have_count(0)
+
+    state["supports_images"] = False
+    await page.reload()
+    await expect(composer).to_be_enabled()
+    await add.tap()
+    disabled = page.get_by_role("menuitem").filter(has_text="Add attachment")
+    await expect(disabled).to_have_attribute("aria-disabled", "true")
+    await expect(disabled.locator("small")).to_have_text(
+        "This chat does not support image attachments"
+    )
+    await composer.tap(position={"x": (await composer.bounding_box())["width"] - 5, "y": 5})
+    state["supports_images"] = True
+    await page.reload()
+    await expect(composer).to_be_enabled()
+
+    # A viewport pan can occur independently of document scrolling on iOS.
+    # Observe the whole shell, not just the focused field after Playwright's
+    # automatic scroll-into-view. The header and composer must stay in bounds.
+    await page.evaluate("""() => {
+      window.__panFixture = {height:350, offsetTop:50, scale:1};
+      for (const key of ['height', 'offsetTop', 'scale']) {
+        Object.defineProperty(visualViewport, key, {configurable:true,
+          get: () => window.__panFixture[key]});
+      }
+      visualViewport.dispatchEvent(new Event('resize'));
+    }""")
+    for width, layout_height, height, top in (
+        (390, 844, 430, 0),
+        (390, 844, 350, 50),
+        (390, 844, 350, 150),
+        (844, 390, 200, 30),
+        (390, 844, 350, 50),
+    ):
+        await page.set_viewport_size({"width": width, "height": layout_height})
+        await page.evaluate(
+            """([height, offsetTop]) => {
+          window.__panFixture = {height, offsetTop, scale:1};
+          visualViewport.dispatchEvent(new Event('resize'));
+          visualViewport.dispatchEvent(new Event('scroll'));
+        }""",
+            [height, top],
+        )
+        await page.wait_for_function(
+            """([top, height]) => {
+          const r = document.querySelector('.app').getBoundingClientRect();
+          return Math.abs(r.top - top) < 1 && Math.abs(r.height - height) < 1;
+        }""",
+            arg=[top, height],
+            timeout=3000,
+        )
+        await composer.tap()
+        await expect(composer).to_be_focused()
+        for selector in (
+            ".app",
+            ".tab-bar",
+            ".composer-textarea",
+            ".composer-add-trigger",
+        ):
+            rect = await page.locator(selector).filter(visible=True).first.bounding_box()
+            assert (
+                rect and rect["y"] >= top - 1 and rect["y"] + rect["height"] <= top + height + 1
+            ), (selector, rect)
+    await page.screenshot(path=str(output / "webkit-keyboard-pan-shell.png"))
+    # Pinch zoom is not a keyboard resize: don't chase its pan or reflow content
+    # under the user's fingers. Keep native zoom allowed by the viewport meta.
+    await page.evaluate("""() => {
+      window.__panFixture = {height:175, offsetTop:80, scale:2};
+      visualViewport.dispatchEvent(new Event('resize'));
+      visualViewport.dispatchEvent(new Event('scroll'));
+    }""")
+    await page.wait_for_timeout(100)
+    rect = await page.locator(".app").bounding_box()
+    assert rect and abs(rect["y"] - 50) < 1 and abs(rect["height"] - 350) < 1, rect
+    await page.evaluate("""() => {
+      for (const key of ['height','offsetTop','scale']) delete visualViewport[key];
+      delete window.__panFixture;
+      visualViewport.dispatchEvent(new Event('resize'));
+    }""")
+    await page.wait_for_function("""() => {
+      const r = document.querySelector('.app').getBoundingClientRect();
+      return Math.abs(r.top) < 1 && Math.abs(r.height - innerHeight) < 1;
+    }""")
+
+
 async def iphone_picker_scenario(page, output, model_changes, state) -> None:
     """Mobile WebKit interaction, plus explicit visual-viewport keyboard stubs.
 
     The stub exercises application resize handling; it does not emulate the
     native iOS keyboard or certify native Safari focus-zoom suppression.
     """
+    await iphone_composer_paths(page, output, state)
     trigger = page.locator(".composer-model-picker .composer-mode-trigger")
     menu = page.get_by_role("dialog", name="Model and thinking effort", exact=True)
     search = page.get_by_role("textbox", name="Search models", exact=True)
@@ -151,7 +296,14 @@ async def iphone_picker_scenario(page, output, model_changes, state) -> None:
     # Rotate while open, including the smallest phone layouts, instead of
     # recreating the menu after every viewport change.
     await trigger.tap()
-    for width, height in ((390, 844), (844, 390), (390, 844), (375, 667), (320, 568), (430, 932)):
+    for width, height in (
+        (390, 844),
+        (844, 390),
+        (390, 844),
+        (375, 667),
+        (320, 568),
+        (430, 932),
+    ):
         await page.set_viewport_size({"width": width, "height": height})
         await expect(menu).to_be_visible()
         await check_field(search, height=height)
@@ -376,7 +528,9 @@ async def main(browser_run: BrowserRun) -> None:
         )
 
     async with browser_run.context(
-        viewport={"width": 390, "height": 844} if IPHONE_WEBKIT else {"width": 1280, "height": 900},
+        viewport=(
+            {"width": 390, "height": 844} if IPHONE_WEBKIT else {"width": 1280, "height": 900}
+        ),
         launch_args=[] if IPHONE_WEBKIT else ["--no-proxy-server"],
         engine="webkit" if IPHONE_WEBKIT else "chromium",
         device="iPhone 13" if IPHONE_WEBKIT else None,
@@ -525,7 +679,7 @@ async def main(browser_run: BrowserRun) -> None:
                     "sources": ["native"],
                     "send_message": True,
                     "supports_goals": False,
-                    "supports_images": True,
+                    "supports_images": state.get("supports_images", True),
                     "agent_type": agent_type,
                     "supports_mode_switch": False,
                     "current_model": tab["env"].get(model_key, "seed-high"),

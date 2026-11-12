@@ -327,6 +327,20 @@
   }
 }
 
+@media (max-width: 768px), (any-pointer: coarse) {
+  /* iOS can pan the visual viewport while revealing an input even when the
+     document has overflow:hidden. Match its origin as well as its height;
+     otherwise the whole header moves above the visible screen. Fixed avoids
+     document scroll contributing a second shift. Do not transform the shell:
+     its dialogs must retain their normal fixed-position containing block. */
+  .app[data-mode='terminal'][data-active-pane-chat='true'] {
+    position: fixed;
+    top: var(--visual-viewport-offset-top, 0px);
+    left: 0;
+    width: 100%;
+  }
+}
+
 @media (max-width: 768px) {
   /* PTYs retain their stable grid height; structured Chat must lift its input
      and picker into the area above the iPhone keyboard. */

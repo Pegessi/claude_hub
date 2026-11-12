@@ -7,6 +7,18 @@
 
 ## Released
 
+### fix(ui): keep Safari Chat in view and open attachments on touch
+
+- Active mobile Chat follows the visual viewport's position as well as height,
+  keeping its header and composer visible when Safari pans for the keyboard.
+  Pinch zoom keeps its native behavior; PTY grid sizing is unchanged.
+- Add attachment survives Safari's null-destination blur before a touch click,
+  so the native picker can open. Unavailable attachments show their reason in
+  the menu, and programmatic menu focus avoids scrolling the page.
+- WebKit acceptance uses actual menu taps and a file chooser, then checks
+  preview, send payload, cancellation, dismissal, and viewport pan/rotation.
+  Keyboard geometry is simulated; physical iPhone verification remains separate.
+
 ### fix(ui): prevent touch picker inputs from triggering Safari focus zoom
 
 - Model search and custom-model inputs, plus the session creation fields and

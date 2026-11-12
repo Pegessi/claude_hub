@@ -57,7 +57,10 @@
         >
           <path d="m8 12 6-6a3 3 0 0 1 4 4l-8 8a5 5 0 0 1-7-7l8-8M7 13l7-7" />
         </svg>
-        <span>Add attachment</span>
+        <span>
+          Add attachment
+          <small v-if="attachmentDisabledReason">{{ attachmentDisabledReason }}</small>
+        </span>
       </button>
       <button
         v-if="showSchedule"
@@ -145,12 +148,12 @@ function showMenu(last = false) {
   emit('update:open', true)
   void nextTick(() => {
     const options = items()
-    options[last ? options.length - 1 : 0]?.focus()
+    options[last ? options.length - 1 : 0]?.focus({ preventScroll: true })
   })
 }
 
 function close(restoreFocus = false) {
-  if (restoreFocus) triggerEl.value?.focus()
+  if (restoreFocus) triggerEl.value?.focus({ preventScroll: true })
   emit('update:open', false)
 }
 
@@ -185,7 +188,7 @@ function handleKeydown(event: KeyboardEvent) {
     const current = options.findIndex(item => item === document.activeElement)
     const index = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1
       : (current + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length
-    options[index]?.focus()
+    options[index]?.focus({ preventScroll: true })
   }
 }
 
@@ -194,7 +197,12 @@ function handleOutsidePointer(event: PointerEvent) {
 }
 
 function handleFocusOut(event: FocusEvent) {
-  if (props.open && !rootEl.value?.contains(event.relatedTarget as Node | null)) close()
+  // Safari touch buttons can blur the focused item without taking focus.
+  // A null destination is not evidence of leaving this menu: unmounting here
+  // removes the tapped button before its click can open the native file picker.
+  // Actual outside taps are handled by pointerdown; Tab/Escape above and known
+  // focus destinations below still dismiss the menu.
+  if (props.open && event.relatedTarget && !rootEl.value?.contains(event.relatedTarget as Node)) close()
 }
 
 onMounted(() => document.addEventListener('pointerdown', handleOutsidePointer))
@@ -210,6 +218,7 @@ onUnmounted(() => document.removeEventListener('pointerdown', handleOutsidePoint
 .composer-add-options svg { flex: 0 0 auto; color: var(--ch-color-text-muted); }
 .composer-add-options button:hover, .composer-add-options button:focus-visible { background: var(--ch-color-surface-control-hover); }
 .composer-add-options button[aria-disabled='true'] { opacity: .45; cursor: not-allowed; }
+.composer-add-options small { display: block; margin-top: 4px; font-size: 12px; line-height: 1.4; }
 button:focus-visible { outline: 2px solid var(--ch-color-accent-ring); outline-offset: 1px; }
 @media (max-width: 640px), (pointer: coarse) { .composer-add-trigger { width: 44px; height: 44px; } .composer-add-options button { min-height: 44px; } }
 </style>
