@@ -8,11 +8,17 @@ export const THEME_PALETTES = [
   { id: 'mono', name: 'Mono', description: 'Black, white, nothing extra', sample: 'Aa' },
   { id: 'studio', name: 'Studio', description: 'Quiet layers, softer edges', sample: 'Aa' },
   { id: 'carbon', name: 'Carbon', description: 'Graphite, raised surfaces', sample: 'Aa' },
-  { id: 'zenless', name: 'Zenless', description: 'Zenless Zone Zero · street-pop', sample: 'ZZ' },
-  { id: 'frontier', name: 'Frontier', description: 'Red Dead · 1899 letterpress', sample: 'RDR' },
-  { id: 'los-santos', name: 'Los Santos', description: 'GTA V · telemetry HUD', sample: 'V' },
+  { id: 'zenless', name: 'Zenless', description: 'Zenless · orange/CRT street-pop', sample: 'ZZ' },
+  { id: 'frontier', name: 'Frontier', description: 'Red Dead · 1899 frontier print', sample: 'RDR' },
+  { id: 'los-santos', name: 'Los Santos', description: 'GTA V · coast & telemetry HUD', sample: 'V' },
 ] as const
 export type ThemePalette = typeof THEME_PALETTES[number]['id']
+export const GAME_THEME_PALETTES = ['zenless', 'frontier', 'los-santos'] as const
+export type GameThemePalette = typeof GAME_THEME_PALETTES[number]
+
+export function isGamePalette(palette: string | null | undefined): palette is GameThemePalette {
+  return palette === 'zenless' || palette === 'frontier' || palette === 'los-santos'
+}
 export type AppearanceMode = ColorScheme | 'system'
 export interface ThemePreference {
   mode: AppearanceMode

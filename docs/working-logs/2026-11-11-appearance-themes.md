@@ -464,3 +464,60 @@ and formatting pass, and the temporary Vite/browser resources are closed.
 A discarded negative probe initially failed to create its output directory;
 its log is retained and the corrected probe passes without a tracked source
 change. Independent re-review must precede the next full frozen gate.
+
+## Illustrated skins and orange/black revision (2026-11-12)
+
+The preceding iteration was delivered at `a36148c` after independent approval
+and its own full serial gates. It is now a baseline, not evidence that this new
+iteration is accepted. The user explicitly rejects green as Zenless's dominant
+color and allows richer wallpapers and iconography for all three game themes.
+Orange/black is a design preference, not a claim that the game has one official
+palette. Semantic success/ANSI green retains its operational meaning.
+
+The same initiator-controlled Task is reopened at execution epoch 4. Product
+work again uses the requested MASO `gemini-4-argon_reasoning_high`, in the same
+`codex/theme-system` worktree; no main merge or shared-service operation is
+included. Research and baseline/QA planning are read-only. The parent retains
+integration, independent review, verification, delivery and cleanup ownership.
+
+### Design boundary and reuse
+
+The existing palette registry, `appStore` appearance lifecycle, game treatments,
+shell consumers and picker remain the single theme path. Original local SVG
+scenes and a small theme-aware chrome-icon component extend that path; there is
+no second preference store, wallpaper service or persistence format. Neutral
+fallbacks must preserve the five non-game styles and layout. Themes decorate
+real controls, never provider identity, fake telemetry or fictional features.
+
+The intended compositions are distinct: orange/obsidian analog street graphics
+for Zenless, engraved western wilderness and parchment/leather for Frontier,
+and a palm/city/coast scene with utility-map details for Los Santos. Artwork
+must survive in actual desktop and phone views, not merely appear as an unused
+CSS URL. Reading/control surfaces separate art from ink; body/code typography,
+keyboard focus, native inline rename and stable pane geometry are retained.
+
+Official reference entry pages were checked at HoYoverse's Zenless site and
+Rockstar's Red Dead Redemption 2 and GTA V sites. These are visual references,
+not a licensed asset inventory. New assets are authored for this repository;
+no blanket copyright-clearance or unmeasured APCA/AAA claim is made.
+
+### Verification agreement and baseline
+
+The immutable non-game `baseline-02` reference and collector are retained.
+Parent recomputation confirms all six prior source-identity hashes against
+`a36148c` Git blobs. Existing full Chat/phone screenshots are before references,
+not goldens for the new art direction. Evidence and the current execution
+record live in ignored `tasks/theme-rich-skins/`.
+
+The bounded acceptance contract requires broad orange color-family checks,
+local/decoded artwork, visible artwork-only ON/OFF pixel contribution in an
+approved exposed region, distinct rendered icon silhouettes in real controls,
+and negative controls for hidden/missing art, stale/common icons and missing
+readability backplates. Flat-color/gradient contrast arithmetic alone cannot
+certify arbitrary SVG or pseudo-element overlays. Existing native interaction,
+persistence, System, cross-tab, reader and terminal checks remain required, as
+do ten direct and thirty return non-game equalities. Deadlines are not relaxed.
+
+At this log update the product implementation and rendering are in progress;
+new focused acceptance, independent review and frozen-SHA full gates are still
+pending. The pre-existing IPv6 preview on 5358 is deliberately retained.

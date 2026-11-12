@@ -54,6 +54,10 @@
             :aria-selected="mode === 'terminal'"
             @click="appStore.setMode('terminal')"
           >
+            <ThemeChromeIcon
+              kind="terminal"
+              :size="14"
+            />
             Terminal
           </button>
           <button
@@ -63,6 +67,10 @@
             :aria-selected="mode === 'workspace'"
             @click="appStore.setMode('workspace')"
           >
+            <ThemeChromeIcon
+              kind="workspace"
+              :size="14"
+            />
             Agent Workspace
           </button>
         </div>
@@ -78,25 +86,30 @@
             aria-haspopup="dialog"
             @click="appStore.openAppearance()"
           >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.7"
-              aria-hidden="true"
+            <ThemeChromeIcon
+              kind="appearance"
+              :size="16"
             >
-              <circle
-                cx="12"
-                cy="12"
-                r="8.5"
-              /><path
-                d="M12 3.5v17A8.5 8.5 0 0 1 12 3.5Z"
-                fill="currentColor"
-                stroke="none"
-              />
-            </svg>
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.7"
+                aria-hidden="true"
+              >
+                <circle
+                  cx="12"
+                  cy="12"
+                  r="8.5"
+                /><path
+                  d="M12 3.5v17A8.5 8.5 0 0 1 12 3.5Z"
+                  fill="currentColor"
+                  stroke="none"
+                />
+              </svg>
+            </ThemeChromeIcon>
             <span>{{ appStore.themePaletteName }}</span>
           </button>
         </div>
@@ -132,6 +145,16 @@
             v-if="tabs.length === 0"
             class="empty-state"
           >
+            <div
+              v-if="isGamePalette(appStore.themePalette)"
+              class="empty-state__emblem"
+              aria-hidden="true"
+            >
+              <ThemeChromeIcon
+                kind="emblem"
+                :size="28"
+              />
+            </div>
             <h2>No Terminal Tabs</h2>
             <p>Click the + button to create a new terminal tab</p>
           </div>
@@ -180,6 +203,8 @@ import ArchivedSessionsPanel from '@/components/ArchivedSessionsPanel.vue'
 import AppExtensionsMenu from '@/components/AppExtensionsMenu.vue'
 import DotLauncher from '@/components/DotLauncher.vue'
 import AppearanceDialog from '@/components/AppearanceDialog.vue'
+import ThemeChromeIcon from '@/features/app-shell/components/ThemeChromeIcon.vue'
+import { isGamePalette } from '@/features/app-shell/themePreference'
 import ServiceRestartDialog from '@/components/ServiceRestartDialog.vue'
 import FeishuBotSettingsDialog from '@/components/FeishuBotSettingsDialog.vue'
 import ScheduledTasksPanel from '@/components/ScheduledTasksPanel.vue'

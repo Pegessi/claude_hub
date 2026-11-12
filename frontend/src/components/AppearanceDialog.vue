@@ -71,7 +71,11 @@
               aria-hidden="true"
             >
               <span class="theme-preview-sidebar"><i /><i /><i /></span>
-              <span class="theme-preview-content"><span class="theme-preview-title">{{ palette.sample }}</span><i /><b /><i /></span>
+              <span class="theme-preview-content"><span class="theme-preview-title"><ThemeChromeIcon
+                :palette="palette.id"
+                kind="emblem"
+                :size="11"
+              />{{ palette.sample }}</span><i /><b /><i /></span>
             </span>
             <span class="appearance-card-title">{{ palette.name }}<span
               class="appearance-check"
@@ -98,6 +102,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 import { useAppStore } from '@/stores/appStore'
+import ThemeChromeIcon from '@/features/app-shell/components/ThemeChromeIcon.vue'
 import { THEME_PALETTES, type AppearanceMode } from '@/features/app-shell/themePreference'
 
 const app = useAppStore()

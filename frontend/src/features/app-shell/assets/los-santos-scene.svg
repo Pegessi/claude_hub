@@ -1,0 +1,164 @@
+<!-- Original static SVG scene illustration authored for Claude Hub (los-santos palette).
+     Motif: Southern California coast, curved Washingtonia palm boulevard, downtown
+     high-rise skyline, warm sliced sunset disc, Pacific wave horizon, and isometric
+     street-map/radar telemetry HUD detailing.
+     No third-party logos, proprietary fonts, or external asset dependencies. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" fill="none">
+  <defs>
+    <linearGradient id="ls-sunset-disc" x1="600" y1="44" x2="600" y2="244" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f59e0b" />
+      <stop offset="0.52" stop-color="#f97316" />
+      <stop offset="1" stop-color="#e11d48" />
+    </linearGradient>
+    <linearGradient id="ls-coast-glow" x1="600" y1="10" x2="600" y2="320" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#38bdf8" stop-opacity="0" />
+      <stop offset="0.5" stop-color="#f59e0b" stop-opacity="0.11" />
+      <stop offset="1" stop-color="#38bdf8" stop-opacity="0.24" />
+    </linearGradient>
+    <clipPath id="ls-sun-bands">
+      <rect x="490" y="42" width="220" height="58" />
+      <rect x="490" y="106" width="220" height="22" />
+      <rect x="490" y="134" width="220" height="18" />
+      <rect x="490" y="158" width="220" height="14" />
+      <rect x="490" y="178" width="220" height="11" />
+      <rect x="490" y="195" width="220" height="9" />
+      <rect x="490" y="210" width="220" height="8" />
+    </clipPath>
+  </defs>
+
+  <!-- Coastal sunset ambient wash -->
+  <rect width="1200" height="320" fill="url(#ls-coast-glow)" />
+
+  <!-- Tactical Street-Map & Radar Sector Grid (Upper Sky & Flanks) -->
+  <g stroke="#38bdf8" stroke-width="1.2" stroke-opacity="0.38">
+    <!-- Perspective coastal map grid lines -->
+    <line x1="0" y1="268" x2="1200" y2="268" />
+    <line x1="0" y1="282" x2="1200" y2="282" />
+    <line x1="600" y1="180" x2="40" y2="300" />
+    <line x1="600" y1="180" x2="240" y2="300" />
+    <line x1="600" y1="180" x2="420" y2="300" />
+    <line x1="600" y1="180" x2="780" y2="300" />
+    <line x1="600" y1="180" x2="960" y2="300" />
+    <line x1="600" y1="180" x2="1160" y2="300" />
+    <!-- Radar range rings -->
+    <circle cx="600" cy="150" r="128" stroke-dasharray="8 6" />
+    <circle cx="600" cy="150" r="168" stroke="#4cd995" stroke-opacity="0.32" stroke-dasharray="4 8" />
+  </g>
+
+  <!-- HUD Corner Target Reticles & Heading Ticks -->
+  <g stroke="#4cd995" stroke-width="2" stroke-opacity="0.75">
+    <path d="M26 48 V26 H48 M1174 48 V26 H1152" />
+    <line x1="540" y1="24" x2="660" y2="24" stroke="#38bdf8" />
+    <line x1="560" y1="18" x2="560" y2="24" />
+    <line x1="600" y1="15" x2="600" y2="24" stroke="#f59e0b" stroke-width="2.5" />
+    <line x1="640" y1="18" x2="640" y2="24" />
+  </g>
+
+  <!-- CENTERPIECE: Warm Southern California Sliced Sunset Disc -->
+  <g clip-path="url(#ls-sun-bands)">
+    <circle cx="600" cy="144" r="92" fill="url(#ls-sunset-disc)" />
+  </g>
+  <circle cx="600" cy="144" r="93" stroke="#f59e0b" stroke-width="2" stroke-opacity="0.65" />
+
+  <!-- Coastal Suspension Bridge & Santa Monica / Del Perro Pier Silhouette (Mid-Left & Mid-Right) -->
+  <g stroke="#38bdf8" stroke-width="2" stroke-opacity="0.65">
+    <!-- Suspension Bridge Tower & Cables (Left Coast) -->
+    <path d="M220 268 V162 L232 162 V268 M220 188 H232 M220 220 H232" fill="#132030" />
+    <path d="M130 256 Q175 218 220 168 Q265 224 320 256" fill="none" />
+    <!-- Pier Ferris Wheel Silhouette (Right Coast) -->
+    <circle cx="936" cy="218" r="34" stroke="#f59e0b" stroke-width="2.2" />
+    <circle cx="936" cy="218" r="24" stroke="#38bdf8" stroke-width="1.4" stroke-dasharray="4 4" />
+    <path d="M916 268 L936 218 L956 268" stroke="#f59e0b" stroke-width="2.5" />
+  </g>
+
+  <!-- DOWNTOWN LOS SANTOS HIGH-RISE SKYLINE (Center Architectural Cluster) -->
+  <g fill="#121e2d" stroke="#38bdf8" stroke-width="2.2" stroke-linejoin="round">
+    <!-- West Wing Towers -->
+    <rect x="332" y="168" width="52" height="128" />
+    <polygon points="394,296 394,132 446,112 446,296" />
+    <rect x="456" y="146" width="48" height="150" stroke="#4cd995" />
+    <!-- Iconic Central Crown Skyscraper (Maze Bank-inspired stepped cylindrical tower) -->
+    <rect x="562" y="86" width="76" height="210" fill="#0f1926" stroke="#f59e0b" stroke-width="2.6" />
+    <rect x="572" y="68" width="56" height="18" fill="#162538" stroke="#f59e0b" stroke-width="2.2" />
+    <polygon points="582,68 600,48 618,68" fill="#f59e0b" stroke="#0f1926" stroke-width="1.5" />
+    <!-- East Wing Modernist High-Rises -->
+    <polygon points="650,296 650,124 704,142 704,296" stroke="#4cd995" />
+    <rect x="716" y="152" width="58" height="144" />
+    <rect x="784" y="178" width="48" height="118" />
+  </g>
+
+  <!-- High-Rise Illuminated Window Grids & Telemetry Edge Bars -->
+  <g stroke-width="2" stroke-linecap="square">
+    <!-- Crown tower vertical neon/amber struts -->
+    <line x1="578" y1="98" x2="578" y2="280" stroke="#f59e0b" stroke-opacity="0.7" />
+    <line x1="600" y1="98" x2="600" y2="280" stroke="#38bdf8" stroke-opacity="0.75" />
+    <line x1="622" y1="98" x2="622" y2="280" stroke="#f59e0b" stroke-opacity="0.7" />
+    <!-- Adjacent tower horizontal window bands -->
+    <path d="M404 148 H436 M404 166 H436 M404 184 H436 M404 202 H436 M404 220 H436" stroke="#38bdf8" stroke-opacity="0.75" />
+    <path d="M466 164 H494 M466 182 H494 M466 200 H494 M466 218 H494" stroke="#4cd995" stroke-opacity="0.8" />
+    <path d="M662 152 H692 M662 170 H692 M662 188 H692 M662 206 H692 M662 224 H692" stroke="#4cd995" stroke-opacity="0.8" />
+    <path d="M728 172 H762 M728 190 H762 M728 208 H762 M728 226 H762" stroke="#f59e0b" stroke-opacity="0.75" />
+  </g>
+
+  <!-- FOREGROUND LEFT & RIGHT: Iconic Southern California Curved Palm Trees -->
+  <!-- Left Outer Tall Palm -->
+  <g>
+    <path d="M78 296 Q92 208 126 108" stroke="#0d1520" stroke-width="11" stroke-linecap="round" fill="none" />
+    <path d="M78 296 Q92 208 126 108" stroke="#f59e0b" stroke-width="2.4" stroke-linecap="round" fill="none" />
+    <!-- Radiating Palm Fronds -->
+    <g transform="translate(126, 108)" fill="#0f1824" stroke="#4cd995" stroke-width="2" stroke-linejoin="round">
+      <path d="M0 0 Q-48 -24 -82 6 Q-42 -4 0 0 Z" />
+      <path d="M0 0 Q-56 4 -76 42 Q-38 18 0 0 Z" />
+      <path d="M0 0 Q-28 -46 -64 -38 Q-30 -24 0 0 Z" stroke="#f59e0b" />
+      <path d="M0 0 Q12 -52 54 -36 Q22 -24 0 0 Z" stroke="#f59e0b" />
+      <path d="M0 0 Q48 -26 84 4 Q42 -6 0 0 Z" />
+      <path d="M0 0 Q54 6 72 44 Q36 18 0 0 Z" stroke="#38bdf8" />
+    </g>
+  </g>
+
+  <!-- Left Inner Mid Palm -->
+  <g>
+    <path d="M168 296 Q178 228 202 154" stroke="#0d1520" stroke-width="8.5" stroke-linecap="round" fill="none" />
+    <path d="M168 296 Q178 228 202 154" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" fill="none" />
+    <g transform="translate(202, 154)" fill="#0f1824" stroke="#38bdf8" stroke-width="1.8" stroke-linejoin="round">
+      <path d="M0 0 Q-38 -18 -64 6 Q-32 -2 0 0 Z" />
+      <path d="M0 0 Q-42 6 -56 34 Q-28 14 0 0 Z" />
+      <path d="M0 0 Q-14 -38 24 -36 Q4 -18 0 0 Z" stroke="#f59e0b" />
+      <path d="M0 0 Q38 -18 66 8 Q32 -4 0 0 Z" stroke="#4cd995" />
+      <path d="M0 0 Q42 8 54 36 Q26 14 0 0 Z" />
+    </g>
+  </g>
+
+  <!-- Right Outer Tall Palm -->
+  <g>
+    <path d="M1122 296 Q1108 208 1074 108" stroke="#0d1520" stroke-width="11" stroke-linecap="round" fill="none" />
+    <path d="M1122 296 Q1108 208 1074 108" stroke="#f59e0b" stroke-width="2.4" stroke-linecap="round" fill="none" />
+    <g transform="translate(1074, 108)" fill="#0f1824" stroke="#4cd995" stroke-width="2" stroke-linejoin="round">
+      <path d="M0 0 Q48 -24 82 6 Q42 -4 0 0 Z" />
+      <path d="M0 0 Q56 4 76 42 Q38 18 0 0 Z" />
+      <path d="M0 0 Q28 -46 64 -38 Q30 -24 0 0 Z" stroke="#f59e0b" />
+      <path d="M0 0 Q-12 -52 -54 -36 Q-22 -24 0 0 Z" stroke="#f59e0b" />
+      <path d="M0 0 Q-48 -26 -84 4 Q-42 -6 0 0 Z" />
+      <path d="M0 0 Q-54 6 -72 44 Q-36 18 0 0 Z" stroke="#38bdf8" />
+    </g>
+  </g>
+
+  <!-- Right Inner Mid Palm -->
+  <g>
+    <path d="M1028 296 Q1016 228 994 156" stroke="#0d1520" stroke-width="8.5" stroke-linecap="round" fill="none" />
+    <path d="M1028 296 Q1016 228 994 156" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" fill="none" />
+    <g transform="translate(994, 156)" fill="#0f1824" stroke="#38bdf8" stroke-width="1.8" stroke-linejoin="round">
+      <path d="M0 0 Q38 -18 64 6 Q32 -2 0 0 Z" />
+      <path d="M0 0 Q42 6 56 34 Q28 14 0 0 Z" />
+      <path d="M0 0 Q14 -38 -24 -36 Q-4 -18 0 0 Z" stroke="#f59e0b" />
+      <path d="M0 0 Q-38 -18 -66 8 Q-32 -4 0 0 Z" stroke="#4cd995" />
+    </g>
+  </g>
+
+  <!-- Pacific Ocean Reflection Shimmer & Tri-Segment Telemetry HUD Plinth -->
+  <rect x="0" y="294" width="1200" height="26" fill="#0b131d" />
+  <rect x="0" y="294" width="696" height="5" fill="#4cd995" />
+  <rect x="696" y="294" width="312" height="5" fill="#38bdf8" />
+  <rect x="1008" y="294" width="192" height="5" fill="#f59e0b" />
+  <line x1="24" y1="308" x2="1176" y2="308" stroke="#38bdf8" stroke-width="2" stroke-dasharray="28 18" stroke-opacity="0.75" />
+</svg>
