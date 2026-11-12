@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "a18352987668bfbfaffb9d6c4781403915bb91fc",
+  "parents": [
+    "4441debbf45d0f09becea014418aa2b1b9081e47",
+    "153b47184df3caf9648aeb6cd1c4ae757f18c693"
+  ],
+  "base": "e3cf4965d196b62f9628d500a573f46db02ed57e",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "28e18e31dac668d2f62203deb67e2364b2b7b96f",
+  "reconstructed_tree": "bd0be7e866325695d3dd2b164d2ade6198f1fa9d",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b68050b492b9be6addbded9bd941cce8754bb047"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "412de5fa6db2d2d66c1aa1898d449925b1c0e103"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "becfc97212a951a01725e7bbc85c3bd4bb2a6810"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "76cd45b293a45c3b2b46fc8d42844cdf6e24f451"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "98547a00bdb569f30442392d7abd4867253f9857"
+      },
+      "reason": "Both branches prepend an entry under '## Released': branch 2 adds the Goal-dialog entry above the Plan-first entry, branch 3 adds the session-status entry. Kept both sides and ordered the newest entry first (session status, then dialog, then Plan-first), matching the file's 'add new ones at the top' rule; no entry text was edited.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
