@@ -109,7 +109,11 @@ export interface NetworkAccessInfo {
  * provider did not report a number; null is not zero.
  */
 export interface QuotaLimit {
-  /** Codex uses a window name such as `weekly`; MASO uses the model name. */
+  /**
+   * The provider's own identifier: Codex reports a window name such as
+   * `weekly`, MASO reports the upstream endpoint a quota row covers (its
+   * `label` carries the model name the panel shows).
+   */
   scope: string
   label: string
   state: string

@@ -149,7 +149,7 @@
                     <div class="quota-row-head">
                       <span
                         class="quota-row-label"
-                        :title="row.label"
+                        :title="row.labelTitle"
                       >{{ row.label }}</span>
                       <strong class="quota-row-value">{{ row.value }}</strong>
                     </div>

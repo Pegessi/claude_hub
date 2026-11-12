@@ -7,6 +7,28 @@
 
 ## Released
 
+### fix(quota): name MASO quota rows after their model, not the endpoint id
+
+- MASO's `/api/llm-quota` reports one row per upstream endpoint and names it
+  with the endpoint id (`ep-20260815235131-vfr5s`), so the quota panel read like
+  a list of gateway keys. The Hub already derives model names from the same
+  catalog it uses to build the model picker, so a quota row is now labelled with
+  the model a person selects for that endpoint (`seed-stable`, `deepseek-v41-flash`,
+  `gemini-4-argon`) while `scope` keeps the endpoint, which is what MASO
+  enforces. Several selector keys share one endpoint (reasoning variants), so
+  the catalog's `selector_primary_key` row names the group; a catalog row with
+  no such marker still contributes its own label.
+- The names come from the catalog discovery already fetched for this reading
+  (`StreamModelOption.description` carries the endpoint, `label` the model), so
+  the panel gains names without a second request. That map keeps one option per
+  selector group, so when a quota row names an endpoint it does not cover the
+  raw catalog is read once more before anything is called unlisted: a group
+  whose rows disagree about their endpoint still gets both names. An endpoint MASO enforces
+  quota for but does not list in its catalog has no name anywhere the Hub may
+  read, so it is labelled for what it is (`Unlisted endpoint · b8c6q`) instead of
+  posing as a model, and every row's label tooltip now carries the identifier the
+  provider reported (`seed-stable (ep-20260815235131-vfr5s)`).
+
 ### fix(ui): a session blocked on a question stops reading as working
 
 - A Chat whose provider holds its turn open on a question keeps
