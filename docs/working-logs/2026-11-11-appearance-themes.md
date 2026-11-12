@@ -518,6 +518,95 @@ certify arbitrary SVG or pseudo-element overlays. Existing native interaction,
 persistence, System, cross-tab, reader and terminal checks remain required, as
 do ten direct and thirty return non-game equalities. Deadlines are not relaxed.
 
-At this log update the product implementation and rendering are in progress;
-new focused acceptance, independent review and frozen-SHA full gates are still
-pending. The pre-existing IPv6 preview on 5358 is deliberately retained.
+### Fixed product and focused evidence
+
+The product and this initial record were committed as `0f2e681` after strict
+frontend lint/types and explicit staged checks. Independent Gemini review of
+the complete `a36148c..0f2e681` commit found no blocking product defect, while
+explicitly withholding final approval pending committed tests and final gates.
+The parent independently matched all 13 product hashes. The producer's two
+timed implementation turns retained their source and render artifacts; a
+separate handoff-only turn stopped verification and recorded their provenance.
+Those time limits were not treated as quota failures or as successful delivery.
+
+New browser coverage retains fractional rendered ink coverage instead of
+binarizing each pixel at 0.5. A common-icon negative exposed quantization:
+identical edge coverage quantized to `96/192 = 0.5` on one palette and
+`90/181 = 0.497237569` on another; 16 native edge cells became 56/576 different
+binary cells after resampling. Parent recomputation confirmed this mechanism.
+Fractional coverage keeps the agreed 3% area threshold and correctly rejects
+the common icons, rather than weakening the negative. The actual shared
+negative replay passed in 4.413s with restored masks and rectangles equal.
+Its first task-local attempt had a readiness error before desktop Appearance
+mounted; that failure is retained and was not fixed by changing product code.
+
+On the first frozen product, Goal passed in 82.465s, Appearance in 36.478s,
+Workspace in 34.044s and Inbox in 25.575s. A fresh immutable comparison passed
+in 31.877s with ten direct and thirty return equalities. These results remain
+source-bound intermediate evidence, not substitutions for final checks.
+The queue fixture initially omitted delivered assistant text, so production
+correctly withheld its process fold. Supplying a real final text event made
+that intended branch reachable without a product fallback or relaxed oracle.
+
+A strict six-surface/six-pending diagnostic then found seven actual foreground
+contrast failures despite valid backplates: error text in dark Zenless,
+Frontier and Los Santos measured 4.3672, 4.1454 and 4.2691; elapsed text in their
+light modes measured 4.3679, 4.0290 and 3.7026; Los Santos light working counts
+measured 4.1060. It exited nonzero rather than calling the diagnostic a pass.
+The bounded correction uses the existing paired `danger-text` ink for game
+error/history-detail text, and removes the second opacity fade from already
+subtle light-game elapsed/counts/hint text. The hint shares the same styling
+cause; no fictitious production field was added to force it into a fixture.
+Five neutral themes, status meanings, fills, geometry and runtime state remain
+untouched. Parent independently recomputes the Zenless error example from
+4.3671576 to 8.6588248 with the corrected ink.
+
+The parent also identified post-activation mode-button screenshots taken
+mid-transition. Capture now waits for the existing finite-animation settling
+helper after native mode activation, without disabling product animations.
+Offline comparison sheets preserve source-image hashes and convert pixels to
+grayscale with channel-equality verification, not a CSS filter that could
+change layout. Interim images and failed runs are retained under
+`tasks/theme-rich-skins/` with their exact boundaries.
+
+A coordination mistake allowed draft test edits while the producer could still
+run those files. The drafts were preserved, execution and writing were made
+serial, and the producer's mixed/draft run was excluded from final evidence.
+The authoritative repository type/format targets are used; an unnecessary
+stricter typing sweep of old dynamic scenarios was not retained.
+
+The one-file readability correction is bound by `product-frozen-02.json`
+(CSS SHA-256 `26c94ff1678e0c1cf53cc88179f2813edb34701d9ee9158e3d2508e5689eb8c5`).
+Final focused acceptance now passes on those product bytes and the four final
+test files: Queue 30.575s, Goal 82.435s, Appearance 37.987s, Workspace 34.180s,
+Inbox 26.306s and immutable comparison 31.887s. Authoritative backend types
+(627 files), backend formatting (651 files), owned-file parsing/formatting and
+diff whitespace checks also pass. Raw evidence, all earlier failures, source
+binding and cleanup are retained in `qa/final-frozen-02/HANDOFF.md`.
+
+The parent independently verifies all 13 product and seven exercised test-file
+hashes, re-counts all twelve art ON/OFF PNG pairs and recomputes twelve icon
+family distances. Minimum exposed artwork contribution is 22.9116% against the
+unchanged 5% floor; minimum icon contribution is 82 pixels and shape difference
+is 0.160239 against the unchanged 8-pixel/0.03 floors. There are 132 protected
+reading samples (minimum 4.777554:1), twelve pending samples (minimum
+6.902404:1), 120 selected-chrome samples, 48 desktop/two phone focus cases and
+six native renames. Ten rich/backing fault injections reject their designated
+oracles and restored positives pass. The ten direct reference payloads match
+exactly; all thirty return cases have zero collector differences.
+
+All seven measured contrast failures are closed. Dark error ratios are now
+8.658825/8.219052/8.464448 (Zenless/Frontier/Los Santos); light elapsed and counts
+are 7.140651/6.388094/5.688806. Final navigation screenshots wait for finite
+transitions and their sampled fill pixels equal the real computed tokens.
+No global animation suppression was used. The live hint and lazy history-detail
+error remain source-audited rather than separate rendered fixture cases. The
+focused runners record context/browser/driver closure, not full process-tree
+certification; owned Vite 5363 is stopped and its socket is closed.
+
+Complete frozen-candidate re-review and serial all/browser/HMR verification
+remain pending at this commit; terminal replay is also planned as an additional
+CI-aligned check. Final Task/artifact records carry those exact-SHA outcomes.
+The existing IPv6 preview on 5358 is deliberately retained, with no main merge
+or shared-service restart. Mocked rendering is not physical-device, exhaustive
+assistive-technology, live-provider or final user aesthetic acceptance.
