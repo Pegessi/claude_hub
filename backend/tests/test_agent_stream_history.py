@@ -125,6 +125,188 @@ def test_summary_preserves_legacy_and_child_failures(store: AgentStreamStore) ->
     asyncio.run(run())
 
 
+def test_summary_preserves_subagent_lifecycle_and_delegation_tools_on_legacy_rows(
+    store: AgentStreamStore,
+) -> None:
+    async def run() -> None:
+        await store.replace_all(
+            [
+                event("turn_started", summary="Delegate"),
+                event(
+                    "tool_call_started",
+                    tool_call_id="task-1",
+                    name="Task",
+                    args={
+                        "description": "Review backend",
+                        "tasks": [
+                            {
+                                "subagent_type": "Explorer",
+                                "subagent_name": "reviewer",
+                                "prompt": "Check history.py",
+                            }
+                        ],
+                    },
+                ),
+                event(
+                    "status",
+                    subagent_thread="reviewer-a679",
+                    provider_status="subagent_lifecycle",
+                    subagent_status="active",
+                    text="MASO sub-agent active",
+                ),
+                event(
+                    "tool_call_completed",
+                    tool_call_id="task-1",
+                    name="Task",
+                    status="completed",
+                    result="Spawned 1/1 sub-agent(s) with IDs: reviewer-a679",
+                ),
+                event(
+                    "tool_call_started",
+                    subagent_thread="reviewer-a679",
+                    tool_call_id="child-bash",
+                    name="Bash",
+                    args={"command": "pytest"},
+                ),
+                event(
+                    "tool_call_started",
+                    subagent_thread="reviewer-a679",
+                    tool_call_id="child-report",
+                    name="SendMessage",
+                    args={"agent_id": "parent", "message": "All checks pass."},
+                ),
+                event(
+                    "status",
+                    subagent_thread="reviewer-a679",
+                    provider_status="subagent_lifecycle",
+                    subagent_status="completed",
+                    text="MASO sub-agent completed",
+                ),
+                event("text_delta", text="Done."),
+                event("turn_completed", status="completed"),
+            ]
+        )
+        # Simulate pre-existing rows recorded when visible=0 was stored for
+        # active/completed lifecycle statuses and delegation tools.
+        with store._database() as db:
+            db.execute("UPDATE stream_events SET visible=0 WHERE sequence IN (1, 2, 3, 4, 5, 6)")
+            db.commit()
+        page = await store.read_conversation()
+        # Child Bash (seq 4) stays hidden behind history_details; Task start/end,
+        # child SendMessage report, and subagent_lifecycle statuses stay visible.
+        assert [item.stream_sequence for item in page.events] == [0, 1, 2, 3, 5, 6, 7, 8]
+        assert page.history_details[0].event_count == 9
+
+        # Cross-page reads must also retain tool_call_completed (seq 3) when its
+        # tool_call_started (seq 1) was returned on an earlier page.
+        page1 = await store.read_conversation(-1, 2)
+        assert [item.stream_sequence for item in page1.events] == [0, 1]
+        page2 = await store.read_conversation(page1.next_sequence, 3)
+        assert [item.stream_sequence for item in page2.events] == [2, 3, 5]
+
+        # Normalized TraeX/Codex spawnAgent and sendInput remain visible, while
+        # a non-subagent tool or a colliding tool_call_id in another turn (or
+        # before a later start in the same turn) must not leak.
+        for extra in (
+            event("turn_started", turn_id="turn-2", summary="Followup"),
+            event(
+                "tool_call_completed",
+                turn_id="turn-2",
+                tool_call_id="reused-in-turn",
+                status="completed",
+                result="ordinary completion before later subagent start",
+            ),
+            event(
+                "tool_call_started",
+                turn_id="turn-2",
+                tool_call_id="reused-in-turn",
+                name="spawnAgent",
+                args={"prompt": "Inspect auth", "receiverThreadIds": ["thread-01"]},
+            ),
+            event(
+                "tool_call_started",
+                turn_id="turn-2",
+                tool_call_id="send-input-1",
+                name="sendInput",
+                args={"prompt": "Check status", "receiverThreadIds": ["thread-01"]},
+            ),
+            event(
+                "tool_call_completed",
+                turn_id="turn-2",
+                tool_call_id="send-input-1",
+                name="sendInput",
+                args={"prompt": "Check status", "receiverThreadIds": ["thread-01"]},
+                status="completed",
+                result="sent",
+            ),
+            event(
+                "tool_call_started",
+                turn_id="turn-2",
+                tool_call_id="task-1",
+                name="Read",
+                args={"file_path": "/tmp/a.py"},
+            ),
+            event(
+                "tool_call_completed",
+                turn_id="turn-2",
+                tool_call_id="task-1",
+                status="completed",
+                result="file contents",
+            ),
+            event(
+                "tool_call_started",
+                turn_id="turn-2",
+                tool_call_id="cursor-oneof-task",
+                name="Task",
+                args={
+                    "description": "Explore auth",
+                    "prompt": "Find auth handler",
+                    "subagentType": {"explore": {}},
+                },
+            ),
+            event(
+                "tool_call_started",
+                turn_id="turn-2",
+                tool_call_id="partial-maso-task",
+                name="Task",
+                args={"tasks": [{"prompt": "ordinary work without subagent_name/type"}]},
+            ),
+            event(
+                "tool_call_started",
+                turn_id="turn-2",
+                tool_call_id="fake-task",
+                name="Task",
+                args={"not_a_subagent": True},
+            ),
+            event(
+                "tool_call_completed",
+                turn_id="turn-2",
+                tool_call_id="fake-task",
+                name="Task",
+                status="completed",
+                result="nope",
+            ),
+            event("turn_completed", turn_id="turn-2", status="completed"),
+        ):
+            await store.append(extra)
+        full = await store.read_conversation(-1, 50)
+        turn2_events = [item for item in full.events if item.turn_id == "turn-2"]
+        assert [(item.type.value, item.payload.get("tool_call_id")) for item in turn2_events] == [
+            ("turn_started", None),
+            ("tool_call_started", "reused-in-turn"),
+            ("tool_call_started", "send-input-1"),
+            ("tool_call_completed", "send-input-1"),
+            ("tool_call_started", "cursor-oneof-task"),
+            ("turn_completed", None),
+        ]
+        # Starting a page right at turn-2's early completion (seq 10) must not
+        # match the later spawnAgent start (seq 11) with the same identity.
+        after_turn2_start = await store.read_conversation(9, 1)
+        assert after_turn2_start.events[0].stream_sequence == 11
+
+    asyncio.run(run())
+
+
 def test_hidden_tail_advances_cursor_without_visible_events(store: AgentStreamStore) -> None:
     async def run() -> None:
         await store.replace_all(

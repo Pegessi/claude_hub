@@ -452,7 +452,7 @@ class _LegacyRuntimeDependencies(RuntimeDependencies):
         return restore_transcript
 
     @property
-    def fork_transcript(self) -> Callable[[ManagedSession, Any, int, str], int]:
+    def fork_transcript(self) -> Callable[..., int]:
         return fork_transcript
 
     @property

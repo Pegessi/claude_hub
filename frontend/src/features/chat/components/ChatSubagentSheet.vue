@@ -50,7 +50,6 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 
 import type { SubagentDockRow, SubagentJumpChip } from '../presentation/subagentJump'
-import type { NativeSubagentRow } from '../presentation/nativeSubagentRows'
 import ChatSubagentList from './ChatSubagentList.vue'
 
 /** The mobile reveal for the Agents pill: a bottom sheet, the same native
@@ -66,7 +65,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (event: 'close'): void
   (event: 'jump', chip: SubagentJumpChip): void
-  (event: 'open', chip: NativeSubagentRow, source: HTMLElement | null): void
+  (event: 'open', chip: SubagentDockRow, source: HTMLElement | null): void
 }>()
 
 const closeRef = ref<HTMLButtonElement | null>(null)
@@ -77,7 +76,7 @@ function onJump(chip: SubagentJumpChip) {
   emit('jump', chip)
 }
 
-function onOpen(chip: NativeSubagentRow, source: HTMLElement | null) {
+function onOpen(chip: SubagentDockRow, source: HTMLElement | null) {
   emit('open', chip, source)
 }
 

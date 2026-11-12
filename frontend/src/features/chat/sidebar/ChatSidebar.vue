@@ -119,6 +119,7 @@
             :dragging="tab.id === draggedTabId"
             :drop-position="dropTarget?.id === tab.id ? dropTarget.position : undefined"
             :status="getTabStatus(tab)"
+            :awaiting="isAwaitingAnswer(tab)"
             :status-label="getTabStatusAriaLabel(tab)"
             :renaming="renamingTabId === tab.id"
             :set-rename-input-ref="setRenameInputRef"
@@ -310,10 +311,13 @@ const mobilePanelStyle = computed(() => {
 })
 
 // Tab-status logic is shared with the TabBar via useTabStatus.
-const { getTabStatus, getTabStatusLabel } = useTabStatus(agentStatuses)
+const { getTabStatus, getTabStatusLabel, isAwaitingAnswer } = useTabStatus(agentStatuses)
 
 function getTabStatusAriaLabel(tab: TerminalTab): string {
-  if (tab.is_unread && getTabStatus(tab) === 'idle') {
+  // An outstanding question is not an unread result: `getTabStatusLabel`
+  // already says "Waiting for your answer", so the read-it-now wording would
+  // contradict the row's own light.
+  if (tab.is_unread && getTabStatus(tab) === 'idle' && !isAwaitingAnswer(tab)) {
     return 'Completed, unread'
   }
   return `Session status: ${getTabStatusLabel(tab)}`

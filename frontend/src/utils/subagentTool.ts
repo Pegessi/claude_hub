@@ -14,6 +14,13 @@
  *   TraeX/Codex → tool name ``sendInput``  args: { prompt, receiverThreadIds }
  *                 (a follow-up directive posted to an already-running child
  *                 thread; rendered as an instruction inside that child group)
+ *   MASO        → tool name ``Task``       args: { description, tasks: [{
+ *                                                subagent_type, subagent_name,
+ *                                                prompt, ... }] }
+ *                 tool name ``Fork``       args: { prompt, agent_name?,
+ *                                                fork_from?, workspace?, ... }
+ *                 tool name ``SendMessage`` args: { agent_id, message, ... }
+ *                 (main-thread directive posted to child ``agent_id``)
  *
  * Codex has no spawn tool in the captured history, so a plain Codex call never
  * matches and keeps rendering as an ordinary tool block; ``sendInput`` is
@@ -25,7 +32,13 @@
  * block instead of being mislabelled as a sub-agent.
  */
 
-export type SubagentProvider = 'claude' | 'cursor' | 'traex'
+export type SubagentProvider = 'claude' | 'cursor' | 'traex' | 'maso'
+
+export interface MasoSubagentTaskItem {
+  agentName: string | null
+  agentType: string | null
+  prompt: string
+}
 
 export interface SubagentView {
   /** Which confirmed provider signature matched. Drives the identity label. */
@@ -45,6 +58,9 @@ export interface SubagentView {
    *  than a fresh spawn. Renders as an instruction row inside the child's
    *  nested group instead of the standalone spawn card. */
   directive: boolean
+  /** MASO ``Task``/``Fork`` task items in declaration order, used to bind each
+   *  spawned ``<subagent_name>-<hex>`` thread id to its own prompt and role. */
+  tasks?: MasoSubagentTaskItem[]
 }
 
 /** Lifecycle status shared with {@link TimelineTool}; kept structural here so
@@ -112,23 +128,84 @@ export function parseSubagent(name: unknown, args: unknown): SubagentView | null
       }
     }
     case 'Task': {
-      // Cursor CLI. Distinguished from Claude's ``Agent`` by the camelCase
-      // ``subagentType`` / ``agentId`` signature (Claude uses snake_case on a
-      // differently-named tool). Require the prompt and one typed target.
+      // Cursor CLI vs MASO Task batch.
+      if (!record) return null
+      const prompt = stringField(record, 'prompt')
+      if (nonEmptyString(prompt)) {
+        const agentType = oneofTypeField(record, 'subagentType')
+        const agentId = optionalTypeField(record, 'agentId')
+        if (!agentType && !agentId) return null
+        return {
+          provider: 'cursor',
+          agentType,
+          description: stringField(record, 'description').trim(),
+          prompt,
+          threadIds: [],
+          background: false,
+          directive: false,
+        }
+      }
+      if (!Array.isArray(record.tasks) || record.tasks.length === 0) return null
+      const description = stringField(record, 'description').trim()
+      if (!description) return null
+      const tasks: MasoSubagentTaskItem[] = []
+      for (const rawTask of record.tasks) {
+        if (!isRecord(rawTask)) return null
+        const taskPrompt = stringField(rawTask, 'prompt')
+        const agentName = optionalTypeField(rawTask, 'subagent_name')
+        const agentType = optionalTypeField(rawTask, 'subagent_type')
+        if (!nonEmptyString(taskPrompt) || !agentName || !agentType) return null
+        tasks.push({ agentName, agentType, prompt: taskPrompt })
+      }
+      const first = tasks[0]
+      return {
+        provider: 'maso',
+        agentType: first.agentName ?? first.agentType,
+        description,
+        prompt: first.prompt,
+        threadIds: [],
+        background: true,
+        directive: false,
+        tasks,
+      }
+    }
+    case 'Fork': {
+      // MASO Fork: spawns an asynchronous forked sub-agent from current/source context.
       if (!record) return null
       const prompt = stringField(record, 'prompt')
       if (!nonEmptyString(prompt)) return null
-      const agentType = oneofTypeField(record, 'subagentType')
-      const agentId = optionalTypeField(record, 'agentId')
-      if (!agentType && !agentId) return null
+      const agentName = optionalTypeField(record, 'agent_name')
+      const forkFrom = optionalTypeField(record, 'fork_from')
+      const workspace = optionalTypeField(record, 'workspace')
+      if (!agentName && !forkFrom && !workspace && typeof record.nested_spawn !== 'boolean') {
+        return null
+      }
       return {
-        provider: 'cursor',
-        agentType,
-        description: stringField(record, 'description').trim(),
+        provider: 'maso',
+        agentType: agentName ?? 'Fork',
+        description: agentName ? `Fork ${agentName}` : 'Fork sub-agent',
         prompt,
         threadIds: [],
-        background: false,
+        background: true,
         directive: false,
+        tasks: [{ agentName, agentType: 'Fork', prompt }],
+      }
+    }
+    case 'SendMessage': {
+      // MASO SendMessage: when issued on the main thread, posts a message to an
+      // existing sub-agent thread ``agent_id``.
+      if (!record) return null
+      const agentId = optionalTypeField(record, 'agent_id')
+      const message = stringField(record, 'message')
+      if (!agentId || !nonEmptyString(message)) return null
+      return {
+        provider: 'maso',
+        agentType: null,
+        description: '',
+        prompt: message,
+        threadIds: [agentId],
+        background: false,
+        directive: true,
       }
     }
     case 'spawnAgent':
@@ -154,6 +231,76 @@ export function parseSubagent(name: unknown, args: unknown): SubagentView | null
     }
     default:
       return null
+  }
+}
+
+const MASO_TASK_IDS_RE = /Spawned\s+\d+\/\d+\s+sub-agent\(s\)\s+with\s+IDs:\s*([^\n]+)/
+const MASO_FORK_ID_RE = /into sub-agent "([^"]+)"/
+const MASO_HEX_SUFFIX_RE = /^[0-9a-f]{4,12}$/i
+
+/** Whether a MASO ``agentName`` matches a runtime ``threadId`` (``<name>`` or ``<name>-<hex>``). */
+export function masoAgentNameMatchesThreadId(
+  agentName: string | null | undefined,
+  threadId: string,
+): boolean {
+  if (!agentName) return false
+  if (threadId === agentName) return true
+  if (!threadId.startsWith(`${agentName}-`)) return false
+  return MASO_HEX_SUFFIX_RE.test(threadId.slice(agentName.length + 1))
+}
+
+/** Extract spawned child thread ids from a MASO ``Task`` or ``Fork`` result string. */
+export function parseMasoSpawnedThreadIds(result: unknown): string[] {
+  if (typeof result !== 'string' || !result) return []
+  const taskMatch = MASO_TASK_IDS_RE.exec(result)
+  if (taskMatch?.[1]) {
+    return taskMatch[1]
+      .split(',')
+      .map(id => id.trim())
+      .filter(id => id.length > 0 && !id.startsWith('('))
+  }
+  const forkMatch = MASO_FORK_ID_RE.exec(result)
+  if (forkMatch?.[1]?.trim()) {
+    return [forkMatch[1].trim()]
+  }
+  return []
+}
+
+/** Whether a MASO ``Task``/``Fork`` view declared a task matching ``threadId``. */
+export function masoTaskMatchesThreadId(view: SubagentView | undefined, threadId: string): boolean {
+  if (!view || view.provider !== 'maso' || view.directive) return false
+  if (view.threadIds.length > 0) {
+    return view.threadIds.includes(threadId)
+  }
+  if (!view.tasks) return false
+  return view.tasks.some(task => masoAgentNameMatchesThreadId(task.agentName, threadId))
+}
+
+/** Bind a multi-task MASO ``SubagentView`` to one specific spawned ``threadId``. */
+export function subagentViewForThread(
+  view: SubagentView,
+  threadId: string,
+  index?: number,
+): SubagentView {
+  if (!view.tasks || view.tasks.length === 0) {
+    return { ...view, threadIds: [threadId] }
+  }
+  const indexed =
+    typeof index === 'number' && index >= 0 && index < view.tasks.length
+      ? view.tasks[index]
+      : undefined
+  const matched =
+    (indexed && (!indexed.agentName || masoAgentNameMatchesThreadId(indexed.agentName, threadId))
+      ? indexed
+      : undefined) ??
+    view.tasks.find(task => masoAgentNameMatchesThreadId(task.agentName, threadId)) ??
+    indexed ??
+    view.tasks[0]
+  return {
+    ...view,
+    agentType: matched.agentName ?? matched.agentType ?? view.agentType,
+    prompt: matched.prompt || view.prompt,
+    threadIds: [threadId],
   }
 }
 
@@ -203,6 +350,7 @@ const PROVIDER_LABELS: Record<SubagentProvider, string> = {
   claude: 'Claude sub-agent',
   cursor: 'Cursor sub-agent',
   traex: 'TraeX sub-agent',
+  maso: 'MASO sub-agent',
 }
 
 /** Provider-prefixed identity chip, e.g. ``Claude sub-agent``. */

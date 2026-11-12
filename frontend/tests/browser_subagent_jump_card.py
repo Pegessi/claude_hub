@@ -322,7 +322,7 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(arch_row).to_have_attribute("data-state", "closed")
         await expect(arch_row).to_contain_text("archived review")
         await expect(arch_row).to_contain_text("Found two failing edge cases.")
-        await expect(arch_row).to_contain_text("Restore & open")
+        await expect(arch_row).to_contain_text("View")
         await page.screenshot(path=str(output / "00-dock-popover.png"))
         await page.keyboard.press("Escape")
         await expect(popover).to_have_count(0)
@@ -353,12 +353,22 @@ async def main(browser_run: BrowserRun) -> None:
         # Back on the parent for the pane-chrome flows below.
         await page.locator(".tab-bar .tab", has_text="Parent Chat").click()
 
-        # The pane-chrome pill keeps its own one-click jump.
+        # Clicking a Hub child in the pane-chrome dock opens the unified detail
+        # window first, with an optional action to switch to the child session.
         await pill.click()
         await live_row.click()
+        overlay = page.get_by_test_id("native-subagent-overlay")
+        await expect(overlay).to_be_visible()
+        await expect(overlay).to_contain_text("Hub sub-agent")
+        await expect(overlay).to_contain_text("analyze parser")
+        open_session_btn = overlay.get_by_test_id("hub-subagent-open-session")
+        await expect(open_session_btn).to_have_text("Open session")
+        await open_session_btn.click()
+        await expect(overlay).to_have_count(0)
         await wait_until(lambda: LIVE in event_tabs)
 
-        # Back on the parent Chat, the archived child restores then focuses.
+        # Back on the parent Chat, clicking the archived child previews its
+        # summary in the unified window, and "Restore & open" unarchives it.
         await page.locator(".tab-bar .tab", has_text="Parent Chat").click()
         await expect(pill).to_be_visible()
         assert not unarchived
@@ -366,6 +376,11 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(arch_row).to_be_hidden()
         await popover.get_by_test_id("subagent-earlier-toggle").click()
         await arch_row.click()
+        await expect(overlay).to_be_visible()
+        await expect(overlay).to_contain_text("Found two failing edge cases.")
+        restore_btn = overlay.get_by_test_id("hub-subagent-open-session")
+        await expect(restore_btn).to_have_text("Restore & open")
+        await restore_btn.click()
         await wait_until(lambda: bool(unarchived))
         await wait_until(lambda: ARCH in event_tabs)
         await page.screenshot(path=str(output / "02-archived-restored.png"))

@@ -137,25 +137,11 @@
             v-if="isModelPickerAvailable"
           />
         </div>
-        <!-- Ask aside: fork this Chat and post the question there. A running
-             turn cannot take a second question without queueing or steering
-             it, and both change the answer already in progress. -->
-        <button
-          v-if="showAside"
-          type="button"
-          class="composer-aside-btn"
-          :disabled="asideReason !== null"
-          aria-label="Ask aside"
-          :title="asideReason || 'Ask this question in a forked Chat, leaving this conversation untouched'"
-          @click="askAside"
-        >
-          {{ asideBusy ? 'Asking…' : (isMobileViewport ? 'Aside' : 'Ask aside') }}
-        </button>
         <button
           v-if="stopArmed"
           type="button"
           class="composer-stop-btn"
-          :disabled="isSending || isCancelling"
+          :disabled="!canStop"
           title="Stop the current turn (works even while reconnecting, queued, or after an error)"
           @click="cancelActiveTurn"
         >
@@ -199,10 +185,7 @@
 </template>
 
 <script setup lang="ts">
-import { requireChatOwner, chatSettingsKey, chatGoalKey, chatAttachmentsKey, chatImagesKey, chatDeliveryKey, chatQueueKey, chatComposerKey, chatIdentityKey, chatTimelineKey } from '../owners'
-import { computed, ref } from 'vue'
-import { useTerminalStore } from '@/stores/terminalStore'
-import { asideClientTurnId, asideFailure, asideForkOrdinal, asideUnavailableReason, buildAsideSendRequest, canOfferAside } from '@/utils/chatAside'
+import { requireChatOwner, chatSettingsKey, chatGoalKey, chatAttachmentsKey, chatImagesKey, chatDeliveryKey, chatQueueKey, chatComposerKey, chatIdentityKey } from '../owners'
 import ChatDraftQueue from '@/components/ChatDraftQueue.vue'
 import ComposerAddMenu from '@/components/ComposerAddMenu.vue'
 import ChatModelPicker from './ChatModelPicker.vue'
@@ -212,102 +195,10 @@ const { modeChangeError, isAddMenuOpen, modeOptions, isModelPickerAvailable } = 
 const { goalError, goal, isGoalSetupOpen, hydrateGoal, isGoalMutating, goalInputBlocked, goalSteerOnly, goalComposerReason, goalSetupDisabledReason, isGoalEditing, goalImageRecovery } = requireChatOwner(chatGoalKey)
 const { attachments, isPreparingAttachments, removeAttachment, handlePaste, attachmentDisabledReason, triggerFilePicker, fileInputEl, handleFilePick } = requireChatOwner(chatAttachmentsKey)
 const { openImageLightbox } = requireChatOwner(chatImagesKey)
-const { isSending, composerError, isSubmissionReady, turnInFlight, composerTurnInFlight, draftMessage, stopArmed, isCancelling, cancelActiveTurn, canSend, submit } = requireChatOwner(chatDeliveryKey)
+const { isSending, composerError, isSubmissionReady, turnInFlight, composerTurnInFlight, draftMessage, stopArmed, canStop, isCancelling, cancelActiveTurn, canSend, submit } = requireChatOwner(chatDeliveryKey)
 const { draftQueue, isQueueSendInProgress, queuedChatState, setQueuedDraftEdit, updateQueuedDraft, cancelQueuedDraft, editQueuedDraft, sendQueuedDraft } = requireChatOwner(chatQueueKey)
 const { composerTextareaEl, isComposing, handleComposerEnter, syncComposerTextareaHeight, isMobileViewport } = requireChatOwner(chatComposerKey)
-const { isManagedChat, connectionState, capabilities, appStore, props, currentTab } = requireChatOwner(chatIdentityKey)
-
-// ── Ask aside ──────────────────────────────────────────────────────────────
-// The fork request and the aside turn are built by ``utils/chatAside``; this
-// component only owns the two effects (fork, then send) and their ordering.
-const { turns } = requireChatOwner(chatTimelineKey)
-const terminalStore = useTerminalStore()
-const asideBusy = ref(false)
-
-/** Ordinal the fork cuts at: the last completed turn. Cutting inside a running
- *  turn would copy half a turn into a session that can never finish it, so the
- *  running turn stays out of the fork entirely (see ``asideForkOrdinal``). */
-const asideOrdinal = computed<number | null>(() => asideForkOrdinal(turns.value))
-
-const asideReason = computed<string | null>(() => asideUnavailableReason({
-  isManagedChat: isManagedChat.value,
-  question: draftMessage.value,
-  attachmentCount: attachments.value.length,
-  ordinal: asideOrdinal.value,
-  hasTurns: turns.value.length > 0,
-  busy: asideBusy.value,
-}))
-
-/** Whether the composer row shows the control at all.
- *
- *  A typed question shows it everywhere. An empty composer shows it only on a
- *  desktop viewport, where the disabled button and its tooltip teach the
- *  feature while a turn is running; a touch row is meant to stay uncluttered
- *  and has no tooltip, so the empty state stays hidden there. Nothing shows
- *  before the pane is ready to send, so hydration cannot flash a dead action. */
-const showAside = computed<boolean>(() => {
-  if (!canOfferAside(isManagedChat.value) || !isSubmissionReady.value) return false
-  if (draftMessage.value.trim().length > 0) return true
-  return !isMobileViewport.value && turnInFlight.value
-})
-
-async function asideErrorDetail(response: Response): Promise<string> {
-  try {
-    const detail = (await response.json())?.detail
-    if (typeof detail === 'string' && detail) return detail
-  } catch {
-    // A non-JSON error body keeps the generic message.
-  }
-  return `HTTP ${response.status}`
-}
-
-async function askAside() {
-  if (asideReason.value !== null || asideBusy.value) return
-  const ordinal = asideOrdinal.value
-  if (ordinal === null) return
-  const question = draftMessage.value.trim()
-  const sourceTabId = props.tabId
-  // The fork is created first and switches the pane; remember it so a later
-  // failure can put the reader back where the question still is.
-  let forkedTabId: string | null = null
-  asideBusy.value = true
-  try {
-    const forked = await terminalStore.forkTab(sourceTabId, ordinal)
-    // ``forkTab`` reports its own failures and resolves undefined; without the
-    // fork there is nowhere to put the question.
-    if (!forked) throw new Error('Could not fork this Chat')
-    forkedTabId = forked.id
-    const request = buildAsideSendRequest(forked.id, question, asideClientTurnId())
-    const response = await fetch(request.path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'same-origin',
-      body: JSON.stringify(request.body),
-    })
-    if (!response.ok) throw new Error(await asideErrorDetail(response))
-    // The question belongs to the fork now. Keeping it here would leave the
-    // same text ready to queue into the main thread by mistake.
-    draftMessage.value = ''
-  } catch (error) {
-    const failure = asideFailure({
-      sourceTabId,
-      sourceTabName: currentTab.value?.name ?? '',
-      forkedTabId,
-      activeTabId: terminalStore.activeTabId,
-      detail: error instanceof Error ? error.message : 'unknown error',
-    })
-    // A failure after the fork leaves the reader on an empty fork while the
-    // draft sits in the source Chat. Restore it first, then report.
-    if (failure.restoreTabId) terminalStore.setActiveTab(failure.restoreTabId)
-    terminalStore.pushNotification({
-      type: 'error',
-      message: failure.message,
-      autoDismissMs: 8000,
-    })
-  } finally {
-    asideBusy.value = false
-  }
-}
+const { isManagedChat, connectionState, capabilities, appStore, props } = requireChatOwner(chatIdentityKey)
 </script>
 
 <style scoped>
@@ -480,36 +371,6 @@ async function askAside() {
 .composer-stop-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-}
-
-/* Quiet by design: a secondary path out of the conversation, not a second
-   primary action beside Send. */
-.composer-aside-btn {
-  height: 34px;
-  padding: 0 10px;
-  font-size: 12.5px;
-  font-weight: 500;
-  color: var(--ch-color-text-muted);
-  background-color: transparent;
-  border: 1px solid var(--ch-color-border-muted);
-  border-radius: var(--ch-radius-sm);
-  cursor: pointer;
-  flex-shrink: 0;
-}
-
-.composer-aside-btn:hover:not(:disabled) {
-  color: var(--ch-color-text);
-  background-color: var(--ch-color-surface-control-hover, var(--ch-color-surface));
-}
-
-.composer-aside-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.composer-aside-btn:focus-visible {
-  outline: 2px solid var(--ch-color-accent-ring);
-  outline-offset: 1px;
 }
 
 .attachment-preview { width: 100%; height: 100%; padding: 0; display: flex; border: 0; background: transparent; cursor: zoom-in; }

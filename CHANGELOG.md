@@ -7,6 +7,214 @@
 
 ## Released
 
+### fix(quota): name MASO quota rows after their model, not the endpoint id
+
+- MASO's `/api/llm-quota` reports one row per upstream endpoint and names it
+  with the endpoint id (`ep-20260815235131-vfr5s`), so the quota panel read like
+  a list of gateway keys. The Hub already derives model names from the same
+  catalog it uses to build the model picker, so a quota row is now labelled with
+  the model a person selects for that endpoint (`seed-stable`, `deepseek-v41-flash`,
+  `gemini-4-argon`) while `scope` keeps the endpoint, which is what MASO
+  enforces. Several selector keys share one endpoint (reasoning variants), so
+  the catalog's `selector_primary_key` row names the group; a catalog row with
+  no such marker still contributes its own label.
+- The names come from the catalog discovery already fetched for this reading
+  (`StreamModelOption.description` carries the endpoint, `label` the model), so
+  the panel gains names without a second request. That map keeps one option per
+  selector group, so when a quota row names an endpoint it does not cover the
+  raw catalog is read once more before anything is called unlisted: a group
+  whose rows disagree about their endpoint still gets both names. An endpoint MASO enforces
+  quota for but does not list in its catalog has no name anywhere the Hub may
+  read, so it is labelled for what it is (`Unlisted endpoint · b8c6q`) instead of
+  posing as a model, and every row's label tooltip now carries the identifier the
+  provider reported (`seed-stable (ep-20260815235131-vfr5s)`).
+
+### fix(ui): a session blocked on a question stops reading as working
+
+- A Chat whose provider holds its turn open on a question keeps
+  `pending_question` in the status poll while the Chat body shows the card.
+  The shared `useTabStatus` now presents that state as finished work that is
+  waiting: the sidebar row, its `data-runtime-status` attribute and the TabBar
+  indicator drop the working light and its pulse, and read
+  `Session status: Waiting for your answer` in the sidebar (`aria-label` and
+  tooltip) and `Waiting for your answer` on the TabBar indicator, instead of
+  "Working". The light keeps the completed colour and gains a `?` in the same
+  slot (`data-awaiting`, shared with the TabBar indicator), so a waiting
+  session is not mistaken for a quiet idle one; an unread row drops its
+  completion badge while the card waits, because answering — not reading —
+  is the action. The flag outranks the provider's own turn flag
+  (`working`/`idle`) but not a failed or dead provider: the backend decides
+  `offline` (hard failure, native or transport error) before `turn_in_flight` and
+  `attention` (a turn that exited non-zero) after it, so `pending_question` rides
+  on both; a dead transport cannot answer a native card at all, and a follow-up
+  answer is refused while the provider still owns the turn or once the turn
+  ended unsuccessfully. Those states keep their own colour and label and only add
+  `— a question is waiting`. The
+  Needs-you inbox names the same two facts for that case. Known limit, out of
+  scope here: while a follow-up turn is still in flight the body still renders
+  the card and `Submit` answers with `409 question_busy`, so the row and the
+  body agree on "waiting" a moment before the answer is deliverable.
+
+### style(ui): rebuild the Goal setup dialog on the app's dialog language
+
+- Shared overlay rules (`overlays.css`) already supplied the scrim, radius and
+  elevation, but the Goal form itself had no structure: one flat block of
+  controls, unscoped `h2`/`p`/`label`/`button` selectors styling every child
+  below it, and three loose sentences of guidance. It now has the same
+  structure as the rest of the Hub's dialogs: an eyebrow/title/subtitle header,
+  labelled sections on the app's own surfaces, a scrolling body and a footer
+  that owns the decision.
+- The Objective field carries a live `n/4000` counter (amber near the limit)
+  and a hint, so the bound is visible instead of silent. The Plan-first option
+  is a state card (accent tint plus a `Review first`/`Off` badge) rather than a
+  floating checkbox, and the guidance is two factual bullets instead of a
+  paragraph block.
+- Phones keep the sheet that `overlays.css` already gave this backdrop, now
+  with a scrolling body and 44px actions; the shared sheet rule now bounds the
+  generic backdrop dialogs' height by `--visual-viewport-height` instead of
+  `100dvh` and lifts every phone sheet by the keyboard height the app already
+  computes (`--keyboard-height`, zoom- and scroll-safe), so a keyboard moves the
+  sheet and its footer instead of covering them; the two native `<dialog>` sheets
+  (`restart-dialog`, `bot-pool`) are lifted the same way and their heights are
+  bounded too, so a lifted full-height sheet cannot push its header and close
+  button off the top; it also no longer adds a second safe-area pad under a
+  footer that owns its own inset.
+- Cross-review fixes: the attachment-row rule targets only the picker's
+  trigger (a bare `button` selector also restyled the chip preview and its
+  remove badge), the row is laid out as caption + trigger + chips instead of
+  stacking at zero gap, and the field hint is linked to the textarea with
+  `aria-describedby` so the auto-focused field describes itself.
+- Behaviour is unchanged: same props, events, labels, focus trap,
+  Escape/Cancel/return-focus and `plan_first` payload; the attachment picker
+  and the recovery slot keep their own components.
+- Validation: `browser_chat_goal_steer.py` now measures real computed
+  contrast in both themes, alpha-compositing the translucent card tint (title,
+  label, hint, note and tips ≥4.5 — the 12–13px copy is normal text, so AA
+  applies), asserts the counter's near-limit state before the hard cap, pins the
+  attachment chip and remove-badge geometry and the row's caption-above /
+  chips-on-trigger-line layout, checks the field hint's `aria-describedby`, and
+  asserts a phone sheet under a shrunk visual viewport whose actions end above
+  the keyboard; `browser_service_restart.py` pins the same lift-and-bound for a
+  native `<dialog>` sheet. The goal-steer, goal-mobile, native-goal and restart
+  scenarios pass against the new surface, together with typecheck, lint and the
+  frontend unit suite.
+
+### fix(goal): Plan-first opens off so a Goal no longer parks for approval unasked
+
+- A Goal that had no request for a plan review could open on `blocked` with an
+  "Approve & start / Revise" card, because the setup dialog's Plan-first
+  checkbox opened ticked and every created Goal therefore sent
+  `plan_first: true`. The option now opens unchecked, the dialog says
+  `The Goal starts working immediately`, and ticking it restores the gate
+  (`Nothing starts until you approve.`) and sends the same additive
+  `plan_first`.
+- The remembered choice moves to `claude-hub.goal-plan-first.v2`, so a
+  `true` written while the option was on by default cannot keep gating new
+  Goals: that value records the old default, not a decision. An explicit
+  opt-in is remembered under the new key.
+- Backend contracts, the plan envelope, the `needs_input` park, the plan card,
+  the provider-native refusal and callers that omit the field are unchanged.
+- Validation: plan-preference unit tests (default off, round trip, legacy key
+  ignored), whole frontend unit suite, typecheck, lint, and
+  `browser_chat_goal_steer.py` re-run against the opt-in path.
+
+### fix(chat): Resend rewrites history honestly, images paste where they were asked for, Ask aside removed
+
+Design notes and the deliberately-open items are in
+`docs/working-logs/2026-11-11-chat-resend-and-paste.md`.
+
+- **Ask aside is gone.** It forked the whole Chat into a new tab so a side
+  question left the running turn alone, but the aside model could not see that
+  turn, received only the copied *text* of earlier turns, cost a second provider
+  session and left a tab to close — a heavier "Fork from here" plus one message.
+  The composer control, its gate module and its suite are removed; the per-turn
+  fork action and the backend fork endpoint are untouched.
+- **Resend can no longer be offered where it must fail.** The editor used to
+  appear on any turn with a text summary and a turn id, including Goal
+  continuations, restart continuations and workspace/schedule turns — whose
+  provider text is a Hub-authored wrapper that differs from the summary on
+  screen, so every Resend returned 409. Those turns now hide the control and the
+  backend refuses them with "This turn was written by the Goal/Hub, not by you",
+  before any truncation or snapshot.
+- **Long and secret-bearing messages can be edited again.** `turn_started` is
+  persisted already redacted (4000-character truncation, secret masking), and
+  the transcript fork compared that summary with the full provider text, so any
+  such message could never match. The turn now records
+  `provider_text_sha256` (a digest of the provider-bound text, never the text
+  itself) and the fork matches on it, falling back to content for historical
+  turns. `stored_text_incomplete` records whether redaction changed the stored
+  summary, and the editor warns that the prefill is partial instead of silently
+  resending a truncated message. A shifted duplicate match is logged with the
+  removed line count rather than passing silently.
+- **A rewrite reports what it removed.** `POST /stream/edit-resend` returns
+  `removed_turn_count` and the composer says how many later turns went with it,
+  so a history deletion cannot read as a rendering bug. The local Stop optimism
+  is retired with the resend instead of minting a phantom "Stopped" row.
+- **One Stop rule instead of three.** The composer checked `isSending ||
+  isCancelling` while the reconnect and failure banners offered Stop
+  unconditionally, and `cancelActiveTurn` returned silently unless a send was
+  idle — so a banner Stop looked armed and did nothing. Both surfaces now read
+  one `canStop` gate that mirrors what the request can actually do, and an
+  unavailable Stop is visibly unavailable. A send that is still in flight still
+  blocks Stop on purpose: a direct-tab send holds the tab's goal-admission lock
+  across provider delivery and `/stream/cancel` takes that same lock, so a
+  mid-send Stop could only queue behind it. A hung send therefore remains
+  un-interruptible; that needs a bounded send, tracked below.
+- **Images paste where they were asked for.** The Resend editor accepts a pasted
+  image, stages it through the composer's attachment pipeline (same validation,
+  size caps and bounded preview), shows it as a removable chip and sends it as
+  `attachments` on `POST /stream/edit-resend` in the same wire form the composer
+  uses (a preview that *is* the original travels as `preview_is_original`
+  instead of uploading the same base64 twice and counting it twice against the
+  request cap); the backend re-sends the original turn's own images and persists
+  only the added ones' previews, in one place (`send_message`'s reuse rule).
+  Because edit-resend rolls the store back when the provider rejects the turn,
+  it asks that one writer to delete the previews it persisted on that path, so a
+  rolled-back edit leaves no orphaned cache entries. The Goal dialog forwards pastes to the same
+  pipeline `startGoal` already serializes, so a pasted image rides the first
+  Goal turn; while editing an existing Goal the paste is inert because that
+  dialog has no image field.
+- A question answer is no longer offered for editing either: the runtime answer
+  path now records `origin: question_answer`, so the editor cannot offer to
+  resend the `<<<HUB_QUESTION_RESPONSE_V1>>>` payload as if it were the reader's
+  own message.
+- Behavior change worth knowing: an original image whose cached preview was
+  evicted is now dropped from the resent turn instead of keeping a
+  "Preview expired" placeholder, because its bytes cannot be re-sent and an
+  unaligned id would attach the wrong thumbnail to an added image.
+- An independent cross-model review (a different model, given the diff and the
+  repo rules) raised one blocking defect the author introduced — an edit-resend
+  whose provider delivery fails would leak the previews it persisted once its
+  store rollback erased them — plus a duplicated-base64 bug in the resend body,
+  an over-eager Stop gate and three smaller items. All are fixed above, with
+  tests that exercise the real `send_message` instead of a mock.
+- Validation: backend format and types; the focused edit-resend, attachment,
+  preview and managed-control suites (218 passed); the default backend scope
+  excluding the machine-local `test_ci_health.py` failure (6558 passed, 9
+  skipped, plus 30 browser-backed cases that pass with
+  `PLAYWRIGHT_BROWSERS_PATH` set; the only remaining errors are the
+  explicit-only `terminal_hmr_recovery_e2e` harness needing a corepack download);
+  frontend
+  lint, types, bundle and the whole unit suite (1462 passed), including new
+  suites for the resend rules, the timeline metadata, the Stop gate and both
+  paste surfaces; and the mocked browser scenarios (23/23 runners passed, none
+  skipped) against the real build.
+
+### feat(chat): unify Hub and native sub-agent preview window and fix switched Hub sub-agent interaction
+
+- Unify Hub sub-agent (`claude-hub agent run`) and provider-native sub-agent presentation: clicking any sub-agent row in the `Agents` dock (`ChatSubagentRow.vue`) or clicking `View` on an inline `ChatHubSubagentLink.vue` now opens the shared `ChatNativeSubagentOverlay.vue` detail window. Hub sub-agents fetch their compacted persisted stream events (`GET /api/workspaces/tabs/{tabId}/stream/events?compact=true&persisted_only=true`, polling while `running`) and project them via `buildHubSubagentLookup` (`hubSubagentThread.ts`, stripping `<claude_hub_subagent>` preambles) into `ChatSubthreadBody.vue`, with an explicit `Open session` / `Restore & open` action (`data-testid="hub-subagent-open-session"`) to switch to the child Chat session.
+- Fix auto-archived Hub sub-agents silently failing to open when `terminalStore.archivedTabs` has not been loaded yet: `toSubagentJumpChip` marks non-live `closed` sub-agents as `archived`, and `useParentSubagents.jump` falls back to `terminalStore.unarchiveTab` when a target `tabId` is absent from `terminalStore.tabs` after `fetchTabs()`.
+- Fix `SessionKind.CHAT` Codex tabs triggering terminal-rollout attribution/quarantine (`_quarantine_codex_tab`) on unarchive or cold start (`manager/tabs.py`, `startup.py`, `attribution.py`, `retirement.py`), which previously wiped `agent_session_id` and prevented resumed interaction when switching to a Codex Hub sub-agent Chat.
+- Centralize sub-agent tab detachment (`detach_subagent_tab` / `_detach_subagent_process` in `retirement.py`, startup healing in `state.py`, web-turn detachment in `dispatch.py`, and grace-window view check in `subagents.py`) so restored or user-adopted sub-agent tabs also clear display-only `workspace_id`/`workspace_name` and appear as normal top-level Chat sessions instead of vanishing from navigation lists.
+- Keep `Needs you` -> `Waiting on you` (`New reply`) scoped to manual user-created Terminal/Chat sessions (`isManualSessionTab` in `inboxModel.ts`), preventing finished `claude-hub agent run` sub-agents and Workspace `orchestrator`/`reviewer` sessions from polluting `Waiting on you` or the `Chats` (`manual`) filter.
+
+### fix(chat): surface native and MASO sub-agents on shallow conversation load and deduplicate cross-turn threads
+
+- Keep sub-agent lifecycle statuses (`active`, `completed`, `failed`, `cancelled`) and sub-agent delegation/directive tool events (`Agent`, `Task`, `Fork`, `spawnAgent`, `sendInput`, `SendMessage`) visible in `view=conversation` (`history.py`), including for pre-existing SQLite rows recorded before this change, while keeping ordinary tool calls and child streaming deltas lazy behind `history_details`.
+- Recognize MASO `Task` (single and fan-out batch), `Fork`, and `SendMessage` in `subagentTool.ts` and `reducer.ts`, binding spawned `<subagent_name>-<hex>` thread IDs to their per-task prompts and roles, preserving readable MASO thread IDs in `nativeSubagentRows.ts`, extracting child `SendMessage` reports in `subthreadHeadline`, and deduplicating/merging long-lived sub-agents across turns.
+- Project turns with real sub-agent launch/lifecycle data into the Agents dock on initial load without eagerly fetching turn execution details, and hydrate lazy turn details on demand when a sub-agent window is opened (`ensureSubthreadDetailsLoaded`).
+- Validation: `env -u FORCE_COLOR ./scripts/verify.sh all` (6,276 backend tests + 1,294 frontend tests; also replaced bare `asyncio.sleep(0)` in `test_cleanup_background_lifetime.py::wait_until` with `asyncio.sleep(0.002)` so coverage-traced `asyncio.to_thread` shutdown writes do not starve on the GIL) and `browser-mocks` (19/19 scenarios, including `browser_native_subagent_dock.py`).
+
 ### feat(chat): list provider-native sub-agents in the Agents dock and read one in a window
 
 - The pane-chrome Agents pill now lists provider-native children (Claude

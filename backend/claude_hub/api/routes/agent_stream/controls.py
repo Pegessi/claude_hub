@@ -1,7 +1,7 @@
 """Agent-stream cancellation and edit-resend controls."""
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -11,6 +11,7 @@ from claude_hub.api.routes.agent_stream.bindings import AgentStreamRouteBindings
 from claude_hub.api.routes.agent_stream.dispatch import require_tab_input_available
 from claude_hub.auth.dependencies import get_current_user
 from claude_hub.models import TERMINAL_GOAL_STATUSES, GoalRunStatus, ManagedSession, User
+from claude_hub.models.chat_image import ChatImageAttachment
 from claude_hub.services.agent_stream import StructuredSourceUnavailable, TailerManager
 
 CHAT_ERROR_REASON_HEADER = "X-Claude-Hub-Error-Reason"
@@ -29,11 +30,17 @@ class StreamCancelRequest(BaseModel):
 
 
 class AgentStreamEditResendRequest(BaseModel):
-    """Request body for editing a previously sent user message and rerunning."""
+    """Request body for editing a previously sent user message and rerunning.
+
+    ``attachments`` carries NEW images the user added while editing; the
+    original turn's images are re-sent by the backend and must not be repeated
+    here.
+    """
 
     text: str = Field(..., min_length=1)
     client_turn_id: str
     turn_id: str
+    attachments: List[ChatImageAttachment] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _require_fields(self) -> "AgentStreamEditResendRequest":
@@ -249,19 +256,35 @@ def register_control_routes(
                 )
             session = bindings.terminal_tab_session_or_404(tab_id)
             manager = bindings.get_tab_tailer_manager()
+            # Decode the NEW images exactly like the normal send path:
+            # fail-closed on malformed data, MIME mismatch or size, and refuse
+            # images the provider cannot accept.
+            images, previews = bindings.decode_attachments(payload.attachments)
+            if images:
+                caps = await bindings.capabilities_for(session, manager)
+                if not caps.supports_images:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{session.agent_type.value} does not support image attachments",
+                    )
             try:
-                await manager.edit_resend(
+                removed_turn_count = await manager.edit_resend(
                     session,
                     payload.text,
                     payload.client_turn_id,
                     payload.turn_id,
                     turn_metadata={"origin": "web"},
+                    added_images=images,
+                    added_previews=previews,
                 )
             except HTTPException:
                 raise
             except Exception as exc:
                 raise map_edit_resend_exception(exc) from exc
-        return {"ok": True}
+        # ``removed_turn_count`` is additive: clients that only read ``ok``
+        # keep working, the composer can tell the user what the rewrite
+        # discarded.
+        return {"ok": True, "removed_turn_count": removed_turn_count}
 
     return AgentStreamControlEndpoints(
         cancel_stream_turn=cancel_stream_turn,

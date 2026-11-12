@@ -424,20 +424,53 @@ MASO_PAYLOAD = {
 }
 
 
+MASO_MODELS = [
+    {
+        "key": "seed-stable",
+        "model_name": "ep-20260815235131-vfr5s",
+        "display_name": "seed-stable",
+        "selector_primary_key": "seed-stable",
+    },
+    {
+        "key": "seed-stable-reasoning",
+        "model_name": "ep-20260815235131-vfr5s",
+        "display_name": "seed-stable-reasoning",
+        "selector_primary_key": "seed-stable",
+    },
+    {
+        "key": "gpt-6-astra",
+        "model_name": "gpt-6-astra",
+        "display_name": "gpt-6-astra",
+        "selector_primary_key": "gpt-6-astra",
+    },
+]
+
+
 @pytest.fixture
 def maso_service(monkeypatch):
     """Mock discovery plus the HTTP transport; never touch a live service."""
-    state = {"payload": MASO_PAYLOAD, "status": 200, "body": None}
+    state = {
+        "payload": MASO_PAYLOAD,
+        "status": 200,
+        "body": None,
+        "catalog": MASO_MODELS,
+        "catalog_status": 200,
+    }
     calls: list[str] = []
     original = httpx.AsyncClient
 
     async def discover(env):
-        return "http://maso.test", [], "seed"
+        # Discovery fetches the catalog; the options carry both identities.
+        return "http://maso.test", maso_http._model_options(state["catalog"]), "seed"
 
     monkeypatch.setattr(pq, "discover_maso_service", discover)
 
     async def handle(request: httpx.Request) -> httpx.Response:
         calls.append(str(request.url))
+        if request.url.path == "/api/models":
+            if state["catalog_status"] != 200:
+                return httpx.Response(state["catalog_status"], json=[])
+            return httpx.Response(200, json=state["catalog"])
         if state["body"] is not None:
             return httpx.Response(state["status"], text=state["body"])
         return httpx.Response(state["status"], json=state["payload"])
@@ -473,7 +506,138 @@ async def test_maso_reading_prefers_the_effective_figures(maso_service) -> None:
     assert quota.limits[1].state == "no_limit"
     assert quota.limits[1].used_percent is None
     assert quota.limits[1].remaining_percent is None
+    # The endpoint id becomes the model people select; scope keeps the endpoint.
+    assert [limit.label for limit in quota.limits] == ["gpt-6-astra", "seed-stable"]
     assert calls == ["http://maso.test/api/llm-quota"]
+
+
+@pytest.mark.asyncio
+async def test_maso_quota_labels_an_unlisted_endpoint_as_unlisted(maso_service) -> None:
+    """An endpoint no catalog row names must not pose as a model name."""
+    state, calls = maso_service
+    # Two selectors without a shared primary marker name one endpoint: the first
+    # wins, and the unlisted endpoint is named for what it is.
+    state["catalog"] = [
+        {"key": "astra-first", "model_name": "gpt-6-astra"},
+        {"key": "astra-second", "model_name": "gpt-6-astra"},
+    ]
+
+    quota = await pq.read_maso_quota()
+
+    assert quota.available is True
+    assert [limit.scope for limit in quota.limits] == ["gpt-6-astra", "ep-20260815235131-vfr5s"]
+    assert [limit.label for limit in quota.limits] == [
+        "astra-first",
+        # The endpoint stays in scope; the label says what it is.
+        "Unlisted endpoint · vfr5s",
+    ]
+    assert quota.limits[1].scope == "ep-20260815235131-vfr5s"
+    # The raw catalog was consulted once, and still had no row for it.
+    assert calls == ["http://maso.test/api/llm-quota", "http://maso.test/api/models"]
+
+
+@pytest.mark.asyncio
+async def test_maso_quota_names_every_endpoint_of_a_split_selector_group(
+    maso_service,
+) -> None:
+    """One selector group may name several endpoints; none of them is unlisted."""
+    state, _calls = maso_service
+    state["catalog"] = [
+        {"key": "seed", "model_name": "ep-a", "selector_primary_key": "seed"},
+        {"key": "seed-high", "model_name": "ep-b", "selector_primary_key": "seed"},
+    ]
+    state["payload"] = {
+        "state": "within",
+        "models": [
+            {
+                "model": "ep-a",
+                "state": "within",
+                "effectiveState": "within",
+                "effectiveUsedPercent": 10,
+            },
+            {
+                "model": "ep-b",
+                "state": "within",
+                "effectiveState": "within",
+                "effectiveUsedPercent": 20,
+            },
+        ],
+        "grants": [],
+        "enforcing": True,
+        "fetchedAt": 1792036198.71,
+    }
+
+    quota = await pq.read_maso_quota()
+
+    # The model picker keeps one option per group (ep-a), so ep-b only has a
+    # name because the raw catalog was read.
+    assert [limit.label for limit in quota.limits] == ["seed", "seed-high"]
+
+
+@pytest.mark.asyncio
+async def test_maso_quota_names_unlisted_endpoints_with_the_catalog_failing(
+    maso_service,
+) -> None:
+    """A broken catalog never fails the reading; it just leaves rows unlisted."""
+    state, _calls = maso_service
+    state["catalog_status"] = 500
+    state["payload"] = {
+        "state": "within",
+        "models": [
+            {"model": "gpt-6-astra", "state": "within", "effectiveUsedPercent": 14},
+            {"model": "ep-20260815235131-vfr5s", "state": "no_limit"},
+            {"model": "ep-3-zzz", "state": "no_data"},
+        ],
+        "grants": [],
+        "enforcing": True,
+        "fetchedAt": 1792036198.71,
+    }
+
+    quota = await pq.read_maso_quota()
+
+    # The options discovery already returned still name what they cover; the
+    # endpoint only the failing catalog could have named stays unlisted.
+    assert quota.available is True
+    assert [limit.label for limit in quota.limits] == [
+        "gpt-6-astra",
+        "seed-stable",
+        "Unlisted endpoint · zzz",
+    ]
+
+
+def test_maso_unlisted_labels_stay_distinct_when_codes_collide() -> None:
+    """Two endpoints sharing a trailing code keep their full ids."""
+    limits = pq._maso_limits(
+        [{"model": "ep-1-abcde"}, {"model": "ep-2-abcde"}, {"model": "ep-3-fghij"}],
+        {},
+    )
+
+    assert [limit.label for limit in limits] == [
+        "ep-1-abcde",
+        "ep-2-abcde",
+        "Unlisted endpoint · fghij",
+    ]
+
+
+def test_maso_catalog_options_carry_the_endpoint_a_quota_row_names() -> None:
+    """Several selector keys share one endpoint; one option names that group."""
+    options = maso_http._model_options(
+        [
+            {
+                "key": "seed-stable-reasoning-high",
+                "model_name": "ep-1",
+                "selector_primary_key": "seed-stable",
+            },
+            {"key": "seed-stable", "model_name": "ep-1", "selector_primary_key": "seed-stable"},
+            {"key": "gone", "model_name": "ep-2", "deprecated": True},
+            {"key": "solo", "model_name": "ep-3"},
+        ]
+    )
+
+    assert [(option.label, option.description) for option in options] == [
+        ("seed-stable", "ep-1"),
+        ("solo", "ep-3"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -482,6 +646,7 @@ async def test_maso_refresh_is_forwarded_upstream(maso_service) -> None:
 
     await pq.read_maso_quota(refresh=True)
 
+    # The labels come from discovery's catalog, so the reading makes one request.
     assert calls == ["http://maso.test/api/llm-quota?refresh=true"]
 
 

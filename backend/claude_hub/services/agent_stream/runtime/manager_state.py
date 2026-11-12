@@ -182,7 +182,9 @@ class ManagerState(ABC):
         turn_id: str,
         *,
         turn_metadata: Optional[Dict[str, Any]] = None,
-    ) -> None:
+        added_images: Optional[List[bytes]] = None,
+        added_previews: Optional[List[Optional[bytes]]] = None,
+    ) -> int:
         raise NotImplementedError()
 
     @abstractmethod
@@ -199,7 +201,9 @@ class ManagerState(ABC):
         adapter: Any,
         *,
         turn_metadata: Optional[Dict[str, Any]] = None,
-    ) -> None:
+        added_images: Optional[List[bytes]] = None,
+        added_previews: Optional[List[Optional[bytes]]] = None,
+    ) -> int:
         raise NotImplementedError()
 
     @abstractmethod

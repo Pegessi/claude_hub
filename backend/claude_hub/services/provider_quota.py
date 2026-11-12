@@ -22,12 +22,16 @@ import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Tuple
 
 import httpx
 
 from ..models import ProviderQuota, QuotaLimit, QuotaResponse
-from .agent_stream.maso_http import MasoServiceUnavailable, configured_maso_base_url
+from .agent_stream.maso_http import (
+    MasoServiceUnavailable,
+    configured_maso_base_url,
+    maso_endpoint_labels,
+)
 from .maso_discovery import discover_maso_service, local_maso_registry_ports
 
 logger = logging.getLogger(__name__)
@@ -388,11 +392,59 @@ def _maso_absent_from_deployment() -> bool:
         return False
 
 
-def _maso_limits(rows: Any) -> List[QuotaLimit]:
-    """Map MASO's per-model rows, preferring its grant-adjusted figures."""
+# MASO enforces quota for endpoints it does not list as models (a rotated or
+# retired endpoint keeps its own ledger row), so no model name exists for them.
+# Saying what they are beats printing a bare id as if it were a model name; the
+# endpoint itself stays in `scope` for the row's tooltip.
+_UNLISTED_ENDPOINT_LABEL = "Unlisted endpoint · {}"
+
+
+def _maso_endpoints(rows: Any) -> List[str]:
+    """The endpoints MASO reported a quota row for."""
+    if not isinstance(rows, list):
+        return []
+    return [
+        row["model"]
+        for row in rows
+        if isinstance(row, dict) and isinstance(row.get("model"), str) and row.get("model")
+    ]
+
+
+def _maso_unlisted_label(endpoint: str) -> str:
+    """A short name for an unnamed endpoint: its trailing code, or the id.
+
+    Endpoint ids are ``ep-<timestamp>-<code>``; the trailing code is what makes
+    two of them different at a glance, and the full id stays in ``scope``. Two
+    endpoints that share a code keep their full ids so their rows stay distinct.
+    """
+    tail = endpoint.rsplit("-", 1)[-1] if "-" in endpoint else endpoint
+    return _UNLISTED_ENDPOINT_LABEL.format(tail)
+
+
+def _maso_unlisted_labels(endpoints: Iterable[str]) -> Dict[str, str]:
+    """Labels for the endpoints no catalog row names.
+
+    The trailing code identifies an endpoint at a glance, but two endpoints may
+    share one; those rows keep their full ids so they stay distinguishable.
+    """
+    tails = {endpoint: _maso_unlisted_label(endpoint) for endpoint in endpoints}
+    shared = {label for label in tails.values() if list(tails.values()).count(label) > 1}
+    return {endpoint: endpoint if label in shared else label for endpoint, label in tails.items()}
+
+
+def _maso_limits(rows: Any, labels: Optional[Mapping[str, str]] = None) -> List[QuotaLimit]:
+    """Map MASO's per-model rows, preferring its grant-adjusted figures.
+
+    The row's ``model`` is an upstream endpoint, so the label is the catalog's
+    model name for that endpoint (`seed-stable`), and an endpoint no catalog row
+    names is labelled as unlisted instead of posing as a model; ``scope`` keeps
+    the endpoint itself, which is what MASO enforces.
+    """
     limits: List[QuotaLimit] = []
     if not isinstance(rows, list):
         return limits
+    named = labels or {}
+    unlisted = _maso_unlisted_labels(_maso_endpoints(rows))
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -405,7 +457,7 @@ def _maso_limits(rows: Any) -> List[QuotaLimit]:
         limits.append(
             QuotaLimit(
                 scope=model,
-                label=model,
+                label=named.get(model) or unlisted.get(model, model),
                 state=_limit_state(row.get("effectiveState") or row.get("state")),
                 used_percent=used,
                 remaining_percent=None if used is None else 100 - used,
@@ -418,7 +470,7 @@ def _maso_limits(rows: Any) -> List[QuotaLimit]:
 async def read_maso_quota(refresh: bool = False) -> ProviderQuota:
     """Ask the discovered local MASO service for its quota snapshot."""
     try:
-        base_url, _models, _default = await discover_maso_service({})
+        base_url, models, _default = await discover_maso_service({})
     except MasoServiceUnavailable as exc:
         if _maso_absent_from_deployment():
             return _maso_not_configured()
@@ -427,6 +479,14 @@ async def read_maso_quota(refresh: bool = False) -> ProviderQuota:
         return _maso_unavailable(str(exc))
     except (ValueError, OSError):
         return _maso_unavailable(_MASO_UNAVAILABLE_MESSAGE)
+    # Discovery already fetched the catalog: each option names its upstream
+    # endpoint (`description`) and the model a person selects (`label`). A
+    # catalog that repeats an endpoint without a primary marker keeps the first
+    # name rather than the last.
+    labels: Dict[str, str] = {}
+    for option in models:
+        if option.description and option.label and option.description not in labels:
+            labels[option.description] = option.label
     try:
         async with httpx.AsyncClient(
             base_url=base_url, trust_env=False, timeout=_MASO_TIMEOUT_S
@@ -436,6 +496,14 @@ async def read_maso_quota(refresh: bool = False) -> ProviderQuota:
             )
             response.raise_for_status()
             payload = response.json()
+            # Options cover the usual case with no extra request. A quota
+            # endpoint they do not cover means either a group whose rows
+            # disagree about their endpoint (one option per group keeps only
+            # one of them) or an endpoint MASO does not list at all, so ask the
+            # raw catalog once before labelling anything unlisted.
+            endpoints = _maso_endpoints(payload.get("models"))
+            if any(endpoint not in labels for endpoint in endpoints):
+                labels = {**labels, **await maso_endpoint_labels(client)}
     except (httpx.HTTPError, TimeoutError, ValueError):
         # Upstream status text may quote request detail; report Hub's own.
         logger.warning("maso quota: request failed", exc_info=True)
@@ -455,7 +523,7 @@ async def read_maso_quota(refresh: bool = False) -> ProviderQuota:
             else None
         ),
         stale=False,
-        limits=_maso_limits(payload.get("models")),
+        limits=_maso_limits(payload.get("models"), labels),
         enforcing=enforcing if isinstance(enforcing, bool) else None,
     )
 

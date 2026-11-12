@@ -280,7 +280,9 @@ async def main(browser_run: BrowserRun) -> None:
                     }[provider]
                     labels = {
                         "codex": "5-hour limit",
-                        "maso": "gpt-6-astra",
+                        # MASO labels a row with the model a person selects; an
+                        # endpoint it does not list is named for what it is.
+                        "maso": "Unlisted endpoint · b8c6q",
                         "antigravity": "Gemini Models · Weekly limit",
                     }
                     body = {
@@ -294,7 +296,11 @@ async def main(browser_run: BrowserRun) -> None:
                                 "stale": False,
                                 "limits": [
                                     {
-                                        "scope": f"{provider}-window",
+                                        "scope": (
+                                            "ep-20261020185502-b8c6q"
+                                            if provider == "maso"
+                                            else f"{provider}-window"
+                                        ),
                                         "label": labels[provider],
                                         "state": "within",
                                         "used_percent": 100 - remaining,
@@ -360,6 +366,14 @@ async def main(browser_run: BrowserRun) -> None:
                 "codex": round((asyncio.get_running_loop().time() - quota_started) * 1000)
             }
             await expect(maso_quota).to_contain_text("80% left")
+            # A quota row's tooltip keeps the identifier behind its label: the
+            # panel labels MASO endpoints its catalog does not list as
+            # "Unlisted endpoint · <code>", and the endpoint stays reachable.
+            maso_label = maso_quota.locator(".quota-row-label").first
+            await expect(maso_label).to_have_text("Unlisted endpoint · b8c6q")
+            await expect(maso_label).to_have_attribute(
+                "title", "Unlisted endpoint · b8c6q (ep-20261020185502-b8c6q)"
+            )
             report["quota_mock_visible_ms"]["maso"] = round(
                 (asyncio.get_running_loop().time() - quota_started) * 1000
             )
@@ -469,6 +483,24 @@ async def main(browser_run: BrowserRun) -> None:
             ).to_be_in_viewport()
             await page.screenshot(path=str(output / "restart-mobile.png"), full_page=True)
             report["screenshots"].extend(["restart-desktop.png", "restart-mobile.png"])
+            # This native <dialog> is a phone sheet. With the keyboard open the
+            # shared overlay rule must lift it above the keyboard and keep its
+            # header inside the viewport; a lift without a bound pushes the top
+            # off-screen instead.
+            keyboard = await dialog.evaluate("""el => {
+                    const root = document.documentElement
+                    root.style.setProperty('--visual-viewport-height', '480px')
+                    root.style.setProperty('--keyboard-height', '364px')
+                    const box = el.getBoundingClientRect()
+                    return { top: box.top, bottom: box.bottom, height: box.height }
+                }""")
+            assert keyboard["top"] >= -1, keyboard
+            assert keyboard["bottom"] <= 480 + 1, keyboard
+            await dialog.evaluate("""() => {
+                    const root = document.documentElement
+                    root.style.removeProperty('--visual-viewport-height')
+                    root.style.removeProperty('--keyboard-height')
+                }""")
             await page.set_viewport_size({"width": 1280, "height": 900})
             await dialog.get_by_role("button", name="Build and restart", exact=True).click()
             for _ in range(30):

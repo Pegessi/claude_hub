@@ -8,7 +8,7 @@ const load = createSidebarLoader({
   'stores/appStore.ts': `import { ref } from 'vue'; const store = { mode: ref('terminal') }; export const useAppStore = () => store`,
   'composables/useViewport.ts': `import { ref } from 'vue'; export const mobile = ref(false); export const useViewport = () => ({ isMobile: mobile })`,
   'composables/useEdgeSwipeDrawer.ts': `import { ref } from 'vue'; export const calls = []; export function useEdgeSwipeDrawer(options) { calls.push(options); return { dragging: ref(false), translatePx: ref(0), backdropOpacity: ref(0) } }`,
-  'composables/useTabStatus.ts': `export const useTabStatus = () => ({ getTabStatus: () => 'idle', getTabStatusLabel: () => 'Idle' })`,
+  'composables/useTabStatus.ts': `export const useTabStatus = () => ({ getTabStatus: () => 'idle', getTabStatusLabel: () => 'Idle', isAwaitingAnswer: () => false })`,
   'components/TabActionsMenu.vue': `<template><button class="menu-stub" /></template><script setup>defineProps(['tab', 'variant'])</script>`,
   'components/ChatSidebarWorkingEffect.vue': `<template><div class="working-effect" /></template><script setup>defineProps(['seed'])</script>`,
 })
@@ -91,6 +91,28 @@ test('rename input keeps the native v-model composition guard and one parent-own
   await nextTick()
   app.unmount()
   assert.ok(inputRef === null, 'Unmount must release the rename input reference')
+})
+
+test('a waiting question keeps the completion colour but drops the unread badge', async t => {
+  installBrowser(t)
+  const waiting = { ...testTab, is_unread: true }
+  const root = { children: [] }
+  const app = makeRenderer().createApp({
+    setup: () => () => h(Row, {
+      tab: waiting, active: false, dragging: false, status: 'idle', awaiting: true,
+      statusLabel: 'Session status: Waiting for your answer',
+      renaming: false, renameName: '', setRenameInputRef() {},
+    }),
+  })
+  app.mount(root)
+  const light = find(root, hasClass('chat-sidebar__item-status'))
+  assert.ok(light)
+  assert.equal(light.attributes['data-status'], 'idle')
+  assert.equal(light.attributes['data-unread'], 'false', 'answering is the action, not reading')
+  assert.equal(light.attributes['data-awaiting'], 'true', 'the row marks the wait')
+  assert.equal(light.attributes['aria-label'], 'Session status: Waiting for your answer')
+  // The pulse belongs to a running session and must not appear here.
+  assert.equal(find(root, hasClass('working-effect')), null)
 })
 
 test('group slots and row components preserve the original DOM hierarchy and accessible events', async t => {

@@ -5,15 +5,22 @@
  * explicit `plan_first`, and storage failures must never block a Goal.
  */
 
-const STORAGE_KEY = 'claude-hub.goal-plan-first'
+/**
+ * Versioned so a value written while the option was on by default cannot
+ * outlive that default. Nobody chose `true` back then; they accepted the
+ * dialog. A Goal that parks for approval unannounced is exactly what the
+ * change removes, so the legacy key is deliberately not read.
+ */
+const STORAGE_KEY = 'claude-hub.goal-plan-first.v2'
 
 export function readPlanFirstPreference(storage: Pick<Storage, 'getItem'> | null | undefined): boolean {
   try {
     const raw = storage?.getItem(STORAGE_KEY)
-    // Absent means the option defaults on for a first-time user.
-    return raw === null || raw === undefined ? true : raw === 'true'
+    // Absent means the option defaults off: a Goal starts working at once
+    // unless the user asked to review the plan first.
+    return raw === null || raw === undefined ? false : raw === 'true'
   } catch {
-    return true
+    return false
   }
 }
 

@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ..models import AgentStreamEvent
-from .agent_stream.history import conversation_event_visible, replay_tool_identity
 from .backend_instance_lock import BackendInstanceLock
 from .local_storage import (
     connection,
@@ -153,6 +152,8 @@ def _last_complete_line(path: Path) -> bytes | None:
 def _insert_stream_event(
     db: sqlite3.Connection, stream_id: int, dictionary: bytes, event: AgentStreamEvent
 ) -> None:
+    from .agent_stream.history import conversation_event_visible, replay_tool_identity
+
     identity = replay_tool_identity(event)
     replay = (
         not event.turn_id

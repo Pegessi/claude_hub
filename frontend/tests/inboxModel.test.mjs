@@ -22,6 +22,7 @@ const {
   needsYouCount,
   RECENT_DONE_WINDOW_MS,
   resolveInboxKey,
+  rowDotState,
   statusLabel,
 } = await load('features/agent-status/inboxModel.ts')
 const { buildInboxReplyBody, canReplyInline, inlineReplyPath, sendInboxReply } = await load(
@@ -65,6 +66,34 @@ test('a pending question is the top reason to show the inbox at all', () => {
   assert.equal(row.reason, 'Waiting for your answer')
 })
 
+test('a card behind a failed provider names the failure, not just the wait', () => {
+  // The backend keeps pending_question on an attention/offline snapshot, where
+  // an answer can be refused; the row must not pretend the session is healthy.
+  const attention = classifyRow(
+    tab(),
+    status({ status: 'attention', detail: 'provider exited unexpectedly', pending_question: true }),
+    NOW,
+  )
+  assert.equal(attention.group, 'needs')
+  assert.equal(attention.reason, 'provider exited unexpectedly — a question is waiting')
+
+  const offline = classifyRow(tab(), status({ status: 'offline', pending_question: true }), NOW)
+  assert.equal(offline.group, 'needs')
+  assert.equal(offline.reason, 'Agent is offline — a question is waiting')
+})
+
+test('the dot follows the same failure rule as the row text', () => {
+  // pending_question also rides on an attention/offline snapshot; the amber
+  // needs dot must not repaint a provider that failed or went away.
+  assert.equal(rowDotState(status({ status: 'working', pending_question: true }), 'needs'), 'needs')
+  assert.equal(rowDotState(status({ status: 'idle', pending_question: true }), 'needs'), 'needs')
+  assert.equal(rowDotState(status({ status: 'attention', pending_question: true }), 'needs'), 'attention')
+  assert.equal(rowDotState(status({ status: 'offline', pending_question: true }), 'needs'), 'offline')
+  assert.equal(rowDotState(status({ status: 'attention' }), 'needs'), 'attention')
+  assert.equal(rowDotState(null, 'working'), 'working')
+  assert.equal(rowDotState(undefined, 'done'), 'idle')
+})
+
 test('a blocked question keeps a timestamp even without an activity clock', () => {
   // An idle turn that asked a question reports no activity_since; the newest
   // reply is its only real time, so the top row must still say when.
@@ -85,12 +114,24 @@ test('a blocked question keeps a timestamp even without an activity clock', () =
   assert.equal(empty.sinceMs, null)
 })
 
-test('an unread finished turn needs you, a read one does not', () => {
+test('an unread finished turn needs you on manual Chats, while agent-managed turns do not', () => {
   const unread = classifyRow(tab({ is_unread: true }), status({ last_reply_at: '2026-11-09T11:50:00Z' }), NOW)
   const read = classifyRow(tab({ is_unread: false }), status(), NOW)
+  const workspaceUnread = classifyRow(
+    tab({ id: 'ws-orch', is_unread: true, workspace_id: 'ws-1', workspace_role: 'orchestrator' }),
+    status({ tab_id: 'ws-orch', last_reply_at: '2026-11-09T11:50:00Z' }),
+    NOW,
+  )
+  const subagentUnread = classifyRow(
+    tab({ id: 'sub-1', is_unread: true, parent_tab_id: 'tab-1', subagent_id: 'sa-1' }),
+    status({ tab_id: 'sub-1', last_reply_at: '2026-11-09T11:50:00Z' }),
+    NOW,
+  )
   assert.equal(unread.group, 'needs')
   assert.equal(unread.reason, 'New reply')
   assert.equal(read.group, 'done')
+  assert.equal(workspaceUnread.group, 'done')
+  assert.equal(subagentUnread.group, 'done')
 })
 
 test('a still-running turn with an older unread reply stays in Working', () => {
@@ -165,18 +206,22 @@ test('stale finished rows drop out of Recently done', () => {
   assert.equal(only(rows, 'done').length, 0)
 })
 
-test('the manual/agent filter is a filter, not a second list', () => {
-  const tabs = [tab({ id: 'm', name: 'Manual' }), tab({ id: 'w', name: 'Workspace', workspace_id: 'ws-1' })]
-  const statuses = [status({ tab_id: 'm' }), status({ tab_id: 'w' })]
+test('the manual/agent filter keeps sub-agents and workspace roles out of manual Chats', () => {
+  const tabs = [
+    tab({ id: 'm', name: 'Manual' }),
+    tab({ id: 'w', name: 'Workspace', workspace_id: 'ws-1' }),
+    tab({ id: 's', name: 'Subagent', parent_tab_id: 'm', subagent_id: 'sa-1' }),
+  ]
+  const statuses = [status({ tab_id: 'm' }), status({ tab_id: 'w' }), status({ tab_id: 's' })]
   assert.deepEqual(
     flattenRows(buildInbox(tabs, statuses, { nowMs: NOW, scope: 'manual' })).map(row => row.tab.id),
     ['m'],
   )
   assert.deepEqual(
     flattenRows(buildInbox(tabs, statuses, { nowMs: NOW, scope: 'workspace' })).map(row => row.tab.id),
-    ['w'],
+    ['w', 's'],
   )
-  assert.equal(flattenRows(buildInbox(tabs, statuses, { nowMs: NOW, scope: 'all' })).length, 2)
+  assert.equal(flattenRows(buildInbox(tabs, statuses, { nowMs: NOW, scope: 'all' })).length, 3)
 })
 
 test('archived sessions never enter the inbox', () => {

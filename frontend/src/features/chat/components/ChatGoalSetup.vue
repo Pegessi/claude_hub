@@ -10,6 +10,7 @@
     :plan-first-disabled-reason="planFirstDisabledReason"
     @close="isGoalSetupOpen = false"
     @submit="startGoal"
+    @paste="handleGoalPaste"
   >
     <template #recovery>
       <div
@@ -82,9 +83,23 @@
 import { requireChatOwner, chatGoalKey, chatAttachmentsKey, chatDeliveryKey, chatImagesKey } from '../owners'
 import GoalSetupDialog from '@/components/GoalSetupDialog.vue'
 const { isGoalSetupOpen, isGoalMutating, isGoalHydrating, hydrateGoal, goalError, isGoalEditing, goal, startGoal, planFirstPreferred, planFirstDisabledReason } = requireChatOwner(chatGoalKey)
-const { isPreparingAttachments, attachmentDisabledReason, triggerFilePicker, attachments, removeAttachment } = requireChatOwner(chatAttachmentsKey)
+const { isPreparingAttachments, attachmentDisabledReason, triggerFilePicker, attachments, removeAttachment, handlePaste } = requireChatOwner(chatAttachmentsKey)
 const { composerError } = requireChatOwner(chatDeliveryKey)
 const { openImageLightbox } = requireChatOwner(chatImagesKey)
+
+/** A pasted image joins the same draft the "Add images" button fills, so
+ *  ``startGoal`` sends it with the first Goal turn. Editing an existing Goal
+ *  has no image field: the dialog tells the reader to steer the Chat instead,
+ *  and a draft staged here would be invisible (the picker is hidden while
+ *  editing) yet still attached to the next composer send. */
+function handleGoalPaste(event: ClipboardEvent) {
+  if (isGoalEditing.value) return
+  // While the Goal is being created the request already carries a snapshot of
+  // these images and clears the array when it resolves, so a paste here would
+  // stage a chip that silently disappears.
+  if (isGoalMutating.value) return
+  handlePaste(event)
+}
 </script>
 
 <style scoped>
@@ -101,6 +116,19 @@ const { openImageLightbox } = requireChatOwner(chatImagesKey)
   cursor: pointer;
 }
 .goal-status-recovery button:disabled { opacity: 0.55; cursor: default; }
+/* The picker owns this row inside the Goal dialog: one line for the caption,
+   then the trigger and the chips side by side instead of stacked at zero gap. */
+.goal-image-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.goal-image-picker p {
+  flex: 1 1 100%;
+}
+
 .attachment-chip {
   position: relative;
   width: 48px;

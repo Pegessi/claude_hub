@@ -2,7 +2,10 @@
   <div
     class="conversation-row conversation-row--assistant conversation-row--subagent"
   >
-    <details class="subagent-card subagent-card--standalone">
+    <details
+      class="subagent-card subagent-card--standalone"
+      :data-subagent-thread-id="part.tool.callId || part.tool.key"
+    >
       <summary
         class="subagent-header"
         :class="{ 'subagent-header--running': part.tool.status === 'running' }"

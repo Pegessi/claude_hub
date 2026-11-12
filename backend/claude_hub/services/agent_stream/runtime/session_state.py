@@ -313,6 +313,7 @@ class SessionState(ABC):
         before_send: Optional[Callable[[], Awaitable[None]]] = None,
         before_delivery: Optional[Callable[[], None]] = None,
         allow_question_answer: bool = True,
+        retain_previews_on_delivery_failure: bool = True,
     ) -> None:
         raise NotImplementedError()
 

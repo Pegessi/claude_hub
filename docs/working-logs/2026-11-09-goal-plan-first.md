@@ -79,3 +79,34 @@ is not allowed to invent new control layers for it.
   than misread.
 - An ordinary (non-Goal) turn that emits `<goal-plan>` in prose keeps it visible:
   only Goal turns strip every control block.
+
+## 2026-11-11: the approval gate is opt-in
+
+The mechanism above is unchanged; its default is not. A Goal started to
+implement a small review fix parked on `blocked` and rendered
+"Approve & start / Revise" without anyone asking to review a plan — the setup
+dialog's Plan-first checkbox had simply been ticked because it opened ticked.
+
+- `readPlanFirstPreference` returns `false` when nothing is stored, and
+  `GoalSetupDialog` opens unchecked and says `The Goal starts working immediately.`
+  Ticking it shows the old promise (`Nothing starts until you approve.`) and
+  sends the same additive `plan_first: true`.
+- The preference key is now `claude-hub.goal-plan-first.v2`. The old key was
+  written on every Goal creation, so a stored `true` there means "the dialog
+  was on by default", not "the user wanted a gate"; carrying it over would keep
+  the surprise for existing users. A deliberate opt-in is remembered from now
+  on under the new key.
+- Unchanged: the plan envelope, the `needs_input` park, the plan card and its
+  actions, the refusal for provider-native Goals, and every backend contract.
+  A caller that sends `plan_first: true` still gets exactly the approval flow
+  described above; a caller that omits it (CLI, Feishu, older clients) is
+  untouched.
+- Validation: `frontend/tests/goalPlanCard.test.mjs` (default off, round trip,
+  and the legacy key ignored), `frontend/tests/browser_chat_goal_steer.py` (the
+  dialog opens unchecked, sends `plan_first: false`, and gates after ticking —
+  the plan-card assertions still run through the opt-in path).
+
+Not done here: a plan that is *displayed* without gating. That would need a
+third state (produce the plan, keep working, show it as an aid) and a new
+request/goal field, which the design deliberately avoids inventing; ask before
+adding one.
