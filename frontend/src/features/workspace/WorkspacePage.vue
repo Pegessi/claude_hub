@@ -1,7 +1,5 @@
 <template>
   <section class="workspace-view">
-    <WorkspaceHeader />
-
     <WorkspaceStyleShowcase
       v-if="runtime.isStyleDemoOpen.value"
       :initial-style="runtime.initialDemoStyle"
@@ -9,6 +7,8 @@
     />
 
     <template v-else>
+      <WorkspaceHeader />
+
       <WorkspaceSummary />
 
       <WorkspaceAgentStatus />

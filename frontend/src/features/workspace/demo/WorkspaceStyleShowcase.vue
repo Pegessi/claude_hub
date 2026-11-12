@@ -1,42 +1,17 @@
 <template>
-  <div class="ws-demo-shell">
-    <!-- Top Style Switcher Bar -->
-    <header class="ws-demo-bar">
-      <div class="ws-demo-bar-title">
-        <span class="ws-demo-pill">UX Prototype</span>
-        <h2>Workspace Task Showcase</h2>
-        <p class="ws-demo-subtitle">
-          {{ currentStyleMeta.tagline }}
-        </p>
-      </div>
-
-      <div class="ws-demo-controls">
-        <div
-          class="ws-demo-segmented"
-          role="tablist"
-          aria-label="Workspace Demo Style"
-        >
-          <button
-            v-for="opt in DEMO_STYLES"
-            :key="opt.id"
-            type="button"
-            role="tab"
-            :aria-selected="activeStyle === opt.id"
-            :class="['ws-demo-tab', { active: activeStyle === opt.id }]"
-            @click="selectStyle(opt.id)"
-          >
-            <strong>{{ opt.code }}</strong>
-            <span>{{ opt.name }}</span>
-          </button>
-        </div>
-
+  <div class="zen-shell">
+    <!-- Single, quiet 44px top bar — zero double headers, zero pill clutter -->
+    <header class="zen-topbar">
+      <div class="zen-topbar-left">
+        <span class="zen-brand">Workspace</span>
+        <span class="zen-sep">/</span>
         <select
           v-model="workspaceFilter"
-          class="ws-demo-filter"
-          aria-label="Filter by workspace"
+          class="zen-ws-select"
+          aria-label="Filter workspace"
         >
           <option value="all">
-            All workspaces ({{ DEMO_TASKS.length }})
+            All repositories
           </option>
           <option
             v-for="ws in workspaceNames"
@@ -46,432 +21,462 @@
             {{ ws }}
           </option>
         </select>
+      </div>
 
+      <nav
+        class="zen-style-tabs"
+        role="tablist"
+        aria-label="Design direction"
+      >
+        <button
+          v-for="opt in DEMO_STYLES"
+          :key="opt.id"
+          type="button"
+          role="tab"
+          :aria-selected="activeStyle === opt.id"
+          :class="['zen-style-tab', { active: activeStyle === opt.id }]"
+          @click="activeStyle = opt.id"
+        >
+          {{ opt.label }}
+        </button>
+      </nav>
+
+      <div class="zen-topbar-right">
+        <span class="zen-ref-hint">{{ currentStyleMeta.reference }}</span>
         <button
           type="button"
-          class="ws-demo-exit"
+          class="zen-ghost-btn"
           @click="$emit('exit')"
         >
-          Classic Board
+          Classic view
         </button>
       </div>
     </header>
 
-    <!-- ==================== STYLE A: LINEAR TRIAGE + RUN TIMELINE ==================== -->
+    <!-- =======================================================================
+         DIRECTION 1: LINEAR SPLIT (Borderless Hairline List + Editorial Spine)
+         ======================================================================= -->
     <div
-      v-if="activeStyle === 'triage_timeline'"
-      class="ws-style-a"
+      v-if="activeStyle === 'linear_zen'"
+      class="zen-linear"
     >
-      <div class="ws-a-list-pane">
+      <aside
+        class="zen-linear-list"
+        aria-label="Tasks"
+      >
         <section
           v-for="group in groupedTasks"
           :key="group.key"
-          class="ws-a-group"
+          class="zen-group"
         >
-          <header class="ws-a-group-head">
-            <span :class="['ws-dot', `ws-dot--${group.dotTone}`]" />
-            <h3>{{ group.label }}</h3>
-            <span class="ws-count">{{ group.items.length }}</span>
+          <header class="zen-group-header">
+            <span>{{ group.label }}</span>
+            <span class="zen-num">{{ group.items.length }}</span>
           </header>
 
-          <div class="ws-a-rows">
-            <article
-              v-for="item in group.items"
-              :key="item.id"
-              :class="['ws-a-row', { selected: selectedTask.id === item.id }]"
-              tabindex="0"
-              @click="selectedTaskId = item.id"
-              @keydown.enter="selectedTaskId = item.id"
-            >
-              <div class="ws-a-row-main">
-                <span :class="['ws-dot', `ws-dot--${item.statusTone}`]" />
-                <span class="ws-a-row-title">{{ item.title }}</span>
-              </div>
-              <div class="ws-a-row-sub">
-                <span class="ws-mono-chip">{{ item.workspace }}</span>
-                <span class="ws-status-text">{{ item.statusBadge }}</span>
-                <span class="ws-muted-text">{{ item.elapsed }} · {{ item.updatedAgo }}</span>
-                <span
-                  v-for="link in item.links.slice(0, 2)"
-                  :key="link.label"
-                  class="ws-link-pill"
-                >{{ link.label }} ↗</span>
-              </div>
-            </article>
+          <div
+            v-for="item in group.items"
+            :key="item.id"
+            :class="['zen-row', { active: selectedTask.id === item.id }]"
+            tabindex="0"
+            @click="selectedTaskId = item.id"
+            @keydown.enter="selectedTaskId = item.id"
+          >
+            <span :class="['zen-dot', `zen-dot--${item.statusTone}`]" />
+            <span class="zen-row-title">{{ item.title }}</span>
+            <span class="zen-row-meta zen-num">{{ item.elapsed }}</span>
           </div>
         </section>
-      </div>
+      </aside>
 
-      <!-- Style A Right Detail: 3-Section Clean Run Timeline -->
-      <aside
-        class="ws-a-detail-pane"
-        aria-label="Selected task timeline"
-      >
-        <div class="ws-detail-head">
-          <div class="ws-detail-badges">
-            <span :class="['ws-tone-pill', `ws-tone-pill--${selectedTask.statusTone}`]">
-              {{ selectedTask.statusBadge }}
+      <main class="zen-linear-detail">
+        <div class="zen-editorial">
+          <div class="zen-meta-line">
+            <span :class="['zen-status-word', `zen-status-word--${selectedTask.statusTone}`]">
+              <i :class="['zen-dot', `zen-dot--${selectedTask.statusTone}`]" />
+              {{ selectedTask.statusLabel }}
             </span>
-            <span class="ws-mono-chip">{{ selectedTask.workspace }} · {{ selectedTask.branch }}</span>
+            <span>·</span>
+            <span class="zen-mono">{{ selectedTask.workspace }}</span>
+            <span>·</span>
+            <span class="zen-mono">{{ selectedTask.branch }}</span>
+            <template v-if="selectedTask.diffStat">
+              <span>·</span>
+              <span class="zen-diff-add zen-num">+{{ selectedTask.diffStat.added }}</span>
+              <span class="zen-diff-del zen-num">−{{ selectedTask.diffStat.removed }}</span>
+            </template>
           </div>
-          <h3>{{ selectedTask.title }}</h3>
-          <p class="ws-detail-outcome">
-            {{ selectedTask.outcomeHeadline }}
+
+          <h1 class="zen-title">
+            {{ selectedTask.title }}
+          </h1>
+
+          <p class="zen-summary">
+            {{ selectedTask.outcomeSummary }}
           </p>
 
-          <div
-            v-if="selectedTask.links.length > 0"
-            class="ws-link-row"
-          >
+          <div class="zen-links-bar">
             <a
               v-for="link in selectedTask.links"
               :key="link.label"
               :href="link.url"
               target="_blank"
               rel="noopener noreferrer"
-              class="ws-external-capsule"
+              class="zen-text-link"
             >
               {{ link.label }} ↗
             </a>
+            <span class="zen-checks-note">✓ {{ selectedTask.checksLabel }}</span>
           </div>
 
+          <!-- Quiet, flat decision bar only when waiting on human -->
           <div
-            v-if="selectedTask.decisionPrompt"
-            class="ws-decision-banner"
+            v-if="selectedTask.decisionLine"
+            class="zen-decision-bar"
           >
-            <p>{{ selectedTask.decisionPrompt }}</p>
-            <div class="ws-decision-actions">
+            <span class="zen-decision-copy">{{ selectedTask.decisionLine }}</span>
+            <div class="zen-decision-btns">
               <button
                 type="button"
-                class="ws-btn ws-btn--primary"
+                class="zen-ghost-btn"
               >
-                Accept &amp; Clean Session
+                Steer…
               </button>
               <button
                 type="button"
-                class="ws-btn"
+                class="zen-primary-btn"
               >
-                Steer / Request Revision
+                Accept
               </button>
             </div>
           </div>
-        </div>
 
-        <div class="ws-timeline-section">
-          <div class="ws-section-label">
-            <span>Run Timeline ({{ selectedTask.timeline.length }} stages)</span>
-            <span>{{ selectedTask.acceptancePassed }}/{{ selectedTask.acceptanceTotal }} checks verified</span>
+          <div
+            v-else-if="selectedTask.liveStep"
+            class="zen-live-banner"
+          >
+            <span class="zen-pulse-dot" />
+            <span class="zen-mono">{{ selectedTask.liveStep }}</span>
           </div>
 
-          <ol class="ws-run-timeline">
-            <li
-              v-for="node in selectedTask.timeline"
-              :key="node.id"
-              :class="['ws-run-node', `ws-run-node--${node.tone}`]"
+          <!-- Pure Vertical Spine Timeline (zero card-in-card boxes) -->
+          <section class="zen-spine-section">
+            <h2 class="zen-micro-heading">
+              TIMELINE
+            </h2>
+            <ol class="zen-spine">
+              <li
+                v-for="node in selectedTask.timeline"
+                :key="node.id"
+                :class="['zen-spine-item', `zen-spine-item--${node.tone}`]"
+              >
+                <span class="zen-spine-time zen-num">{{ node.timeLabel }}</span>
+                <span class="zen-spine-track">
+                  <i class="zen-spine-node" />
+                </span>
+                <div class="zen-spine-body">
+                  <div class="zen-spine-head">
+                    <strong>{{ node.stage }}</strong>
+                    <span class="zen-spine-actor">{{ node.actor }} · {{ node.deltaLabel }}</span>
+                    <button
+                      v-if="node.sessionTabId"
+                      type="button"
+                      class="zen-inline-link"
+                      @click="openLogNodeId = openLogNodeId === node.id ? null : node.id"
+                    >
+                      {{ openLogNodeId === node.id ? 'Hide log' : 'Transcript ↗' }}
+                    </button>
+                  </div>
+                  <p>{{ node.summary }}</p>
+                  <div
+                    v-if="node.receipt"
+                    class="zen-spine-receipt zen-mono"
+                  >
+                    {{ node.receipt }}
+                  </div>
+                  <div
+                    v-if="openLogNodeId === node.id"
+                    class="zen-log-excerpt"
+                  >
+                    <div
+                      v-for="(line, idx) in selectedTask.transcriptExcerpt"
+                      :key="idx"
+                      class="zen-log-row"
+                    >
+                      <span class="zen-mono">{{ line.time }}</span>
+                      <span class="zen-mono">{{ line.speaker }}</span>
+                      <span>{{ line.text }}</span>
+                    </div>
+                  </div>
+                </div>
+              </li>
+            </ol>
+          </section>
+
+          <details class="zen-meta-disclosure">
+            <summary>System metadata</summary>
+            <p class="zen-mono">
+              control={{ selectedTask.internalMeta.control }} · mode={{ selectedTask.internalMeta.mode }} · epoch={{ selectedTask.internalMeta.epoch }} · seat={{ selectedTask.internalMeta.seat }}
+            </p>
+          </details>
+        </div>
+      </main>
+    </div>
+
+    <!-- =======================================================================
+         DIRECTION 2: CALM READER (Centered Single-Column Inbox, Things 3 Style)
+         ======================================================================= -->
+    <div
+      v-else-if="activeStyle === 'focused_inbox'"
+      class="zen-reader-scroll"
+    >
+      <div class="zen-reader-column">
+        <header class="zen-reader-head">
+          <div>
+            <h1>Tasks</h1>
+            <p>Only items waiting for your judgment are expanded; active and archived work stays quiet.</p>
+          </div>
+          <div class="zen-filter-pills">
+            <button
+              v-for="f in readerFilters"
+              :key="f.id"
+              type="button"
+              :class="['zen-filter-btn', { active: readerBucket === f.id }]"
+              @click="readerBucket = f.id"
             >
-              <div class="ws-run-rail">
-                <span class="ws-run-marker" />
-              </div>
-              <div class="ws-run-card">
-                <div class="ws-run-card-top">
-                  <strong>{{ node.stage }}</strong>
-                  <span class="ws-model-tag">{{ node.modelBadge }}</span>
-                  <span class="ws-run-time">{{ node.timeLabel }} ({{ node.deltaLabel }})</span>
-                </div>
-                <p>{{ node.summary }}</p>
+              {{ f.label }}
+              <span class="zen-num">{{ f.count }}</span>
+            </button>
+          </div>
+        </header>
+
+        <div class="zen-reader-list">
+          <article
+            v-for="item in readerTasks"
+            :key="item.id"
+            :class="['zen-sheet-item', { expanded: expandedReaderId === item.id }]"
+          >
+            <div
+              class="zen-sheet-summary"
+              tabindex="0"
+              @click="toggleReaderExpand(item.id)"
+              @keydown.enter="toggleReaderExpand(item.id)"
+            >
+              <span :class="['zen-dot', `zen-dot--${item.statusTone}`]" />
+              <span class="zen-sheet-title">{{ item.title }}</span>
+              <span class="zen-sheet-ws zen-mono">{{ item.workspace }}</span>
+              <span class="zen-sheet-state">{{ item.statusLabel }}</span>
+              <span class="zen-sheet-time zen-num">{{ item.elapsed }}</span>
+            </div>
+
+            <!-- Smooth in-place editorial sheet when expanded -->
+            <div
+              v-if="expandedReaderId === item.id"
+              class="zen-sheet-body"
+            >
+              <p class="zen-sheet-outcome">
+                {{ item.outcomeSummary }}
+              </p>
+
+              <!-- Minimalist horizontal step track -->
+              <div class="zen-step-track">
                 <div
-                  v-if="node.verification"
-                  class="ws-run-verify"
+                  v-for="(node, idx) in item.timeline"
+                  :key="node.id"
+                  :class="['zen-step-cell', `zen-step-cell--${node.tone}`]"
                 >
-                  ✓ {{ node.verification }}
+                  <div class="zen-step-line">
+                    <i class="zen-step-dot" />
+                    <span
+                      v-if="idx < item.timeline.length - 1"
+                      class="zen-step-connector"
+                    />
+                  </div>
+                  <strong>{{ node.shortStage }}</strong>
+                  <span class="zen-num">{{ node.timeLabel }}</span>
                 </div>
+              </div>
+
+              <div class="zen-sheet-footer">
+                <div class="zen-sheet-links">
+                  <a
+                    v-for="link in item.links"
+                    :key="link.label"
+                    :href="link.url"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="zen-text-link"
+                  >
+                    {{ link.label }} ↗
+                  </a>
+                  <span class="zen-checks-note">· ✓ {{ item.checksLabel }}</span>
+                </div>
+
                 <div
-                  v-if="node.sessionTabId"
-                  class="ws-run-links"
+                  v-if="item.bucket === 'needs_you'"
+                  class="zen-decision-btns"
                 >
                   <button
                     type="button"
-                    class="ws-ghost-link"
-                    @click="peekTranscriptTabId = peekTranscriptTabId === node.id ? null : node.id"
+                    class="zen-ghost-btn"
                   >
-                    {{ peekTranscriptTabId === node.id ? 'Hide conversation excerpt' : `View ${node.sessionArchived ? 'archived ' : ''}conversation (${node.sessionTabId})` }}
+                    Steer…
+                  </button>
+                  <button
+                    type="button"
+                    class="zen-primary-btn"
+                  >
+                    Accept
                   </button>
                 </div>
-                <div
-                  v-if="peekTranscriptTabId === node.id"
-                  class="ws-inline-transcript"
-                >
-                  <div
-                    v-for="(line, idx) in selectedTask.transcriptPreview"
-                    :key="idx"
-                    class="ws-transcript-line"
-                  >
-                    <span class="ws-transcript-speaker">{{ line.speaker }}</span>
-                    <span class="ws-transcript-text">{{ line.text }}</span>
-                  </div>
-                </div>
               </div>
-            </li>
-          </ol>
+            </div>
+          </article>
         </div>
-
-        <details class="ws-internal-drawer">
-          <summary>Raw Prompt &amp; Scheduler Metadata (collapsed by default)</summary>
-          <div class="ws-internal-grid">
-            <div><span>Control</span><strong>{{ selectedTask.rawInternalMeta.executionControl }}</strong></div>
-            <div><span>Mode</span><strong>{{ selectedTask.rawInternalMeta.taskMode }}</strong></div>
-            <div><span>Epoch</span><strong>{{ selectedTask.rawInternalMeta.epoch }}</strong></div>
-            <div><span>Seat</span><strong>{{ selectedTask.rawInternalMeta.sessionSeat }}</strong></div>
-          </div>
-          <pre class="ws-raw-prompt">{{ selectedTask.rawInternalMeta.rawPromptPreview }}</pre>
-        </details>
-      </aside>
+      </div>
     </div>
 
-    <!-- ==================== STYLE B: COMPACT BOARD + WALKTHROUGH DELIVERABLE ==================== -->
+    <!-- =======================================================================
+         DIRECTION 3: TRACE LEDGER (Vercel / Raycast Swiss Precision Table)
+         ======================================================================= -->
     <div
-      v-else-if="activeStyle === 'walkthrough_board'"
-      class="ws-style-b"
+      v-else
+      class="zen-ledger-wrap"
     >
-      <div class="ws-b-columns">
-        <section
-          v-for="group in groupedTasks"
-          :key="group.key"
-          class="ws-b-col"
-        >
-          <header class="ws-b-col-head">
-            <span :class="['ws-dot', `ws-dot--${group.dotTone}`]" />
-            <h3>{{ group.label }}</h3>
-            <span class="ws-count">{{ group.items.length }}</span>
-          </header>
-
-          <div class="ws-b-cards">
-            <article
-              v-for="item in group.items"
+      <div class="zen-ledger-table-scroll">
+        <table class="zen-ledger">
+          <thead>
+            <tr>
+              <th class="col-status">
+                STATE
+              </th>
+              <th class="col-task">
+                TASK
+              </th>
+              <th class="col-repo">
+                BRANCH / DIFF
+              </th>
+              <th class="col-trace">
+                PIPELINE STAGES
+              </th>
+              <th class="col-checks">
+                VERIFICATION
+              </th>
+              <th class="col-time">
+                TIME
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="item in filteredTasks"
               :key="item.id"
-              :class="['ws-b-card', { selected: selectedTask.id === item.id }]"
+              :class="{ selected: selectedTask.id === item.id }"
               tabindex="0"
               @click="selectedTaskId = item.id"
               @keydown.enter="selectedTaskId = item.id"
             >
-              <div class="ws-b-card-top">
-                <span class="ws-mono-chip">{{ item.workspace }}</span>
-                <span class="ws-muted-text">{{ item.elapsed }}</span>
-              </div>
-              <h4>{{ item.title }}</h4>
-              <p class="ws-b-card-outcome">
-                {{ item.outcomeHeadline }}
-              </p>
-              <div class="ws-b-card-foot">
-                <span :class="['ws-tone-pill', `ws-tone-pill--${item.statusTone}`]">
-                  {{ item.statusBadge }}
+              <td>
+                <span class="zen-ledger-state">
+                  <i :class="['zen-dot', `zen-dot--${item.statusTone}`]" />
+                  {{ item.bucket === 'needs_you' ? 'Review' : item.bucket === 'working' ? 'Running' : 'Done' }}
                 </span>
-                <span class="ws-check-ratio">✓ {{ item.acceptancePassed }}/{{ item.acceptanceTotal }}</span>
-              </div>
-            </article>
-          </div>
-        </section>
+              </td>
+              <td>
+                <div class="zen-ledger-title">
+                  {{ item.title }}
+                </div>
+                <div class="zen-ledger-sub">
+                  {{ item.liveStep || item.outcomeSummary }}
+                </div>
+              </td>
+              <td class="zen-mono">
+                <div>{{ item.workspace }}</div>
+                <div class="zen-ledger-diff">
+                  <span>{{ item.branch }}</span>
+                  <template v-if="item.diffStat">
+                    <span class="zen-diff-add">+{{ item.diffStat.added }}</span>
+                    <span class="zen-diff-del">−{{ item.diffStat.removed }}</span>
+                  </template>
+                </div>
+              </td>
+              <td>
+                <div class="zen-pip-bar">
+                  <span
+                    v-for="node in item.timeline"
+                    :key="node.id"
+                    :class="['zen-pip', `zen-pip--${node.tone}`]"
+                    :title="`${node.stage} (${node.deltaLabel})`"
+                  />
+                  <span class="zen-pip-caption">{{ item.statusLabel }}</span>
+                </div>
+              </td>
+              <td class="zen-mono zen-ledger-checks">
+                {{ item.checksLabel }}
+              </td>
+              <td class="zen-num zen-ledger-time">
+                {{ item.elapsed }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </div>
 
-      <!-- Walkthrough Deliverable Sheet -->
-      <section
-        class="ws-b-walkthrough"
-        aria-label="Deliverable Walkthrough"
-      >
-        <div class="ws-b-walk-header">
-          <div>
-            <span class="ws-eyebrow">Deliverable Walkthrough</span>
-            <h3>{{ selectedTask.title }}</h3>
-          </div>
-          <div
-            v-if="selectedTask.bucket === 'needs_you'"
-            class="ws-decision-actions"
-          >
-            <button
-              type="button"
-              class="ws-btn ws-btn--primary"
-            >
-              Approve Deliverable
-            </button>
-            <button
-              type="button"
-              class="ws-btn"
-            >
-              Send Feedback
-            </button>
-          </div>
-        </div>
-
-        <div class="ws-b-walk-grid">
-          <div class="ws-b-walk-card">
-            <h4>Executive Outcome</h4>
-            <p>{{ selectedTask.outcomeHeadline }}</p>
-            <div class="ws-link-row">
+      <!-- Crisp, monochrome bottom inspector strip -->
+      <footer class="zen-ledger-drawer">
+        <div class="zen-ledger-drawer-col">
+          <div class="zen-drawer-head">
+            <strong>{{ selectedTask.title }}</strong>
+            <div class="zen-sheet-links">
               <a
                 v-for="link in selectedTask.links"
                 :key="link.label"
                 :href="link.url"
                 target="_blank"
                 rel="noopener noreferrer"
-                class="ws-external-capsule"
+                class="zen-text-link"
               >
                 {{ link.label }} ↗
               </a>
             </div>
           </div>
-
-          <div class="ws-b-walk-card">
-            <h4>Cross-Model Consensus &amp; Checks</h4>
-            <p class="ws-b-consensus">
-              {{ selectedTask.reviewRoundsSummary }}
-            </p>
-            <div
-              v-if="selectedTask.changedFiles.length > 0"
-              class="ws-file-chips"
-            >
-              <span
-                v-for="file in selectedTask.changedFiles"
-                :key="file"
-                class="ws-mono-chip"
-              >{{ file }}</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="ws-b-stepper">
-          <div
-            v-for="node in selectedTask.timeline"
-            :key="node.id"
-            :class="['ws-b-step', `ws-b-step--${node.tone}`]"
-          >
-            <span class="ws-b-step-time">{{ node.timeLabel }} ({{ node.deltaLabel }})</span>
-            <strong>{{ node.stage }}</strong>
-            <span class="ws-model-tag">{{ node.modelBadge }}</span>
-            <p>{{ node.summary }}</p>
-          </div>
-        </div>
-      </section>
-    </div>
-
-    <!-- ==================== STYLE C: LIVE COMMAND CENTER ==================== -->
-    <div
-      v-else
-      class="ws-style-c"
-    >
-      <div class="ws-c-grid">
-        <article
-          v-for="item in filteredTasks"
-          :key="item.id"
-          :class="['ws-c-unit', { selected: selectedTask.id === item.id }]"
-          tabindex="0"
-          @click="selectedTaskId = item.id"
-          @keydown.enter="selectedTaskId = item.id"
-        >
-          <div class="ws-c-unit-head">
-            <span :class="['ws-dot', `ws-dot--${item.statusTone}`]" />
-            <strong>{{ item.title }}</strong>
-            <span class="ws-c-elapsed">{{ item.elapsed }}</span>
-          </div>
-
-          <div class="ws-c-meta-strip">
-            <span class="ws-mono-chip">{{ item.workspace }}</span>
-            <span class="ws-mono-chip">{{ item.branch }}</span>
-            <span :class="['ws-tone-pill', `ws-tone-pill--${item.statusTone}`]">{{ item.statusBadge }}</span>
-          </div>
-
-          <div class="ws-c-live-box">
-            <template v-if="item.liveActivityLine">
-              <div class="ws-c-live-now">
-                ▸ {{ item.liveActivityLine }}
-              </div>
-              <div class="ws-c-live-counts">
-                {{ item.liveStepCounts }}
-              </div>
-            </template>
-            <template v-else>
-              <div class="ws-c-live-done">
-                {{ item.outcomeHeadline }}
-              </div>
-            </template>
-          </div>
-
-          <!-- Inline micro-milestone dots -->
-          <div class="ws-c-milestones">
-            <span
-              v-for="node in item.timeline"
-              :key="node.id"
-              :class="['ws-c-mile', `ws-c-mile--${node.tone}`]"
-              :title="`${node.stage} (${node.deltaLabel})`"
-            >
-              <i />
-              {{ node.stage.split('·')[0]?.trim() }}
-            </span>
-          </div>
-        </article>
-      </div>
-
-      <!-- Command Center Bottom Split: Stage Log + Live/Archived Read-Only Transcript -->
-      <section
-        class="ws-c-inspector"
-        aria-label="Command Center Inspector"
-      >
-        <div class="ws-c-inspector-col">
-          <div class="ws-section-label">
-            <span>Stage Progression · {{ selectedTask.id }}</span>
-            <div class="ws-link-row">
-              <a
-                v-for="link in selectedTask.links"
-                :key="link.label"
-                :href="link.url"
-                target="_blank"
-                rel="noopener noreferrer"
-                class="ws-link-pill"
-              >{{ link.label }} ↗</a>
-            </div>
-          </div>
-          <ol class="ws-c-stage-list">
+          <ol class="zen-compact-stages">
             <li
               v-for="node in selectedTask.timeline"
               :key="node.id"
             >
-              <span class="ws-run-time">{{ node.timeLabel }}</span>
-              <strong>{{ node.stage }}</strong>
-              <span class="ws-model-tag">{{ node.modelBadge }}</span>
-              <p>{{ node.summary }}</p>
+              <span class="zen-mono zen-num">{{ node.timeLabel }}</span>
+              <i :class="['zen-pip-dot', `zen-pip--${node.tone}`]" />
+              <strong>{{ node.shortStage }}</strong>
+              <span class="zen-compact-summary">{{ node.summary }}</span>
             </li>
           </ol>
         </div>
 
-        <div class="ws-c-inspector-col ws-c-transcript-pane">
-          <div class="ws-section-label">
-            <span>Read-only Session Stream Preview</span>
-            <span class="ws-mono-chip">{{ selectedTask.rawInternalMeta.sessionSeat }}</span>
-          </div>
-          <div class="ws-c-stream-lines">
-            <div
-              v-for="(line, idx) in selectedTask.transcriptPreview"
-              :key="idx"
-              :class="['ws-c-stream-row', `ws-c-stream-row--${line.role}`]"
-            >
-              <span class="ws-c-stream-time">{{ line.time }}</span>
-              <span class="ws-c-stream-speaker">{{ line.speaker }}</span>
-              <span class="ws-c-stream-body">{{ line.text }}</span>
-            </div>
-          </div>
-          <div
-            v-if="selectedTask.decisionPrompt"
-            class="ws-c-quick-bar"
-          >
-            <span>{{ selectedTask.decisionPrompt }}</span>
+        <div class="zen-ledger-drawer-col zen-ledger-log">
+          <div class="zen-drawer-head">
+            <span class="zen-micro-heading">SESSION STREAM</span>
             <button
+              v-if="selectedTask.bucket === 'needs_you'"
               type="button"
-              class="ws-btn ws-btn--primary"
+              class="zen-primary-btn zen-primary-btn--sm"
             >
-              Accept
+              Accept Deliverable
             </button>
           </div>
+          <div class="zen-log-excerpt zen-log-excerpt--flush">
+            <div
+              v-for="(line, idx) in selectedTask.transcriptExcerpt"
+              :key="idx"
+              class="zen-log-row"
+            >
+              <span class="zen-mono">{{ line.time }}</span>
+              <span class="zen-mono">{{ line.speaker }}</span>
+              <span>{{ line.text }}</span>
+            </div>
+          </div>
         </div>
-      </section>
+      </footer>
     </div>
   </div>
 </template>
@@ -486,57 +491,71 @@ import {
 } from './workspaceDemoData'
 
 const props = defineProps<{
-  initialStyle?: DemoStyleId
+  initialStyle?: string
 }>()
 
 defineEmits<{
   exit: []
 }>()
 
-const activeStyle = ref<DemoStyleId>(props.initialStyle ?? 'triage_timeline')
+function normalizeStyle(raw?: string): DemoStyleId {
+  if (raw === 'focused_inbox' || raw === 'precision_grid') return raw
+  return 'linear_zen'
+}
+
+const activeStyle = ref<DemoStyleId>(normalizeStyle(props.initialStyle))
 const workspaceFilter = ref<string>('all')
 const selectedTaskId = ref<string>(DEMO_TASKS[0].id)
-const peekTranscriptTabId = ref<string | null>('t3')
+const openLogNodeId = ref<string | null>(null)
+const readerBucket = ref<'all' | 'needs_you' | 'working' | 'done'>('all')
+const expandedReaderId = ref<string | null>(DEMO_TASKS[0].id)
 
-function selectStyle(id: DemoStyleId) {
-  activeStyle.value = id
+function toggleReaderExpand(id: string) {
+  expandedReaderId.value = expandedReaderId.value === id ? null : id
 }
 
 const currentStyleMeta = computed(() =>
   DEMO_STYLES.find(s => s.id === activeStyle.value) ?? DEMO_STYLES[0],
 )
 
-const workspaceNames = computed(() => {
-  const set = new Set<string>()
-  for (const t of DEMO_TASKS) set.add(t.workspace)
-  return [...set]
-})
+const workspaceNames = computed(() => [...new Set(DEMO_TASKS.map(t => t.workspace))])
 
-const filteredTasks = computed<DemoTaskRecord[]>(() => {
-  if (workspaceFilter.value === 'all') return [...DEMO_TASKS]
-  return DEMO_TASKS.filter(t => t.workspace === workspaceFilter.value)
-})
+const filteredTasks = computed<DemoTaskRecord[]>(() =>
+  workspaceFilter.value === 'all'
+    ? [...DEMO_TASKS]
+    : DEMO_TASKS.filter(t => t.workspace === workspaceFilter.value),
+)
 
 const groupedTasks = computed(() => [
   {
     key: 'needs_you',
-    label: 'Waiting on you',
-    dotTone: 'attention',
+    label: 'NEEDS YOU',
     items: filteredTasks.value.filter(t => t.bucket === 'needs_you'),
   },
   {
     key: 'working',
-    label: 'Working',
-    dotTone: 'working',
+    label: 'ACTIVE',
     items: filteredTasks.value.filter(t => t.bucket === 'working'),
   },
   {
     key: 'done',
-    label: 'Recently done',
-    dotTone: 'done',
+    label: 'RECENT',
     items: filteredTasks.value.filter(t => t.bucket === 'done'),
   },
 ])
+
+const readerFilters = computed(() => [
+  { id: 'all' as const, label: 'All', count: filteredTasks.value.length },
+  { id: 'needs_you' as const, label: 'Needs you', count: filteredTasks.value.filter(t => t.bucket === 'needs_you').length },
+  { id: 'working' as const, label: 'Active', count: filteredTasks.value.filter(t => t.bucket === 'working').length },
+  { id: 'done' as const, label: 'Done', count: filteredTasks.value.filter(t => t.bucket === 'done').length },
+])
+
+const readerTasks = computed(() =>
+  readerBucket.value === 'all'
+    ? filteredTasks.value
+    : filteredTasks.value.filter(t => t.bucket === readerBucket.value),
+)
 
 const selectedTask = computed<DemoTaskRecord>(() =>
   filteredTasks.value.find(t => t.id === selectedTaskId.value)
@@ -546,863 +565,934 @@ const selectedTask = computed<DemoTaskRecord>(() =>
 </script>
 
 <style scoped>
-.ws-demo-shell {
+/* ============================================================================
+   DESIGN CRAFT TOKENS (Radix Slate Dark + Geist Hairline + Linear Scarcity)
+   ============================================================================ */
+.zen-shell {
+  --z-bg-canvas: #111113;
+  --z-bg-panel: #16171a;
+  --z-bg-elevated: #1c1d21;
+  --z-bg-hover: rgba(255, 255, 255, 0.04);
+  --z-bg-selected: rgba(255, 255, 255, 0.065);
+  --z-line: rgba(255, 255, 255, 0.075);
+  --z-line-strong: rgba(255, 255, 255, 0.14);
+  --z-fg-1: #edeef0;
+  --z-fg-2: #a0a5ad;
+  --z-fg-3: #696e77;
+  --z-accent: #5e6ad2;
+  --z-accent-text: #9aa6ff;
+  --z-amber: #e5a44a;
+  --z-green: #4cb782;
+
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--ch-color-app-bg);
-  color: var(--ch-color-text);
-  overflow: hidden;
-}
-
-.ws-demo-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 18px;
-  border-bottom: 1px solid var(--ch-color-border-muted);
-  background: var(--ch-color-surface-raised);
-}
-
-.ws-demo-bar-title {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 10px;
-  min-width: 0;
-}
-
-.ws-demo-pill {
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--ch-color-accent-soft, rgba(74, 140, 224, 0.14));
-  border: 1px solid var(--ch-color-accent-ring-strong, rgba(74, 140, 224, 0.35));
-  color: var(--ch-color-accent);
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.ws-demo-bar-title h2 {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--ch-color-text-strong);
-}
-
-.ws-demo-subtitle {
-  flex: 1 1 100%;
-  margin: 0;
-  font-size: 12px;
-  color: var(--ch-color-text-muted);
-}
-
-.ws-demo-controls {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.ws-demo-segmented {
-  display: inline-flex;
-  padding: 3px;
-  border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface-sunken);
-  gap: 3px;
-}
-
-.ws-demo-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 30px;
-  padding: 4px 10px;
-  border: 1px solid transparent;
-  border-radius: var(--ch-radius-sm);
-  background: transparent;
-  color: var(--ch-color-text-muted);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.ws-demo-tab strong {
-  font-weight: 600;
-  color: var(--ch-color-text);
-}
-
-.ws-demo-tab.active {
-  background: var(--ch-color-surface-raised);
-  border-color: var(--ch-color-accent);
-  color: var(--ch-color-text-strong);
-}
-
-.ws-demo-filter,
-.ws-demo-exit {
-  height: 32px;
-  padding: 0 10px;
-  border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface-control);
-  color: var(--ch-color-text);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-/* Shared tokens */
-.ws-dot {
-  width: 8px;
-  height: 8px;
-  flex: 0 0 auto;
-  border-radius: 999px;
-  background: var(--ch-color-text-muted);
-}
-.ws-dot--attention { background: var(--ch-color-warning, #e5a44a); }
-.ws-dot--working { background: var(--ch-color-accent, #4a8ce0); }
-.ws-dot--done { background: var(--ch-color-success, #30a46c); }
-.ws-dot--failed { background: var(--ch-color-danger, #e5484d); }
-
-.ws-count {
-  font-size: 11px;
-  color: var(--ch-color-text-muted);
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--ch-color-surface-control);
-}
-
-.ws-mono-chip {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 7px;
-  border-radius: 6px;
-  background: var(--ch-color-surface-control);
-  border: 1px solid var(--ch-color-border-muted);
-  color: var(--ch-color-text-muted);
-  font-family: var(--ch-font-mono);
-  font-size: 11px;
-}
-
-.ws-link-pill,
-.ws-external-capsule {
-  display: inline-flex;
-  align-items: center;
-  padding: 3px 9px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--ch-color-accent) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--ch-color-accent) 32%, transparent);
-  color: var(--ch-color-accent);
-  font-size: 11px;
-  font-weight: 500;
-  text-decoration: none;
-}
-
-.ws-tone-pill {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 500;
-  background: var(--ch-color-surface-control);
-  color: var(--ch-color-text);
-}
-.ws-tone-pill--attention {
-  background: color-mix(in srgb, var(--ch-color-warning, #e5a44a) 15%, transparent);
-  color: var(--ch-color-warning, #d9822b);
-}
-.ws-tone-pill--working {
-  background: color-mix(in srgb, var(--ch-color-accent) 15%, transparent);
-  color: var(--ch-color-accent);
-}
-.ws-tone-pill--done {
-  background: color-mix(in srgb, var(--ch-color-success, #30a46c) 15%, transparent);
-  color: var(--ch-color-success, #30a46c);
-}
-
-.ws-btn {
-  min-height: 32px;
-  padding: 0 12px;
-  border: 1px solid var(--ch-color-border-strong);
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface-control);
-  color: var(--ch-color-text);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.ws-btn--primary {
-  background: var(--ch-color-accent-strong);
-  border-color: var(--ch-color-accent-strong);
-  color: #fff;
-}
-
-/* ==================== STYLE A ==================== */
-.ws-style-a {
-  flex: 1;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: minmax(340px, 46%) minmax(380px, 54%);
-  overflow: hidden;
-}
-
-.ws-a-list-pane {
-  overflow-y: auto;
-  padding: 14px 16px;
-  border-right: 1px solid var(--ch-color-border-muted);
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.ws-a-group-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-.ws-a-group-head h3 {
-  margin: 0;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--ch-color-text-muted);
-}
-
-.ws-a-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.ws-a-row {
-  padding: 9px 11px;
-  border: 1px solid var(--ch-color-border-muted);
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface);
-  cursor: pointer;
-  display: grid;
-  gap: 5px;
-}
-.ws-a-row:hover {
-  background: var(--ch-color-surface-raised);
-}
-.ws-a-row.selected {
-  border-color: var(--ch-color-accent);
-  background: color-mix(in srgb, var(--ch-color-accent) 8%, var(--ch-color-surface));
-}
-
-.ws-a-row-main {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.ws-a-row-title {
+  background: var(--z-bg-canvas);
+  color: var(--z-fg-1);
+  font-family: var(--ch-font-sans);
   font-size: 13px;
-  font-weight: 500;
-  color: var(--ch-color-text-strong);
-  line-height: 1.35;
-}
-.ws-a-row-sub {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  padding-left: 16px;
-  font-size: 11px;
-}
-.ws-status-text {
-  color: var(--ch-color-text);
-  font-weight: 500;
-}
-.ws-muted-text {
-  color: var(--ch-color-text-muted);
-}
-
-.ws-a-detail-pane {
-  overflow-y: auto;
-  padding: 18px 22px;
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-  background: var(--ch-color-surface);
-}
-
-.ws-detail-head {
-  display: grid;
-  gap: 8px;
-  padding-bottom: 14px;
-  border-bottom: 1px solid var(--ch-color-border-muted);
-}
-.ws-detail-badges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-}
-.ws-detail-head h3 {
-  margin: 0;
-  font-size: 17px;
-  font-weight: 600;
-  color: var(--ch-color-text-strong);
-  line-height: 1.35;
-}
-.ws-detail-outcome {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.55;
-  color: var(--ch-color-text);
-}
-.ws-link-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.ws-decision-banner {
-  margin-top: 4px;
-  padding: 12px 14px;
-  border: 1px solid color-mix(in srgb, var(--ch-color-warning, #e5a44a) 45%, var(--ch-color-border));
-  border-radius: var(--ch-radius-md);
-  background: color-mix(in srgb, var(--ch-color-warning, #e5a44a) 8%, var(--ch-color-surface-raised));
-  display: grid;
-  gap: 10px;
-}
-.ws-decision-banner p {
-  margin: 0;
-  font-size: 12.5px;
   line-height: 1.5;
-}
-.ws-decision-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  overflow: hidden;
 }
 
-.ws-section-label {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+:root[data-theme='light'] .zen-shell {
+  --z-bg-canvas: #fafafa;
+  --z-bg-panel: #f4f4f5;
+  --z-bg-elevated: #ffffff;
+  --z-bg-hover: rgba(0, 0, 0, 0.035);
+  --z-bg-selected: rgba(0, 0, 0, 0.06);
+  --z-line: rgba(0, 0, 0, 0.08);
+  --z-line-strong: rgba(0, 0, 0, 0.16);
+  --z-fg-1: #18181b;
+  --z-fg-2: #52525b;
+  --z-fg-3: #8a8f98;
+  --z-accent: #4f5bd5;
+  --z-accent-text: #434ec2;
+  --z-amber: #c97a16;
+  --z-green: #1e8e5a;
+}
+
+.zen-num {
+  font-variant-numeric: tabular-nums;
+}
+
+.zen-mono {
+  font-family: var(--ch-font-mono);
   font-size: 12px;
+}
+
+/* Top Bar — 44px single quiet navigation line */
+.zen-topbar {
+  height: 44px;
+  flex: 0 0 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--z-line);
+  background: var(--z-bg-canvas);
+}
+
+.zen-topbar-left,
+.zen-topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.zen-brand {
   font-weight: 600;
-  color: var(--ch-color-text-muted);
-  margin-bottom: 10px;
+  color: var(--z-fg-1);
+  letter-spacing: -0.01em;
 }
 
-.ws-run-timeline {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+.zen-sep {
+  color: var(--z-fg-3);
 }
 
-.ws-run-node {
+.zen-ws-select {
+  height: 26px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--z-fg-2);
+  font-size: 13px;
+  cursor: pointer;
+}
+.zen-ws-select:hover {
+  background: var(--z-bg-hover);
+  color: var(--z-fg-1);
+}
+
+.zen-style-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--z-bg-panel);
+  border: 1px solid var(--z-line);
+}
+
+.zen-style-tab {
+  height: 26px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--z-fg-2);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 120ms ease, background-color 120ms ease;
+}
+.zen-style-tab:hover {
+  color: var(--z-fg-1);
+}
+.zen-style-tab.active {
+  background: var(--z-bg-elevated);
+  color: var(--z-fg-1);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.zen-ref-hint {
+  font-size: 12px;
+  color: var(--z-fg-3);
+}
+
+.zen-ghost-btn {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--z-line-strong);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--z-fg-2);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.zen-ghost-btn:hover {
+  color: var(--z-fg-1);
+  background: var(--z-bg-hover);
+}
+
+.zen-primary-btn {
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--z-accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.zen-primary-btn--sm {
+  height: 26px;
+  padding: 0 10px;
+}
+
+/* Status Dots — 6px restrained punctuation */
+.zen-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: var(--z-fg-3);
+}
+.zen-dot--attention { background: var(--z-amber); }
+.zen-dot--working { background: var(--z-accent-text); }
+.zen-dot--done { background: var(--z-green); opacity: 0.75; }
+
+/* ============================================================================
+   DIRECTION 1: LINEAR SPLIT
+   ============================================================================ */
+.zen-linear {
+  flex: 1;
+  min-height: 0;
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: 380px minmax(0, 1fr);
+  overflow: hidden;
 }
 
-.ws-run-rail {
-  position: relative;
-  display: flex;
-  justify-content: center;
+.zen-linear-list {
+  border-right: 1px solid var(--z-line);
+  background: var(--z-bg-panel);
+  overflow-y: auto;
+  padding: 16px 0;
 }
-.ws-run-rail::after {
+
+.zen-group + .zen-group {
+  margin-top: 20px;
+}
+
+.zen-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 18px 6px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  color: var(--z-fg-3);
+}
+
+.zen-row {
+  position: relative;
+  height: 38px;
+  padding: 0 18px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  transition: background-color 100ms ease;
+}
+.zen-row:hover {
+  background: var(--z-bg-hover);
+}
+.zen-row.active {
+  background: var(--z-bg-selected);
+}
+.zen-row.active::before {
   content: '';
   position: absolute;
-  top: 14px;
-  bottom: -12px;
-  width: 1px;
-  background: var(--ch-color-border-muted);
-}
-.ws-run-node:last-child .ws-run-rail::after {
-  display: none;
-}
-.ws-run-marker {
-  margin-top: 5px;
-  width: 9px;
-  height: 9px;
-  border-radius: 999px;
-  background: var(--ch-color-accent);
-}
-.ws-run-node--review_block .ws-run-marker { background: var(--ch-color-warning, #e5a44a); }
-.ws-run-node--review_pass .ws-run-marker,
-.ws-run-node--done .ws-run-marker { background: var(--ch-color-success, #30a46c); }
-
-.ws-run-card {
-  padding: 10px 12px;
-  border: 1px solid var(--ch-color-border-muted);
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface-raised);
-  display: grid;
-  gap: 6px;
-}
-.ws-run-card-top {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  font-size: 12.5px;
-}
-.ws-model-tag {
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: var(--ch-color-surface-control);
-  font-family: var(--ch-font-mono);
-  font-size: 11px;
-  color: var(--ch-color-text-muted);
-}
-.ws-run-time {
-  margin-left: auto;
-  font-family: var(--ch-font-mono);
-  font-size: 11px;
-  color: var(--ch-color-text-muted);
-}
-.ws-run-card p {
-  margin: 0;
-  font-size: 12.5px;
-  line-height: 1.5;
-  color: var(--ch-color-text);
-}
-.ws-run-verify {
-  font-family: var(--ch-font-mono);
-  font-size: 11px;
-  color: var(--ch-color-success, #30a46c);
-}
-.ws-ghost-link {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--ch-color-accent);
-  font-size: 11.5px;
-  cursor: pointer;
-  text-decoration: underline;
-}
-.ws-inline-transcript {
-  margin-top: 4px;
-  padding: 8px 10px;
-  border-radius: var(--ch-radius-sm);
-  background: var(--ch-color-surface-sunken);
-  display: grid;
-  gap: 5px;
-  font-size: 11.5px;
-}
-.ws-transcript-line {
-  display: grid;
-  grid-template-columns: 120px minmax(0, 1fr);
-  gap: 8px;
-}
-.ws-transcript-speaker {
-  font-family: var(--ch-font-mono);
-  color: var(--ch-color-text-muted);
+  left: 0;
+  top: 7px;
+  bottom: 7px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: var(--z-accent-text);
 }
 
-.ws-internal-drawer {
-  border-top: 1px solid var(--ch-color-border-muted);
-  padding-top: 10px;
-  font-size: 12px;
-  color: var(--ch-color-text-muted);
-}
-.ws-internal-drawer summary {
-  cursor: pointer;
-  font-weight: 500;
-}
-.ws-internal-grid {
-  margin-top: 8px;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-.ws-internal-grid div {
-  padding: 6px 8px;
-  border-radius: var(--ch-radius-sm);
-  background: var(--ch-color-surface-sunken);
-}
-.ws-internal-grid span {
-  display: block;
-  font-size: 11px;
-}
-.ws-internal-grid strong {
-  color: var(--ch-color-text);
-  font-size: 12px;
-}
-.ws-raw-prompt {
-  margin: 8px 0 0;
-  padding: 8px;
-  border-radius: var(--ch-radius-sm);
-  background: var(--ch-color-surface-sunken);
-  font-family: var(--ch-font-mono);
-  font-size: 11px;
-  white-space: pre-wrap;
-}
-
-/* ==================== STYLE B ==================== */
-.ws-style-b {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 14px 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.ws-b-columns {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.ws-b-col {
-  border: 1px solid var(--ch-color-border-muted);
-  border-radius: var(--ch-radius-lg);
-  background: var(--ch-color-surface);
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.ws-b-col-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.ws-b-col-head h3 {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
-}
-.ws-b-cards {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.ws-b-card {
-  padding: 10px 12px;
-  border: 1px solid var(--ch-color-border-muted);
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface-raised);
-  cursor: pointer;
-  display: grid;
-  gap: 6px;
-}
-.ws-b-card.selected {
-  border-color: var(--ch-color-accent);
-  box-shadow: 0 0 0 1px var(--ch-color-accent);
-}
-.ws-b-card-top,
-.ws-b-card-foot {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 11px;
-}
-.ws-b-card h4 {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.35;
-  color: var(--ch-color-text-strong);
-}
-.ws-b-card-outcome {
-  margin: 0;
-  font-size: 12px;
-  color: var(--ch-color-text-muted);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.ws-check-ratio {
-  font-family: var(--ch-font-mono);
-  color: var(--ch-color-success, #30a46c);
-}
-
-.ws-b-walkthrough {
-  border: 1px solid var(--ch-color-border);
-  border-radius: var(--ch-radius-lg);
-  background: var(--ch-color-surface-raised);
-  padding: 16px 18px;
-  display: grid;
-  gap: 14px;
-}
-.ws-b-walk-header {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-}
-.ws-eyebrow {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--ch-color-accent);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.ws-b-walk-header h3 {
-  margin: 2px 0 0;
-  font-size: 16px;
-}
-.ws-b-walk-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-.ws-b-walk-card {
-  padding: 12px;
-  border: 1px solid var(--ch-color-border-muted);
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface);
-  display: grid;
-  gap: 8px;
-}
-.ws-b-walk-card h4 {
-  margin: 0;
-  font-size: 12px;
-  color: var(--ch-color-text-muted);
-}
-.ws-b-walk-card p {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.5;
-}
-.ws-file-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-}
-.ws-b-stepper {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-  gap: 10px;
-}
-.ws-b-step {
-  padding: 10px;
-  border-top: 2px solid var(--ch-color-accent);
-  background: var(--ch-color-surface);
-  border-radius: 0 0 var(--ch-radius-sm) var(--ch-radius-sm);
-  display: grid;
-  gap: 4px;
-  font-size: 12px;
-}
-.ws-b-step--review_block { border-top-color: var(--ch-color-warning, #e5a44a); }
-.ws-b-step--review_pass,
-.ws-b-step--done { border-top-color: var(--ch-color-success, #30a46c); }
-.ws-b-step-time {
-  font-family: var(--ch-font-mono);
-  font-size: 11px;
-  color: var(--ch-color-text-muted);
-}
-.ws-b-step p {
-  margin: 0;
-  color: var(--ch-color-text-muted);
-  font-size: 11.5px;
-  line-height: 1.45;
-}
-
-/* ==================== STYLE C ==================== */
-.ws-style-c {
-  flex: 1;
-  min-height: 0;
-  display: grid;
-  grid-template-rows: minmax(220px, 52%) minmax(220px, 48%);
-  overflow: hidden;
-}
-
-.ws-c-grid {
-  overflow-y: auto;
-  padding: 14px 18px;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
-  gap: 10px;
-  align-content: start;
-}
-
-.ws-c-unit {
-  padding: 11px 13px;
-  border: 1px solid var(--ch-color-border-muted);
-  border-radius: var(--ch-radius-md);
-  background: var(--ch-color-surface);
-  cursor: pointer;
-  display: grid;
-  gap: 8px;
-}
-.ws-c-unit.selected {
-  border-color: var(--ch-color-accent);
-  background: var(--ch-color-surface-raised);
-}
-.ws-c-unit-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-}
-.ws-c-unit-head strong {
+.zen-row-title {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--z-fg-2);
+  font-size: 13px;
 }
-.ws-c-elapsed {
-  font-family: var(--ch-font-mono);
-  font-size: 11px;
-  color: var(--ch-color-text-muted);
+.zen-row.active .zen-row-title {
+  color: var(--z-fg-1);
+  font-weight: 500;
 }
-.ws-c-meta-strip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.ws-c-live-box {
-  padding: 7px 9px;
-  border-radius: var(--ch-radius-sm);
-  background: var(--ch-color-surface-sunken);
-  font-family: var(--ch-font-mono);
-  font-size: 11.5px;
-  line-height: 1.45;
-}
-.ws-c-live-now { color: var(--ch-color-text-strong); }
-.ws-c-live-counts { color: var(--ch-color-text-muted); font-size: 11px; margin-top: 2px; }
-.ws-c-live-done { font-family: var(--ch-font-sans); color: var(--ch-color-text); }
 
-.ws-c-milestones {
+.zen-row-meta {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--z-fg-3);
+}
+
+.zen-linear-detail {
+  overflow-y: auto;
+  padding: 36px 48px 56px;
+}
+
+.zen-editorial {
+  max-width: 660px;
+  margin: 0 auto;
+}
+
+.zen-meta-line {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
-  font-size: 11px;
-  color: var(--ch-color-text-muted);
+  font-size: 12px;
+  color: var(--z-fg-3);
+  margin-bottom: 10px;
 }
-.ws-c-mile {
+
+.zen-status-word {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  font-weight: 500;
+  color: var(--z-fg-2);
 }
-.ws-c-mile i {
+.zen-status-word--attention { color: var(--z-amber); }
+.zen-status-word--working { color: var(--z-accent-text); }
+
+.zen-diff-add { color: var(--z-green); }
+.zen-diff-del { color: #e5726b; }
+
+.zen-title {
+  margin: 0 0 12px;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -0.015em;
+  color: var(--z-fg-1);
+}
+
+.zen-summary {
+  margin: 0 0 16px;
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--z-fg-2);
+}
+
+.zen-links-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--z-line);
+}
+
+.zen-text-link {
+  color: var(--z-accent-text);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-decoration: none;
+}
+.zen-text-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.zen-checks-note {
+  font-size: 12px;
+  color: var(--z-fg-3);
+}
+
+.zen-decision-bar {
+  margin-top: 20px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  background: var(--z-bg-panel);
+  border: 1px solid var(--z-line-strong);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.zen-decision-copy {
+  font-size: 13px;
+  color: var(--z-fg-1);
+  line-height: 1.45;
+}
+
+.zen-decision-btns {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.zen-live-banner {
+  margin-top: 20px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: var(--z-bg-panel);
+  border: 1px solid var(--z-line);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--z-fg-2);
+}
+
+.zen-pulse-dot {
   width: 6px;
   height: 6px;
-  border-radius: 999px;
-  background: var(--ch-color-accent);
+  border-radius: 50%;
+  background: var(--z-accent-text);
 }
-.ws-c-mile--review_block i { background: var(--ch-color-warning, #e5a44a); }
-.ws-c-mile--review_pass i,
-.ws-c-mile--done i { background: var(--ch-color-success, #30a46c); }
 
-.ws-c-inspector {
-  border-top: 1px solid var(--ch-color-border);
-  background: var(--ch-color-surface-raised);
+/* Spine Timeline — pure typography & single 1px vertical thread */
+.zen-spine-section {
+  margin-top: 32px;
+}
+
+.zen-micro-heading {
+  margin: 0 0 16px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.07em;
+  color: var(--z-fg-3);
+}
+
+.zen-spine {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.zen-spine-item {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 44px 20px minmax(0, 1fr);
+  gap: 0 8px;
+}
+
+.zen-spine-time {
+  font-size: 12px;
+  color: var(--z-fg-3);
+  padding-top: 1px;
+}
+
+.zen-spine-track {
+  position: relative;
+  display: flex;
+  justify-content: center;
+}
+.zen-spine-track::after {
+  content: '';
+  position: absolute;
+  top: 14px;
+  bottom: -6px;
+  width: 1px;
+  background: var(--z-line);
+}
+.zen-spine-item:last-child .zen-spine-track::after {
+  display: none;
+}
+
+.zen-spine-node {
+  margin-top: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--z-bg-canvas);
+  border: 1.5px solid var(--z-fg-3);
+  z-index: 1;
+}
+.zen-spine-item--warn .zen-spine-node {
+  border-color: var(--z-amber);
+  background: var(--z-amber);
+}
+.zen-spine-item--pass .zen-spine-node {
+  border-color: var(--z-green);
+  background: var(--z-green);
+}
+.zen-spine-item--live .zen-spine-node {
+  border-color: var(--z-accent-text);
+  background: var(--z-accent-text);
+}
+
+.zen-spine-body {
+  padding-bottom: 22px;
+  min-width: 0;
+}
+
+.zen-spine-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+.zen-spine-head strong {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--z-fg-1);
+}
+.zen-spine-actor {
+  font-size: 12px;
+  color: var(--z-fg-3);
+}
+.zen-inline-link {
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--z-fg-3);
+  font-size: 12px;
+  cursor: pointer;
+}
+.zen-inline-link:hover {
+  color: var(--z-accent-text);
+}
+
+.zen-spine-body p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--z-fg-2);
+  line-height: 1.55;
+}
+
+.zen-spine-receipt {
+  margin-top: 6px;
+  color: var(--z-fg-3);
+}
+
+.zen-log-excerpt {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--z-bg-panel);
+  border: 1px solid var(--z-line);
+  display: grid;
+  gap: 6px;
+}
+.zen-log-excerpt--flush {
+  margin-top: 0;
+}
+.zen-log-row {
+  display: grid;
+  grid-template-columns: 44px 96px minmax(0, 1fr);
+  gap: 10px;
+  font-size: 12px;
+  color: var(--z-fg-2);
+}
+.zen-log-row > span:first-child,
+.zen-log-row > span:nth-child(2) {
+  color: var(--z-fg-3);
+}
+
+.zen-meta-disclosure {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--z-line);
+  color: var(--z-fg-3);
+  font-size: 12px;
+}
+.zen-meta-disclosure summary {
+  cursor: pointer;
+  user-select: none;
+}
+.zen-meta-disclosure p {
+  margin: 8px 0 0;
+}
+
+/* ============================================================================
+   DIRECTION 2: CALM READER (Single-Column Centered Editorial Inbox)
+   ============================================================================ */
+.zen-reader-scroll {
+  flex: 1;
   min-height: 0;
-  overflow: hidden;
-}
-.ws-c-inspector-col {
-  padding: 12px 16px;
   overflow-y: auto;
+  padding: 40px 24px 64px;
 }
-.ws-c-transcript-pane {
-  border-left: 1px solid var(--ch-color-border-muted);
-  background: var(--ch-color-surface);
+
+.zen-reader-column {
+  max-width: 740px;
+  margin: 0 auto;
+}
+
+.zen-reader-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--z-line);
+}
+.zen-reader-head h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.zen-reader-head p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--z-fg-3);
+}
+
+.zen-filter-pills {
+  display: flex;
+  gap: 4px;
+}
+.zen-filter-btn {
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--z-fg-2);
+  font-size: 12.5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.zen-filter-btn span {
+  color: var(--z-fg-3);
+}
+.zen-filter-btn.active {
+  background: var(--z-bg-selected);
+  color: var(--z-fg-1);
+  font-weight: 500;
+}
+
+.zen-reader-list {
   display: flex;
   flex-direction: column;
 }
-.ws-c-stage-list {
+
+.zen-sheet-item {
+  border-bottom: 1px solid var(--z-line);
+}
+.zen-sheet-item.expanded {
+  margin: 12px -16px;
+  padding: 4px 16px 18px;
+  border: 1px solid var(--z-line-strong);
+  border-radius: 10px;
+  background: var(--z-bg-panel);
+}
+
+.zen-sheet-summary {
+  min-height: 46px;
+  display: grid;
+  grid-template-columns: 6px minmax(0, 1fr) auto auto 44px;
+  align-items: center;
+  gap: 14px;
+  cursor: pointer;
+}
+
+.zen-sheet-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--z-fg-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zen-sheet-ws {
+  color: var(--z-fg-3);
+}
+
+.zen-sheet-state {
+  font-size: 12px;
+  color: var(--z-fg-2);
+}
+
+.zen-sheet-time {
+  text-align: right;
+  font-size: 12px;
+  color: var(--z-fg-3);
+}
+
+.zen-sheet-body {
+  padding: 6px 0 0 20px;
+  display: grid;
+  gap: 18px;
+}
+
+.zen-sheet-outcome {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--z-fg-2);
+  max-width: 64ch;
+}
+
+.zen-step-track {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: 8px;
+  padding: 12px 0;
+  border-top: 1px solid var(--z-line);
+  border-bottom: 1px solid var(--z-line);
+}
+
+.zen-step-cell {
+  display: grid;
+  gap: 3px;
+}
+.zen-step-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+.zen-step-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--z-fg-3);
+  flex: 0 0 7px;
+}
+.zen-step-cell--warn .zen-step-dot { background: var(--z-amber); }
+.zen-step-cell--pass .zen-step-dot { background: var(--z-green); }
+.zen-step-cell--live .zen-step-dot { background: var(--z-accent-text); }
+
+.zen-step-connector {
+  flex: 1;
+  height: 1px;
+  background: var(--z-line-strong);
+}
+
+.zen-step-cell strong {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--z-fg-1);
+}
+.zen-step-cell > span {
+  font-size: 11px;
+  color: var(--z-fg-3);
+}
+
+.zen-sheet-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.zen-sheet-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+/* ============================================================================
+   DIRECTION 3: TRACE LEDGER (Swiss Grid Table + Clean Bottom Inspector)
+   ============================================================================ */
+.zen-ledger-wrap {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) 230px;
+  overflow: hidden;
+}
+
+.zen-ledger-table-scroll {
+  overflow-y: auto;
+}
+
+.zen-ledger {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.zen-ledger thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: 34px;
+  padding: 0 18px;
+  background: var(--z-bg-panel);
+  border-bottom: 1px solid var(--z-line);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  color: var(--z-fg-3);
+}
+
+.zen-ledger tbody tr {
+  border-bottom: 1px solid var(--z-line);
+  cursor: pointer;
+  transition: background-color 100ms ease;
+}
+.zen-ledger tbody tr:hover {
+  background: var(--z-bg-hover);
+}
+.zen-ledger tbody tr.selected {
+  background: var(--z-bg-selected);
+}
+
+.zen-ledger td {
+  padding: 12px 18px;
+  vertical-align: middle;
+}
+
+.col-status { width: 100px; }
+.col-repo { width: 210px; }
+.col-trace { width: 230px; }
+.col-time { width: 76px; text-align: right; }
+
+.zen-ledger-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--z-fg-2);
+}
+
+.zen-ledger-title {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--z-fg-1);
+}
+
+.zen-ledger-sub {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--z-fg-3);
+  max-width: 54ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zen-ledger-diff {
+  display: flex;
+  gap: 8px;
+  color: var(--z-fg-3);
+  font-size: 11.5px;
+}
+
+.zen-pip-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.zen-pip {
+  width: 14px;
+  height: 6px;
+  border-radius: 2px;
+  background: var(--z-line-strong);
+}
+.zen-pip--warn { background: var(--z-amber); }
+.zen-pip--pass { background: var(--z-green); }
+.zen-pip--live { background: var(--z-accent-text); }
+
+.zen-pip-caption {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--z-fg-2);
+}
+
+.zen-ledger-checks {
+  color: var(--z-fg-2);
+}
+.zen-ledger-time {
+  text-align: right;
+  color: var(--z-fg-3);
+}
+
+.zen-ledger-drawer {
+  border-top: 1px solid var(--z-line-strong);
+  background: var(--z-bg-panel);
+  display: grid;
+  grid-template-columns: 1.15fr 0.85fr;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.zen-ledger-drawer-col {
+  padding: 16px 22px;
+  overflow-y: auto;
+}
+.zen-ledger-log {
+  border-left: 1px solid var(--z-line);
+}
+
+.zen-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.zen-drawer-head strong {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.zen-compact-stages {
   list-style: none;
   margin: 0;
   padding: 0;
   display: grid;
   gap: 8px;
-  font-size: 12px;
 }
-.ws-c-stage-list li {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--ch-color-border-muted);
-}
-.ws-c-stage-list p {
-  flex: 1 1 100%;
-  margin: 2px 0 0;
-  color: var(--ch-color-text-muted);
-}
-.ws-c-stream-lines {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 12px;
-}
-.ws-c-stream-row {
-  padding: 6px 8px;
-  border-radius: var(--ch-radius-sm);
-  background: var(--ch-color-surface-sunken);
+.zen-compact-stages li {
   display: grid;
-  grid-template-columns: 44px 120px minmax(0, 1fr);
+  grid-template-columns: 42px 8px 92px minmax(0, 1fr);
+  align-items: baseline;
   gap: 8px;
+  font-size: 12.5px;
 }
-.ws-c-stream-time,
-.ws-c-stream-speaker {
-  font-family: var(--ch-font-mono);
-  font-size: 11px;
-  color: var(--ch-color-text-muted);
+.zen-compact-stages li > span:first-child {
+  color: var(--z-fg-3);
 }
-.ws-c-quick-bar {
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid var(--ch-color-border-muted);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  font-size: 12px;
+.zen-pip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--z-fg-3);
+  align-self: center;
+}
+.zen-compact-summary {
+  color: var(--z-fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (max-width: 820px) {
-  .ws-style-a {
+  .zen-ref-hint { display: none; }
+  .zen-linear {
     grid-template-columns: 1fr;
     overflow-y: auto;
   }
-  .ws-a-list-pane {
+  .zen-linear-list {
     border-right: 0;
-    border-bottom: 1px solid var(--ch-color-border-muted);
+    border-bottom: 1px solid var(--z-line);
     overflow: visible;
   }
-  .ws-a-detail-pane {
+  .zen-linear-detail {
+    padding: 24px 18px 40px;
     overflow: visible;
   }
-  .ws-b-columns,
-  .ws-b-walk-grid {
-    grid-template-columns: 1fr;
+  .zen-sheet-summary {
+    grid-template-columns: 6px minmax(0, 1fr) 40px;
   }
-  .ws-style-c {
+  .zen-sheet-ws,
+  .zen-sheet-state {
+    display: none;
+  }
+  .zen-ledger-wrap {
     grid-template-rows: auto auto;
     overflow-y: auto;
   }
-  .ws-c-grid {
+  .zen-ledger-drawer {
     grid-template-columns: 1fr;
-    overflow: visible;
   }
-  .ws-c-inspector {
-    grid-template-columns: 1fr;
-    overflow: visible;
-  }
-  .ws-c-transcript-pane {
+  .zen-ledger-log {
     border-left: 0;
-    border-top: 1px solid var(--ch-color-border-muted);
-  }
-  .ws-demo-tab span {
-    display: none;
-  }
-  .ws-btn,
-  .ws-demo-tab,
-  .ws-demo-exit {
-    min-height: 44px;
+    border-top: 1px solid var(--z-line);
   }
 }
 </style>
