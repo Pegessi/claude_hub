@@ -21,6 +21,12 @@ from urllib.parse import parse_qs, urlparse
 from browser_lifecycle import BrowserRun, run_browser_main
 from playwright.async_api import expect
 
+# Opt-in WebKit/iPhone path reuses the same strict full-app API fixture and
+# lifecycle owner; the existing Chromium acceptance remains the default.
+IPHONE_WEBKIT = "--iphone-webkit" in sys.argv
+if IPHONE_WEBKIT:
+    sys.argv.remove("--iphone-webkit")
+
 TAB = "fixture-composer-tab"
 SESSION = "fixture-composer-session"
 TURN_ONE = "fixture-turn-1"
@@ -94,6 +100,205 @@ EVENTS = [
         agent_type="codex",
     ),
 ]
+
+
+async def iphone_picker_scenario(page, output, model_changes, state) -> None:
+    """Mobile WebKit interaction, plus explicit visual-viewport keyboard stubs.
+
+    The stub exercises application resize handling; it does not emulate the
+    native iOS keyboard or certify native Safari focus-zoom suppression.
+    """
+    trigger = page.locator(".composer-model-picker .composer-mode-trigger")
+    menu = page.get_by_role("dialog", name="Model and thinking effort", exact=True)
+    search = page.get_by_role("textbox", name="Search models", exact=True)
+    custom = page.get_by_placeholder("custom model id…", exact=True)
+    measurements = []
+    assert await page.evaluate("matchMedia('(any-pointer: coarse)').matches")
+    viewport_meta = await page.locator('meta[name="viewport"]').get_attribute("content")
+    assert viewport_meta and "maximum-scale" not in viewport_meta
+    assert "user-scalable=no" not in viewport_meta
+
+    async def check_field(field, *, top=0, height=None):
+        await field.scroll_into_view_if_needed()
+        # Playwright waits for the real element to settle after toolbar/viewport
+        # transitions; geometric assertions then inspect the actionable state.
+        await field.tap()
+        await expect(field).to_be_focused()
+        observed = await field.evaluate("""el => {
+          const r = el.getBoundingClientRect();
+          const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+          return {field: el.getAttribute('aria-label') || el.id || el.placeholder,
+            font: parseFloat(getComputedStyle(el).fontSize), viewportWidth: innerWidth,
+            x:r.x, y:r.y, width:r.width, height:r.height, hit: hit === el};
+        }""")
+        measurements.append(observed)
+        observed.update(await page.evaluate("""() => ({
+          vv: {height: visualViewport.height, offsetTop: visualViewport.offsetTop},
+          appHeight: document.querySelector('.app').getBoundingClientRect().height,
+          cssHeight: document.documentElement.style.getPropertyValue('--visual-viewport-height'),
+          scrollY, innerHeight
+        })"""))
+        (output / "iphone-measurements.json").write_text(json.dumps(measurements, indent=2))
+        await page.screenshot(path=str(output / "webkit-last-field.png"))
+        assert observed["font"] >= 16, observed
+        assert observed["x"] >= 0, observed
+        assert observed["x"] + observed["width"] <= observed["viewportWidth"], observed
+        assert observed["hit"], observed
+        if height is not None:
+            assert observed["y"] >= top - 1, observed
+            assert observed["y"] + observed["height"] <= top + height + 1, observed
+
+    # Rotate while open, including the smallest phone layouts, instead of
+    # recreating the menu after every viewport change.
+    await trigger.tap()
+    for width, height in ((390, 844), (844, 390), (390, 844), (375, 667), (320, 568), (430, 932)):
+        await page.set_viewport_size({"width": width, "height": height})
+        await expect(menu).to_be_visible()
+        await check_field(search, height=height)
+        await search.fill("no-such-model")
+        await expect(menu.get_by_text("No matching models", exact=True)).to_be_visible()
+        await search.fill("seed")
+        await expect(page.get_by_role("option", name="seed", exact=True)).to_be_visible()
+        await check_field(custom, height=height)
+        await page.screenshot(path=str(output / f"webkit-picker-{width}x{height}.png"))
+
+    await page.set_viewport_size({"width": 390, "height": 844})
+    await page.evaluate("""() => {
+      window.__keyboardFixture = null;
+      for (const key of ['height', 'width', 'offsetTop']) {
+        Object.defineProperty(window.visualViewport, key, {configurable:true,
+          get: () => key === 'width' ? innerWidth :
+            (window.__keyboardFixture?.[key] ?? (key === 'height' ? innerHeight : 0))});
+      }
+      visualViewport.dispatchEvent(new Event('resize'));
+    }""")
+    # Layout viewport and 100dvh stay unchanged while only the visual viewport
+    # shrinks. This is the failure mode missed by set_viewport_size alone.
+    for layout_width, layout_height, height, offset in (
+        (390, 844, 430, 0),
+        (390, 844, 350, 50),
+        (844, 390, 180, 0),
+        (568, 320, 160, 0),
+        (390, 844, 844, 0),
+    ):
+        await page.set_viewport_size({"width": layout_width, "height": layout_height})
+        await page.evaluate(
+            """([height, offsetTop]) => {
+          window.__keyboardFixture = {height, offsetTop};
+          visualViewport.dispatchEvent(new Event('resize'));
+        }""",
+            [height, offset],
+        )
+        await page.wait_for_function(
+            """h =>
+          document.documentElement.style.getPropertyValue('--visual-viewport-height') === `${h}px`
+        """,
+            arg=height,
+        )
+        assert await page.evaluate("innerHeight") == layout_height
+        if height < 320:
+            await page.wait_for_function("""() =>
+              document.querySelector('.composer-model-menu')?.matches(':popover-open')
+            """)
+        await check_field(search, top=offset, height=height)
+        await search.fill("")
+        await check_field(custom, top=offset, height=height)
+        await page.screenshot(path=str(output / f"webkit-keyboard-{height}-{offset}.png"))
+        if height == 180:
+            await page.keyboard.press("Escape")
+            await expect(menu).to_have_count(0)
+            assert await page.locator(":popover-open").count() == 0
+            await trigger.tap()
+            await page.wait_for_function(
+                "() => document.querySelector('.composer-model-menu')?.matches(':popover-open')"
+            )
+            await expect(search).to_be_focused()
+            await page.touchscreen.tap(2, 100)
+            await expect(menu).to_have_count(0)
+            assert await page.locator(":popover-open").count() == 0
+            await trigger.tap()
+            await expect(search).to_be_focused()
+        if height == 430:
+            choices = menu.get_by_role("listbox", name="Models", exact=True)
+            assert await menu.evaluate("el => el.scrollHeight > el.clientHeight")
+            last = choices.get_by_role("option", name="iPhone model 19", exact=True)
+            await last.scroll_into_view_if_needed()
+            await last.tap()
+            await page.screenshot(path=str(output / "webkit-selected-last.png"))
+            (output / "selected-menu.txt").write_text(
+                await menu.inner_text() if await menu.count() else "closed"
+            )
+            await expect(menu).to_have_count(0)
+            await expect(trigger).to_be_focused()
+            await expect(trigger).to_be_enabled()
+            assert model_changes[-1]["env"]["MASO_MODEL"] == "iphone-model-19"
+            await trigger.tap()
+    await page.evaluate("""() => {
+      for (const key of ['height', 'width', 'offsetTop']) delete visualViewport[key];
+      delete window.__keyboardFixture;
+      visualViewport.dispatchEvent(new Event('resize'));
+    }""")
+
+    before = len(model_changes)
+    await custom.fill("custom-iphone-model")
+    await custom.press("Enter")
+    await expect(menu).to_have_count(0)
+    await expect(trigger).to_be_focused()
+    assert len(model_changes) == before + 1, model_changes
+    assert model_changes[-1]["env"]["MASO_MODEL"] == "custom-iphone-model", model_changes
+    composer = page.locator("textarea.composer-textarea")
+    await check_field(composer, height=844)
+    await composer.fill("Unsent iPhone draft")
+    await trigger.tap()
+    await search.fill("seed")
+    await page.keyboard.press("Escape")
+    await expect(menu).to_have_count(0)
+    await expect(trigger).to_be_focused()
+    await expect(composer).to_have_value("Unsent iPhone draft")
+
+    # A delayed model request must not steal focus from subsequent user input.
+    delay = asyncio.Event()
+    state["model_change_delay"] = delay
+    await trigger.tap()
+    await custom.fill("delayed-iphone-model")
+    await custom.press("Enter")
+    await expect(trigger).to_be_disabled()
+    await composer.tap()
+    await composer.fill("Keep typing during model change")
+    delay.set()
+    await expect(trigger).to_be_enabled()
+    # Capabilities refresh temporarily disables the composer; the model picker
+    # must not reclaim focus after the user's later input during the request.
+    await expect(trigger).not_to_be_focused()
+    await expect(composer).to_have_value("Keep typing during model change")
+    state["model_change_delay"] = None
+
+    await page.evaluate(
+        "localStorage.setItem('claude-hub:cwd-history:local', JSON.stringify(['/fixture/recent']))"
+    )
+    await page.locator(".add-tab").tap()
+    name = page.locator("#tabName")
+    await check_field(name)
+    await name.fill("iPhone fixture")
+    cwd = page.locator("#tabCwd")
+    await check_field(cwd)
+    await cwd.fill("/fixture")
+    await page.locator(".cwd-choice").filter(has_text="/fixture/recent").tap()
+    await expect(cwd).to_have_value("/fixture/recent")
+    for field in await page.locator(".modal .acf-select").all():
+        assert await field.evaluate("el => parseFloat(getComputedStyle(el).fontSize)") >= 16
+    await page.locator(".modal").get_by_role("button", name="Browse", exact=True).tap()
+    path = page.locator(".current-path-input")
+    await check_field(path)
+    await path.fill("/fixture/browsed")
+    await path.press("Enter")
+    await expect(path).to_have_value("/fixture/browsed")
+    await page.locator(".file-browser-footer").get_by_role(
+        "button", name="Select", exact=False
+    ).tap()
+    await expect(cwd).to_have_value("/fixture/browsed")
+    await page.locator(".modal").get_by_role("button", name="Cancel", exact=True).tap()
+    (output / "iphone-measurements.json").write_text(json.dumps(measurements, indent=2))
 
 
 async def main(browser_run: BrowserRun) -> None:
@@ -171,8 +376,10 @@ async def main(browser_run: BrowserRun) -> None:
         )
 
     async with browser_run.context(
-        viewport={"width": 1280, "height": 900},
-        launch_args=["--no-proxy-server"],
+        viewport={"width": 390, "height": 844} if IPHONE_WEBKIT else {"width": 1280, "height": 900},
+        launch_args=[] if IPHONE_WEBKIT else ["--no-proxy-server"],
+        engine="webkit" if IPHONE_WEBKIT else "chromium",
+        device="iPhone 13" if IPHONE_WEBKIT else None,
     ) as context:
 
         async def block_websocket(socket) -> None:
@@ -201,6 +408,20 @@ async def main(browser_run: BrowserRun) -> None:
 
             path = parsed.path
             method = request.method
+            if IPHONE_WEBKIT and method == "GET" and path == "/api/filesystem/list":
+                requested = parse_qs(parsed.query).get("path", ["/fixture"])[0]
+                await route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(
+                        {
+                            "current_path": requested,
+                            "parent_path": "/",
+                            "items": [],
+                        }
+                    ),
+                )
+                return
             if path.startswith(MANAGED_BASE):
                 managed_stream_paths.append((method, path))
             if not path.startswith("/api/"):
@@ -329,9 +550,21 @@ async def main(browser_run: BrowserRun) -> None:
                         }
                     ],
                 }
+                if IPHONE_WEBKIT:
+                    body["available_models"].extend(
+                        {
+                            "id": f"iphone-model-{i}",
+                            "label": f"iPhone model {i}",
+                            "provider_model_id": f"iphone-model-{i}",
+                            "supported_reasoning_efforts": [],
+                        }
+                        for i in range(20)
+                    )
             elif method == "POST" and path == f"/api/tabs/{TAB}/switch-env":
                 payload = json.loads(request.post_data or "{}")
                 model_changes.append(payload)
+                if state.get("model_change_delay"):
+                    await state["model_change_delay"].wait()
                 tab["env"] = payload["env"]
                 body = tab
             elif method == "GET" and path in {
@@ -557,6 +790,25 @@ async def main(browser_run: BrowserRun) -> None:
         initial_manual_capabilities.set()
         await expect(composer).to_be_enabled()
         await expect(model_trigger).to_be_enabled()
+        if IPHONE_WEBKIT:
+            await iphone_picker_scenario(page, output, model_changes, state)
+            assert not errors, errors
+            assert not unexpected_external, unexpected_external
+            assert not unknown_requests, unknown_requests
+            (output / "report.json").write_text(
+                json.dumps(
+                    {
+                        "result": "PASS",
+                        "engine": "webkit",
+                        "device": "iPhone 13",
+                        "model_changes": model_changes,
+                        "unknown_requests": unknown_requests,
+                        "unexpected_external_requests": unexpected_external,
+                    },
+                    indent=2,
+                )
+            )
+            return
         await composer.fill("Capability gate probe")
         await expect(send_button).to_be_enabled()
         await composer.fill("")

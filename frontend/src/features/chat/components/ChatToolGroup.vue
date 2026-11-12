@@ -1180,7 +1180,7 @@ watchEffect(() => {
   background: var(--ch-color-app-bg);
   color: var(--ch-color-text);
   font: inherit;
-  font-size: 12px;
+  font-size: max(12px, var(--ch-editable-font-min, 0px));
 }
 
 .activity-diff-editor-actions {

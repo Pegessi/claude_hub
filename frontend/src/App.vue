@@ -2,6 +2,7 @@
   <div
     class="app"
     :data-mode="mode"
+    :data-active-pane-chat="activePaneIsChat"
   >
     <!-- 登录页面 -->
     <LoginView v-if="authStore.authRequired && !authStore.isAuthenticated && !authStore.isLoading" />

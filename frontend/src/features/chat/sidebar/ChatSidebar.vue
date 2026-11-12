@@ -529,7 +529,7 @@ watch(mobileDrawerOpen, isOpen => {
   border: none;
   background: transparent;
   color: var(--ch-color-text);
-  font-size: var(--ch-font-size-sm);
+  font-size: max(var(--ch-font-size-sm), var(--ch-editable-font-min, 0px));
   outline: none;
 }
 

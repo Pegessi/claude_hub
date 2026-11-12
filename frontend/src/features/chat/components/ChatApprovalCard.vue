@@ -598,7 +598,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', handleDocumentKeyd
   background: transparent;
   color: inherit;
   font: inherit;
-  font-size: 13px;
+  font-size: max(13px, var(--ch-editable-font-min, 0px));
 }
 
 .approval-custom-answer::placeholder {

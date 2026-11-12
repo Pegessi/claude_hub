@@ -467,7 +467,7 @@
   .form-group input,
   .form-group select,
   .current-path-input {
-    font-size: 16px;
+    font-size: max(var(--ch-font-size-md), var(--ch-editable-font-min, 16px));
   }
 }
 

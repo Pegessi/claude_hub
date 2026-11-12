@@ -341,7 +341,7 @@ const emit = defineEmits<{
   border-radius: var(--ch-radius-sm);
   background: var(--ch-color-surface-control);
   color: var(--ch-color-text);
-  font-size: var(--ch-font-size-sm);
+  font-size: max(var(--ch-font-size-sm), var(--ch-editable-font-min, 0px));
   outline: none;
 }
 </style>

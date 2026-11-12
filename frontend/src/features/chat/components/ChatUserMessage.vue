@@ -369,7 +369,7 @@ function handleEditEnter(event: KeyboardEvent, turn: TimelineTurn) {
   background: none;
   color: inherit;
   font-family: inherit;
-  font-size: 14px;
+  font-size: max(14px, var(--ch-editable-font-min, 0px));
   line-height: 1.5;
   resize: vertical;
   outline: none;

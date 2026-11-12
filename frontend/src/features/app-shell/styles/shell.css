@@ -328,7 +328,9 @@
 }
 
 @media (max-width: 768px) {
-  .app[data-mode='terminal'] {
+  /* PTYs retain their stable grid height; structured Chat must lift its input
+     and picker into the area above the iPhone keyboard. */
+  .app[data-mode='terminal']:not([data-active-pane-chat='true']) {
     height: var(--stable-viewport-height, 100dvh);
   }
 

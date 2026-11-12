@@ -424,6 +424,20 @@ for (const cleanup of ['deactivate', 'unmount']) {
   })
 }
 
+test('a cached Chat closes its model popover before leaving the document', async t => {
+  const h = await mount(t)
+  const settings = h.owner(h.keys.chatSettingsKey)
+  settings.isModelMenuOpen.value = true
+  await flush()
+  h.selected.value = 'two'
+  await flush()
+  assert.equal(settings.isModelMenuOpen.value, false)
+  h.selected.value = 'one'
+  await flush()
+  assert.equal(h.owner(h.keys.chatSettingsKey), settings)
+  assert.equal(settings.isModelMenuOpen.value, false)
+})
+
 test('cached settings cannot mutate a Chat while hydration, reconciliation or failure locks readiness', async t => {
   const h = await mount(t)
   const delivery = h.owner(h.keys.chatDeliveryKey)

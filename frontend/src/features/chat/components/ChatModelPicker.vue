@@ -22,7 +22,10 @@
     </button>
     <div
       v-if="isModelMenuOpen"
+      ref="modelMenuEl"
       class="composer-mode-menu composer-model-menu"
+      :class="{ 'composer-model-menu--short': shortTouchViewport }"
+      :popover="shortTouchViewport ? 'manual' : undefined"
       role="dialog"
       aria-label="Model and thinking effort"
     >
@@ -126,10 +129,33 @@
 </template>
 
 <script setup lang="ts">
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { requireChatOwner, chatSettingsKey, chatDeliveryKey } from '../owners'
 import { effortLabel } from '@/features/chat/presentation/chatModelPresentation'
 const { modelPickerEl, modelTriggerEl, isModelMenuOpen, combinedModelLabel, isUpdatingModel, isUpdatingReasoningEffort, toggleModelMenu, modelSearchEl, modelSearch, filteredModelOptions, selectedMenuModel, chooseMenuModel, isModelActive, selectModelAndEffort, isModelEffortActive, defaultReasoningEffortLabel, modelInputEl, currentModel, selectModel } = requireChatOwner(chatSettingsKey)
 const { modeInteractionLocked } = requireChatOwner(chatDeliveryKey)
+const modelMenuEl = ref<HTMLElement | null>(null)
+const shortTouchViewport = ref(false)
+function updateShortViewport() {
+  shortTouchViewport.value = (window.matchMedia?.('(any-pointer: coarse)').matches ?? false)
+    && (window.visualViewport?.height ?? window.innerHeight) < 320
+}
+watch([isModelMenuOpen, shortTouchViewport], ([open, short]) => {
+  if (open && short && isModelMenuOpen.value && shortTouchViewport.value) {
+    // The top layer escapes the toolbar's stacking context when a landscape
+    // keyboard leaves too little room for an anchored menu. No modal/inert UI.
+    modelMenuEl.value?.showPopover?.()
+  }
+}, { flush: 'post' })
+onMounted(() => {
+  updateShortViewport()
+  window.addEventListener('resize', updateShortViewport)
+  window.visualViewport?.addEventListener('resize', updateShortViewport)
+})
+onUnmounted(() => {
+  window.removeEventListener('resize', updateShortViewport)
+  window.visualViewport?.removeEventListener('resize', updateShortViewport)
+})
 </script>
 
 <style scoped>
@@ -385,8 +411,32 @@ const { modeInteractionLocked } = requireChatOwner(chatDeliveryKey)
 
   .composer-model-menu {
     width: min(420px, calc(100vw - 32px));
-    /* Leave room for the app toolbar and composer on landscape phones. */
-    max-height: min(420px, calc(100dvh - 200px));
+    /* Leave room for toolbar/composer, even when only the visual viewport
+       shrinks. The whole menu can scroll in a short landscape keyboard view. */
+    max-height: min(420px, calc(var(--visual-viewport-height, 100dvh) - 200px));
+    overflow-y: auto;
+  }
+
+  .composer-model-columns {
+    flex-shrink: 0;
+    overflow: visible;
+  }
+
+  .composer-model-menu .composer-model-list,
+  .composer-model-menu .composer-effort-list {
+    max-height: none;
+    overflow: visible;
+  }
+
+  .composer-model-menu.composer-model-menu--short {
+    position: fixed;
+    min-width: 0;
+    width: min(420px, calc(100vw - 24px));
+    max-width: calc(100vw - 24px);
+    inset: calc(var(--visual-viewport-offset-top, 0px) + 8px) auto auto 12px;
+    margin: 0;
+    max-height: calc(var(--visual-viewport-height, 100dvh) - 16px);
+    z-index: 1000;
   }
 }
 

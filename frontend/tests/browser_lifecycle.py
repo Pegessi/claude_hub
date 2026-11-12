@@ -102,6 +102,8 @@ class BrowserRun:
         viewport: ViewportSize,
         launch_args: list[str] | None = None,
         service_workers: Literal["allow", "block"] = "block",
+        engine: Literal["chromium", "webkit"] = "chromium",
+        device: str | None = None,
     ) -> AsyncIterator[BrowserContext]:
         if self.used:
             raise RuntimeError("each browser runner must own exactly one browser context")
@@ -111,10 +113,12 @@ class BrowserRun:
         body_failed = False
         try:
             playwright = await manager.start()
-            browser = await playwright.chromium.launch(
+            browser = await getattr(playwright, engine).launch(
                 headless=True, executable_path=str(self.executable), args=launch_args or []
             )
-            context = await browser.new_context(viewport=viewport, service_workers=service_workers)
+            options = dict(playwright.devices[device]) if device else {}
+            options.update(viewport=viewport, service_workers=service_workers)
+            context = await browser.new_context(**options)
             yield context
         except BaseException:
             body_failed = True

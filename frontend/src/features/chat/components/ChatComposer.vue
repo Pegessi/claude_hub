@@ -309,7 +309,7 @@ const { isManagedChat, connectionState, capabilities, appStore, props } = requir
   resize: none;
   overflow-y: hidden;
   padding: 7px 10px;
-  font-size: 13px;
+  font-size: max(13px, var(--ch-editable-font-min, 0px));
   line-height: 1.4;
   color: var(--ch-color-text);
   background-color: var(--ch-color-app-bg);
