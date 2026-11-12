@@ -540,6 +540,20 @@ class AgentStreamStore:
 
         return await _complete_io(count_rows)
 
+    async def count_turns(self) -> int:
+        """Count durable ``turn_started`` events without unpacking their bodies."""
+
+        def count_rows() -> int:
+            with self._read_database() as (db, name):
+                return int(
+                    db.execute(
+                        "SELECT count(*) FROM stream_events WHERE name=? AND kind=?",
+                        (name, AgentStreamEventType.TURN_STARTED.value),
+                    ).fetchone()[0]
+                )
+
+        return await _complete_io(count_rows)
+
     def _scan_turn_lifecycle(self, turn_id: str, strict: bool) -> TurnLifecycleSnapshot:
         try:
             with self._read_database() as (db, name):

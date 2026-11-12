@@ -70,7 +70,6 @@
 import { computed, ref } from 'vue'
 
 import type { SubagentDockRow, SubagentJumpChip } from '../presentation/subagentJump'
-import type { NativeSubagentRow } from '../presentation/nativeSubagentRows'
 import ChatSubagentRow from './ChatSubagentRow.vue'
 
 const props = defineProps<{
@@ -80,10 +79,10 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (event: 'jump', chip: SubagentJumpChip): void
-  (event: 'open', chip: NativeSubagentRow, source: HTMLElement | null): void
+  (event: 'open', chip: SubagentDockRow, source: HTMLElement | null): void
 }>()
 
-function onOpen(chip: NativeSubagentRow, source: HTMLElement | null) {
+function onOpen(chip: SubagentDockRow, source: HTMLElement | null) {
   emit('open', chip, source)
 }
 

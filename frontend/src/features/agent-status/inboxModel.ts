@@ -55,8 +55,20 @@ function isAgentTab(tab: TerminalTab): boolean {
   return tab.session_kind === 'chat' || Boolean(tab.agent_type)
 }
 
-function isWorkspaceTab(tab: TerminalTab): boolean {
-  return Boolean(tab.workspace_id)
+function isSubagentTab(tab: TerminalTab): boolean {
+  return Boolean(tab.parent_tab_id || tab.subagent_id)
+}
+
+/** A manual top-level session created in the Terminal/Chat UI, not a Workspace
+ *  managed session or a Hub sub-agent spawned from another Chat. */
+export function isManualSessionTab(tab: TerminalTab): boolean {
+  return (
+    !tab.workspace_id &&
+    !tab.parent_tab_id &&
+    !tab.subagent_id &&
+    !tab.managed_session_id &&
+    !tab.workspace_role
+  )
 }
 
 function parseMs(value?: string | null): number | null {
@@ -87,6 +99,18 @@ function activityLabel(status?: TerminalAgentStatus): string {
  * outranks everything (a turn can keep running while a card waits), then an
  * unread finished turn, then failures, then plain work.
  */
+/** The dot a row wears, from the same fields the row's text uses.
+ *
+ * A card waiting on the user is its own state (`needs`), but only where the
+ * provider is otherwise healthy: `pending_question` also rides on an
+ * `attention`/`offline` snapshot (see `useTabStatus`), and painting that amber
+ * would contradict the row's own reason and the sidebar light. */
+export function rowDotState(reported: TerminalAgentStatus | null | undefined, group: string): string {
+  const state = reported?.status
+  if (reported?.pending_question && state !== 'attention' && state !== 'offline') return 'needs'
+  return state ?? (group === 'working' ? 'working' : 'idle')
+}
+
 export function classifyRow(
   tab: TerminalTab,
   status: TerminalAgentStatus | undefined,
@@ -116,21 +140,53 @@ export function classifyRow(
     sortKey,
   })
 
+  if (isSubagentTab(tab)) {
+    // A Hub sub-agent is owned by its parent Chat (which consumes its reply
+    // and surfaces it in the pane-chrome Agents dock), so it never demands
+    // human attention in "Waiting on you".
+    if (runtimeStatus === 'working') {
+      return row(
+        'working',
+        activityLabel(status),
+        null,
+        activitySinceMs,
+        nowMs - (activitySinceMs ?? nowMs),
+      )
+    }
+    return row(
+      'done',
+      status?.detail?.trim() || (runtimeStatus === 'idle' ? 'Idle' : 'Offline'),
+      replyExcerpt,
+      replyAtMs,
+      -(replyAtMs ?? 0),
+    )
+  }
+
   if (status?.pending_question) {
     // A blocked idle turn reports no activity clock; the newest reply is the
-    // only real timestamp it has, so the row keeps a time either way.
+    // only real timestamp it has, so the row keeps a time either way. The
+    // backend also keeps `pending_question` on an attention/offline snapshot,
+    // where an answer can be refused, so the reason names the failure too
+    // instead of hiding it behind "Waiting for your answer".
+    const failure = runtimeStatus === 'attention' || runtimeStatus === 'offline'
+    const failureReason = failure
+      ? (status?.detail ?? '').trim() ||
+        (runtimeStatus === 'attention' ? 'Needs attention' : 'Agent is offline')
+      : null
     return row(
       'needs',
-      'Waiting for your answer',
+      failureReason ? `${failureReason} — a question is waiting` : 'Waiting for your answer',
       replyExcerpt,
       activitySinceMs ?? replyAtMs,
       4,
     )
   }
 
-  // A finished turn the user has not looked at yet is the inbox's core case:
-  // the work is done and the result is sitting unread.
-  if (tab.is_unread && runtimeStatus !== 'working') {
+  // A finished turn the user has not looked at yet is the inbox's core case for
+  // manual user Chats: the work is done and the result is sitting unread.
+  // Workspace orchestrator/reviewer sessions report to the Task Graph rather
+  // than waiting on the user to open their internal Chat tab.
+  if (tab.is_unread && runtimeStatus !== 'working' && isManualSessionTab(tab)) {
     return row('needs', 'New reply', replyExcerpt, replyAtMs, 3)
   }
 
@@ -174,8 +230,8 @@ export function classifyRow(
 
 export function inScope(tab: TerminalTab, scope: InboxScope): boolean {
   if (scope === 'all') return true
-  if (scope === 'workspace') return isWorkspaceTab(tab)
-  return !isWorkspaceTab(tab)
+  if (scope === 'workspace') return !isManualSessionTab(tab)
+  return isManualSessionTab(tab)
 }
 
 /**

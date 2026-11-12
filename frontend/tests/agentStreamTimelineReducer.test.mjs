@@ -750,3 +750,25 @@ test('ordinary tools stay grouped even when an Agent-named call lacks the signat
   assert.deepEqual(turn.parts.map(p => p.kind), ['tool_group'])
   assert.equal(turn.parts[0].tools[0].subagent, undefined)
 })
+
+test('turn_started metadata surfaces who wrote the turn and whether the copy is whole', () => {
+  // Resend is a history rewrite, so it needs the raw provider origin (a Goal
+  // continuation is not the reader's message) and the backend's flag that the
+  // stored summary was truncated or masked. Both come from the same payload.
+  const events = [
+    makeEvent(0, 'turn_started', {
+      summary: 'Continue active Goal',
+      metadata: { origin: 'goal', stored_text_incomplete: true },
+    }, { turn_id: 't1' }),
+    makeEvent(1, 'turn_started', { summary: 'mine', metadata: { origin: 'web' } }, { turn_id: 't2' }),
+    makeEvent(2, 'turn_started', { summary: 'legacy' }, { turn_id: 't3' }),
+  ]
+  const turns = groupEventsIntoTurns(events)
+
+  assert.equal(turns[0].providerOrigin, 'goal')
+  assert.equal(turns[0].storedTextIncomplete, true)
+  assert.equal(turns[1].providerOrigin, 'web')
+  assert.equal(turns[1].storedTextIncomplete, false)
+  assert.equal(turns[2].providerOrigin, null, 'a legacy turn has no origin and stays editable')
+  assert.equal(turns[2].storedTextIncomplete, false)
+})

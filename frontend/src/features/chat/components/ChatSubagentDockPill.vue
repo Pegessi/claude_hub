@@ -111,7 +111,6 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useViewport } from '@/composables/useViewport'
 import { subagentDockCounts, type SubagentDockRow, type SubagentJumpChip } from '../presentation/subagentJump'
 import { useNativeSubagentDock } from '../controllers/nativeSubagentDock'
-import type { NativeSubagentRow } from '../presentation/nativeSubagentRows'
 import ChatSubagentList from './ChatSubagentList.vue'
 import ChatSubagentRow from './ChatSubagentRow.vue'
 import ChatSubagentSheet from './ChatSubagentSheet.vue'
@@ -222,7 +221,7 @@ function onJump(chip: SubagentJumpChip) {
 // window (it owns the timeline), so this chrome control only requests it.
 // The window is rendered by the Chat body, so the dock owns focus restoration
 // on dismissal: the row that opened it when still mounted, else this pill.
-function onNativeOpen(chip: NativeSubagentRow, source: HTMLElement | null) {
+function onNativeOpen(chip: SubagentDockRow, source: HTMLElement | null) {
   close(false)
   nativeDock?.open(chip, source, triggerRef.value)
 }

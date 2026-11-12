@@ -240,6 +240,10 @@ class ManagerHost(ABC):
         raise NotImplementedError()
 
     @abstractmethod
+    def detach_subagent_tab(self, tab_id: str) -> Optional[TerminalTab]:
+        raise NotImplementedError()
+
+    @abstractmethod
     def list_archived_tabs(self) -> list[TerminalTab]:
         raise NotImplementedError()
 

@@ -10,7 +10,7 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Dict, List, Optional
 
-from ....models import AgentType, ExecutionTarget
+from ....models import AgentType, ExecutionTarget, SessionKind
 from ..defaults import (
     _CODEX_NEW_PIN_TS_EARLY_S,
     _CODEX_NEW_PIN_TS_LATE_S,
@@ -151,7 +151,12 @@ class ManagerStartupMixin(ManagerHost):
                 hot.append(p)
             elif hot_restart:
                 p.is_active = False
-            elif p.agent_type == AgentType.CODEX and p.target == ExecutionTarget.LOCAL:
+            elif (
+                p.agent_type == AgentType.CODEX
+                and p.target == ExecutionTarget.LOCAL
+                and getattr(p, "session_kind", None) != SessionKind.CHAT
+                and not p._shell_explicitly_provided
+            ):
                 cold_codex.append(p)
             else:
                 cold_non_codex.append(p)

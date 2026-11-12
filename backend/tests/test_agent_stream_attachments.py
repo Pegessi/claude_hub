@@ -1636,3 +1636,271 @@ def test_save_eviction_failure_does_not_grow_disk_usage(
     # previews were rolled back.
     assert len(files) == 1
     assert files[0].name == first["id"]
+
+
+# ── provider-text identity + hybrid reuse (edit-resend contracts) ───────────
+
+
+def _send_session(session_id: str = "s1") -> Any:
+    """A minimal CHAT session for the real ``send_message`` path."""
+    from datetime import datetime
+
+    from claude_hub.models import (
+        AgentType,
+        ExecutionTarget,
+        ManagedSession,
+        ManagedSessionStatus,
+        SessionKind,
+        WorkspaceSessionRole,
+    )
+
+    return ManagedSession(
+        id=session_id,
+        workspace_id="ws1",
+        tab_id="t1",
+        role=WorkspaceSessionRole.WORKER,
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+        status=ManagedSessionStatus.WORKING,
+        title="test",
+        workspace_path="/tmp/ws",
+        tmux_session="tmux-s1",
+        target=ExecutionTarget.LOCAL,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+
+
+def _recording_transport() -> Any:
+    """A transport double that records what the provider was asked to send."""
+
+    class FakeTransport:
+        _started = True
+        turn_in_flight = False
+
+        def __init__(self) -> None:
+            self.sent: List[Tuple[str, List[bytes]]] = []
+
+        async def start(self) -> None:
+            return None
+
+        async def send_message(self, text: str, images: List[bytes]) -> None:
+            self.sent.append((text, list(images)))
+
+        async def stop(self) -> None:
+            return None
+
+    return FakeTransport()
+
+
+def _turn_started_event(tailer: Any) -> Any:
+    from claude_hub.models import AgentStreamEventType
+
+    events = asyncio.run(tailer.store.read_since(-1)).events
+    return next(e for e in events if e.type == AgentStreamEventType.TURN_STARTED)
+
+
+def _send(turn_text: str, **kwargs: Any) -> Any:
+    """Run the real ``send_message`` on a recording transport; return the tailer."""
+    from claude_hub.services.agent_stream.tailer import SessionTailer
+
+    session = _send_session()
+    transport = _recording_transport()
+
+    async def run() -> Any:
+        tailer = SessionTailer(
+            workspace_id="ws1",
+            session_id="s1",
+            adapter=MagicMock(),
+            session_getter=lambda: session,
+            native_transport=transport,
+        )
+        await tailer.send_message(
+            turn_text, images=kwargs.pop("images", []), client_turn_id="turn-1", **kwargs
+        )
+        return tailer
+
+    tailer = asyncio.run(run())
+    tailer.transport_sent = transport.sent  # type: ignore[attr-defined]
+    return tailer
+
+
+def test_turn_started_records_provider_text_digest(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The turn records a digest of the provider text and keeps caller metadata."""
+    from claude_hub.services.agent_stream.transcript_fork import hash_provider_text
+
+    text = "please review this diff"
+    tailer = _send(text, turn_metadata={"origin": "web"})
+    metadata = _turn_started_event(tailer).payload["metadata"]
+    assert metadata["origin"] == "web", "caller metadata must survive"
+    assert metadata["provider_text_sha256"] == hash_provider_text(text)
+    assert metadata["stored_text_incomplete"] is False
+
+
+def test_turn_started_flags_incomplete_summary_without_leaking_text(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A masked/truncated summary is flagged, and only its digest is stored."""
+    from claude_hub.services.agent_stream.redaction import MAX_FIELD_CHARS
+    from claude_hub.services.agent_stream.transcript_fork import hash_provider_text
+
+    secret = "sk-abcd1234efgh5678"
+    text = secret + " " + ("x" * 4200)
+    tailer = _send(text)
+    turn_started = _turn_started_event(tailer)
+    metadata = turn_started.payload["metadata"]
+    assert metadata["stored_text_incomplete"] is True
+    assert metadata["provider_text_sha256"] == hash_provider_text(text)
+    # The stored copy is masked and bounded, and cannot identify the message.
+    summary = turn_started.payload["summary"]
+    assert len(summary) <= MAX_FIELD_CHARS
+    assert "[REDACTED]" in summary
+    assert metadata["provider_text_sha256"] != hash_provider_text(summary)
+    assert secret not in turn_started.model_dump_json()
+
+
+def test_reused_attachments_keep_prefix_and_persist_extra_previews(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Leading images are reused; extra images persist their own previews."""
+    from claude_hub.services.agent_stream.attachments import AgentStreamAttachmentStore
+
+    reused_preview = _png(8, 8)
+    reused_meta = asyncio.run(
+        AgentStreamAttachmentStore("ws1", "s1").save("image/png", reused_preview)
+    )
+    extra_with_preview = _png(4, 4)
+    extra_preview = _png(3, 3)
+    extra_without_preview = _png(2, 2)
+
+    tailer = _send(
+        "edited",
+        images=[reused_preview, extra_with_preview, extra_without_preview],
+        previews=[None, extra_preview, None],
+        reuse_attachments=[reused_meta],
+    )
+
+    sent_text, sent_images = tailer.transport_sent[0]  # type: ignore[attr-defined]
+    assert sent_text == "edited"
+    assert sent_images == [reused_preview, extra_with_preview, extra_without_preview]
+
+    metas = _turn_started_event(tailer).payload["attachments"]
+    assert len(metas) == 3
+    assert metas[0] == reused_meta, "the original attachment must be re-referenced as-is"
+    assert metas[1]["id"] != reused_meta["id"]
+    assert asyncio.run(AgentStreamAttachmentStore("ws1", "s1").read(metas[1]["id"])) == (
+        extra_preview,
+        "image/png",
+    )
+    # No preview slot: placeholder metadata, never a persisted original.
+    assert metas[2]["id"] is None
+    assert metas[2]["bytes"] == len(extra_without_preview)
+
+
+def _failing_transport() -> Any:
+    """A transport double whose provider call fails after the turn is published."""
+
+    class FailingTransport:
+        _started = True
+        turn_in_flight = False
+
+        async def start(self) -> None:
+            return None
+
+        async def send_message(self, text: str, images: List[bytes]) -> None:
+            raise RuntimeError("send failed")
+
+        async def stop(self) -> None:
+            return None
+
+    return FailingTransport()
+
+
+def _deliver(
+    *, reuse_attachments: Any, images: List[bytes], previews: List[Any], retain: bool
+) -> Any:
+    """Run a real ``send_message`` against a failing transport; return the error."""
+    from claude_hub.services.agent_stream.tailer import SessionTailer
+
+    session = _send_session()
+
+    async def run() -> None:
+        tailer = SessionTailer(
+            workspace_id="ws1",
+            session_id="s1",
+            adapter=MagicMock(),
+            session_getter=lambda: session,
+            native_transport=_failing_transport(),
+        )
+        await tailer.send_message(
+            "edited",
+            images=images,
+            client_turn_id="turn-1",
+            previews=previews,
+            reuse_attachments=reuse_attachments,
+            retain_previews_on_delivery_failure=retain,
+        )
+
+    try:
+        asyncio.run(run())
+    except RuntimeError as exc:
+        return exc
+    raise AssertionError("the failing transport was expected to raise")
+
+
+def _cached_preview_ids() -> set:
+    from claude_hub.services.agent_stream.attachments import AgentStreamAttachmentStore
+
+    return {entry["id"] for entry in AgentStreamAttachmentStore._read_index()}
+
+
+def test_rejected_delivery_keeps_previews_for_an_ordinary_send(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn that stays in the store must keep its thumbnails renderable."""
+    from claude_hub.services.agent_stream.attachments import AgentStreamAttachmentStore
+
+    reused_preview = _png(8, 8)
+    reused_meta = asyncio.run(
+        AgentStreamAttachmentStore("ws1", "s1").save("image/png", reused_preview)
+    )
+    extra_preview = _png(3, 3)
+
+    _deliver(
+        reuse_attachments=[reused_meta],
+        images=[reused_preview, _png(2, 2)],
+        previews=[None, extra_preview],
+        retain=True,
+    )
+
+    cached = _cached_preview_ids()
+    assert reused_meta["id"] in cached, "the reused preview is never deleted"
+    assert len(cached) == 2, "the ordinary send keeps the preview it persisted"
+
+
+def test_rolled_back_edit_deletes_only_the_previews_it_persisted(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """edit-resend restores the store, so its new previews must not survive the failure."""
+    from claude_hub.services.agent_stream.attachments import AgentStreamAttachmentStore
+
+    reused_preview = _png(8, 8)
+    reused_meta = asyncio.run(
+        AgentStreamAttachmentStore("ws1", "s1").save("image/png", reused_preview)
+    )
+
+    _deliver(
+        reuse_attachments=[reused_meta],
+        images=[reused_preview, _png(2, 2)],
+        previews=[None, _png(3, 3)],
+        retain=False,
+    )
+
+    cached = _cached_preview_ids()
+    assert cached == {reused_meta["id"]}, "a rolled-back edit leaks its own preview"
+    assert asyncio.run(AgentStreamAttachmentStore("ws1", "s1").read(reused_meta["id"])) == (
+        reused_preview,
+        "image/png",
+    ), "the original turn's preview must survive"

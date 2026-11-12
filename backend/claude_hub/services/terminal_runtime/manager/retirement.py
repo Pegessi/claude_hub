@@ -7,13 +7,16 @@ import logging
 import uuid
 from contextlib import asynccontextmanager
 from functools import partial
-from typing import AsyncIterator, List, Optional, Tuple
+from typing import TYPE_CHECKING, AsyncIterator, List, Optional, Tuple
 
-from ....models import TerminalTab
+from ....models import SessionKind, TerminalTab
 from ....models.subagent import SUBAGENT_ID_ENV
 from ..records import TabCleanupPendingError, _PendingTabCleanup, _TabStateCommitError
 from ..retirement_listeners import notify_tab_retired
 from .host import ManagerHost
+
+if TYPE_CHECKING:
+    from ...ttyd_manager import TTYDProcess
 
 logger = logging.getLogger("claude_hub.services.ttyd_manager")
 
@@ -249,6 +252,33 @@ class ManagerRetirementMixin(ManagerHost):
             notify_tab_retired(tab_id)
             return process.to_schema()
 
+    def _detach_subagent_process(self, process: TTYDProcess) -> bool:
+        """Detach a subagent Chat tab so it becomes an ordinary top-level Chat."""
+        if not (process.subagent_id or process.parent_tab_id):
+            return False
+        logger.info(
+            "Detaching tab %s from subagent %s (parent %s)",
+            process.tab_id,
+            process.subagent_id,
+            process.parent_tab_id,
+        )
+        process.subagent_id = None
+        process.parent_tab_id = None
+        process.env.pop(SUBAGENT_ID_ENV, None)
+        if process.workspace_role is None and not process.managed_session_id:
+            process.workspace_id = None
+            process.workspace_name = None
+        return True
+
+    def detach_subagent_tab(self, tab_id: str) -> Optional[TerminalTab]:
+        """Detach a live or archived subagent tab into an ordinary top-level Chat."""
+        process = self.processes.get(tab_id)
+        if process is None:
+            return None
+        if self._detach_subagent_process(process):
+            self._save_state()
+        return process.to_schema()
+
     async def unarchive_tab(self, tab_id: str) -> Optional[TerminalTab]:
         """Restore an archived record, then best-effort start its runtime."""
         async with self._locked_current_tab(tab_id) as process:
@@ -258,19 +288,9 @@ class ManagerRetirementMixin(ManagerHost):
                 self._check_live_tab_capacity()
                 process.archived = False
                 process.archived_at = None
-                if process.subagent_id or process.parent_tab_id:
-                    # A user restoring a retired subagent Chat keeps it as an
-                    # ordinary Chat: detach it so subagent lifecycle (parent
-                    # closure, startup reconciliation) never re-archives it.
-                    logger.info(
-                        "Detaching unarchived tab %s from subagent %s (parent %s)",
-                        tab_id,
-                        process.subagent_id,
-                        process.parent_tab_id,
-                    )
-                    process.subagent_id = None
-                    process.parent_tab_id = None
-                    process.env.pop(SUBAGENT_ID_ENV, None)
+                if getattr(process, "session_kind", None) == SessionKind.CHAT:
+                    process.resume_quarantined = False
+                self._detach_subagent_process(process)
             logger.info("Unarchiving tab %s (%s)", tab_id, process.name)
             self._save_state()
 

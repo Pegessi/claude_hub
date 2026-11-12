@@ -1,6 +1,6 @@
 import { subagentProviderLabel } from '@/utils/subagentTool'
 import type { TimelineSubagentLifecycle, TimelineSubthread, TimelineTurn } from '../timeline/types'
-import { subthreadHeadline } from './chatSubagentPresentation'
+import { subthreadHeadline, subthreadReportHeadline } from './chatSubagentPresentation'
 
 /**
  * Dock rows for provider-native sub-agents (Claude ``Agent``, Cursor ``Task``,
@@ -52,20 +52,29 @@ export interface NativeSubagentRow {
   canOpen: true
 }
 
+const READABLE_MASO_THREAD_ID_RE = /^[a-zA-Z0-9_]+-[0-9a-f]{4,8}$/
+
 function rowState(lifecycle: TimelineSubagentLifecycle): NativeSubagentState {
   return lifecycle === 'active' ? 'running' : lifecycle
 }
 
 function threadName(thread: TimelineSubthread): string {
+  if (
+    (thread.launchTool?.subagent?.provider === 'maso' || thread.provider === 'maso') &&
+    READABLE_MASO_THREAD_ID_RE.test(thread.threadId)
+  ) {
+    return thread.threadId
+  }
   const agentType = thread.launchTool?.subagent?.agentType
   if (agentType) return agentType
+  if (READABLE_MASO_THREAD_ID_RE.test(thread.threadId)) return thread.threadId
   // Claude addresses children by tool-use id, TraeX by thread id: show a short
   // form so the row still names the child the provider knows.
   return thread.threadId.length > 12 ? `Thread ${thread.threadId.slice(0, 8)}` : thread.threadId
 }
 
 function threadProvider(thread: TimelineSubthread): string {
-  const provider = thread.launchTool?.subagent?.provider
+  const provider = thread.launchTool?.subagent?.provider ?? thread.provider
   return provider ? subagentProviderLabel(provider) : 'Native sub-agent'
 }
 
@@ -97,6 +106,75 @@ export interface NativeSubagentRowMemo {
   turn: TimelineTurn
   revision: number
   rows: NativeSubagentRow[]
+}
+
+function turnHasNonMasoLaunchForThread(turn: TimelineTurn, threadId: string): boolean {
+  for (const part of turn.parts) {
+    if (part.kind === 'subagent' && part.tool.subagent && part.tool.subagent.provider !== 'maso') {
+      if ((part.tool.callId || part.tool.key) === threadId) return true
+    }
+    if (part.kind !== 'subagents') continue
+    for (const thread of part.threads) {
+      if (thread.threadId !== threadId) continue
+      if (thread.launchTool && thread.launchTool.subagent?.provider !== 'maso') {
+        return true
+      }
+    }
+  }
+  return false
+}
+
+function standaloneToolToSubthread(tool: TimelineTurn['tools'][number]): TimelineSubthread {
+  const threadId = tool.callId || tool.key
+  const lifecycleStatus: TimelineSubagentLifecycle =
+    tool.status === 'running'
+      ? 'active'
+      : tool.status === 'failed'
+        ? 'failed'
+        : tool.status === 'cancelled'
+          ? 'cancelled'
+          : 'completed'
+  return {
+    key: `subthread-${threadId}`,
+    threadId,
+    parts: [],
+    launchTool: tool,
+    lifecycleStatus,
+    provider: tool.subagent?.provider,
+    renderRevision: 1,
+  }
+}
+
+function turnSubthreads(turn: TimelineTurn): TimelineSubthread[] {
+  const threads: TimelineSubthread[] = []
+  const seen = new Set<string>()
+  for (const part of turn.parts) {
+    if (part.kind !== 'subagents') continue
+    for (const thread of part.threads) {
+      seen.add(thread.threadId)
+      threads.push(thread)
+    }
+  }
+  for (const part of turn.parts) {
+    if (part.kind !== 'subagent' || !part.tool.subagent) continue
+    const threadId = part.tool.callId || part.tool.key
+    if (seen.has(threadId)) continue
+    seen.add(threadId)
+    threads.push(standaloneToolToSubthread(part.tool))
+  }
+  return threads
+}
+
+function turnReportHeadlineForThread(turn: TimelineTurn, threadId: string): string | null {
+  for (const part of turn.parts) {
+    if (part.kind !== 'subagents') continue
+    for (const thread of part.threads) {
+      if (thread.threadId !== threadId) continue
+      const report = subthreadReportHeadline(thread)
+      if (report) return report
+    }
+  }
+  return null
 }
 
 /** Whether a turn's children are fully known yet.
@@ -131,27 +209,79 @@ export function nativeSubagentRows(
   isReady: NativeSubagentRowReadiness = () => true,
 ): NativeSubagentRow[] {
   const rows: NativeSubagentRow[] = []
+  const byThreadId = new Map<string, number>()
+  const hasReportByThreadId = new Map<string, boolean>()
   const liveKeys = new Set<string>()
   for (let index = turns.length - 1; index >= 0; index -= 1) {
     const turn = turns[index]
     liveKeys.add(turn.key)
     if (!isReady(turn)) continue
+    let turnRows: NativeSubagentRow[]
     const cached = memo?.get(turn.key)
     if (cached && cached.turn === turn && cached.revision === turn.renderRevision) {
-      rows.push(...cached.rows)
+      turnRows = cached.rows
     } else {
       const fresh: NativeSubagentRow[] = []
-      for (const part of turn.parts) {
-        if (part.kind !== 'subagents') continue
-        // Threads are appended in creation order; the list reads newest first.
-        for (let threadIndex = part.threads.length - 1; threadIndex >= 0; threadIndex -= 1) {
-          fresh.push(nativeSubagentRow(turn, part.threads[threadIndex]))
-        }
+      const subthreads = turnSubthreads(turn)
+      // Threads are appended in creation order; the list reads newest first.
+      for (let threadIndex = subthreads.length - 1; threadIndex >= 0; threadIndex -= 1) {
+        fresh.push(nativeSubagentRow(turn, subthreads[threadIndex]))
       }
       memo?.set(turn.key, { turn, revision: turn.renderRevision, rows: fresh })
-      rows.push(...fresh)
+      turnRows = fresh
     }
-    if (rows.length >= NATIVE_SUBAGENT_ROW_LIMIT) break
+    for (const candidate of turnRows) {
+      const existingIndex = byThreadId.get(candidate.threadId)
+      const current = existingIndex !== undefined ? rows[existingIndex] : undefined
+      const isDistinctSyntheticSpawn =
+        current !== undefined &&
+        current.agentType !== 'MASO sub-agent' &&
+        candidate.agentType !== 'MASO sub-agent' &&
+        turnHasNonMasoLaunchForThread(turn, candidate.threadId) &&
+        turns.some(
+          t => t.key === current.turnKey && turnHasNonMasoLaunchForThread(t, current.threadId),
+        )
+      const candidateReport = turnReportHeadlineForThread(turn, candidate.threadId)
+      if (existingIndex === undefined || isDistinctSyntheticSpawn) {
+        if (rows.length >= NATIVE_SUBAGENT_ROW_LIMIT) continue
+        byThreadId.set(candidate.threadId, rows.length)
+        hasReportByThreadId.set(candidate.threadId, candidateReport !== null)
+        rows.push(candidate)
+      } else if (current) {
+        // Long-lived sub-agents (e.g. MASO Task/SendMessage across turns) keep
+        // one dock entry anchored at their latest turn while inheriting spawn
+        // metadata or lifecycle state from earlier turns when needed.
+        const nextState = current.state !== 'unknown' ? current.state : candidate.state
+        const nextAgentType =
+          current.agentType !== 'Native sub-agent' ? current.agentType : candidate.agentType
+        const nextName =
+          current.agentType !== 'Native sub-agent' ? current.name : candidate.name
+        const currentHasReport = hasReportByThreadId.get(candidate.threadId) === true
+        let nextSummary = current.summary
+        if (!currentHasReport && candidateReport !== null && nextState !== 'running') {
+          nextSummary = candidateReport
+          hasReportByThreadId.set(candidate.threadId, true)
+        } else if (current.summary === 'Waiting for sub-agent activity') {
+          nextSummary = candidate.summary
+        }
+        if (
+          nextState !== current.state ||
+          nextAgentType !== current.agentType ||
+          nextName !== current.name ||
+          nextSummary !== current.summary
+        ) {
+          rows[existingIndex] = {
+            ...current,
+            name: nextName,
+            agentType: nextAgentType,
+            state: nextState,
+            stateLabel: STATE_LABELS[nextState],
+            group: nextState === 'running' ? 'active' : 'earlier',
+            summary: nextSummary,
+          }
+        }
+      }
+    }
   }
   if (memo) {
     // Turns scrolled out of the pane's history would otherwise pin their rows.
@@ -175,15 +305,54 @@ export function findNativeSubthread(
   turnKey: string,
   threadId: string,
 ): NativeSubthreadLookup | null {
-  for (let index = turns.length - 1; index >= 0; index -= 1) {
+  const matches: Array<{ turn: TimelineTurn; thread: TimelineSubthread; ordinal: number }> = []
+  for (let index = 0; index < turns.length; index += 1) {
     const turn = turns[index]
-    if (turn.key !== turnKey) continue
-    for (const part of turn.parts) {
-      if (part.kind !== 'subagents') continue
-      const thread = part.threads.find(candidate => candidate.threadId === threadId)
-      if (thread) return { turn, thread, ordinal: index + 1 }
+    const thread = turnSubthreads(turn).find(candidate => candidate.threadId === threadId)
+    if (thread) {
+      matches.push({ turn, thread, ordinal: index + 1 })
     }
-    return null
   }
-  return null
+  if (matches.length === 0) return null
+  const targetIndex = matches.findIndex(item => item.turn.key === turnKey)
+  if (targetIndex < 0) return null
+  const target = matches[targetIndex]
+  if (
+    matches.length === 1 ||
+    (target.thread.provider !== 'maso' &&
+      target.thread.launchTool?.subagent?.provider !== 'maso' &&
+      turnHasNonMasoLaunchForThread(target.turn, threadId))
+  ) {
+    return target
+  }
+  let launchTool = target.thread.launchTool
+  let lifecycleStatus = target.thread.lifecycleStatus
+  let provider = target.thread.provider
+  let renderRevision = 0
+  const mergedParts: TimelineSubthread['parts'] = []
+  for (let i = 0; i <= targetIndex; i += 1) {
+    const item = matches[i]
+    if (!launchTool && item.thread.launchTool) launchTool = item.thread.launchTool
+    if (item.thread.lifecycleStatus !== 'unknown') lifecycleStatus = item.thread.lifecycleStatus
+    if (!provider && item.thread.provider) provider = item.thread.provider
+    renderRevision += item.thread.renderRevision + 1
+    for (const part of item.thread.parts) {
+      mergedParts.push(
+        i === targetIndex ? part : { ...part, key: `${item.turn.key}:${part.key}` },
+      )
+    }
+  }
+  return {
+    turn: target.turn,
+    ordinal: target.ordinal,
+    thread: {
+      key: target.thread.key,
+      threadId: target.thread.threadId,
+      parts: mergedParts,
+      launchTool,
+      lifecycleStatus,
+      renderRevision,
+      ...(provider ? { provider } : {}),
+    },
+  }
 }

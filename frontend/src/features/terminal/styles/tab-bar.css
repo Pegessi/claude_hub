@@ -295,6 +295,14 @@
   background-color: var(--ch-color-text-subtle);
 }
 
+/* A finished turn whose card waits for the user: completed, with a ring that
+   says the answer is what moves it. */
+.tab-indicator[data-awaiting='true'] {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--ch-color-success) 40%, transparent),
+    0 0 5px var(--ch-color-success-bg);
+}
+
 .pane-indicator {
   background-color: var(--ch-color-accent-strong);
   color: var(--ch-color-text-inverse);

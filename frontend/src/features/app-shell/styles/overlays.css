@@ -63,27 +63,36 @@ dialog::backdrop {
   :root:root :is(.modal-overlay, .workspace-modal-overlay, .goal-dialog-backdrop, .quota-modal-backdrop):not(.image-lightbox-overlay) {
     align-items: flex-end;
     place-items: end center;
-    padding: 0;
+    /* Bottom-align to the visual viewport, not the layout viewport: with the
+       keyboard open the sheet would otherwise keep its bottom at the layout
+       edge and sit behind the keyboard. App.vue already computes the height the
+       keyboard steals (zoom- and offset-safe), so use it rather than re-deriving
+       `100dvh - visual viewport` here. Zero when no keyboard is open. */
+    padding: 0 0 var(--keyboard-height, 0px);
   }
 
   :root:root :is(.modal-overlay, .workspace-modal-overlay, .goal-dialog-backdrop, .quota-modal-backdrop):not(.image-lightbox-overlay) > :is(.modal, .workspace-modal, .goal-dialog, .quota-modal) {
     width: 100%;
     min-width: 0;
     max-width: 100%;
-    max-height: calc(100dvh - 24px - env(safe-area-inset-top, 0px));
+    /* The visual viewport shrinks when the keyboard opens; 100dvh does not,
+       which pushed a sheet's footer behind the keyboard. */
+    max-height: calc(var(--visual-viewport-height, 100dvh) - 24px - env(safe-area-inset-top, 0px));
     border-width: 1px 0 0;
     border-radius: var(--ch-radius-overlay) var(--ch-radius-overlay) 0 0;
     box-shadow: var(--ch-shadow-sheet);
     animation-name: ch-sheet-in;
   }
 
-  :root:root :is(.modal-overlay, .workspace-modal-overlay, .goal-dialog-backdrop):not(.image-lightbox-overlay) > :is(.modal, .workspace-modal, .goal-dialog) {
+  /* The Goal dialog's own footer owns the bottom inset (it draws the safe-area
+     band and the actions); padding it here too left an empty strip below it. */
+  :root:root :is(.modal-overlay, .workspace-modal-overlay):not(.image-lightbox-overlay) > :is(.modal, .workspace-modal) {
     padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
   }
 
   :root:root dialog.restart-dialog[open],
   :root:root dialog.bot-pool[open] {
-    inset: auto 0 0 0;
+    inset: auto 0 var(--keyboard-height, 0px) 0;
     margin: 0;
     width: 100%;
     max-width: 100%;
@@ -94,8 +103,14 @@ dialog::backdrop {
   }
   :root:root dialog.restart-dialog[open] {
     padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+    max-height: calc(var(--visual-viewport-height, 100dvh) - 24px - env(safe-area-inset-top, 0px));
+    overflow-y: auto;
   }
-  :root:root dialog.bot-pool[open] { height: calc(100dvh - 24px - env(safe-area-inset-top, 0px)); }
+  /* Full-height sheet: bound it by the visual viewport too, or lifting it above
+     the keyboard would push its header and close button off the top. */
+  :root:root dialog.bot-pool[open] {
+    height: calc(var(--visual-viewport-height, 100dvh) - 24px - env(safe-area-inset-top, 0px));
+  }
 
   /* Anchored popovers must not overflow the narrow viewport. */
   :root:root :is(.tam-panel, .layout-menu-panel, .extensions-panel, .network-access-panel, .mobile-app-menu-panel) {

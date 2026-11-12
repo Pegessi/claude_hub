@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "b931133626d30f215e83cd4eaf97249831b605f4",
+  "parents": [
+    "d7654d893fe19e7460067f813815cf1df27788ce",
+    "94bc6a72f33b20795a105f105ff47bd99bedfd87"
+  ],
+  "base": "97e1e2ce3fd213c5129bb5bb20e7259b256965df",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "ce053b799dce843f765c4cb6612fcdb0f4929999",
+  "reconstructed_tree": "332b39f3893e61586b40696665dccab6fd05bad1",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "07472bfef6b1eee7a91f2e256f8179c3c6c7883a"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ec92944469a43ec54cc8f6bdcd04ea4b05821e75"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "098b07405a39de297ef626240015df4a3e512745"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "e9dfc07c89b418ba7dc9751d5b01dfc3056e6299"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b68050b492b9be6addbded9bd941cce8754bb047"
+      },
+      "reason": "Both sides appended a new \"Released\" entry at the top of the file; the merge keeps both, with the entry merged later (this branch) first, which is the file's own \"newest at top\" rule.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

@@ -73,6 +73,12 @@ export function useParentSubagents(tabId: Ref<string>) {
       return
     }
     await terminalStore.fetchTabs()
+    if (!terminalStore.tabs.some(tab => tab.id === chip.tabId)) {
+      const restored = await terminalStore.unarchiveTab(chip.tabId)
+      if (!restored) return
+      appStore.setMode('terminal')
+      return
+    }
     appStore.setMode('terminal')
     terminalStore.setActiveTab(chip.tabId)
   }

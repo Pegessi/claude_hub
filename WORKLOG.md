@@ -116,6 +116,32 @@
 
 ---
 
+## Bug #8: Switched Hub Sub-Agent Sessions Cannot Open or Resume Direct Interaction
+
+**Symptom**: Clicking a finished `claude-hub agent run` sub-agent in the `Agents` dock or inline link either does nothing (unless the Archive modal was opened first), or restores the tab into an invisible ghost state where sending a follow-up message in a Codex sub-agent starts a fresh thread instead of continuing the sub-agent's conversation.
+
+**Root Cause**:
+1. `toSubagentJumpChip` checked `options.archivedTabIds.has(summary.tab_id)`, which is empty until `fetchArchivedTabs()` is manually triggered by opening the Archive modal, so auto-archived sub-agents called `setActiveTab` (a no-op for archived tabs) instead of `unarchiveTab`.
+2. `_start_missing_tab_identity_safe` (`manager/tabs.py`), `start_all_tabs` (`startup.py`), and `_schedule_codex_discovery` (`attribution.py`) treated `SessionKind.CHAT` Codex tabs as TUI rollout tabs, polling `~/.codex/sessions` for a TUI process that does not exist (`SessionKind.CHAT` runs `/bin/bash` in tmux while `CodexAppServerTransport` owns the conversation) and calling `_quarantine_codex_tab`, which wiped `agent_session_id = None` and set `resume_quarantined = True`.
+3. Unarchiving a sub-agent tab cleared `subagent_id` and `parent_tab_id` but left display-only `workspace_id`/`workspace_name` (`workspace_role = None`), causing both the main Chat list (`!tab.workspace_id`) and Workspace Subagents list (`Boolean(tab.parent_tab_id)`) to hide the tab.
+
+**Fix**:
+- Mark `!live && state === 'closed'` sub-agents as `archived` in `toSubagentJumpChip` and fall back to `unarchiveTab` in `useParentSubagents.jump` when the tab is absent from `terminalStore.tabs`.
+- Exclude `SessionKind.CHAT` from all TUI Codex rollout attribution/quarantine paths (`tabs.py`, `startup.py`, `attribution.py`) and clear `resume_quarantined` on unarchive/state load.
+- Clear display-only `workspace_id`/`workspace_name` in `_detach_subagent_process`, detach on web user send (`dispatch.py`), and detach instead of auto-archiving when a user views a sub-agent tab during the 3s grace window (`subagents.py`).
+
+**Files Changed**:
+- `backend/claude_hub/services/terminal_runtime/manager/{tabs,startup,attribution,retirement,state,host}.py`
+- `backend/claude_hub/services/subagents.py`
+- `backend/claude_hub/api/routes/agent_stream/{dispatch,runtime}.py`
+- `frontend/src/features/chat/presentation/{subagentJump,hubSubagentThread}.ts`
+- `frontend/src/features/chat/controllers/{useParentSubagents,nativeSubagentDock}.ts`
+- `frontend/src/features/chat/components/{ChatNativeSubagentOverlay,ChatSubagentRow,ChatHubSubagentLink}.vue`
+
+**Key Lesson**: `SessionKind.CHAT` and `SessionKind.TERMINAL` have distinct session-identity owners (`ProviderSession` vs. TUI rollout scanner); lifecycle hooks on `TTYDManager` must guard TUI-only attribution by `session_kind != SessionKind.CHAT`, and detaching a child tab must clear all parent-derived display metadata so sidebar predicates remain partitioning.
+
+---
+
 ## Environment Notes
 
 - **System proxy** (`http_proxy=127.0.0.1:7890`) was active on the dev machine. The backend already handles this by clearing proxy env vars at import time and using `trust_env=False` on httpx. But `curl` commands during debugging needed `--noproxy '*'` to avoid false 502 errors.

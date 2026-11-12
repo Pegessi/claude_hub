@@ -29,6 +29,7 @@ Unsupported agent types fail closed (raise ``ValueError``).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import shutil
@@ -203,16 +204,28 @@ def _normalize_text(text: str) -> str:
     return text.strip()
 
 
+def hash_provider_text(text: str) -> str:
+    """Hex SHA-256 of ``text`` normalized exactly as matching normalizes it.
+
+    The ``turn_started`` event stores this digest instead of the full
+    provider-bound text: the stored ``summary`` is redacted (masked secrets,
+    truncated at 4000 chars), so it cannot identify a long or secret-like
+    message.  A digest of the normalized text can.
+    """
+    return hashlib.sha256(_normalize_text(text).encode("utf-8")).hexdigest()
+
+
 def _find_target_line(
     user_messages: List[Tuple[int, int, str]],
     turn_index: int,
     turn_text: str,
+    provider_text_sha256: Optional[str] = None,
 ) -> int:
     """Find the transcript line number of the user message for the edited turn.
 
     ``user_messages`` is a list of ``(line_number, ordinal, text)`` tuples in
-    file order.  The edited turn is matched to a provider message by *content*
-    (normalized), disambiguated by ordinal position:
+    file order.  The edited turn is matched to a provider message, disambiguated
+    by ordinal position:
 
     1. An exact ordinal+content match is preferred.
     2. Otherwise the content match with the largest ordinal below
@@ -220,16 +233,31 @@ def _find_target_line(
        provider ordinals down).
     3. Otherwise the content match with the smallest ordinal.
 
-    Raises ``TranscriptForkError`` if there is no content match at all — the
-    turn's delivery likely failed and there is no provider message to
-    truncate at, so we fail fast rather than guess.
+    When ``provider_text_sha256`` is supplied the candidate messages are
+    matched by the digest of their normalized text instead of by content
+    comparison.  This is authoritative for modern turns: the stored
+    ``summary`` is redacted, so it is truncated (4000 chars) and secret-masked
+    and would never equal a long or secret-bearing provider message.  Turns
+    written before that digest was recorded have no hash and keep the content
+    path.
+
+    Raises ``TranscriptForkError`` if there is no match at all — the turn's
+    delivery likely failed and there is no provider message to truncate at,
+    so we fail fast rather than guess.
     """
-    target = _normalize_text(turn_text)
-    matches = [
-        (ordinal, line_no)
-        for line_no, ordinal, text in user_messages
-        if _normalize_text(text) == target
-    ]
+    if provider_text_sha256:
+        matches = [
+            (ordinal, line_no)
+            for line_no, ordinal, text in user_messages
+            if hash_provider_text(text) == provider_text_sha256
+        ]
+    else:
+        target = _normalize_text(turn_text)
+        matches = [
+            (ordinal, line_no)
+            for line_no, ordinal, text in user_messages
+            if _normalize_text(text) == target
+        ]
     if not matches:
         raise TranscriptForkError(
             "edited turn has no matching provider user message "
@@ -249,15 +277,19 @@ def fork_transcript(
     adapter: Any,
     turn_index: int,
     turn_text: str,
+    *,
+    provider_text_sha256: Optional[str] = None,
 ) -> int:
     """Truncate the provider transcript at the user message for the edited turn.
 
     The Hub turn identified by the caller is matched to a provider user
-    message by *content* (``turn_text``), disambiguated by ``turn_index``, so
-    a ``turn_started`` whose provider delivery failed cannot shift the
-    truncation onto the wrong message.  All records before the matched user
-    message are preserved; the matched message and everything after it is
-    discarded.
+    message by its ``provider_text_sha256`` digest when the caller has one
+    (authoritative, immune to the redaction of the stored summary), or by
+    *content* (``turn_text``) for historical turns without a digest.  Matching
+    is disambiguated by ``turn_index``, so a ``turn_started`` whose provider
+    delivery failed cannot shift the truncation onto the wrong message.  All
+    records before the matched user message are preserved; the matched message
+    and everything after it is discarded.
 
     Args:
         session: The managed session.
@@ -265,7 +297,10 @@ def fork_transcript(
         turn_index: 0-based ordinal of the edited turn among Hub
             ``turn_started`` events (used to disambiguate duplicate content).
         turn_text: The edited turn's text (``payload.summary`` from the Hub
-            store) used to match the provider user message by content.
+            store) used to match the provider user message by content when no
+            digest is available.
+        provider_text_sha256: Optional hex digest of the provider-bound text
+            recorded on the ``turn_started`` event.
 
     Returns:
         The number of transcript lines removed.
@@ -307,11 +342,32 @@ def fork_transcript(
                 user_count += 1
 
     # Find the line to truncate at (raises TranscriptForkError if unmappable).
-    target_line = _find_target_line(user_messages, turn_index, turn_text)
+    target_line = _find_target_line(
+        user_messages, turn_index, turn_text, provider_text_sha256=provider_text_sha256
+    )
 
     # Keep everything strictly before the target line.
     kept = all_lines[:target_line]
     removed = len(all_lines) - target_line
+
+    # The ordinal heuristics may land on a duplicate/drifted message instead of
+    # the requested turn.  Never silent: log the requested turn, the ordinal
+    # actually matched and how much of the transcript that removed.  The
+    # heuristics themselves are unchanged.
+    matched_ordinal = next(
+        ordinal for line_no, ordinal, _text in user_messages if line_no == target_line
+    )
+    if matched_ordinal != turn_index:
+        logger.warning(
+            "fork_transcript shifted match for session %s: requested turn_index=%d "
+            "but matched provider user message ordinal=%d (removed %d transcript lines "
+            "from line %d); the edit will truncate at that shifted message",
+            session.id,
+            turn_index,
+            matched_ordinal,
+            removed,
+            target_line,
+        )
 
     # Write the truncated transcript atomically: write to a temp file first,
     # then rename, so a crash mid-write does not corrupt the original.

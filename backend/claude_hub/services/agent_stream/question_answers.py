@@ -265,6 +265,11 @@ class QuestionAnswers:
                             payload,
                             stream._agent_stream_bindings,
                             goal_locked=True,
+                            # A question answer is a Hub-formatted payload, not
+                            # the reader's own message: recording the origin
+                            # keeps it out of the resend editor, which would
+                            # otherwise offer to resend the protocol JSON.
+                            turn_metadata={"origin": "question_answer"},
                         )
                         await manager.resolve_answered_questions(
                             session,
