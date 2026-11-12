@@ -114,6 +114,8 @@ def _model_options(rows: Any) -> List[StreamModelOption]:
                 id=key,
                 label=key,
                 provider_model_id=key,
+                # The upstream endpoint, which is what quota rows and health
+                # samples name; the model picker itself shows ``key``.
                 description=str(row.get("model_name") or ""),
                 default_reasoning_effort=next(
                     (item.id for item in efforts if item.provider_model_id == key), None
@@ -122,6 +124,48 @@ def _model_options(rows: Any) -> List[StreamModelOption]:
             )
         )
     return options
+
+
+def endpoint_labels(rows: Any) -> Dict[str, str]:
+    """Model names for every upstream endpoint a quota row can name.
+
+    `_model_options` keeps one option per selector group, so a group whose rows
+    disagree about their endpoint would lose the extra endpoints. This reads the
+    raw catalog instead: every row names one endpoint, and a row that is its
+    group's `selector_primary_key` names the whole group. First row wins per
+    endpoint, which keeps the result stable when the catalog repeats one.
+    """
+    if not isinstance(rows, list):
+        return {}
+    primary: Dict[str, str] = {}
+    labels: Dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict) or row.get("deprecated") is True:
+            continue
+        endpoint, key = row.get("model_name"), row.get("key")
+        if not isinstance(endpoint, str) or not endpoint or not isinstance(key, str) or not key:
+            continue
+        display_name = row.get("display_name")
+        label = display_name if isinstance(display_name, str) and display_name else key
+        labels.setdefault(endpoint, label)
+        if row.get("selector_primary_key") == key:
+            primary.setdefault(endpoint, label)
+    return {endpoint: primary.get(endpoint, label) for endpoint, label in labels.items()}
+
+
+async def maso_endpoint_labels(client: httpx.AsyncClient) -> Dict[str, str]:
+    """Best-effort endpoint names, read on a caller's already-open client.
+
+    Quota is a passive display surface: a missing or broken catalog degrades to
+    "no names", never to a failed reading.
+    """
+    try:
+        async with asyncio.timeout(2.0):
+            response = await client.get("/api/models", timeout=2.0)
+            response.raise_for_status()
+            return endpoint_labels(response.json())
+    except (httpx.HTTPError, TimeoutError, ValueError, RuntimeError):
+        return {}
 
 
 class MasoServiceUnavailable(RuntimeError):
