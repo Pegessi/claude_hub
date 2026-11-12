@@ -7,6 +7,25 @@
 
 ## Released
 
+### fix(goal): Plan-first opens off so a Goal no longer parks for approval unasked
+
+- A Goal that had no request for a plan review could open on `blocked` with an
+  "Approve & start / Revise" card, because the setup dialog's Plan-first
+  checkbox opened ticked and every created Goal therefore sent
+  `plan_first: true`. The option now opens unchecked, the dialog says
+  `The Goal starts working immediately`, and ticking it restores the gate
+  (`Nothing starts until you approve.`) and sends the same additive
+  `plan_first`.
+- The remembered choice moves to `claude-hub.goal-plan-first.v2`, so a
+  `true` written while the option was on by default cannot keep gating new
+  Goals: that value records the old default, not a decision. An explicit
+  opt-in is remembered under the new key.
+- Backend contracts, the plan envelope, the `needs_input` park, the plan card,
+  the provider-native refusal and callers that omit the field are unchanged.
+- Validation: plan-preference unit tests (default off, round trip, legacy key
+  ignored), whole frontend unit suite, typecheck, lint, and
+  `browser_chat_goal_steer.py` re-run against the opt-in path.
+
 ### fix(chat): Resend rewrites history honestly, images paste where they were asked for, Ask aside removed
 
 Design notes and the deliberately-open items are in
