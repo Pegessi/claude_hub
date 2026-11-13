@@ -138,6 +138,7 @@ class _TurnAccumulator:
     # Per-turn Cursor ACP tool metadata buffered across partial ``tool_call``
     # and ``tool_call_update`` notifications until execution starts/completes.
     acp_tool_meta: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    saw_turn_error: bool = False
     # Open assistant MESSAGE lifecycle (``message_start`` … ``message_stop``),
     # distinct from the per-message text accumulator above. A one-shot provider
     # can close stdout mid-generation after a ``message_start`` with only some
@@ -338,7 +339,7 @@ class AgentStreamAdapter:
             self._turn_state.pop((ctx.session_id, epoch, ctx.sub_thread_id), None)
             return
         stale_keys = [
-            key for key in self._turn_state if key[0] == ctx.session_id and key[1] == epoch
+            key for key in self._turn_state if key[0] == ctx.session_id and key[1] <= epoch
         ]
         for key in stale_keys:
             self._turn_state.pop(key, None)

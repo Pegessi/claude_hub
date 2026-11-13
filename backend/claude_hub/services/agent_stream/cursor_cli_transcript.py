@@ -246,6 +246,7 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
         if raw.get("type") == "acp_error":
             msg = raw.get("message")
             if isinstance(msg, str) and msg:
+                self._get_turn_state(ctx).saw_turn_error = True
                 events.append(ctx.event(AgentStreamEventType.ERROR, {"message": msg}))
             return events
 
@@ -567,10 +568,11 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
             if usage is not None:
                 completed_payload["usage"] = usage
             if is_error:
+                state = self._get_turn_state(ctx)
                 raw_err = raw.get("error")
                 err = (
                     ""
-                    if raw_err == "" and not raw.get("result")
+                    if state.saw_turn_error and not raw_err and not raw.get("result")
                     else (raw.get("result") or raw_err or "turn failed")
                 )
                 if isinstance(err, str) and err:
@@ -608,6 +610,7 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
             content = update.get("content")
             text = content.get("text") if isinstance(content, dict) else None
             if isinstance(text, str) and text:
+                self._append_text_delta(record_ctx, text)
                 events.append(
                     ctx.event(
                         AgentStreamEventType.TEXT_DELTA,
@@ -731,12 +734,13 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
         tool_name, args = self._derive_acp_tool_identity(meta)
         status = update.get("status")
 
-        # AskQuestion cards are already emitted with full options by the
-        # blocking ``cursor/ask_question`` server request handler.
-        if tool_name == "AskQuestion":
+        # AskQuestion and permission cards are already emitted with full
+        # options by the blocking server request handlers.
+        if tool_name == "AskQuestion" or call_id in state.emitted_approval_call_ids:
             return events
 
-        should_emit_start = status in ("in_progress", "completed", "failed")
+        terminal_statuses = ("completed", "failed", "cancelled", "canceled", "rejected", "aborted")
+        should_emit_start = status in ("in_progress", *terminal_statuses)
         if should_emit_start and call_id not in state.emitted_tool_call_ids:
             state.emitted_tool_call_ids.add(call_id)
             events.append(
@@ -748,25 +752,32 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
                 )
             )
 
-        if status in ("completed", "failed") and call_id not in state.completed_tool_call_ids:
+        if status in terminal_statuses and call_id not in state.completed_tool_call_ids:
             state.completed_tool_call_ids.add(call_id)
             raw_out = meta.get("raw_output")
-            failed = status == "failed" or (
+            cancelled = status in ("cancelled", "canceled", "aborted")
+            failed = status in ("failed", "rejected") or (
                 isinstance(raw_out, dict)
                 and (
                     any(k in raw_out for k in ("error", "rejected", "permissionDenied"))
                     or raw_out.get("exitCode") not in (None, 0)
                 )
             )
-            result_val = self._format_acp_tool_result(raw_out, meta.get("content"))
+            result_val = self._format_acp_tool_result(
+                raw_out, meta.get("content"), tool_name=tool_name
+            )
+            completed_status = "cancelled" if cancelled else ("failed" if failed else "completed")
+            completed_payload: Dict[str, Any] = {
+                "name": tool_name,
+                "status": completed_status,
+                "result": result_val,
+            }
+            if args:
+                completed_payload["args"] = args
             events.append(
                 ctx.event(
                     AgentStreamEventType.TOOL_CALL_COMPLETED,
-                    {
-                        "name": tool_name,
-                        "status": "failed" if failed else "completed",
-                        "result": result_val,
-                    },
+                    completed_payload,
                     call_id=call_id,
                     sub_thread_id=sub_thread,
                 )
@@ -847,8 +858,14 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
         return name, raw_args
 
     @staticmethod
-    def _format_acp_tool_result(raw_out: Any, content_items: Any) -> Any:
+    def _format_acp_tool_result(
+        raw_out: Any, content_items: Any, *, tool_name: Optional[str] = None
+    ) -> Any:
         if isinstance(raw_out, dict):
+            if tool_name == "Task" and any(
+                key in raw_out for key in ("success", "error", "failure", "rejected")
+            ):
+                return raw_out
             if "stdout" in raw_out or "stderr" in raw_out:
                 parts: List[str] = []
                 for k in ("stdout", "stderr"):
