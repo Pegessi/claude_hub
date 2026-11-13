@@ -50,9 +50,10 @@ def _inject_acp_preload_env(provider_env: Dict[str, str]) -> Dict[str, str]:
     """
     if not _ACP_PRELOAD_PATH.is_file():
         return provider_env
-    req_flag = f"--require={_ACP_PRELOAD_PATH}"
+    path_str = str(_ACP_PRELOAD_PATH)
+    req_flag = f'--require="{path_str}"' if " " in path_str else f"--require={path_str}"
     existing = provider_env.get("NODE_OPTIONS", "").strip()
-    if req_flag in existing or str(_ACP_PRELOAD_PATH) in existing:
+    if req_flag in existing or path_str in existing:
         return provider_env
     merged = dict(provider_env)
     merged["NODE_OPTIONS"] = f"{existing} {req_flag}".strip() if existing else req_flag
@@ -77,6 +78,7 @@ _CURSOR_EFFORT_SUFFIXES: Tuple[str, ...] = (
 )
 _CURSOR_BRACKET_RE = re.compile(r"^([^[\]]+)\[(.*)\]$")
 _CURSOR_LEGACY_CLAUDE_RE = re.compile(r"^claude-(\d+)\.(\d+)-(sonnet|opus|haiku)$")
+_CURSOR_SHORT_CLAUDE_RE = re.compile(r"^(sonnet|opus|haiku)-(\d+)\.(\d+)$")
 
 
 def _parse_cursor_model_spec(
@@ -87,11 +89,12 @@ def _parse_cursor_model_spec(
 
     ``agent --list-models`` emits flat legacy slugs (e.g.
     ``gemini-4-carbon-high``, ``cursor-grok-4.6-high-fast``, ``gpt-5.3-codex-xhigh``,
-    ``auto``), whereas ``agent acp`` with ``parameterizedModelPicker=True``
-    splits selection into a base model ID (``gemini-4-carbon``, ``grok-4.6``,
-    ``gpt-5.3-codex``, ``auto-smart``) plus ``session/set_config_option``
-    parameter values (``reasoning_effort``, ``reasoning``, ``effort``, ``fast``,
-    ``thinking``, ``context``, ``optimize_for``).
+    ``sonnet-4.6-1m-thinking-high``, ``auto``), whereas ``agent acp`` with
+    ``parameterizedModelPicker=True`` splits selection into a base model ID
+    (``gemini-4-carbon``, ``grok-4.6``, ``gpt-5.3-codex``, ``claude-sonnet-4-6``,
+    ``auto-smart``) plus ``session/set_config_option`` parameter values
+    (``reasoning_effort``, ``reasoning``, ``effort``, ``fast``, ``thinking``,
+    ``context``, ``optimize_for``).
     """
     spec = raw_model.strip()
     if not spec or not available_base_ids:
@@ -116,9 +119,12 @@ def _parse_cursor_model_spec(
     if spec in available_base_ids:
         params = dict(explicit_params)
         if not has_brackets:
-            params.setdefault("_fast_default", "false")
+            # Bare composer-2 defaults to fast=true in Cursor's model catalog.
+            default_fast = "true" if spec.startswith("composer-2") else "false"
+            params.setdefault("_fast_default", default_fast)
             params.setdefault("_effort_default", "medium")
             params.setdefault("_thinking_default", "false")
+            params.setdefault("_context_default", "default")
         return spec, params
 
     if spec == "auto" and "auto-smart" in available_base_ids:
@@ -128,14 +134,22 @@ def _parse_cursor_model_spec(
     fast: Optional[str] = None
     thinking: Optional[str] = None
     effort: Optional[str] = None
+    context: Optional[str] = None
 
     if rem.endswith("-fast") and rem not in available_base_ids:
         fast = "true"
         rem = rem[:-5]
+    elif rem.endswith("-standard") and rem not in available_base_ids:
+        fast = "false"
+        rem = rem[:-9]
 
     if rem.endswith("-thinking") and rem not in available_base_ids:
         thinking = "true"
         rem = rem[:-9]
+
+    if rem.endswith("-1m") and rem not in available_base_ids:
+        context = "1m"
+        rem = rem[:-3]
 
     for eff in _CURSOR_EFFORT_SUFFIXES:
         if rem.endswith(f"-{eff}") and rem not in available_base_ids:
@@ -147,6 +161,10 @@ def _parse_cursor_model_spec(
         thinking = "true"
         rem = rem[:-9]
 
+    if rem.endswith("-1m") and rem not in available_base_ids:
+        context = "1m"
+        rem = rem[:-3]
+
     candidates: List[str] = [rem]
     if rem.startswith("cursor-"):
         candidates.append(rem[len("cursor-") :])
@@ -154,6 +172,11 @@ def _parse_cursor_model_spec(
     if claude_match is not None:
         candidates.append(
             f"claude-{claude_match.group(3)}-{claude_match.group(1)}-{claude_match.group(2)}"
+        )
+    short_claude_match = _CURSOR_SHORT_CLAUDE_RE.fullmatch(rem)
+    if short_claude_match is not None:
+        candidates.append(
+            f"claude-{short_claude_match.group(1)}-{short_claude_match.group(2)}-{short_claude_match.group(3)}"
         )
 
     base_id = next((cand for cand in candidates if cand in available_base_ids), None)
@@ -164,11 +187,18 @@ def _parse_cursor_model_spec(
     if fast is not None:
         params.setdefault("fast", fast)
     elif not has_brackets:
-        params.setdefault("_fast_default", "false")
+        default_fast = "true" if base_id.startswith("composer-2") else "false"
+        params.setdefault("_fast_default", default_fast)
     if thinking is not None:
         params.setdefault("thinking", thinking)
-    elif not has_brackets and (effort is not None or claude_match is not None):
+    elif not has_brackets and (
+        effort is not None or claude_match is not None or short_claude_match is not None
+    ):
         params.setdefault("_thinking_default", "false")
+    if context is not None:
+        params.setdefault("context", context)
+    elif not has_brackets:
+        params.setdefault("_context_default", "default")
     if effort is not None:
         params.setdefault("_effort", effort)
     elif not has_brackets:
@@ -218,10 +248,16 @@ def _resolve_config_option_updates(
             target: Optional[str] = None
             if effort in valid:
                 target = effort
-            elif effort == "xhigh" and "extra-high" in valid:
-                target = "extra-high"
-            elif effort == "extra-high" and "xhigh" in valid:
-                target = "xhigh"
+            elif effort in ("xhigh", "extra-high"):
+                for alias in ("xhigh", "extra-high", "max"):
+                    if alias in valid:
+                        target = alias
+                        break
+            elif effort == "max":
+                for alias in ("max", "xhigh", "extra-high"):
+                    if alias in valid:
+                        target = alias
+                        break
             if target is not None and opt.get("currentValue") != target:
                 updates.append((eff_key, target))
             break
@@ -239,6 +275,13 @@ def _resolve_config_option_updates(
             target = params["_fast_default"]
             if target in _valid_values(opt) and opt.get("currentValue") != target:
                 updates.append(("fast", target))
+
+    if "context" not in params and "_context_default" in params:
+        opt = by_id.get("context")
+        if opt is not None:
+            target = params["_context_default"]
+            if target in _valid_values(opt) and opt.get("currentValue") != target:
+                updates.append(("context", target))
 
     return updates
 
@@ -519,6 +562,7 @@ class CursorSession(ProcessSession):
                 and self._process.returncode is None
                 and self._reader_task is not None
                 and not self._reader_task.done()
+                and (self._acp_session_id is not None or self._defer_initial_adoption)
             ):
                 return
 
@@ -658,7 +702,8 @@ class CursorSession(ProcessSession):
 
     async def _apply_acp_config_option(
         self, sid: str, config_id: str, value: str, *, is_model: bool = False
-    ) -> None:
+    ) -> bool:
+        previous_error = self._last_error
         try:
             resp = await self._send_request(
                 "session/set_config_option",
@@ -666,27 +711,34 @@ class CursorSession(ProcessSession):
                 timeout=_ACP_SESSION_INIT_TIMEOUT_S,
             )
             self._capture_session_metadata(resp)
+            return True
         except ProviderRpcError as exc:
             if exc.code == -32601 and is_model:
+                self._last_error = previous_error
                 await self._send_request(
                     "session/set_model",
                     {"sessionId": sid, "modelId": value},
                     timeout=_ACP_SESSION_INIT_TIMEOUT_S,
                 )
-                return
+                return True
             if exc.code in (-32601, -32602):
+                self._last_error = previous_error
                 self._runtime.logger().warning(
                     "cursor acp session/set_config_option rejected %s=%s (%s)",
                     config_id,
                     value,
                     exc,
                 )
-                return
+                return False
             raise
 
     async def _initialize_session(self, provider_env: Dict[str, str]) -> None:
         cwd = os.path.realpath(self._cwd) if self._cwd else os.getcwd()
-        if self._conversation_id and self._conversation_id_verified:
+        if (
+            not self._defer_initial_adoption
+            and self._conversation_id
+            and self._conversation_id_verified
+        ):
             sid = self._conversation_id
             await asyncio.to_thread(_migrate_legacy_cli_store_for_acp, sid, cwd, provider_env)
             loaded_resp: Any = None
@@ -774,6 +826,7 @@ class CursorSession(ProcessSession):
                 self._applied_model = model
                 return
 
+        previous_error = self._last_error
         try:
             await self._send_request(
                 "session/set_model",
@@ -783,6 +836,7 @@ class CursorSession(ProcessSession):
             self._applied_model = model
         except ProviderRpcError as exc:
             if exc.code in (-32601, -32602):
+                self._last_error = previous_error
                 # Older ACP builds without session/set_model (-32601) or custom/unlisted
                 # CLI slugs rejected by the ACP picker (-32602) still honor --model.
                 if exc.code == -32602:
@@ -871,33 +925,38 @@ class CursorSession(ProcessSession):
         self._staged_images = []
 
     async def _send_text(self, text: str) -> None:
-        if not self._started or self._process is None or not self._acp_session_id:
-            await self.start()
-        await self._ensure_session_model()
-        await self._ensure_session_mode()
-        self.check_delivery_admission()
+        try:
+            if not self._started or self._process is None or not self._acp_session_id:
+                await self.start()
+            await self._ensure_session_model()
+            await self._ensure_session_mode()
+            self.check_delivery_admission()
 
-        sid = self._acp_session_id
-        if not sid:
-            raise RuntimeError("cursor acp session is unavailable")
+            sid = self._acp_session_id
+            if not sid:
+                raise RuntimeError("cursor acp session is unavailable")
 
-        prompt_text = text
-        prompt_items: List[Dict[str, Any]] = []
-        staged = self._staged_images
-        self._staged_images = []
-        for mime_type, b64_data in staged:
-            prompt_items.append({"type": "image", "mimeType": mime_type, "data": b64_data})
-        if prompt_text or not prompt_items:
-            prompt_items.append({"type": "text", "text": prompt_text})
+            prompt_text = text
+            prompt_items: List[Dict[str, Any]] = []
+            staged = self._staged_images
+            self._staged_images = []
+            for mime_type, b64_data in staged:
+                prompt_items.append({"type": "image", "mimeType": mime_type, "data": b64_data})
+            if prompt_text or not prompt_items:
+                prompt_items.append({"type": "text", "text": prompt_text})
 
-        self._suppress_active_turn_updates = False
-        self._turn_error_emitted = False
+            self._suppress_active_turn_updates = False
+            self._turn_error_emitted = False
 
-        prompt_generation = self._stdout_generation
-        req_id, future = await self._write_request(
-            "session/prompt",
-            {"sessionId": sid, "prompt": prompt_items},
-        )
+            prompt_generation = self._stdout_generation
+            req_id, future = await self._write_request(
+                "session/prompt",
+                {"sessionId": sid, "prompt": prompt_items},
+            )
+        except asyncio.CancelledError:
+            self._clear_staged_images()
+            self._end_turn()
+            raise
         self._prompt_task = asyncio.create_task(
             self._await_prompt_completion(sid, req_id, future, prompt_generation)
         )
@@ -1079,12 +1138,18 @@ class CursorSession(ProcessSession):
     ) -> Tuple[int, "asyncio.Future[Dict[str, Any]]"]:
         if method == "session/prompt":
             self.check_delivery_admission()
-        if self._process is None or self._process.stdin is None:
-            raise RuntimeError("cursor acp server is not running")
+        if (
+            self._process is None
+            or self._process.stdin is None
+            or self._process.returncode is not None
+            or (self._reader_task is not None and self._reader_task.done())
+        ):
+            raise RuntimeError(self._exit_error or "cursor acp server is not running")
         self._jsonrpc_id += 1
         req_id = self._jsonrpc_id
         loop = asyncio.get_running_loop()
         future: asyncio.Future[Dict[str, Any]] = loop.create_future()
+        future.add_done_callback(lambda f: None if f.cancelled() else f.exception())
         self._pending_requests[req_id] = future
         request = {
             "jsonrpc": "2.0",
@@ -1099,6 +1164,14 @@ class CursorSession(ProcessSession):
             self._pending_requests.pop(req_id, None)
             self._last_error = f"cursor acp {method} write failed: {exc}"
             raise RuntimeError(self._last_error) from exc
+        if (
+            self._process is None
+            or self._process.returncode is not None
+            or (self._reader_task is not None and self._reader_task.done())
+        ) and not future.done():
+            self._pending_requests.pop(req_id, None)
+            self._last_error = self._exit_error or f"cursor acp {method} failed: server exited"
+            raise RuntimeError(self._last_error)
         return req_id, future
 
     async def _send_request(
@@ -1443,8 +1516,12 @@ class CursorSession(ProcessSession):
         update_kind = update.get("sessionUpdate")
 
         # Catch inline ACP error chunks emitted by agent-session.ts catch block
-        # so they surface as structured ERROR events instead of fake prose.
-        if update_kind == "agent_message_chunk":
+        # on the parent session so they surface as structured ERROR events
+        # instead of fake prose, without letting sub-agent error chunks poison
+        # the parent turn.
+        if update_kind == "agent_message_chunk" and (
+            not self._acp_session_id or session_id == self._acp_session_id
+        ):
             content = update.get("content")
             text = content.get("text") if isinstance(content, dict) else None
             if isinstance(text, str) and text.startswith("\n\nError:"):
@@ -1491,6 +1568,7 @@ class CursorSession(ProcessSession):
             gen, record = await self._notification_queue.get()
             if gen < self._stdout_generation:
                 continue
+            self._client_requested_stop = False
             return record
 
     async def _drain_stdout(self, generation: Optional[int] = None) -> None:
@@ -1537,14 +1615,16 @@ class CursorSession(ProcessSession):
             self._pending_questions.clear()
             self._pending_permissions.clear()
             if not cancelled:
+                if my_gen == self._stdout_generation:
+                    self._started = False
                 try:
-                    returncode = await proc.wait()
+                    returncode = await asyncio.wait_for(proc.wait(), timeout=1.0)
                 except Exception:
-                    returncode = -1
+                    returncode = proc.returncode if proc.returncode is not None else -1
                 stderr_task = self._stderr_task
                 if stderr_task is not None:
                     try:
-                        await stderr_task
+                        await asyncio.wait_for(stderr_task, timeout=1.0)
                     except Exception:
                         pass
                 if returncode != 0:

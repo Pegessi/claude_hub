@@ -5430,32 +5430,102 @@ async def test_cursor_acp_parameterized_model_resolution_and_config_options() ->
         "gpt-5.3-codex",
         "claude-opus-4-8",
         "claude-sonnet-4-6",
+        "composer-2",
     }
     assert _parse_cursor_model_spec("gemini-4-carbon-high", base_ids) == (
         "gemini-4-carbon",
-        {"_fast_default": "false", "_thinking_default": "false", "_effort": "high"},
+        {
+            "_fast_default": "false",
+            "_thinking_default": "false",
+            "_context_default": "default",
+            "_effort": "high",
+        },
     )
     assert _parse_cursor_model_spec("cursor-grok-4.6-high-fast", base_ids) == (
         "grok-4.6",
-        {"fast": "true", "_thinking_default": "false", "_effort": "high"},
+        {
+            "fast": "true",
+            "_thinking_default": "false",
+            "_context_default": "default",
+            "_effort": "high",
+        },
     )
     assert _parse_cursor_model_spec("gpt-5.3-codex-xhigh", base_ids) == (
         "gpt-5.3-codex",
-        {"_fast_default": "false", "_thinking_default": "false", "_effort": "xhigh"},
+        {
+            "_fast_default": "false",
+            "_thinking_default": "false",
+            "_context_default": "default",
+            "_effort": "xhigh",
+        },
     )
     assert _parse_cursor_model_spec("claude-opus-4-8-thinking-high", base_ids) == (
         "claude-opus-4-8",
-        {"_fast_default": "false", "thinking": "true", "_effort": "high"},
+        {
+            "_fast_default": "false",
+            "thinking": "true",
+            "_context_default": "default",
+            "_effort": "high",
+        },
     )
     assert _parse_cursor_model_spec("claude-4.6-sonnet-medium-thinking", base_ids) == (
         "claude-sonnet-4-6",
-        {"_fast_default": "false", "thinking": "true", "_effort": "medium"},
+        {
+            "_fast_default": "false",
+            "thinking": "true",
+            "_context_default": "default",
+            "_effort": "medium",
+        },
+    )
+    assert _parse_cursor_model_spec("sonnet-4.6-1m-thinking-high", base_ids) == (
+        "claude-sonnet-4-6",
+        {
+            "_fast_default": "false",
+            "thinking": "true",
+            "context": "1m",
+            "_effort": "high",
+        },
+    )
+    assert _parse_cursor_model_spec("composer-2", base_ids) == (
+        "composer-2",
+        {
+            "_fast_default": "true",
+            "_effort_default": "medium",
+            "_thinking_default": "false",
+            "_context_default": "default",
+        },
+    )
+    assert _parse_cursor_model_spec("composer-2-standard", base_ids) == (
+        "composer-2",
+        {"fast": "false", "_context_default": "default", "_effort_default": "medium"},
     )
     assert _parse_cursor_model_spec("auto", base_ids) == ("auto-smart", {})
     assert _parse_cursor_model_spec("gemini-4-carbon[reasoning_effort=low]", base_ids) == (
         "gemini-4-carbon",
         {"reasoning_effort": "low"},
     )
+
+    _, grok_xhigh_params = _parse_cursor_model_spec("cursor-grok-4.6-xhigh-fast", base_ids)
+    assert _resolve_config_option_updates(
+        grok_xhigh_params,
+        [
+            {
+                "id": "effort",
+                "currentValue": "medium",
+                "options": [
+                    {"value": "low"},
+                    {"value": "medium"},
+                    {"value": "high"},
+                    {"value": "max"},
+                ],
+            },
+            {
+                "id": "fast",
+                "currentValue": "false",
+                "options": [{"value": "true"}, {"value": "false"}],
+            },
+        ],
+    ) == [("fast", "true"), ("effort", "max")]
 
     codex_opts = [
         {
@@ -5690,8 +5760,9 @@ def test_cursor_acp_retry_preload_enables_checkpoint_retries_and_scrubs_node_opt
     """Regression for ``RetriableError: [resource_exhausted] Error`` aborting
     ACP turns on ``attempt=0``: ``cursor_acp_preload.cjs`` enables
     ``enableAgentRetries=True`` and ``maxRetries=8`` on ``agent-session.ts``'s
-    ``agentClient.run`` options and scrubs itself from ``NODE_OPTIONS`` so
-    child tool shells do not inherit the preload flag."""
+    ``agentClient.run`` options via ``Module._load`` (without polluting
+    ``Object.prototype``) and scrubs itself from ``NODE_OPTIONS`` so child
+    tool shells do not inherit the preload flag."""
     import os
     import shutil
     import subprocess
@@ -5702,9 +5773,10 @@ def test_cursor_acp_retry_preload_enables_checkpoint_retries_and_scrubs_node_opt
     )
 
     assert _ACP_PRELOAD_PATH.is_file()
-    env = _inject_acp_preload_env({"PATH": "/bin", "NODE_OPTIONS": "--max-old-space-size=4096"})
+    existing_opts = '--max-old-space-size=4096 --require="/tmp/path  with  two spaces.cjs"'
+    env = _inject_acp_preload_env({"PATH": "/bin", "NODE_OPTIONS": existing_opts})
     assert f"--require={_ACP_PRELOAD_PATH}" in env["NODE_OPTIONS"]
-    assert "--max-old-space-size=4096" in env["NODE_OPTIONS"]
+    assert existing_opts in env["NODE_OPTIONS"]
     # Idempotent when already present.
     assert _inject_acp_preload_env(env)["NODE_OPTIONS"] == env["NODE_OPTIONS"]
 
@@ -5712,28 +5784,44 @@ def test_cursor_acp_retry_preload_enables_checkpoint_retries_and_scrubs_node_opt
     if node_bin is None:
         return
     script = """
+    const hooks = globalThis.__claudeHubCursorAcpPreload;
+    const capturedOpts = [];
+    const fakeAgentClient = {
+      run(...args) {
+        capturedOpts.push(args[10]);
+      },
+    };
+    hooks.patchAgentClient(fakeAgentClient);
     const w = {
       conversationId: "conv-1",
       onConnectionStateChange: () => {},
       onErrorNotRetried: () => {},
     };
-    const other = { conversationId: "conv-1" };
+    fakeAgentClient.run(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, w);
+
     const explicitOff = {
       conversationId: "conv-1",
       onConnectionStateChange: () => {},
       onErrorNotRetried: () => {},
       enableAgentRetries: false,
     };
+    fakeAgentClient.run(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, explicitOff);
+
+    const frozen = Object.freeze({});
     console.log(JSON.stringify({
       nodeOptionsAfterLoad: process.env.NODE_OPTIONS || "",
-      wEnable: w.enableAgentRetries ?? false,
+      inProtoEnable: "enableAgentRetries" in frozen,
+      inProtoMaxRetries: "maxRetries" in frozen,
+      wEnable: w.enableAgentRetries,
       wMaxRetries: w.maxRetries,
-      wKeys: Object.keys(w),
-      otherEnable: other.enableAgentRetries ?? null,
-      explicitOffEnable: explicitOff.enableAgentRetries ?? false,
+      explicitOffEnable: explicitOff.enableAgentRetries,
     }));
     """
-    run_env = {**os.environ, "NODE_OPTIONS": env["NODE_OPTIONS"]}
+    # Strip the fake quoted require before spawning node so node only loads _ACP_PRELOAD_PATH.
+    test_env = _inject_acp_preload_env(
+        {"PATH": "/bin", "NODE_OPTIONS": "--max-old-space-size=4096"}
+    )
+    run_env = {**os.environ, "NODE_OPTIONS": test_env["NODE_OPTIONS"]}
     out = subprocess.check_output(
         [node_bin, "-e", script, "acp"],
         env=run_env,
@@ -5742,12 +5830,75 @@ def test_cursor_acp_retry_preload_enables_checkpoint_retries_and_scrubs_node_opt
     parsed = json.loads(out.strip())
     assert str(_ACP_PRELOAD_PATH) not in parsed["nodeOptionsAfterLoad"]
     assert parsed["nodeOptionsAfterLoad"] == "--max-old-space-size=4096"
+    assert parsed["inProtoEnable"] is False
+    assert parsed["inProtoMaxRetries"] is False
     assert parsed["wEnable"] is True
     assert parsed["wMaxRetries"] == 8
-    assert parsed["wKeys"] == [
-        "conversationId",
-        "onConnectionStateChange",
-        "onErrorNotRetried",
-    ]
-    assert parsed["otherEnable"] is None
     assert parsed["explicitOffEnable"] is False
+
+
+@pytest.mark.asyncio
+async def test_cursor_acp_cold_discarded_rotation_recovers_and_preserves_clean_last_error() -> None:
+    """Cross-verification regressions:
+    1. Cold ``rotate_conversation()`` followed by ``discard_rotated_conversation()``
+       leaves ``_acp_session_id is None``; the next ``start()`` / ``send_message()``
+       must initialize an active session instead of returning early and raising
+       ``cursor acp session is unavailable``.
+    2. Handled ``-32602`` on ``session/set_model`` must not leave ``_last_error``
+       set on a healthy session.
+    3. Sub-agent inline error chunks (``sessionId != _acp_session_id``) must not
+       poison the parent turn's ``_turn_error_emitted`` flag."""
+    sess = _session(AgentType.CURSOR)
+    sess.env = {"CURSOR_MODEL": "unlisted-custom-slug"}
+    proc1 = _InteractiveAcpProc(session_id="rotated-sid-1")
+    proc2 = _InteractiveAcpProc(session_id="active-sid-2")
+    orig_on_stdin2 = proc2._on_stdin
+
+    def reject_set_model(msg: Dict[str, Any]) -> None:
+        if msg.get("method") == "session/set_model":
+            proc2.requests.append(msg)
+            proc2.stdout.push_json(
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg["id"],
+                    "error": {"code": -32602, "message": "Invalid model value"},
+                }
+            )
+            return
+        orig_on_stdin2(msg)
+
+    proc2.stdin._handler = reject_set_model
+    spawned = [proc1, proc2]
+    native = CursorNativeSession(sess)
+    native._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
+    native._spawn_subprocess = AsyncMock(side_effect=spawned)  # type: ignore[method-assign]
+
+    cand = await native.rotate_conversation()
+    assert cand == "rotated-sid-1"
+    await native.discard_rotated_conversation(cand)
+    assert native._acp_session_id is None
+
+    # Next start() must not early-return with _acp_session_id=None.
+    await native.start()
+    try:
+        assert native._acp_session_id == "active-sid-2"
+        assert native.last_error is None
+
+        # Sub-agent inline error chunk must not poison parent _turn_error_emitted.
+        await native._handle_notification(
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "subagent-child-sid",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "\n\nError: subagent failed"},
+                    },
+                },
+            },
+            generation=native._stdout_generation,
+        )
+        assert native._turn_error_emitted is False
+    finally:
+        await native.stop()

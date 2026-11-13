@@ -7,18 +7,29 @@
 // and aborts the turn on attempt=0 on any transient RetriableError (such as
 // upstream [resource_exhausted] 429 rate-limit blips or HTTP/2 stream resets)
 // instead of resuming from the latest SQLite checkpoint via resumeAction.
+//
+// Additionally, ModelManager.prototype.mapModelToParameterizedSelection in
+// 1623.index.js maps legacy variant slugs (e.g. gemini-4-carbon-high) to the
+// base model's saved/default parameters instead of consulting
+// mapInitialModelVariantToParameterizedSelection for the variant's exact
+// parameterValues.
+//
+// We intercept webpack's CommonJS chunk loader via Module._load so
+// Object.prototype is never modified.
 
 (function () {
-  // Scrub this preload from NODE_OPTIONS immediately so child processes
-  // spawned by Cursor's Shell tool or MCP servers never inherit it.
+  // Scrub only this preload token from NODE_OPTIONS immediately so child
+  // processes spawned by Cursor's Shell tool or MCP servers never inherit it,
+  // while preserving any existing flags (including quoted paths with spaces).
   const selfPath = __filename;
   const rawOpts = process.env.NODE_OPTIONS;
   if (typeof rawOpts === "string" && rawOpts.includes(selfPath)) {
     const escaped = selfPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const cleaned = rawOpts
-      .replace(new RegExp(`--require(?:=|\\s+)"?${escaped}"?`, "g"), "")
-      .trim()
-      .replace(/\s+/g, " ");
+    const tokenRe = new RegExp(
+      `(?:^|\\s+)--require(?:=|\\s+)(?:"${escaped}"|'${escaped}'|${escaped})(?=\\s|$)`,
+      "g"
+    );
+    const cleaned = rawOpts.replace(tokenRe, "").trim();
     if (cleaned) {
       process.env.NODE_OPTIONS = cleaned;
     } else {
@@ -26,53 +37,189 @@
     }
   }
 
+  function patchAcpRunOptions(opts) {
+    if (opts && typeof opts === "object") {
+      if (opts.enableAgentRetries === undefined) {
+        opts.enableAgentRetries = true;
+      }
+      if (opts.maxRetries === undefined) {
+        opts.maxRetries = 8;
+      }
+    }
+    return opts;
+  }
+
+  function patchAgentClient(ac) {
+    if (!ac || typeof ac.run !== "function" || ac.run.__claudeHubPatched) {
+      return;
+    }
+    const origRun = ac.run;
+    const patchedRun = function (...runArgs) {
+      if (runArgs.length >= 11) {
+        patchAcpRunOptions(runArgs[10]);
+      }
+      return origRun.apply(this, runArgs);
+    };
+    patchedRun.__claudeHubPatched = true;
+    ac.run = patchedRun;
+  }
+
+  function patchModelManager(mm) {
+    if (
+      !mm ||
+      typeof mm.mapModelToParameterizedSelection !== "function" ||
+      typeof mm.mapInitialModelVariantToParameterizedSelection !== "function" ||
+      mm.mapModelToParameterizedSelection.__claudeHubPatched
+    ) {
+      return;
+    }
+    const origMap = mm.mapModelToParameterizedSelection;
+    const patchedMap = function (modelId, configProvider) {
+      if (
+        typeof modelId === "string" &&
+        this.parameterizedModelMap &&
+        typeof this.parameterizedModelMap.has === "function" &&
+        !this.parameterizedModelMap.has(modelId)
+      ) {
+        const exactVariant = this.mapInitialModelVariantToParameterizedSelection(modelId);
+        if (exactVariant) {
+          return exactVariant;
+        }
+      }
+      return origMap.apply(this, arguments);
+    };
+    patchedMap.__claudeHubPatched = true;
+    mm.mapModelToParameterizedSelection = patchedMap;
+  }
+
+  function patchAgentSessionClass(AgentSession) {
+    if (!AgentSession || !AgentSession.prototype || AgentSession.__claudeHubPatched) {
+      return;
+    }
+    AgentSession.__claudeHubPatched = true;
+    const origProcessPrompt = AgentSession.prototype.processPrompt;
+    if (typeof origProcessPrompt === "function") {
+      AgentSession.prototype.processPrompt = async function (...args) {
+        if (this && this.sharedServices) {
+          patchAgentClient(this.sharedServices.agentClient);
+          patchModelManager(this.sharedServices.modelManager);
+        }
+        return origProcessPrompt.apply(this, args);
+      };
+    }
+  }
+
+  function patchCursorAcpAgentClass(CursorAcpAgent) {
+    if (!CursorAcpAgent || !CursorAcpAgent.prototype || CursorAcpAgent.__claudeHubPatched) {
+      return;
+    }
+    CursorAcpAgent.__claudeHubPatched = true;
+    for (const method of ["newSession", "loadSession", "setSessionModel"]) {
+      const orig = CursorAcpAgent.prototype[method];
+      if (typeof orig === "function") {
+        CursorAcpAgent.prototype[method] = async function (...args) {
+          if (this && this.sharedServices) {
+            patchAgentClient(this.sharedServices.agentClient);
+            patchModelManager(this.sharedServices.modelManager);
+          }
+          return orig.apply(this, args);
+        };
+      }
+    }
+  }
+
+  Object.defineProperty(globalThis, "__claudeHubCursorAcpPreload", {
+    value: {
+      patchAcpRunOptions,
+      patchAgentClient,
+      patchModelManager,
+      patchAgentSessionClass,
+      patchCursorAcpAgentClass,
+    },
+    configurable: true,
+    enumerable: false,
+    writable: false,
+  });
+
   if (!Array.isArray(process.argv) || !process.argv.includes("acp")) {
     return;
   }
 
-  function isAcpAgentClientRunOptions(obj) {
-    return (
-      obj !== null &&
-      typeof obj === "object" &&
-      typeof obj.conversationId === "string" &&
-      typeof obj.onConnectionStateChange === "function" &&
-      typeof obj.onErrorNotRetried === "function"
-    );
-  }
-
-  if (!Object.prototype.hasOwnProperty("enableAgentRetries")) {
-    Object.defineProperty(Object.prototype, "enableAgentRetries", {
-      configurable: true,
-      enumerable: false,
-      get() {
-        return isAcpAgentClientRunOptions(this) ? true : undefined;
-      },
-      set(v) {
-        Object.defineProperty(this, "enableAgentRetries", {
-          value: v,
-          writable: true,
-          configurable: true,
-          enumerable: true,
-        });
-      },
-    });
-  }
-
-  if (!Object.prototype.hasOwnProperty("maxRetries")) {
-    Object.defineProperty(Object.prototype, "maxRetries", {
-      configurable: true,
-      enumerable: false,
-      get() {
-        return isAcpAgentClientRunOptions(this) ? 8 : undefined;
-      },
-      set(v) {
-        Object.defineProperty(this, "maxRetries", {
-          value: v,
-          writable: true,
-          configurable: true,
-          enumerable: true,
-        });
-      },
-    });
+  const Module = require("node:module");
+  const origLoad = Module._load;
+  if (typeof origLoad === "function" && !origLoad.__claudeHubPatched) {
+    const patchedLoad = function (request, parent, isMain) {
+      const loaded = origLoad.apply(this, arguments);
+      if (loaded && typeof loaded === "object" && loaded.modules) {
+        const mods = loaded.modules;
+        if (
+          typeof mods["./src/acp/agent-session.ts"] === "function" &&
+          !mods["./src/acp/agent-session.ts"].__claudeHubPatched
+        ) {
+          const origFactory = mods["./src/acp/agent-session.ts"];
+          const wrappedFactory = function (e, t, s) {
+            const wrappedS = Object.assign(
+              function (id) {
+                return s(id);
+              },
+              s,
+              {
+                d(target, def) {
+                  if (def && typeof def.m === "function") {
+                    const origGetter = def.m;
+                    def = Object.assign({}, def, {
+                      m() {
+                        const cls = origGetter();
+                        patchAgentSessionClass(cls);
+                        return cls;
+                      },
+                    });
+                  }
+                  return s.d(target, def);
+                },
+              }
+            );
+            return origFactory.call(this, e, t, wrappedS);
+          };
+          wrappedFactory.__claudeHubPatched = true;
+          mods["./src/acp/agent-session.ts"] = wrappedFactory;
+        }
+        if (
+          typeof mods["./src/acp/cursor-acp-agent.ts"] === "function" &&
+          !mods["./src/acp/cursor-acp-agent.ts"].__claudeHubPatched
+        ) {
+          const origAgentFactory = mods["./src/acp/cursor-acp-agent.ts"];
+          const wrappedAgentFactory = function (e, t, s) {
+            const wrappedS = Object.assign(
+              function (id) {
+                return s(id);
+              },
+              s,
+              {
+                d(target, def) {
+                  if (def && typeof def.o === "function") {
+                    const origGetter = def.o;
+                    def = Object.assign({}, def, {
+                      o() {
+                        const cls = origGetter();
+                        patchCursorAcpAgentClass(cls);
+                        return cls;
+                      },
+                    });
+                  }
+                  return s.d(target, def);
+                },
+              }
+            );
+            return origAgentFactory.call(this, e, t, wrappedS);
+          };
+          wrappedAgentFactory.__claudeHubPatched = true;
+          mods["./src/acp/cursor-acp-agent.ts"] = wrappedAgentFactory;
+        }
+      }
+      return loaded;
+    };
+    patchedLoad.__claudeHubPatched = true;
+    Module._load = patchedLoad;
   }
 })();

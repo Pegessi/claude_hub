@@ -151,4 +151,8 @@ all actionable findings and added regression coverage:
    the latest SQLite checkpoint via `resumeAction`. Added `cursor_acp_preload.cjs`
    (injected via `NODE_OPTIONS` and immediately scrubbed so child tool shells do
    not inherit it) to supply `enableAgentRetries = true` and `maxRetries = 8` on
-   the ACP `runOptions` object.
+   the ACP `runOptions` object via `Module._load` (without touching
+   `Object.prototype`), and hardened `CursorSession` rotation discard,
+   `_write_request` liveness checks, `_last_error` preservation on non-fatal
+   `-32601`/`-32602` fallbacks, sub-agent inline error isolation, and `-1m` /
+   short Claude / Grok `xhigh->max` / `composer-2` model parameter resolution.
