@@ -7,10 +7,22 @@ import base64
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import uuid
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import (
+    AbstractSet,
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from ....models import ChatMode, ManagedSession, StreamModeOption
 from ..provider_network import ProviderNetworkError
@@ -28,6 +40,183 @@ _CONTENT_POLICY_HINT = (
     " (Cursor/upstream model content safety filter rejected this prompt or context — "
     "not a local login expiry; switch models or start a fresh session to trim context)"
 )
+
+_CURSOR_EFFORT_SUFFIXES: Tuple[str, ...] = (
+    "extra-high",
+    "minimal",
+    "medium",
+    "xhigh",
+    "high",
+    "none",
+    "low",
+    "max",
+)
+_CURSOR_BRACKET_RE = re.compile(r"^([^[\]]+)\[(.*)\]$")
+_CURSOR_LEGACY_CLAUDE_RE = re.compile(r"^claude-(\d+)\.(\d+)-(sonnet|opus|haiku)$")
+
+
+def _parse_cursor_model_spec(
+    raw_model: str, available_base_ids: AbstractSet[str]
+) -> Tuple[Optional[str], Dict[str, str]]:
+    """Resolve a ``CURSOR_MODEL`` CLI slug or bracket override against ACP's
+    parameterized base model catalog.
+
+    ``agent --list-models`` emits flat legacy slugs (e.g.
+    ``gemini-4-carbon-high``, ``cursor-grok-4.6-high-fast``, ``gpt-5.3-codex-xhigh``,
+    ``auto``), whereas ``agent acp`` with ``parameterizedModelPicker=True``
+    splits selection into a base model ID (``gemini-4-carbon``, ``grok-4.6``,
+    ``gpt-5.3-codex``, ``auto-smart``) plus ``session/set_config_option``
+    parameter values (``reasoning_effort``, ``reasoning``, ``effort``, ``fast``,
+    ``thinking``, ``context``, ``optimize_for``).
+    """
+    spec = raw_model.strip()
+    if not spec or not available_base_ids:
+        return None, {}
+
+    explicit_params: Dict[str, str] = {}
+    has_brackets = False
+    bracket = _CURSOR_BRACKET_RE.fullmatch(spec)
+    if bracket is not None:
+        has_brackets = True
+        spec = bracket.group(1).strip()
+        inner = bracket.group(2).strip()
+        if inner:
+            for part in inner.split(","):
+                if "=" in part:
+                    key, val = part.split("=", 1)
+                    key = key.strip()
+                    val = val.strip()
+                    if key and val:
+                        explicit_params[key] = val
+
+    if spec in available_base_ids:
+        params = dict(explicit_params)
+        if not has_brackets:
+            params.setdefault("_fast_default", "false")
+            params.setdefault("_effort_default", "medium")
+            params.setdefault("_thinking_default", "false")
+        return spec, params
+
+    if spec == "auto" and "auto-smart" in available_base_ids:
+        return "auto-smart", dict(explicit_params)
+
+    rem = spec
+    fast: Optional[str] = None
+    thinking: Optional[str] = None
+    effort: Optional[str] = None
+
+    if rem.endswith("-fast") and rem not in available_base_ids:
+        fast = "true"
+        rem = rem[:-5]
+
+    if rem.endswith("-thinking") and rem not in available_base_ids:
+        thinking = "true"
+        rem = rem[:-9]
+
+    for eff in _CURSOR_EFFORT_SUFFIXES:
+        if rem.endswith(f"-{eff}") and rem not in available_base_ids:
+            effort = eff
+            rem = rem[: -(len(eff) + 1)]
+            break
+
+    if rem.endswith("-thinking") and rem not in available_base_ids:
+        thinking = "true"
+        rem = rem[:-9]
+
+    candidates: List[str] = [rem]
+    if rem.startswith("cursor-"):
+        candidates.append(rem[len("cursor-") :])
+    claude_match = _CURSOR_LEGACY_CLAUDE_RE.fullmatch(rem)
+    if claude_match is not None:
+        candidates.append(
+            f"claude-{claude_match.group(3)}-{claude_match.group(1)}-{claude_match.group(2)}"
+        )
+
+    base_id = next((cand for cand in candidates if cand in available_base_ids), None)
+    if base_id is None:
+        return None, {}
+
+    params = dict(explicit_params)
+    if fast is not None:
+        params.setdefault("fast", fast)
+    elif not has_brackets:
+        params.setdefault("_fast_default", "false")
+    if thinking is not None:
+        params.setdefault("thinking", thinking)
+    elif not has_brackets and (effort is not None or claude_match is not None):
+        params.setdefault("_thinking_default", "false")
+    if effort is not None:
+        params.setdefault("_effort", effort)
+    elif not has_brackets:
+        params.setdefault("_effort_default", "medium")
+    return base_id, params
+
+
+def _resolve_config_option_updates(
+    params: Mapping[str, str], config_options: Sequence[Dict[str, Any]]
+) -> List[Tuple[str, str]]:
+    """Determine ``(configId, value)`` updates needed to satisfy ``params``."""
+    by_id: Dict[str, Dict[str, Any]] = {
+        opt["id"]: opt
+        for opt in config_options
+        if isinstance(opt, dict) and isinstance(opt.get("id"), str)
+    }
+    updates: List[Tuple[str, str]] = []
+
+    def _valid_values(opt: Dict[str, Any]) -> set[str]:
+        raw_opts = opt.get("options")
+        if not isinstance(raw_opts, list):
+            return set()
+        return {
+            item["value"]
+            for item in raw_opts
+            if isinstance(item, dict) and isinstance(item.get("value"), str)
+        }
+
+    for key, val in params.items():
+        if key.startswith("_") or key in ("model", "mode"):
+            continue
+        opt = by_id.get(key)
+        if opt is None:
+            continue
+        if val in _valid_values(opt) and opt.get("currentValue") != val:
+            updates.append((key, val))
+
+    effort = params.get("_effort") or params.get("_effort_default")
+    if effort:
+        for eff_key in ("reasoning_effort", "reasoning", "effort"):
+            if eff_key in params:
+                break
+            opt = by_id.get(eff_key)
+            if opt is None:
+                continue
+            valid = _valid_values(opt)
+            target: Optional[str] = None
+            if effort in valid:
+                target = effort
+            elif effort == "xhigh" and "extra-high" in valid:
+                target = "extra-high"
+            elif effort == "extra-high" and "xhigh" in valid:
+                target = "xhigh"
+            if target is not None and opt.get("currentValue") != target:
+                updates.append((eff_key, target))
+            break
+
+    if "thinking" not in params and "_thinking_default" in params:
+        opt = by_id.get("thinking")
+        if opt is not None:
+            target = params["_thinking_default"]
+            if target in _valid_values(opt) and opt.get("currentValue") != target:
+                updates.append(("thinking", target))
+
+    if "fast" not in params and "_fast_default" in params:
+        opt = by_id.get("fast")
+        if opt is not None:
+            target = params["_fast_default"]
+            if target in _valid_values(opt) and opt.get("currentValue") != target:
+                updates.append(("fast", target))
+
+    return updates
 
 
 def _cursor_config_root(env: Dict[str, str], cwd: str) -> Path:
@@ -223,6 +412,8 @@ class CursorSession(ProcessSession):
         self._launch_fingerprint: Optional[str] = None
         self._applied_mode: Optional[str] = None
         self._applied_model: Optional[str] = None
+        self._acp_config_options: List[Dict[str, Any]] = []
+        self._acp_available_models: List[Dict[str, Any]] = []
         self._replaying_history = False
         self._suppress_active_turn_updates = False
         self._prompt_task: Optional[asyncio.Task[None]] = None
@@ -313,6 +504,8 @@ class CursorSession(ProcessSession):
             self._acp_session_id = None
             self._applied_mode = None
             self._applied_model = None
+            self._acp_config_options = []
+            self._acp_available_models = []
             self._pending_questions.clear()
             self._pending_permissions.clear()
 
@@ -388,6 +581,8 @@ class CursorSession(ProcessSession):
             self._acp_session_id = None
             self._applied_mode = None
             self._applied_model = None
+            self._acp_config_options = []
+            self._acp_available_models = []
             self._suppress_active_turn_updates = False
             self._delivery_uncertain = False
             self._submission_outcome_uncertain = False
@@ -399,27 +594,85 @@ class CursorSession(ProcessSession):
                 "fs": {"readTextFile": False, "writeTextFile": False},
                 "terminal": False,
                 "subagents": {},
+                "_meta": {"parameterizedModelPicker": True},
             },
             "clientInfo": {"name": "claude-hub", "version": "1.0.0"},
         }
         await self._send_request("initialize", init_params, timeout=self._runtime.startup_grace_s())
+
+    def _capture_session_metadata(self, resp: Any) -> None:
+        if not isinstance(resp, dict):
+            return
+        raw_opts = resp.get("configOptions")
+        if isinstance(raw_opts, list):
+            self._acp_config_options = [opt for opt in raw_opts if isinstance(opt, dict)]
+        models_obj = resp.get("models")
+        if isinstance(models_obj, dict):
+            avail = models_obj.get("availableModels")
+            if isinstance(avail, list):
+                self._acp_available_models = [item for item in avail if isinstance(item, dict)]
+
+    def _available_acp_base_model_ids(self) -> set[str]:
+        ids: set[str] = set()
+        for opt in self._acp_config_options:
+            if opt.get("id") != "model":
+                continue
+            raw_options = opt.get("options")
+            if isinstance(raw_options, list):
+                for item in raw_options:
+                    if isinstance(item, dict) and isinstance(item.get("value"), str):
+                        val = item["value"].strip()
+                        if val:
+                            ids.add(val)
+        for item in self._acp_available_models:
+            raw_id = item.get("modelId")
+            if isinstance(raw_id, str) and raw_id.strip():
+                ids.add(raw_id.strip())
+        return ids
+
+    async def _apply_acp_config_option(
+        self, sid: str, config_id: str, value: str, *, is_model: bool = False
+    ) -> None:
+        try:
+            resp = await self._send_request(
+                "session/set_config_option",
+                {"sessionId": sid, "configId": config_id, "value": value},
+                timeout=_ACP_SESSION_INIT_TIMEOUT_S,
+            )
+            self._capture_session_metadata(resp)
+        except ProviderRpcError as exc:
+            if exc.code == -32601 and is_model:
+                await self._send_request(
+                    "session/set_model",
+                    {"sessionId": sid, "modelId": value},
+                    timeout=_ACP_SESSION_INIT_TIMEOUT_S,
+                )
+                return
+            if exc.code in (-32601, -32602):
+                self._runtime.logger().warning(
+                    "cursor acp session/set_config_option rejected %s=%s (%s)",
+                    config_id,
+                    value,
+                    exc,
+                )
+                return
+            raise
 
     async def _initialize_session(self, provider_env: Dict[str, str]) -> None:
         cwd = os.path.realpath(self._cwd) if self._cwd else os.getcwd()
         if self._conversation_id and self._conversation_id_verified:
             sid = self._conversation_id
             await asyncio.to_thread(_migrate_legacy_cli_store_for_acp, sid, cwd, provider_env)
+            loaded_resp: Any = None
+            loaded_ok = False
             self._replaying_history = True
             try:
-                await self._send_request(
+                loaded_resp = await self._send_request(
                     "session/load",
                     {"sessionId": sid, "cwd": cwd, "mcpServers": []},
                     timeout=_ACP_SESSION_INIT_TIMEOUT_S,
                 )
-                self._acp_session_id = sid
-                await self._ensure_session_model()
-                await self._ensure_session_mode()
-                return
+                loaded_ok = True
             except RuntimeError:
                 if self._required_conversation_id is not None:
                     raise
@@ -428,6 +681,12 @@ class CursorSession(ProcessSession):
                 )
             finally:
                 self._replaying_history = False
+            if loaded_ok:
+                self._acp_session_id = sid
+                self._capture_session_metadata(loaded_resp)
+                await self._ensure_session_model()
+                await self._ensure_session_mode()
+                return
 
         if self._required_conversation_id is not None:
             raise RuntimeError("the original provider conversation could not be resumed")
@@ -440,39 +699,72 @@ class CursorSession(ProcessSession):
         new_sid = resp.get("sessionId") if isinstance(resp, dict) else None
         if not isinstance(new_sid, str) or not new_sid:
             raise RuntimeError("cursor acp session/new returned no sessionId")
+        self._capture_session_metadata(resp)
         if self._defer_initial_adoption:
             self._pending_rotation = new_sid
             return
         self._acp_session_id = new_sid
+        await self._ensure_session_model()
+        await self._ensure_session_mode()
         self._persist_conversation_id(new_sid)
         # Fresh provider conversation needs first-turn Hub runtime guidance.
         self._hub_runtime_guidance_injected = False
-        await self._ensure_session_model()
-        await self._ensure_session_mode()
 
     async def _ensure_session_model(self) -> None:
         """Re-apply ``CURSOR_MODEL`` after ``session/load`` or ``session/new``.
 
         ``agent acp``'s ``loadSession`` resets the in-memory ``modelManager``
-        to the SQLite store's ``lastUsedModel``, overriding the CLI ``--model``
-        launch flag. Calling ``session/set_model`` restores the user's selected
-        model on the resumed session.
+        to the SQLite store's ``lastUsedModel``, and ``newSession``'s
+        ``syncCurrentSelectionWithParameterizedModels`` collapses legacy CLI
+        slugs (such as ``gemini-4-carbon-high``) to the base model's saved/default
+        parameters when startup parameterized probing times out. When the ACP
+        server advertises parameterized ``configOptions``, resolve ``CURSOR_MODEL``
+        into its base model ID and parameter options via
+        ``session/set_config_option``; otherwise fall back to ``session/set_model``.
         """
         if not self._acp_session_id:
             return
         model = self._selected_model()
         if not model or self._applied_model == model:
             return
+        sid = self._acp_session_id
+        available_base_ids = self._available_acp_base_model_ids()
+        if available_base_ids:
+            base_id, desired_params = _parse_cursor_model_spec(model, available_base_ids)
+            if base_id is not None:
+                model_opt = next(
+                    (opt for opt in self._acp_config_options if opt.get("id") == "model"),
+                    None,
+                )
+                current_base = (
+                    model_opt.get("currentValue") if isinstance(model_opt, dict) else None
+                )
+                if current_base != base_id:
+                    await self._apply_acp_config_option(sid, "model", base_id, is_model=True)
+                for config_id, target_val in _resolve_config_option_updates(
+                    desired_params, self._acp_config_options
+                ):
+                    await self._apply_acp_config_option(sid, config_id, target_val, is_model=False)
+                self._applied_model = model
+                return
+
         try:
             await self._send_request(
                 "session/set_model",
-                {"sessionId": self._acp_session_id, "modelId": model},
+                {"sessionId": sid, "modelId": model},
                 timeout=_ACP_SESSION_INIT_TIMEOUT_S,
             )
             self._applied_model = model
         except ProviderRpcError as exc:
-            if exc.code == -32601:
-                # Older ACP builds without session/set_model still honor --model.
+            if exc.code in (-32601, -32602):
+                # Older ACP builds without session/set_model (-32601) or custom/unlisted
+                # CLI slugs rejected by the ACP picker (-32602) still honor --model.
+                if exc.code == -32602:
+                    self._runtime.logger().warning(
+                        "cursor acp session/set_model rejected %s (%s); keeping CLI --model",
+                        model,
+                        exc,
+                    )
                 self._applied_model = model
                 return
             raise
@@ -522,6 +814,7 @@ class CursorSession(ProcessSession):
         new_sid = resp.get("sessionId") if isinstance(resp, dict) else None
         if not isinstance(new_sid, str) or not new_sid:
             raise RuntimeError("cursor-native session/new returned no sessionId")
+        self._capture_session_metadata(resp)
         self._pending_rotation = new_sid
         return new_sid
 

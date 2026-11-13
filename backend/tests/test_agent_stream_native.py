@@ -5408,3 +5408,279 @@ async def test_claude_codex_return_static_without_probe() -> None:
     assert spawn.call_count == 0
     assert [m.id for m in claude_opts] == native_module._STATIC_MODELS["claude"]
     assert [m.id for m in codex_opts] == native_module._STATIC_MODELS["codex"]
+
+
+@pytest.mark.asyncio
+async def test_cursor_acp_parameterized_model_resolution_and_config_options() -> None:
+    """Regression for Cursor ACP -32602 ``Invalid model value: gemini-4-carbon-high``:
+    ``agent acp`` rejects legacy CLI variant slugs on ``session/set_model`` and
+    requires negotiating ``clientCapabilities._meta.parameterizedModelPicker=True``
+    plus applying base model IDs and parameter options via
+    ``session/set_config_option``."""
+    from claude_hub.services.agent_stream.providers.cursor import (
+        _parse_cursor_model_spec,
+        _resolve_config_option_updates,
+    )
+
+    base_ids = {
+        "auto-smart",
+        "gemini-4-carbon",
+        "gemini-4-argon",
+        "grok-4.6",
+        "gpt-5.3-codex",
+        "claude-opus-4-8",
+        "claude-sonnet-4-6",
+    }
+    assert _parse_cursor_model_spec("gemini-4-carbon-high", base_ids) == (
+        "gemini-4-carbon",
+        {"_fast_default": "false", "_thinking_default": "false", "_effort": "high"},
+    )
+    assert _parse_cursor_model_spec("cursor-grok-4.6-high-fast", base_ids) == (
+        "grok-4.6",
+        {"fast": "true", "_thinking_default": "false", "_effort": "high"},
+    )
+    assert _parse_cursor_model_spec("gpt-5.3-codex-xhigh", base_ids) == (
+        "gpt-5.3-codex",
+        {"_fast_default": "false", "_thinking_default": "false", "_effort": "xhigh"},
+    )
+    assert _parse_cursor_model_spec("claude-opus-4-8-thinking-high", base_ids) == (
+        "claude-opus-4-8",
+        {"_fast_default": "false", "thinking": "true", "_effort": "high"},
+    )
+    assert _parse_cursor_model_spec("claude-4.6-sonnet-medium-thinking", base_ids) == (
+        "claude-sonnet-4-6",
+        {"_fast_default": "false", "thinking": "true", "_effort": "medium"},
+    )
+    assert _parse_cursor_model_spec("auto", base_ids) == ("auto-smart", {})
+    assert _parse_cursor_model_spec("gemini-4-carbon[reasoning_effort=low]", base_ids) == (
+        "gemini-4-carbon",
+        {"reasoning_effort": "low"},
+    )
+
+    codex_opts = [
+        {
+            "id": "reasoning",
+            "currentValue": "medium",
+            "options": [{"value": "low"}, {"value": "medium"}, {"value": "extra-high"}],
+        },
+        {
+            "id": "fast",
+            "currentValue": "true",
+            "options": [{"value": "true"}, {"value": "false"}],
+        },
+    ]
+    _, codex_params = _parse_cursor_model_spec("gpt-5.3-codex-xhigh", base_ids)
+    assert _resolve_config_option_updates(codex_params, codex_opts) == [
+        ("reasoning", "extra-high"),
+        ("fast", "false"),
+    ]
+
+    class _ParameterizedAcpProc(_InteractiveAcpProc):
+        def __init__(self, *, initial_model: str = "gemini-4-carbon") -> None:
+            super().__init__(session_id="acp-param-1")
+            self.current_model = initial_model
+            self.current_effort = "medium"
+            self.current_fast = "false"
+
+        def _config_options(self) -> List[Dict[str, Any]]:
+            opts: List[Dict[str, Any]] = [
+                {
+                    "id": "model",
+                    "currentValue": self.current_model,
+                    "options": [
+                        {"value": "auto-smart"},
+                        {"value": "gemini-4-carbon"},
+                        {"value": "grok-4.6"},
+                    ],
+                }
+            ]
+            if self.current_model == "gemini-4-carbon":
+                opts.append(
+                    {
+                        "id": "reasoning_effort",
+                        "currentValue": self.current_effort,
+                        "options": [
+                            {"value": "low"},
+                            {"value": "medium"},
+                            {"value": "high"},
+                        ],
+                    }
+                )
+            elif self.current_model == "grok-4.6":
+                opts.extend(
+                    [
+                        {
+                            "id": "effort",
+                            "currentValue": self.current_effort,
+                            "options": [
+                                {"value": "low"},
+                                {"value": "medium"},
+                                {"value": "high"},
+                            ],
+                        },
+                        {
+                            "id": "fast",
+                            "currentValue": self.current_fast,
+                            "options": [{"value": "true"}, {"value": "false"}],
+                        },
+                    ]
+                )
+            return opts
+
+        def _on_stdin(self, msg: Dict[str, Any]) -> None:
+            self.requests.append(msg)
+            method = msg.get("method")
+            req_id = msg.get("id")
+            if req_id is None:
+                return
+            if method == "initialize":
+                self.stdout.push_json(
+                    {"jsonrpc": "2.0", "id": req_id, "result": {"protocolVersion": 1}}
+                )
+            elif method in ("session/new", "session/load"):
+                self.stdout.push_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {
+                            "sessionId": self.session_id,
+                            "configOptions": self._config_options(),
+                            "models": {
+                                "currentModelId": self.current_model,
+                                "availableModels": [
+                                    {"modelId": "auto-smart"},
+                                    {"modelId": "gemini-4-carbon"},
+                                    {"modelId": "grok-4.6"},
+                                ],
+                            },
+                        },
+                    }
+                )
+            elif method == "session/set_model":
+                # Real agent acp rejects CLI legacy variant slugs here with -32602.
+                self.stdout.push_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {
+                            "code": -32602,
+                            "message": "Invalid params",
+                            "data": {"message": f"Invalid model value: {msg['params']['modelId']}"},
+                        },
+                    }
+                )
+            elif method == "session/set_config_option":
+                cid = msg["params"]["configId"]
+                val = msg["params"]["value"]
+                if cid == "model":
+                    self.current_model = val
+                elif cid in ("reasoning_effort", "effort"):
+                    self.current_effort = val
+                elif cid == "fast":
+                    self.current_fast = val
+                self.stdout.push_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {"configOptions": self._config_options()},
+                    }
+                )
+            elif method == "session/set_mode":
+                self.stdout.push_json({"jsonrpc": "2.0", "id": req_id, "result": {}})
+
+    sess = _session(AgentType.CURSOR)
+    sess.env = {"CURSOR_MODEL": "gemini-4-carbon-high"}
+    proc = _ParameterizedAcpProc(initial_model="gemini-4-carbon")
+    native = CursorNativeSession(sess)
+    native._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
+    native._spawn_subprocess = AsyncMock(return_value=proc)  # type: ignore[method-assign]
+
+    await native.start()
+    try:
+        init_req = next(r for r in proc.requests if r.get("method") == "initialize")
+        assert init_req["params"]["clientCapabilities"]["_meta"] == {
+            "parameterizedModelPicker": True
+        }
+        cfg_reqs = [r for r in proc.requests if r.get("method") == "session/set_config_option"]
+        assert [(r["params"]["configId"], r["params"]["value"]) for r in cfg_reqs] == [
+            ("reasoning_effort", "high")
+        ]
+        assert not any(r.get("method") == "session/set_model" for r in proc.requests)
+
+        # Switching to cursor-grok-4.6-high-fast across a session/load restart
+        # updates both base model ("grok-4.6") and parameters ("effort"="high", "fast"="true").
+        sess.env["CURSOR_MODEL"] = "cursor-grok-4.6-high-fast"
+        proc2 = _ParameterizedAcpProc(initial_model="auto-smart")
+        native._spawn_subprocess = AsyncMock(return_value=proc2)  # type: ignore[method-assign]
+        await native.restart_for_recovery()
+        cfg_reqs2 = [r for r in proc2.requests if r.get("method") == "session/set_config_option"]
+        assert [(r["params"]["configId"], r["params"]["value"]) for r in cfg_reqs2] == [
+            ("model", "grok-4.6"),
+            ("fast", "true"),
+            ("effort", "high"),
+        ]
+    finally:
+        await native.stop()
+
+
+@pytest.mark.asyncio
+async def test_cursor_acp_session_load_error_boundary_and_persistence_ordering(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """1. A post-``session/load`` error (e.g. ``session/set_mode`` failing) must
+       NOT be misclassified as a ``session/load`` failure or fall through to
+       ``session/new`` to overwrite a verified ``conversation_id``.
+    2. On ``session/new``, ``_persist_conversation_id`` runs only AFTER
+       ``_ensure_session_model`` and ``_ensure_session_mode`` succeed.
+    3. If ``session/set_model`` returns ``-32602`` without ``configOptions``,
+       ``start()`` logs a warning and keeps the CLI ``--model`` selection."""
+    monkeypatch.setattr(
+        "claude_hub.services.agent_stream.providers.cursor._migrate_legacy_cli_store_for_acp",
+        lambda *args, **kwargs: None,
+    )
+
+    class _ModeFailingAcpProc(_InteractiveAcpProc):
+        def _on_stdin(self, msg: Dict[str, Any]) -> None:
+            self.requests.append(msg)
+            method = msg.get("method")
+            req_id = msg.get("id")
+            if req_id is None:
+                return
+            if method == "session/set_mode":
+                self.stdout.push_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {"code": -32603, "message": "mode switch failed"},
+                    }
+                )
+                return
+            super()._on_stdin(msg)
+
+    persisted: List[str] = []
+    sess = _session(AgentType.CURSOR)
+    sess.agent_session_id = "existing-sid-1"
+    sess.agent_session_id_verified = True
+    proc = _ModeFailingAcpProc(session_id="new-sid-should-not-be-used")
+    native = CursorNativeSession(sess, conversation_id_persist=persisted.append)
+    native._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
+    native._spawn_subprocess = AsyncMock(return_value=proc)  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="mode switch failed"):
+        await native.start()
+    methods = [r.get("method") for r in proc.requests]
+    assert "session/load" in methods
+    assert "session/new" not in methods
+    assert native._conversation_id == "existing-sid-1"
+    assert persisted == []
+
+    # Fresh session/new whose set_mode fails must not persist new_sid prematurely.
+    sess_fresh = _session(AgentType.CURSOR)
+    proc_fresh = _ModeFailingAcpProc(session_id="uninitialized-new-sid")
+    native_fresh = CursorNativeSession(sess_fresh, conversation_id_persist=persisted.append)
+    native_fresh._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
+    native_fresh._spawn_subprocess = AsyncMock(return_value=proc_fresh)  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="mode switch failed"):
+        await native_fresh.start()
+    assert persisted == []
+    assert native_fresh._conversation_id is None

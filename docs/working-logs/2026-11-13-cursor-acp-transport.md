@@ -129,3 +129,15 @@ all actionable findings and added regression coverage:
    `toolCall.content` details in permission cards, marked rejected permissions
    as `failed`, swept stale `run_epoch` `_TurnAccumulator` entries on cancel/fail,
    and deferred session adoption during cold `rotate_conversation()` fallbacks.
+7. **Parameterized model resolution & `session/load` error boundary (`fix/cursor-acp-model-selection`)**:
+   `agent --list-models` emits flat legacy CLI slugs (`gemini-4-carbon-high`,
+   `cursor-grok-4.6-high-fast`, `gpt-5.3-codex-xhigh`, `auto`), whereas
+   `agent acp`'s `session/set_model` rejects legacy variant slugs with JSON-RPC
+   `-32602 Invalid model value`. Negotiated
+   `clientCapabilities._meta.parameterizedModelPicker = True`, resolved legacy
+   CLI slugs into base model IDs + `session/set_config_option` parameter updates
+   (`reasoning_effort`, `reasoning`, `effort`, `fast`, `thinking`), narrowed the
+   `session/load` `try/except RuntimeError` block to the `session/load` RPC call
+   alone so post-load setup errors never fall through to `session/new` and
+   overwrite an existing conversation, and deferred `_persist_conversation_id` on
+   `session/new` until model/mode setup completes.
