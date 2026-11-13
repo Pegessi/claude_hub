@@ -291,12 +291,27 @@ export function applySubthreadEvent(
           parts.push({ kind: 'tool_group', key: `sub-tool-group-${event.stream_sequence}`, tools: [tool] })
         }
       }
+      const completedArgsRecord = payloadRecord(event, 'args')
+      let nextArgsText = tool.argsText
+      if (completedArgsRecord && Object.keys(completedArgsRecord).length > 0) {
+        try {
+          nextArgsText = JSON.stringify(completedArgsRecord, null, 2)
+        } catch {
+          nextArgsText = String(event.payload.args ?? '')
+        }
+      }
+      const rawCompletedStatus = payloadString(event, 'status')
       const newStatus: TimelineTool['status'] =
-        payloadString(event, 'status') === 'failed' ? 'failed' : 'completed'
+        rawCompletedStatus === 'cancelled'
+          ? 'cancelled'
+          : rawCompletedStatus === 'failed'
+            ? 'failed'
+            : 'completed'
       const newResult = payloadString(event, 'result')
-      if (tool.status !== newStatus || tool.resultText !== newResult) {
+      if (tool.status !== newStatus || tool.resultText !== newResult || tool.argsText !== nextArgsText) {
         tool.status = newStatus
         tool.resultText = newResult
+        tool.argsText = nextArgsText
         return true
       }
       return lifecycleChanged

@@ -89,3 +89,43 @@ Worktree: `/home/tiger/claude_hub_worktree/cursor-acp-transport`.
 - Full `./scripts/verify.sh all` and `./scripts/verify.sh check-staged` run on
   the final candidate commit. Browser mock gates and production service restart
   remain separate per user authorization.
+
+## Independent MASO Argon adversarial review & fixes
+
+Ran independent read-only adversarial reviews with `gemini-4-argon_reasoning_high`
+via `claude-hub agent run --provider maso` across all changed files and upstream
+consumers (`native_consumer.py`, `retirement.py`, `reducer.ts`, `subthreads.ts`,
+`_cursor_verify.py`, and the installed `2026.11.11-043ef28` ACP bundle). Fixed
+all actionable findings and added regression coverage:
+
+1. **Generation-fenced persistent queue & `_client_requested_stop` handoff (P0)**:
+   Kept a single generation-tagged `_notification_queue` across restarts, stopped
+   `read_line()` from clearing `_client_requested_stop` before `native_consumer`
+   observes expected restart EOFs, and discarded superseded reader sentinels via
+   `_stdout_generation`.
+2. **Model re-assertion after `session/load` (P1)**: `agent acp`'s `loadSession`
+   resets `modelManager` to `store.db`'s `lastUsedModel`; added
+   `session/set_model` synchronization after `session/load` / `session/new`.
+3. **Sub-agent thread isolation & capability negotiation (P1)**: Exposed
+   `CursorSession.active_thread_id` and negotiated `clientCapabilities.subagents`
+   so child `session/update` frames carry `subagent_thread` and never pollute the
+   parent turn's `final_text`.
+4. **Crash ordering, stdin lock & cancellation resilience (P1)**: Ordered
+   `_await_prompt_completion` error records ahead of the `None` EOF sentinel on
+   server crash, serialized `proc.stdin` writes with `_stdin_lock`, cleared
+   pending questions/permissions on reader exit, and protected
+   `cancel_active_turn()` with `try/finally` so `CancelledError` never strands
+   `_turn_in_flight`.
+5. **SQLite WAL-safe migration & unified path verification (P1)**: Replaced raw
+   `shutil.copy2` with SQLite online `backup()` (preserving uncheckpointed `-wal`
+   frames), enforced target-side symlink checks and atomic `meta.json` writes,
+   and unified `resolve_cursor_roots` across `cursor.py`, `restart_continuation.py`,
+   and `_cursor_verify.py`.
+6. **Tool lifecycle, error deduplication & cold rotation safety (P1/P2)**:
+   Forwarded late `Edit`/`Delete` diff `args` and `cancelled` status on
+   `TOOL_CALL_COMPLETED` (and updated `reducer.ts` / `subthreads.ts`), preserved
+   structured `Task` dict results for `subagentTool.ts`, deduplicated inline
+   `acp_error` + RPC error responses via `saw_turn_error`, included
+   `toolCall.content` details in permission cards, marked rejected permissions
+   as `failed`, swept stale `run_epoch` `_TurnAccumulator` entries on cancel/fail,
+   and deferred session adoption during cold `rotate_conversation()` fallbacks.

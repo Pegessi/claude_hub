@@ -3675,6 +3675,600 @@ def test_cursor_acp_session_updates_and_content_refusal_normalize_cleanly() -> N
     assert "not a local login expiry" in refusal
 
 
+class _InteractiveAcpStream:
+    """Line-driven fake stdin/stdout for testing ``CursorSession`` JSON-RPC."""
+
+    def __init__(self, handler: Optional[Any] = None, *, eof: bool = False) -> None:
+        self._queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self.written: List[bytes] = []
+        self._handler = handler
+        self._eof = eof
+
+    def push_json(self, obj: Dict[str, Any]) -> None:
+        self._queue.put_nowait((json.dumps(obj) + "\n").encode("utf-8"))
+
+    def push_eof(self) -> None:
+        self._eof = True
+        self._queue.put_nowait(b"")
+
+    async def read(self, n: int) -> bytes:
+        if self._queue.empty() and self._eof:
+            return b""
+        return await self._queue.get()
+
+    def write(self, data: bytes) -> None:
+        self.written.append(data)
+        if self._handler is not None:
+            for line in data.decode("utf-8").splitlines():
+                if line.strip():
+                    self._handler(json.loads(line))
+
+    async def drain(self) -> None:
+        await asyncio.sleep(0)
+
+
+class _InteractiveAcpProc:
+    def __init__(self, *, session_id: str = "acp-main-1", exit_code: int = 0) -> None:
+        self.session_id = session_id
+        self.returncode: Optional[int] = None
+        self._exit_code = exit_code
+        self.requests: List[Dict[str, Any]] = []
+        self.stdout = _InteractiveAcpStream()
+        self.stdin = _InteractiveAcpStream(handler=self._on_stdin)
+        self.stderr = _InteractiveAcpStream(eof=True)
+
+    def _on_stdin(self, msg: Dict[str, Any]) -> None:
+        self.requests.append(msg)
+        method = msg.get("method")
+        req_id = msg.get("id")
+        if req_id is None:
+            return
+        if method == "initialize":
+            self.stdout.push_json(
+                {"jsonrpc": "2.0", "id": req_id, "result": {"protocolVersion": 1}}
+            )
+        elif method == "session/new":
+            self.stdout.push_json(
+                {"jsonrpc": "2.0", "id": req_id, "result": {"sessionId": self.session_id}}
+            )
+        elif method == "session/load":
+            sid = msg["params"]["sessionId"]
+            self.session_id = sid
+            self.stdout.push_json({"jsonrpc": "2.0", "id": req_id, "result": {"modes": {}}})
+        elif method in ("session/set_mode", "session/set_model"):
+            self.stdout.push_json({"jsonrpc": "2.0", "id": req_id, "result": {}})
+
+    def crash(self, exit_code: int = 1, stderr_msg: str = "fatal crash") -> None:
+        self.returncode = exit_code
+        self._exit_code = exit_code
+        self.stderr._queue.put_nowait(stderr_msg.encode("utf-8"))
+        self.stderr.push_eof()
+        self.stdout.push_eof()
+
+    async def wait(self) -> int:
+        if self.returncode is None:
+            self.returncode = self._exit_code
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.returncode = 0
+        self.stdout.push_eof()
+
+    def kill(self) -> None:
+        self.returncode = -9
+        self.stdout.push_eof()
+
+
+@pytest.mark.asyncio
+async def test_cursor_acp_tailer_survives_recovery_restart_and_isolates_subagent_threads(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Regression for MASO Argon P0-1 & P1-1/P1-subthread:
+    1. ``restart_for_recovery()`` (triggered e.g. when toggling Plan mode under
+       ``solo_mode=True`` or switching ``CURSOR_MODEL``) must NOT trip
+       ``SessionTailer._hard_failed`` via premature ``_client_requested_stop``
+       clearing or ``_notification_queue`` replacement.
+    2. ``session/load`` re-applies ``session/set_model`` so ``store.db``'s old
+       ``lastUsedModel`` cannot silently override ``CURSOR_MODEL``.
+    3. ``CursorSession.active_thread_id`` stamps child ``session/update`` frames
+       with ``subagent_thread`` so child text never pollutes ``final_text``."""
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+    from claude_hub.services.agent_stream.tailer import SessionTailer
+
+    sess = _session(AgentType.CURSOR)
+    sess.solo_mode = True
+    sess.env = {"CURSOR_MODEL": "gemini-4-carbon-high"}
+    native = CursorNativeSession(sess)
+    monkeypatch.setattr(native, "_build_provider_env", AsyncMock(return_value={"PATH": "/bin"}))
+    monkeypatch.setattr(
+        importlib.import_module("claude_hub.services.workspace_manager"), "STATE_ROOT", tmp_path
+    )
+
+    proc1 = _InteractiveAcpProc(session_id="acp-main-1")
+    proc2 = _InteractiveAcpProc(session_id="acp-main-1")
+    procs = [proc1, proc2]
+    spawned = {"idx": 0}
+
+    async def fake_spawn(cmd: List[str], env: Dict[str, str]) -> Any:
+        p = procs[spawned["idx"]]
+        spawned["idx"] += 1
+        return p
+
+    monkeypatch.setattr(native, "_spawn_subprocess", fake_spawn)
+
+    store = AgentStreamStore("ws-acp", "sess-acp-tailer")
+    tailer = SessionTailer(
+        workspace_id="ws-acp",
+        session_id="sess-acp-tailer",
+        adapter=CursorCliTranscriptAdapter(),
+        session_getter=lambda: native.session,
+        store=store,
+        native_transport=native,
+    )
+    queue = await tailer.subscribe()
+    try:
+        # Wait briefly for _run_native to start proc1 and enter read_line().
+        for _ in range(40):
+            if native._started and native._acp_session_id == "acp-main-1":
+                break
+            await asyncio.sleep(0.01)
+        assert native.active_thread_id == "acp-main-1"
+
+        # Toggle Plan mode while solo_mode=True -> triggers restart_for_recovery().
+        await native.set_mode("plan")
+        await asyncio.sleep(0.05)
+
+        assert tailer._hard_failed is False
+        assert spawned["idx"] == 2
+        # Verify proc2 ran session/load AND re-applied session/set_model + session/set_mode(plan).
+        methods2 = [r.get("method") for r in proc2.requests]
+        assert "session/load" in methods2
+        assert "session/set_model" in methods2
+        set_model_req = next(r for r in proc2.requests if r.get("method") == "session/set_model")
+        assert set_model_req["params"] == {
+            "sessionId": "acp-main-1",
+            "modelId": "gemini-4-carbon-high",
+        }
+
+        # Send a turn on the restarted process and interleave a child subagent frame.
+        await tailer.send_message("review this", [], client_turn_id="turn-after-restart")
+        ev_started = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert ev_started.type == AgentStreamEventType.TURN_STARTED
+
+        prompt_req = next(r for r in proc2.requests if r.get("method") == "session/prompt")
+        proc2.stdout.push_json(
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "child-sub-99",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "SUBAGENT SECRET CHATTER "},
+                    },
+                },
+            }
+        )
+        proc2.stdout.push_json(
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "acp-main-1",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "Clean parent answer."},
+                    },
+                },
+            }
+        )
+        proc2.stdout.push_json(
+            {
+                "jsonrpc": "2.0",
+                "id": prompt_req["id"],
+                "result": {"stopReason": "end_turn"},
+            }
+        )
+
+        collected: List[Any] = []
+        while True:
+            ev = await asyncio.wait_for(queue.get(), timeout=1.0)
+            collected.append(ev)
+            if ev.type == AgentStreamEventType.TURN_COMPLETED:
+                break
+
+        child_events = [e for e in collected if e.payload.get("subagent_thread") == "child-sub-99"]
+        assert len(child_events) == 1
+        done_ev = collected[-1]
+        assert done_ev.payload["status"] == "completed"
+        assert done_ev.payload["assistant_text"] == "Clean parent answer."
+        assert "SUBAGENT SECRET CHATTER" not in done_ev.payload["assistant_text"]
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_cursor_acp_crash_orders_error_before_eof_and_dedups_inline_error() -> None:
+    """Regression for MASO Argon P1-2 & P2-error:
+    1. When ``agent acp`` crashes mid-prompt, the synthetic ``result(is_error=True)``
+       record is queued BEFORE the ``None`` EOF sentinel and stale pending
+       questions/permissions are cleared.
+    2. When an inline ``\\n\\nError: ...`` chunk was already emitted as ``acp_error``,
+       a trailing JSON-RPC error response does NOT emit a duplicate ``ERROR`` event."""
+    proc = _InteractiveAcpProc(session_id="acp-crash-1")
+    native = CursorNativeSession(_session(AgentType.CURSOR))
+    native._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
+    native._spawn_subprocess = AsyncMock(return_value=proc)  # type: ignore[method-assign]
+
+    await native.start()
+    await native.send_message("trigger crash", [])
+    native._pending_questions[99] = {"toolCallId": "stale-q"}
+    native._pending_permissions[100] = {"question_id": "permission:100", "choices": {}}
+
+    # Emit inline error chunk, then crash the server before answering session/prompt.
+    proc.stdout.push_json(
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "acp-crash-1",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "\n\nError: upstream boom"},
+                },
+            },
+        }
+    )
+    await asyncio.sleep(0.02)
+    proc.crash(exit_code=1, stderr_msg="upstream boom")
+
+    records: List[Optional[Dict[str, Any]]] = []
+    while True:
+        rec = await asyncio.wait_for(native.read_line(), timeout=1.0)
+        records.append(rec)
+        if rec is None:
+            break
+
+    # Both acp_error AND synthetic result arrive BEFORE the None EOF sentinel.
+    assert [r.get("type") for r in records[:-1] if isinstance(r, dict)] == ["acp_error", "result"]
+    assert native._pending_questions == {}
+    assert native._pending_permissions == {}
+
+    adapter = CursorCliTranscriptAdapter()
+    ctx = NormalizeContext(
+        session_id="sess-err",
+        tab_id="tab-err",
+        agent_type=AgentType.CURSOR,
+        run_epoch=1,
+        turn_id="turn-err",
+        main_thread_id="acp-crash-1",
+    )
+    normalized = []
+    for rec in records[:-1]:
+        assert rec is not None
+        normalized.extend(adapter.normalize_line(rec, ctx))
+
+    # Exactly ONE ERROR event followed by TURN_COMPLETED(status="failed").
+    assert [e.type for e in normalized] == [
+        AgentStreamEventType.ERROR,
+        AgentStreamEventType.TURN_COMPLETED,
+    ]
+    await native.stop()
+
+
+def test_cursor_acp_tool_late_diff_cancelled_and_task_dict_preservation() -> None:
+    """Regression for MASO Argon P1-tool & P2-permission:
+    - ``Edit`` diff arriving only on ``completed`` is carried in ``TOOL_CALL_COMPLETED.payload['args']``;
+    - ``status='cancelled'`` closes the tool card as ``status='cancelled'``;
+    - ``Task`` structured dict output is preserved as a dict for ``subagentTool.ts``."""
+    adapter = CursorCliTranscriptAdapter()
+    ctx = NormalizeContext(
+        session_id="sess-tools",
+        tab_id="tab-tools",
+        agent_type=AgentType.CURSOR,
+        run_epoch=1,
+        turn_id="turn-tools",
+        main_thread_id="main-sid",
+    )
+    # 1. Edit starts in_progress without diff, completes with diff content.
+    ev_start = adapter.normalize_line(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "main-sid",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "edit-1",
+                    "kind": "edit",
+                    "title": "Edit `foo.py`",
+                    "status": "in_progress",
+                    "rawInput": {"path": "foo.py"},
+                },
+            },
+        },
+        ctx,
+    )
+    assert len(ev_start) == 1 and ev_start[0].type == AgentStreamEventType.TOOL_CALL_STARTED
+    ev_done = adapter.normalize_line(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "main-sid",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "edit-1",
+                    "status": "completed",
+                    "content": [
+                        {
+                            "type": "diff",
+                            "path": "foo.py",
+                            "oldText": "a = 1\n",
+                            "newText": "a = 2\n",
+                        }
+                    ],
+                },
+            },
+        },
+        ctx,
+    )
+    assert len(ev_done) == 1
+    assert ev_done[0].payload["args"] == {
+        "path": "foo.py",
+        "old_string": "a = 1\n",
+        "new_string": "a = 2\n",
+    }
+
+    # 2. Cancelled tool closes cleanly with status="cancelled".
+    adapter.normalize_line(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "main-sid",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "sh-cancel",
+                    "kind": "execute",
+                    "status": "in_progress",
+                    "rawInput": {"command": "sleep 10"},
+                },
+            },
+        },
+        ctx,
+    )
+    ev_cancel = adapter.normalize_line(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "main-sid",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "sh-cancel",
+                    "status": "cancelled",
+                },
+            },
+        },
+        ctx,
+    )
+    assert len(ev_cancel) == 1
+    assert ev_cancel[0].type == AgentStreamEventType.TOOL_CALL_COMPLETED
+    assert ev_cancel[0].payload["status"] == "cancelled"
+
+    # 3. Task structured dict output stays a dict.
+    ev_task = adapter.normalize_line(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "main-sid",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "task-1",
+                    "status": "completed",
+                    "rawInput": {"_toolName": "task", "prompt": "check", "subagentType": "explore"},
+                    "rawOutput": {
+                        "success": {"conversationSteps": [{"assistantMessage": {"text": "done"}}]}
+                    },
+                },
+            },
+        },
+        ctx,
+    )
+    assert [e.type for e in ev_task] == [
+        AgentStreamEventType.TOOL_CALL_STARTED,
+        AgentStreamEventType.TOOL_CALL_COMPLETED,
+    ]
+    assert isinstance(ev_task[1].payload["result"], dict)
+    assert "success" in ev_task[1].payload["result"]
+
+
+def test_cursor_legacy_store_migration_merges_wal_and_rejects_symlinks(tmp_path: Path) -> None:
+    """Regression for MASO Argon P1-4:
+    ``_migrate_legacy_cli_store_for_acp`` merges uncheckpointed SQLite ``-wal``
+    frames via online backup, repairs missing ``meta.json``, and refuses
+    symlinked target directories."""
+    import sqlite3 as _sqlite3
+
+    from claude_hub.services._cursor_verify import _cursor_id_exists, _cwd_hash
+    from claude_hub.services.agent_stream.providers.cursor import _migrate_legacy_cli_store_for_acp
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    cursor_home = tmp_path / ".cursor"
+    sid = "wal-session-123"
+    legacy_dir = cursor_home / "chats" / _cwd_hash(str(workspace)) / "legacy-chat"
+    legacy_dir.mkdir(parents=True)
+    legacy_db = legacy_dir / "store.db"
+
+    # Keep a WAL connection open without checkpointing so the latest row lives only in -wal.
+    conn = _sqlite3.connect(str(legacy_db))
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE meta (key INTEGER PRIMARY KEY, value TEXT)")
+        conn.execute("CREATE TABLE blobs (id TEXT PRIMARY KEY, body TEXT)")
+        meta_hex = json.dumps({"agentId": sid}).encode("utf-8").hex()
+        conn.execute("INSERT INTO meta (key, value) VALUES (0, ?)", (meta_hex,))
+        conn.execute("INSERT INTO blobs (id, body) VALUES ('turn-wal', 'uncheckpointed-payload')")
+        conn.commit()
+
+        env = {"HOME": str(tmp_path), "CURSOR_HOME": "~/.cursor"}
+        assert _migrate_legacy_cli_store_for_acp(sid, str(workspace), env) is True
+
+        migrated_db = cursor_home / "acp-sessions" / sid / "store.db"
+        migrated_meta = cursor_home / "acp-sessions" / sid / "meta.json"
+        assert migrated_db.is_file()
+        assert migrated_meta.is_file()
+        with _sqlite3.connect(str(migrated_db)) as check_conn:
+            row = check_conn.execute("SELECT body FROM blobs WHERE id='turn-wal'").fetchone()
+            assert row == ("uncheckpointed-payload",)
+
+        # Repair missing meta.json on idempotent re-run.
+        migrated_meta.unlink()
+        assert _migrate_legacy_cli_store_for_acp(sid, str(workspace), env) is True
+        assert migrated_meta.is_file()
+        assert _cursor_id_exists(sid, str(workspace), home=str(tmp_path)) is True
+    finally:
+        conn.close()
+
+    # Refuse symlinked target acp-sessions directory.
+    evil_root = tmp_path / "evil-config"
+    evil_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (evil_root / "acp-sessions").symlink_to(outside)
+    assert (
+        _migrate_legacy_cli_store_for_acp(
+            sid, str(workspace), {"HOME": str(tmp_path), "CURSOR_CONFIG_DIR": str(evil_root)}
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_cursor_acp_cancel_interrupted_and_cold_rotate_fallback_safety() -> None:
+    """Regression for MASO Argon P1-3, P2-1, and P2-2:
+    1. Cancelling ``cancel_active_turn()`` mid-wait still clears ``_turn_in_flight``;
+    2. Cold ``rotate_conversation()`` when ``session/load`` fails and falls back to
+       ``session/new`` does NOT prematurely overwrite ``_conversation_id`` before
+       ``adopt_rotated_conversation``;
+    3. ``session/request_permission`` includes ``toolCall.content`` details in the
+       prompt and marks user rejection as ``status='failed'``."""
+    # 1. Interrupted cancel_active_turn releases _turn_in_flight.
+    proc_c = _InteractiveAcpProc(session_id="acp-cancel-1")
+    native_c = CursorNativeSession(_session(AgentType.CURSOR))
+    native_c._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
+    native_c._spawn_subprocess = AsyncMock(return_value=proc_c)  # type: ignore[method-assign]
+    native_c.restart_for_recovery = AsyncMock()  # type: ignore[method-assign]
+
+    await native_c.start()
+    await native_c.send_message("long work", [])
+    assert native_c.turn_in_flight is True
+
+    cancel_task = asyncio.create_task(native_c.cancel_active_turn())
+    await asyncio.sleep(0.02)
+    cancel_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancel_task
+    assert native_c.turn_in_flight is False
+    await native_c.stop()
+
+    # 2. Cold rotate_conversation with session/load failure preserves old _conversation_id.
+    sess_rot = _session(AgentType.CURSOR)
+    sess_rot.agent_session_id = "old-verified-sid"
+    sess_rot.agent_session_id_verified = True
+    persisted_ids: List[str] = []
+    native_r = CursorNativeSession(sess_rot, conversation_id_persist=persisted_ids.append)
+    native_r._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
+
+    proc_r = _InteractiveAcpProc(session_id="fresh-rotated-sid")
+    orig_on_stdin = proc_r._on_stdin
+
+    def fail_load(msg: Dict[str, Any]) -> None:
+        if msg.get("method") == "session/load":
+            proc_r.requests.append(msg)
+            proc_r.stdout.push_json(
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg["id"],
+                    "error": {"code": -32602, "message": "Session not found"},
+                }
+            )
+            return
+        orig_on_stdin(msg)
+
+    proc_r.stdin._handler = fail_load
+    native_r._spawn_subprocess = AsyncMock(return_value=proc_r)  # type: ignore[method-assign]
+
+    candidate_sid = await native_r.rotate_conversation()
+    assert candidate_sid == "fresh-rotated-sid"
+    # Only ONE session/new was sent, and old _conversation_id is untouched until adopt!
+    assert [m.get("method") for m in proc_r.requests].count("session/new") == 1
+    assert native_r._conversation_id == "old-verified-sid"
+    assert persisted_ids == []
+
+    await native_r.discard_rotated_conversation(candidate_sid)
+    assert native_r._conversation_id == "old-verified-sid"
+    await native_r.stop()
+
+    # 3. Permission prompt detail extraction + reject -> status="failed".
+    proc_p = _FakeProcess(stdout_lines=[])
+    sess_p = _session(AgentType.CURSOR)
+    sess_p.solo_mode = False
+    native_p = CursorNativeSession(sess_p)
+    native_p._process = cast(asyncio.subprocess.Process, proc_p)
+    native_p._started = True
+    native_p._acp_session_id = "acp-perm-1"
+    native_p._turn_in_flight = True
+
+    await native_p._handle_server_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": "acp-perm-1",
+                "toolCall": {
+                    "toolCallId": "web-1",
+                    "title": "Allow web fetch?",
+                    "content": [
+                        {
+                            "type": "content",
+                            "content": {"type": "text", "text": "URL: https://example.com/api"},
+                        }
+                    ],
+                },
+                "options": [
+                    {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+                    {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
+                ],
+            },
+        }
+    )
+    started_perm = await asyncio.wait_for(native_p.read_line(), timeout=1.0)
+    assert started_perm is not None
+    adapter = CursorCliTranscriptAdapter()
+    ctx = NormalizeContext(
+        session_id="sess-p",
+        tab_id="tab-p",
+        agent_type=AgentType.CURSOR,
+        run_epoch=1,
+        turn_id="turn-p",
+        main_thread_id="acp-perm-1",
+    )
+    perm_events = adapter.normalize_line(started_perm, ctx)
+    approval_ev = next(e for e in perm_events if e.type == AgentStreamEventType.APPROVAL_REQUIRED)
+    assert "URL: https://example.com/api" in approval_ev.payload["questions"][0]["prompt"]
+
+    consumed = await native_p.answer_pending_question(
+        [{"questionId": "permission:21", "selected": ["Reject"]}],
+        expected_call_id="permission:21",
+    )
+    assert consumed is True
+    completed_perm = await asyncio.wait_for(native_p.read_line(), timeout=1.0)
+    assert completed_perm is not None
+    comp_events = adapter.normalize_line(completed_perm, ctx)
+    assert comp_events[-1].type == AgentStreamEventType.TOOL_CALL_COMPLETED
+    assert comp_events[-1].payload["status"] == "failed"
+
+
 def test_cursor_startup_cleanup_removes_prior_process_temp_files(tmp_path: Path) -> None:
     """``cleanup_cursor_temp_dir`` removes orphaned image temp files left by a
     prior crashed process (single-ownership guarantee at startup)."""

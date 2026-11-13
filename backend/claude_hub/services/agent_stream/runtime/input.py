@@ -267,9 +267,10 @@ class InputMixin(SessionState):
             parsed_answers = self._deps.parse_ask_question_response(text)
             if parsed_answers is not None:
                 consumed = await transport.answer_pending_question(parsed_answers)
-                # The card is answered either way: Codex consumed the answer
-                # as the blocking JSON-RPC response; Claude/Cursor have no
-                # question channel and deliver it as a steer/follow-up below.
+                # The card is answered either way: RPC-blocking providers
+                # (Codex/TraeX/Cursor) consumed the answer as the blocking
+                # JSON-RPC response; one-shot steer providers (Claude) return
+                # False and deliver it as a steer/follow-up below.
                 # Persist an ``approval_resolved`` for each answered card so a
                 # reload marks it resolved instead of rendering an open card
                 # inside a completed turn (and re-submitting a stale card no
