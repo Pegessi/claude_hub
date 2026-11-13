@@ -415,5 +415,3 @@ def _extract_permission_detail(tool_call: Dict[str, Any]) -> str:
             if isinstance(path, str) and path.strip():
                 parts.append(f"Path: {path.strip()}")
     return "\n".join(parts)
-
-
