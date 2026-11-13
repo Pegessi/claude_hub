@@ -14,7 +14,7 @@
       v-else
       class="tp-linear"
     >
-      <!-- ==================== LEFT TRIAGE RAIL (360px) ==================== -->
+      <!-- ==================== LEFT TRIAGE RAIL ==================== -->
       <aside
         class="tp-rail"
         aria-label="Workspace tasks"
@@ -75,7 +75,6 @@
               <div class="tp-row-top">
                 <span :class="['tp-dot', `tp-dot--${item.statusTone}`]" />
                 <span class="tp-row-code tp-mono">{{ item.code }}</span>
-                <span class="tp-row-ws tp-mono">{{ item.workspaceName }}</span>
                 <span :class="['tp-row-state', `tp-row-state--${item.statusTone}`]">
                   {{ item.statusLabel }}
                 </span>
@@ -112,24 +111,9 @@
             </span>
           </div>
         </div>
-
-        <footer class="tp-rail-footer">
-          <span class="tp-kbd-group">
-            <kbd>J</kbd><kbd>K</kbd>
-            <span>navigate</span>
-          </span>
-          <span class="tp-kbd-group">
-            <kbd>S</kbd>
-            <span>steer</span>
-          </span>
-          <span class="tp-kbd-group">
-            <kbd>⌘↵</kbd>
-            <span>accept</span>
-          </span>
-        </footer>
       </aside>
 
-      <!-- ==================== RIGHT EDITORIAL CANVAS ==================== -->
+      <!-- ==================== RIGHT DETAIL CANVAS ==================== -->
       <main
         class="tp-detail"
         aria-label="Selected task detail"
@@ -138,169 +122,167 @@
           v-if="!activeItem"
           class="tp-detail-empty"
         >
-          <p>Select a task on the left or create a new task to inspect its execution spine.</p>
+          <p>Select a task on the left or create a new task to inspect its summary and deliverables.</p>
         </div>
 
         <div
           v-else
           class="tp-editorial"
         >
-          <!-- Meta Breadcrumb -->
-          <div class="tp-meta-line">
-            <span :class="['tp-status-pill', `tp-status-pill--${activeItem.statusTone}`]">
-              <i :class="['tp-dot', `tp-dot--${activeItem.statusTone}`]" />
-              {{ activeItem.statusLabel }}
-            </span>
-            <span class="tp-mono tp-meta-code">{{ activeItem.code }}</span>
-            <span class="tp-sep">·</span>
-            <span class="tp-mono">{{ activeItem.workspaceName }}</span>
-            <span class="tp-sep">·</span>
-            <span class="tp-branch-chip tp-mono">
-              <svg
-                class="tp-icon"
-                viewBox="0 0 16 16"
-                fill="none"
-                aria-hidden="true"
-              >
-                <circle
-                  cx="5"
-                  cy="4"
-                  r="1.75"
-                  stroke="currentColor"
-                  stroke-width="1.5"
-                />
-                <circle
-                  cx="5"
-                  cy="12"
-                  r="1.75"
-                  stroke="currentColor"
-                  stroke-width="1.5"
-                />
-                <circle
-                  cx="11"
-                  cy="6.5"
-                  r="1.75"
-                  stroke="currentColor"
-                  stroke-width="1.5"
-                />
-                <path
-                  d="M5 5.75v4.5M11 8.25c0 2-2 2.25-6 2.25"
-                  stroke="currentColor"
-                  stroke-width="1.5"
-                  stroke-linecap="round"
-                />
-              </svg>
-              {{ activeItem.branchLabel }}
-            </span>
-            <template v-if="activeItem.changedFilesCount > 0">
+          <!-- Top Bar: Concise Identity + Live A/B Presentation Switcher -->
+          <div class="tp-top-bar">
+            <div class="tp-meta-line">
+              <span :class="['tp-status-pill', `tp-status-pill--${activeItem.statusTone}`]">
+                <i :class="['tp-dot', `tp-dot--${activeItem.statusTone}`]" />
+                {{ activeItem.statusLabel }}
+              </span>
+              <span class="tp-mono tp-meta-code">{{ activeItem.code }}</span>
               <span class="tp-sep">·</span>
-              <span class="tp-mono tp-num">{{ activeItem.changedFilesCount }} files</span>
-            </template>
-            <span class="tp-meta-updated tp-num">
-              <template v-if="activeItem.updatedAgoLabel">{{ activeItem.updatedAgoLabel }} · </template>
-              {{ activeItem.elapsedLabel }}
-            </span>
+              <span class="tp-mono">{{ activeItem.workspaceName }}</span>
+              <span class="tp-sep">·</span>
+              <span class="tp-branch-chip tp-mono">{{ activeItem.branchLabel }}</span>
+              <span
+                v-if="activeItem.reviewSummaryChip"
+                class="tp-review-chip tp-mono"
+              >
+                {{ activeItem.reviewSummaryChip }}
+              </span>
+            </div>
+
+            <div
+              class="tp-mode-switch"
+              role="group"
+              aria-label="Detail view layout"
+            >
+              <button
+                type="button"
+                :class="['tp-mode-btn', { active: detailMode === 'digest' }]"
+                :aria-pressed="detailMode === 'digest'"
+                @click="setDetailMode('digest')"
+              >
+                A · Milestone Digest
+              </button>
+              <button
+                type="button"
+                :class="['tp-mode-btn', { active: detailMode === 'memo' }]"
+                :aria-pressed="detailMode === 'memo'"
+                @click="setDetailMode('memo')"
+              >
+                B · One-Page Brief
+              </button>
+            </div>
           </div>
 
-          <h1 class="tp-title">
-            {{ activeItem.title }}
-          </h1>
+          <!-- Title + At-a-Glance Macro Stage Strip -->
+          <div class="tp-heading-block">
+            <h1 class="tp-title">
+              {{ activeItem.title }}
+            </h1>
 
-          <p class="tp-summary">
-            {{ activeItem.outcomeSummary }}
-          </p>
+            <div
+              class="tp-stage-strip"
+              aria-label="Task lifecycle stages"
+            >
+              <template
+                v-for="(stage, idx) in activeItem.macroStages"
+                :key="stage.key"
+              >
+                <span :class="['tp-stage-pill', `tp-stage-pill--${stage.state}`]">
+                  <span v-if="stage.state === 'done'">✓</span>
+                  <span v-else-if="stage.state === 'warn'">!</span>
+                  <span v-else-if="stage.state === 'current'">●</span>
+                  {{ stage.label }}
+                </span>
+                <span
+                  v-if="idx < activeItem.macroStages.length - 1"
+                  class="tp-stage-arrow"
+                  aria-hidden="true"
+                >→</span>
+              </template>
 
-          <!-- Architectural Deliverable & Consensus Spec Frame -->
+              <span class="tp-stage-elapsed tp-mono tp-num">
+                <template v-if="activeItem.updatedAgoLabel">{{ activeItem.updatedAgoLabel }} · </template>
+                {{ activeItem.elapsedLabel }}
+              </span>
+            </div>
+          </div>
+
+          <!-- Action / Decision Gate -->
           <section
-            class="tp-spec-frame"
-            aria-label="Deliverable and consensus specification"
+            :class="['tp-gate-card', { 'tp-gate-card--attention': activeItem.bucket === 'needs_you' }]"
+            aria-label="Task actions and decision gate"
           >
-            <!-- Row 1: Actionable Gate -->
             <div class="tp-spec-gate">
               <div class="tp-spec-gate-left">
-                <span :class="['tp-verdict-badge', `tp-verdict-badge--${activeItem.consensus.verdictTone}`, 'tp-mono']">
-                  <svg
-                    v-if="activeItem.consensus.verdictTone === 'pass'"
-                    class="tp-icon"
-                    viewBox="0 0 16 16"
-                    fill="none"
-                    aria-hidden="true"
-                  >
-                    <path
-                      d="M3.5 8.25L6.5 11.25L12.5 4.75"
-                      stroke="currentColor"
-                      stroke-width="1.5"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                    />
-                  </svg>
-                  <span
-                    v-else-if="activeItem.consensus.verdictTone === 'live'"
-                    class="tp-pulse-dot"
-                  />
-                  {{ activeItem.consensus.verdictLabel }}
+                <span class="tp-gate-eyebrow">
+                  {{
+                    activeItem.bucket === 'needs_you'
+                      ? 'Decision needed'
+                      : activeItem.bucket === 'done'
+                        ? 'Completed'
+                        : 'Current status'
+                  }}
                 </span>
                 <span class="tp-decision-copy">
-                  {{ activeItem.decisionLine || activeItem.liveStep || activeItem.consensus.roundsLabel }}
+                  {{ gateBannerCopy }}
                 </span>
               </div>
 
-              <div
-                v-if="canUseManagedTaskActions(activeItem.task)"
-                class="tp-decision-btns"
-              >
-                <LoadingButton
-                  v-if="activeItem.task.status === 'todo'"
-                  type="button"
-                  class="tp-primary-btn"
-                  :loading="isPending(taskActionKey('start', activeItem.id))"
-                  loading-label="Starting…"
-                  @click="startTask(activeItem.task)"
-                >
-                  Start Task
-                </LoadingButton>
+              <div class="tp-decision-btns">
+                <template v-if="canUseManagedTaskActions(activeItem.task)">
+                  <LoadingButton
+                    v-if="activeItem.task.status === 'todo'"
+                    type="button"
+                    class="tp-primary-btn"
+                    :loading="isPending(taskActionKey('start', activeItem.id))"
+                    loading-label="Starting…"
+                    @click="startTask(activeItem.task)"
+                  >
+                    Start Task
+                  </LoadingButton>
 
-                <button
-                  v-if="selectedSession"
-                  type="button"
-                  class="tp-ghost-btn"
-                  @click="toggleSteerComposer"
-                >
-                  {{ isSteerOpen ? 'Close steer' : 'Steer…' }}
-                </button>
+                  <button
+                    v-if="selectedSession"
+                    type="button"
+                    class="tp-ghost-btn"
+                    @click="toggleSteerComposer"
+                  >
+                    {{ isSteerOpen ? 'Close steer' : 'Steer…' }}
+                  </button>
 
-                <LoadingButton
-                  v-if="canRequestReviewTask(activeItem.task)"
-                  type="button"
-                  class="tp-ghost-btn"
-                  :loading="isPending(taskActionKey('request-review', activeItem.id))"
-                  loading-label="Requesting…"
-                  @click="requestReview(activeItem.task)"
-                >
-                  Request review
-                </LoadingButton>
+                  <LoadingButton
+                    v-if="canRequestReviewTask(activeItem.task)"
+                    type="button"
+                    class="tp-ghost-btn"
+                    :loading="isPending(taskActionKey('request-review', activeItem.id))"
+                    loading-label="Requesting…"
+                    @click="requestReview(activeItem.task)"
+                  >
+                    Request review
+                  </LoadingButton>
 
-                <LoadingButton
-                  v-if="canMarkDoneTask(activeItem.task)"
-                  type="button"
-                  class="tp-primary-btn"
-                  :loading="isPending(taskActionKey('mark-done', activeItem.id))"
-                  loading-label="Accepting…"
-                  @click="acceptAndCleanupTask(activeItem.task)"
-                >
-                  Accept
-                </LoadingButton>
+                  <LoadingButton
+                    v-if="canMarkDoneTask(activeItem.task)"
+                    type="button"
+                    class="tp-primary-btn"
+                    :loading="isPending(taskActionKey('mark-done', activeItem.id))"
+                    loading-label="Accepting…"
+                    @click="acceptAndCleanupTask(activeItem.task)"
+                  >
+                    Accept
+                  </LoadingButton>
 
-                <LoadingButton
-                  v-if="activeItem.bucket === 'done' && selectedSession?.ephemeral"
-                  type="button"
-                  class="tp-ghost-btn"
-                  :loading="isPending(taskActionKey('cleanup-session', activeItem.id))"
-                  loading-label="Releasing…"
-                  @click="cleanupCompletedTaskSession(activeItem.task)"
-                >
-                  Release session
-                </LoadingButton>
+                  <LoadingButton
+                    v-if="activeItem.bucket === 'done' && selectedSession?.ephemeral"
+                    type="button"
+                    class="tp-ghost-btn"
+                    :loading="isPending(taskActionKey('cleanup-session', activeItem.id))"
+                    loading-label="Releasing…"
+                    @click="cleanupCompletedTaskSession(activeItem.task)"
+                  >
+                    Release session
+                  </LoadingButton>
+                </template>
 
                 <button
                   v-if="selectedSession"
@@ -323,7 +305,6 @@
               </div>
             </div>
 
-            <!-- Inline Steer / Follow-up Composer (expands cleanly inside the Spec Frame) -->
             <form
               v-if="isSteerOpen && selectedSession && canUseManagedTaskActions(activeItem.task)"
               class="tp-steer-form"
@@ -355,7 +336,11 @@
               </div>
               <div class="tp-steer-actions">
                 <span class="tp-steer-hint tp-mono">
-                  {{ activeItem.task.status === 'review' || activeItem.task.status === 'failed' ? 'Continues task from review/failed' : 'Sends live follow-up to active session' }}
+                  {{
+                    activeItem.task.status === 'review' || activeItem.task.status === 'failed'
+                      ? 'Continues task from review/failed'
+                      : 'Sends live follow-up to active session'
+                  }}
                 </span>
                 <LoadingButton
                   type="submit"
@@ -368,211 +353,300 @@
                 </LoadingButton>
               </div>
             </form>
-
-            <!-- Row 2: Heterogeneous Consensus Matrix -->
-            <div class="tp-spec-consensus">
-              <div class="tp-consensus-cell">
-                <span class="tp-cell-label">CONVERGENCE PAIR</span>
-                <div class="tp-cell-val">
-                  <span>{{ activeItem.consensus.implementer }}</span>
-                  <span class="tp-arrow">→</span>
-                  <span>{{ activeItem.consensus.reviewer }}</span>
-                </div>
-              </div>
-              <div class="tp-consensus-cell">
-                <span class="tp-cell-label">REVIEW TRAJECTORY</span>
-                <div class="tp-cell-val">
-                  {{ activeItem.consensus.roundsLabel }}
-                </div>
-              </div>
-              <div class="tp-consensus-cell">
-                <span class="tp-cell-label">EVIDENCE &amp; CHECKS</span>
-                <div class="tp-cell-val tp-mono tp-num">
-                  {{ activeItem.consensus.metricHighlight }}
-                </div>
-              </div>
-            </div>
-
-            <!-- Row 3: Deliverable Artifacts & Changed Markdown Docs -->
-            <div
-              v-if="activeItem.links.length > 0 || selectedMarkdownDocuments.length > 0 || imageAttachments.length > 0"
-              class="tp-spec-artifacts"
-            >
-              <div class="tp-artifacts-list">
-                <a
-                  v-for="link in activeItem.links"
-                  :key="link.url"
-                  :href="link.url"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="tp-artifact-row"
-                >
-                  <svg
-                    v-if="link.kind === 'mr'"
-                    class="tp-icon tp-artifact-icon"
-                    viewBox="0 0 16 16"
-                    fill="none"
-                    aria-hidden="true"
-                  >
-                    <circle
-                      cx="4.5"
-                      cy="4"
-                      r="1.75"
-                      stroke="currentColor"
-                      stroke-width="1.5"
-                    />
-                    <circle
-                      cx="4.5"
-                      cy="12"
-                      r="1.75"
-                      stroke="currentColor"
-                      stroke-width="1.5"
-                    />
-                    <circle
-                      cx="11.5"
-                      cy="12"
-                      r="1.75"
-                      stroke="currentColor"
-                      stroke-width="1.5"
-                    />
-                    <path
-                      d="M4.5 5.75v4.5M11.5 10.25V6.5a2.5 2.5 0 0 0-2.5-2.5H7.5"
-                      stroke="currentColor"
-                      stroke-width="1.5"
-                      stroke-linecap="round"
-                    />
-                  </svg>
-                  <svg
-                    v-else
-                    class="tp-icon tp-artifact-icon"
-                    viewBox="0 0 16 16"
-                    fill="none"
-                    aria-hidden="true"
-                  >
-                    <rect
-                      x="3"
-                      y="2.25"
-                      width="10"
-                      height="11.5"
-                      rx="1.5"
-                      stroke="currentColor"
-                      stroke-width="1.5"
-                    />
-                    <path
-                      d="M5.5 5.75h5M5.5 8.25h5M5.5 10.75h3"
-                      stroke="currentColor"
-                      stroke-width="1.5"
-                      stroke-linecap="round"
-                    />
-                  </svg>
-                  <span class="tp-artifact-label">{{ link.label }}</span>
-                  <span class="tp-artifact-meta tp-mono">{{ link.meta }}</span>
-                  <span class="tp-artifact-ext">↗</span>
-                </a>
-
-                <button
-                  v-for="doc in selectedMarkdownDocuments.slice(0, 4)"
-                  :key="doc.id"
-                  type="button"
-                  class="tp-doc-btn tp-mono"
-                  @click="openMarkdownPreviewModal(doc.path)"
-                >
-                  {{ doc.label }} ↗
-                </button>
-
-                <button
-                  v-for="img in imageAttachments"
-                  :key="img.id"
-                  type="button"
-                  class="tp-doc-btn tp-mono"
-                  @click="openImageLightbox(`/api/workspaces/attachments/${img.id}`, img.filename)"
-                >
-                  {{ img.filename }} ↗
-                </button>
-              </div>
-              <span class="tp-checks-note tp-mono">✓ {{ activeItem.checksLabel }}</span>
-            </div>
           </section>
 
-          <!-- Sculptural Epoch Run Spine -->
-          <section class="tp-spine-section">
-            <div class="tp-spine-header">
-              <h2 class="tp-micro-heading">
-                EXECUTION &amp; REVIEW SPINE
-              </h2>
-              <span class="tp-spine-overview tp-mono tp-num">
-                {{ activeItem.spine.length }} stages · epoch {{ activeItem.internalMeta.epoch }} · {{ activeItem.elapsedLabel }}
-              </span>
+          <!-- ==================== MODE A: MILESTONE DIGEST ==================== -->
+          <template v-if="detailMode === 'digest'">
+            <section
+              class="tp-card"
+              aria-label="Summary and key takeaways"
+            >
+              <div class="tp-section-head">
+                <h2 class="tp-micro-heading">
+                  Summary &amp; Key Takeaways
+                </h2>
+                <button
+                  v-if="activeItem.digest.rawText && activeItem.digest.bullets.length > 0"
+                  type="button"
+                  class="tp-inline-link tp-mono"
+                  @click="showRawDigest = !showRawDigest"
+                >
+                  {{ showRawDigest ? 'Structured view' : 'Raw text' }}
+                </button>
+              </div>
+
+              <pre
+                v-if="showRawDigest && activeItem.digest.rawText"
+                class="tp-raw-summary"
+              >{{ activeItem.digest.rawText }}</pre>
+
+              <template v-else>
+                <p class="tp-headline">
+                  {{ activeItem.digest.headline }}
+                </p>
+                <ul
+                  v-if="activeItem.digest.bullets.length > 0"
+                  class="tp-bullets"
+                >
+                  <li
+                    v-for="(bullet, idx) in activeItem.digest.bullets"
+                    :key="idx"
+                  >
+                    <span
+                      v-if="bullet.label"
+                      class="tp-bullet-label"
+                    >{{ bullet.label }}</span>
+                    <span>{{ bullet.text }}</span>
+                  </li>
+                </ul>
+              </template>
+            </section>
+
+            <div
+              v-if="hasDeliverables || hasVerification"
+              class="tp-evidence-grid"
+            >
+              <!-- Deliverables Card -->
+              <section
+                v-if="hasDeliverables"
+                class="tp-card"
+                aria-label="Deliverables"
+              >
+                <div class="tp-section-head">
+                  <h2 class="tp-micro-heading">
+                    Deliverables ({{ activeItem.deliverables.length + imageAttachments.length }})
+                  </h2>
+                </div>
+
+                <div class="tp-deliverables">
+                  <template
+                    v-for="deliv in activeItem.deliverables"
+                    :key="deliv.key"
+                  >
+                    <a
+                      v-if="deliv.url"
+                      :href="deliv.url"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="tp-deliverable-item"
+                    >
+                      <div class="tp-deliv-main">
+                        <div class="tp-deliv-title-row">
+                          <span :class="['tp-deliv-kind', `tp-deliv-kind--${deliv.kind}`]">{{ deliv.kind }}</span>
+                          <span class="tp-deliv-title">{{ deliv.title }}</span>
+                        </div>
+                        <span class="tp-deliv-sub tp-mono">{{ deliv.subtitle }}</span>
+                      </div>
+                      <span class="tp-mono">Open ↗</span>
+                    </a>
+
+                    <div
+                      v-else
+                      class="tp-deliverable-item"
+                    >
+                      <div class="tp-deliv-main">
+                        <div class="tp-deliv-title-row">
+                          <span :class="['tp-deliv-kind', `tp-deliv-kind--${deliv.kind}`]">
+                            {{ deliv.kind === 'markdown' ? 'md' : deliv.kind }}
+                          </span>
+                          <span class="tp-deliv-title tp-mono">{{ deliv.title }}</span>
+                        </div>
+                        <span class="tp-deliv-sub tp-mono">{{ deliv.subtitle }}</span>
+                      </div>
+
+                      <div class="tp-deliv-actions">
+                        <button
+                          v-if="deliv.kind === 'markdown' && deliv.artifactPath"
+                          type="button"
+                          class="tp-mini-btn tp-mini-btn--accent"
+                          @click="openDeliverableModal(deliv)"
+                        >
+                          Preview
+                        </button>
+                        <button
+                          v-if="deliv.copyText || deliv.artifactPath"
+                          type="button"
+                          class="tp-mini-btn tp-mono"
+                          @click="copyDeliverableText(deliv.key, deliv.copyText || deliv.artifactPath || '')"
+                        >
+                          {{ copiedKey === deliv.key ? 'Copied' : 'Copy' }}
+                        </button>
+                      </div>
+                    </div>
+                  </template>
+
+                  <div
+                    v-for="img in imageAttachments"
+                    :key="img.id"
+                    class="tp-deliverable-item"
+                  >
+                    <div class="tp-deliv-main">
+                      <div class="tp-deliv-title-row">
+                        <span class="tp-deliv-kind">img</span>
+                        <span class="tp-deliv-title tp-mono">{{ img.filename }}</span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      class="tp-mini-btn"
+                      @click="openImageLightbox(`/api/workspaces/attachments/${img.id}`, img.filename)"
+                    >
+                      View ↗
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              <!-- Verification & Caveats Card -->
+              <section
+                v-if="hasVerification"
+                class="tp-card"
+                aria-label="Verification and caveats"
+              >
+                <div class="tp-section-head">
+                  <h2 class="tp-micro-heading">
+                    Verification &amp; Caveats
+                  </h2>
+                  <span
+                    :class="[
+                      'tp-val-badge',
+                      'tp-mono',
+                      activeItem.validation.failedCount > 0
+                        ? 'tp-val-badge--fail'
+                        : activeItem.validation.passedCount > 0
+                          ? 'tp-val-badge--pass'
+                          : '',
+                    ]"
+                  >
+                    {{ activeItem.validation.summaryLabel }}
+                  </span>
+                </div>
+
+                <div
+                  v-if="activeItem.validation.pills.length > 0"
+                  class="tp-pill-wrap"
+                >
+                  <span
+                    v-for="(pill, idx) in activeItem.validation.pills"
+                    :key="idx"
+                    :class="['tp-check-pill', 'tp-mono', `tp-check-pill--${pill.status}`]"
+                  >
+                    <span>{{ pill.status === 'fail' ? '✕' : '✓' }}</span>
+                    <span>{{ pill.label }}</span>
+                  </span>
+                </div>
+
+                <ul
+                  v-if="activeItem.validation.notes.length > 0"
+                  class="tp-val-notes"
+                >
+                  <li
+                    v-for="(note, idx) in activeItem.validation.notes"
+                    :key="idx"
+                  >
+                    {{ note }}
+                  </li>
+                </ul>
+
+                <div
+                  v-if="activeItem.validation.riskBullets.length > 0"
+                  class="tp-risk-box"
+                >
+                  <span class="tp-risk-title">Caveats &amp; Unverified Scope</span>
+                  <ul class="tp-risk-list">
+                    <li
+                      v-for="(risk, idx) in activeItem.validation.riskBullets"
+                      :key="idx"
+                    >
+                      {{ risk }}
+                    </li>
+                  </ul>
+                </div>
+              </section>
             </div>
 
-            <ol class="tp-spine">
-              <template
-                v-for="node in activeItem.spine"
-                :key="node.id"
-              >
-                <li
-                  v-if="node.epochLabel"
-                  class="tp-epoch-row"
-                >
-                  <span class="tp-epoch-label tp-mono">{{ node.epochLabel }}</span>
-                  <span class="tp-epoch-line" />
-                </li>
+            <!-- Aggregated Key Milestones (2~6 clean nodes, zero text duplication) -->
+            <section
+              class="tp-milestones-section"
+              aria-label="Key milestones"
+            >
+              <div class="tp-section-head">
+                <h2 class="tp-micro-heading">
+                  Key Milestones ({{ activeItem.milestones.length }})
+                </h2>
+                <span
+                  v-if="eventsLoading"
+                  class="tp-mono tp-sep"
+                >Syncing checkpoints…</span>
+              </div>
 
-                <li :class="['tp-spine-item', `tp-spine-item--${node.tone}`, `tp-spine-role--${node.actorRole}`]">
-                  <div class="tp-spine-time-col tp-num">
-                    <span class="tp-spine-time">{{ node.timeLabel }}</span>
+              <ol class="tp-milestone-list">
+                <li
+                  v-for="step in activeItem.milestones"
+                  :key="step.id"
+                  :class="['tp-ms-item', `tp-ms-item--${step.tone}`]"
+                >
+                  <div class="tp-ms-time-col tp-num">
+                    <span class="tp-ms-time">{{ step.timeLabel }}</span>
                     <span
-                      v-if="node.deltaLabel"
-                      class="tp-spine-delta tp-mono"
-                    >{{ node.deltaLabel }}</span>
+                      v-if="step.deltaLabel"
+                      class="tp-ms-delta tp-mono"
+                    >{{ step.deltaLabel }}</span>
                   </div>
 
-                  <span class="tp-spine-track">
-                    <i class="tp-spine-node" />
+                  <span class="tp-ms-track">
+                    <i class="tp-ms-dot" />
                   </span>
 
-                  <div class="tp-spine-body">
-                    <div class="tp-spine-head">
-                      <strong>{{ node.stage }}</strong>
-                      <span class="tp-spine-actor">
-                        {{ node.actor }}
-                        <em class="tp-role-tag">{{ node.actorRole }}</em>
-                      </span>
+                  <div class="tp-ms-body">
+                    <div class="tp-ms-head">
+                      <span class="tp-ms-title">{{ step.title }}</span>
                       <span
-                        v-if="node.badge"
-                        :class="['tp-node-badge', 'tp-mono', `tp-node-badge--${node.tone}`]"
+                        v-if="step.badge"
+                        :class="['tp-ms-badge', 'tp-mono', `tp-ms-badge--${step.tone}`]"
                       >
-                        {{ node.badge }}
+                        {{ step.badge }}
                       </span>
-                      <button
-                        v-if="node.sessionId || node.tabId"
-                        type="button"
-                        class="tp-inline-link tp-mono"
-                        @click="toggleTranscript(node)"
-                      >
-                        {{ openTranscriptNodeId === node.id ? 'Hide transcript' : 'Transcript ↗' }}
-                      </button>
+
+                      <div class="tp-ms-links">
+                        <button
+                          v-if="step.detailText"
+                          type="button"
+                          class="tp-inline-link tp-mono"
+                          @click="toggleStepDetail(step.id)"
+                        >
+                          {{
+                            expandedStepIds.has(step.id)
+                              ? 'Hide details'
+                              : step.collapsedCount
+                                ? `Details (${step.collapsedCount})`
+                                : 'Details'
+                          }}
+                        </button>
+                        <button
+                          v-if="step.sessionId || step.tabId"
+                          type="button"
+                          class="tp-inline-link tp-mono"
+                          @click="toggleTranscript(step)"
+                        >
+                          {{ openTranscriptNodeId === step.id ? 'Hide transcript' : 'Transcript ↗' }}
+                        </button>
+                      </div>
                     </div>
 
-                    <p>{{ node.summary }}</p>
+                    <p :class="['tp-ms-oneliner', { 'tp-ms-oneliner--echo': step.isCurrentEcho }]">
+                      {{ step.oneLiner }}
+                    </p>
 
                     <div
-                      v-if="node.filesTouched || node.receipt"
-                      class="tp-spine-evidence tp-mono"
+                      v-if="step.detailText && expandedStepIds.has(step.id)"
+                      class="tp-ms-detail-box"
                     >
-                      <span
-                        v-if="node.filesTouched"
-                        class="tp-evidence-files"
-                      >{{ node.filesTouched }}</span>
-                      <span
-                        v-if="node.receipt"
-                        class="tp-evidence-receipt"
-                      >✓ {{ node.receipt }}</span>
+                      <pre class="tp-ms-detail-pre">{{ step.detailText }}</pre>
                     </div>
 
-                    <!-- Real Read-only Session Stream Excerpt (fetched on demand, works even when archived!) -->
                     <div
-                      v-if="openTranscriptNodeId === node.id"
+                      v-if="openTranscriptNodeId === step.id"
                       class="tp-log-excerpt"
                     >
                       <div
@@ -608,13 +682,13 @@
                       </template>
 
                       <div
-                        v-if="node.tabId"
+                        v-if="step.tabId"
                         class="tp-log-footer"
                       >
                         <button
                           type="button"
                           class="tp-inline-link tp-mono"
-                          @click="openOrRestoreTab(node.tabId)"
+                          @click="openOrRestoreTab(step.tabId)"
                         >
                           Open full conversation in Chat pane ↗
                         </button>
@@ -622,11 +696,291 @@
                     </div>
                   </div>
                 </li>
-              </template>
-            </ol>
-          </section>
+              </ol>
+            </section>
+          </template>
 
-          <!-- Collapsible Raw Prompt, Execution Control & Secondary Actions (Zero Default Clutter) -->
+          <!-- ==================== MODE B: ONE-PAGE BRIEF ==================== -->
+          <template v-else>
+            <section
+              class="tp-card tp-card--memo"
+              aria-label="One-page sign-off brief"
+            >
+              <div class="tp-section-head">
+                <h2 class="tp-micro-heading">
+                  1 · Executive Summary
+                </h2>
+                <button
+                  v-if="activeItem.digest.rawText && activeItem.digest.bullets.length > 0"
+                  type="button"
+                  class="tp-inline-link tp-mono"
+                  @click="showRawDigest = !showRawDigest"
+                >
+                  {{ showRawDigest ? 'Structured view' : 'Raw text' }}
+                </button>
+              </div>
+
+              <pre
+                v-if="showRawDigest && activeItem.digest.rawText"
+                class="tp-raw-summary"
+              >{{ activeItem.digest.rawText }}</pre>
+
+              <template v-else>
+                <p class="tp-headline">
+                  {{ activeItem.digest.headline }}
+                </p>
+                <ul
+                  v-if="activeItem.digest.bullets.length > 0"
+                  class="tp-bullets"
+                >
+                  <li
+                    v-for="(bullet, idx) in activeItem.digest.bullets"
+                    :key="idx"
+                  >
+                    <span
+                      v-if="bullet.label"
+                      class="tp-bullet-label"
+                    >{{ bullet.label }}</span>
+                    <span>{{ bullet.text }}</span>
+                  </li>
+                </ul>
+              </template>
+
+              <template v-if="hasDeliverables">
+                <div class="tp-section-head">
+                  <h2 class="tp-micro-heading">
+                    2 · Deliverables &amp; Reports
+                  </h2>
+                </div>
+
+                <div class="tp-deliverables">
+                  <template
+                    v-for="deliv in activeItem.deliverables"
+                    :key="deliv.key"
+                  >
+                    <a
+                      v-if="deliv.url"
+                      :href="deliv.url"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="tp-deliverable-item"
+                    >
+                      <div class="tp-deliv-main">
+                        <div class="tp-deliv-title-row">
+                          <span :class="['tp-deliv-kind', `tp-deliv-kind--${deliv.kind}`]">{{ deliv.kind }}</span>
+                          <span class="tp-deliv-title">{{ deliv.title }}</span>
+                        </div>
+                        <span class="tp-deliv-sub tp-mono">{{ deliv.subtitle }}</span>
+                      </div>
+                      <span class="tp-mono">Open ↗</span>
+                    </a>
+
+                    <div v-else>
+                      <div class="tp-deliverable-item">
+                        <div class="tp-deliv-main">
+                          <div class="tp-deliv-title-row">
+                            <span :class="['tp-deliv-kind', `tp-deliv-kind--${deliv.kind}`]">
+                              {{ deliv.kind === 'markdown' ? 'md' : deliv.kind }}
+                            </span>
+                            <span class="tp-deliv-title tp-mono">{{ deliv.title }}</span>
+                          </div>
+                          <span class="tp-deliv-sub tp-mono">{{ deliv.subtitle }}</span>
+                        </div>
+
+                        <div class="tp-deliv-actions">
+                          <button
+                            v-if="deliv.kind === 'markdown' && deliv.artifactPath"
+                            type="button"
+                            class="tp-mini-btn tp-mini-btn--accent"
+                            @click="toggleInlineMarkdown(deliv)"
+                          >
+                            {{ inlineMdKey === deliv.key ? 'Hide preview' : 'Inline preview' }}
+                          </button>
+                          <button
+                            v-if="deliv.kind === 'markdown' && deliv.artifactPath"
+                            type="button"
+                            class="tp-mini-btn"
+                            @click="openDeliverableModal(deliv)"
+                          >
+                            Modal ↗
+                          </button>
+                          <button
+                            v-if="deliv.copyText || deliv.artifactPath"
+                            type="button"
+                            class="tp-mini-btn tp-mono"
+                            @click="copyDeliverableText(deliv.key, deliv.copyText || deliv.artifactPath || '')"
+                          >
+                            {{ copiedKey === deliv.key ? 'Copied' : 'Copy' }}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div
+                        v-if="inlineMdKey === deliv.key"
+                        class="tp-inline-md-box"
+                      >
+                        <div class="tp-inline-md-head">
+                          <span class="tp-mono">{{ deliv.artifactPath }}</span>
+                          <button
+                            v-if="deliv.artifactPath"
+                            type="button"
+                            class="tp-inline-link tp-mono"
+                            @click="openDeliverableModal(deliv)"
+                          >
+                            Full reader ↗
+                          </button>
+                        </div>
+                        <div
+                          v-if="inlineMdLoading"
+                          class="tp-log-status tp-mono"
+                        >
+                          Loading Markdown document…
+                        </div>
+                        <div
+                          v-else-if="inlineMdError"
+                          class="tp-log-status tp-mono"
+                        >
+                          {{ inlineMdError }}
+                        </div>
+                        <MarkdownContent
+                          v-else-if="inlineMdContent"
+                          link-markdown-paths
+                          :text="inlineMdContent"
+                          @markdown-path-click="path => openMarkdownPreviewModal(path)"
+                        />
+                      </div>
+                    </div>
+                  </template>
+
+                  <div
+                    v-for="img in imageAttachments"
+                    :key="img.id"
+                    class="tp-deliverable-item"
+                  >
+                    <div class="tp-deliv-main">
+                      <div class="tp-deliv-title-row">
+                        <span class="tp-deliv-kind">img</span>
+                        <span class="tp-deliv-title tp-mono">{{ img.filename }}</span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      class="tp-mini-btn"
+                      @click="openImageLightbox(`/api/workspaces/attachments/${img.id}`, img.filename)"
+                    >
+                      View ↗
+                    </button>
+                  </div>
+                </div>
+              </template>
+
+              <template v-if="hasVerification">
+                <div class="tp-section-head">
+                  <h2 class="tp-micro-heading">
+                    {{ hasDeliverables ? '3 · Verification & Caveats' : '2 · Verification & Caveats' }}
+                  </h2>
+                  <span
+                    :class="[
+                      'tp-val-badge',
+                      'tp-mono',
+                      activeItem.validation.failedCount > 0
+                        ? 'tp-val-badge--fail'
+                        : activeItem.validation.passedCount > 0
+                          ? 'tp-val-badge--pass'
+                          : '',
+                    ]"
+                  >
+                    {{ activeItem.validation.summaryLabel }}
+                  </span>
+                </div>
+
+                <div
+                  v-if="activeItem.validation.pills.length > 0"
+                  class="tp-pill-wrap"
+                >
+                  <span
+                    v-for="(pill, idx) in activeItem.validation.pills"
+                    :key="idx"
+                    :class="['tp-check-pill', 'tp-mono', `tp-check-pill--${pill.status}`]"
+                  >
+                    <span>{{ pill.status === 'fail' ? '✕' : '✓' }}</span>
+                    <span>{{ pill.label }}</span>
+                  </span>
+                </div>
+
+                <ul
+                  v-if="activeItem.validation.notes.length > 0"
+                  class="tp-val-notes"
+                >
+                  <li
+                    v-for="(note, idx) in activeItem.validation.notes"
+                    :key="idx"
+                  >
+                    {{ note }}
+                  </li>
+                </ul>
+
+                <div
+                  v-if="activeItem.validation.riskBullets.length > 0"
+                  class="tp-risk-box"
+                >
+                  <span class="tp-risk-title">Caveats &amp; Unverified Scope</span>
+                  <ul class="tp-risk-list">
+                    <li
+                      v-for="(risk, idx) in activeItem.validation.riskBullets"
+                      :key="idx"
+                    >
+                      {{ risk }}
+                    </li>
+                  </ul>
+                </div>
+              </template>
+            </section>
+
+            <!-- Mode B keeps Process History quietly tucked in a collapsible drawer -->
+            <details class="tp-meta-disclosure">
+              <summary>
+                <span>Process History ({{ activeItem.milestones.length }} milestones)</span>
+                <span class="tp-mono tp-num">{{ activeItem.elapsedLabel }}</span>
+              </summary>
+              <div class="tp-disclosure-body">
+                <ol class="tp-milestone-list">
+                  <li
+                    v-for="step in activeItem.milestones"
+                    :key="step.id"
+                    :class="['tp-ms-item', `tp-ms-item--${step.tone}`]"
+                  >
+                    <div class="tp-ms-time-col tp-num">
+                      <span class="tp-ms-time">{{ step.timeLabel }}</span>
+                      <span
+                        v-if="step.deltaLabel"
+                        class="tp-ms-delta tp-mono"
+                      >{{ step.deltaLabel }}</span>
+                    </div>
+                    <span class="tp-ms-track">
+                      <i class="tp-ms-dot" />
+                    </span>
+                    <div class="tp-ms-body">
+                      <div class="tp-ms-head">
+                        <span class="tp-ms-title">{{ step.title }}</span>
+                        <span
+                          v-if="step.badge"
+                          :class="['tp-ms-badge', 'tp-mono', `tp-ms-badge--${step.tone}`]"
+                        >
+                          {{ step.badge }}
+                        </span>
+                      </div>
+                      <p :class="['tp-ms-oneliner', { 'tp-ms-oneliner--echo': step.isCurrentEcho }]">
+                        {{ step.oneLiner }}
+                      </p>
+                    </div>
+                  </li>
+                </ol>
+              </div>
+            </details>
+          </template>
+
+          <!-- Collapsible Raw Prompt, Execution Control & Secondary Actions -->
           <details class="tp-meta-disclosure">
             <summary>
               <span>Prompt, Execution Control &amp; Secondary Actions</span>
@@ -671,7 +1025,7 @@
 
               <div class="tp-raw-prompt-block">
                 <div class="tp-micro-heading">
-                  TASK DESCRIPTION / BRIEF
+                  Task Description / Brief
                 </div>
                 <MarkdownContent
                   class="tp-prompt-md"
@@ -704,6 +1058,7 @@ import {
   nextTick,
   onBeforeUnmount,
   onMounted,
+  reactive,
   ref,
   watch,
 } from 'vue'
@@ -713,7 +1068,13 @@ import TaskExecutionPanel from '@/components/TaskExecutionPanel.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
-import type { AgentStreamEvent, ManagedSession } from '@/types'
+import type {
+  AgentStreamEvent,
+  ManagedSession,
+  WorkspaceArtifactPreview,
+  WorkspaceTaskEvent,
+} from '@/types'
+import { writeClipboard } from '@/utils/clipboard'
 import {
   formatAttachmentSize,
   handleAttachmentPaste,
@@ -723,10 +1084,7 @@ import {
 } from '@/utils/draftAttachments'
 import { parseTimestampMs } from '@/utils/duration'
 import {
-  useWorkspaceAgentManagerContext,
   useWorkspaceArtifactsContext,
-  useWorkspaceEditorContext,
-  useWorkspaceLessonsContext,
   useWorkspaceRuntimeContext,
   useWorkspaceTaskActionsContext,
   useWorkspaceTaskPresentationContext,
@@ -734,9 +1092,38 @@ import {
 import {
   buildTriageTaskViewModel,
   groupTriageTasks,
-  type TriageSpineNode,
+  type DeliverableItem,
+  type MilestoneStep,
   type TriageTaskViewModel,
 } from '../presentation/triageProModel'
+
+type TriageDetailMode = 'digest' | 'memo'
+const DETAIL_MODE_STORAGE_KEY = 'claude-hub.triage-detail-mode.v1'
+
+function readInitialDetailMode(): TriageDetailMode {
+  if (typeof window !== 'undefined') {
+    const param = new URLSearchParams(window.location.search).get('triage_mode')
+    if (param === 'memo' || param === 'digest') return param
+    try {
+      const saved = window.localStorage.getItem(DETAIL_MODE_STORAGE_KEY)
+      if (saved === 'memo' || saved === 'digest') return saved
+    } catch {
+      // Ignore storage access errors.
+    }
+  }
+  return 'digest'
+}
+
+const detailMode = ref<TriageDetailMode>(readInitialDetailMode())
+
+function setDetailMode(mode: TriageDetailMode) {
+  detailMode.value = mode
+  try {
+    window.localStorage.setItem(DETAIL_MODE_STORAGE_KEY, mode)
+  } catch {
+    // Ignore storage write errors.
+  }
+}
 
 const workspaceStore = useWorkspaceStore()
 const terminalStore = useTerminalStore()
@@ -760,24 +1147,7 @@ const {
   handleLoadOlderTasks,
   boardLoadMoreError,
   taskCapabilities,
-  taskCreateFlow,
 } = useWorkspaceRuntimeContext()
-
-const {
-  showWorkspaceModal,
-  showResidentAgentModal,
-} = useWorkspaceEditorContext()
-
-const {
-  showAgentOptionsModal,
-  showAgentFileBrowser,
-  showSwitchEnvModal,
-  showSwitchEnvManager,
-} = useWorkspaceAgentManagerContext()
-
-const {
-  showLessonsModal,
-} = useWorkspaceLessonsContext()
 
 const {
   canUseManagedTaskActions,
@@ -802,14 +1172,11 @@ const {
   sendDetailMessage,
   detailAttachments,
   detailMessage,
-  showEditTaskModal,
 } = useWorkspaceTaskActionsContext()
 
 const {
   openMarkdownPreviewModal,
   openImageLightbox,
-  markdownPreviewModalPath,
-  imageLightboxUrl,
 } = useWorkspaceArtifactsContext()
 
 const nowMs = ref(Date.now())
@@ -817,6 +1184,23 @@ let clockTimer: ReturnType<typeof setInterval> | null = null
 
 const isSteerOpen = ref(false)
 const steerInputRef = ref<HTMLTextAreaElement | null>(null)
+const showRawDigest = ref(false)
+const expandedStepIds = reactive(new Set<string>())
+const copiedKey = ref<string | null>(null)
+let copyResetTimer: ReturnType<typeof setTimeout> | null = null
+
+// On-demand initiator progress events cache (fetched only when progress_revision > 1)
+const taskEventsByTaskId = reactive<Record<string, WorkspaceTaskEvent[]>>({})
+const taskEventsFetchedRev = new Map<string, number>()
+const eventsLoading = ref(false)
+let eventsFetchEpoch = 0
+
+// Inline Markdown preview state for Mode B (One-Page Brief)
+const inlineMdKey = ref<string | null>(null)
+const inlineMdContent = ref<string | null>(null)
+const inlineMdLoading = ref(false)
+const inlineMdError = ref<string | null>(null)
+let inlineMdEpoch = 0
 
 interface TranscriptExcerptRow {
   time: string
@@ -840,19 +1224,23 @@ const sessionsById = computed(() => {
 })
 
 const triageItems = computed<TriageTaskViewModel[]>(() => {
-  const wsName = activeWorkspace.value?.name || 'workspace'
-  const defBranch = activeWorkspace.value?.default_branch || 'main'
+  const wsName = board.value?.workspace?.name || activeWorkspace.value?.name || 'workspace'
+  const defBranch = board.value?.workspace?.default_branch || activeWorkspace.value?.default_branch || 'main'
   const lifecycles = board.value?.task_lifecycles ?? {}
 
   return tasks.value.map(task => {
     const isSelected = selectedTaskId.value === task.id
     const fullReports = isSelected ? selectedReports.value : []
     const reports = fullReports.length > 0 ? fullReports : workspaceStore.reportsForTask(task)
+    const docs = isSelected ? selectedMarkdownDocuments.value : []
+    const events = taskEventsByTaskId[task.id] || []
     return buildTriageTaskViewModel({
       task,
       workspaceName: wsName,
       defaultBranch: defBranch,
       reports,
+      events,
+      markdownDocs: docs,
       sessionsById: sessionsById.value,
       lifecycle: lifecycles[task.id],
       nowMs: nowMs.value,
@@ -861,10 +1249,8 @@ const triageItems = computed<TriageTaskViewModel[]>(() => {
 })
 
 const groupedTasks = computed(() => groupTriageTasks(triageItems.value))
-
 const orderedVisibleItems = computed(() => groupedTasks.value.flatMap(g => g.items))
 
-// Auto-select first prioritized task when entering or switching workspaces without opening a modal dialog
 watch(
   [orderedVisibleItems, activeWorkspaceId],
   ([items]) => {
@@ -890,14 +1276,87 @@ const imageAttachments = computed(() =>
   ),
 )
 
+const hasDeliverables = computed(() =>
+  Boolean(
+    activeItem.value &&
+      (activeItem.value.deliverables.length > 0 || imageAttachments.value.length > 0),
+  ),
+)
+
+const hasVerification = computed(() => {
+  const v = activeItem.value?.validation
+  if (!v) return false
+  return v.pills.length > 0 || v.notes.length > 0 || v.riskBullets.length > 0
+})
+
+const gateBannerCopy = computed(() => {
+  const item = activeItem.value
+  if (!item) return ''
+  if (item.digest.actionPrompt) return item.digest.actionPrompt
+  if (item.decisionLine) return item.decisionLine
+  if (item.task.status === 'todo') return 'Queued in backlog — click Start Task to dispatch.'
+  if (item.bucket === 'working') {
+    return `Active run · ${item.milestones.length} milestone${item.milestones.length === 1 ? '' : 's'} recorded`
+  }
+  return item.task.human_accepted_at ? 'Accepted and finalized.' : 'Completed.'
+})
+
+// Lazily hydrate initiator checkpoint history when a multi-checkpoint task is selected
+watch(
+  () => {
+    const t = activeItem.value?.task
+    if (!t) return null
+    return {
+      wsId: t.workspace_id,
+      taskId: t.id,
+      control: t.execution_control,
+      rev: t.progress_revision ?? 0,
+    }
+  },
+  async target => {
+    if (!target || target.control !== 'initiator' || target.rev <= 1) return
+    if (taskEventsFetchedRev.get(target.taskId) === target.rev) return
+    taskEventsFetchedRev.set(target.taskId, target.rev)
+    const epoch = ++eventsFetchEpoch
+    eventsLoading.value = true
+    try {
+      const res = await fetch(
+        `/api/workspaces/${encodeURIComponent(target.wsId)}/tasks/${encodeURIComponent(target.taskId)}/events?since_sequence=0`,
+        { credentials: 'same-origin' },
+      )
+      if (epoch !== eventsFetchEpoch) return
+      if (res.ok) {
+        const data = (await res.json()) as WorkspaceTaskEvent[]
+        if (Array.isArray(data)) {
+          taskEventsByTaskId[target.taskId] = data
+        }
+      }
+    } catch {
+      // Quietly fall back to latest_progress snapshot on offline/mocked surfaces.
+    } finally {
+      if (epoch === eventsFetchEpoch) {
+        eventsLoading.value = false
+      }
+    }
+  },
+  { immediate: true },
+)
+
 let steerSelectionEpoch = 0
 
 function resetTaskTransientState() {
   steerSelectionEpoch += 1
+  inlineMdEpoch += 1
   detailMessage.value = ''
   resetDraftAttachments(detailAttachments.value)
   detailAttachments.value = []
   isSteerOpen.value = false
+  showRawDigest.value = false
+  expandedStepIds.clear()
+  inlineMdKey.value = null
+  inlineMdContent.value = null
+  inlineMdError.value = null
+  inlineMdLoading.value = false
   openTranscriptNodeId.value = null
   transcriptLines.value = []
   transcriptError.value = null
@@ -939,6 +1398,85 @@ async function submitSteer() {
   }
 }
 
+function toggleStepDetail(stepId: string) {
+  if (expandedStepIds.has(stepId)) {
+    expandedStepIds.delete(stepId)
+  } else {
+    expandedStepIds.add(stepId)
+  }
+}
+
+function openDeliverableModal(deliv: DeliverableItem) {
+  if (!deliv.artifactPath) return
+  const matchingReport = deliv.reportId
+    ? selectedReports.value.find(r => r.id === deliv.reportId)
+    : undefined
+  void openMarkdownPreviewModal(deliv.artifactPath, matchingReport)
+}
+
+async function toggleInlineMarkdown(deliv: DeliverableItem) {
+  if (!deliv.artifactPath || !activeItem.value) return
+  if (inlineMdKey.value === deliv.key) {
+    inlineMdKey.value = null
+    return
+  }
+  inlineMdKey.value = deliv.key
+  inlineMdContent.value = null
+  inlineMdError.value = null
+  inlineMdLoading.value = true
+  const epoch = ++inlineMdEpoch
+  const wsId = activeItem.value.task.workspace_id
+  const sourceTabId = activeItem.value.task.source?.tab_id
+
+  try {
+    const preview = await workspaceStore.fetchArtifactPreview(
+      wsId,
+      deliv.artifactPath,
+      deliv.reportId,
+    )
+    if (epoch !== inlineMdEpoch) return
+    inlineMdContent.value = preview.content
+  } catch (primaryErr) {
+    if (epoch !== inlineMdEpoch) return
+    if (sourceTabId) {
+      try {
+        const res = await fetch(
+          `/api/workspaces/tabs/${encodeURIComponent(sourceTabId)}/stream/markdown?path=${encodeURIComponent(deliv.artifactPath)}`,
+          { credentials: 'same-origin' },
+        )
+        if (epoch !== inlineMdEpoch) return
+        if (res.ok) {
+          const fallback = (await res.json()) as WorkspaceArtifactPreview
+          inlineMdContent.value = fallback.content
+          return
+        }
+      } catch {
+        // Retain primary error message below.
+      }
+    }
+    inlineMdError.value =
+      primaryErr instanceof Error ? primaryErr.message : 'Failed to load Markdown preview.'
+  } finally {
+    if (epoch === inlineMdEpoch) {
+      inlineMdLoading.value = false
+    }
+  }
+}
+
+async function copyDeliverableText(key: string, value: string) {
+  if (!value) return
+  try {
+    await writeClipboard(value)
+    copiedKey.value = key
+    if (copyResetTimer !== null) clearTimeout(copyResetTimer)
+    copyResetTimer = setTimeout(() => {
+      copiedKey.value = null
+    }, 1600)
+  } catch {
+    // Ignore clipboard rejection.
+  }
+}
+
 function formatClock(iso: string | undefined): string {
   const ms = parseTimestampMs(iso)
   if (ms === null) return '--:--'
@@ -946,31 +1484,31 @@ function formatClock(iso: string | undefined): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
-async function toggleTranscript(node: TriageSpineNode) {
-  if (openTranscriptNodeId.value === node.id) {
+async function toggleTranscript(step: MilestoneStep) {
+  if (openTranscriptNodeId.value === step.id) {
     openTranscriptNodeId.value = null
     return
   }
-  openTranscriptNodeId.value = node.id
+  openTranscriptNodeId.value = step.id
   transcriptLoading.value = true
   transcriptError.value = null
   transcriptLines.value = []
   const reqEpoch = ++transcriptEpoch
 
   try {
-    const endpoint = node.sessionId
-      ? `/api/workspaces/sessions/${encodeURIComponent(node.sessionId)}/stream/events?since_sequence=-1&limit=120&compact=true`
-      : node.tabId
-        ? `/api/workspaces/tabs/${encodeURIComponent(node.tabId)}/stream/events?since_sequence=-1&limit=120&compact=true`
+    const endpoint = step.sessionId
+      ? `/api/workspaces/sessions/${encodeURIComponent(step.sessionId)}/stream/events?since_sequence=-1&limit=120&compact=true`
+      : step.tabId
+        ? `/api/workspaces/tabs/${encodeURIComponent(step.tabId)}/stream/events?since_sequence=-1&limit=120&compact=true`
         : null
     if (!endpoint) {
-      transcriptError.value = 'No session reference recorded on this stage.'
+      transcriptError.value = 'No session reference recorded on this checkpoint.'
       return
     }
     const response = await fetch(endpoint, { credentials: 'same-origin' })
     if (reqEpoch !== transcriptEpoch) return
     if (!response.ok) {
-      transcriptError.value = node.tabId
+      transcriptError.value = step.tabId
         ? 'Live stream closed; click below to restore the archived conversation.'
         : `Stream unavailable (HTTP ${response.status}).`
       return
@@ -990,14 +1528,16 @@ async function toggleTranscript(node: TriageSpineNode) {
           })
         }
       } else if (ev.type === 'turn_completed') {
-        const text = String(ev.payload?.final_text || ev.payload?.assistant_text || ev.payload?.summary || '')
+        const text = String(
+          ev.payload?.final_text || ev.payload?.assistant_text || ev.payload?.summary || '',
+        )
           .replace(/\s+/g, ' ')
           .trim()
         if (text) {
           rows.push({
             time: formatClock(ev.created_at),
-            speaker: node.actorRole === 'reviewer' ? 'Reviewer' : 'Agent',
-            role: node.actorRole === 'reviewer' ? 'reviewer' : 'worker',
+            speaker: step.phase === 'review' ? 'Reviewer' : 'Agent',
+            role: step.phase === 'review' ? 'reviewer' : 'worker',
             text: text.slice(0, 260),
           })
         }
@@ -1028,783 +1568,20 @@ async function openOrRestoreTab(tabId: string) {
   terminalStore.setActiveTab(tabId)
 }
 
-const isAnyOverlayOpen = computed(() =>
-  Boolean(
-    taskCreateFlow.visible.value ||
-      showWorkspaceModal.value ||
-      showResidentAgentModal.value ||
-      showEditTaskModal.value ||
-      showLessonsModal.value ||
-      showAgentOptionsModal.value ||
-      showAgentFileBrowser.value ||
-      showSwitchEnvModal.value ||
-      showSwitchEnvManager.value ||
-      markdownPreviewModalPath.value ||
-      imageLightboxUrl.value,
-  ),
-)
-
-function handleKeydown(event: KeyboardEvent) {
-  if (isAnyOverlayOpen.value) return
-  if (
-    typeof document !== 'undefined' &&
-    document.querySelector(
-      '[role="dialog"], dialog[open], .workspace-picker__panel, .workspace-mobile-menu[open]',
-    )
-  ) {
-    return
-  }
-  const target = event.target as HTMLElement | null
-  if (
-    target &&
-    (target.tagName === 'INPUT' ||
-      target.tagName === 'TEXTAREA' ||
-      target.tagName === 'SELECT' ||
-      target.isContentEditable ||
-      Boolean(target.closest('[role="dialog"], [role="menu"]')))
-  ) {
-    return
-  }
-  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
-    const current = activeItem.value
-    if (current && canUseManagedTaskActions(current.task) && canMarkDoneTask(current.task)) {
-      event.preventDefault()
-      void acceptAndCleanupTask(current.task)
-    }
-    return
-  }
-  if (event.metaKey || event.ctrlKey || event.altKey) return
-  const list = orderedVisibleItems.value
-  if (!list.length) return
-
-  if (event.key === 'j' || event.key === 'ArrowDown') {
-    event.preventDefault()
-    const idx = list.findIndex(item => item.id === activeItem.value?.id)
-    selectTriageTask(list[(idx + 1) % list.length].id)
-  } else if (event.key === 'k' || event.key === 'ArrowUp') {
-    event.preventDefault()
-    const idx = list.findIndex(item => item.id === activeItem.value?.id)
-    selectTriageTask(list[(idx - 1 + list.length) % list.length].id)
-  } else if (event.key === 's' && selectedSession.value) {
-    event.preventDefault()
-    toggleSteerComposer()
-  }
-}
-
 onMounted(() => {
-  window.addEventListener('keydown', handleKeydown)
   clockTimer = setInterval(() => {
     nowMs.value = Date.now()
   }, 15_000)
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('keydown', handleKeydown)
   if (clockTimer !== null) clearInterval(clockTimer)
+  if (copyResetTimer !== null) clearTimeout(copyResetTimer)
   transcriptEpoch += 1
+  eventsFetchEpoch += 1
+  inlineMdEpoch += 1
   resetTaskTransientState()
 })
 </script>
 
-<style scoped>
-/* ============================================================================
-   LINEAR TRIAGE PRO — High-Contrast Architectural Tokens (Dark & Light)
-   ============================================================================ */
-.tp-shell {
-  --tp-bg-canvas: #111113;
-  --tp-bg-panel: #16171a;
-  --tp-bg-elevated: #1c1d22;
-  --tp-bg-hover: #1f2127;
-  --tp-bg-selected: #22242b;
-  --tp-line: #2a2d35;
-  --tp-line-subtle: #1f2229;
-  --tp-line-strong: #3a3f4b;
-  --tp-fg-1: #edeef0;
-  --tp-fg-2: #b8bdc7;
-  --tp-fg-3: #949aa4;
-  --tp-accent: #3d4fd6;
-  --tp-accent-text: #a5b4ff;
-  --tp-amber: #f0b45a;
-  --tp-amber-bg: #261e12;
-  --tp-green: #5cd696;
-  --tp-green-bg: #12261c;
-  --tp-live-bg: #171c30;
-  --tp-red: #ff8a80;
-  --tp-red-bg: #291517;
-
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  background: var(--tp-bg-canvas);
-  color: var(--tp-fg-1);
-  font-family: var(--ch-font-sans);
-  font-size: 13px;
-  line-height: 1.5;
-  overflow: hidden;
-}
-
-:root[data-theme='light'] .tp-shell {
-  --tp-bg-canvas: #f8f9fa;
-  --tp-bg-panel: #f1f3f5;
-  --tp-bg-elevated: #ffffff;
-  --tp-bg-hover: #e9ecef;
-  --tp-bg-selected: #e5e8ef;
-  --tp-line: #d5d9e2;
-  --tp-line-subtle: #e4e7ee;
-  --tp-line-strong: #b8bfcc;
-  --tp-fg-1: #141619;
-  --tp-fg-2: #353942;
-  --tp-fg-3: #505664;
-  --tp-accent: #3645c4;
-  --tp-accent-text: #313fb2;
-  --tp-amber: #944f04;
-  --tp-amber-bg: #fef3e2;
-  --tp-green: #126940;
-  --tp-green-bg: #e6f6ee;
-  --tp-live-bg: #e8ecfc;
-  --tp-red: #b42824;
-  --tp-red-bg: #fdeaea;
-}
-
-.tp-num { font-variant-numeric: tabular-nums; }
-.tp-mono { font-family: var(--ch-font-mono); font-size: 12px; }
-.tp-icon { width: 14px; height: 14px; flex: 0 0 14px; }
-.tp-sep { color: var(--tp-fg-3); }
-
-.tp-ghost-btn {
-  height: 28px;
-  padding: 0 10px;
-  border: 1px solid var(--tp-line-strong);
-  border-radius: 6px;
-  background: var(--tp-bg-elevated);
-  color: var(--tp-fg-1);
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-}
-.tp-ghost-btn:hover:not(:disabled) { background: var(--tp-bg-hover); }
-.tp-ghost-btn:disabled { opacity: 0.55; cursor: default; }
-.tp-danger-text { color: var(--tp-red); }
-
-.tp-primary-btn {
-  height: 28px;
-  padding: 0 12px;
-  border: 0;
-  border-radius: 6px;
-  background: var(--tp-accent);
-  color: #ffffff;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-}
-.tp-primary-btn:disabled { opacity: 0.55; cursor: default; }
-
-.tp-dot, .tp-pulse-dot {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 6px;
-  border-radius: 50%;
-  background: var(--tp-fg-3);
-}
-.tp-dot--attention { background: var(--tp-amber); }
-.tp-dot--working, .tp-pulse-dot { background: var(--tp-accent-text); }
-.tp-dot--done { background: var(--tp-green); }
-.tp-dot--failed { background: var(--tp-red); }
-
-.tp-empty-workspace,
-.tp-detail-empty {
-  flex: 1;
-  display: grid;
-  place-items: center;
-  padding: 32px;
-  color: var(--tp-fg-3);
-}
-.tp-empty-card {
-  max-width: 420px;
-  text-align: center;
-}
-.tp-empty-card h2 {
-  margin: 0 0 6px;
-  font-size: 16px;
-  color: var(--tp-fg-1);
-}
-.tp-empty-card p {
-  margin: 0;
-  font-size: 13px;
-}
-
-/* Split Layout */
-.tp-linear {
-  flex: 1;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: 360px minmax(0, 1fr);
-  overflow: hidden;
-}
-
-.tp-rail {
-  border-right: 1px solid var(--tp-line);
-  background: var(--tp-bg-panel);
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.tp-rail-loading,
-.tp-rail-empty {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  padding: 24px;
-  text-align: center;
-  color: var(--tp-fg-3);
-}
-.tp-rail-empty p { margin: 0; }
-
-.tp-groups {
-  flex: 1;
-  overflow-y: auto;
-  padding: 12px 0;
-}
-
-.tp-group + .tp-group { margin-top: 14px; }
-
-.tp-group-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 16px 5px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  color: var(--tp-fg-3);
-}
-
-.tp-group-empty {
-  padding: 6px 16px;
-  font-size: 12px;
-  color: var(--tp-fg-3);
-}
-
-.tp-row {
-  appearance: none;
-  width: 100%;
-  background: transparent;
-  border: none;
-  border-bottom: 1px solid var(--tp-line-subtle);
-  text-align: left;
-  font: inherit;
-  color: inherit;
-  position: relative;
-  padding: 8px 16px 9px;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  cursor: pointer;
-}
-.tp-row:focus-visible {
-  outline: 1.5px solid var(--tp-accent-text);
-  outline-offset: -2px;
-}
-.tp-row:hover { background: var(--tp-bg-hover); }
-.tp-row.active { background: var(--tp-bg-selected); }
-.tp-row.active::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  background: var(--tp-accent-text);
-}
-
-.tp-row-top {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-}
-.tp-row-code { font-size: 11.5px; font-weight: 600; color: var(--tp-fg-1); }
-.tp-row-ws {
-  font-size: 11.5px;
-  color: var(--tp-fg-3);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tp-row-state {
-  margin-left: auto;
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--tp-fg-2);
-  white-space: nowrap;
-}
-.tp-row-state--attention { color: var(--tp-amber); }
-.tp-row-state--working { color: var(--tp-accent-text); }
-.tp-row-state--done { color: var(--tp-green); }
-.tp-row-state--failed { color: var(--tp-red); }
-.tp-row-elapsed { font-size: 11.5px; color: var(--tp-fg-3); flex: 0 0 auto; }
-
-.tp-row-title {
-  font-size: 13px;
-  color: var(--tp-fg-2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tp-row.active .tp-row-title { color: var(--tp-fg-1); font-weight: 500; }
-
-.tp-load-more-wrap {
-  padding: 12px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.tp-load-more-btn { width: 100%; }
-.tp-error-inline { font-size: 11.5px; color: var(--tp-red); }
-
-.tp-rail-footer {
-  flex: 0 0 auto;
-  padding: 8px 16px;
-  border-top: 1px solid var(--tp-line);
-  background: var(--tp-bg-canvas);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 11px;
-  color: var(--tp-fg-3);
-}
-.tp-kbd-group { display: inline-flex; align-items: center; gap: 3px; }
-.tp-kbd-group span { margin-left: 2px; }
-.tp-kbd-group kbd {
-  padding: 1px 4px;
-  border: 1px solid var(--tp-line-strong);
-  border-radius: 3px;
-  background: var(--tp-bg-panel);
-  color: var(--tp-fg-2);
-  font-family: var(--ch-font-mono);
-  font-size: 10.5px;
-  line-height: 1.2;
-}
-
-/* Right Detail Canvas */
-.tp-detail {
-  overflow-y: auto;
-  padding: 20px 36px 40px;
-}
-.tp-editorial {
-  max-width: 740px;
-  margin: 0 auto;
-}
-
-.tp-meta-line {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--tp-fg-3);
-  margin-bottom: 8px;
-}
-.tp-status-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 8px;
-  border-radius: 4px;
-  border: 1px solid var(--tp-line-strong);
-  background: var(--tp-bg-panel);
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--tp-fg-1);
-}
-.tp-status-pill--attention { color: var(--tp-amber); background: var(--tp-amber-bg); }
-.tp-status-pill--working { color: var(--tp-accent-text); background: var(--tp-live-bg); }
-.tp-status-pill--done { color: var(--tp-green); background: var(--tp-green-bg); }
-.tp-status-pill--failed { color: var(--tp-red); background: var(--tp-red-bg); }
-
-.tp-meta-code { font-weight: 600; color: var(--tp-fg-1); }
-.tp-branch-chip { display: inline-flex; align-items: center; gap: 4px; color: var(--tp-fg-2); }
-.tp-meta-updated { margin-left: auto; color: var(--tp-fg-3); }
-
-.tp-title {
-  margin: 0 0 6px;
-  font-size: 19px;
-  font-weight: 600;
-  line-height: 1.32;
-  letter-spacing: -0.018em;
-  color: var(--tp-fg-1);
-}
-.tp-summary {
-  margin: 0 0 14px;
-  font-size: 13.5px;
-  line-height: 1.58;
-  color: var(--tp-fg-2);
-}
-
-/* Spec Frame */
-.tp-spec-frame {
-  border: 1px solid var(--tp-line-strong);
-  border-radius: 8px;
-  background: var(--tp-bg-panel);
-  overflow: hidden;
-}
-.tp-spec-gate {
-  padding: 10px 14px;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  background: var(--tp-bg-elevated);
-}
-.tp-spec-gate-left {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  flex: 1;
-}
-.tp-verdict-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 2px 7px;
-  border-radius: 4px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  white-space: nowrap;
-  border: 1px solid var(--tp-line-strong);
-  color: var(--tp-fg-1);
-  background: var(--tp-bg-panel);
-}
-.tp-verdict-badge--pass { color: var(--tp-green); background: var(--tp-green-bg); }
-.tp-verdict-badge--live { color: var(--tp-accent-text); background: var(--tp-live-bg); }
-.tp-verdict-badge--warn { color: var(--tp-amber); background: var(--tp-amber-bg); }
-.tp-verdict-badge--auto { color: var(--tp-fg-2); }
-
-.tp-decision-copy { font-size: 12.5px; color: var(--tp-fg-1); line-height: 1.4; }
-.tp-decision-btns { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-
-.tp-steer-form {
-  border-top: 1px solid var(--tp-line);
-  padding: 10px 14px;
-  background: var(--tp-bg-canvas);
-  display: grid;
-  gap: 8px;
-}
-.tp-steer-form textarea {
-  width: 100%;
-  box-sizing: border-box;
-  border: 1px solid var(--tp-line-strong);
-  border-radius: 6px;
-  background: var(--tp-bg-panel);
-  color: var(--tp-fg-1);
-  padding: 8px 10px;
-  font-size: 13px;
-  line-height: 1.45;
-  resize: vertical;
-}
-.tp-steer-attachments { display: flex; flex-wrap: wrap; gap: 6px; }
-.tp-att-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 8px;
-  border-radius: 4px;
-  border: 1px solid var(--tp-line-strong);
-  background: var(--tp-bg-panel);
-  font-size: 11px;
-}
-.tp-att-chip button {
-  border: 0;
-  background: transparent;
-  color: var(--tp-fg-3);
-  cursor: pointer;
-}
-.tp-steer-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-.tp-steer-hint { font-size: 11px; color: var(--tp-fg-3); }
-
-.tp-spec-consensus {
-  border-top: 1px solid var(--tp-line);
-  display: grid;
-  grid-template-columns: 0.95fr 1.05fr 1.2fr;
-}
-.tp-consensus-cell {
-  padding: 7px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.tp-consensus-cell + .tp-consensus-cell { border-left: 1px solid var(--tp-line); }
-.tp-cell-label {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  color: var(--tp-fg-3);
-}
-.tp-cell-val {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--tp-fg-1);
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tp-arrow { color: var(--tp-fg-3); }
-
-.tp-spec-artifacts {
-  border-top: 1px solid var(--tp-line);
-  padding: 7px 14px;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-.tp-artifacts-list { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
-.tp-artifact-row {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  text-decoration: none;
-  color: var(--tp-fg-1);
-  font-size: 12px;
-}
-.tp-artifact-row:hover .tp-artifact-label {
-  color: var(--tp-accent-text);
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-.tp-artifact-icon, .tp-artifact-label { color: var(--tp-accent-text); font-weight: 500; }
-.tp-artifact-meta, .tp-artifact-ext { color: var(--tp-fg-3); font-size: 11px; }
-.tp-doc-btn {
-  padding: 2px 7px;
-  border: 1px solid var(--tp-line-strong);
-  border-radius: 4px;
-  background: var(--tp-bg-elevated);
-  color: var(--tp-accent-text);
-  font-size: 11px;
-  cursor: pointer;
-}
-.tp-checks-note { font-size: 11.5px; color: var(--tp-green); }
-
-/* Epoch Run Spine */
-.tp-spine-section { margin-top: 18px; }
-.tp-spine-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 8px;
-}
-.tp-micro-heading {
-  margin: 0;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.07em;
-  color: var(--tp-fg-3);
-}
-.tp-spine-overview { color: var(--tp-fg-3); font-size: 11.5px; }
-.tp-spine { list-style: none; margin: 0; padding: 0; }
-
-.tp-epoch-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
-.tp-epoch-row:first-child { margin-top: 0; }
-.tp-epoch-label {
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  color: var(--tp-fg-3);
-  white-space: nowrap;
-}
-.tp-epoch-line { flex: 1; height: 1px; background: var(--tp-line); }
-
-.tp-spine-item {
-  display: grid;
-  grid-template-columns: 44px 20px minmax(0, 1fr);
-  gap: 0 8px;
-}
-.tp-spine-time-col { display: flex; flex-direction: column; align-items: flex-end; }
-.tp-spine-time { font-size: 12px; color: var(--tp-fg-2); line-height: 1.25; }
-.tp-spine-delta { font-size: 10.5px; color: var(--tp-fg-3); line-height: 1.15; }
-.tp-spine-track { position: relative; display: flex; justify-content: center; }
-.tp-spine-track::after {
-  content: '';
-  position: absolute;
-  top: 13px;
-  bottom: -4px;
-  width: 1px;
-  background: var(--tp-line-strong);
-}
-.tp-spine-item:last-child .tp-spine-track::after { display: none; }
-.tp-spine-node {
-  margin-top: 4px;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--tp-bg-canvas);
-  border: 1.5px solid var(--tp-fg-3);
-  z-index: 1;
-}
-.tp-spine-role--worker .tp-spine-node { background: var(--tp-fg-2); border-color: var(--tp-fg-2); }
-.tp-spine-item--warn .tp-spine-node {
-  border-radius: 2px;
-  transform: rotate(45deg);
-  border-color: var(--tp-amber);
-  background: var(--tp-amber);
-}
-.tp-spine-item--pass .tp-spine-node { border-color: var(--tp-green); background: var(--tp-green); }
-.tp-spine-item--live .tp-spine-node { border-color: var(--tp-accent-text); background: var(--tp-accent-text); }
-
-.tp-spine-body { padding-bottom: 12px; min-width: 0; }
-.tp-spine-head { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
-.tp-spine-head strong { font-size: 13px; font-weight: 600; color: var(--tp-fg-1); }
-.tp-spine-actor { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--tp-fg-2); }
-.tp-role-tag { font-style: normal; font-size: 10.5px; color: var(--tp-fg-3); }
-.tp-node-badge {
-  padding: 1px 6px;
-  border-radius: 4px;
-  border: 1px solid var(--tp-line-strong);
-  background: var(--tp-bg-panel);
-  color: var(--tp-fg-2);
-  font-size: 10.5px;
-  font-weight: 600;
-}
-.tp-node-badge--warn { color: var(--tp-amber); background: var(--tp-amber-bg); }
-.tp-node-badge--pass { color: var(--tp-green); background: var(--tp-green-bg); }
-.tp-node-badge--live { color: var(--tp-accent-text); background: var(--tp-live-bg); }
-
-.tp-inline-link {
-  margin-left: auto;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--tp-accent-text);
-  font-size: 11.5px;
-  cursor: pointer;
-}
-.tp-inline-link:hover { text-decoration: underline; }
-
-.tp-spine-body p {
-  margin: 2px 0 0;
-  font-size: 12.5px;
-  color: var(--tp-fg-2);
-  line-height: 1.48;
-  overflow-wrap: anywhere;
-}
-.tp-spine-evidence {
-  margin-top: 3px;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  font-size: 11px;
-}
-.tp-evidence-files { color: var(--tp-fg-2); }
-.tp-evidence-receipt { color: var(--tp-fg-3); }
-
-.tp-log-excerpt {
-  margin-top: 6px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: var(--tp-bg-panel);
-  border: 1px solid var(--tp-line-strong);
-  display: grid;
-  gap: 5px;
-}
-.tp-log-status { font-size: 11.5px; color: var(--tp-fg-3); }
-.tp-log-row {
-  display: grid;
-  grid-template-columns: 40px 84px minmax(0, 1fr);
-  gap: 8px;
-  font-size: 11.5px;
-  color: var(--tp-fg-2);
-}
-.tp-log-row > span:first-child { color: var(--tp-fg-3); }
-.tp-log-speaker { font-weight: 600; color: var(--tp-fg-1); }
-.tp-log-speaker--gate { color: var(--tp-amber); }
-.tp-log-speaker--reviewer { color: var(--tp-green); }
-.tp-log-speaker--worker { color: var(--tp-accent-text); }
-.tp-log-footer {
-  padding-top: 4px;
-  border-top: 1px solid var(--tp-line);
-  display: flex;
-  justify-content: flex-end;
-}
-
-/* Metadata & Secondary Disclosure */
-.tp-meta-disclosure {
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px solid var(--tp-line);
-  color: var(--tp-fg-3);
-  font-size: 12px;
-}
-.tp-meta-disclosure summary {
-  cursor: pointer;
-  user-select: none;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-.tp-disclosure-body {
-  margin-top: 12px;
-  display: grid;
-  gap: 14px;
-}
-.tp-secondary-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.tp-raw-prompt-block {
-  padding: 10px 12px;
-  border-radius: 6px;
-  border: 1px solid var(--tp-line);
-  background: var(--tp-bg-panel);
-  display: grid;
-  gap: 6px;
-}
-.tp-prompt-md {
-  color: var(--tp-fg-2);
-  font-size: 12.5px;
-}
-
-@media (max-width: 860px) {
-  .tp-shell { overflow-y: auto; }
-  .tp-linear, .tp-spec-consensus {
-    display: flex;
-    flex-direction: column;
-    overflow: visible;
-  }
-  .tp-rail {
-    flex: 0 0 auto;
-    border-right: 0;
-    border-bottom: 1px solid var(--tp-line);
-    max-height: 260px;
-  }
-  .tp-rail-footer { display: none; }
-  .tp-detail { padding: 16px 14px 32px; overflow: visible; }
-  .tp-consensus-cell + .tp-consensus-cell { border-left: 0; border-top: 1px solid var(--tp-line); }
-  .tp-ghost-btn, .tp-primary-btn { min-height: 40px; }
-}
-</style>
+<style scoped src="../styles/workspace-triage-pro.css"></style>

@@ -3,9 +3,30 @@ import type {
   ManagedSession,
   TaskLifecycle,
   WorkspaceTask,
+  WorkspaceTaskEvent,
 } from '@/types'
 import { formatElapsedDuration, parseTimestampMs } from '@/utils/duration'
-import { evidenceLine, evidenceLinks, taskEvidence } from './evidence'
+import { evidenceLine, evidenceLinks, evidenceReport, taskEvidence } from './evidence'
+import {
+  buildKeyMilestones,
+  buildMacroStageBar,
+  extractDeliverables,
+  parseStructuredDigest,
+  parseStructuredValidation,
+  type DeliverableItem,
+  type MacroStagePill,
+  type MilestoneStep,
+  type StructuredDigest,
+  type StructuredValidation,
+} from './triageDigest'
+
+export type {
+  DeliverableItem,
+  MacroStagePill,
+  MilestoneStep,
+  StructuredDigest,
+  StructuredValidation,
+}
 
 export type TriageBucket = 'needs_you' | 'working' | 'done'
 export type TriageTone = 'attention' | 'working' | 'done' | 'failed' | 'neutral'
@@ -66,6 +87,13 @@ export interface TriageTaskViewModel {
   consensus: TriageConsensusInfo
   links: TriageArtifactLink[]
   spine: TriageSpineNode[]
+  digest: StructuredDigest
+  deliverables: DeliverableItem[]
+  validation: StructuredValidation
+  milestones: MilestoneStep[]
+  macroStages: MacroStagePill[]
+  hasIndependentReview: boolean
+  reviewSummaryChip: string | null
   internalMeta: {
     control: string
     epoch: number
@@ -361,11 +389,23 @@ export function buildTriageTaskViewModel(input: {
   workspaceName: string
   defaultBranch: string
   reports: readonly AgentReport[]
+  events?: readonly WorkspaceTaskEvent[]
+  markdownDocs?: readonly { path: string; report_id?: string | null }[]
   sessionsById: ReadonlyMap<string, ManagedSession>
   lifecycle?: TaskLifecycle
   nowMs: number
 }): TriageTaskViewModel {
-  const { task, workspaceName, defaultBranch, reports, sessionsById, lifecycle, nowMs } = input
+  const {
+    task,
+    workspaceName,
+    defaultBranch,
+    reports,
+    events = [],
+    markdownDocs = [],
+    sessionsById,
+    lifecycle,
+    nowMs,
+  } = input
   const ev = taskEvidence(task, reports)
   const bucket = classifyTriageBucket(task, lifecycle)
   const statusTone = classifyStatusTone(task, bucket)
@@ -496,6 +536,33 @@ export function buildTriageTaskViewModel(input: {
 
   const spine = buildTaskSpine(task, reports, sessionsById)
 
+  const newestReport = evidenceReport(reports)
+  const rawDigestSource =
+    (task.status === 'failed' && task.failure_reason ? task.failure_reason : '') ||
+    (newestReport ? (newestReport.message_zh || newestReport.message || newestReport.message_en || '') : '') ||
+    (task.latest_progress?.summary || '')
+  const digest = parseStructuredDigest(rawDigestSource, task, lifecycle)
+  const deliverables = extractDeliverables(task, reports, markdownDocs)
+  const validation = parseStructuredValidation(ev.validation, ev.risks, ev.acceptance)
+  const milestones = buildKeyMilestones({
+    task,
+    reports,
+    events,
+    sessionsById,
+    currentHeadline: digest.headline,
+  })
+  const macroStages = buildMacroStageBar(task, milestones, bucket)
+  const hasIndependentReview = Boolean(reviewerSession) || reviewVerdicts.length > 0
+  const reviewSummaryChip = hasIndependentReview
+    ? `${implementer} → ${reviewer} · ${roundsCount > 0 ? `R${roundsCount} ` : ''}${
+        latestVerdict?.state === 'review_passed'
+          ? 'PASS'
+          : latestVerdict?.state === 'review_failed'
+            ? 'Changes requested'
+            : statusLabel
+      }`
+    : null
+
   return {
     task,
     id: task.id,
@@ -523,6 +590,13 @@ export function buildTriageTaskViewModel(input: {
     },
     links,
     spine,
+    digest,
+    deliverables,
+    validation,
+    milestones,
+    macroStages,
+    hasIndependentReview,
+    reviewSummaryChip,
     internalMeta: {
       control: task.execution_control || 'workspace',
       epoch: task.execution_epoch ?? 1,

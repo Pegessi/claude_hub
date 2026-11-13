@@ -270,18 +270,26 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(panel).to_be_hidden()
 
         # Also exercise the default Linear Triage Pro surface across 1280px and
-        # 390px: row selection, keyboard J/K navigation, Start Task, and clean
-        # layout toggle without horizontal overflow.
+        # 390px: row selection, A/B detail-mode toggle (Milestone Digest vs
+        # One-Page Brief), removal of keyboard-shortcut clutter, Start Task, and
+        # clean layout toggle without horizontal overflow.
         task["status"] = "todo"
         await page.set_viewport_size({"width": 1280, "height": 860})
         await page.goto(f"{url}?ws_layout=triage", wait_until="networkidle")
         await expect(page.locator(".tp-shell")).to_be_visible()
+        await expect(page.locator(".tp-rail-footer")).to_have_count(0)
         held_row = page.locator(".tp-row").filter(has_text=held["title"])
         await expect(held_row).to_be_visible()
         deep_row = page.locator(".tp-row").filter(has_text=deep["title"])
         await deep_row.click()
         await expect(page.locator(".tp-title")).to_have_text(deep["title"])
+        await expect(page.get_by_label("Key milestones")).to_be_visible()
         await page.screenshot(path=str(output / "triage-pro-dark-1280.png"))
+        await page.get_by_role("button", name="B · One-Page Brief", exact=True).click()
+        await expect(page.get_by_label("One-page sign-off brief")).to_be_visible()
+        await page.screenshot(path=str(output / "triage-pro-memo-dark-1280.png"))
+        await page.get_by_role("button", name="A · Milestone Digest", exact=True).click()
+        await expect(page.get_by_label("Key milestones")).to_be_visible()
         await page.evaluate("() => document.documentElement.setAttribute('data-theme', 'light')")
         await page.screenshot(path=str(output / "triage-pro-light-1280.png"))
         await page.evaluate("() => document.documentElement.setAttribute('data-theme', 'dark')")

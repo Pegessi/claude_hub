@@ -21,9 +21,16 @@ const evidenceMod = asModule(
     `from ${JSON.stringify(reportsMod)}`,
   ),
 )
+const digestMod = asModule(
+  transpileFile('../src/features/workspace/presentation/triageDigest.ts')
+    .replaceAll("from '@/utils/duration'", `from ${JSON.stringify(durationMod)}`)
+    .replaceAll("from './evidence'", `from ${JSON.stringify(evidenceMod)}`)
+    .replaceAll("from './reports'", `from ${JSON.stringify(reportsMod)}`),
+)
 const triageSource = transpileFile('../src/features/workspace/presentation/triageProModel.ts')
   .replaceAll("from '@/utils/duration'", `from ${JSON.stringify(durationMod)}`)
   .replaceAll("from './evidence'", `from ${JSON.stringify(evidenceMod)}`)
+  .replaceAll("from './triageDigest'", `from ${JSON.stringify(digestMod)}`)
 
 const triage = await import(asModule(triageSource))
 
@@ -170,4 +177,87 @@ test('buildTriageTaskViewModel constructs consensus, artifact links, and multi-r
   const groups = triage.groupTriageTasks([vm])
   assert.equal(groups[0].key, 'needs_you')
   assert.equal(groups[0].items.length, 1)
+  assert.equal(vm.hasIndependentReview, true)
+  assert.equal(vm.reviewSummaryChip, 'Argon High → [redacted] · R2 PASS')
+  assert.equal(vm.milestones.at(-1).isCurrentEcho, true)
+})
+
+test('buildTriageTaskViewModel denoises dense initiator prose, extracts .md deliverables, and clusters events without duplication', () => {
+  const initiatorTask = makeTask({
+    id: 'e76ff774-0053-4953-9b89-6a078f8bd90c',
+    title: 'UI upgrade: needs-you inbox, decision cards, evidence-first task detail',
+    prompt: 'Fan-out implementation of 6 UI upgrades.',
+    execution_control: 'initiator',
+    progress_revision: 4,
+    status: 'working',
+    latest_progress: {
+      state: 'needs_input',
+      summary:
+        'A third, cross-model review (Gemini-4 argon via MASO) found 10 items the first two rounds missed: 1 blocking (live work log froze for streaming turn), 2 high (plan_first approval bypass). All were fixed and merged into `feat/ui-upgrade-batch-20261109` @ `2e743b4` (60 commits, 119 files). Remaining decision is the user\'s: merge to main and push, or stop at branch delivery.',
+      validation:
+        'At 2e743b4: frontend-lint PASS; frontend-types PASS; frontend-tests 1393/0 PASS; browser-mocks 21/21 PASS',
+      risks: 'New backend status fields still unverified against a real backend.',
+      artifact_refs: [
+        '/home/tiger/claude_hub_workspace/ui-fanout-20261109/REVIEW_ARGON.md',
+        '/home/tiger/claude_hub_workspace/ui-fanout-20261109/FINAL_STATUS.md',
+      ],
+      reported_at: '2026-11-10T00:43:00Z',
+    },
+  })
+
+  const events = [
+    {
+      sequence: 1,
+      type: 'progress',
+      action: 'task_progress',
+      created_at: '2026-11-09T16:15:00',
+      payload: {
+        state: 'started',
+        summary: 'Created isolated integration worktree and dispatched 6 feature subagents.',
+      },
+    },
+    {
+      sequence: 2,
+      type: 'progress',
+      action: 'task_progress',
+      created_at: '2026-11-09T16:43:00',
+      payload: {
+        state: 'needs_input',
+        summary: initiatorTask.latest_progress.summary,
+      },
+    },
+  ]
+
+  const vm = triage.buildTriageTaskViewModel({
+    task: initiatorTask,
+    workspaceName: 'claude_hub',
+    defaultBranch: 'main',
+    reports: [],
+    events,
+    sessionsById: new Map(),
+    nowMs: NOW_MS,
+  })
+
+  assert.equal(vm.code, '#E76FF7')
+  assert.equal(vm.hasIndependentReview, false)
+  assert.equal(vm.reviewSummaryChip, null)
+  assert.equal(
+    vm.digest.actionPrompt,
+    'Decision needed: merge to main and push, or stop at branch delivery.',
+  )
+  assert.match(vm.digest.headline, /A third, cross-model review/)
+  assert.ok(vm.digest.bullets.some(b => b.label === 'Breakdown'))
+  assert.ok(vm.deliverables.some(d => d.kind === 'markdown' && d.title === 'REVIEW_ARGON.md'))
+  assert.ok(vm.deliverables.some(d => d.kind === 'markdown' && d.title === 'FINAL_STATUS.md'))
+  assert.ok(
+    vm.deliverables.some(
+      d => d.kind === 'branch' && d.title === 'feat/ui-upgrade-batch-20261109 @ 2e743b4',
+    ),
+  )
+  assert.equal(vm.validation.passedCount, 4)
+  assert.equal(vm.validation.riskBullets.length, 1)
+  assert.equal(vm.milestones.length, 3) // start + 2 progress events
+  assert.equal(vm.milestones[1].title, 'Workspace & environment initialized')
+  assert.equal(vm.milestones[2].isCurrentEcho, true)
+  assert.doesNotMatch(vm.milestones[2].oneLiner, /A third, cross-model review/)
 })
