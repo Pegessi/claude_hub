@@ -6,8 +6,6 @@ export const THEME_PALETTES = [
   { id: 'classic', name: 'Classic', description: 'Original carbon & clay', sample: 'CH' },
   { id: 'contrast', name: 'Contrast', description: 'Crisp edges, clear focus', sample: 'Aa' },
   { id: 'mono', name: 'Mono', description: 'Black, white, nothing extra', sample: 'Aa' },
-  { id: 'studio', name: 'Studio', description: 'Quiet layers, softer edges', sample: 'Aa' },
-  { id: 'carbon', name: 'Carbon', description: 'Graphite, raised surfaces', sample: 'Aa' },
   { id: 'zenless', name: 'Zenless', description: 'Zenless · Eous & Random Play H.D.D.', sample: 'ZZ' },
   { id: 'frontier', name: 'Frontier', description: 'Red Dead · Arthur & outlaw horizon', sample: 'RDR' },
   { id: 'los-santos', name: 'Los Santos', description: 'GTA V · Los Santos trio & Vinewood', sample: 'V' },

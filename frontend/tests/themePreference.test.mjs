@@ -29,9 +29,13 @@ function fixture(t, stored = {}, systemDark = false) {
   const systemListeners = new Map()
   const dataset = {}
   let chromeColor = null
+  let storageWrites = 0
   const localStorage = {
     getItem: key => values.get(key) ?? null,
-    setItem: (key, value) => values.set(key, value),
+    setItem: (key, value) => {
+      storageWrites++
+      values.set(key, value)
+    },
   }
   const globals = {
     localStorage,
@@ -63,7 +67,7 @@ function fixture(t, stored = {}, systemDark = false) {
     })
   }
   const store = useAppStore(pinia)
-  return { store, values, dataset, windowListeners, systemListeners, localStorage, chromeColor: () => chromeColor }
+  return { store, values, dataset, windowListeners, systemListeners, localStorage, chromeColor: () => chromeColor, storageWrites: () => storageWrites }
 }
 
 test('existing users retain their original light/dark palette; invalid records recover', () => {
@@ -78,7 +82,7 @@ test('existing users retain their original light/dark palette; invalid records r
 })
 
 test('retired palette IDs recover to Classic without discarding the selected mode', () => {
-  for (const palette of ['slate', 'sand', 'forest', 'dusk']) {
+  for (const palette of ['slate', 'sand', 'forest', 'dusk', 'studio', 'carbon']) {
     for (const mode of ['system', 'light', 'dark']) {
       assert.deepEqual(parseThemePreference(JSON.stringify({ mode, palette })), { mode, palette: 'classic' })
     }
@@ -87,7 +91,7 @@ test('retired palette IDs recover to Classic without discarding the selected mod
 
 test('all shipped palettes are selectable independently of system/light/dark mode', () => {
   assert.deepEqual(THEME_PALETTES.map(p => p.id).sort(), [
-    'classic', 'contrast', 'mono', 'studio', 'carbon', 'zenless', 'frontier', 'los-santos',
+    'classic', 'contrast', 'mono', 'zenless', 'frontier', 'los-santos',
   ].sort())
   for (const { id: palette } of THEME_PALETTES) {
     for (const mode of ['system', 'light', 'dark']) {
@@ -111,12 +115,12 @@ test('the real store owns root appearance and migrates only when the user choose
 
 test('system changes follow only System mode, without rewriting preference or palette', t => {
   const f = fixture(t)
-  f.store.setAppearance('system', 'carbon')
+  f.store.setAppearance('system', 'mono')
   assert.equal(f.store.colorScheme, 'light')
   const record = f.values.get(THEME_STORAGE_KEY)
   f.systemListeners.get('change')({ matches: true })
   assert.equal(f.store.colorScheme, 'dark')
-  assert.equal(f.store.themePalette, 'carbon')
+  assert.equal(f.store.themePalette, 'mono')
   assert.equal(f.values.get(THEME_STORAGE_KEY), record)
   f.store.setAppearance('light')
   f.systemListeners.get('change')({ matches: false })
@@ -126,12 +130,12 @@ test('system changes follow only System mode, without rewriting preference or pa
 
 test('cross-tab updates and clear apply without writeback; listeners are disposed', t => {
   const f = fixture(t)
-  f.values.set(THEME_STORAGE_KEY, JSON.stringify({ mode: 'system', palette: 'studio' }))
+  f.values.set(THEME_STORAGE_KEY, JSON.stringify({ mode: 'system', palette: 'contrast' }))
   const event = { key: THEME_STORAGE_KEY, storageArea: f.localStorage }
   f.windowListeners.get('storage')({ ...event, storageArea: {} })
   assert.equal(f.store.themePalette, 'classic')
   f.windowListeners.get('storage')(event)
-  assert.deepEqual(f.dataset, { theme: 'light', palette: 'studio' })
+  assert.deepEqual(f.dataset, { theme: 'light', palette: 'contrast' })
   f.values.clear()
   f.windowListeners.get('storage')({ ...event, key: null })
   assert.deepEqual(f.dataset, { theme: 'dark', palette: 'classic' })
@@ -149,4 +153,38 @@ test('blocked persistence leaves the chosen palette usable and reports the limit
   f.localStorage.setItem = () => {}
   f.store.setAppearance('dark')
   assert.equal(f.store.themePersistenceError, false)
+})
+
+for (const palette of ['studio', 'carbon']) {
+  for (const mode of ['system', 'light', 'dark']) {
+    test(`stored ${palette}/${mode} boots in Classic without rewriting the saved preference`, t => {
+      const record = JSON.stringify({ mode, palette })
+      const f = fixture(t, { [THEME_STORAGE_KEY]: record }, true)
+      assert.equal(f.store.appearanceMode, mode)
+      assert.equal(f.store.themePaletteName, 'Classic')
+      assert.deepEqual(f.dataset, { theme: mode === 'system' ? 'dark' : mode, palette: 'classic' })
+      f.systemListeners.get('change')({ matches: false })
+      assert.deepEqual(f.dataset, { theme: mode === 'system' ? 'light' : mode, palette: 'classic' })
+      assert.equal(f.values.get(THEME_STORAGE_KEY), record)
+      assert.equal(f.storageWrites(), 0)
+    })
+  }
+}
+
+test('retired palette storage events retain their mode without writeback', t => {
+  const f = fixture(t)
+  f.store.setAppearance('dark', 'zenless')
+  const writes = f.storageWrites()
+  for (const palette of ['studio', 'carbon']) {
+    for (const mode of ['system', 'light', 'dark']) {
+      const record = JSON.stringify({ mode, palette })
+      f.values.set(THEME_STORAGE_KEY, record)
+      f.windowListeners.get('storage')({ key: THEME_STORAGE_KEY, storageArea: f.localStorage })
+      assert.equal(f.store.appearanceMode, mode)
+      assert.equal(f.store.themePaletteName, 'Classic')
+      assert.deepEqual(f.dataset, { theme: mode === 'system' ? 'light' : mode, palette: 'classic' })
+      assert.equal(f.values.get(THEME_STORAGE_KEY), record)
+      assert.equal(f.storageWrites(), writes)
+    }
+  }
 })

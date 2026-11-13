@@ -14,7 +14,7 @@ from typing import Any
 
 from playwright.async_api import ElementHandle, Locator, Page, Request, expect
 
-PALETTES = ("Classic", "Contrast", "Mono", "Studio", "Carbon", "Zenless", "Frontier", "Los Santos")
+PALETTES = ("Classic", "Contrast", "Mono", "Zenless", "Frontier", "Los Santos")
 GAME_PALETTES = ("Zenless", "Frontier", "Los Santos")
 ART_PIXEL_DELTA = 12
 ART_VISIBLE_FRACTION = 0.05

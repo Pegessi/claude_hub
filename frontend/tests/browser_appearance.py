@@ -345,7 +345,12 @@ async def main(browser_run: BrowserRun) -> None:
             dialog = page.get_by_role("dialog")
             await expect(dialog).to_be_visible()
             await expect(dialog.get_by_role("button", name="Done")).to_be_focused()
-            await expect(page.locator('input[name="theme-palette"]')).to_have_count(len(PALETTES))
+            palette_inputs = page.locator('input[name="theme-palette"]')
+            await expect(palette_inputs).to_have_count(len(PALETTES))
+            assert await palette_inputs.evaluate_all("els => els.map(el => el.value)") == [
+                "classic", "contrast", "mono", "zenless", "frontier", "los-santos",
+            ]
+            await shot("appearance-six-themes-desktop.png")
             report["switch_back"] = []
             report["preview_fidelity"] = []
             for mode in ("Dark", "Light"):
@@ -355,7 +360,6 @@ async def main(browser_run: BrowserRun) -> None:
                 baseline_tokens = (await theme_state(page))["values"]
                 baseline_typography = await reader_typography(reader)
                 actual_roots: dict[str, dict[str, str]] = {}
-                canvases: set[str] = set()
                 for palette in PALETTES:
                     await choose_palette(page, palette)
                     await assert_theme(page, palette, mode.lower())
@@ -373,7 +377,6 @@ async def main(browser_run: BrowserRun) -> None:
                     assert reader_state["values"] == state["values"], (palette, mode)
                     assert await article.evaluate("element => element.isConnected")
                     assert len(reads) == 1, reads
-                    canvases.add(state["values"]["color-main-bg"])
                     selected_preview = page.locator(
                         f'.theme-preview[data-palette="{palette_id(palette)}"]'
                     )
@@ -393,9 +396,13 @@ async def main(browser_run: BrowserRun) -> None:
                         }
                     )
                     await shot(f"palette-{palette_id(palette)}-{mode.lower()}.png")
-                assert (
-                    len(canvases) >= 5
-                ), f"palettes must change the canvas, not only an accent: {canvases}"
+                # The three neutral light palettes intentionally share white.
+                # Games must still differ in canvas, not just their accent.
+                game_canvases = {
+                    actual_roots[palette_id(game)]["color-main-bg"] for game in GAME_PALETTES
+                }
+                assert len(game_canvases) == len(GAME_PALETTES), game_canvases
+                assert baseline_tokens["color-main-bg"] not in game_canvases, game_canvases
                 # An unselected tile inherits from a foreign root. Optional
                 # palette primitives must not leak through that ancestor and
                 # recolor its bubble or foreground before a var() fallback.
@@ -573,9 +580,10 @@ async def main(browser_run: BrowserRun) -> None:
             # Inspect actual shell consumers after closing the picker; its game
             # preview tiles intentionally retain their own illustration/icons.
             report["game_chrome_returns"] = []
+            neutral_palettes = tuple(palette for palette in PALETTES if palette not in GAME_PALETTES)
             for return_mode in ("dark", "light"):
                 for game in GAME_PALETTES:
-                    for neutral in PALETTES[:5]:
+                    for neutral in neutral_palettes:
                         await select_appearance(page, return_mode, game)
                         await select_appearance(page, return_mode, neutral)
                         report["game_chrome_returns"].append(
@@ -586,7 +594,7 @@ async def main(browser_run: BrowserRun) -> None:
                                 "chrome": await no_stale_skin_chrome(page),
                             }
                         )
-            assert len(report["game_chrome_returns"]) == 30
+            assert len(report["game_chrome_returns"]) == 2 * len(GAME_PALETTES) * len(neutral_palettes)
             record_phase("game_chrome_returns")
 
             await trigger.click()
@@ -630,7 +638,7 @@ async def main(browser_run: BrowserRun) -> None:
             await assert_theme(page, "Zenless", "dark")
             await expect(dialog.get_by_role("alert")).to_contain_text("could not save")
             await page.evaluate("() => window.restoreAppearanceStorage()")
-            await choose_palette(page, "Carbon")
+            await choose_palette(page, "Mono")
             await expect(dialog.get_by_role("alert")).to_have_count(0)
             await dialog.get_by_role("button", name="Done").click()
             report["blocked_storage"] = (
@@ -653,11 +661,19 @@ async def main(browser_run: BrowserRun) -> None:
             record_phase("legacy_migration")
 
             report["retired_palette_fallback"] = []
-            for retired in ("slate", "sand", "forest", "dusk"):
+            for retired in ("slate", "sand", "forest", "dusk", "studio", "carbon"):
+                # Give the already-open reader a distinct state before testing
+                # the retired ID's live storage-event fallback and shell reload.
+                await page.evaluate(
+                    "key => localStorage.setItem(key, JSON.stringify({mode:'dark', palette:'zenless'}))",
+                    STORAGE_KEY,
+                )
+                await assert_theme(reader, "Zenless", "dark")
                 await page.evaluate(
                     "([key, palette]) => localStorage.setItem(key, JSON.stringify({mode:'system', palette}))",
                     [STORAGE_KEY, retired],
                 )
+                await assert_theme(reader, "Classic", "light")
                 await page.reload()
                 await expect(trigger).to_be_visible()
                 await assert_theme(page, "Classic", "light")
