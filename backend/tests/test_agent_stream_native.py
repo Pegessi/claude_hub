@@ -5684,3 +5684,70 @@ async def test_cursor_acp_session_load_error_boundary_and_persistence_ordering(
         await native_fresh.start()
     assert persisted == []
     assert native_fresh._conversation_id is None
+
+
+def test_cursor_acp_retry_preload_enables_checkpoint_retries_and_scrubs_node_options() -> None:
+    """Regression for ``RetriableError: [resource_exhausted] Error`` aborting
+    ACP turns on ``attempt=0``: ``cursor_acp_preload.cjs`` enables
+    ``enableAgentRetries=True`` and ``maxRetries=8`` on ``agent-session.ts``'s
+    ``agentClient.run`` options and scrubs itself from ``NODE_OPTIONS`` so
+    child tool shells do not inherit the preload flag."""
+    import os
+    import shutil
+    import subprocess
+
+    from claude_hub.services.agent_stream.providers.cursor import (
+        _ACP_PRELOAD_PATH,
+        _inject_acp_preload_env,
+    )
+
+    assert _ACP_PRELOAD_PATH.is_file()
+    env = _inject_acp_preload_env({"PATH": "/bin", "NODE_OPTIONS": "--max-old-space-size=4096"})
+    assert f"--require={_ACP_PRELOAD_PATH}" in env["NODE_OPTIONS"]
+    assert "--max-old-space-size=4096" in env["NODE_OPTIONS"]
+    # Idempotent when already present.
+    assert _inject_acp_preload_env(env)["NODE_OPTIONS"] == env["NODE_OPTIONS"]
+
+    node_bin = shutil.which("node")
+    if node_bin is None:
+        return
+    script = """
+    const w = {
+      conversationId: "conv-1",
+      onConnectionStateChange: () => {},
+      onErrorNotRetried: () => {},
+    };
+    const other = { conversationId: "conv-1" };
+    const explicitOff = {
+      conversationId: "conv-1",
+      onConnectionStateChange: () => {},
+      onErrorNotRetried: () => {},
+      enableAgentRetries: false,
+    };
+    console.log(JSON.stringify({
+      nodeOptionsAfterLoad: process.env.NODE_OPTIONS || "",
+      wEnable: w.enableAgentRetries ?? false,
+      wMaxRetries: w.maxRetries,
+      wKeys: Object.keys(w),
+      otherEnable: other.enableAgentRetries ?? null,
+      explicitOffEnable: explicitOff.enableAgentRetries ?? false,
+    }));
+    """
+    run_env = {**os.environ, "NODE_OPTIONS": env["NODE_OPTIONS"]}
+    out = subprocess.check_output(
+        [node_bin, "-e", script, "acp"],
+        env=run_env,
+        text=True,
+    )
+    parsed = json.loads(out.strip())
+    assert str(_ACP_PRELOAD_PATH) not in parsed["nodeOptionsAfterLoad"]
+    assert parsed["nodeOptionsAfterLoad"] == "--max-old-space-size=4096"
+    assert parsed["wEnable"] is True
+    assert parsed["wMaxRetries"] == 8
+    assert parsed["wKeys"] == [
+        "conversationId",
+        "onConnectionStateChange",
+        "onErrorNotRetried",
+    ]
+    assert parsed["otherEnable"] is None
+    assert parsed["explicitOffEnable"] is False
