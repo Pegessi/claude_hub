@@ -1085,3 +1085,12 @@ and port5366 are closed, and all six artwork files match ec842d8 byte-for-byte.
 The fourteen preference/store unit tests and frontend lint also pass. This is
 scoped mocked-browser evidence, not the committed-SHA all/browser/HMR/replay
 gates or live integration; independent review and those gates remain separate.
+
+The first committed `all` attempt at849217b fails only Black's formatting gate:
+three new assertion/comprehension layouts need the repository's explicit
+`backend/pyproject.toml` configuration. Backend6556/9skipped and frontend1467
+pass, as do the remaining standard targets, but that is not an `all` pass and
+the later browser/HMR/replay gates did not run. Keep that failed attempt intact.
+Apply only the three required formatting changes; the browser script's full
+Python AST is identical before/after. A new reviewed SHA must run all four
+final gates rather than silently retrying or relabeling the failed receipt.

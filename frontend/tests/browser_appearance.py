@@ -348,7 +348,12 @@ async def main(browser_run: BrowserRun) -> None:
             palette_inputs = page.locator('input[name="theme-palette"]')
             await expect(palette_inputs).to_have_count(len(PALETTES))
             assert await palette_inputs.evaluate_all("els => els.map(el => el.value)") == [
-                "classic", "contrast", "mono", "zenless", "frontier", "los-santos",
+                "classic",
+                "contrast",
+                "mono",
+                "zenless",
+                "frontier",
+                "los-santos",
             ]
             await shot("appearance-six-themes-desktop.png")
             report["switch_back"] = []
@@ -580,7 +585,9 @@ async def main(browser_run: BrowserRun) -> None:
             # Inspect actual shell consumers after closing the picker; its game
             # preview tiles intentionally retain their own illustration/icons.
             report["game_chrome_returns"] = []
-            neutral_palettes = tuple(palette for palette in PALETTES if palette not in GAME_PALETTES)
+            neutral_palettes = tuple(
+                palette for palette in PALETTES if palette not in GAME_PALETTES
+            )
             for return_mode in ("dark", "light"):
                 for game in GAME_PALETTES:
                     for neutral in neutral_palettes:
@@ -594,7 +601,9 @@ async def main(browser_run: BrowserRun) -> None:
                                 "chrome": await no_stale_skin_chrome(page),
                             }
                         )
-            assert len(report["game_chrome_returns"]) == 2 * len(GAME_PALETTES) * len(neutral_palettes)
+            assert len(report["game_chrome_returns"]) == 2 * len(GAME_PALETTES) * len(
+                neutral_palettes
+            )
             record_phase("game_chrome_returns")
 
             await trigger.click()
