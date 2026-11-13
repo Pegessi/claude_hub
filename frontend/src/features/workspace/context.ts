@@ -318,7 +318,7 @@ type WorkspaceNavigationContext = Pick<ReturnType<typeof useWorkspaceNavigation>
   | 'openLessonsModalFromMenu'
   | 'openAgentOptionsModalFromMenu'
   | 'refreshAgentStatusesFromMenu'
-  | 'toggleThemeFromMenu'
+  | 'openAppearanceFromMenu'
   | 'workspaceMobileMenuRef'
 >
 const navigationKey: InjectionKey<WorkspaceNavigationContext> = Symbol('WorkspaceNavigationContext')

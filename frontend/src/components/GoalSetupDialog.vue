@@ -562,7 +562,7 @@ function submit() {
 }
 
 .goal-dialog-button--primary {
-  color: var(--ch-color-text-inverse);
+  color: var(--ch-color-on-accent);
   background: var(--ch-color-accent-strong);
   border-color: var(--ch-color-accent-strong);
   box-shadow: var(--ch-shadow-button-primary);

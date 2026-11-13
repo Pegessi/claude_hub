@@ -650,7 +650,7 @@ export function useTerminalView(props: TerminalViewProps) {
       scheduleReconnectClear(tabId, 6000)
     }
   }
-  watch(colorScheme, () => {
+  watch([colorScheme, () => appStore.themePalette], () => {
     lastThemeKey = null
     requestAnimationFrame(() => {
       postTerminalTheme()

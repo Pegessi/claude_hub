@@ -1,10 +1,18 @@
 <template>
   <header class="workspace-header">
     <div class="workspace-title-block">
-      <h1>Agent Workspace</h1>
+      <h1>
+        <ThemeChromeIcon
+          kind="workspace"
+          :size="16"
+        />Agent Workspace
+      </h1>
       <p>Manual task queue with multiple resident workspace agents.</p>
       <div class="workspace-mobile-identity">
-        <span>Agent Workspace</span>
+        <span><ThemeChromeIcon
+          kind="workspace"
+          :size="13"
+        />Agent Workspace</span>
         <strong>{{ activeWorkspace?.name || 'No workspace' }}</strong>
         <small>{{ mobileWorkspaceSummary }}</small>
       </div>
@@ -138,9 +146,9 @@
           <button
             type="button"
             class="workspace-mobile-menu-item workspace-mobile-menu-item--theme"
-            @click="toggleThemeFromMenu"
+            @click="openAppearanceFromMenu"
           >
-            <span>{{ colorScheme === 'dark' ? 'Switch to Light' : 'Switch to Dark' }}</span>
+            <span>Appearance</span>
             <strong>{{ colorScheme }}</strong>
           </button>
         </div>
@@ -152,6 +160,7 @@
 <script setup lang="ts">
 import LoadingButton from '@/components/LoadingButton.vue'
 import AppExtensionActions from '@/components/AppExtensionActions.vue'
+import ThemeChromeIcon from '@/features/app-shell/components/ThemeChromeIcon.vue'
 import WorkspacePicker from './WorkspacePicker.vue'
 import {
   useWorkspaceRuntimeContext,
@@ -190,7 +199,7 @@ const {
   openLessonsModalFromMenu,
   openAgentOptionsModalFromMenu,
   refreshAgentStatusesFromMenu,
-  toggleThemeFromMenu,
+  openAppearanceFromMenu,
   workspaceMobileMenuRef,
 } = useWorkspaceNavigationContext()
 
@@ -416,7 +425,7 @@ async function handlePickerSelect(workspaceId: string) {
 <style scoped src="../styles/shared-task-cards.css"></style>
 
 <style scoped>
-@media (max-width: 760px) {
+@media (max-width: 768px) {
   .workspace-header {
     position: sticky;
     top: 0;
