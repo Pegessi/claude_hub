@@ -7,6 +7,14 @@
 
 ## Released
 
+### fix(theme): show Fairy on the Zenless illustration's monitor
+
+- Replace the generic shutter emblem with a reference-led Fairy eye drawn by
+  Cursor Carbon, preserving the existing CRT glass and scanline treatment.
+- Keep all decoded pixels outside the screen patch and every alpha value
+  unchanged. Use a lossless PNG for this scene to avoid recompressing the
+  accepted surrounding artwork; other themes and interface behavior are unchanged.
+
 ### style(theme): replace geometric game figures with painted scene artwork
 
 - Replace the three hand-drawn SVG wallpapers with local, reference-conditioned

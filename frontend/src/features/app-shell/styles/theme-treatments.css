@@ -39,7 +39,7 @@
   --ch-radius-lg: 10px;
   --ch-radius-xl: 14px;
   --ch-radius-overlay: 16px;
-  --palette-scene: url('../assets/zenless-scene.webp');
+  --palette-scene: url('../assets/zenless-scene.png');
   --palette-scene-glow: linear-gradient(
     180deg,
     transparent 0%,
