@@ -946,3 +946,37 @@ remain explicit, nonblocking limits. The favorable precommit review does not
 stand in for the subsequent committed-SHA all/browser/HMR/replay gates or final
 human aesthetic acceptance. Full evidence: `qa/attempt-04/HANDOFF.md`,
 `parent-proof-check-04.json` and `precommit-review-04.md` under the redraw root.
+
+## Follow-up: Fairy on the Zenless monitor
+
+The user accepts the painted scenes overall and asks Cursor Carbon to correct
+only the monitor emblem. Starting from `eed26adfee2104263fca9a5588919bba7e7cdb5d`,
+the same selected `gemini-4-carbon-high` draws an isolated Fairy eye after viewing
+an official Steam Fairy avatar and the official Fairy Radio poster. Parent also
+views those actual images. The reference-led redraw retains the concentric eye,
+cardinal details and lower-right white pupil/glint instead of camera-shutter
+blades; it is not a claim of official licensing or exact version-specific likeness.
+
+Parent composites the symbol into the existing glass with mild CRT projection,
+scanlines and attenuation. The only allowed edit rectangle is x402..475/y143..216
+in the 1200×320 asset. Chromium-decoded comparison finds 4770 changed pixels,
+zero changed pixels outside that rectangle and zero changed alpha values globally.
+Thus Eous, the workbench, monitor bezel and existing spatial fade remain unchanged.
+A browser WebP re-encoding identity probe changes 84110 pixels, whereas PNG changes
+zero; the Zenless asset therefore becomes a 235671-byte lossless PNG with one CSS
+URL substitution. The other two WebPs, all theme tokens, UI and tests stay intact.
+No runtime dependency, remote asset or image-generation service is introduced.
+
+Evidence lives under `tasks/theme-fairy-correction/`: the Carbon reference and
+symbol handoff, preserved reference-phase timeout, parent `patch-01/proof.json`,
+diagnostic before/after monitor crops and reproducible local compositing script.
+Actual UI acceptance, independent review and committed-SHA full gates remain
+separate requirements; this pixel-scope proof does not establish those passes.
+
+The frozen Fairy candidate passes the unchanged strict Queue scenario in38.370s
+and Goal scenario in82.780s. Actual desktop and phone Zenless views show the eye
+inside the same subdued monitor; the existing borderless composition and reading
+controls remain intact. The original visibility, salience, contrast, negative and
+restoration assertions are not weakened. Before/after product/test hashes match,
+both browser lifecycle records close normally, and the owned5366server is stopped.
+These scoped results are retained in `qa-01/`; final-SHA gates remain pending.
