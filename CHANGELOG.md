@@ -7,6 +7,128 @@
 
 ## Released
 
+### refactor(theme): retire Studio and Carbon
+
+- Remove Studio and Carbon from the picker and delete their dedicated styles;
+  retain Classic, Contrast, Mono, Zenless, Frontier and Los Santos.
+- Saved retired selections recover to Classic through the existing preference
+  reader without discarding System/Light/Dark or forcing a storage rewrite.
+  Accepted compact and panoramic game artwork remains unchanged.
+
+### feat(theme): add adaptive panoramic artwork for wide panes
+
+- Add newly painted, native-resolution panoramic game scenes with wider settings
+  and prominent characters rather than stretching the compact illustrations.
+- Select the wide composition using each pane's allocated width and fit both
+  axes without distorting or clipping it. Narrow panes, phones, sidebars and
+  appearance previews retain the accepted compact artwork.
+- Keep foreground reading surfaces, theme preferences and terminal behavior;
+  verify wide coverage, short-pane fitting and old-cap/source-selection faults.
+
+### fix(theme): show Fairy on the Zenless illustration's monitor
+
+- Replace the generic shutter emblem with a reference-led Fairy eye drawn by
+  Cursor Carbon, preserving the existing CRT glass and scanline treatment.
+- Keep all decoded pixels outside the screen patch and every alpha value
+  unchanged. Use a lossless PNG for this scene to avoid recompressing the
+  accepted surrounding artwork; other themes and interface behavior are unchanged.
+
+### style(theme): replace geometric game figures with painted scene artwork
+
+- Replace the three hand-drawn SVG wallpapers with local, reference-conditioned
+  generated illustrations: the classic GTA trio, Arthur's western poster scene,
+  and Eous at an orange/black retro-electronic workbench.
+- Keep character heads intact in responsive bust compositions. Bake subtle
+  opacity and four-edge feathering into WebP assets so painted backgrounds fade
+  into both modes without adding poster boxes or fading foreground controls.
+- Reuse the existing scene consumers, theme state, icons and five neutral themes;
+  no runtime image-generation service, hotlink, new preference or dependency.
+
+### style(theme): refine game scenes from visual references
+
+- Replace abstract wireframe-like subjects with richer original illustrations
+  informed by viewed game references: rounded material volumes for Eous,
+  red/black poster shading for Frontier, and differentiated classic-era GTA
+  character anatomy, clothing and light/shadow planes.
+- Keep the accepted borderless UI, orange/black Zenless, existing appearance
+  state and neutral palettes. Reference images remain research inputs rather
+  than bundled third-party wallpaper or runtime hotlinks.
+
+### style(theme): soften game themes and make room for iconic imagery
+
+- Remove stacked composer and transcript frames, hard offset shadows and the
+  large turn backplates. Keep real input, selection and keyboard-focus cues.
+- Replace generic genre props with original game-inspired character and landmark
+  compositions. Attenuate the complete artwork and anchor Chat wallpaper to the
+  timeline above the actual footer, including responsive phone framing.
+- Preserve orange/black Zenless and the five non-game themes. Verify visible but
+  subdued artwork, unobscured subjects and readable text on the actual composed
+  background rather than requiring the previous opaque-box implementation.
+- Keep secondary/live text readable over artwork and semantic alerts on their
+  own canvas base. Scope empty-state wallpaper to the shell, not inline dialogs.
+
+### feat(theme): add illustrated game skins and themed chrome icons
+
+- Recast Zenless in orange and black, and give all three game themes original,
+  locally bundled scene illustrations: analog urban electronics, a western
+  wilderness print, and a Los Santos coastal skyline.
+- Carry the visual identity into Chat, Workspace, empty states and picker
+  previews, with theme-specific chrome icons and protected reading surfaces.
+  Preserve the five non-game themes, palette IDs, semantic status/provider
+  identities and existing appearance persistence. No remote artwork service or
+  extra appearance-preference model is introduced.
+- Verify rendered artwork and icon differences with browser-only negative
+  controls, and protect sidebar/non-prose/pending text with opaque group/turn
+  backplates. Use paired error ink and avoid double-dimming small live-work
+  labels in light game themes.
+
+### style(theme): distinguish the three game themes
+
+- Give Zenless solid street-pop capsules, oblique display type and hard offset
+  shadows; Frontier square letterpress bookplates, serif chapter rules and
+  leather/vellum surfaces; Los Santos sharp navy/concrete HUD blocks and segmented
+  radar-color accents. Apply the same visual grammar to navigation, Chat/Goal
+  chrome, Workspace and picker previews instead of relying on colored outlines.
+- Preserve all five non-game appearances, the eight palette IDs and existing
+  preference/reader/terminal behavior. Keep body/code readable and use original
+  CSS materials with local font fallbacks, not game artwork or remote assets.
+- Check actual nested selection controls with translucent/gradient backgrounds,
+  native hover/press and color-preserving geometry negatives. Exercise all three
+  game palettes in the live terminal loop and restore the prior non-game theme.
+- Keep styled split-pane focus indicators from changing inner viewport dimensions.
+  Restore visible game-theme keyboard cues and readable inline tab rename fields;
+  handle the loop-backed editor ref correctly so native rename actually focuses.
+
+### feat(theme): add studio and game-inspired visual themes
+
+- Keep Classic and Contrast; replace the rejected tinted palettes with Mono,
+  Studio and Carbon, and add Zenless (Zenless Zone Zero), Frontier (Red Dead
+  Redemption) and Los Santos (GTA V) inspired themes. All eight support light,
+  dark and System; retired palette IDs recover to Classic without changing mode.
+- Add scoped material, heading and chrome treatments, not just alternate hues:
+  neutral layers, urban signal stripes, western serif/double rules and HUD edges.
+  Body text/code remain readable; no game artwork or font assets are bundled.
+- Pair primary fills with `on-accent` foregrounds, and message surfaces with their
+  own text token, so white/yellow buttons and neutral bubbles work in both modes.
+  Preserve semantic danger/success colors and the original accepted themes.
+  Keep bright primary presses readable and selected panes distinct in split layouts.
+- Expand real browser and terminal regression coverage to the new palette set;
+  keep the user-requested IPv6 feature preview, without changing the main service.
+
+### feat(theme): add curated palettes and responsive appearance controls
+
+- Replace the fixed light/dark switch with Classic, Slate, Sand, Forest, Dusk and
+  Contrast palettes, each with light/dark variants and optional system following.
+  Preserve existing preferences and synchronize appearance across browser tabs
+  and standalone readers, including terminal repaint and browser chrome color.
+- Add real palette previews, keyboard-operable radio groups and a phone bottom
+  sheet with safe-area spacing, scrollable content and 44px primary controls.
+  Retain existing semantic status/code tokens and report blocked persistence.
+  Keep filled approval hover text readable and Workspace Appearance reachable
+  at the 768px layout boundary; verify live terminal repaint without reconnect.
+- Design references, acceptance scope and evidence:
+  [appearance themes](docs/working-logs/2026-11-11-appearance-themes.md).
+
 ### fix(ui): keep Safari Chat in view and open attachments on touch
 
 - Active mobile Chat follows the visual viewport's position as well as height,

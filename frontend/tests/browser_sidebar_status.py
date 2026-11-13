@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 from playwright.async_api import ViewportSize, expect
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appearance_assertions import GAME_PALETTES, select_appearance  # noqa: E402
 from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
 
 DESKTOP: ViewportSize = {"width": 1440, "height": 900}
@@ -355,6 +356,60 @@ async def main(browser_run: BrowserRun) -> None:
                 "aria-label", "Waiting for your answer"
             )
             await shot("00-desktop-status.png")
+
+            # Compare two real active tabs, not a hand-edited data attribute.
+            # A game skin must retain the waiting cue as well as its active ring.
+            report["game_waiting_indicators"] = []
+            for mode in ("dark", "light"):
+                for palette in GAME_PALETTES:
+                    await select_appearance(page, mode, palette)
+                    paints = {}
+                    for tab_id, waiting in ((BLOCKED, True), (DONE, False)):
+                        await page.locator(
+                            f'.chat-sidebar__item[data-tab-id="{tab_id}"] .chat-sidebar__item-main'
+                        ).click()
+                        active = page.locator(f'.tab-bar .tab.active[data-tab-id="{tab_id}"]')
+                        indicator = active.locator(".tab-indicator")
+                        await expect(indicator).to_have_attribute("data-status", "idle")
+                        await expect(indicator).to_have_attribute(
+                            "data-awaiting", str(waiting).lower()
+                        )
+                        await indicator.evaluate("""async el => {
+                          getComputedStyle(el).boxShadow;
+                          await Promise.all(el.getAnimations().filter(a =>
+                            Number.isFinite(a.effect?.getComputedTiming().endTime)).map(a => a.finished));
+                        }""")
+                        paints[str(waiting)] = await indicator.evaluate(
+                            """el => ({
+                          shadow:getComputedStyle(el).boxShadow,
+                          color:getComputedStyle(el).backgroundColor,
+                          width:el.getBoundingClientRect().width,height:el.getBoundingClientRect().height})"""
+                        )
+                        await shot(
+                            f"status-{palette.lower().replace(' ', '-')}-{mode}-{waiting}.png"
+                        )
+                    assert paints["True"]["shadow"] != paints["False"]["shadow"], (
+                        palette,
+                        mode,
+                        paints,
+                    )
+                    assert paints["True"]["shadow"] != "none", (palette, mode, paints)
+                    assert paints["True"]["color"] == paints["False"]["color"], (
+                        palette,
+                        mode,
+                        paints,
+                    )
+                    assert all(
+                        paints["True"][key] == paints["False"][key] == 7
+                        for key in ("width", "height")
+                    )
+                    report["game_waiting_indicators"].append(
+                        {"palette": palette, "mode": mode, **paints}
+                    )
+            await select_appearance(page, "dark", "Classic")
+            await page.locator(
+                f'.chat-sidebar__item[data-tab-id="{BLOCKED}"] .chat-sidebar__item-main'
+            ).click()
 
             # Narrow pane: the sentence must still be reachable and the 8px
             # light must not grow or displace the row's name.

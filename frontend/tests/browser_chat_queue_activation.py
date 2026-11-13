@@ -13,11 +13,21 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from playwright.async_api import expect
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appearance_assertions import (  # noqa: E402
+    GAME_PALETTES,
+    artwork_text_contrast,
+    quiet_chat_surfaces,
+    readability_fault_controls,
+    rendered_scene_artwork,
+    responsive_scene_geometry,
+    select_appearance,
+)
 from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
 
 TAB_A = "queue-tab-a"
@@ -49,6 +59,91 @@ def event(sequence: int, event_type: str, payload: dict) -> dict:
 
 STARTED = event(0, "turn_started", {"summary": "Initial work", "mode": "default"})
 COMPLETED = event(1, "turn_completed", {"status": "completed"})
+
+
+def surface_stream_events() -> list[dict]:
+    """Replay the production thinking/tool/status paths after queue acceptance."""
+    specs: list[tuple[str, str, dict[str, Any], str]] = [
+        ("history", "turn_started", {"summary": "Surface transcript proof"}, "surface-user"),
+        (
+            "history",
+            "status",
+            {"text": "Thinking…", "provider_status": "reasoning", "snapshot": True},
+            "reasoning:first",
+        ),
+        (
+            "history",
+            "thinking_delta",
+            {"text": "Inspect the natural reading surface."},
+            "surface-thinking",
+        ),
+        (
+            "history",
+            "status",
+            {"text": "Done thinking", "provider_status": "reasoning", "snapshot": True},
+            "reasoning:first",
+        ),
+        (
+            "history",
+            "tool_call_started",
+            {"name": "Read", "args": {"path": "/fixture/note.txt"}, "tool_call_id": "surface-read"},
+            "surface-read",
+        ),
+        (
+            "history",
+            "tool_call_completed",
+            {
+                "name": "Read",
+                "result": "A bounded result.",
+                "status": "completed",
+                "tool_call_id": "surface-read",
+            },
+            "surface-read",
+        ),
+        (
+            "history",
+            "status",
+            {"text": "Done thinking", "provider_status": "reasoning", "snapshot": True},
+            "reasoning:after-tool",
+        ),
+        ("history", "status", {"text": "Inspection activity note"}, "surface-status"),
+        (
+            "history",
+            "error",
+            {"message": "Fixture diagnostic", "detail": "A bounded diagnostic detail."},
+            "surface-error",
+        ),
+        # A delivered answer is required for the natural process-fold boundary.
+        ("history", "text_delta", {"text": "Surface answer."}, "surface-answer"),
+        ("history", "turn_completed", {"status": "cancelled"}, "surface-history"),
+        ("live", "turn_started", {"summary": "Surface live proof"}, "surface-live-user"),
+        (
+            "live",
+            "tool_call_started",
+            {
+                "name": "Read",
+                "args": {"path": "/fixture/live.txt"},
+                "tool_call_id": "surface-live-read",
+            },
+            "surface-live-read",
+        ),
+        (
+            "live",
+            "status",
+            {"text": "Thinking…", "provider_status": "reasoning", "snapshot": True},
+            "reasoning:live",
+        ),
+    ]
+    rows = []
+    for sequence, (turn, kind, payload, message_id) in enumerate(specs):
+        rows.append(
+            {
+                **event(sequence, kind, payload),
+                "turn_id": f"surface-{turn}",
+                "message_id": message_id,
+            }
+        )
+    return rows
 
 
 async def main(browser_run: BrowserRun) -> None:
@@ -89,7 +184,10 @@ async def main(browser_run: BrowserRun) -> None:
     completion_released = asyncio.Event()
     completion_visible = False
     send_payloads: list[dict] = []
-    report = {
+    surface_rows: list[dict] | None = None
+    surface_send_payloads: list[dict] = []
+    pending_released = asyncio.Event()
+    report: dict[str, Any] = {
         "result": "FAIL",
         "api_requests": [],
         "blocked_external_requests": [],
@@ -97,6 +195,9 @@ async def main(browser_run: BrowserRun) -> None:
         "unknown_requests": [],
         "page_errors": [],
         "send_payloads": send_payloads,
+        "surface_send_payloads": surface_send_payloads,
+        "surface_readability": [],
+        "pending_readability": [],
         "screenshots": [],
         "boundary": "Real SPA rendering with mocked APIs; no backend or provider traffic.",
     }
@@ -164,19 +265,34 @@ async def main(browser_run: BrowserRun) -> None:
                     since = int(parse_qs(parsed.query).get("since_sequence", ["-1"])[0])
                     rows = []
                     if tab_id == TAB_A:
-                        candidates = [STARTED, *([COMPLETED] if completion_visible else [])]
+                        candidates = (
+                            surface_rows
+                            if surface_rows is not None
+                            else [
+                                STARTED,
+                                *([COMPLETED] if completion_visible else []),
+                            ]
+                        )
                         rows = [item for item in candidates if item["stream_sequence"] > since]
                     next_sequence = rows[-1]["stream_sequence"] if rows else since
                     body = {"events": rows, "next_sequence": next_sequence, "has_more": False}
                 elif path.endswith("/wait"):
                     tab_id = TAB_A if f"/{TAB_A}/" in path else TAB_B
                     since = int(parse_qs(parsed.query).get("since_sequence", ["-1"])[0])
-                    if tab_id == TAB_A and not completion_visible:
-                        await completion_released.wait()
-                        completion_visible = True
+                    if surface_rows is not None:
+                        await asyncio.sleep(0.1)
+                        rows = (
+                            [item for item in surface_rows if item["stream_sequence"] > since]
+                            if tab_id == TAB_A
+                            else []
+                        )
                     else:
-                        await asyncio.sleep(0.2)
-                    rows = [COMPLETED] if tab_id == TAB_A and since < 1 else []
+                        if tab_id == TAB_A and not completion_visible:
+                            await completion_released.wait()
+                            completion_visible = True
+                        else:
+                            await asyncio.sleep(0.2)
+                        rows = [COMPLETED] if tab_id == TAB_A and since < 1 else []
                     next_sequence = rows[-1]["stream_sequence"] if rows else since
                     body = {"events": rows, "next_sequence": next_sequence, "has_more": False}
                 elif path.endswith("/live"):
@@ -185,7 +301,11 @@ async def main(browser_run: BrowserRun) -> None:
                     )
                     return
                 elif path.endswith("/stream/send") and request.method == "POST":
-                    send_payloads.append(json.loads(request.post_data or "{}"))
+                    if surface_rows is not None:
+                        surface_send_payloads.append(json.loads(request.post_data or "{}"))
+                        await pending_released.wait()
+                    else:
+                        send_payloads.append(json.loads(request.post_data or "{}"))
                     body = {"ok": True}
                 elif path.startswith("/api/tabs/sidebar-preferences"):
                     # Read, one-shot pin migration and per-tab pin updates
@@ -223,6 +343,8 @@ async def main(browser_run: BrowserRun) -> None:
 
             composer = page.locator(".composer-textarea").first
             await expect(composer).to_be_enabled()
+            await composer.click()
+            await expect(composer).to_be_focused()
             await composer.fill("Queued after the first turn")
             await composer.press("Enter")
             await expect(page.locator(".draft-queue .queue-heading")).to_contain_text(
@@ -280,6 +402,221 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(page.locator(".draft-queue")).to_have_count(0)
             assert len(send_payloads) == 1
 
+            # Queue correctness is complete. Reuse its real long sidebar and
+            # donor stream events for a bounded reading-surface matrix.
+            surface_rows = surface_stream_events()
+            await page.set_viewport_size({"width": 1280, "height": 560})
+            await page.reload(wait_until="domcontentloaded")
+            history = page.locator(".structured-turn").filter(has_text="Surface transcript proof")
+            live = page.locator(".structured-turn").filter(has_text="Surface live proof")
+            await expect(history).to_have_count(1)
+            await expect(live).to_have_count(1)
+            off_origin_before_surfaces = set(report["blocked_external_requests"])
+            for mode in ("dark", "light"):
+                for palette in GAME_PALETTES:
+                    await select_appearance(page, mode, palette)
+                    samples = {}
+                    group = page.locator(
+                        ".chat-sidebar__group:not(.chat-sidebar__group--pinned)"
+                    ).first
+                    more = group.locator(".chat-sidebar__show-more")
+                    if await more.get_attribute("aria-expanded") == "true":
+                        await more.click()
+                    await expect(more).to_contain_text("Show more")
+                    inactive = group.locator(".chat-sidebar__item:not(.active)").first
+                    for label, control in (
+                        ("folder", group.locator(".chat-sidebar__group-label")),
+                        ("folder-count", group.locator(".chat-sidebar__group-count")),
+                        ("show-more", more),
+                        ("inactive-name", inactive.locator(".chat-sidebar__item-name")),
+                        ("inactive-time", inactive.locator(".chat-sidebar__item-time")),
+                    ):
+                        samples[label] = await artwork_text_contrast(
+                            control, ".chat-sidebar__body", output
+                        )
+                    await more.click()
+                    await expect(more).to_contain_text("Show less")
+                    samples["expanded-last-row"] = await artwork_text_contrast(
+                        group.locator(
+                            ".chat-sidebar__item:not(.active) .chat-sidebar__item-name"
+                        ).last,
+                        ".chat-sidebar__body",
+                        output,
+                    )
+                    process = history.get_by_test_id("history-details-toggle")
+                    if await process.get_attribute("aria-expanded") == "true":
+                        await process.click()
+                    samples["process-closed"] = await artwork_text_contrast(
+                        process.locator(".process-fold-meta"), ".structured-timeline", output
+                    )
+                    await process.click()
+                    await expect(process).to_have_attribute("aria-expanded", "true")
+                    samples["process-open"] = await artwork_text_contrast(
+                        process.locator(".process-fold-meta"), ".structured-timeline", output
+                    )
+                    thinking = history.locator(".thinking-card")
+                    summary = thinking.locator("summary")
+                    if await thinking.get_attribute("open") is not None:
+                        await summary.click()
+                    samples["thinking-closed"] = await artwork_text_contrast(
+                        summary.locator(".thinking-label > span:last-child"),
+                        ".structured-timeline",
+                        output,
+                    )
+                    await summary.click()
+                    samples["thinking-open"] = await artwork_text_contrast(
+                        thinking.locator(".thinking-body"), ".structured-timeline", output
+                    )
+                    await summary.click()
+                    tools = history.locator(".tool-card--group")
+                    tool_summary = tools.locator(":scope > summary")
+                    if await tools.get_attribute("open") is not None:
+                        await tool_summary.click()
+                    samples["tool-closed"] = await artwork_text_contrast(
+                        tool_summary.locator(".activity-verb"), ".structured-timeline", output
+                    )
+                    await tool_summary.click()
+                    samples["tool-open"] = await artwork_text_contrast(
+                        tool_summary.locator(".activity-verb"), ".structured-timeline", output
+                    )
+                    await tool_summary.click()
+                    for label, control in (
+                        ("status", history.locator(".event-status > span")),
+                        (
+                            "reasoning",
+                            history.locator(".reasoning-status .thinking-label > span:last-child"),
+                        ),
+                        ("error", history.locator(".error-body > span")),
+                        ("error-detail", history.locator(".error-detail")),
+                        ("cancelled", history.locator(".turn-cancelled-marker")),
+                        ("working", live.locator(".turn-working-label")),
+                        ("working-step", live.locator(".turn-working-step")),
+                        ("working-time", live.locator(".turn-working-elapsed")),
+                        ("working-counts", live.locator(".turn-working-counts-text")),
+                        (
+                            "live-reasoning",
+                            live.locator(".reasoning-status .thinking-label > span:last-child"),
+                        ),
+                    ):
+                        samples[label] = await artwork_text_contrast(
+                            control, ".structured-timeline", output
+                        )
+                    if palette == "Zenless" and mode == "dark":
+                        report["readability_negatives"] = await readability_fault_controls(
+                            inactive.locator(".chat-sidebar__item-name"),
+                            ".chat-sidebar__body",
+                            output,
+                        )
+                        report["readability_negatives"].extend(
+                            await readability_fault_controls(
+                                live.locator(".turn-working-elapsed"),
+                                ".structured-timeline",
+                                output,
+                            )
+                        )
+                    assert {"opaque-front-backing", "sampled-rendered-backdrop"} <= {
+                        sample["method"] for sample in samples.values()
+                    }
+                    report["surface_readability"].append(
+                        {
+                            "palette": palette,
+                            "mode": mode,
+                            "samples": samples,
+                            "quiet": await quiet_chat_surfaces(page),
+                        }
+                    )
+                    screenshot = f"reading-surface-{palette.lower().replace(' ', '-')}-{mode}.png"
+                    await page.screenshot(path=str(output / screenshot), full_page=True)
+                    report["screenshots"].append(screenshot)
+                    print(f"Reading contrast captured: {palette}/{mode}", flush=True)
+                    # The live fixture stays mounted: resizing must not replay or send a turn.
+                    await page.set_viewport_size({"width": 1920, "height": 560})
+                    host = page.locator(".structured-timeline:visible").first
+                    report["surface_readability"][-1]["short_wide"] = {
+                        "selection": await responsive_scene_geometry(host, wide=True),
+                        "art": await rendered_scene_artwork(
+                            host, output, f"short-wide-{palette.lower().replace(' ', '-')}-{mode}"
+                        ),
+                        "status": await artwork_text_contrast(
+                            history.locator(".event-status > span"), ".structured-timeline", output
+                        ),
+                        "live": await artwork_text_contrast(
+                            live.locator(".turn-working-elapsed"), ".structured-timeline", output
+                        ),
+                    }
+                    screenshot = f"short-wide-{palette.lower().replace(' ', '-')}-{mode}.png"
+                    await page.screenshot(path=str(output / screenshot), full_page=True)
+                    report["screenshots"].append(screenshot)
+                    await page.set_viewport_size({"width": 1280, "height": 560})
+
+            surface_rows.append(
+                {
+                    **event(len(surface_rows), "turn_completed", {"status": "completed"}),
+                    "turn_id": "surface-live",
+                    "message_id": "surface-live",
+                }
+            )
+            await expect(page.locator(".turn-working")).to_have_count(0)
+            await composer.fill("Pending reading surface proof")
+            await composer.press("Enter")
+            pending = page.locator(".structured-turn--pending")
+            try:
+                await expect(pending).to_have_count(1)
+                for mode in ("dark", "light"):
+                    for palette in GAME_PALETTES:
+                        await select_appearance(page, mode, palette)
+                        report["pending_readability"].append(
+                            {
+                                "palette": palette,
+                                "mode": mode,
+                                "quiet": await quiet_chat_surfaces(page),
+                                "status": await artwork_text_contrast(
+                                    pending.locator(".event-status--pending > span"),
+                                    ".structured-timeline",
+                                    output,
+                                ),
+                                "message": await artwork_text_contrast(
+                                    pending.locator(
+                                        ".conversation-bubble--user .markdown-content p"
+                                    ),
+                                    ".structured-timeline",
+                                    output,
+                                ),
+                            }
+                        )
+                        screenshot = (
+                            f"pending-surface-{palette.lower().replace(' ', '-')}-{mode}.png"
+                        )
+                        await page.screenshot(path=str(output / screenshot), full_page=True)
+                        report["screenshots"].append(screenshot)
+                        await page.set_viewport_size({"width": 1920, "height": 560})
+                        report["pending_readability"][-1]["short_wide"] = {
+                            "selection": await responsive_scene_geometry(
+                                page.locator(".structured-timeline:visible").first, wide=True
+                            ),
+                            "status": await artwork_text_contrast(
+                                pending.locator(".event-status--pending > span"),
+                                ".structured-timeline",
+                                output,
+                            ),
+                            "message": await artwork_text_contrast(
+                                pending.locator(".conversation-bubble--user .markdown-content p"),
+                                ".structured-timeline",
+                                output,
+                            ),
+                        }
+                        screenshot = (
+                            f"pending-short-wide-{palette.lower().replace(' ', '-')}-{mode}.png"
+                        )
+                        await page.screenshot(path=str(output / screenshot), full_page=True)
+                        report["screenshots"].append(screenshot)
+                        await page.set_viewport_size({"width": 1280, "height": 560})
+            finally:
+                pending_released.set()
+            assert len(surface_send_payloads) == 1, surface_send_payloads
+            assert surface_send_payloads[0]["text"] == "Pending reading surface proof"
+            assert len(send_payloads) == 1, send_payloads
+            assert set(report["blocked_external_requests"]) <= off_origin_before_surfaces
             assert not report["unknown_requests"], report["unknown_requests"]
             assert not report["page_errors"], report["page_errors"]
             report["result"] = "PASS"
@@ -293,7 +630,20 @@ async def main(browser_run: BrowserRun) -> None:
                     pass
 
     (output / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print(json.dumps(report, indent=2))
+    print(
+        json.dumps(
+            {
+                **{
+                    key: value
+                    for key, value in report.items()
+                    if key not in ("surface_readability", "pending_readability")
+                },
+                "surface_readability_variants": len(report["surface_readability"]),
+                "pending_readability_variants": len(report["pending_readability"]),
+            },
+            indent=2,
+        )
+    )
     if failure is not None:
         raise failure
 
