@@ -17,7 +17,9 @@ import posixpath
 import re
 import struct
 import sys
+import threading
 import zlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -1680,6 +1682,203 @@ async def check_mermaid(page, output: Path, report: dict) -> None:
     await page.evaluate("document.documentElement.dataset.theme = 'dark'")
 
 
+async def exercise_cross_origin_images(page, base: str, report: dict) -> None:
+    """Exercise browser COEP enforcement, not just successful HTTP responses."""
+    requests = []
+    recovered = False
+
+    class ImageHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append({"url": remote + self.path, "mode": self.headers.get("Sec-Fetch-Mode")})
+            path = urlparse(self.path).path
+            body = png(48, 24)
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            if path == "/corp.png" or (path == "/corp-recovery.png" and recovered):
+                self.send_header("Cross-Origin-Resource-Policy", "cross-origin")
+            elif path not in {"/unavailable.png", "/corp-recovery.png"} or recovered:
+                self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    # Playwright route.fulfill can bypass the response policy being tested.
+    # Use a real second origin so Chromium itself must enforce COEP/CORS.
+    server = ThreadingHTTPServer(("127.0.0.1", 0), ImageHandler)
+    remote = f"http://127.0.0.1:{server.server_port}"
+    signed_url = remote + "/unavailable.png?signature=a%2Fb&retry=123#original"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    await page.route(remote + "/**", lambda route: route.continue_())
+    try:
+        assert await page.evaluate("crossOriginIsolated")
+        # The original unadorned img must fail with the very same CORS-only reply.
+        assert not await page.evaluate(
+            """url => new Promise(resolve => {
+              const img = new Image();
+              img.onload = () => resolve(true);
+              img.onerror = () => resolve(false);
+              img.src = url;
+            })""",
+            remote + "/negative.png",
+        )
+        root = page.locator(".markdown-content")
+        for scope, markup in [
+            ("image-streaming-probe", "![Remote plot]({url})"),
+            ("/api/workspaces/sessions/managed-probe/stream", "- ![Remote plot]({url})"),
+            ("", '<img src="{url}" alt="Remote plot">'),
+        ]:
+            start = len(requests)
+            url = remote + f"/cors-{start}.png"
+            await page.evaluate(
+                """({scope, text}) => {
+                  window.__imageStreamProbe.setScope(scope);
+                  window.__imageStreamProbe.setText(text);
+                }""",
+                {"scope": scope, "text": markup.format(url=url)},
+            )
+            image = root.get_by_role("img", name="Remote plot")
+            await expect(image).to_have_js_property("naturalWidth", 48)
+            await expect(image).to_have_attribute("crossorigin", "anonymous")
+            assert [row["mode"] for row in requests[start:]] == [
+                "no-cors",
+                "cors",
+            ], requests
+            # The same component's rewritten live block must not retry no-cors.
+            for index in range(3):
+                previous = len(requests)
+                await page.evaluate("window.__imageStreamProbe.append(' tail')")
+                await expect(image).to_have_js_property("naturalWidth", 48)
+                assert [row["mode"] for row in requests[previous:]] == ["cors"], requests
+            assert await page.evaluate("window.__imageStreamProbe.mounts") == 1
+
+        start = len(requests)
+        await page.evaluate(
+            "text => window.__imageStreamProbe.setText(text)",
+            f"![CORP plot]({remote}/corp.png)",
+        )
+        await expect(root.get_by_role("img", name="CORP plot")).to_have_js_property(
+            "naturalWidth", 48
+        )
+        assert [row["mode"] for row in requests[start:]] == ["no-cors"], requests
+
+        start = len(requests)
+        await page.evaluate(
+            "text => window.__imageStreamProbe.setText(text)",
+            f"![Unavailable plot]({signed_url}) and tail",
+        )
+        missing = root.locator(".quoted-img-missing")
+        await expect(missing).to_be_visible()
+        assert [row["mode"] for row in requests[start:]] == ["no-cors", "cors"], requests
+        for index in range(5):
+            await page.evaluate("window.__imageStreamProbe.append(' delta')")
+            await expect(missing).to_be_visible()
+            await page.evaluate(
+                "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
+            )
+            assert len(requests) == start + 2, requests
+        # Each explicit retry restarts a bounded negotiation of the exact URL.
+        await missing.get_by_role("button", name="Retry loading image Unavailable plot").click()
+        await expect(missing).to_be_visible()
+        assert len(requests) == start + 4, requests
+        recovered = True
+        await missing.get_by_role("button", name="Retry loading image Unavailable plot").click()
+        image = root.get_by_role("img", name="Unavailable plot")
+        await expect(image).to_have_js_property("naturalWidth", 48)
+        await expect(image).to_have_attribute("src", signed_url)
+        assert len(requests) == start + 6, requests
+        assert all(row["url"] == signed_url.split("#")[0] for row in requests[start:])
+        assert [row["mode"] for row in requests[start:]] == ["no-cors", "cors"] * 3
+
+        recovered = False
+        await page.evaluate(
+            "text => window.__imageStreamProbe.setText(text)",
+            f"![CORP recovery]({remote}/corp-recovery.png)",
+        )
+        await expect(missing).to_be_visible()
+        recovered = True
+        start = len(requests)
+        await missing.get_by_role("button", name="Retry loading image CORP recovery").click()
+        await expect(root.get_by_role("img", name="CORP recovery")).to_have_js_property(
+            "naturalWidth", 48
+        )
+        assert [row["mode"] for row in requests[start:]] == ["no-cors"], requests
+
+        # Scope changes must discard old DOM recovery closures even when the
+        # source and rendered HTML are byte-identical.
+        recovered = False
+        await page.evaluate(
+            "text => window.__imageStreamProbe.setText(text)",
+            f"![Same source]({remote}/unavailable.png?scope-test=1)",
+        )
+        await expect(missing).to_be_visible()
+        recovered = True
+        start = len(requests)
+        await page.evaluate("window.__imageStreamProbe.setScope('scope-B')")
+        await expect(root.get_by_role("img", name="Same source")).to_have_js_property(
+            "naturalWidth", 48
+        )
+        assert [row["mode"] for row in requests[start:]] == ["no-cors", "cors"], requests
+
+        # Prior automatic fallback for a URL must not erase a different node's
+        # authored anonymous mode and send credentials on its manual retry.
+        recovered = False
+        explicit_url = remote + "/unavailable.png?explicit-mode=1"
+        await page.evaluate(
+            "text => window.__imageStreamProbe.setText(text)",
+            f"![Implicit mode]({explicit_url})",
+        )
+        await expect(missing).to_be_visible()
+        await page.evaluate(
+            "text => window.__imageStreamProbe.setText(text)",
+            f'<img src="{explicit_url}" crossorigin="anonymous" alt="Explicit mode">',
+        )
+        await expect(missing).to_contain_text("Explicit mode")
+        recovered = True
+        start = len(requests)
+        await missing.get_by_role("button", name="Retry loading image Explicit mode").click()
+        await expect(root.get_by_role("img", name="Explicit mode")).to_have_js_property(
+            "naturalWidth", 48
+        )
+        assert [row["mode"] for row in requests[start:]] == ["cors"], requests
+
+        # Browser-native same-origin and data images keep their existing mode.
+        data_url = "data:image/png;base64," + base64.b64encode(png(12, 6)).decode("ascii")
+        local_url = (
+            base
+            + "/api/workspaces/tabs/image-streaming-probe/stream/agent-image?path=%2Ftmp%2Fstreaming-missing.png"
+        )
+        await page.evaluate(
+            "text => window.__imageStreamProbe.setText(text)",
+            f"![Data plot]({data_url}) ![Same origin plot]({local_url})",
+        )
+        await expect(root.get_by_role("img", name="Data plot")).to_have_js_property(
+            "naturalWidth", 12
+        )
+        await expect(root.get_by_role("img", name="Same origin plot")).to_have_js_property(
+            "naturalWidth", 4
+        )
+        assert await root.locator("img[crossorigin], img[data-remote-img]").count() == 0
+        report["cross_origin_images"] = {
+            "isolated": True,
+            "negative_control_blocked": True,
+            "scopes": ["tab", "managed", "unscoped"],
+            "corp_only_preserved": True,
+            "signed_retry_url_unchanged": True,
+            "requests": requests,
+        }
+
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
 async def exercise_streamed_image_retry(context, base: str, report: dict) -> None:
     """A failed image must stay failed through real same-paragraph DOM updates."""
     page = await context.new_page()
@@ -1743,6 +1942,7 @@ async def exercise_streamed_image_retry(context, base: str, report: dict) -> Non
             "() => { const img = document.querySelector('img'); return img?.complete && img.naturalWidth > 0 }"
         )
         evidence.update(manual_retry_requests=1, recovered=True, click_and_keyboard_preview=True)
+        await exercise_cross_origin_images(page, base, report)
     finally:
         evidence["request_urls"] = requests
         await page.close()

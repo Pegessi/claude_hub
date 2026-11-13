@@ -7,6 +7,18 @@
 
 ## Released
 
+### fix(chat): recover cross-origin Markdown images under COEP
+
+- Retry a failed external Markdown image once with anonymous CORS, allowing
+  CORS-only CDN images to load without weakening cross-origin isolation or
+  breaking successful CORP-only images.
+- Retain the selected mode across streamed updates; show an explicit Retry when
+  neither mode works. Manual recovery preserves signed URLs and authored CORS
+  settings, and can recover a transient CORP-only failure.
+- Clear recovery state and remount image content on scope/document changes.
+  Verify browser policy enforcement against a real second HTTP origin, including
+  streaming, recovery, same-source scope changes and explicit anonymous images.
+
 ### refactor(theme): retire Studio and Carbon
 
 - Remove Studio and Carbon from the picker and delete their dedicated styles;
