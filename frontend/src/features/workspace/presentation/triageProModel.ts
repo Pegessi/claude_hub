@@ -143,8 +143,11 @@ export function deriveStatusLabel(
     if (task.review_skipped_at) return 'Ready to accept'
     return 'In review'
   }
+  if (lifecycle?.phase === 'orphaned') return 'Session lost'
+  if (lifecycle?.phase === 'awaiting_acceptance') return 'Ready to accept'
+  if (lifecycle?.phase === 'needs_user') return 'Needs input'
   if (lifecycle?.attention && lifecycle.reason_text) {
-    return lifecycle.reason_text
+    return lifecycle.reason_text.length <= 20 ? lifecycle.reason_text : 'Needs attention'
   }
   if (task.latest_progress?.state === 'needs_input') return 'Needs input'
   if (task.latest_progress?.state === 'blocked') return 'Blocked'

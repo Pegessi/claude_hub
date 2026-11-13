@@ -311,6 +311,15 @@
                 >
                   Open session ↗
                 </button>
+
+                <button
+                  v-else-if="activeItem.task.source?.tab_id"
+                  type="button"
+                  :class="activeItem.bucket === 'needs_you' ? 'tp-primary-btn' : 'tp-ghost-btn'"
+                  @click="openOrRestoreTab(activeItem.task.source.tab_id)"
+                >
+                  Open Chat ↗
+                </button>
               </div>
             </div>
 
