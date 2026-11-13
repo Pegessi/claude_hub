@@ -1046,3 +1046,42 @@ configured dead-end127.0.0.1:9, with no unknown-request/page-error report; the
 suspected routing-close race is not asserted as proven. Independent full-candidate
 review and committed-SHA all/browser/HMR/replay gates still follow this scoped
 four-scenario precommit result, rather than being implied by it.
+
+
+## 2026-11-13 — Retire Studio and Carbon
+
+The user accepted the responsive artwork and explicitly removed Studio and
+Carbon. The current collection is Classic, Contrast, Mono, Zenless, Frontier
+and Los Santos: six palettes, twelve resolved light/dark variants and three
+non-game palettes. Earlier eight-palette/five-neutral entries above describe
+historical candidates, not the current collection.
+
+Remove the two registry entries and only their exclusive palette/treatment CSS.
+The existing registry-based reader already normalizes retired IDs to Classic
+while preserving a valid System/Light/Dark mode. No migration flag, extra store
+or forced writeback is introduced. Store tests exercise both IDs at boot and
+on storage events in all three modes, including OS changes after boot and
+zero writeback. Real browser coverage checks the exact six-option picker,
+retired shell reloads and live standalone-reader recovery; game-to-neutral
+return checks derive the neutral set instead of slicing five entries.
+
+All six accepted compact/panoramic artwork files, game tokens and responsive
+scene rules remain untouched. Validation and independent review evidence for
+this bounded removal is recorded under `tasks/theme-retire-palettes/`; earlier
+wide-art results are not substituted for this candidate's required gates.
+
+The first scoped browser attempt (`qa-01`) stopped on an obsolete five-distinct-
+canvas assertion: the three retained neutral light palettes intentionally share
+white, so the six-theme set has four distinct light canvases. Keep those accepted
+colors unchanged; replace the incidental collection-size floor with assertions
+that all three game canvases differ from each other and from Classic. Preserve
+the failed receipt and rerun the unfiltered original scenario in `qa-02`.
+
+The corrected scoped Appearance run passes in39.925s under the original120s
+deadline: twelve palette/mode variants, eighteen game-to-neutral returns,
+all six historical retired IDs (including Studio/Carbon), and desktop/phone
+interaction coverage. Both tracked-input snapshots match, the known Vite PIDs
+and port5366 are closed, and all six artwork files match ec842d8 byte-for-byte.
+The fourteen preference/store unit tests and frontend lint also pass. This is
+scoped mocked-browser evidence, not the committed-SHA all/browser/HMR/replay
+gates or live integration; independent review and those gates remain separate.

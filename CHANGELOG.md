@@ -7,6 +7,14 @@
 
 ## Released
 
+### refactor(theme): retire Studio and Carbon
+
+- Remove Studio and Carbon from the picker and delete their dedicated styles;
+  retain Classic, Contrast, Mono, Zenless, Frontier and Los Santos.
+- Saved retired selections recover to Classic through the existing preference
+  reader without discarding System/Light/Dark or forcing a storage rewrite.
+  Accepted compact and panoramic game artwork remains unchanged.
+
 ### feat(theme): add adaptive panoramic artwork for wide panes
 
 - Add newly painted, native-resolution panoramic game scenes with wider settings
