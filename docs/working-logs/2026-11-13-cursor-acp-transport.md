@@ -141,3 +141,14 @@ all actionable findings and added regression coverage:
    alone so post-load setup errors never fall through to `session/new` and
    overwrite an existing conversation, and deferred `_persist_conversation_id` on
    `session/new` until model/mode setup completes.
+8. **Checkpoint-based `resumeAction` retries for `RetriableError: [resource_exhausted]` in `agent acp`**:
+   Cursor CLI `2026.11.11`'s `./src/acp/agent-session.ts` wires
+   `onConnectionStateChange` and `onErrorNotRetried` into `agentClient.run`
+   `runOptions`, but omits `enableAgentRetries: true` (unlike `--print`, TUI, and
+   subagent runners), causing `agentClient.run` (`retriesEnabled:
+   p.enableAgentRetries ?? false`) to abort turns on `attempt=0` on any transient
+   `RetriableError: [resource_exhausted]` or stream reset instead of resuming from
+   the latest SQLite checkpoint via `resumeAction`. Added `cursor_acp_preload.cjs`
+   (injected via `NODE_OPTIONS` and immediately scrubbed so child tool shells do
+   not inherit it) to supply `enableAgentRetries = true` and `maxRetries = 8` on
+   the ACP `runOptions` object.

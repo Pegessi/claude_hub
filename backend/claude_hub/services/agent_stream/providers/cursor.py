@@ -34,6 +34,30 @@ from .process import ProcessSession
 # one-shot handshake grace over a corporate proxy.
 _ACP_SESSION_INIT_TIMEOUT_S = 60.0
 _ACP_CANCEL_CONFIRM_TIMEOUT_S = 10.0
+_ACP_PRELOAD_PATH = Path(__file__).with_name("cursor_acp_preload.cjs").resolve()
+
+
+def _inject_acp_preload_env(provider_env: Dict[str, str]) -> Dict[str, str]:
+    """Attach ``cursor_acp_preload.cjs`` via ``NODE_OPTIONS`` for ``agent acp``.
+
+    Cursor CLI 2026.11.11's ``./src/acp/agent-session.ts`` omits
+    ``enableAgentRetries: true`` when calling ``agentClient.run``, causing
+    transient ``RetriableError: [resource_exhausted]`` and stream blips to fail
+    on ``attempt=0`` instead of resuming from the latest checkpoint via
+    ``resumeAction``. The preload enables checkpoint retries on the ACP
+    ``runOptions`` object and immediately scrubs itself from ``NODE_OPTIONS``
+    so child tool shells do not inherit it.
+    """
+    if not _ACP_PRELOAD_PATH.is_file():
+        return provider_env
+    req_flag = f"--require={_ACP_PRELOAD_PATH}"
+    existing = provider_env.get("NODE_OPTIONS", "").strip()
+    if req_flag in existing or str(_ACP_PRELOAD_PATH) in existing:
+        return provider_env
+    merged = dict(provider_env)
+    merged["NODE_OPTIONS"] = f"{existing} {req_flag}".strip() if existing else req_flag
+    return merged
+
 
 _CONTENT_POLICY_REFUSAL_SUBSTR = "The provider refused to serve this request based on the content"
 _CONTENT_POLICY_HINT = (
@@ -521,7 +545,9 @@ class CursorSession(ProcessSession):
                     )
                     raise ProviderNetworkError(self._last_error)
                 try:
-                    self._process = await self._spawn_subprocess(cmd, provider_env)
+                    self._process = await self._spawn_subprocess(
+                        cmd, _inject_acp_preload_env(provider_env)
+                    )
                 except FileNotFoundError:
                     self._last_error = f"provider binary not found: {cmd[0]}"
                     raise
