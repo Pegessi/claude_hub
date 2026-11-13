@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, urlparse
 from playwright.async_api import expect
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from appearance_assertions import filled_button_themes  # noqa: E402
+from appearance_assertions import filled_button_themes, wide_chat_themes  # noqa: E402
 from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
 
 TAB = "goal-steer-tab"
@@ -634,6 +634,9 @@ async def main(browser_run: BrowserRun) -> None:
                 card.get_by_role("button", name="Approve & start", exact=True),
                 card.get_by_role("button", name="Revise", exact=True),
                 screenshot_dir=output,
+            )
+            report["wide_chat_artwork"] = await wide_chat_themes(
+                page, output, card.get_by_role("button", name="Approve & start", exact=True)
             )
             assert set(report["blocked_external_requests"]) <= set(off_origin_before_themes), (
                 "Theme assets attempted new off-origin requests",

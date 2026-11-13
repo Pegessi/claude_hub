@@ -544,12 +544,21 @@ async def _paint_difference(
       };
       const on = await decode(painted), off = await decode(hidden);
       if (on.width !== off.width || on.height !== off.height) throw new Error('Paint ROI resized');
-      let changed = 0;
+      let changed = 0, differentPixels = 0, leftQuarter = 0, rightQuarter = 0;
+      let leftmost = on.width, rightmost = -1;
+      const quarterWidth = Math.floor(on.width / 4);
       const histogram = Array(256).fill(0);
       const nativeMask = [];
       for (let p = 0; p < on.data.length; p += 4) {
         const difference = Math.max(...[0,1,2].map(c => Math.abs(on.data[p+c] - off.data[p+c])));
-        if (difference >= delta) { changed++; histogram[difference]++; }
+        if (difference > 0 || on.data[p+3] !== off.data[p+3]) differentPixels++;
+        if (difference >= delta) {
+          changed++; histogram[difference]++;
+          const x = (p / 4) % on.width;
+          leftmost = Math.min(leftmost, x); rightmost = Math.max(rightmost, x);
+          if (x < quarterWidth) leftQuarter++;
+          if (x >= on.width - quarterWidth) rightQuarter++;
+        }
         if (ink) {
           const fullInk = Math.max(...[0,1,2].map(c => Math.abs(ink[c]*255 - off.data[p+c]))) * ink[3];
           // Preserve fractional coverage: rounding an RGB edge from 0.500
@@ -570,6 +579,11 @@ async def _paint_difference(
       }
       return {width:on.width, height:on.height, changed, pixels:on.width*on.height,
         fraction:changed/(on.width*on.height), changed_delta_p95:p95,
+        different_pixels:differentPixels, horizontal_span:changed ? rightmost-leftmost+1 : 0,
+        horizontal_fraction:changed ? (rightmost-leftmost+1)/on.width : 0,
+        outer_quarters:{pixels:quarterWidth*on.height, left:leftQuarter, right:rightQuarter,
+          left_fraction:leftQuarter/(quarterWidth*on.height),
+          right_fraction:rightQuarter/(quarterWidth*on.height)},
         mask, maskEncoding:ink ? 'fractional-coverage-v1' : null};
     }""",
         {
@@ -589,12 +603,12 @@ async def chat_artwork(page: Page, output: Path, name: str) -> dict[str, Any]:
     )
 
 
-async def rendered_scene_artwork(host: Locator, output: Path, name: str) -> dict[str, Any]:
-    """Measure the actual owner's fixed bottom-128px viewport scene region."""
-    page = host.page
+async def scene_source(host: Locator) -> dict[str, Any]:
+    """Decode the selected consumer source, not a filename or root token alone."""
     await expect(host).to_be_visible()
     source: dict[str, Any] = await host.evaluate(r"""async el => {
-      const style = getComputedStyle(el), scene = style.getPropertyValue('--palette-scene').trim();
+      const style = getComputedStyle(el), root = getComputedStyle(document.documentElement);
+      const scene = style.getPropertyValue('--palette-scene').trim();
       const match = /^url\((.*)\)$/.exec(scene);
       if (!match) return {scene, local:false, decoded:false};
       const url = new URL(match[1].trim().replace(/^['"]|['"]$/g, ''), location.href);
@@ -606,9 +620,281 @@ async def rendered_scene_artwork(host: Locator, output: Path, name: str) -> dict
           setTimeout(() => reject(new Error('Artwork decode timeout')), 5000))]);
       } catch (error) { return {scene, url:url.href, local, decoded:false, error:String(error)}; }
       return {scene, url:url.href, local, decoded:image.naturalWidth > 0 && image.naturalHeight > 0,
-        width:image.naturalWidth, height:image.naturalHeight};
+        width:image.naturalWidth, height:image.naturalHeight,
+        compact:root.getPropertyValue('--palette-scene').trim(),
+        wide:root.getPropertyValue('--palette-scene-wide').trim(),
+        image:style.backgroundImage, size:style.backgroundSize};
     }""")
     assert source["local"] and source["decoded"], ("Local artwork decode", source)
+    return source
+
+
+async def compact_scene_source(host: Locator) -> dict[str, Any]:
+    source = await scene_source(host)
+    assert source["scene"] == source["compact"], ("Compact artwork source", source)
+    assert source["url"] in source["image"], ("Actual artwork background", source)
+    return source
+
+
+async def responsive_scene_geometry(host: Locator, wide: bool) -> dict[str, Any]:
+    """Check actual independent parent width, selected source and ratio-safe fitting."""
+    await _settle_styles(host.page)
+    source = await scene_source(host)
+    geometry = await host.evaluate(
+        r"""(el, source) => {
+      const parent = el.parentElement.closest('.terminal-pane, .terminal-main-column, .workspace-layout');
+      if (!parent) throw new Error('Missing independent scene parent');
+      const ps = getComputedStyle(parent), s = getComputedStyle(el), rect = el.getBoundingClientRect();
+      const parentWidth = parent.clientWidth - parseFloat(ps.paddingLeft) - parseFloat(ps.paddingRight);
+      // Split CSS math without treating min()/clamp() commas or spaces as layer separators.
+      const split = (value, delimiter) => {
+        const parts = []; let depth = 0, start = 0;
+        for (let i = 0; i < value.length; i++) {
+          if (value[i] === '(') depth++;
+          if (value[i] === ')') depth--;
+          if (!depth && delimiter.test(value[i])) {
+            if (value.slice(start,i).trim()) parts.push(value.slice(start,i).trim());
+            start = i+1;
+          }
+        }
+        if (value.slice(start).trim()) parts.push(value.slice(start).trim());
+        return parts;
+      };
+      const size = split(s.backgroundSize, /,/)[0];
+      const parts = split(size, /\s/), ratio = source.width / source.height;
+      const width = el.clientWidth, height = el.clientHeight;
+      const length = (value, base) => {
+        if (value.endsWith('px')) return Number(value.slice(0,-2));
+        if (value.endsWith('%')) return Number(value.slice(0,-1))*base/100;
+        const match = /^(min|max|clamp|calc)\((.*)\)$/.exec(value);
+        if (!match) throw new Error(`Unsupported scene size: ${value}`);
+        if (match[1] === 'calc') {
+          const terms = split(match[2], /\s/);
+          if (terms.length === 1) return length(terms[0],base);
+          if (terms.length === 3 && terms[1] === '+') return length(terms[0],base)+length(terms[2],base);
+          if (terms.length === 3 && terms[1] === '-') return length(terms[0],base)-length(terms[2],base);
+          throw new Error(`Unsupported scene calc: ${value}`);
+        }
+        const values = split(match[2], /,/).map(v => length(v,base));
+        return match[1] === 'min' ? Math.min(...values) : match[1] === 'max' ? Math.max(...values) :
+          Math.max(values[0],Math.min(values[1],values[2]));
+      };
+      let paintedWidth, paintedHeight;
+      if (size === 'contain' || size === 'cover') {
+        const scale = Math[size === 'contain' ? 'min' : 'max'](width/source.width,height/source.height);
+        paintedWidth = source.width*scale; paintedHeight = source.height*scale;
+      } else {
+        const [x, y = 'auto'] = parts;
+        paintedWidth = x === 'auto' ? null : length(x,width);
+        paintedHeight = y === 'auto' ? null : length(y,height);
+        if (paintedWidth === null && paintedHeight === null) paintedWidth = source.width;
+        if (paintedWidth === null) paintedWidth = paintedHeight*ratio;
+        if (paintedHeight === null) paintedHeight = paintedWidth/ratio;
+      }
+      const footer = [...(el.closest('.structured-pane')?.querySelectorAll(
+        ':scope > .goal-status, :scope > .message-inbox, :scope > .structured-composer') ?? [])]
+        .find(node => node.getBoundingClientRect().height > 0);
+      return {host:rect.toJSON(), viewport:{width:innerWidth,height:innerHeight},
+        parent:{classes:parent.className,width:parentWidth,rect:parent.getBoundingClientRect().toJSON(),
+          name:ps.containerName,type:ps.containerType},
+        size, paintedWidth, paintedHeight, clientWidth:width, clientHeight:height,
+        footer:footer?.getBoundingClientRect().toJSON() ?? null,
+        isTimeline:el.matches('.structured-timeline'),
+        pageOverflow:document.documentElement.scrollWidth-innerWidth};
+    }""",
+        source,
+    )
+    parent = geometry["parent"]
+    assert parent["name"] != "none" and "inline-size" in parent["type"], (
+        "Named inline-size artwork parent",
+        geometry,
+    )
+    assert (parent["width"] >= 1100) == wide, ("Actual artwork parent width", wide, geometry)
+    expected = source["wide"] if wide else source["compact"]
+    assert expected and source["scene"] == expected and source["url"] in source["image"], (
+        "Wide artwork source/resolution" if wide else "Compact artwork source",
+        source,
+        geometry,
+    )
+    if wide:
+        assert (
+            source["scene"] != source["compact"]
+            and source["width"] >= 2000
+            and source["width"] / source["height"] >= 3.5
+        ), ("Wide artwork source/resolution", source, geometry)
+        assert (
+            abs(
+                geometry["paintedWidth"]
+                / geometry["paintedHeight"]
+                / (source["width"] / source["height"])
+                - 1
+            )
+            <= 0.01
+        ), ("Wide artwork aspect ratio", source, geometry)
+        assert (
+            0 < geometry["paintedWidth"] <= geometry["clientWidth"] + 1
+            and 0 < geometry["paintedHeight"] <= geometry["clientHeight"] + 1
+        ), ("Wide artwork fits actual host", geometry)
+    assert geometry["pageOverflow"] <= 1, ("Scene viewport overflow", geometry)
+    if geometry["isTimeline"]:
+        assert geometry["footer"] is not None, ("Missing actual Chat footer", geometry)
+    if geometry["footer"] is not None:
+        assert geometry["host"]["bottom"] <= geometry["footer"]["top"] + 1, (
+            "Artwork owner above actual footer",
+            geometry,
+        )
+    return {"source": source, "geometry": geometry}
+
+
+def _assert_wide_spatial(paint: dict[str, Any], geometry: dict[str, Any], name: str) -> None:
+    assert geometry["host"]["width"] >= 1500, ("Wide spatial fixture width", name, geometry)
+    assert paint["horizontal_fraction"] >= 0.65 and all(
+        paint["outer_quarters"][side] >= 0.01 for side in ("left_fraction", "right_fraction")
+    ), ("Wide artwork spatial coverage", name, paint, geometry)
+
+
+async def wide_chat_themes(page: Page, output: Path, primary: Locator) -> list[dict[str, Any]]:
+    """Capture only wide artwork/readability, without repeating the chrome matrix."""
+    viewport = page.viewport_size
+    previous = await page.evaluate("""() => ({mode:document.documentElement.dataset.theme,
+      palette:document.documentElement.dataset.palette})""")
+    results = []
+    try:
+        for width, height in ((1920, 1080), (2560, 1440)):
+            await page.set_viewport_size({"width": width, "height": height})
+            for mode in ("dark", "light"):
+                for palette in GAME_PALETTES:
+                    await select_appearance(page, mode, palette)
+                    await primary.scroll_into_view_if_needed()
+                    await expect(primary).to_be_in_viewport()
+                    name = f"wide-chat-{width}-{palette_id(palette)}-{mode}"
+                    host = page.locator(".structured-timeline:visible").first
+                    selected = await responsive_scene_geometry(host, wide=True)
+                    art = await rendered_scene_artwork(host, output, name, wide_spatial=True)
+                    visible = await primary.evaluate("""el => {
+                      const r = el.getBoundingClientRect();
+                      return {rect:r.toJSON(), unobscured:el.contains(document.elementFromPoint(
+                        r.left+r.width/2,r.top+r.height/2))};
+                    }""")
+                    assert visible["unobscured"], ("Wide primary unobscured", visible)
+                    sidebar = await compact_scene_source(page.locator(".chat-sidebar__body"))
+                    assert sidebar["size"].split()[0] == "360px", (
+                        "Compact sidebar fitting",
+                        sidebar,
+                    )
+                    screenshot = f"{name}.png"
+                    await page.screenshot(path=str(output / screenshot), full_page=True)
+                    row = {
+                        "palette": palette,
+                        "mode": mode,
+                        "width": width,
+                        "selection": selected,
+                        "art": art,
+                        "primary": visible,
+                        "sidebar": sidebar,
+                        "screenshot": screenshot,
+                    }
+                    if width == 1920 and palette == "Zenless" and mode == "dark":
+                        row["negatives"] = await wide_scene_fault_controls(host, output, name)
+                    results.append(row)
+                    print(f"Wide artwork captured: {width} {palette}/{mode}", flush=True)
+    finally:
+        if viewport is not None:
+            await page.set_viewport_size(viewport)
+        await select_appearance(page, previous["mode"], previous["palette"])
+    return results
+
+
+async def split_pane_scene_widths(page: Page, output: Path) -> list[dict[str, Any]]:
+    """Exercise real layout controls; a large viewport must not promote narrow panes."""
+    viewport = page.viewport_size
+    previous = await page.evaluate("""() => ({mode:document.documentElement.dataset.theme,
+      palette:document.documentElement.dataset.palette})""")
+    results = []
+    try:
+        for width, height, layout, count, wide in (
+            (2560, 1440, "Two Columns", 2, True),
+            (1920, 1080, "Two Columns", 2, False),
+            (2560, 1440, "Three Columns", 3, False),
+        ):
+            await page.set_viewport_size({"width": width, "height": height})
+            await page.get_by_title(layout, exact=True).click()
+            panes = page.locator(".terminal-pane")
+            await expect(panes).to_have_count(count)
+            for mode in ("dark", "light"):
+                await select_appearance(page, mode, "Zenless")
+                selected = []
+                for index in range(count):
+                    host = (
+                        panes.nth(index)
+                        .locator(".structured-timeline:visible, .pane-empty:visible")
+                        .first
+                    )
+                    selected.append(await responsive_scene_geometry(host, wide=wide))
+                screenshot = f"split-scene-{width}-{count}-{mode}.png"
+                await page.screenshot(path=str(output / screenshot), full_page=True)
+                results.append(
+                    {
+                        "width": width,
+                        "mode": mode,
+                        "layout": layout,
+                        "wide": wide,
+                        "panes": selected,
+                        "screenshot": screenshot,
+                    }
+                )
+    finally:
+        await page.get_by_title("Two Columns", exact=True).click()
+        if viewport is not None:
+            await page.set_viewport_size(viewport)
+        await select_appearance(page, previous["mode"], previous["palette"])
+    return results
+
+
+async def wide_scene_fault_controls(host: Locator, output: Path, name: str) -> list[dict[str, Any]]:
+    """Keep source selection and spatial coverage independently fault-sensitive."""
+    clean = await responsive_scene_geometry(host, wide=True)
+    baseline = await rendered_scene_artwork(host, output, f"{name}-clean", wide_spatial=True)
+    clip = baseline["geometry"]["clip"]
+    pixels = (output / baseline["screenshots"][0]).read_bytes()
+    snapshot = """el => ({inline:el.style.cssText, rect:el.getBoundingClientRect().toJSON(),
+      image:getComputedStyle(el).backgroundImage, size:getComputedStyle(el).backgroundSize,
+      scene:getComputedStyle(el).getPropertyValue('--palette-scene'),
+      glow:getComputedStyle(el).getPropertyValue('--palette-scene-glow')})"""
+    state = await host.evaluate(snapshot)
+    results = []
+    for label, values, oracle in (
+        (
+            "compact",
+            {"--palette-scene": clean["source"]["compact"]},
+            "Wide artwork source/resolution",
+        ),
+        ("old-cap", {"background-size": "760px auto, 100% 100%"}, "Wide artwork spatial coverage"),
+    ):
+        async with _inline_styles(host, values):
+            check = (
+                responsive_scene_geometry(host, wide=True)
+                if label == "compact"
+                else rendered_scene_artwork(host, output, f"{name}-{label}", wide_spatial=True)
+            )
+            result = await _expect_probe_failure(check, oracle)
+        assert await host.evaluate(snapshot) == state, (
+            "Wide fault style/geometry restoration",
+            label,
+        )
+        restored = await _paint_difference(host.page, pixels, await _region_png(host.page, clip))
+        assert restored["different_pixels"] == 0, ("Wide fault pixel restoration", label, restored)
+        results.append({"fault": label, **result, "restored": True, "restoredPaint": restored})
+    return results
+
+
+async def rendered_scene_artwork(
+    host: Locator, output: Path, name: str, *, wide_spatial: bool = False
+) -> dict[str, Any]:
+    """Measure the actual owner's fixed bottom-128px viewport scene region."""
+    page = host.page
+    await expect(host).to_be_visible()
+    source = await scene_source(host)
     await _settle_styles(page)
     geometry: dict[str, Any] = await host.evaluate("""el => {
       const rect = el.getBoundingClientRect(), timeline = rect;
@@ -636,6 +922,8 @@ async def rendered_scene_artwork(host: Locator, output: Path, name: str) -> dict
     (output / painted_name).write_bytes(painted)
     (output / hidden_name).write_bytes(hidden)
     difference = await _paint_difference(page, painted, hidden)
+    if wide_spatial:
+        _assert_wide_spatial(difference, geometry, name)
     assert difference["fraction"] >= ART_VISIBLE_FRACTION, (
         "Artwork visible area",
         name,
@@ -689,6 +977,10 @@ async def empty_pane_phone_themes(
                 assert observed["size"].split(",")[0].strip().split()[0] == "520px", observed
                 art = await rendered_scene_artwork(
                     pane, output, f"empty-pane-{palette_id(palette)}-{mode}"
+                )
+                assert art["source"]["scene"] == art["source"]["compact"], (
+                    "Compact phone empty-pane source",
+                    art["source"],
                 )
                 hint = await artwork_text_contrast(
                     pane.locator(".empty-hint"), ".pane-empty", output
@@ -1571,6 +1863,9 @@ async def filled_button_themes(
                 overflow = await page.evaluate("document.documentElement.scrollWidth - innerWidth")
                 assert overflow <= 1, (variant["palette"], variant["mode"], overflow)
                 variant["phone_quiet"] = await quiet_chat_surfaces(page)
+                variant["phone_scene_source"] = await compact_scene_source(
+                    page.locator(".structured-timeline:visible").first
+                )
                 variant["phone_art"] = await chat_artwork(
                     page,
                     screenshot_dir,
