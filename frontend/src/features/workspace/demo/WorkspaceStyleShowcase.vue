@@ -1,6 +1,6 @@
 <template>
   <div class="zen-shell">
-    <!-- Single, quiet 44px top bar — zero double headers, zero pill clutter -->
+    <!-- Single, quiet 44px top bar — zero double headers, zero emoji clutter -->
     <header class="zen-topbar">
       <div class="zen-topbar-left">
         <span class="zen-brand">Workspace</span>
@@ -21,6 +21,9 @@
             {{ ws }}
           </option>
         </select>
+        <span class="zen-topbar-summary zen-num">
+          {{ needsYouTasks.length }} sign-off · {{ workingTasks.length }} active
+        </span>
       </div>
 
       <nav
@@ -37,7 +40,8 @@
           :class="['zen-style-tab', { active: activeStyle === opt.id }]"
           @click="activeStyle = opt.id"
         >
-          {{ opt.label }}
+          <span class="zen-tab-full">{{ opt.label }}</span>
+          <span class="zen-tab-short">{{ opt.shortLabel }}</span>
         </button>
       </nav>
 
@@ -54,7 +58,7 @@
     </header>
 
     <!-- =======================================================================
-         DIRECTION 1: LINEAR SPLIT (Borderless Hairline List + Editorial Spine)
+         CANDIDATE 1: 1 · LINEAR TRIAGE PRO (Linear Triage × GitButler Spine)
          ======================================================================= -->
     <div
       v-if="activeStyle === 'linear_zen'"
@@ -63,6 +67,750 @@
       <aside
         class="zen-linear-list"
         aria-label="Tasks"
+      >
+        <div class="zen-linear-groups">
+          <section
+            v-for="group in groupedTasks"
+            :key="group.key"
+            class="zen-group"
+          >
+            <header class="zen-group-header">
+              <span>{{ group.label }}</span>
+              <span class="zen-num">{{ group.items.length }}</span>
+            </header>
+
+            <div
+              v-for="item in group.items"
+              :key="item.id"
+              :class="['zen-pro-row', { active: selectedTask.id === item.id }]"
+              tabindex="0"
+              @click="selectTask(item.id)"
+              @keydown.enter="selectTask(item.id)"
+            >
+              <div class="zen-pro-row-top">
+                <span :class="['zen-dot', `zen-dot--${item.statusTone}`]" />
+                <span class="zen-pro-code zen-mono">{{ item.code }}</span>
+                <span class="zen-pro-ws zen-mono">{{ item.workspace }}</span>
+                <span :class="['zen-pro-state', `zen-pro-state--${item.statusTone}`]">
+                  {{ item.statusLabel }}
+                </span>
+                <span class="zen-pro-elapsed zen-num">{{ item.elapsed }}</span>
+              </div>
+              <div class="zen-pro-row-title">
+                {{ item.title }}
+              </div>
+              <div
+                v-if="typeof item.progressPct === 'number'"
+                class="zen-pro-progress-track"
+              >
+                <div
+                  class="zen-pro-progress-fill"
+                  :style="{ width: `${item.progressPct}%` }"
+                />
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <footer class="zen-rail-footer">
+          <span class="zen-kbd-group">
+            <kbd>J</kbd><kbd>K</kbd>
+            <span>navigate</span>
+          </span>
+          <span class="zen-kbd-group">
+            <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd>
+            <span>view</span>
+          </span>
+          <span class="zen-kbd-group">
+            <kbd>⌘↵</kbd>
+            <span>accept</span>
+          </span>
+        </footer>
+      </aside>
+
+      <main class="zen-linear-detail">
+        <div class="zen-editorial">
+          <!-- Meta Breadcrumb -->
+          <div class="zen-meta-line">
+            <span :class="['zen-status-pill', `zen-status-pill--${selectedTask.statusTone}`]">
+              <i :class="['zen-dot', `zen-dot--${selectedTask.statusTone}`]" />
+              {{ selectedTask.statusLabel }}
+            </span>
+            <span class="zen-mono zen-meta-code">{{ selectedTask.code }}</span>
+            <span class="zen-sep">·</span>
+            <span class="zen-mono">{{ selectedTask.workspace }}</span>
+            <span class="zen-sep">·</span>
+            <span class="zen-branch-chip zen-mono">
+              <svg
+                class="zen-icon"
+                viewBox="0 0 16 16"
+                fill="none"
+                aria-hidden="true"
+              >
+                <circle
+                  cx="5"
+                  cy="4"
+                  r="1.75"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                />
+                <circle
+                  cx="5"
+                  cy="12"
+                  r="1.75"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                />
+                <circle
+                  cx="11"
+                  cy="6.5"
+                  r="1.75"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                />
+                <path
+                  d="M5 5.75v4.5M11 8.25c0 2-2 2.25-6 2.25"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                />
+              </svg>
+              {{ selectedTask.branch }}
+            </span>
+            <template v-if="selectedTask.diffStat">
+              <span class="zen-sep">·</span>
+              <span class="zen-diff-add zen-mono zen-num">+{{ selectedTask.diffStat.added }}</span>
+              <span class="zen-diff-del zen-mono zen-num">−{{ selectedTask.diffStat.removed }}</span>
+              <span class="zen-mono zen-num">({{ selectedTask.diffStat.files }} files)</span>
+            </template>
+            <span class="zen-meta-updated zen-num">{{ selectedTask.updatedAgo }} · {{ selectedTask.elapsed }}</span>
+          </div>
+
+          <h1 class="zen-title">
+            {{ selectedTask.title }}
+          </h1>
+
+          <p class="zen-summary">
+            {{ selectedTask.outcomeSummary }}
+          </p>
+
+          <!-- Architectural Deliverable & Consensus Spec Frame -->
+          <section
+            class="zen-spec-frame"
+            aria-label="Deliverable and consensus specification"
+          >
+            <!-- Row 1: Decision / Live Gate -->
+            <div
+              v-if="selectedTask.bucket === 'needs_you'"
+              class="zen-spec-gate"
+            >
+              <div class="zen-spec-gate-left">
+                <span class="zen-verdict-badge zen-verdict-badge--pass zen-mono">
+                  <svg
+                    class="zen-icon"
+                    viewBox="0 0 16 16"
+                    fill="none"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="M3.5 8.25L6.5 11.25L12.5 4.75"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                  {{ selectedTask.consensus.verdictLabel }}
+                </span>
+                <span class="zen-decision-copy">{{ selectedTask.decisionLine }}</span>
+              </div>
+              <div class="zen-decision-btns">
+                <button
+                  type="button"
+                  class="zen-ghost-btn"
+                >
+                  Steer…
+                </button>
+                <button
+                  type="button"
+                  class="zen-primary-btn"
+                  @click="triggerAccept(selectedTask.id)"
+                >
+                  {{ acceptedIds.has(selectedTask.id) ? 'Accepted' : 'Accept' }}
+                </button>
+              </div>
+            </div>
+
+            <div
+              v-else-if="selectedTask.bucket === 'working'"
+              class="zen-spec-gate"
+            >
+              <div class="zen-spec-gate-left">
+                <span class="zen-verdict-badge zen-verdict-badge--live zen-mono">
+                  <span class="zen-pulse-dot" />
+                  {{ selectedTask.consensus.verdictLabel }}
+                </span>
+                <span class="zen-mono zen-live-step-text">{{ selectedTask.liveStep }}</span>
+              </div>
+              <div class="zen-spec-progress-wrap">
+                <div class="zen-spec-progress-bar">
+                  <div
+                    class="zen-spec-progress-fill"
+                    :style="{ width: `${selectedTask.progressPct ?? 50}%` }"
+                  />
+                </div>
+                <span class="zen-mono zen-num">{{ selectedTask.progressPct ?? 50 }}%</span>
+              </div>
+            </div>
+
+            <div
+              v-else
+              class="zen-spec-gate"
+            >
+              <div class="zen-spec-gate-left">
+                <span class="zen-verdict-badge zen-verdict-badge--pass zen-mono">
+                  {{ selectedTask.consensus.verdictLabel }}
+                </span>
+                <span class="zen-decision-copy">{{ selectedTask.consensus.roundsLabel }}</span>
+              </div>
+              <span class="zen-mono zen-checks-pill">✓ {{ selectedTask.checksLabel }}</span>
+            </div>
+
+            <!-- Row 2: Consensus Matrix -->
+            <div class="zen-spec-consensus">
+              <div class="zen-consensus-cell">
+                <span class="zen-cell-label">CONVERGENCE PAIR</span>
+                <div class="zen-cell-val">
+                  <span>{{ selectedTask.consensus.implementer }}</span>
+                  <span class="zen-arrow">→</span>
+                  <span>{{ selectedTask.consensus.reviewer }}</span>
+                </div>
+              </div>
+              <div class="zen-consensus-cell">
+                <span class="zen-cell-label">REVIEW TRAJECTORY</span>
+                <div class="zen-cell-val">
+                  {{ selectedTask.consensus.roundsLabel }}
+                </div>
+              </div>
+              <div class="zen-consensus-cell">
+                <span class="zen-cell-label">EVIDENCE &amp; BENCHMARK</span>
+                <div class="zen-cell-val zen-mono zen-num">
+                  {{ selectedTask.consensus.metricHighlight }}
+                </div>
+              </div>
+            </div>
+
+            <!-- Row 3: Deliverable Artifacts -->
+            <div class="zen-spec-artifacts">
+              <div class="zen-artifacts-list">
+                <a
+                  v-for="link in selectedTask.links"
+                  :key="link.label"
+                  :href="link.url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="zen-artifact-row"
+                >
+                  <svg
+                    v-if="link.kind === 'mr'"
+                    class="zen-icon zen-artifact-icon"
+                    viewBox="0 0 16 16"
+                    fill="none"
+                    aria-hidden="true"
+                  >
+                    <circle
+                      cx="4.5"
+                      cy="4"
+                      r="1.75"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                    />
+                    <circle
+                      cx="4.5"
+                      cy="12"
+                      r="1.75"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                    />
+                    <circle
+                      cx="11.5"
+                      cy="12"
+                      r="1.75"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                    />
+                    <path
+                      d="M4.5 5.75v4.5M11.5 10.25V6.5a2.5 2.5 0 0 0-2.5-2.5H7.5"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                    />
+                  </svg>
+                  <svg
+                    v-else-if="link.kind === 'doc'"
+                    class="zen-icon zen-artifact-icon"
+                    viewBox="0 0 16 16"
+                    fill="none"
+                    aria-hidden="true"
+                  >
+                    <rect
+                      x="3"
+                      y="2.25"
+                      width="10"
+                      height="11.5"
+                      rx="1.5"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                    />
+                    <path
+                      d="M5.5 5.75h5M5.5 8.25h5M5.5 10.75h3"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                    />
+                  </svg>
+                  <svg
+                    v-else-if="link.kind === 'arena'"
+                    class="zen-icon zen-artifact-icon"
+                    viewBox="0 0 16 16"
+                    fill="none"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="M2 8.5h2.5L6.25 4l3.25 8 2-3.5H14"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                  <svg
+                    v-else
+                    class="zen-icon zen-artifact-icon"
+                    viewBox="0 0 16 16"
+                    fill="none"
+                    aria-hidden="true"
+                  >
+                    <circle
+                      cx="8"
+                      cy="8"
+                      r="2.25"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                    />
+                    <path
+                      d="M2 8h3.75M10.25 8H14"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                    />
+                  </svg>
+                  <span class="zen-artifact-label">{{ link.label }}</span>
+                  <span class="zen-artifact-meta zen-mono">{{ link.meta }}</span>
+                  <span class="zen-artifact-ext">↗</span>
+                </a>
+              </div>
+              <span class="zen-checks-note zen-mono">✓ {{ selectedTask.checksLabel }}</span>
+            </div>
+          </section>
+
+          <!-- Sculptural Epoch Run Spine -->
+          <section class="zen-spine-section">
+            <div class="zen-spine-header">
+              <h2 class="zen-micro-heading">
+                EXECUTION &amp; REVIEW SPINE
+              </h2>
+              <span class="zen-spine-overview zen-mono zen-num">
+                {{ selectedTask.timeline.length }} stages · epoch {{ selectedTask.internalMeta.epoch }} · {{ selectedTask.elapsed }}
+              </span>
+            </div>
+
+            <ol class="zen-spine">
+              <template
+                v-for="node in selectedTask.timeline"
+                :key="node.id"
+              >
+                <li
+                  v-if="node.epochLabel"
+                  class="zen-epoch-row"
+                >
+                  <span class="zen-epoch-label zen-mono">{{ node.epochLabel }}</span>
+                  <span class="zen-epoch-line" />
+                </li>
+
+                <li :class="['zen-spine-item', `zen-spine-item--${node.tone}`, `zen-spine-role--${node.actorRole}`]">
+                  <div class="zen-spine-time-col zen-num">
+                    <span class="zen-spine-time">{{ node.timeLabel }}</span>
+                    <span class="zen-spine-delta zen-mono">{{ node.deltaLabel }}</span>
+                  </div>
+
+                  <span class="zen-spine-track">
+                    <i class="zen-spine-node" />
+                  </span>
+
+                  <div class="zen-spine-body">
+                    <div class="zen-spine-head">
+                      <strong>{{ node.stage }}</strong>
+                      <span class="zen-spine-actor">
+                        {{ node.actor }}
+                        <em class="zen-role-tag">{{ node.actorRole }}</em>
+                      </span>
+                      <span
+                        v-if="node.badge"
+                        :class="['zen-node-badge', 'zen-mono', `zen-node-badge--${node.tone}`]"
+                      >
+                        {{ node.badge }}
+                      </span>
+                      <button
+                        v-if="node.sessionTabId"
+                        type="button"
+                        class="zen-inline-link zen-mono"
+                        @click="openLogNodeId = openLogNodeId === node.id ? null : node.id"
+                      >
+                        {{ openLogNodeId === node.id ? 'Hide transcript' : 'Transcript ↗' }}
+                      </button>
+                    </div>
+
+                    <p>{{ node.summary }}</p>
+
+                    <div
+                      v-if="node.filesTouched || node.receipt"
+                      class="zen-spine-evidence zen-mono"
+                    >
+                      <span
+                        v-if="node.filesTouched"
+                        class="zen-evidence-files"
+                      >
+                        {{ node.filesTouched }}
+                      </span>
+                      <span
+                        v-if="node.filesTouched && node.receipt"
+                        class="zen-sep"
+                      >·</span>
+                      <span
+                        v-if="node.receipt"
+                        class="zen-evidence-receipt"
+                      >
+                        ✓ {{ node.receipt }}
+                      </span>
+                    </div>
+
+                    <div
+                      v-if="openLogNodeId === node.id"
+                      class="zen-log-excerpt"
+                    >
+                      <div
+                        v-for="(line, idx) in selectedTask.transcriptExcerpt"
+                        :key="idx"
+                        class="zen-log-row"
+                      >
+                        <span class="zen-mono zen-num">{{ line.time }}</span>
+                        <span :class="['zen-mono', 'zen-log-speaker', `zen-log-speaker--${line.role}`]">
+                          {{ line.speaker }}
+                        </span>
+                        <span>{{ line.text }}</span>
+                      </div>
+                    </div>
+                  </div>
+                </li>
+              </template>
+            </ol>
+          </section>
+
+          <details class="zen-meta-disclosure">
+            <summary>System governance &amp; runtime metadata</summary>
+            <p class="zen-mono">
+              control={{ selectedTask.internalMeta.control }} · mode={{ selectedTask.internalMeta.mode }} · epoch={{ selectedTask.internalMeta.epoch }} · seat={{ selectedTask.internalMeta.seat }}
+            </p>
+          </details>
+        </div>
+      </main>
+    </div>
+
+    <!-- =======================================================================
+         CANDIDATE 2: 2 · COMMAND STUDIO (Decision Spotlight × Autonomous River)
+         ======================================================================= -->
+    <div
+      v-else-if="activeStyle === 'focused_inbox'"
+      class="zen-studio"
+    >
+      <main class="zen-studio-main">
+        <!-- Zone A: Decision Spotlight (Only needs_you tasks) -->
+        <section class="zen-studio-zone">
+          <header class="zen-zone-header">
+            <div class="zen-zone-title">
+              <span class="zen-dot zen-dot--attention" />
+              <h2>NEEDS YOUR SIGN-OFF</h2>
+              <span class="zen-zone-count zen-mono zen-num">{{ needsYouTasks.length }}</span>
+            </div>
+            <span class="zen-zone-sub">Heterogeneous review converged · awaiting human merge</span>
+          </header>
+
+          <div class="zen-spotlight-grid">
+            <article
+              v-for="item in needsYouTasks"
+              :key="item.id"
+              :class="['zen-spotlight-card', { selected: selectedTask.id === item.id }]"
+              tabindex="0"
+              @click="selectTask(item.id)"
+              @keydown.enter="selectTask(item.id)"
+            >
+              <div class="zen-spotlight-top">
+                <span class="zen-mono zen-pro-code">{{ item.code }}</span>
+                <span class="zen-mono">{{ item.workspace }}</span>
+                <span class="zen-mono zen-branch-label">{{ item.branch }}</span>
+                <template v-if="item.diffStat">
+                  <span class="zen-diff-add zen-mono zen-num">+{{ item.diffStat.added }}</span>
+                  <span class="zen-diff-del zen-mono zen-num">−{{ item.diffStat.removed }}</span>
+                </template>
+                <span class="zen-spotlight-elapsed zen-num">{{ item.elapsed }}</span>
+              </div>
+
+              <h3 class="zen-spotlight-title">
+                {{ item.title }}
+              </h3>
+
+              <p class="zen-spotlight-decision">
+                {{ item.decisionLine }}
+              </p>
+
+              <div class="zen-spotlight-consensus">
+                <div class="zen-spotlight-pair">
+                  <span class="zen-cell-label">CONSENSUS</span>
+                  <strong>{{ item.consensus.implementer }} → {{ item.consensus.reviewer }}</strong>
+                </div>
+                <span class="zen-verdict-badge zen-verdict-badge--pass zen-mono">
+                  {{ item.consensus.verdictLabel }}
+                </span>
+                <span class="zen-spotlight-metric zen-mono zen-num">
+                  {{ item.consensus.metricHighlight }}
+                </span>
+              </div>
+
+              <footer class="zen-spotlight-footer">
+                <div class="zen-spotlight-links">
+                  <a
+                    v-for="link in item.links"
+                    :key="link.label"
+                    :href="link.url"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="zen-text-link"
+                    @click.stop
+                  >
+                    {{ link.label }} ↗
+                  </a>
+                </div>
+                <div class="zen-decision-btns">
+                  <button
+                    type="button"
+                    class="zen-ghost-btn zen-btn-sm"
+                    @click.stop="selectTask(item.id)"
+                  >
+                    Steer…
+                  </button>
+                  <button
+                    type="button"
+                    class="zen-primary-btn zen-btn-sm"
+                    @click.stop="triggerAccept(item.id)"
+                  >
+                    {{ acceptedIds.has(item.id) ? 'Accepted' : 'Accept' }}
+                  </button>
+                </div>
+              </footer>
+            </article>
+          </div>
+        </section>
+
+        <!-- Zone B: Active Autonomous Runs (Sleek Horizontal Swimlanes) -->
+        <section class="zen-studio-zone">
+          <header class="zen-zone-header">
+            <div class="zen-zone-title">
+              <span class="zen-dot zen-dot--working" />
+              <h2>ACTIVE AUTONOMOUS RUNS</h2>
+              <span class="zen-zone-count zen-mono zen-num">{{ workingTasks.length }}</span>
+            </div>
+            <span class="zen-zone-sub">Streaming telemetry &amp; cross-model verification in progress</span>
+          </header>
+
+          <div class="zen-swimlanes">
+            <div
+              v-for="item in workingTasks"
+              :key="item.id"
+              :class="['zen-swimlane', { selected: selectedTask.id === item.id }]"
+              tabindex="0"
+              @click="selectTask(item.id)"
+              @keydown.enter="selectTask(item.id)"
+            >
+              <div class="zen-swimlane-main">
+                <div class="zen-swimlane-head">
+                  <span class="zen-pulse-dot" />
+                  <span class="zen-mono zen-pro-code">{{ item.code }}</span>
+                  <strong class="zen-swimlane-title">{{ item.title }}</strong>
+                  <span class="zen-mono zen-swimlane-ws">{{ item.workspace }} · {{ item.branch }}</span>
+                </div>
+                <div class="zen-swimlane-ticker zen-mono">
+                  <span>{{ item.liveStep }}</span>
+                </div>
+              </div>
+
+              <div class="zen-swimlane-right">
+                <div class="zen-swimlane-metrics">
+                  <span class="zen-mono zen-num">{{ item.statusLabel }}</span>
+                  <span class="zen-sep">·</span>
+                  <span class="zen-mono">{{ item.checksLabel }}</span>
+                  <span class="zen-sep">·</span>
+                  <span class="zen-mono zen-num">{{ item.elapsed }}</span>
+                </div>
+                <div class="zen-swimlane-bar">
+                  <div
+                    class="zen-swimlane-bar-fill"
+                    :style="{ width: `${item.progressPct ?? 50}%` }"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Zone C: Autonomous Archive (Feishu Triage & Auto-Merged) -->
+        <section class="zen-studio-zone">
+          <header class="zen-zone-header">
+            <div class="zen-zone-title">
+              <span class="zen-dot zen-dot--done" />
+              <h2>FEISHU TRIAGE &amp; AUTO-MERGED</h2>
+              <span class="zen-zone-count zen-mono zen-num">{{ doneTasks.length }}</span>
+            </div>
+            <span class="zen-zone-sub">Zero-toil patrol · InfoWall synced · ephemeral sessions released</span>
+          </header>
+
+          <div class="zen-archive-ledger">
+            <div
+              v-for="item in doneTasks"
+              :key="item.id"
+              :class="['zen-archive-row', { selected: selectedTask.id === item.id }]"
+              tabindex="0"
+              @click="selectTask(item.id)"
+              @keydown.enter="selectTask(item.id)"
+            >
+              <span class="zen-dot zen-dot--done" />
+              <span class="zen-mono zen-pro-code">{{ item.code }}</span>
+              <span class="zen-archive-title">{{ item.title }}</span>
+              <span class="zen-archive-flow">{{ item.consensus.roundsLabel }}</span>
+              <span class="zen-mono zen-archive-checks">✓ {{ item.checksLabel }}</span>
+              <span class="zen-mono zen-num zen-archive-time">{{ item.elapsed }}</span>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <!-- Right Docked Stage Spine & Transcript Inspector -->
+      <aside
+        class="zen-studio-inspector"
+        aria-label="Stage Spine Inspector"
+      >
+        <div class="zen-inspector-head">
+          <div class="zen-inspector-meta">
+            <span class="zen-micro-heading">STAGE SPINE INSPECTOR</span>
+            <span class="zen-mono zen-num">{{ selectedTask.code }} · {{ selectedTask.elapsed }}</span>
+          </div>
+          <h3 class="zen-inspector-title">
+            {{ selectedTask.title }}
+          </h3>
+          <p class="zen-inspector-summary">
+            {{ selectedTask.outcomeSummary }}
+          </p>
+          <div class="zen-inspector-links">
+            <a
+              v-for="link in selectedTask.links"
+              :key="link.label"
+              :href="link.url"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="zen-text-link"
+            >
+              {{ link.label }} ↗
+            </a>
+            <span class="zen-mono zen-checks-note">· ✓ {{ selectedTask.checksLabel }}</span>
+          </div>
+        </div>
+
+        <div class="zen-inspector-body">
+          <ol class="zen-spine zen-spine--compact">
+            <template
+              v-for="node in selectedTask.timeline"
+              :key="node.id"
+            >
+              <li
+                v-if="node.epochLabel"
+                class="zen-epoch-row"
+              >
+                <span class="zen-epoch-label zen-mono">{{ node.epochLabel }}</span>
+                <span class="zen-epoch-line" />
+              </li>
+              <li :class="['zen-spine-item', `zen-spine-item--${node.tone}`, `zen-spine-role--${node.actorRole}`]">
+                <div class="zen-spine-time-col zen-num">
+                  <span class="zen-spine-time">{{ node.timeLabel }}</span>
+                  <span class="zen-spine-delta zen-mono">{{ node.deltaLabel }}</span>
+                </div>
+                <span class="zen-spine-track">
+                  <i class="zen-spine-node" />
+                </span>
+                <div class="zen-spine-body">
+                  <div class="zen-spine-head">
+                    <strong>{{ node.stage }}</strong>
+                    <span
+                      v-if="node.badge"
+                      :class="['zen-node-badge', 'zen-mono', `zen-node-badge--${node.tone}`]"
+                    >
+                      {{ node.badge }}
+                    </span>
+                  </div>
+                  <p>{{ node.summary }}</p>
+                  <div
+                    v-if="node.receipt"
+                    class="zen-spine-evidence zen-mono"
+                  >
+                    ✓ {{ node.receipt }}
+                  </div>
+                </div>
+              </li>
+            </template>
+          </ol>
+
+          <div class="zen-inspector-transcript">
+            <div class="zen-micro-heading">
+              VERIFICATION TRANSCRIPT
+            </div>
+            <div class="zen-log-excerpt zen-log-excerpt--flush">
+              <div
+                v-for="(line, idx) in selectedTask.transcriptExcerpt"
+                :key="idx"
+                class="zen-log-row"
+              >
+                <span class="zen-mono zen-num">{{ line.time }}</span>
+                <span :class="['zen-mono', 'zen-log-speaker', `zen-log-speaker--${line.role}`]">
+                  {{ line.speaker }}
+                </span>
+                <span>{{ line.text }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <!-- =======================================================================
+         CANDIDATE 3: 3 · REVIEW BLUEPRINT (3-Pane Stripe Workbench × PR Checks)
+         ======================================================================= -->
+    <div
+      v-else
+      class="zen-blueprint"
+    >
+      <!-- Left Pane: 268px Triage Rail -->
+      <aside
+        class="zen-bp-rail"
+        aria-label="Blueprint Triage Rail"
       >
         <section
           v-for="group in groupedTasks"
@@ -77,412 +825,307 @@
           <div
             v-for="item in group.items"
             :key="item.id"
-            :class="['zen-row', { active: selectedTask.id === item.id }]"
+            :class="['zen-pro-row', { active: selectedTask.id === item.id }]"
             tabindex="0"
-            @click="selectedTaskId = item.id"
-            @keydown.enter="selectedTaskId = item.id"
+            @click="selectTask(item.id)"
+            @keydown.enter="selectTask(item.id)"
           >
-            <span :class="['zen-dot', `zen-dot--${item.statusTone}`]" />
-            <span class="zen-row-title">{{ item.title }}</span>
-            <span class="zen-row-meta zen-num">{{ item.elapsed }}</span>
+            <div class="zen-pro-row-top">
+              <span :class="['zen-dot', `zen-dot--${item.statusTone}`]" />
+              <span class="zen-pro-code zen-mono">{{ item.code }}</span>
+              <span :class="['zen-pro-state', `zen-pro-state--${item.statusTone}`]">
+                {{ item.statusLabel }}
+              </span>
+              <span class="zen-pro-elapsed zen-num">{{ item.elapsed }}</span>
+            </div>
+            <div class="zen-pro-row-title">
+              {{ item.title }}
+            </div>
           </div>
         </section>
       </aside>
 
-      <main class="zen-linear-detail">
-        <div class="zen-editorial">
+      <!-- Center Pane: Iterative Run & Transcript Spine -->
+      <main class="zen-bp-center">
+        <header class="zen-bp-header">
           <div class="zen-meta-line">
-            <span :class="['zen-status-word', `zen-status-word--${selectedTask.statusTone}`]">
-              <i :class="['zen-dot', `zen-dot--${selectedTask.statusTone}`]" />
-              {{ selectedTask.statusLabel }}
-            </span>
-            <span>·</span>
+            <span class="zen-mono zen-meta-code">{{ selectedTask.code }}</span>
+            <span class="zen-sep">·</span>
             <span class="zen-mono">{{ selectedTask.workspace }}</span>
-            <span>·</span>
+            <span class="zen-sep">·</span>
             <span class="zen-mono">{{ selectedTask.branch }}</span>
-            <template v-if="selectedTask.diffStat">
-              <span>·</span>
-              <span class="zen-diff-add zen-num">+{{ selectedTask.diffStat.added }}</span>
-              <span class="zen-diff-del zen-num">−{{ selectedTask.diffStat.removed }}</span>
-            </template>
+            <span class="zen-sep">·</span>
+            <span class="zen-mono zen-num">{{ selectedTask.elapsed }} elapsed</span>
           </div>
 
-          <h1 class="zen-title">
+          <h1 class="zen-bp-title">
             {{ selectedTask.title }}
           </h1>
-
-          <p class="zen-summary">
+          <p class="zen-bp-summary">
             {{ selectedTask.outcomeSummary }}
           </p>
 
-          <div class="zen-links-bar">
-            <a
-              v-for="link in selectedTask.links"
-              :key="link.label"
-              :href="link.url"
-              target="_blank"
-              rel="noopener noreferrer"
-              class="zen-text-link"
+          <!-- Horizontal Pipeline Stage Overview Strip -->
+          <div class="zen-bp-pipeline">
+            <div
+              v-for="(node, idx) in selectedTask.timeline"
+              :key="node.id"
+              :class="['zen-bp-step', `zen-bp-step--${node.tone}`]"
             >
-              {{ link.label }} ↗
-            </a>
-            <span class="zen-checks-note">✓ {{ selectedTask.checksLabel }}</span>
-          </div>
-
-          <!-- Quiet, flat decision bar only when waiting on human -->
-          <div
-            v-if="selectedTask.decisionLine"
-            class="zen-decision-bar"
-          >
-            <span class="zen-decision-copy">{{ selectedTask.decisionLine }}</span>
-            <div class="zen-decision-btns">
-              <button
-                type="button"
-                class="zen-ghost-btn"
-              >
-                Steer…
-              </button>
-              <button
-                type="button"
-                class="zen-primary-btn"
-              >
-                Accept
-              </button>
+              <span class="zen-bp-step-num zen-mono zen-num">{{ idx + 1 }}</span>
+              <span class="zen-bp-step-name">{{ node.shortStage }}</span>
+              <span class="zen-bp-step-actor zen-mono">{{ node.deltaLabel }}</span>
             </div>
-          </div>
-
-          <div
-            v-else-if="selectedTask.liveStep"
-            class="zen-live-banner"
-          >
-            <span class="zen-pulse-dot" />
-            <span class="zen-mono">{{ selectedTask.liveStep }}</span>
-          </div>
-
-          <!-- Pure Vertical Spine Timeline (zero card-in-card boxes) -->
-          <section class="zen-spine-section">
-            <h2 class="zen-micro-heading">
-              TIMELINE
-            </h2>
-            <ol class="zen-spine">
-              <li
-                v-for="node in selectedTask.timeline"
-                :key="node.id"
-                :class="['zen-spine-item', `zen-spine-item--${node.tone}`]"
-              >
-                <span class="zen-spine-time zen-num">{{ node.timeLabel }}</span>
-                <span class="zen-spine-track">
-                  <i class="zen-spine-node" />
-                </span>
-                <div class="zen-spine-body">
-                  <div class="zen-spine-head">
-                    <strong>{{ node.stage }}</strong>
-                    <span class="zen-spine-actor">{{ node.actor }} · {{ node.deltaLabel }}</span>
-                    <button
-                      v-if="node.sessionTabId"
-                      type="button"
-                      class="zen-inline-link"
-                      @click="openLogNodeId = openLogNodeId === node.id ? null : node.id"
-                    >
-                      {{ openLogNodeId === node.id ? 'Hide log' : 'Transcript ↗' }}
-                    </button>
-                  </div>
-                  <p>{{ node.summary }}</p>
-                  <div
-                    v-if="node.receipt"
-                    class="zen-spine-receipt zen-mono"
-                  >
-                    {{ node.receipt }}
-                  </div>
-                  <div
-                    v-if="openLogNodeId === node.id"
-                    class="zen-log-excerpt"
-                  >
-                    <div
-                      v-for="(line, idx) in selectedTask.transcriptExcerpt"
-                      :key="idx"
-                      class="zen-log-row"
-                    >
-                      <span class="zen-mono">{{ line.time }}</span>
-                      <span class="zen-mono">{{ line.speaker }}</span>
-                      <span>{{ line.text }}</span>
-                    </div>
-                  </div>
-                </div>
-              </li>
-            </ol>
-          </section>
-
-          <details class="zen-meta-disclosure">
-            <summary>System metadata</summary>
-            <p class="zen-mono">
-              control={{ selectedTask.internalMeta.control }} · mode={{ selectedTask.internalMeta.mode }} · epoch={{ selectedTask.internalMeta.epoch }} · seat={{ selectedTask.internalMeta.seat }}
-            </p>
-          </details>
-        </div>
-      </main>
-    </div>
-
-    <!-- =======================================================================
-         DIRECTION 2: CALM READER (Centered Single-Column Inbox, Things 3 Style)
-         ======================================================================= -->
-    <div
-      v-else-if="activeStyle === 'focused_inbox'"
-      class="zen-reader-scroll"
-    >
-      <div class="zen-reader-column">
-        <header class="zen-reader-head">
-          <div>
-            <h1>Tasks</h1>
-            <p>Only items waiting for your judgment are expanded; active and archived work stays quiet.</p>
-          </div>
-          <div class="zen-filter-pills">
-            <button
-              v-for="f in readerFilters"
-              :key="f.id"
-              type="button"
-              :class="['zen-filter-btn', { active: readerBucket === f.id }]"
-              @click="readerBucket = f.id"
-            >
-              {{ f.label }}
-              <span class="zen-num">{{ f.count }}</span>
-            </button>
           </div>
         </header>
 
-        <div class="zen-reader-list">
-          <article
-            v-for="item in readerTasks"
-            :key="item.id"
-            :class="['zen-sheet-item', { expanded: expandedReaderId === item.id }]"
-          >
-            <div
-              class="zen-sheet-summary"
-              tabindex="0"
-              @click="toggleReaderExpand(item.id)"
-              @keydown.enter="toggleReaderExpand(item.id)"
-            >
-              <span :class="['zen-dot', `zen-dot--${item.statusTone}`]" />
-              <span class="zen-sheet-title">{{ item.title }}</span>
-              <span class="zen-sheet-ws zen-mono">{{ item.workspace }}</span>
-              <span class="zen-sheet-state">{{ item.statusLabel }}</span>
-              <span class="zen-sheet-time zen-num">{{ item.elapsed }}</span>
-            </div>
-
-            <!-- Smooth in-place editorial sheet when expanded -->
-            <div
-              v-if="expandedReaderId === item.id"
-              class="zen-sheet-body"
-            >
-              <p class="zen-sheet-outcome">
-                {{ item.outcomeSummary }}
-              </p>
-
-              <!-- Minimalist horizontal step track -->
-              <div class="zen-step-track">
-                <div
-                  v-for="(node, idx) in item.timeline"
-                  :key="node.id"
-                  :class="['zen-step-cell', `zen-step-cell--${node.tone}`]"
-                >
-                  <div class="zen-step-line">
-                    <i class="zen-step-dot" />
-                    <span
-                      v-if="idx < item.timeline.length - 1"
-                      class="zen-step-connector"
-                    />
-                  </div>
-                  <strong>{{ node.shortStage }}</strong>
-                  <span class="zen-num">{{ node.timeLabel }}</span>
-                </div>
-              </div>
-
-              <div class="zen-sheet-footer">
-                <div class="zen-sheet-links">
-                  <a
-                    v-for="link in item.links"
-                    :key="link.label"
-                    :href="link.url"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    class="zen-text-link"
-                  >
-                    {{ link.label }} ↗
-                  </a>
-                  <span class="zen-checks-note">· ✓ {{ item.checksLabel }}</span>
-                </div>
-
-                <div
-                  v-if="item.bucket === 'needs_you'"
-                  class="zen-decision-btns"
-                >
-                  <button
-                    type="button"
-                    class="zen-ghost-btn"
-                  >
-                    Steer…
-                  </button>
-                  <button
-                    type="button"
-                    class="zen-primary-btn"
-                  >
-                    Accept
-                  </button>
-                </div>
-              </div>
-            </div>
-          </article>
-        </div>
-      </div>
-    </div>
-
-    <!-- =======================================================================
-         DIRECTION 3: TRACE LEDGER (Vercel / Raycast Swiss Precision Table)
-         ======================================================================= -->
-    <div
-      v-else
-      class="zen-ledger-wrap"
-    >
-      <div class="zen-ledger-table-scroll">
-        <table class="zen-ledger">
-          <thead>
-            <tr>
-              <th class="col-status">
-                STATE
-              </th>
-              <th class="col-task">
-                TASK
-              </th>
-              <th class="col-repo">
-                BRANCH / DIFF
-              </th>
-              <th class="col-trace">
-                PIPELINE STAGES
-              </th>
-              <th class="col-checks">
-                VERIFICATION
-              </th>
-              <th class="col-time">
-                TIME
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="item in filteredTasks"
-              :key="item.id"
-              :class="{ selected: selectedTask.id === item.id }"
-              tabindex="0"
-              @click="selectedTaskId = item.id"
-              @keydown.enter="selectedTaskId = item.id"
-            >
-              <td>
-                <span class="zen-ledger-state">
-                  <i :class="['zen-dot', `zen-dot--${item.statusTone}`]" />
-                  {{ item.bucket === 'needs_you' ? 'Review' : item.bucket === 'working' ? 'Running' : 'Done' }}
-                </span>
-              </td>
-              <td>
-                <div class="zen-ledger-title">
-                  {{ item.title }}
-                </div>
-                <div class="zen-ledger-sub">
-                  {{ item.liveStep || item.outcomeSummary }}
-                </div>
-              </td>
-              <td class="zen-mono">
-                <div>{{ item.workspace }}</div>
-                <div class="zen-ledger-diff">
-                  <span>{{ item.branch }}</span>
-                  <template v-if="item.diffStat">
-                    <span class="zen-diff-add">+{{ item.diffStat.added }}</span>
-                    <span class="zen-diff-del">−{{ item.diffStat.removed }}</span>
-                  </template>
-                </div>
-              </td>
-              <td>
-                <div class="zen-pip-bar">
-                  <span
-                    v-for="node in item.timeline"
-                    :key="node.id"
-                    :class="['zen-pip', `zen-pip--${node.tone}`]"
-                    :title="`${node.stage} (${node.deltaLabel})`"
-                  />
-                  <span class="zen-pip-caption">{{ item.statusLabel }}</span>
-                </div>
-              </td>
-              <td class="zen-mono zen-ledger-checks">
-                {{ item.checksLabel }}
-              </td>
-              <td class="zen-num zen-ledger-time">
-                {{ item.elapsed }}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <!-- Crisp, monochrome bottom inspector strip -->
-      <footer class="zen-ledger-drawer">
-        <div class="zen-ledger-drawer-col">
-          <div class="zen-drawer-head">
-            <strong>{{ selectedTask.title }}</strong>
-            <div class="zen-sheet-links">
-              <a
-                v-for="link in selectedTask.links"
-                :key="link.label"
-                :href="link.url"
-                target="_blank"
-                rel="noopener noreferrer"
-                class="zen-text-link"
-              >
-                {{ link.label }} ↗
-              </a>
-            </div>
+        <section class="zen-bp-spine-wrap">
+          <div class="zen-spine-header">
+            <h2 class="zen-micro-heading">
+              CHRONOLOGICAL ENGINEERING SPINE
+            </h2>
+            <span class="zen-mono zen-spine-overview">
+              {{ selectedTask.consensus.roundsLabel }}
+            </span>
           </div>
-          <ol class="zen-compact-stages">
-            <li
+
+          <ol class="zen-spine">
+            <template
               v-for="node in selectedTask.timeline"
               :key="node.id"
             >
-              <span class="zen-mono zen-num">{{ node.timeLabel }}</span>
-              <i :class="['zen-pip-dot', `zen-pip--${node.tone}`]" />
-              <strong>{{ node.shortStage }}</strong>
-              <span class="zen-compact-summary">{{ node.summary }}</span>
-            </li>
-          </ol>
-        </div>
+              <li
+                v-if="node.epochLabel"
+                class="zen-epoch-row"
+              >
+                <span class="zen-epoch-label zen-mono">{{ node.epochLabel }}</span>
+                <span class="zen-epoch-line" />
+              </li>
 
-        <div class="zen-ledger-drawer-col zen-ledger-log">
-          <div class="zen-drawer-head">
-            <span class="zen-micro-heading">SESSION STREAM</span>
-            <button
-              v-if="selectedTask.bucket === 'needs_you'"
-              type="button"
-              class="zen-primary-btn zen-primary-btn--sm"
-            >
-              Accept Deliverable
-            </button>
-          </div>
+              <li :class="['zen-spine-item', `zen-spine-item--${node.tone}`, `zen-spine-role--${node.actorRole}`]">
+                <div class="zen-spine-time-col zen-num">
+                  <span class="zen-spine-time">{{ node.timeLabel }}</span>
+                  <span class="zen-spine-delta zen-mono">{{ node.deltaLabel }}</span>
+                </div>
+
+                <span class="zen-spine-track">
+                  <i class="zen-spine-node" />
+                </span>
+
+                <div class="zen-spine-body">
+                  <div class="zen-spine-head">
+                    <strong>{{ node.stage }}</strong>
+                    <span class="zen-spine-actor">
+                      {{ node.actor }}
+                      <em class="zen-role-tag">{{ node.actorRole }}</em>
+                    </span>
+                    <span
+                      v-if="node.badge"
+                      :class="['zen-node-badge', 'zen-mono', `zen-node-badge--${node.tone}`]"
+                    >
+                      {{ node.badge }}
+                    </span>
+                  </div>
+
+                  <p>{{ node.summary }}</p>
+
+                  <div
+                    v-if="node.filesTouched || node.receipt"
+                    class="zen-spine-evidence zen-mono"
+                  >
+                    <span
+                      v-if="node.filesTouched"
+                      class="zen-evidence-files"
+                    >
+                      {{ node.filesTouched }}
+                    </span>
+                    <span
+                      v-if="node.filesTouched && node.receipt"
+                      class="zen-sep"
+                    >·</span>
+                    <span
+                      v-if="node.receipt"
+                      class="zen-evidence-receipt"
+                    >
+                      ✓ {{ node.receipt }}
+                    </span>
+                  </div>
+                </div>
+              </li>
+            </template>
+          </ol>
+        </section>
+
+        <section class="zen-bp-transcript-section">
+          <h2 class="zen-micro-heading">
+            SESSION VERIFICATION STREAM
+          </h2>
           <div class="zen-log-excerpt zen-log-excerpt--flush">
             <div
               v-for="(line, idx) in selectedTask.transcriptExcerpt"
               :key="idx"
               class="zen-log-row"
             >
-              <span class="zen-mono">{{ line.time }}</span>
-              <span class="zen-mono">{{ line.speaker }}</span>
+              <span class="zen-mono zen-num">{{ line.time }}</span>
+              <span :class="['zen-mono', 'zen-log-speaker', `zen-log-speaker--${line.role}`]">
+                {{ line.speaker }}
+              </span>
               <span>{{ line.text }}</span>
             </div>
           </div>
+        </section>
+      </main>
+
+      <!-- Right Pane: 332px Deliverable & Verification Spec Sheet -->
+      <aside
+        class="zen-bp-spec"
+        aria-label="Deliverable and Verification Spec Sheet"
+      >
+        <!-- Block 1: Sign-off Gate -->
+        <div class="zen-spec-block">
+          <div class="zen-spec-block-head">
+            <span class="zen-micro-heading">SIGN-OFF GATE</span>
+            <span :class="['zen-verdict-badge', 'zen-mono', `zen-verdict-badge--${selectedTask.consensus.verdictTone}`]">
+              {{ selectedTask.consensus.verdictLabel }}
+            </span>
+          </div>
+          <p class="zen-bp-gate-copy">
+            {{ selectedTask.decisionLine || selectedTask.liveStep || selectedTask.consensus.roundsLabel }}
+          </p>
+          <div
+            v-if="selectedTask.bucket === 'needs_you'"
+            class="zen-bp-cta-row"
+          >
+            <button
+              type="button"
+              class="zen-primary-btn zen-btn-full"
+              @click="triggerAccept(selectedTask.id)"
+            >
+              {{ acceptedIds.has(selectedTask.id) ? 'Deliverable Accepted' : 'Accept Deliverable' }}
+            </button>
+            <button
+              type="button"
+              class="zen-ghost-btn"
+            >
+              Steer…
+            </button>
+          </div>
         </div>
-      </footer>
+
+        <!-- Block 2: Heterogeneous Consensus Matrix -->
+        <div class="zen-spec-block">
+          <div class="zen-micro-heading">
+            HETEROGENEOUS CONSENSUS
+          </div>
+          <dl class="zen-kv-list">
+            <div class="zen-kv-row">
+              <dt>Implementer</dt>
+              <dd class="zen-mono">
+                {{ selectedTask.consensus.implementer }}
+              </dd>
+            </div>
+            <div class="zen-kv-row">
+              <dt>Reviewer</dt>
+              <dd class="zen-mono">
+                {{ selectedTask.consensus.reviewer }}
+              </dd>
+            </div>
+            <div class="zen-kv-row">
+              <dt>Convergence</dt>
+              <dd>
+                {{ selectedTask.consensus.roundsLabel }}
+              </dd>
+            </div>
+            <div class="zen-kv-row">
+              <dt>Key Metric</dt>
+              <dd class="zen-mono zen-num">
+                {{ selectedTask.consensus.metricHighlight }}
+              </dd>
+            </div>
+          </dl>
+        </div>
+
+        <!-- Block 3: Diff Stat & Proportion Bar -->
+        <div
+          v-if="selectedTask.diffStat"
+          class="zen-spec-block"
+        >
+          <div class="zen-spec-block-head">
+            <span class="zen-micro-heading">DIFF SCOPE</span>
+            <span class="zen-mono zen-num">{{ selectedTask.diffStat.files }} files</span>
+          </div>
+          <div class="zen-diff-summary-row zen-mono zen-num">
+            <span class="zen-diff-add">+{{ selectedTask.diffStat.added }} added</span>
+            <span class="zen-diff-del">−{{ selectedTask.diffStat.removed }} removed</span>
+          </div>
+          <div class="zen-diff-bar">
+            <span
+              class="zen-diff-bar-add"
+              :style="{ width: `${diffAddPct(selectedTask)}%` }"
+            />
+            <span
+              class="zen-diff-bar-del"
+              :style="{ width: `${100 - diffAddPct(selectedTask)}%` }"
+            />
+          </div>
+        </div>
+
+        <!-- Block 4: Deliverable Artifacts -->
+        <div class="zen-spec-block">
+          <div class="zen-micro-heading">
+            DELIVERABLE ARTIFACTS
+          </div>
+          <div class="zen-bp-artifacts">
+            <a
+              v-for="link in selectedTask.links"
+              :key="link.label"
+              :href="link.url"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="zen-bp-artifact-card"
+            >
+              <div class="zen-bp-artifact-top">
+                <strong>{{ link.label }}</strong>
+                <span>↗</span>
+              </div>
+              <span class="zen-mono zen-bp-artifact-meta">{{ link.meta }}</span>
+            </a>
+          </div>
+        </div>
+
+        <!-- Block 5: Verification & Governance -->
+        <div class="zen-spec-block">
+          <div class="zen-micro-heading">
+            VERIFICATION &amp; GOVERNANCE
+          </div>
+          <dl class="zen-kv-list">
+            <div class="zen-kv-row">
+              <dt>Checks</dt>
+              <dd class="zen-mono">
+                ✓ {{ selectedTask.checksLabel }}
+              </dd>
+            </div>
+            <div class="zen-kv-row">
+              <dt>Control</dt>
+              <dd class="zen-mono">
+                {{ selectedTask.internalMeta.control }} · {{ selectedTask.internalMeta.mode }}
+              </dd>
+            </div>
+            <div class="zen-kv-row">
+              <dt>Session Seat</dt>
+              <dd class="zen-mono">
+                epoch {{ selectedTask.internalMeta.epoch }} · {{ selectedTask.internalMeta.seat }}
+              </dd>
+            </div>
+          </dl>
+        </div>
+      </aside>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   DEMO_STYLES,
   DEMO_TASKS,
@@ -506,13 +1149,8 @@ function normalizeStyle(raw?: string): DemoStyleId {
 const activeStyle = ref<DemoStyleId>(normalizeStyle(props.initialStyle))
 const workspaceFilter = ref<string>('all')
 const selectedTaskId = ref<string>(DEMO_TASKS[0].id)
-const openLogNodeId = ref<string | null>(null)
-const readerBucket = ref<'all' | 'needs_you' | 'working' | 'done'>('all')
-const expandedReaderId = ref<string | null>(DEMO_TASKS[0].id)
-
-function toggleReaderExpand(id: string) {
-  expandedReaderId.value = expandedReaderId.value === id ? null : id
-}
+const openLogNodeId = ref<string | null>('t3')
+const acceptedIds = ref<Set<string>>(new Set())
 
 const currentStyleMeta = computed(() =>
   DEMO_STYLES.find(s => s.id === activeStyle.value) ?? DEMO_STYLES[0],
@@ -526,63 +1164,98 @@ const filteredTasks = computed<DemoTaskRecord[]>(() =>
     : DEMO_TASKS.filter(t => t.workspace === workspaceFilter.value),
 )
 
+const needsYouTasks = computed(() => filteredTasks.value.filter(t => t.bucket === 'needs_you'))
+const workingTasks = computed(() => filteredTasks.value.filter(t => t.bucket === 'working'))
+const doneTasks = computed(() => filteredTasks.value.filter(t => t.bucket === 'done'))
+
 const groupedTasks = computed(() => [
-  {
-    key: 'needs_you',
-    label: 'NEEDS YOU',
-    items: filteredTasks.value.filter(t => t.bucket === 'needs_you'),
-  },
-  {
-    key: 'working',
-    label: 'ACTIVE',
-    items: filteredTasks.value.filter(t => t.bucket === 'working'),
-  },
-  {
-    key: 'done',
-    label: 'RECENT',
-    items: filteredTasks.value.filter(t => t.bucket === 'done'),
-  },
+  { key: 'needs_you', label: 'NEEDS YOU', items: needsYouTasks.value },
+  { key: 'working', label: 'ACTIVE', items: workingTasks.value },
+  { key: 'done', label: 'RECENT', items: doneTasks.value },
 ])
-
-const readerFilters = computed(() => [
-  { id: 'all' as const, label: 'All', count: filteredTasks.value.length },
-  { id: 'needs_you' as const, label: 'Needs you', count: filteredTasks.value.filter(t => t.bucket === 'needs_you').length },
-  { id: 'working' as const, label: 'Active', count: filteredTasks.value.filter(t => t.bucket === 'working').length },
-  { id: 'done' as const, label: 'Done', count: filteredTasks.value.filter(t => t.bucket === 'done').length },
-])
-
-const readerTasks = computed(() =>
-  readerBucket.value === 'all'
-    ? filteredTasks.value
-    : filteredTasks.value.filter(t => t.bucket === readerBucket.value),
-)
 
 const selectedTask = computed<DemoTaskRecord>(() =>
   filteredTasks.value.find(t => t.id === selectedTaskId.value)
   ?? filteredTasks.value[0]
   ?? DEMO_TASKS[0],
 )
+
+function selectTask(id: string) {
+  selectedTaskId.value = id
+  if (id === '47e984bf') {
+    openLogNodeId.value = 't3'
+  } else {
+    const task = DEMO_TASKS.find(t => t.id === id)
+    openLogNodeId.value = task?.timeline.find(n => n.sessionTabId)?.id ?? null
+  }
+}
+
+function triggerAccept(id: string) {
+  const next = new Set(acceptedIds.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  acceptedIds.value = next
+}
+
+function diffAddPct(task: DemoTaskRecord): number {
+  if (!task.diffStat) return 100
+  const total = task.diffStat.added + task.diffStat.removed
+  return total <= 0 ? 100 : Math.max(8, Math.min(92, Math.round((task.diffStat.added / total) * 100)))
+}
+
+function handleKeydown(e: KeyboardEvent) {
+  const target = e.target as HTMLElement | null
+  if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT')) return
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+    e.preventDefault()
+    triggerAccept(selectedTask.value.id)
+    return
+  }
+  if (e.metaKey || e.ctrlKey || e.altKey) return
+  if (e.key === '1') activeStyle.value = 'linear_zen'
+  else if (e.key === '2') activeStyle.value = 'focused_inbox'
+  else if (e.key === '3') activeStyle.value = 'precision_grid'
+  else if (e.key === 'j' || e.key === 'ArrowDown') {
+    const list = filteredTasks.value
+    if (!list.length) return
+    const idx = list.findIndex(t => t.id === selectedTask.value.id)
+    selectTask(list[(idx + 1) % list.length].id)
+  } else if (e.key === 'k' || e.key === 'ArrowUp') {
+    const list = filteredTasks.value
+    if (!list.length) return
+    const idx = list.findIndex(t => t.id === selectedTask.value.id)
+    selectTask(list[(idx - 1 + list.length) % list.length].id)
+  }
+}
+
+onMounted(() => window.addEventListener('keydown', handleKeydown))
+onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown))
 </script>
 
 <style scoped>
 /* ============================================================================
-   DESIGN CRAFT TOKENS (Radix Slate Dark + Geist Hairline + Linear Scarcity)
+   DESIGN CRAFT TOKENS — High-Contrast Dark & Light (WCAG >= 5.0:1 guaranteed)
    ============================================================================ */
 .zen-shell {
   --z-bg-canvas: #111113;
   --z-bg-panel: #16171a;
-  --z-bg-elevated: #1c1d21;
-  --z-bg-hover: rgba(255, 255, 255, 0.04);
-  --z-bg-selected: rgba(255, 255, 255, 0.065);
-  --z-line: rgba(255, 255, 255, 0.075);
-  --z-line-strong: rgba(255, 255, 255, 0.14);
+  --z-bg-elevated: #1c1d22;
+  --z-bg-hover: #1f2127;
+  --z-bg-selected: #22242b;
+  --z-line: #2a2d35;
+  --z-line-subtle: #1f2229;
+  --z-line-strong: #3a3f4b;
   --z-fg-1: #edeef0;
-  --z-fg-2: #a0a5ad;
-  --z-fg-3: #696e77;
-  --z-accent: #5e6ad2;
-  --z-accent-text: #9aa6ff;
-  --z-amber: #e5a44a;
-  --z-green: #4cb782;
+  --z-fg-2: #b8bdc7;
+  --z-fg-3: #949aa4;
+  --z-accent: #3d4fd6;
+  --z-accent-text: #a5b4ff;
+  --z-amber: #f0b45a;
+  --z-amber-bg: #261e12;
+  --z-green: #5cd696;
+  --z-green-bg: #12261c;
+  --z-live-bg: #171c30;
+  --z-red: #ff8a80;
 
   flex: 1;
   min-height: 0;
@@ -597,76 +1270,63 @@ const selectedTask = computed<DemoTaskRecord>(() =>
 }
 
 :root[data-theme='light'] .zen-shell {
-  --z-bg-canvas: #fafafa;
-  --z-bg-panel: #f4f4f5;
+  --z-bg-canvas: #f8f9fa;
+  --z-bg-panel: #f1f3f5;
   --z-bg-elevated: #ffffff;
-  --z-bg-hover: rgba(0, 0, 0, 0.035);
-  --z-bg-selected: rgba(0, 0, 0, 0.06);
-  --z-line: rgba(0, 0, 0, 0.08);
-  --z-line-strong: rgba(0, 0, 0, 0.16);
-  --z-fg-1: #18181b;
-  --z-fg-2: #52525b;
-  --z-fg-3: #8a8f98;
-  --z-accent: #4f5bd5;
-  --z-accent-text: #434ec2;
-  --z-amber: #c97a16;
-  --z-green: #1e8e5a;
+  --z-bg-hover: #e9ecef;
+  --z-bg-selected: #e5e8ef;
+  --z-line: #d5d9e2;
+  --z-line-subtle: #e4e7ee;
+  --z-line-strong: #b8bfcc;
+  --z-fg-1: #141619;
+  --z-fg-2: #353942;
+  --z-fg-3: #505664;
+  --z-accent: #3645c4;
+  --z-accent-text: #313fb2;
+  --z-amber: #944f04;
+  --z-amber-bg: #fef3e2;
+  --z-green: #126940;
+  --z-green-bg: #e6f6ee;
+  --z-live-bg: #e8ecfc;
+  --z-red: #b42824;
 }
 
-.zen-num {
-  font-variant-numeric: tabular-nums;
-}
+.zen-num { font-variant-numeric: tabular-nums; }
+.zen-mono { font-family: var(--ch-font-mono); font-size: 12px; }
+.zen-icon { width: 14px; height: 14px; flex: 0 0 14px; }
 
-.zen-mono {
-  font-family: var(--ch-font-mono);
-  font-size: 12px;
-}
-
-/* Top Bar — 44px single quiet navigation line */
+/* Top Bar — 42px single quiet navigation line */
 .zen-topbar {
-  height: 44px;
-  flex: 0 0 44px;
+  min-height: 42px;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 0 20px;
+  gap: 14px;
+  padding: 0 18px;
   border-bottom: 1px solid var(--z-line);
   background: var(--z-bg-canvas);
 }
-
-.zen-topbar-left,
-.zen-topbar-right {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.zen-brand {
-  font-weight: 600;
-  color: var(--z-fg-1);
-  letter-spacing: -0.01em;
-}
-
-.zen-sep {
-  color: var(--z-fg-3);
-}
-
+.zen-topbar-left, .zen-topbar-right { display: flex; align-items: center; gap: 8px; }
+.zen-brand { font-weight: 600; color: var(--z-fg-1); letter-spacing: -0.01em; }
+.zen-sep { color: var(--z-fg-3); }
 .zen-ws-select {
   height: 26px;
   padding: 0 6px;
-  border: 0;
+  border: 1px solid transparent;
   border-radius: 5px;
-  background: transparent;
+  background: var(--z-bg-canvas);
   color: var(--z-fg-2);
-  font-size: 13px;
+  font-size: 12.5px;
   cursor: pointer;
 }
-.zen-ws-select:hover {
-  background: var(--z-bg-hover);
-  color: var(--z-fg-1);
+.zen-ws-select:hover { background: var(--z-bg-hover); color: var(--z-fg-1); }
+.zen-topbar-summary {
+  padding-left: 6px;
+  border-left: 1px solid var(--z-line);
+  font-size: 11.5px;
+  color: var(--z-fg-3);
 }
-
 .zen-style-tabs {
   display: inline-flex;
   align-items: center;
@@ -676,7 +1336,6 @@ const selectedTask = computed<DemoTaskRecord>(() =>
   background: var(--z-bg-panel);
   border: 1px solid var(--z-line);
 }
-
 .zen-style-tab {
   height: 26px;
   padding: 0 12px;
@@ -687,56 +1346,43 @@ const selectedTask = computed<DemoTaskRecord>(() =>
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
-  transition: color 120ms ease, background-color 120ms ease;
 }
-.zen-style-tab:hover {
-  color: var(--z-fg-1);
-}
+.zen-style-tab:hover { color: var(--z-fg-1); }
 .zen-style-tab.active {
   background: var(--z-bg-elevated);
   color: var(--z-fg-1);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16);
 }
-
-.zen-ref-hint {
-  font-size: 12px;
-  color: var(--z-fg-3);
-}
+.zen-tab-short { display: none; }
+.zen-ref-hint { font-size: 12px; color: var(--z-fg-3); }
 
 .zen-ghost-btn {
   height: 28px;
   padding: 0 10px;
   border: 1px solid var(--z-line-strong);
   border-radius: 6px;
-  background: transparent;
-  color: var(--z-fg-2);
+  background: var(--z-bg-elevated);
+  color: var(--z-fg-1);
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
 }
-.zen-ghost-btn:hover {
-  color: var(--z-fg-1);
-  background: var(--z-bg-hover);
-}
-
+.zen-ghost-btn:hover { background: var(--z-bg-hover); }
 .zen-primary-btn {
   height: 28px;
   padding: 0 12px;
   border: 0;
   border-radius: 6px;
   background: var(--z-accent);
-  color: #fff;
+  color: #ffffff;
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
 }
-.zen-primary-btn--sm {
-  height: 26px;
-  padding: 0 10px;
-}
+.zen-btn-sm { height: 26px; padding: 0 10px; }
+.zen-btn-full { flex: 1; }
 
-/* Status Dots — 6px restrained punctuation */
-.zen-dot {
+.zen-dot, .zen-pulse-dot {
   width: 6px;
   height: 6px;
   flex: 0 0 6px;
@@ -744,99 +1390,124 @@ const selectedTask = computed<DemoTaskRecord>(() =>
   background: var(--z-fg-3);
 }
 .zen-dot--attention { background: var(--z-amber); }
-.zen-dot--working { background: var(--z-accent-text); }
-.zen-dot--done { background: var(--z-green); opacity: 0.75; }
+.zen-dot--working, .zen-pulse-dot { background: var(--z-accent-text); }
+.zen-dot--done { background: var(--z-green); }
 
 /* ============================================================================
-   DIRECTION 1: LINEAR SPLIT
+   CANDIDATE 1: 1 · LINEAR TRIAGE PRO
    ============================================================================ */
 .zen-linear {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 380px minmax(0, 1fr);
+  grid-template-columns: 360px minmax(0, 1fr);
   overflow: hidden;
 }
-
 .zen-linear-list {
   border-right: 1px solid var(--z-line);
   background: var(--z-bg-panel);
-  overflow-y: auto;
-  padding: 16px 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
-
-.zen-group + .zen-group {
-  margin-top: 20px;
-}
-
+.zen-linear-groups { flex: 1; overflow-y: auto; padding: 10px 0; }
+.zen-group + .zen-group { margin-top: 12px; }
 .zen-group-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 18px 6px;
+  padding: 0 16px 4px;
   font-size: 11px;
-  font-weight: 500;
+  font-weight: 600;
   letter-spacing: 0.06em;
   color: var(--z-fg-3);
 }
-
-.zen-row {
+.zen-pro-row {
   position: relative;
-  height: 38px;
-  padding: 0 18px;
+  padding: 8px 16px 9px;
+  border-bottom: 1px solid var(--z-line-subtle);
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  gap: 3px;
   cursor: pointer;
-  transition: background-color 100ms ease;
 }
-.zen-row:hover {
-  background: var(--z-bg-hover);
-}
-.zen-row.active {
-  background: var(--z-bg-selected);
-}
-.zen-row.active::before {
+.zen-pro-row:hover { background: var(--z-bg-hover); }
+.zen-pro-row.active { background: var(--z-bg-selected); }
+.zen-pro-row.active::before {
   content: '';
   position: absolute;
   left: 0;
-  top: 7px;
-  bottom: 7px;
+  top: 0;
+  bottom: 0;
   width: 2px;
-  border-radius: 0 2px 2px 0;
   background: var(--z-accent-text);
 }
-
-.zen-row-title {
-  flex: 1;
-  min-width: 0;
+.zen-pro-row-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.zen-pro-code { font-size: 11.5px; font-weight: 600; color: var(--z-fg-1); }
+.zen-pro-ws {
+  font-size: 11.5px;
+  color: var(--z-fg-3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--z-fg-2);
-  font-size: 13px;
 }
-.zen-row.active .zen-row-title {
-  color: var(--z-fg-1);
+.zen-pro-state {
+  margin-left: auto;
+  font-size: 11px;
   font-weight: 500;
+  color: var(--z-fg-2);
+  white-space: nowrap;
 }
+.zen-pro-state--attention { color: var(--z-amber); }
+.zen-pro-state--working { color: var(--z-accent-text); }
+.zen-pro-state--done { color: var(--z-green); }
+.zen-pro-elapsed { font-size: 11.5px; color: var(--z-fg-3); flex: 0 0 auto; }
+.zen-pro-row-title {
+  font-size: 13px;
+  color: var(--z-fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zen-pro-row.active .zen-pro-row-title { color: var(--z-fg-1); font-weight: 500; }
+.zen-pro-progress-track {
+  margin-top: 3px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--z-line);
+  overflow: hidden;
+}
+.zen-pro-progress-fill { height: 100%; background: var(--z-accent-text); }
 
-.zen-row-meta {
+.zen-rail-footer {
   flex: 0 0 auto;
-  font-size: 12px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--z-line);
+  background: var(--z-bg-canvas);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
   color: var(--z-fg-3);
 }
-
-.zen-linear-detail {
-  overflow-y: auto;
-  padding: 36px 48px 56px;
+.zen-kbd-group { display: inline-flex; align-items: center; gap: 3px; }
+.zen-kbd-group span { margin-left: 2px; }
+.zen-kbd-group kbd {
+  padding: 1px 4px;
+  border: 1px solid var(--z-line-strong);
+  border-radius: 3px;
+  background: var(--z-bg-panel);
+  color: var(--z-fg-2);
+  font-family: var(--ch-font-mono);
+  font-size: 10.5px;
+  line-height: 1.2;
 }
 
-.zen-editorial {
-  max-width: 660px;
-  margin: 0 auto;
-}
-
+/* Right Editorial Canvas */
+.zen-linear-detail { overflow-y: auto; padding: 16px 36px 28px; }
+.zen-editorial { max-width: 740px; margin: 0 auto; }
 .zen-meta-line {
   display: flex;
   flex-wrap: wrap;
@@ -844,655 +1515,667 @@ const selectedTask = computed<DemoTaskRecord>(() =>
   gap: 8px;
   font-size: 12px;
   color: var(--z-fg-3);
-  margin-bottom: 10px;
+  margin-bottom: 6px;
 }
-
-.zen-status-word {
+.zen-status-pill {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-weight: 500;
-  color: var(--z-fg-2);
-}
-.zen-status-word--attention { color: var(--z-amber); }
-.zen-status-word--working { color: var(--z-accent-text); }
-
-.zen-diff-add { color: var(--z-green); }
-.zen-diff-del { color: #e5726b; }
-
-.zen-title {
-  margin: 0 0 12px;
-  font-size: 20px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--z-line-strong);
+  background: var(--z-bg-panel);
+  font-size: 11.5px;
   font-weight: 600;
-  line-height: 1.35;
-  letter-spacing: -0.015em;
   color: var(--z-fg-1);
 }
-
+.zen-status-pill--attention { color: var(--z-amber); background: var(--z-amber-bg); }
+.zen-status-pill--working { color: var(--z-accent-text); background: var(--z-live-bg); }
+.zen-status-pill--done { color: var(--z-green); background: var(--z-green-bg); }
+.zen-meta-code { font-weight: 600; color: var(--z-fg-1); }
+.zen-branch-chip { display: inline-flex; align-items: center; gap: 4px; color: var(--z-fg-2); }
+.zen-meta-updated { margin-left: auto; color: var(--z-fg-3); }
+.zen-diff-add { color: var(--z-green); font-weight: 500; }
+.zen-diff-del { color: var(--z-red); font-weight: 500; }
+.zen-title {
+  margin: 0 0 4px;
+  font-size: 19px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.018em;
+  color: var(--z-fg-1);
+}
 .zen-summary {
-  margin: 0 0 16px;
-  font-size: 14px;
-  line-height: 1.65;
+  margin: 0 0 11px;
+  font-size: 13px;
+  line-height: 1.52;
   color: var(--z-fg-2);
 }
 
-.zen-links-bar {
+/* Architectural Deliverable & Consensus Spec Frame */
+.zen-spec-frame {
+  border: 1px solid var(--z-line-strong);
+  border-radius: 8px;
+  background: var(--z-bg-panel);
+  overflow: hidden;
+}
+.zen-spec-gate {
+  padding: 8px 14px;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 16px;
-  padding-bottom: 20px;
-  border-bottom: 1px solid var(--z-line);
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--z-bg-elevated);
 }
+.zen-spec-gate-left {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+.zen-verdict-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  border: 1px solid var(--z-line-strong);
+  color: var(--z-fg-1);
+  background: var(--z-bg-panel);
+}
+.zen-verdict-badge--pass { color: var(--z-green); background: var(--z-green-bg); }
+.zen-verdict-badge--live { color: var(--z-accent-text); background: var(--z-live-bg); }
+.zen-verdict-badge--auto { color: var(--z-fg-2); }
+.zen-decision-copy { font-size: 12.5px; color: var(--z-fg-1); line-height: 1.38; }
+.zen-live-step-text { color: var(--z-fg-2); }
+.zen-decision-btns { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
+.zen-spec-progress-wrap { display: flex; align-items: center; gap: 8px; }
+.zen-spec-progress-bar {
+  width: 110px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--z-line);
+  overflow: hidden;
+}
+.zen-spec-progress-fill { height: 100%; background: var(--z-accent-text); }
+.zen-checks-pill { color: var(--z-green); }
 
+.zen-spec-consensus {
+  border-top: 1px solid var(--z-line);
+  display: grid;
+  grid-template-columns: 0.9fr 1fr 1.35fr;
+}
+.zen-consensus-cell {
+  padding: 6px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.zen-consensus-cell + .zen-consensus-cell { border-left: 1px solid var(--z-line); }
+.zen-cell-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--z-fg-3);
+}
+.zen-cell-val {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--z-fg-1);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zen-arrow { color: var(--z-fg-3); }
+
+.zen-spec-artifacts {
+  border-top: 1px solid var(--z-line);
+  padding: 6px 14px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.zen-artifacts-list { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
+.zen-artifact-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  text-decoration: none;
+  color: var(--z-fg-1);
+  font-size: 12px;
+}
+.zen-artifact-row:hover .zen-artifact-label {
+  color: var(--z-accent-text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.zen-artifact-icon, .zen-artifact-label { color: var(--z-accent-text); font-weight: 500; }
+.zen-artifact-meta, .zen-artifact-ext { color: var(--z-fg-3); font-size: 11px; }
+.zen-checks-note { font-size: 11.5px; color: var(--z-green); }
 .zen-text-link {
   color: var(--z-accent-text);
   font-size: 12.5px;
   font-weight: 500;
   text-decoration: none;
 }
-.zen-text-link:hover {
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
+.zen-text-link:hover { text-decoration: underline; text-underline-offset: 3px; }
 
-.zen-checks-note {
-  font-size: 12px;
-  color: var(--z-fg-3);
-}
-
-.zen-decision-bar {
-  margin-top: 20px;
-  padding: 12px 16px;
-  border-radius: 8px;
-  background: var(--z-bg-panel);
-  border: 1px solid var(--z-line-strong);
+/* Sculptural Epoch Run Spine */
+.zen-spine-section { margin-top: 14px; }
+.zen-spine-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px;
+  margin-bottom: 6px;
 }
-
-.zen-decision-copy {
-  font-size: 13px;
-  color: var(--z-fg-1);
-  line-height: 1.45;
-}
-
-.zen-decision-btns {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.zen-live-banner {
-  margin-top: 20px;
-  padding: 10px 14px;
-  border-radius: 8px;
-  background: var(--z-bg-panel);
-  border: 1px solid var(--z-line);
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  color: var(--z-fg-2);
-}
-
-.zen-pulse-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--z-accent-text);
-}
-
-/* Spine Timeline — pure typography & single 1px vertical thread */
-.zen-spine-section {
-  margin-top: 32px;
-}
-
 .zen-micro-heading {
-  margin: 0 0 16px;
+  margin: 0;
   font-size: 11px;
-  font-weight: 500;
+  font-weight: 600;
   letter-spacing: 0.07em;
   color: var(--z-fg-3);
 }
-
-.zen-spine {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+.zen-spine-overview { color: var(--z-fg-3); font-size: 11.5px; }
+.zen-spine { list-style: none; margin: 0; padding: 0; }
+.zen-epoch-row { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+.zen-epoch-row:first-child { margin-top: 0; }
+.zen-epoch-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--z-fg-3);
+  white-space: nowrap;
 }
+.zen-epoch-line { flex: 1; height: 1px; background: var(--z-line); }
 
 .zen-spine-item {
   display: grid;
   grid-template-columns: 44px 20px minmax(0, 1fr);
   gap: 0 8px;
 }
-
-.zen-spine-time {
-  font-size: 12px;
-  color: var(--z-fg-3);
-  padding-top: 1px;
-}
-
-.zen-spine-track {
-  position: relative;
-  display: flex;
-  justify-content: center;
-}
+.zen-spine-time-col { display: flex; flex-direction: column; align-items: flex-end; }
+.zen-spine-time { font-size: 12px; color: var(--z-fg-2); line-height: 1.25; }
+.zen-spine-delta { font-size: 10.5px; color: var(--z-fg-3); line-height: 1.15; }
+.zen-spine-track { position: relative; display: flex; justify-content: center; }
 .zen-spine-track::after {
   content: '';
   position: absolute;
-  top: 14px;
-  bottom: -6px;
+  top: 13px;
+  bottom: -4px;
   width: 1px;
-  background: var(--z-line);
+  background: var(--z-line-strong);
 }
-.zen-spine-item:last-child .zen-spine-track::after {
-  display: none;
-}
-
+.zen-spine-item:last-child .zen-spine-track::after { display: none; }
 .zen-spine-node {
-  margin-top: 6px;
-  width: 7px;
-  height: 7px;
+  margin-top: 4px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: var(--z-bg-canvas);
   border: 1.5px solid var(--z-fg-3);
   z-index: 1;
 }
+.zen-spine-role--worker .zen-spine-node { background: var(--z-fg-2); border-color: var(--z-fg-2); }
 .zen-spine-item--warn .zen-spine-node {
+  border-radius: 2px;
+  transform: rotate(45deg);
   border-color: var(--z-amber);
   background: var(--z-amber);
 }
-.zen-spine-item--pass .zen-spine-node {
-  border-color: var(--z-green);
-  background: var(--z-green);
-}
-.zen-spine-item--live .zen-spine-node {
-  border-color: var(--z-accent-text);
-  background: var(--z-accent-text);
-}
+.zen-spine-item--pass .zen-spine-node { border-color: var(--z-green); background: var(--z-green); }
+.zen-spine-item--live .zen-spine-node { border-color: var(--z-accent-text); background: var(--z-accent-text); }
 
-.zen-spine-body {
-  padding-bottom: 22px;
-  min-width: 0;
+.zen-spine-body { padding-bottom: 9px; min-width: 0; }
+.zen-spine-head { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.zen-spine-head strong { font-size: 13px; font-weight: 600; color: var(--z-fg-1); }
+.zen-spine-actor { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--z-fg-2); }
+.zen-role-tag { font-style: normal; font-size: 10.5px; color: var(--z-fg-3); }
+.zen-node-badge {
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--z-line-strong);
+  background: var(--z-bg-panel);
+  color: var(--z-fg-2);
+  font-size: 10.5px;
+  font-weight: 600;
 }
-
-.zen-spine-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 8px;
-}
-.zen-spine-head strong {
-  font-size: 13.5px;
-  font-weight: 500;
-  color: var(--z-fg-1);
-}
-.zen-spine-actor {
-  font-size: 12px;
-  color: var(--z-fg-3);
-}
+.zen-node-badge--warn { color: var(--z-amber); background: var(--z-amber-bg); }
+.zen-node-badge--pass { color: var(--z-green); background: var(--z-green-bg); }
+.zen-node-badge--live { color: var(--z-accent-text); background: var(--z-live-bg); }
 .zen-inline-link {
   margin-left: auto;
   padding: 0;
   border: 0;
   background: transparent;
-  color: var(--z-fg-3);
-  font-size: 12px;
-  cursor: pointer;
-}
-.zen-inline-link:hover {
   color: var(--z-accent-text);
-}
-
-.zen-spine-body p {
-  margin: 4px 0 0;
-  font-size: 13px;
-  color: var(--z-fg-2);
-  line-height: 1.55;
-}
-
-.zen-spine-receipt {
-  margin-top: 6px;
-  color: var(--z-fg-3);
-}
-
-.zen-log-excerpt {
-  margin-top: 10px;
-  padding: 10px 12px;
-  border-radius: 6px;
-  background: var(--z-bg-panel);
-  border: 1px solid var(--z-line);
-  display: grid;
-  gap: 6px;
-}
-.zen-log-excerpt--flush {
-  margin-top: 0;
-}
-.zen-log-row {
-  display: grid;
-  grid-template-columns: 44px 96px minmax(0, 1fr);
-  gap: 10px;
-  font-size: 12px;
-  color: var(--z-fg-2);
-}
-.zen-log-row > span:first-child,
-.zen-log-row > span:nth-child(2) {
-  color: var(--z-fg-3);
-}
-
-.zen-meta-disclosure {
-  margin-top: 20px;
-  padding-top: 16px;
-  border-top: 1px solid var(--z-line);
-  color: var(--z-fg-3);
-  font-size: 12px;
-}
-.zen-meta-disclosure summary {
+  font-size: 11.5px;
   cursor: pointer;
-  user-select: none;
 }
-.zen-meta-disclosure p {
-  margin: 8px 0 0;
-}
-
-/* ============================================================================
-   DIRECTION 2: CALM READER (Single-Column Centered Editorial Inbox)
-   ============================================================================ */
-.zen-reader-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 40px 24px 64px;
-}
-
-.zen-reader-column {
-  max-width: 740px;
-  margin: 0 auto;
-}
-
-.zen-reader-head {
+.zen-inline-link:hover { text-decoration: underline; }
+.zen-spine-body p { margin: 1px 0 0; font-size: 12.5px; color: var(--z-fg-2); line-height: 1.42; }
+.zen-spine-evidence {
+  margin-top: 2px;
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-  padding-bottom: 20px;
-  border-bottom: 1px solid var(--z-line);
-}
-.zen-reader-head h1 {
-  margin: 0;
-  font-size: 22px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-}
-.zen-reader-head p {
-  margin: 4px 0 0;
-  font-size: 13px;
-  color: var(--z-fg-3);
-}
-
-.zen-filter-pills {
-  display: flex;
-  gap: 4px;
-}
-.zen-filter-btn {
-  height: 28px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--z-fg-2);
-  font-size: 12.5px;
-  display: inline-flex;
   align-items: center;
   gap: 6px;
-  cursor: pointer;
+  font-size: 11px;
 }
-.zen-filter-btn span {
-  color: var(--z-fg-3);
-}
-.zen-filter-btn.active {
-  background: var(--z-bg-selected);
-  color: var(--z-fg-1);
-  font-weight: 500;
-}
+.zen-evidence-files { color: var(--z-fg-2); }
+.zen-evidence-receipt { color: var(--z-fg-3); }
 
-.zen-reader-list {
-  display: flex;
-  flex-direction: column;
-}
-
-.zen-sheet-item {
-  border-bottom: 1px solid var(--z-line);
-}
-.zen-sheet-item.expanded {
-  margin: 12px -16px;
-  padding: 4px 16px 18px;
-  border: 1px solid var(--z-line-strong);
-  border-radius: 10px;
+.zen-log-excerpt {
+  margin-top: 5px;
+  padding: 6px 10px;
+  border-radius: 6px;
   background: var(--z-bg-panel);
-}
-
-.zen-sheet-summary {
-  min-height: 46px;
-  display: grid;
-  grid-template-columns: 6px minmax(0, 1fr) auto auto 44px;
-  align-items: center;
-  gap: 14px;
-  cursor: pointer;
-}
-
-.zen-sheet-title {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--z-fg-1);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.zen-sheet-ws {
-  color: var(--z-fg-3);
-}
-
-.zen-sheet-state {
-  font-size: 12px;
-  color: var(--z-fg-2);
-}
-
-.zen-sheet-time {
-  text-align: right;
-  font-size: 12px;
-  color: var(--z-fg-3);
-}
-
-.zen-sheet-body {
-  padding: 6px 0 0 20px;
-  display: grid;
-  gap: 18px;
-}
-
-.zen-sheet-outcome {
-  margin: 0;
-  font-size: 13.5px;
-  line-height: 1.65;
-  color: var(--z-fg-2);
-  max-width: 64ch;
-}
-
-.zen-step-track {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
-  gap: 8px;
-  padding: 12px 0;
-  border-top: 1px solid var(--z-line);
-  border-bottom: 1px solid var(--z-line);
-}
-
-.zen-step-cell {
+  border: 1px solid var(--z-line-strong);
   display: grid;
   gap: 3px;
 }
-.zen-step-line {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 3px;
-}
-.zen-step-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--z-fg-3);
-  flex: 0 0 7px;
-}
-.zen-step-cell--warn .zen-step-dot { background: var(--z-amber); }
-.zen-step-cell--pass .zen-step-dot { background: var(--z-green); }
-.zen-step-cell--live .zen-step-dot { background: var(--z-accent-text); }
-
-.zen-step-connector {
-  flex: 1;
-  height: 1px;
-  background: var(--z-line-strong);
-}
-
-.zen-step-cell strong {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--z-fg-1);
-}
-.zen-step-cell > span {
-  font-size: 11px;
-  color: var(--z-fg-3);
-}
-
-.zen-sheet-footer {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.zen-sheet-links {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-}
-
-/* ============================================================================
-   DIRECTION 3: TRACE LEDGER (Swiss Grid Table + Clean Bottom Inspector)
-   ============================================================================ */
-.zen-ledger-wrap {
-  flex: 1;
-  min-height: 0;
+.zen-log-excerpt--flush { margin-top: 6px; }
+.zen-log-row {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) 230px;
-  overflow: hidden;
-}
-
-.zen-ledger-table-scroll {
-  overflow-y: auto;
-}
-
-.zen-ledger {
-  width: 100%;
-  border-collapse: collapse;
-  text-align: left;
-}
-
-.zen-ledger thead th {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  height: 34px;
-  padding: 0 18px;
-  background: var(--z-bg-panel);
-  border-bottom: 1px solid var(--z-line);
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.06em;
-  color: var(--z-fg-3);
-}
-
-.zen-ledger tbody tr {
-  border-bottom: 1px solid var(--z-line);
-  cursor: pointer;
-  transition: background-color 100ms ease;
-}
-.zen-ledger tbody tr:hover {
-  background: var(--z-bg-hover);
-}
-.zen-ledger tbody tr.selected {
-  background: var(--z-bg-selected);
-}
-
-.zen-ledger td {
-  padding: 12px 18px;
-  vertical-align: middle;
-}
-
-.col-status { width: 100px; }
-.col-repo { width: 210px; }
-.col-trace { width: 230px; }
-.col-time { width: 76px; text-align: right; }
-
-.zen-ledger-state {
-  display: inline-flex;
-  align-items: center;
+  grid-template-columns: 38px 90px minmax(0, 1fr);
   gap: 8px;
-  font-size: 12.5px;
+  font-size: 11.5px;
   color: var(--z-fg-2);
 }
+.zen-log-row > span:first-child { color: var(--z-fg-3); }
+.zen-log-speaker { font-weight: 600; color: var(--z-fg-1); }
+.zen-log-speaker--gate { color: var(--z-amber); }
+.zen-log-speaker--reviewer { color: var(--z-green); }
+.zen-log-speaker--worker { color: var(--z-accent-text); }
 
-.zen-ledger-title {
-  font-size: 13.5px;
-  font-weight: 500;
-  color: var(--z-fg-1);
-}
-
-.zen-ledger-sub {
-  margin-top: 2px;
-  font-size: 12px;
-  color: var(--z-fg-3);
-  max-width: 54ch;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.zen-ledger-diff {
-  display: flex;
-  gap: 8px;
+.zen-meta-disclosure {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--z-line);
   color: var(--z-fg-3);
   font-size: 11.5px;
 }
+.zen-meta-disclosure summary { cursor: pointer; user-select: none; }
+.zen-meta-disclosure p { margin: 4px 0 0; }
 
-.zen-pip-bar {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-.zen-pip {
-  width: 14px;
-  height: 6px;
-  border-radius: 2px;
-  background: var(--z-line-strong);
-}
-.zen-pip--warn { background: var(--z-amber); }
-.zen-pip--pass { background: var(--z-green); }
-.zen-pip--live { background: var(--z-accent-text); }
-
-.zen-pip-caption {
-  margin-left: 8px;
-  font-size: 12px;
-  color: var(--z-fg-2);
-}
-
-.zen-ledger-checks {
-  color: var(--z-fg-2);
-}
-.zen-ledger-time {
-  text-align: right;
-  color: var(--z-fg-3);
-}
-
-.zen-ledger-drawer {
-  border-top: 1px solid var(--z-line-strong);
-  background: var(--z-bg-panel);
-  display: grid;
-  grid-template-columns: 1.15fr 0.85fr;
+/* ============================================================================
+   CANDIDATE 2: 2 · COMMAND STUDIO
+   ============================================================================ */
+.zen-studio {
+  flex: 1;
   min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 400px;
   overflow: hidden;
 }
-
-.zen-ledger-drawer-col {
-  padding: 16px 22px;
+.zen-studio-main {
   overflow-y: auto;
+  padding: 20px 26px 36px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
 }
-.zen-ledger-log {
-  border-left: 1px solid var(--z-line);
+.zen-studio-zone { display: flex; flex-direction: column; gap: 10px; }
+.zen-zone-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--z-line);
 }
-
-.zen-drawer-head {
+.zen-zone-title { display: flex; align-items: center; gap: 8px; }
+.zen-zone-title h2 {
+  margin: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--z-fg-1);
+}
+.zen-zone-count {
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--z-bg-panel);
+  border: 1px solid var(--z-line);
+  color: var(--z-fg-2);
+  font-size: 11px;
+}
+.zen-zone-sub { font-size: 12px; color: var(--z-fg-3); }
+.zen-spotlight-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.zen-spotlight-card {
+  padding: 13px 15px;
+  border-radius: 8px;
+  border: 1px solid var(--z-line);
+  background: var(--z-bg-panel);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  cursor: pointer;
+}
+.zen-spotlight-card:hover { border-color: var(--z-line-strong); }
+.zen-spotlight-card.selected { border-color: var(--z-accent-text); background: var(--z-bg-elevated); }
+.zen-spotlight-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  color: var(--z-fg-3);
+}
+.zen-branch-label { color: var(--z-fg-2); }
+.zen-spotlight-elapsed { margin-left: auto; color: var(--z-fg-3); }
+.zen-spotlight-title { margin: 0; font-size: 14.5px; font-weight: 600; line-height: 1.35; color: var(--z-fg-1); }
+.zen-spotlight-decision { margin: 0; font-size: 12.5px; line-height: 1.48; color: var(--z-fg-2); }
+.zen-spotlight-consensus {
+  padding: 7px 10px;
+  border-radius: 6px;
+  background: var(--z-bg-canvas);
+  border: 1px solid var(--z-line);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.zen-spotlight-pair { display: flex; flex-direction: column; gap: 1px; margin-right: auto; }
+.zen-spotlight-pair strong { font-size: 12px; color: var(--z-fg-1); }
+.zen-spotlight-metric { font-size: 11px; color: var(--z-fg-2); }
+.zen-spotlight-footer {
+  margin-top: auto;
+  padding-top: 4px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: 8px;
 }
-.zen-drawer-head strong {
-  font-size: 13.5px;
-  font-weight: 600;
-}
+.zen-spotlight-links { display: flex; flex-wrap: wrap; gap: 10px; }
 
-.zen-compact-stages {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 8px;
+.zen-swimlanes { display: flex; flex-direction: column; gap: 8px; }
+.zen-swimlane {
+  padding: 10px 14px;
+  border-radius: 7px;
+  border: 1px solid var(--z-line);
+  background: var(--z-bg-panel);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  cursor: pointer;
 }
-.zen-compact-stages li {
-  display: grid;
-  grid-template-columns: 42px 8px 92px minmax(0, 1fr);
-  align-items: baseline;
-  gap: 8px;
-  font-size: 12.5px;
-}
-.zen-compact-stages li > span:first-child {
-  color: var(--z-fg-3);
-}
-.zen-pip-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--z-fg-3);
-  align-self: center;
-}
-.zen-compact-summary {
-  color: var(--z-fg-2);
+.zen-swimlane:hover { border-color: var(--z-line-strong); }
+.zen-swimlane.selected { border-color: var(--z-accent-text); background: var(--z-bg-elevated); }
+.zen-swimlane-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3px; }
+.zen-swimlane-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.zen-swimlane-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--z-fg-1);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.zen-swimlane-ws { color: var(--z-fg-3); font-size: 11.5px; white-space: nowrap; }
+.zen-swimlane-ticker {
+  padding-left: 14px;
+  color: var(--z-fg-2);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zen-swimlane-right {
+  flex: 0 0 320px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+}
+.zen-swimlane-metrics {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--z-fg-2);
+  white-space: nowrap;
+}
+.zen-swimlane-bar { width: 100%; height: 4px; border-radius: 2px; background: var(--z-line); overflow: hidden; }
+.zen-swimlane-bar-fill { height: 100%; background: var(--z-accent-text); }
 
-@media (max-width: 820px) {
-  .zen-ref-hint { display: none; }
-  .zen-linear {
-    grid-template-columns: 1fr;
-    overflow-y: auto;
+.zen-archive-ledger {
+  border: 1px solid var(--z-line);
+  border-radius: 7px;
+  background: var(--z-bg-panel);
+  overflow: hidden;
+}
+.zen-archive-row {
+  padding: 9px 14px;
+  display: grid;
+  grid-template-columns: 6px 64px minmax(0, 1.3fr) minmax(0, 1fr) auto 40px;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+.zen-archive-row + .zen-archive-row { border-top: 1px solid var(--z-line); }
+.zen-archive-row:hover { background: var(--z-bg-hover); }
+.zen-archive-row.selected { background: var(--z-bg-selected); }
+.zen-archive-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--z-fg-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zen-archive-flow {
+  font-size: 12px;
+  color: var(--z-fg-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zen-archive-checks { color: var(--z-green); font-size: 11.5px; }
+.zen-archive-time { text-align: right; color: var(--z-fg-3); }
+
+/* Right Docked Stage Spine Inspector */
+.zen-studio-inspector {
+  border-left: 1px solid var(--z-line);
+  background: var(--z-bg-panel);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.zen-inspector-head {
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid var(--z-line);
+  background: var(--z-bg-elevated);
+}
+.zen-inspector-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  color: var(--z-fg-3);
+}
+.zen-inspector-title { margin: 0 0 4px; font-size: 14px; font-weight: 600; color: var(--z-fg-1); }
+.zen-inspector-summary { margin: 0 0 6px; font-size: 12px; line-height: 1.42; color: var(--z-fg-2); }
+.zen-inspector-links { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.zen-inspector-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.zen-spine--compact .zen-spine-body { padding-bottom: 7px; }
+.zen-inspector-transcript { padding-top: 8px; border-top: 1px solid var(--z-line); }
+
+/* ============================================================================
+   CANDIDATE 3: 3 · REVIEW BLUEPRINT (3-Pane Workbench)
+   ============================================================================ */
+.zen-blueprint {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 268px minmax(0, 1fr) 332px;
+  overflow: hidden;
+}
+.zen-bp-rail {
+  border-right: 1px solid var(--z-line);
+  background: var(--z-bg-panel);
+  overflow-y: auto;
+  padding: 12px 0;
+}
+.zen-bp-center {
+  overflow-y: auto;
+  padding: 18px 26px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.zen-bp-header { padding-bottom: 14px; border-bottom: 1px solid var(--z-line); }
+.zen-bp-title {
+  margin: 0 0 5px;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--z-fg-1);
+}
+.zen-bp-summary { margin: 0 0 12px; font-size: 13px; line-height: 1.55; color: var(--z-fg-2); }
+.zen-bp-pipeline {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 6px;
+}
+.zen-bp-step {
+  padding: 5px 9px;
+  border-radius: 5px;
+  border: 1px solid var(--z-line);
+  background: var(--z-bg-panel);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.zen-bp-step--warn { border-color: var(--z-amber); background: var(--z-amber-bg); }
+.zen-bp-step--pass { border-color: var(--z-green); background: var(--z-green-bg); }
+.zen-bp-step--live { border-color: var(--z-accent-text); background: var(--z-live-bg); }
+.zen-bp-step-num { color: var(--z-fg-3); font-size: 11px; }
+.zen-bp-step-name {
+  font-weight: 600;
+  color: var(--z-fg-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zen-bp-step-actor { margin-left: auto; font-size: 11px; color: var(--z-fg-3); }
+.zen-bp-transcript-section { padding-top: 12px; border-top: 1px solid var(--z-line); }
+
+/* Right Pane: 332px Spec Sheet */
+.zen-bp-spec {
+  border-left: 1px solid var(--z-line);
+  background: var(--z-bg-panel);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.zen-spec-block {
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--z-line);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.zen-spec-block-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.zen-bp-gate-copy { margin: 0; font-size: 12.5px; line-height: 1.48; color: var(--z-fg-2); }
+.zen-bp-cta-row { display: flex; gap: 8px; }
+.zen-kv-list { margin: 0; display: grid; gap: 6px; }
+.zen-kv-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 12px; }
+.zen-kv-row dt { color: var(--z-fg-3); flex: 0 0 auto; }
+.zen-kv-row dd { margin: 0; color: var(--z-fg-1); font-weight: 500; text-align: right; }
+.zen-diff-summary-row { display: flex; justify-content: space-between; font-size: 12px; }
+.zen-diff-bar { height: 6px; border-radius: 3px; overflow: hidden; display: flex; background: var(--z-line); }
+.zen-diff-bar-add { background: var(--z-green); }
+.zen-diff-bar-del { background: var(--z-red); }
+.zen-bp-artifacts { display: flex; flex-direction: column; gap: 6px; }
+.zen-bp-artifact-card {
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--z-line-strong);
+  background: var(--z-bg-elevated);
+  text-decoration: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.zen-bp-artifact-card:hover { border-color: var(--z-accent-text); }
+.zen-bp-artifact-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--z-accent-text);
+  font-size: 12.5px;
+}
+.zen-bp-artifact-meta { color: var(--z-fg-3); font-size: 11px; }
+
+/* Responsive / Mobile (390px viewport support, zero horizontal overflow) */
+@media (max-width: 960px) {
+  .zen-shell { overflow-y: auto; }
+  .zen-topbar { flex-wrap: wrap; padding: 8px 12px; gap: 8px; }
+  .zen-topbar-summary, .zen-ref-hint, .zen-tab-full, .zen-rail-footer, .zen-group-header { display: none; }
+  .zen-tab-short { display: inline; }
+  .zen-style-tabs { order: 3; width: 100%; justify-content: space-between; }
+  .zen-style-tab { flex: 1; padding: 0 6px; text-align: center; }
+  .zen-linear, .zen-studio, .zen-blueprint, .zen-spotlight-grid, .zen-spec-consensus {
+    display: flex;
+    flex-direction: column;
+    overflow: visible;
   }
   .zen-linear-list {
+    flex: 0 0 auto;
     border-right: 0;
     border-bottom: 1px solid var(--z-line);
     overflow: visible;
   }
-  .zen-linear-detail {
-    padding: 24px 18px 40px;
+  .zen-linear-groups {
+    padding: 6px 10px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
     overflow: visible;
   }
-  .zen-sheet-summary {
-    grid-template-columns: 6px minmax(0, 1fr) 40px;
+  .zen-group { display: contents; }
+  .zen-pro-row {
+    padding: 5px 10px;
+    border: 1px solid var(--z-line);
+    border-radius: 5px;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
   }
-  .zen-sheet-ws,
-  .zen-sheet-state {
-    display: none;
-  }
-  .zen-ledger-wrap {
-    grid-template-rows: auto auto;
-    overflow-y: auto;
-  }
-  .zen-ledger-drawer {
-    grid-template-columns: 1fr;
-  }
-  .zen-ledger-log {
-    border-left: 0;
-    border-top: 1px solid var(--z-line);
-  }
+  .zen-pro-row.active::before { display: none; }
+  .zen-pro-row.active { border-color: var(--z-accent-text); }
+  .zen-pro-row-title, .zen-pro-ws, .zen-pro-state, .zen-pro-progress-track { display: none; }
+  .zen-linear-detail { padding: 14px 14px 28px; overflow: visible; }
+  .zen-consensus-cell + .zen-consensus-cell { border-left: 0; border-top: 1px solid var(--z-line); }
+  .zen-log-row { grid-template-columns: 38px 76px minmax(0, 1fr); font-size: 11.5px; }
+  .zen-swimlane { flex-direction: column; align-items: stretch; }
+  .zen-swimlane-right { flex: 0 0 auto; align-items: flex-start; }
+  .zen-archive-row { grid-template-columns: 6px 58px minmax(0, 1fr) 36px; }
+  .zen-archive-flow, .zen-archive-checks { display: none; }
 }
 </style>
