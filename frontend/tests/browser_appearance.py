@@ -25,10 +25,12 @@ from appearance_assertions import (  # noqa: E402
     PALETTES,
     choose_mode,
     choose_palette,
+    compact_scene_source,
     contrast,
     no_stale_skin_chrome,
     palette_id,
     rendered_scene_artwork,
+    responsive_scene_geometry,
     select_appearance,
 )
 from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
@@ -516,6 +518,10 @@ async def main(browser_run: BrowserRun) -> None:
                     art = await rendered_scene_artwork(
                         shell_empty, output, f"shell-empty-{palette_id(game)}-{empty_mode}"
                     )
+                    assert art["source"]["scene"] == art["source"]["compact"], (
+                        "Compact phone shell source",
+                        art["source"],
+                    )
                     report["empty_consumers"].append(
                         {
                             "palette": game,
@@ -526,8 +532,43 @@ async def main(browser_run: BrowserRun) -> None:
                         }
                     )
                     await shot(f"shell-empty-{palette_id(game)}-{empty_mode}.png")
+                    await page.set_viewport_size({"width": 1920, "height": 1080})
+                    report["empty_consumers"][-1]["wide_shell"] = await responsive_scene_geometry(
+                        shell_empty, wide=True
+                    )
+                    await shot(f"shell-empty-wide-{palette_id(game)}-{empty_mode}.png")
+                    await trigger.click()
+                    preview = page.locator(
+                        f'.theme-preview[data-palette="{palette_id(game)}"] .theme-preview-content'
+                    )
+                    report["empty_consumers"][-1]["wide_picker_compact"] = (
+                        await compact_scene_source(preview)
+                    )
+                    assert (
+                        await preview.evaluate("el => getComputedStyle(el).backgroundSize")
+                    ).split()[0] == "145%", ("Compact picker fitting", game, empty_mode)
+                    await page.get_by_role("dialog").get_by_role(
+                        "button", name="Done", exact=True
+                    ).click()
                     await page.set_viewport_size({"width": 1440, "height": 900})
             record_phase("empty_consumers")
+            report["wide_workspace_board"] = []
+            await page.set_viewport_size({"width": 1920, "height": 1080})
+            await page.get_by_role("tab", name="Agent Workspace", exact=True).click()
+            board = page.locator(".workspace-view .board")
+            await expect(board.locator(".empty-board")).to_be_visible()
+            for board_mode in ("dark", "light"):
+                await select_appearance(page, board_mode, "Zenless")
+                report["wide_workspace_board"].append(
+                    {
+                        "mode": board_mode,
+                        "selection": await responsive_scene_geometry(board, wide=True),
+                    }
+                )
+                await shot(f"workspace-board-wide-{board_mode}.png")
+            await page.get_by_role("tab", name="Terminal", exact=True).click()
+            await page.set_viewport_size({"width": 1440, "height": 900})
+            record_phase("wide_workspace_board")
 
             # Inspect actual shell consumers after closing the picker; its game
             # preview tiles intentionally retain their own illustration/icons.

@@ -24,6 +24,8 @@ from appearance_assertions import (  # noqa: E402
     artwork_text_contrast,
     quiet_chat_surfaces,
     readability_fault_controls,
+    rendered_scene_artwork,
+    responsive_scene_geometry,
     select_appearance,
 )
 from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
@@ -527,6 +529,25 @@ async def main(browser_run: BrowserRun) -> None:
                     await page.screenshot(path=str(output / screenshot), full_page=True)
                     report["screenshots"].append(screenshot)
                     print(f"Reading contrast captured: {palette}/{mode}", flush=True)
+                    # The live fixture stays mounted: resizing must not replay or send a turn.
+                    await page.set_viewport_size({"width": 1920, "height": 560})
+                    host = page.locator(".structured-timeline:visible").first
+                    report["surface_readability"][-1]["short_wide"] = {
+                        "selection": await responsive_scene_geometry(host, wide=True),
+                        "art": await rendered_scene_artwork(
+                            host, output, f"short-wide-{palette.lower().replace(' ', '-')}-{mode}"
+                        ),
+                        "status": await artwork_text_contrast(
+                            history.locator(".event-status > span"), ".structured-timeline", output
+                        ),
+                        "live": await artwork_text_contrast(
+                            live.locator(".turn-working-elapsed"), ".structured-timeline", output
+                        ),
+                    }
+                    screenshot = f"short-wide-{palette.lower().replace(' ', '-')}-{mode}.png"
+                    await page.screenshot(path=str(output / screenshot), full_page=True)
+                    report["screenshots"].append(screenshot)
+                    await page.set_viewport_size({"width": 1280, "height": 560})
 
             surface_rows.append(
                 {
@@ -568,6 +589,28 @@ async def main(browser_run: BrowserRun) -> None:
                         )
                         await page.screenshot(path=str(output / screenshot), full_page=True)
                         report["screenshots"].append(screenshot)
+                        await page.set_viewport_size({"width": 1920, "height": 560})
+                        report["pending_readability"][-1]["short_wide"] = {
+                            "selection": await responsive_scene_geometry(
+                                page.locator(".structured-timeline:visible").first, wide=True
+                            ),
+                            "status": await artwork_text_contrast(
+                                pending.locator(".event-status--pending > span"),
+                                ".structured-timeline",
+                                output,
+                            ),
+                            "message": await artwork_text_contrast(
+                                pending.locator(".conversation-bubble--user .markdown-content p"),
+                                ".structured-timeline",
+                                output,
+                            ),
+                        }
+                        screenshot = (
+                            f"pending-short-wide-{palette.lower().replace(' ', '-')}-{mode}.png"
+                        )
+                        await page.screenshot(path=str(output / screenshot), full_page=True)
+                        report["screenshots"].append(screenshot)
+                        await page.set_viewport_size({"width": 1280, "height": 560})
             finally:
                 pending_released.set()
             assert len(surface_send_payloads) == 1, surface_send_payloads

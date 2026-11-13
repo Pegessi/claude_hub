@@ -5,6 +5,7 @@
    removes every treatment. */
 :where(:root, .theme-preview) {
   --palette-scene: none;
+  --palette-scene-wide: none;
   --palette-scene-glow: none;
 }
 :is(:root, .theme-preview)[data-palette='mono'] {
@@ -40,6 +41,7 @@
   --ch-radius-xl: 14px;
   --ch-radius-overlay: 16px;
   --palette-scene: url('../assets/zenless-scene.png');
+  --palette-scene-wide: url('../assets/zenless-scene-wide.webp');
   --palette-scene-glow: linear-gradient(
     180deg,
     transparent 0%,
@@ -55,6 +57,7 @@
   --ch-radius-overlay: 10px;
   --ch-radius-popover: 5px;
   --palette-scene: url('../assets/frontier-scene.webp');
+  --palette-scene-wide: url('../assets/frontier-scene-wide.webp');
   --palette-scene-glow: linear-gradient(
     180deg,
     transparent 0%,
@@ -70,6 +73,7 @@
   --ch-radius-overlay: 10px;
   --ch-radius-popover: 5px;
   --palette-scene: url('../assets/los-santos-scene.webp');
+  --palette-scene-wide: url('../assets/los-santos-scene-wide.webp');
   --palette-scene-glow: linear-gradient(
     180deg,
     transparent 0%,
@@ -466,6 +470,13 @@
   .structured-pane {
   background: var(--ch-color-main-bg);
 }
+/* Each independently sized pane owns its query; a wide window must not promote
+   narrow split panes. Inline-size containment preserves natural vertical flow. */
+:root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
+  :is(.terminal-pane, .terminal-main-column, .workspace-view .workspace-layout) {
+  container-name: theme-scene;
+  container-type: inline-size;
+}
 /* Timeline-bound scene layer: anchored to the actual bottom of .structured-timeline
    directly above any variable-height Goal status bar, inbox, or composer footer. */
 :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
@@ -695,5 +706,15 @@
   :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
     .workspace-view .board {
     padding-bottom: 120px;
+  }
+}
+
+/* Broad content surfaces get a panoramic composition; sidebar and picker retain
+   the compact artwork. Fitting both axes keeps heads intact in short panes. */
+@container theme-scene (min-width: 1100px) {
+  :root:is([data-palette='zenless'], [data-palette='frontier'], [data-palette='los-santos'])
+    :is(.structured-timeline, .workspace-view .board, .terminal-main-column > .empty-state, .pane-empty) {
+    --palette-scene: var(--palette-scene-wide);
+    background-size: contain, 100% 100%;
   }
 }

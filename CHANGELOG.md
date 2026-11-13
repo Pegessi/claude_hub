@@ -7,6 +7,16 @@
 
 ## Released
 
+### feat(theme): add adaptive panoramic artwork for wide panes
+
+- Add newly painted, native-resolution panoramic game scenes with wider settings
+  and prominent characters rather than stretching the compact illustrations.
+- Select the wide composition using each pane's allocated width and fit both
+  axes without distorting or clipping it. Narrow panes, phones, sidebars and
+  appearance previews retain the accepted compact artwork.
+- Keep foreground reading surfaces, theme preferences and terminal behavior;
+  verify wide coverage, short-pane fitting and old-cap/source-selection faults.
+
 ### fix(theme): show Fairy on the Zenless illustration's monitor
 
 - Replace the generic shutter emblem with a reference-led Fairy eye drawn by

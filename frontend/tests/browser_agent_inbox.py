@@ -18,7 +18,11 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
-from appearance_assertions import empty_pane_phone_themes, split_pane_themes
+from appearance_assertions import (
+    empty_pane_phone_themes,
+    split_pane_scene_widths,
+    split_pane_themes,
+)
 from playwright.async_api import ViewportSize, expect
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -390,6 +394,7 @@ async def main(browser_run: BrowserRun) -> None:
             await page.locator(f'.tab-bar .tab[data-tab-id="{WORKING}"]').click()
             await expect(panes.locator(".pane-session-name")).to_have_count(2)
             report["split_pane_theme_handoff"] = await split_pane_themes(page)
+            report["split_pane_scene_widths"] = await split_pane_scene_widths(page, output)
             await shot("04-themed-split-panes.png")
             await page.get_by_title("Single", exact=True).click()
 

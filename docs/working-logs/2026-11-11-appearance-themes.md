@@ -980,3 +980,69 @@ controls remain intact. The original visibility, salience, contrast, negative an
 restoration assertions are not weakened. Before/after product/test hashes match,
 both browser lifecycle records close normally, and the owned5366server is stopped.
 These scoped results are retained in `qa-01/`; final-SHA gates remain pending.
+
+## Follow-up: genuinely wider artwork for broad panes
+
+After accepting the Fairy correction, the user asks for larger, adaptive wide
+illustrations while retaining the good phone treatment. The old Chat background
+is capped at760px, regardless of pane width; its transparent composition makes
+Zenless's alpha>=10 footprint only about509px wide at that cap. This diagnostic
+explains the small center cluster but is not a semantic artwork measurement.
+
+Cursor `gemini-4-carbon-high` views the accepted masters and actual references,
+then paints complementary environmental panels for each game. The native image
+tool provides1280×720 panels, not custom4:1 output; two new panels per theme are
+registered at1:1 pixel scale to form2340px Zenless,2360px Frontier and2324px Los
+Santos panoramas. Parent samples Zenless's native-panel and crop correspondence
+independently, finding zero differences outside the stitched overlap in the
+sampled coordinates. This is not a claim of exhaustive seam or official-likeness
+certification. The wider workbench, western landscape and coastal/city settings
+are real additional painted composition, not interpolation of the compact image.
+
+Three new local `*-scene-wide.webp` assets carry bounded opacity and four-edge
+feathering. The original three compact files remain byte-identical to `d135684`.
+A named inline-size container on each independently allocated pane/column/board
+parent selects panoramic artwork only at1100px or wider. The scene stays on its
+existing timeline/board/empty-state owner, with `contain` fitting both actual
+axes; no viewport-wide stretch, resize observer, new preference or renderer.
+Sidebar/picker and phone/narrow-pane source selection stay compact. Foreground
+controls, palette tokens and terminal lifecycle are not redesigned.
+
+The existing browser helpers gain real source decoding and parent-width checks,
+wide horizontal coverage and outer-quarter contribution, short-host fitting,
+and distinct compact-source/old760px-cap fault controls with exact restoration.
+Original5% visibility, delta12, p95<=76, contrast and120s runner limits remain.
+New checks reuse the existing Goal, Queue, Inbox and Appearance scenarios rather
+than duplicate their full theme-interaction matrices.
+
+The first explicitly Zenless-only pilot fails the original normal-desktop Goal
+visibility floor at4.1012%; its evidence is preserved. A native2340×480 bust crop
+and lower-edge fade repair move useful imagery into the exposed lower band
+without enlarging pixels or weakening the oracle. The second scoped pilot passes
+Goal in66.862s and Queue in19.447s, with both new negative controls/restorations.
+Parent independently recomputes wide dark horizontal spans of87.7858% at1920 and
+85.5778% at2560, with nonzero qualifying coverage in both outer quarters. An
+independent Zenless-only visual review confirms the broader coherent scene,
+recognizable Eous/Fairy, borderless fading and preserved phone treatment; natural
+opaque Goal-card occlusion remains an explicit limit. These are not full-suite
+or other-theme approvals. Full three-theme UI checks, independent candidate
+review and fixed-SHA final gates are separate pending steps. Evidence lives in
+`tasks/theme-wide-art/`, including raw native panels/manifests, compositing
+profiles, both pilots, parent pixel checks and the narrow visual review.
+
+The first complete three-theme, four-scenario precommit run passes without a
+retry: Queue46.163s, Goal106.975s, Inbox43.097s and Appearance46.453s, each under
+the unchanged120s deadline. All12wide cases satisfy source/fitting and original
+visibility/salience checks; minimum horizontal span is82.2328%, minimum outer
+quarter contribution1.9429%, maximum p9545. Short-pane live/status contrast stays
+at least5.4414:1. Real split-pane allocations1152px select wide, while832px and
+766px remain compact. Both new faults fail their designated oracles and restore
+exactly. All1557 recorded inputs are unchanged during the run, and the owned5366
+Vite/browser resources close before handoff. Full evidence is `qa-01/`.
+
+This single local Goal run leaves13.025s deadline headroom; portable timing is
+not certified. Teardown-aligned `/stream/wait` refusals target only the explicitly
+configured dead-end127.0.0.1:9, with no unknown-request/page-error report; the
+suspected routing-close race is not asserted as proven. Independent full-candidate
+review and committed-SHA all/browser/HMR/replay gates still follow this scoped
+four-scenario precommit result, rather than being implied by it.
