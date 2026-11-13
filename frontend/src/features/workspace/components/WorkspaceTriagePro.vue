@@ -402,90 +402,87 @@
               </template>
             </section>
 
-            <div
-              v-if="hasDeliverables || hasVerification"
-              class="tp-evidence-grid"
+            <!-- Deliverables Card (Full-width: zero vertical stretch void, full path & button clearance) -->
+            <section
+              v-if="hasDeliverables"
+              class="tp-card"
+              aria-label="Deliverables"
             >
-              <!-- Deliverables Card -->
-              <section
-                v-if="hasDeliverables"
-                class="tp-card"
-                aria-label="Deliverables"
-              >
-                <div class="tp-section-head">
-                  <h2 class="tp-micro-heading">
-                    Deliverables ({{ activeItem.deliverables.length + imageAttachments.length }})
-                  </h2>
-                </div>
+              <div class="tp-section-head">
+                <h2 class="tp-micro-heading">
+                  Deliverables ({{ activeItem.deliverables.length + imageAttachments.length }})
+                </h2>
+              </div>
 
-                <div class="tp-deliverables">
-                  <template
-                    v-for="deliv in activeItem.deliverables"
-                    :key="deliv.key"
-                  >
-                    <a
-                      v-if="deliv.url"
-                      :href="deliv.url"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      class="tp-deliverable-item"
-                    >
-                      <div class="tp-deliv-main">
-                        <div class="tp-deliv-title-row">
-                          <span :class="['tp-deliv-kind', `tp-deliv-kind--${deliv.kind}`]">{{ deliv.kind }}</span>
-                          <span class="tp-deliv-title">{{ deliv.title }}</span>
-                        </div>
-                        <span class="tp-deliv-sub tp-mono">{{ deliv.subtitle }}</span>
-                      </div>
-                      <span class="tp-mono">Open ↗</span>
-                    </a>
-
-                    <div
-                      v-else
-                      class="tp-deliverable-item"
-                    >
-                      <div class="tp-deliv-main">
-                        <div class="tp-deliv-title-row">
-                          <span :class="['tp-deliv-kind', `tp-deliv-kind--${deliv.kind}`]">
-                            {{ deliv.kind === 'markdown' ? 'md' : deliv.kind }}
-                          </span>
-                          <span class="tp-deliv-title tp-mono">{{ deliv.title }}</span>
-                        </div>
-                        <span class="tp-deliv-sub tp-mono">{{ deliv.subtitle }}</span>
-                      </div>
-
-                      <div class="tp-deliv-actions">
-                        <button
-                          v-if="deliv.kind === 'markdown' && deliv.artifactPath"
-                          type="button"
-                          class="tp-mini-btn tp-mini-btn--accent"
-                          @click="openDeliverableModal(deliv)"
-                        >
-                          Preview
-                        </button>
-                        <button
-                          v-if="deliv.copyText || deliv.artifactPath"
-                          type="button"
-                          class="tp-mini-btn tp-mono"
-                          @click="copyDeliverableText(deliv.key, deliv.copyText || deliv.artifactPath || '')"
-                        >
-                          {{ copiedKey === deliv.key ? 'Copied' : 'Copy' }}
-                        </button>
-                      </div>
-                    </div>
-                  </template>
-
-                  <div
-                    v-for="img in imageAttachments"
-                    :key="img.id"
+              <div class="tp-deliverables">
+                <template
+                  v-for="deliv in activeItem.deliverables"
+                  :key="deliv.key"
+                >
+                  <a
+                    v-if="deliv.url"
+                    :href="deliv.url"
+                    target="_blank"
+                    rel="noopener noreferrer"
                     class="tp-deliverable-item"
                   >
                     <div class="tp-deliv-main">
                       <div class="tp-deliv-title-row">
-                        <span class="tp-deliv-kind">img</span>
-                        <span class="tp-deliv-title tp-mono">{{ img.filename }}</span>
+                        <span :class="['tp-deliv-kind', `tp-deliv-kind--${deliv.kind}`]">{{ deliv.kind }}</span>
+                        <span class="tp-deliv-title">{{ deliv.title }}</span>
                       </div>
+                      <span class="tp-deliv-sub tp-mono">{{ deliv.subtitle }}</span>
                     </div>
+                    <span class="tp-deliv-actions tp-mono">Open ↗</span>
+                  </a>
+
+                  <div
+                    v-else
+                    class="tp-deliverable-item"
+                  >
+                    <div class="tp-deliv-main">
+                      <div class="tp-deliv-title-row">
+                        <span :class="['tp-deliv-kind', `tp-deliv-kind--${deliv.kind}`]">
+                          {{ deliv.kind === 'markdown' ? 'md' : deliv.kind }}
+                        </span>
+                        <span class="tp-deliv-title tp-mono">{{ deliv.title }}</span>
+                      </div>
+                      <span class="tp-deliv-sub tp-mono">{{ deliv.subtitle }}</span>
+                    </div>
+
+                    <div class="tp-deliv-actions">
+                      <button
+                        v-if="deliv.kind === 'markdown' && deliv.artifactPath"
+                        type="button"
+                        class="tp-mini-btn tp-mini-btn--accent"
+                        @click="openDeliverableModal(deliv)"
+                      >
+                        Preview
+                      </button>
+                      <button
+                        v-if="deliv.copyText || deliv.artifactPath"
+                        type="button"
+                        class="tp-mini-btn tp-mono"
+                        @click="copyDeliverableText(deliv.key, deliv.copyText || deliv.artifactPath || '')"
+                      >
+                        {{ copiedKey === deliv.key ? 'Copied' : 'Copy' }}
+                      </button>
+                    </div>
+                  </div>
+                </template>
+
+                <div
+                  v-for="img in imageAttachments"
+                  :key="img.id"
+                  class="tp-deliverable-item"
+                >
+                  <div class="tp-deliv-main">
+                    <div class="tp-deliv-title-row">
+                      <span class="tp-deliv-kind">img</span>
+                      <span class="tp-deliv-title tp-mono">{{ img.filename }}</span>
+                    </div>
+                  </div>
+                  <div class="tp-deliv-actions">
                     <button
                       type="button"
                       class="tp-mini-btn"
@@ -495,75 +492,75 @@
                     </button>
                   </div>
                 </div>
-              </section>
+              </div>
+            </section>
 
-              <!-- Verification & Caveats Card -->
-              <section
-                v-if="hasVerification"
-                class="tp-card"
-                aria-label="Verification and caveats"
+            <!-- Verification & Caveats Card -->
+            <section
+              v-if="hasVerification"
+              class="tp-card"
+              aria-label="Verification and caveats"
+            >
+              <div class="tp-section-head">
+                <h2 class="tp-micro-heading">
+                  Verification &amp; Caveats
+                </h2>
+                <span
+                  :class="[
+                    'tp-val-badge',
+                    'tp-mono',
+                    activeItem.validation.failedCount > 0
+                      ? 'tp-val-badge--fail'
+                      : activeItem.validation.passedCount > 0
+                        ? 'tp-val-badge--pass'
+                        : '',
+                  ]"
+                >
+                  {{ activeItem.validation.summaryLabel }}
+                </span>
+              </div>
+
+              <div
+                v-if="activeItem.validation.pills.length > 0"
+                class="tp-pill-wrap"
               >
-                <div class="tp-section-head">
-                  <h2 class="tp-micro-heading">
-                    Verification &amp; Caveats
-                  </h2>
-                  <span
-                    :class="[
-                      'tp-val-badge',
-                      'tp-mono',
-                      activeItem.validation.failedCount > 0
-                        ? 'tp-val-badge--fail'
-                        : activeItem.validation.passedCount > 0
-                          ? 'tp-val-badge--pass'
-                          : '',
-                    ]"
-                  >
-                    {{ activeItem.validation.summaryLabel }}
-                  </span>
-                </div>
-
-                <div
-                  v-if="activeItem.validation.pills.length > 0"
-                  class="tp-pill-wrap"
+                <span
+                  v-for="(pill, idx) in activeItem.validation.pills"
+                  :key="idx"
+                  :class="['tp-check-pill', 'tp-mono', `tp-check-pill--${pill.status}`]"
                 >
-                  <span
-                    v-for="(pill, idx) in activeItem.validation.pills"
-                    :key="idx"
-                    :class="['tp-check-pill', 'tp-mono', `tp-check-pill--${pill.status}`]"
-                  >
-                    <span>{{ pill.status === 'fail' ? '✕' : '✓' }}</span>
-                    <span>{{ pill.label }}</span>
-                  </span>
-                </div>
+                  <span>{{ pill.status === 'fail' ? '✕' : '✓' }}</span>
+                  <span>{{ pill.label }}</span>
+                </span>
+              </div>
 
-                <ul
-                  v-if="activeItem.validation.notes.length > 0"
-                  class="tp-val-notes"
+              <ul
+                v-if="activeItem.validation.notes.length > 0"
+                class="tp-val-notes"
+              >
+                <li
+                  v-for="(note, idx) in activeItem.validation.notes"
+                  :key="idx"
                 >
+                  {{ note }}
+                </li>
+              </ul>
+
+              <div
+                v-if="activeItem.validation.riskBullets.length > 0"
+                class="tp-risk-box"
+              >
+                <span class="tp-risk-title">Caveats &amp; Unverified Scope</span>
+                <ul class="tp-risk-list">
                   <li
-                    v-for="(note, idx) in activeItem.validation.notes"
+                    v-for="(risk, idx) in activeItem.validation.riskBullets"
                     :key="idx"
                   >
-                    {{ note }}
+                    {{ risk }}
                   </li>
                 </ul>
-
-                <div
-                  v-if="activeItem.validation.riskBullets.length > 0"
-                  class="tp-risk-box"
-                >
-                  <span class="tp-risk-title">Caveats &amp; Unverified Scope</span>
-                  <ul class="tp-risk-list">
-                    <li
-                      v-for="(risk, idx) in activeItem.validation.riskBullets"
-                      :key="idx"
-                    >
-                      {{ risk }}
-                    </li>
-                  </ul>
-                </div>
-              </section>
-            </div>
+              </div>
+            </section>
 
             <!-- Aggregated Key Milestones (2~6 clean nodes, zero text duplication) -->
             <section
@@ -772,10 +769,13 @@
                         </div>
                         <span class="tp-deliv-sub tp-mono">{{ deliv.subtitle }}</span>
                       </div>
-                      <span class="tp-mono">Open ↗</span>
+                      <span class="tp-deliv-actions tp-mono">Open ↗</span>
                     </a>
 
-                    <div v-else>
+                    <div
+                      v-else
+                      class="tp-deliverable-wrap"
+                    >
                       <div class="tp-deliverable-item">
                         <div class="tp-deliv-main">
                           <div class="tp-deliv-title-row">

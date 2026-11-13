@@ -261,3 +261,55 @@ test('buildTriageTaskViewModel denoises dense initiator prose, extracts .md deli
   assert.equal(vm.milestones[2].isCurrentEcho, true)
   assert.doesNotMatch(vm.milestones[2].oneLiner, /A third, cross-model review/)
 })
+
+test('buildKeyMilestones folds 50+ iterative initiator working events into bounded phases', () => {
+  const task = makeTask({
+    id: 'b1b6c019-625f-4f70-910b-95e2e4ecdfae',
+    title: '将 GB200 算子监控开销迭代压至接近零',
+    execution_control: 'initiator',
+    progress_revision: 56,
+    status: 'working',
+    latest_progress: {
+      state: 'working',
+      summary: 'Independent review APPROVE for cpu-callers4d diagnostic conclusions.',
+      reported_at: '2026-11-13T02:59:37Z',
+    },
+  })
+
+  const events = [
+    {
+      sequence: 1,
+      type: 'progress',
+      action: 'task_progress',
+      created_at: '2026-11-12T16:53:44',
+      payload: { state: 'started', summary: 'Initialized isolated GB200 ablation directory.' },
+    },
+    ...Array.from({ length: 55 }, (_, i) => ({
+      sequence: i + 2,
+      type: 'progress',
+      action: 'task_progress',
+      created_at: '2026-11-12T18:00:00',
+      payload: {
+        state: 'working',
+        summary:
+          i === 54
+            ? 'Independent review APPROVE for cpu-callers4d diagnostic conclusions.'
+            : `Ablation iteration #${i + 1} completed and verified.`,
+      },
+    })),
+  ]
+
+  const vm = triage.buildTriageTaskViewModel({
+    task,
+    workspaceName: 'llmserver-evo-workspace',
+    defaultBranch: 'main',
+    reports: [],
+    events,
+    sessionsById: new Map(),
+    nowMs: NOW_MS,
+  })
+
+  assert.ok(vm.milestones.length <= 8, `expected <= 8 milestones, got ${vm.milestones.length}`)
+  assert.ok(vm.milestones.some(m => (m.collapsedCount ?? 0) > 10))
+  assert.equal(vm.milestones.at(-1).isCurrentEcho, true)
+})

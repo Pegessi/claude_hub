@@ -76,7 +76,11 @@ async def main(browser_run: BrowserRun) -> None:
                 "One helper signature widened; every in-repo caller was updated "
                 "in the same commit, but out-of-tree consumers would notice."
             ),
-            "artifact_refs": ["docs/parsers.md", "reports/parser-diff.md"],
+            "artifact_refs": [
+                "outputs/gb200-nearzero-20261113/NEXT_EXPERIMENT.md",
+                "docs/parsers.md",
+                "reports/parser-diff.md",
+            ],
             "call_id": "call-deep",
             "execution_epoch": 2,
             "reported_at": "2026-10-24T09:30:00",
@@ -284,6 +288,27 @@ async def main(browser_run: BrowserRun) -> None:
         await deep_row.click()
         await expect(page.locator(".tp-title")).to_have_text(deep["title"])
         await expect(page.get_by_label("Key milestones")).to_be_visible()
+        # Deliverables buttons (Preview / Copy) must stay strictly inside their card
+        # with zero horizontal clipping or cross-card collision across widths.
+        for check_w in (1280, 920, 390):
+            await page.set_viewport_size({"width": check_w, "height": 860})
+            deliv_card = page.get_by_label("Deliverables", exact=True)
+            verif_card = page.get_by_label("Verification and caveats", exact=True)
+            await expect(deliv_card).to_be_visible()
+            await expect(verif_card).to_be_visible()
+            c_box = await deliv_card.bounding_box()
+            v_box = await verif_card.bounding_box()
+            assert c_box and v_box
+            for btn in await deliv_card.locator("button").all():
+                b_box = await btn.bounding_box()
+                assert b_box is not None
+                assert b_box["x"] >= c_box["x"] - 1 and (
+                    b_box["x"] + b_box["width"] <= c_box["x"] + c_box["width"] + 1
+                ), f"deliverable button overflowed card at {check_w}px: btn={b_box} card={c_box}"
+            assert (
+                c_box["y"] + c_box["height"] <= v_box["y"] + 1
+            ), f"deliverables and verification cards overlapped at {check_w}px: {c_box} vs {v_box}"
+        await page.set_viewport_size({"width": 1280, "height": 860})
         await page.screenshot(path=str(output / "triage-pro-dark-1280.png"))
         await page.get_by_role("button", name="B · One-Page Brief", exact=True).click()
         await expect(page.get_by_label("One-page sign-off brief")).to_be_visible()
