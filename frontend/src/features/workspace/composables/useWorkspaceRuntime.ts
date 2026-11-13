@@ -74,17 +74,20 @@ export function useWorkspaceRuntime() {
 
   const taskCreateFlow = useTaskCreateFlow()
 
-  const initialDemoParam = typeof window !== 'undefined' && window.location?.search
-    ? new URLSearchParams(window.location.search).get('ws_demo')
+  const STORAGE_KEY_LAYOUT_MODE = 'claude_hub_workspace_layout_mode'
+  const storedLayoutMode = typeof localStorage !== 'undefined'
+    ? localStorage.getItem(STORAGE_KEY_LAYOUT_MODE)
     : null
-  const isStyleDemoOpen = ref(Boolean(initialDemoParam))
-  const initialDemoStyle = (
-    initialDemoParam === 'focused_inbox' || initialDemoParam === 'precision_grid'
-      ? initialDemoParam
-      : 'linear_zen'
-  ) as 'linear_zen' | 'focused_inbox' | 'precision_grid'
-  function toggleStyleDemo() {
-    isStyleDemoOpen.value = !isStyleDemoOpen.value
+  const queryLayoutParam = typeof window !== 'undefined' && window.location?.search
+    ? new URLSearchParams(window.location.search).get('ws_layout')
+    : null
+  const workspaceLayoutMode = ref<'triage' | 'board'>(
+    queryLayoutParam === 'board' || (queryLayoutParam !== 'triage' && storedLayoutMode === 'board')
+      ? 'board'
+      : 'triage',
+  )
+  function toggleWorkspaceLayoutMode() {
+    setWorkspaceLayoutMode(workspaceLayoutMode.value === 'triage' ? 'board' : 'triage')
   }
 
   const {
@@ -135,6 +138,18 @@ export function useWorkspaceRuntime() {
   const selectedWorkspaceId = ref(activeWorkspaceId.value || '')
 
   const selectedTaskId = ref<string | null>(null)
+
+  function setWorkspaceLayoutMode(mode: 'triage' | 'board') {
+    if (mode === 'board' && workspaceLayoutMode.value === 'triage') {
+      selectedTaskId.value = null
+    }
+    workspaceLayoutMode.value = mode
+    try {
+      localStorage.setItem(STORAGE_KEY_LAYOUT_MODE, mode)
+    } catch {
+      // Ignore storage quota / private mode errors.
+    }
+  }
 
   const workspaceSessionView = ref<WorkspaceSessionView>('agents')
 
@@ -588,9 +603,9 @@ export function useWorkspaceRuntime() {
     envPresets,
     workspaceNotifications,
     dismissToast,
-    isStyleDemoOpen,
-    initialDemoStyle,
-    toggleStyleDemo,
+    workspaceLayoutMode,
+    setWorkspaceLayoutMode,
+    toggleWorkspaceLayoutMode,
     taskCreateFlow,
     defaultPresetTextForAgent,
     workspaceStore,

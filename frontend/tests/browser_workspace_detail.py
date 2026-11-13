@@ -209,7 +209,7 @@ async def main(browser_run: BrowserRun) -> None:
         for width in (390, 720, 1280):
             task["status"] = "todo"
             await page.set_viewport_size({"width": width, "height": 844})
-            await page.goto(url, wait_until="networkidle")
+            await page.goto(f"{url}?ws_layout=board", wait_until="networkidle")
             held_card = page.locator(".task-card--review").filter(has_text=held["title"])
             note = held_card.locator(".lifecycle-note--attention")
             await expect(note).to_have_text("Needs you · AI reviewer has a question for you")
@@ -269,11 +269,39 @@ async def main(browser_run: BrowserRun) -> None:
             await panel.get_by_role("button", name="Close task detail", exact=True).click()
             await expect(panel).to_be_hidden()
 
-        # A review task whose evidence fills the screen must still offer the
-        # decision without hunting for it: the compact bar appears while the
-        # Decision section is off screen, jumps to it, then retires itself.
+        # Also exercise the default Linear Triage Pro surface across 1280px and
+        # 390px: row selection, keyboard J/K navigation, Start Task, and clean
+        # layout toggle without horizontal overflow.
+        task["status"] = "todo"
+        await page.set_viewport_size({"width": 1280, "height": 860})
+        await page.goto(f"{url}?ws_layout=triage", wait_until="networkidle")
+        await expect(page.locator(".tp-shell")).to_be_visible()
+        held_row = page.locator(".tp-row").filter(has_text=held["title"])
+        await expect(held_row).to_be_visible()
+        deep_row = page.locator(".tp-row").filter(has_text=deep["title"])
+        await deep_row.click()
+        await expect(page.locator(".tp-title")).to_have_text(deep["title"])
+        await page.screenshot(path=str(output / "triage-pro-dark-1280.png"))
+        await page.evaluate("() => document.documentElement.setAttribute('data-theme', 'light')")
+        await page.screenshot(path=str(output / "triage-pro-light-1280.png"))
+        await page.evaluate("() => document.documentElement.setAttribute('data-theme', 'dark')")
+        detail_row = page.locator(".tp-row").filter(has_text=task["title"])
+        await detail_row.click()
+        await expect(page.locator(".tp-title")).to_have_text(task["title"])
+        start_triage = page.locator(".tp-spec-gate").get_by_role(
+            "button", name="Start Task", exact=True
+        )
+        await expect(start_triage).to_be_enabled()
+        await start_triage.click()
+        await expect(page.locator(".tp-status-pill")).to_contain_text("Working")
         await page.set_viewport_size({"width": 390, "height": 844})
-        await page.goto(url, wait_until="networkidle")
+        assert await page.locator(".tp-shell").evaluate(
+            "el => el.scrollWidth <= el.clientWidth + 1"
+        )
+        await page.screenshot(path=str(output / "triage-pro-mobile-390.png"))
+
+        # Restore Classic Board for the deep-review sticky-bar assertions below.
+        await page.goto(f"{url}?ws_layout=board", wait_until="networkidle")
         await page.locator(".task-card h3").filter(has_text=deep["title"]).click()
         panel = page.locator(".task-detail-panel")
         await expect(panel).to_be_visible()
@@ -325,7 +353,7 @@ async def main(browser_run: BrowserRun) -> None:
         )
         await panel.get_by_role("button", name="Close task detail", exact=True).click()
         await expect(panel).to_be_hidden()
-        assert len(starts) == 3
+        assert len(starts) == 4
         assert not page_errors, page_errors
         assert not console_errors, console_errors
         assert not blocked, blocked

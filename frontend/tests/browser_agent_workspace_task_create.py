@@ -611,7 +611,10 @@ async def main(browser_run: BrowserRun) -> None:
                     "mimeType": ATTACHMENT_MIME_TYPE,
                 },
             )
-            assert result == {"defaultPrevented": True, "fileSize": len(ATTACHMENT_BYTES)}
+            assert result == {
+                "defaultPrevented": True,
+                "fileSize": len(ATTACHMENT_BYTES),
+            }
             row = modal.locator(".attachment-row")
             await expect(row).to_have_count(1)
             await expect(row.locator("strong")).to_have_text(ATTACHMENT_FILENAME)
@@ -650,6 +653,13 @@ async def main(browser_run: BrowserRun) -> None:
             before = await browser_create_count()
             await modal.locator("form").evaluate("form => form.requestSubmit()")
             assert await browser_create_count() == before
+
+        # Default view is Linear Triage Pro; verify it renders the task row and
+        # switches cleanly to Classic Board via the header control.
+        await expect(page.locator(".tp-shell")).to_be_visible()
+        await expect(page.locator(".tp-row").filter(has_text="Record-only fixture")).to_be_visible()
+        await page.get_by_role("button", name="Classic Board", exact=True).click()
+        await expect(page.locator(".tp-shell")).to_have_count(0)
 
         # Record-only cards keep their source/progress UI but expose no
         # Workspace-managed dispatch/edit/abort/delete controls.
@@ -781,7 +791,11 @@ async def main(browser_run: BrowserRun) -> None:
         await modal.screenshot(path=str(output / "agent-workspace-task-recover.png"))
         first = create_calls[-1]
         assert first["body"]["execution_control"] == "initiator"
-        assert first["body"]["source"] == {"kind": "human", "tab_id": None, "agent_id": None}
+        assert first["body"]["source"] == {
+            "kind": "human",
+            "tab_id": None,
+            "agent_id": None,
+        }
         assert len(first["body"]["request_key"]) > 0
         assert len(first["body"]["reporter_key"]) >= 32
         await recover_create.click()
@@ -835,7 +849,10 @@ async def main(browser_run: BrowserRun) -> None:
         isolation_call = create_calls[-1]
         isolation_key = isolation_call["body"]["reporter_key"]
         persisted_attempt = await load_create_attempt("ws-1")
-        assert persisted_attempt == {"workspace_id": "ws-1", "payload": isolation_call["body"]}
+        assert persisted_attempt == {
+            "workspace_id": "ws-1",
+            "payload": isolation_call["body"],
+        }
         await modal.get_by_role("button", name="Cancel", exact=True).click()
         await switch_workspace("ws-2")
         modal_b = await open_add_task()
