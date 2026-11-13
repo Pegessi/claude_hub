@@ -7,6 +7,21 @@
 
 ## Released
 
+### fix(workspace): preserve monitor cancellation on Python 3.11 and split Cursor ACP helpers
+
+- Replace `asyncio.wait_for` in `_background_monitor_loop`'s `_guard_awaitable`
+  with `asyncio.timeout` and re-raise `asyncio.CancelledError` whenever the
+  monitor task's cancellation count exceeds its entry baseline. In Python 3.11,
+  `asyncio.wait_for` swallows an external `task.cancel()` when its wrapped
+  future has already completed (`if fut.done(): return fut.result()`), which
+  caused `_guard_awaitable`'s `except Exception:` handler to absorb the monitor
+  cancellation and spin `test_suppressed_count_flushes_after_window` (or
+  `stop_background_monitor()`) until the 60s `faulthandler_timeout` aborted CI
+  with exit code 139.
+- Extract Cursor ACP model-spec parsing, store migration, and preload helpers
+  into `providers/cursor_helpers.py` so `providers/cursor.py` stays within the
+  1500-line AI metrics ratchet ceiling.
+
 ### feat(agent_stream): migrate Cursor native Chat to persistent `agent acp` transport
 
 - Cursor native Chat now runs a persistent `agent acp` stdio JSON-RPC server per
