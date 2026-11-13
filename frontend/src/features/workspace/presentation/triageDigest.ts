@@ -682,8 +682,7 @@ export function buildKeyMilestones(input: {
     )
 
     if (progressEvents.length > 0) {
-      progressEvents.forEach((ev, idx) => {
-        const isLast = idx === progressEvents.length - 1
+      const emitSingleEvent = (ev: WorkspaceTaskEvent, idx: number, isLast: boolean) => {
         const state = String(ev.payload.state || ev.type || 'working')
         const rawSummary = String(ev.payload.summary || '').trim()
         const eventIso = normalizeEventIso(ev.created_at)
@@ -735,7 +734,93 @@ export function buildKeyMilestones(input: {
           detailText: isCurrentEcho ? undefined : rawSummary,
           tabId: task.source?.tab_id ?? null,
         })
-      })
+      }
+
+      if (progressEvents.length <= 8) {
+        progressEvents.forEach((ev, idx) => {
+          emitSingleEvent(ev, idx, idx === progressEvents.length - 1)
+        })
+      } else {
+        // Long-running iterative tasks (e.g. 50+ ablation updates): keep major state transitions
+        // and fold intermediate working runs into at most 5 digestible phase batches.
+        let workRun: WorkspaceTaskEvent[] = []
+        let batchOrdinal = 0
+
+        const flushWorkRun = (touchesEnd: boolean) => {
+          if (workRun.length === 0) return
+          const targetChunks = Math.min(4, Math.max(1, Math.ceil(workRun.length / 12)))
+          const chunkSize = Math.ceil(workRun.length / targetChunks)
+
+          for (let offset = 0; offset < workRun.length; offset += chunkSize) {
+            const slice = workRun.slice(offset, offset + chunkSize)
+            const isFinalSlice = touchesEnd && offset + chunkSize >= workRun.length
+            if (isFinalSlice && slice.length > 1) {
+              const prior = slice.slice(0, -1)
+              const lastPrior = prior[prior.length - 1]
+              const priorIso = normalizeEventIso(lastPrior.created_at)
+              const priorParsed = parseStructuredDigest(String(lastPrior.payload.summary || ''), task)
+              batchOrdinal += 1
+              steps.push({
+                id: `ev-batch-${lastPrior.sequence}`,
+                phase: 'work',
+                tone: 'pass',
+                title: `Iteration phase ${batchOrdinal} (${prior.length} updates)`,
+                oneLiner:
+                  priorParsed.headline.length > 96
+                    ? `${priorParsed.headline.slice(0, 94)}…`
+                    : priorParsed.headline,
+                timeLabel: formatClock(priorIso),
+                deltaLabel: deltaFrom(priorIso),
+                badge: `${prior.length} UPDATES`,
+                collapsedCount: prior.length,
+                detailText: prior
+                  .map(e => `[${formatClock(normalizeEventIso(e.created_at))}] ${String(e.payload.summary || '').trim()}`)
+                  .join('\n\n'),
+                tabId: task.source?.tab_id ?? null,
+              })
+              emitSingleEvent(slice[slice.length - 1], progressEvents.length - 1, true)
+            } else if (slice.length === 1) {
+              emitSingleEvent(slice[0], batchOrdinal, isFinalSlice)
+            } else {
+              const lastEv = slice[slice.length - 1]
+              const sliceIso = normalizeEventIso(lastEv.created_at)
+              const sliceParsed = parseStructuredDigest(String(lastEv.payload.summary || ''), task)
+              batchOrdinal += 1
+              steps.push({
+                id: `ev-batch-${lastEv.sequence}`,
+                phase: 'work',
+                tone: 'pass',
+                title: `Iteration phase ${batchOrdinal} (${slice.length} updates)`,
+                oneLiner:
+                  sliceParsed.headline.length > 96
+                    ? `${sliceParsed.headline.slice(0, 94)}…`
+                    : sliceParsed.headline,
+                timeLabel: formatClock(sliceIso),
+                deltaLabel: deltaFrom(sliceIso),
+                badge: `${slice.length} UPDATES`,
+                collapsedCount: slice.length,
+                detailText: slice
+                  .map(e => `[${formatClock(normalizeEventIso(e.created_at))}] ${String(e.payload.summary || '').trim()}`)
+                  .join('\n\n'),
+                tabId: task.source?.tab_id ?? null,
+              })
+            }
+          }
+          workRun = []
+        }
+
+        progressEvents.forEach((ev, idx) => {
+          const isLast = idx === progressEvents.length - 1
+          const state = String(ev.payload.state || ev.type || 'working')
+          if (state === 'working') {
+            workRun.push(ev)
+            if (isLast) flushWorkRun(true)
+            return
+          }
+          flushWorkRun(false)
+          emitSingleEvent(ev, idx, isLast)
+        })
+      }
     } else if (task.latest_progress) {
       // Single snapshot fallback — mark as current echo so we NEVER duplicate the 400-word summary!
       const prog = task.latest_progress
