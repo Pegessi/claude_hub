@@ -7,6 +7,26 @@
 
 ## Released
 
+### feat(agent_stream): migrate Cursor native Chat to persistent `agent acp` transport
+
+- Cursor native Chat now runs a persistent `agent acp` stdio JSON-RPC server per
+  session instead of spawning a fresh `agent --print` CLI process on every turn,
+  keeping Cursor's server configuration, skill catalog, and HTTP/2 connection
+  pool warm across turns and eliminating the ~15–23s per-turn CLI cold start.
+- Images travel directly as base64 `image` blocks in `session/prompt` without
+  staging temp-file paths for a second `Read` tool round-trip; `AskQuestion` and
+  permission prompts block in-turn via `cursor/ask_question` and
+  `session/request_permission` JSON-RPC requests instead of failing closed and
+  requiring a follow-up steer turn.
+- Verified legacy `~/.cursor/chats/<cwd-hash>/<id>/store.db` stores migrate
+  into `~/.cursor/acp-sessions/<id>/` on `session/load`, and restart
+  continuation verifies ACP session stores alongside legacy CLI stores.
+- Single-chunk assistant messages flushed with `timestamp_ms` (such as short
+  post-`AskQuestion` acknowledgments) reconcile without false mismatch errors;
+  upstream content-policy `ActionRequiredError` rejections append an explicit
+  non-auth diagnostic hint; successful provider network route selections cache
+  for 300s to avoid repeating 3s direct-probe timeouts between turns.
+
 ### fix(ui): keep Safari Chat in view and open attachments on touch
 
 - Active mobile Chat follows the visual viewport's position as well as height,

@@ -392,15 +392,20 @@ def test_launch_env_model_override_only_claude_codex() -> None:
 
 
 def test_fork_predicate_support_matches_spec() -> None:
-    for provider in (AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR):
+    for provider in (AgentType.CLAUDE, AgentType.CODEX):
         assert callable(transcript_fork._user_message_predicate(provider))
-    for provider in (AgentType.TRAEX, AgentType.MASO, AgentType.ANTIGRAVITY, AgentType.TERMINAL):
+    for provider in (
+        AgentType.CURSOR,
+        AgentType.TRAEX,
+        AgentType.MASO,
+        AgentType.ANTIGRAVITY,
+        AgentType.TERMINAL,
+    ):
         with pytest.raises(transcript_fork.TranscriptForkError, match="edit-resend"):
             transcript_fork._user_message_predicate(provider)
     assert {agent for agent, spec in all_specs().items() if spec.edit_resend} == {
         AgentType.CLAUDE,
         AgentType.CODEX,
-        AgentType.CURSOR,
     }
 
 
@@ -445,12 +450,10 @@ def test_native_approval_projection_per_provider() -> None:
     assert _bare_transport(ClaudeNativeSession, AgentType.CLAUDE).supports_approval_ui is False
     assert _bare_transport(CodexNativeSession, AgentType.CODEX).supports_approval_ui is True
     assert _bare_transport(TraexNativeSession, AgentType.TRAEX).supports_approval_ui is True
-    # Deliberate retained override: native cursor advertises approval UI even
-    # though its direct-chat channel is the one-shot steer.
     cursor = _bare_transport(CursorNativeSession, AgentType.CURSOR)
     assert (
         get_spec(AgentType.CURSOR).approval_channels[Surface.DIRECT_CHAT]
-        is ApprovalChannel.ONESHOT_STEER
+        is ApprovalChannel.RPC_BLOCKING
     )
     assert cursor.supports_approval_ui is True
 

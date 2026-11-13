@@ -374,11 +374,11 @@ async def test_identity_change_during_turn_publication_prevents_delivery(setup, 
 
 @pytest.mark.parametrize("boundary", ["environment", "terminate", "spawn"])
 @pytest.mark.parametrize("change", [None, "stop", "config", "conversation", "shutdown"])
-@pytest.mark.parametrize("provider_type", [AgentType.CLAUDE, AgentType.CURSOR])
+@pytest.mark.parametrize("provider_type", [AgentType.CLAUDE])
 async def test_oneshot_rechecks_intent_after_async_preparation(
     setup, boundary, change, provider_type
 ):
-    """Use actual Claude/Cursor stdin paths; replace external process I/O."""
+    """Use actual Claude one-shot stdin path; replace external process I/O."""
     from claude_hub.services.agent_stream import tailer as tailer_module
 
     h = setup
@@ -580,6 +580,21 @@ async def test_strict_codex_resume_cannot_start_blank_thread(setup, reply):
     else:
         pytest.fail("strict resume accepted a missing/different conversation")
     assert [call.args[0] for call in request.await_args_list] == ["thread/resume"]
+
+
+@pytest.mark.asyncio
+async def test_strict_cursor_acp_resume_cannot_start_blank_session(setup):
+    session = setup.api._terminal_tab_session_or_404(setup.tab.id)
+    session.agent_type = AgentType.CURSOR
+    session.agent_session_id = "cursor-pinned-sid"
+    session.agent_session_id_verified = True
+    provider = CursorNativeSession(session)
+    provider.require_resumed_conversation("cursor-pinned-sid")
+    request = AsyncMock(side_effect=RuntimeError("Session not found"))
+    setup.monkeypatch.setattr(provider, "_send_request", request)
+    with pytest.raises(RuntimeError):
+        await provider._initialize_session({})
+    assert [call.args[0] for call in request.await_args_list] == ["session/load"]
 
 
 @pytest.mark.parametrize(

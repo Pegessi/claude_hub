@@ -50,7 +50,7 @@ _TRUTHY_VALUES = frozenset({"1", "true", "yes", "on", "y"})
 _VALID_MODES = frozenset({"auto", "direct", "proxy", "inherit"})
 
 
-_SUCCESS_TTL_SECONDS = 30.0
+_SUCCESS_TTL_SECONDS = 300.0
 
 
 _FAILURE_TTL_SECONDS = 5.0

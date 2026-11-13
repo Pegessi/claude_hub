@@ -230,7 +230,15 @@ async def test_native_chat_lifecycle_through_status_apis_and_cli(
                             ]
                         },
                     },
-                    {"type": "result", "subtype": "success"},
+                    {
+                        "type": "stream_event",
+                        "event": {
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {"type": "text_delta", "text": "Done."},
+                        },
+                    },
+                    {"type": "result", "subtype": "success", "result": "Done."},
                 ]
             else:
 
@@ -242,6 +250,7 @@ async def test_native_chat_lifecycle_through_status_apis_and_cli(
                     rpc("item/agentMessage/delta", delta=marker),
                     rpc("item/started", item=item),
                     rpc("item/completed", item={**item, "aggregatedOutput": marker, "exitCode": 0}),
+                    rpc("item/agentMessage/delta", delta="Done."),
                     rpc("turn/completed", turn={"id": "status-turn", "status": "completed"}),
                 ]
             for record, expected_event, expected_status in zip(
@@ -250,9 +259,10 @@ async def test_native_chat_lifecycle_through_status_apis_and_cli(
                     AgentStreamEventType.TEXT_DELTA,
                     AgentStreamEventType.TOOL_CALL_STARTED,
                     AgentStreamEventType.TOOL_CALL_COMPLETED,
+                    AgentStreamEventType.TEXT_DELTA,
                     AgentStreamEventType.TURN_COMPLETED,
                 ],
-                ["working", "working", "working", "idle"],
+                ["working", "working", "working", "working", "idle"],
             ):
                 transport._records.put_nowait(record)
                 await event(expected_event)

@@ -223,13 +223,13 @@
   },
   "cursor": {
     "approval_channels": {
-      "direct_chat": "oneshot_steer",
-      "dot": "oneshot_steer",
-      "managed_chat": "oneshot_steer",
+      "direct_chat": "rpc_blocking",
+      "dot": "rpc_blocking",
+      "managed_chat": "rpc_blocking",
       "managed_terminal": "native_tui",
       "resident": "native_tui",
       "scheduled": "native_tui",
-      "subagent": "oneshot_steer",
+      "subagent": "rpc_blocking",
       "terminal_tab": "native_tui"
     },
     "auth": {
@@ -244,9 +244,9 @@
     },
     "binary": "agent",
     "display_name": "Cursor",
-    "edit_resend": true,
+    "edit_resend": false,
     "effort_env_keys": [],
-    "eof_is_fatal": false,
+    "eof_is_fatal": true,
     "fork_seed_via_prompt": true,
     "goals": {
       "api": "none",
@@ -264,7 +264,7 @@
       "CURSOR_MODEL"
     ],
     "id": "cursor",
-    "images": "prompt_file_ref",
+    "images": "sdk_base64",
     "model_catalog": "cli_list_models",
     "model_configurable_in_managed": false,
     "model_env_key": "CURSOR_MODEL",
@@ -273,13 +273,13 @@
     "reasoning_effort": "model_id_suffix",
     "remote_terminal": true,
     "resume": {
-      "constructive_always": true,
-      "constructive_flag": "--resume",
-      "kind": "constructive_flag",
+      "constructive_always": false,
+      "constructive_flag": null,
+      "kind": "rpc_thread",
       "verified_flag": null
     },
     "solo": "always",
-    "stream_source": "stdout_stream_json",
+    "stream_source": "rpc_notifications",
     "supports_conversation_rotation": true,
     "surfaces": [
       "direct_chat",
@@ -293,7 +293,7 @@
     ],
     "system_instruction_channel": "prompt_sentinel",
     "tool_timeline": true,
-    "transport": "cli_oneshot"
+    "transport": "cli_persistent"
   },
   "maso": {
     "approval_channels": {

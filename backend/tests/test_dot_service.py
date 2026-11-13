@@ -724,20 +724,36 @@ async def test_first_cursor_image_after_switch_prepares_dot_without_visible_text
         session_turns=0,
     )
     transport = CursorNativeSession(_session(TAB_ID, AgentType.CURSOR))
-    mock_spawn = AsyncMock()
+    transport._started = True
+    transport._process = MagicMock(returncode=None, wait=AsyncMock(return_value=0))
+    transport._acp_session_id = "cursor-initial"
+    transport._applied_mode = "agent"
+    transport._launch_fingerprint = transport._configuration_fingerprint()
+    loop = asyncio.get_running_loop()
+    pending_fut: asyncio.Future[dict[str, Any]] = loop.create_future()
+    mock_request = AsyncMock(
+        side_effect=lambda method, _params, **_kw: (
+            {"sessionId": "cursor-rotated"} if method == "session/new" else {}
+        )
+    )
+    mock_write = AsyncMock(return_value=(1, pending_fut))
     try:
-        with patch.object(transport, "_spawn_oneshot", mock_spawn):
+        with (
+            patch.object(transport, "_send_request", mock_request),
+            patch.object(transport, "_write_request", mock_write),
+        ):
             await transport.send_message("", [_VALID_PNG])
-        call_args = mock_spawn.await_args
-        assert call_args is not None
-        prompt = str(call_args.args[1])
+        assert mock_write.await_args is not None
+        prompt_items = mock_write.await_args.args[1]["prompt"]
+        assert prompt_items[0]["type"] == "image"
+        prompt = str(prompt_items[1]["text"])
         assert "You are Dot" in prompt
         clean = strip_image_attachment_guidance(prompt)
         clean = strip_question_protocol_guidance(clean)
         assert strip_hub_runtime_guidance(clean) == ""
         state = service.store.read_state()
         assert state["session_turns"] == 1
-        assert state["session_conversation_id"] == transport._conversation_id
+        assert state["session_conversation_id"] == transport._conversation_id == "cursor-rotated"
     finally:
         await transport.stop()
 

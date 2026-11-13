@@ -29,17 +29,17 @@ from ....models import AgentType
 
 
 class TransportKind(str, Enum):
-    CLI_ONESHOT = "cli_oneshot"  # claude --print / agent --print
-    CLI_PERSISTENT = "cli_persistent"  # codex/traex app-server JSON-RPC
+    CLI_ONESHOT = "cli_oneshot"  # claude --print
+    CLI_PERSISTENT = "cli_persistent"  # codex/traex app-server & cursor acp JSON-RPC
     HTTP_SSE = "http_sse"  # maso
     SHELL = "shell"  # terminal pseudo-provider and unknown fail-closed record
 
 
 class ImageTransport(str, Enum):
     NONE = "none"
-    SDK_BASE64 = "sdk_base64"  # claude SDKUserMessage blocks
+    SDK_BASE64 = "sdk_base64"  # claude SDKUserMessage / cursor ACP image blocks
     RPC_TEMP_FILE = "rpc_temp_file"  # codex/traex staged files over RPC
-    PROMPT_FILE_REF = "prompt_file_ref"  # cursor sentinel path block + Read
+    PROMPT_FILE_REF = "prompt_file_ref"  # antigravity sentinel path block + Read
     HTTP_CHUNKED = "http_chunked"  # maso 512 KiB chunks, 8 MiB cap
 
 
@@ -432,21 +432,18 @@ REGISTRY: Mapping[AgentType, ProviderSpec] = MappingProxyType(
         AgentType.CURSOR: ProviderSpec(
             id=AgentType.CURSOR,
             display_name="Cursor",
-            transport=TransportKind.CLI_ONESHOT,
-            stream_source=StreamEventSource.STDOUT_STREAM_JSON,
+            transport=TransportKind.CLI_PERSISTENT,
+            stream_source=StreamEventSource.RPC_NOTIFICATIONS,
+            eof_is_fatal=True,
             binary="agent",
-            resume=ResumeSpec(
-                kind="constructive_flag",
-                constructive_flag="--resume",
-                constructive_always=True,
-            ),
+            resume=ResumeSpec(kind="rpc_thread"),
             supports_conversation_rotation=True,
-            edit_resend=True,
-            images=ImageTransport.PROMPT_FILE_REF,
+            edit_resend=False,
+            images=ImageTransport.SDK_BASE64,
             tool_timeline=True,
             plan_mode=PlanMode.CLI_FLAG_PROBED,
             system_instruction_channel="prompt_sentinel",
-            approval_channels=ApprovalChannels.for_surfaces(_TUI_APPROVAL),
+            approval_channels=ApprovalChannels.for_surfaces(_RPC_APPROVAL),
             model_catalog=ModelCatalogSource.CLI_LIST_MODELS,
             model_env_key="CURSOR_MODEL",
             reasoning_effort=ReasoningEffortKind.MODEL_ID_SUFFIX,

@@ -208,7 +208,7 @@ function startStream() {
   void start(streamSourceId.value, streamSource.value)
 }
 const supportsEditResend = computed(() =>
-  !isManagedChat.value && ['claude', 'codex', 'cursor'].includes(currentTab.value?.agent_type ?? '')
+  !isManagedChat.value && ['claude', 'codex'].includes(currentTab.value?.agent_type ?? '')
 )
 const isPaneActivated = ref(false)
 function retry() {

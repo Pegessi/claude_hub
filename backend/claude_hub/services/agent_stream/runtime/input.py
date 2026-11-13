@@ -6,8 +6,9 @@ import asyncio
 import logging
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from ....models import AgentStreamEventType, AgentType
+from ....models import AgentStreamEventType
 from ..base import NativeInputNotSubmittedError, NormalizeContext
+from ..providers.spec import ApprovalChannel, Surface, get_spec
 from ..redaction import redact_event
 from ..transcript_fork import hash_provider_text
 from .session_state import SessionState
@@ -38,7 +39,10 @@ class InputMixin(SessionState):
         if card is None or card.turn_id != turn_id or session is None:
             return None
         mode = (
-            "followup" if session.agent_type in {AgentType.CLAUDE, AgentType.CURSOR} else "native"
+            "followup"
+            if get_spec(session.agent_type).approval_channels[Surface.DIRECT_CHAT]
+            is ApprovalChannel.ONESHOT_STEER
+            else "native"
         )
         if mode == "followup" and card.run_epoch != self._run_epoch:
             return None
@@ -124,10 +128,14 @@ class InputMixin(SessionState):
         *,
         expected_call_id: Optional[str] = None,
     ) -> bool:
-        """Claude/Cursor answer questions with a new turn, not in-turn."""
+        """One-shot steer providers answer questions with a new turn, not in-turn."""
         session = self._session_getter()
         answers = self._deps.parse_ask_question_response(text)
-        if session is None or session.agent_type not in {AgentType.CLAUDE, AgentType.CURSOR}:
+        if (
+            session is None
+            or get_spec(session.agent_type).approval_channels[Surface.DIRECT_CHAT]
+            is not ApprovalChannel.ONESHOT_STEER
+        ):
             return False
         if answers is None:
             return False
