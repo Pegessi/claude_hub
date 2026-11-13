@@ -125,7 +125,7 @@ def _config_digest(tab: Any) -> str:
 
 
 def _cursor_database_exists(transport: Any) -> bool:
-    """Cursor's constructive --resume needs an authoritative existing DB."""
+    """Cursor's constructive --resume / ACP session load needs an authoritative existing DB."""
     from ._cursor_verify import _cwd_hash, _read_agent_id_from_db
 
     env = transport._build_env()
@@ -138,6 +138,36 @@ def _cursor_database_exists(transport: Any) -> bool:
     data_dir = env.get("CURSOR_DATA_DIR")
     if data_dir and Path(data_dir).resolve() != root.resolve():
         return False
+    config_dir_raw = env.get("CURSOR_CONFIG_DIR")
+    if config_dir_raw and config_dir_raw.strip():
+        acp_root = Path(config_dir_raw.strip()).expanduser()
+    elif env.get("XDG_CONFIG_HOME") and env["XDG_CONFIG_HOME"].strip():
+        acp_root = Path(env["XDG_CONFIG_HOME"].strip()).expanduser() / "cursor"
+    else:
+        acp_root = root
+    cid = transport._conversation_id
+    if (
+        isinstance(cid, str)
+        and cid
+        and "/" not in cid
+        and "\\" not in cid
+        and cid not in {".", ".."}
+    ):
+        acp_sessions = acp_root / "acp-sessions"
+        acp_session_dir = acp_sessions / cid
+        acp_db = acp_session_dir / "store.db"
+        try:
+            if (
+                not acp_sessions.is_symlink()
+                and not acp_session_dir.is_symlink()
+                and not acp_db.is_symlink()
+                and acp_db.is_file()
+                and acp_db.resolve().parent.parent == acp_sessions.resolve()
+                and _read_agent_id_from_db(acp_db) == cid
+            ):
+                return True
+        except OSError:
+            pass
     bucket = root / "chats" / _cwd_hash(transport._cwd)
     matches = 0
     try:

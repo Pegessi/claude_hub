@@ -252,16 +252,27 @@ async def test_claude_seed_prepended_to_first_turn_only() -> None:
 
 @pytest.mark.asyncio
 async def test_cursor_seed_prepended_to_first_turn_only() -> None:
+    import asyncio
+
     transport = CursorNativeSession(_session(AgentType.CURSOR), seed_history="User: q")
-    mock_spawn = AsyncMock()
-    with patch.object(transport, "_spawn_oneshot", mock_spawn):
-        await transport.send_message("continue", [])
-        transport.acknowledge_turn_complete()
-        await transport.send_message("again", [])
-    first = mock_spawn.await_args_list[0].args[1]
-    second = mock_spawn.await_args_list[1].args[1]
-    assert "FORK_SEED_HISTORY_V1" in first and first.endswith("continue")
-    assert "FORK_SEED" not in second and second.endswith("again")
+    transport._started = True
+    transport._process = MagicMock(returncode=None, wait=AsyncMock(return_value=0))
+    transport._acp_session_id = "cursor-sid"
+    transport._applied_mode = "agent"
+    transport._launch_fingerprint = transport._configuration_fingerprint()
+    loop = asyncio.get_running_loop()
+    mock_write = AsyncMock(side_effect=lambda *_a, **_k: (1, loop.create_future()))
+    try:
+        with patch.object(transport, "_write_request", mock_write):
+            await transport.send_message("continue", [])
+            transport.acknowledge_turn_complete()
+            await transport.send_message("again", [])
+        first = mock_write.await_args_list[0].args[1]["prompt"][0]["text"]
+        second = mock_write.await_args_list[1].args[1]["prompt"][0]["text"]
+        assert "FORK_SEED_HISTORY_V1" in first and first.endswith("continue")
+        assert "FORK_SEED" not in second and second.endswith("again")
+    finally:
+        await transport.stop()
 
 
 @pytest.mark.asyncio

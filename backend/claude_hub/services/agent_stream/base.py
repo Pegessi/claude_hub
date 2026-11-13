@@ -128,12 +128,16 @@ class _TurnAccumulator:
     # Tool call ids announced by either a streamed content block or an
     # assistant snapshot. Whichever representation arrives second is skipped.
     emitted_tool_call_ids: Set[str] = field(default_factory=set)
+    completed_tool_call_ids: Set[str] = field(default_factory=set)
     emitted_approval_call_ids: Set[str] = field(default_factory=set)
     # Per-message tool input assembly keyed by content block index. Claude
     # streams tool arguments as ``input_json_delta`` fragments between
     # ``content_block_start`` and ``content_block_stop``.
     pending_tool_inputs: Dict[int, str] = field(default_factory=dict)
     pending_tool_meta: Dict[int, Dict[str, Any]] = field(default_factory=dict)
+    # Per-turn Cursor ACP tool metadata buffered across partial ``tool_call``
+    # and ``tool_call_update`` notifications until execution starts/completes.
+    acp_tool_meta: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     # Open assistant MESSAGE lifecycle (``message_start`` … ``message_stop``),
     # distinct from the per-message text accumulator above. A one-shot provider
     # can close stdout mid-generation after a ``message_start`` with only some
@@ -461,14 +465,17 @@ class AgentStreamAdapter:
         state.text_chunks.append(text)
 
     def _is_recent_text_snapshot(self, ctx: NormalizeContext, text: str) -> bool:
-        """Whether ``text`` exactly replays two or more recent delta chunks.
+        """Whether ``text`` replays already-emitted delta chunks of this message.
 
         Cursor normally marks final snapshots by omitting ``timestamp_ms``,
-        but resumed/multi-message turns can timestamp the replay as well.  A
-        suffix string check alone would incorrectly discard a legitimate
-        repeated token.  Requiring the record to reconstruct at least two
-        complete prior chunks narrowly identifies the observed snapshot
-        shape while preserving ordinary repeated deltas.
+        but its ``fe({includeTimestamp: true})`` flush before ``modelCallCompleted``,
+        ``toolCallStarted``, and ``interaction_query`` also timestamps the
+        replay.  When a short assistant message (such as the post-``AskQuestion``
+        acknowledgment) streams in a single delta chunk, the flush record is a
+        1-chunk exact match of ``state.text``; multi-chunk messages reconstruct
+        two or more complete trailing chunks.  Checking full-message equality
+        only past a non-trivial length (12 chars) preserves ordinary single-token
+        repeats while catching single-chunk sentence flushes.
         """
 
         if not text:
@@ -476,6 +483,8 @@ class AgentStreamAdapter:
         state = self._get_turn_state(ctx)
         if not state.text.endswith(text):
             return False
+        if text == state.text and len(state.text_chunks) == 1 and len(text) >= 12:
+            return True
         remaining = len(text)
         matched_chunks = 0
         for chunk in reversed(state.text_chunks):

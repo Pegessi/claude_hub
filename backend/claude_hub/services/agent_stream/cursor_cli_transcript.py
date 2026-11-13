@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -238,6 +239,16 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
         if not isinstance(raw, dict):
             return events
 
+        # Cursor ACP persistent JSON-RPC notifications carry ``method ==
+        # "session/update"``; inline transport errors use ``type == "acp_error"``.
+        if raw.get("method") == "session/update":
+            return self._normalize_acp_update(raw.get("params"), ctx)
+        if raw.get("type") == "acp_error":
+            msg = raw.get("message")
+            if isinstance(msg, str) and msg:
+                events.append(ctx.event(AgentStreamEventType.ERROR, {"message": msg}))
+            return events
+
         # Native stream-json stdout records carry a top-level ``type`` field
         # (``system``, ``thinking``, ``assistant``, ``result``). Transcript
         # file rows use ``role`` (``user``/``assistant``) or ``type:
@@ -437,6 +448,10 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
                 {"id": call_id, "name": name, "input": tool.get("args")}, ctx
             )
             if subtype == "completed":
+                state = self._get_turn_state(ctx)
+                if call_id in state.completed_tool_call_ids:
+                    return events
+                state.completed_tool_call_ids.add(call_id)
                 result = tool.get("result")
                 failed = isinstance(result, dict) and any(
                     key in result for key in ("error", "rejected", "failure")
@@ -552,7 +567,12 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
             if usage is not None:
                 completed_payload["usage"] = usage
             if is_error:
-                err = raw.get("result") or raw.get("error") or "turn failed"
+                raw_err = raw.get("error")
+                err = (
+                    ""
+                    if raw_err == "" and not raw.get("result")
+                    else (raw.get("result") or raw_err or "turn failed")
+                )
                 if isinstance(err, str) and err:
                     events.append(ctx.event(AgentStreamEventType.ERROR, {"message": err}))
                 events.append(ctx.event(AgentStreamEventType.TURN_COMPLETED, completed_payload))
@@ -561,6 +581,298 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
             self._clear_turn_state(ctx)
             return events
         return events
+
+    def _normalize_acp_update(self, params: Any, ctx: NormalizeContext) -> List[AgentStreamEvent]:
+        """Normalize a Cursor ``agent acp`` ``session/update`` notification."""
+        events: List[AgentStreamEvent] = []
+        if not isinstance(params, dict):
+            return events
+        update = params.get("update")
+        if not isinstance(update, dict):
+            return events
+        session_id = params.get("sessionId")
+        sub_thread = (
+            session_id
+            if isinstance(session_id, str)
+            and session_id
+            and ctx.main_thread_id
+            and session_id != ctx.main_thread_id
+            else None
+        )
+        if sub_thread is not None and not ctx.turn_id:
+            return events
+        record_ctx = replace(ctx, sub_thread_id=sub_thread) if sub_thread else ctx
+        kind = update.get("sessionUpdate")
+
+        if kind == "agent_message_chunk":
+            content = update.get("content")
+            text = content.get("text") if isinstance(content, dict) else None
+            if isinstance(text, str) and text:
+                events.append(
+                    ctx.event(
+                        AgentStreamEventType.TEXT_DELTA,
+                        {"text": text},
+                        sub_thread_id=sub_thread,
+                    )
+                )
+            return events
+
+        if kind == "agent_thought_chunk":
+            content = update.get("content")
+            text = content.get("text") if isinstance(content, dict) else None
+            if isinstance(text, str) and text:
+                state = self._get_turn_state(record_ctx)
+                state.thinking += text
+                events.append(
+                    ctx.event(
+                        AgentStreamEventType.THINKING_DELTA,
+                        {"text": text},
+                        sub_thread_id=sub_thread,
+                    )
+                )
+            return events
+
+        if kind == "plan":
+            entries = update.get("entries")
+            if isinstance(entries, list):
+                lines: List[str] = []
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    label = entry.get("content")
+                    if not isinstance(label, str) or not label.strip():
+                        continue
+                    step_status = entry.get("status")
+                    marker = "x" if step_status == "completed" else " "
+                    suffix = " (in progress)" if step_status == "in_progress" else ""
+                    lines.append(f"- [{marker}] {label.strip()}{suffix}")
+                if lines:
+                    events.append(
+                        ctx.event(
+                            AgentStreamEventType.TEXT_DELTA,
+                            {
+                                "text": "\n".join(lines),
+                                "plan": True,
+                                "plan_kind": "progress",
+                                "snapshot": True,
+                            },
+                            message_id=f"plan-progress:{ctx.turn_id or session_id or ''}",
+                            sub_thread_id=sub_thread,
+                        )
+                    )
+            return events
+
+        if kind in ("subagent_spawned", "subagent_state_update"):
+            child_id = update.get("subagentSessionId")
+            if not isinstance(child_id, str) or not child_id or not ctx.turn_id:
+                return events
+            if kind == "subagent_spawned":
+                lifecycle = "active"
+                label_name = update.get("name") or "sub-agent"
+                status_text = f"Sub-agent {label_name} started"
+            else:
+                raw_state = update.get("state")
+                if raw_state == "disconnected":
+                    lifecycle = "cancelled"
+                elif raw_state in ("active", "completed", "failed", "cancelled"):
+                    lifecycle = raw_state
+                else:
+                    return events
+                status_text = f"Sub-agent {lifecycle}"
+            events.append(
+                ctx.event(
+                    AgentStreamEventType.STATUS,
+                    {
+                        "text": status_text,
+                        "provider_status": "subagent_lifecycle",
+                        "subagent_status": lifecycle,
+                        "snapshot": True,
+                    },
+                    message_id=f"subagent:{child_id}",
+                    sub_thread_id=child_id,
+                )
+            )
+            return events
+
+        if kind in ("tool_call", "tool_call_update"):
+            return self._normalize_acp_tool_update(update, ctx, record_ctx, sub_thread)
+
+        return events
+
+    def _normalize_acp_tool_update(
+        self,
+        update: Dict[str, Any],
+        ctx: NormalizeContext,
+        record_ctx: NormalizeContext,
+        sub_thread: Optional[str],
+    ) -> List[AgentStreamEvent]:
+        events: List[AgentStreamEvent] = []
+        call_id = update.get("toolCallId")
+        if not isinstance(call_id, str) or not call_id:
+            return events
+        state = self._get_turn_state(record_ctx)
+        meta = state.acp_tool_meta.setdefault(call_id, {"args": {}})
+        if isinstance(update.get("kind"), str):
+            meta["kind"] = update["kind"]
+        if isinstance(update.get("title"), str):
+            meta["title"] = update["title"]
+        raw_input = update.get("rawInput")
+        if isinstance(raw_input, dict):
+            merged_args = dict(meta.get("args") or {})
+            merged_args.update(raw_input)
+            meta["args"] = merged_args
+        if isinstance(update.get("locations"), list):
+            meta["locations"] = update["locations"]
+        if isinstance(update.get("content"), list):
+            meta["content"] = update["content"]
+        if "rawOutput" in update and update["rawOutput"] is not None:
+            meta["raw_output"] = update["rawOutput"]
+
+        tool_name, args = self._derive_acp_tool_identity(meta)
+        status = update.get("status")
+
+        # AskQuestion cards are already emitted with full options by the
+        # blocking ``cursor/ask_question`` server request handler.
+        if tool_name == "AskQuestion":
+            return events
+
+        should_emit_start = status in ("in_progress", "completed", "failed")
+        if should_emit_start and call_id not in state.emitted_tool_call_ids:
+            state.emitted_tool_call_ids.add(call_id)
+            events.append(
+                ctx.event(
+                    AgentStreamEventType.TOOL_CALL_STARTED,
+                    {"name": tool_name, "args": args},
+                    call_id=call_id,
+                    sub_thread_id=sub_thread,
+                )
+            )
+
+        if status in ("completed", "failed") and call_id not in state.completed_tool_call_ids:
+            state.completed_tool_call_ids.add(call_id)
+            raw_out = meta.get("raw_output")
+            failed = status == "failed" or (
+                isinstance(raw_out, dict)
+                and (
+                    any(k in raw_out for k in ("error", "rejected", "permissionDenied"))
+                    or raw_out.get("exitCode") not in (None, 0)
+                )
+            )
+            result_val = self._format_acp_tool_result(raw_out, meta.get("content"))
+            events.append(
+                ctx.event(
+                    AgentStreamEventType.TOOL_CALL_COMPLETED,
+                    {
+                        "name": tool_name,
+                        "status": "failed" if failed else "completed",
+                        "result": result_val,
+                    },
+                    call_id=call_id,
+                    sub_thread_id=sub_thread,
+                )
+            )
+        return events
+
+    @staticmethod
+    def _derive_acp_tool_identity(meta: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+        raw_args = dict(meta.get("args") or {})
+        explicit = raw_args.pop("_toolName", None)
+        kind = str(meta.get("kind") or "")
+        title = str(meta.get("title") or "")
+
+        explicit_map = {
+            "task": "Task",
+            "askQuestion": "AskQuestion",
+            "updateTodos": "TodoWrite",
+            "createPlan": "CreatePlan",
+            "generateImage": "GenerateImage",
+            "generateVideo": "GenerateVideo",
+        }
+        if isinstance(explicit, str) and explicit in explicit_map:
+            name = explicit_map[explicit]
+        elif "providerIdentifier" in raw_args or "toolName" in raw_args:
+            prov = raw_args.get("providerIdentifier") or "mcp"
+            tname = raw_args.get("toolName") or "tool"
+            name = f"mcp__{prov}__{tname}"
+        elif kind == "execute":
+            name = "Shell"
+        elif kind == "edit":
+            name = "Edit"
+        elif kind == "delete":
+            name = "Delete"
+        elif kind == "read":
+            name = "Read"
+        elif kind == "fetch":
+            name = "WebSearch" if "searchTerm" in raw_args else "WebFetch"
+        elif kind == "switch_mode":
+            name = "SwitchMode"
+        elif kind == "search":
+            if "query" in raw_args:
+                name = "SemSearch"
+            elif title.startswith("Find"):
+                name = "Glob"
+            elif title.startswith("List "):
+                name = "Ls"
+            else:
+                name = "Grep"
+        else:
+            name = title.split(":", 1)[0].strip() or "Tool"
+
+        if "path" not in raw_args:
+            locations = meta.get("locations")
+            if isinstance(locations, list) and locations:
+                first_loc = locations[0]
+                if isinstance(first_loc, dict) and isinstance(first_loc.get("path"), str):
+                    raw_args["path"] = first_loc["path"]
+
+        if name == "Read" and isinstance(raw_args.get("path"), str):
+            raw_args.setdefault("file_path", raw_args["path"])
+
+        if name in ("Edit", "Delete"):
+            content_items = meta.get("content")
+            if isinstance(content_items, list):
+                for c_item in content_items:
+                    if isinstance(c_item, dict) and c_item.get("type") == "diff":
+                        if isinstance(c_item.get("path"), str):
+                            raw_args.setdefault("path", c_item["path"])
+                        if c_item.get("oldText") is not None:
+                            raw_args.setdefault("old_string", c_item["oldText"])
+                        if isinstance(c_item.get("newText"), str):
+                            raw_args.setdefault("new_string", c_item["newText"])
+                        break
+
+        if name == "WebSearch" and "searchTerm" in raw_args and "query" not in raw_args:
+            raw_args["query"] = raw_args["searchTerm"]
+
+        return name, raw_args
+
+    @staticmethod
+    def _format_acp_tool_result(raw_out: Any, content_items: Any) -> Any:
+        if isinstance(raw_out, dict):
+            if "stdout" in raw_out or "stderr" in raw_out:
+                parts: List[str] = []
+                for k in ("stdout", "stderr"):
+                    val = raw_out.get(k)
+                    if isinstance(val, str) and val.strip():
+                        parts.append(val.strip())
+                return "\n".join(parts)
+            if isinstance(raw_out.get("content"), str):
+                return raw_out["content"]
+            if isinstance(raw_out.get("error"), str):
+                return raw_out["error"]
+            return json.dumps(raw_out, ensure_ascii=False)
+        if isinstance(raw_out, str):
+            return raw_out
+        if isinstance(content_items, list):
+            texts: List[str] = []
+            for item in content_items:
+                if isinstance(item, dict) and item.get("type") == "content":
+                    inner = item.get("content")
+                    if isinstance(inner, dict) and isinstance(inner.get("text"), str):
+                        texts.append(inner["text"])
+            if texts:
+                return "\n".join(texts)
+        return ""
 
     @staticmethod
     def _extract_text(message: Any) -> str:

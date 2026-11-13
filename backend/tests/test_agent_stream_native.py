@@ -130,14 +130,14 @@ def test_claude_plan_mode_uses_permission_mode_without_permission_bypass() -> No
     assert "--dangerously-skip-permissions" not in command
 
 
-def test_cursor_plan_mode_uses_mode_without_yolo() -> None:
+def test_cursor_plan_mode_omits_yolo_and_runs_acp() -> None:
     session = _session(AgentType.CURSOR).model_copy(
         update={"chat_mode": ChatMode.PLAN, "solo_mode": True}
     )
 
     command = CursorNativeSession(session)._build_command()
 
-    assert command[-2:] == ["--mode", "plan"]
+    assert command[-1] == "acp"
     assert "--yolo" not in command
 
 
@@ -332,20 +332,28 @@ def test_image_and_question_guidance_strips_compose(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cursor_send_text_prepends_question_protocol_guidance() -> None:
-    """Cursor's CLI has no system-prompt flag, so ``_send_text`` delivers the
-    guidance as a sentinel-wrapped prefix on the prompt (the adapter strips it
-    on transcript read)."""
+async def test_cursor_send_text_sends_clean_prompt_over_acp_without_oneshot_sentinel() -> None:
+    """Cursor ACP handles AskQuestion via blocking ``cursor/ask_question`` RPC,
+    so ``_send_text`` sends the prompt directly over ``session/prompt`` without
+    injecting the one-shot auto-reject sentinel."""
     sess = _session(AgentType.CURSOR)
     native = CursorNativeSession(sess)
-    with patch.object(native, "_spawn_oneshot", new_callable=AsyncMock) as mock_spawn:
-        await native._send_text("hello")
-    mock_spawn.assert_awaited_once()
-    assert mock_spawn.await_args is not None
-    prompt = mock_spawn.await_args.args[1]
-    assert prompt.startswith("<<<HUB_QUESTION_PROTOCOL_V1>>>")
-    assert QUESTION_PROTOCOL_GUIDANCE in prompt
-    assert prompt.endswith("hello")
+    native._started = True
+    native._process = MagicMock(returncode=None, wait=AsyncMock(return_value=0))
+    native._acp_session_id = "acp-sid-1"
+    native._applied_mode = "agent"
+    loop = asyncio.get_running_loop()
+    mock_write = AsyncMock(return_value=(1, loop.create_future()))
+    try:
+        with patch.object(native, "_write_request", mock_write):
+            await native._send_text("hello")
+        mock_write.assert_awaited_once()
+        assert mock_write.await_args is not None
+        assert mock_write.await_args.args[0] == "session/prompt"
+        prompt_items = mock_write.await_args.args[1]["prompt"]
+        assert prompt_items == [{"type": "text", "text": "hello"}]
+    finally:
+        await native.stop()
 
 
 # ── Hub Chat runtime / self-scheduling guidance (first turn, native only) ────
@@ -475,24 +483,30 @@ async def test_claude_send_message_injects_hub_guidance_once() -> None:
 
 @pytest.mark.asyncio
 async def test_cursor_send_message_injects_hub_guidance_once() -> None:
-    """Cursor Chat: the first prompt carries BOTH the question-protocol block
-    (every turn) and the Hub runtime block (first turn only); the second turn
-    carries only the question block."""
+    """Cursor ACP Chat: only the first ``session/prompt`` turn carries the Hub
+    runtime block; subsequent turns on the persistent session are bare."""
     native = CursorNativeSession(_session(AgentType.CURSOR))
-    mock_spawn = AsyncMock()
-    with patch.object(native, "_spawn_oneshot", mock_spawn):
-        await native.send_message("first", [])
-        native.acknowledge_turn_complete()
-        await native.send_message("second", [])
+    native._started = True
+    native._process = MagicMock(returncode=None, wait=AsyncMock(return_value=0))
+    native._acp_session_id = "acp-sid-1"
+    native._applied_mode = "agent"
+    native._launch_fingerprint = native._configuration_fingerprint()
+    loop = asyncio.get_running_loop()
+    mock_write = AsyncMock(side_effect=lambda *_a, **_k: (1, loop.create_future()))
+    try:
+        with patch.object(native, "_write_request", mock_write):
+            await native.send_message("first", [])
+            native.acknowledge_turn_complete()
+            await native.send_message("second", [])
 
-    first = mock_spawn.await_args_list[0].args[1]
-    second = mock_spawn.await_args_list[1].args[1]
-    assert "<claude_hub_instructions>" in first
-    assert "<<<HUB_QUESTION_PROTOCOL_V1>>>" in first
-    assert first.endswith("first")
-    assert "<claude_hub_instructions>" not in second
-    assert "<<<HUB_QUESTION_PROTOCOL_V1>>>" in second
-    assert second.endswith("second")
+        first = mock_write.await_args_list[0].args[1]["prompt"][0]["text"]
+        second = mock_write.await_args_list[1].args[1]["prompt"][0]["text"]
+        assert "<claude_hub_instructions>" in first
+        assert first.endswith("first")
+        assert second == "second"
+        assert "<claude_hub_instructions>" not in second
+    finally:
+        await native.stop()
 
 
 @pytest.mark.asyncio
@@ -1070,7 +1084,7 @@ def test_first_turn_blocks_strip_in_normalizer_order(
     assert recovered == clean
 
 
-@pytest.mark.parametrize("agent_type", [AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR])
+@pytest.mark.parametrize("agent_type", [AgentType.CLAUDE, AgentType.CODEX])
 def test_fork_extract_user_text_strips_hub_runtime_guidance(
     runtime_wrap: Callable[[str], str], agent_type: AgentType
 ) -> None:
@@ -3366,10 +3380,13 @@ async def test_invalid_image_resets_turn_guard() -> None:
 @pytest.mark.asyncio
 async def test_cursor_invalid_image_resets_turn_guard() -> None:
     """If ``_stage_images`` raises (invalid image bytes), the turn guard must
-    be released so a subsequent text-only turn can be sent. Cursor now
-    supports images (via file reference), so the failure is a ``ValueError``
-    from magic-byte validation, not ``NotImplementedError``."""
+    be released so a subsequent text-only turn can be sent."""
     native = CursorNativeSession(_session(AgentType.CURSOR))
+    native._started = True
+    native._process = MagicMock(returncode=None, wait=AsyncMock(return_value=0))
+    native._acp_session_id = "acp-sid-1"
+    native._applied_mode = "agent"
+    native._launch_fingerprint = native._configuration_fingerprint()
 
     with pytest.raises(ValueError):
         await native.send_message("hello", [b"not an image"])
@@ -3377,177 +3394,285 @@ async def test_cursor_invalid_image_resets_turn_guard() -> None:
     assert native._staged_images == []
 
     # A text-only turn must succeed after the failed image send.
-    proc = _FakeProcess(stdout_lines=[])
-    with patch("asyncio.create_subprocess_exec", return_value=proc):
-        await native.send_message("hello", [])
-    assert native._turn_in_flight is True
-
-
-def test_cursor_image_staging_uses_private_runtime_owned_files(tmp_path: Path) -> None:
-    """Cursor stages image bytes to 0600 files under an app-owned 0700
-    ``runtime_home/tmp/cursor-images`` directory (never the persistent
-    workspace state)."""
-    native = CursorNativeSession(_session(AgentType.CURSOR))
-    with patch(
-        "claude_hub.services.agent_stream.native._runtime_home",
-        return_value=tmp_path,
-    ):
-        native._stage_images([_VALID_PNG])
-        staged = list(native._staged_images)
-        temp_dir = tmp_path / "tmp" / "cursor-images"
-
-        assert staged and staged[0].parent == temp_dir
-        assert temp_dir.stat().st_mode & 0o777 == 0o700
-        assert staged[0].stat().st_mode & 0o777 == 0o600
-
-        native._clear_staged_images()
-
-    assert all(not path.exists() for path in staged)
+    loop = asyncio.get_running_loop()
+    try:
+        with patch.object(
+            native, "_write_request", AsyncMock(return_value=(1, loop.create_future()))
+        ):
+            await native.send_message("hello", [])
+        assert native._turn_in_flight is True
+    finally:
+        await native.stop()
 
 
 @pytest.mark.asyncio
-async def test_cursor_send_message_stages_images_and_cleans_up_on_eof(
-    tmp_path: Path,
-) -> None:
-    """Cursor has no structured image flag: images are staged to temp files,
-    referenced by absolute path in a sentinel-wrapped prompt block, and
-    deleted when the one-shot process exits (EOF)."""
-    proc = _FakeProcess(stdout_lines=[])  # stdout blocks until we push EOF
+async def test_cursor_acp_send_message_delivers_base64_images_and_clears_staging() -> None:
+    """Cursor ACP delivers images directly as base64 ``{type: 'image'}`` blocks
+    in ``session/prompt`` without writing temporary prompt-ref files."""
+    import base64 as _b64
+
     native = CursorNativeSession(_session(AgentType.CURSOR))
-    captured_paths: List[Path] = []
-    original_stage = native._stage_images
-
-    def tracking_stage(images: List[bytes]) -> None:
-        original_stage(images)
-        captured_paths.extend(native._staged_images)
-
-    native._stage_images = tracking_stage  # type: ignore[assignment]
-
-    with (
-        patch(
-            "claude_hub.services.agent_stream.native._runtime_home",
-            return_value=tmp_path,
-        ),
-        patch("asyncio.create_subprocess_exec", return_value=proc),
-    ):
-        await native.send_message("what color?", [_VALID_PNG])
-
-        # Staged images transferred to in-flight before spawn; the files still
-        # exist while the (still-running) one-shot process may read them.
+    native._started = True
+    native._process = MagicMock(returncode=None, wait=AsyncMock(return_value=0))
+    native._acp_session_id = "acp-sid-img"
+    native._applied_mode = "agent"
+    native._launch_fingerprint = native._configuration_fingerprint()
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future[Dict[str, Any]] = loop.create_future()
+    mock_write = AsyncMock(return_value=(1, fut))
+    try:
+        with patch.object(native, "_write_request", mock_write):
+            await native.send_message("what color?", [_VALID_PNG])
         assert native._staged_images == []
-        # Registered under the generation _spawn_oneshot just assigned.
-        assert native._inflight_images_by_gen[native._stdout_generation] == captured_paths
-        assert captured_paths and all(path.exists() for path in captured_paths)
+        assert mock_write.await_args is not None
+        params = mock_write.await_args.args[1]
+        assert params["sessionId"] == "acp-sid-img"
+        assert params["prompt"][0] == {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": _b64.b64encode(_VALID_PNG).decode("ascii"),
+        }
+        assert params["prompt"][1]["type"] == "text"
+        assert params["prompt"][1]["text"].endswith("what color?")
 
-        # The prompt written to stdin carries the sentinel block + paths.
-        written = b"".join(proc.stdin.written).decode("utf-8")
-        assert "<<<HUB_IMAGE_ATTACHMENT_V1>>>" in written
-        assert "<<<END_HUB_IMAGE_ATTACHMENT_V1>>>" in written
-        for path in captured_paths:
-            assert str(path) in written
-        assert "what color?" in written
-
-        # Signal EOF: the one-shot process exits. The drain's finally clears
-        # the in-flight images and deletes the temp files.
-        proc.stdout.push(b"")
-        assert await asyncio.wait_for(native.read_line(), timeout=1.0) is None
-        reader_task = native._reader_task
-        assert reader_task is not None
-        await asyncio.wait_for(reader_task, timeout=1.0)
-
-    # The drain's finally popped its generation, so the dict is empty and the
-    # temp files are deleted.
-    assert native._inflight_images_by_gen == {}
-    assert all(not path.exists() for path in captured_paths)
+        fut.set_result({"id": 1, "result": {"stopReason": "end_turn"}})
+        result_rec = await asyncio.wait_for(native.read_line(), timeout=1.0)
+        assert result_rec is not None
+        assert result_rec["type"] == "result" and result_rec["is_error"] is False
+    finally:
+        await native.stop()
 
 
 @pytest.mark.asyncio
-async def test_cursor_lingering_turn_does_not_delete_next_turn_images(
-    tmp_path: Path,
-) -> None:
-    """Regression: a one-shot process that lingers past TURN_COMPLETED must
-    not delete the NEXT turn's image files.
-
-    Turn N's process stays alive (stdout never reaches EOF) after the tailer
-    acknowledges TURN_COMPLETED. Turn N+1 then spawns a fresh process;
-    ``_spawn_oneshot`` terminates turn N's lingering drain, whose ``finally``
-    must pop ONLY turn N's generation (deleting turn N's files) — not turn
-    N+1's, registered under a newer generation. A single shared in-flight slot
-    clobbered by turn N+1 before the termination made the old drain delete the
-    wrong turn's files (and leak its own).
-    """
-    proc_n = _FakeProcess(stdout_lines=[])  # lingers: stdout blocks, no EOF
-    proc_n1 = _FakeProcess(stdout_lines=[])
-    procs = [proc_n, proc_n1]
-    calls = {"n": 0}
-    staged: List[List[Path]] = []
-
-    async def fake_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
-        proc = procs[calls["n"]]
-        calls["n"] += 1
-        return proc
-
+async def test_cursor_acp_blocking_question_and_cancel_round_trip() -> None:
+    """Cursor ACP ``cursor/ask_question`` blocks in-turn, emits a single
+    ``AskQuestion`` approval card, maps option labels/ids in
+    ``answer_pending_question``, and resolves cleanly."""
+    proc = _FakeProcess(stdout_lines=[])
     native = CursorNativeSession(_session(AgentType.CURSOR))
-    original_stage = native._stage_images
+    native._process = cast(asyncio.subprocess.Process, proc)
+    native._started = True
+    native._acp_session_id = "acp-sid-q"
+    native._turn_in_flight = True
 
-    def tracking_stage(images: List[bytes]) -> None:
-        original_stage(images)
-        staged.append(list(native._staged_images))
+    req = {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "cursor/ask_question",
+        "params": {
+            "toolCallId": "ask-acp-1",
+            "title": "Pick approach",
+            "questions": [
+                {
+                    "id": "approach",
+                    "prompt": "Which route?",
+                    "allowMultiple": False,
+                    "options": [
+                        {"id": "opt_acp", "label": "Use ACP (Recommended)"},
+                        {"id": "opt_cli", "label": "Keep one-shot"},
+                    ],
+                }
+            ],
+        },
+    }
+    await native._handle_server_request(req)
+    assert 7 in native._pending_questions
 
-    native._stage_images = tracking_stage  # type: ignore[assignment]
+    notif = await asyncio.wait_for(native.read_line(), timeout=1.0)
+    assert notif is not None
+    adapter = CursorCliTranscriptAdapter()
+    ctx = NormalizeContext(
+        session_id="sess-q",
+        tab_id="tab-q",
+        agent_type=AgentType.CURSOR,
+        run_epoch=1,
+        turn_id="turn-q",
+        main_thread_id="acp-sid-q",
+    )
+    events = adapter.normalize_line(notif, ctx)
+    assert [e.type for e in events] == [
+        AgentStreamEventType.TOOL_CALL_STARTED,
+        AgentStreamEventType.APPROVAL_REQUIRED,
+    ]
 
-    with (
-        patch(
-            "claude_hub.services.agent_stream.native._runtime_home",
-            return_value=tmp_path,
-        ),
-        patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
-    ):
-        # Turn N: send with images; the process lingers (no EOF pushed).
-        await native.send_message("first", [_VALID_PNG])
-        paths_n = staged[0]
-        gen_n = native._stdout_generation
-        assert native._inflight_images_by_gen[gen_n] == paths_n
-        assert all(p.exists() for p in paths_n)
+    # Duplicate ACP tool_call update for AskQuestion is ignored (no double card).
+    dup_events = adapter.normalize_line(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "acp-sid-q",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "ask-acp-1",
+                    "title": "Pick approach",
+                    "kind": "think",
+                    "status": "pending",
+                    "rawInput": {"_toolName": "askQuestion", "title": "Pick approach"},
+                },
+            },
+        },
+        ctx,
+    )
+    assert dup_events == []
 
-        # Let turn N's drain task start and block on stdout. The fake
-        # subprocess spawn and stdin drain complete without yielding to the
-        # event loop, so without this yield the drain coroutine never executes
-        # before turn N+1's ``_terminate_process`` cancels it — and a
-        # never-started task's ``finally`` never runs, leaking turn N's files.
-        # Real subprocess I/O always yields, so this only affects the test.
-        # 0.05s exceeds ``_FakeStream.read``'s 0.01s latency shim, so the drain
-        # is genuinely blocked on its stdout queue (the lingering state).
-        await asyncio.sleep(0.05)
+    # Answer using the display label; CursorSession maps it back to option id.
+    consumed = await native.answer_pending_question(
+        [{"questionId": "approach", "selected": ["Use ACP (Recommended)"]}],
+        expected_call_id="ask-acp-1",
+    )
+    assert consumed is True
+    assert native._pending_questions == {}
+    written = _written_requests(proc)
+    resp = next(m for m in written if m.get("id") == 7)
+    assert resp["result"] == {
+        "outcome": {
+            "outcome": "answered",
+            "answers": [{"questionId": "approach", "selectedOptionIds": ["opt_acp"]}],
+        }
+    }
+    done_notif = await asyncio.wait_for(native.read_line(), timeout=1.0)
+    assert done_notif is not None
+    done_events = adapter.normalize_line(done_notif, ctx)
+    assert [e.type for e in done_events] == [AgentStreamEventType.TOOL_CALL_COMPLETED]
 
-        # Tailer acknowledges TURN_COMPLETED (releasing the guard) while the
-        # process is still alive — the linger window that triggers the bug.
-        native.acknowledge_turn_complete()
-        assert native._turn_in_flight is False
 
-        # Turn N+1: send with images. Spawning terminates turn N's lingering
-        # drain; its finally pops only gen_n, leaving turn N+1's files intact.
-        await native.send_message("second", [_VALID_PNG])
-        paths_n1 = staged[1]
-        gen_n1 = native._stdout_generation
+def test_cursor_single_chunk_timestamped_snapshot_reconciles_without_error() -> None:
+    """Regression: Cursor CLI ``fe({includeTimestamp: true})`` flushes the
+    accumulated message text with ``timestamp_ms`` before ``modelCallCompleted``.
+    When a short assistant message arrived in a single delta chunk (e.g.
+    post-AskQuestion acknowledgment), the timestamped replay previously failed
+    ``matched_chunks >= 2``, doubled ``state.text``, and emitted ``assistant
+    final text does not match streamed deltas; cannot safely reconcile``."""
+    adapter = CursorCliTranscriptAdapter()
+    ctx = NormalizeContext(
+        session_id="sess-reconcile",
+        tab_id="tab-reconcile",
+        agent_type=AgentType.CURSOR,
+        run_epoch=1,
+        turn_id="turn-reconcile",
+    )
+    short_msg = "已在上方列出下一步选项，等待你的选择。"
+    ev1 = adapter.normalize_line(
+        {
+            "type": "assistant",
+            "timestamp_ms": 1000,
+            "message": {"role": "assistant", "content": [{"type": "text", "text": short_msg}]},
+        },
+        ctx,
+    )
+    ev2 = adapter.normalize_line(
+        {
+            "type": "assistant",
+            "timestamp_ms": 1005,
+            "message": {"role": "assistant", "content": [{"type": "text", "text": short_msg}]},
+        },
+        ctx,
+    )
+    ev3 = adapter.normalize_line(
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": short_msg}]},
+        },
+        ctx,
+    )
+    assert [e.type for e in ev1] == [AgentStreamEventType.TEXT_DELTA]
+    assert ev2 == []
+    assert ev3 == []
 
-        # Turn N's files were cleaned by its own drain's termination.
-        assert all(not p.exists() for p in paths_n)
-        # Turn N+1's files MUST still exist — the old drain must not have
-        # deleted them. With the shared-slot clobber these were already gone.
-        assert paths_n1 and all(p.exists() for p in paths_n1)
-        assert native._inflight_images_by_gen == {gen_n1: paths_n1}
 
-        # Turn N+1's process exits: its drain cleans its own files.
-        proc_n1.stdout.push(b"")
-        assert await asyncio.wait_for(native.read_line(), timeout=1.0) is None
-        reader_task = native._reader_task
-        assert reader_task is not None
-        await asyncio.wait_for(reader_task, timeout=1.0)
+def test_cursor_acp_session_updates_and_content_refusal_normalize_cleanly() -> None:
+    """ACP ``session/update`` notifications normalize text, thinking, tools with
+    diffs, subagent lifecycle, and content-policy refusal hints."""
+    from claude_hub.services.agent_stream.providers.cursor import _format_acp_error_text
 
-    assert native._inflight_images_by_gen == {}
-    assert all(not p.exists() for p in paths_n1)
-    assert calls["n"] == 2
+    adapter = CursorCliTranscriptAdapter()
+    ctx = NormalizeContext(
+        session_id="sess-acp",
+        tab_id="tab-acp",
+        agent_type=AgentType.CURSOR,
+        run_epoch=1,
+        turn_id="turn-acp",
+        main_thread_id="main-sid",
+    )
+    assert (
+        adapter.normalize_line(
+            {
+                "method": "session/update",
+                "params": {
+                    "sessionId": "main-sid",
+                    "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "tc-1",
+                        "title": "`pytest -q`",
+                        "kind": "execute",
+                        "status": "pending",
+                        "rawInput": {"command": "pytest -q"},
+                    },
+                },
+            },
+            ctx,
+        )
+        == []
+    )
+    started = adapter.normalize_line(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "main-sid",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "tc-1",
+                    "status": "in_progress",
+                },
+            },
+        },
+        ctx,
+    )
+    assert len(started) == 1
+    assert started[0].type == AgentStreamEventType.TOOL_CALL_STARTED
+    assert started[0].payload == {"name": "Shell", "args": {"command": "pytest -q"}}
+
+    completed = adapter.normalize_line(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "main-sid",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "tc-1",
+                    "status": "completed",
+                    "rawOutput": {"exitCode": 0, "stdout": "1 passed\n", "stderr": ""},
+                },
+            },
+        },
+        ctx,
+    )
+    assert len(completed) == 1
+    assert completed[0].type == AgentStreamEventType.TOOL_CALL_COMPLETED
+    assert completed[0].payload["status"] == "completed"
+    assert completed[0].payload["result"] == "1 passed"
+
+    child_delta = adapter.normalize_line(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "child-sid",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "sub reply"},
+                },
+            },
+        },
+        ctx,
+    )
+    assert len(child_delta) == 1
+    assert child_delta[0].payload.get("subagent_thread") == "child-sid"
+
+    refusal = _format_acp_error_text(
+        "ActionRequiredError: Unauthorized request. The provider refused to serve this request based on the content"
+    )
+    assert "content safety filter" in refusal
+    assert "not a local login expiry" in refusal
 
 
 def test_cursor_startup_cleanup_removes_prior_process_temp_files(tmp_path: Path) -> None:
