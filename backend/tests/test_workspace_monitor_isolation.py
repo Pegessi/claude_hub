@@ -590,3 +590,44 @@ async def test_slow_liveness_task_does_not_starve_next_task(monkeypatch):
     )
     await _run_exact_rounds(fake, 1, calls)
     assert ("liveness", "slow") in calls and ("liveness", "next") in calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raise_in_step", [False, True], ids=["return", "raise"])
+async def test_cancel_during_completed_wait_for_window_stops_monitor_loop(
+    monkeypatch: pytest.MonkeyPatch, raise_in_step: bool
+) -> None:
+    # Regression for Python 3.11 asyncio.wait_for: when a wrapped future is
+    # already done() at the moment an external task.cancel() cancels wait_for's
+    # waiter, wait_for returns/raises the inner outcome instead of re-raising
+    # CancelledError while leaving task.cancelling() > 0. The monitor guard
+    # must still propagate CancelledError rather than looping forever.
+    monkeypatch.setattr(workspaces_module, "WORKSPACE_MONITOR_INTERVAL_SECONDS", 0.002)
+    calls: list[tuple[str, str]] = []
+    task_holder: dict[str, asyncio.Task[None]] = {}
+    loop = asyncio.get_running_loop()
+
+    async def inner_step() -> None:
+        loop.call_soon(task_holder["task"].cancel)
+        if raise_in_step:
+            raise RuntimeError("persistent boom")
+
+    async def dispatch(workspace_id: str, **_kwargs: Any) -> None:
+        calls.append(("dispatch_workspace", workspace_id))
+        await asyncio.wait_for(inner_step(), timeout=5.0)
+
+    _patch_ttyd_cleanup(monkeypatch)
+    fake = _make_fake(
+        calls,
+        workspaces={"ws-a": SimpleNamespace(id="ws-a")},
+        dispatch_workspace=dispatch,
+    )
+
+    task = asyncio.create_task(_WorkspacesMixin._background_monitor_loop(fake))
+    task_holder["task"] = task
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1.0)
+
+    assert [call for call in calls if call[0] == "dispatch_workspace"] == [
+        ("dispatch_workspace", "ws-a")
+    ]

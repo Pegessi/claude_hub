@@ -42,7 +42,8 @@ Worktree: `/home/tiger/claude_hub_worktree/cursor-acp-transport`.
 
 ## Changes and ownership
 
-- `backend/claude_hub/services/agent_stream/providers/cursor.py`: Replaced
+- `backend/claude_hub/services/agent_stream/providers/cursor.py` and
+  `cursor_helpers.py`: Replaced
   one-shot `--print` process spawning with a persistent `agent acp` stdio
   JSON-RPC session (`initialize`, `session/new`, `session/load`,
   `session/set_mode`, `session/prompt`, `session/cancel`). Supports native

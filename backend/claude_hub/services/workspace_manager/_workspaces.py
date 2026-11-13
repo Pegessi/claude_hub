@@ -138,6 +138,17 @@ class _WorkspacesMixin(
         # cannot flood the log once per monitor interval; state dies with the
         # monitor task and idle per-scope buckets are pruned every round.
         error_log_state = _StepErrorLogState()
+        monitor_task = asyncio.current_task()
+        cancelling_baseline = monitor_task.cancelling() if monitor_task is not None else 0
+
+        def _reraise_if_task_cancelling() -> None:
+            # Python 3.11's asyncio.wait_for swallows an external task.cancel()
+            # when its inner future already finished (returning result or
+            # raising the inner exception while leaving task.cancelling() > 0).
+            # Re-raising whenever the monitor task's cancel count exceeds its
+            # entry baseline guarantees shutdown cancellation is never lost.
+            if monitor_task is not None and monitor_task.cancelling() > cancelling_baseline:
+                raise asyncio.CancelledError
 
         def _log_step_error(step: str, scope: str, failure_type: str, *, timed_out: bool) -> None:
             emit_log, suppressed = error_log_state.record_failure(
@@ -167,17 +178,19 @@ class _WorkspacesMixin(
 
         async def _guard_awaitable(step: str, scope: str, awaitable: Any) -> Any:
             try:
-                result = await asyncio.wait_for(
-                    awaitable, timeout=WORKSPACE_MONITOR_STEP_TIMEOUT_SECONDS
-                )
+                async with asyncio.timeout(WORKSPACE_MONITOR_STEP_TIMEOUT_SECONDS):
+                    result = await awaitable
             except asyncio.CancelledError:
                 raise
             except asyncio.TimeoutError:
+                _reraise_if_task_cancelling()
                 _log_step_error(step, scope, "timeout", timed_out=True)
                 return _GUARD_STEP_FAILED
             except Exception as exc:
+                _reraise_if_task_cancelling()
                 _log_step_error(step, scope, type(exc).__name__, timed_out=False)
                 return _GUARD_STEP_FAILED
+            _reraise_if_task_cancelling()
             error_log_state.clear_scope(step, scope)
             return result
 
@@ -185,8 +198,10 @@ class _WorkspacesMixin(
             try:
                 result = func(*args)
             except Exception as exc:
+                _reraise_if_task_cancelling()
                 _log_step_error(step, scope, type(exc).__name__, timed_out=False)
                 return _GUARD_STEP_FAILED
+            _reraise_if_task_cancelling()
             error_log_state.clear_scope(step, scope)
             return result
 
@@ -366,5 +381,6 @@ class _WorkspacesMixin(
             except asyncio.CancelledError:
                 raise
             except Exception:
+                _reraise_if_task_cancelling()
                 logger.exception("Workspace background monitor failed")
             await asyncio.sleep(WORKSPACE_MONITOR_INTERVAL_SECONDS)
