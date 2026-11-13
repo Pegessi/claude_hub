@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "2b975f958a99ef9f36bc6ea9181ceec6bd3062ca",
+  "parents": [
+    "1507a635b0026902e976c0aa528bc53cd7c70400",
+    "f4cb1138f80f98870b92f66bdc6913165e830024"
+  ],
+  "base": "c2a97baad057659450a207ef5ae59f188040af29",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "56063f15425ac9f160738cd92ab1e3511d01a2c9",
+  "reconstructed_tree": "a1414c0c804a42084a00f295abf1076dedbf7eab",
+  "conflicts": [
+    "CHANGELOG.md",
+    "backend/tests/test_status_kinds_integration.py"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "14846a428cf07a24984518d5eba33fd78daca58e"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ca5f20c94aa80f7a2610c78c3bec771643208bbd"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "671ee0edfc4d6767de5c21d1720018e726bd0931"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d15486af8ae897bf6caf0a4076c119dcb2c4520b"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "e059e1580ce97f4dbcd79c343dcba7de959e900a"
+      },
+      "reason": "Preserve both parents' release entries; place the newly integrated Cursor ACP transport entry above the existing main entries without dropping any history.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/tests/test_status_kinds_integration.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8d4ed836b1cb6cf606764224b0bd14d309b44350"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "8361e63da80975d5944a55bea71c35690fbbffa6"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "031e4cc6990846c7d80729c5e5679e2c0b76f32f"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a1de92f15afb7dca508d37683939c526dc1bc1c6"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "031e4cc6990846c7d80729c5e5679e2c0b76f32f"
+      },
+      "reason": "Retain main's dedicated native completion fixture fix from ac8437a verbatim (strict zip + authoritative result for Claude and post-tool delta for Codex).",
+      "disposition": "retain-parent",
+      "destinations": []
+    }
+  ]
+}
