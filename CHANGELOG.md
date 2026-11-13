@@ -7,6 +7,21 @@
 
 ## Released
 
+### feat(workspace): default Linear Triage Pro view with consensus spec frame and ephemeral cleanup
+
+- Agent Workspace defaults to a two-pane `Linear Triage Pro` surface (`NEEDS YOU` /
+  `ACTIVE` / `RECENT` task rail + architectural Decision Gate, Heterogeneous Consensus
+  Matrix, Deliverable Artifacts, and per-epoch Execution & Review Spine with on-demand
+  transcript excerpts), while retaining a persisted `Classic Board` toggle in the header
+  and mobile menu (`?ws_layout=board|triage`).
+- Accepting a task from Triage (`Accept` or `Cmd/Ctrl+Enter`) marks the task `done`
+  and automatically invokes `POST /api/workspaces/tasks/{id}/cleanup` when the task's
+  session is caller-owned ephemeral, surfacing a warning toast and a retryable
+  `Release session` control if cleanup is deferred or fails.
+- Keyboard triage shortcuts (`J`/`K`, arrows, `S`, `Cmd/Ctrl+Enter`) pause whenever
+  an input or workspace dialog/popover/lightbox is open, and switching tasks or
+  layouts invalidates in-flight clipboard attachment pastes so drafts never cross tasks.
+
 ### fix(ui): keep Safari Chat in view and open attachments on touch
 
 - Active mobile Chat follows the visual viewport's position as well as height,

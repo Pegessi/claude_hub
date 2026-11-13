@@ -1,22 +1,18 @@
 <template>
   <section class="workspace-view">
-    <WorkspaceStyleShowcase
-      v-if="runtime.isStyleDemoOpen.value"
-      :initial-style="runtime.initialDemoStyle"
-      @exit="runtime.isStyleDemoOpen.value = false"
-    />
+    <WorkspaceHeader />
+
+    <WorkspaceTriagePro v-if="runtime.workspaceLayoutMode.value === 'triage'" />
 
     <template v-else>
-      <WorkspaceHeader />
-
       <WorkspaceSummary />
 
       <WorkspaceAgentStatus />
 
       <WorkspaceBoard />
-    </template>
 
-    <TaskDetailDialog />
+      <TaskDetailDialog />
+    </template>
 
     <ArtifactPreviewDialogs />
 
@@ -47,7 +43,7 @@ import WorkspaceHeader from './components/WorkspaceHeader.vue'
 import WorkspaceSummary from './components/WorkspaceSummary.vue'
 import WorkspaceAgentStatus from './components/WorkspaceAgentStatus.vue'
 import WorkspaceBoard from './components/WorkspaceBoard.vue'
-import WorkspaceStyleShowcase from './demo/WorkspaceStyleShowcase.vue'
+import WorkspaceTriagePro from './components/WorkspaceTriagePro.vue'
 import TaskDetailDialog from './components/TaskDetailDialog.vue'
 import ArtifactPreviewDialogs from './components/ArtifactPreviewDialogs.vue'
 import WorkspaceEditorDialog from './components/WorkspaceEditorDialog.vue'
@@ -260,9 +256,10 @@ provideWorkspaceRuntimeContext({
   envPresets: runtime.envPresets,
   workspaceNotifications: runtime.workspaceNotifications,
   dismissToast: runtime.dismissToast,
-  isStyleDemoOpen: runtime.isStyleDemoOpen,
-  initialDemoStyle: runtime.initialDemoStyle,
-  toggleStyleDemo: runtime.toggleStyleDemo,
+  workspaceLayoutMode: runtime.workspaceLayoutMode,
+  setWorkspaceLayoutMode: runtime.setWorkspaceLayoutMode,
+  toggleWorkspaceLayoutMode: runtime.toggleWorkspaceLayoutMode,
+  taskCreateFlow: runtime.taskCreateFlow,
 })
 provideWorkspaceEditorContext({
   openWorkspaceModal: editor.openWorkspaceModal,
@@ -396,6 +393,8 @@ provideWorkspaceTaskActionsContext({
   startTask: tasks.startTask,
   openEditTaskModal: tasks.openEditTaskModal,
   markTask: tasks.markTask,
+  acceptAndCleanupTask: tasks.acceptAndCleanupTask,
+  cleanupCompletedTaskSession: tasks.cleanupCompletedTaskSession,
   requestReview: tasks.requestReview,
   abortTask: tasks.abortTask,
   deleteTask: tasks.deleteTask,

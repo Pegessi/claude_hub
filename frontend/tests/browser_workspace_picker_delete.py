@@ -138,6 +138,12 @@ async def main(browser_run: BrowserRun) -> None:
                 body = WS_1_BOARD if workspace_id == "ws-1" else empty_board(WORKSPACES[1])
             elif method == "GET" and path.startswith("/api/workspaces/") and "/lessons" in path:
                 body = []
+            elif (
+                method == "GET"
+                and path.startswith("/api/workspaces/")
+                and path.endswith("/reports")
+            ):
+                body = []
             else:
                 unknown.append((method, path))
                 await route.fulfill(status=501, body=f"unmocked API: {method} {path}")
