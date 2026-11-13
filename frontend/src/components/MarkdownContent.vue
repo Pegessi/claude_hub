@@ -10,7 +10,7 @@
   >
     <template
       v-for="block in blocks"
-      :key="block.key"
+      :key="`${renderScope}:${block.key}`"
     >
       <!-- Non-list blocks: a single element whose innerHTML is the rendered
            block. Completed blocks are cached and never re-rendered; only the
@@ -95,6 +95,15 @@ const contentRoot = ref<HTMLElement | null>(null)
 // re-render would re-request a dead URL and loop. Failed URLs render the
 // placeholder directly until the user explicitly retries one.
 const failedImageUrls = new Set<string>()
+// COEP blocks a no-cors image from CORS-only CDNs. Remember the anonymous
+// retry mode across streamed DOM replacements, without changing signed URLs.
+const corsImageUrls = new Set<string>()
+const autoCorsImages = new WeakSet<HTMLImageElement>()
+const renderScope = computed(() => JSON.stringify([props.tabId, props.documentPath]))
+watch([() => props.tabId, () => props.documentPath], () => {
+  failedImageUrls.clear()
+  corsImageUrls.clear()
+}, { flush: 'sync' })
 
 const blocks = computed(() => {
   // Depend on highlightReady so the computed re-evaluates when the
@@ -232,11 +241,26 @@ function withFreshNonce(src: string): string {
   return `${identity}${separator}retry=${Date.now()}`
 }
 
+function imageIdentity(img: HTMLImageElement): string {
+  const src = img.getAttribute('src') || ''
+  return img.dataset.remoteImg ? src : src.replace(/[?&]retry=\d+$/, '')
+}
+
 function handleError(event: Event) {
   const target = event.target
-  if (!(target instanceof HTMLImageElement)) return
-  if (!target.dataset.quotedImg && !target.dataset.localImg) return
+  if (!(target instanceof HTMLImageElement) || !contentRoot.value?.contains(target)) return
+  if (!target.dataset.quotedImg && !target.dataset.localImg && !target.dataset.remoteImg) return
   if (target.closest('.quoted-img-missing')) return
+  const identityUrl = imageIdentity(target)
+  if (target.dataset.remoteImg && target.crossOrigin === null && !failedImageUrls.has(identityUrl)) {
+    // A single anonymous retry allows CORS-only hosts under require-corp.
+    // Successful CORP-only images never enter this path. Only an explicit
+    // Retry may renegotiate from no-cors; automatic recovery never loops back.
+    corsImageUrls.add(identityUrl)
+    autoCorsImages.add(target)
+    target.crossOrigin = 'anonymous'
+    return
+  }
 
   // Preserve the original image's rendering contract (lazy load, async
   // decode, dimensions, markers) and its preview wrapper: a Markdown image
@@ -247,6 +271,12 @@ function handleError(event: Event) {
     alt: target.alt,
     quoted: target.dataset.quotedImg || '',
     local: target.dataset.localImg || '',
+    remote: target.dataset.remoteImg || '',
+    // An explicit user retry may recover a transient CORP-only failure. Use
+    // the authored mode again, rather than permanently forcing failed CORS.
+    crossOrigin: autoCorsImages.has(target) ? null : target.crossOrigin,
+    srcset: target.getAttribute('srcset'),
+    sizes: target.getAttribute('sizes'),
     className: target.className,
     width: target.getAttribute('width'),
     height: target.getAttribute('height'),
@@ -257,7 +287,6 @@ function handleError(event: Event) {
   // Remember the authorized URL (without the retry nonce) so later v-html
   // re-renders during streaming go straight to the placeholder instead of
   // issuing another failing request — including re-creation of the same block.
-  const identityUrl = original.src.replace(/[?&]retry=\d+$/, '')
   failedImageUrls.add(identityUrl)
 
   const buildImage = () => {
@@ -268,9 +297,14 @@ function handleError(event: Event) {
     img.alt = original.alt
     if (original.quoted) img.dataset.quotedImg = original.quoted
     if (original.local) img.dataset.localImg = original.local
+    if (original.remote) img.dataset.remoteImg = original.remote
+    if (original.crossOrigin !== null) img.crossOrigin = original.crossOrigin
+    if (original.sizes) img.setAttribute('sizes', original.sizes)
+    if (original.srcset) img.setAttribute('srcset', original.srcset)
     if (original.loading) img.setAttribute('loading', original.loading)
     if (original.decoding) img.setAttribute('decoding', original.decoding)
-    img.src = withFreshNonce(original.src)
+    // External queries/fragments may be signed. Retry exactly the same URL.
+    img.src = original.remote ? original.src : withFreshNonce(original.src)
     return img
   }
 
@@ -312,8 +346,9 @@ function handleError(event: Event) {
       clickEvent.stopPropagation()
       // Manual retry: stop treating the URL as failed and rebuild the image
       // (inside its preview wrapper when the original had one). One request
-      // per user action; a second failure re-enters this path.
+      // for local images; remote images may need one anonymous fallback.
       failedImageUrls.delete(identityUrl)
+      corsImageUrls.delete(identityUrl)
       placeholder.replaceWith(previewButton ? buildPreviewButton() : buildImage())
     })
     placeholder.append(retry)
@@ -329,9 +364,13 @@ function handleError(event: Event) {
 // B6: after every v-html render, neutralize images whose URL already failed
 // in this component instance, so streaming deltas cannot re-request them.
 function neutralizeKnownFailures(root: HTMLElement) {
-  if (failedImageUrls.size === 0) return
-  root.querySelectorAll<HTMLImageElement>('img[data-quoted-img], img[data-local-img]').forEach((img) => {
-    const src = (img.getAttribute('src') || '').replace(/[?&]retry=\d+$/, '')
+  if (failedImageUrls.size === 0 && corsImageUrls.size === 0) return
+  root.querySelectorAll<HTMLImageElement>('img[data-quoted-img], img[data-local-img], img[data-remote-img]').forEach((img) => {
+    const src = imageIdentity(img)
+    if (img.dataset.remoteImg && corsImageUrls.has(src) && img.crossOrigin === null) {
+      autoCorsImages.add(img)
+      img.crossOrigin = 'anonymous'
+    }
     if (!failedImageUrls.has(src) || img.closest('.quoted-img-missing')) return
     const synthetic = new Event('error', { bubbles: false, cancelable: true })
     Object.defineProperty(synthetic, 'target', { value: img })

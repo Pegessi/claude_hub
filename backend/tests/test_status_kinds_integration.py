@@ -230,15 +230,13 @@ async def test_native_chat_lifecycle_through_status_apis_and_cli(
                             ]
                         },
                     },
+                    # A successful tool-using turn needs an authoritative final
+                    # answer; the pre-tool marker alone is deliberately rejected.
                     {
-                        "type": "stream_event",
-                        "event": {
-                            "type": "content_block_delta",
-                            "index": 0,
-                            "delta": {"type": "text_delta", "text": "Done."},
-                        },
+                        "type": "result",
+                        "subtype": "success",
+                        "result": "The lifecycle probe is complete.",
                     },
-                    {"type": "result", "subtype": "success", "result": "Done."},
                 ]
             else:
 
@@ -250,23 +248,23 @@ async def test_native_chat_lifecycle_through_status_apis_and_cli(
                     rpc("item/agentMessage/delta", delta=marker),
                     rpc("item/started", item=item),
                     rpc("item/completed", item={**item, "aggregatedOutput": marker, "exitCode": 0}),
-                    rpc("item/agentMessage/delta", delta="Done."),
+                    rpc("item/agentMessage/delta", delta="The lifecycle probe is complete."),
                     rpc("turn/completed", turn={"id": "status-turn", "status": "completed"}),
                 ]
-            for record, expected_event, expected_status in zip(
-                records,
-                [
-                    AgentStreamEventType.TEXT_DELTA,
-                    AgentStreamEventType.TOOL_CALL_STARTED,
-                    AgentStreamEventType.TOOL_CALL_COMPLETED,
-                    AgentStreamEventType.TEXT_DELTA,
-                    AgentStreamEventType.TURN_COMPLETED,
-                ],
-                ["working", "working", "working", "working", "idle"],
-            ):
+            expected_events = [
+                AgentStreamEventType.TEXT_DELTA,
+                AgentStreamEventType.TOOL_CALL_STARTED,
+                AgentStreamEventType.TOOL_CALL_COMPLETED,
+            ]
+            if agent_type == AgentType.CODEX:
+                expected_events.append(AgentStreamEventType.TEXT_DELTA)
+            expected_events.append(AgentStreamEventType.TURN_COMPLETED)
+            for record, expected_event in zip(records, expected_events, strict=True):
                 transport._records.put_nowait(record)
                 await event(expected_event)
-                await assert_status(expected_status)
+                await assert_status(
+                    "idle" if expected_event == AgentStreamEventType.TURN_COMPLETED else "working"
+                )
             assert not transport.turn_in_flight
             await assert_status("idle")  # Stale Working text cannot make native Chat busy.
             if agent_type == AgentType.CLAUDE:

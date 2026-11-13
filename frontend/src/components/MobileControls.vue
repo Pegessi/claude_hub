@@ -450,7 +450,7 @@ onUnmounted(() => {
 .control-btn.active {
   background-color: var(--ch-color-accent-strong);
   border-color: var(--ch-color-accent);
-  color: var(--ch-color-text-inverse);
+  color: var(--ch-color-on-accent);
   box-shadow: 0 0 0 3px var(--ch-color-accent-ring);
 }
 

@@ -252,7 +252,7 @@ function handleEditEnter(event: KeyboardEvent, turn: TimelineTurn) {
 .conversation-bubble--user {
   position: relative;
   background: var(--ch-color-message-user-bg);
-  color: var(--ch-color-text-inverse);
+  color: var(--ch-color-message-user-text);
   border-bottom-right-radius: var(--ch-radius-sm);
 }
 

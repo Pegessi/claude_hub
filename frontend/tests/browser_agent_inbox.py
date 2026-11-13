@@ -18,6 +18,11 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
+from appearance_assertions import (
+    empty_pane_phone_themes,
+    split_pane_scene_widths,
+    split_pane_themes,
+)
 from playwright.async_api import ViewportSize, expect
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -370,6 +375,28 @@ async def main(browser_run: BrowserRun) -> None:
             ), "phone sheet keeps its Done control"
             await page.keyboard.press("Escape")
             await expect(sheet).to_have_count(0)
+
+            # Reuse the real Chats and layout controls; no fake pane component
+            # or direct active-class manipulation can satisfy this handoff.
+            await page.set_viewport_size(DESKTOP)
+            await page.get_by_title("Two Columns", exact=True).click()
+            panes = page.locator(".terminal-pane")
+            await expect(panes).to_have_count(2)
+            report["empty_pane_phone"] = await empty_pane_phone_themes(
+                page,
+                panes.nth(1).locator(".pane-empty"),
+                output,
+                page.get_by_title("Two Columns", exact=True),
+            )
+            await panes.nth(0).locator(".pane-session-name").click()
+            await page.locator(f'.tab-bar .tab[data-tab-id="{NEEDS}"]').click()
+            await panes.nth(1).locator(".pane-empty").click()
+            await page.locator(f'.tab-bar .tab[data-tab-id="{WORKING}"]').click()
+            await expect(panes.locator(".pane-session-name")).to_have_count(2)
+            report["split_pane_theme_handoff"] = await split_pane_themes(page)
+            report["split_pane_scene_widths"] = await split_pane_scene_widths(page, output)
+            await shot("04-themed-split-panes.png")
+            await page.get_by_title("Single", exact=True).click()
 
             await page.wait_for_timeout(1200)
             assert not unknown_requests, unknown_requests
