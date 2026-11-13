@@ -29,7 +29,10 @@
         <span
           class="empty-orbit"
           aria-hidden="true"
-        >✦</span>
+        ><ThemeChromeIcon
+          kind="spark"
+          :size="18"
+        >✦</ThemeChromeIcon></span>
         <strong>Ready when you are</strong>
         <p>Send a message below to start this chat.</p>
       </div>
@@ -55,6 +58,7 @@
 <script setup lang="ts">
 import { requireChatOwner, chatTimelineKey, chatDeliveryKey, chatGoalKey, chatImagesKey, chatComposerKey, chatActionsKey, chatIdentityKey } from '../owners'
 import ChatTurn from './ChatTurn.vue'
+import ThemeChromeIcon from '@/features/app-shell/components/ThemeChromeIcon.vue'
 import { goalPlanSignature as goalPlanCardSignature } from '../goal-plan/planCard'
 import type { TimelineTurn } from '../timeline/types'
 import ChatPendingTurn from './ChatPendingTurn.vue'

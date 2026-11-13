@@ -422,7 +422,7 @@ provideWorkspaceNavigationContext({
   openLessonsModalFromMenu: navigation.openLessonsModalFromMenu,
   openAgentOptionsModalFromMenu: navigation.openAgentOptionsModalFromMenu,
   refreshAgentStatusesFromMenu: navigation.refreshAgentStatusesFromMenu,
-  toggleThemeFromMenu: navigation.toggleThemeFromMenu,
+  openAppearanceFromMenu: navigation.openAppearanceFromMenu,
   workspaceMobileMenuRef: navigation.workspaceMobileMenuRef,
 })
 const {

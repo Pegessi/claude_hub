@@ -20,11 +20,18 @@
 .task-actions button:active,
 .agent-row button:active,
 .tool-button:active,
-.primary-button:active,
 .abort-button:active,
 .danger-button:active {
   transform: translateY(1px);
   background: var(--ch-color-surface-pressed);
+}
+
+/* A primary press retains its fill/ink pair, even inside generic action rows. */
+.primary-button:active:not(:disabled) {
+  transform: translateY(1px);
+  background: var(--ch-color-accent-fill-hover);
+  border-color: var(--ch-color-accent-fill-hover);
+  color: var(--ch-color-on-accent);
 }
 
 .task-actions .danger-button,

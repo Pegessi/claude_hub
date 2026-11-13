@@ -75,8 +75,8 @@ export function useWorkspaceNavigation(inputs: WorkspaceNavigationInputs) {
     closeWorkspaceMobileMenu()
   }
 
-  function toggleThemeFromMenu() {
-    appStore.toggleColorScheme()
+  function openAppearanceFromMenu() {
+    appStore.openAppearance()
     closeWorkspaceMobileMenu()
   }
 
@@ -93,7 +93,7 @@ export function useWorkspaceNavigation(inputs: WorkspaceNavigationInputs) {
     openLessonsModalFromMenu,
     openAgentOptionsModalFromMenu,
     refreshAgentStatusesFromMenu,
-    toggleThemeFromMenu,
+    openAppearanceFromMenu,
     workspaceMobileMenuRef,
     handleWorkspaceDocumentPointerDown,
   }

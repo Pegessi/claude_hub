@@ -1,0 +1,256 @@
+/* Curated theme primitives. Treatments live in theme-treatments.css; all
+   consumers keep the same semantic contract. Previews use the real tokens.
+   Game-inspired themes use original CSS, not game artwork or proprietary fonts. */
+
+/* Reset optional primitives per scope: a preview must not inherit the selected
+   root's message fill/ink before its own palette fallback can take effect. */
+:where(:root, .theme-preview) {
+  --palette-on-fill: #ffffff;
+  --palette-message-bg: var(--palette-fill);
+  --palette-message-text: var(--palette-on-fill);
+}
+
+:is(:root, .theme-preview)[data-palette='mono'] {
+  --palette-chrome: #090909;
+  --palette-main: #090909;
+  --palette-surface: #101010;
+  --palette-raised: #181818;
+  --palette-control: #202020;
+  --palette-border: #303030;
+  --palette-border-strong: #606060;
+  --palette-text: #eeeeee;
+  --palette-muted: #b7b7b7;
+  --palette-subtle: #999999;
+  --palette-accent: #dedede;
+  --palette-fill: #ededed;
+  --palette-fill-hover: #cccccc;
+  --palette-on-fill: #111111;
+  --palette-message-bg: #1c1c1c;
+  --palette-message-text: #ededed;
+}
+
+:is(:root, .theme-preview)[data-palette='mono'][data-theme='light'] {
+  --palette-chrome: #f5f5f5;
+  --palette-main: #ffffff;
+  --palette-surface: #fafafa;
+  --palette-raised: #ffffff;
+  --palette-control: #ededed;
+  --palette-border: #d4d4d4;
+  --palette-border-strong: #777777;
+  --palette-text: #151515;
+  --palette-muted: #555555;
+  --palette-subtle: #666666;
+  --palette-accent: #292929;
+  --palette-fill: #171717;
+  --palette-fill-hover: #333333;
+  --palette-on-fill: #ffffff;
+  --palette-message-bg: #f0f0f0;
+  --palette-message-text: #202020;
+}
+
+:is(:root, .theme-preview)[data-palette='zenless'] {
+  --palette-chrome: #0a0908;
+  --palette-main: #11100e;
+  --palette-surface: #191715;
+  --palette-raised: #23201d;
+  --palette-control: #2d2824;
+  --palette-border: #54473e;
+  --palette-border-strong: #a38f80;
+  --palette-text: #faf5f0;
+  --palette-muted: #d1c5b8;
+  --palette-subtle: #cbbbae;
+  --palette-accent: #ff7a1f;
+  --palette-fill: #ff6f0f;
+  --palette-fill-hover: #ff8533;
+  --palette-on-fill: #120802;
+  --palette-message-bg: #291c14;
+  --palette-message-text: #faf5f0;
+}
+
+:is(:root, .theme-preview)[data-palette='zenless'][data-theme='light'] {
+  --palette-chrome: #e8dfd5;
+  --palette-main: #faf7f2;
+  --palette-surface: #f2ece2;
+  --palette-raised: #ffffff;
+  --palette-control: #e3d9cc;
+  --palette-border: #ab9886;
+  --palette-border-strong: #544335;
+  --palette-text: #17120e;
+  --palette-muted: #47382c;
+  --palette-subtle: #544335;
+  --palette-accent: #ad3d00;
+  --palette-fill: #ff6f0f;
+  --palette-fill-hover: #f05f00;
+  --palette-on-fill: #120802;
+  --palette-message-bg: #f2ded0;
+  --palette-message-text: #1c1108;
+}
+
+:is(:root, .theme-preview)[data-palette='frontier'] {
+  --palette-chrome: #110d0a;
+  --palette-main: #191410;
+  --palette-surface: #231c16;
+  --palette-raised: #2e251d;
+  --palette-control: #3b2f25;
+  --palette-border: #5c493a;
+  --palette-border-strong: #a38368;
+  --palette-text: #f6ecdc;
+  --palette-muted: #dfcfba;
+  --palette-subtle: #d2c1ae;
+  --palette-accent: #f2977e;
+  --palette-fill: #a82a24;
+  --palette-fill-hover: #8e221d;
+  --palette-on-fill: #ffffff;
+  --palette-message-bg: #2d2119;
+  --palette-message-text: #f6ecdc;
+}
+
+:is(:root, .theme-preview)[data-palette='frontier'][data-theme='light'] {
+  --palette-chrome: #e6dbc9;
+  --palette-main: #fbf5e9;
+  --palette-surface: #f3ead8;
+  --palette-raised: #fffbf2;
+  --palette-control: #e3d5be;
+  --palette-border: #c2ab8c;
+  --palette-border-strong: #856a4d;
+  --palette-text: #281d14;
+  --palette-muted: #4a3a2c;
+  --palette-subtle: #574535;
+  --palette-accent: #96211e;
+  --palette-fill: #96211e;
+  --palette-fill-hover: #7c1a17;
+  --palette-on-fill: #ffffff;
+  --palette-message-bg: #e8dac3;
+  --palette-message-text: #2c2016;
+}
+
+:is(:root, .theme-preview)[data-palette='los-santos'] {
+  --palette-chrome: #070b10;
+  --palette-main: #0e141d;
+  --palette-surface: #151e2b;
+  --palette-raised: #1d293a;
+  --palette-control: #253449;
+  --palette-border: #394f6b;
+  --palette-border-strong: #6a8cb5;
+  --palette-text: #eef5fc;
+  --palette-muted: #c5d6e7;
+  --palette-subtle: #b0c5dc;
+  --palette-accent: #5ce6a0;
+  --palette-fill: #4cd995;
+  --palette-fill-hover: #36c480;
+  --palette-on-fill: #062012;
+  --palette-message-bg: #192b3d;
+  --palette-message-text: #eaf4fc;
+}
+
+:is(:root, .theme-preview)[data-palette='los-santos'][data-theme='light'] {
+  --palette-chrome: #dfe6ee;
+  --palette-main: #f6f9fc;
+  --palette-surface: #ebf0f6;
+  --palette-raised: #ffffff;
+  --palette-control: #d7e1ed;
+  --palette-border: #acc0d4;
+  --palette-border-strong: #546e8a;
+  --palette-text: #111d2b;
+  --palette-muted: #354659;
+  --palette-subtle: #394b5e;
+  --palette-accent: #14693e;
+  --palette-fill: #14693e;
+  --palette-fill-hover: #0e5430;
+  --palette-on-fill: #ffffff;
+  --palette-message-bg: #dce7f3;
+  --palette-message-text: #132336;
+}
+
+:is(:root, .theme-preview)[data-palette='contrast'] {
+  --palette-chrome: #090909;
+  --palette-main: #000000;
+  --palette-surface: #0c0c0c;
+  --palette-raised: #171717;
+  --palette-control: #242424;
+  --palette-border: #969696;
+  --palette-border-strong: #d2d2d2;
+  --palette-text: #ffffff;
+  --palette-muted: #e0e0e0;
+  --palette-subtle: #c7c7c7;
+  --palette-accent: #9acbff;
+  --palette-fill: #245fa6;
+  --palette-fill-hover: #1a4a86;
+}
+:is(:root, .theme-preview)[data-palette='contrast'][data-theme='light'] {
+  --palette-chrome: #f5f5f5;
+  --palette-main: #ffffff;
+  --palette-surface: #ffffff;
+  --palette-raised: #ffffff;
+  --palette-control: #eaeaea;
+  --palette-border: #707070;
+  --palette-border-strong: #303030;
+  --palette-text: #000000;
+  --palette-muted: #242424;
+  --palette-subtle: #3f3f3f;
+  --palette-accent: #174e94;
+  --palette-fill: #174e94;
+  --palette-fill-hover: #103d77;
+}
+
+:is(:root, .theme-preview)[data-palette]:not([data-palette='classic']) {
+  --ch-color-app-bg: var(--palette-chrome);
+  --ch-color-main-bg: var(--palette-main);
+  --ch-color-sidebar-bg: var(--palette-chrome);
+  --ch-color-canvas: var(--palette-main);
+  --ch-color-surface: var(--palette-surface);
+  --ch-color-surface-raised: var(--palette-raised);
+  --ch-color-surface-soft: var(--palette-surface);
+  --ch-color-surface-muted: var(--palette-raised);
+  --ch-color-surface-control: var(--palette-control);
+  --ch-color-surface-control-hover: color-mix(in srgb, var(--palette-control), var(--palette-text) 8%);
+  --ch-color-surface-control-active: color-mix(in srgb, var(--palette-control), var(--palette-text) 13%);
+  --ch-color-surface-pressed: color-mix(in srgb, var(--palette-control), var(--palette-text) 18%);
+  --ch-color-surface-selected: color-mix(in srgb, var(--palette-surface), var(--palette-accent) 14%);
+  --ch-color-surface-sunken: var(--palette-main);
+  --ch-color-surface-glass: color-mix(in srgb, var(--palette-surface) 97%, transparent);
+  --ch-color-border: var(--palette-border);
+  --ch-color-border-muted: color-mix(in srgb, var(--palette-border) 75%, var(--palette-surface));
+  --ch-color-border-strong: var(--palette-border-strong);
+  --ch-color-border-hover: var(--palette-border-strong);
+  --ch-color-border-selected: var(--palette-accent);
+  --ch-color-text: var(--palette-text);
+  --ch-color-text-strong: var(--palette-text);
+  --ch-color-text-muted: var(--palette-muted);
+  --ch-color-text-subtle: var(--palette-subtle);
+  --ch-color-text-soft: var(--palette-muted);
+  --ch-color-text-selected: var(--palette-text);
+  --ch-color-text-code: var(--palette-text);
+  --ch-color-accent: var(--palette-accent);
+  --ch-color-accent-strong: var(--palette-fill);
+  --ch-color-accent-hover: var(--palette-accent);
+  --ch-color-accent-fill-hover: var(--palette-fill-hover);
+  --ch-color-on-accent: var(--palette-on-fill, #ffffff);
+  --ch-color-accent-soft: color-mix(in srgb, var(--palette-accent) 14%, transparent);
+  --ch-color-accent-ring: var(--palette-accent);
+  --ch-color-accent-halo: color-mix(in srgb, var(--palette-accent) 25%, transparent);
+  --ch-color-accent-ring-strong: color-mix(in srgb, var(--palette-accent) 58%, transparent);
+  --ch-color-session-glow: var(--palette-accent);
+  --ch-color-session-glow-strong: var(--palette-accent);
+  --ch-color-session-star: var(--palette-text);
+  --ch-color-session-star-halo: var(--ch-color-accent-halo);
+  --ch-color-message-user-bg: var(--palette-message-bg, var(--palette-fill));
+  --ch-color-message-user-text: var(--palette-message-text, var(--ch-color-on-accent));
+  --ch-color-message-user-muted: var(--ch-color-message-user-text);
+  --ch-color-message-user-error: var(--ch-color-message-user-text);
+  --ch-color-message-user-focus: var(--ch-color-message-user-text);
+  --ch-color-chip-bg: color-mix(in srgb, var(--palette-text) 7%, transparent);
+  --ch-color-chip-bg-muted: color-mix(in srgb, var(--palette-text) 4%, transparent);
+  --ch-color-row-hover: color-mix(in srgb, var(--palette-text) 6%, transparent);
+  --ch-shadow-button-primary: 0 1px 6px var(--ch-color-accent-halo);
+  --ch-tab-fade-start: var(--palette-surface);
+  --ch-tab-fade-end: color-mix(in srgb, var(--palette-surface) 0%, transparent);
+  --ch-terminal-bg: var(--palette-chrome);
+  --ch-terminal-fg: var(--palette-text);
+  --ch-terminal-cursor: var(--palette-accent);
+  --ch-terminal-selection: var(--ch-color-accent-halo);
+}
+
+:is(:root, .theme-preview)[data-palette='contrast'] {
+  --ch-color-border-muted: var(--palette-border);
+}

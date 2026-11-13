@@ -1,0 +1,229 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "e77d7bba860598694a716dff23cb58f18b8501f2",
+  "parents": [
+    "c2a97baad057659450a207ef5ae59f188040af29",
+    "fbc1491bb86813905b2a533e8059aa5fe4450bb8"
+  ],
+  "base": "745b6a9a8f335f61f4f468967a00f2fe9cac0080",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "d18761d0e44caf7825667ec258417c62b27cbc9f",
+  "reconstructed_tree": "212fcecc8bc8cd83271f1f31ee924754d8059338",
+  "conflicts": [
+    "CHANGELOG.md",
+    "frontend/src/components/GoalSetupDialog.vue"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "cf166a7439268ee3481bd918f6ae1b1402c8f37c"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "14846a428cf07a24984518d5eba33fd78daca58e"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "51da7311283cb5beab3ec93930e1369e79aeb08c"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "03273350964064cafcfb7dd1add7332baff049e2"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b90be2e55c850980895dba9c9c6171073a7fc394"
+      },
+      "reason": "Preserve both parents' release entries; place the newly integrated theme entries before the existing main entries. Neither history block is dropped.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "docs/UI_ACCEPTANCE.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "efaeda2820b389f81f2025d58b552b6dc8003858"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "43055d3ef0dbd2532e965bd7302fe5795c8e2992"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "062193696b3900c40ec651f0c881eff01e1de904"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "db1cefe503785a52ecf10763734d15e74d92d789"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "75c553ac9b075f2d3a12aef5f63c95af0634dd4a"
+      },
+      "reason": "Retain the native combination of both acceptance contracts and document the new real active-game waiting/idle ring comparison in both modes, with color and size preserved.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "docs/working-logs/2026-11-13-theme-system-main-integration.md",
+      "base": null,
+      "parent1": null,
+      "parent2": null,
+      "reconstructed": null,
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "83f3c9abe2420d64cfafca0bd85b56554d212d74"
+      },
+      "reason": "Record fixed inputs, all integration decisions, failed diagnostic/red attempts, completed scoped QA and remaining final/live-validation boundaries. This merge-specific evidence did not exist in either parent.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/src/components/GoalSetupDialog.vue",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a54cee1d5d4472323e968e284a0d6cbe20107e8a"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "68df959860775bf21615dc30ca6061fab98e306f"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b9f51347ec8ef3c985f4b02729b90f5f73e0865f"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9ac0c3cc8e39c124197046a56f6aa70ee0a8bf71"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "12f6c1a009e7fd8a902e8bedd72333e1e54fe086"
+      },
+      "reason": "Retain main's entire rebuilt dialog, Plan-first behavior, attachment framing and keyboard sheet. Transpose the theme parent's paired foreground to main's new primary-button selector using --ch-color-on-accent instead of restoring the obsolete broad button.primary rule.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/src/features/app-shell/styles/theme-treatments.css",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9fe2e9646eedb625630b63e89a52d195c287e20b"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9fe2e9646eedb625630b63e89a52d195c287e20b"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c2d69aba2b9d4f31ab4f59af90b88ca8f01a072e"
+      },
+      "reason": "Keep the theme active-tab contrast outline and add the main waiting cue outside it only on active game tabs with data-awaiting=true. A real waiting-versus-idle browser comparison reproduced the native CSS cascade defect before the repair and passes for all three games in both modes.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/tests/appearance_assertions.py",
+      "base": null,
+      "parent1": null,
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "4bf2759ed4e9aecda818bfaef103dba68d6bb1a5"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "4bf2759ed4e9aecda818bfaef103dba68d6bb1a5"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b8269c3822d7a12d813b9ba92345acfb5992c99d"
+      },
+      "reason": "Limit cleanup to the thick-frame negative probe: verify the same timeline owner and unchanged extents, restore its displaced scroll, then retain full original geometry/CSS equality and the negative failure assertion. Recorded scrollTop292->312->292 proves the view-state displacement; no product scrolling behavior or threshold is weakened.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/tests/browser_chat_goal_steer.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "5c700ded0a51fd9085dd58f6c3bed81436a2d241"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "fb65ade117781b24775d668c72fa6ce80a6f2eba"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b9a688fc5baaa279ca0a48ca65dc03141c577816"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b3c725217b9d60d02b23b9049fc0d01015b8f234"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "36e708fb4e9e89091a38f0f95f5b6d0b46ae799d"
+      },
+      "reason": "Preserve both main Goal/keyboard/Plan-first tests and theme contrast/artwork matrices. Replace two newly inherited .theme-switch clicks with the existing real select_appearance flow, explicitly switching light/dark while preserving the current palette; the obsolete-control timeout is retained as evidence.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/tests/browser_sidebar_status.py",
+      "base": null,
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "730fada22790d10eb722519950c8781d4a61259e"
+      },
+      "parent2": null,
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "730fada22790d10eb722519950c8781d4a61259e"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "4f58d076e733c5d121639e8b317c79ed80f8f58e"
+      },
+      "reason": "Retain main's real status/aria/pulse/unread scenarios and add actual waiting/idle active-tab comparisons for three game palettes in both modes. Verify distinct waiting shadows, unchanged completed color and 7px dimensions, then restore Classic and the original active tab for existing narrow/phone checks.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

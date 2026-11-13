@@ -43,6 +43,7 @@ RUNNERS = (
     ("browser_chat_goal_mobile.py", ""),
     ("browser_chat_image_quality.py", ""),
     ("browser_markdown_reader.py", ""),
+    ("browser_appearance.py", ""),
     ("browser_dot_panel.py", ""),
     ("browser_service_restart.py", ""),
     ("browser_diff_review.py", "/tests/diff_review_harness.html"),

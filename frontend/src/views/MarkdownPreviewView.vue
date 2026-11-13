@@ -107,7 +107,6 @@ import '@/features/app-shell/styles/theme.css'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import { markdownStreamBase } from '@/utils/markdownPreview'
-import { useAppStore } from '@/stores/appStore'
 
 interface MarkdownDocument {
   path: string
@@ -128,12 +127,7 @@ const showSource = ref(false)
 const filename = computed(() => (document.value?.path || path).split('/').pop() || 'Markdown document')
 const chatUrl = scope.startsWith('/api/') ? '/' : `/?tab=${encodeURIComponent(scope)}`
 watch(filename, (name) => { window.document.title = `${name} · Claude Hub` }, { immediate: true })
-const appStore = useAppStore()
 let request: AbortController | null = null
-
-watch(() => appStore.colorScheme, (theme) => {
-  window.document.documentElement.dataset.theme = theme
-}, { immediate: true })
 
 function openImage(url: string) {
   window.open(url, '_blank', 'noopener,noreferrer')
