@@ -69,3 +69,29 @@ The scoped browser evidence is Chromium with mocked APIs. WebKit's optional
 `--iphone-webkit` path and physical iPhone behavior are not certified here;
 Safari source/contract preservation is reviewed separately. Existing warning,
 performance, lifecycle-inspection and live-provider boundaries remain.
+
+
+## Follow-up: main's native-status success fixture
+
+The first fixed551eb6e `all` run stops in a main-owned backend status test
+(5047 passed/3 skipped before maxfail); all other standard targets pass and
+the later browser/HMR/replay targets do not run. The exact failing Claude case
+reproduces independently in the isolated entry point. Both this test and all
+backend product code are byte-identical to main's c2a97ba parent.
+
+The fixture claims successful completion after tool output but supplies neither
+a post-tool answer nor authoritative result text. Main's new substantive-final
+contract correctly rejects that input. ATTENTION at the native runtime layer
+maps to NEEDS_INPUT in the managed-session layer; these are distinct enum domains,
+not evidence that the success contract should be relaxed.
+
+Repair only successful fixture inputs: Claude supplies an authoritative result
+answer, while Codex emits its real agentMessage delta before turn/completed.
+Retain every status assertion, stale Working-marker exclusion and late-EOF
+check; strict zip also prevents a new record from being silently truncated.
+No backend product behavior is changed. The first Claude-only repair exposes
+the same missing-answer condition in both Codex role cases (206 pass/2 fail),
+then the complete status-integration and native-stream suites pass208 tests in
+`status-fixture-fix-02`. Prior failures remain intact. This post-merge repair
+requires its own review/commit and new fixed-final-SHA gates; it is not hidden
+inside, or attributed to, the already fixed e77d7bb merge-decision record.
