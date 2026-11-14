@@ -60,6 +60,13 @@ class _InternalReportHandlingMixin(_ReportReviewRequestMixin):
             ),
             session_id=session.id,
         )
+        expected_worker_id = session.id
+        expected_worker_tab = session.tab_id
+        expected_worker_created = session.created_at
+        should_delete_worker = bool(session.ephemeral)
+        self._write_task_record(updated)
+        self._release_task_session(updated)
+        self._save_state()
         if updated.infowall_demand_id:
             synced = await sync_task_progress_to_infowall(
                 updated,
@@ -72,12 +79,18 @@ class _InternalReportHandlingMixin(_ReportReviewRequestMixin):
                     update={"infowall_synced_at": self._runtime_now()}
                 )
                 self.tasks[updated.id] = updated
-        self._write_task_record(updated)
-        self._release_task_session(updated)
-        self._save_state()
-        live_sess = self.sessions.get(session.id)
-        if live_sess is not None and live_sess.ephemeral:
-            await self._best_effort_delete_session(live_sess.id)
+                self._save_state()
+        if should_delete_worker:
+            await self._best_effort_delete_session(
+                expected_worker_id,
+                before_delete=lambda: (
+                    (cur := self.sessions.get(expected_worker_id)) is not None
+                    and cur.tab_id == expected_worker_tab
+                    and cur.created_at == expected_worker_created
+                    and cur.task_id in {None, updated.id}
+                    and cur.current_task_id in {None, updated.id}
+                ),
+            )
         await self.dispatch_workspace(updated.workspace_id)
 
     async def _handle_internal_task_report(

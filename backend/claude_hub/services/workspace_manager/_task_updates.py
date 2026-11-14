@@ -300,6 +300,8 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
             reviewer_tabs: list[str] = []
             review_report: AgentReport | None = None
             rename_session_id: str | None = None
+            worker_incarnation: tuple[str, str, datetime] | None = None
+            reviewer_incarnation: tuple[str, str, datetime] | None = None
             status = payload.status
             outcome: Literal["committed", "uncommitted", "unknown"] = "uncommitted"
             save_error: BaseException | None = None
@@ -317,6 +319,37 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                     and not was_already_done
                     and self._workspace_owns_task(current)
                 ):
+                    if current.session_id:
+                        w_sess = self.sessions.get(current.session_id)
+                        if (
+                            w_sess is not None
+                            and w_sess.ephemeral
+                            and w_sess.role
+                            in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}
+                            and (
+                                current.recipe != WorkspaceTaskRecipe.STANDARD
+                                or current.worktree_path is not None
+                            )
+                        ):
+                            worker_incarnation = (w_sess.id, w_sess.tab_id, w_sess.created_at)
+                    if current.review_session_id:
+                        r_sess = self.sessions.get(current.review_session_id)
+                        cutoff_at = (
+                            current.review_completed_at
+                            or current.review_requested_at
+                            or task.completed_at
+                            or task.updated_at
+                        )
+                        if (
+                            r_sess is not None
+                            and r_sess.ephemeral
+                            and not r_sess.caller_owned_ephemeral
+                            and r_sess.role == WorkspaceSessionRole.REVIEWER
+                            and r_sess.task_id in {None, current.id}
+                            and r_sess.current_task_id in {None, current.id}
+                            and (cutoff_at is None or r_sess.created_at <= cutoff_at)
+                        ):
+                            reviewer_incarnation = (r_sess.id, r_sess.tab_id, r_sess.created_at)
                     self._release_task_session(current)
                     reviewer_tabs = await self._cleanup_reviewer_for_terminal_task(
                         current, updated_at=now, delete_tabs=False
@@ -430,59 +463,30 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                             update={"infowall_synced_at": self._runtime_now()}
                         )
                         self._save_workspace_state(current.workspace_id)
-                if not was_already_done and current.session_id:
-                    worker_sess = self.sessions.get(current.session_id)
-                    if (
-                        worker_sess is not None
-                        and worker_sess.ephemeral
-                        and worker_sess.role
-                        in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}
-                        and (
-                            current.recipe != WorkspaceTaskRecipe.STANDARD
-                            or current.worktree_path is not None
-                        )
-                    ):
-                        w_id = worker_sess.id
-                        w_tab = worker_sess.tab_id
-                        w_created = worker_sess.created_at
-                        await self._best_effort_delete_session(
-                            w_id,
-                            before_delete=lambda: (
-                                (cur := self.sessions.get(w_id)) is not None
-                                and cur.tab_id == w_tab
-                                and cur.created_at == w_created
-                            ),
-                        )
-                if not was_already_done and current.review_session_id:
-                    reviewer_sess = self.sessions.get(current.review_session_id)
-                    cutoff_at = (
-                        current.review_completed_at
-                        or current.review_requested_at
-                        or task.completed_at
-                        or task.updated_at
+                if worker_incarnation is not None:
+                    w_id, w_tab, w_created = worker_incarnation
+                    await self._best_effort_delete_session(
+                        w_id,
+                        before_delete=lambda: (
+                            (cur := self.sessions.get(w_id)) is not None
+                            and cur.tab_id == w_tab
+                            and cur.created_at == w_created
+                            and cur.task_id in {None, current.id}
+                            and cur.current_task_id in {None, current.id}
+                        ),
                     )
-                    if (
-                        reviewer_sess is not None
-                        and reviewer_sess.ephemeral
-                        and not reviewer_sess.caller_owned_ephemeral
-                        and reviewer_sess.role == WorkspaceSessionRole.REVIEWER
-                        and reviewer_sess.task_id in {None, current.id}
-                        and reviewer_sess.current_task_id in {None, current.id}
-                        and (cutoff_at is None or reviewer_sess.created_at <= cutoff_at)
-                    ):
-                        r_id = reviewer_sess.id
-                        r_tab = reviewer_sess.tab_id
-                        r_created = reviewer_sess.created_at
-                        await self._best_effort_delete_session(
-                            r_id,
-                            before_delete=lambda: (
-                                (cur := self.sessions.get(r_id)) is not None
-                                and cur.tab_id == r_tab
-                                and cur.created_at == r_created
-                                and cur.task_id in {None, current.id}
-                                and cur.current_task_id in {None, current.id}
-                            ),
-                        )
+                if reviewer_incarnation is not None:
+                    r_id, r_tab, r_created = reviewer_incarnation
+                    await self._best_effort_delete_session(
+                        r_id,
+                        before_delete=lambda: (
+                            (cur := self.sessions.get(r_id)) is not None
+                            and cur.tab_id == r_tab
+                            and cur.created_at == r_created
+                            and cur.task_id in {None, current.id}
+                            and cur.current_task_id in {None, current.id}
+                        ),
+                    )
             elif rename_session_id is not None:
                 session = self.sessions.get(rename_session_id)
                 if (

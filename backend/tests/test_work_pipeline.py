@@ -1018,6 +1018,61 @@ async def test_dot_delegate_request_key_idempotency_with_changing_demand_summary
         assert ws_b_1["work"]["task_id"] == ws_b_2["work"]["task_id"]
         assert ws_b_1["work"]["task_id"] != conc1["work"]["task_id"]
         assert call_count == 3
+
+        # Legacy actor-A work record without actor_key_hash must NEVER shadow actor-B
+        # concurrent delegate calls with the same request_key in the same workspace!
+        legacy_task, _ = await manager.register_task(
+            ws_b.id,
+            WorkspaceTaskCreate(
+                title="Legacy Actor A Task",
+                prompt="Legacy prompt",
+                agent_type=AgentType.CLAUDE,
+                request_key="req-legacy-shared-key",
+            ),
+            "actor-legacy-a",
+        )
+        dot_service.store.upsert_work(
+            legacy_task.id,
+            workspace_id=ws_b.id,
+            title=legacy_task.title,
+            goal="Legacy goal",
+            done_when=["pytest passes"],
+            output="legacy.txt",
+            agent_type="claude",
+            status=legacy_task.status.value,
+            request_key="req-legacy-shared-key",
+            actor_key_hash=None,
+            watched=False,
+        )
+        act_b_1, act_b_2 = await asyncio.gather(
+            dot_service.delegate(
+                workspace_id=ws_b.id,
+                title="Actor B delegation",
+                goal="Verify legacy None hash does not shadow Actor B",
+                done_when=["pytest passes"],
+                output="out_actor_b.txt",
+                demand_id="dem-idem-2",
+                request_key="req-legacy-shared-key",
+                start=False,
+                confirm=True,
+                actor_key="actor-modern-b",
+            ),
+            dot_service.delegate(
+                workspace_id=ws_b.id,
+                title="Actor B delegation",
+                goal="Verify legacy None hash does not shadow Actor B",
+                done_when=["pytest passes"],
+                output="out_actor_b.txt",
+                demand_id="dem-idem-2",
+                request_key="req-legacy-shared-key",
+                start=False,
+                confirm=True,
+                actor_key="actor-modern-b",
+            ),
+        )
+        assert act_b_1["work"]["task_id"] == act_b_2["work"]["task_id"]
+        assert act_b_1["work"]["task_id"] != legacy_task.id
+        assert call_count == 4
     finally:
         reset_dot_service(None)
 
@@ -1241,3 +1296,75 @@ async def test_concurrent_todo_edit_to_auto_worktree_and_reviewer_incarnation_sa
     )
     assert rev_c.id in manager.sessions
     assert rev_c.tab_id in _wm.ttyd_manager.processes
+
+    # 4. Round 5 probe: accept ephemeral recipe worker's task while pausing sync_task_progress_to_infowall,
+    # delete old worker & create replacement ephemeral worker reusing the friendly ID during the pause,
+    # then resume acceptance -> replacement worker and its tab survive 100% untouched!
+    worker_d = await manager.ensure_workspace_agent(
+        ws.id,
+        EnsureWorkspaceAgentRequest(
+            agent_type=AgentType.CLAUDE,
+            session_kind=SessionKind.CHAT,
+            role=WorkspaceSessionRole.ORCHESTRATOR,
+            ephemeral=True,
+            reuse_existing=False,
+            cwd=str(repo),
+        ),
+    )
+    old_worker_d_id = worker_d.id
+    task_d = manager.create_task(
+        ws.id,
+        WorkspaceTaskCreate(
+            title="Task D worker incarnation",
+            prompt="Verify worker incarnation fence across InfoWall await",
+            agent_type=AgentType.CLAUDE,
+            session_kind=SessionKind.CHAT,
+            recipe=WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW,
+            infowall_demand_id="dem-worker-incarnation",
+            auto_worktree=False,
+            auto_push_remote=False,
+        ),
+    )
+    manager.tasks[task_d.id] = task_d.model_copy(
+        update={"status": WorkspaceTaskStatus.REVIEW, "session_id": old_worker_d_id}
+    )
+
+    replacement_worker: Any = None
+
+    async def swap_worker_during_infowall_sync(*_args: Any, **_kwargs: Any) -> bool:
+        nonlocal replacement_worker
+        await manager.delete_session(old_worker_d_id)
+        new_sess = await manager.ensure_workspace_agent(
+            ws.id,
+            EnsureWorkspaceAgentRequest(
+                agent_type=AgentType.CLAUDE,
+                session_kind=SessionKind.CHAT,
+                role=WorkspaceSessionRole.ORCHESTRATOR,
+                ephemeral=True,
+                reuse_existing=False,
+                cwd=str(repo),
+            ),
+        )
+        # Force replacement worker onto the exact same friendly session ID to test the
+        # pre-await (id, tab_id, created_at) incarnation fence directly!
+        if new_sess.id != old_worker_d_id:
+            manager.sessions.pop(new_sess.id, None)
+            rebound = new_sess.model_copy(update={"id": old_worker_d_id})
+            manager.sessions[old_worker_d_id] = rebound
+            proc = _wm.ttyd_manager.processes.get(rebound.tab_id)
+            if proc is not None:
+                proc.managed_session_id = old_worker_d_id
+            replacement_worker = rebound
+        else:
+            replacement_worker = new_sess
+        return True
+
+    monkeypatch.setattr(
+        "claude_hub.services.work_pipeline.sync_task_progress_to_infowall",
+        swap_worker_during_infowall_sync,
+    )
+    await manager.update_task(task_d.id, WorkspaceTaskUpdate(status=WorkspaceTaskStatus.DONE))
+    assert replacement_worker is not None
+    assert old_worker_d_id in manager.sessions
+    assert manager.sessions[old_worker_d_id].tab_id == replacement_worker.tab_id
+    assert replacement_worker.tab_id in _wm.ttyd_manager.processes
