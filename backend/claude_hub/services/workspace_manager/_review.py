@@ -494,7 +494,13 @@ class _ReviewMixin(_WorkspaceManagerBase):
 
         if report.state != AgentReportState.REVIEW_FAILED:
             if report.state == AgentReportState.REVIEW_PASSED:
-                await self._after_review_passed_effects(task.id, reviewer.id, report)
+                await self._after_review_passed_effects(
+                    task.id,
+                    reviewer.id,
+                    report,
+                    expected_tab_id=reviewer.tab_id,
+                    expected_created_at=reviewer.created_at,
+                )
             return
         updated_task = self.tasks[task.id]
         if updated_task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
@@ -707,6 +713,9 @@ class _ReviewMixin(_WorkspaceManagerBase):
         task_id: str,
         reviewer_id: str,
         report: AgentReport,
+        *,
+        expected_tab_id: str | None = None,
+        expected_created_at: datetime | None = None,
     ) -> None:
         """Execute post-REVIEW_PASSED pipeline actions: remote push, InfoWall sync, and ephemeral reviewer teardown."""
         from claude_hub.services.cross_reviewer import is_heterogeneous_reviewer
@@ -721,6 +730,11 @@ class _ReviewMixin(_WorkspaceManagerBase):
         workspace = self.workspaces.get(task.workspace_id)
         if workspace is None:
             return
+        initial_reviewer = self.sessions.get(reviewer_id)
+        if expected_tab_id is None and initial_reviewer is not None:
+            expected_tab_id = initial_reviewer.tab_id
+        if expected_created_at is None and initial_reviewer is not None:
+            expected_created_at = initial_reviewer.created_at
 
         if task.auto_push_remote:
             worker = self.sessions.get(task.session_id) if task.session_id else None
@@ -768,6 +782,12 @@ class _ReviewMixin(_WorkspaceManagerBase):
             reviewer.role != WorkspaceSessionRole.REVIEWER
             or not reviewer.ephemeral
             or reviewer.caller_owned_ephemeral
+            or (expected_tab_id is not None and reviewer.tab_id != expected_tab_id)
+            or (expected_created_at is not None and reviewer.created_at != expected_created_at)
+            or (
+                task.review_completed_at is not None
+                and reviewer.created_at > task.review_completed_at
+            )
             or self._reviewer_is_busy_with_other_task(reviewer, task.id)
         ):
             return
@@ -789,9 +809,18 @@ class _ReviewMixin(_WorkspaceManagerBase):
             or task.recipe != WorkspaceTaskRecipe.STANDARD
             or heterogeneous
         ):
+            target_tab_id = reviewer.tab_id
+            target_created_at = reviewer.created_at
             try:
                 await self.delete_session(
                     reviewer.id,
+                    before_delete=lambda: (
+                        (cur := self.sessions.get(reviewer.id)) is not None
+                        and cur.tab_id == target_tab_id
+                        and cur.created_at == target_created_at
+                        and cur.task_id in {None, task.id}
+                        and cur.current_task_id in {None, task.id}
+                    ),
                     allow_completed_review_for_task_id=task.id,
                 )
             except Exception:

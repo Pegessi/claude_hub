@@ -304,6 +304,7 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
             outcome: Literal["committed", "uncommitted", "unknown"] = "uncommitted"
             save_error: BaseException | None = None
             staged = False
+            was_already_done = task.status == WorkspaceTaskStatus.DONE
             try:
                 self._write_prepared_attachments(plan.prepared_attachments, created_paths)
                 staged = True
@@ -311,7 +312,11 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                 for descendant_id, fields in plan.descendants.items():
                     self.tasks[descendant_id] = self.tasks[descendant_id].model_copy(update=fields)
                 current = self.tasks[task.id]
-                if status == WorkspaceTaskStatus.DONE and self._workspace_owns_task(current):
+                if (
+                    status == WorkspaceTaskStatus.DONE
+                    and not was_already_done
+                    and self._workspace_owns_task(current)
+                ):
                     self._release_task_session(current)
                     reviewer_tabs = await self._cleanup_reviewer_for_terminal_task(
                         current, updated_at=now, delete_tabs=False
@@ -425,7 +430,7 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                             update={"infowall_synced_at": self._runtime_now()}
                         )
                         self._save_workspace_state(current.workspace_id)
-                if current.session_id:
+                if not was_already_done and current.session_id:
                     worker_sess = self.sessions.get(current.session_id)
                     if (
                         worker_sess is not None
@@ -437,9 +442,25 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                             or current.worktree_path is not None
                         )
                     ):
-                        await self._best_effort_delete_session(worker_sess.id)
-                if current.review_session_id:
+                        w_id = worker_sess.id
+                        w_tab = worker_sess.tab_id
+                        w_created = worker_sess.created_at
+                        await self._best_effort_delete_session(
+                            w_id,
+                            before_delete=lambda: (
+                                (cur := self.sessions.get(w_id)) is not None
+                                and cur.tab_id == w_tab
+                                and cur.created_at == w_created
+                            ),
+                        )
+                if not was_already_done and current.review_session_id:
                     reviewer_sess = self.sessions.get(current.review_session_id)
+                    cutoff_at = (
+                        current.review_completed_at
+                        or current.review_requested_at
+                        or task.completed_at
+                        or task.updated_at
+                    )
                     if (
                         reviewer_sess is not None
                         and reviewer_sess.ephemeral
@@ -447,12 +468,21 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                         and reviewer_sess.role == WorkspaceSessionRole.REVIEWER
                         and reviewer_sess.task_id in {None, current.id}
                         and reviewer_sess.current_task_id in {None, current.id}
-                        and (
-                            current.review_completed_at is None
-                            or reviewer_sess.created_at <= current.review_completed_at
-                        )
+                        and (cutoff_at is None or reviewer_sess.created_at <= cutoff_at)
                     ):
-                        await self._best_effort_delete_session(reviewer_sess.id)
+                        r_id = reviewer_sess.id
+                        r_tab = reviewer_sess.tab_id
+                        r_created = reviewer_sess.created_at
+                        await self._best_effort_delete_session(
+                            r_id,
+                            before_delete=lambda: (
+                                (cur := self.sessions.get(r_id)) is not None
+                                and cur.tab_id == r_tab
+                                and cur.created_at == r_created
+                                and cur.task_id in {None, current.id}
+                                and cur.current_task_id in {None, current.id}
+                            ),
+                        )
             elif rename_session_id is not None:
                 session = self.sessions.get(rename_session_id)
                 if (

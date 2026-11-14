@@ -173,7 +173,9 @@ class DotWorkService(DotSessionService, ABC):
                 session_kind = SessionKind.CHAT
 
         import contextlib
+        import hashlib
 
+        actor_key_hash = hashlib.sha256((actor_key or "").encode("utf-8")).hexdigest()
         req_locks: dict[tuple[str, str, str], asyncio.Lock] | None = getattr(
             self, "_delegate_request_locks", None
         )
@@ -181,7 +183,7 @@ class DotWorkService(DotSessionService, ABC):
             req_locks = {}
             setattr(self, "_delegate_request_locks", req_locks)
         req_lock_cm: Any = (
-            req_locks.setdefault((workspace_id, actor_key, request_key), asyncio.Lock())
+            req_locks.setdefault((workspace_id, actor_key_hash, request_key), asyncio.Lock())
             if request_key
             else contextlib.nullcontext()
         )
@@ -193,6 +195,8 @@ class DotWorkService(DotSessionService, ABC):
                         item
                         for item in self.store.list_work(include_closed=True)
                         if item.get("request_key") == request_key
+                        and item.get("workspace_id") == workspace_id
+                        and item.get("actor_key_hash") in {actor_key_hash, None}
                     ),
                     None,
                 )
@@ -279,6 +283,7 @@ class DotWorkService(DotSessionService, ABC):
                 status=None if replay else task.status.value,
                 stall_hours=stall_hours,
                 request_key=request_key,
+                actor_key_hash=actor_key_hash if request_key else None,
                 caller_fp=caller_fp if request_key else None,
                 enriched_context=effective_context if request_key else None,
                 # Kept so a later review can see which warnings Dot sent past.
