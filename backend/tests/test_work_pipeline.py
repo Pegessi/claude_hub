@@ -980,6 +980,44 @@ async def test_dot_delegate_request_key_idempotency_with_changing_demand_summary
         )
         assert conc1["work"]["task_id"] == conc2["work"]["task_id"]
         assert call_count == 2
+
+        # Cross-workspace request_key namespace isolation: delegating with the same
+        # request_key in a second workspace ws_b must not collide with ws and must
+        # serialize concurrent calls in ws_b with only 1 new InfoWall lookup!
+        repo_b = tmp_path / "repo_b"
+        repo_b.mkdir()
+        ws_b = manager.create_workspace(
+            WorkspaceCreate(name="Idempotency Repo B", path=str(repo_b), default_branch="main")
+        )
+        ws_b_1, ws_b_2 = await asyncio.gather(
+            dot_service.delegate(
+                workspace_id=ws_b.id,
+                title="Workspace B delegation",
+                goal="Verify cross-workspace request_key isolation",
+                done_when=["pytest passes"],
+                output="out_b.txt",
+                demand_id="dem-idem-2",
+                request_key="req-idem-key-concurrent",
+                start=False,
+                confirm=True,
+                actor_key="actor-idem",
+            ),
+            dot_service.delegate(
+                workspace_id=ws_b.id,
+                title="Workspace B delegation",
+                goal="Verify cross-workspace request_key isolation",
+                done_when=["pytest passes"],
+                output="out_b.txt",
+                demand_id="dem-idem-2",
+                request_key="req-idem-key-concurrent",
+                start=False,
+                confirm=True,
+                actor_key="actor-idem",
+            ),
+        )
+        assert ws_b_1["work"]["task_id"] == ws_b_2["work"]["task_id"]
+        assert ws_b_1["work"]["task_id"] != conc1["work"]["task_id"]
+        assert call_count == 3
     finally:
         reset_dot_service(None)
 
@@ -1159,3 +1197,47 @@ async def test_concurrent_todo_edit_to_auto_worktree_and_reviewer_incarnation_sa
     # Accepting Task A transitions Task A to DONE and leaves Task B's reviewer untouched
     await manager.update_task(task.id, WorkspaceTaskUpdate(status=WorkspaceTaskStatus.DONE))
     assert rev_b.id in manager.sessions
+
+    # 3. Round 4 probe: accept Task B DONE BEFORE reviewer verdict (review_completed_at is None),
+    # spawn a new reviewer rev_c, and even if task_b.review_session_id is pointed at rev_c.id
+    # (or DONE update is retried / delayed _after_review_passed_effects runs with old incarnation),
+    # rev_c and its tab remain 100% untouched!
+    old_rev_b_tab = rev_b.tab_id
+    old_rev_b_created = rev_b.created_at
+    await manager.update_task(task_b.id, WorkspaceTaskUpdate(status=WorkspaceTaskStatus.DONE))
+    assert manager.tasks[task_b.id].review_completed_at is None
+
+    rev_c = await manager.ensure_workspace_agent(
+        ws.id,
+        EnsureWorkspaceAgentRequest(
+            agent_type=AgentType.MASO,
+            session_kind=SessionKind.CHAT,
+            role=WorkspaceSessionRole.REVIEWER,
+            ephemeral=True,
+            caller_owned_ephemeral=False,
+            reuse_existing=False,
+            cwd=str(repo),
+            env={"MASO_BASE_URL": "http://127.0.0.1:11004", "MASO_MODEL": "gemini-4-argon"},
+        ),
+    )
+    assert rev_c.id != rev_b.id
+    # Simulate a reallocated ID collision by pointing task_b.review_session_id to rev_c.id
+    manager.tasks[task_b.id] = manager.tasks[task_b.id].model_copy(
+        update={"review_session_id": rev_c.id}
+    )
+    # Retrying DONE on already-DONE task_b must not touch rev_c
+    await manager.update_task(task_b.id, WorkspaceTaskUpdate(status=WorkspaceTaskStatus.DONE))
+    assert rev_c.id in manager.sessions
+    assert rev_c.tab_id in _wm.ttyd_manager.processes
+
+    # Delayed _after_review_passed_effects with old (tab_id, created_at) fence must also leave rev_c untouched
+    dummy_report = next(iter(manager.reports.values()))
+    await manager._after_review_passed_effects(
+        task_b.id,
+        rev_c.id,
+        dummy_report,
+        expected_tab_id=old_rev_b_tab,
+        expected_created_at=old_rev_b_created,
+    )
+    assert rev_c.id in manager.sessions
+    assert rev_c.tab_id in _wm.ttyd_manager.processes

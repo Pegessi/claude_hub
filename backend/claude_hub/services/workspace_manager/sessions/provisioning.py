@@ -183,8 +183,15 @@ class _SessionProvisioningMixin(_WorkspaceManagerBase):
             ref_id
             for task_item in self.tasks.values()
             if task_item.workspace_id == workspace.id
-            and task_item.status not in {WorkspaceTaskStatus.DONE, WorkspaceTaskStatus.FAILED}
-            for ref_id in (task_item.session_id, task_item.review_session_id)
+            for ref_id in (
+                (
+                    task_item.session_id
+                    if task_item.status
+                    not in {WorkspaceTaskStatus.DONE, WorkspaceTaskStatus.FAILED}
+                    else None
+                ),
+                task_item.review_session_id,
+            )
             if ref_id
         }
         while (
