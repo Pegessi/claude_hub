@@ -7,6 +7,17 @@
 
 ## Released
 
+### fix(ui): keep mobile Chat sidebar drawer above its backdrop
+
+- Render `.chat-drawer-edge-band` and `.chat-drawer-backdrop` as siblings of
+  `<aside class="chat-sidebar">` inside `.terminal-mode-shell` instead of
+  teleporting only the backdrop to `<body>`. On mobile Chat panes,
+  `.app[data-mode='terminal'][data-active-pane-chat='true']` uses
+  `position: fixed`, which creates a root-level stacking context; a
+  `<body>`-teleported backdrop (`z-index: 849`) painted over the `.app`-scoped
+  drawer (`z-index: 850`), dimming the entire drawer and intercepting touch
+  scrolling and taps.
+
 ### fix(workspace): preserve monitor cancellation on Python 3.11 and split Cursor ACP helpers
 
 - Replace `asyncio.wait_for` in `_background_monitor_loop`'s `_guard_awaitable`
