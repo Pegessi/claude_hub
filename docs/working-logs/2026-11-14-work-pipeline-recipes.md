@@ -29,3 +29,21 @@ This change introduces standardized pipeline recipes (`WorkspaceTaskRecipe`), a 
 4. **CLI & `dot delegate` Upgrade (`services/dot/runtime/work.py`, `api/dot.py`, `cli/commands/dot.py`, `cli/task_commands/creation.py`)**:
    - Added `maso` and `antigravity` support plus `--model`, `--env-preset`, `--recipe`, `--demand-id`, and `--ephemeral/--no-ephemeral` to `dot delegate`.
    - Added `--recipe`, `--demand-id`, `--auto-worktree/--no-auto-worktree`, and `--auto-push-remote/--no-auto-push-remote` to `task create`.
+
+## Round 2 Adversarial Review Fixes
+
+1. **Fail-Closed `auto_worktree` Admission & Non-Blocking Git Lookups**:
+   - Replaced synchronous `git_repo_identity` with async `_resolve_canonical_git_repo_root` and `_is_valid_git_worktree` using `_run_bounded_subprocess`.
+   - `provision_task_worktree` now raises `RuntimeError` if a local `auto_worktree` task cannot provision or validate an isolated Git worktree, never falling back to `workspace.path`.
+2. **Per-Task Start Serialization & Ephemeral Session Compensation**:
+   - Added `_task_start_locks` to serialize `_start_task_workspace` per `task_id`, validating admission inputs before provisioning worktrees or sessions, re-reading live task state after every `await`, and retiring unattached ephemeral sessions on start/delegate failure.
+3. **Strict Reviewer Heterogeneity & Implicit MASO Default Model Handling**:
+   - Updated `maso_model_family`, `is_heterogeneous_reviewer`, and `resolve_cross_reviewer_target` to account for MASO's discovered `default_model` when `MASO_MODEL` is unset in `worker.env`.
+   - `_select_or_create_reviewer` resolves `cross_target` up front for local Chat reviews and requires heterogeneity when `cross_target` or an idle heterogeneous reviewer is available.
+4. **Canonical Locked Session Retirement & Multi-Round Remote Push**:
+   - Removed manual `self.sessions.pop` bypasses; temporary reviewers and completed ephemeral workers are retired exclusively via `delete_session` (`allow_completed_review_for_task_id=task.id`).
+   - `push_task_feature_branch` compares `task.remote_pushed_ref` against `origin/<branch>@<current_head_sha[:7]>`, pushing new commits on subsequent review rounds.
+5. **`dot delegate --request-key` Replay Idempotency & Bounded Subprocess Reaping**:
+   - Persisted `caller_fp` and `enriched_context` in `DotStore` so `request_key` replays reuse the original enriched context even if InfoWall state changes.
+   - Unified `git` and `infowall` subprocesses under `_run_bounded_subprocess` (`start_new_session=True`, 32 MiB stream limit, 20s InfoWall timeout, loopback `NO_PROXY`, process-group `SIGKILL` + `await proc.wait()`).
+

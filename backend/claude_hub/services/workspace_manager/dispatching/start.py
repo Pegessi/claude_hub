@@ -8,12 +8,43 @@ from claude_hub.services.workspace_manager._constants import *  # noqa: F401,F40
 
 
 class _TaskStartMixin(_WorkspaceManagerBase):
+    def _validate_start_admission_inputs(
+        self,
+        workspace: Workspace,
+        task: WorkspaceTask,
+        payload: StartTaskRequest,
+    ) -> None:
+        if task.status == WorkspaceTaskStatus.DONE:
+            raise RuntimeError("Done tasks cannot be started")
+        if task.status != WorkspaceTaskStatus.WORKING:
+            require_task_dependencies(self.tasks, task)
+        validate_workspace_session_surface(payload.agent_type or task.agent_type, task.session_kind)
+        if payload.related_task_id and payload.related_task_id not in self.tasks:
+            raise KeyError(payload.related_task_id)
+        if payload.target_session_id:
+            selected = self.sessions.get(payload.target_session_id)
+            if selected is None or selected.workspace_id != workspace.id:
+                raise KeyError(payload.target_session_id)
+            if selected.role != WorkspaceSessionRole.ORCHESTRATOR:
+                raise RuntimeError("Tasks can only be assigned to workspace agents")
+            if selected.session_kind != task.session_kind:
+                raise ValueError("The selected agent does not match the Task execution surface")
+
     async def _start_task_workspace(
         self,
         task_id: str,
         payload: StartTaskRequest | None = None,
     ) -> WorkspaceTask:
         payload = payload or StartTaskRequest()
+        start_lock = self._task_start_locks.setdefault(task_id, asyncio.Lock())
+        async with start_lock:
+            return await self._start_task_workspace_locked(task_id, payload)
+
+    async def _start_task_workspace_locked(
+        self,
+        task_id: str,
+        payload: StartTaskRequest,
+    ) -> WorkspaceTask:
         task = self.tasks.get(task_id)
         if not task:
             raise KeyError(task_id)
@@ -27,20 +58,13 @@ class _TaskStartMixin(_WorkspaceManagerBase):
             require_task_dependencies(self.tasks, task)
 
         # Idempotency: if the task was already started (QUEUED or WORKING),
-        # do not re-dispatch. A crash between the dispatch side effect and
-        # the state persist could leave a stale TODO status on disk; in that
-        # case a retry would call start_task again. To avoid duplicate
-        # dispatch, we check the task's session_id: if it is set, the task
-        # was already assigned to a worker and we only ensure the dispatch
-        # runs (dispatch_workspace is idempotent).
+        # do not re-dispatch.
         if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
             if task.session_id:
                 await self.dispatch_workspace(workspace.id)
             return self.tasks[task_id]
 
-        # A compatibility start payload can override the provider even when an
-        # existing agent avoids the normal creation/admission path.
-        validate_workspace_session_surface(payload.agent_type or task.agent_type, task.session_kind)
+        self._validate_start_admission_inputs(workspace, task, payload)
 
         logger.info(
             "Starting workspace task id=%s workspace_id=%s title=%r payload_target_session_id=%s "
@@ -58,22 +82,20 @@ class _TaskStartMixin(_WorkspaceManagerBase):
         # Refresh can yield to a todo edit. Do not create an agent from the
         # pre-refresh surface and only discover that it was invalid afterward.
         task = self.tasks[task_id]
-        if task.status == WorkspaceTaskStatus.DONE:
-            raise RuntimeError("Done tasks cannot be started")
         if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
             return task
-        require_task_dependencies(self.tasks, task)
-        validate_workspace_session_surface(payload.agent_type or task.agent_type, task.session_kind)
+        self._validate_start_admission_inputs(workspace, task, payload)
         selected_kind = task.session_kind
 
-        if workspace.target == ExecutionTarget.LOCAL and task.auto_worktree:
-            from claude_hub.services.work_pipeline import provision_task_worktree
-            from claude_hub.services.workspace_identity import resolve_path
+        created_ephemeral_session_id: str | None = None
+        try:
+            if workspace.target == ExecutionTarget.LOCAL and task.auto_worktree:
+                from claude_hub.services.work_pipeline import provision_task_worktree
+                from claude_hub.services.workspace_identity import resolve_path
 
-            if not task.worktree_path:
-                provisioned = await provision_task_worktree(workspace, task)
-                if provisioned is not None:
-                    wt_path, wt_branch = provisioned
+                wt_path, wt_branch = await provision_task_worktree(workspace, task)
+                task = self.tasks[task_id]
+                if task.worktree_path != wt_path or task.worktree_branch != wt_branch:
                     task = task.model_copy(
                         update={
                             "worktree_path": wt_path,
@@ -84,9 +106,11 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                     self.tasks[task.id] = task
                     self._save_workspace_state(workspace.id)
 
-            task = self.tasks[task_id]
-            if task.worktree_path:
-                wanted_wt = resolve_path(task.worktree_path)
+                if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
+                    return task
+                self._validate_start_admission_inputs(workspace, task, payload)
+
+                wanted_wt = resolve_path(wt_path)
                 selected_in_wt = False
                 inherited_env: dict[str, str] = {}
                 inherited_preset: str | None = None
@@ -124,113 +148,114 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                             reuse_existing=False,
                             ephemeral=True,
                             caller_owned_ephemeral=True,
-                            cwd=task.worktree_path,
+                            cwd=wt_path,
                             env=inherited_env,
                             env_preset=inherited_preset,
                         ),
                     )
+                    created_ephemeral_session_id = worktree_agent.id
                     payload = payload.model_copy(update={"target_session_id": worktree_agent.id})
 
-        if payload.target_session_id:
-            selected = self.sessions.get(payload.target_session_id)
-            if selected is None or selected.workspace_id != workspace.id:
-                raise KeyError(payload.target_session_id)
-            if selected.role != WorkspaceSessionRole.ORCHESTRATOR:
-                raise RuntimeError("Tasks can only be assigned to workspace agents")
-            if selected.session_kind != task.session_kind:
-                raise ValueError("The selected agent does not match the Task execution surface")
+            self._validate_start_admission_inputs(workspace, self.tasks[task_id], payload)
 
-        if not payload.target_session_id and not any(
-            agent.session_kind == selected_kind
-            for agent in self._workspace_agents(workspace.id, include_stopped=True)
-        ):
-            logger.info(
-                "No workspace agents found for workspace_id=%s; creating default agent for task id=%s",
-                workspace.id,
-                task.id,
-            )
-            await self.ensure_workspace_agent(
-                workspace.id,
-                EnsureWorkspaceAgentRequest(
-                    agent_type=payload.agent_type or task.agent_type,
-                    session_kind=selected_kind,
-                    reuse_existing=False,
-                ),
-            )
-
-        # Session preparation awaits external work; a todo edit may have changed
-        # prerequisites meanwhile. Never overwrite that newer task contract.
-        task = self.tasks[task_id]
-        if task.status == WorkspaceTaskStatus.DONE:
-            raise RuntimeError("Done tasks cannot be started")
-        if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
-            return task
-        validate_workspace_session_surface(payload.agent_type or task.agent_type, task.session_kind)
-        require_task_dependencies(self.tasks, task)
-
-        base_update: dict[str, Any] = {
-            "status": WorkspaceTaskStatus.QUEUED,
-            "queued_at": task.queued_at or self._runtime_now(),
-            "updated_at": self._runtime_now(),
-            "dispatch_pending": False,
-            "manual_aborted_at": None,
-            "manual_abort_reason": None,
-            # Each (re-)dispatch gets a fresh attempt ordinal so the dispatch
-            # call_id (dispatch:{task.id}:{dispatch_attempt}) is unique per
-            # attempt. Followups may carry a different assignment prompt; a
-            # new call_id keeps them compatible with the immutable-call_id
-            # payload invariant. Crash recovery reuses the stored attempt, so
-            # the same call_id no-ops correctly.
-            "dispatch_attempt": task.dispatch_attempt + 1,
-        }
-        if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
-            run = task.autonomous_run or self._default_autonomous_run(
-                task.id,
-                task.autonomy_policy.max_iterations if task.autonomy_policy else 3,
-            )
-            phase = AutonomousRunPhase.DISPATCHING
-            base_update["autonomous_run"] = run.model_copy(
-                update={
-                    "phase": phase,
-                    "status_summary": self._autonomous_phase_label(phase),
-                    "next_action": self._autonomous_next_action(phase),
-                }
-            )
-        if payload.agent_type:
-            base_update["agent_type"] = payload.agent_type
-        if payload.related_task_id:
-            if payload.related_task_id not in self.tasks:
-                raise KeyError(payload.related_task_id)
-            base_update["related_task_id"] = payload.related_task_id
-
-        task = apply_task_update(task, base_update, cause="start")
-        decision = await self._choose_dispatch_target(workspace, task, payload)
-        target, clear_context, reason = decision
-        autonomous_run = task.autonomous_run
-        if task.task_mode == WorkspaceTaskMode.AUTONOMOUS and autonomous_run is not None:
-            phase = AutonomousRunPhase.WORKING
-            autonomous_run = autonomous_run.model_copy(
-                update={
-                    "phase": phase,
-                    "status_summary": self._autonomous_phase_label(phase),
-                    "active_session_ids": list(
-                        dict.fromkeys([*autonomous_run.active_session_ids, target.id])
+            if not payload.target_session_id and not any(
+                agent.session_kind == selected_kind
+                for agent in self._workspace_agents(workspace.id, include_stopped=True)
+            ):
+                logger.info(
+                    "No workspace agents found for workspace_id=%s; creating default agent for task id=%s",
+                    workspace.id,
+                    task.id,
+                )
+                await self.ensure_workspace_agent(
+                    workspace.id,
+                    EnsureWorkspaceAgentRequest(
+                        agent_type=payload.agent_type or task.agent_type,
+                        session_kind=selected_kind,
+                        reuse_existing=False,
                     ),
-                    "next_action": self._autonomous_next_action(phase),
+                )
+
+            # Session preparation awaits external work; a todo edit may have changed
+            # prerequisites meanwhile. Never overwrite that newer task contract.
+            task = self.tasks[task_id]
+            if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
+                if (
+                    created_ephemeral_session_id is not None
+                    and task.session_id != created_ephemeral_session_id
+                ):
+                    await self._best_effort_delete_session(created_ephemeral_session_id)
+                return task
+            self._validate_start_admission_inputs(workspace, task, payload)
+
+            base_update: dict[str, Any] = {
+                "status": WorkspaceTaskStatus.QUEUED,
+                "queued_at": task.queued_at or self._runtime_now(),
+                "updated_at": self._runtime_now(),
+                "dispatch_pending": False,
+                "manual_aborted_at": None,
+                "manual_abort_reason": None,
+                "dispatch_attempt": task.dispatch_attempt + 1,
+            }
+            if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
+                run = task.autonomous_run or self._default_autonomous_run(
+                    task.id,
+                    task.autonomy_policy.max_iterations if task.autonomy_policy else 3,
+                )
+                phase = AutonomousRunPhase.DISPATCHING
+                base_update["autonomous_run"] = run.model_copy(
+                    update={
+                        "phase": phase,
+                        "status_summary": self._autonomous_phase_label(phase),
+                        "next_action": self._autonomous_next_action(phase),
+                    }
+                )
+            if payload.agent_type:
+                base_update["agent_type"] = payload.agent_type
+            if payload.related_task_id:
+                if payload.related_task_id not in self.tasks:
+                    raise KeyError(payload.related_task_id)
+                base_update["related_task_id"] = payload.related_task_id
+
+            staged_task = apply_task_update(task, base_update, cause="start")
+            decision = await self._choose_dispatch_target(workspace, staged_task, payload)
+            target, clear_context, reason = decision
+            autonomous_run = staged_task.autonomous_run
+            if staged_task.task_mode == WorkspaceTaskMode.AUTONOMOUS and autonomous_run is not None:
+                phase = AutonomousRunPhase.WORKING
+                autonomous_run = autonomous_run.model_copy(
+                    update={
+                        "phase": phase,
+                        "status_summary": self._autonomous_phase_label(phase),
+                        "active_session_ids": list(
+                            dict.fromkeys([*autonomous_run.active_session_ids, target.id])
+                        ),
+                        "next_action": self._autonomous_next_action(phase),
+                    }
+                )
+            committed_task = staged_task.model_copy(
+                update={
+                    "session_id": target.id,
+                    "clear_context": clear_context,
+                    "dispatch_reason": reason,
+                    "dispatch_pending": False,
+                    "autonomous_run": autonomous_run,
+                    "updated_at": self._runtime_now(),
                 }
             )
-        task = task.model_copy(
-            update={
-                "session_id": target.id,
-                "clear_context": clear_context,
-                "dispatch_reason": reason,
-                "dispatch_pending": False,
-                "autonomous_run": autonomous_run,
-                "updated_at": self._runtime_now(),
-            }
-        )
-        self.tasks[task.id] = task
-        self._save_state()
+            self.tasks[committed_task.id] = committed_task
+            self._save_state()
+            created_ephemeral_session_id = None
+            task = committed_task
+        except BaseException:
+            if created_ephemeral_session_id is not None:
+                live_after_err = self.tasks.get(task_id)
+                if (
+                    live_after_err is None
+                    or live_after_err.session_id != created_ephemeral_session_id
+                ):
+                    await self._best_effort_delete_session(created_ephemeral_session_id)
+            raise
         logger.info(
             "Workspace task id=%s queued for session_id=%s session_title=%r related_task_id=%s "
             "clear_context=%s reason=%r",

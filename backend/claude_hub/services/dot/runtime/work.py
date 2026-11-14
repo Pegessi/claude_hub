@@ -141,12 +141,7 @@ class DotWorkService(DotSessionService, ABC):
         cleaned_demand_id = (
             demand_id.strip() if isinstance(demand_id, str) and demand_id.strip() else None
         )
-        if cleaned_demand_id:
-            demand_summary = await read_infowall_demand_summary(cleaned_demand_id)
-            if demand_summary:
-                context = (
-                    f"{context.strip()}\n\n{demand_summary}" if context.strip() else demand_summary
-                )
+        caller_context = context.strip()
 
         session_kind = None
         if session_id:
@@ -178,16 +173,57 @@ class DotWorkService(DotSessionService, ABC):
                 session_kind = SessionKind.CHAT
 
         self.store.ensure()
-        warnings = lint_brief(done_when=checks, context=context, output=output)
-        replay = bool(request_key) and any(
-            item.get("request_key") == request_key
-            for item in self.store.list_work(include_closed=True)
+        existing_work = (
+            next(
+                (
+                    item
+                    for item in self.store.list_work(include_closed=True)
+                    if item.get("request_key") == request_key
+                ),
+                None,
+            )
+            if request_key
+            else None
         )
+        replay = existing_work is not None
+        caller_fp = [
+            workspace_id,
+            title.strip(),
+            goal.strip(),
+            checks,
+            output.strip(),
+            caller_context,
+            out_of_scope.strip(),
+            constraints.strip(),
+            agent_type,
+            task_mode,
+            recipe,
+            cleaned_demand_id,
+        ]
+        if (
+            replay
+            and existing_work is not None
+            and existing_work.get("caller_fp") == caller_fp
+            and isinstance(existing_work.get("enriched_context"), str)
+        ):
+            effective_context = existing_work["enriched_context"]
+        elif cleaned_demand_id:
+            demand_summary = await read_infowall_demand_summary(cleaned_demand_id)
+            if demand_summary:
+                effective_context = (
+                    f"{caller_context}\n\n{demand_summary}" if caller_context else demand_summary
+                )
+            else:
+                effective_context = caller_context
+        else:
+            effective_context = caller_context
+
+        warnings = lint_brief(done_when=checks, context=effective_context, output=output)
         if warnings and not (confirm or replay):
             return {"held": True, "warnings": warnings, "work": None}
         brief = BRIEF_TEMPLATE.format(
             goal=goal.strip(),
-            context=context.strip() or "(none given)",
+            context=effective_context.strip() or "(none given)",
             done_when="\n".join(f"{number}. {item}" for number, item in enumerate(checks, 1)),
             output=output.strip() or "(not given; say in the report where the result is)",
             out_of_scope=out_of_scope.strip() or "(none given)",
@@ -227,6 +263,8 @@ class DotWorkService(DotSessionService, ABC):
             status=None if replay else task.status.value,
             stall_hours=stall_hours,
             request_key=request_key,
+            caller_fp=caller_fp if request_key else None,
+            enriched_context=effective_context if request_key else None,
             # Kept so a later review can see which warnings Dot sent past.
             brief_warnings=warnings or None,
             # Dot's own, even if the watcher saw it first (it watches Dot's tasks).
@@ -234,8 +272,9 @@ class DotWorkService(DotSessionService, ABC):
         )
         try:
             if start and task.status.value == "todo":
+                created_ephemeral_session_id: str | None = None
                 try:
-                    target_session_id = session_id
+                    target_session_id = session_id or getattr(task, "session_id", None)
                     if not target_session_id and (
                         model
                         or env_preset
@@ -248,18 +287,16 @@ class DotWorkService(DotSessionService, ABC):
                             and getattr(task, "auto_worktree", False)
                             and not getattr(task, "worktree_path", None)
                         ):
-                            provisioned = await provision_task_worktree(ws_obj, task)
-                            if provisioned is not None:
-                                wt_path, wt_branch = provisioned
-                                if hasattr(task, "model_copy"):
-                                    task = task.model_copy(
-                                        update={
-                                            "worktree_path": wt_path,
-                                            "worktree_branch": wt_branch,
-                                        }
-                                    )
-                                    if task.id in getattr(workspace_manager, "tasks", {}):
-                                        workspace_manager.tasks[task.id] = task
+                            wt_path, wt_branch = await provision_task_worktree(ws_obj, task)
+                            if hasattr(task, "model_copy"):
+                                task = task.model_copy(
+                                    update={
+                                        "worktree_path": wt_path,
+                                        "worktree_branch": wt_branch,
+                                    }
+                                )
+                                if task.id in getattr(workspace_manager, "tasks", {}):
+                                    workspace_manager.tasks[task.id] = task
                         agent_env: dict[str, str] = {}
                         parsed_agent = AgentType(agent_type)
                         if parsed_agent == AgentType.MASO:
@@ -287,6 +324,8 @@ class DotWorkService(DotSessionService, ABC):
                                 env_preset=env_preset,
                             ),
                         )
+                        if use_ephemeral:
+                            created_ephemeral_session_id = created_session.id
                         target_session_id = created_session.id
 
                     task = await workspace_manager.start_task(
@@ -295,9 +334,32 @@ class DotWorkService(DotSessionService, ABC):
                             agent_type=AgentType(agent_type), target_session_id=target_session_id
                         ),
                     )
+                    created_ephemeral_session_id = None
                 except TaskExecutionConflict:
+                    if created_ephemeral_session_id and hasattr(
+                        workspace_manager, "delete_session"
+                    ):
+                        try:
+                            await workspace_manager.delete_session(created_ephemeral_session_id)
+                        except Exception:
+                            logger.debug(
+                                "Best-effort cleanup of unstarted delegate session %s failed",
+                                created_ephemeral_session_id,
+                                exc_info=True,
+                            )
                     raise
                 except Exception as exc:
+                    if created_ephemeral_session_id and hasattr(
+                        workspace_manager, "delete_session"
+                    ):
+                        try:
+                            await workspace_manager.delete_session(created_ephemeral_session_id)
+                        except Exception:
+                            logger.debug(
+                                "Best-effort cleanup of unstarted delegate session %s failed",
+                                created_ephemeral_session_id,
+                                exc_info=True,
+                            )
                     raise DelegateNotStarted(
                         f"Task {task.id} was created but did not start: {exc}"
                     ) from exc

@@ -78,17 +78,6 @@ class _InternalReportHandlingMixin(_ReportReviewRequestMixin):
         live_sess = self.sessions.get(session.id)
         if live_sess is not None and live_sess.ephemeral:
             await self._best_effort_delete_session(live_sess.id)
-            if live_sess.id in self.sessions:
-                self.sessions.pop(live_sess.id, None)
-                self._save_state()
-                try:
-                    await ttyd_manager.delete_tab(live_sess.tab_id)
-                except Exception:
-                    logger.debug(
-                        "Best-effort tab delete failed for triage_diagnose session=%s",
-                        live_sess.id,
-                        exc_info=True,
-                    )
         await self.dispatch_workspace(updated.workspace_id)
 
     async def _handle_internal_task_report(
