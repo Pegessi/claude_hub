@@ -13,16 +13,19 @@
 
       // Keep one real component and one live paragraph, not a replayed snapshot.
       const text = ref('Look at ![Streaming image](/tmp/streaming-missing.png) and tail')
+      const tabId = ref('image-streaming-probe')
       const probe = {
         mounts: 0,
         previews: [],
         append: delta => { text.value += delta },
+        setText: value => { text.value = value },
+        setScope: value => { tabId.value = value },
       }
       createApp({
         setup() {
           return () => h(MarkdownContent, {
             text: text.value,
-            tabId: 'image-streaming-probe',
+            tabId: tabId.value,
             onVnodeMounted: () => { probe.mounts++ },
             onImageClick: (url, alt) => { probe.previews.push({ url, alt }) },
           })

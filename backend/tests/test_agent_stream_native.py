@@ -130,14 +130,14 @@ def test_claude_plan_mode_uses_permission_mode_without_permission_bypass() -> No
     assert "--dangerously-skip-permissions" not in command
 
 
-def test_cursor_plan_mode_uses_mode_without_yolo() -> None:
+def test_cursor_plan_mode_omits_yolo_and_runs_acp() -> None:
     session = _session(AgentType.CURSOR).model_copy(
         update={"chat_mode": ChatMode.PLAN, "solo_mode": True}
     )
 
     command = CursorNativeSession(session)._build_command()
 
-    assert command[-2:] == ["--mode", "plan"]
+    assert command[-1] == "acp"
     assert "--yolo" not in command
 
 
@@ -332,20 +332,28 @@ def test_image_and_question_guidance_strips_compose(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cursor_send_text_prepends_question_protocol_guidance() -> None:
-    """Cursor's CLI has no system-prompt flag, so ``_send_text`` delivers the
-    guidance as a sentinel-wrapped prefix on the prompt (the adapter strips it
-    on transcript read)."""
+async def test_cursor_send_text_sends_clean_prompt_over_acp_without_oneshot_sentinel() -> None:
+    """Cursor ACP handles AskQuestion via blocking ``cursor/ask_question`` RPC,
+    so ``_send_text`` sends the prompt directly over ``session/prompt`` without
+    injecting the one-shot auto-reject sentinel."""
     sess = _session(AgentType.CURSOR)
     native = CursorNativeSession(sess)
-    with patch.object(native, "_spawn_oneshot", new_callable=AsyncMock) as mock_spawn:
-        await native._send_text("hello")
-    mock_spawn.assert_awaited_once()
-    assert mock_spawn.await_args is not None
-    prompt = mock_spawn.await_args.args[1]
-    assert prompt.startswith("<<<HUB_QUESTION_PROTOCOL_V1>>>")
-    assert QUESTION_PROTOCOL_GUIDANCE in prompt
-    assert prompt.endswith("hello")
+    native._started = True
+    native._process = MagicMock(returncode=None, wait=AsyncMock(return_value=0))
+    native._acp_session_id = "acp-sid-1"
+    native._applied_mode = "agent"
+    loop = asyncio.get_running_loop()
+    mock_write = AsyncMock(return_value=(1, loop.create_future()))
+    try:
+        with patch.object(native, "_write_request", mock_write):
+            await native._send_text("hello")
+        mock_write.assert_awaited_once()
+        assert mock_write.await_args is not None
+        assert mock_write.await_args.args[0] == "session/prompt"
+        prompt_items = mock_write.await_args.args[1]["prompt"]
+        assert prompt_items == [{"type": "text", "text": "hello"}]
+    finally:
+        await native.stop()
 
 
 # ── Hub Chat runtime / self-scheduling guidance (first turn, native only) ────
@@ -475,24 +483,30 @@ async def test_claude_send_message_injects_hub_guidance_once() -> None:
 
 @pytest.mark.asyncio
 async def test_cursor_send_message_injects_hub_guidance_once() -> None:
-    """Cursor Chat: the first prompt carries BOTH the question-protocol block
-    (every turn) and the Hub runtime block (first turn only); the second turn
-    carries only the question block."""
+    """Cursor ACP Chat: only the first ``session/prompt`` turn carries the Hub
+    runtime block; subsequent turns on the persistent session are bare."""
     native = CursorNativeSession(_session(AgentType.CURSOR))
-    mock_spawn = AsyncMock()
-    with patch.object(native, "_spawn_oneshot", mock_spawn):
-        await native.send_message("first", [])
-        native.acknowledge_turn_complete()
-        await native.send_message("second", [])
+    native._started = True
+    native._process = MagicMock(returncode=None, wait=AsyncMock(return_value=0))
+    native._acp_session_id = "acp-sid-1"
+    native._applied_mode = "agent"
+    native._launch_fingerprint = native._configuration_fingerprint()
+    loop = asyncio.get_running_loop()
+    mock_write = AsyncMock(side_effect=lambda *_a, **_k: (1, loop.create_future()))
+    try:
+        with patch.object(native, "_write_request", mock_write):
+            await native.send_message("first", [])
+            native.acknowledge_turn_complete()
+            await native.send_message("second", [])
 
-    first = mock_spawn.await_args_list[0].args[1]
-    second = mock_spawn.await_args_list[1].args[1]
-    assert "<claude_hub_instructions>" in first
-    assert "<<<HUB_QUESTION_PROTOCOL_V1>>>" in first
-    assert first.endswith("first")
-    assert "<claude_hub_instructions>" not in second
-    assert "<<<HUB_QUESTION_PROTOCOL_V1>>>" in second
-    assert second.endswith("second")
+        first = mock_write.await_args_list[0].args[1]["prompt"][0]["text"]
+        second = mock_write.await_args_list[1].args[1]["prompt"][0]["text"]
+        assert "<claude_hub_instructions>" in first
+        assert first.endswith("first")
+        assert second == "second"
+        assert "<claude_hub_instructions>" not in second
+    finally:
+        await native.stop()
 
 
 @pytest.mark.asyncio
@@ -1070,7 +1084,7 @@ def test_first_turn_blocks_strip_in_normalizer_order(
     assert recovered == clean
 
 
-@pytest.mark.parametrize("agent_type", [AgentType.CLAUDE, AgentType.CODEX, AgentType.CURSOR])
+@pytest.mark.parametrize("agent_type", [AgentType.CLAUDE, AgentType.CODEX])
 def test_fork_extract_user_text_strips_hub_runtime_guidance(
     runtime_wrap: Callable[[str], str], agent_type: AgentType
 ) -> None:
@@ -3366,10 +3380,13 @@ async def test_invalid_image_resets_turn_guard() -> None:
 @pytest.mark.asyncio
 async def test_cursor_invalid_image_resets_turn_guard() -> None:
     """If ``_stage_images`` raises (invalid image bytes), the turn guard must
-    be released so a subsequent text-only turn can be sent. Cursor now
-    supports images (via file reference), so the failure is a ``ValueError``
-    from magic-byte validation, not ``NotImplementedError``."""
+    be released so a subsequent text-only turn can be sent."""
     native = CursorNativeSession(_session(AgentType.CURSOR))
+    native._started = True
+    native._process = MagicMock(returncode=None, wait=AsyncMock(return_value=0))
+    native._acp_session_id = "acp-sid-1"
+    native._applied_mode = "agent"
+    native._launch_fingerprint = native._configuration_fingerprint()
 
     with pytest.raises(ValueError):
         await native.send_message("hello", [b"not an image"])
@@ -3377,177 +3394,879 @@ async def test_cursor_invalid_image_resets_turn_guard() -> None:
     assert native._staged_images == []
 
     # A text-only turn must succeed after the failed image send.
-    proc = _FakeProcess(stdout_lines=[])
-    with patch("asyncio.create_subprocess_exec", return_value=proc):
-        await native.send_message("hello", [])
-    assert native._turn_in_flight is True
-
-
-def test_cursor_image_staging_uses_private_runtime_owned_files(tmp_path: Path) -> None:
-    """Cursor stages image bytes to 0600 files under an app-owned 0700
-    ``runtime_home/tmp/cursor-images`` directory (never the persistent
-    workspace state)."""
-    native = CursorNativeSession(_session(AgentType.CURSOR))
-    with patch(
-        "claude_hub.services.agent_stream.native._runtime_home",
-        return_value=tmp_path,
-    ):
-        native._stage_images([_VALID_PNG])
-        staged = list(native._staged_images)
-        temp_dir = tmp_path / "tmp" / "cursor-images"
-
-        assert staged and staged[0].parent == temp_dir
-        assert temp_dir.stat().st_mode & 0o777 == 0o700
-        assert staged[0].stat().st_mode & 0o777 == 0o600
-
-        native._clear_staged_images()
-
-    assert all(not path.exists() for path in staged)
+    loop = asyncio.get_running_loop()
+    try:
+        with patch.object(
+            native, "_write_request", AsyncMock(return_value=(1, loop.create_future()))
+        ):
+            await native.send_message("hello", [])
+        assert native._turn_in_flight is True
+    finally:
+        await native.stop()
 
 
 @pytest.mark.asyncio
-async def test_cursor_send_message_stages_images_and_cleans_up_on_eof(
-    tmp_path: Path,
-) -> None:
-    """Cursor has no structured image flag: images are staged to temp files,
-    referenced by absolute path in a sentinel-wrapped prompt block, and
-    deleted when the one-shot process exits (EOF)."""
-    proc = _FakeProcess(stdout_lines=[])  # stdout blocks until we push EOF
+async def test_cursor_acp_send_message_delivers_base64_images_and_clears_staging() -> None:
+    """Cursor ACP delivers images directly as base64 ``{type: 'image'}`` blocks
+    in ``session/prompt`` without writing temporary prompt-ref files."""
+    import base64 as _b64
+
     native = CursorNativeSession(_session(AgentType.CURSOR))
-    captured_paths: List[Path] = []
-    original_stage = native._stage_images
-
-    def tracking_stage(images: List[bytes]) -> None:
-        original_stage(images)
-        captured_paths.extend(native._staged_images)
-
-    native._stage_images = tracking_stage  # type: ignore[assignment]
-
-    with (
-        patch(
-            "claude_hub.services.agent_stream.native._runtime_home",
-            return_value=tmp_path,
-        ),
-        patch("asyncio.create_subprocess_exec", return_value=proc),
-    ):
-        await native.send_message("what color?", [_VALID_PNG])
-
-        # Staged images transferred to in-flight before spawn; the files still
-        # exist while the (still-running) one-shot process may read them.
+    native._started = True
+    native._process = MagicMock(returncode=None, wait=AsyncMock(return_value=0))
+    native._acp_session_id = "acp-sid-img"
+    native._applied_mode = "agent"
+    native._launch_fingerprint = native._configuration_fingerprint()
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future[Dict[str, Any]] = loop.create_future()
+    mock_write = AsyncMock(return_value=(1, fut))
+    try:
+        with patch.object(native, "_write_request", mock_write):
+            await native.send_message("what color?", [_VALID_PNG])
         assert native._staged_images == []
-        # Registered under the generation _spawn_oneshot just assigned.
-        assert native._inflight_images_by_gen[native._stdout_generation] == captured_paths
-        assert captured_paths and all(path.exists() for path in captured_paths)
+        assert mock_write.await_args is not None
+        params = mock_write.await_args.args[1]
+        assert params["sessionId"] == "acp-sid-img"
+        assert params["prompt"][0] == {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": _b64.b64encode(_VALID_PNG).decode("ascii"),
+        }
+        assert params["prompt"][1]["type"] == "text"
+        assert params["prompt"][1]["text"].endswith("what color?")
 
-        # The prompt written to stdin carries the sentinel block + paths.
-        written = b"".join(proc.stdin.written).decode("utf-8")
-        assert "<<<HUB_IMAGE_ATTACHMENT_V1>>>" in written
-        assert "<<<END_HUB_IMAGE_ATTACHMENT_V1>>>" in written
-        for path in captured_paths:
-            assert str(path) in written
-        assert "what color?" in written
-
-        # Signal EOF: the one-shot process exits. The drain's finally clears
-        # the in-flight images and deletes the temp files.
-        proc.stdout.push(b"")
-        assert await asyncio.wait_for(native.read_line(), timeout=1.0) is None
-        reader_task = native._reader_task
-        assert reader_task is not None
-        await asyncio.wait_for(reader_task, timeout=1.0)
-
-    # The drain's finally popped its generation, so the dict is empty and the
-    # temp files are deleted.
-    assert native._inflight_images_by_gen == {}
-    assert all(not path.exists() for path in captured_paths)
+        fut.set_result({"id": 1, "result": {"stopReason": "end_turn"}})
+        result_rec = await asyncio.wait_for(native.read_line(), timeout=1.0)
+        assert result_rec is not None
+        assert result_rec["type"] == "result" and result_rec["is_error"] is False
+    finally:
+        await native.stop()
 
 
 @pytest.mark.asyncio
-async def test_cursor_lingering_turn_does_not_delete_next_turn_images(
-    tmp_path: Path,
-) -> None:
-    """Regression: a one-shot process that lingers past TURN_COMPLETED must
-    not delete the NEXT turn's image files.
-
-    Turn N's process stays alive (stdout never reaches EOF) after the tailer
-    acknowledges TURN_COMPLETED. Turn N+1 then spawns a fresh process;
-    ``_spawn_oneshot`` terminates turn N's lingering drain, whose ``finally``
-    must pop ONLY turn N's generation (deleting turn N's files) — not turn
-    N+1's, registered under a newer generation. A single shared in-flight slot
-    clobbered by turn N+1 before the termination made the old drain delete the
-    wrong turn's files (and leak its own).
-    """
-    proc_n = _FakeProcess(stdout_lines=[])  # lingers: stdout blocks, no EOF
-    proc_n1 = _FakeProcess(stdout_lines=[])
-    procs = [proc_n, proc_n1]
-    calls = {"n": 0}
-    staged: List[List[Path]] = []
-
-    async def fake_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
-        proc = procs[calls["n"]]
-        calls["n"] += 1
-        return proc
-
+async def test_cursor_acp_blocking_question_and_cancel_round_trip() -> None:
+    """Cursor ACP ``cursor/ask_question`` blocks in-turn, emits a single
+    ``AskQuestion`` approval card, maps option labels/ids in
+    ``answer_pending_question``, and resolves cleanly."""
+    proc = _FakeProcess(stdout_lines=[])
     native = CursorNativeSession(_session(AgentType.CURSOR))
-    original_stage = native._stage_images
+    native._process = cast(asyncio.subprocess.Process, proc)
+    native._started = True
+    native._acp_session_id = "acp-sid-q"
+    native._turn_in_flight = True
 
-    def tracking_stage(images: List[bytes]) -> None:
-        original_stage(images)
-        staged.append(list(native._staged_images))
+    req = {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "cursor/ask_question",
+        "params": {
+            "toolCallId": "ask-acp-1",
+            "title": "Pick approach",
+            "questions": [
+                {
+                    "id": "approach",
+                    "prompt": "Which route?",
+                    "allowMultiple": False,
+                    "options": [
+                        {"id": "opt_acp", "label": "Use ACP (Recommended)"},
+                        {"id": "opt_cli", "label": "Keep one-shot"},
+                    ],
+                }
+            ],
+        },
+    }
+    await native._handle_server_request(req)
+    assert 7 in native._pending_questions
 
-    native._stage_images = tracking_stage  # type: ignore[assignment]
+    notif = await asyncio.wait_for(native.read_line(), timeout=1.0)
+    assert notif is not None
+    adapter = CursorCliTranscriptAdapter()
+    ctx = NormalizeContext(
+        session_id="sess-q",
+        tab_id="tab-q",
+        agent_type=AgentType.CURSOR,
+        run_epoch=1,
+        turn_id="turn-q",
+        main_thread_id="acp-sid-q",
+    )
+    events = adapter.normalize_line(notif, ctx)
+    assert [e.type for e in events] == [
+        AgentStreamEventType.TOOL_CALL_STARTED,
+        AgentStreamEventType.APPROVAL_REQUIRED,
+    ]
 
-    with (
-        patch(
-            "claude_hub.services.agent_stream.native._runtime_home",
-            return_value=tmp_path,
-        ),
-        patch("asyncio.create_subprocess_exec", side_effect=fake_exec),
-    ):
-        # Turn N: send with images; the process lingers (no EOF pushed).
-        await native.send_message("first", [_VALID_PNG])
-        paths_n = staged[0]
-        gen_n = native._stdout_generation
-        assert native._inflight_images_by_gen[gen_n] == paths_n
-        assert all(p.exists() for p in paths_n)
+    # Duplicate ACP tool_call update for AskQuestion is ignored (no double card).
+    dup_events = adapter.normalize_line(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "acp-sid-q",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "ask-acp-1",
+                    "title": "Pick approach",
+                    "kind": "think",
+                    "status": "pending",
+                    "rawInput": {"_toolName": "askQuestion", "title": "Pick approach"},
+                },
+            },
+        },
+        ctx,
+    )
+    assert dup_events == []
 
-        # Let turn N's drain task start and block on stdout. The fake
-        # subprocess spawn and stdin drain complete without yielding to the
-        # event loop, so without this yield the drain coroutine never executes
-        # before turn N+1's ``_terminate_process`` cancels it — and a
-        # never-started task's ``finally`` never runs, leaking turn N's files.
-        # Real subprocess I/O always yields, so this only affects the test.
-        # 0.05s exceeds ``_FakeStream.read``'s 0.01s latency shim, so the drain
-        # is genuinely blocked on its stdout queue (the lingering state).
+    # Answer using the display label; CursorSession maps it back to option id.
+    consumed = await native.answer_pending_question(
+        [{"questionId": "approach", "selected": ["Use ACP (Recommended)"]}],
+        expected_call_id="ask-acp-1",
+    )
+    assert consumed is True
+    assert native._pending_questions == {}
+    written = _written_requests(proc)
+    resp = next(m for m in written if m.get("id") == 7)
+    assert resp["result"] == {
+        "outcome": {
+            "outcome": "answered",
+            "answers": [{"questionId": "approach", "selectedOptionIds": ["opt_acp"]}],
+        }
+    }
+    done_notif = await asyncio.wait_for(native.read_line(), timeout=1.0)
+    assert done_notif is not None
+    done_events = adapter.normalize_line(done_notif, ctx)
+    assert [e.type for e in done_events] == [AgentStreamEventType.TOOL_CALL_COMPLETED]
+
+
+def test_cursor_single_chunk_timestamped_snapshot_reconciles_without_error() -> None:
+    """Regression: Cursor CLI ``fe({includeTimestamp: true})`` flushes the
+    accumulated message text with ``timestamp_ms`` before ``modelCallCompleted``.
+    When a short assistant message arrived in a single delta chunk (e.g.
+    post-AskQuestion acknowledgment), the timestamped replay previously failed
+    ``matched_chunks >= 2``, doubled ``state.text``, and emitted ``assistant
+    final text does not match streamed deltas; cannot safely reconcile``."""
+    adapter = CursorCliTranscriptAdapter()
+    ctx = NormalizeContext(
+        session_id="sess-reconcile",
+        tab_id="tab-reconcile",
+        agent_type=AgentType.CURSOR,
+        run_epoch=1,
+        turn_id="turn-reconcile",
+    )
+    short_msg = "已在上方列出下一步选项，等待你的选择。"
+    ev1 = adapter.normalize_line(
+        {
+            "type": "assistant",
+            "timestamp_ms": 1000,
+            "message": {"role": "assistant", "content": [{"type": "text", "text": short_msg}]},
+        },
+        ctx,
+    )
+    ev2 = adapter.normalize_line(
+        {
+            "type": "assistant",
+            "timestamp_ms": 1005,
+            "message": {"role": "assistant", "content": [{"type": "text", "text": short_msg}]},
+        },
+        ctx,
+    )
+    ev3 = adapter.normalize_line(
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": short_msg}]},
+        },
+        ctx,
+    )
+    assert [e.type for e in ev1] == [AgentStreamEventType.TEXT_DELTA]
+    assert ev2 == []
+    assert ev3 == []
+
+
+def test_cursor_acp_session_updates_and_content_refusal_normalize_cleanly() -> None:
+    """ACP ``session/update`` notifications normalize text, thinking, tools with
+    diffs, subagent lifecycle, and content-policy refusal hints."""
+    from claude_hub.services.agent_stream.providers.cursor import _format_acp_error_text
+
+    adapter = CursorCliTranscriptAdapter()
+    ctx = NormalizeContext(
+        session_id="sess-acp",
+        tab_id="tab-acp",
+        agent_type=AgentType.CURSOR,
+        run_epoch=1,
+        turn_id="turn-acp",
+        main_thread_id="main-sid",
+    )
+    assert (
+        adapter.normalize_line(
+            {
+                "method": "session/update",
+                "params": {
+                    "sessionId": "main-sid",
+                    "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "tc-1",
+                        "title": "`pytest -q`",
+                        "kind": "execute",
+                        "status": "pending",
+                        "rawInput": {"command": "pytest -q"},
+                    },
+                },
+            },
+            ctx,
+        )
+        == []
+    )
+    started = adapter.normalize_line(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "main-sid",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "tc-1",
+                    "status": "in_progress",
+                },
+            },
+        },
+        ctx,
+    )
+    assert len(started) == 1
+    assert started[0].type == AgentStreamEventType.TOOL_CALL_STARTED
+    assert started[0].payload == {"name": "Shell", "args": {"command": "pytest -q"}}
+
+    completed = adapter.normalize_line(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "main-sid",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "tc-1",
+                    "status": "completed",
+                    "rawOutput": {"exitCode": 0, "stdout": "1 passed\n", "stderr": ""},
+                },
+            },
+        },
+        ctx,
+    )
+    assert len(completed) == 1
+    assert completed[0].type == AgentStreamEventType.TOOL_CALL_COMPLETED
+    assert completed[0].payload["status"] == "completed"
+    assert completed[0].payload["result"] == "1 passed"
+
+    child_delta = adapter.normalize_line(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "child-sid",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "sub reply"},
+                },
+            },
+        },
+        ctx,
+    )
+    assert len(child_delta) == 1
+    assert child_delta[0].payload.get("subagent_thread") == "child-sid"
+
+    refusal = _format_acp_error_text(
+        "ActionRequiredError: Unauthorized request. The provider refused to serve this request based on the content"
+    )
+    assert "content safety filter" in refusal
+    assert "not a local login expiry" in refusal
+
+
+class _InteractiveAcpStream:
+    """Line-driven fake stdin/stdout for testing ``CursorSession`` JSON-RPC."""
+
+    def __init__(self, handler: Optional[Any] = None, *, eof: bool = False) -> None:
+        self._queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self.written: List[bytes] = []
+        self._handler = handler
+        self._eof = eof
+
+    def push_json(self, obj: Dict[str, Any]) -> None:
+        self._queue.put_nowait((json.dumps(obj) + "\n").encode("utf-8"))
+
+    def push_eof(self) -> None:
+        self._eof = True
+        self._queue.put_nowait(b"")
+
+    async def read(self, n: int) -> bytes:
+        if self._queue.empty() and self._eof:
+            return b""
+        return await self._queue.get()
+
+    def write(self, data: bytes) -> None:
+        self.written.append(data)
+        if self._handler is not None:
+            for line in data.decode("utf-8").splitlines():
+                if line.strip():
+                    self._handler(json.loads(line))
+
+    async def drain(self) -> None:
+        await asyncio.sleep(0)
+
+
+class _InteractiveAcpProc:
+    def __init__(self, *, session_id: str = "acp-main-1", exit_code: int = 0) -> None:
+        self.session_id = session_id
+        self.returncode: Optional[int] = None
+        self._exit_code = exit_code
+        self.requests: List[Dict[str, Any]] = []
+        self.stdout = _InteractiveAcpStream()
+        self.stdin = _InteractiveAcpStream(handler=self._on_stdin)
+        self.stderr = _InteractiveAcpStream(eof=True)
+
+    def _on_stdin(self, msg: Dict[str, Any]) -> None:
+        self.requests.append(msg)
+        method = msg.get("method")
+        req_id = msg.get("id")
+        if req_id is None:
+            return
+        if method == "initialize":
+            self.stdout.push_json(
+                {"jsonrpc": "2.0", "id": req_id, "result": {"protocolVersion": 1}}
+            )
+        elif method == "session/new":
+            self.stdout.push_json(
+                {"jsonrpc": "2.0", "id": req_id, "result": {"sessionId": self.session_id}}
+            )
+        elif method == "session/load":
+            sid = msg["params"]["sessionId"]
+            self.session_id = sid
+            self.stdout.push_json({"jsonrpc": "2.0", "id": req_id, "result": {"modes": {}}})
+        elif method in ("session/set_mode", "session/set_model"):
+            self.stdout.push_json({"jsonrpc": "2.0", "id": req_id, "result": {}})
+
+    def crash(self, exit_code: int = 1, stderr_msg: str = "fatal crash") -> None:
+        self.returncode = exit_code
+        self._exit_code = exit_code
+        self.stderr._queue.put_nowait(stderr_msg.encode("utf-8"))
+        self.stderr.push_eof()
+        self.stdout.push_eof()
+
+    async def wait(self) -> int:
+        if self.returncode is None:
+            self.returncode = self._exit_code
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.returncode = 0
+        self.stdout.push_eof()
+
+    def kill(self) -> None:
+        self.returncode = -9
+        self.stdout.push_eof()
+
+
+@pytest.mark.asyncio
+async def test_cursor_acp_tailer_survives_recovery_restart_and_isolates_subagent_threads(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Regression for MASO Argon P0-1 & P1-1/P1-subthread:
+    1. ``restart_for_recovery()`` (triggered e.g. when toggling Plan mode under
+       ``solo_mode=True`` or switching ``CURSOR_MODEL``) must NOT trip
+       ``SessionTailer._hard_failed`` via premature ``_client_requested_stop``
+       clearing or ``_notification_queue`` replacement.
+    2. ``session/load`` re-applies ``session/set_model`` so ``store.db``'s old
+       ``lastUsedModel`` cannot silently override ``CURSOR_MODEL``.
+    3. ``CursorSession.active_thread_id`` stamps child ``session/update`` frames
+       with ``subagent_thread`` so child text never pollutes ``final_text``."""
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+    from claude_hub.services.agent_stream.tailer import SessionTailer
+
+    sess = _session(AgentType.CURSOR)
+    sess.solo_mode = True
+    sess.env = {"CURSOR_MODEL": "[redacted]-high"}
+    native = CursorNativeSession(sess)
+    monkeypatch.setattr(native, "_build_provider_env", AsyncMock(return_value={"PATH": "/bin"}))
+    monkeypatch.setattr(
+        importlib.import_module("claude_hub.services.workspace_manager"), "STATE_ROOT", tmp_path
+    )
+
+    proc1 = _InteractiveAcpProc(session_id="acp-main-1")
+    proc2 = _InteractiveAcpProc(session_id="acp-main-1")
+    procs = [proc1, proc2]
+    spawned = {"idx": 0}
+
+    async def fake_spawn(cmd: List[str], env: Dict[str, str]) -> Any:
+        p = procs[spawned["idx"]]
+        spawned["idx"] += 1
+        return p
+
+    monkeypatch.setattr(native, "_spawn_subprocess", fake_spawn)
+
+    store = AgentStreamStore("ws-acp", "sess-acp-tailer")
+    tailer = SessionTailer(
+        workspace_id="ws-acp",
+        session_id="sess-acp-tailer",
+        adapter=CursorCliTranscriptAdapter(),
+        session_getter=lambda: native.session,
+        store=store,
+        native_transport=native,
+    )
+    queue = await tailer.subscribe()
+    try:
+        # Wait briefly for _run_native to start proc1 and enter read_line().
+        for _ in range(40):
+            if native._started and native._acp_session_id == "acp-main-1":
+                break
+            await asyncio.sleep(0.01)
+        assert native.active_thread_id == "acp-main-1"
+
+        # Toggle Plan mode while solo_mode=True -> triggers restart_for_recovery().
+        await native.set_mode("plan")
         await asyncio.sleep(0.05)
 
-        # Tailer acknowledges TURN_COMPLETED (releasing the guard) while the
-        # process is still alive — the linger window that triggers the bug.
-        native.acknowledge_turn_complete()
-        assert native._turn_in_flight is False
+        assert tailer._hard_failed is False
+        assert spawned["idx"] == 2
+        # Verify proc2 ran session/load AND re-applied session/set_model + session/set_mode(plan).
+        methods2 = [r.get("method") for r in proc2.requests]
+        assert "session/load" in methods2
+        assert "session/set_model" in methods2
+        set_model_req = next(r for r in proc2.requests if r.get("method") == "session/set_model")
+        assert set_model_req["params"] == {
+            "sessionId": "acp-main-1",
+            "modelId": "[redacted]-high",
+        }
 
-        # Turn N+1: send with images. Spawning terminates turn N's lingering
-        # drain; its finally pops only gen_n, leaving turn N+1's files intact.
-        await native.send_message("second", [_VALID_PNG])
-        paths_n1 = staged[1]
-        gen_n1 = native._stdout_generation
+        # Send a turn on the restarted process and interleave a child subagent frame.
+        await tailer.send_message("review this", [], client_turn_id="turn-after-restart")
+        ev_started = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert ev_started.type == AgentStreamEventType.TURN_STARTED
 
-        # Turn N's files were cleaned by its own drain's termination.
-        assert all(not p.exists() for p in paths_n)
-        # Turn N+1's files MUST still exist — the old drain must not have
-        # deleted them. With the shared-slot clobber these were already gone.
-        assert paths_n1 and all(p.exists() for p in paths_n1)
-        assert native._inflight_images_by_gen == {gen_n1: paths_n1}
+        prompt_req = next(r for r in proc2.requests if r.get("method") == "session/prompt")
+        proc2.stdout.push_json(
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "child-sub-99",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "SUBAGENT SECRET CHATTER "},
+                    },
+                },
+            }
+        )
+        proc2.stdout.push_json(
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "acp-main-1",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "Clean parent answer."},
+                    },
+                },
+            }
+        )
+        proc2.stdout.push_json(
+            {
+                "jsonrpc": "2.0",
+                "id": prompt_req["id"],
+                "result": {"stopReason": "end_turn"},
+            }
+        )
 
-        # Turn N+1's process exits: its drain cleans its own files.
-        proc_n1.stdout.push(b"")
-        assert await asyncio.wait_for(native.read_line(), timeout=1.0) is None
-        reader_task = native._reader_task
-        assert reader_task is not None
-        await asyncio.wait_for(reader_task, timeout=1.0)
+        collected: List[Any] = []
+        while True:
+            ev = await asyncio.wait_for(queue.get(), timeout=1.0)
+            collected.append(ev)
+            if ev.type == AgentStreamEventType.TURN_COMPLETED:
+                break
 
-    assert native._inflight_images_by_gen == {}
-    assert all(not p.exists() for p in paths_n1)
-    assert calls["n"] == 2
+        child_events = [e for e in collected if e.payload.get("subagent_thread") == "child-sub-99"]
+        assert len(child_events) == 1
+        done_ev = collected[-1]
+        assert done_ev.payload["status"] == "completed"
+        assert done_ev.payload["assistant_text"] == "Clean parent answer."
+        assert "SUBAGENT SECRET CHATTER" not in done_ev.payload["assistant_text"]
+    finally:
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_cursor_acp_crash_orders_error_before_eof_and_dedups_inline_error() -> None:
+    """Regression for MASO Argon P1-2 & P2-error:
+    1. When ``agent acp`` crashes mid-prompt, the synthetic ``result(is_error=True)``
+       record is queued BEFORE the ``None`` EOF sentinel and stale pending
+       questions/permissions are cleared.
+    2. When an inline ``\\n\\nError: ...`` chunk was already emitted as ``acp_error``,
+       a trailing JSON-RPC error response does NOT emit a duplicate ``ERROR`` event."""
+    proc = _InteractiveAcpProc(session_id="acp-crash-1")
+    native = CursorNativeSession(_session(AgentType.CURSOR))
+    native._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
+    native._spawn_subprocess = AsyncMock(return_value=proc)  # type: ignore[method-assign]
+
+    await native.start()
+    await native.send_message("trigger crash", [])
+    native._pending_questions[99] = {"toolCallId": "stale-q"}
+    native._pending_permissions[100] = {"question_id": "permission:100", "choices": {}}
+
+    # Emit inline error chunk, then crash the server before answering session/prompt.
+    proc.stdout.push_json(
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "acp-crash-1",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "\n\nError: upstream boom"},
+                },
+            },
+        }
+    )
+    await asyncio.sleep(0.02)
+    proc.crash(exit_code=1, stderr_msg="upstream boom")
+
+    records: List[Optional[Dict[str, Any]]] = []
+    while True:
+        rec = await asyncio.wait_for(native.read_line(), timeout=1.0)
+        records.append(rec)
+        if rec is None:
+            break
+
+    # Both acp_error AND synthetic result arrive BEFORE the None EOF sentinel.
+    assert [r.get("type") for r in records[:-1] if isinstance(r, dict)] == ["acp_error", "result"]
+    assert native._pending_questions == {}
+    assert native._pending_permissions == {}
+
+    adapter = CursorCliTranscriptAdapter()
+    ctx = NormalizeContext(
+        session_id="sess-err",
+        tab_id="tab-err",
+        agent_type=AgentType.CURSOR,
+        run_epoch=1,
+        turn_id="turn-err",
+        main_thread_id="acp-crash-1",
+    )
+    normalized = []
+    for rec in records[:-1]:
+        assert rec is not None
+        normalized.extend(adapter.normalize_line(rec, ctx))
+
+    # Exactly ONE ERROR event followed by TURN_COMPLETED(status="failed").
+    assert [e.type for e in normalized] == [
+        AgentStreamEventType.ERROR,
+        AgentStreamEventType.TURN_COMPLETED,
+    ]
+    await native.stop()
+
+
+def test_cursor_acp_tool_late_diff_cancelled_and_task_dict_preservation() -> None:
+    """Regression for MASO Argon P1-tool & P2-permission:
+    - ``Edit`` diff arriving only on ``completed`` is carried in ``TOOL_CALL_COMPLETED.payload['args']``;
+    - ``status='cancelled'`` closes the tool card as ``status='cancelled'``;
+    - ``Task`` structured dict output is preserved as a dict for ``subagentTool.ts``."""
+    adapter = CursorCliTranscriptAdapter()
+    ctx = NormalizeContext(
+        session_id="sess-tools",
+        tab_id="tab-tools",
+        agent_type=AgentType.CURSOR,
+        run_epoch=1,
+        turn_id="turn-tools",
+        main_thread_id="main-sid",
+    )
+    # 1. Edit starts in_progress without diff, completes with diff content.
+    ev_start = adapter.normalize_line(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "main-sid",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "edit-1",
+                    "kind": "edit",
+                    "title": "Edit `foo.py`",
+                    "status": "in_progress",
+                    "rawInput": {"path": "foo.py"},
+                },
+            },
+        },
+        ctx,
+    )
+    assert len(ev_start) == 1 and ev_start[0].type == AgentStreamEventType.TOOL_CALL_STARTED
+    ev_done = adapter.normalize_line(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "main-sid",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "edit-1",
+                    "status": "completed",
+                    "content": [
+                        {
+                            "type": "diff",
+                            "path": "foo.py",
+                            "oldText": "a = 1\n",
+                            "newText": "a = 2\n",
+                        }
+                    ],
+                },
+            },
+        },
+        ctx,
+    )
+    assert len(ev_done) == 1
+    assert ev_done[0].payload["args"] == {
+        "path": "foo.py",
+        "old_string": "a = 1\n",
+        "new_string": "a = 2\n",
+    }
+
+    # 2. Cancelled tool closes cleanly with status="cancelled".
+    adapter.normalize_line(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "main-sid",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "sh-cancel",
+                    "kind": "execute",
+                    "status": "in_progress",
+                    "rawInput": {"command": "sleep 10"},
+                },
+            },
+        },
+        ctx,
+    )
+    ev_cancel = adapter.normalize_line(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "main-sid",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "sh-cancel",
+                    "status": "cancelled",
+                },
+            },
+        },
+        ctx,
+    )
+    assert len(ev_cancel) == 1
+    assert ev_cancel[0].type == AgentStreamEventType.TOOL_CALL_COMPLETED
+    assert ev_cancel[0].payload["status"] == "cancelled"
+
+    # 3. Task structured dict output stays a dict.
+    ev_task = adapter.normalize_line(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "main-sid",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "task-1",
+                    "status": "completed",
+                    "rawInput": {"_toolName": "task", "prompt": "check", "subagentType": "explore"},
+                    "rawOutput": {
+                        "success": {"conversationSteps": [{"assistantMessage": {"text": "done"}}]}
+                    },
+                },
+            },
+        },
+        ctx,
+    )
+    assert [e.type for e in ev_task] == [
+        AgentStreamEventType.TOOL_CALL_STARTED,
+        AgentStreamEventType.TOOL_CALL_COMPLETED,
+    ]
+    assert isinstance(ev_task[1].payload["result"], dict)
+    assert "success" in ev_task[1].payload["result"]
+
+
+def test_cursor_legacy_store_migration_merges_wal_and_rejects_symlinks(tmp_path: Path) -> None:
+    """Regression for MASO Argon P1-4:
+    ``_migrate_legacy_cli_store_for_acp`` merges uncheckpointed SQLite ``-wal``
+    frames via online backup, repairs missing ``meta.json``, and refuses
+    symlinked target directories."""
+    import sqlite3 as _sqlite3
+
+    from claude_hub.services._cursor_verify import _cursor_id_exists, _cwd_hash
+    from claude_hub.services.agent_stream.providers.cursor import _migrate_legacy_cli_store_for_acp
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    cursor_home = tmp_path / ".cursor"
+    sid = "wal-session-123"
+    legacy_dir = cursor_home / "chats" / _cwd_hash(str(workspace)) / "legacy-chat"
+    legacy_dir.mkdir(parents=True)
+    legacy_db = legacy_dir / "store.db"
+
+    # Keep a WAL connection open without checkpointing so the latest row lives only in -wal.
+    conn = _sqlite3.connect(str(legacy_db))
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE meta (key INTEGER PRIMARY KEY, value TEXT)")
+        conn.execute("CREATE TABLE blobs (id TEXT PRIMARY KEY, body TEXT)")
+        meta_hex = json.dumps({"agentId": sid}).encode("utf-8").hex()
+        conn.execute("INSERT INTO meta (key, value) VALUES (0, ?)", (meta_hex,))
+        conn.execute("INSERT INTO blobs (id, body) VALUES ('turn-wal', 'uncheckpointed-payload')")
+        conn.commit()
+
+        env = {"HOME": str(tmp_path), "CURSOR_HOME": "~/.cursor"}
+        assert _migrate_legacy_cli_store_for_acp(sid, str(workspace), env) is True
+
+        migrated_db = cursor_home / "acp-sessions" / sid / "store.db"
+        migrated_meta = cursor_home / "acp-sessions" / sid / "meta.json"
+        assert migrated_db.is_file()
+        assert migrated_meta.is_file()
+        with _sqlite3.connect(str(migrated_db)) as check_conn:
+            row = check_conn.execute("SELECT body FROM blobs WHERE id='turn-wal'").fetchone()
+            assert row == ("uncheckpointed-payload",)
+
+        # Repair missing meta.json on idempotent re-run.
+        migrated_meta.unlink()
+        assert _migrate_legacy_cli_store_for_acp(sid, str(workspace), env) is True
+        assert migrated_meta.is_file()
+        assert _cursor_id_exists(sid, str(workspace), home=str(tmp_path)) is True
+    finally:
+        conn.close()
+
+    # Refuse symlinked target acp-sessions directory.
+    evil_root = tmp_path / "evil-config"
+    evil_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (evil_root / "acp-sessions").symlink_to(outside)
+    assert (
+        _migrate_legacy_cli_store_for_acp(
+            sid, str(workspace), {"HOME": str(tmp_path), "CURSOR_CONFIG_DIR": str(evil_root)}
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_cursor_acp_cancel_interrupted_and_cold_rotate_fallback_safety() -> None:
+    """Regression for MASO Argon P1-3, P2-1, and P2-2:
+    1. Cancelling ``cancel_active_turn()`` mid-wait still clears ``_turn_in_flight``;
+    2. Cold ``rotate_conversation()`` when ``session/load`` fails and falls back to
+       ``session/new`` does NOT prematurely overwrite ``_conversation_id`` before
+       ``adopt_rotated_conversation``;
+    3. ``session/request_permission`` includes ``toolCall.content`` details in the
+       prompt and marks user rejection as ``status='failed'``."""
+    # 1. Interrupted cancel_active_turn releases _turn_in_flight.
+    proc_c = _InteractiveAcpProc(session_id="acp-cancel-1")
+    native_c = CursorNativeSession(_session(AgentType.CURSOR))
+    native_c._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
+    native_c._spawn_subprocess = AsyncMock(return_value=proc_c)  # type: ignore[method-assign]
+    native_c.restart_for_recovery = AsyncMock()  # type: ignore[method-assign]
+
+    await native_c.start()
+    await native_c.send_message("long work", [])
+    assert native_c.turn_in_flight is True
+
+    cancel_task = asyncio.create_task(native_c.cancel_active_turn())
+    await asyncio.sleep(0.02)
+    cancel_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancel_task
+    assert native_c.turn_in_flight is False
+    await native_c.stop()
+
+    # 2. Cold rotate_conversation with session/load failure preserves old _conversation_id.
+    sess_rot = _session(AgentType.CURSOR)
+    sess_rot.agent_session_id = "old-verified-sid"
+    sess_rot.agent_session_id_verified = True
+    persisted_ids: List[str] = []
+    native_r = CursorNativeSession(sess_rot, conversation_id_persist=persisted_ids.append)
+    native_r._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
+
+    proc_r = _InteractiveAcpProc(session_id="fresh-rotated-sid")
+    orig_on_stdin = proc_r._on_stdin
+
+    def fail_load(msg: Dict[str, Any]) -> None:
+        if msg.get("method") == "session/load":
+            proc_r.requests.append(msg)
+            proc_r.stdout.push_json(
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg["id"],
+                    "error": {"code": -32602, "message": "Session not found"},
+                }
+            )
+            return
+        orig_on_stdin(msg)
+
+    proc_r.stdin._handler = fail_load
+    native_r._spawn_subprocess = AsyncMock(return_value=proc_r)  # type: ignore[method-assign]
+
+    candidate_sid = await native_r.rotate_conversation()
+    assert candidate_sid == "fresh-rotated-sid"
+    # Only ONE session/new was sent, and old _conversation_id is untouched until adopt!
+    assert [m.get("method") for m in proc_r.requests].count("session/new") == 1
+    assert native_r._conversation_id == "old-verified-sid"
+    assert persisted_ids == []
+
+    await native_r.discard_rotated_conversation(candidate_sid)
+    assert native_r._conversation_id == "old-verified-sid"
+    await native_r.stop()
+
+    # 3. Permission prompt detail extraction + reject -> status="failed".
+    proc_p = _FakeProcess(stdout_lines=[])
+    sess_p = _session(AgentType.CURSOR)
+    sess_p.solo_mode = False
+    native_p = CursorNativeSession(sess_p)
+    native_p._process = cast(asyncio.subprocess.Process, proc_p)
+    native_p._started = True
+    native_p._acp_session_id = "acp-perm-1"
+    native_p._turn_in_flight = True
+
+    await native_p._handle_server_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": "acp-perm-1",
+                "toolCall": {
+                    "toolCallId": "web-1",
+                    "title": "Allow web fetch?",
+                    "content": [
+                        {
+                            "type": "content",
+                            "content": {"type": "text", "text": "URL: https://example.com/api"},
+                        }
+                    ],
+                },
+                "options": [
+                    {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+                    {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
+                ],
+            },
+        }
+    )
+    started_perm = await asyncio.wait_for(native_p.read_line(), timeout=1.0)
+    assert started_perm is not None
+    adapter = CursorCliTranscriptAdapter()
+    ctx = NormalizeContext(
+        session_id="sess-p",
+        tab_id="tab-p",
+        agent_type=AgentType.CURSOR,
+        run_epoch=1,
+        turn_id="turn-p",
+        main_thread_id="acp-perm-1",
+    )
+    perm_events = adapter.normalize_line(started_perm, ctx)
+    approval_ev = next(e for e in perm_events if e.type == AgentStreamEventType.APPROVAL_REQUIRED)
+    assert "URL: https://example.com/api" in approval_ev.payload["questions"][0]["prompt"]
+
+    consumed = await native_p.answer_pending_question(
+        [{"questionId": "permission:21", "selected": ["Reject"]}],
+        expected_call_id="permission:21",
+    )
+    assert consumed is True
+    completed_perm = await asyncio.wait_for(native_p.read_line(), timeout=1.0)
+    assert completed_perm is not None
+    comp_events = adapter.normalize_line(completed_perm, ctx)
+    assert comp_events[-1].type == AgentStreamEventType.TOOL_CALL_COMPLETED
+    assert comp_events[-1].payload["status"] == "failed"
 
 
 def test_cursor_startup_cleanup_removes_prior_process_temp_files(tmp_path: Path) -> None:
@@ -4689,3 +5408,497 @@ async def test_claude_codex_return_static_without_probe() -> None:
     assert spawn.call_count == 0
     assert [m.id for m in claude_opts] == native_module._STATIC_MODELS["claude"]
     assert [m.id for m in codex_opts] == native_module._STATIC_MODELS["codex"]
+
+
+@pytest.mark.asyncio
+async def test_cursor_acp_parameterized_model_resolution_and_config_options() -> None:
+    """Regression for Cursor ACP -32602 ``Invalid model value: [redacted]-high``:
+    ``agent acp`` rejects legacy CLI variant slugs on ``session/set_model`` and
+    requires negotiating ``clientCapabilities._meta.parameterizedModelPicker=True``
+    plus applying base model IDs and parameter options via
+    ``session/set_config_option``."""
+    from claude_hub.services.agent_stream.providers.cursor import (
+        _parse_cursor_model_spec,
+        _resolve_config_option_updates,
+    )
+
+    base_ids = {
+        "auto-smart",
+        "[redacted]",
+        "[redacted]",
+        "grok-4.6",
+        "gpt-5.3-codex",
+        "claude-opus-4-8",
+        "claude-sonnet-4-6",
+        "composer-2",
+    }
+    assert _parse_cursor_model_spec("[redacted]-high", base_ids) == (
+        "[redacted]",
+        {
+            "_fast_default": "false",
+            "_thinking_default": "false",
+            "_context_default": "default",
+            "_effort": "high",
+        },
+    )
+    assert _parse_cursor_model_spec("cursor-grok-4.6-high-fast", base_ids) == (
+        "grok-4.6",
+        {
+            "fast": "true",
+            "_thinking_default": "false",
+            "_context_default": "default",
+            "_effort": "high",
+        },
+    )
+    assert _parse_cursor_model_spec("gpt-5.3-codex-xhigh", base_ids) == (
+        "gpt-5.3-codex",
+        {
+            "_fast_default": "false",
+            "_thinking_default": "false",
+            "_context_default": "default",
+            "_effort": "xhigh",
+        },
+    )
+    assert _parse_cursor_model_spec("claude-opus-4-8-thinking-high", base_ids) == (
+        "claude-opus-4-8",
+        {
+            "_fast_default": "false",
+            "thinking": "true",
+            "_context_default": "default",
+            "_effort": "high",
+        },
+    )
+    assert _parse_cursor_model_spec("claude-4.6-sonnet-medium-thinking", base_ids) == (
+        "claude-sonnet-4-6",
+        {
+            "_fast_default": "false",
+            "thinking": "true",
+            "_context_default": "default",
+            "_effort": "medium",
+        },
+    )
+    assert _parse_cursor_model_spec("sonnet-4.6-1m-thinking-high", base_ids) == (
+        "claude-sonnet-4-6",
+        {
+            "_fast_default": "false",
+            "thinking": "true",
+            "context": "1m",
+            "_effort": "high",
+        },
+    )
+    assert _parse_cursor_model_spec("composer-2", base_ids) == (
+        "composer-2",
+        {
+            "_fast_default": "true",
+            "_effort_default": "medium",
+            "_thinking_default": "false",
+            "_context_default": "default",
+        },
+    )
+    assert _parse_cursor_model_spec("composer-2-standard", base_ids) == (
+        "composer-2",
+        {"fast": "false", "_context_default": "default", "_effort_default": "medium"},
+    )
+    assert _parse_cursor_model_spec("auto", base_ids) == ("auto-smart", {})
+    assert _parse_cursor_model_spec("[redacted][reasoning_effort=low]", base_ids) == (
+        "[redacted]",
+        {"reasoning_effort": "low"},
+    )
+
+    _, grok_xhigh_params = _parse_cursor_model_spec("cursor-grok-4.6-xhigh-fast", base_ids)
+    assert _resolve_config_option_updates(
+        grok_xhigh_params,
+        [
+            {
+                "id": "effort",
+                "currentValue": "medium",
+                "options": [
+                    {"value": "low"},
+                    {"value": "medium"},
+                    {"value": "high"},
+                    {"value": "max"},
+                ],
+            },
+            {
+                "id": "fast",
+                "currentValue": "false",
+                "options": [{"value": "true"}, {"value": "false"}],
+            },
+        ],
+    ) == [("fast", "true"), ("effort", "max")]
+
+    codex_opts = [
+        {
+            "id": "reasoning",
+            "currentValue": "medium",
+            "options": [{"value": "low"}, {"value": "medium"}, {"value": "extra-high"}],
+        },
+        {
+            "id": "fast",
+            "currentValue": "true",
+            "options": [{"value": "true"}, {"value": "false"}],
+        },
+    ]
+    _, codex_params = _parse_cursor_model_spec("gpt-5.3-codex-xhigh", base_ids)
+    assert _resolve_config_option_updates(codex_params, codex_opts) == [
+        ("reasoning", "extra-high"),
+        ("fast", "false"),
+    ]
+
+    class _ParameterizedAcpProc(_InteractiveAcpProc):
+        def __init__(self, *, initial_model: str = "[redacted]") -> None:
+            super().__init__(session_id="acp-param-1")
+            self.current_model = initial_model
+            self.current_effort = "medium"
+            self.current_fast = "false"
+
+        def _config_options(self) -> List[Dict[str, Any]]:
+            opts: List[Dict[str, Any]] = [
+                {
+                    "id": "model",
+                    "currentValue": self.current_model,
+                    "options": [
+                        {"value": "auto-smart"},
+                        {"value": "[redacted]"},
+                        {"value": "grok-4.6"},
+                    ],
+                }
+            ]
+            if self.current_model == "[redacted]":
+                opts.append(
+                    {
+                        "id": "reasoning_effort",
+                        "currentValue": self.current_effort,
+                        "options": [
+                            {"value": "low"},
+                            {"value": "medium"},
+                            {"value": "high"},
+                        ],
+                    }
+                )
+            elif self.current_model == "grok-4.6":
+                opts.extend(
+                    [
+                        {
+                            "id": "effort",
+                            "currentValue": self.current_effort,
+                            "options": [
+                                {"value": "low"},
+                                {"value": "medium"},
+                                {"value": "high"},
+                            ],
+                        },
+                        {
+                            "id": "fast",
+                            "currentValue": self.current_fast,
+                            "options": [{"value": "true"}, {"value": "false"}],
+                        },
+                    ]
+                )
+            return opts
+
+        def _on_stdin(self, msg: Dict[str, Any]) -> None:
+            self.requests.append(msg)
+            method = msg.get("method")
+            req_id = msg.get("id")
+            if req_id is None:
+                return
+            if method == "initialize":
+                self.stdout.push_json(
+                    {"jsonrpc": "2.0", "id": req_id, "result": {"protocolVersion": 1}}
+                )
+            elif method in ("session/new", "session/load"):
+                self.stdout.push_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {
+                            "sessionId": self.session_id,
+                            "configOptions": self._config_options(),
+                            "models": {
+                                "currentModelId": self.current_model,
+                                "availableModels": [
+                                    {"modelId": "auto-smart"},
+                                    {"modelId": "[redacted]"},
+                                    {"modelId": "grok-4.6"},
+                                ],
+                            },
+                        },
+                    }
+                )
+            elif method == "session/set_model":
+                # Real agent acp rejects CLI legacy variant slugs here with -32602.
+                self.stdout.push_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {
+                            "code": -32602,
+                            "message": "Invalid params",
+                            "data": {"message": f"Invalid model value: {msg['params']['modelId']}"},
+                        },
+                    }
+                )
+            elif method == "session/set_config_option":
+                cid = msg["params"]["configId"]
+                val = msg["params"]["value"]
+                if cid == "model":
+                    self.current_model = val
+                elif cid in ("reasoning_effort", "effort"):
+                    self.current_effort = val
+                elif cid == "fast":
+                    self.current_fast = val
+                self.stdout.push_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {"configOptions": self._config_options()},
+                    }
+                )
+            elif method == "session/set_mode":
+                self.stdout.push_json({"jsonrpc": "2.0", "id": req_id, "result": {}})
+
+    sess = _session(AgentType.CURSOR)
+    sess.env = {"CURSOR_MODEL": "[redacted]-high"}
+    proc = _ParameterizedAcpProc(initial_model="[redacted]")
+    native = CursorNativeSession(sess)
+    native._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
+    native._spawn_subprocess = AsyncMock(return_value=proc)  # type: ignore[method-assign]
+
+    await native.start()
+    try:
+        init_req = next(r for r in proc.requests if r.get("method") == "initialize")
+        assert init_req["params"]["clientCapabilities"]["_meta"] == {
+            "parameterizedModelPicker": True
+        }
+        cfg_reqs = [r for r in proc.requests if r.get("method") == "session/set_config_option"]
+        assert [(r["params"]["configId"], r["params"]["value"]) for r in cfg_reqs] == [
+            ("reasoning_effort", "high")
+        ]
+        assert not any(r.get("method") == "session/set_model" for r in proc.requests)
+
+        # Switching to cursor-grok-4.6-high-fast across a session/load restart
+        # updates both base model ("grok-4.6") and parameters ("effort"="high", "fast"="true").
+        sess.env["CURSOR_MODEL"] = "cursor-grok-4.6-high-fast"
+        proc2 = _ParameterizedAcpProc(initial_model="auto-smart")
+        native._spawn_subprocess = AsyncMock(return_value=proc2)  # type: ignore[method-assign]
+        await native.restart_for_recovery()
+        cfg_reqs2 = [r for r in proc2.requests if r.get("method") == "session/set_config_option"]
+        assert [(r["params"]["configId"], r["params"]["value"]) for r in cfg_reqs2] == [
+            ("model", "grok-4.6"),
+            ("fast", "true"),
+            ("effort", "high"),
+        ]
+    finally:
+        await native.stop()
+
+
+@pytest.mark.asyncio
+async def test_cursor_acp_session_load_error_boundary_and_persistence_ordering(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """1. A post-``session/load`` error (e.g. ``session/set_mode`` failing) must
+       NOT be misclassified as a ``session/load`` failure or fall through to
+       ``session/new`` to overwrite a verified ``conversation_id``.
+    2. On ``session/new``, ``_persist_conversation_id`` runs only AFTER
+       ``_ensure_session_model`` and ``_ensure_session_mode`` succeed.
+    3. If ``session/set_model`` returns ``-32602`` without ``configOptions``,
+       ``start()`` logs a warning and keeps the CLI ``--model`` selection."""
+    monkeypatch.setattr(
+        "claude_hub.services.agent_stream.providers.cursor._migrate_legacy_cli_store_for_acp",
+        lambda *args, **kwargs: None,
+    )
+
+    class _ModeFailingAcpProc(_InteractiveAcpProc):
+        def _on_stdin(self, msg: Dict[str, Any]) -> None:
+            self.requests.append(msg)
+            method = msg.get("method")
+            req_id = msg.get("id")
+            if req_id is None:
+                return
+            if method == "session/set_mode":
+                self.stdout.push_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {"code": -32603, "message": "mode switch failed"},
+                    }
+                )
+                return
+            super()._on_stdin(msg)
+
+    persisted: List[str] = []
+    sess = _session(AgentType.CURSOR)
+    sess.agent_session_id = "existing-sid-1"
+    sess.agent_session_id_verified = True
+    proc = _ModeFailingAcpProc(session_id="new-sid-should-not-be-used")
+    native = CursorNativeSession(sess, conversation_id_persist=persisted.append)
+    native._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
+    native._spawn_subprocess = AsyncMock(return_value=proc)  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="mode switch failed"):
+        await native.start()
+    methods = [r.get("method") for r in proc.requests]
+    assert "session/load" in methods
+    assert "session/new" not in methods
+    assert native._conversation_id == "existing-sid-1"
+    assert persisted == []
+
+    # Fresh session/new whose set_mode fails must not persist new_sid prematurely.
+    sess_fresh = _session(AgentType.CURSOR)
+    proc_fresh = _ModeFailingAcpProc(session_id="uninitialized-new-sid")
+    native_fresh = CursorNativeSession(sess_fresh, conversation_id_persist=persisted.append)
+    native_fresh._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
+    native_fresh._spawn_subprocess = AsyncMock(return_value=proc_fresh)  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="mode switch failed"):
+        await native_fresh.start()
+    assert persisted == []
+    assert native_fresh._conversation_id is None
+
+
+def test_cursor_acp_retry_preload_enables_checkpoint_retries_and_scrubs_node_options() -> None:
+    """Regression for ``RetriableError: [resource_exhausted] Error`` aborting
+    ACP turns on ``attempt=0``: ``cursor_acp_preload.cjs`` enables
+    ``enableAgentRetries=True`` and ``maxRetries=8`` on ``agent-session.ts``'s
+    ``agentClient.run`` options via ``Module._load`` (without polluting
+    ``Object.prototype``) and scrubs itself from ``NODE_OPTIONS`` so child
+    tool shells do not inherit the preload flag."""
+    import os
+    import shutil
+    import subprocess
+
+    from claude_hub.services.agent_stream.providers.cursor import (
+        _ACP_PRELOAD_PATH,
+        _inject_acp_preload_env,
+    )
+
+    assert _ACP_PRELOAD_PATH.is_file()
+    existing_opts = '--max-old-space-size=4096 --require="/tmp/path  with  two spaces.cjs"'
+    env = _inject_acp_preload_env({"PATH": "/bin", "NODE_OPTIONS": existing_opts})
+    assert f"--require={_ACP_PRELOAD_PATH}" in env["NODE_OPTIONS"]
+    assert existing_opts in env["NODE_OPTIONS"]
+    # Idempotent when already present.
+    assert _inject_acp_preload_env(env)["NODE_OPTIONS"] == env["NODE_OPTIONS"]
+
+    node_bin = shutil.which("node")
+    if node_bin is None:
+        return
+    script = """
+    const hooks = globalThis.__claudeHubCursorAcpPreload;
+    const capturedOpts = [];
+    const fakeAgentClient = {
+      run(...args) {
+        capturedOpts.push(args[10]);
+      },
+    };
+    hooks.patchAgentClient(fakeAgentClient);
+    const w = {
+      conversationId: "conv-1",
+      onConnectionStateChange: () => {},
+      onErrorNotRetried: () => {},
+    };
+    fakeAgentClient.run(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, w);
+
+    const explicitOff = {
+      conversationId: "conv-1",
+      onConnectionStateChange: () => {},
+      onErrorNotRetried: () => {},
+      enableAgentRetries: false,
+    };
+    fakeAgentClient.run(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, explicitOff);
+
+    const frozen = Object.freeze({});
+    console.log(JSON.stringify({
+      nodeOptionsAfterLoad: process.env.NODE_OPTIONS || "",
+      inProtoEnable: "enableAgentRetries" in frozen,
+      inProtoMaxRetries: "maxRetries" in frozen,
+      wEnable: w.enableAgentRetries,
+      wMaxRetries: w.maxRetries,
+      explicitOffEnable: explicitOff.enableAgentRetries,
+    }));
+    """
+    # Strip the fake quoted require before spawning node so node only loads _ACP_PRELOAD_PATH.
+    test_env = _inject_acp_preload_env(
+        {"PATH": "/bin", "NODE_OPTIONS": "--max-old-space-size=4096"}
+    )
+    run_env = {**os.environ, "NODE_OPTIONS": test_env["NODE_OPTIONS"]}
+    out = subprocess.check_output(
+        [node_bin, "-e", script, "acp"],
+        env=run_env,
+        text=True,
+    )
+    parsed = json.loads(out.strip())
+    assert str(_ACP_PRELOAD_PATH) not in parsed["nodeOptionsAfterLoad"]
+    assert parsed["nodeOptionsAfterLoad"] == "--max-old-space-size=4096"
+    assert parsed["inProtoEnable"] is False
+    assert parsed["inProtoMaxRetries"] is False
+    assert parsed["wEnable"] is True
+    assert parsed["wMaxRetries"] == 8
+    assert parsed["explicitOffEnable"] is False
+
+
+@pytest.mark.asyncio
+async def test_cursor_acp_cold_discarded_rotation_recovers_and_preserves_clean_last_error() -> None:
+    """Cross-verification regressions:
+    1. Cold ``rotate_conversation()`` followed by ``discard_rotated_conversation()``
+       leaves ``_acp_session_id is None``; the next ``start()`` / ``send_message()``
+       must initialize an active session instead of returning early and raising
+       ``cursor acp session is unavailable``.
+    2. Handled ``-32602`` on ``session/set_model`` must not leave ``_last_error``
+       set on a healthy session.
+    3. Sub-agent inline error chunks (``sessionId != _acp_session_id``) must not
+       poison the parent turn's ``_turn_error_emitted`` flag."""
+    sess = _session(AgentType.CURSOR)
+    sess.env = {"CURSOR_MODEL": "unlisted-custom-slug"}
+    proc1 = _InteractiveAcpProc(session_id="rotated-sid-1")
+    proc2 = _InteractiveAcpProc(session_id="active-sid-2")
+    orig_on_stdin2 = proc2._on_stdin
+
+    def reject_set_model(msg: Dict[str, Any]) -> None:
+        if msg.get("method") == "session/set_model":
+            proc2.requests.append(msg)
+            proc2.stdout.push_json(
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg["id"],
+                    "error": {"code": -32602, "message": "Invalid model value"},
+                }
+            )
+            return
+        orig_on_stdin2(msg)
+
+    proc2.stdin._handler = reject_set_model
+    spawned = [proc1, proc2]
+    native = CursorNativeSession(sess)
+    native._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
+    native._spawn_subprocess = AsyncMock(side_effect=spawned)  # type: ignore[method-assign]
+
+    cand = await native.rotate_conversation()
+    assert cand == "rotated-sid-1"
+    await native.discard_rotated_conversation(cand)
+    assert native._acp_session_id is None
+
+    # Next start() must not early-return with _acp_session_id=None.
+    await native.start()
+    try:
+        assert native._acp_session_id == "active-sid-2"
+        assert native.last_error is None
+
+        # Sub-agent inline error chunk must not poison parent _turn_error_emitted.
+        await native._handle_notification(
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "subagent-child-sid",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "\n\nError: subagent failed"},
+                    },
+                },
+            },
+            generation=native._stdout_generation,
+        )
+        assert native._turn_error_emitted is False
+    finally:
+        await native.stop()

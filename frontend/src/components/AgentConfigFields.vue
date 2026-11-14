@@ -185,12 +185,15 @@ const uid = `acf-${Math.random().toString(36).slice(2, 9)}`
 const showEnvManager = ref(false)
 
 const supportsSoloMode = computed(
-  () => !['cursor', 'terminal', 'maso'].includes(props.agentType)
+  () => !['terminal', 'maso'].includes(props.agentType)
 )
 
 const yoloHint = computed(() => {
   if (props.agentType === 'antigravity') {
     return 'Runs Antigravity with --dangerously-skip-permissions. Enable only for trusted tasks.'
+  }
+  if (props.agentType === 'cursor') {
+    return 'Runs Cursor with --yolo (auto-approves tool and web permissions in Default mode)'
   }
   if (props.agentType === 'codex' || props.agentType === 'traex') {
     const name = props.agentType === 'traex' ? 'TraeX' : 'Codex'
@@ -250,7 +253,7 @@ function onAgentTypeChange(value: string) {
   // type's default env preset/text. Programmatic prop updates (e.g. populating
   // an existing config) do NOT pass through here, so they are not clobbered.
   // Antigravity requires a fresh, explicit choice to bypass permissions.
-  if (['cursor', 'terminal', 'maso', 'antigravity'].includes(agentType)) {
+  if (['terminal', 'maso', 'antigravity'].includes(agentType)) {
     emit('update:soloMode', false)
   }
   emit('update:envPreset', defaultLaunchEnvPresetForAgent(agentType))

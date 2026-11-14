@@ -245,6 +245,17 @@ class RetirementMixin(SessionState):
         self._blocking_approval_call_ids.clear()
         self._reset_queue_wait_state()
         self._goal_terminal_at = None
+        session = self._session_getter()
+        if session is not None:
+            self.adapter.clear_turn_state(
+                NormalizeContext(
+                    session_id=self.session_id,
+                    tab_id=session.tab_id,
+                    agent_type=session.agent_type,
+                    run_epoch=self._run_epoch,
+                    turn_id=turn_id,
+                )
+            )
         if turn_id is not None and publish_error is None and completed is not None:
             self._notify_post_persist(completed)
         # Provider teardown. It is bounded (a native interrupt waits on a short
@@ -441,6 +452,7 @@ class RetirementMixin(SessionState):
                 self.session_id,
             )
             return None
+        self.adapter.clear_turn_state(ctx)
         self._turn_completed_seen = True
         self._terminalize_native_runtime("failed")
         return completed

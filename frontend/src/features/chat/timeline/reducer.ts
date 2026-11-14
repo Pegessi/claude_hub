@@ -462,8 +462,22 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
           mutated = true
         }
       }
+      const completedArgsRecord = payloadRecord(event, 'args')
+      let nextArgsText = tool.argsText
+      if (completedArgsRecord && Object.keys(completedArgsRecord).length > 0) {
+        try {
+          nextArgsText = JSON.stringify(completedArgsRecord, null, 2)
+        } catch {
+          nextArgsText = String(event.payload.args ?? '')
+        }
+      }
+      const rawCompletedStatus = payloadString(event, 'status')
       let newStatus: TimelineTool['status'] =
-        payloadString(event, 'status') === 'failed' ? 'failed' : 'completed'
+        rawCompletedStatus === 'cancelled'
+          ? 'cancelled'
+          : rawCompletedStatus === 'failed'
+            ? 'failed'
+            : 'completed'
       // AskUserQuestion reports "failed" when the user dismisses the prompt —
       // that is a cancellation, not a tool error. Surface it as cancelled.
       // The tool name is only known when the start event was loaded (it alone
@@ -490,9 +504,10 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
       }
       const newResult = subagentResultText(tool.subagent, event.payload.result)
         ?? payloadString(event, 'result')
-      if (isNew || tool.status !== newStatus || tool.resultText !== newResult) {
+      if (isNew || tool.status !== newStatus || tool.resultText !== newResult || tool.argsText !== nextArgsText) {
         tool.status = newStatus
         tool.resultText = newResult
+        tool.argsText = nextArgsText
         mutated = true
       }
       break

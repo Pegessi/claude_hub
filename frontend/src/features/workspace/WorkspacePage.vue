@@ -2,7 +2,9 @@
   <section class="workspace-view">
     <WorkspaceHeader />
 
-    <WorkspaceTriagePro v-if="runtime.workspaceLayoutMode.value === 'triage'" />
+    <WorkspaceTriagePro
+      v-if="runtime.workspaceLayoutMode.value === 'triage' && (Boolean(runtime.activeWorkspaceId.value) || runtime.workspaces.value.length > 0)"
+    />
 
     <template v-else>
       <WorkspaceSummary />
@@ -433,7 +435,7 @@ provideWorkspaceNavigationContext({
   openLessonsModalFromMenu: navigation.openLessonsModalFromMenu,
   openAgentOptionsModalFromMenu: navigation.openAgentOptionsModalFromMenu,
   refreshAgentStatusesFromMenu: navigation.refreshAgentStatusesFromMenu,
-  toggleThemeFromMenu: navigation.toggleThemeFromMenu,
+  openAppearanceFromMenu: navigation.openAppearanceFromMenu,
   workspaceMobileMenuRef: navigation.workspaceMobileMenuRef,
 })
 const {

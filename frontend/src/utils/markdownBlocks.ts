@@ -84,11 +84,25 @@ function promoteLocalImageLinks(tokens: Token[], tabId: string): void {
   })
 }
 
-function wrapImagePreviews(html: string): string {
-  if (typeof document === 'undefined') return html
+function prepareImages(html: string): string {
+  if (typeof document === 'undefined' || !/<img\b/i.test(html)) return html
   const template = document.createElement('template')
   template.innerHTML = html
-  template.content.querySelectorAll<HTMLImageElement>('img[data-local-img], img[data-quoted-img]').forEach((img) => {
+  template.content.querySelectorAll<HTMLImageElement>('img').forEach((img) => {
+    const src = img.getAttribute('src')
+    if (src) {
+      try {
+        const url = new URL(src, document.baseURI)
+        if (/^https?:$/.test(url.protocol) && url.origin !== location.origin) {
+          img.dataset.remoteImg = '1'
+          // Defer the request until per-instance recovery state is restored.
+          // Keep no-cors by default: CORP-only hosts need not support CORS.
+          img.loading = 'lazy'
+          img.decoding = 'async'
+        }
+      } catch { /* Invalid sources retain the browser's normal URL handling. */ }
+    }
+    if (!img.dataset.localImg && !img.dataset.quotedImg) return
     if (img.closest('a, button')) return
     const button = document.createElement('button')
     button.type = 'button'
@@ -481,8 +495,8 @@ export class MarkdownBlockCache {
     if (quotedTabId) {
       result = rewriteMarkdownLinks(result, quotedTabId, this.documentPath)
       result = rewriteQuotedImageSrcs(result, quotedTabId)
-      result = wrapImagePreviews(result)
     }
+    result = prepareImages(result)
     result = decorateRichBlocks(result)
     return result
   }

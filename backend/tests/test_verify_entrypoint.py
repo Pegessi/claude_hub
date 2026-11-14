@@ -228,6 +228,7 @@ def verify_fixture(tmp_path: Path) -> Generator[VerifyFixture, None, None]:
     # The format target discovers scenarios, so the fixture repo needs real
     # ones. The shared lifecycle helper is tooling and must stay separate.
     (root / "frontend/tests/browser_lifecycle.py").write_text("# helper\n")
+    (root / "frontend/tests/appearance_assertions.py").write_text("# helper\n")
     for scenario in _FIXTURE_BROWSER_SCENARIOS:
         (root / "frontend/tests" / scenario).write_text("# scenario\n")
     # Never copy caller credentials into the recording tools' environment.
@@ -328,6 +329,7 @@ def test_types_include_tests(verify_fixture: VerifyFixture) -> None:
         ".",
         str(verify_fixture.root / "scripts/verify_browser_mocks.py"),
         str(verify_fixture.root / "frontend/tests/browser_lifecycle.py"),
+        str(verify_fixture.root / "frontend/tests/appearance_assertions.py"),
         *[str(path) for path in sorted((verify_fixture.root / "scripts").glob("check_*.py"))],
     ]
     assert Path(calls[0]["cwd"]) == verify_fixture.root / "backend"
@@ -613,6 +615,7 @@ def test_format_checks_include_all_browser_scenarios(verify_fixture: VerifyFixtu
         for path in (
             "scripts/verify_browser_mocks.py",
             "frontend/tests/browser_lifecycle.py",
+            "frontend/tests/appearance_assertions.py",
         )
     } | {
         str(verify_fixture.root / "frontend/tests" / scenario)
