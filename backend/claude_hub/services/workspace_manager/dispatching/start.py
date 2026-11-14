@@ -85,177 +85,212 @@ class _TaskStartMixin(_WorkspaceManagerBase):
         if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
             return task
         self._validate_start_admission_inputs(workspace, task, payload)
-        selected_kind = task.session_kind
 
-        created_ephemeral_session_id: str | None = None
-        try:
-            if workspace.target == ExecutionTarget.LOCAL and task.auto_worktree:
-                from claude_hub.services.work_pipeline import provision_task_worktree
-                from claude_hub.services.workspace_identity import resolve_path
+        initial_payload = payload
+        for _attempt in range(3):
+            payload = initial_payload
+            task = self.tasks[task_id]
+            if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
+                return task
+            self._validate_start_admission_inputs(workspace, task, payload)
+            selected_kind = task.session_kind
 
-                wt_path, wt_branch = await provision_task_worktree(workspace, task)
-                task = self.tasks[task_id]
-                if task.worktree_path != wt_path or task.worktree_branch != wt_branch:
-                    task = task.model_copy(
-                        update={
-                            "worktree_path": wt_path,
-                            "worktree_branch": wt_branch,
-                            "updated_at": self._runtime_now(),
-                        }
-                    )
-                    self.tasks[task.id] = task
-                    self._save_workspace_state(workspace.id)
+            created_ephemeral_session_id: str | None = None
+            try:
+                if workspace.target == ExecutionTarget.LOCAL and task.auto_worktree:
+                    from claude_hub.services.work_pipeline import provision_task_worktree
+                    from claude_hub.services.workspace_identity import resolve_path
 
-                if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
-                    return task
-                self._validate_start_admission_inputs(workspace, task, payload)
+                    wt_path, wt_branch = await provision_task_worktree(workspace, task)
+                    task = self.tasks[task_id]
+                    if task.worktree_path != wt_path or task.worktree_branch != wt_branch:
+                        task = task.model_copy(
+                            update={
+                                "worktree_path": wt_path,
+                                "worktree_branch": wt_branch,
+                                "updated_at": self._runtime_now(),
+                            }
+                        )
+                        self.tasks[task.id] = task
+                        self._save_workspace_state(workspace.id)
 
-                wanted_wt = resolve_path(wt_path)
-                selected_in_wt = False
-                inherited_env: dict[str, str] = {}
-                inherited_preset: str | None = None
-                if payload.target_session_id:
-                    candidate = self.sessions.get(payload.target_session_id)
-                    if candidate is not None and candidate.workspace_id == workspace.id:
-                        inherited_env = dict(candidate.env)
-                        inherited_preset = candidate.env_preset
+                    if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
+                        return task
+                    self._validate_start_admission_inputs(workspace, task, payload)
+
+                    wanted_wt = resolve_path(wt_path)
+                    selected_in_wt = False
+                    inherited_env: dict[str, str] = {}
+                    inherited_preset: str | None = None
+                    if payload.target_session_id:
+                        candidate = self.sessions.get(payload.target_session_id)
+                        if candidate is not None and candidate.workspace_id == workspace.id:
+                            inherited_env = dict(candidate.env)
+                            inherited_preset = candidate.env_preset
+                            if (
+                                candidate.role == WorkspaceSessionRole.ORCHESTRATOR
+                                and candidate.session_kind == task.session_kind
+                                and resolve_path(candidate.workspace_path or workspace.path)
+                                == wanted_wt
+                            ):
+                                selected_in_wt = True
+                    elif task.session_id:
+                        candidate = self.sessions.get(task.session_id)
                         if (
-                            candidate.role == WorkspaceSessionRole.ORCHESTRATOR
+                            candidate is not None
+                            and candidate.workspace_id == workspace.id
+                            and candidate.role == WorkspaceSessionRole.ORCHESTRATOR
                             and candidate.session_kind == task.session_kind
                             and resolve_path(candidate.workspace_path or workspace.path)
                             == wanted_wt
                         ):
+                            payload = payload.model_copy(update={"target_session_id": candidate.id})
                             selected_in_wt = True
-                elif task.session_id:
-                    candidate = self.sessions.get(task.session_id)
-                    if (
-                        candidate is not None
-                        and candidate.workspace_id == workspace.id
-                        and candidate.role == WorkspaceSessionRole.ORCHESTRATOR
-                        and candidate.session_kind == task.session_kind
-                        and resolve_path(candidate.workspace_path or workspace.path) == wanted_wt
-                    ):
-                        payload = payload.model_copy(update={"target_session_id": candidate.id})
-                        selected_in_wt = True
 
-                if not selected_in_wt:
-                    worktree_agent = await self.ensure_workspace_agent(
+                    if not selected_in_wt:
+                        worktree_agent = await self.ensure_workspace_agent(
+                            workspace.id,
+                            EnsureWorkspaceAgentRequest(
+                                agent_type=payload.agent_type or task.agent_type,
+                                session_kind=selected_kind,
+                                role=WorkspaceSessionRole.ORCHESTRATOR,
+                                reuse_existing=False,
+                                ephemeral=True,
+                                caller_owned_ephemeral=True,
+                                cwd=wt_path,
+                                env=inherited_env,
+                                env_preset=inherited_preset,
+                            ),
+                        )
+                        created_ephemeral_session_id = worktree_agent.id
+                        payload = payload.model_copy(
+                            update={"target_session_id": worktree_agent.id}
+                        )
+
+                self._validate_start_admission_inputs(workspace, self.tasks[task_id], payload)
+
+                if not payload.target_session_id and not any(
+                    agent.session_kind == selected_kind
+                    for agent in self._workspace_agents(workspace.id, include_stopped=True)
+                ):
+                    logger.info(
+                        "No workspace agents found for workspace_id=%s; creating default agent for task id=%s",
+                        workspace.id,
+                        task.id,
+                    )
+                    await self.ensure_workspace_agent(
                         workspace.id,
                         EnsureWorkspaceAgentRequest(
                             agent_type=payload.agent_type or task.agent_type,
                             session_kind=selected_kind,
-                            role=WorkspaceSessionRole.ORCHESTRATOR,
                             reuse_existing=False,
-                            ephemeral=True,
-                            caller_owned_ephemeral=True,
-                            cwd=wt_path,
-                            env=inherited_env,
-                            env_preset=inherited_preset,
                         ),
                     )
-                    created_ephemeral_session_id = worktree_agent.id
-                    payload = payload.model_copy(update={"target_session_id": worktree_agent.id})
 
-            self._validate_start_admission_inputs(workspace, self.tasks[task_id], payload)
+                # Session preparation awaits external work; a todo edit may have changed
+                # prerequisites or auto_worktree meanwhile. Never overwrite that newer contract.
+                task = self.tasks[task_id]
+                if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
+                    return task
+                self._validate_start_admission_inputs(workspace, task, payload)
 
-            if not payload.target_session_id and not any(
-                agent.session_kind == selected_kind
-                for agent in self._workspace_agents(workspace.id, include_stopped=True)
-            ):
-                logger.info(
-                    "No workspace agents found for workspace_id=%s; creating default agent for task id=%s",
-                    workspace.id,
-                    task.id,
-                )
-                await self.ensure_workspace_agent(
-                    workspace.id,
-                    EnsureWorkspaceAgentRequest(
-                        agent_type=payload.agent_type or task.agent_type,
-                        session_kind=selected_kind,
-                        reuse_existing=False,
-                    ),
-                )
-
-            # Session preparation awaits external work; a todo edit may have changed
-            # prerequisites meanwhile. Never overwrite that newer task contract.
-            task = self.tasks[task_id]
-            if task.status in (WorkspaceTaskStatus.QUEUED, WorkspaceTaskStatus.WORKING):
-                if (
-                    created_ephemeral_session_id is not None
-                    and task.session_id != created_ephemeral_session_id
-                ):
-                    await self._best_effort_delete_session(created_ephemeral_session_id)
-                return task
-            self._validate_start_admission_inputs(workspace, task, payload)
-
-            base_update: dict[str, Any] = {
-                "status": WorkspaceTaskStatus.QUEUED,
-                "queued_at": task.queued_at or self._runtime_now(),
-                "updated_at": self._runtime_now(),
-                "dispatch_pending": False,
-                "manual_aborted_at": None,
-                "manual_abort_reason": None,
-                "dispatch_attempt": task.dispatch_attempt + 1,
-            }
-            if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
-                run = task.autonomous_run or self._default_autonomous_run(
-                    task.id,
-                    task.autonomy_policy.max_iterations if task.autonomy_policy else 3,
-                )
-                phase = AutonomousRunPhase.DISPATCHING
-                base_update["autonomous_run"] = run.model_copy(
-                    update={
-                        "phase": phase,
-                        "status_summary": self._autonomous_phase_label(phase),
-                        "next_action": self._autonomous_next_action(phase),
-                    }
-                )
-            if payload.agent_type:
-                base_update["agent_type"] = payload.agent_type
-            if payload.related_task_id:
-                if payload.related_task_id not in self.tasks:
-                    raise KeyError(payload.related_task_id)
-                base_update["related_task_id"] = payload.related_task_id
-
-            staged_task = apply_task_update(task, base_update, cause="start")
-            decision = await self._choose_dispatch_target(workspace, staged_task, payload)
-            target, clear_context, reason = decision
-            autonomous_run = staged_task.autonomous_run
-            if staged_task.task_mode == WorkspaceTaskMode.AUTONOMOUS and autonomous_run is not None:
-                phase = AutonomousRunPhase.WORKING
-                autonomous_run = autonomous_run.model_copy(
-                    update={
-                        "phase": phase,
-                        "status_summary": self._autonomous_phase_label(phase),
-                        "active_session_ids": list(
-                            dict.fromkeys([*autonomous_run.active_session_ids, target.id])
-                        ),
-                        "next_action": self._autonomous_next_action(phase),
-                    }
-                )
-            committed_task = staged_task.model_copy(
-                update={
-                    "session_id": target.id,
-                    "clear_context": clear_context,
-                    "dispatch_reason": reason,
-                    "dispatch_pending": False,
-                    "autonomous_run": autonomous_run,
+                base_update: dict[str, Any] = {
+                    "status": WorkspaceTaskStatus.QUEUED,
+                    "queued_at": task.queued_at or self._runtime_now(),
                     "updated_at": self._runtime_now(),
+                    "dispatch_pending": False,
+                    "manual_aborted_at": None,
+                    "manual_abort_reason": None,
+                    "dispatch_attempt": task.dispatch_attempt + 1,
                 }
-            )
-            self.tasks[committed_task.id] = committed_task
-            self._save_state()
-            created_ephemeral_session_id = None
-            task = committed_task
-        except BaseException:
-            if created_ephemeral_session_id is not None:
-                live_after_err = self.tasks.get(task_id)
-                if (
-                    live_after_err is None
-                    or live_after_err.session_id != created_ephemeral_session_id
+                if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
+                    run = task.autonomous_run or self._default_autonomous_run(
+                        task.id,
+                        task.autonomy_policy.max_iterations if task.autonomy_policy else 3,
+                    )
+                    phase = AutonomousRunPhase.DISPATCHING
+                    base_update["autonomous_run"] = run.model_copy(
+                        update={
+                            "phase": phase,
+                            "status_summary": self._autonomous_phase_label(phase),
+                            "next_action": self._autonomous_next_action(phase),
+                        }
+                    )
+                if payload.agent_type:
+                    base_update["agent_type"] = payload.agent_type
+                if payload.related_task_id:
+                    if payload.related_task_id not in self.tasks:
+                        raise KeyError(payload.related_task_id)
+                    base_update["related_task_id"] = payload.related_task_id
+
+                staged_task = apply_task_update(task, base_update, cause="start")
+                decision = await self._choose_dispatch_target(workspace, staged_task, payload)
+                target, clear_context, reason = decision
+
+                # Re-read live task after _choose_dispatch_target await and enforce
+                # the auto_worktree isolation invariant before committing!
+                latest_task = self.tasks[task_id]
+                if latest_task.status in (
+                    WorkspaceTaskStatus.QUEUED,
+                    WorkspaceTaskStatus.WORKING,
                 ):
-                    await self._best_effort_delete_session(created_ephemeral_session_id)
-            raise
+                    return latest_task
+                self._validate_start_admission_inputs(workspace, latest_task, payload)
+                if workspace.target == ExecutionTarget.LOCAL and latest_task.auto_worktree:
+                    from claude_hub.services.workspace_identity import resolve_path
+
+                    wt_path_str = latest_task.worktree_path
+                    wt_ok = (
+                        wt_path_str is not None
+                        and bool(wt_path_str)
+                        and resolve_path(wt_path_str) != resolve_path(workspace.path)
+                        and resolve_path(target.workspace_path or "") == resolve_path(wt_path_str)
+                    )
+                    if not wt_ok:
+                        continue
+
+                staged_task = apply_task_update(latest_task, base_update, cause="start")
+                autonomous_run = staged_task.autonomous_run
+                if (
+                    staged_task.task_mode == WorkspaceTaskMode.AUTONOMOUS
+                    and autonomous_run is not None
+                ):
+                    phase = AutonomousRunPhase.WORKING
+                    autonomous_run = autonomous_run.model_copy(
+                        update={
+                            "phase": phase,
+                            "status_summary": self._autonomous_phase_label(phase),
+                            "active_session_ids": list(
+                                dict.fromkeys([*autonomous_run.active_session_ids, target.id])
+                            ),
+                            "next_action": self._autonomous_next_action(phase),
+                        }
+                    )
+                committed_task = staged_task.model_copy(
+                    update={
+                        "session_id": target.id,
+                        "clear_context": clear_context,
+                        "dispatch_reason": reason,
+                        "dispatch_pending": False,
+                        "autonomous_run": autonomous_run,
+                        "updated_at": self._runtime_now(),
+                    }
+                )
+                self.tasks[committed_task.id] = committed_task
+                self._save_state()
+                task = committed_task
+                break
+            finally:
+                if created_ephemeral_session_id is not None:
+                    live_after = self.tasks.get(task_id)
+                    if live_after is None or live_after.session_id != created_ephemeral_session_id:
+                        await asyncio.shield(
+                            self._best_effort_delete_session(created_ephemeral_session_id)
+                        )
+        else:
+            raise RuntimeError(
+                "Task worktree contract changed repeatedly during start admission; retry start_task"
+            )
         logger.info(
             "Workspace task id=%s queued for session_id=%s session_title=%r related_task_id=%s "
             "clear_context=%s reason=%r",

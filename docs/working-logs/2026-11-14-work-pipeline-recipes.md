@@ -44,6 +44,8 @@ This change introduces standardized pipeline recipes (`WorkspaceTaskRecipe`), a 
    - Removed manual `self.sessions.pop` bypasses; temporary reviewers and completed ephemeral workers are retired exclusively via `delete_session` (`allow_completed_review_for_task_id=task.id`).
    - `push_task_feature_branch` compares `task.remote_pushed_ref` against `origin/<branch>@<current_head_sha[:7]>`, pushing new commits on subsequent review rounds.
 5. **`dot delegate --request-key` Replay Idempotency & Bounded Subprocess Reaping**:
-   - Persisted `caller_fp` and `enriched_context` in `DotStore` so `request_key` replays reuse the original enriched context even if InfoWall state changes.
-   - Unified `git` and `infowall` subprocesses under `_run_bounded_subprocess` (`start_new_session=True`, 32 MiB stream limit, 20s InfoWall timeout, loopback `NO_PROXY`, process-group `SIGKILL` + `await proc.wait()`).
-
+   - Persisted `caller_fp` and `enriched_context` in `DotStore` and serialized concurrent `delegate` calls per `(workspace_id, actor_key, request_key)` so `request_key` replays reuse the original enriched context without conflicts.
+   - Unified `git` and `infowall` subprocesses under `_run_bounded_subprocess` (`start_new_session=True`, cumulative 32 MiB chunked reader cap, 20s default timeout, loopback `NO_PROXY`, unconditional process-group `SIGKILL` on timeout/cancel/overflow even if the group leader exited, and transport cleanup).
+6. **Concurrent `auto_worktree` Admission Invariant & Reviewer Incarnation Safety**:
+   - `_start_task_workspace_locked` re-verifies `task.auto_worktree` and target session worktree placement before committing and retries preparation if a concurrent TODO edit enabled `auto_worktree`.
+   - Reserved active task `session_id` / `review_session_id` values during friendly session ID allocation and guarded `_cleanup_reviewer_for_terminal_task` against cross-task or newer-incarnation reviewer sessions.
