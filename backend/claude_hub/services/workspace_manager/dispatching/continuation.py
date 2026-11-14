@@ -135,6 +135,7 @@ class _TaskContinuationMixin(_WorkspaceManagerBase):
                 "review_completed_at": None,
                 "reviewed_at": None,
                 "review_requested_at": None,
+                "remote_push_error": None,
                 "failure_reason": None,
                 "failed_at": None,
             },

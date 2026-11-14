@@ -1,18 +1,21 @@
-"""Standardized work pipeline automation: worktree provisioning, remote branch push, and InfoWall sync."""
+"""Work Standard Pipeline Engine: isolated feature worktrees, safe remote push, and InfoWall writeback."""
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
+import signal
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
+from urllib.parse import urlparse
 
-from ..models import Workspace, WorkspaceTask
-from .workspace_identity import git_repo_identity
+from claude_hub.models import ExecutionTarget, Workspace, WorkspaceTask
 
 logger = logging.getLogger(__name__)
 
@@ -21,121 +24,204 @@ DEFAULT_INFOWALL_URL = "http://127.0.0.1:18899"
 DEFAULT_INFOWALL_API_KEY_FILE = "/home/tiger/.local/state/infowall/api-key"
 
 PROTECTED_PUSH_BRANCHES = frozenset({"main", "master", "develop", "HEAD", ""})
-_URL_PATTERN = re.compile(r"https?://[^\s)>\]\"'`]+")
+SUBPROCESS_STREAM_LIMIT = 32 * 1024 * 1024
+INFOWALL_SUBPROCESS_TIMEOUT_SECONDS = 20.0
+LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1"
+
+_URL_RE = re.compile(r"https://[^\s<>()\[\]\"'`]+")
+_SLUG_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
 
-def slugify_task_title(title: str, task_id: str) -> str:
-    """Build a deterministic ASCII kebab-case slug ``<title-slug>-<task_id[:6]>``."""
-    ascii_slug = re.sub(r"[^a-z0-9]+", "-", (title or "").lower()).strip("-")
-    if len(ascii_slug) > 32:
-        ascii_slug = ascii_slug[:32].rstrip("-")
-    if not ascii_slug:
-        ascii_slug = "task"
-    short_id = re.sub(r"[^a-z0-9]", "", (task_id or "").lower())[:6] or "000000"
-    return f"{ascii_slug}-{short_id}"
+def _slugify_task_title(title: str, max_len: int = 32) -> str:
+    lowered = _SLUG_NON_ALNUM_RE.sub("-", (title or "").strip().lower()).strip("-")
+    if not lowered:
+        lowered = "task"
+    return lowered[:max_len].strip("-") or "task"
+
+
+def _task_worktree_slug(task: WorkspaceTask) -> str:
+    prefix = _slugify_task_title(task.title, max_len=32)
+    short_id = re.sub(r"[^a-z0-9]", "", (task.id or "").lower())[:8] or "00000000"
+    return f"{prefix}-{short_id}"
+
+
+async def _run_bounded_subprocess(
+    args: list[str],
+    *,
+    cwd: str | None = None,
+    env: dict[str, str] | None = None,
+    stdin_bytes: bytes | None = None,
+    timeout: float = 15.0,
+) -> tuple[int, str, str]:
+    """Run a subprocess in its own process group with bounded timeout and guaranteed reaping."""
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        cwd=cwd,
+        env=env,
+        stdin=(asyncio.subprocess.PIPE if stdin_bytes is not None else asyncio.subprocess.DEVNULL),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        limit=SUBPROCESS_STREAM_LIMIT,
+        start_new_session=True,
+    )
+    try:
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            proc.communicate(input=stdin_bytes),
+            timeout=timeout,
+        )
+        return (
+            proc.returncode if proc.returncode is not None else 1,
+            stdout_bytes.decode("utf-8", errors="replace").strip(),
+            stderr_bytes.decode("utf-8", errors="replace").strip(),
+        )
+    except asyncio.TimeoutError:
+        return 124, "", f"command timed out after {int(timeout)}s: {' '.join(args[:3])}"
+    finally:
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
+        if proc.stdin is not None:
+            with contextlib.suppress(Exception):
+                proc.stdin.close()
 
 
 async def _run_git(
-    repo_dir: str | Path,
-    *args: str,
+    args: list[str],
+    *,
+    cwd: str,
     timeout: float = 15.0,
 ) -> tuple[int, str, str]:
-    proc = await asyncio.create_subprocess_exec(
-        "git",
-        "-C",
-        str(repo_dir),
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    env = {
+        **os.environ,
+        "GIT_TERMINAL_PROMPT": "0",
+    }
     try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        return 124, "", f"git {' '.join(args)} timed out after {timeout:.0f}s"
-    return (
-        proc.returncode or 0,
-        stdout_bytes.decode("utf-8", errors="replace").strip(),
-        stderr_bytes.decode("utf-8", errors="replace").strip(),
+        return await _run_bounded_subprocess(
+            ["git", *args],
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+        )
+    except OSError as exc:
+        return 1, "", str(exc)
+
+
+async def _resolve_canonical_git_repo_root(workspace_path: str) -> Path:
+    """Resolve the canonical primary Git repository root without blocking the event loop."""
+    candidate = Path(workspace_path).expanduser()
+    if not candidate.exists() or not candidate.is_dir():
+        raise RuntimeError(f"Workspace path does not exist or is not a directory: {workspace_path}")
+    resolved = candidate.resolve()
+    rc, common_out, err = await _run_git(
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd=str(resolved),
+        timeout=10.0,
     )
+    if rc != 0 or not common_out:
+        detail = err or common_out or "not a git repository"
+        raise RuntimeError(
+            f"Workspace path '{workspace_path}' is not a valid Git repository ({detail})"
+        )
+    common_dir = Path(common_out.splitlines()[0].strip()).resolve()
+    if common_dir.name == ".git":
+        return common_dir.parent
+    rc_top, top_out, _ = await _run_git(
+        ["rev-parse", "--path-format=absolute", "--show-toplevel"],
+        cwd=str(resolved),
+        timeout=10.0,
+    )
+    if rc_top == 0 and top_out:
+        return Path(top_out.splitlines()[0].strip()).resolve()
+    return resolved
+
+
+async def _is_valid_git_worktree(path: Path) -> bool:
+    if not path.exists() or not path.is_dir():
+        return False
+    rc, out, _ = await _run_git(
+        ["rev-parse", "--is-inside-work-tree"],
+        cwd=str(path),
+        timeout=10.0,
+    )
+    return rc == 0 and out.strip().lower() == "true"
 
 
 async def provision_task_worktree(
     workspace: Workspace,
     task: WorkspaceTask,
-) -> tuple[str, str] | None:
-    """Create or reuse an isolated sibling worktree for a local workspace task.
+) -> tuple[str, str]:
+    """Create or reuse an isolated Git feature worktree for a local task.
 
-    Places worktrees under ``<canonical_repo_parent>/<canonical_repo_name>_worktree/<slug>``
-    on branch ``feat/<slug>``. Never touches or resets the primary checkout.
+    Fails closed with ``RuntimeError`` when ``workspace.target == LOCAL`` and
+    a valid Git worktree cannot be provisioned or verified.
     """
-    identity = git_repo_identity(workspace.path)
-    if not identity.is_git:
-        logger.warning(
-            "Cannot provision auto_worktree for non-git workspace_id=%s path=%s",
-            workspace.id,
-            workspace.path,
+    if workspace.target != ExecutionTarget.LOCAL:
+        raise RuntimeError("Isolated git worktree provisioning requires a local workspace")
+
+    slug = _task_worktree_slug(task)
+    branch_name = task.worktree_branch or f"feat/{slug}"
+
+    if task.worktree_path:
+        existing = Path(task.worktree_path)
+        if await _is_valid_git_worktree(existing):
+            return str(existing.resolve()), branch_name
+
+    repo_root = await _resolve_canonical_git_repo_root(workspace.path)
+    worktree_root = repo_root.parent / f"{repo_root.name}_worktree"
+    worktree_dir = worktree_root / slug
+
+    if worktree_dir.exists():
+        if await _is_valid_git_worktree(worktree_dir):
+            rc, current_branch, _ = await _run_git(
+                ["rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=str(worktree_dir),
+                timeout=10.0,
+            )
+            resolved_branch = current_branch if rc == 0 and current_branch else branch_name
+            return str(worktree_dir.resolve()), resolved_branch
+        raise RuntimeError(
+            f"Worktree path '{worktree_dir}' already exists but is not a valid Git worktree"
         )
-        return None
 
-    canonical_root = Path(identity.primary_worktree).resolve()
-    repo_name = canonical_root.name or "repo"
-    slug = slugify_task_title(task.title, task.id)
-    worktree_parent = canonical_root.parent / f"{repo_name}_worktree"
-    worktree_path = worktree_parent / slug
-    worktree_branch = f"feat/{slug}"
+    try:
+        worktree_root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(
+            f"Failed to create worktree root directory '{worktree_root}': {exc}"
+        ) from exc
 
-    if worktree_path.exists() and (worktree_path / ".git").exists():
-        return str(worktree_path.resolve()), worktree_branch
-
-    worktree_parent.mkdir(parents=True, exist_ok=True)
-
-    default_branch = (workspace.default_branch or "main").strip() or "main"
-    rc_ref, _, _ = await _run_git(
-        canonical_root, "rev-parse", "--verify", "--quiet", default_branch
+    base_ref = (workspace.default_branch or "main").strip() or "main"
+    rc_verify, _, _ = await _run_git(
+        ["rev-parse", "--verify", base_ref],
+        cwd=str(repo_root),
+        timeout=10.0,
     )
-    base_ref = default_branch if rc_ref == 0 else "HEAD"
+    if rc_verify != 0:
+        base_ref = "HEAD"
 
     rc_branch, _, _ = await _run_git(
-        canonical_root,
-        "show-ref",
-        "--verify",
-        "--quiet",
-        f"refs/heads/{worktree_branch}",
+        ["show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"],
+        cwd=str(repo_root),
+        timeout=10.0,
     )
     if rc_branch == 0:
-        rc_add, _, err_add = await _run_git(
-            canonical_root,
-            "worktree",
-            "add",
-            str(worktree_path),
-            worktree_branch,
-        )
+        cmd = ["worktree", "add", str(worktree_dir), branch_name]
     else:
-        rc_add, _, err_add = await _run_git(
-            canonical_root,
-            "worktree",
-            "add",
-            str(worktree_path),
-            "-b",
-            worktree_branch,
-            base_ref,
+        cmd = ["worktree", "add", "-b", branch_name, str(worktree_dir), base_ref]
+
+    rc_add, out_add, err_add = await _run_git(cmd, cwd=str(repo_root), timeout=20.0)
+    if rc_add != 0 or not await _is_valid_git_worktree(worktree_dir):
+        detail = (err_add or out_add or f"exit {rc_add}")[:300]
+        raise RuntimeError(
+            f"Failed to provision isolated git worktree at '{worktree_dir}' "
+            f"on branch '{branch_name}': {detail}"
         )
 
-    if rc_add != 0:
-        if worktree_path.exists() and (worktree_path / ".git").exists():
-            return str(worktree_path.resolve()), worktree_branch
-        logger.warning(
-            "Failed to create git worktree for task_id=%s path=%s branch=%s error=%s",
-            task.id,
-            worktree_path,
-            worktree_branch,
-            err_add,
-        )
-        return None
-
-    return str(worktree_path.resolve()), worktree_branch
+    return str(worktree_dir.resolve()), branch_name
 
 
 async def push_task_feature_branch(
@@ -144,165 +230,191 @@ async def push_task_feature_branch(
     *,
     cwd: str | None = None,
 ) -> tuple[str | None, str | None]:
-    """Safely push a reviewed feature branch to ``origin`` without ``--force``.
+    """Push the task's feature branch to origin (never main/master/default_branch, never --force).
 
-    Returns ``(remote_pushed_ref, remote_push_error)``. Refuses to push ``main``,
-    ``master``, ``develop``, detached ``HEAD``, or ``workspace.default_branch``.
+    Returns ``(remote_pushed_ref, remote_push_error)``. If ``task.remote_pushed_ref``
+    already matches ``origin/<branch>@<current_head_sha[:7]>``, returns immediately
+    without re-pushing; if a newer commit was created on a subsequent review round,
+    pushes the updated branch and returns the new ``origin/<branch>@<new_sha[:7]>``.
     """
+    if workspace.target != ExecutionTarget.LOCAL:
+        return None, "Remote branch push is only supported for local workspaces"
+
     target_cwd = cwd or task.worktree_path or workspace.path
     if not target_cwd or not Path(target_cwd).exists():
-        return None, f"Target checkout does not exist: {target_cwd}"
+        return task.remote_pushed_ref, f"Worktree path does not exist: {target_cwd}"
 
-    rc_branch, branch, err_branch = await _run_git(target_cwd, "rev-parse", "--abbrev-ref", "HEAD")
+    rc_branch, branch_out, err_branch = await _run_git(
+        ["rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=target_cwd,
+        timeout=10.0,
+    )
     if rc_branch != 0:
-        return None, f"Failed to inspect git branch: {err_branch or 'unknown error'}"[:400]
+        return (
+            task.remote_pushed_ref,
+            f"git rev-parse --abbrev-ref HEAD failed: {err_branch or branch_out}"[:300],
+        )
 
+    branch = branch_out.strip()
     default_branch = (workspace.default_branch or "main").strip()
     if branch in PROTECTED_PUSH_BRANCHES or branch == default_branch:
         return (
-            None,
-            f"Refused to push protected or default branch '{branch or 'HEAD'}'",
+            task.remote_pushed_ref,
+            f"Refused to push protected or default branch '{branch}'",
         )
 
-    rc_sha, sha, err_sha = await _run_git(target_cwd, "rev-parse", "HEAD")
-    if rc_sha != 0 or not sha:
-        return None, f"Failed to resolve HEAD commit SHA: {err_sha or 'unknown error'}"[:400]
+    rc_sha, sha_out, err_sha = await _run_git(
+        ["rev-parse", "HEAD"],
+        cwd=target_cwd,
+        timeout=10.0,
+    )
+    if rc_sha != 0 or not sha_out:
+        return (
+            task.remote_pushed_ref,
+            f"git rev-parse HEAD failed: {err_sha or sha_out}"[:300],
+        )
+    head_sha = sha_out.strip()
+    expected_ref = f"origin/{branch}@{head_sha[:7]}"
+    if task.remote_pushed_ref == expected_ref:
+        return expected_ref, None
 
-    rc_push, _out_push, err_push = await _run_git(
-        target_cwd,
-        "push",
-        "-u",
-        "origin",
-        branch,
+    rc_push, out_push, err_push = await _run_git(
+        ["push", "-u", "origin", branch],
+        cwd=target_cwd,
         timeout=30.0,
     )
     if rc_push != 0:
-        detail = err_push or f"git push exited with code {rc_push}"
-        return None, detail[:400]
+        detail = (err_push or out_push or f"git push exited with {rc_push}")[:300]
+        return task.remote_pushed_ref, detail
 
-    return f"origin/{branch}@{sha[:7]}", None
+    return expected_ref, None
 
 
-def resolve_infowall_binary() -> str | None:
-    """Locate the InfoWall CLI binary without reading any credential files."""
+def _resolve_infowall_bin() -> str | None:
     env_bin = os.environ.get("INFOWALL_BIN", "").strip()
-    if env_bin and Path(env_bin).is_file() and os.access(env_bin, os.X_OK):
-        return env_bin
-    if Path(DEFAULT_INFOWALL_BIN).is_file() and os.access(DEFAULT_INFOWALL_BIN, os.X_OK):
+    if env_bin:
+        if os.path.isfile(env_bin) and os.access(env_bin, os.X_OK):
+            return env_bin
+        found_env = shutil.which(env_bin)
+        if found_env:
+            return found_env
+    if os.path.isfile(DEFAULT_INFOWALL_BIN) and os.access(DEFAULT_INFOWALL_BIN, os.X_OK):
         return DEFAULT_INFOWALL_BIN
-    found = shutil.which("infowall")
-    return found
+    return shutil.which("infowall")
 
 
-def _infowall_subprocess_env() -> dict[str, str]:
-    """Construct subprocess env passing only the API key file path, never reading it."""
+def _is_loopback_infowall_url(url: str) -> bool:
+    try:
+        host = (urlparse(url).hostname or "").strip().lower()
+    except ValueError:
+        return False
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
+def _infowall_env() -> dict[str, str]:
+    """Build subprocess environment for InfoWall CLI without reading the API key file in Python."""
     env = dict(os.environ)
-    env["INFOWALL_URL"] = env.get("INFOWALL_URL", "").strip() or DEFAULT_INFOWALL_URL
-    env["INFOWALL_API_KEY_FILE"] = (
-        env.get("INFOWALL_API_KEY_FILE", "").strip() or DEFAULT_INFOWALL_API_KEY_FILE
-    )
+    infowall_url = env.get("INFOWALL_URL", "").strip() or DEFAULT_INFOWALL_URL
+    env["INFOWALL_URL"] = infowall_url
+    if not env.get("INFOWALL_API_KEY_FILE", "").strip():
+        env["INFOWALL_API_KEY_FILE"] = DEFAULT_INFOWALL_API_KEY_FILE
+    if _is_loopback_infowall_url(infowall_url):
+        env["NO_PROXY"] = LOOPBACK_NO_PROXY
+        env["no_proxy"] = LOOPBACK_NO_PROXY
     return env
 
 
-def extract_canonical_links(
-    summary: str,
-    *,
-    extra_urls: Sequence[str] | None = None,
-) -> list[dict[str, str]]:
-    """Extract and classify canonical HTTP(S) links for InfoWall progress entries."""
-    raw_urls: list[str] = []
-    for match in _URL_PATTERN.findall(summary or ""):
-        cleaned = match.rstrip(".,;:!?")
-        if cleaned and cleaned not in raw_urls:
-            raw_urls.append(cleaned)
-    for item in extra_urls or ():
-        if not isinstance(item, str):
-            continue
-        for match in _URL_PATTERN.findall(item):
-            cleaned = match.rstrip(".,;:!?")
-            if cleaned and cleaned not in raw_urls:
-                raw_urls.append(cleaned)
+def _classify_link_kind(url: str) -> str:
+    lowered = url.lower()
+    if "/merge_requests/" in lowered or "/pull/" in lowered:
+        return "mr"
+    if (
+        "larkoffice.com" in lowered
+        or "feishu.cn" in lowered
+        or "/docx/" in lowered
+        or "/wiki/" in lowered
+    ):
+        return "doc"
+    if "seed.bytedance" in lowered or "merlin" in lowered or "arena" in lowered:
+        return "eval"
+    return "link"
 
+
+def extract_canonical_links(text: str, extra_urls: list[str] | None = None) -> list[dict[str, str]]:
+    seen: set[str] = set()
     links: list[dict[str, str]] = []
-    for url in raw_urls:
-        lower = url.lower()
-        if "code.byted.org" in lower and "/merge_requests/" in lower:
-            mr_num = url.rstrip("/").rsplit("/", 1)[-1]
-            links.append(
-                {
-                    "kind": "mr",
-                    "external_id": f"mr:{mr_num}",
-                    "title": f"MR !{mr_num}" if mr_num.isdigit() else "Codebase MR",
-                    "url": url,
-                    "state": "open",
-                    "dedupe_key": url,
-                }
-            )
-        elif "feishu.cn" in lower or "larkoffice.com" in lower:
-            links.append(
-                {
-                    "kind": "doc",
-                    "external_id": url,
-                    "title": "Feishu Document",
-                    "url": url,
-                    "state": "active",
-                    "dedupe_key": url,
-                }
-            )
-        elif "seed.bytedance" in lower or "merlin" in lower:
-            links.append(
-                {
-                    "kind": "eval",
-                    "external_id": url,
-                    "title": "Seed / Merlin Link",
-                    "url": url,
-                    "state": "active",
-                    "dedupe_key": url,
-                }
-            )
-        else:
-            links.append(
-                {
-                    "kind": "link",
-                    "external_id": url,
-                    "title": url,
-                    "url": url,
-                    "state": "active",
-                    "dedupe_key": url,
-                }
-            )
+    candidates: list[str] = []
+    if text:
+        candidates.extend(_URL_RE.findall(text))
+    if extra_urls:
+        for item in extra_urls:
+            if isinstance(item, str) and item.strip().startswith("https://"):
+                candidates.append(item.strip())
+    for raw in candidates:
+        cleaned = raw.rstrip(".,;:!?)")
+        if not cleaned.startswith("https://") or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        kind = _classify_link_kind(cleaned)
+        links.append(
+            {
+                "kind": kind,
+                "label": kind.upper() if kind == "mr" else kind.capitalize(),
+                "url": cleaned,
+            }
+        )
     return links
 
 
+async def _check_infowall_writable(infowall_bin: str, env: dict[str, str]) -> bool:
+    try:
+        rc, out, _ = await _run_bounded_subprocess(
+            [infowall_bin, "health", "--json"],
+            env=env,
+            timeout=10.0,
+        )
+    except Exception:
+        return False
+    if rc != 0 or not out:
+        return False
+    try:
+        payload = json.loads(out)
+    except ValueError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    role = payload.get("instance_role")
+    read_only = payload.get("read_only")
+    if role is not None and role != "primary":
+        return False
+    if read_only is True:
+        return False
+    return True
+
+
 async def read_infowall_demand_summary(demand_id: str) -> str | None:
-    """Best-effort fetch of an InfoWall demand summary to enrich task delegation context."""
+    """Best-effort fetch of an InfoWall demand's title, priority/status, and next_action."""
     cleaned_id = (demand_id or "").strip()
     if not cleaned_id:
         return None
-    binary = resolve_infowall_binary()
-    if not binary:
+    infowall_bin = _resolve_infowall_bin()
+    if not infowall_bin:
         return None
-    env = _infowall_subprocess_env()
+    env = _infowall_env()
     try:
-        proc = await asyncio.create_subprocess_exec(
-            binary,
-            "demand",
-            "get",
-            cleaned_id,
-            "--json",
+        rc, out, _ = await _run_bounded_subprocess(
+            [infowall_bin, "demand", "get", cleaned_id, "--json"],
             env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            timeout=INFOWALL_SUBPROCESS_TIMEOUT_SECONDS,
         )
-        stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
     except Exception:
         logger.debug("InfoWall demand get failed for demand_id=%s", cleaned_id, exc_info=True)
         return None
 
-    if proc.returncode != 0 or not stdout_bytes:
+    if rc != 0 or not out:
         return None
     try:
-        data = json.loads(stdout_bytes.decode("utf-8", errors="replace"))
+        data = json.loads(out)
     except ValueError:
         return None
     if not isinstance(data, dict):
@@ -339,103 +451,88 @@ async def sync_task_progress_to_infowall(
     *,
     milestone: str,
     summary: str,
-    links: Sequence[str | dict[str, Any]] | None = None,
+    links: list[str] | None = None,
 ) -> bool:
-    """Idempotently append a task milestone progress entry to InfoWall via ``demand apply``."""
+    """Idempotently write task progress back to InfoWall via ``infowall demand apply``."""
     demand_id = (task.infowall_demand_id or "").strip()
     if not demand_id:
         return False
 
-    binary = resolve_infowall_binary()
-    if not binary:
+    infowall_bin = _resolve_infowall_bin()
+    if not infowall_bin:
+        logger.info(
+            "Skipping InfoWall sync for task_id=%s demand_id=%s: infowall binary not found",
+            task.id,
+            demand_id,
+        )
         return False
 
-    env = _infowall_subprocess_env()
-    try:
-        health_proc = await asyncio.create_subprocess_exec(
-            binary,
-            "health",
-            "--json",
-            env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+    env = _infowall_env()
+    if not await _check_infowall_writable(infowall_bin, env):
+        logger.info(
+            "Skipping InfoWall sync for task_id=%s demand_id=%s: InfoWall primary not writable",
+            task.id,
+            demand_id,
         )
-        health_out, _ = await asyncio.wait_for(health_proc.communicate(), timeout=5.0)
-        if health_proc.returncode != 0 or not health_out:
-            return False
-        health_data = json.loads(health_out.decode("utf-8", errors="replace"))
-        if not isinstance(health_data, dict):
-            return False
-        if health_data.get("instance_role") != "primary" or health_data.get("read_only") is True:
-            logger.warning(
-                "Skipping InfoWall writeback for task_id=%s: instance_role=%r read_only=%r",
-                task.id,
-                health_data.get("instance_role"),
-                health_data.get("read_only"),
-            )
-            return False
-    except Exception:
-        logger.debug("InfoWall health check failed for task_id=%s", task.id, exc_info=True)
         return False
 
     dedupe_key = f"claude-hub-pipeline:{task.id}:{milestone}"
-    extra_urls: list[str] = []
-    structured_links: list[dict[str, Any]] = []
-    for item in links or ():
-        if isinstance(item, str):
-            extra_urls.append(item)
-        elif isinstance(item, dict) and item.get("url"):
-            structured_links.append(dict(item))
-    for extracted in extract_canonical_links(summary, extra_urls=extra_urls):
-        if not any(existing.get("url") == extracted["url"] for existing in structured_links):
-            structured_links.append(extracted)
+    progress_id = f"prog-{hashlib.sha1(dedupe_key.encode('utf-8')).hexdigest()[:12]}"
 
-    branch_note = f" [pushed: {task.remote_pushed_ref}]" if task.remote_pushed_ref else ""
-    clean_summary = (summary or "").strip() or f"Task {task.title} reached {milestone}."
-    progress_text = f"[{milestone}] {task.title}{branch_note}: {clean_summary}"[:1500]
+    summary_clean = " ".join((summary or "").strip().split())
+    if len(summary_clean) > 360:
+        summary_clean = summary_clean[:357] + "..."
 
-    payload = {
+    parts = [f"[Claude Hub {milestone}] {task.title}"]
+    if task.remote_pushed_ref:
+        parts.append(f"branch={task.remote_pushed_ref}")
+    if summary_clean:
+        parts.append(summary_clean)
+    progress_text = " — ".join(parts)
+
+    structured_links = extract_canonical_links(summary or "", extra_urls=links)
+    progress_entry: dict[str, Any] = {
+        "id": progress_id,
+        "text": progress_text,
+        "dedupe_key": dedupe_key,
+        "source": "claude_hub_pipeline",
+    }
+    if structured_links:
+        progress_entry["links"] = structured_links
+
+    apply_payload = {
         "demands": [
             {
                 "id": demand_id,
-                "progress": [
-                    {
-                        "id": dedupe_key,
-                        "text": progress_text,
-                        "dedupe_key": dedupe_key,
-                        "links": structured_links,
-                    }
-                ],
+                "progress": [progress_entry],
             }
         ]
     }
-    payload_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    stdin_bytes = json.dumps(apply_payload, ensure_ascii=False).encode("utf-8")
 
     try:
-        apply_proc = await asyncio.create_subprocess_exec(
-            binary,
-            "demand",
-            "apply",
-            "--input",
-            "-",
-            "--json",
+        rc, out, err = await _run_bounded_subprocess(
+            [infowall_bin, "demand", "apply", "--input", "-", "--json"],
             env=env,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdin_bytes=stdin_bytes,
+            timeout=INFOWALL_SUBPROCESS_TIMEOUT_SECONDS,
         )
-        _out, err = await asyncio.wait_for(
-            apply_proc.communicate(input=payload_bytes), timeout=10.0
-        )
-        if apply_proc.returncode != 0:
-            logger.warning(
-                "InfoWall demand apply failed for task_id=%s demand_id=%s: %s",
-                task.id,
-                demand_id,
-                err.decode("utf-8", errors="replace")[:300],
-            )
-            return False
-        return True
     except Exception:
-        logger.debug("InfoWall demand apply errored for task_id=%s", task.id, exc_info=True)
+        logger.warning(
+            "InfoWall demand apply failed for task_id=%s demand_id=%s",
+            task.id,
+            demand_id,
+            exc_info=True,
+        )
         return False
+
+    if rc != 0:
+        logger.warning(
+            "InfoWall demand apply exited %s for task_id=%s demand_id=%s: %s",
+            rc,
+            task.id,
+            demand_id,
+            (err or out)[:300],
+        )
+        return False
+    return True

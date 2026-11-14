@@ -64,7 +64,51 @@ class _ReviewMixin(_WorkspaceManagerBase):
         workspace: Workspace,
         task: WorkspaceTask,
     ) -> ManagedSession:
+        from claude_hub.services.cross_reviewer import (
+            CrossReviewerTarget,
+            is_heterogeneous_reviewer,
+            resolve_cross_reviewer_target,
+        )
+
         task = self._require_workspace_execution(task)
+        placement = self._reviewer_placement(workspace, task)
+        worker = self.sessions.get(task.session_id) if task.session_id else None
+        expected_kind = worker.session_kind if worker is not None else task.session_kind
+        worker_agent_type = worker.agent_type if worker is not None else task.agent_type
+        worker_env = dict(worker.env) if worker is not None else {}
+        is_local_chat = (
+            placement["target"] == ExecutionTarget.LOCAL and expected_kind == SessionKind.CHAT
+        )
+
+        cross_target: CrossReviewerTarget | None = None
+        default_maso_model: str | None = None
+        if is_local_chat:
+            cross_target = await resolve_cross_reviewer_target(
+                worker_agent_type,
+                worker_env,
+            )
+            if cross_target is not None:
+                default_maso_model = cross_target.default_maso_model
+
+        has_heterogeneous_idle_candidate = is_local_chat and (
+            self._first_available_reviewer(
+                workspace.id,
+                target=placement["target"],
+                cwd=placement["cwd"],
+                remote_profile_id=placement["remote_profile_id"],
+                remote_cwd=placement["remote_cwd"],
+                session_kind=expected_kind,
+                worker_agent_type=worker_agent_type,
+                worker_env=worker_env,
+                default_maso_model=default_maso_model,
+                require_heterogeneous=True,
+            )
+            is not None
+        )
+        enforce_heterogeneity = is_local_chat and (
+            cross_target is not None or has_heterogeneous_idle_candidate
+        )
+
         if task.review_session_id:
             reviewer = self.sessions.get(task.review_session_id)
             if (
@@ -75,20 +119,26 @@ class _ReviewMixin(_WorkspaceManagerBase):
                 and not reviewer.chat_paused
                 and not self._reviewer_is_busy_with_other_task(reviewer, task.id)
                 and self._reviewer_matches_placement(reviewer, workspace, task)
+                and (
+                    not enforce_heterogeneity
+                    or is_heterogeneous_reviewer(
+                        worker_agent_type,
+                        worker_env,
+                        reviewer.agent_type,
+                        reviewer.env,
+                        default_maso_model=default_maso_model,
+                    )
+                )
             ):
                 return reviewer
             if reviewer and reviewer.status != ManagedSessionStatus.STOPPED:
                 logger.info(
-                    "Reviewer %s is unavailable or on a different checkout; trying an "
-                    "available reviewer for task_id=%s",
+                    "Reviewer %s is unavailable, homogeneous, or on a different checkout; "
+                    "trying an available reviewer for task_id=%s",
                     reviewer.id,
                     task.id,
                 )
-        placement = self._reviewer_placement(workspace, task)
-        worker = self.sessions.get(task.session_id) if task.session_id else None
-        expected_kind = worker.session_kind if worker is not None else task.session_kind
-        worker_agent_type = worker.agent_type if worker is not None else task.agent_type
-        worker_env = dict(worker.env) if worker is not None else {}
+
         reviewer = self._first_available_reviewer(
             workspace.id,
             target=placement["target"],
@@ -96,52 +146,52 @@ class _ReviewMixin(_WorkspaceManagerBase):
             remote_profile_id=placement["remote_profile_id"],
             remote_cwd=placement["remote_cwd"],
             session_kind=expected_kind,
-            worker_agent_type=(
-                worker_agent_type
-                if placement["target"] == ExecutionTarget.LOCAL
-                and expected_kind == SessionKind.CHAT
-                else None
-            ),
+            worker_agent_type=worker_agent_type if is_local_chat else None,
             worker_env=worker_env,
+            default_maso_model=default_maso_model,
+            require_heterogeneous=enforce_heterogeneity,
         )
         if reviewer:
             return reviewer
 
-        if placement["target"] == ExecutionTarget.LOCAL and expected_kind == SessionKind.CHAT:
-            from claude_hub.services.cross_reviewer import resolve_cross_reviewer_target
-
-            cross_target = await resolve_cross_reviewer_target(
-                worker_agent_type,
-                worker_env,
-            )
-            if cross_target is not None:
-                try:
-                    return await self.ensure_workspace_agent(
-                        workspace.id,
-                        EnsureWorkspaceAgentRequest(
-                            agent_type=cross_target.agent_type,
-                            session_kind=cross_target.session_kind,
-                            env=dict(cross_target.env),
-                            title=f"{workspace.name} Temporary Reviewer",
-                            role=WorkspaceSessionRole.REVIEWER,
-                            reuse_existing=False,
-                            cwd=placement["cwd"],
-                            target=placement["target"],
-                            remote_profile_id=placement["remote_profile_id"],
-                            remote_cwd=placement["remote_cwd"],
-                            remote_reconnect=None,
-                            ephemeral=True,
-                            caller_owned_ephemeral=False,
-                            env_preset=None,
-                        ),
-                    )
-                except Exception:
-                    logger.warning(
-                        "Failed to spawn heterogeneous cross-reviewer for task_id=%s; "
-                        "falling back to worker-inherited reviewer",
-                        task.id,
-                        exc_info=True,
-                    )
+        if is_local_chat and cross_target is not None:
+            try:
+                return await self.ensure_workspace_agent(
+                    workspace.id,
+                    EnsureWorkspaceAgentRequest(
+                        agent_type=cross_target.agent_type,
+                        session_kind=cross_target.session_kind,
+                        env=dict(cross_target.env),
+                        title=f"{workspace.name} Temporary Reviewer",
+                        role=WorkspaceSessionRole.REVIEWER,
+                        reuse_existing=False,
+                        cwd=placement["cwd"],
+                        target=placement["target"],
+                        remote_profile_id=placement["remote_profile_id"],
+                        remote_cwd=placement["remote_cwd"],
+                        remote_reconnect=None,
+                        ephemeral=True,
+                        caller_owned_ephemeral=False,
+                        env_preset=None,
+                    ),
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to spawn heterogeneous cross-reviewer for task_id=%s; "
+                    "falling back to homogeneous reviewer",
+                    task.id,
+                    exc_info=True,
+                )
+                fallback_idle = self._first_available_reviewer(
+                    workspace.id,
+                    target=placement["target"],
+                    cwd=placement["cwd"],
+                    remote_profile_id=placement["remote_profile_id"],
+                    remote_cwd=placement["remote_cwd"],
+                    session_kind=expected_kind,
+                )
+                if fallback_idle is not None:
+                    return fallback_idle
 
         # Inherit the worker's env preset so an auto-created reviewer launches
         # with the same (working) provider env as the session that produced the
@@ -672,7 +722,7 @@ class _ReviewMixin(_WorkspaceManagerBase):
         if workspace is None:
             return
 
-        if task.auto_push_remote and not task.remote_pushed_ref:
+        if task.auto_push_remote:
             worker = self.sessions.get(task.session_id) if task.session_id else None
             target_cwd = task.worktree_path or (
                 worker.workspace_path if worker and worker.workspace_path else workspace.path
@@ -682,16 +732,17 @@ class _ReviewMixin(_WorkspaceManagerBase):
                 task,
                 cwd=target_cwd,
             )
-            now = self._runtime_now()
-            task = self.tasks[task_id].model_copy(
-                update={
-                    "remote_pushed_ref": pushed_ref,
-                    "remote_push_error": push_error,
-                    "updated_at": now,
-                }
-            )
-            self.tasks[task_id] = task
-            self._save_state()
+            if pushed_ref != task.remote_pushed_ref or push_error != task.remote_push_error:
+                now = self._runtime_now()
+                task = self.tasks[task_id].model_copy(
+                    update={
+                        "remote_pushed_ref": pushed_ref,
+                        "remote_push_error": push_error,
+                        "updated_at": now,
+                    }
+                )
+                self.tasks[task_id] = task
+                self._save_state()
 
         task = self.tasks.get(task_id)
         if task is not None and task.infowall_demand_id:
@@ -731,39 +782,22 @@ class _ReviewMixin(_WorkspaceManagerBase):
             reviewer.env,
         )
         # Preserve legacy terminal-reviewer assertions on STANDARD tasks while
-        # immediately retiring temporary Chat / heterogeneous / recipe reviewers.
+        # retiring temporary Chat / heterogeneous / recipe reviewers under the
+        # canonical delete_session lock and fence checks.
         if (
             reviewer.session_kind == SessionKind.CHAT
             or task.recipe != WorkspaceTaskRecipe.STANDARD
             or heterogeneous
         ):
-            self.sessions.pop(reviewer.id, None)
-            self._save_state()
             try:
-                await ttyd_manager.delete_tab(reviewer.tab_id)
+                await self.delete_session(
+                    reviewer.id,
+                    allow_completed_review_for_task_id=task.id,
+                )
             except Exception:
                 logger.exception(
-                    "Failed to delete temporary reviewer tab after review_passed session_id=%s tab_id=%s",
+                    "Failed to delete temporary reviewer session after review_passed "
+                    "session_id=%s task_id=%s",
                     reviewer.id,
-                    reviewer.tab_id,
+                    task.id,
                 )
-            if reviewer.session_kind == SessionKind.CHAT:
-                try:
-                    from claude_hub.services.agent_stream import (
-                        discard_session_stream,
-                        fence_session_stream,
-                    )
-
-                    fenced = await fence_session_stream(reviewer.id)
-                    await discard_session_stream(
-                        reviewer.workspace_id,
-                        reviewer.id,
-                        acknowledged_call_ids=set(reviewer.delivered_call_ids),
-                        provider_fenced=fenced,
-                    )
-                except Exception:
-                    logger.debug(
-                        "Best-effort stream discard after review_passed for reviewer=%s",
-                        reviewer.id,
-                        exc_info=True,
-                    )

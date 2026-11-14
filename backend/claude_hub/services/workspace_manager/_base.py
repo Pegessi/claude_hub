@@ -55,6 +55,7 @@ if TYPE_CHECKING:
 
 class _WorkspaceManagerBase(_RuntimeHostContract):
     _dispatch_locks: dict[str, asyncio.Lock]
+    _task_start_locks: dict[str, asyncio.Lock]
     _feedback_automation_task: asyncio.Task[None] | None
     _feedback_chat_busy: Callable[[], bool] | None
     _feedback_started_at: datetime
@@ -636,7 +637,11 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
 
     @abstractmethod
     async def delete_session(
-        self, session_id: str, *, before_delete: Callable[[], bool] | None = None
+        self,
+        session_id: str,
+        *,
+        before_delete: Callable[[], bool] | None = None,
+        allow_completed_review_for_task_id: str | None = None,
     ) -> None: ...
 
     @abstractmethod
@@ -761,7 +766,11 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
 
     @abstractmethod
     def _non_terminal_tasks_referencing_session(
-        self, session_id: str, *, exclude_task_id: str | None = None
+        self,
+        session_id: str,
+        *,
+        exclude_task_id: str | None = None,
+        allow_completed_review_for_task_id: str | None = None,
     ) -> list[WorkspaceTask]: ...
 
     @abstractmethod
@@ -803,6 +812,8 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
         session_kind: SessionKind | None = None,
         worker_agent_type: AgentType | None = None,
         worker_env: dict[str, str] | None = None,
+        default_maso_model: str | None = None,
+        require_heterogeneous: bool = False,
     ) -> Optional[ManagedSession]: ...
 
     @abstractmethod

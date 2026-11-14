@@ -438,6 +438,15 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                         )
                     ):
                         await self._best_effort_delete_session(worker_sess.id)
+                if current.review_session_id:
+                    reviewer_sess = self.sessions.get(current.review_session_id)
+                    if (
+                        reviewer_sess is not None
+                        and reviewer_sess.ephemeral
+                        and not reviewer_sess.caller_owned_ephemeral
+                        and reviewer_sess.role == WorkspaceSessionRole.REVIEWER
+                    ):
+                        await self._best_effort_delete_session(reviewer_sess.id)
             elif rename_session_id is not None:
                 session = self.sessions.get(rename_session_id)
                 if (

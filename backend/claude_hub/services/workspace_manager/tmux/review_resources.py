@@ -128,6 +128,8 @@ class _ReviewResourcesMixin(_WorkspaceManagerBase):
         session_kind: SessionKind | None = None,
         worker_agent_type: "AgentType | None" = None,
         worker_env: dict[str, str] | None = None,
+        default_maso_model: str | None = None,
+        require_heterogeneous: bool = False,
     ) -> Optional[ManagedSession]:
         """Internal review dispatch only — not CLI agent-create reuse.
 
@@ -168,6 +170,18 @@ class _ReviewResourcesMixin(_WorkspaceManagerBase):
                 )
             )
         ]
+        if require_heterogeneous and worker_agent_type is not None:
+            reviewers = [
+                session
+                for session in reviewers
+                if is_heterogeneous_reviewer(
+                    worker_agent_type,
+                    worker_env or {},
+                    session.agent_type,
+                    session.env,
+                    default_maso_model=default_maso_model,
+                )
+            ]
         if not reviewers:
             return None
         return sorted(
@@ -180,6 +194,7 @@ class _ReviewResourcesMixin(_WorkspaceManagerBase):
                             worker_env or {},
                             session.agent_type,
                             session.env,
+                            default_maso_model=default_maso_model,
                         )
                     )
                     if worker_agent_type is not None

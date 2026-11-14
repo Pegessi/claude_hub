@@ -432,3 +432,117 @@ async def test_workspace_manager_prefers_heterogeneous_reviewer_and_cleans_up_ep
     assert after_pass.review_session_id == spawned_reviewer_id
     assert spawned_reviewer_id not in manager.sessions
     assert spawned_reviewer.tab_id in deleted_tabs
+
+
+@pytest.mark.asyncio
+async def test_implicit_default_maso_worker_rejects_same_model_reviewer_and_spawns_cross_reviewer(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "state"
+    root.mkdir()
+    index = root / "index.json"
+    monkeypatch.setattr(_wm, "STATE_ROOT", root)
+    monkeypatch.setattr(_wm, "INDEX_FILE", index)
+    monkeypatch.setattr(_wm._persistence, "INDEX_FILE", index)
+    monkeypatch.setattr(_wm._state, "INDEX_FILE", index)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    tabs = _wm.ttyd_manager
+    monkeypatch.setattr(tabs, "processes", {})
+    monkeypatch.setattr(tabs, "_tab_order", [])
+    monkeypatch.setattr(tabs, "_status_snapshots", {})
+    monkeypatch.setattr(tabs, "_status_cache", {})
+    monkeypatch.setattr(tabs, "_start_locks", {})
+    monkeypatch.setattr(tabs, "_save_state", lambda: None)
+    monkeypatch.setattr(tabs, "_save_order", lambda: None)
+    monkeypatch.setattr(tabs, "_get_next_port", lambda: 24500 + len(tabs.processes))
+
+    async def fake_discover_maso(_env: dict[str, str]):
+        return (
+            "http://127.0.0.1:11004",
+            _maso_catalog(),
+            "gemini-4-argon_reasoning_high",
+        )
+
+    from claude_hub.services import maso_discovery
+
+    monkeypatch.setattr(maso_discovery, "discover_maso_service", fake_discover_maso)
+    monkeypatch.setattr(cross_reviewer, "discover_maso_service", fake_discover_maso)
+    monkeypatch.setattr(managed_chat, "send_message", lambda *_a, **_k: None)
+    monkeypatch.setattr(managed_chat, "delivery_state", lambda _s, _cid: "accepted")
+    monkeypatch.setattr(managed_chat, "is_turn_running", lambda _s: False)
+    monkeypatch.setattr(managed_chat, "runtime_status", lambda _s: AgentRuntimeStatus.IDLE)
+
+    # 1. Direct unit test: MASO worker with MASO_MODEL unset uses discovered default_model
+    resolved = await resolve_cross_reviewer_target(
+        AgentType.MASO,
+        {"MASO_BASE_URL": "http://127.0.0.1:11004"},
+    )
+    assert resolved is not None
+    assert resolved.env["MASO_MODEL"] == DEFAULT_ASTRA_REVIEW_MODEL
+    assert resolved.default_maso_model == "gemini-4-argon_reasoning_high"
+
+    manager = WorkspaceManager()
+    monkeypatch.setattr(manager, "_build_session_bootstrap_prompt", lambda *_a, **_k: "")
+    workspace = manager.create_workspace(
+        WorkspaceCreate(name="Implicit Default MASO", path=str(repo), target=ExecutionTarget.LOCAL)
+    )
+
+    # Create a MASO worker without explicit MASO_MODEL in env (uses service default Argon)
+    worker = await manager.ensure_workspace_agent(
+        workspace.id,
+        EnsureWorkspaceAgentRequest(
+            agent_type=AgentType.MASO,
+            session_kind=SessionKind.CHAT,
+            role=WorkspaceSessionRole.ORCHESTRATOR,
+            cwd=str(repo),
+            env={"MASO_BASE_URL": "http://127.0.0.1:11004"},
+            reuse_existing=False,
+        ),
+    )
+    # Create an idle Argon reviewer (homogeneous with the worker's effective default model)
+    idle_argon_reviewer = await manager.ensure_workspace_agent(
+        workspace.id,
+        EnsureWorkspaceAgentRequest(
+            agent_type=AgentType.MASO,
+            session_kind=SessionKind.CHAT,
+            role=WorkspaceSessionRole.REVIEWER,
+            cwd=str(repo),
+            env={
+                "MASO_BASE_URL": "http://127.0.0.1:11004",
+                "MASO_MODEL": "gemini-4-argon_reasoning_high",
+            },
+            reuse_existing=False,
+        ),
+    )
+    for s_id in (worker.id, idle_argon_reviewer.id):
+        manager.sessions[s_id] = manager.sessions[s_id].model_copy(
+            update={"status": ManagedSessionStatus.IDLE, "runtime_status": AgentRuntimeStatus.IDLE}
+        )
+
+    task = manager.create_task(
+        workspace.id,
+        WorkspaceTaskCreate(
+            title="Implicit default MASO task",
+            prompt="Check cross reviewer selection",
+            agent_type=AgentType.MASO,
+            session_kind=SessionKind.CHAT,
+            auto_worktree=False,
+            auto_push_remote=False,
+        ),
+    )
+    # Even if task.review_session_id was previously set to the homogeneous Argon reviewer,
+    # _select_or_create_reviewer must reject it and spawn a heterogeneous Astra reviewer!
+    manager.tasks[task.id] = task.model_copy(
+        update={"session_id": worker.id, "review_session_id": idle_argon_reviewer.id}
+    )
+    selected_reviewer = await manager._select_or_create_reviewer(
+        workspace,
+        manager.tasks[task.id],
+    )
+    assert selected_reviewer.id != idle_argon_reviewer.id
+    assert selected_reviewer.agent_type == AgentType.MASO
+    assert selected_reviewer.env["MASO_MODEL"] == DEFAULT_ASTRA_REVIEW_MODEL

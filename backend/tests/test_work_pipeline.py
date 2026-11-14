@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import subprocess
 from datetime import datetime
@@ -20,6 +21,7 @@ from claude_hub.models import (
     AgentReportState,
     AgentRuntimeStatus,
     AgentType,
+    ContinueTaskRequest,
     EnsureWorkspaceAgentRequest,
     ExecutionTarget,
     GoalPacket,
@@ -39,6 +41,8 @@ from claude_hub.models import (
 from claude_hub.services import cross_reviewer, managed_chat, maso_discovery
 from claude_hub.services.dot import DotService, DotStore, reset_dot_service
 from claude_hub.services.work_pipeline import (
+    _infowall_env,
+    _run_bounded_subprocess,
     push_task_feature_branch,
     read_infowall_demand_summary,
     sync_task_progress_to_infowall,
@@ -370,6 +374,72 @@ async def test_spec_implement_review_worktree_cross_review_and_remote_push(
         text=True,
     ).stdout.strip()
     assert origin_sha == head_sha
+
+    # Cycle 2: reopen the task via continue_task, commit a second change (commit B),
+    # and verify the second REVIEW_PASSED re-pushes commit B and updates remote_pushed_ref!
+    await manager.continue_task(
+        task.id,
+        ContinueTaskRequest(message="Add second helper constant"),
+    )
+    (wt_path / "helper.py").write_text("VALUE = 42\nSECOND = 99\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(wt_path), "add", "helper.py"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(wt_path), "commit", "-m", "feat: add SECOND constant"],
+        check=True,
+        capture_output=True,
+    )
+    head_sha_b = subprocess.run(
+        ["git", "-C", str(wt_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head_sha_b != head_sha
+
+    await manager.create_report(
+        worker.id,
+        AgentReportCreate(
+            task_id=task.id,
+            state=AgentReportState.COMPLETED,
+            call_id="work-done-2",
+            message="Added SECOND constant",
+            changed_files=["helper.py"],
+            validation="pytest passed",
+            risks="none",
+            review_decision=ReviewDecision.REQUEST,
+        ),
+    )
+    in_review_2 = manager.tasks[task.id]
+    assert in_review_2.status == WorkspaceTaskStatus.REVIEW
+    reviewer_2_id = in_review_2.review_session_id
+    assert reviewer_2_id is not None
+
+    await manager.create_report(
+        reviewer_2_id,
+        AgentReportCreate(
+            task_id=task.id,
+            state=AgentReportState.REVIEW_PASSED,
+            call_id="rev-pass-2",
+            message="Verified cycle 2 commit B.",
+        ),
+    )
+
+    reviewed_2 = manager.tasks[task.id]
+    assert reviewed_2.remote_push_error is None
+    assert reviewed_2.remote_pushed_ref == f"origin/{started.worktree_branch}@{head_sha_b[:7]}"
+    origin_sha_b = subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(bare_origin),
+            "rev-parse",
+            f"refs/heads/{started.worktree_branch}",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert origin_sha_b == head_sha_b
 
     # Human acceptance transitions task to DONE and cleans up the ephemeral worktree worker session
     done_task = await manager.update_task(
@@ -724,3 +794,187 @@ async def test_dot_delegate_maso_model_recipe_and_cli(
     assert task_body["auto_worktree"] is False
     assert task_body["auto_push_remote"] is False
     assert "task_mode" not in task_body
+
+
+@pytest.mark.asyncio
+async def test_fail_closed_auto_worktree_concurrent_start_and_rollback_compensation(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    manager, deleted_tabs = _setup_fake_chat_runtime(monkeypatch, tmp_path)
+
+    # 1. Non-git workspace directory with auto_worktree=True MUST fail closed (never fall back to workspace.path)
+    non_git_dir = tmp_path / "not_a_git_repo"
+    non_git_dir.mkdir()
+    ws_non_git = manager.create_workspace(
+        WorkspaceCreate(name="Non-Git Workspace", path=str(non_git_dir))
+    )
+    task_non_git = manager.create_task(
+        ws_non_git.id,
+        WorkspaceTaskCreate(
+            title="Must fail closed",
+            prompt="Should not run in non-git primary path",
+            agent_type=AgentType.CLAUDE,
+            session_kind=SessionKind.CHAT,
+            recipe=WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW,
+        ),
+    )
+    with pytest.raises(RuntimeError, match="not a valid Git repository"):
+        await manager.start_task(task_non_git.id)
+    assert manager.tasks[task_non_git.id].status == WorkspaceTaskStatus.TODO
+    assert manager.tasks[task_non_git.id].session_id is None
+    assert len(manager.sessions) == 0
+
+    # 2. Failed start_task (bad related_task_id) must reject before leaking any ephemeral session
+    repo, _ = _init_git_repo_with_bare_origin(tmp_path)
+    ws = manager.create_workspace(
+        WorkspaceCreate(name="Concurrency Repo", path=str(repo), default_branch="main")
+    )
+    task_bad_rel = manager.create_task(
+        ws.id,
+        WorkspaceTaskCreate(
+            title="Bad related task",
+            prompt="Should fail without leaking session",
+            agent_type=AgentType.CLAUDE,
+            session_kind=SessionKind.CHAT,
+            recipe=WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW,
+        ),
+    )
+    with pytest.raises(KeyError):
+        await manager.start_task(
+            task_bad_rel.id,
+            StartTaskRequest(related_task_id="nonexistent-related-id"),
+        )
+    assert len(manager.sessions) == 0
+
+    # Also verify compensation if _choose_dispatch_target raises after worktree agent creation
+    orig_choose = manager._choose_dispatch_target
+
+    async def failing_choose(*_a, **_k):
+        raise RuntimeError("dispatch target failure after ephemeral creation")
+
+    monkeypatch.setattr(manager, "_choose_dispatch_target", failing_choose)
+    with pytest.raises(RuntimeError, match="dispatch target failure"):
+        await manager.start_task(task_bad_rel.id)
+    assert len(manager.sessions) == 0
+    assert len(deleted_tabs) == 1
+    monkeypatch.setattr(manager, "_choose_dispatch_target", orig_choose)
+
+    # 3. Concurrent asyncio.gather(start_task, start_task) on the same auto_worktree task
+    # serializes via _task_start_locks and leaves exactly 1 worker session.
+    task_concurrent = manager.create_task(
+        ws.id,
+        WorkspaceTaskCreate(
+            title="Concurrent start task",
+            prompt="Run concurrently",
+            agent_type=AgentType.CLAUDE,
+            session_kind=SessionKind.CHAT,
+            recipe=WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW,
+        ),
+    )
+    res1, res2 = await asyncio.gather(
+        manager.start_task(task_concurrent.id),
+        manager.start_task(task_concurrent.id),
+    )
+    assert res1.session_id == res2.session_id
+    assert res1.session_id is not None
+    assert len(manager.sessions) == 1
+
+
+@pytest.mark.asyncio
+async def test_dot_delegate_request_key_idempotency_with_changing_demand_summary_and_subprocess_reaping(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo, _ = _init_git_repo_with_bare_origin(tmp_path)
+    manager, _ = _setup_fake_chat_runtime(monkeypatch, tmp_path)
+
+    from claude_hub.services import work_pipeline
+    from claude_hub.services import workspace_manager as global_wm
+
+    ws = manager.create_workspace(
+        WorkspaceCreate(name="Idempotency Repo", path=str(repo), default_branch="main")
+    )
+    monkeypatch.setattr(global_wm, "workspaces", manager.workspaces)
+    monkeypatch.setattr(global_wm, "tasks", manager.tasks)
+    monkeypatch.setattr(global_wm, "sessions", manager.sessions)
+    monkeypatch.setattr(global_wm, "register_task", manager.register_task)
+    monkeypatch.setattr(global_wm, "ensure_workspace_agent", manager.ensure_workspace_agent)
+    monkeypatch.setattr(global_wm, "start_task", manager.start_task)
+    monkeypatch.setattr(global_wm, "delete_session", manager.delete_session)
+
+    call_count = 0
+
+    async def changing_demand_summary(demand_id: str) -> str | None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return f"InfoWall Demand [{demand_id}]: Version 1 summary"
+        return f"InfoWall Demand [{demand_id}]: Version 2 mutated summary"
+
+    monkeypatch.setattr(work_pipeline, "read_infowall_demand_summary", changing_demand_summary)
+
+    dot_store = DotStore(tmp_path / "dot_idem")
+    dot_store.ensure()
+    dot_store.update_state(tab_id="dot-tab-idem")
+    dot_service = DotService(dot_store)
+    reset_dot_service(dot_service)
+    try:
+        first = await dot_service.delegate(
+            workspace_id=ws.id,
+            title="Idempotent demand delegation",
+            goal="Verify request_key replay safety",
+            done_when=["pytest passes"],
+            output="out.txt",
+            demand_id="dem-idem-1",
+            request_key="req-idem-key-1",
+            start=False,
+            confirm=True,
+            actor_key="actor-idem",
+        )
+        second = await dot_service.delegate(
+            workspace_id=ws.id,
+            title="Idempotent demand delegation",
+            goal="Verify request_key replay safety",
+            done_when=["pytest passes"],
+            output="out.txt",
+            demand_id="dem-idem-1",
+            request_key="req-idem-key-1",
+            start=False,
+            confirm=True,
+            actor_key="actor-idem",
+        )
+        assert first["work"]["task_id"] == second["work"]["task_id"]
+        assert call_count == 1
+    finally:
+        reset_dot_service(None)
+
+    # Verify _infowall_env sets NO_PROXY for loopback URLs
+    monkeypatch.setenv("INFOWALL_URL", "http://127.0.0.1:18899")
+    monkeypatch.setenv("HTTP_PROXY", "http://10.0.0.1:8080")
+    iw_env = _infowall_env()
+    assert iw_env["NO_PROXY"] == "127.0.0.1,localhost,::1"
+    assert iw_env["no_proxy"] == "127.0.0.1,localhost,::1"
+
+    # Verify _run_bounded_subprocess kills and reaps timed-out process groups cleanly
+    pid_file = tmp_path / "child.pid"
+    rc, _out, err = await _run_bounded_subprocess(
+        [
+            "python3",
+            "-c",
+            (
+                f"import os, time, pathlib; "
+                f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); "
+                f"time.sleep(30)"
+            ),
+        ],
+        timeout=0.3,
+    )
+    assert rc == 124
+    assert "timed out" in err
+    if pid_file.exists():
+        child_pid = int(pid_file.read_text().strip())
+        with pytest.raises(ProcessLookupError):
+            os.kill(child_pid, 0)
