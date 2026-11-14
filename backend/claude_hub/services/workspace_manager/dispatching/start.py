@@ -65,6 +65,72 @@ class _TaskStartMixin(_WorkspaceManagerBase):
         require_task_dependencies(self.tasks, task)
         validate_workspace_session_surface(payload.agent_type or task.agent_type, task.session_kind)
         selected_kind = task.session_kind
+
+        if workspace.target == ExecutionTarget.LOCAL and task.auto_worktree:
+            from claude_hub.services.work_pipeline import provision_task_worktree
+            from claude_hub.services.workspace_identity import resolve_path
+
+            if not task.worktree_path:
+                provisioned = await provision_task_worktree(workspace, task)
+                if provisioned is not None:
+                    wt_path, wt_branch = provisioned
+                    task = task.model_copy(
+                        update={
+                            "worktree_path": wt_path,
+                            "worktree_branch": wt_branch,
+                            "updated_at": self._runtime_now(),
+                        }
+                    )
+                    self.tasks[task.id] = task
+                    self._save_workspace_state(workspace.id)
+
+            task = self.tasks[task_id]
+            if task.worktree_path:
+                wanted_wt = resolve_path(task.worktree_path)
+                selected_in_wt = False
+                inherited_env: dict[str, str] = {}
+                inherited_preset: str | None = None
+                if payload.target_session_id:
+                    candidate = self.sessions.get(payload.target_session_id)
+                    if candidate is not None and candidate.workspace_id == workspace.id:
+                        inherited_env = dict(candidate.env)
+                        inherited_preset = candidate.env_preset
+                        if (
+                            candidate.role == WorkspaceSessionRole.ORCHESTRATOR
+                            and candidate.session_kind == task.session_kind
+                            and resolve_path(candidate.workspace_path or workspace.path)
+                            == wanted_wt
+                        ):
+                            selected_in_wt = True
+                elif task.session_id:
+                    candidate = self.sessions.get(task.session_id)
+                    if (
+                        candidate is not None
+                        and candidate.workspace_id == workspace.id
+                        and candidate.role == WorkspaceSessionRole.ORCHESTRATOR
+                        and candidate.session_kind == task.session_kind
+                        and resolve_path(candidate.workspace_path or workspace.path) == wanted_wt
+                    ):
+                        payload = payload.model_copy(update={"target_session_id": candidate.id})
+                        selected_in_wt = True
+
+                if not selected_in_wt:
+                    worktree_agent = await self.ensure_workspace_agent(
+                        workspace.id,
+                        EnsureWorkspaceAgentRequest(
+                            agent_type=payload.agent_type or task.agent_type,
+                            session_kind=selected_kind,
+                            role=WorkspaceSessionRole.ORCHESTRATOR,
+                            reuse_existing=False,
+                            ephemeral=True,
+                            caller_owned_ephemeral=True,
+                            cwd=task.worktree_path,
+                            env=inherited_env,
+                            env_preset=inherited_preset,
+                        ),
+                    )
+                    payload = payload.model_copy(update={"target_session_id": worktree_agent.id})
+
         if payload.target_session_id:
             selected = self.sessions.get(payload.target_session_id)
             if selected is None or selected.workspace_id != workspace.id:

@@ -87,6 +87,8 @@ class _ReviewMixin(_WorkspaceManagerBase):
         placement = self._reviewer_placement(workspace, task)
         worker = self.sessions.get(task.session_id) if task.session_id else None
         expected_kind = worker.session_kind if worker is not None else task.session_kind
+        worker_agent_type = worker.agent_type if worker is not None else task.agent_type
+        worker_env = dict(worker.env) if worker is not None else {}
         reviewer = self._first_available_reviewer(
             workspace.id,
             target=placement["target"],
@@ -94,9 +96,53 @@ class _ReviewMixin(_WorkspaceManagerBase):
             remote_profile_id=placement["remote_profile_id"],
             remote_cwd=placement["remote_cwd"],
             session_kind=expected_kind,
+            worker_agent_type=(
+                worker_agent_type
+                if placement["target"] == ExecutionTarget.LOCAL
+                and expected_kind == SessionKind.CHAT
+                else None
+            ),
+            worker_env=worker_env,
         )
         if reviewer:
             return reviewer
+
+        if placement["target"] == ExecutionTarget.LOCAL and expected_kind == SessionKind.CHAT:
+            from claude_hub.services.cross_reviewer import resolve_cross_reviewer_target
+
+            cross_target = await resolve_cross_reviewer_target(
+                worker_agent_type,
+                worker_env,
+            )
+            if cross_target is not None:
+                try:
+                    return await self.ensure_workspace_agent(
+                        workspace.id,
+                        EnsureWorkspaceAgentRequest(
+                            agent_type=cross_target.agent_type,
+                            session_kind=cross_target.session_kind,
+                            env=dict(cross_target.env),
+                            title=f"{workspace.name} Temporary Reviewer",
+                            role=WorkspaceSessionRole.REVIEWER,
+                            reuse_existing=False,
+                            cwd=placement["cwd"],
+                            target=placement["target"],
+                            remote_profile_id=placement["remote_profile_id"],
+                            remote_cwd=placement["remote_cwd"],
+                            remote_reconnect=None,
+                            ephemeral=True,
+                            caller_owned_ephemeral=False,
+                            env_preset=None,
+                        ),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to spawn heterogeneous cross-reviewer for task_id=%s; "
+                        "falling back to worker-inherited reviewer",
+                        task.id,
+                        exc_info=True,
+                    )
+
         # Inherit the worker's env preset so an auto-created reviewer launches
         # with the same (working) provider env as the session that produced the
         # task. Without this the reviewer starts on the default env, which for
@@ -397,6 +443,8 @@ class _ReviewMixin(_WorkspaceManagerBase):
             )
 
         if report.state != AgentReportState.REVIEW_FAILED:
+            if report.state == AgentReportState.REVIEW_PASSED:
+                await self._after_review_passed_effects(task.id, reviewer.id, report)
             return
         updated_task = self.tasks[task.id]
         if updated_task.task_mode == WorkspaceTaskMode.AUTONOMOUS:
@@ -603,3 +651,119 @@ class _ReviewMixin(_WorkspaceManagerBase):
                 report_state=AgentReportState.NEEDS_INPUT,
                 sampled_at=self._runtime_now(),
             )
+
+    async def _after_review_passed_effects(
+        self,
+        task_id: str,
+        reviewer_id: str,
+        report: AgentReport,
+    ) -> None:
+        """Execute post-REVIEW_PASSED pipeline actions: remote push, InfoWall sync, and ephemeral reviewer teardown."""
+        from claude_hub.services.cross_reviewer import is_heterogeneous_reviewer
+        from claude_hub.services.work_pipeline import (
+            push_task_feature_branch,
+            sync_task_progress_to_infowall,
+        )
+
+        task = self.tasks.get(task_id)
+        if task is None or not self._workspace_owns_task(task):
+            return
+        workspace = self.workspaces.get(task.workspace_id)
+        if workspace is None:
+            return
+
+        if task.auto_push_remote and not task.remote_pushed_ref:
+            worker = self.sessions.get(task.session_id) if task.session_id else None
+            target_cwd = task.worktree_path or (
+                worker.workspace_path if worker and worker.workspace_path else workspace.path
+            )
+            pushed_ref, push_error = await push_task_feature_branch(
+                workspace,
+                task,
+                cwd=target_cwd,
+            )
+            now = self._runtime_now()
+            task = self.tasks[task_id].model_copy(
+                update={
+                    "remote_pushed_ref": pushed_ref,
+                    "remote_push_error": push_error,
+                    "updated_at": now,
+                }
+            )
+            self.tasks[task_id] = task
+            self._save_state()
+
+        task = self.tasks.get(task_id)
+        if task is not None and task.infowall_demand_id:
+            extra_links = list(report.artifact_refs or [])
+            synced = await sync_task_progress_to_infowall(
+                task,
+                milestone="review_passed",
+                summary=report.message,
+                links=extra_links,
+            )
+            if synced and task_id in self.tasks:
+                now = self._runtime_now()
+                self.tasks[task_id] = self.tasks[task_id].model_copy(
+                    update={"infowall_synced_at": now, "updated_at": now}
+                )
+                self._save_state()
+
+        task = self.tasks.get(task_id)
+        reviewer = self.sessions.get(reviewer_id)
+        if task is None or reviewer is None:
+            return
+        if (
+            reviewer.role != WorkspaceSessionRole.REVIEWER
+            or not reviewer.ephemeral
+            or reviewer.caller_owned_ephemeral
+            or self._reviewer_is_busy_with_other_task(reviewer, task.id)
+        ):
+            return
+
+        worker = self.sessions.get(task.session_id) if task.session_id else None
+        worker_agent_type = worker.agent_type if worker is not None else task.agent_type
+        worker_env = dict(worker.env) if worker is not None else {}
+        heterogeneous = is_heterogeneous_reviewer(
+            worker_agent_type,
+            worker_env,
+            reviewer.agent_type,
+            reviewer.env,
+        )
+        # Preserve legacy terminal-reviewer assertions on STANDARD tasks while
+        # immediately retiring temporary Chat / heterogeneous / recipe reviewers.
+        if (
+            reviewer.session_kind == SessionKind.CHAT
+            or task.recipe != WorkspaceTaskRecipe.STANDARD
+            or heterogeneous
+        ):
+            self.sessions.pop(reviewer.id, None)
+            self._save_state()
+            try:
+                await ttyd_manager.delete_tab(reviewer.tab_id)
+            except Exception:
+                logger.exception(
+                    "Failed to delete temporary reviewer tab after review_passed session_id=%s tab_id=%s",
+                    reviewer.id,
+                    reviewer.tab_id,
+                )
+            if reviewer.session_kind == SessionKind.CHAT:
+                try:
+                    from claude_hub.services.agent_stream import (
+                        discard_session_stream,
+                        fence_session_stream,
+                    )
+
+                    fenced = await fence_session_stream(reviewer.id)
+                    await discard_session_stream(
+                        reviewer.workspace_id,
+                        reviewer.id,
+                        acknowledged_call_ids=set(reviewer.delivered_call_ids),
+                        provider_fenced=fenced,
+                    )
+                except Exception:
+                    logger.debug(
+                        "Best-effort stream discard after review_passed for reviewer=%s",
+                        reviewer.id,
+                        exc_info=True,
+                    )

@@ -145,6 +145,12 @@ class _ReportEventsMixin(_InternalReportHandlingMixin):
         if task.system_internal:
             await self._handle_internal_task_report(task, session, report)
             return
+        if task.recipe == WorkspaceTaskRecipe.TRIAGE_DIAGNOSE and report.state in {
+            AgentReportState.COMPLETED,
+            AgentReportState.READY_FOR_REVIEW,
+        }:
+            await self._handle_triage_diagnose_completion(task, session, report)
+            return
         if self._is_goal_packet_approval_review(task, report):
             await self._request_task_review(task, report)
             return
@@ -213,7 +219,11 @@ class _ReportEventsMixin(_InternalReportHandlingMixin):
                 self._mark_task_review_skipped(task, report)
             return
         evidence_gaps = self._completion_evidence_gaps(task, report)
-        if report.review_decision == ReviewDecision.SKIP and evidence_gaps:
+        if (
+            task.recipe != WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW
+            and report.review_decision == ReviewDecision.SKIP
+            and evidence_gaps
+        ):
             await self._request_goal_packet_supplement(task, session, report, evidence_gaps)
             return
         if task.task_mode == WorkspaceTaskMode.AUTONOMOUS:

@@ -8,7 +8,6 @@ from claude_hub.services.dot.runtime.common import (
     _QUESTION_REPORT_STATES,
     _TERMINAL_TASK_STATES,
     BRIEF_TEMPLATE,
-    DEFAULT_STALL_HOURS,
     REVIEW_CAUSES,
     REVIEW_VERDICTS,
     STATS_WINDOW,
@@ -28,7 +27,6 @@ from claude_hub.services.dot.runtime.common import (
     _worker_report,
     _worker_return,
     asyncio,
-    datetime,
     lesson_score,
     lint_brief,
     logger,
@@ -36,7 +34,6 @@ from claude_hub.services.dot.runtime.common import (
     same_rule,
     session_rules,
     time,
-    timedelta,
 )
 from claude_hub.services.dot.runtime.session import DotSessionService
 
@@ -101,6 +98,11 @@ class DotWorkService(DotSessionService, ABC):
         constraints: str = "",
         agent_type: str = "codex",
         task_mode: Optional[str] = None,
+        model: Optional[str] = None,
+        env_preset: Optional[str] = None,
+        recipe: Optional[str] = None,
+        demand_id: Optional[str] = None,
+        ephemeral: Optional[bool] = None,
         start: bool = True,
         request_key: Optional[str] = None,
         stall_hours: Optional[float] = None,
@@ -117,18 +119,35 @@ class DotWorkService(DotSessionService, ABC):
         """
         from ....models.schemas import (
             AgentType,
+            EnsureWorkspaceAgentRequest,
+            SessionKind,
             StartTaskRequest,
             TaskSourceReference,
             WorkspaceSessionRole,
             WorkspaceTaskCreate,
             WorkspaceTaskMode,
+            WorkspaceTaskRecipe,
         )
         from ... import workspace_manager
+        from ...agent_stream.providers.spec import get_spec
+        from ...maso_discovery import discover_maso_service
+        from ...work_pipeline import provision_task_worktree, read_infowall_demand_summary
         from ...workspace_manager._task_execution import TaskExecutionConflict
 
         checks = [" ".join(item.split()) for item in done_when if item.strip()]
         if not title.strip() or not goal.strip() or not checks:
             raise ValueError("title, goal and done_when are required")
+
+        cleaned_demand_id = (
+            demand_id.strip() if isinstance(demand_id, str) and demand_id.strip() else None
+        )
+        if cleaned_demand_id:
+            demand_summary = await read_infowall_demand_summary(cleaned_demand_id)
+            if demand_summary:
+                context = (
+                    f"{context.strip()}\n\n{demand_summary}" if context.strip() else demand_summary
+                )
+
         session_kind = None
         if session_id:
             target = workspace_manager.sessions.get(session_id)
@@ -141,6 +160,23 @@ class DotWorkService(DotSessionService, ABC):
             # The task runs as that agent, on its surface (terminal or Chat).
             agent_type = getattr(target.agent_type, "value", str(target.agent_type))
             session_kind = target.session_kind
+        else:
+            parsed_agent = AgentType(agent_type)
+            if (
+                parsed_agent in {AgentType.MASO, AgentType.ANTIGRAVITY}
+                or model
+                or env_preset
+                or ephemeral is not None
+                or recipe == "triage_diagnose"
+            ) and parsed_agent in {
+                AgentType.CLAUDE,
+                AgentType.CODEX,
+                AgentType.CURSOR,
+                AgentType.MASO,
+                AgentType.ANTIGRAVITY,
+            }:
+                session_kind = SessionKind.CHAT
+
         self.store.ensure()
         warnings = lint_brief(done_when=checks, context=context, output=output)
         replay = bool(request_key) and any(
@@ -168,6 +204,10 @@ class DotWorkService(DotSessionService, ABC):
             fields["source"] = TaskSourceReference(kind="chat", tab_id=tab_id)
         if task_mode:
             fields["task_mode"] = WorkspaceTaskMode(task_mode)
+        if recipe:
+            fields["recipe"] = WorkspaceTaskRecipe(recipe)
+        if cleaned_demand_id:
+            fields["infowall_demand_id"] = cleaned_demand_id
         if session_kind is not None:
             fields["session_kind"] = session_kind
         task, _replayed = await workspace_manager.register_task(
@@ -195,10 +235,64 @@ class DotWorkService(DotSessionService, ABC):
         try:
             if start and task.status.value == "todo":
                 try:
+                    target_session_id = session_id
+                    if not target_session_id and (
+                        model
+                        or env_preset
+                        or ephemeral is not None
+                        or AgentType(agent_type) == AgentType.MASO
+                    ):
+                        ws_obj = getattr(workspace_manager, "workspaces", {}).get(workspace_id)
+                        if (
+                            ws_obj is not None
+                            and getattr(task, "auto_worktree", False)
+                            and not getattr(task, "worktree_path", None)
+                        ):
+                            provisioned = await provision_task_worktree(ws_obj, task)
+                            if provisioned is not None:
+                                wt_path, wt_branch = provisioned
+                                if hasattr(task, "model_copy"):
+                                    task = task.model_copy(
+                                        update={
+                                            "worktree_path": wt_path,
+                                            "worktree_branch": wt_branch,
+                                        }
+                                    )
+                                    if task.id in getattr(workspace_manager, "tasks", {}):
+                                        workspace_manager.tasks[task.id] = task
+                        agent_env: dict[str, str] = {}
+                        parsed_agent = AgentType(agent_type)
+                        if parsed_agent == AgentType.MASO:
+                            base_url, _models, _default = await discover_maso_service(agent_env)
+                            agent_env["MASO_BASE_URL"] = base_url
+                        if model:
+                            spec = get_spec(parsed_agent)
+                            if spec.model_env_key:
+                                agent_env[spec.model_env_key] = model.strip()
+                        use_ephemeral = True if ephemeral is None else bool(ephemeral)
+                        target_cwd = getattr(task, "worktree_path", None) or (
+                            ws_obj.path if ws_obj is not None else None
+                        )
+                        created_session = await workspace_manager.ensure_workspace_agent(
+                            workspace_id,
+                            EnsureWorkspaceAgentRequest(
+                                agent_type=parsed_agent,
+                                session_kind=session_kind or SessionKind.CHAT,
+                                role=WorkspaceSessionRole.ORCHESTRATOR,
+                                reuse_existing=not use_ephemeral,
+                                ephemeral=use_ephemeral,
+                                caller_owned_ephemeral=use_ephemeral,
+                                cwd=target_cwd,
+                                env=agent_env,
+                                env_preset=env_preset,
+                            ),
+                        )
+                        target_session_id = created_session.id
+
                     task = await workspace_manager.start_task(
                         task.id,
                         StartTaskRequest(
-                            agent_type=AgentType(agent_type), target_session_id=session_id
+                            agent_type=AgentType(agent_type), target_session_id=target_session_id
                         ),
                     )
                 except TaskExecutionConflict:

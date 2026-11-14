@@ -73,6 +73,24 @@ class _TaskCoreMixin(_WorkspaceManagerBase):
             if payload.task_mode == WorkspaceTaskMode.AUTONOMOUS
             else None
         )
+        recipe = payload.recipe
+        if recipe == WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW:
+            auto_worktree = True if payload.auto_worktree is None else bool(payload.auto_worktree)
+            auto_push_remote = (
+                True if payload.auto_push_remote is None else bool(payload.auto_push_remote)
+            )
+        else:
+            auto_worktree = (
+                bool(payload.auto_worktree) if payload.auto_worktree is not None else False
+            )
+            auto_push_remote = (
+                bool(payload.auto_push_remote) if payload.auto_push_remote is not None else False
+            )
+        infowall_demand_id = (
+            payload.infowall_demand_id.strip()
+            if isinstance(payload.infowall_demand_id, str) and payload.infowall_demand_id.strip()
+            else None
+        )
         task = WorkspaceTask(
             execution_control=payload.execution_control,
             source=payload.source,
@@ -91,6 +109,10 @@ class _TaskCoreMixin(_WorkspaceManagerBase):
             agent_type=payload.agent_type,
             session_kind=session_kind,
             task_mode=payload.task_mode,
+            recipe=recipe,
+            infowall_demand_id=infowall_demand_id,
+            auto_worktree=auto_worktree,
+            auto_push_remote=auto_push_remote,
             execution_complexity=payload.execution_complexity,
             origin=payload.origin,
             agent_tag=payload.agent_tag,

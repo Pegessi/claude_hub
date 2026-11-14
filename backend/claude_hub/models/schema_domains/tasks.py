@@ -27,6 +27,7 @@ from claude_hub.models.schema_domains.runtime import (
     WorkspaceTaskExecutionComplexity,
     WorkspaceTaskMode,
     WorkspaceTaskOrigin,
+    WorkspaceTaskRecipe,
     WorkspaceTaskStatus,
     normalize_agent_tag,
 )
@@ -50,6 +51,10 @@ class WorkspaceTaskCreate(BaseModel):
     agent_type: AgentType = AgentType.CODEX
     session_kind: SessionKind = SessionKind.TERMINAL
     task_mode: WorkspaceTaskMode = WorkspaceTaskMode.REVIEWED
+    recipe: WorkspaceTaskRecipe = WorkspaceTaskRecipe.STANDARD
+    infowall_demand_id: Optional[str] = None
+    auto_worktree: Optional[bool] = None
+    auto_push_remote: Optional[bool] = None
     execution_complexity: WorkspaceTaskExecutionComplexity = WorkspaceTaskExecutionComplexity.AUTO
     origin: WorkspaceTaskOrigin = WorkspaceTaskOrigin.HUMAN
     related_task_id: Optional[str] = None
@@ -83,6 +88,28 @@ class WorkspaceTaskCreate(BaseModel):
 
     @model_validator(mode="after")
     def _validate_session_surface(self) -> "WorkspaceTaskCreate":
+        if self.recipe == WorkspaceTaskRecipe.TRIAGE_DIAGNOSE:
+            if "task_mode" not in self.model_fields_set:
+                self.task_mode = WorkspaceTaskMode.SUBAGENT
+            if (
+                "session_kind" not in self.model_fields_set
+                and not self.session_id
+                and self.agent_type
+                in {
+                    AgentType.CLAUDE,
+                    AgentType.CODEX,
+                    AgentType.CURSOR,
+                    AgentType.MASO,
+                    AgentType.ANTIGRAVITY,
+                }
+            ):
+                self.session_kind = SessionKind.CHAT
+        elif (
+            "session_kind" not in self.model_fields_set
+            and not self.session_id
+            and self.agent_type in {AgentType.MASO, AgentType.ANTIGRAVITY}
+        ):
+            self.session_kind = SessionKind.CHAT
         validate_workspace_session_surface(self.agent_type, self.session_kind)
         return self
 
@@ -115,6 +142,10 @@ class WorkspaceTaskUpdate(BaseModel):
     status: Optional[WorkspaceTaskStatus] = None
     goal_packet: Optional[GoalPacket] = None
     task_mode: Optional[WorkspaceTaskMode] = None
+    recipe: Optional[WorkspaceTaskRecipe] = None
+    infowall_demand_id: Optional[str] = None
+    auto_worktree: Optional[bool] = None
+    auto_push_remote: Optional[bool] = None
     session_kind: Optional[SessionKind] = None
     execution_complexity: Optional[WorkspaceTaskExecutionComplexity] = None
     review_profiles: Optional[List[ReviewProfile]] = None
@@ -171,6 +202,15 @@ class WorkspaceTask(BaseModel):
     agent_type: AgentType
     session_kind: SessionKind = SessionKind.TERMINAL
     task_mode: WorkspaceTaskMode = WorkspaceTaskMode.REVIEWED
+    recipe: WorkspaceTaskRecipe = WorkspaceTaskRecipe.STANDARD
+    infowall_demand_id: Optional[str] = None
+    auto_worktree: bool = False
+    auto_push_remote: bool = False
+    worktree_path: Optional[str] = None
+    worktree_branch: Optional[str] = None
+    remote_pushed_ref: Optional[str] = None
+    remote_push_error: Optional[str] = None
+    infowall_synced_at: Optional[datetime] = None
     execution_complexity: WorkspaceTaskExecutionComplexity = WorkspaceTaskExecutionComplexity.AUTO
     origin: WorkspaceTaskOrigin = WorkspaceTaskOrigin.HUMAN
     agent_tag: Optional[str] = None

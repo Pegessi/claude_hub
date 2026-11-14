@@ -3,9 +3,7 @@
 import hashlib
 import json
 from abc import abstractmethod
-from collections.abc import Mapping
 
-from ...request_fingerprint import request_fingerprint
 from .._base import _WorkspaceManagerBase
 from .._constants import *  # noqa: F401,F403
 
@@ -71,6 +69,8 @@ class _ReportIdentityMixin(_WorkspaceManagerBase):
         """Return true for the plan-only Goal Packet report on reviewed tasks."""
 
         if task is None or payload.goal_packet is None:
+            return False
+        if task.recipe == WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW:
             return False
         if task.task_mode != WorkspaceTaskMode.REVIEWED:
             return False
