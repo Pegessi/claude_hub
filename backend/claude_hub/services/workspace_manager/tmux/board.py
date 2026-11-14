@@ -1,6 +1,12 @@
 """Workspace board projection and tab metadata synchronization."""
 
-from claude_hub.models.schemas import TaskExecutionControl, TaskLifecycle
+from claude_hub.models.schemas import (
+    TaskExecutionControl,
+    TaskLifecycle,
+    redact_managed_sessions_for_public,
+)
+from claude_hub.services.board_pagination import paginate_board_tasks
+from claude_hub.services.task_brief import build_task_brief_payload
 from claude_hub.services.task_dependencies import task_dependency_blockers
 from claude_hub.services.task_lifecycle import (
     ChatTabFacts,
@@ -148,6 +154,77 @@ class _WorkspaceBoardMixin(_WorkspaceManagerBase):
             snapshot_path=str(self.snapshot_path(workspace_id)),
             tasks_pagination=tasks_pagination,
             task_lifecycles=self.task_lifecycles(page_tasks),
+        )
+
+    def get_board_overview(self, *, done_per_workspace: int = 8) -> dict[str, Any]:
+        """Lightweight read-only cross-workspace triage projection (all open + recent done)."""
+        workspaces = self.list_workspaces()
+        all_tasks: list[WorkspaceTask] = []
+        all_reports: list[AgentReport] = []
+        all_sessions: list[ManagedSession] = []
+        all_lifecycles: dict[str, TaskLifecycle] = {}
+        attention_counts: dict[str, int] = {}
+
+        for ws in workspaces:
+            ws_tasks = [
+                (
+                    task.model_copy(
+                        update={
+                            "prompt": (
+                                "System-managed Feedback Reaper task. Inspect its reports and "
+                                "summary-run audit for lifecycle details."
+                            )
+                        }
+                    )
+                    if task.system_internal and task.internal_kind == "feedback_reaper"
+                    else task
+                )
+                for task in self.tasks.values()
+                if task.workspace_id == ws.id
+            ]
+            page_tasks, _ = paginate_board_tasks(ws_tasks, limit=done_per_workspace, cursor=None)
+            lifecycles = self.task_lifecycles(page_tasks)
+            attention_counts[ws.id] = sum(1 for lc in lifecycles.values() if lc.attention)
+            task_ids = {t.id for t in page_tasks}
+            reports = [
+                report
+                for report in self.latest_reports_per_task_for_workspace(ws.id)
+                if report.task_id in task_ids
+            ]
+            all_tasks.extend(page_tasks)
+            all_reports.extend(reports)
+            all_sessions.extend(self.sessions_for_workspace(ws.id, include_archived=False))
+            all_lifecycles.update(lifecycles)
+
+        return {
+            "workspaces": workspaces,
+            "tasks": all_tasks,
+            "reports": all_reports,
+            "sessions": redact_managed_sessions_for_public(all_sessions),
+            "task_lifecycles": all_lifecycles,
+            "attention_counts": attention_counts,
+        }
+
+    def get_task_brief(self, workspace_id: str, task_id: str) -> dict[str, Any]:
+        """Return a bounded (<2 KB) AI handoff and context-recovery brief for one Task."""
+        workspace = self.workspaces.get(workspace_id)
+        if workspace is None:
+            raise KeyError(workspace_id)
+        task = self.require_workspace_task(workspace_id, task_id)
+        lifecycle = self.task_lifecycles([task])[task.id]
+        reports = self.reports_for_task(workspace_id, task_id)
+        events = self.list_task_mailbox_events(
+            workspace_id, task_id, since_sequence=0, subtree=False
+        )
+        ws_tasks = {t.id: t for t in self.tasks.values() if t.workspace_id == workspace_id}
+        blockers = task_dependency_blockers(ws_tasks, task)
+        return build_task_brief_payload(
+            workspace=workspace,
+            task=task,
+            lifecycle=lifecycle,
+            reports=reports,
+            events=events,
+            blockers=blockers,
         )
 
     def _sync_workspace_tab_metadata(self, workspace_id: str) -> None:

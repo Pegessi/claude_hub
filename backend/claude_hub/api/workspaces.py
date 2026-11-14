@@ -95,6 +95,15 @@ async def list_workspaces(current_user: User = Depends(get_current_user)) -> Lis
     return workspace_manager.list_workspaces()
 
 
+@router.get("/board-overview")
+async def get_workspaces_board_overview(
+    done_per_workspace: int = Query(default=8, ge=1, le=50),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Return a cross-workspace triage projection (all open tasks + recent done)."""
+    return workspace_manager.get_board_overview(done_per_workspace=done_per_workspace)
+
+
 @router.get("/sessions", response_model=List[ManagedSessionPublic])
 async def list_managed_sessions(
     current_user: User = Depends(get_current_user),
@@ -250,6 +259,19 @@ async def get_workspace_board(
         return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
 
     return redact_workspace_board_for_public(board)
+
+
+@router.get("/{workspace_id}/tasks/{task_id}/brief")
+async def get_task_brief(
+    workspace_id: str,
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Return a bounded (<2 KB) AI handoff and context-recovery brief for one Task."""
+    try:
+        return workspace_manager.get_task_brief(workspace_id, task_id)
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise _task_public_http(exc) from exc
 
 
 @router.get(

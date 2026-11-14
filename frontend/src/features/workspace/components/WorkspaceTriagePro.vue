@@ -1,7 +1,7 @@
 <template>
   <div class="tp-shell">
     <div
-      v-if="!activeWorkspaceId"
+      v-if="!activeWorkspaceId && scopeMode !== 'all'"
       class="tp-empty-workspace"
     >
       <div class="tp-empty-card">
@@ -20,7 +20,35 @@
         aria-label="Workspace tasks"
       >
         <div
-          v-if="boardLoading && triageItems.length === 0"
+          v-if="workspaces.length > 1"
+          class="tp-scope-bar"
+          role="group"
+          aria-label="Workspace scope"
+        >
+          <button
+            type="button"
+            :class="['tp-scope-btn', { active: scopeMode === 'current' }]"
+            :aria-pressed="scopeMode === 'current'"
+            @click="setScopeMode('current')"
+          >
+            {{ activeWorkspace?.name || 'Current' }}
+          </button>
+          <button
+            type="button"
+            :class="['tp-scope-btn', { active: scopeMode === 'all' }]"
+            :aria-pressed="scopeMode === 'all'"
+            @click="setScopeMode('all')"
+          >
+            <span>All Workspaces</span>
+            <span
+              v-if="overviewAttentionTotal > 0"
+              class="tp-scope-badge tp-num"
+            >{{ overviewAttentionTotal }}</span>
+          </button>
+        </div>
+
+        <div
+          v-if="(scopeMode === 'all' ? overviewLoading : boardLoading) && triageItems.length === 0"
           class="tp-rail-loading"
           role="status"
           aria-live="polite"
@@ -32,8 +60,13 @@
           v-else-if="triageItems.length === 0"
           class="tp-rail-empty"
         >
-          <p>No tasks in {{ activeWorkspace?.name || 'this workspace' }} yet.</p>
+          <p>
+            No tasks in
+            {{ scopeMode === 'all' ? 'any workspace' : activeWorkspace?.name || 'this workspace' }}
+            yet.
+          </p>
           <button
+            v-if="activeWorkspaceId"
             type="button"
             class="tp-primary-btn"
             @click="openTaskModal"
@@ -70,11 +103,15 @@
               :class="['tp-row', { active: activeItem?.id === item.id }]"
               :aria-current="activeItem?.id === item.id ? 'true' : undefined"
               :data-task-id="item.id"
-              @click="selectTriageTask(item.id)"
+              @click="selectTriageItem(item)"
             >
               <div class="tp-row-top">
                 <span :class="['tp-dot', `tp-dot--${item.statusTone}`]" />
                 <span class="tp-row-code tp-mono">{{ item.code }}</span>
+                <span
+                  v-if="scopeMode === 'all'"
+                  class="tp-row-ws tp-mono"
+                >{{ item.workspaceName }}</span>
                 <span :class="['tp-row-state', `tp-row-state--${item.statusTone}`]">
                   {{ item.statusLabel }}
                 </span>
@@ -87,7 +124,7 @@
           </section>
 
           <div
-            v-if="boardTasksPagination && boardOlderTasksRemaining > 0"
+            v-if="scopeMode === 'current' && boardTasksPagination && boardOlderTasksRemaining > 0"
             class="tp-load-more-wrap"
           >
             <button
@@ -113,7 +150,7 @@
         </div>
       </aside>
 
-      <!-- ==================== RIGHT DETAIL CANVAS ==================== -->
+      <!-- ==================== RIGHT UNIFIED DETAIL CANVAS ==================== -->
       <main
         class="tp-detail"
         aria-label="Selected task detail"
@@ -129,7 +166,7 @@
           v-else
           class="tp-editorial"
         >
-          <!-- Top Bar: Concise Identity + Live A/B Presentation Switcher -->
+          <!-- Top Bar: Identity + AI Handoff Utilities -->
           <div class="tp-top-bar">
             <div class="tp-meta-line">
               <span :class="['tp-status-pill', `tp-status-pill--${activeItem.statusTone}`]">
@@ -149,27 +186,24 @@
               </span>
             </div>
 
-            <div
-              class="tp-mode-switch"
-              role="group"
-              aria-label="Detail view layout"
-            >
+            <div class="tp-handoff-tools">
               <button
                 type="button"
-                :class="['tp-mode-btn', { active: detailMode === 'digest' }]"
-                :aria-pressed="detailMode === 'digest'"
-                @click="setDetailMode('digest')"
+                class="tp-ghost-btn tp-mono"
+                :disabled="briefCopying"
+                @click="copyAiTaskBrief(activeItem)"
               >
-                A · Milestone Digest
+                {{ copiedKey === `brief:${activeItem.id}` ? 'Brief copied' : 'Copy AI Brief' }}
               </button>
-              <button
+              <LoadingButton
                 type="button"
-                :class="['tp-mode-btn', { active: detailMode === 'memo' }]"
-                :aria-pressed="detailMode === 'memo'"
-                @click="setDetailMode('memo')"
+                class="tp-ghost-btn"
+                :loading="handoffChatLaunching"
+                loading-label="Opening…"
+                @click="continueInNewChat(activeItem)"
               >
-                B · One-Page Brief
-              </button>
+                Continue in New Chat ↗
+              </LoadingButton>
             </div>
           </div>
 
@@ -207,7 +241,7 @@
             </div>
           </div>
 
-          <!-- Action / Decision Gate -->
+          <!-- Action / Decision Gate (Supports BOTH Managed & Initiator Tasks!) -->
           <section
             :class="['tp-gate-card', { 'tp-gate-card--attention': activeItem.bucket === 'needs_you' }]"
             aria-label="Task actions and decision gate"
@@ -229,6 +263,7 @@
               </div>
 
               <div class="tp-decision-btns">
+                <!-- Workspace-controlled actions -->
                 <template v-if="canUseManagedTaskActions(activeItem.task)">
                   <LoadingButton
                     v-if="activeItem.task.status === 'todo'"
@@ -242,7 +277,7 @@
                   </LoadingButton>
 
                   <button
-                    v-if="selectedSession"
+                    v-if="selectedSessionForActive"
                     type="button"
                     class="tp-ghost-btn"
                     @click="toggleSteerComposer"
@@ -273,7 +308,7 @@
                   </LoadingButton>
 
                   <LoadingButton
-                    v-if="activeItem.bucket === 'done' && selectedSession?.ephemeral"
+                    v-if="activeItem.bucket === 'done' && selectedSessionForActive?.ephemeral"
                     type="button"
                     class="tp-ghost-btn"
                     :loading="isPending(taskActionKey('cleanup-session', activeItem.id))"
@@ -284,12 +319,35 @@
                   </LoadingButton>
                 </template>
 
+                <!-- Initiator-controlled actions: Inline Reply + One-click Mark Done -->
+                <template v-else-if="isInitiatorTask(activeItem.task)">
+                  <button
+                    v-if="activeItem.task.source?.tab_id && activeItem.bucket !== 'done'"
+                    type="button"
+                    class="tp-ghost-btn"
+                    @click="toggleInitiatorReply"
+                  >
+                    {{ isInitiatorReplyOpen ? 'Close reply' : 'Reply inline…' }}
+                  </button>
+
+                  <LoadingButton
+                    v-if="canMarkInitiatorDone(activeItem.task)"
+                    type="button"
+                    :class="activeItem.statusLabel === 'Session lost' ? 'tp-primary-btn' : 'tp-ghost-btn'"
+                    :loading="initiatorCloseLoading"
+                    loading-label="Closing…"
+                    @click="markInitiatorTaskDone(activeItem)"
+                  >
+                    Mark Done
+                  </LoadingButton>
+                </template>
+
                 <button
-                  v-if="selectedSession"
+                  v-if="selectedSessionForActive"
                   type="button"
                   class="tp-ghost-btn"
-                  :disabled="isPending(sessionActionKey('open', selectedSession.id))"
-                  @click="openSession(selectedSession)"
+                  :disabled="isPending(sessionActionKey('open', selectedSessionForActive.id))"
+                  @click="openSession(selectedSessionForActive)"
                 >
                   Open session ↗
                 </button>
@@ -297,7 +355,11 @@
                 <button
                   v-else-if="activeItem.task.source?.tab_id"
                   type="button"
-                  :class="activeItem.bucket === 'needs_you' ? 'tp-primary-btn' : 'tp-ghost-btn'"
+                  :class="
+                    activeItem.bucket === 'needs_you' && activeItem.statusLabel !== 'Session lost'
+                      ? 'tp-primary-btn'
+                      : 'tp-ghost-btn'
+                  "
                   @click="openOrRestoreTab(activeItem.task.source.tab_id)"
                 >
                   Open Chat ↗
@@ -305,8 +367,17 @@
               </div>
             </div>
 
+            <div
+              v-if="gateActionNotice"
+              :class="['tp-gate-notice', `tp-gate-notice--${gateActionNotice.tone}`]"
+              :role="gateActionNotice.tone === 'error' ? 'alert' : 'status'"
+            >
+              {{ gateActionNotice.text }}
+            </div>
+
+            <!-- Managed Session Steer Form -->
             <form
-              v-if="isSteerOpen && selectedSession && canUseManagedTaskActions(activeItem.task)"
+              v-if="isSteerOpen && selectedSessionForActive && canUseManagedTaskActions(activeItem.task)"
               class="tp-steer-form"
               @submit.prevent="submitSteer"
               @paste="handleSteerPaste"
@@ -353,93 +424,121 @@
                 </LoadingButton>
               </div>
             </form>
+
+            <!-- Initiator Chat Inline Reply Form -->
+            <form
+              v-if="isInitiatorReplyOpen && activeItem.task.source?.tab_id"
+              class="tp-steer-form"
+              @submit.prevent="submitInitiatorReply(activeItem)"
+            >
+              <textarea
+                ref="initiatorReplyInputRef"
+                v-model="initiatorReplyText"
+                rows="2"
+                placeholder="Reply directly to the originating Chat without leaving the board…"
+              />
+              <div class="tp-steer-actions">
+                <span class="tp-steer-hint tp-mono">
+                  Restores archived Chat automatically if needed, then delivers your reply
+                </span>
+                <LoadingButton
+                  type="submit"
+                  class="tp-primary-btn"
+                  :disabled="!initiatorReplyText.trim()"
+                  :loading="initiatorReplySending"
+                  loading-label="Sending…"
+                >
+                  Send reply
+                </LoadingButton>
+              </div>
+            </form>
           </section>
 
-          <!-- ==================== MODE A: MILESTONE DIGEST ==================== -->
-          <template v-if="detailMode === 'digest'">
-            <section
-              class="tp-card"
-              aria-label="Summary and key takeaways"
-            >
-              <div class="tp-section-head">
-                <h2 class="tp-micro-heading">
-                  Summary &amp; Key Takeaways
-                </h2>
-                <button
-                  v-if="activeItem.digest.rawText && activeItem.digest.bullets.length > 0"
-                  type="button"
-                  class="tp-inline-link tp-mono"
-                  @click="showRawDigest = !showRawDigest"
+          <!-- 1. Summary & Key Takeaways -->
+          <section
+            class="tp-card"
+            aria-label="Summary and key takeaways"
+          >
+            <div class="tp-section-head">
+              <h2 class="tp-micro-heading">
+                Summary &amp; Key Takeaways
+              </h2>
+              <button
+                v-if="activeItem.digest.rawText && activeItem.digest.bullets.length > 0"
+                type="button"
+                class="tp-inline-link tp-mono"
+                @click="showRawDigest = !showRawDigest"
+              >
+                {{ showRawDigest ? 'Structured view' : 'Raw text' }}
+              </button>
+            </div>
+
+            <pre
+              v-if="showRawDigest && activeItem.digest.rawText"
+              class="tp-raw-summary"
+            >{{ activeItem.digest.rawText }}</pre>
+
+            <template v-else>
+              <p class="tp-headline">
+                {{ activeItem.digest.headline }}
+              </p>
+              <ul
+                v-if="activeItem.digest.bullets.length > 0"
+                class="tp-bullets"
+              >
+                <li
+                  v-for="(bullet, idx) in activeItem.digest.bullets"
+                  :key="idx"
                 >
-                  {{ showRawDigest ? 'Structured view' : 'Raw text' }}
-                </button>
-              </div>
+                  <span
+                    v-if="bullet.label"
+                    class="tp-bullet-label"
+                  >{{ bullet.label }}</span>
+                  <span>{{ bullet.text }}</span>
+                </li>
+              </ul>
+            </template>
+          </section>
 
-              <pre
-                v-if="showRawDigest && activeItem.digest.rawText"
-                class="tp-raw-summary"
-              >{{ activeItem.digest.rawText }}</pre>
+          <!-- 2. Deliverables Card (Unified with Inline Markdown Preview + Modal + Copy) -->
+          <section
+            v-if="hasDeliverables"
+            class="tp-card"
+            aria-label="Deliverables"
+          >
+            <div class="tp-section-head">
+              <h2 class="tp-micro-heading">
+                Deliverables ({{ activeItem.deliverables.length + imageAttachments.length }})
+              </h2>
+            </div>
 
-              <template v-else>
-                <p class="tp-headline">
-                  {{ activeItem.digest.headline }}
-                </p>
-                <ul
-                  v-if="activeItem.digest.bullets.length > 0"
-                  class="tp-bullets"
+            <div class="tp-deliverables">
+              <template
+                v-for="deliv in activeItem.deliverables"
+                :key="deliv.key"
+              >
+                <a
+                  v-if="deliv.url"
+                  :href="deliv.url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="tp-deliverable-item"
                 >
-                  <li
-                    v-for="(bullet, idx) in activeItem.digest.bullets"
-                    :key="idx"
-                  >
-                    <span
-                      v-if="bullet.label"
-                      class="tp-bullet-label"
-                    >{{ bullet.label }}</span>
-                    <span>{{ bullet.text }}</span>
-                  </li>
-                </ul>
-              </template>
-            </section>
-
-            <!-- Deliverables Card (Full-width: zero vertical stretch void, full path & button clearance) -->
-            <section
-              v-if="hasDeliverables"
-              class="tp-card"
-              aria-label="Deliverables"
-            >
-              <div class="tp-section-head">
-                <h2 class="tp-micro-heading">
-                  Deliverables ({{ activeItem.deliverables.length + imageAttachments.length }})
-                </h2>
-              </div>
-
-              <div class="tp-deliverables">
-                <template
-                  v-for="deliv in activeItem.deliverables"
-                  :key="deliv.key"
-                >
-                  <a
-                    v-if="deliv.url"
-                    :href="deliv.url"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    class="tp-deliverable-item"
-                  >
-                    <div class="tp-deliv-main">
-                      <div class="tp-deliv-title-row">
-                        <span :class="['tp-deliv-kind', `tp-deliv-kind--${deliv.kind}`]">{{ deliv.kind }}</span>
-                        <span class="tp-deliv-title">{{ deliv.title }}</span>
-                      </div>
-                      <span class="tp-deliv-sub tp-mono">{{ deliv.subtitle }}</span>
+                  <div class="tp-deliv-main">
+                    <div class="tp-deliv-title-row">
+                      <span :class="['tp-deliv-kind', `tp-deliv-kind--${deliv.kind}`]">{{ deliv.kind }}</span>
+                      <span class="tp-deliv-title">{{ deliv.title }}</span>
                     </div>
-                    <span class="tp-deliv-actions tp-mono">Open ↗</span>
-                  </a>
+                    <span class="tp-deliv-sub tp-mono">{{ deliv.subtitle }}</span>
+                  </div>
+                  <span class="tp-deliv-actions tp-mono">Open ↗</span>
+                </a>
 
-                  <div
-                    v-else
-                    class="tp-deliverable-item"
-                  >
+                <div
+                  v-else
+                  class="tp-deliverable-wrap"
+                >
+                  <div class="tp-deliverable-item">
                     <div class="tp-deliv-main">
                       <div class="tp-deliv-title-row">
                         <span :class="['tp-deliv-kind', `tp-deliv-kind--${deliv.kind}`]">
@@ -455,6 +554,14 @@
                         v-if="deliv.kind === 'markdown' && deliv.artifactPath"
                         type="button"
                         class="tp-mini-btn tp-mini-btn--accent"
+                        @click="toggleInlineMarkdown(deliv)"
+                      >
+                        {{ inlineMdKey === deliv.key ? 'Hide' : 'Inline' }}
+                      </button>
+                      <button
+                        v-if="deliv.kind === 'markdown' && deliv.artifactPath"
+                        type="button"
+                        class="tp-mini-btn"
                         @click="openDeliverableModal(deliv)"
                       >
                         Preview
@@ -469,518 +576,272 @@
                       </button>
                     </div>
                   </div>
-                </template>
-
-                <div
-                  v-for="img in imageAttachments"
-                  :key="img.id"
-                  class="tp-deliverable-item"
-                >
-                  <div class="tp-deliv-main">
-                    <div class="tp-deliv-title-row">
-                      <span class="tp-deliv-kind">img</span>
-                      <span class="tp-deliv-title tp-mono">{{ img.filename }}</span>
-                    </div>
-                  </div>
-                  <div class="tp-deliv-actions">
-                    <button
-                      type="button"
-                      class="tp-mini-btn"
-                      @click="openImageLightbox(`/api/workspaces/attachments/${img.id}`, img.filename)"
-                    >
-                      View ↗
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </section>
-
-            <!-- Verification & Caveats Card -->
-            <section
-              v-if="hasVerification"
-              class="tp-card"
-              aria-label="Verification and caveats"
-            >
-              <div class="tp-section-head">
-                <h2 class="tp-micro-heading">
-                  Verification &amp; Caveats
-                </h2>
-                <span
-                  :class="[
-                    'tp-val-badge',
-                    'tp-mono',
-                    activeItem.validation.failedCount > 0
-                      ? 'tp-val-badge--fail'
-                      : activeItem.validation.passedCount > 0
-                        ? 'tp-val-badge--pass'
-                        : '',
-                  ]"
-                >
-                  {{ activeItem.validation.summaryLabel }}
-                </span>
-              </div>
-
-              <div
-                v-if="activeItem.validation.pills.length > 0"
-                class="tp-pill-wrap"
-              >
-                <span
-                  v-for="(pill, idx) in activeItem.validation.pills"
-                  :key="idx"
-                  :class="['tp-check-pill', 'tp-mono', `tp-check-pill--${pill.status}`]"
-                >
-                  <span>{{ pill.status === 'fail' ? '✕' : '✓' }}</span>
-                  <span>{{ pill.label }}</span>
-                </span>
-              </div>
-
-              <ul
-                v-if="activeItem.validation.notes.length > 0"
-                class="tp-val-notes"
-              >
-                <li
-                  v-for="(note, idx) in activeItem.validation.notes"
-                  :key="idx"
-                >
-                  {{ note }}
-                </li>
-              </ul>
-
-              <div
-                v-if="activeItem.validation.riskBullets.length > 0"
-                class="tp-risk-box"
-              >
-                <span class="tp-risk-title">Caveats &amp; Unverified Scope</span>
-                <ul class="tp-risk-list">
-                  <li
-                    v-for="(risk, idx) in activeItem.validation.riskBullets"
-                    :key="idx"
-                  >
-                    {{ risk }}
-                  </li>
-                </ul>
-              </div>
-            </section>
-
-            <!-- Aggregated Key Milestones (2~6 clean nodes, zero text duplication) -->
-            <section
-              class="tp-milestones-section"
-              aria-label="Key milestones"
-            >
-              <div class="tp-section-head">
-                <h2 class="tp-micro-heading">
-                  Key Milestones ({{ activeItem.milestones.length }})
-                </h2>
-                <span
-                  v-if="eventsLoading"
-                  class="tp-mono tp-sep"
-                >Syncing checkpoints…</span>
-              </div>
-
-              <ol class="tp-milestone-list">
-                <li
-                  v-for="step in activeItem.milestones"
-                  :key="step.id"
-                  :class="['tp-ms-item', `tp-ms-item--${step.tone}`]"
-                >
-                  <div class="tp-ms-time-col tp-num">
-                    <span class="tp-ms-time">{{ step.timeLabel }}</span>
-                    <span
-                      v-if="step.deltaLabel"
-                      class="tp-ms-delta tp-mono"
-                    >{{ step.deltaLabel }}</span>
-                  </div>
-
-                  <span class="tp-ms-track">
-                    <i class="tp-ms-dot" />
-                  </span>
-
-                  <div class="tp-ms-body">
-                    <div class="tp-ms-head">
-                      <span class="tp-ms-title">{{ step.title }}</span>
-                      <span
-                        v-if="step.badge"
-                        :class="['tp-ms-badge', 'tp-mono', `tp-ms-badge--${step.tone}`]"
-                      >
-                        {{ step.badge }}
-                      </span>
-
-                      <div class="tp-ms-links">
-                        <button
-                          v-if="step.detailText"
-                          type="button"
-                          class="tp-inline-link tp-mono"
-                          @click="toggleStepDetail(step.id)"
-                        >
-                          {{
-                            expandedStepIds.has(step.id)
-                              ? 'Hide details'
-                              : step.collapsedCount
-                                ? `Details (${step.collapsedCount})`
-                                : 'Details'
-                          }}
-                        </button>
-                        <button
-                          v-if="step.sessionId || step.tabId"
-                          type="button"
-                          class="tp-inline-link tp-mono"
-                          @click="toggleTranscript(step)"
-                        >
-                          {{ openTranscriptNodeId === step.id ? 'Hide transcript' : 'Transcript ↗' }}
-                        </button>
-                      </div>
-                    </div>
-
-                    <p :class="['tp-ms-oneliner', { 'tp-ms-oneliner--echo': step.isCurrentEcho }]">
-                      {{ step.oneLiner }}
-                    </p>
-
-                    <div
-                      v-if="step.detailText && expandedStepIds.has(step.id)"
-                      class="tp-ms-detail-box"
-                    >
-                      <pre class="tp-ms-detail-pre">{{ step.detailText }}</pre>
-                    </div>
-
-                    <div
-                      v-if="openTranscriptNodeId === step.id"
-                      class="tp-log-excerpt"
-                    >
-                      <div
-                        v-if="transcriptLoading"
-                        class="tp-log-status tp-mono"
-                      >
-                        Loading session stream…
-                      </div>
-                      <div
-                        v-else-if="transcriptError"
-                        class="tp-log-status tp-mono"
-                      >
-                        {{ transcriptError }}
-                      </div>
-                      <div
-                        v-else-if="transcriptLines.length === 0"
-                        class="tp-log-status tp-mono"
-                      >
-                        No persisted structured stream turns found for this session.
-                      </div>
-                      <template v-else>
-                        <div
-                          v-for="(line, idx) in transcriptLines"
-                          :key="idx"
-                          class="tp-log-row"
-                        >
-                          <span class="tp-mono tp-num">{{ line.time }}</span>
-                          <span :class="['tp-mono', 'tp-log-speaker', `tp-log-speaker--${line.role}`]">
-                            {{ line.speaker }}
-                          </span>
-                          <span>{{ line.text }}</span>
-                        </div>
-                      </template>
-
-                      <div
-                        v-if="step.tabId"
-                        class="tp-log-footer"
-                      >
-                        <button
-                          type="button"
-                          class="tp-inline-link tp-mono"
-                          @click="openOrRestoreTab(step.tabId)"
-                        >
-                          Open full conversation in Chat pane ↗
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </li>
-              </ol>
-            </section>
-          </template>
-
-          <!-- ==================== MODE B: ONE-PAGE BRIEF ==================== -->
-          <template v-else>
-            <section
-              class="tp-card tp-card--memo"
-              aria-label="One-page sign-off brief"
-            >
-              <div class="tp-section-head">
-                <h2 class="tp-micro-heading">
-                  1 · Executive Summary
-                </h2>
-                <button
-                  v-if="activeItem.digest.rawText && activeItem.digest.bullets.length > 0"
-                  type="button"
-                  class="tp-inline-link tp-mono"
-                  @click="showRawDigest = !showRawDigest"
-                >
-                  {{ showRawDigest ? 'Structured view' : 'Raw text' }}
-                </button>
-              </div>
-
-              <pre
-                v-if="showRawDigest && activeItem.digest.rawText"
-                class="tp-raw-summary"
-              >{{ activeItem.digest.rawText }}</pre>
-
-              <template v-else>
-                <p class="tp-headline">
-                  {{ activeItem.digest.headline }}
-                </p>
-                <ul
-                  v-if="activeItem.digest.bullets.length > 0"
-                  class="tp-bullets"
-                >
-                  <li
-                    v-for="(bullet, idx) in activeItem.digest.bullets"
-                    :key="idx"
-                  >
-                    <span
-                      v-if="bullet.label"
-                      class="tp-bullet-label"
-                    >{{ bullet.label }}</span>
-                    <span>{{ bullet.text }}</span>
-                  </li>
-                </ul>
-              </template>
-
-              <template v-if="hasDeliverables">
-                <div class="tp-section-head">
-                  <h2 class="tp-micro-heading">
-                    2 · Deliverables &amp; Reports
-                  </h2>
-                </div>
-
-                <div class="tp-deliverables">
-                  <template
-                    v-for="deliv in activeItem.deliverables"
-                    :key="deliv.key"
-                  >
-                    <a
-                      v-if="deliv.url"
-                      :href="deliv.url"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      class="tp-deliverable-item"
-                    >
-                      <div class="tp-deliv-main">
-                        <div class="tp-deliv-title-row">
-                          <span :class="['tp-deliv-kind', `tp-deliv-kind--${deliv.kind}`]">{{ deliv.kind }}</span>
-                          <span class="tp-deliv-title">{{ deliv.title }}</span>
-                        </div>
-                        <span class="tp-deliv-sub tp-mono">{{ deliv.subtitle }}</span>
-                      </div>
-                      <span class="tp-deliv-actions tp-mono">Open ↗</span>
-                    </a>
-
-                    <div
-                      v-else
-                      class="tp-deliverable-wrap"
-                    >
-                      <div class="tp-deliverable-item">
-                        <div class="tp-deliv-main">
-                          <div class="tp-deliv-title-row">
-                            <span :class="['tp-deliv-kind', `tp-deliv-kind--${deliv.kind}`]">
-                              {{ deliv.kind === 'markdown' ? 'md' : deliv.kind }}
-                            </span>
-                            <span class="tp-deliv-title tp-mono">{{ deliv.title }}</span>
-                          </div>
-                          <span class="tp-deliv-sub tp-mono">{{ deliv.subtitle }}</span>
-                        </div>
-
-                        <div class="tp-deliv-actions">
-                          <button
-                            v-if="deliv.kind === 'markdown' && deliv.artifactPath"
-                            type="button"
-                            class="tp-mini-btn tp-mini-btn--accent"
-                            @click="toggleInlineMarkdown(deliv)"
-                          >
-                            {{ inlineMdKey === deliv.key ? 'Hide preview' : 'Inline preview' }}
-                          </button>
-                          <button
-                            v-if="deliv.kind === 'markdown' && deliv.artifactPath"
-                            type="button"
-                            class="tp-mini-btn"
-                            @click="openDeliverableModal(deliv)"
-                          >
-                            Modal ↗
-                          </button>
-                          <button
-                            v-if="deliv.copyText || deliv.artifactPath"
-                            type="button"
-                            class="tp-mini-btn tp-mono"
-                            @click="copyDeliverableText(deliv.key, deliv.copyText || deliv.artifactPath || '')"
-                          >
-                            {{ copiedKey === deliv.key ? 'Copied' : 'Copy' }}
-                          </button>
-                        </div>
-                      </div>
-
-                      <div
-                        v-if="inlineMdKey === deliv.key"
-                        class="tp-inline-md-box"
-                      >
-                        <div class="tp-inline-md-head">
-                          <span class="tp-mono">{{ deliv.artifactPath }}</span>
-                          <button
-                            v-if="deliv.artifactPath"
-                            type="button"
-                            class="tp-inline-link tp-mono"
-                            @click="openDeliverableModal(deliv)"
-                          >
-                            Full reader ↗
-                          </button>
-                        </div>
-                        <div
-                          v-if="inlineMdLoading"
-                          class="tp-log-status tp-mono"
-                        >
-                          Loading Markdown document…
-                        </div>
-                        <div
-                          v-else-if="inlineMdError"
-                          class="tp-log-status tp-mono"
-                        >
-                          {{ inlineMdError }}
-                        </div>
-                        <MarkdownContent
-                          v-else-if="inlineMdContent"
-                          link-markdown-paths
-                          :text="inlineMdContent"
-                          @markdown-path-click="path => openMarkdownPreviewModal(path)"
-                        />
-                      </div>
-                    </div>
-                  </template>
 
                   <div
-                    v-for="img in imageAttachments"
-                    :key="img.id"
-                    class="tp-deliverable-item"
+                    v-if="inlineMdKey === deliv.key"
+                    class="tp-inline-md-box"
                   >
-                    <div class="tp-deliv-main">
-                      <div class="tp-deliv-title-row">
-                        <span class="tp-deliv-kind">img</span>
-                        <span class="tp-deliv-title tp-mono">{{ img.filename }}</span>
-                      </div>
+                    <div class="tp-inline-md-head">
+                      <span class="tp-mono">{{ deliv.artifactPath }}</span>
+                      <button
+                        v-if="deliv.artifactPath"
+                        type="button"
+                        class="tp-inline-link tp-mono"
+                        @click="openDeliverableModal(deliv)"
+                      >
+                        Full reader ↗
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      class="tp-mini-btn"
-                      @click="openImageLightbox(`/api/workspaces/attachments/${img.id}`, img.filename)"
+                    <div
+                      v-if="inlineMdLoading"
+                      class="tp-log-status tp-mono"
                     >
-                      View ↗
-                    </button>
+                      Loading Markdown document…
+                    </div>
+                    <div
+                      v-else-if="inlineMdError"
+                      class="tp-log-status tp-mono"
+                    >
+                      {{ inlineMdError }}
+                    </div>
+                    <MarkdownContent
+                      v-else-if="inlineMdContent"
+                      link-markdown-paths
+                      :text="inlineMdContent"
+                      @markdown-path-click="path => openMarkdownPreviewModal(path)"
+                    />
                   </div>
                 </div>
               </template>
 
-              <template v-if="hasVerification">
-                <div class="tp-section-head">
-                  <h2 class="tp-micro-heading">
-                    {{ hasDeliverables ? '3 · Verification & Caveats' : '2 · Verification & Caveats' }}
-                  </h2>
-                  <span
-                    :class="[
-                      'tp-val-badge',
-                      'tp-mono',
-                      activeItem.validation.failedCount > 0
-                        ? 'tp-val-badge--fail'
-                        : activeItem.validation.passedCount > 0
-                          ? 'tp-val-badge--pass'
-                          : '',
-                    ]"
-                  >
-                    {{ activeItem.validation.summaryLabel }}
-                  </span>
+              <div
+                v-for="img in imageAttachments"
+                :key="img.id"
+                class="tp-deliverable-item"
+              >
+                <div class="tp-deliv-main">
+                  <div class="tp-deliv-title-row">
+                    <span class="tp-deliv-kind">img</span>
+                    <span class="tp-deliv-title tp-mono">{{ img.filename }}</span>
+                  </div>
                 </div>
-
-                <div
-                  v-if="activeItem.validation.pills.length > 0"
-                  class="tp-pill-wrap"
-                >
-                  <span
-                    v-for="(pill, idx) in activeItem.validation.pills"
-                    :key="idx"
-                    :class="['tp-check-pill', 'tp-mono', `tp-check-pill--${pill.status}`]"
+                <div class="tp-deliv-actions">
+                  <button
+                    type="button"
+                    class="tp-mini-btn"
+                    @click="openImageLightbox(`/api/workspaces/attachments/${img.id}`, img.filename)"
                   >
-                    <span>{{ pill.status === 'fail' ? '✕' : '✓' }}</span>
-                    <span>{{ pill.label }}</span>
-                  </span>
+                    View ↗
+                  </button>
                 </div>
-
-                <ul
-                  v-if="activeItem.validation.notes.length > 0"
-                  class="tp-val-notes"
-                >
-                  <li
-                    v-for="(note, idx) in activeItem.validation.notes"
-                    :key="idx"
-                  >
-                    {{ note }}
-                  </li>
-                </ul>
-
-                <div
-                  v-if="activeItem.validation.riskBullets.length > 0"
-                  class="tp-risk-box"
-                >
-                  <span class="tp-risk-title">Caveats &amp; Unverified Scope</span>
-                  <ul class="tp-risk-list">
-                    <li
-                      v-for="(risk, idx) in activeItem.validation.riskBullets"
-                      :key="idx"
-                    >
-                      {{ risk }}
-                    </li>
-                  </ul>
-                </div>
-              </template>
-            </section>
-
-            <!-- Mode B keeps Process History quietly tucked in a collapsible drawer -->
-            <details class="tp-meta-disclosure">
-              <summary>
-                <span>Process History ({{ activeItem.milestones.length }} milestones)</span>
-                <span class="tp-mono tp-num">{{ activeItem.elapsedLabel }}</span>
-              </summary>
-              <div class="tp-disclosure-body">
-                <ol class="tp-milestone-list">
-                  <li
-                    v-for="step in activeItem.milestones"
-                    :key="step.id"
-                    :class="['tp-ms-item', `tp-ms-item--${step.tone}`]"
-                  >
-                    <div class="tp-ms-time-col tp-num">
-                      <span class="tp-ms-time">{{ step.timeLabel }}</span>
-                      <span
-                        v-if="step.deltaLabel"
-                        class="tp-ms-delta tp-mono"
-                      >{{ step.deltaLabel }}</span>
-                    </div>
-                    <span class="tp-ms-track">
-                      <i class="tp-ms-dot" />
-                    </span>
-                    <div class="tp-ms-body">
-                      <div class="tp-ms-head">
-                        <span class="tp-ms-title">{{ step.title }}</span>
-                        <span
-                          v-if="step.badge"
-                          :class="['tp-ms-badge', 'tp-mono', `tp-ms-badge--${step.tone}`]"
-                        >
-                          {{ step.badge }}
-                        </span>
-                      </div>
-                      <p :class="['tp-ms-oneliner', { 'tp-ms-oneliner--echo': step.isCurrentEcho }]">
-                        {{ step.oneLiner }}
-                      </p>
-                    </div>
-                  </li>
-                </ol>
               </div>
-            </details>
-          </template>
+            </div>
+          </section>
 
-          <!-- Collapsible Raw Prompt, Execution Control & Secondary Actions -->
+          <!-- 3. Verification & Caveats Card -->
+          <section
+            v-if="hasVerification"
+            class="tp-card"
+            aria-label="Verification and caveats"
+          >
+            <div class="tp-section-head">
+              <h2 class="tp-micro-heading">
+                Verification &amp; Caveats
+              </h2>
+              <span
+                :class="[
+                  'tp-val-badge',
+                  'tp-mono',
+                  activeItem.validation.failedCount > 0
+                    ? 'tp-val-badge--fail'
+                    : activeItem.validation.passedCount > 0
+                      ? 'tp-val-badge--pass'
+                      : '',
+                ]"
+              >
+                {{ activeItem.validation.summaryLabel }}
+              </span>
+            </div>
+
+            <div
+              v-if="activeItem.validation.pills.length > 0"
+              class="tp-pill-wrap"
+            >
+              <span
+                v-for="(pill, idx) in activeItem.validation.pills"
+                :key="idx"
+                :class="['tp-check-pill', 'tp-mono', `tp-check-pill--${pill.status}`]"
+              >
+                <span>{{ pill.status === 'fail' ? '✕' : '✓' }}</span>
+                <span>{{ pill.label }}</span>
+              </span>
+            </div>
+
+            <ul
+              v-if="activeItem.validation.notes.length > 0"
+              class="tp-val-notes"
+            >
+              <li
+                v-for="(note, idx) in activeItem.validation.notes"
+                :key="idx"
+              >
+                {{ note }}
+              </li>
+            </ul>
+
+            <div
+              v-if="activeItem.validation.riskBullets.length > 0"
+              class="tp-risk-box"
+            >
+              <span class="tp-risk-title">Caveats &amp; Unverified Scope</span>
+              <ul class="tp-risk-list">
+                <li
+                  v-for="(risk, idx) in activeItem.validation.riskBullets"
+                  :key="idx"
+                >
+                  {{ risk }}
+                </li>
+              </ul>
+            </div>
+          </section>
+
+          <!-- 4. Adaptive Key Milestones: Expanded for Open Tasks, Folded for Done Tasks -->
+          <details
+            class="tp-milestones-disclosure"
+            :open="milestonesExpanded"
+            aria-label="Key milestones"
+            @toggle="onMilestonesToggle"
+          >
+            <summary class="tp-milestones-summary">
+              <span class="tp-micro-heading">
+                Key Milestones ({{ activeItem.milestones.length }})
+              </span>
+              <span class="tp-mono tp-sep">
+                <template v-if="eventsLoading">Syncing checkpoints…</template>
+                <template v-else>{{ milestonesExpanded ? 'Collapse' : 'Expand history' }}</template>
+              </span>
+            </summary>
+
+            <ol class="tp-milestone-list">
+              <li
+                v-for="step in activeItem.milestones"
+                :key="step.id"
+                :class="['tp-ms-item', `tp-ms-item--${step.tone}`]"
+              >
+                <div class="tp-ms-time-col tp-num">
+                  <span class="tp-ms-time">{{ step.timeLabel }}</span>
+                  <span
+                    v-if="step.deltaLabel"
+                    class="tp-ms-delta tp-mono"
+                  >{{ step.deltaLabel }}</span>
+                </div>
+
+                <span class="tp-ms-track">
+                  <i class="tp-ms-dot" />
+                </span>
+
+                <div class="tp-ms-body">
+                  <div class="tp-ms-head">
+                    <span class="tp-ms-title">{{ step.title }}</span>
+                    <span
+                      v-if="step.badge"
+                      :class="['tp-ms-badge', 'tp-mono', `tp-ms-badge--${step.tone}`]"
+                    >
+                      {{ step.badge }}
+                    </span>
+
+                    <div class="tp-ms-links">
+                      <button
+                        v-if="step.detailText"
+                        type="button"
+                        class="tp-inline-link tp-mono"
+                        @click="toggleStepDetail(step.id)"
+                      >
+                        {{
+                          expandedStepIds.has(step.id)
+                            ? 'Hide details'
+                            : step.collapsedCount
+                              ? `Details (${step.collapsedCount})`
+                              : 'Details'
+                        }}
+                      </button>
+                      <button
+                        v-if="step.sessionId || step.tabId"
+                        type="button"
+                        class="tp-inline-link tp-mono"
+                        @click="toggleTranscript(step)"
+                      >
+                        {{ openTranscriptNodeId === step.id ? 'Hide transcript' : 'Transcript ↗' }}
+                      </button>
+                    </div>
+                  </div>
+
+                  <p :class="['tp-ms-oneliner', { 'tp-ms-oneliner--echo': step.isCurrentEcho }]">
+                    {{ step.oneLiner }}
+                  </p>
+
+                  <div
+                    v-if="step.detailText && expandedStepIds.has(step.id)"
+                    class="tp-ms-detail-box"
+                  >
+                    <pre class="tp-ms-detail-pre">{{ step.detailText }}</pre>
+                  </div>
+
+                  <div
+                    v-if="openTranscriptNodeId === step.id"
+                    class="tp-log-excerpt"
+                  >
+                    <div
+                      v-if="transcriptLoading"
+                      class="tp-log-status tp-mono"
+                    >
+                      Loading session stream…
+                    </div>
+                    <div
+                      v-else-if="transcriptError"
+                      class="tp-log-status tp-mono"
+                    >
+                      {{ transcriptError }}
+                    </div>
+                    <div
+                      v-else-if="transcriptLines.length === 0"
+                      class="tp-log-status tp-mono"
+                    >
+                      No persisted structured stream turns found for this session.
+                    </div>
+                    <template v-else>
+                      <div
+                        v-for="(line, idx) in transcriptLines"
+                        :key="idx"
+                        class="tp-log-row"
+                      >
+                        <span class="tp-mono tp-num">{{ line.time }}</span>
+                        <span :class="['tp-mono', 'tp-log-speaker', `tp-log-speaker--${line.role}`]">
+                          {{ line.speaker }}
+                        </span>
+                        <span>{{ line.text }}</span>
+                      </div>
+                    </template>
+
+                    <div
+                      v-if="step.tabId"
+                      class="tp-log-footer"
+                    >
+                      <button
+                        type="button"
+                        class="tp-inline-link tp-mono"
+                        @click="openOrRestoreTab(step.tabId)"
+                      >
+                        Open full conversation in Chat pane ↗
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </li>
+            </ol>
+          </details>
+
+          <!-- 5. Collapsible Raw Prompt, Execution Control & Secondary Actions -->
           <details class="tp-meta-disclosure">
             <summary>
               <span>Prompt, Execution Control &amp; Secondary Actions</span>
@@ -1036,9 +897,8 @@
               </div>
 
               <TaskExecutionPanel
-                v-if="activeWorkspaceId"
-                :key="`${activeWorkspaceId}:${activeItem.id}`"
-                :workspace-id="activeWorkspaceId"
+                :key="`${activeItem.task.workspace_id}:${activeItem.id}`"
+                :workspace-id="activeItem.task.workspace_id"
                 :task="activeItem.task"
                 :capabilities="taskCapabilities"
                 :debug-open="false"
@@ -1069,11 +929,16 @@ import { useAppStore } from '@/stores/appStore'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
 import type {
+  AgentReport,
   AgentStreamEvent,
   ManagedSession,
+  TaskLifecycle,
+  Workspace,
   WorkspaceArtifactPreview,
+  WorkspaceTask,
   WorkspaceTaskEvent,
 } from '@/types'
+import { createComposerDraftId } from '@/utils/chatComposerInteraction'
 import { writeClipboard } from '@/utils/clipboard'
 import {
   formatAttachmentSize,
@@ -1083,6 +948,7 @@ import {
   type DraftAttachment,
 } from '@/utils/draftAttachments'
 import { parseTimestampMs } from '@/utils/duration'
+import { generateTaskCallId, isWorkspaceControlledTask } from '@/utils/taskExecution'
 import {
   useWorkspaceArtifactsContext,
   useWorkspaceRuntimeContext,
@@ -1097,33 +963,42 @@ import {
   type TriageTaskViewModel,
 } from '../presentation/triageProModel'
 
-type TriageDetailMode = 'digest' | 'memo'
-const DETAIL_MODE_STORAGE_KEY = 'claude-hub.triage-detail-mode.v1'
+type TriageScopeMode = 'current' | 'all'
+const SCOPE_MODE_STORAGE_KEY = 'claude-hub.triage-scope-mode.v1'
 
-function readInitialDetailMode(): TriageDetailMode {
+interface BoardOverviewPayload {
+  workspaces: Workspace[]
+  tasks: WorkspaceTask[]
+  reports: AgentReport[]
+  sessions: ManagedSession[]
+  task_lifecycles: Record<string, TaskLifecycle>
+  attention_counts: Record<string, number>
+}
+
+interface TaskBriefPayload {
+  workspace_id: string
+  workspace_name: string
+  workspace_path: string
+  task_id: string
+  title: string
+  markdown: string
+}
+
+function readInitialScopeMode(): TriageScopeMode {
   if (typeof window !== 'undefined') {
-    const param = new URLSearchParams(window.location.search).get('triage_mode')
-    if (param === 'memo' || param === 'digest') return param
+    const param = new URLSearchParams(window.location.search).get('ws_scope')
+    if (param === 'all' || param === 'current') return param
     try {
-      const saved = window.localStorage.getItem(DETAIL_MODE_STORAGE_KEY)
-      if (saved === 'memo' || saved === 'digest') return saved
+      const saved = window.localStorage.getItem(SCOPE_MODE_STORAGE_KEY)
+      if (saved === 'all' || saved === 'current') return saved
     } catch {
       // Ignore storage access errors.
     }
   }
-  return 'digest'
+  return 'current'
 }
 
-const detailMode = ref<TriageDetailMode>(readInitialDetailMode())
-
-function setDetailMode(mode: TriageDetailMode) {
-  detailMode.value = mode
-  try {
-    window.localStorage.setItem(DETAIL_MODE_STORAGE_KEY, mode)
-  } catch {
-    // Ignore storage write errors.
-  }
-}
+const scopeMode = ref<TriageScopeMode>(readInitialScopeMode())
 
 const workspaceStore = useWorkspaceStore()
 const terminalStore = useTerminalStore()
@@ -1132,6 +1007,9 @@ const appStore = useAppStore()
 const {
   activeWorkspace,
   activeWorkspaceId,
+  selectedWorkspaceId,
+  workspaces,
+  handleWorkspaceChange,
   board,
   boardLoading,
   tasks,
@@ -1181,11 +1059,127 @@ const {
 
 const nowMs = ref(Date.now())
 let clockTimer: ReturnType<typeof setInterval> | null = null
+let overviewTimer: ReturnType<typeof setInterval> | null = null
+
+const overviewData = ref<BoardOverviewPayload | null>(null)
+const overviewLoading = ref(false)
+let overviewEpoch = 0
+
+async function fetchOverviewFallbackFromBoards(): Promise<BoardOverviewPayload | null> {
+  const wsList = workspaces.value
+  if (!wsList.length) return null
+  const boards = await Promise.all(
+    wsList.map(async ws => {
+      try {
+        const r = await fetch(
+          `/api/workspaces/${encodeURIComponent(ws.id)}/board?tasks_limit=8`,
+          { credentials: 'same-origin' },
+        )
+        return r.ok ? ((await r.json()) as Record<string, unknown>) : null
+      } catch {
+        return null
+      }
+    }),
+  )
+  const mergedTasks: WorkspaceTask[] = []
+  const mergedReports: AgentReport[] = []
+  const mergedSessions: ManagedSession[] = []
+  const mergedLifecycles: Record<string, TaskLifecycle> = {}
+  const attentionCounts: Record<string, number> = {}
+  boards.forEach((b, idx) => {
+    const ws = wsList[idx]
+    if (!b || !ws) return
+    const tList = Array.isArray(b.tasks) ? (b.tasks as WorkspaceTask[]) : []
+    const rList = Array.isArray(b.reports) ? (b.reports as AgentReport[]) : []
+    const sList = Array.isArray(b.sessions) ? (b.sessions as ManagedSession[]) : []
+    const lcs = (b.task_lifecycles as Record<string, TaskLifecycle> | undefined) ?? {}
+    mergedTasks.push(...tList)
+    mergedReports.push(...rList)
+    mergedSessions.push(...sList)
+    Object.assign(mergedLifecycles, lcs)
+    attentionCounts[ws.id] = Object.values(lcs).filter(lc => lc.attention).length
+  })
+  return {
+    workspaces: wsList,
+    tasks: mergedTasks,
+    reports: mergedReports,
+    sessions: mergedSessions,
+    task_lifecycles: mergedLifecycles,
+    attention_counts: attentionCounts,
+  }
+}
+
+let overviewInFlight = false
+
+async function refreshOverview() {
+  if (scopeMode.value !== 'all' || overviewInFlight) return
+  overviewInFlight = true
+  const epoch = ++overviewEpoch
+  if (!overviewData.value) overviewLoading.value = true
+  try {
+    const res = await fetch('/api/workspaces/board-overview?done_per_workspace=8', {
+      credentials: 'same-origin',
+    })
+    if (epoch !== overviewEpoch) return
+    if (res.ok) {
+      overviewData.value = (await res.json()) as BoardOverviewPayload
+      return
+    }
+    if (res.status === 404) {
+      // Compatibility fallback when previewing against an older un-restarted backend
+      const fallback = await fetchOverviewFallbackFromBoards()
+      if (epoch === overviewEpoch && fallback) {
+        overviewData.value = fallback
+      }
+    }
+  } catch {
+    // Ignore transient poll errors.
+  } finally {
+    overviewInFlight = false
+    if (epoch === overviewEpoch) {
+      overviewLoading.value = false
+    }
+  }
+}
+
+function setScopeMode(mode: TriageScopeMode) {
+  if (scopeMode.value === mode) return
+  scopeMode.value = mode
+  try {
+    window.localStorage.setItem(SCOPE_MODE_STORAGE_KEY, mode)
+  } catch {
+    // Ignore storage write errors.
+  }
+  if (mode === 'all') {
+    void refreshOverview()
+  }
+}
+
+const overviewAttentionTotal = computed(() => {
+  if (overviewData.value?.attention_counts) {
+    return Object.values(overviewData.value.attention_counts).reduce((a, b) => a + b, 0)
+  }
+  const lifecycles = board.value?.task_lifecycles ?? {}
+  return Object.values(lifecycles).filter(lc => lc.attention).length
+})
 
 const isSteerOpen = ref(false)
 const steerInputRef = ref<HTMLTextAreaElement | null>(null)
+const isInitiatorReplyOpen = ref(false)
+const initiatorReplyInputRef = ref<HTMLTextAreaElement | null>(null)
+const initiatorReplyText = ref('')
+const initiatorReplyTurnId = ref<string>('')
+const initiatorReplySending = ref(false)
+const initiatorCloseLoading = ref(false)
+let initiatorCloseCallId: string | null = null
+
+const briefCopying = ref(false)
+const handoffChatLaunching = ref(false)
+const gateActionNotice = ref<{ tone: 'success' | 'error'; text: string } | null>(null)
+
 const showRawDigest = ref(false)
 const expandedStepIds = reactive(new Set<string>())
+const milestonesManualOverride = ref<boolean | null>(null)
 const copiedKey = ref<string | null>(null)
 let copyResetTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -1195,7 +1189,7 @@ const taskEventsFetchedRev = new Map<string, number>()
 const eventsLoading = ref(false)
 let eventsFetchEpoch = 0
 
-// Inline Markdown preview state for Mode B (One-Page Brief)
+// Inline Markdown preview state (unified into the single detail surface)
 const inlineMdKey = ref<string | null>(null)
 const inlineMdContent = ref<string | null>(null)
 const inlineMdLoading = ref(false)
@@ -1217,13 +1211,52 @@ let transcriptEpoch = 0
 
 const sessionsById = computed(() => {
   const map = new Map<string, ManagedSession>()
-  for (const session of board.value?.sessions ?? []) {
+  const list =
+    scopeMode.value === 'all' && overviewData.value
+      ? overviewData.value.sessions
+      : board.value?.sessions ?? []
+  for (const session of list) {
     map.set(session.id, session)
   }
   return map
 })
 
 const triageItems = computed<TriageTaskViewModel[]>(() => {
+  if (scopeMode.value === 'all' && overviewData.value) {
+    const wsById = new Map(overviewData.value.workspaces.map(w => [w.id, w]))
+    const reportsByTask = new Map<string, AgentReport[]>()
+    for (const r of overviewData.value.reports) {
+      if (!r.task_id) continue
+      const arr = reportsByTask.get(r.task_id) ?? []
+      arr.push(r)
+      reportsByTask.set(r.task_id, arr)
+    }
+    const lifecycles = overviewData.value.task_lifecycles ?? {}
+    return overviewData.value.tasks.map(task => {
+      const ws = wsById.get(task.workspace_id)
+      const isSelected = selectedTaskId.value === task.id
+      const fullReports =
+        isSelected && activeWorkspaceId.value === task.workspace_id ? selectedReports.value : []
+      const reports = fullReports.length > 0 ? fullReports : reportsByTask.get(task.id) ?? []
+      const docs =
+        isSelected && activeWorkspaceId.value === task.workspace_id
+          ? selectedMarkdownDocuments.value
+          : []
+      const events = taskEventsByTaskId[task.id] || []
+      return buildTriageTaskViewModel({
+        task,
+        workspaceName: ws?.name || 'workspace',
+        defaultBranch: ws?.default_branch || 'main',
+        reports,
+        events,
+        markdownDocs: docs,
+        sessionsById: sessionsById.value,
+        lifecycle: lifecycles[task.id],
+        nowMs: nowMs.value,
+      })
+    })
+  }
+
   const wsName = board.value?.workspace?.name || activeWorkspace.value?.name || 'workspace'
   const defBranch = board.value?.workspace?.default_branch || activeWorkspace.value?.default_branch || 'main'
   const lifecycles = board.value?.task_lifecycles ?? {}
@@ -1251,10 +1284,19 @@ const triageItems = computed<TriageTaskViewModel[]>(() => {
 const groupedTasks = computed(() => groupTriageTasks(triageItems.value))
 const orderedVisibleItems = computed(() => groupedTasks.value.flatMap(g => g.items))
 
+let pendingCrossWorkspaceSelectionId: string | null = null
+
 watch(
-  [orderedVisibleItems, activeWorkspaceId],
+  [orderedVisibleItems, activeWorkspaceId, scopeMode],
   ([items]) => {
     if (items.length === 0) return
+    if (
+      pendingCrossWorkspaceSelectionId &&
+      items.some(i => i.id === pendingCrossWorkspaceSelectionId)
+    ) {
+      selectedTaskId.value = pendingCrossWorkspaceSelectionId
+      return
+    }
     if (!selectedTaskId.value || !items.some(i => i.id === selectedTaskId.value)) {
       selectedTaskId.value = items[0].id
     }
@@ -1269,6 +1311,27 @@ const activeItem = computed<TriageTaskViewModel | null>(() => {
     orderedVisibleItems.value[0]
   )
 })
+
+const selectedSessionForActive = computed<ManagedSession | null>(() => {
+  const item = activeItem.value
+  if (!item) return null
+  if (item.task.session_id) {
+    return sessionsById.value.get(item.task.session_id) ?? selectedSession.value ?? null
+  }
+  return selectedSession.value
+})
+
+// Adaptive Milestones: automatically expanded for active/needs-you tasks, folded for done tasks
+const milestonesExpanded = computed(() => {
+  if (milestonesManualOverride.value !== null) return milestonesManualOverride.value
+  return activeItem.value?.bucket !== 'done'
+})
+
+function onMilestonesToggle(event: Event) {
+  const el = event.target as HTMLDetailsElement | null
+  if (!el) return
+  milestonesManualOverride.value = el.open
+}
 
 const imageAttachments = computed(() =>
   (activeItem.value?.task.attachments || []).filter(att =>
@@ -1300,6 +1363,23 @@ const gateBannerCopy = computed(() => {
   }
   return item.task.human_accepted_at ? 'Accepted and finalized.' : 'Completed.'
 })
+
+function isInitiatorTask(task: WorkspaceTask): boolean {
+  return !isWorkspaceControlledTask(task)
+}
+
+function canMarkInitiatorDone(task: WorkspaceTask): boolean {
+  return (
+    isInitiatorTask(task) &&
+    !task.execution_released &&
+    task.status !== 'done' &&
+    task.status !== 'failed' &&
+    Number.isInteger(task.execution_epoch) &&
+    (task.execution_epoch ?? 0) >= 1 &&
+    Number.isInteger(task.progress_revision) &&
+    (task.progress_revision ?? -1) >= 0
+  )
+}
 
 // Lazily hydrate initiator checkpoint history when a multi-checkpoint task is selected
 watch(
@@ -1351,7 +1431,13 @@ function resetTaskTransientState() {
   resetDraftAttachments(detailAttachments.value)
   detailAttachments.value = []
   isSteerOpen.value = false
+  isInitiatorReplyOpen.value = false
+  initiatorReplyText.value = ''
+  initiatorReplyTurnId.value = ''
+  initiatorCloseCallId = null
+  gateActionNotice.value = null
   showRawDigest.value = false
+  milestonesManualOverride.value = null
   expandedStepIds.clear()
   inlineMdKey.value = null
   inlineMdContent.value = null
@@ -1379,22 +1465,264 @@ watch(selectedTaskId, (nextId, prevId) => {
   }
 })
 
-function selectTriageTask(id: string) {
-  if (selectedTaskId.value === id) return
-  selectedTaskId.value = id
+async function selectTriageItem(item: TriageTaskViewModel) {
+  const targetId = item.id
+  pendingCrossWorkspaceSelectionId = targetId
+  try {
+    if (scopeMode.value === 'all' && item.task.workspace_id !== activeWorkspaceId.value) {
+      selectedWorkspaceId.value = item.task.workspace_id
+      await handleWorkspaceChange()
+      await nextTick()
+    }
+    selectedTaskId.value = targetId
+  } finally {
+    pendingCrossWorkspaceSelectionId = null
+  }
 }
 
 function toggleSteerComposer() {
   isSteerOpen.value = !isSteerOpen.value
   if (isSteerOpen.value) {
+    isInitiatorReplyOpen.value = false
     void nextTick(() => steerInputRef.value?.focus())
   }
 }
+
+function toggleInitiatorReply() {
+  isInitiatorReplyOpen.value = !isInitiatorReplyOpen.value
+  if (isInitiatorReplyOpen.value) {
+    isSteerOpen.value = false
+    if (!initiatorReplyTurnId.value) {
+      initiatorReplyTurnId.value = createComposerDraftId()
+    }
+    void nextTick(() => initiatorReplyInputRef.value?.focus())
+  }
+}
+
+watch(initiatorReplyText, () => {
+  // Fresh text edits mint a new idempotency turn ID; retrying after a network error without editing keeps the same ID.
+  initiatorReplyTurnId.value = createComposerDraftId()
+})
 
 async function submitSteer() {
   await sendDetailMessage()
   if (!detailMessage.value.trim() && detailAttachments.value.length === 0) {
     isSteerOpen.value = false
+  }
+}
+
+async function submitInitiatorReply(item: TriageTaskViewModel) {
+  const tabId = item.task.source?.tab_id
+  const message = initiatorReplyText.value.trim()
+  if (!tabId || !message || initiatorReplySending.value) return
+
+  initiatorReplySending.value = true
+  gateActionNotice.value = null
+  const turnId = initiatorReplyTurnId.value || createComposerDraftId()
+  initiatorReplyTurnId.value = turnId
+
+  try {
+    await Promise.all([
+      terminalStore.fetchTabs(),
+      terminalStore.fetchArchivedTabs(),
+    ])
+    if (terminalStore.archivedTabs.some(t => t.id === tabId)) {
+      const restored = await terminalStore.unarchiveTab(tabId)
+      if (!restored) {
+        throw new Error('Could not restore the archived Chat tab.')
+      }
+    }
+
+    const res = await fetch(`/api/workspaces/tabs/${encodeURIComponent(tabId)}/stream/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({
+        client_turn_id: turnId,
+        text: message,
+        delivery: 'normal',
+        attachments: [],
+      }),
+    })
+    if (!res.ok) {
+      let detail = `Reply failed (HTTP ${res.status})`
+      try {
+        const errBody = await res.json()
+        if (typeof errBody?.detail === 'string' && errBody.detail.trim()) {
+          detail = errBody.detail.trim()
+        }
+      } catch {
+        // Keep status fallback.
+      }
+      throw new Error(detail)
+    }
+
+    initiatorReplyText.value = ''
+    initiatorReplyTurnId.value = ''
+    isInitiatorReplyOpen.value = false
+    gateActionNotice.value = {
+      tone: 'success',
+      text: 'Reply delivered to the originating Chat.',
+    }
+  } catch (err) {
+    gateActionNotice.value = {
+      tone: 'error',
+      text: err instanceof Error ? err.message : 'Failed to deliver reply.',
+    }
+  } finally {
+    initiatorReplySending.value = false
+  }
+}
+
+async function markInitiatorTaskDone(item: TriageTaskViewModel) {
+  if (!canMarkInitiatorDone(item.task) || initiatorCloseLoading.value) return
+  initiatorCloseLoading.value = true
+  gateActionNotice.value = null
+  const callId = initiatorCloseCallId || generateTaskCallId()
+  initiatorCloseCallId = callId
+  const prog = item.task.latest_progress
+
+  try {
+    await workspaceStore.reportTaskProgressManually(item.task.workspace_id, item.task.id, {
+      call_id: callId,
+      expected_execution_epoch: item.task.execution_epoch!,
+      expected_progress_revision: item.task.progress_revision!,
+      state: 'completed',
+      summary: prog?.summary || `Marked completed from Agent Workspace: ${item.task.title}`,
+      validation: prog?.validation ?? null,
+      risks: prog?.risks ?? null,
+      artifact_refs: prog?.artifact_refs ?? [],
+    })
+    initiatorCloseCallId = null
+    await Promise.all([
+      workspaceStore.fetchBoard(item.task.workspace_id),
+      scopeMode.value === 'all' ? refreshOverview() : Promise.resolve(),
+    ])
+    gateActionNotice.value = {
+      tone: 'success',
+      text: 'Task marked Done.',
+    }
+  } catch (err) {
+    gateActionNotice.value = {
+      tone: 'error',
+      text: err instanceof Error ? err.message : 'Could not mark task Done.',
+    }
+  } finally {
+    initiatorCloseLoading.value = false
+  }
+}
+
+async function fetchOrBuildTaskBrief(item: TriageTaskViewModel): Promise<{
+  markdown: string
+  workspacePath: string
+}> {
+  const wsId = item.task.workspace_id
+  try {
+    const res = await fetch(
+      `/api/workspaces/${encodeURIComponent(wsId)}/tasks/${encodeURIComponent(item.task.id)}/brief`,
+      { credentials: 'same-origin' },
+    )
+    if (res.ok) {
+      const payload = (await res.json()) as TaskBriefPayload
+      if (payload.markdown) {
+        return {
+          markdown: payload.markdown,
+          workspacePath: payload.workspace_path || activeWorkspace.value?.path || '',
+        }
+      }
+    }
+  } catch {
+    // Fall back to client-side brief synthesis below.
+  }
+
+  const wsObj = workspaces.value.find(w => w.id === wsId) || activeWorkspace.value
+  const lines = [
+    `# Task Handoff Brief — ${item.title}`,
+    `- Task: \`${item.id}\` | Workspace: \`${item.workspaceName}\` (\`${wsId}\`)`,
+    `- State: status=\`${item.task.status}\`, label=\`${item.statusLabel}\`, control=\`${item.internalMeta.control}\``,
+    `- Summary: ${item.digest.headline}`,
+  ]
+  if (item.digest.actionPrompt) lines.push(`- Decision / Blocker: ${item.digest.actionPrompt}`)
+  if (item.deliverables.length > 0) {
+    lines.push(
+      `- Deliverables: ${item.deliverables.map(d => d.artifactPath || d.url || d.title).join(', ')}`,
+    )
+  }
+  lines.push(`- Inspect full record: \`claude-hub task status ${item.id} --workspace-id ${wsId}\``)
+  return {
+    markdown: lines.join('\n'),
+    workspacePath: wsObj?.path || '',
+  }
+}
+
+async function copyAiTaskBrief(item: TriageTaskViewModel) {
+  if (briefCopying.value) return
+  briefCopying.value = true
+  try {
+    const { markdown } = await fetchOrBuildTaskBrief(item)
+    await writeClipboard(markdown)
+    const key = `brief:${item.id}`
+    copiedKey.value = key
+    if (copyResetTimer !== null) clearTimeout(copyResetTimer)
+    copyResetTimer = setTimeout(() => {
+      copiedKey.value = null
+    }, 1800)
+  } catch {
+    gateActionNotice.value = {
+      tone: 'error',
+      text: 'Could not copy AI brief to clipboard.',
+    }
+  } finally {
+    briefCopying.value = false
+  }
+}
+
+async function continueInNewChat(item: TriageTaskViewModel) {
+  if (handoffChatLaunching.value) return
+  handoffChatLaunching.value = true
+  gateActionNotice.value = null
+  try {
+    const { markdown, workspacePath } = await fetchOrBuildTaskBrief(item)
+    const supportedChatTypes = new Set(['claude', 'codex', 'cursor', 'maso', 'antigravity'])
+    const chosenAgent = supportedChatTypes.has(item.task.agent_type)
+      ? item.task.agent_type
+      : 'claude'
+    const soloMode = ['claude', 'codex'].includes(chosenAgent)
+
+    const newTab = await terminalStore.createTab({
+      name: `Handoff ${item.code}`,
+      cwd: workspacePath || undefined,
+      agent_type: chosenAgent,
+      session_kind: 'chat',
+      solo_mode: soloMode,
+      target: 'local',
+    })
+    if (!newTab?.id) {
+      throw new Error('Could not create handoff Chat session.')
+    }
+
+    const promptText = `${markdown}\n\n请基于以上 Task 恢复包接力该任务：先核对当前工作区与分支状态，确认剩余事项后继续推进或给出明确结论。`
+    await fetch(`/api/workspaces/tabs/${encodeURIComponent(newTab.id)}/stream/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({
+        client_turn_id: createComposerDraftId(),
+        text: promptText,
+        delivery: 'normal',
+        attachments: [],
+      }),
+    })
+
+    appStore.setMode('terminal')
+    terminalStore.setActiveTab(newTab.id)
+  } catch (err) {
+    gateActionNotice.value = {
+      tone: 'error',
+      text: err instanceof Error ? err.message : 'Failed to start handoff Chat.',
+    }
+  } finally {
+    handoffChatLaunching.value = false
   }
 }
 
@@ -1569,17 +1897,25 @@ async function openOrRestoreTab(tabId: string) {
 }
 
 onMounted(() => {
+  if (scopeMode.value === 'all') {
+    void refreshOverview()
+  }
   clockTimer = setInterval(() => {
     nowMs.value = Date.now()
   }, 15_000)
+  overviewTimer = setInterval(() => {
+    if (scopeMode.value === 'all') void refreshOverview()
+  }, 5_000)
 })
 
 onBeforeUnmount(() => {
   if (clockTimer !== null) clearInterval(clockTimer)
+  if (overviewTimer !== null) clearInterval(overviewTimer)
   if (copyResetTimer !== null) clearTimeout(copyResetTimer)
   transcriptEpoch += 1
   eventsFetchEpoch += 1
   inlineMdEpoch += 1
+  overviewEpoch += 1
   resetTaskTransientState()
 })
 </script>

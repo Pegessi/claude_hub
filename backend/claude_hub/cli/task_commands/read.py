@@ -117,7 +117,12 @@ def _board_tasks(board: Any) -> List[dict]:
 
 
 @task.command("list")
-@click.argument("workspace_id")
+@click.argument("workspace_id", required=False, default=None)
+@click.option(
+    "--all-workspaces",
+    is_flag=True,
+    help="List tasks across every Workspace (all open tasks + recent done).",
+)
 @click.option("--status", default=None, help="Client-side filter on task status.")
 @click.option("--phase", default=None, help="Client-side filter on lifecycle phase.")
 @click.option(
@@ -128,15 +133,24 @@ def _board_tasks(board: Any) -> List[dict]:
 @click.pass_context
 def task_list(
     ctx: click.Context,
-    workspace_id: str,
+    workspace_id: Optional[str],
+    all_workspaces: bool,
     status: Optional[str],
     phase: Optional[str],
     attention: bool,
 ) -> None:
-    """List tasks for a workspace with their lifecycle phase and owner."""
+    """List tasks for a workspace (or --all-workspaces) with lifecycle phase and owner."""
+    if all_workspaces and workspace_id is not None:
+        raise click.ClickException("Pass either WORKSPACE_ID or --all-workspaces, not both.")
+    if not all_workspaces and not workspace_id:
+        raise click.ClickException("Missing argument 'WORKSPACE_ID' (or pass --all-workspaces).")
     try:
         with cli_main.get_client(ctx) as client:
-            board = client.get_board(workspace_id)
+            if all_workspaces:
+                board = client.get_board_overview()
+            else:
+                assert workspace_id is not None
+                board = client.get_board(workspace_id)
     except HubError as e:
         raise click.ClickException(str(e)) from e
     tasks = _board_tasks(board)
@@ -484,3 +498,26 @@ def task_review(ctx: click.Context, task_id: str, workspace_id: Optional[str]) -
         emit(rounds, True)
     else:
         print_rows(rounds, ["review_cycle", "verdict", "reviewer", "created_at", "notes"])
+
+
+@task.command("brief")
+@click.argument("task_id")
+@click.option(
+    "--workspace-id",
+    default=None,
+    help="Workspace to look in (skips the cross-workspace scan).",
+)
+@click.pass_context
+def task_brief(ctx: click.Context, task_id: str, workspace_id: Optional[str]) -> None:
+    """Emit a bounded (<2 KB) AI handoff and context-recovery brief for a task."""
+    try:
+        with cli_main.get_client(ctx) as client:
+            ws_id = _resolve_ws_id(client, task_id, workspace_id)
+            payload = client.get_task_brief(ws_id, task_id)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    if cli_main.as_json(ctx):
+        emit(payload, True)
+    else:
+        markdown = payload.get("markdown") if isinstance(payload, dict) else ""
+        click.echo(str(markdown or ""))
