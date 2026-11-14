@@ -8,11 +8,16 @@
 // upstream [resource_exhausted] 429 rate-limit blips or HTTP/2 stream resets)
 // instead of resuming from the latest SQLite checkpoint via resumeAction.
 //
-// Additionally, ModelManager.prototype.mapModelToParameterizedSelection in
-// 1623.index.js maps legacy variant slugs (e.g. gemini-4-carbon-high) to the
-// base model's saved/default parameters instead of consulting
-// mapInitialModelVariantToParameterizedSelection for the variant's exact
-// parameterValues.
+// Additionally:
+// 1. ModelManager.prototype.mapModelToParameterizedSelection in 1623.index.js
+//    maps legacy variant slugs (e.g. gemini-4-carbon-high) to the base model's
+//    saved/default parameters instead of consulting
+//    mapInitialModelVariantToParameterizedSelection for the variant's exact
+//    parameterValues.
+// 2. ./src/acp/agent-store.ts and ./src/acp/session-resources.ts only enable
+//    isRunEverything when CLI --yolo (options.force) is passed, ignoring
+//    `approvalMode: "unrestricted"` in ~/.cursor/cli-config.json (which
+//    headless --print and TUI honor).
 //
 // We intercept webpack's CommonJS chunk loader via Module._load so
 // Object.prototype is never modified.
@@ -92,6 +97,40 @@
     mm.mapModelToParameterizedSelection = patchedMap;
   }
 
+  function isUnrestrictedConfig(sharedServices) {
+    try {
+      const cfg =
+        sharedServices &&
+        sharedServices.configProvider &&
+        typeof sharedServices.configProvider.get === "function"
+          ? sharedServices.configProvider.get()
+          : null;
+      return Boolean(cfg && cfg.approvalMode === "unrestricted");
+    } catch {
+      return false;
+    }
+  }
+
+  function syncRunEverythingMetadata(sessionInstance) {
+    try {
+      const store = sessionInstance && sessionInstance.agentStore;
+      if (!store || typeof store.getMetadata !== "function" || typeof store.setMetadata !== "function") {
+        return;
+      }
+      const mode = store.getMetadata("mode");
+      if (mode === "plan" || mode === "ask") {
+        return;
+      }
+      if (isUnrestrictedConfig(sessionInstance.sharedServices)) {
+        if (store.getMetadata("isRunEverything") !== true) {
+          store.setMetadata("isRunEverything", true);
+        }
+      }
+    } catch {
+      // Best-effort metadata sync.
+    }
+  }
+
   function patchAgentSessionClass(AgentSession) {
     if (!AgentSession || !AgentSession.prototype || AgentSession.__claudeHubPatched) {
       return;
@@ -104,6 +143,7 @@
           patchAgentClient(this.sharedServices.agentClient);
           patchModelManager(this.sharedServices.modelManager);
         }
+        syncRunEverythingMetadata(this);
         return origProcessPrompt.apply(this, args);
       };
     }
@@ -121,6 +161,14 @@
           if (this && this.sharedServices) {
             patchAgentClient(this.sharedServices.agentClient);
             patchModelManager(this.sharedServices.modelManager);
+            if (
+              isUnrestrictedConfig(this.sharedServices) &&
+              this.options &&
+              typeof this.options === "object" &&
+              !this.options.force
+            ) {
+              this.options = Object.assign({}, this.options, { force: true });
+            }
           }
           return orig.apply(this, args);
         };
@@ -135,6 +183,7 @@
       patchModelManager,
       patchAgentSessionClass,
       patchCursorAcpAgentClass,
+      syncRunEverythingMetadata,
     },
     configurable: true,
     enumerable: false,
