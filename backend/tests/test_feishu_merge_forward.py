@@ -152,6 +152,33 @@ def test_bundle_orders_children_handles_nested_types_and_preserves_urls() -> Non
     assert image_refs == (("om-post", "img-post"), ("om-image", "img-only"))
 
 
+def test_bundle_omits_code_block_language_metadata_but_preserves_code() -> None:
+    code = 'raise RuntimeError("https://code.byted.org/team/repo/merge_requests/12")'
+    text, refs = render_merged_forward_bundle(
+        [
+            _record(
+                "om-code",
+                "post",
+                {
+                    "content": [
+                        [
+                            {
+                                "tag": "code_block",
+                                "language": "python",
+                                "text": code,
+                            }
+                        ]
+                    ]
+                },
+            )
+        ],
+        root_message_id="root",
+    )
+    assert code in text
+    assert "python" not in text and "code_block" not in text
+    assert refs == ()
+
+
 def test_bundle_bounds_messages_images_and_untrusted_delimiters() -> None:
     records = [_record(f"om-{i}", "image", {"image_key": f"img-{i}"}) for i in range(60)]
     text, refs = render_merged_forward_bundle(records, root_message_id="root")

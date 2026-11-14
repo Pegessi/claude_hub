@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
 import sys
+import textwrap
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -368,4 +372,197 @@ def test_infowall_credentials_are_path_only(monkeypatch: pytest.MonkeyPatch) -> 
     assert commands.infowall_env() == {
         "INFOWALL_API_KEY_FILE": "/nonexistent/never-read",
         "INFOWALL_URL": "http://127.0.0.1:19999",
+        "NO_PROXY": "127.0.0.1,localhost,::1",
+        "no_proxy": "127.0.0.1,localhost,::1",
     }
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "[::1]"])
+def test_infowall_loopback_bypasses_inherited_proxies(
+    monkeypatch: pytest.MonkeyPatch,
+    host: str,
+) -> None:
+    monkeypatch.setenv("INFOWALL_URL", f"http://{host}:18899")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:8080")
+    monkeypatch.setenv("http_proxy", "http://proxy.invalid:8080")
+    monkeypatch.setenv("NO_PROXY", "example.test")
+    monkeypatch.setenv("no_proxy", "example.test")
+    env = commands.infowall_env()
+    assert env["NO_PROXY"] == env["no_proxy"] == "127.0.0.1,localhost,::1"
+
+
+def test_infowall_remote_endpoint_keeps_proxy_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INFOWALL_URL", "https://infowall.example.test")
+    env = commands.infowall_env()
+    assert "NO_PROXY" not in env and "no_proxy" not in env
+
+
+@pytest.mark.parametrize(
+    "name,relative",
+    [
+        ("infowall", ".local/opt/infowall/current/infowall"),
+        ("lark-cli", ".local/bin/lark-cli"),
+    ],
+)
+@pytest.mark.parametrize("location", ["path", "home", "home-nonexecutable", "host", "missing"])
+def test_cli_executable_resolution_order(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    name: str,
+    relative: str,
+    location: str,
+) -> None:
+    home = tmp_path / "isolated-home"
+    monkeypatch.setenv("HOME", str(home))
+    on_path = "/test-bin/" + name
+    monkeypatch.setattr(
+        commands.shutil, "which", lambda value: on_path if location == "path" else None
+    )
+    checked: list[Path] = []
+    candidates = [home / relative, Path("/home/tiger") / relative]
+
+    def is_installed(path: Path) -> bool:
+        checked.append(path)
+        if location == "home-nonexecutable":
+            return path in candidates
+        return (
+            path == candidates[0]
+            if location == "home"
+            else path == candidates[1] and location == "host"
+        )
+
+    def is_executable(path: Path, mode: int) -> bool:
+        assert mode == os.X_OK
+        return not (location == "home-nonexecutable" and path == candidates[0])
+
+    monkeypatch.setattr(Path, "is_file", is_installed)
+    monkeypatch.setattr(commands.os, "access", is_executable)
+    actual = commands._resolve_executable(name)
+    expected = {
+        "path": on_path,
+        "home": str(candidates[0]),
+        "home-nonexecutable": str(candidates[1]),
+        "host": str(candidates[1]),
+        "missing": name,
+    }
+    assert actual == expected[location]
+    assert checked == (
+        [] if location == "path" else candidates[:1] if location == "home" else candidates
+    )
+
+
+@pytest.mark.parametrize("cleanup_error", [TimeoutError, OSError])
+async def test_cli_cleanup_preserves_primary_error_and_closes_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup_error: type[Exception],
+) -> None:
+    stdout = asyncio.StreamReader()
+    stdout.feed_data(b"x" * 32)
+    stdout.feed_eof()
+    transport = Mock()
+    process = SimpleNamespace(
+        stdout=stdout,
+        returncode=0,
+        pid=12345,
+        wait=AsyncMock(side_effect=cleanup_error("cleanup failure")),
+        _transport=transport,
+    )
+    monkeypatch.setattr(commands, "_MAX_OUTPUT_BYTES", 16)
+    monkeypatch.setattr(commands.asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
+    kill = Mock(side_effect=AssertionError("an exited process must not be signalled"))
+    monkeypatch.setattr(commands.os, "killpg", kill)
+    with pytest.raises(commands.CommandError, match="output budget"):
+        await commands.run_command([sys.executable, "-c", "unused"])
+    kill.assert_not_called()
+    process.wait.assert_awaited_once()
+    transport.close.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "output_bytes,outcome",
+    [
+        (6_488_929, "success"),
+        (33 * 1024 * 1024, "bounded"),
+    ],
+)
+def test_infowall_large_json_and_overflow_close_transports_before_loop_shutdown(
+    tmp_path: Path,
+    output_bytes: int,
+    outcome: str,
+) -> None:
+    # Execute a fake CLI through the real pipe reader in a disposable interpreter;
+    # pytest's long-lived loop cannot hide transport destructors running after close.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    executable = bin_dir / "infowall"
+    executable.write_text(
+        f"#!{sys.executable}\n" + textwrap.dedent("""\
+        import json
+        import os
+        import sys
+        assert sys.argv[1:] == ["demand", "list", "--json"]
+        payload = {"demands": [{"id": str(i)} for i in range(365)], "padding": "",
+                   "proxy_excluded": os.environ.get("NO_PROXY")}
+        padding_size = int(os.environ["PATROL_TEST_PAYLOAD_BYTES"]) - len(json.dumps(payload).encode())
+        payload["padding"] = "x" * padding_size
+        sys.stdout.write(json.dumps(payload))
+        sys.stdout.flush()
+        """),
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    probe = textwrap.dedent("""\
+        import asyncio
+        import gc
+        import json
+        import sys
+        sys.path.insert(0, sys.argv[1])
+        from claude_hub.services.demand_patrol.commands import CommandError, infowall_env, run_command
+        try:
+            payload = asyncio.run(run_command(["infowall", "demand", "list", "--json"],
+                                             timeout=15, env=infowall_env()))
+            print(json.dumps({"outcome": "success", "demands": len(payload["demands"]),
+                              "bytes": len(json.dumps(payload).encode()),
+                              "proxy_excluded": payload["proxy_excluded"]}))
+        except CommandError as exc:
+            print(json.dumps({"outcome": "bounded", "error": str(exc)}))
+        gc.collect()
+        """)
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "CLAUDE_HUB_HOME": str(tmp_path / "hub"),
+        "CLAUDE_HUB_STATE_ROOT": str(tmp_path / "state"),
+        "CLAUDE_HUB_TMUX_SOCKET": "ch-patrol-r2-pipes",
+        "CLAUDE_HUB_DISABLE_PATROL_LOOP": "1",
+        "INFOWALL_URL": "http://127.0.0.1:18899",
+        "INFOWALL_API_KEY_FILE": "/nonexistent/never-read",
+        "HTTP_PROXY": "http://proxy.invalid:8080",
+        "PATH": str(bin_dir),
+        "PATROL_TEST_PAYLOAD_BYTES": str(output_bytes),
+    }
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-W",
+            "always",
+            "-c",
+            probe,
+            str(Path(__file__).resolve().parents[1]),
+        ],
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=25,
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["outcome"] == outcome
+    if outcome == "success":
+        assert report["demands"] == 365 and report["bytes"] == output_bytes
+        assert report["proxy_excluded"] == "127.0.0.1,localhost,::1"
+    else:
+        assert "output budget" in report["error"]
+    assert result.stderr == "", result.stderr

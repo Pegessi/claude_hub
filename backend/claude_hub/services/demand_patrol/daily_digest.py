@@ -262,10 +262,7 @@ async def build_daily_digest(
 
     urls_to_demands: dict[str, list[Mapping[str, Any]]] = {}
     for demand in demand_rows:
-        if demand.get("status") not in _OPEN_DEMAND_STATUSES and demand.get("priority") not in {
-            "p0",
-            "p1",
-        }:
+        if demand.get("status") not in _OPEN_DEMAND_STATUSES:
             continue
         for url in sorted(demand_mr_urls(demand)):
             urls_to_demands.setdefault(url, []).append(demand)
