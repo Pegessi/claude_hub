@@ -81,8 +81,16 @@ test('an invisible left edge band is rendered only on mobile terminal mode', () 
   assert.match(sidebar, /v-if="isMobile && isTerminalMode"/)
 })
 
-test('the backdrop closes via @click.self so panel interactions do not dismiss it', () => {
+test('the backdrop closes via @click.self and stays in the same stacking context as the drawer', () => {
   assert.match(sidebar, /class="chat-drawer-backdrop"[\s\S]*?@click\.self="closeMobileDrawer"/)
+  // .app[data-mode='terminal'][data-active-pane-chat='true'] is position:fixed
+  // on mobile, which creates a stacking context. The backdrop must NOT be
+  // teleported to <body> while <aside class="chat-sidebar"> stays inside .app,
+  // or the backdrop (z-index: 849 on body) paints over and blocks the drawer.
+  assert.doesNotMatch(sidebar, /<Teleport\s+to="body"/)
+  const asideClose = sidebar.indexOf('</aside>')
+  const backdropIdx = sidebar.indexOf('class="chat-drawer-backdrop"')
+  assert.ok(asideClose > 0 && backdropIdx > asideClose)
 })
 
 test('selecting a row in the mobile drawer goes through selectMobileTab (switch + auto-close)', () => {

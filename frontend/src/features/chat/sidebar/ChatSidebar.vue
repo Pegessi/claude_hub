@@ -1,5 +1,6 @@
 <template>
   <aside
+    v-bind="$attrs"
     ref="panelRef"
     class="chat-sidebar"
     :class="{
@@ -231,29 +232,31 @@
       @dblclick="resetSidebarWidth"
       @keydown="resizeWithKeyboard"
     />
-
-    <!-- Mobile-only: invisible left-edge gesture zone (above the ttyd iframe,
-         whose touches never reach this document) and the dimmed backdrop.
-         Teleported so the fixed positioning escapes any pane transform. -->
-    <Teleport to="body">
-      <div
-        v-if="isMobile && isTerminalMode"
-        ref="bandRef"
-        class="chat-drawer-edge-band"
-        aria-hidden="true"
-      />
-      <Transition name="chat-drawer-fade">
-        <div
-          v-if="isMobile && isTerminalMode && (mobileDrawerOpen || edgeDragging)"
-          ref="backdropRef"
-          class="chat-drawer-backdrop"
-          :class="{ 'chat-drawer-backdrop--dragging': edgeDragging }"
-          :style="edgeDragging ? { opacity: edgeBackdropOpacity } : undefined"
-          @click.self="closeMobileDrawer"
-        />
-      </Transition>
-    </Teleport>
   </aside>
+
+  <!-- Mobile-only: invisible left-edge gesture zone (above the ttyd iframe,
+       whose touches never reach this document) and the dimmed backdrop.
+       Rendered as siblings of <aside> inside .terminal-mode-shell rather than
+       inside <aside> or teleported to <body>: this escapes the drawer's own
+       translateX transform while keeping the drawer (z-index: 850) and
+       backdrop (z-index: 849) in the same stacking context when .app uses
+       position: fixed on mobile Chat panes. -->
+  <div
+    v-if="isMobile && isTerminalMode"
+    ref="bandRef"
+    class="chat-drawer-edge-band"
+    aria-hidden="true"
+  />
+  <Transition name="chat-drawer-fade">
+    <div
+      v-if="isMobile && isTerminalMode && (mobileDrawerOpen || edgeDragging)"
+      ref="backdropRef"
+      class="chat-drawer-backdrop"
+      :class="{ 'chat-drawer-backdrop--dragging': edgeDragging }"
+      :style="edgeDragging ? { opacity: edgeBackdropOpacity } : undefined"
+      @click.self="closeMobileDrawer"
+    />
+  </Transition>
 </template>
 
 <script setup lang="ts">
@@ -272,6 +275,8 @@ import { useSidebarPointerDrag } from './useSidebarPointerDrag'
 import { useSidebarRename } from './useSidebarRename'
 import { useSidebarResize, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH } from './useSidebarResize'
 import type { TerminalTab } from '@/types'
+
+defineOptions({ inheritAttrs: false })
 
 const props = defineProps<{
   /** Main content element; a rightward swipe on it opens the mobile drawer. */
