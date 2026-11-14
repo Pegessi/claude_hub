@@ -37,7 +37,7 @@ test('Antigravity is opt-in for local Chat surfaces and scheduled tasks, not Res
 test('Antigravity solo is an explicit choice and its identity is not rendered as Terminal', () => {
   assert.match(agentConfigFields, /'antigravity'\]\s*\.includes\(agentType\)\) \{\s*emit\('update:soloMode', false\)/)
   assert.match(agentConfigFields, /Runs Antigravity with --dangerously-skip-permissions/)
-  assert.match(sessionCreator, /\['claude', 'codex', 'traex', 'antigravity'\]\.includes\(form\.agent_type\)/)
+  assert.match(sessionCreator, /\['claude', 'codex', 'traex', 'cursor', 'antigravity'\]\.includes\(form\.agent_type\)/)
   assert.match(agentAvatar, /v-else-if="kind === 'antigravity'"/)
   assert.match(agentAvatar, /raw === 'antigravity'/)
   assert.match(agentAvatar, /official Google Gemini mark/)
