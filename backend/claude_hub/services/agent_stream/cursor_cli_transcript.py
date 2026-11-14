@@ -669,9 +669,42 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
             child_id = update.get("subagentSessionId")
             if not isinstance(child_id, str) or not child_id or not ctx.turn_id:
                 return events
+            meta_obj = update.get("_meta")
+            cursor_meta = meta_obj.get("cursor") if isinstance(meta_obj, dict) else None
+            tool_call_id = (
+                cursor_meta.get("toolCallId")
+                if isinstance(cursor_meta, dict)
+                and isinstance(cursor_meta.get("toolCallId"), str)
+                and cursor_meta.get("toolCallId")
+                else None
+            )
+            agent_id = (
+                cursor_meta.get("agentId")
+                if isinstance(cursor_meta, dict)
+                and isinstance(cursor_meta.get("agentId"), str)
+                and cursor_meta.get("agentId")
+                else None
+            )
+            raw_name = update.get("name")
+            subagent_name = (
+                raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else None
+            )
+            if tool_call_id:
+                parent_state = self._get_turn_state(ctx)
+                tool_meta = parent_state.acp_tool_meta.setdefault(tool_call_id, {"args": {}})
+                merged_args = dict(tool_meta.get("args") or {})
+                merged_args.setdefault("_toolName", "task")
+                if agent_id:
+                    merged_args.setdefault("agentId", agent_id)
+                if subagent_name:
+                    merged_args["subagentType"] = subagent_name
+                if isinstance(update.get("task"), str) and update["task"].strip():
+                    merged_args.setdefault("prompt", update["task"].strip())
+                merged_args["receiverThreadIds"] = [child_id]
+                tool_meta["args"] = merged_args
             if kind == "subagent_spawned":
                 lifecycle = "active"
-                label_name = update.get("name") or "sub-agent"
+                label_name = subagent_name or "sub-agent"
                 status_text = f"Sub-agent {label_name} started"
             else:
                 raw_state = update.get("state")
@@ -682,15 +715,21 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
                 else:
                     return events
                 status_text = f"Sub-agent {lifecycle}"
+            status_payload: Dict[str, Any] = {
+                "text": status_text,
+                "provider_status": "subagent_lifecycle",
+                "subagent_status": lifecycle,
+                "snapshot": True,
+            }
+            if tool_call_id:
+                status_payload["tool_call_id"] = tool_call_id
+            if subagent_name:
+                status_payload["subagent_name"] = subagent_name
             events.append(
                 ctx.event(
                     AgentStreamEventType.STATUS,
-                    {
-                        "text": status_text,
-                        "provider_status": "subagent_lifecycle",
-                        "subagent_status": lifecycle,
-                        "snapshot": True,
-                    },
+                    status_payload,
+                    call_id=tool_call_id,
                     message_id=f"subagent:{child_id}",
                     sub_thread_id=child_id,
                 )
@@ -801,6 +840,8 @@ class CursorCliTranscriptAdapter(AgentStreamAdapter):
         }
         if isinstance(explicit, str) and explicit in explicit_map:
             name = explicit_map[explicit]
+            if name == "Task" and not raw_args.get("subagentType") and not raw_args.get("agentId"):
+                raw_args["subagentType"] = {"unspecified": {}}
         elif "providerIdentifier" in raw_args or "toolName" in raw_args:
             prov = raw_args.get("providerIdentifier") or "mcp"
             tname = raw_args.get("toolName") or "tool"

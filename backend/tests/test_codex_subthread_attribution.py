@@ -1032,3 +1032,208 @@ def test_item_owner_thread_still_routes_during_active_parent_turn() -> None:
     )
     assert _types(events) == [AgentStreamEventType.TOOL_CALL_STARTED]
     assert events[0].payload["subagent_thread"] == F6
+
+
+def test_codex_subagent_activity_and_agent_message_normalize_into_subthread() -> None:
+    adapter = CodexJsonlAdapter()
+    ctx = _ctx()
+    cipher = "gAAAAABq9GEY7mEoWEh7WNbQkxLNM1ZSE0gePW2-93kpC4S-uJ77JfaK1nH9I"
+    # 1. Real rollout sequence: function_call(spawn_agent) with Fernet message ->
+    #    SubAgentActivity(started) -> function_call_output({"task_name":...}).
+    fc_spawn = adapter.normalize_line(
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "call_id": "call_sub_1",
+                "name": "spawn_agent",
+                "namespace": "collaboration",
+                "arguments": f'{{"task_name":"cpu_callers4d_final_review","model":"gpt-6-astra","reasoning_effort":"xhigh","message":"{cipher}"}}',
+            },
+        },
+        ctx,
+    )
+    assert _types(fc_spawn) == [AgentStreamEventType.TOOL_CALL_STARTED]
+    assert fc_spawn[0].payload["args"]["prompt"] == "Spawned cpu_callers4d_final_review"
+
+    started = adapter.normalize_line(
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": MAIN,
+                "turn_id": "turn-1",
+                "item": {
+                    "type": "SubAgentActivity",
+                    "id": "call_sub_1",
+                    "kind": "started",
+                    "agent_thread_id": F6,
+                    "agent_path": "/root/cpu_callers4d_final_review",
+                    "model": "gpt-6-astra",
+                    "reasoning_effort": "xhigh",
+                },
+            },
+        },
+        ctx,
+    )
+    assert _types(started) == [
+        AgentStreamEventType.TOOL_CALL_COMPLETED,
+        AgentStreamEventType.STATUS,
+    ]
+    assert started[0].payload["name"] == "spawnAgent"
+    assert started[0].payload["args"]["receiverThreadIds"] == [F6]
+    assert started[0].payload["args"]["subagentType"] == "cpu_callers4d_final_review"
+    assert started[1].payload["subagent_status"] == "active"
+    assert started[1].payload["subagent_thread"] == F6
+
+    # Duplicate function_call_output (even with non-empty JSON) is suppressed.
+    fc_out = adapter.normalize_line(
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_sub_1",
+                "output": '{"task_name":"/root/cpu_callers4d_final_review"}',
+            },
+        },
+        ctx,
+    )
+    assert fc_out == []
+
+    # 2. Follow-up with Fernet ciphertext sanitizes prompt and maps receiverThreadIds.
+    fc_follow = adapter.normalize_line(
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "call_id": "call_follow_1",
+                "name": "followup_task",
+                "namespace": "collaboration",
+                "arguments": f'{{"target":"/root/cpu_callers4d_final_review","message":"{cipher}"}}',
+            },
+        },
+        ctx,
+    )
+    assert _types(fc_follow) == [AgentStreamEventType.TOOL_CALL_STARTED]
+    assert fc_follow[0].payload["args"]["prompt"] == "Follow-up to cpu_callers4d_final_review"
+    assert fc_follow[0].payload["args"]["receiverThreadIds"] == [F6]
+
+    # Plaintext follow-up prompt is preserved across a prompt-less SubAgentActivity completion.
+    fc_plain = adapter.normalize_line(
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "call_id": "call_follow_plain",
+                "name": "followup_task",
+                "namespace": "collaboration",
+                "arguments": '{"target":"/root/cpu_callers4d_final_review","message":"Check the timeout branch"}',
+            },
+        },
+        ctx,
+    )
+    assert fc_plain[0].payload["args"]["prompt"] == "Check the timeout branch"
+    act_plain = adapter.normalize_line(
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": MAIN,
+                "turn_id": "turn-1",
+                "item": {
+                    "type": "SubAgentActivity",
+                    "id": "call_follow_plain",
+                    "kind": "interacted",
+                    "agent_thread_id": F6,
+                    "agent_path": "/root/cpu_callers4d_final_review",
+                },
+            },
+        },
+        ctx,
+    )
+    assert act_plain[0].payload["args"]["prompt"] == "Check the timeout branch"
+    assert "syntheticPrompt" not in act_plain[0].payload["args"]
+
+    # 3. Child-to-root send_message(target="/root") + SubAgentActivity(agent_path="/root")
+    #    in a child rollout are ignored so /root is never rendered as a fake subagent.
+    assert (
+        adapter.normalize_line(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "call_id": "call_root_1",
+                    "name": "send_message",
+                    "namespace": "collaboration",
+                    "arguments": f'{{"target":"/root","message":"{cipher}"}}',
+                },
+            },
+            ctx,
+        )
+        == []
+    )
+    assert (
+        adapter.normalize_line(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "thread_id": F6,
+                    "turn_id": "turn-1",
+                    "item": {
+                        "type": "SubAgentActivity",
+                        "id": "call_root_1",
+                        "kind": "interacted",
+                        "agent_thread_id": MAIN,
+                        "agent_path": "/root",
+                    },
+                },
+            },
+            ctx,
+        )
+        == []
+    )
+
+    # 4. Real rollout order: SubAgentActivity(completed) arrives BEFORE agent_message(FINAL_ANSWER).
+    completed = adapter.normalize_line(
+        {
+            "method": "item/completed",
+            "params": {
+                "threadId": MAIN,
+                "item": {
+                    "type": "subAgentActivity",
+                    "id": "subagent-completed-1",
+                    "kind": "completed",
+                    "agentThreadId": F6,
+                    "agentPath": "/root/cpu_callers4d_final_review",
+                },
+            },
+        },
+        ctx,
+    )
+    assert _types(completed) == [AgentStreamEventType.STATUS]
+    assert completed[0].payload["subagent_status"] == "completed"
+    assert completed[0].payload["subagent_thread"] == F6
+
+    report = adapter.normalize_line(
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "agent_message",
+                "id": "amsg_1",
+                "author": "/root/cpu_callers4d_final_review",
+                "recipient": "/root",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/cpu_callers4d_final_review\nPayload:\nAPPROVE: all checks passed.",
+                    }
+                ],
+            },
+        },
+        ctx,
+    )
+    assert _types(report) == [AgentStreamEventType.TEXT_DELTA]
+    assert report[0].payload["subagent_thread"] == F6
+    assert report[0].payload["text"] == "APPROVE: all checks passed."
+    assert report[0].payload["final_report"] is True

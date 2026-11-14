@@ -61,6 +61,9 @@ export interface SubagentView {
   /** MASO ``Task``/``Fork`` task items in declaration order, used to bind each
    *  spawned ``<subagent_name>-<hex>`` thread id to its own prompt and role. */
   tasks?: MasoSubagentTaskItem[]
+  /** True when ``prompt`` was synthesized because the provider omitted or
+   *  encrypted the raw instruction text. */
+  syntheticPrompt?: boolean
 }
 
 /** Lifecycle status shared with {@link TimelineTool}; kept structural here so
@@ -92,6 +95,29 @@ function oneofTypeField(record: Record<string, unknown>, key: string): string | 
   if (!isRecord(value)) return optionalTypeField(record, key)
   const keys = Object.keys(value)
   return keys.length === 1 && keys[0] !== 'unspecified' ? keys[0] : null
+}
+
+function hasOneofTypeField(record: Record<string, unknown>, key: string): boolean {
+  const value = record[key]
+  if (nonEmptyString(value)) return true
+  if (!isRecord(value)) return false
+  const keys = Object.keys(value)
+  return keys.length === 1 && nonEmptyString(keys[0])
+}
+
+const FERNET_TOKEN_RE = /^gAAAAAB[A-Za-z0-9_-]{40,}={0,2}$/
+
+function nonCiphertextString(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  return FERNET_TOKEN_RE.test(value.trim()) ? '' : value
+}
+
+function cleanAgentPath(value: unknown): string | null {
+  if (!nonEmptyString(value)) return null
+  const trimmed = value.trim()
+  if (trimmed === '/root' || trimmed === 'root') return null
+  const idx = trimmed.lastIndexOf('/')
+  return idx >= 0 ? trimmed.slice(idx + 1) || null : trimmed
 }
 
 function threadIdList(value: unknown): string[] {
@@ -134,13 +160,13 @@ export function parseSubagent(name: unknown, args: unknown): SubagentView | null
       if (nonEmptyString(prompt)) {
         const agentType = oneofTypeField(record, 'subagentType')
         const agentId = optionalTypeField(record, 'agentId')
-        if (!agentType && !agentId) return null
+        if (!agentType && !agentId && !hasOneofTypeField(record, 'subagentType')) return null
         return {
           provider: 'cursor',
           agentType,
           description: stringField(record, 'description').trim(),
           prompt,
-          threadIds: [],
+          threadIds: threadIdList(record.receiverThreadIds),
           background: false,
           directive: false,
         }
@@ -209,24 +235,54 @@ export function parseSubagent(name: unknown, args: unknown): SubagentView | null
       }
     }
     case 'spawnAgent':
-    case 'sendInput': {
+    case 'spawn_agent':
+    case 'sendInput':
+    case 'sendMessage':
+    case 'followupTask':
+    case 'send_message':
+    case 'followup_task': {
       // TraeX/Codex collab protocol. The child conversation is addressed by
-      // receiver thread ids; there is no human description or sub-agent type
-      // in the payload. ``sendInput`` is a follow-up directive to an existing
-      // thread (``directive: true``), ``spawnAgent`` launches the local worker.
+      // receiver thread ids (or collaboration agentPath / task_name).
+      // ``sendInput`` / ``sendMessage`` / ``followupTask`` is a follow-up
+      // directive to an existing thread (``directive: true``); ``spawnAgent``
+      // / ``spawn_agent`` launches the worker.
       if (!record) return null
-      const prompt = stringField(record, 'prompt')
+      const agentType =
+        optionalTypeField(record, 'subagentType') ??
+        cleanAgentPath(record.agentPath ?? record.agent_path ?? record.target) ??
+        optionalTypeField(record, 'task_name')
+      const isSpawn = name === 'spawnAgent' || name === 'spawn_agent'
+      const rawPrompt =
+        nonCiphertextString(record.prompt) || nonCiphertextString(record.message)
+      const isSynthetic = record.syntheticPrompt === true || !nonEmptyString(rawPrompt)
+      const prompt =
+        rawPrompt ||
+        (agentType
+          ? isSpawn
+            ? `Spawned ${agentType}`
+            : `Follow-up to ${agentType}`
+          : '')
       if (!nonEmptyString(prompt)) return null
-      const threadIds = threadIdList(record.receiverThreadIds)
+      const threadIds = threadIdList(record.receiverThreadIds ?? record.receiver_thread_ids)
       if (threadIds.length === 0) return null
+      const description =
+        stringField(record, 'description').trim() ||
+        [
+          optionalTypeField(record, 'model'),
+          optionalTypeField(record, 'reasoningEffort') ??
+            optionalTypeField(record, 'reasoning_effort'),
+        ]
+          .filter(Boolean)
+          .join(' · ')
       return {
         provider: 'traex',
-        agentType: null,
-        description: '',
+        agentType,
+        description,
         prompt,
         threadIds,
         background: false,
-        directive: name === 'sendInput',
+        directive: !isSpawn,
+        ...(isSynthetic ? { syntheticPrompt: true } : {}),
       }
     }
     default:

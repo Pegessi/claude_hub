@@ -5902,3 +5902,87 @@ async def test_cursor_acp_cold_discarded_rotation_recovers_and_preserves_clean_l
         assert native._turn_error_emitted is False
     finally:
         await native.stop()
+
+
+def test_cursor_acp_task_tool_and_subagent_spawned_correlate_by_tool_call_id() -> None:
+    adapter = CursorCliTranscriptAdapter()
+    ctx = NormalizeContext(
+        session_id="cursor-sess",
+        tab_id="cursor-tab",
+        agent_type=AgentType.CURSOR,
+        run_epoch=1,
+        turn_id="turn-acp-sub",
+        main_thread_id="main-sid",
+    )
+    # 1. Task tool starts with _toolName="task" and omitted subagentType/agentId
+    #    (as Cursor ACP extractToolCallInput emits for protobuf oneof subagentType).
+    started = adapter.normalize_line(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "main-sid",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call-task-1",
+                    "kind": "other",
+                    "title": "Task: Audit auth",
+                    "status": "in_progress",
+                    "rawInput": {
+                        "_toolName": "task",
+                        "description": "Audit auth",
+                        "prompt": "Check auth middleware",
+                    },
+                },
+            },
+        },
+        ctx,
+    )
+    assert len(started) == 1
+    assert started[0].type == AgentStreamEventType.TOOL_CALL_STARTED
+    assert started[0].payload["name"] == "Task"
+    assert started[0].payload["args"]["subagentType"] == {"unspecified": {}}
+
+    # 2. subagent_spawned arrives with _meta.cursor.toolCallId="call-task-1".
+    spawned = adapter.normalize_line(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "main-sid",
+                "update": {
+                    "sessionUpdate": "subagent_spawned",
+                    "subagentSessionId": "child-sid.1",
+                    "name": "explore",
+                    "task": "Check auth middleware",
+                    "_meta": {"cursor": {"toolCallId": "call-task-1", "agentId": "child-sid"}},
+                },
+            },
+        },
+        ctx,
+    )
+    assert len(spawned) == 1
+    assert spawned[0].type == AgentStreamEventType.STATUS
+    assert spawned[0].call_id == "call-task-1"
+    assert spawned[0].payload["subagent_thread"] == "child-sid.1"
+    assert spawned[0].payload["subagent_name"] == "explore"
+
+    # 3. Task completion carries the enriched subagentType and receiverThreadIds.
+    completed = adapter.normalize_line(
+        {
+            "method": "session/update",
+            "params": {
+                "sessionId": "main-sid",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-task-1",
+                    "status": "completed",
+                    "rawOutput": {"content": "Auth middleware verified."},
+                },
+            },
+        },
+        ctx,
+    )
+    assert len(completed) == 1
+    assert completed[0].type == AgentStreamEventType.TOOL_CALL_COMPLETED
+    assert completed[0].payload["args"]["subagentType"] == "explore"
+    assert completed[0].payload["args"]["agentId"] == "child-sid"
+    assert completed[0].payload["args"]["receiverThreadIds"] == ["child-sid.1"]
