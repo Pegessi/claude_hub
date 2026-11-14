@@ -209,6 +209,7 @@ def _register() -> None:
     from claude_hub.cli.commands.feedback import feedback
     from claude_hub.cli.commands.feishu import feishu
     from claude_hub.cli.commands.lessons import lessons
+    from claude_hub.cli.commands.patrol import patrol
     from claude_hub.cli.commands.rest import (
         api,
         auth,
@@ -246,6 +247,7 @@ def _register() -> None:
     cli.add_command(feishu)
     cli.add_command(feedback)
     cli.add_command(dot)
+    cli.add_command(patrol)
 
 
 _register()

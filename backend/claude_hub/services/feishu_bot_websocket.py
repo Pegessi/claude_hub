@@ -397,16 +397,22 @@ def message_event_from_sdk(
             if not continues_thread:
                 raise
     message_type = getattr(message, "message_type", None)
-    if message_type not in {"text", "post"}:
-        raise ValueError("Only Feishu text and post messages are supported")
-    try:
-        content = json.loads(getattr(message, "content", ""))
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"Feishu {message_type} message content is invalid") from exc
+    if message_type not in {"text", "post", "merge_forward"}:
+        raise ValueError("Only Feishu text, post and merge_forward messages are supported")
+    content: Any = None
+    if message_type != "merge_forward":
+        try:
+            content = json.loads(getattr(message, "content", ""))
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Feishu {message_type} message content is invalid") from exc
     image_keys: tuple[str, ...] = ()
-    if message_type == "text":
-        text = content.get("text") if isinstance(content, dict) else None
-        text = _required_text(text, "text")
+    if message_type == "merge_forward":
+        # Feishu varies this placeholder between plain text, JSON and an empty
+        # object. The owning Bot fetches the actual records before dispatch.
+        text = "[Merged and Forwarded Message]"
+    elif message_type == "text":
+        raw_text = content.get("text") if isinstance(content, dict) else None
+        text = _required_text(raw_text, "text")
         if mention_key is not None:
             text = _strip_mention_key(text, mention_key, mention_keys)
         if len(text) > _MAX_INPUT_CHARS:
@@ -436,6 +442,7 @@ def message_event_from_sdk(
         text=text,
         message_created_at_ms=created_at,
         image_keys=image_keys,
+        message_type=message_type,
         parent_id=parent_id,
         root_id=root_id,
         chat_type=chat_type,
