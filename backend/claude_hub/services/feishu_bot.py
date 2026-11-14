@@ -203,7 +203,7 @@ def _forward_content(body: Any) -> tuple[str, list[str]]:
             pending.extend(
                 (child, depth + 1)
                 for key, child in reversed(list(value.items())[:1000])
-                if key not in {"tag", "image_key", "style", "config"}
+                if key not in {"tag", "image_key", "style", "config", "language"}
             )
     if pending:
         pieces.append("[内容过多，已省略]")

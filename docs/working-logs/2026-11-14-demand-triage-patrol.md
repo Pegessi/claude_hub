@@ -50,7 +50,7 @@ The current repository uses `message_event_from_sdk`, not `_parse_message_event`
 The requested `tests/test_feishu_bot.py` does not exist at the base revision;
 its actual split suites are reported separately rather than fabricating a pass.
 
-Final source validation (all run in the owned worktree):
+Round 1 source validation (all run in the owned worktree):
 
 | Command | Result / evidence |
 | --- | --- |
@@ -108,3 +108,58 @@ budget contracts; installed CLI specifications inform the adapters. Provider
 availability, actual enterprise permissions, and real notification delivery
 remain deployment smoke checks. Read-only triage is a prompt-level restriction
 on the existing solo Subagent execution contract, not a new filesystem sandbox.
+
+## Round 2: live payload and cross-review corrections
+
+Base: `a683c12458ecfe786c7ea4b27a29f38ae176fada`. The Commander's reported
+6,488,929-byte InfoWall response demonstrated that the original 4 MiB cap was
+insufficient; early pipe-reader exit could also let cleanup replace the budget
+error with `TimeoutError` and defer transport destruction beyond loop shutdown.
+
+- Increased the bounded JSON response budget to **32 MiB**. Cleanup signals only
+  a still-running process, retains the owned POSIX process group boundary,
+  suppresses secondary wait failures, and explicitly closes the asyncio process
+  transport while the loop is alive. The five-second reap deadline remains.
+- Loopback InfoWall endpoints explicitly override both `NO_PROXY` and `no_proxy`.
+  CLI resolution prefers PATH, then the runtime user's installation, then the
+  explicit `/home/tiger` installation for InfoWall and Lark. Non-executable
+  fallback files do not mask a later usable installation.
+- Adopted the user's permitted **open-only MR policy**: only `active`, `waiting`,
+  and `planned` demands consume the 15-MR budget, regardless of priority.
+  `done`/`dismissed` historical P0/P1 items are excluded; `pending` remains
+  inbox-only. Tests place 20 historical URLs before 15 active URLs to prove
+  historical demands cannot displace any of the active query slots.
+- Rich-forward `code_block.language` is metadata, not standalone message text;
+  its code and URLs remain in the bundle.
+
+Regression coverage uses a fake executable through real subprocess pipes in a
+fresh interpreter. Exactly **6,488,929 bytes / 365 synthetic demands** succeed;
+**33 MiB** raises the original `CommandError`, not `TimeoutError`, and stderr
+stays empty through `asyncio.run()` teardown and explicit garbage collection.
+Injected wait failures additionally prove transport closure and no signaling of
+an already-exited PID. No large fixture payload is committed.
+
+An actual **read-only local InfoWall smoke** also passed through the corrected
+`run_command` after CLI-spec, public health, and unauthenticated capabilities
+checks: **367 demands**, **6,619,255 bytes when reserialized**, loopback proxy
+bypass enabled, and no transport warnings. This is a decoded JSON size, not a
+claim that wire formatting matched the earlier probe. Only aggregate counts
+were printed; credential contents were never opened by Shell/Python, no business
+writes were made, and Hub runtime state stayed in a disposable isolated home.
+
+Independent scoped re-review approved the fixes. Its MR-policy question was
+resolved explicitly above; the optional executable-permission check was also
+adopted. Final Round 2 source validation:
+
+| Check | Result / evidence |
+| --- | --- |
+| `./scripts/verify.sh backend-format` | Passed, 666 files unchanged; final rerun under `all`: `/tmp/claude-hub-verify.dr1lu_6r` |
+| `./scripts/verify.sh backend-types` | Passed, 641 source files; final rerun under `all`: `/tmp/claude-hub-verify.d90gsk02` |
+| `./scripts/verify.sh docs` | Passed |
+| Same focused `backend-tests` command listed above | **230 passed** in 9.67s; `/tmp/claude-hub-verify.n8sccl30` |
+| `PY_COLORS=0 ./scripts/verify.sh all` | All backend/docs targets passed; backend default suite **6,736 passed, 10 skipped, 17 warnings**, 472.53s, 86% coverage; `/tmp/claude-hub-verify.cxhv9hmp` |
+
+The Round 2 `all` exit remains nonzero only because all four frontend targets
+require the absent `frontend/node_modules`. Frontend files are untouched. Full
+console evidence: `/tmp/patrol-round2-all.bbKVPw.log`. Index and committed-HEAD
+checkout safety are checked again for this commit; no merge or push is requested.

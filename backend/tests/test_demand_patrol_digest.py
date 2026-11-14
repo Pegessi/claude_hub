@@ -237,6 +237,52 @@ async def test_queries_are_deduplicated_capped_and_concurrency_bounded() -> None
     assert record.details["mrs_omitted"] == 5
 
 
+@pytest.mark.parametrize("terminal_status", ["done", "dismissed"])
+@pytest.mark.parametrize("priority", ["p0", "p1"])
+async def test_terminal_demands_do_not_consume_mr_query_slots(
+    terminal_status: str,
+    priority: str,
+) -> None:
+    closed_urls = [f"https://[redacted]/a/history/merge_requests/{i}" for i in range(20)]
+    open_urls = [f"https://[redacted]/z/active/merge_requests/{i}" for i in range(15)]
+    closed = _demand(
+        title="历史需求不应巡检",
+        status=terminal_status,
+        priority=priority,
+        sources=[{"url": url} for url in closed_urls],
+    )
+    active = [
+        _demand(
+            status=["active", "waiting", "planned"][index % 3],
+            priority="none",
+            sources=[{"url": url}],
+        )
+        for index, url in enumerate(open_urls)
+    ]
+    state = PatrolState(
+        mr_snapshots={
+            closed_urls[0]: MRStateSnapshot(
+                url=closed_urls[0], state="merged", ci_status="success"
+            ),
+        }
+    )
+    runner = DigestRunner(
+        {"demands": [closed, *active]},
+        {
+            **{url: {"state": "merged", "ci_status": "failed"} for url in closed_urls},
+            **{url: {"state": "open", "ci_status": "success"} for url in open_urls},
+        },
+    )
+    record = await build_daily_digest(state, now=NOW, tasks=[], lifecycles={}, runner=runner)
+    queried_urls = {argv[-1] for argv, _, _ in runner.calls if argv[0] == "bytedcli"}
+    assert queried_urls == set(open_urls)
+    assert record.details["mrs_requested"] == record.details["mrs_queried"] == 15
+    assert record.details["mrs_omitted"] == 0
+    assert record.details["state_changes"] == 0 and not record.errors
+    assert not any(url in record.markdown for url in closed_urls)
+    assert state.mr_snapshots[closed_urls[0]].ci_status == "success"
+
+
 @pytest.mark.asyncio
 async def test_source_errors_are_unknown_not_empty_and_preserve_prior_snapshot() -> None:
     state = PatrolState(

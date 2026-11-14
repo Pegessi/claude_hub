@@ -9,8 +9,9 @@ import shutil
 import signal
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
-_MAX_OUTPUT_BYTES = 4 * 1024 * 1024
+_MAX_OUTPUT_BYTES = 32 * 1024 * 1024
 
 
 class CommandError(RuntimeError):
@@ -29,12 +30,34 @@ class CommandRunner(Protocol):
 
 
 def infowall_env() -> dict[str, str]:
-    return {
+    env = {
         "INFOWALL_URL": os.environ.get("INFOWALL_URL", "http://127.0.0.1:18899"),
         "INFOWALL_API_KEY_FILE": os.environ.get(
             "INFOWALL_API_KEY_FILE", "/home/tiger/.local/state/infowall/api-key"
         ),
     }
+    if urlsplit(env["INFOWALL_URL"]).hostname in {"127.0.0.1", "localhost", "::1"}:
+        # The Go CLI also inherits host proxy settings; local primary traffic
+        # must remain local regardless of upper/lower-case proxy conventions.
+        env.update(NO_PROXY="127.0.0.1,localhost,::1", no_proxy="127.0.0.1,localhost,::1")
+    return env
+
+
+def _resolve_executable(name: str) -> str:
+    relative = {
+        "infowall": ".local/opt/infowall/current/infowall",
+        "lark-cli": ".local/bin/lark-cli",
+    }.get(name)
+    if relative is None:
+        return name
+    found = shutil.which(name)
+    if found:
+        return found
+    # Isolated runtime HOME and minimal PATH must not hide host-installed CLIs.
+    for installed in (Path.home() / relative, Path("/home/tiger") / relative):
+        if installed.is_file() and os.access(installed, os.X_OK):
+            return str(installed)
+    return name
 
 
 async def _read_bounded(stream: asyncio.StreamReader) -> bytes:
@@ -57,11 +80,7 @@ async def run_command(
 ) -> Any:
     if not argv:
         raise ValueError("CLI argv must not be empty")
-    executable = argv[0]
-    if executable == "infowall" and not shutil.which(executable):
-        installed = Path.home() / ".local/opt/infowall/current/infowall"
-        if installed.is_file():
-            executable = str(installed)
+    executable = _resolve_executable(argv[0])
     try:
         proc = await asyncio.create_subprocess_exec(
             executable,
@@ -102,10 +121,22 @@ async def run_command(
         # Wrappers may leave descendants holding stdout open. Only this owned
         # session is killed; killing the direct PID alone cannot bound proc.wait().
         try:
-            if os.name == "posix":
-                os.killpg(proc.pid, signal.SIGKILL)
-            elif proc.returncode is None:
-                proc.kill()
+            if proc.returncode is None:
+                if os.name == "posix":
+                    os.killpg(proc.pid, signal.SIGKILL)
+                else:
+                    proc.kill()
         except ProcessLookupError:
             pass
-        await asyncio.wait_for(proc.wait(), timeout=5)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except Exception:
+            # A paused, unread stdout pipe can delay wait() after output overflow.
+            # Cleanup failure must not replace the primary budget/CLI exception.
+            pass
+        finally:
+            # Process has no public close(); close its pipes while the loop is
+            # still alive instead of leaving transport destruction to GC.
+            transport = getattr(proc, "_transport", None)
+            if transport is not None:
+                transport.close()
