@@ -452,7 +452,7 @@ const {
   () => parseLaunchEnv(form.env_text)?.MASO_BASE_URL,
 )
 const supportsSoloMode = computed(
-  () => ['claude', 'codex', 'traex', 'antigravity'].includes(form.agent_type)
+  () => ['claude', 'codex', 'traex', 'cursor', 'antigravity'].includes(form.agent_type)
 )
 const browserCurrentPath = ref('')
 const browserPathInput = ref('')
@@ -726,7 +726,7 @@ watch(showModal, (newVal) => {
 watch(
   () => form.agent_type,
   (agentType) => {
-    if (agentType === 'cursor' || agentType === 'terminal') {
+    if (agentType === 'terminal') {
       form.solo_mode = false
     }
     if (agentType !== 'codex') {

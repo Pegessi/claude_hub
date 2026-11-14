@@ -321,7 +321,8 @@ run_one() {
   local _scenario
   local -a browser_scenarios=()
   local -a python_tools=(
-    "$ROOT/scripts/verify_browser_mocks.py" "$ROOT/frontend/tests/browser_lifecycle.py")
+    "$ROOT/scripts/verify_browser_mocks.py" "$ROOT/frontend/tests/browser_lifecycle.py"
+    "$ROOT/frontend/tests/appearance_assertions.py")
   while IFS= read -r _scenario; do
     python_tools+=("$_scenario")
   done < <(find "$ROOT/scripts" -maxdepth 1 -name 'check_*.py' | sort)

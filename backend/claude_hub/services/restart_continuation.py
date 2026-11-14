@@ -125,19 +125,46 @@ def _config_digest(tab: Any) -> str:
 
 
 def _cursor_database_exists(transport: Any) -> bool:
-    """Cursor's constructive --resume needs an authoritative existing DB."""
-    from ._cursor_verify import _cwd_hash, _read_agent_id_from_db
+    """Cursor's constructive --resume / ACP session load needs an authoritative existing DB."""
+    from ._cursor_verify import (
+        _cwd_hash,
+        _expand_with_home,
+        _read_agent_id_from_db,
+        resolve_cursor_roots,
+    )
 
     env = transport._build_env()
-    home = Path(env.get("HOME") or str(Path.home()))
-    root = Path(env.get("CURSOR_HOME") or str(home / ".cursor"))
-    if str(root).startswith("~/"):
-        root = home / str(root)[2:]
-    if not root.is_absolute():
-        root = Path(transport._cwd) / root
+    raw_home = env.get("HOME")
+    effective_home = Path(raw_home).expanduser() if raw_home else Path.home()
+    root, acp_root = resolve_cursor_roots(env=env, cwd=transport._cwd)
     data_dir = env.get("CURSOR_DATA_DIR")
-    if data_dir and Path(data_dir).resolve() != root.resolve():
-        return False
+    if data_dir and data_dir.strip():
+        resolved_data = _expand_with_home(data_dir, effective_home, transport._cwd)
+        if resolved_data.resolve() != root.resolve():
+            return False
+    cid = transport._conversation_id
+    if (
+        isinstance(cid, str)
+        and cid
+        and "/" not in cid
+        and "\\" not in cid
+        and cid not in {".", ".."}
+    ):
+        acp_sessions = acp_root / "acp-sessions"
+        acp_session_dir = acp_sessions / cid
+        acp_db = acp_session_dir / "store.db"
+        try:
+            if (
+                not acp_sessions.is_symlink()
+                and not acp_session_dir.is_symlink()
+                and not acp_db.is_symlink()
+                and acp_db.is_file()
+                and acp_db.resolve().parent.parent == acp_sessions.resolve()
+                and _read_agent_id_from_db(acp_db) == cid
+            ):
+                return True
+        except OSError:
+            pass
     bucket = root / "chats" / _cwd_hash(transport._cwd)
     matches = 0
     try:

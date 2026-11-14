@@ -21,6 +21,11 @@ from urllib.parse import parse_qs, urlparse
 from playwright.async_api import expect
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appearance_assertions import (  # noqa: E402
+    filled_button_themes,
+    select_appearance,
+    wide_chat_themes,
+)
 from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
 
 TAB = "goal-steer-tab"
@@ -264,6 +269,7 @@ async def main(browser_run: BrowserRun) -> None:
     current_goal = dict(GOAL)
     idle_fixture = False
     plan_fixture = False
+    approval_fixture = False
     fail_next_send = False
     goal_updates = []
     goal_creates = []
@@ -305,7 +311,12 @@ async def main(browser_run: BrowserRun) -> None:
                     body = {"messages": []}
                 elif path == "/api/tabs":
                     body = tabs
-                elif path in {"/api/tabs/status", "/api/tabs/archived"}:
+                elif path in {
+                    "/api/tabs/status",
+                    "/api/tabs/archived",
+                    "/api/workspaces",
+                    "/api/remote/profiles",
+                }:
                     body = []
                 elif path.startswith("/api/tabs/sidebar-preferences"):
                     body = {"pinned_tab_ids": []}
@@ -376,6 +387,37 @@ async def main(browser_run: BrowserRun) -> None:
                                 PLAN_TURN,
                             )
                         )
+                    if approval_fixture:
+                        fixture_events.extend(
+                            [
+                                event(
+                                    8,
+                                    "turn_started",
+                                    "theme-approval",
+                                    {"summary": "Confirm implementation scope"},
+                                    "theme-approval:user",
+                                ),
+                                event(
+                                    9,
+                                    "approval_required",
+                                    "theme-approval",
+                                    {
+                                        "tool_call_id": "theme-approval-call",
+                                        "kind": "ask_question",
+                                        "questions": [
+                                            {
+                                                "id": "scope",
+                                                "prompt": "Choose the implementation scope",
+                                                "options": [
+                                                    {"id": "bounded", "label": "Keep scope bounded"}
+                                                ],
+                                            }
+                                        ],
+                                    },
+                                    "theme-approval:question",
+                                ),
+                            ]
+                        )
                     rows = [item for item in fixture_events if item["stream_sequence"] > since]
                     next_sequence = rows[-1]["stream_sequence"] if rows else since
                     body = {
@@ -383,6 +425,8 @@ async def main(browser_run: BrowserRun) -> None:
                         "next_sequence": next_sequence,
                         "has_more": False,
                     }
+                elif request.method == "GET" and path == f"/api/workspaces/tabs/{TAB}/questions":
+                    body = {"questions": []}
                 elif path.endswith("/wait"):
                     since = int(parse_qs(parsed.query).get("since_sequence", ["-1"])[0])
                     await asyncio.sleep(0.2)
@@ -641,11 +685,11 @@ async def main(browser_run: BrowserRun) -> None:
             await page.wait_for_timeout(400)
             await page.screenshot(path=str(output / "goal-setup-plan-first.png"), full_page=True)
             report["screenshots"].append("goal-setup-plan-first.png")
-            # Both themes must stay readable — a restyled surface that only
-            # works in the dark palette is not usable. Contrast is measured on
-            # the real computed colours, walking up for the effective
-            # background. The theme switch sits behind the modal backdrop, so
-            # each pass closes the dialog before flipping it.
+            # Both modes must stay readable. Close the Goal modal before using
+            # the real Appearance dialog; changing mode must retain the palette.
+            # Contrast walks the real computed colours for the effective backdrop.
+            setup_palette = await page.locator("html").get_attribute("data-palette")
+            assert setup_palette is not None
             dark_ratio = await dialog.evaluate(CONTRAST_SCRIPT)
             assert dark_ratio["title"] >= 4.5, dark_ratio
             assert dark_ratio["label"] >= 4.5, dark_ratio
@@ -654,7 +698,7 @@ async def main(browser_run: BrowserRun) -> None:
             assert dark_ratio["tips"] >= 4.5, dark_ratio
             await dialog.get_by_role("button", name="Cancel", exact=True).click()
             await expect(dialog).not_to_be_visible()
-            await page.locator(".theme-switch").click()
+            await select_appearance(page, "light", setup_palette)
             await page.get_by_role("button", name="Add to chat", exact=True).click()
             await page.get_by_role("menuitem", name="Set a Goal").click()
             dialog = page.get_by_role("dialog", name="Set a Goal", exact=True)
@@ -677,7 +721,7 @@ async def main(browser_run: BrowserRun) -> None:
             report["screenshots"].append("goal-setup-plan-first-light.png")
             await dialog.get_by_role("button", name="Cancel", exact=True).click()
             await expect(dialog).not_to_be_visible()
-            await page.locator(".theme-switch").click()
+            await select_appearance(page, "dark", setup_palette)
             await page.get_by_role("button", name="Add to chat", exact=True).click()
             await page.get_by_role("menuitem", name="Set a Goal").click()
             dialog = page.get_by_role("dialog", name="Set a Goal", exact=True)
@@ -756,6 +800,20 @@ async def main(browser_run: BrowserRun) -> None:
             await card.scroll_into_view_if_needed()
             await page.screenshot(path=str(output / "goal-plan-card-desktop.png"), full_page=True)
             report["screenshots"].append("goal-plan-card-desktop.png")
+            off_origin_before_themes = list(report["blocked_external_requests"])
+            report["plan_button_theme_contrast"] = await filled_button_themes(
+                page,
+                card.get_by_role("button", name="Approve & start", exact=True),
+                card.get_by_role("button", name="Revise", exact=True),
+                screenshot_dir=output,
+            )
+            report["wide_chat_artwork"] = await wide_chat_themes(
+                page, output, card.get_by_role("button", name="Approve & start", exact=True)
+            )
+            assert set(report["blocked_external_requests"]) <= set(off_origin_before_themes), (
+                "Theme assets attempted new off-origin requests",
+                report["blocked_external_requests"],
+            )
 
             # Reload at each width: the app chooses its mobile shell from the
             # viewport it boots in, so resizing alone would keep the desktop one.
@@ -822,6 +880,24 @@ async def main(browser_run: BrowserRun) -> None:
                 path.endswith("/resume") or path.endswith("/pause")
                 for _, path in report["api_requests"]
             )
+
+            # The same full SPA renders the provider's approval-required event
+            # through ChatApprovalCard; exercise its real submit fill, not tokens.
+            current_goal = None
+            approval_fixture = True
+            await page.reload(wait_until="domcontentloaded")
+            choice = page.get_by_role("button", name="Keep scope bounded", exact=True)
+            await expect(choice).to_be_enabled()
+            await choice.click()
+            submit = page.get_by_role("button", name="Submit answer", exact=True)
+            await expect(submit).to_be_enabled()
+            sends_before_theme_check = len(send_payloads)
+            report["approval_button_theme_contrast"] = await filled_button_themes(page, submit)
+            assert len(send_payloads) == sends_before_theme_check, "hover must not submit an answer"
+            await page.screenshot(
+                path=str(output / "approval-card-theme-hover.png"), full_page=True
+            )
+            report["screenshots"].append("approval-card-theme-hover.png")
 
             assert not report["unknown_requests"], report["unknown_requests"]
             assert not report["page_errors"], report["page_errors"]

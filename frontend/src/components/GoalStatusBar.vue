@@ -341,6 +341,6 @@ watch([expanded, isPhone], ([open, phone], [wasOpen, wasPhone]) => {
   .goal-sheet-actions button { min-height: 44px; padding: 0 12px; font-size: 14px; }
   .goal-sheet-actions button:only-child, .goal-sheet-actions button:last-child:nth-child(odd) { grid-column: 1 / -1; }
 }
-.goal-action--primary { color: white !important; background: var(--ch-color-accent-strong) !important; border-color: var(--ch-color-accent-strong) !important; }
+.goal-action--primary { color: var(--ch-color-on-accent) !important; background: var(--ch-color-accent-strong) !important; border-color: var(--ch-color-accent-strong) !important; }
 .goal-action--danger { color: var(--ch-color-danger, #e5484d) !important; border-color: color-mix(in srgb, var(--ch-color-danger, #e5484d) 45%, transparent) !important; }
 </style>

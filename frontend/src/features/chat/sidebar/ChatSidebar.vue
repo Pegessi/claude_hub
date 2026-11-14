@@ -1,5 +1,6 @@
 <template>
   <aside
+    v-bind="$attrs"
     ref="panelRef"
     class="chat-sidebar"
     :class="{
@@ -20,7 +21,10 @@
       <span
         v-if="!sidebarCollapsed || isMobile"
         class="chat-sidebar__title"
-      >Chats</span>
+      ><ThemeChromeIcon
+        kind="chats"
+        :size="14"
+      />Chats</span>
       <button
         v-if="isMobile"
         type="button"
@@ -51,36 +55,47 @@
         :aria-label="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
         @click="toggleSidebar"
       >
-        <svg
-          class="chat-sidebar__chevron"
-          :class="{ flipped: sidebarCollapsed }"
-          viewBox="0 0 16 16"
-          width="16"
-          height="16"
-          aria-hidden="true"
+        <ThemeChromeIcon
+          kind="sidebar-toggle"
+          :size="16"
+          :flipped="sidebarCollapsed"
         >
-          <path
-            fill="currentColor"
-            d="M10 12.5 5.5 8 10 3.5l.9.9L7.3 8l3.6 3.6z"
-          />
-        </svg>
+          <svg
+            class="chat-sidebar__chevron"
+            :class="{ flipped: sidebarCollapsed }"
+            viewBox="0 0 16 16"
+            width="16"
+            height="16"
+            aria-hidden="true"
+          >
+            <path
+              fill="currentColor"
+              d="M10 12.5 5.5 8 10 3.5l.9.9L7.3 8l3.6 3.6z"
+            />
+          </svg>
+        </ThemeChromeIcon>
       </button>
     </div>
 
     <!-- Expanded body (always rendered inside the mobile drawer) -->
     <template v-if="!sidebarCollapsed || isMobile">
       <div class="chat-sidebar__search">
-        <svg
-          viewBox="0 0 16 16"
-          width="13"
-          height="13"
-          aria-hidden="true"
+        <ThemeChromeIcon
+          kind="search"
+          :size="13"
         >
-          <path
-            fill="currentColor"
-            d="M11.4 10.6a5.5 5.5 0 1 0-.8.8l3 3 .8-.8-3-3zM7 11.5a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z"
-          />
-        </svg>
+          <svg
+            viewBox="0 0 16 16"
+            width="13"
+            height="13"
+            aria-hidden="true"
+          >
+            <path
+              fill="currentColor"
+              d="M11.4 10.6a5.5 5.5 0 1 0-.8.8l3 3 .8-.8-3-3zM7 11.5a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z"
+            />
+          </svg>
+        </ThemeChromeIcon>
         <input
           v-model="filterText"
           type="text"
@@ -152,17 +167,22 @@
         aria-label="Show chats"
         @click="toggleSidebar"
       >
-        <svg
-          viewBox="0 0 16 16"
-          width="18"
-          height="18"
-          aria-hidden="true"
+        <ThemeChromeIcon
+          kind="chats"
+          :size="18"
         >
-          <path
-            fill="currentColor"
-            d="M8 2a6.5 6.5 0 0 0-6.5 6.5c0 1.2.3 2.3.9 3.3L2 14l2.4-.5c1.1.6 2.3 1 3.6 1A6.5 6.5 0 1 0 8 2zm0 1a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11zM5.5 7a1 1 0 1 0 0 2 1 1 0 0 0 0-2zm5 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2z"
-          />
-        </svg>
+          <svg
+            viewBox="0 0 16 16"
+            width="18"
+            height="18"
+            aria-hidden="true"
+          >
+            <path
+              fill="currentColor"
+              d="M8 2a6.5 6.5 0 0 0-6.5 6.5c0 1.2.3 2.3.9 3.3L2 14l2.4-.5c1.1.6 2.3 1 3.6 1A6.5 6.5 0 1 0 8 2zm0 1a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11zM5.5 7a1 1 0 1 0 0 2 1 1 0 0 0 0-2zm5 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2z"
+            />
+          </svg>
+        </ThemeChromeIcon>
       </button>
     </div>
 
@@ -174,17 +194,22 @@
         :title="sidebarCollapsed ? 'View archived sessions' : ''"
         @click="openArchive"
       >
-        <svg
-          viewBox="0 0 16 16"
-          width="15"
-          height="15"
-          aria-hidden="true"
+        <ThemeChromeIcon
+          kind="archive"
+          :size="15"
         >
-          <path
-            fill="currentColor"
-            d="M2 3.5h12v2h-.6l-.8 7.5H3.4L2.6 5.5H2v-2zm1.7 2 .6 6.5h7.4l.6-6.5H3.7zM6 7h1v4H6V7zm3 0h1v4H9V7zM4 4.5h8v-1H4v1z"
-          />
-        </svg>
+          <svg
+            viewBox="0 0 16 16"
+            width="15"
+            height="15"
+            aria-hidden="true"
+          >
+            <path
+              fill="currentColor"
+              d="M2 3.5h12v2h-.6l-.8 7.5H3.4L2.6 5.5H2v-2zm1.7 2 .6 6.5h7.4l.6-6.5H3.7zM6 7h1v4H6V7zm3 0h1v4H9V7zM4 4.5h8v-1H4v1z"
+            />
+          </svg>
+        </ThemeChromeIcon>
         <span
           v-if="!sidebarCollapsed || isMobile"
           class="chat-sidebar__archived-label"
@@ -207,29 +232,31 @@
       @dblclick="resetSidebarWidth"
       @keydown="resizeWithKeyboard"
     />
-
-    <!-- Mobile-only: invisible left-edge gesture zone (above the ttyd iframe,
-         whose touches never reach this document) and the dimmed backdrop.
-         Teleported so the fixed positioning escapes any pane transform. -->
-    <Teleport to="body">
-      <div
-        v-if="isMobile && isTerminalMode"
-        ref="bandRef"
-        class="chat-drawer-edge-band"
-        aria-hidden="true"
-      />
-      <Transition name="chat-drawer-fade">
-        <div
-          v-if="isMobile && isTerminalMode && (mobileDrawerOpen || edgeDragging)"
-          ref="backdropRef"
-          class="chat-drawer-backdrop"
-          :class="{ 'chat-drawer-backdrop--dragging': edgeDragging }"
-          :style="edgeDragging ? { opacity: edgeBackdropOpacity } : undefined"
-          @click.self="closeMobileDrawer"
-        />
-      </Transition>
-    </Teleport>
   </aside>
+
+  <!-- Mobile-only: invisible left-edge gesture zone (above the ttyd iframe,
+       whose touches never reach this document) and the dimmed backdrop.
+       Rendered as siblings of <aside> inside .terminal-mode-shell rather than
+       inside <aside> or teleported to <body>: this escapes the drawer's own
+       translateX transform while keeping the drawer (z-index: 850) and
+       backdrop (z-index: 849) in the same stacking context when .app uses
+       position: fixed on mobile Chat panes. -->
+  <div
+    v-if="isMobile && isTerminalMode"
+    ref="bandRef"
+    class="chat-drawer-edge-band"
+    aria-hidden="true"
+  />
+  <Transition name="chat-drawer-fade">
+    <div
+      v-if="isMobile && isTerminalMode && (mobileDrawerOpen || edgeDragging)"
+      ref="backdropRef"
+      class="chat-drawer-backdrop"
+      :class="{ 'chat-drawer-backdrop--dragging': edgeDragging }"
+      :style="edgeDragging ? { opacity: edgeBackdropOpacity } : undefined"
+      @click.self="closeMobileDrawer"
+    />
+  </Transition>
 </template>
 
 <script setup lang="ts">
@@ -243,10 +270,13 @@ import { useViewport } from '@/composables/useViewport'
 import { useEdgeSwipeDrawer } from '@/composables/useEdgeSwipeDrawer'
 import ChatSidebarGroup from './ChatSidebarGroup.vue'
 import ChatSidebarRow from './ChatSidebarRow.vue'
+import ThemeChromeIcon from '@/features/app-shell/components/ThemeChromeIcon.vue'
 import { useSidebarPointerDrag } from './useSidebarPointerDrag'
 import { useSidebarRename } from './useSidebarRename'
 import { useSidebarResize, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH } from './useSidebarResize'
 import type { TerminalTab } from '@/types'
+
+defineOptions({ inheritAttrs: false })
 
 const props = defineProps<{
   /** Main content element; a rightward swipe on it opens the mobile drawer. */
