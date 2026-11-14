@@ -948,6 +948,38 @@ async def test_dot_delegate_request_key_idempotency_with_changing_demand_summary
         )
         assert first["work"]["task_id"] == second["work"]["task_id"]
         assert call_count == 1
+
+        # Concurrent delegate calls with identical request_key serialize cleanly
+        import asyncio
+
+        conc1, conc2 = await asyncio.gather(
+            dot_service.delegate(
+                workspace_id=ws.id,
+                title="Concurrent demand delegation",
+                goal="Verify concurrent request_key serialization",
+                done_when=["pytest passes"],
+                output="out2.txt",
+                demand_id="dem-idem-2",
+                request_key="req-idem-key-concurrent",
+                start=False,
+                confirm=True,
+                actor_key="actor-idem",
+            ),
+            dot_service.delegate(
+                workspace_id=ws.id,
+                title="Concurrent demand delegation",
+                goal="Verify concurrent request_key serialization",
+                done_when=["pytest passes"],
+                output="out2.txt",
+                demand_id="dem-idem-2",
+                request_key="req-idem-key-concurrent",
+                start=False,
+                confirm=True,
+                actor_key="actor-idem",
+            ),
+        )
+        assert conc1["work"]["task_id"] == conc2["work"]["task_id"]
+        assert call_count == 2
     finally:
         reset_dot_service(None)
 
@@ -958,23 +990,172 @@ async def test_dot_delegate_request_key_idempotency_with_changing_demand_summary
     assert iw_env["NO_PROXY"] == "127.0.0.1,localhost,::1"
     assert iw_env["no_proxy"] == "127.0.0.1,localhost,::1"
 
-    # Verify _run_bounded_subprocess kills and reaps timed-out process groups cleanly
-    pid_file = tmp_path / "child.pid"
+    # Verify _run_bounded_subprocess kills and reaps timed-out process groups cleanly,
+    # even when the group leader exits immediately after forking a background descendant!
+    grandchild_pid_file = tmp_path / "grandchild.pid"
     rc, _out, err = await _run_bounded_subprocess(
         [
             "python3",
             "-c",
             (
                 f"import os, time, pathlib; "
-                f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); "
+                f"pid = os.fork(); "
+                f"pathlib.Path({str(grandchild_pid_file)!r}).write_text(str(os.getpid())) if pid == 0 else os._exit(0); "
                 f"time.sleep(30)"
             ),
         ],
-        timeout=0.3,
+        timeout=0.4,
     )
     assert rc == 124
     assert "timed out" in err
-    if pid_file.exists():
-        child_pid = int(pid_file.read_text().strip())
+    if grandchild_pid_file.exists():
+        grandchild_pid = int(grandchild_pid_file.read_text().strip())
+        for _ in range(25):
+            try:
+                os.kill(grandchild_pid, 0)
+            except ProcessLookupError:
+                break
+            await asyncio.sleep(0.05)
         with pytest.raises(ProcessLookupError):
-            os.kill(child_pid, 0)
+            os.kill(grandchild_pid, 0)
+
+    # Verify _run_bounded_subprocess enforces cumulative max_output_bytes cap
+    rc_cap, _out_cap, err_cap = await _run_bounded_subprocess(
+        [
+            "python3",
+            "-c",
+            "import sys; sys.stdout.write('x' * 200000); sys.stdout.flush()",
+        ],
+        timeout=5.0,
+        max_output_bytes=32768,
+    )
+    assert rc_cap == 1
+    assert "exceeded 32768 bytes cap" in err_cap
+
+
+@pytest.mark.asyncio
+async def test_concurrent_todo_edit_to_auto_worktree_and_reviewer_incarnation_safety(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo, _ = _init_git_repo_with_bare_origin(tmp_path)
+    manager, _ = _setup_fake_chat_runtime(monkeypatch, tmp_path)
+
+    async def fake_discover_maso(_env: dict[str, str]):
+        return (
+            "http://127.0.0.1:11004",
+            [
+                StreamModelOption(id="gemini-4-argon", label="gemini-4-argon"),
+                StreamModelOption(id="gpt-6-astra", label="gpt-6-astra"),
+            ],
+            "gemini-4-argon",
+        )
+
+    monkeypatch.setattr(cross_reviewer, "discover_maso_service", fake_discover_maso)
+    monkeypatch.setattr(maso_discovery, "discover_maso_service", fake_discover_maso)
+
+    ws = manager.create_workspace(
+        WorkspaceCreate(name="Round3 Repo", path=str(repo), default_branch="main")
+    )
+
+    # 1. Task starts with auto_worktree=False; while _choose_dispatch_target runs on attempt 0,
+    # a concurrent TODO edit flips auto_worktree=True -> start_task retries and provisions worktree!
+    task = manager.create_task(
+        ws.id,
+        WorkspaceTaskCreate(
+            title="Flip to auto worktree",
+            prompt="Start as standard then flip to auto_worktree",
+            agent_type=AgentType.CLAUDE,
+            session_kind=SessionKind.CHAT,
+            auto_worktree=False,
+        ),
+    )
+    orig_choose = manager._choose_dispatch_target
+    flipped = False
+
+    async def choose_and_flip(workspace_arg, staged_arg, payload_arg):
+        nonlocal flipped
+        res = await orig_choose(workspace_arg, staged_arg, payload_arg)
+        if not flipped:
+            flipped = True
+            live = manager.tasks[task.id]
+            manager.tasks[task.id] = live.model_copy(
+                update={
+                    "recipe": WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW,
+                    "auto_worktree": True,
+                }
+            )
+        return res
+
+    monkeypatch.setattr(manager, "_choose_dispatch_target", choose_and_flip)
+    started = await manager.start_task(task.id)
+    monkeypatch.setattr(manager, "_choose_dispatch_target", orig_choose)
+
+    assert started.auto_worktree is True
+    assert started.worktree_path is not None
+    assert Path(started.worktree_path).resolve() != repo.resolve()
+    assert started.session_id is not None
+    assigned_worker = manager.sessions[started.session_id]
+    assert Path(assigned_worker.workspace_path).resolve() == Path(started.worktree_path).resolve()
+
+    # 2. Reviewer ID reservation & incarnation safety when Task A is accepted after Task B
+    # spawns its own reviewer: accepting Task A must NEVER delete Task B's reviewer!
+    await manager.create_report(
+        assigned_worker.id,
+        AgentReportCreate(
+            task_id=task.id,
+            state=AgentReportState.COMPLETED,
+            call_id="r3-work-1",
+            message="Done task A",
+            changed_files=["a.py"],
+            validation="pytest",
+            risks="none",
+            review_decision=ReviewDecision.REQUEST,
+        ),
+    )
+    rev_a_id = manager.tasks[task.id].review_session_id
+    assert rev_a_id is not None
+    await manager.create_report(
+        rev_a_id,
+        AgentReportCreate(
+            task_id=task.id,
+            state=AgentReportState.REVIEW_PASSED,
+            call_id="r3-rev-1",
+            message="Pass task A",
+        ),
+    )
+    assert rev_a_id not in manager.sessions
+
+    # Now create Task B and spawn a new reviewer while Task A is still in REVIEW
+    task_b = manager.create_task(
+        ws.id,
+        WorkspaceTaskCreate(
+            title="Task B",
+            prompt="Concurrent task B",
+            agent_type=AgentType.CLAUDE,
+            session_kind=SessionKind.CHAT,
+            auto_worktree=False,
+        ),
+    )
+    rev_b = await manager.ensure_workspace_agent(
+        ws.id,
+        EnsureWorkspaceAgentRequest(
+            agent_type=AgentType.MASO,
+            session_kind=SessionKind.CHAT,
+            role=WorkspaceSessionRole.REVIEWER,
+            ephemeral=True,
+            caller_owned_ephemeral=False,
+            reuse_existing=False,
+            cwd=str(repo),
+            env={"MASO_BASE_URL": "http://127.0.0.1:11004", "MASO_MODEL": "gemini-4-argon"},
+        ),
+    )
+    # Task B's reviewer must not collide with Task A's reserved review_session_id
+    assert rev_b.id != rev_a_id
+    manager.tasks[task_b.id] = task_b.model_copy(
+        update={"status": WorkspaceTaskStatus.REVIEW, "review_session_id": rev_b.id}
+    )
+
+    # Accepting Task A transitions Task A to DONE and leaves Task B's reviewer untouched
+    await manager.update_task(task.id, WorkspaceTaskUpdate(status=WorkspaceTaskStatus.DONE))
+    assert rev_b.id in manager.sessions

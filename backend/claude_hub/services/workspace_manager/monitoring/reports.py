@@ -288,6 +288,16 @@ class _ReportReconciliationMixin(_WorkspaceManagerBase):
             session = self.sessions.get(session_id)
             if not session or session.role != WorkspaceSessionRole.REVIEWER:
                 continue
+            if (
+                (session.task_id and session.task_id != task.id)
+                or (session.current_task_id and session.current_task_id != task.id)
+                or self._non_terminal_tasks_referencing_session(session_id, exclude_task_id=task.id)
+                or (
+                    task.review_completed_at is not None
+                    and session.created_at > task.review_completed_at
+                )
+            ):
+                continue
             if session.ephemeral:
                 self.sessions.pop(session.id, None)
                 if delete_tabs:

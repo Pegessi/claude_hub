@@ -172,203 +172,219 @@ class DotWorkService(DotSessionService, ABC):
             }:
                 session_kind = SessionKind.CHAT
 
-        self.store.ensure()
-        existing_work = (
-            next(
-                (
-                    item
-                    for item in self.store.list_work(include_closed=True)
-                    if item.get("request_key") == request_key
-                ),
-                None,
-            )
-            if request_key
-            else None
+        import contextlib
+
+        req_locks: dict[tuple[str, str, str], asyncio.Lock] | None = getattr(
+            self, "_delegate_request_locks", None
         )
-        replay = existing_work is not None
-        caller_fp = [
-            workspace_id,
-            title.strip(),
-            goal.strip(),
-            checks,
-            output.strip(),
-            caller_context,
-            out_of_scope.strip(),
-            constraints.strip(),
-            agent_type,
-            task_mode,
-            recipe,
-            cleaned_demand_id,
-        ]
-        if (
-            replay
-            and existing_work is not None
-            and existing_work.get("caller_fp") == caller_fp
-            and isinstance(existing_work.get("enriched_context"), str)
-        ):
-            effective_context = existing_work["enriched_context"]
-        elif cleaned_demand_id:
-            demand_summary = await read_infowall_demand_summary(cleaned_demand_id)
-            if demand_summary:
-                effective_context = (
-                    f"{caller_context}\n\n{demand_summary}" if caller_context else demand_summary
+        if req_locks is None:
+            req_locks = {}
+            setattr(self, "_delegate_request_locks", req_locks)
+        req_lock_cm: Any = (
+            req_locks.setdefault((workspace_id, actor_key, request_key), asyncio.Lock())
+            if request_key
+            else contextlib.nullcontext()
+        )
+        async with req_lock_cm:
+            self.store.ensure()
+            existing_work = (
+                next(
+                    (
+                        item
+                        for item in self.store.list_work(include_closed=True)
+                        if item.get("request_key") == request_key
+                    ),
+                    None,
                 )
+                if request_key
+                else None
+            )
+            replay = existing_work is not None
+            caller_fp = [
+                workspace_id,
+                title.strip(),
+                goal.strip(),
+                checks,
+                output.strip(),
+                caller_context,
+                out_of_scope.strip(),
+                constraints.strip(),
+                agent_type,
+                task_mode,
+                recipe,
+                cleaned_demand_id,
+            ]
+            if (
+                replay
+                and existing_work is not None
+                and existing_work.get("caller_fp") == caller_fp
+                and isinstance(existing_work.get("enriched_context"), str)
+            ):
+                effective_context = existing_work["enriched_context"]
+            elif cleaned_demand_id:
+                demand_summary = await read_infowall_demand_summary(cleaned_demand_id)
+                if demand_summary:
+                    effective_context = (
+                        f"{caller_context}\n\n{demand_summary}"
+                        if caller_context
+                        else demand_summary
+                    )
+                else:
+                    effective_context = caller_context
             else:
                 effective_context = caller_context
-        else:
-            effective_context = caller_context
 
-        warnings = lint_brief(done_when=checks, context=effective_context, output=output)
-        if warnings and not (confirm or replay):
-            return {"held": True, "warnings": warnings, "work": None}
-        brief = BRIEF_TEMPLATE.format(
-            goal=goal.strip(),
-            context=effective_context.strip() or "(none given)",
-            done_when="\n".join(f"{number}. {item}" for number, item in enumerate(checks, 1)),
-            output=output.strip() or "(not given; say in the report where the result is)",
-            out_of_scope=out_of_scope.strip() or "(none given)",
-            constraints=constraints.strip() or "(none)",
-        )
-        fields: dict[str, Any] = {
-            "title": title.strip(),
-            "prompt": brief,
-            "agent_type": AgentType(agent_type),
-            "request_key": request_key,
-        }
-        tab_id = self.tab_id()
-        if tab_id:
-            fields["source"] = TaskSourceReference(kind="chat", tab_id=tab_id)
-        if task_mode:
-            fields["task_mode"] = WorkspaceTaskMode(task_mode)
-        if recipe:
-            fields["recipe"] = WorkspaceTaskRecipe(recipe)
-        if cleaned_demand_id:
-            fields["infowall_demand_id"] = cleaned_demand_id
-        if session_kind is not None:
-            fields["session_kind"] = session_kind
-        task, _replayed = await workspace_manager.register_task(
-            workspace_id, WorkspaceTaskCreate(**fields), actor_key
-        )
-        # Tracked before it starts: a task that fails to start is still Dot's.
-        item = self.store.upsert_work(
-            task.id,
-            workspace_id=workspace_id,
-            title=task.title,
-            goal=goal.strip(),
-            done_when=checks,
-            output=output.strip() or None,
-            agent_type=agent_type,
-            # A replayed task may have moved on since the last poll; the watcher must
-            # still see that change, or its result event is lost.
-            status=None if replay else task.status.value,
-            stall_hours=stall_hours,
-            request_key=request_key,
-            caller_fp=caller_fp if request_key else None,
-            enriched_context=effective_context if request_key else None,
-            # Kept so a later review can see which warnings Dot sent past.
-            brief_warnings=warnings or None,
-            # Dot's own, even if the watcher saw it first (it watches Dot's tasks).
-            watched=False,
-        )
-        try:
-            if start and task.status.value == "todo":
-                created_ephemeral_session_id: str | None = None
-                try:
-                    target_session_id = session_id or getattr(task, "session_id", None)
-                    if not target_session_id and (
-                        model
-                        or env_preset
-                        or ephemeral is not None
-                        or AgentType(agent_type) == AgentType.MASO
-                    ):
-                        ws_obj = getattr(workspace_manager, "workspaces", {}).get(workspace_id)
-                        if (
-                            ws_obj is not None
-                            and getattr(task, "auto_worktree", False)
-                            and not getattr(task, "worktree_path", None)
+            warnings = lint_brief(done_when=checks, context=effective_context, output=output)
+            if warnings and not (confirm or replay):
+                return {"held": True, "warnings": warnings, "work": None}
+            brief = BRIEF_TEMPLATE.format(
+                goal=goal.strip(),
+                context=effective_context.strip() or "(none given)",
+                done_when="\n".join(f"{number}. {item}" for number, item in enumerate(checks, 1)),
+                output=output.strip() or "(not given; say in the report where the result is)",
+                out_of_scope=out_of_scope.strip() or "(none given)",
+                constraints=constraints.strip() or "(none)",
+            )
+            fields: dict[str, Any] = {
+                "title": title.strip(),
+                "prompt": brief,
+                "agent_type": AgentType(agent_type),
+                "request_key": request_key,
+            }
+            tab_id = self.tab_id()
+            if tab_id:
+                fields["source"] = TaskSourceReference(kind="chat", tab_id=tab_id)
+            if task_mode:
+                fields["task_mode"] = WorkspaceTaskMode(task_mode)
+            if recipe:
+                fields["recipe"] = WorkspaceTaskRecipe(recipe)
+            if cleaned_demand_id:
+                fields["infowall_demand_id"] = cleaned_demand_id
+            if session_kind is not None:
+                fields["session_kind"] = session_kind
+            task, _replayed = await workspace_manager.register_task(
+                workspace_id, WorkspaceTaskCreate(**fields), actor_key
+            )
+            # Tracked before it starts: a task that fails to start is still Dot's.
+            item = self.store.upsert_work(
+                task.id,
+                workspace_id=workspace_id,
+                title=task.title,
+                goal=goal.strip(),
+                done_when=checks,
+                output=output.strip() or None,
+                agent_type=agent_type,
+                # A replayed task may have moved on since the last poll; the watcher must
+                # still see that change, or its result event is lost.
+                status=None if replay else task.status.value,
+                stall_hours=stall_hours,
+                request_key=request_key,
+                caller_fp=caller_fp if request_key else None,
+                enriched_context=effective_context if request_key else None,
+                # Kept so a later review can see which warnings Dot sent past.
+                brief_warnings=warnings or None,
+                # Dot's own, even if the watcher saw it first (it watches Dot's tasks).
+                watched=False,
+            )
+            try:
+                if start and task.status.value == "todo":
+                    created_ephemeral_session_id: str | None = None
+                    try:
+                        target_session_id = session_id or getattr(task, "session_id", None)
+                        if not target_session_id and (
+                            model
+                            or env_preset
+                            or ephemeral is not None
+                            or AgentType(agent_type) == AgentType.MASO
                         ):
-                            wt_path, wt_branch = await provision_task_worktree(ws_obj, task)
-                            if hasattr(task, "model_copy"):
-                                task = task.model_copy(
-                                    update={
-                                        "worktree_path": wt_path,
-                                        "worktree_branch": wt_branch,
-                                    }
-                                )
-                                if task.id in getattr(workspace_manager, "tasks", {}):
-                                    workspace_manager.tasks[task.id] = task
-                        agent_env: dict[str, str] = {}
-                        parsed_agent = AgentType(agent_type)
-                        if parsed_agent == AgentType.MASO:
-                            base_url, _models, _default = await discover_maso_service(agent_env)
-                            agent_env["MASO_BASE_URL"] = base_url
-                        if model:
-                            spec = get_spec(parsed_agent)
-                            if spec.model_env_key:
-                                agent_env[spec.model_env_key] = model.strip()
-                        use_ephemeral = True if ephemeral is None else bool(ephemeral)
-                        target_cwd = getattr(task, "worktree_path", None) or (
-                            ws_obj.path if ws_obj is not None else None
-                        )
-                        created_session = await workspace_manager.ensure_workspace_agent(
-                            workspace_id,
-                            EnsureWorkspaceAgentRequest(
-                                agent_type=parsed_agent,
-                                session_kind=session_kind or SessionKind.CHAT,
-                                role=WorkspaceSessionRole.ORCHESTRATOR,
-                                reuse_existing=not use_ephemeral,
-                                ephemeral=use_ephemeral,
-                                caller_owned_ephemeral=use_ephemeral,
-                                cwd=target_cwd,
-                                env=agent_env,
-                                env_preset=env_preset,
+                            ws_obj = getattr(workspace_manager, "workspaces", {}).get(workspace_id)
+                            if (
+                                ws_obj is not None
+                                and getattr(task, "auto_worktree", False)
+                                and not getattr(task, "worktree_path", None)
+                            ):
+                                wt_path, wt_branch = await provision_task_worktree(ws_obj, task)
+                                if hasattr(task, "model_copy"):
+                                    task = task.model_copy(
+                                        update={
+                                            "worktree_path": wt_path,
+                                            "worktree_branch": wt_branch,
+                                        }
+                                    )
+                                    if task.id in getattr(workspace_manager, "tasks", {}):
+                                        workspace_manager.tasks[task.id] = task
+                            agent_env: dict[str, str] = {}
+                            parsed_agent = AgentType(agent_type)
+                            if parsed_agent == AgentType.MASO:
+                                base_url, _models, _default = await discover_maso_service(agent_env)
+                                agent_env["MASO_BASE_URL"] = base_url
+                            if model:
+                                spec = get_spec(parsed_agent)
+                                if spec.model_env_key:
+                                    agent_env[spec.model_env_key] = model.strip()
+                            use_ephemeral = True if ephemeral is None else bool(ephemeral)
+                            target_cwd = getattr(task, "worktree_path", None) or (
+                                ws_obj.path if ws_obj is not None else None
+                            )
+                            created_session = await workspace_manager.ensure_workspace_agent(
+                                workspace_id,
+                                EnsureWorkspaceAgentRequest(
+                                    agent_type=parsed_agent,
+                                    session_kind=session_kind or SessionKind.CHAT,
+                                    role=WorkspaceSessionRole.ORCHESTRATOR,
+                                    reuse_existing=not use_ephemeral,
+                                    ephemeral=use_ephemeral,
+                                    caller_owned_ephemeral=use_ephemeral,
+                                    cwd=target_cwd,
+                                    env=agent_env,
+                                    env_preset=env_preset,
+                                ),
+                            )
+                            if use_ephemeral:
+                                created_ephemeral_session_id = created_session.id
+                            target_session_id = created_session.id
+
+                        task = await workspace_manager.start_task(
+                            task.id,
+                            StartTaskRequest(
+                                agent_type=AgentType(agent_type),
+                                target_session_id=target_session_id,
                             ),
                         )
-                        if use_ephemeral:
-                            created_ephemeral_session_id = created_session.id
-                        target_session_id = created_session.id
-
-                    task = await workspace_manager.start_task(
-                        task.id,
-                        StartTaskRequest(
-                            agent_type=AgentType(agent_type), target_session_id=target_session_id
-                        ),
-                    )
-                    created_ephemeral_session_id = None
-                except TaskExecutionConflict:
-                    if created_ephemeral_session_id and hasattr(
-                        workspace_manager, "delete_session"
-                    ):
-                        try:
-                            await workspace_manager.delete_session(created_ephemeral_session_id)
-                        except Exception:
-                            logger.debug(
-                                "Best-effort cleanup of unstarted delegate session %s failed",
-                                created_ephemeral_session_id,
-                                exc_info=True,
+                    except TaskExecutionConflict:
+                        raise
+                    except Exception as exc:
+                        raise DelegateNotStarted(
+                            f"Task {task.id} was created but did not start: {exc}"
+                        ) from exc
+                    finally:
+                        if created_ephemeral_session_id is not None:
+                            live_task = getattr(workspace_manager, "tasks", {}).get(task.id)
+                            live_session_id = (
+                                getattr(live_task, "session_id", None)
+                                if live_task is not None
+                                else getattr(task, "session_id", None)
                             )
-                    raise
-                except Exception as exc:
-                    if created_ephemeral_session_id and hasattr(
-                        workspace_manager, "delete_session"
-                    ):
-                        try:
-                            await workspace_manager.delete_session(created_ephemeral_session_id)
-                        except Exception:
-                            logger.debug(
-                                "Best-effort cleanup of unstarted delegate session %s failed",
-                                created_ephemeral_session_id,
-                                exc_info=True,
-                            )
-                    raise DelegateNotStarted(
-                        f"Task {task.id} was created but did not start: {exc}"
-                    ) from exc
-                # Outside the "did not start" net: it did start, whatever this write does.
-                if not replay:
-                    item = self.store.upsert_work(task.id, status=task.status.value)
-        finally:
-            await asyncio.to_thread(self.store.commit, f"dot: delegate {task.id}")
-        return {"held": False, "warnings": warnings, "work": item}
+                            if live_session_id != created_ephemeral_session_id:
+                                if hasattr(workspace_manager, "_best_effort_delete_session"):
+                                    await asyncio.shield(
+                                        workspace_manager._best_effort_delete_session(
+                                            created_ephemeral_session_id
+                                        )
+                                    )
+                                elif hasattr(workspace_manager, "delete_session"):
+                                    with contextlib.suppress(Exception):
+                                        await asyncio.shield(
+                                            workspace_manager.delete_session(
+                                                created_ephemeral_session_id
+                                            )
+                                        )
+                    # Outside the "did not start" net: it did start, whatever this write does.
+                    if not replay:
+                        item = self.store.upsert_work(task.id, status=task.status.value)
+            finally:
+                await asyncio.to_thread(self.store.commit, f"dot: delegate {task.id}")
+            return {"held": False, "warnings": warnings, "work": item}
 
     async def review(
         self,

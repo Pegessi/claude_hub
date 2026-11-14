@@ -45,15 +45,75 @@ def _task_worktree_slug(task: WorkspaceTask) -> str:
     return f"{prefix}-{short_id}"
 
 
+class _SubprocessOutputOverflow(RuntimeError):
+    """Raised when subprocess stdout+stderr exceeds the configured byte cap."""
+
+
+async def _read_stream_bounded(
+    stream: asyncio.StreamReader | None,
+    *,
+    max_bytes: int,
+    state: dict[str, int],
+) -> bytes:
+    if stream is None:
+        return b""
+    chunks: list[bytes] = []
+    while True:
+        chunk = await stream.read(65536)
+        if not chunk:
+            break
+        state["total_bytes"] += len(chunk)
+        if state["total_bytes"] > max_bytes:
+            raise _SubprocessOutputOverflow(f"subprocess output exceeded {max_bytes} bytes cap")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _communicate_bounded(
+    proc: asyncio.subprocess.Process,
+    *,
+    stdin_bytes: bytes | None,
+    max_output_bytes: int,
+) -> tuple[bytes, bytes]:
+    if proc.stdin is not None:
+        try:
+            if stdin_bytes:
+                proc.stdin.write(stdin_bytes)
+                await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            with contextlib.suppress(Exception):
+                proc.stdin.close()
+    state = {"total_bytes": 0}
+    stdout_task = asyncio.create_task(
+        _read_stream_bounded(proc.stdout, max_bytes=max_output_bytes, state=state)
+    )
+    stderr_task = asyncio.create_task(
+        _read_stream_bounded(proc.stderr, max_bytes=max_output_bytes, state=state)
+    )
+    try:
+        stdout_bytes, stderr_bytes = await asyncio.gather(stdout_task, stderr_task)
+    finally:
+        for reader_task in (stdout_task, stderr_task):
+            if not reader_task.done():
+                reader_task.cancel()
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+    await proc.wait()
+    return stdout_bytes, stderr_bytes
+
+
 async def _run_bounded_subprocess(
     args: list[str],
     *,
     cwd: str | None = None,
     env: dict[str, str] | None = None,
     stdin_bytes: bytes | None = None,
-    timeout: float = 15.0,
+    timeout: float = 20.0,
+    max_output_bytes: int = SUBPROCESS_STREAM_LIMIT,
 ) -> tuple[int, str, str]:
-    """Run a subprocess in its own process group with bounded timeout and guaranteed reaping."""
+    """Run a subprocess in its own process group with bounded output, timeout, and reaping."""
     proc = await asyncio.create_subprocess_exec(
         *args,
         cwd=cwd,
@@ -61,12 +121,17 @@ async def _run_bounded_subprocess(
         stdin=(asyncio.subprocess.PIPE if stdin_bytes is not None else asyncio.subprocess.DEVNULL),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        limit=SUBPROCESS_STREAM_LIMIT,
+        limit=65536,
         start_new_session=True,
     )
+    needs_pg_kill = False
     try:
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(input=stdin_bytes),
+            _communicate_bounded(
+                proc,
+                stdin_bytes=stdin_bytes,
+                max_output_bytes=max_output_bytes,
+            ),
             timeout=timeout,
         )
         return (
@@ -74,19 +139,34 @@ async def _run_bounded_subprocess(
             stdout_bytes.decode("utf-8", errors="replace").strip(),
             stderr_bytes.decode("utf-8", errors="replace").strip(),
         )
+    except _SubprocessOutputOverflow as exc:
+        needs_pg_kill = True
+        return 1, "", str(exc)
     except asyncio.TimeoutError:
+        needs_pg_kill = True
         return 124, "", f"command timed out after {int(timeout)}s: {' '.join(args[:3])}"
+    except BaseException:
+        needs_pg_kill = True
+        raise
     finally:
-        if proc.returncode is None:
+        if needs_pg_kill or proc.returncode is None:
             with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
                 os.killpg(proc.pid, signal.SIGKILL)
+        if proc.returncode is None:
             with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
                 proc.kill()
-            with contextlib.suppress(Exception):
-                await proc.wait()
         if proc.stdin is not None:
             with contextlib.suppress(Exception):
                 proc.stdin.close()
+        transport = getattr(proc, "_transport", None)
+        if needs_pg_kill and transport is not None:
+            with contextlib.suppress(Exception):
+                transport.close()
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=2.0)
+        if transport is not None:
+            with contextlib.suppress(Exception):
+                transport.close()
 
 
 async def _run_git(
