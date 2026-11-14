@@ -189,20 +189,33 @@ class DotWorkService(DotSessionService, ABC):
         )
         async with req_lock_cm:
             self.store.ensure()
-            existing_work = (
-                next(
-                    (
-                        item
-                        for item in self.store.list_work(include_closed=True)
-                        if item.get("request_key") == request_key
-                        and item.get("workspace_id") == workspace_id
-                        and item.get("actor_key_hash") in {actor_key_hash, None}
-                    ),
-                    None,
-                )
-                if request_key
-                else None
+            work_items = self.store.list_work(include_closed=True) if request_key else []
+            existing_work = next(
+                (
+                    item
+                    for item in work_items
+                    if item.get("request_key") == request_key
+                    and item.get("workspace_id") == workspace_id
+                    and item.get("actor_key_hash") == actor_key_hash
+                ),
+                None,
             )
+            if existing_work is None and request_key:
+                for item in work_items:
+                    if (
+                        item.get("request_key") == request_key
+                        and item.get("workspace_id") == workspace_id
+                        and item.get("actor_key_hash") is None
+                    ):
+                        linked_task = getattr(workspace_manager, "tasks", {}).get(
+                            str(item.get("task_id") or "")
+                        )
+                        if (
+                            linked_task is not None
+                            and getattr(linked_task, "creation_actor_key", None) == actor_key
+                        ):
+                            existing_work = item
+                            break
             replay = existing_work is not None
             caller_fp = [
                 workspace_id,
