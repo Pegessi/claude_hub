@@ -250,9 +250,10 @@ class HubClient:
         *,
         json: Any = None,
         params: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
     ) -> Any:
         """Generic REST escape hatch for current and future API routes."""
-        return self._request(method, path, json=json, params=params)
+        return self._request(method, path, json=json, params=params, timeout=timeout)
 
     # -- Auth / system ------------------------------------------------------
 

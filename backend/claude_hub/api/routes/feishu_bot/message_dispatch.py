@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import Any, AsyncIterator, Callable
 
+import httpx
 from fastapi import HTTPException
 
 from claude_hub.api.agent_stream import (
@@ -31,11 +32,13 @@ from claude_hub.services.agent_stream.turn_source import (
 )
 from claude_hub.services.feishu_bot import (
     FeishuBotClient,
+    FeishuBotError,
     FeishuMessageEvent,
     FeishuMessageTimeStatus,
     FeishuReplyReceipt,
     feishu_message_time_notice,
     feishu_message_time_status,
+    render_merged_forward_bundle,
 )
 from claude_hub.services.feishu_bot_pool import (
     BotBinding,
@@ -49,6 +52,25 @@ from claude_hub.services.feishu_message_format import build_feishu_message_paylo
 
 logger = logging.getLogger(__name__)
 _BIND_CODE_RE = re.compile(r"^(?:bind\s+)?(CH-[A-Z0-9]{10})$", re.IGNORECASE)
+_BARE_FORWARD_TRIAGE_INTENT = (
+    "用户向你合并转发了一段飞书聊天记录（未附额外说明，默认触发答疑/排障模式）："
+    "请将转发记录视为待核查证据，只读排查其中提及的报错/链接/代码/MR/评测问题，"
+    "若属于可追踪事项则幂等同步至 InfoWall，并给出："
+    "(1) 一句话查实根因与硬证据链接；"
+    "(2) 一段 80~150 字可直接复制回群里的中文回复草稿；"
+    "(3) 是否建议派发修复开发任务。"
+)
+
+
+def _with_forward_intent(text: str, items: list[_TabDispatchItem]) -> str:
+    if (
+        items
+        and all(item.event.chat_type == "p2p" for item in items)
+        and any(item.event.message_type == "merge_forward" for item in items)
+        and not any(item.event.message_type in {"text", "post"} for item in items)
+    ):
+        return f"{_BARE_FORWARD_TRIAGE_INTENT}\n\n{text}"
+    return text
 
 
 # How long a finished batch waits for a stop a newer message asked for.
@@ -148,6 +170,29 @@ class FeishuMessageDispatcher:
             return "image/webp"
         return None
 
+    async def _prepare_event(
+        self, client: FeishuBotClient, event: FeishuMessageEvent
+    ) -> FeishuMessageEvent:
+        if event.message_type != "merge_forward":
+            return event
+        try:
+            items = await client.fetch_merged_forward_messages(event.message_id)
+        except (FeishuBotError, httpx.HTTPError) as exc:
+            logger.info(
+                "Feishu merged-forward unavailable for %s: %s",
+                event.message_id,
+                type(exc).__name__,
+            )
+            return replace(
+                event,
+                text=(
+                    "[合并转发记录读取失败：Bot 可能缺少消息读取权限，或飞书接口暂不可用。"
+                    "当前未取得原文，请勿推断根因；请用户补发相关原文或链接。]"
+                ),
+            )
+        text, image_refs = render_merged_forward_bundle(items, root_message_id=event.message_id)
+        return replace(event, text=text, image_refs=image_refs)
+
     async def _event_attachments(
         self,
         client: FeishuBotClient,
@@ -161,7 +206,8 @@ class FeishuMessageDispatcher:
         attachments: list[AgentStreamAttachment] = []
         used_bytes = 0
         omitted: list[int] = []
-        for index, image_key in enumerate(event.image_keys, start=1):
+        image_refs = event.image_refs or tuple((event.message_id, key) for key in event.image_keys)
+        for index, (source_message_id, image_key) in enumerate(image_refs, start=1):
             if len(attachments) >= remaining_count:
                 logger.info(
                     "Feishu message image omitted for %s item %d: batch count limit",
@@ -171,7 +217,7 @@ class FeishuMessageDispatcher:
                 omitted.append(index)
                 continue
             try:
-                content = await client.download_message_image(event.message_id, image_key)
+                content = await client.download_message_image(source_message_id, image_key)
                 mime_type = self._image_mime(content)
                 if mime_type is None:
                     raise ValueError("unsupported image bytes")
@@ -578,7 +624,7 @@ class FeishuMessageDispatcher:
 
     def _batch_visible_text(self, items: list[_TabDispatchItem], *, followup: bool) -> str:
         if len(items) == 1 and not followup:
-            return items[0].event.text
+            return _with_forward_intent(items[0].event.text, items)
         intro = (
             "用户在你处理上一条消息期间补充了以下信息，请结合已有上下文统一处理："
             if followup
@@ -587,7 +633,7 @@ class FeishuMessageDispatcher:
         messages = "\n\n".join(
             f"[消息 {index}]\n{item.event.text}" for index, item in enumerate(items, start=1)
         )
-        return f"{intro}\n\n{messages}"
+        return _with_forward_intent(f"{intro}\n\n{messages}", items)
 
     async def _stopped_for_newer(self, batch: list[_TabDispatchItem]) -> bool | None:
         """None when no newer message asked to stop this batch; else whether it stopped."""
@@ -612,10 +658,11 @@ class FeishuMessageDispatcher:
         messages = "\n\n".join(
             f"[新消息 {index}]\n{item.event.text}" for index, item in enumerate(items, start=1)
         )
-        return (
+        return _with_forward_intent(
             "你回复用户上一条消息时，用户又发来了新消息，上一次回复已停止、未发出。"
             "请结合两者给出一个回复：\n\n"
-            f"[上一条]\n{earlier}\n\n{messages}"
+            f"[上一条]\n{earlier}\n\n{messages}",
+            items,
         )
 
     def _channel_matches(self, first: _TabDispatchItem, candidate: _TabDispatchItem) -> bool:
@@ -719,6 +766,8 @@ class FeishuMessageDispatcher:
                         turn_id_for(leader.bot_id, leader.event.message_id)
                     )
                 batch[0].reaction_dispatch_started.set()
+                for item in batch:
+                    item.event = await self._prepare_event(item.client, item.event)
                 visible_text = self._batch_visible_text(batch, followup=followup)
                 # The user's own words; a later stop carries these, without intros.
                 core_text = "\n\n".join(item.event.text for item in batch)
@@ -758,7 +807,7 @@ class FeishuMessageDispatcher:
                         + "、".join(omitted_images)
                         + "。请勿假设已经看到这些图片；如需分析，请提示用户重新发送。]"
                     )
-                images = sum(len(item.event.image_keys) for item in batch)
+                images = sum(len(item.event.image_refs or item.event.image_keys) for item in batch)
                 queue.active_text = core_text + (
                     f"\n\n[系统提示：上一条消息附带的 {images} 张图片不会随本次重新发送；"
                     "如需分析，请提示用户重新发送。]"
