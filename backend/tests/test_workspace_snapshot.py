@@ -14,6 +14,12 @@ from claude_hub.models import (
     WorkspaceTaskStatus,
     WorkspaceTaskUpdate,
 )
+from claude_hub.models.schemas import (
+    TaskExecutionControl,
+    TaskManualProgressRequest,
+    TaskProgressState,
+    WorkspaceTaskCreate,
+)
 from claude_hub.services.local_storage import read_document
 from claude_hub.services.workspace_manager import WorkspaceManager
 from claude_hub.services.workspace_snapshot import MAX_SNAPSHOT_TASKS
@@ -176,3 +182,52 @@ def test_snapshot_orders_mixed_legacy_naive_and_aware_timestamps(manager, worksp
     snapshot = manager.snapshot_path(workspace.id).read_text()
     assert "progress-1" in snapshot
     assert "progress-0" not in snapshot
+
+
+@pytest.mark.asyncio
+async def test_snapshot_brief_and_overview_include_initiator_progress(manager, workspace):
+    task, _ = await manager.register_task(
+        workspace.id,
+        WorkspaceTaskCreate(
+            request_key="req-init-1",
+            reporter_key="r" * 40,
+            title="Initiator near-zero audit",
+            prompt="Investigate GB200 overhead and report findings.",
+            execution_control=TaskExecutionControl.INITIATOR,
+        ),
+        "actor-test",
+    )
+    await manager.record_manual_task_progress(
+        workspace.id,
+        task.id,
+        TaskManualProgressRequest(
+            call_id="prog-1",
+            expected_execution_epoch=1,
+            expected_progress_revision=0,
+            state=TaskProgressState.NEEDS_INPUT,
+            summary="Diagnostic complete. Decision needed: merge or hold.",
+            validation="pytest 42 passed",
+            risks="runtime CUDA 13.5 unverified",
+            artifact_refs=["outputs/NEXT_EXPERIMENT.md"],
+        ),
+    )
+
+    snapshot = manager.snapshot_path(workspace.id).read_text()
+    assert "Latest initiator progress: state=needs_input; epoch=1; rev=1" in snapshot
+    assert "Diagnostic complete. Decision needed: merge or hold." in snapshot
+    assert "pytest 42 passed" in snapshot
+    assert "outputs/NEXT_EXPERIMENT.md" in snapshot
+    assert "Inspect the latest initiator progress blocker/question" in snapshot
+    assert f"claude-hub task brief {task.id} --workspace-id {workspace.id}" in snapshot
+
+    brief = manager.get_task_brief(workspace.id, task.id)
+    assert brief["task_id"] == task.id
+    assert brief["phase"] == "needs_user"
+    assert brief["attention"] is True
+    assert "Diagnostic complete" in brief["markdown"]
+    assert "outputs/NEXT_EXPERIMENT.md" in brief["markdown"]
+    assert len(brief["markdown"]) <= 2048
+
+    overview = manager.get_board_overview(done_per_workspace=5)
+    assert any(t.id == task.id for t in overview["tasks"])
+    assert overview["attention_counts"][workspace.id] >= 1

@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from typing import Any
 
     from ...models.schemas import TaskLifecycle
+    from ...models.task_mailbox import TaskEvent
     from ..chat_message_inbox import ChatMessageInbox
     from ..task_lifecycle import TaskNotifier
     from ..task_mailbox import TaskMailbox
@@ -698,6 +699,22 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
 
     @abstractmethod
     def require_workspace_task(self, workspace_id: str, task_id: str) -> WorkspaceTask: ...
+
+    @abstractmethod
+    def list_workspaces(self) -> list[Workspace]: ...
+
+    @abstractmethod
+    def reports_for_task(self, workspace_id: str, task_id: str) -> list[AgentReport]: ...
+
+    @abstractmethod
+    def list_task_mailbox_events(
+        self,
+        workspace_id: str,
+        task_id: str,
+        *,
+        since_sequence: int = 0,
+        subtree: bool = False,
+    ) -> list[TaskEvent]: ...
 
     @abstractmethod
     def _active_feedback_summary_task(self, workspace_id: str) -> WorkspaceTask | None: ...
