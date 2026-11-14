@@ -801,6 +801,8 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
         remote_profile_id: str | None = None,
         remote_cwd: str | None = None,
         session_kind: SessionKind | None = None,
+        worker_agent_type: AgentType | None = None,
+        worker_env: dict[str, str] | None = None,
     ) -> Optional[ManagedSession]: ...
 
     @abstractmethod

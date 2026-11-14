@@ -101,6 +101,7 @@ SCHEMA_MODULE_CLASSES: Dict[str, Tuple[str, ...]] = {
         "WorkspaceSessionRole",
         "WorkspaceTaskStatus",
         "WorkspaceTaskMode",
+        "WorkspaceTaskRecipe",
         "WorkspaceTaskExecutionComplexity",
         "WorkspaceTaskOrigin",
         "EvaluationStrictness",

@@ -98,8 +98,15 @@ class DelegateRequest(BaseModel):
     context: str = Field(default="", max_length=20_000)
     out_of_scope: str = Field(default="", max_length=4000)
     constraints: str = Field(default="", max_length=4000)
-    agent_type: Literal["codex", "claude", "cursor", "traex"] = "codex"
-    task_mode: Optional[Literal["direct", "reviewed", "autonomous"]] = None
+    agent_type: Literal["codex", "claude", "cursor", "traex", "maso", "antigravity"] = "codex"
+    task_mode: Optional[Literal["direct", "reviewed", "autonomous", "subagent"]] = None
+    model: Optional[str] = Field(default=None, min_length=1, max_length=256)
+    env_preset: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    recipe: Optional[
+        Literal["standard", "triage_diagnose", "spec_implement_review", "eval_and_report"]
+    ] = None
+    demand_id: Optional[str] = Field(default=None, min_length=1, max_length=256)
+    ephemeral: Optional[bool] = None
     start: bool = True
     request_key: Optional[str] = Field(default=None, min_length=1, max_length=128)
     stall_hours: Optional[float] = Field(default=None, gt=0, le=720)

@@ -5,22 +5,16 @@ from claude_hub.services.workspace_manager._constants import (
     AgentReport,
     AgentReportState,
     AgentRuntimeStatus,
+    AgentType,
     ExecutionTarget,
-    GoalPacketStatus,
     ManagedSession,
     ManagedSessionStatus,
     Optional,
     ReviewDecision,
     SessionKind,
     WorkspaceSessionRole,
-    WorkspaceTask,
-    WorkspaceTaskMode,
-    WorkspaceTaskStatus,
-    datetime,
     logger,
-    state_policy,
     ttyd_manager,
-    uuid,
 )
 
 from .._base import _WorkspaceManagerBase
@@ -132,6 +126,8 @@ class _ReviewResourcesMixin(_WorkspaceManagerBase):
         remote_profile_id: str | None = None,
         remote_cwd: str | None = None,
         session_kind: SessionKind | None = None,
+        worker_agent_type: "AgentType | None" = None,
+        worker_env: dict[str, str] | None = None,
     ) -> Optional[ManagedSession]:
         """Internal review dispatch only — not CLI agent-create reuse.
 
@@ -140,6 +136,7 @@ class _ReviewResourcesMixin(_WorkspaceManagerBase):
         ``_find_compatible_workspace_agent`` instead.
         """
 
+        from claude_hub.services.cross_reviewer import is_heterogeneous_reviewer
         from claude_hub.services.workspace_identity import normalize_remote_cwd, resolve_path
 
         wanted_remote_cwd = (
@@ -173,4 +170,22 @@ class _ReviewResourcesMixin(_WorkspaceManagerBase):
         ]
         if not reviewers:
             return None
-        return sorted(reviewers, key=lambda session: (session.ephemeral, session.created_at))[0]
+        return sorted(
+            reviewers,
+            key=lambda session: (
+                (
+                    (
+                        not is_heterogeneous_reviewer(
+                            worker_agent_type,
+                            worker_env or {},
+                            session.agent_type,
+                            session.env,
+                        )
+                    )
+                    if worker_agent_type is not None
+                    else False
+                ),
+                session.ephemeral,
+                session.created_at,
+            ),
+        )[0]

@@ -41,6 +41,28 @@ from claude_hub.cli.task_commands.group import task
     help="Task automation mode.",
 )
 @click.option(
+    "--recipe",
+    type=click.Choice(["standard", "triage_diagnose", "spec_implement_review", "eval_and_report"]),
+    default=None,
+    help="Standardized pipeline execution recipe.",
+)
+@click.option(
+    "--demand-id",
+    "demand_id",
+    default=None,
+    help="Linked InfoWall demand ID.",
+)
+@click.option(
+    "--auto-worktree/--no-auto-worktree",
+    default=None,
+    help="Automatically provision an isolated Git feature worktree on start.",
+)
+@click.option(
+    "--auto-push-remote/--no-auto-push-remote",
+    default=None,
+    help="Automatically push the feature branch to origin after review_passed.",
+)
+@click.option(
     "--execution-complexity",
     type=click.Choice(["auto", "simple", "complex"]),
     default="auto",
@@ -93,6 +115,10 @@ def task_create(
     agent_type: str,
     session_kind: Optional[str],
     task_mode: str,
+    recipe: Optional[str],
+    demand_id: Optional[str],
+    auto_worktree: Optional[bool],
+    auto_push_remote: Optional[bool],
     execution_complexity: str,
     review_profiles: tuple,
     related_task_id: Optional[str],
@@ -106,13 +132,23 @@ def task_create(
     payload_json: Optional[str],
 ) -> None:
     """Create a workspace-controlled Task record without starting it."""
+    effective_task_mode: Optional[str] = task_mode
+    if (
+        recipe == "triage_diagnose"
+        and ctx.get_parameter_source("task_mode") == click.core.ParameterSource.DEFAULT
+    ):
+        effective_task_mode = None
     body = merge_payload(
         payload_json,
         title=title,
         prompt=prompt,
         agent_type=agent_type,
         session_kind=session_kind,
-        task_mode=task_mode,
+        task_mode=effective_task_mode,
+        recipe=recipe,
+        infowall_demand_id=demand_id,
+        auto_worktree=auto_worktree,
+        auto_push_remote=auto_push_remote,
         execution_complexity=execution_complexity,
         review_profiles=list(review_profiles),
         related_task_id=related_task_id,

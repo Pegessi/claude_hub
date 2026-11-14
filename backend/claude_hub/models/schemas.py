@@ -115,6 +115,7 @@ from claude_hub.models.schema_domains.runtime import (
     WorkspaceTaskExecutionComplexity,
     WorkspaceTaskMode,
     WorkspaceTaskOrigin,
+    WorkspaceTaskRecipe,
     WorkspaceTaskStatus,
     normalize_agent_tag,
 )

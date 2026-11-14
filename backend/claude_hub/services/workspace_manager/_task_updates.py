@@ -51,6 +51,10 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                 payload.session_kind is not None,
                 payload.parent_task_id is not None,
                 payload.depends_on_task_ids is not None,
+                payload.recipe is not None,
+                "infowall_demand_id" in payload.model_fields_set,
+                payload.auto_worktree is not None,
+                payload.auto_push_remote is not None,
                 "agent_tag" in payload.model_fields_set,
             ]
         )
@@ -147,6 +151,37 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                 raise ValueError("The selected agent does not match the Task execution surface")
         if "agent_tag" in payload.model_fields_set:
             update["agent_tag"] = payload.agent_tag
+        if "infowall_demand_id" in payload.model_fields_set:
+            update["infowall_demand_id"] = (payload.infowall_demand_id or "").strip() or None
+        if payload.recipe is not None:
+            update["recipe"] = payload.recipe
+            if payload.recipe == WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW:
+                if payload.auto_worktree is None:
+                    update["auto_worktree"] = True
+                if payload.auto_push_remote is None:
+                    update["auto_push_remote"] = True
+            elif payload.recipe == WorkspaceTaskRecipe.TRIAGE_DIAGNOSE:
+                if payload.task_mode is None:
+                    update["task_mode"] = WorkspaceTaskMode.SUBAGENT
+                    update["autonomy_policy"] = None
+                    update["autonomous_run"] = None
+                if (
+                    payload.session_kind is None
+                    and not (payload.session_id or task.session_id)
+                    and task.agent_type
+                    in {
+                        AgentType.CLAUDE,
+                        AgentType.CODEX,
+                        AgentType.CURSOR,
+                        AgentType.MASO,
+                        AgentType.ANTIGRAVITY,
+                    }
+                ):
+                    update["session_kind"] = SessionKind.CHAT
+        if payload.auto_worktree is not None:
+            update["auto_worktree"] = payload.auto_worktree
+        if payload.auto_push_remote is not None:
+            update["auto_push_remote"] = payload.auto_push_remote
         if payload.goal_packet is not None:
             update["goal_packet"] = payload.goal_packet
         if payload.review_profiles is not None:
@@ -370,6 +405,39 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                         success=True,
                         now=now,
                     )
+                if current.infowall_demand_id:
+                    from claude_hub.services.work_pipeline import sync_task_progress_to_infowall
+
+                    summary_text = self._task_record_final_summary(
+                        [
+                            r
+                            for r in self.reports_for_workspace(current.workspace_id)
+                            if r.task_id == current.id
+                        ]
+                    )
+                    synced = await sync_task_progress_to_infowall(
+                        current,
+                        milestone="done",
+                        summary=summary_text or f"Task {current.title} accepted and marked done.",
+                    )
+                    if synced and current.id in self.tasks:
+                        self.tasks[current.id] = self.tasks[current.id].model_copy(
+                            update={"infowall_synced_at": self._runtime_now()}
+                        )
+                        self._save_workspace_state(current.workspace_id)
+                if current.session_id:
+                    worker_sess = self.sessions.get(current.session_id)
+                    if (
+                        worker_sess is not None
+                        and worker_sess.ephemeral
+                        and worker_sess.role
+                        in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}
+                        and (
+                            current.recipe != WorkspaceTaskRecipe.STANDARD
+                            or current.worktree_path is not None
+                        )
+                    ):
+                        await self._best_effort_delete_session(worker_sess.id)
             elif rename_session_id is not None:
                 session = self.sessions.get(rename_session_id)
                 if (
