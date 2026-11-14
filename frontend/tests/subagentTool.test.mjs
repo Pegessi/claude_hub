@@ -138,6 +138,14 @@ test('parseSubagent reads the Cursor protobuf oneof sub-agent type', () => {
   const unspecified = parseSubagent('Task', { ...CURSOR_TASK_ARGS, subagentType: { unspecified: {} } })
   assert.equal(unspecified.provider, 'cursor')
   assert.equal(unspecified.agentType, null)
+  // Cursor stream-json / ACP also emits { unspecified: {} } without agentId.
+  const unspecifiedWithoutId = parseSubagent('Task', {
+    description: 'Search auth',
+    prompt: 'Find auth routes',
+    subagentType: { unspecified: {} },
+  })
+  assert.equal(unspecifiedWithoutId.provider, 'cursor')
+  assert.equal(unspecifiedWithoutId.agentType, null)
 })
 
 test('subagentResultText shows the Cursor child report instead of the raw record', () => {
@@ -168,6 +176,18 @@ test('parseSubagent projects the TraeX spawnAgent view (thread target, no type)'
   assert.equal(view.description, '')
   assert.equal(view.directive, false)
   assert.deepEqual(view.threadIds, ['01a0bce6-af31-7ab1-b111-5d0b50967ae7'])
+
+  // Codex SubAgentActivity / spawn_agent carries agentPath + model + reasoningEffort.
+  const codexNamed = parseSubagent('spawnAgent', {
+    prompt: 'Spawned cpu_callers4d_final_review',
+    receiverThreadIds: ['01a1d2d2-b9c1-70b2-a989-b08f07910a26'],
+    agentPath: '/root/cpu_callers4d_final_review',
+    model: '[redacted]',
+    reasoningEffort: 'xhigh',
+  })
+  assert.equal(codexNamed.agentType, 'cpu_callers4d_final_review')
+  assert.equal(codexNamed.description, '[redacted] · xhigh')
+  assert.equal(codexNamed.directive, false)
 })
 
 test('parseSubagent treats sendInput as a directive to an existing thread', () => {

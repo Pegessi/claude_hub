@@ -184,12 +184,19 @@ export function subagentDockCounts(chips: readonly SubagentDockRow[]): SubagentD
 }
 
 const HUB_SUBAGENT_ID_RE = /\bsa-[0-9a-f]{12}\b/
-const HUB_AGENT_RUN_RE = /claude-hub\s+agent\s+(?:run|send)\b/
+const HUB_CLI_RE = /\bclaude-hub\b/
+const HUB_AGENT_RUN_RE = /\bagent\s+(?:run|send)\b/
+const HUB_AGENT_STDERR_RE = /\[agent\]\s+subagent\s+(sa-[0-9a-f]{12})\b/
 
 /** Hub sub-agent id of a `claude-hub agent run` Bash call, only when the
  *  command is an agent run AND its output clearly names the id (background
- *  runs and `--json` print it; foreground runs may not, and then no link). */
+ *  runs, `--json`, and the CLI's stderr start banner print it). */
 export function hubSubagentIdFromTool(argsText: string, resultText: string): string | null {
-  if (!HUB_AGENT_RUN_RE.test(argsText)) return null
-  return HUB_SUBAGENT_ID_RE.exec(resultText)?.[0] ?? HUB_SUBAGENT_ID_RE.exec(argsText)?.[0] ?? null
+  if (!HUB_CLI_RE.test(argsText) || !HUB_AGENT_RUN_RE.test(argsText)) return null
+  return (
+    HUB_AGENT_STDERR_RE.exec(resultText)?.[1] ??
+    HUB_SUBAGENT_ID_RE.exec(resultText)?.[0] ??
+    HUB_SUBAGENT_ID_RE.exec(argsText)?.[0] ??
+    null
+  )
 }

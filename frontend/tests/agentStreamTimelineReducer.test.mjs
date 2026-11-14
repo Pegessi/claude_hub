@@ -720,6 +720,131 @@ test('a Cursor Task card shows the child report from its record result', () => {
   assert.equal(sub.tool.resultText, 'Found it.')
 })
 
+test('Cursor structured Shell result and ACP subagent_spawned bind cleanly', () => {
+  const reducer = new IncrementalTimelineReducer()
+  const turns = reducer.reduce([
+    makeEvent(0, 'turn_started', { summary: 'run hub and acp task' }, { turn_id: 't1', agent_type: 'cursor' }),
+    makeEvent(1, 'tool_call_started', {
+      tool_call_id: 'sh-1',
+      name: 'Shell',
+      args: { command: 'claude-hub agent run --provider codex --prompt "x"' },
+    }, { turn_id: 't1', agent_type: 'cursor' }),
+    makeEvent(2, 'tool_call_completed', {
+      tool_call_id: 'sh-1',
+      name: 'Shell',
+      status: 'completed',
+      result: {
+        success: {
+          stdout: 'Final answer from subagent',
+          stderr: '[agent] subagent sa-0123456789ab (codex) started in tab tab-1; turn turn-1',
+        },
+      },
+    }, { turn_id: 't1', agent_type: 'cursor' }),
+    makeEvent(3, 'tool_call_started', {
+      tool_call_id: 'task-acp-1',
+      name: 'Task',
+      args: { description: 'Audit auth', prompt: 'Check auth', subagentType: { unspecified: {} } },
+    }, { turn_id: 't1', agent_type: 'cursor' }),
+    makeEvent(4, 'status', {
+      text: 'Sub-agent explore started',
+      provider_status: 'subagent_lifecycle',
+      subagent_status: 'active',
+      subagent_thread: 'child-sid.1',
+      subagent_name: 'explore',
+      tool_call_id: 'task-acp-1',
+      snapshot: true,
+    }, { turn_id: 't1', agent_type: 'cursor', call_id: 'task-acp-1', message_id: 'subagent:child-sid.1' }),
+    makeEvent(5, 'text_delta', {
+      text: 'Auth looks solid.',
+      subagent_thread: 'child-sid.1',
+    }, { turn_id: 't1', agent_type: 'cursor' }),
+  ])
+  const toolGroup = turns[0].parts.find(part => part.kind === 'tool_group')
+  assert.ok(toolGroup.tools[0].resultText.includes('sa-0123456789ab'))
+  const region = turns[0].parts.find(part => part.kind === 'subagents')
+  assert.ok(region)
+  assert.equal(region.threads.length, 1)
+  assert.equal(region.threads[0].threadId, 'child-sid.1')
+  assert.equal(region.threads[0].launchTool?.callId, 'task-acp-1')
+  assert.equal(region.threads[0].launchTool?.subagent?.agentType, 'explore')
+})
+
+test('Codex followup_task replaces Fernet ciphertext on completion and final_report keeps completed lifecycle', () => {
+  const reducer = new IncrementalTimelineReducer()
+  const cipher = 'gAAAAABq9GEY7mEoWEh7WNbQkxLNM1ZSE0gePW2-93kpC4S-uJ77JfaK1nH9I'
+  const turns = reducer.reduce([
+    makeEvent(0, 'turn_started', { summary: 'codex collab' }, { turn_id: 't1', agent_type: 'codex' }),
+    makeEvent(1, 'tool_call_started', {
+      tool_call_id: 'c-follow',
+      name: 'followup_task',
+      args: {
+        target: '/root/compiled_scope_probe',
+        message: cipher,
+        receiverThreadIds: ['01a1ca9b-493a-7cd0-bbfd-9be39d04843a'],
+      },
+    }, { turn_id: 't1', agent_type: 'codex' }),
+    makeEvent(2, 'tool_call_completed', {
+      tool_call_id: 'c-follow',
+      name: 'sendInput',
+      args: {
+        prompt: 'Follow-up to compiled_scope_probe',
+        receiverThreadIds: ['01a1ca9b-493a-7cd0-bbfd-9be39d04843a'],
+        subagentType: 'compiled_scope_probe',
+      },
+      status: 'completed',
+      result: '',
+    }, { turn_id: 't1', agent_type: 'codex' }),
+    makeEvent(3, 'status', {
+      text: 'Sub-agent turn completed',
+      provider_status: 'subagent_lifecycle',
+      subagent_status: 'completed',
+      subagent_thread: '01a1ca9b-493a-7cd0-bbfd-9be39d04843a',
+      snapshot: true,
+    }, { turn_id: 't1', agent_type: 'codex', message_id: 'subagent-lifecycle:01a1ca9b-493a-7cd0-bbfd-9be39d04843a' }),
+    makeEvent(4, 'text_delta', {
+      text: 'APPROVE: all checks passed.',
+      final_report: true,
+      subagent_thread: '01a1ca9b-493a-7cd0-bbfd-9be39d04843a',
+    }, { turn_id: 't1', agent_type: 'codex' }),
+  ])
+  const region = turns[0].parts.find(part => part.kind === 'subagents')
+  assert.ok(region)
+  const thread = region.threads[0]
+  assert.equal(thread.lifecycleStatus, 'completed')
+  const instruction = thread.parts.find(part => part.kind === 'instruction')
+  assert.equal(instruction?.tool.subagent?.prompt, 'Follow-up to compiled_scope_probe')
+  assert.equal(instruction?.tool.subagent?.agentType, 'compiled_scope_probe')
+
+  // Plaintext follow-up instructions are preserved even if completion carries a synthetic fallback.
+  const plainTurns = reducer.reduce([
+    makeEvent(0, 'turn_started', { summary: 'codex plain' }, { turn_id: 't2', agent_type: 'codex' }),
+    makeEvent(1, 'tool_call_started', {
+      tool_call_id: 'c-plain',
+      name: 'followup_task',
+      args: {
+        target: '/root/compiled_scope_probe',
+        message: 'Follow-up to yesterday: check the timeout branch',
+        receiverThreadIds: ['01a1ca9b-493a-7cd0-bbfd-9be39d04843a'],
+      },
+    }, { turn_id: 't2', agent_type: 'codex' }),
+    makeEvent(2, 'tool_call_completed', {
+      tool_call_id: 'c-plain',
+      name: 'sendInput',
+      args: {
+        prompt: 'Follow-up to compiled_scope_probe',
+        syntheticPrompt: true,
+        receiverThreadIds: ['01a1ca9b-493a-7cd0-bbfd-9be39d04843a'],
+        subagentType: 'compiled_scope_probe',
+      },
+      status: 'completed',
+      result: '',
+    }, { turn_id: 't2', agent_type: 'codex' }),
+  ])
+  const plainRegion = plainTurns[0].parts.find(part => part.kind === 'subagents')
+  const plainInstruction = plainRegion.threads[0].parts.find(part => part.kind === 'instruction')
+  assert.equal(plainInstruction?.tool.subagent?.prompt, 'Follow-up to yesterday: check the timeout branch')
+})
+
 test('a sub-agent mid-turn (before completion) reads as running', () => {
   const reducer = new IncrementalTimelineReducer()
   const turns = reducer.reduce([
