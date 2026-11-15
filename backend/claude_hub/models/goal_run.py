@@ -19,6 +19,7 @@ GOAL_PLAN_STEPS_LIMIT = 30
 GOAL_PLAN_HELPERS_LIMIT = 10
 GOAL_STRICT_REVIEW_MAX_ROUNDS = 3
 GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS = 5
+GOAL_STRICT_REVIEW_HISTORY_LIMIT = 10
 
 
 def utc_now() -> datetime:
@@ -148,6 +149,7 @@ class GoalStrictReviewRound(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    cycle: int = Field(default=1, ge=1)
     round_number: int = Field(ge=1, le=GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS)
     worker_turn_id: str = Field(min_length=1, max_length=128)
     reviewer_subagent_id: str | None = Field(default=None, max_length=128)
@@ -208,6 +210,7 @@ class GoalRun(BaseModel):
     # Goal stays Hub-managed and intercepts ``complete`` to run an independent
     # cross-model review subagent before allowing completion.
     strict_review: bool = False
+    strict_review_cycle: int = Field(default=1, ge=1)
     strict_review_rounds: int = Field(default=0, ge=0, le=GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS)
     strict_review_max_rounds: int = Field(
         default=GOAL_STRICT_REVIEW_MAX_ROUNDS, ge=1, le=GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS
@@ -216,7 +219,7 @@ class GoalRun(BaseModel):
     strict_review_subagent_id: str | None = None
     strict_review_feedback: str | None = Field(default=None, max_length=GOAL_STEER_INPUT_MAX_LENGTH)
     strict_review_history: list[GoalStrictReviewRound] = Field(
-        default_factory=list, max_length=GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS
+        default_factory=list, max_length=GOAL_STRICT_REVIEW_HISTORY_LIMIT
     )
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

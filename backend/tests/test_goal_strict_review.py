@@ -32,6 +32,7 @@ from claude_hub.services.goal_run.controller import (
 )
 from claude_hub.services.goal_run.native import NativeGoalConnection
 from claude_hub.services.goal_run.strict_review import (
+    _run_git_command,
     build_strict_review_prompt,
     collect_strict_review_context,
     evaluate_review_continuation,
@@ -87,6 +88,44 @@ def test_parse_strict_review_output_enforces_p0_p1_block() -> None:
         reviewer_provider="maso",
     )
     assert parsed_block.verdict == "BLOCK"
+
+
+def test_parse_strict_review_output_30_p2_plus_1_p1_forces_block_and_retains_p1() -> None:
+    import json
+
+    findings_list = [
+        {
+            "severity": "P2",
+            "file": f"minor_{i}.py:{i}",
+            "summary": f"Optional style observation {i}",
+            "fix": None,
+        }
+        for i in range(1, 31)
+    ]
+    findings_list.append(
+        {
+            "severity": "P1",
+            "file": "critical_bug.py:99",
+            "summary": "Dropped write under concurrent lock contention",
+            "fix": "Acquire lock before state mutation",
+        }
+    )
+    raw = (
+        "<goal-review>\n"
+        + json.dumps(
+            {
+                "verdict": "PASS",
+                "summary": "Many minor observations plus one late P1.",
+                "findings": findings_list,
+            }
+        )
+        + "\n</goal-review>"
+    )
+    parsed = parse_strict_review_output(raw, reviewer_provider="maso")
+    assert parsed.verdict == "BLOCK"
+    assert len(parsed.findings) == 30
+    assert parsed.findings[0].severity == "P1"
+    assert parsed.findings[0].file == "critical_bug.py:99"
 
 
 def test_select_cross_reviewer_candidates_picks_heterogeneous_models() -> None:
@@ -414,17 +453,23 @@ async def test_strict_review_recurring_blocker_impasse_stops_early_and_resets_on
     assert r2.strict_review_rounds == 2
     assert "impasse" in (r2.status_message or "").lower()
 
-    # Resuming the BLOCKED Goal resets the review budget cleanly!
+    # Resuming the BLOCKED Goal advances strict_review_cycle and resets the active round counter
+    # while preserving prior-cycle audit history!
     pass_after_resume = True
     resumed = await ctrl.resume(goal.id, "resume-after-impasse")
     assert resumed.status == GoalRunStatus.ACTIVE
+    assert resumed.strict_review_cycle == 2
     assert resumed.strict_review_rounds == 0
-    assert resumed.strict_review_history == []
+    assert len(resumed.strict_review_history) == 2
+    assert all(r.cycle == 1 for r in resumed.strict_review_history)
 
     done = await ctrl.on_turn_completed("tab-impasse", sent[-1], "completed", complete_envelope())
     assert done is not None
     assert done.status == GoalRunStatus.COMPLETE
     assert done.strict_review_rounds == 1
+    assert len(done.strict_review_history) == 3
+    assert done.strict_review_history[-1].cycle == 2
+    assert done.strict_review_history[-1].round_number == 1
 
 
 @pytest.mark.asyncio
@@ -765,11 +810,12 @@ async def test_steer_after_max_rounds_resets_budget_and_persists_valid_history(
     assert res.status == GoalRunStatus.BLOCKED
     assert res.strict_review_rounds == 3
 
-    # Human steers the blocked Goal -> resets review budget -> 4th review passes -> reload works!
+    # Human steers the blocked Goal -> increments cycle, resets active round counter, preserves audit history!
     steered = await ctrl.steer(goal.id, "steer-1", "Apply alternative fix", "user-steer-turn")
     assert steered.status == GoalRunStatus.ACTIVE
+    assert steered.strict_review_cycle == 2
     assert steered.strict_review_rounds == 0
-    assert steered.strict_review_history == []
+    assert len(steered.strict_review_history) == 3
 
     done = await ctrl.on_turn_completed(
         "tab-steer", "user-steer-turn", "completed", complete_envelope("Fixed after steer")
@@ -777,7 +823,9 @@ async def test_steer_after_max_rounds_resets_budget_and_persists_valid_history(
     assert done is not None
     assert done.status == GoalRunStatus.COMPLETE
     assert done.strict_review_rounds == 1
-    assert len(done.strict_review_history) == 1
+    assert len(done.strict_review_history) == 4
+    assert done.strict_review_history[-1].cycle == 2
+    assert done.strict_review_history[-1].round_number == 1
     reloaded = GoalRunStore(store_path)
     assert reloaded.get(goal.id).status == GoalRunStatus.COMPLETE
 
@@ -863,3 +911,269 @@ def test_legacy_goal_without_strict_review_keeps_verbatim_prompt() -> None:
     plain = GoalRun(tab_id="tab", objective="Verify")
     assert "Strict cross-model review" not in build_continuation_prompt(plain)
     assert build_dispatch_prompt(plain) == build_continuation_prompt(plain)
+
+
+@pytest.mark.asyncio
+async def test_collect_strict_review_context_rejects_symlink_escaped_review_md(
+    tmp_path: Path,
+) -> None:
+    outside_secret = tmp_path / "outside_secret.txt"
+    outside_secret.write_text("TOP_SECRET_TOKEN=xyz123\n", encoding="utf-8")
+
+    repo_dir = tmp_path / "symlink_repo"
+    repo_dir.mkdir()
+    (repo_dir / "REVIEW.md").symlink_to(outside_secret)
+
+    ctx = await collect_strict_review_context(
+        str(repo_dir),
+        objective="Check symlink safety",
+        assistant_text="Completed.",
+    )
+    assert ctx.review_md_excerpt == ""
+    assert "TOP_SECRET_TOKEN" not in ctx.render_prompt_block()
+
+
+@pytest.mark.asyncio
+async def test_run_git_command_detached_child_holding_stdout_does_not_hang_timeout(
+    tmp_path: Path,
+) -> None:
+    import sys
+    import time
+
+    repo_dir = tmp_path / "git_timeout_repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "-C", str(repo_dir), "init", "-b", "main"], check=True)
+
+    # Git alias spawns a background child that inherits stdout and sleeps 30s,
+    # while the parent also sleeps 30s. _run_git_command must time out and return promptly.
+    alias_cmd = (
+        f"!{sys.executable} -c "
+        '"import subprocess, sys, time; '
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+        'time.sleep(30)"'
+    )
+    t0 = time.monotonic()
+    rc, out = await _run_git_command(
+        str(repo_dir),
+        "-c",
+        f"alias.hang={alias_cmd}",
+        "hang",
+        timeout=0.25,
+    )
+    elapsed = time.monotonic() - t0
+    assert rc == 124
+    assert out == ""
+    assert elapsed < 3.0
+
+
+@pytest.mark.asyncio
+async def test_run_subagent_strict_review_uses_active_maso_session_model_over_changed_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.models import StreamModelOption
+    from claude_hub.models.subagent import SubagentTurnStatus
+    from claude_hub.services.agent_stream import tailer as tailer_mod
+    from claude_hub.services.goal_run import strict_review as sr_mod
+    from claude_hub.services.ttyd_manager import ttyd_manager
+
+    # Tab env has no MASO_MODEL, but the active MasoHttpSession is running Argon.
+    # Meanwhile the MASO service's global default has changed to Astra.
+    fake_tab = SimpleNamespace(
+        id="tab-maso-live",
+        agent_type=AgentType.MASO,
+        env={},
+        cwd=str(tmp_path),
+    )
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda tab_id: fake_tab)
+
+    fake_transport = SimpleNamespace(
+        session=SimpleNamespace(tab_id="tab-maso-live"),
+        current_model=lambda: "gemini-4-argon_reasoning_high",
+    )
+    fake_tailer = SimpleNamespace(native_transport=fake_transport)
+    fake_manager = SimpleNamespace(
+        get_tailer=lambda sid: fake_tailer if sid == "tab-maso-live" else None,
+        tailers=lambda: [fake_tailer],
+    )
+    monkeypatch.setattr(tailer_mod, "_TAILER_MANAGERS", [fake_manager])
+
+    async def fake_discover(_env: dict[str, str]):
+        return (
+            "http://127.0.0.1:11004",
+            [
+                StreamModelOption(id="gemini-4-argon", label="Argon"),
+                StreamModelOption(id="gpt-6-astra", label="Astra"),
+            ],
+            "gpt-6-astra_reasoning_high",
+        )
+
+    monkeypatch.setattr(sr_mod, "discover_maso_service", fake_discover)
+
+    created_requests: list[Any] = []
+
+    class FakeSubagentService:
+        def __init__(self) -> None:
+            self._last: Any = None
+
+        async def create(self, req: Any):
+            created_requests.append(req)
+            rec = SimpleNamespace(
+                id="sa-live-1",
+                name=req.name,
+                agent_type=req.agent_type,
+                model=req.model,
+            )
+            turn = SimpleNamespace(
+                turn_id="t-1",
+                status=SubagentTurnStatus.COMPLETED,
+                final_text='<goal-review>{"verdict":"PASS","summary":"Verified","findings":[]}</goal-review>',
+            )
+            self._last = (rec, turn)
+            return rec, turn
+
+        async def wait_turn(self, subagent_id: str, turn_id: str, wait_seconds: float = 30.0):
+            return self._last
+
+    from claude_hub.services import subagents as subagents_mod
+
+    monkeypatch.setattr(subagents_mod, "get_subagent_service", lambda: FakeSubagentService())
+
+    goal = GoalRun(tab_id="tab-maso-live", objective="Verify active MASO model", strict_review=True)
+    outcome = await run_subagent_strict_review(goal, "Completed.", 1)
+    assert outcome.verdict == "PASS"
+    assert len(created_requests) == 1
+    # Because the active session was Argon, the reviewer MUST be Astra (not Argon self-review)!
+    assert created_requests[0].agent_type == AgentType.MASO
+    assert created_requests[0].model == "gpt-6-astra_reasoning_high"
+
+
+@pytest.mark.asyncio
+async def test_update_objective_during_in_flight_review_does_not_charge_new_cycle(
+    tmp_path: Path,
+) -> None:
+    review_entered = asyncio.Event()
+    release_review = asyncio.Event()
+    dispatched_prompts: list[str] = []
+
+    async def dispatch(goal: GoalRun, prompt: str) -> str | None:
+        dispatched_prompts.append(prompt)
+        return goal.pending_step_id
+
+    async def slow_block_reviewer(
+        goal: GoalRun, assistant_text: str, round_number: int
+    ) -> StrictReviewOutcome:
+        review_entered.set()
+        await release_review.wait()
+        return StrictReviewOutcome(
+            verdict="BLOCK",
+            summary="Stale review against old objective",
+            findings=[
+                GoalStrictReviewFinding(
+                    severity="P1",
+                    file="old.py:1",
+                    summary="Old objective issue",
+                    fix="Fix old",
+                )
+            ],
+            reviewer_provider="maso",
+        )
+
+    ctrl = GoalRunController(
+        GoalRunStore(tmp_path / "goals.json"),
+        dispatch=dispatch,
+        strict_reviewer=slow_block_reviewer,
+    )
+    goal = await ctrl.create_and_start(
+        "tab-obj-race",
+        GoalRunCreate(
+            objective="Original objective v1",
+            client_request_id="req-obj-v1",
+            strict_review=True,
+        ),
+    )
+    assert goal.current_turn_id is not None
+    turn_task = asyncio.create_task(
+        ctrl.on_turn_completed(
+            "tab-obj-race", goal.current_turn_id, "completed", complete_envelope()
+        )
+    )
+    await asyncio.wait_for(review_entered.wait(), timeout=5)
+
+    # Edit objective while reviewer is in flight
+    updated = await ctrl.update_objective(goal.id, "req-obj-v2", "Updated objective v2")
+    assert updated.objective == "Updated objective v2"
+    assert updated.strict_review_cycle == 2
+    assert updated.strict_review_rounds == 0
+
+    release_review.set()
+    settled = await turn_task
+    assert settled is not None
+    assert settled.status == GoalRunStatus.ACTIVE
+    # Stale review must NOT have charged round 1 or polluted history on cycle 2!
+    assert settled.strict_review_cycle == 2
+    assert settled.strict_review_rounds == 0
+    assert settled.strict_review_history == []
+    assert settled.strict_review_feedback is None
+    assert len(dispatched_prompts) == 2
+    assert "Updated objective v2" in dispatched_prompts[-1]
+
+
+@pytest.mark.asyncio
+async def test_plan_first_and_strict_review_planning_turn_complete_signal_parks_for_approval(
+    tmp_path: Path,
+) -> None:
+    review_called = False
+
+    async def dispatch(goal: GoalRun, prompt: str) -> str | None:
+        return goal.pending_step_id
+
+    async def reviewer(
+        goal: GoalRun, assistant_text: str, round_number: int
+    ) -> StrictReviewOutcome:
+        nonlocal review_called
+        review_called = True
+        return StrictReviewOutcome(
+            verdict="PASS",
+            summary="Should not run on planning turn",
+            findings=[],
+            reviewer_provider="maso",
+        )
+
+    ctrl = GoalRunController(
+        GoalRunStore(tmp_path / "goals.json"),
+        dispatch=dispatch,
+        strict_reviewer=reviewer,
+    )
+    goal = await ctrl.create_and_start(
+        "tab-plan-strict",
+        GoalRunCreate(
+            objective="Plan first with strict review",
+            client_request_id="req-plan-strict",
+            plan_first=True,
+            strict_review=True,
+        ),
+    )
+    assert goal.plan_pending is True
+    assert goal.current_turn_id is not None
+
+    # Model disobeys the planning turn prompt and emits state="complete" instead of "needs_input"
+    disobedient_plan_turn = (
+        "Here is the plan.\n"
+        "<goal-plan>\n"
+        '{"summary":"Add cache","steps":[{"title":"Step 1","detail":"Code","acceptance":"pytest"}],'
+        '"budget":{"helpers":[],"max_parallelism":1,"duration_estimate":"5m"}}\n'
+        "</goal-plan>\n"
+        "<goal-checkpoint>\n"
+        '{"verified_progress":[],"decisions":[],"remaining":["Step 1"],"blocker":null,"next_step":"Approve"}\n'
+        "</goal-checkpoint>\n"
+        '<goal-status state="complete">Plan complete</goal-status>'
+    )
+    after_plan = await ctrl.on_turn_completed(
+        "tab-plan-strict", goal.current_turn_id, "completed", disobedient_plan_turn
+    )
+    assert after_plan is not None
+    assert review_called is False
+    assert after_plan.status == GoalRunStatus.BLOCKED
+    assert after_plan.strict_review_in_progress is False
+    assert after_plan.strict_review_rounds == 0
+    assert after_plan.status_message == "The plan awaits your approval before the Goal continues"

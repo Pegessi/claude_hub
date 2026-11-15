@@ -175,6 +175,7 @@ export interface ChatGoalStrictReviewFinding {
 }
 
 export interface ChatGoalStrictReviewRound {
+  cycle?: number
   round_number: number
   worker_turn_id: string
   reviewer_subagent_id?: string | null
@@ -225,6 +226,7 @@ export interface ChatGoal {
   plan_answered?: boolean
   plan_warning?: string | null
   strict_review?: boolean
+  strict_review_cycle?: number
   strict_review_rounds?: number
   strict_review_max_rounds?: number
   strict_review_in_progress?: boolean

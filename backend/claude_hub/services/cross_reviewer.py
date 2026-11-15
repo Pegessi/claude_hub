@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Mapping, Sequence
 
@@ -23,6 +24,11 @@ DEFAULT_ARGON_REVIEW_MODEL = "gemini-4-argon_reasoning_high"
 DEFAULT_ASTRA_REVIEW_MODEL = "gpt-6-astra_reasoning_high"
 _ORIGINAL_DISCOVER_MASO_SERVICE = maso_discovery.discover_maso_service
 _QUOTA_READ_TIMEOUT_SECONDS = 1.5
+_MASO_VARIANT_SUFFIX_RE = re.compile(
+    r"(?:[_-]reasoning(?:[_-](?:xhigh|high|medium|low|max))?"
+    r"|[_-]thinking(?:[_-](?:xhigh|high|medium|low|max))?)$",
+    re.IGNORECASE,
+)
 
 MasoProbeFn = Callable[
     [dict[str, str]],
@@ -99,27 +105,27 @@ def is_heterogeneous_reviewer(
     return False
 
 
+def canonical_maso_base_model(model: str) -> str:
+    """Strip reasoning/thinking effort variant suffixes without conflating distinct endpoints."""
+    cleaned = model.strip().lower()
+    if not cleaned:
+        return ""
+    return _MASO_VARIANT_SUFFIX_RE.sub("", cleaned)
+
+
 def _maso_limit_matches_model(limit_label: str, limit_scope: str, model: str) -> bool:
     raw_model = model.strip().lower()
     if not raw_model:
         return False
+    base_model = canonical_maso_base_model(raw_model)
     label = limit_label.strip().lower()
     scope = limit_scope.strip().lower()
-    if label == raw_model or scope == raw_model:
+    label_base = canonical_maso_base_model(label)
+    scope_base = canonical_maso_base_model(scope)
+    if label in {raw_model, base_model} or scope in {raw_model, base_model}:
         return True
-    base_prefix = raw_model.split("_", 1)[0]
-    if base_prefix and (
-        label == base_prefix
-        or label.startswith(base_prefix)
-        or raw_model.startswith(label)
-        and len(label) >= 4
-    ):
+    if base_model and (label_base == base_model or scope_base == base_model):
         return True
-    candidate_family = maso_model_family({"MASO_MODEL": raw_model})
-    if candidate_family and label:
-        label_family = maso_model_family({"MASO_MODEL": label})
-        if label_family == candidate_family:
-            return True
     return False
 
 

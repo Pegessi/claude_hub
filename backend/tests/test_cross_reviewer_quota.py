@@ -9,6 +9,7 @@ from claude_hub.services.cross_reviewer import (
     DEFAULT_ARGON_REVIEW_MODEL,
     DEFAULT_ASTRA_REVIEW_MODEL,
     CrossReviewCandidate,
+    canonical_maso_base_model,
     is_candidate_quota_exhausted,
     resolve_cross_reviewer_target,
     select_cross_reviewer_candidates,
@@ -117,6 +118,47 @@ def test_is_candidate_quota_exhausted_respects_enforcing_and_freshness() -> None
         )
     }
     assert is_candidate_quota_exhausted(argon_cand, quota_maso_advisory) is False
+
+
+def test_maso_distinct_endpoints_in_same_family_do_not_false_exhaust() -> None:
+    assert canonical_maso_base_model("seed-stable-reasoning-high") == "seed-stable"
+    assert canonical_maso_base_model("seed-nightly-reasoning-high") == "seed-nightly"
+    assert canonical_maso_base_model("gemini-4-argon_reasoning_high") == "gemini-4-argon"
+    assert canonical_maso_base_model("gpt-6-astra_reasoning_xhigh") == "gpt-6-astra"
+
+    quota_seed_nightly_over = {
+        "maso": ProviderQuota(
+            provider="maso",
+            available=True,
+            state="over",
+            stale=False,
+            enforcing=True,
+            limits=[
+                QuotaLimit(
+                    scope="ep-seed-nightly",
+                    label="seed-nightly",
+                    state="over",
+                    used_percent=100,
+                ),
+                QuotaLimit(
+                    scope="ep-seed-stable",
+                    label="seed-stable",
+                    state="within",
+                    used_percent=20,
+                ),
+            ],
+        )
+    }
+    seed_stable_cand = CrossReviewCandidate(
+        provider="maso",
+        model="seed-stable-reasoning-high",
+    )
+    seed_nightly_cand = CrossReviewCandidate(
+        provider="maso",
+        model="seed-nightly-reasoning-high",
+    )
+    assert is_candidate_quota_exhausted(seed_nightly_cand, quota_seed_nightly_over) is True
+    assert is_candidate_quota_exhausted(seed_stable_cand, quota_seed_nightly_over) is False
 
 
 def test_select_cross_reviewer_candidates_filters_quota_and_fixes_implicit_maso_default() -> None:

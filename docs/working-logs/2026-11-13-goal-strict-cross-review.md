@@ -20,8 +20,15 @@ Chat Goals support an optional `strict_review` gate where `<goal-status state="c
   - Implemented `evaluate_review_continuation`:
     - **Early Impasse Detection ($r \ge 2$)**: Stops early on `BLOCKED` when blocker count does not decrease ($B_r \ge B_{r-1}$) and $\ge 50\%$ of current blockers match the previous round's normalized file + summary token signature.
     - **Monotonic Convergence Grace ($3 \le r < 5$)**: Grants a grace round (`effective_max_rounds = min(5, r + 1)`) when blocker count strictly decreased ($B_r < B_{r-1}$).
-    - **Fresh Budget on User Steer / Resume**: Explicitly steering or resuming a `BLOCKED` Goal resets `strict_review_rounds`, `strict_review_max_rounds`, and `strict_review_history`.
-  - Updated `GoalStatusBar.vue` to compute `strictMaxRounds` dynamically so grace rounds render as `4/4` or `5/5`.
+    - **Fresh Budget on User Steer / Resume with Cycle-Scoped History**: Explicitly steering or resuming a `BLOCKED` Goal increments `strict_review_cycle`, resets `strict_review_rounds = 0` and `strict_review_max_rounds = 3`, and retains up to `GOAL_STRICT_REVIEW_HISTORY_LIMIT = 10` rounds of audit history while scoping `evaluate_review_continuation` to the active `strict_review_cycle`.
+  - Updated `GoalStatusBar.vue` to compute `strictMaxRounds` dynamically so grace rounds render as `4/4` or `5/5`, and keyed `v-for` by `${round.cycle ?? 1}-${round.round_number}`.
+
+## Round 2 Hardening (Astra Cross-Review Fixes)
+- **Symlink-Safe & Off-Loop Context Collection**: `_read_bounded_review_md` verifies `REVIEW.md` resolves inside `root_real`, opens with `O_NOFOLLOW`, and reads at most `8192` bytes; `_detect_referenced_worktrees_sync` and `_collect_workspace_memory_sync` execute via `asyncio.to_thread`.
+- **Bounded Subprocess Teardown**: `_run_git_command` reads bounded streams under `asyncio.timeout`, kills the process group (`os.killpg`), awaits `proc.wait()` with a 2s cap, and closes `proc._transport` without calling unbounded `proc.communicate()`.
+- **Exact Canonical Base Model Matching**: `canonical_maso_base_model` strips only reasoning/thinking effort suffixes so `seed-nightly: over` never falsely marks `seed-stable-reasoning-high` exhausted.
+- **Live MASO Session Model Detection**: `run_subagent_strict_review` checks `_resolve_active_tab_model(goal.tab_id)` when `MASO_MODEL` is unset in `tab.env` before falling back to the MASO service's current global default.
+- **Objective Revision & `plan_first` Guards**: `_execute_strict_review` checks `reviewed_objective_revision` and `reviewed_cycle` before recording round results; `_on_turn_completed_locked` enforces the `planning_turn or planned_now` pause before `signal == "complete"`, and `parse_strict_review_output` checks all findings (up to 500) for `P0`/`P1` before prioritizing blockers in the 30-finding slice.
 
 ## Verification
 - `./scripts/verify.sh backend-format`

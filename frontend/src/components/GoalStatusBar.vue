@@ -139,7 +139,7 @@
             <strong>Cross-review rounds</strong>
             <div
               v-for="round in goal.strict_review_history"
-              :key="round.round_number"
+              :key="`${round.cycle ?? 1}-${round.round_number}`"
               class="goal-strict-round"
             >
               <p>
