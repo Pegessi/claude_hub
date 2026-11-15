@@ -934,6 +934,97 @@ async def test_collect_strict_review_context_rejects_symlink_escaped_review_md(
 
 
 @pytest.mark.asyncio
+async def test_collect_strict_review_context_rejects_fifo_review_md_without_blocking(
+    tmp_path: Path,
+) -> None:
+    import os
+    import time
+
+    fifo_repo = tmp_path / "fifo_repo"
+    fifo_repo.mkdir()
+    os.mkfifo(str(fifo_repo / "REVIEW.md"))
+
+    t0 = time.monotonic()
+    ctx = await asyncio.wait_for(
+        collect_strict_review_context(
+            str(fifo_repo),
+            objective="Check FIFO safety",
+            assistant_text="Completed.",
+        ),
+        timeout=1.0,
+    )
+    elapsed = time.monotonic() - t0
+    assert ctx.review_md_excerpt == ""
+    assert elapsed < 0.5
+
+
+@pytest.mark.asyncio
+async def test_run_git_command_cancellation_kills_descendant_and_overflow_returns_nonzero(
+    tmp_path: Path,
+) -> None:
+    import os
+    import sys
+
+    repo_dir = tmp_path / "git_cancel_repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "-C", str(repo_dir), "init", "-b", "main"], check=True)
+
+    # 1. Leader exits 0 immediately after spawning a descendant that holds stdout open and writes its PID.
+    pid_file = tmp_path / "descendant.pid"
+    alias_detach = (
+        f"!{sys.executable} -c "
+        '"import pathlib, subprocess, sys; '
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+        f'pathlib.Path({str(pid_file)!r}).write_text(str(p.pid))"'
+    )
+    cmd_task = asyncio.create_task(
+        _run_git_command(
+            str(repo_dir),
+            "-c",
+            f"alias.detach={alias_detach}",
+            "detach",
+            timeout=10.0,
+        )
+    )
+    for _ in range(50):
+        if pid_file.exists() and pid_file.read_text().strip():
+            break
+        await asyncio.sleep(0.02)
+    assert pid_file.exists()
+    descendant_pid = int(pid_file.read_text().strip())
+
+    # Cancel _run_git_command while leader has already exited 0 and descendant holds stdout!
+    cmd_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cmd_task
+
+    # Descendant in the process group must have been killed by os.killpg!
+    for _ in range(25):
+        try:
+            os.kill(descendant_pid, 0)
+        except ProcessLookupError:
+            break
+        await asyncio.sleep(0.02)
+    with pytest.raises(ProcessLookupError):
+        os.kill(descendant_pid, 0)
+
+    # 2. Overflowing stdout beyond max_stdout_bytes returns non-zero cleanly without hanging.
+    alias_flood = (
+        f"!{sys.executable} -c " "\"import sys; sys.stdout.write('A' * 20000); sys.stdout.flush()\""
+    )
+    rc, out = await _run_git_command(
+        str(repo_dir),
+        "-c",
+        f"alias.flood={alias_flood}",
+        "flood",
+        timeout=3.0,
+        max_stdout_bytes=4096,
+    )
+    assert rc != 0
+    assert out == ""
+
+
+@pytest.mark.asyncio
 async def test_run_git_command_detached_child_holding_stdout_does_not_hang_timeout(
     tmp_path: Path,
 ) -> None:
