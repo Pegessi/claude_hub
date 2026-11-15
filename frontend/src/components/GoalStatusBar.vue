@@ -92,7 +92,7 @@
           </p>
           <div class="goal-status-meta">
             <span>{{ goal.execution_owner === 'provider_native' ? 'Managed by provider' : 'Managed by Claude Hub' }}</span>
-            <span v-if="goal.strict_review">Strict cross-review ({{ goal.strict_review_rounds ?? 0 }}/{{ goal.strict_review_max_rounds ?? 3 }})</span>
+            <span v-if="goal.strict_review">Strict cross-review ({{ goal.strict_review_rounds ?? 0 }}/{{ strictMaxRounds }})</span>
             <span>Started {{ formatTime(goal.created_at) }}</span>
             <span>Updated {{ formatTime(goal.updated_at) }}</span>
           </div>
@@ -240,9 +240,16 @@ const statusText = computed(() => {
   if (props.goal.strict_review_in_progress) return 'Cross-reviewing'
   return goalStatusLabel(props.goal.status)
 })
+const strictMaxRounds = computed(() =>
+  Math.max(
+    props.goal.strict_review_max_rounds ?? 3,
+    props.goal.strict_review_rounds ?? 0,
+    props.goal.strict_review_in_progress ? (props.goal.strict_review_rounds ?? 0) + 1 : 0,
+  ),
+)
 const strictPillText = computed(() => {
   const rounds = props.goal.strict_review_rounds ?? 0
-  const max = props.goal.strict_review_max_rounds ?? 3
+  const max = strictMaxRounds.value
   if (props.goal.strict_review_in_progress) return `Review ${rounds + 1}/${max}`
   if (rounds > 0) return `Strict ${rounds}/${max}`
   return 'Strict'

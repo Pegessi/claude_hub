@@ -17,6 +17,7 @@ from ...models.goal_run import (
     GOAL_PLAN_STEPS_LIMIT,
     GOAL_RECENT_TURN_IDS_LIMIT,
     GOAL_STEER_INPUT_MAX_LENGTH,
+    GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS,
     GOAL_STRICT_REVIEW_MAX_ROUNDS,
     GoalCheckpoint,
     GoalDispatchState,
@@ -35,6 +36,7 @@ from .policy import GoalPolicyError, ensure_unfinished
 from .store import GoalRunStore
 from .strict_review import (
     StrictReviewerCallback,
+    evaluate_review_continuation,
     format_strict_review_feedback,
     run_subagent_strict_review,
 )
@@ -184,13 +186,26 @@ def _strict_review_prompt(goal: GoalRun) -> str:
             "Strict cross-model review is enabled for this Goal. Your previous completion "
             "claim did not pass independent review:\n"
             f"{goal.strict_review_feedback}\n"
+            "Guidance for addressing review feedback: fix genuine P0/P1 defects and re-run "
+            "verification, or if a finding is a false positive, refute it with concrete "
+            "code/runtime evidence in your response and <goal-checkpoint> rather than adding "
+            "speculative defensive bloat.\n"
             "End of independent review feedback.\n\n"
         )
     return (
         "Strict cross-model review is enabled for this Goal: when you emit "
         '<goal-status state="complete">, Claude Hub automatically runs an independent '
-        "cross-model reviewer against your changes and verification evidence before "
-        "completing the Goal.\n\n"
+        "cross-model reviewer against actual workspace state and your verification evidence "
+        "before completing the Goal.\n"
+        "- Situational hygiene guidance: if this objective modifies a Git repository and "
+        "the current checkout sits on a shared primary branch (main/master/develop), follow "
+        "repository guidance (e.g. AGENTS.md isolated feature worktree) rather than editing "
+        "the primary branch directly; for read-only investigations, evaluations, or non-repo "
+        "work, no Git ceremony is required.\n"
+        "- Evidence & baseline guidance: verify claims with real commands/checks (and "
+        "comparable before-vs-after baseline numbers for performance/memory tuning), record "
+        "unverified gaps honestly in <goal-checkpoint>, and refute any false-positive "
+        "review claim with concrete code/runtime evidence rather than speculative bloat.\n\n"
     )
 
 
@@ -515,8 +530,14 @@ class GoalRunController:
 
         def apply(goal: GoalRun) -> None:
             ensure_unfinished(goal)
-            if goal.strict_review and goal.strict_review_rounds >= goal.strict_review_max_rounds:
+            if goal.strict_review and (
+                goal.status == GoalRunStatus.BLOCKED
+                or goal.strict_review_rounds >= goal.strict_review_max_rounds
+            ):
                 goal.strict_review_rounds = 0
+                goal.strict_review_max_rounds = GOAL_STRICT_REVIEW_MAX_ROUNDS
+                goal.strict_review_feedback = None
+                goal.strict_review_history = []
             goal.status = GoalRunStatus.ACTIVE
             goal.paused_at = None
             deferred = after_current_turn and goal.dispatch_state == GoalDispatchState.IDLE
@@ -580,6 +601,7 @@ class GoalRunController:
                         GoalRunStatus.BLOCKED,
                     } and not (goal.status == GoalRunStatus.PAUSED and goal.pending_image_count):
                         raise GoalPolicyError("Resume the Goal before steering it")
+                    was_blocked = goal.status == GoalRunStatus.BLOCKED
                     goal.status = GoalRunStatus.PAUSED
                     goal.paused_at = utc_now()
                     goal.status_message = "steering the Goal with a new message"
@@ -591,11 +613,13 @@ class GoalRunController:
                     goal.pending_image_count = image_count
                     goal.pending_image_fingerprint = image_digest
                     goal.resume_after_turn = False
-                    if (
-                        goal.strict_review
-                        and goal.strict_review_rounds >= goal.strict_review_max_rounds
+                    if goal.strict_review and (
+                        was_blocked or goal.strict_review_rounds >= goal.strict_review_max_rounds
                     ):
                         goal.strict_review_rounds = 0
+                        goal.strict_review_max_rounds = GOAL_STRICT_REVIEW_MAX_ROUNDS
+                        goal.strict_review_feedback = None
+                        goal.strict_review_history = []
 
                 goal = self._mutate_once(goal_id, client_request_id, operation, apply)
             goal = await self._cancel_current(goal)
@@ -635,7 +659,9 @@ class GoalRunController:
                         goal.objective_revision += 1
                         if goal.strict_review:
                             goal.strict_review_rounds = 0
+                            goal.strict_review_max_rounds = GOAL_STRICT_REVIEW_MAX_ROUNDS
                             goal.strict_review_feedback = None
+                            goal.strict_review_history = []
 
                 return self._mutate_once(goal_id, client_request_id, operation, apply)
 
@@ -806,7 +832,7 @@ class GoalRunController:
             )
             latest.strict_review_history.append(round_record)
             latest.strict_review_history = latest.strict_review_history[
-                -GOAL_STRICT_REVIEW_MAX_ROUNDS:
+                -GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS:
             ]
             latest.dispatch_state = GoalDispatchState.IDLE
             if latest.dispatched_objective_revision != latest.objective_revision:
@@ -823,20 +849,42 @@ class GoalRunController:
                     f"{round_record.reviewer_provider}): {round_record.summary[:240]}"
                 )
                 return self.store.put(latest)
-            elif round_number >= latest.strict_review_max_rounds:
-                latest.strict_review_feedback = format_strict_review_feedback(round_record)
-                latest.status = GoalRunStatus.BLOCKED
-                latest.status_message = (
-                    f"Strict cross-review blocked after {round_number}/"
-                    f"{latest.strict_review_max_rounds} rounds: {round_record.summary[:240]}"
-                )
-                return self.store.put(latest)
             else:
-                latest.strict_review_feedback = format_strict_review_feedback(round_record)
-                latest.status_message = (
-                    f"Cross-review round {round_number} requested fixes "
-                    f"({round_record.reviewer_provider}); continuing…"
+                decision = evaluate_review_continuation(
+                    latest.strict_review_history,
+                    base_max_rounds=latest.strict_review_max_rounds,
+                    hard_max_rounds=GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS,
                 )
+                latest.strict_review_feedback = format_strict_review_feedback(round_record)
+                if not decision.should_continue:
+                    latest.status = GoalRunStatus.BLOCKED
+                    if decision.reason == "impasse":
+                        latest.status_message = (
+                            f"Strict cross-review stopped early on round {round_number}/"
+                            f"{latest.strict_review_max_rounds} due to a recurring blocker "
+                            f"impasse ({round_record.reviewer_provider}): "
+                            f"{round_record.summary[:200]} — steer the Goal or complete manually"
+                        )
+                    else:
+                        latest.status_message = (
+                            f"Strict cross-review blocked after {round_number}/"
+                            f"{latest.strict_review_max_rounds} rounds: "
+                            f"{round_record.summary[:240]}"
+                        )
+                    return self.store.put(latest)
+
+                if decision.reason == "converging_grace":
+                    latest.strict_review_max_rounds = decision.effective_max_rounds
+                    latest.status_message = (
+                        f"Cross-review round {round_number} blockers are converging; "
+                        f"granted grace round {round_number + 1}/"
+                        f"{latest.strict_review_max_rounds} ({round_record.reviewer_provider})…"
+                    )
+                else:
+                    latest.status_message = (
+                        f"Cross-review round {round_number} requested fixes "
+                        f"({round_record.reviewer_provider}); continuing…"
+                    )
                 if self.dispatch is None:
                     latest.status = GoalRunStatus.PAUSED
                     latest.status_message = "automatic continuation is not connected"
@@ -998,18 +1046,21 @@ class GoalRunController:
         if signal == "complete":
             if goal.strict_review and not planning_turn:
                 next_round = goal.strict_review_rounds + 1
-                if next_round > goal.strict_review_max_rounds:
+                effective_limit = min(
+                    GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS,
+                    max(goal.strict_review_max_rounds, GOAL_STRICT_REVIEW_MAX_ROUNDS),
+                )
+                if next_round > effective_limit:
                     goal.status = GoalRunStatus.BLOCKED
                     goal.status_message = (
-                        f"Strict cross-review reached the {goal.strict_review_max_rounds}-round "
+                        f"Strict cross-review reached the {effective_limit}-round "
                         "limit without consensus; inspect findings and steer or complete manually"
                     )
                     return self.store.put(goal)
                 goal.strict_review_in_progress = True
                 goal.dispatch_state = GoalDispatchState.DISPATCHED
                 goal.status_message = (
-                    f"Running strict cross-model review (round {next_round}/"
-                    f"{goal.strict_review_max_rounds})…"
+                    f"Running strict cross-model review (round {next_round}/" f"{effective_limit})…"
                 )
                 return self.store.put(goal)
             goal.status = GoalRunStatus.COMPLETE
