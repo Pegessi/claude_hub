@@ -23,18 +23,60 @@ import logging
 import os
 import sqlite3
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
+def _expand_with_home(raw_path: str, home: Path, cwd: Optional[str] = None) -> Path:
+    stripped = raw_path.strip()
+    if stripped == "~":
+        return home
+    if stripped.startswith("~/"):
+        return home / stripped[2:]
+    path = Path(stripped).expanduser()
+    if not path.is_absolute():
+        return Path(cwd or ".") / path
+    return path
+
+
+def resolve_cursor_roots(
+    env: Optional[Mapping[str, str]] = None,
+    cwd: Optional[str] = None,
+    home: Optional[str] = None,
+) -> Tuple[Path, Path]:
+    """Return ``(chats_root, acp_config_root)`` honoring ``env`` and ``home``.
+
+    * ``chats_root`` owns ``chats/<md5(realpath(cwd))>/<chatId>/store.db``.
+    * ``acp_config_root`` owns ``acp-sessions/<sid>/store.db`` (honoring
+      ``CURSOR_CONFIG_DIR`` and ``XDG_CONFIG_HOME/cursor`` before falling back
+      to ``chats_root``).
+    """
+    source_env: Mapping[str, str] = env if env is not None else os.environ
+    raw_home = home or source_env.get("HOME")
+    effective_home = Path(raw_home).expanduser() if raw_home else Path.home()
+
+    cursor_home_raw = source_env.get("CURSOR_HOME")
+    if isinstance(cursor_home_raw, str) and cursor_home_raw.strip():
+        chats_root = _expand_with_home(cursor_home_raw, effective_home, cwd)
+    else:
+        chats_root = effective_home / ".cursor"
+
+    config_dir_raw = source_env.get("CURSOR_CONFIG_DIR")
+    xdg_raw = source_env.get("XDG_CONFIG_HOME")
+    if isinstance(config_dir_raw, str) and config_dir_raw.strip():
+        acp_root = _expand_with_home(config_dir_raw, effective_home, cwd)
+    elif isinstance(xdg_raw, str) and xdg_raw.strip():
+        acp_root = _expand_with_home(xdg_raw, effective_home, cwd) / "cursor"
+    else:
+        acp_root = chats_root
+    return chats_root, acp_root
+
+
 def _cursor_home_dir(home: Optional[str] = None) -> Path:
     """Cursor config root (respects $CURSOR_HOME / $HOME override for tests)."""
-    override = os.environ.get("CURSOR_HOME")
-    if override:
-        return Path(override).expanduser()
-    base = Path(home) if home else Path.home()
-    return base / ".cursor"
+    chats_root, _ = resolve_cursor_roots(home=home)
+    return chats_root
 
 
 def _cwd_hash(cwd: str) -> str:
@@ -55,15 +97,43 @@ def _cursor_id_exists(sid: str, cwd: str, home: Optional[str] = None) -> bool:
     """
     if not sid or not cwd:
         return False
-    root = _cursor_home_dir(home)
-    chats = root / "chats"
-    if not chats.is_dir():
-        return False
-    target_hash = _cwd_hash(cwd)
+    root, acp_root = resolve_cursor_roots(cwd=cwd, home=home)
     try:
         target_real = os.path.realpath(cwd)
     except OSError:
         target_real = cwd
+
+    if "/" not in sid and "\\" not in sid and sid not in {".", ".."}:
+        acp_sessions = acp_root / "acp-sessions"
+        acp_dir = acp_sessions / sid
+        acp_db = acp_dir / "store.db"
+        acp_meta = acp_dir / "meta.json"
+        try:
+            if (
+                not acp_sessions.is_symlink()
+                and not acp_dir.is_symlink()
+                and not acp_db.is_symlink()
+                and acp_db.is_file()
+                and acp_db.resolve().parent.parent == acp_sessions.resolve()
+                and _read_agent_id_from_db(acp_db) == sid
+            ):
+                if acp_meta.is_file() and not acp_meta.is_symlink():
+                    meta = json.loads(acp_meta.read_text(encoding="utf-8"))
+                    meta_cwd = meta.get("cwd")
+                    if isinstance(meta_cwd, str) and meta_cwd:
+                        if os.path.realpath(meta_cwd) == target_real:
+                            return True
+                    else:
+                        return True
+                else:
+                    return True
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+
+    chats = root / "chats"
+    if not chats.is_dir():
+        return False
+    target_hash = _cwd_hash(cwd)
 
     cwd_bucket = chats / target_hash
     if cwd_bucket.is_dir():

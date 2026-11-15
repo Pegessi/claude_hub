@@ -26,10 +26,23 @@ def _transient_provider_notice(message: Any) -> bool:
 _CODE_MODE_NESTED_PREFIX = "code-mode-nested:"
 
 
-_COLLAB_SPAWN_TOOLS = {"spawnAgent"}
+_COLLAB_SPAWN_TOOLS = {"spawnAgent", "spawn_agent"}
 
 
-_COLLAB_MESSAGE_TOOLS = {"sendInput"}
+_COLLAB_MESSAGE_TOOLS = {
+    "sendInput",
+    "sendMessage",
+    "followupTask",
+    "send_message",
+    "followup_task",
+}
+
+
+_FERNET_TOKEN_RE = re.compile(r"^gAAAAAB[A-Za-z0-9_-]{40,}={0,2}$")
+
+
+def _is_fernet_token(value: Any) -> bool:
+    return isinstance(value, str) and bool(_FERNET_TOKEN_RE.match(value.strip()))
 
 
 def _clean_thread_id(value: Any) -> Optional[str]:

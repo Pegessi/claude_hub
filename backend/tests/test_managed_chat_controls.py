@@ -264,6 +264,71 @@ async def test_managed_blocking_question_uses_exact_provider_request(
 
 
 @pytest.mark.asyncio
+async def test_managed_cursor_acp_blocking_question_uses_exact_provider_request(
+    managed_workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.agent_stream.native import CursorNativeSession
+
+    async def fake_start(self: CursorNativeSession) -> None:
+        self._started = True
+
+    monkeypatch.setattr(CursorNativeSession, "start", fake_start)
+    manager, workspace = managed_workspace
+    session = _managed_session(
+        workspace, agent_type=AgentType.CURSOR, tab_id="cursor-blocking"
+    ).model_copy(update={"cursor_transport": "native"})
+    tailers, tailer = await _real_tailer_manager(manager, session, monkeypatch)
+    transport = cast(Any, tailer.native_transport)
+    assert isinstance(transport, CursorNativeSession)
+    stdin = _FakeStdin()
+    cast(Any, transport)._process = SimpleNamespace(stdin=stdin)
+    transport._acp_session_id = "cursor-acp-sid"
+    transport._turn_in_flight = True
+    transport._pending_questions[9] = {
+        "toolCallId": "cursor-q-1",
+        "questions": [{"id": "q1", "prompt": "Pick", "options": [{"id": "red", "label": "red"}]}],
+        "_normalized": [
+            {
+                "id": "q1",
+                "prompt": "Pick",
+                "options": [{"id": "red", "label": "red"}],
+                "allow_multiple": False,
+            }
+        ],
+    }
+    tailer._active_turn_id = "turn-1"
+    tailer._record_approval_card(_approval_event(session, turn_id="turn-1", call_id="cursor-q-1"))
+
+    result = await stream_api.send_stream_input(
+        session.id,
+        stream_api.AgentStreamSendRequest(
+            text=_answer_text(),
+            client_turn_id="cursor-answer-attempt",
+            question_turn_id="turn-1",
+            question_call_id="cursor-q-1",
+        ),
+        User(open_id="user", name="User", email="user@example.com"),
+    )
+    _accepted_receipt(result)
+    assert stdin.writes == []
+    item = await _pump_receipt(result)
+    assert item.state == "completed"
+    response = json.loads(stdin.writes[-1])
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 9,
+        "result": {
+            "outcome": {
+                "outcome": "answered",
+                "answers": [{"questionId": "q1", "selectedOptionIds": ["red"]}],
+            }
+        },
+    }
+    assert "cursor-q-1" not in tailer._pending_approvals
+    await _stop_tailers(tailers, transport)
+
+
+@pytest.mark.asyncio
 async def test_exact_question_publish_is_serialized_before_managed_delete(
     managed_workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1097,7 +1162,7 @@ async def _pump_failed_handoff(result: dict[str, Any], failure: BaseException) -
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("agent_type", [AgentType.CLAUDE, AgentType.CURSOR])
+@pytest.mark.parametrize("agent_type", [AgentType.CLAUDE])
 @pytest.mark.parametrize("same_call", [False, True])
 async def test_question_answers_are_serialized_with_mailbox_admission(
     managed_workspace, monkeypatch: pytest.MonkeyPatch, agent_type: AgentType, same_call: bool

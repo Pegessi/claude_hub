@@ -11,6 +11,43 @@ export function payloadRecord(event: AgentStreamEvent, key: string): Record<stri
   return value && typeof value === 'object' ? value as Record<string, unknown> : {}
 }
 
+function extractStructuredStreams(record: Record<string, unknown>): string {
+  const parts: string[] = []
+  for (const key of ['stdout', 'stderr', 'content', 'output']) {
+    const val = record[key]
+    if (typeof val === 'string' && val.trim().length > 0) {
+      parts.push(val.trimEnd())
+    }
+  }
+  return parts.join('\n')
+}
+
+/** Extract readable tool output when a provider stores a structured result dict
+ *  (e.g. Cursor stream-json ``{success: {stdout, stderr}}`` or ``{error: {message}}``). */
+export function toolResultText(raw: unknown): string {
+  if (typeof raw === 'string') return raw
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return ''
+  const record = raw as Record<string, unknown>
+  const direct = extractStructuredStreams(record)
+  if (direct) return direct
+  const success = record.success
+  if (success && typeof success === 'object' && !Array.isArray(success)) {
+    const nested = extractStructuredStreams(success as Record<string, unknown>)
+    if (nested) return nested
+  }
+  for (const key of ['error', 'failure', 'rejected']) {
+    const detail = record[key]
+    if (typeof detail === 'string' && detail.trim()) return detail
+    if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+      const msg = (detail as Record<string, unknown>).message
+      if (typeof msg === 'string' && msg.trim()) return msg
+      const nestedErr = extractStructuredStreams(detail as Record<string, unknown>)
+      if (nestedErr) return nestedErr
+    }
+  }
+  return ''
+}
+
 type ExplicitTimelineTurnOrigin = Exclude<TimelineTurnOrigin, 'unknown'>
 
 export function turnProvenance(event: AgentStreamEvent): {

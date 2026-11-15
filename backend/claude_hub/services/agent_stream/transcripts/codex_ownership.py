@@ -47,6 +47,12 @@ class CodexOwnership(AgentStreamAdapter):
         # by turn (``ctx.turn_id`` or session id), value maps reasoning item
         # id → the sub-thread it belongs to (None for the main thread).
         self._inflight_reasoning: Dict[str, Dict[str, Optional[str]]] = {}
+        # Maps Codex collaboration ``agent_path`` (e.g. ``/root/reviewer``) to
+        # its ``agent_thread_id`` per session for transcript ``agent_message`` routing.
+        self._agent_path_threads: Dict[str, Dict[str, str]] = {}
+        self._collab_call_prompts: Dict[str, Dict[str, str]] = {}
+        self._started_collab_call_ids: Dict[str, Set[str]] = {}
+        self._completed_collab_call_ids: Dict[str, Set[str]] = {}
 
     def _error_or_status_event(
         self, ctx: NormalizeContext, message: str, sub_thread: Optional[str] = None
@@ -88,7 +94,11 @@ class CodexOwnership(AgentStreamAdapter):
         address pre-existing remote peer threads. The registry lets us place
         ``code-mode-nested`` work on the spawned worker when the provider does
         not repeat an explicit ``threadId`` on every nested item."""
-        raw = args.get("receiverThreadIds") if isinstance(args, dict) else None
+        raw = (
+            (args.get("receiverThreadIds") or args.get("receiver_thread_ids"))
+            if isinstance(args, dict)
+            else None
+        )
         if not isinstance(raw, list):
             return
         ids = {t for t in raw if isinstance(t, str) and t.strip()}
@@ -163,6 +173,17 @@ class CodexOwnership(AgentStreamAdapter):
         top-level ``threadId`` / ``thread_id`` and collab's
         ``senderThreadId`` / ``agentThreadId``. Non-string/blank → None."""
         if not isinstance(item, dict):
+            return None
+        if item.get("type") in (
+            "subAgentActivity",
+            "SubAgentActivity",
+            "collabAgentToolCall",
+            "CollabAgentToolCall",
+        ):
+            for key in ("threadId", "thread_id", "senderThreadId", "sender_thread_id"):
+                value = _clean_thread_id(item.get(key))
+                if value is not None:
+                    return value
             return None
         for key in ("threadId", "thread_id", "senderThreadId", "agentThreadId"):
             value = _clean_thread_id(item.get(key))

@@ -4,7 +4,7 @@ import { parseStructuredQuestions } from '@/utils/chatQuestionResponse'
 import { masoTaskMatchesThreadId, parseMasoSpawnedThreadIds, parseSubagent, subagentResultText } from '@/utils/subagentTool'
 import type { TimelineTurn, TimelineTool, TimelineApproval, TimelineAttachment, TimelinePart } from './types'
 import { createReducerState, type ReducerState } from './state'
-import { createTurn, payloadString, payloadRecord, statusText, turnProvenance, appendTextPart, trimSnapshotReplay } from './eventValues'
+import { createTurn, payloadString, payloadRecord, statusText, toolResultText, turnProvenance, appendTextPart, trimSnapshotReplay } from './eventValues'
 import { subThreadIdOf, ensureSubthread, applySubthreadEvent, bindLaunchToolForThread, detachToolFromMainParts } from './subthreads'
 
 function resolveTurn(state: ReducerState, event: AgentStreamEvent): TimelineTurn {
@@ -428,7 +428,7 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
       // identity from item/completed, detach the temporary generic tool row,
       // and attach the same TimelineTool to the full-id child row.
       if (!tool.subagent) {
-        const recovered = parseSubagent(payloadString(event, 'name'), event.payload.args)
+        const recovered = parseSubagent(payloadString(event, 'name') || tool.name, event.payload.args)
         if (recovered && recovered.threadIds.length > 0) {
           tool.name = payloadString(event, 'name') || tool.name
           tool.subagent = recovered
@@ -448,6 +448,56 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
           }
           mutated = true
         }
+      } else if (tool.subagent.provider === 'traex' && event.payload.args) {
+        const recovered = parseSubagent(payloadString(event, 'name') || tool.name, event.payload.args)
+        if (recovered) {
+          const hadThreads = tool.subagent.threadIds.length > 0
+          const nextThreadIds = recovered.threadIds.length > 0 ? recovered.threadIds : tool.subagent.threadIds
+          const nextAgentType = recovered.agentType ?? tool.subagent.agentType
+          const nextDescription = recovered.description || tool.subagent.description
+          const recoveredIsSynthetic = recovered.syntheticPrompt === true
+          const currentIsSynthetic =
+            !tool.subagent.prompt || tool.subagent.syntheticPrompt === true
+          const useRecoveredPrompt =
+            Boolean(recovered.prompt) && (!recoveredIsSynthetic || currentIsSynthetic)
+          const nextPrompt = useRecoveredPrompt ? recovered.prompt : tool.subagent.prompt
+          const nextSynthetic = useRecoveredPrompt
+            ? recovered.syntheticPrompt
+            : tool.subagent.syntheticPrompt
+          if (
+            nextAgentType !== tool.subagent.agentType ||
+            nextDescription !== tool.subagent.description ||
+            nextPrompt !== tool.subagent.prompt ||
+            nextSynthetic !== tool.subagent.syntheticPrompt ||
+            nextThreadIds.join(',') !== tool.subagent.threadIds.join(',')
+          ) {
+            const { syntheticPrompt: _prevSynthetic, ...restSubagent } = tool.subagent
+            tool.subagent = {
+              ...restSubagent,
+              agentType: nextAgentType,
+              description: nextDescription,
+              prompt: nextPrompt,
+              threadIds: nextThreadIds,
+              ...(nextSynthetic ? { syntheticPrompt: true } : {}),
+            }
+            mutated = true
+          }
+          if (!hadThreads && nextThreadIds.length > 0) {
+            detachToolFromMainParts(turn, tool)
+            for (const threadId of nextThreadIds) {
+              if (tool.subagent.directive) {
+                ensureSubthread(state, turn, threadId, toolMapKey).thread.parts.push({
+                  kind: 'instruction',
+                  key: `sub-instruction-${identity}-${threadId}`,
+                  tool,
+                })
+              } else {
+                ensureSubthread(state, turn, threadId, toolMapKey).thread.launchTool = tool
+              }
+            }
+            mutated = true
+          }
+        }
       } else if (tool.subagent.provider === 'maso' && !tool.subagent.directive) {
         const spawnedIds = parseMasoSpawnedThreadIds(event.payload.result)
         if (spawnedIds.length > 0) {
@@ -462,8 +512,22 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
           mutated = true
         }
       }
+      const completedArgsRecord = payloadRecord(event, 'args')
+      let nextArgsText = tool.argsText
+      if (completedArgsRecord && Object.keys(completedArgsRecord).length > 0) {
+        try {
+          nextArgsText = JSON.stringify(completedArgsRecord, null, 2)
+        } catch {
+          nextArgsText = String(event.payload.args ?? '')
+        }
+      }
+      const rawCompletedStatus = payloadString(event, 'status')
       let newStatus: TimelineTool['status'] =
-        payloadString(event, 'status') === 'failed' ? 'failed' : 'completed'
+        rawCompletedStatus === 'cancelled'
+          ? 'cancelled'
+          : rawCompletedStatus === 'failed'
+            ? 'failed'
+            : 'completed'
       // AskUserQuestion reports "failed" when the user dismisses the prompt —
       // that is a cancellation, not a tool error. Surface it as cancelled.
       // The tool name is only known when the start event was loaded (it alone
@@ -489,10 +553,11 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
         }
       }
       const newResult = subagentResultText(tool.subagent, event.payload.result)
-        ?? payloadString(event, 'result')
-      if (isNew || tool.status !== newStatus || tool.resultText !== newResult) {
+        ?? toolResultText(event.payload.result)
+      if (isNew || tool.status !== newStatus || tool.resultText !== newResult || tool.argsText !== nextArgsText) {
         tool.status = newStatus
         tool.resultText = newResult
+        tool.argsText = nextArgsText
         mutated = true
       }
       break

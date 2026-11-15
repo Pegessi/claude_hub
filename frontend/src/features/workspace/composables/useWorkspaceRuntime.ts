@@ -217,7 +217,7 @@ export function useWorkspaceRuntime() {
     return terminalStore.tabs.filter(
       tab =>
         tab.workspace_id === wsId &&
-        Boolean(tab.parent_tab_id) &&
+        (Boolean(tab.parent_tab_id) || Boolean(tab.subagent_id)) &&
         !tab.archived &&
         tab.session_kind === 'chat',
     )

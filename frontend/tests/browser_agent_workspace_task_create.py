@@ -14,6 +14,14 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
+from appearance_assertions import (
+    PALETTES,
+    contrast,
+    keyboard_focus_controls,
+    luminance,
+    palette_id,
+    rendered_button_state,
+)
 from browser_lifecycle import BrowserRun, run_browser_main
 from playwright.async_api import expect
 
@@ -651,6 +659,95 @@ async def main(browser_run: BrowserRun) -> None:
             await modal.locator("form").evaluate("form => form.requestSubmit()")
             assert await browser_create_count() == before
 
+        # The historical Workspace-only harness has fallback colors. Load the
+        # actual production theme modules before claiming multi-theme coverage.
+        await page.evaluate("""async () => {
+          await import('/src/features/app-shell/styles/theme.css');
+          await import('/src/features/app-shell/styles/palettes.css');
+          await import('/src/features/app-shell/styles/theme-treatments.css');
+        }""")
+        pressed_theme_samples = []
+        keyboard_theme_samples = []
+
+        async def primary_press_themes(button, release_target):
+            previous = await page.evaluate("""async () => {
+              const {useAppStore} = await import('/src/stores/appStore.ts');
+              const app = useAppStore();
+              return {mode: app.appearanceMode, palette: app.themePalette};
+            }""")
+            try:
+                for mode in ("dark", "light"):
+                    for palette in PALETTES:
+                        await page.evaluate(
+                            """async ([mode, palette]) => {
+                          const {useAppStore} = await import('/src/stores/appStore.ts');
+                          useAppStore().setAppearance(mode, palette);
+                        }""",
+                            [mode, palette_id(palette)],
+                        )
+                        await expect(page.locator("html")).to_have_attribute(
+                            "data-palette", palette_id(palette)
+                        )
+                        for interaction in ("rest", "pressed"):
+                            rendered = await rendered_button_state(
+                                button, interaction, release_target
+                            )
+                            ratio = contrast(rendered["foreground"], rendered["background"])
+                            assert ratio >= 4.5, (palette, mode, rendered, ratio)
+                            if interaction == "rest" and (
+                                palette == "Zenless" or (mode == "dark" and palette == "Mono")
+                            ):
+                                assert luminance(rendered["foreground"]) < luminance(
+                                    rendered["background"]
+                                ), (palette, mode, rendered)
+                            pressed_theme_samples.append(
+                                {
+                                    "palette": palette,
+                                    "mode": mode,
+                                    **rendered,
+                                    "contrast": round(ratio, 3),
+                                }
+                            )
+                        if palette in ("Zenless", "Frontier", "Los Santos"):
+                            keyboard_theme_samples.append(
+                                {
+                                    "palette": palette,
+                                    "mode": mode,
+                                    "label": (await button.text_content() or "").strip(),
+                                    "focus": await keyboard_focus_controls(
+                                        page, {"primary": button}
+                                    ),
+                                }
+                            )
+            finally:
+                await page.evaluate(
+                    """async ({mode, palette}) => {
+                  const {useAppStore} = await import('/src/stores/appStore.ts');
+                  useAppStore().setAppearance(mode, palette);
+                }""",
+                    previous,
+                )
+
+        before_press_probes = await browser_create_count()
+        await primary_press_themes(
+            page.get_by_role("button", name="Add Task", exact=True),
+            page.locator(".workspace-title-block > h1"),
+        )
+        await expect(page.get_by_role("heading", name="Add Task", exact=True)).to_have_count(0)
+        press_modal = await open_add_task()
+        await fill_task(press_modal, "Unsubmitted appearance probe")
+        await primary_press_themes(
+            press_modal.get_by_role("button", name="Create Task", exact=True),
+            press_modal.get_by_role("heading", name="Add Task", exact=True),
+        )
+        await expect(press_modal.get_by_label("Title", exact=True)).to_have_value(
+            "Unsubmitted appearance probe"
+        )
+        assert (
+            await browser_create_count() == before_press_probes
+        ), "pointer release must not submit"
+        await press_modal.get_by_role("button", name="Cancel", exact=True).click()
+
         # Record-only cards keep their source/progress UI but expose no
         # Workspace-managed dispatch/edit/abort/delete controls.
         record_card = page.locator(".task-card").filter(has_text="Record-only fixture")
@@ -1069,6 +1166,8 @@ async def main(browser_run: BrowserRun) -> None:
     report = {
         "result": "PASS",
         "create_requests": len(create_calls),
+        "primary_theme_press_samples": pressed_theme_samples,
+        "primary_keyboard_focus_samples": keyboard_theme_samples,
         "blocked_requests": blocked_requests,
         "unknown_requests": unknown_requests,
         "page_errors": page_errors,

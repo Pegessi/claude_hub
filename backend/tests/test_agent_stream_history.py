@@ -267,6 +267,42 @@ def test_summary_preserves_subagent_lifecycle_and_delegation_tools_on_legacy_row
             event(
                 "tool_call_started",
                 turn_id="turn-2",
+                tool_call_id="cursor-unspecified-task",
+                name="Task",
+                args={
+                    "description": "General task",
+                    "prompt": "Inspect config",
+                    "subagentType": {"unspecified": {}},
+                },
+            ),
+            event(
+                "tool_call_started",
+                turn_id="turn-2",
+                tool_call_id="codex-spawn-agent",
+                name="spawn_agent",
+                args={"task_name": "reviewer", "message": "Review diff"},
+            ),
+            event(
+                "tool_call_started",
+                turn_id="turn-2",
+                tool_call_id="hub-agent-run-bash",
+                name="Bash",
+                args={
+                    "command": "claude-hub --base-url http://[::1]:8173 agent run --provider codex --prompt 'hi'"
+                },
+            ),
+            event(
+                "tool_call_completed",
+                turn_id="turn-2",
+                tool_call_id="standalone-subagent-completed",
+                name="spawnAgent",
+                args={"prompt": "Spawned worker", "receiverThreadIds": ["thread-02"]},
+                status="completed",
+                result="",
+            ),
+            event(
+                "tool_call_started",
+                turn_id="turn-2",
                 tool_call_id="partial-maso-task",
                 name="Task",
                 args={"tasks": [{"prompt": "ordinary work without subagent_name/type"}]},
@@ -289,6 +325,11 @@ def test_summary_preserves_subagent_lifecycle_and_delegation_tools_on_legacy_row
             event("turn_completed", turn_id="turn-2", status="completed"),
         ):
             await store.append(extra)
+        with store._database() as db:
+            db.execute(
+                "UPDATE stream_events SET visible=0 WHERE identity='standalone-subagent-completed'"
+            )
+            db.commit()
         full = await store.read_conversation(-1, 50)
         turn2_events = [item for item in full.events if item.turn_id == "turn-2"]
         assert [(item.type.value, item.payload.get("tool_call_id")) for item in turn2_events] == [
@@ -297,6 +338,10 @@ def test_summary_preserves_subagent_lifecycle_and_delegation_tools_on_legacy_row
             ("tool_call_started", "send-input-1"),
             ("tool_call_completed", "send-input-1"),
             ("tool_call_started", "cursor-oneof-task"),
+            ("tool_call_started", "cursor-unspecified-task"),
+            ("tool_call_started", "codex-spawn-agent"),
+            ("tool_call_started", "hub-agent-run-bash"),
+            ("tool_call_completed", "standalone-subagent-completed"),
             ("turn_completed", None),
         ]
         # Starting a page right at turn-2's early completion (seq 10) must not

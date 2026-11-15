@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -34,11 +35,23 @@ _SUBAGENT_TOOL_NAMES = frozenset(
         "Task",
         "Fork",
         "spawnAgent",
+        "spawn_agent",
         "sendInput",
+        "sendMessage",
+        "followupTask",
+        "send_message",
+        "followup_task",
         "SendMessage",
         "collabAgentToolCall",
+        "Bash",
+        "Shell",
+        "exec_command",
+        "exec",
     }
 )
+_SHELL_TOOL_NAMES = frozenset({"Bash", "Shell", "exec_command", "exec"})
+_HUB_CLI_RE = re.compile(r"\bclaude-hub\b")
+_HUB_AGENT_RUN_RE = re.compile(r"\bagent\s+(?:run|send)\b")
 _CONTROL_TYPES = frozenset(
     {
         AgentStreamEventType.TURN_STARTED,
@@ -79,7 +92,17 @@ def _has_oneof_type(value: object) -> bool:
     if not isinstance(value, dict) or len(value) != 1:
         return False
     only_key = next(iter(value))
-    return isinstance(only_key, str) and only_key != "unspecified"
+    return isinstance(only_key, str) and bool(only_key.strip())
+
+
+def _has_receiver_threads(args: Dict[str, object]) -> bool:
+    for key in ("receiverThreadIds", "receiver_thread_ids"):
+        receivers = args.get(key)
+        if isinstance(receivers, list) and any(
+            isinstance(item, str) and len(item) > 0 for item in receivers
+        ):
+            return True
+    return False
 
 
 def _is_subagent_delegation_tool(tool_name: object, args: object, *, has_subthread: bool) -> bool:
@@ -92,6 +115,13 @@ def _is_subagent_delegation_tool(tool_name: object, args: object, *, has_subthre
             tool_name == "SendMessage"
             and _non_empty_str(args.get("agent_id"))
             and _non_empty_str(args.get("message"))
+        )
+    if tool_name in _SHELL_TOOL_NAMES:
+        cmd = args.get("command") if isinstance(args.get("command"), str) else args.get("cmd")
+        return (
+            isinstance(cmd, str)
+            and bool(_HUB_CLI_RE.search(cmd))
+            and bool(_HUB_AGENT_RUN_RE.search(cmd))
         )
     if tool_name == "Agent":
         return _non_empty_str(args.get("prompt")) and (
@@ -120,12 +150,24 @@ def _is_subagent_delegation_tool(tool_name: object, args: object, *, has_subthre
             or _non_empty_str(args.get("workspace"))
             or isinstance(args.get("nested_spawn"), bool)
         )
-    if tool_name in ("spawnAgent", "sendInput"):
-        receivers = args.get("receiverThreadIds")
+    if tool_name in ("spawnAgent", "sendInput", "sendMessage", "followupTask"):
+        return _non_empty_str(args.get("prompt")) and _has_receiver_threads(args)
+    if tool_name == "spawn_agent":
         return (
             _non_empty_str(args.get("prompt"))
-            and isinstance(receivers, list)
-            and any(isinstance(item, str) and len(item) > 0 for item in receivers)
+            or _non_empty_str(args.get("message"))
+            or _non_empty_str(args.get("task_name"))
+        ) and (
+            _has_receiver_threads(args)
+            or _non_empty_str(args.get("task_name"))
+            or _non_empty_str(args.get("agentPath"))
+            or _non_empty_str(args.get("agent_path"))
+        )
+    if tool_name in ("send_message", "followup_task"):
+        target = args.get("target")
+        return (_non_empty_str(args.get("prompt")) or _non_empty_str(args.get("message"))) and (
+            _has_receiver_threads(args)
+            or (_non_empty_str(target) and str(target).strip() not in ("main", "root", "/root"))
         )
     if tool_name == "SendMessage":
         agent_id = args.get("agent_id")
@@ -226,6 +268,25 @@ class ConversationHistoryIndex:
                             ).fetchone()
                             if start_row is None:
                                 start_visible = False
+                                row = db.execute(
+                                    "SELECT body FROM stream_events WHERE name=? AND sequence=?",
+                                    (name, sequence),
+                                ).fetchone()
+                                if row is not None and row[0] is not None:
+                                    raw_dict = unpack(row[0], dictionary)
+                                    payload_obj = (
+                                        raw_dict.get("payload")
+                                        if isinstance(raw_dict, dict)
+                                        else None
+                                    )
+                                    if (
+                                        isinstance(payload_obj, dict)
+                                        and payload_obj.get("name") in _SUBAGENT_TOOL_NAMES
+                                    ):
+                                        comp_ev = AgentStreamEvent.model_validate(raw_dict)
+                                        if conversation_event_visible(comp_ev):
+                                            candidate = comp_ev
+                                            is_visible = True
                             elif start_row[0]:
                                 start_visible = True
                             elif start_row[1] is not None:

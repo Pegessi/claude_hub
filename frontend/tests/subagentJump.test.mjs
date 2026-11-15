@@ -201,6 +201,15 @@ test('relativeSubagentTime buckets and tolerates bad dates', () => {
 test('hubSubagentIdFromTool needs an agent run command and an id in the output', () => {
   const args = JSON.stringify({ command: 'claude-hub agent run codex --json "x"' })
   assert.equal(hubSubagentIdFromTool(args, '{"subagent_id":"sa-0123456789ab"}'), 'sa-0123456789ab')
+  assert.equal(
+    hubSubagentIdFromTool(
+      JSON.stringify({
+        command: "HB=/home/tiger/claude_hub/backend/.venv/bin/claude-hub\n$HB --base-url 'http://[::1]:8173' agent run --provider maso --prompt 'hi'",
+      }),
+      '[agent] subagent sa-0123456789ab (maso) started in tab t-1; turn u-1\nDone',
+    ),
+    'sa-0123456789ab',
+  )
   assert.equal(hubSubagentIdFromTool(args, 'finished'), null)
   assert.equal(hubSubagentIdFromTool('{"command":"ls sa-0123456789ab"}', 'sa-0123456789ab'), null)
 })
