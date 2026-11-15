@@ -649,7 +649,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', handleDocumentKeyd
   font: inherit;
   font-size: 12px;
   font-weight: 500;
-  color: var(--ch-color-text-inverse);
+  color: var(--ch-color-on-accent);
   background: var(--ch-color-accent-strong);
   border: none;
   border-radius: var(--ch-radius-md);
@@ -657,7 +657,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', handleDocumentKeyd
 }
 
 .approval-submit-btn:hover:not(:disabled) {
-  background: var(--ch-color-accent-hover);
+  background: var(--ch-color-accent-fill-hover);
 }
 
 .approval-submit-btn:focus-visible {

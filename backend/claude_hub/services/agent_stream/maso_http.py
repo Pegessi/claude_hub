@@ -371,7 +371,7 @@ class MasoHttpSession(ProviderSession):
         if prompt != text and prompt:
             # A service-side tool process cannot inherit this Hub tab's env.
             prompt = (
-                "MASO HTTP transport: for Hub CLI tool calls, first set "
+                "MASO HTTP transport: for Hub CLI tool calls, first export "
                 f"CLAUDE_HUB_TAB_ID={shlex.quote(self.session.tab_id)} in that shell command. "
                 "This is the current Chat's ID supplied by Hub.\n\n" + prompt
             )

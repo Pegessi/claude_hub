@@ -3,7 +3,7 @@ import { agentImagePathFromTool } from '@/utils/agentImage'
 import { masoTaskMatchesThreadId, subagentViewForThread } from '@/utils/subagentTool'
 import type { TimelineTurn, TimelineSubthread, TimelineSubagentLifecycle, TimelineTool } from './types'
 import type { ReducerState, SubthreadState } from './state'
-import { payloadString, payloadRecord, statusText } from './eventValues'
+import { payloadString, payloadRecord, statusText, toolResultText } from './eventValues'
 
 /** Create a per-thread TimelineTool view for a MASO Task/Fork call whose live
  *  status and resultText stay synchronized with the underlying tool call. */
@@ -47,12 +47,35 @@ function countClaimedThreadsForTool(turn: TimelineTurn, toolKey: string): number
   return count
 }
 
-function attachPendingLaunchTool(turn: TimelineTurn, thread: TimelineSubthread): void {
-  if (thread.launchTool) return
+function attachPendingLaunchTool(
+  turn: TimelineTurn,
+  thread: TimelineSubthread,
+  launchCallId: string | null = null,
+  subagentName: string | null = null,
+): void {
+  if (thread.launchTool) {
+    if (subagentName && thread.launchTool.subagent && !thread.launchTool.subagent.agentType) {
+      thread.launchTool.subagent = { ...thread.launchTool.subagent, agentType: subagentName }
+    }
+    return
+  }
   for (let i = turn.tools.length - 1; i >= 0; i -= 1) {
     const candidate = turn.tools[i]
     if (!candidate.subagent || candidate.subagent.directive) continue
     if (candidate.subagent.provider === 'claude' && candidate.callId === thread.threadId) {
+      detachToolFromMainParts(turn, candidate)
+      thread.launchTool = candidate
+      return
+    }
+    if (
+      candidate.subagent.provider === 'cursor' &&
+      (candidate.callId === thread.threadId ||
+        (launchCallId !== null && candidate.callId === launchCallId) ||
+        candidate.subagent.threadIds.includes(thread.threadId))
+    ) {
+      if (subagentName && !candidate.subagent.agentType) {
+        candidate.subagent = { ...candidate.subagent, agentType: subagentName }
+      }
       detachToolFromMainParts(turn, candidate)
       thread.launchTool = candidate
       return
@@ -143,6 +166,9 @@ function childActivityRestartsLifecycle(
   event: AgentStreamEvent,
   child: SubthreadState,
 ): boolean {
+  if (event.type === 'text_delta' && event.payload.final_report === true) {
+    return false
+  }
   if (event.type === 'thinking_delta' || event.type === 'text_delta') {
     return payloadString(event, 'text').length > 0
   }
@@ -204,8 +230,13 @@ export function applySubthreadEvent(
   const lifecycle = subagentLifecycleOf(event)
   if (!subthreadEventCanMount(event, lifecycle)) return false
   const child = ensureSubthread(state, turn, threadId, toolMapKey)
-  if (event.agent_type === 'maso' && !child.thread.provider) {
-    child.thread.provider = 'maso'
+  if ((event.agent_type === 'maso' || event.agent_type === 'cursor') && !child.thread.provider) {
+    child.thread.provider = event.agent_type
+  }
+  if (lifecycle !== null) {
+    const launchCallId = (event.payload.tool_call_id as string | null) ?? event.call_id ?? null
+    const subagentName = payloadString(event, 'subagent_name') || null
+    attachPendingLaunchTool(turn, child.thread, launchCallId, subagentName)
   }
   let lifecycleChanged = false
   if (lifecycle !== null && child.thread.lifecycleStatus !== lifecycle) {
@@ -291,12 +322,27 @@ export function applySubthreadEvent(
           parts.push({ kind: 'tool_group', key: `sub-tool-group-${event.stream_sequence}`, tools: [tool] })
         }
       }
+      const completedArgsRecord = payloadRecord(event, 'args')
+      let nextArgsText = tool.argsText
+      if (completedArgsRecord && Object.keys(completedArgsRecord).length > 0) {
+        try {
+          nextArgsText = JSON.stringify(completedArgsRecord, null, 2)
+        } catch {
+          nextArgsText = String(event.payload.args ?? '')
+        }
+      }
+      const rawCompletedStatus = payloadString(event, 'status')
       const newStatus: TimelineTool['status'] =
-        payloadString(event, 'status') === 'failed' ? 'failed' : 'completed'
-      const newResult = payloadString(event, 'result')
-      if (tool.status !== newStatus || tool.resultText !== newResult) {
+        rawCompletedStatus === 'cancelled'
+          ? 'cancelled'
+          : rawCompletedStatus === 'failed'
+            ? 'failed'
+            : 'completed'
+      const newResult = toolResultText(event.payload.result)
+      if (tool.status !== newStatus || tool.resultText !== newResult || tool.argsText !== nextArgsText) {
         tool.status = newStatus
         tool.resultText = newResult
+        tool.argsText = nextArgsText
         return true
       }
       return lifecycleChanged

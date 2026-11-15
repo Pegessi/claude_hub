@@ -197,22 +197,32 @@ def test_generic_strip_preserves_earliest_malformed_block() -> None:
 async def test_first_turn_and_cursor_send_still_resolve_native_wrappers(
     monkeypatch, session
 ) -> None:
+    import asyncio
+
     runtime_wrap = MagicMock(return_value="runtime user")
-    question_wrap = MagicMock(return_value="question user")
     monkeypatch.setattr(native, "wrap_hub_runtime_guidance", runtime_wrap)
-    monkeypatch.setattr(native, "wrap_question_protocol_guidance", question_wrap)
     transport = native.CursorNativeSession(session)
-    spawn = AsyncMock()
-    monkeypatch.setattr(transport, "_spawn_oneshot", spawn)
+    transport._started = True
+    transport._process = MagicMock(returncode=None, wait=AsyncMock(return_value=0))
+    transport._acp_session_id = "acp-helper-sid"
+    transport._applied_mode = "agent"
+    transport._launch_fingerprint = transport._configuration_fingerprint()
+    loop = asyncio.get_running_loop()
+    write_req = AsyncMock(side_effect=lambda *_a, **_k: (1, loop.create_future()))
+    monkeypatch.setattr(transport, "_write_request", write_req)
 
-    await transport.send_message("user", [])
-    transport.acknowledge_turn_complete()
-    await transport.send_message("next", [])
+    try:
+        await transport.send_message("user", [])
+        transport.acknowledge_turn_complete()
+        await transport.send_message("next", [])
 
-    runtime_wrap.assert_called_once_with("user", context="")
-    assert question_wrap.call_args_list[0].args == ("runtime user",)
-    assert question_wrap.call_args_list[1].args == ("next",)
-    assert spawn.await_args_list[0].args[1] == "question user"
+        runtime_wrap.assert_called_once_with("user", context="")
+        assert write_req.await_args_list[0].args[1]["prompt"] == [
+            {"type": "text", "text": "runtime user"}
+        ]
+        assert write_req.await_args_list[1].args[1]["prompt"] == [{"type": "text", "text": "next"}]
+    finally:
+        await transport.stop()
 
 
 @pytest.mark.asyncio

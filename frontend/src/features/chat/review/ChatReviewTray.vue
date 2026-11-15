@@ -239,7 +239,7 @@ function send(): void {
   border: 1px solid var(--ch-color-accent-strong);
   border-radius: var(--ch-radius-sm);
   background: var(--ch-color-accent-strong);
-  color: var(--ch-color-text-inverse);
+  color: var(--ch-color-on-accent);
   font: inherit;
   font-size: 12px;
   font-weight: 500;

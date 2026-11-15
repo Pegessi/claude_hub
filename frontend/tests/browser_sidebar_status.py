@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 from playwright.async_api import ViewportSize, expect
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appearance_assertions import GAME_PALETTES, select_appearance  # noqa: E402
 from browser_lifecycle import BrowserRun, run_browser_main  # noqa: E402
 
 DESKTOP: ViewportSize = {"width": 1440, "height": 900}
@@ -292,7 +293,10 @@ async def main(browser_run: BrowserRun) -> None:
             # Desktop: the blocked question reads as finished work waiting on
             # the user, never as the pulse a running turn carries.
             await expect_row_presentation(
-                BLOCKED, "idle", "Session status: Waiting for your answer", pulsing=False
+                BLOCKED,
+                "idle",
+                "Session status: Waiting for your answer",
+                pulsing=False,
             )
             await expect_row_presentation(
                 WORKING, "working", "Session status: Working", pulsing=True
@@ -356,12 +360,69 @@ async def main(browser_run: BrowserRun) -> None:
             )
             await shot("00-desktop-status.png")
 
+            # Compare two real active tabs, not a hand-edited data attribute.
+            # A game skin must retain the waiting cue as well as its active ring.
+            report["game_waiting_indicators"] = []
+            for mode in ("dark", "light"):
+                for palette in GAME_PALETTES:
+                    await select_appearance(page, mode, palette)
+                    paints = {}
+                    for tab_id, waiting in ((BLOCKED, True), (DONE, False)):
+                        await page.locator(
+                            f'.chat-sidebar__item[data-tab-id="{tab_id}"] .chat-sidebar__item-main'
+                        ).click()
+                        active = page.locator(f'.tab-bar .tab.active[data-tab-id="{tab_id}"]')
+                        indicator = active.locator(".tab-indicator")
+                        await expect(indicator).to_have_attribute("data-status", "idle")
+                        await expect(indicator).to_have_attribute(
+                            "data-awaiting", str(waiting).lower()
+                        )
+                        await indicator.evaluate("""async el => {
+                          getComputedStyle(el).boxShadow;
+                          await Promise.all(el.getAnimations().filter(a =>
+                            Number.isFinite(a.effect?.getComputedTiming().endTime)).map(a => a.finished));
+                        }""")
+                        paints[str(waiting)] = await indicator.evaluate(
+                            """el => ({
+                          shadow:getComputedStyle(el).boxShadow,
+                          color:getComputedStyle(el).backgroundColor,
+                          width:el.getBoundingClientRect().width,height:el.getBoundingClientRect().height})"""
+                        )
+                        await shot(
+                            f"status-{palette.lower().replace(' ', '-')}-{mode}-{waiting}.png"
+                        )
+                    assert paints["True"]["shadow"] != paints["False"]["shadow"], (
+                        palette,
+                        mode,
+                        paints,
+                    )
+                    assert paints["True"]["shadow"] != "none", (palette, mode, paints)
+                    assert paints["True"]["color"] == paints["False"]["color"], (
+                        palette,
+                        mode,
+                        paints,
+                    )
+                    assert all(
+                        paints["True"][key] == paints["False"][key] == 7
+                        for key in ("width", "height")
+                    )
+                    report["game_waiting_indicators"].append(
+                        {"palette": palette, "mode": mode, **paints}
+                    )
+            await select_appearance(page, "dark", "Classic")
+            await page.locator(
+                f'.chat-sidebar__item[data-tab-id="{BLOCKED}"] .chat-sidebar__item-main'
+            ).click()
+
             # Narrow pane: the sentence must still be reachable and the 8px
             # light must not grow or displace the row's name.
             await page.set_viewport_size(NARROW)
             await expect(sidebar).to_be_visible()
             await expect_row_presentation(
-                BLOCKED, "idle", "Session status: Waiting for your answer", pulsing=False
+                BLOCKED,
+                "idle",
+                "Session status: Waiting for your answer",
+                pulsing=False,
             )
             await expect_row_presentation(
                 WORKING, "working", "Session status: Working", pulsing=True
@@ -410,6 +471,59 @@ async def main(browser_run: BrowserRun) -> None:
             # the "Session status:" prefix for its longer spoken label.
             await expect(working_indicator).to_have_attribute("aria-label", "Working")
             await shot("02-phone-tab-indicator.png")
+
+            # Open the mobile drawer while an active Chat pane makes .app
+            # position:fixed. The drawer must sit above .chat-drawer-backdrop
+            # (un-dimmed, pointer-reachable, and vertically scrollable).
+            await select_appearance(page, "light", "Zenless")
+            await page.locator(".mobile-app-menu-trigger").click()
+            await page.locator(".mobile-app-menu-item", has_text="Chats").click()
+            await expect(
+                page.locator(".chat-sidebar.mobile-drawer.mobile-drawer--open")
+            ).to_be_visible()
+            await expect(page.locator(".chat-drawer-backdrop")).to_be_visible()
+            await page.wait_for_timeout(220)
+            drawer_stack = await page.evaluate("""() => {
+              const drawer = document.querySelector('.chat-sidebar.mobile-drawer.mobile-drawer--open');
+              const body = document.querySelector('.chat-sidebar__body');
+              const backdrop = document.querySelector('.chat-drawer-backdrop');
+              if (!drawer || !body || !backdrop) return { missing: true };
+              const rect = drawer.getBoundingClientRect();
+              const centerHit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+              const outsideHit = document.elementFromPoint(rect.right + 24, rect.top + rect.height / 2);
+              const spacer = document.createElement('div');
+              spacer.style.height = '1200px';
+              body.appendChild(spacer);
+              body.scrollTop = 180;
+              const scrolled = body.scrollTop;
+              body.scrollTop = 0;
+              spacer.remove();
+              const originalParent = backdrop.parentNode;
+              const originalNext = backdrop.nextSibling;
+              document.body.appendChild(backdrop);
+              const teleportedBugHit = document.elementFromPoint(
+                rect.left + rect.width / 2,
+                rect.top + rect.height / 2,
+              ) === backdrop;
+              originalParent.insertBefore(backdrop, originalNext);
+              return {
+                drawerHitInside: Boolean(centerHit && drawer.contains(centerHit)),
+                centerHitClass: centerHit?.className ?? null,
+                outsideHitsBackdrop: outsideHit === backdrop,
+                teleportedBugHit,
+                scrolled,
+              };
+            }""")
+            assert drawer_stack.get("drawerHitInside") is True, drawer_stack
+            assert drawer_stack.get("outsideHitsBackdrop") is True, drawer_stack
+            assert drawer_stack.get("teleportedBugHit") is True, drawer_stack
+            assert (drawer_stack.get("scrolled") or 0) >= 150, drawer_stack
+            await page.locator(
+                f'.chat-sidebar__item[data-tab-id="{WORKING}"] .chat-sidebar__item-main'
+            ).click()
+            await page.wait_for_function(
+                "document.querySelector('.chat-sidebar').getBoundingClientRect().right <= 1"
+            )
 
             await page.wait_for_timeout(800)
             assert not unknown_requests, unknown_requests

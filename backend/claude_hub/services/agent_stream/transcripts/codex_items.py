@@ -10,7 +10,15 @@ from ..base import NormalizeContext
 from ..fork_seed import strip_fork_seed_history
 from ..native import codex_normalize_questions, strip_hub_runtime_guidance
 from .codex_ownership import CodexOwnership
-from .codex_values import _codex_extract_text, _codex_parse_arguments, _codex_tool_args
+from .codex_values import (
+    _COLLAB_MESSAGE_TOOLS,
+    _COLLAB_SPAWN_TOOLS,
+    _clean_thread_id,
+    _codex_extract_text,
+    _codex_parse_arguments,
+    _codex_tool_args,
+    _is_fernet_token,
+)
 
 
 class CodexItems(CodexOwnership):
@@ -108,13 +116,30 @@ class CodexItems(CodexOwnership):
         elif kind == "imageView":
             name, args = "view_image", {"path": item.get("path")}
             result = ""
-        elif kind == "collabAgentToolCall":
-            name = str(item.get("tool") or kind)
+        elif kind in {"collabAgentToolCall", "CollabAgentToolCall"}:
+            name = str(item.get("tool") or "collabAgentToolCall")
+            receivers = item.get("receiverThreadIds")
+            if not isinstance(receivers, list):
+                receivers = item.get("receiver_thread_ids")
             args = {
                 "prompt": item.get("prompt"),
-                "receiverThreadIds": item.get("receiverThreadIds"),
+                "receiverThreadIds": receivers if isinstance(receivers, list) else [],
             }
+            for extra_key, dst_key in (
+                ("model", "model"),
+                ("reasoningEffort", "reasoningEffort"),
+                ("reasoning_effort", "reasoningEffort"),
+                ("agentPath", "agentPath"),
+                ("agent_path", "agentPath"),
+            ):
+                val = _clean_thread_id(item.get(extra_key))
+                if val is not None:
+                    args.setdefault(dst_key, val)
             result = item.get("agentsStates")
+            if result is None:
+                result = item.get("agents_states")
+        elif kind in {"subAgentActivity", "SubAgentActivity"}:
+            return self._normalize_subagent_activity_item(item, method, ctx)
         else:
             # Text/reasoning/plan items already arrive as deltas.
             return []
@@ -123,7 +148,11 @@ class CodexItems(CodexOwnership):
         # stay on the main stream as instruction cards; they also teach us the
         # receiver threads. Every other item that carries a sub-thread id (or a
         # ``code-mode-nested`` item id) is the child's own work and is nested.
-        is_collab = kind == "collabAgentToolCall"
+        is_collab = kind in {"collabAgentToolCall", "CollabAgentToolCall"} and (
+            name in _COLLAB_SPAWN_TOOLS
+            or name in _COLLAB_MESSAGE_TOOLS
+            or name == "collabAgentToolCall"
+        )
         if is_collab:
             self._remember_collab_threads(name, args, ctx)
         sub_thread = None
@@ -168,6 +197,107 @@ class CodexItems(CodexOwnership):
                 sub_thread_id=sub_thread,
             )
         ]
+
+    def _normalize_subagent_activity_item(
+        self,
+        item: Dict[str, Any],
+        method: str,
+        ctx: NormalizeContext,
+    ) -> List[AgentStreamEvent]:
+        """Normalize Codex ``SubAgentActivity`` / ``subAgentActivity`` items."""
+        target_thread = _clean_thread_id(item.get("agentThreadId") or item.get("agent_thread_id"))
+        if target_thread is None:
+            return []
+        agent_path = _clean_thread_id(item.get("agentPath") or item.get("agent_path"))
+        main_id = _clean_thread_id(ctx.main_thread_id)
+        if agent_path in ("/root", "root", "main") or (
+            main_id is not None and target_thread == main_id
+        ):
+            return []
+        short_name = (
+            agent_path.rsplit("/", 1)[-1]
+            if agent_path and agent_path not in ("/root", "root")
+            else None
+        )
+        if agent_path:
+            self._agent_path_threads.setdefault(ctx.session_id, {})[agent_path] = target_thread
+            if short_name:
+                self._agent_path_threads[ctx.session_id][short_name] = target_thread
+        activity_kind = item.get("kind")
+        if activity_kind == "completed":
+            if method == "item/completed" and ctx.turn_id:
+                return [self._child_lifecycle_event(ctx, target_thread, "completed")]
+            return []
+        if activity_kind not in ("started", "interacted"):
+            return []
+        call_id = str(item["id"])
+        name = "spawnAgent" if activity_kind == "started" else "sendInput"
+        default_prompt = (
+            f"Spawned {short_name or target_thread}"
+            if activity_kind == "started"
+            else f"Follow-up to {short_name or target_thread}"
+        )
+        raw_prompt = _clean_thread_id(item.get("prompt"))
+        saved_prompt = self._collab_call_prompts.get(ctx.session_id, {}).pop(call_id, None)
+        explicit_prompt = (
+            raw_prompt if raw_prompt and not _is_fernet_token(raw_prompt) else saved_prompt
+        )
+        args: Dict[str, Any] = {
+            "prompt": explicit_prompt or default_prompt,
+            "receiverThreadIds": [target_thread],
+        }
+        if not explicit_prompt:
+            args["syntheticPrompt"] = True
+        if short_name:
+            args["subagentType"] = short_name
+        if agent_path:
+            args["agentPath"] = agent_path
+        model = _clean_thread_id(item.get("model"))
+        effort = _clean_thread_id(item.get("reasoningEffort") or item.get("reasoning_effort"))
+        if model:
+            args["model"] = model
+        if effort:
+            args["reasoningEffort"] = effort
+        self._remember_collab_threads(name, args, ctx)
+        events: List[AgentStreamEvent] = []
+        started_set = self._started_collab_call_ids.setdefault(ctx.session_id, set())
+        if method == "item/started":
+            if call_id not in started_set:
+                started_set.add(call_id)
+                events.append(
+                    ctx.event(
+                        AgentStreamEventType.TOOL_CALL_STARTED,
+                        {"tool_call_id": call_id, "name": name, "args": args},
+                        call_id=call_id,
+                    )
+                )
+        else:
+            if call_id not in started_set:
+                started_set.add(call_id)
+                events.append(
+                    ctx.event(
+                        AgentStreamEventType.TOOL_CALL_STARTED,
+                        {"tool_call_id": call_id, "name": name, "args": args},
+                        call_id=call_id,
+                    )
+                )
+            self._completed_collab_call_ids.setdefault(ctx.session_id, set()).add(call_id)
+            events.append(
+                ctx.event(
+                    AgentStreamEventType.TOOL_CALL_COMPLETED,
+                    {
+                        "tool_call_id": call_id,
+                        "name": name,
+                        "args": args,
+                        "status": "completed",
+                        "result": "",
+                    },
+                    call_id=call_id,
+                )
+            )
+        if ctx.turn_id:
+            events.append(self._child_lifecycle_event(ctx, target_thread, "active"))
+        return events
 
     def _normalize_question(
         self, params: Dict[str, Any], ctx: NormalizeContext
@@ -234,6 +364,20 @@ class CodexItems(CodexOwnership):
                     message = detail
             if isinstance(message, str) and message.strip():
                 events.append(ctx.event(AgentStreamEventType.ERROR, {"message": message}))
+        elif payload_type in {"item_started", "item_completed"}:
+            item = payload.get("item")
+            if isinstance(item, dict) and item.get("type") in {
+                "SubAgentActivity",
+                "subAgentActivity",
+                "CollabAgentToolCall",
+                "collabAgentToolCall",
+            }:
+                method = "item/started" if payload_type == "item_started" else "item/completed"
+                events.extend(
+                    self._normalize_tool_item(
+                        item, method, ctx, payload.get("thread_id") or payload.get("threadId")
+                    )
+                )
         elif payload_type == "task_complete":
             completed: Dict[str, Any] = {"status": "completed"}
             summary = payload.get("last_agent_message")
@@ -255,23 +399,87 @@ class CodexItems(CodexOwnership):
                 text = _codex_extract_text(payload.get("content"))
                 if text:
                     events.append(ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": text}))
+        elif payload_type == "agent_message":
+            author = _clean_thread_id(payload.get("author"))
+            recipient = _clean_thread_id(payload.get("recipient"))
+            sub_thread = (
+                self._agent_path_threads.get(ctx.session_id, {}).get(author)
+                if author and author not in ("/root", "root") and recipient in ("/root", "root")
+                else None
+            )
+            if sub_thread:
+                raw_text = _codex_extract_text(payload.get("content"))
+                marker = "\nPayload:\n"
+                report = (
+                    raw_text.split(marker, 1)[1].strip() if marker in raw_text else raw_text.strip()
+                )
+                if report and not _is_fernet_token(report):
+                    is_final = "Message Type: FINAL_ANSWER" in raw_text
+                    events.append(
+                        ctx.event(
+                            AgentStreamEventType.TEXT_DELTA,
+                            {"text": report, **({"final_report": True} if is_final else {})},
+                            sub_thread_id=sub_thread,
+                        )
+                    )
         elif payload_type == "function_call":
             name = payload.get("name") or "unknown"
             call_id = payload.get("call_id")
             tool_call_id = call_id if isinstance(call_id, str) else None
+            args = _codex_parse_arguments(payload.get("arguments"))
+            if name in _COLLAB_SPAWN_TOOLS or name in _COLLAB_MESSAGE_TOOLS:
+                target = _clean_thread_id(args.get("target") or args.get("task_name"))
+                if target in ("/root", "root", "main"):
+                    if tool_call_id:
+                        self._completed_collab_call_ids.setdefault(ctx.session_id, set()).add(
+                            tool_call_id
+                        )
+                    return events
+                short_target = target.rsplit("/", 1)[-1] if target else None
+                raw_msg = _clean_thread_id(args.get("prompt") or args.get("message"))
+                if _is_fernet_token(args.get("message")):
+                    fallback_msg = (
+                        f"Spawned {short_target or 'sub-agent'}"
+                        if name in _COLLAB_SPAWN_TOOLS
+                        else f"Follow-up to {short_target or 'sub-agent'}"
+                    )
+                    args["message"] = fallback_msg
+                    args.setdefault("prompt", fallback_msg)
+                    args["syntheticPrompt"] = True
+                elif raw_msg:
+                    args.setdefault("prompt", raw_msg)
+                    if tool_call_id:
+                        self._collab_call_prompts.setdefault(ctx.session_id, {})[
+                            tool_call_id
+                        ] = raw_msg
+                if short_target:
+                    args.setdefault("subagentType", short_target)
+                mapped = (
+                    self._agent_path_threads.get(ctx.session_id, {}).get(target) if target else None
+                )
+                if mapped and "receiverThreadIds" not in args:
+                    args["receiverThreadIds"] = [mapped]
+                if tool_call_id:
+                    self._started_collab_call_ids.setdefault(ctx.session_id, set()).add(
+                        tool_call_id
+                    )
             events.append(
                 ctx.event(
                     AgentStreamEventType.TOOL_CALL_STARTED,
                     {
                         "tool_call_id": tool_call_id,
                         "name": name,
-                        "args": _codex_parse_arguments(payload.get("arguments")),
+                        "args": args,
                     },
                     call_id=tool_call_id,
                 )
             )
         elif payload_type == "function_call_output":
             call_id = payload.get("call_id")
+            if isinstance(call_id, str) and call_id in self._completed_collab_call_ids.get(
+                ctx.session_id, set()
+            ):
+                return events
             events.append(
                 ctx.event(
                     AgentStreamEventType.TOOL_CALL_COMPLETED,
