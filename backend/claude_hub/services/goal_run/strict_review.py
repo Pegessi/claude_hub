@@ -68,10 +68,16 @@ _MAX_RETAINED_FINDINGS = 30
 _DEFAULT_REVIEW_TIMEOUT_SECONDS = 900.0
 _MAX_ASSISTANT_EXCERPT_CHARS = 12_000
 _GIT_CMD_TIMEOUT_SECONDS = 3.0
+_MAX_GIT_STDOUT_BYTES = 256 * 1024
+_MAX_GIT_STDERR_BYTES = 64 * 1024
 _MAX_GIT_SUMMARY_CHARS = 2_000
 _MAX_LESSONS_CHARS = 1_500
 _MAX_REVIEW_MD_BYTES = 8_192
 _MAX_REVIEW_MD_CHARS = 2_000
+
+
+class _GitOutputOverflow(Exception):
+    """Raised when a git subprocess stream exceeds its byte cap."""
 
 
 @dataclass(frozen=True)
@@ -131,22 +137,29 @@ class ReviewContinuationDecision:
 StrictReviewerCallback = Callable[[GoalRun, str, int], Awaitable[StrictReviewOutcome]]
 
 
-async def _read_stream_bounded(stream: asyncio.StreamReader | None, limit: int = 65_536) -> bytes:
+async def _read_stream_bounded(
+    stream: asyncio.StreamReader | None, max_bytes: int = _MAX_GIT_STDOUT_BYTES
+) -> bytes:
     if stream is None:
         return b""
     chunks: list[bytes] = []
-    remaining = limit
-    while remaining > 0:
-        chunk = await stream.read(min(4096, remaining))
+    total = 0
+    while True:
+        chunk = await stream.read(min(4096, max_bytes - total + 1))
         if not chunk:
             break
+        total += len(chunk)
+        if total > max_bytes:
+            raise _GitOutputOverflow(f"git stream output exceeded {max_bytes} bytes")
         chunks.append(chunk)
-        remaining -= len(chunk)
     return b"".join(chunks)
 
 
 async def _run_git_command(
-    target_cwd: str, *args: str, timeout: float = _GIT_CMD_TIMEOUT_SECONDS
+    target_cwd: str,
+    *args: str,
+    timeout: float = _GIT_CMD_TIMEOUT_SECONDS,
+    max_stdout_bytes: int = _MAX_GIT_STDOUT_BYTES,
 ) -> tuple[int, str]:
     """Run a bounded read-only git command without touching index locks or hanging on grandchild pipes."""
     try:
@@ -164,23 +177,33 @@ async def _run_git_command(
     except OSError:
         return 1, ""
     timed_out = False
+    overflowed = False
+    needs_pg_kill = False
     stdout_bytes = b""
     try:
         async with asyncio.timeout(timeout):
-            stdout_task = asyncio.create_task(_read_stream_bounded(proc.stdout, 65_536))
-            stderr_task = asyncio.create_task(_read_stream_bounded(proc.stderr, 16_384))
+            stdout_task = asyncio.create_task(_read_stream_bounded(proc.stdout, max_stdout_bytes))
+            stderr_task = asyncio.create_task(
+                _read_stream_bounded(proc.stderr, _MAX_GIT_STDERR_BYTES)
+            )
             try:
-                await proc.wait()
-                stdout_bytes, _ = await asyncio.gather(stdout_task, stderr_task)
+                stdout_bytes, _, _ = await asyncio.gather(stdout_task, stderr_task, proc.wait())
             finally:
                 for reader_task in (stdout_task, stderr_task):
                     if not reader_task.done():
                         reader_task.cancel()
                 await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+    except _GitOutputOverflow:
+        overflowed = True
+        needs_pg_kill = True
     except (asyncio.TimeoutError, TimeoutError):
         timed_out = True
+        needs_pg_kill = True
+    except asyncio.CancelledError:
+        needs_pg_kill = True
+        raise
     finally:
-        if timed_out or proc.returncode is None:
+        if needs_pg_kill or proc.returncode is None:
             with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
                 os.killpg(proc.pid, signal.SIGKILL)
             with contextlib.suppress(ProcessLookupError, OSError):
@@ -193,6 +216,8 @@ async def _run_git_command(
                 transport.close()
     if timed_out:
         return 124, ""
+    if overflowed:
+        return 1, ""
     return (proc.returncode or 0), stdout_bytes.decode("utf-8", errors="replace").strip()
 
 
@@ -293,7 +318,7 @@ def _indent_block(text: str, prefix: str) -> str:
 
 
 def _read_bounded_review_md(target_dir: str) -> str:
-    """Safely read up to 8 KiB from <target_dir>/REVIEW.md, rejecting symlink escapes."""
+    """Safely read up to 8 KiB from <target_dir>/REVIEW.md, rejecting symlinks/FIFOs outside root."""
     if not target_dir:
         return ""
     try:
@@ -305,19 +330,24 @@ def _read_bounded_review_md(target_dir: str) -> str:
                 return ""
             open_path = resolved_target
         else:
-            if not review_file.exists():
+            lstat_res = review_file.lstat()
+            if not stat.S_ISREG(lstat_res.st_mode):
                 return ""
             resolved_target = review_file.resolve(strict=True)
             if not resolved_target.is_relative_to(root_real):
                 return ""
             open_path = review_file
 
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        if not stat.S_ISREG(open_path.lstat().st_mode):
+            return ""
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         fd = os.open(str(open_path), flags)
         try:
             st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode):
                 return ""
+            with contextlib.suppress(OSError):
+                os.set_blocking(fd, True)
             with os.fdopen(fd, "rb", closefd=False) as handle:
                 raw_bytes = handle.read(_MAX_REVIEW_MD_BYTES)
         finally:
