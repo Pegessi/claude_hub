@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import re
 import signal
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable, Literal, Sequence
@@ -21,13 +23,17 @@ from ...models.goal_run import (
     GoalStrictReviewFinding,
     GoalStrictReviewRound,
 )
+from .. import maso_discovery
 from ..cross_reviewer import (
+    _ORIGINAL_DISCOVER_MASO_SERVICE,
     CrossReviewCandidate,
     StrictReviewerTarget,
+    canonical_maso_base_model,
     is_candidate_quota_exhausted,
     read_cached_quota_map,
     select_cross_reviewer_candidates,
 )
+from ..maso_discovery import discover_maso_service
 
 logger = logging.getLogger(__name__)
 
@@ -57,11 +63,14 @@ _STOPWORDS = frozenset(
     }
 )
 _MAX_REVIEW_JSON_CHARS = 32 * 1024
+_MAX_PARSED_FINDINGS = 500
+_MAX_RETAINED_FINDINGS = 30
 _DEFAULT_REVIEW_TIMEOUT_SECONDS = 900.0
 _MAX_ASSISTANT_EXCERPT_CHARS = 12_000
 _GIT_CMD_TIMEOUT_SECONDS = 3.0
 _MAX_GIT_SUMMARY_CHARS = 2_000
 _MAX_LESSONS_CHARS = 1_500
+_MAX_REVIEW_MD_BYTES = 8_192
 _MAX_REVIEW_MD_CHARS = 2_000
 
 
@@ -122,10 +131,24 @@ class ReviewContinuationDecision:
 StrictReviewerCallback = Callable[[GoalRun, str, int], Awaitable[StrictReviewOutcome]]
 
 
+async def _read_stream_bounded(stream: asyncio.StreamReader | None, limit: int = 65_536) -> bytes:
+    if stream is None:
+        return b""
+    chunks: list[bytes] = []
+    remaining = limit
+    while remaining > 0:
+        chunk = await stream.read(min(4096, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
 async def _run_git_command(
     target_cwd: str, *args: str, timeout: float = _GIT_CMD_TIMEOUT_SECONDS
 ) -> tuple[int, str]:
-    """Run a bounded read-only git command without touching index locks."""
+    """Run a bounded read-only git command without touching index locks or hanging on grandchild pipes."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "git",
@@ -140,33 +163,47 @@ async def _run_git_command(
         )
     except OSError:
         return 1, ""
+    timed_out = False
+    stdout_bytes = b""
     try:
-        stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except (asyncio.TimeoutError, TimeoutError, asyncio.CancelledError):
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except OSError:
+        async with asyncio.timeout(timeout):
+            stdout_task = asyncio.create_task(_read_stream_bounded(proc.stdout, 65_536))
+            stderr_task = asyncio.create_task(_read_stream_bounded(proc.stderr, 16_384))
             try:
+                await proc.wait()
+                stdout_bytes, _ = await asyncio.gather(stdout_task, stderr_task)
+            finally:
+                for reader_task in (stdout_task, stderr_task):
+                    if not reader_task.done():
+                        reader_task.cancel()
+                await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+    except (asyncio.TimeoutError, TimeoutError):
+        timed_out = True
+    finally:
+        if timed_out or proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError, OSError):
                 proc.kill()
-            except OSError:
-                pass
-        try:
-            await proc.communicate()
-        except Exception:
-            pass
-        if isinstance(asyncio.current_task(), asyncio.Task) and asyncio.current_task().cancelling():  # type: ignore[union-attr]
-            raise
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+        transport = getattr(proc, "_transport", None)
+        if transport is not None:
+            with contextlib.suppress(Exception):
+                transport.close()
+    if timed_out:
         return 124, ""
-    return (proc.returncode or 0), stdout.decode("utf-8", errors="replace").strip()
+    return (proc.returncode or 0), stdout_bytes.decode("utf-8", errors="replace").strip()
 
 
-def _detect_referenced_worktrees(
+def _detect_referenced_worktrees_sync(
     cwd: str,
     *,
     objective: str,
     assistant_text: str,
     checkpoint: GoalCheckpoint | None,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
+    """Detect referenced *_worktree/<slug> directories and filter existing inspection dirs off-loop."""
     checkpoint_blob = (
         checkpoint.model_dump_json(exclude={"turn_id", "created_at"})
         if checkpoint is not None
@@ -174,7 +211,7 @@ def _detect_referenced_worktrees(
     )
     corpus = f"{checkpoint_blob}\n{assistant_text}\n{objective}"
     try:
-        resolved_cwd = str(Path(cwd).expanduser().resolve())
+        resolved_cwd = str(Path(cwd).expanduser().resolve()) if cwd else ""
     except OSError:
         resolved_cwd = cwd
     found: list[str] = []
@@ -191,7 +228,17 @@ def _detect_referenced_worktrees(
             found.append(resolved)
         if len(found) >= 3:
             break
-    return found
+
+    existing_dirs: list[str] = []
+    for d in [*found, cwd]:
+        if not d or d in existing_dirs:
+            continue
+        try:
+            if Path(d).expanduser().is_dir():
+                existing_dirs.append(d)
+        except OSError:
+            continue
+    return found, existing_dirs
 
 
 async def _collect_single_dir_git_snapshot(target_cwd: str) -> tuple[bool, str, str | None]:
@@ -245,30 +292,58 @@ def _indent_block(text: str, prefix: str) -> str:
     return "\n".join(f"{prefix}{line}" for line in text.splitlines())
 
 
-def _collect_workspace_memory(
+def _read_bounded_review_md(target_dir: str) -> str:
+    """Safely read up to 8 KiB from <target_dir>/REVIEW.md, rejecting symlink escapes."""
+    if not target_dir:
+        return ""
+    try:
+        root_real = Path(target_dir).expanduser().resolve(strict=True)
+        review_file = Path(target_dir).expanduser() / "REVIEW.md"
+        if review_file.is_symlink():
+            resolved_target = review_file.resolve(strict=True)
+            if not resolved_target.is_relative_to(root_real):
+                return ""
+            open_path = resolved_target
+        else:
+            if not review_file.exists():
+                return ""
+            resolved_target = review_file.resolve(strict=True)
+            if not resolved_target.is_relative_to(root_real):
+                return ""
+            open_path = review_file
+
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(open_path), flags)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                return ""
+            with os.fdopen(fd, "rb", closefd=False) as handle:
+                raw_bytes = handle.read(_MAX_REVIEW_MD_BYTES)
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        return raw_bytes.decode("utf-8", errors="replace").strip()[:_MAX_REVIEW_MD_CHARS]
+    except OSError:
+        return ""
+
+
+def _collect_workspace_memory_sync(
     candidate_paths: Sequence[str],
     *,
     objective: str,
     assistant_text: str,
 ) -> tuple[str | None, str, str]:
-    """Match candidate paths against registered workspaces and read lessons + REVIEW.md."""
+    """Match candidate paths against registered workspaces and read lessons + REVIEW.md off-loop."""
     workspace_id: str | None = None
     lessons_summary = ""
     review_md_excerpt = ""
 
     for path_str in candidate_paths:
-        if not path_str:
-            continue
-        try:
-            review_file = Path(path_str) / "REVIEW.md"
-            if review_file.is_file():
-                review_md_excerpt = review_file.read_text(
-                    encoding="utf-8", errors="replace"
-                ).strip()[:_MAX_REVIEW_MD_CHARS]
-                if review_md_excerpt:
-                    break
-        except OSError:
-            continue
+        excerpt = _read_bounded_review_md(path_str)
+        if excerpt:
+            review_md_excerpt = excerpt
+            break
 
     try:
         from ..workspace_manager import workspace_manager
@@ -353,25 +428,20 @@ async def collect_strict_review_context(
 ) -> StrictReviewContext:
     """Gather objective situational facts (Git diff/status, Workspace lessons, REVIEW.md)."""
     effective_cwd = (cwd or "").strip()
-    referenced = _detect_referenced_worktrees(
+    referenced, inspect_dirs = await asyncio.to_thread(
+        _detect_referenced_worktrees_sync,
         effective_cwd,
         objective=objective,
         assistant_text=assistant_text,
         checkpoint=checkpoint,
     )
     primary_cwd = referenced[0] if referenced else effective_cwd
-    inspect_dirs: list[str] = []
-    for d in [*referenced, effective_cwd]:
-        if d and d not in inspect_dirs:
-            inspect_dirs.append(d)
 
     any_git = False
     git_blocks: list[str] = []
     canonical_roots: list[str] = []
 
     for d in inspect_dirs:
-        if not Path(d).is_dir():
-            continue
         is_git, block, root = await _collect_single_dir_git_snapshot(d)
         if is_git:
             any_git = True
@@ -387,8 +457,9 @@ async def collect_strict_review_context(
             "and evidence directly against the Objective."
         )
 
-    all_candidate_paths = [*inspect_dirs, *canonical_roots]
-    workspace_id, lessons_summary, review_md_excerpt = _collect_workspace_memory(
+    all_candidate_paths = [p for p in [*referenced, effective_cwd, *canonical_roots] if p]
+    workspace_id, lessons_summary, review_md_excerpt = await asyncio.to_thread(
+        _collect_workspace_memory_sync,
         all_candidate_paths,
         objective=objective,
         assistant_text=assistant_text,
@@ -456,10 +527,14 @@ def _active_epoch_history(
     history: Sequence[GoalStrictReviewRound],
 ) -> list[GoalStrictReviewRound]:
     items = list(history)
-    for idx in range(len(items) - 1, -1, -1):
-        if items[idx].round_number == 1:
-            return items[idx:]
-    return items
+    if not items:
+        return []
+    current_cycle = getattr(items[-1], "cycle", 1)
+    cycle_items = [item for item in items if getattr(item, "cycle", 1) == current_cycle]
+    for idx in range(len(cycle_items) - 1, -1, -1):
+        if cycle_items[idx].round_number == 1:
+            return cycle_items[idx:]
+    return cycle_items
 
 
 def evaluate_review_continuation(
@@ -562,9 +637,14 @@ def build_strict_review_prompt(
     )
     effective_max = max(goal.strict_review_max_rounds, round_number)
     prior_rounds = ""
-    if goal.strict_review_history:
+    active_history = [
+        item
+        for item in goal.strict_review_history
+        if getattr(item, "cycle", 1) == getattr(goal, "strict_review_cycle", 1)
+    ] or list(goal.strict_review_history)
+    if active_history:
         lines: list[str] = []
-        for item in goal.strict_review_history:
+        for item in active_history:
             lines.append(
                 f"- Round {item.round_number} ({item.reviewer_provider}"
                 f"{'/' + item.reviewer_model if item.reviewer_model else ''}): "
@@ -640,7 +720,7 @@ def parse_strict_review_output(
     reviewer_model: str | None = None,
     reviewer_subagent_id: str | None = None,
 ) -> StrictReviewOutcome:
-    """Parse ``<goal-review>`` JSON, enforcing fail-closed P0/P1 blocking rules."""
+    """Parse ``<goal-review>`` JSON, enforcing fail-closed P0/P1 blocking rules across all findings."""
     matches = list(_GOAL_REVIEW_RE.finditer(raw_text))
     if not matches:
         raise ValueError("reviewer response omitted a <goal-review> JSON block")
@@ -659,10 +739,18 @@ def parse_strict_review_output(
     raw_findings = payload.get("findings") or []
     if not isinstance(raw_findings, list):
         raise ValueError("reviewer findings must be a JSON list")
-    findings = [GoalStrictReviewFinding.model_validate(item) for item in raw_findings[:30]]
-    # Fail closed: any P0/P1 finding forces BLOCK even if the model wrote PASS.
-    if any(item.severity in {"P0", "P1"} for item in findings):
+    if len(raw_findings) > _MAX_PARSED_FINDINGS:
+        raise ValueError(f"reviewer findings list exceeds {_MAX_PARSED_FINDINGS} items")
+    all_findings = [GoalStrictReviewFinding.model_validate(item) for item in raw_findings]
+    blocking = [item for item in all_findings if item.severity in {"P0", "P1"}]
+    advisory = [item for item in all_findings if item.severity not in {"P0", "P1"}]
+    # Fail closed: any P0/P1 finding anywhere in the full list forces BLOCK even if the model wrote PASS.
+    if blocking:
         verdict = "BLOCK"
+    findings = (
+        blocking[:_MAX_RETAINED_FINDINGS]
+        + advisory[: max(0, _MAX_RETAINED_FINDINGS - len(blocking))]
+    )[:_MAX_RETAINED_FINDINGS]
     return StrictReviewOutcome(
         verdict=verdict,
         summary=summary[:2000],
@@ -704,6 +792,39 @@ def format_strict_review_feedback(round_record: GoalStrictReviewRound) -> str:
     return "\n".join(lines)
 
 
+def _resolve_active_tab_model(tab_id: str) -> str | None:
+    """Inspect active native provider transport for tab_id to read its live current_model()."""
+    try:
+        from ..agent_stream.tailer import _TAILER_MANAGERS
+
+        for manager in list(_TAILER_MANAGERS):
+            direct = manager.get_tailer(tab_id)
+            if direct is not None and getattr(direct, "native_transport", None) is not None:
+                model_fn = getattr(direct.native_transport, "current_model", None)
+                if callable(model_fn):
+                    model = model_fn()
+                    if isinstance(model, str) and model.strip():
+                        return model.strip()
+            tailers_fn = getattr(manager, "tailers", None)
+            if not callable(tailers_fn):
+                continue
+            for tailer in tailers_fn():
+                transport = getattr(tailer, "native_transport", None)
+                if (
+                    transport is None
+                    or getattr(getattr(transport, "session", None), "tab_id", None) != tab_id
+                ):
+                    continue
+                model_fn = getattr(transport, "current_model", None)
+                if callable(model_fn):
+                    model = model_fn()
+                    if isinstance(model, str) and model.strip():
+                        return model.strip()
+    except Exception:
+        logger.debug("Could not inspect active provider model for tab %s", tab_id, exc_info=True)
+    return None
+
+
 async def run_subagent_strict_review(
     goal: GoalRun,
     assistant_text: str,
@@ -711,16 +832,18 @@ async def run_subagent_strict_review(
 ) -> StrictReviewOutcome:
     """Default production reviewer backed by ``SubagentService``."""
     from ...models.subagent import SubagentCreate, SubagentTurnStatus
-    from .. import maso_discovery
-    from ..cross_reviewer import _ORIGINAL_DISCOVER_MASO_SERVICE
-    from ..maso_discovery import discover_maso_service
-    from ..subagents import get_subagent_service
+    from .. import subagents as subagents_mod
     from ..ttyd_manager import ttyd_manager
 
     tab = ttyd_manager.get_tab(goal.tab_id)
     if tab is None:
         raise RuntimeError(f"Goal tab {goal.tab_id} no longer exists")
     parent_env = dict(tab.env or {})
+    if tab.agent_type == AgentType.MASO and not parent_env.get("MASO_MODEL"):
+        active_model = _resolve_active_tab_model(goal.tab_id)
+        if active_model:
+            parent_env["MASO_MODEL"] = active_model
+
     maso_url: str | None = None
     maso_model_ids: list[str] = []
     default_maso_model: str | None = None
@@ -731,10 +854,13 @@ async def run_subagent_strict_review(
         and maso_discovery.discover_maso_service is _ORIGINAL_DISCOVER_MASO_SERVICE
     )
     if should_probe_maso:
+        probe = (
+            discover_maso_service
+            if discover_maso_service is not _ORIGINAL_DISCOVER_MASO_SERVICE
+            else maso_discovery.discover_maso_service
+        )
         try:
-            discovered_url, discovered_models, discovered_default = await discover_maso_service(
-                parent_env
-            )
+            discovered_url, discovered_models, discovered_default = await probe(parent_env)
             maso_url = discovered_url
             maso_model_ids = [m.id for m in discovered_models]
             default_maso_model = discovered_default
@@ -769,7 +895,7 @@ async def run_subagent_strict_review(
         round_number,
         context=context,
     )
-    service = get_subagent_service()
+    service = subagents_mod.get_subagent_service()
     errors: list[str] = []
 
     for index, candidate in enumerate(candidates):
@@ -837,6 +963,7 @@ __all__ = [
     "StrictReviewerCallback",
     "StrictReviewerTarget",
     "build_strict_review_prompt",
+    "canonical_maso_base_model",
     "collect_strict_review_context",
     "evaluate_review_continuation",
     "format_strict_review_feedback",

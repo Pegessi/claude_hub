@@ -18,6 +18,7 @@ from ...models.goal_run import (
     GOAL_RECENT_TURN_IDS_LIMIT,
     GOAL_STEER_INPUT_MAX_LENGTH,
     GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS,
+    GOAL_STRICT_REVIEW_HISTORY_LIMIT,
     GOAL_STRICT_REVIEW_MAX_ROUNDS,
     GoalCheckpoint,
     GoalDispatchState,
@@ -534,10 +535,13 @@ class GoalRunController:
                 goal.status == GoalRunStatus.BLOCKED
                 or goal.strict_review_rounds >= goal.strict_review_max_rounds
             ):
+                goal.strict_review_cycle += 1
                 goal.strict_review_rounds = 0
                 goal.strict_review_max_rounds = GOAL_STRICT_REVIEW_MAX_ROUNDS
                 goal.strict_review_feedback = None
-                goal.strict_review_history = []
+                goal.strict_review_history = goal.strict_review_history[
+                    -GOAL_STRICT_REVIEW_HISTORY_LIMIT:
+                ]
             goal.status = GoalRunStatus.ACTIVE
             goal.paused_at = None
             deferred = after_current_turn and goal.dispatch_state == GoalDispatchState.IDLE
@@ -616,10 +620,13 @@ class GoalRunController:
                     if goal.strict_review and (
                         was_blocked or goal.strict_review_rounds >= goal.strict_review_max_rounds
                     ):
+                        goal.strict_review_cycle += 1
                         goal.strict_review_rounds = 0
                         goal.strict_review_max_rounds = GOAL_STRICT_REVIEW_MAX_ROUNDS
                         goal.strict_review_feedback = None
-                        goal.strict_review_history = []
+                        goal.strict_review_history = goal.strict_review_history[
+                            -GOAL_STRICT_REVIEW_HISTORY_LIMIT:
+                        ]
 
                 goal = self._mutate_once(goal_id, client_request_id, operation, apply)
             goal = await self._cancel_current(goal)
@@ -658,10 +665,13 @@ class GoalRunController:
                         goal.objective = objective
                         goal.objective_revision += 1
                         if goal.strict_review:
+                            goal.strict_review_cycle += 1
                             goal.strict_review_rounds = 0
                             goal.strict_review_max_rounds = GOAL_STRICT_REVIEW_MAX_ROUNDS
                             goal.strict_review_feedback = None
-                            goal.strict_review_history = []
+                            goal.strict_review_history = goal.strict_review_history[
+                                -GOAL_STRICT_REVIEW_HISTORY_LIMIT:
+                            ]
 
                 return self._mutate_once(goal_id, client_request_id, operation, apply)
 
@@ -772,6 +782,8 @@ class GoalRunController:
         if not current.strict_review_in_progress or current.status != GoalRunStatus.ACTIVE:
             return current
         round_number = current.strict_review_rounds + 1
+        reviewed_objective_revision = current.dispatched_objective_revision
+        reviewed_cycle = current.strict_review_cycle
         reviewer_cb = self.strict_reviewer or run_subagent_strict_review
 
         async def _invoke_reviewer() -> Any:
@@ -817,41 +829,55 @@ class GoalRunController:
             latest = self.store.get(goal_id)
             if not latest.strict_review_in_progress or latest.status != GoalRunStatus.ACTIVE:
                 return latest
-            latest.strict_review_in_progress = False
-            latest.strict_review_rounds = round_number
-            latest.strict_review_subagent_id = outcome.reviewer_subagent_id
-            round_record = GoalStrictReviewRound(
-                round_number=round_number,
-                worker_turn_id=worker_turn_id,
-                reviewer_subagent_id=outcome.reviewer_subagent_id,
-                reviewer_provider=outcome.reviewer_provider,
-                reviewer_model=outcome.reviewer_model,
-                verdict="PASS" if outcome.verdict == "PASS" else "BLOCK",
-                summary=outcome.summary,
-                findings=outcome.findings,
-            )
-            latest.strict_review_history.append(round_record)
-            latest.strict_review_history = latest.strict_review_history[
-                -GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS:
-            ]
-            latest.dispatch_state = GoalDispatchState.IDLE
-            if latest.dispatched_objective_revision != latest.objective_revision:
-                # Objective changed while reviewer ran: continue against updated objective.
+            if (
+                latest.objective_revision != reviewed_objective_revision
+                or latest.dispatched_objective_revision != latest.objective_revision
+                or latest.strict_review_cycle != reviewed_cycle
+            ):
+                # Objective or cycle changed while reviewer ran: do not charge the new
+                # cycle's round counter or pollute its history with a stale verdict.
+                latest.strict_review_in_progress = False
+                latest.strict_review_subagent_id = None
                 latest.strict_review_feedback = None
+                latest.dispatch_state = GoalDispatchState.IDLE
                 self.store.put(latest)
                 prepared = self._prepare_dispatch_locked(latest.id)
-            elif round_record.verdict == "PASS":
-                latest.strict_review_feedback = None
-                latest.status = GoalRunStatus.COMPLETE
-                latest.completed_at = utc_now()
-                latest.status_message = (
-                    f"Passed strict cross-review (round {round_number}, "
-                    f"{round_record.reviewer_provider}): {round_record.summary[:240]}"
-                )
-                return self.store.put(latest)
             else:
+                latest.strict_review_in_progress = False
+                latest.strict_review_rounds = round_number
+                latest.strict_review_subagent_id = outcome.reviewer_subagent_id
+                round_record = GoalStrictReviewRound(
+                    cycle=latest.strict_review_cycle,
+                    round_number=round_number,
+                    worker_turn_id=worker_turn_id,
+                    reviewer_subagent_id=outcome.reviewer_subagent_id,
+                    reviewer_provider=outcome.reviewer_provider,
+                    reviewer_model=outcome.reviewer_model,
+                    verdict="PASS" if outcome.verdict == "PASS" else "BLOCK",
+                    summary=outcome.summary,
+                    findings=outcome.findings,
+                )
+                latest.strict_review_history.append(round_record)
+                latest.strict_review_history = latest.strict_review_history[
+                    -GOAL_STRICT_REVIEW_HISTORY_LIMIT:
+                ]
+                latest.dispatch_state = GoalDispatchState.IDLE
+                if round_record.verdict == "PASS":
+                    latest.strict_review_feedback = None
+                    latest.status = GoalRunStatus.COMPLETE
+                    latest.completed_at = utc_now()
+                    latest.status_message = (
+                        f"Passed strict cross-review (round {round_number}, "
+                        f"{round_record.reviewer_provider}): {round_record.summary[:240]}"
+                    )
+                    return self.store.put(latest)
+                active_cycle_history = [
+                    item
+                    for item in latest.strict_review_history
+                    if item.cycle == latest.strict_review_cycle
+                ]
                 decision = evaluate_review_continuation(
-                    latest.strict_review_history,
+                    active_cycle_history,
                     base_max_rounds=latest.strict_review_max_rounds,
                     hard_max_rounds=GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS,
                 )
@@ -1043,8 +1069,18 @@ class GoalRunController:
                 goal.plan_pending = True
             self.store.put(goal)
             return self._prepare_dispatch_locked(goal.id)
+        if signal in {"blocked", "needs_input"}:
+            goal.status = GoalRunStatus.BLOCKED
+            return self.store.put(goal)
+        if planning_turn or planned_now:
+            # The Hub, not the model, owns this pause. A plan was produced and
+            # the user has not answered it, so the Goal parks even if the model
+            # asked to continue or complete: approving is what starts implementation.
+            goal.status = GoalRunStatus.BLOCKED
+            goal.status_message = "The plan awaits your approval before the Goal continues"
+            return self.store.put(goal)
         if signal == "complete":
-            if goal.strict_review and not planning_turn:
+            if goal.strict_review:
                 next_round = goal.strict_review_rounds + 1
                 effective_limit = min(
                     GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS,
@@ -1065,16 +1101,6 @@ class GoalRunController:
                 return self.store.put(goal)
             goal.status = GoalRunStatus.COMPLETE
             goal.completed_at = utc_now()
-            return self.store.put(goal)
-        if signal in {"blocked", "needs_input"}:
-            goal.status = GoalRunStatus.BLOCKED
-            return self.store.put(goal)
-        if planning_turn or planned_now:
-            # The Hub, not the model, owns this pause. A plan was produced and
-            # the user has not answered it, so the Goal parks even if the model
-            # asked to continue: approving is what starts implementation.
-            goal.status = GoalRunStatus.BLOCKED
-            goal.status_message = "The plan awaits your approval before the Goal continues"
             return self.store.put(goal)
 
         if self.dispatch is None:
