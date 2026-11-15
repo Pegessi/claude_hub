@@ -1,20 +1,25 @@
-"""Strict cross-review Goal gate tests: consensus PASS, P0/P1 BLOCK loop, and native override."""
+"""Strict cross-review Goal gate tests: consensus PASS, P0/P1 BLOCK loop, quota routing, context, and adaptive convergence."""
 
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from claude_hub.models import AgentType
+from claude_hub.models import AgentType, ProviderQuota, QuotaLimit
 from claude_hub.models.goal_run import (
+    GoalCheckpoint,
     GoalDispatchState,
     GoalRun,
     GoalRunCreate,
     GoalRunStatus,
     GoalStrictReviewFinding,
+    GoalStrictReviewRound,
+    GoalVerifiedProgress,
 )
 from claude_hub.services.goal_run import (
     GoalRunController,
@@ -27,7 +32,11 @@ from claude_hub.services.goal_run.controller import (
 )
 from claude_hub.services.goal_run.native import NativeGoalConnection
 from claude_hub.services.goal_run.strict_review import (
+    build_strict_review_prompt,
+    collect_strict_review_context,
+    evaluate_review_continuation,
     parse_strict_review_output,
+    run_subagent_strict_review,
     select_cross_reviewer_candidates,
 )
 
@@ -89,6 +98,7 @@ def test_select_cross_reviewer_candidates_picks_heterogeneous_models() -> None:
     )
     assert codex_targets[0].provider == "maso"
     assert codex_targets[0].model == "gemini-4-argon_reasoning_high"
+    assert all(t.provider != "codex" for t in codex_targets)
 
     argon_targets = select_cross_reviewer_candidates(
         AgentType.MASO,
@@ -99,6 +109,7 @@ def test_select_cross_reviewer_candidates_picks_heterogeneous_models() -> None:
     assert argon_targets[0].provider == "maso"
     assert argon_targets[0].model == "gpt-6-astra_reasoning_high"
     assert any(t.provider == "codex" for t in argon_targets)
+    assert all(t.model != "gemini-4-argon_reasoning_high" for t in argon_targets)
 
 
 @pytest.mark.asyncio
@@ -157,6 +168,7 @@ async def test_strict_review_blocks_p1_continues_and_completes_on_consensus(tmp_
     assert goal.status == GoalRunStatus.ACTIVE
     assert len(sent_prompts) == 1
     assert "Strict cross-model review is enabled" in sent_prompts[0][1]
+    assert "Situational hygiene guidance" in sent_prompts[0][1]
 
     # Turn 1 claims complete -> reviewer round 1 returns BLOCK -> controller dispatches turn 2
     first_turn_id = sent_prompts[0][0]
@@ -190,24 +202,30 @@ async def test_strict_review_blocks_p1_continues_and_completes_on_consensus(tmp_
 @pytest.mark.asyncio
 async def test_strict_review_parks_blocked_after_max_rounds(tmp_path: Path) -> None:
     sent: list[str] = []
+    distinct_Round_issues = {
+        1: ("main.py:10", "Startup config parser crashes on empty env"),
+        2: ("router.py:44", "Missing authentication guard on admin endpoint"),
+        3: ("store.py:88", "Unbounded list growth on event replay"),
+    }
 
     async def dispatch(goal: GoalRun, prompt: str) -> str | None:
         assert goal.pending_step_id is not None
         sent.append(goal.pending_step_id)
         return goal.pending_step_id
 
-    async def always_block(
+    async def distinct_block(
         goal: GoalRun, assistant_text: str, round_number: int
     ) -> StrictReviewOutcome:
+        file_loc, summary = distinct_Round_issues[round_number]
         return StrictReviewOutcome(
             verdict="BLOCK",
-            summary=f"Still failing in round {round_number}",
+            summary=f"Blocking issue in round {round_number}",
             findings=[
                 GoalStrictReviewFinding(
                     severity="P0",
-                    file="main.py:10",
-                    summary="Crashes on startup",
-                    fix="Initialize config first",
+                    file=file_loc,
+                    summary=summary,
+                    fix="Fix defect",
                 )
             ],
             reviewer_provider="codex",
@@ -216,7 +234,7 @@ async def test_strict_review_parks_blocked_after_max_rounds(tmp_path: Path) -> N
     ctrl = GoalRunController(
         GoalRunStore(tmp_path / "goals.json"),
         dispatch=dispatch,
-        strict_reviewer=always_block,
+        strict_reviewer=distinct_block,
     )
     goal = await ctrl.create_and_start(
         "tab-max",
@@ -235,13 +253,345 @@ async def test_strict_review_parks_blocked_after_max_rounds(tmp_path: Path) -> N
         assert res.status == GoalRunStatus.ACTIVE
         assert res.strict_review_rounds == expected_round
 
-    # Round 3 hits max_rounds and parks as BLOCKED for human judgment.
+    # Round 3 hits max_rounds (non-converging count 1 -> 1 -> 1) and parks as BLOCKED.
     step3 = sent[-1]
     final = await ctrl.on_turn_completed("tab-max", step3, "completed", complete_envelope())
     assert final is not None
     assert final.status == GoalRunStatus.BLOCKED
     assert final.strict_review_rounds == 3
     assert "3/3 rounds" in (final.status_message or "")
+
+
+@pytest.mark.asyncio
+async def test_strict_review_converging_blockers_grants_grace_round_and_completes(
+    tmp_path: Path,
+) -> None:
+    sent: list[str] = []
+
+    async def dispatch(goal: GoalRun, prompt: str) -> str | None:
+        assert goal.pending_step_id is not None
+        sent.append(goal.pending_step_id)
+        return goal.pending_step_id
+
+    # Monotonically decreasing blocker counts across rounds 1..3: 4 -> 2 -> 1, then PASS on round 4!
+    round_blocker_counts = {1: 4, 2: 2, 3: 1, 4: 0}
+
+    async def converging_reviewer(
+        goal: GoalRun, assistant_text: str, round_number: int
+    ) -> StrictReviewOutcome:
+        count = round_blocker_counts[round_number]
+        if count == 0:
+            return StrictReviewOutcome(
+                verdict="PASS",
+                summary="All remaining blockers resolved in grace round 4.",
+                findings=[],
+                reviewer_provider="maso",
+                reviewer_model="gpt-6-astra_reasoning_high",
+            )
+        findings = [
+            GoalStrictReviewFinding(
+                severity="P1",
+                file=f"mod_r{round_number}_{idx}.py:{idx * 10}",
+                summary=f"Distinct defect r{round_number} item {idx} in pipeline handler",
+                fix="Apply targeted fix",
+            )
+            for idx in range(1, count + 1)
+        ]
+        return StrictReviewOutcome(
+            verdict="BLOCK",
+            summary=f"{count} blocking defect(s) remain in round {round_number}",
+            findings=findings,
+            reviewer_provider="maso",
+            reviewer_model="gpt-6-astra_reasoning_high",
+        )
+
+    ctrl = GoalRunController(
+        GoalRunStore(tmp_path / "goals.json"),
+        dispatch=dispatch,
+        strict_reviewer=converging_reviewer,
+    )
+    goal = await ctrl.create_and_start(
+        "tab-converge",
+        GoalRunCreate(
+            objective="Ship multi-part refactor",
+            client_request_id="req-converge",
+            strict_review=True,
+        ),
+    )
+    assert goal.strict_review_max_rounds == 3
+
+    # Rounds 1 and 2 continue within base budget
+    for expected_round in (1, 2):
+        res = await ctrl.on_turn_completed(
+            "tab-converge", sent[-1], "completed", complete_envelope(f"Turn {expected_round}")
+        )
+        assert res is not None
+        assert res.status == GoalRunStatus.ACTIVE
+        assert res.strict_review_rounds == expected_round
+        assert res.strict_review_max_rounds == 3
+
+    # Round 3 sees blockers drop from 2 -> 1: grants convergence grace round 4 (max_rounds becomes 4)!
+    after_r3 = await ctrl.on_turn_completed(
+        "tab-converge", sent[-1], "completed", complete_envelope("Turn 3")
+    )
+    assert after_r3 is not None
+    assert after_r3.status == GoalRunStatus.ACTIVE
+    assert after_r3.strict_review_rounds == 3
+    assert after_r3.strict_review_max_rounds == 4
+    assert "grace round 4/4" in (after_r3.status_message or "")
+
+    # Round 4 passes and completes the Goal!
+    after_r4 = await ctrl.on_turn_completed(
+        "tab-converge", sent[-1], "completed", complete_envelope("Turn 4")
+    )
+    assert after_r4 is not None
+    assert after_r4.status == GoalRunStatus.COMPLETE
+    assert after_r4.strict_review_rounds == 4
+    assert len(after_r4.strict_review_history) == 4
+    assert after_r4.strict_review_history[-1].verdict == "PASS"
+
+
+@pytest.mark.asyncio
+async def test_strict_review_recurring_blocker_impasse_stops_early_and_resets_on_resume(
+    tmp_path: Path,
+) -> None:
+    sent: list[str] = []
+    pass_after_resume = False
+
+    async def dispatch(goal: GoalRun, prompt: str) -> str | None:
+        assert goal.pending_step_id is not None
+        sent.append(goal.pending_step_id)
+        return goal.pending_step_id
+
+    async def impasse_reviewer(
+        goal: GoalRun, assistant_text: str, round_number: int
+    ) -> StrictReviewOutcome:
+        if pass_after_resume:
+            return StrictReviewOutcome(
+                verdict="PASS",
+                summary="Resolved after user resume.",
+                findings=[],
+                reviewer_provider="maso",
+            )
+        return StrictReviewOutcome(
+            verdict="BLOCK",
+            summary=f"Same blocker persists in round {round_number}",
+            findings=[
+                GoalStrictReviewFinding(
+                    severity="P1",
+                    file="backend/auth.py:42",
+                    summary="Token signature verification skipped when header is lowercase",
+                    fix="Normalize header keys before lookup",
+                )
+            ],
+            reviewer_provider="maso",
+        )
+
+    ctrl = GoalRunController(
+        GoalRunStore(tmp_path / "goals.json"),
+        dispatch=dispatch,
+        strict_reviewer=impasse_reviewer,
+    )
+    goal = await ctrl.create_and_start(
+        "tab-impasse",
+        GoalRunCreate(
+            objective="Harden token verification",
+            client_request_id="req-impasse",
+            strict_review=True,
+        ),
+    )
+
+    # Round 1 blocks and continues
+    r1 = await ctrl.on_turn_completed("tab-impasse", sent[-1], "completed", complete_envelope())
+    assert r1 is not None
+    assert r1.status == GoalRunStatus.ACTIVE
+    assert r1.strict_review_rounds == 1
+
+    # Round 2 reports the identical blocker on backend/auth.py -> stops early with impasse!
+    r2 = await ctrl.on_turn_completed("tab-impasse", sent[-1], "completed", complete_envelope())
+    assert r2 is not None
+    assert r2.status == GoalRunStatus.BLOCKED
+    assert r2.strict_review_rounds == 2
+    assert "impasse" in (r2.status_message or "").lower()
+
+    # Resuming the BLOCKED Goal resets the review budget cleanly!
+    pass_after_resume = True
+    resumed = await ctrl.resume(goal.id, "resume-after-impasse")
+    assert resumed.status == GoalRunStatus.ACTIVE
+    assert resumed.strict_review_rounds == 0
+    assert resumed.strict_review_history == []
+
+    done = await ctrl.on_turn_completed("tab-impasse", sent[-1], "completed", complete_envelope())
+    assert done is not None
+    assert done.status == GoalRunStatus.COMPLETE
+    assert done.strict_review_rounds == 1
+
+
+@pytest.mark.asyncio
+async def test_collect_strict_review_context_git_worktree_lessons_and_non_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 1. Plain non-Git directory succeeds with zero Git errors or ceremony
+    plain_dir = tmp_path / "plain_analysis_dir"
+    plain_dir.mkdir()
+    (plain_dir / "report.txt").write_text("Throughput +14%\n", encoding="utf-8")
+
+    plain_ctx = await collect_strict_review_context(
+        str(plain_dir),
+        objective="Analyze Arena throughput results",
+        assistant_text="Wrote report.txt with summary table.",
+    )
+    assert plain_ctx.is_git_repo is False
+    assert "not a Git repository" in plain_ctx.git_summary
+    assert plain_ctx.primary_cwd == str(plain_dir)
+
+    # 2. Real temporary Git repository + referenced *_worktree/<slug> + REVIEW.md + Workspace lessons
+    primary_repo = tmp_path / "my_repo"
+    primary_repo.mkdir()
+    subprocess.run(["git", "-C", str(primary_repo), "init", "-b", "main"], check=True)
+    subprocess.run(
+        ["git", "-C", str(primary_repo), "config", "user.email", "test@example.com"], check=True
+    )
+    subprocess.run(["git", "-C", str(primary_repo), "config", "user.name", "Test User"], check=True)
+    (primary_repo / "app.py").write_text("print('v1')\n", encoding="utf-8")
+    (primary_repo / "REVIEW.md").write_text(
+        "# Review Guide\nAlways verify lock ordering in app.py.\n", encoding="utf-8"
+    )
+    subprocess.run(["git", "-C", str(primary_repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(primary_repo), "commit", "-m", "init"], check=True)
+
+    worktree_root = tmp_path / "my_repo_worktree"
+    worktree_root.mkdir()
+    wt_dir = worktree_root / "feat-lock"
+    subprocess.run(
+        ["git", "-C", str(primary_repo), "worktree", "add", str(wt_dir), "-b", "feat/lock", "main"],
+        check=True,
+    )
+    (wt_dir / "app.py").write_text("print('v2 with lock')\n", encoding="utf-8")
+
+    from claude_hub.services.workspace_manager import workspace_manager
+
+    fake_ws = SimpleNamespace(id="ws-test-1", path=str(primary_repo))
+    monkeypatch.setattr(workspace_manager, "workspaces", {"ws-test-1": fake_ws})
+    monkeypatch.setattr(
+        workspace_manager,
+        "_lesson_context_payload",
+        lambda ws, query: [
+            {
+                "id": "lesson-lock-1",
+                "title": "Check asyncio lock re-entrancy",
+                "summary": "Never await transport callbacks inside _lock_for",
+                "do": "Release lock before awaiting transport",
+                "avoid": "Nested lock acquisition",
+            }
+        ],
+    )
+
+    git_ctx = await collect_strict_review_context(
+        str(primary_repo),
+        objective="Update app.py in isolated worktree",
+        assistant_text=f"Implemented changes in {wt_dir} and verified.",
+    )
+    assert git_ctx.is_git_repo is True
+    assert str(wt_dir.resolve()) in git_ctx.referenced_worktrees
+    assert git_ctx.primary_cwd == str(wt_dir.resolve())
+    assert "feat/lock" in git_ctx.git_summary
+    assert "app.py" in git_ctx.git_summary
+    assert "Always verify lock ordering" in git_ctx.review_md_excerpt
+    assert "lesson-lock-1" in git_ctx.lessons_summary
+    assert "Release lock before awaiting transport" in git_ctx.lessons_summary
+
+
+def test_build_strict_review_prompt_includes_prior_blocker_ledger_and_rebuttal_rules() -> None:
+    goal = GoalRun(
+        tab_id="tab-prompt",
+        objective="Fix race condition in dispatcher",
+        strict_review=True,
+        strict_review_rounds=1,
+        strict_review_history=[
+            GoalStrictReviewRound(
+                round_number=1,
+                worker_turn_id="turn-1",
+                reviewer_provider="maso",
+                reviewer_model="gemini-4-argon_reasoning_high",
+                verdict="BLOCK",
+                summary="Race condition when task completes during cancel.",
+                findings=[
+                    GoalStrictReviewFinding(
+                        severity="P1",
+                        file="dispatcher.py:112",
+                        summary="State overwritten after cancellation",
+                        fix="Re-check status under lock",
+                    )
+                ],
+            )
+        ],
+        checkpoint=GoalCheckpoint(
+            turn_id="turn-2",
+            verified_progress=[GoalVerifiedProgress(item="lock check", evidence="pytest passed")],
+            decisions=["Re-checked state under lock"],
+            remaining=[],
+        ),
+    )
+    prompt = build_strict_review_prompt(
+        goal,
+        "turn-2",
+        "Added state re-check under lock and verified.",
+        2,
+    )
+    assert "prior P0/P1 blocker ledger" in prompt
+    assert "[P1] dispatcher.py:112 — State overwritten after cancellation" in prompt
+    assert "accept valid evidence-backed rebuttals" in prompt
+    assert "Anti-Nitpick Guard" in prompt
+    assert "COMPLETE actual git status and diff" in prompt
+
+
+@pytest.mark.asyncio
+async def test_run_subagent_strict_review_no_eligible_reviewer_parks_goal_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.goal_run import strict_review as sr_mod
+    from claude_hub.services.ttyd_manager import ttyd_manager
+
+    fake_tab = SimpleNamespace(
+        id="tab-no-rev",
+        agent_type=AgentType.CLAUDE,
+        env={},
+        cwd=str(tmp_path),
+    )
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda tab_id: fake_tab)
+
+    async def exhausted_quota():
+        return {
+            "codex": ProviderQuota(
+                provider="codex",
+                available=True,
+                state="over",
+                limits=[QuotaLimit(scope="5h", label="5h", state="over")],
+            )
+        }
+
+    monkeypatch.setattr(sr_mod, "read_cached_quota_map", exhausted_quota)
+
+    async def dispatch(goal: GoalRun, prompt: str) -> str | None:
+        return goal.pending_step_id
+
+    ctrl = GoalRunController(GoalRunStore(tmp_path / "goals.json"), dispatch=dispatch)
+    goal = await ctrl.create_and_start(
+        "tab-no-rev",
+        GoalRunCreate(
+            objective="Test no available cross reviewer",
+            client_request_id="req-no-rev",
+            strict_review=True,
+        ),
+    )
+    assert goal.current_turn_id is not None
+    settled = await ctrl.on_turn_completed(
+        "tab-no-rev", goal.current_turn_id, "completed", complete_envelope()
+    )
+    assert settled is not None
+    assert settled.status == GoalRunStatus.BLOCKED
+    assert "No eligible heterogeneous Chat provider" in (settled.status_message or "")
 
 
 @pytest.mark.asyncio
@@ -380,9 +730,9 @@ async def test_steer_after_max_rounds_resets_budget_and_persists_valid_history(
             [
                 GoalStrictReviewFinding(
                     severity="P1",
-                    file="x.py:1",
-                    summary="Defect",
-                    fix="Fix x",
+                    file=f"module_{round_number}.py:{round_number}",
+                    summary=f"Distinct defect in module {round_number} handler",
+                    fix="Fix handler",
                 )
             ]
             if verdict == "BLOCK"
@@ -419,13 +769,15 @@ async def test_steer_after_max_rounds_resets_budget_and_persists_valid_history(
     steered = await ctrl.steer(goal.id, "steer-1", "Apply alternative fix", "user-steer-turn")
     assert steered.status == GoalRunStatus.ACTIVE
     assert steered.strict_review_rounds == 0
+    assert steered.strict_review_history == []
 
     done = await ctrl.on_turn_completed(
         "tab-steer", "user-steer-turn", "completed", complete_envelope("Fixed after steer")
     )
     assert done is not None
     assert done.status == GoalRunStatus.COMPLETE
-    assert len(done.strict_review_history) == 3
+    assert done.strict_review_rounds == 1
+    assert len(done.strict_review_history) == 1
     reloaded = GoalRunStore(store_path)
     assert reloaded.get(goal.id).status == GoalRunStatus.COMPLETE
 

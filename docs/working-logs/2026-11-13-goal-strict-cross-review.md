@@ -1,41 +1,34 @@
-# 2026-11-13 Goal strict cross-review consensus gate
+# Working Log: Guidance-First Chat Goal Strict Cross-Review Upgrade (`2026-11-13`)
 
-## Overview
+## Context & Problem Statement
+Chat Goals support an optional `strict_review` gate where `<goal-status state="complete">` is verified by an independent cross-model reviewer subagent. Three practical limitations existed in the initial implementation:
+1. **Duplicate / Quota-Blind Routing**: Cross-reviewer candidate selection lived separately in `services/goal_run/strict_review.py` and `services/cross_reviewer.py`, did not consult `provider_quota` readings (risking timeouts on exhausted Codex or MASO models), and could fall back to same-model self-review when `MASO_MODEL` was omitted from `tab.env`.
+2. **Missing Situational Context & Rubric**: The reviewer subagent received only the worker's prose excerpt and checkpoint JSON without an objective full-diff snapshot, Workspace Feedback Lessons, `REVIEW.md` guidance, or a structured prior-round P0/P1 ledger with rebuttal fairness rules.
+3. **Rigid 3-Round Ceiling**: A fixed 3-round cutoff stopped Goals that were actively converging (`4 -> 2 -> 1` blockers) while wasting a third round when rounds 1 and 2 were already stuck on the exact same blocker impasse.
 
-Adds an optional `strict_review` gate to Chat Goals (`Set a Goal` dialog).
-When enabled (default remembered on under `claude-hub.goal-strict-review.v1`),
-completion is gated by an independent cross-model reviewer subagent before the
-Goal transitions to `complete`.
+## Design Decisions (Guidance-First, Zero Rigid Ceremony)
+- **Single Quota-Aware Cross-Reviewer Router (`backend/claude_hub/services/cross_reviewer.py`)**:
+  - Unified `CrossReviewCandidate`, `is_candidate_quota_exhausted`, `select_cross_reviewer_candidates`, and `resolve_cross_reviewer_target` in `cross_reviewer.py` while keeping all existing Workspace Task signatures backward-compatible.
+  - Resolved implicit MASO service defaults via `maso_model_family(parent_env, default_model=default_maso_model)` and removed silent same-model fallback.
+  - Added non-blocking cached quota filtering (`read_cached_quota_map`) that skips `codex`/`traex` when `state == "over"`, `maso` models only when `enforcing is True` and the matching model limit is `"over"`, and `antigravity` when its matching family bucket is `"over"`.
+- **Situational Context & Surgical Review Guidance (`services/goal_run/strict_review.py`, `controller.py`)**:
+  - Added worker situational guidance in `_strict_review_prompt` (worktree hygiene when modifying a Git repo on a shared branch, baseline evidence for perf/memory work, and evidence-backed rebuttals for false positives) without imposing rigid Git worktree/commit/push gates on read-only or non-Git Goals.
+  - Added `collect_strict_review_context` using bounded async `git -C <dir> --no-optional-locks` subprocesses (`<= 3s` timeout, process-group cleanup), automatic detection of referenced `*_worktree/<slug>` checkouts, and read-only lookup of Workspace `Feedback Lessons` and `REVIEW.md`.
+  - Upgraded `build_strict_review_prompt` with full-diff inspection instructions, a causal P0/P1 counterexample bar, an anti-nitpick guard, and a prior-round blocker ledger that honors valid evidence-backed rebuttals.
+- **Convergence-Aware Adaptive Round Budget (`models/goal_run.py`, `strict_review.py`, `controller.py`, `GoalStatusBar.vue`)**:
+  - Kept `GOAL_STRICT_REVIEW_MAX_ROUNDS = 3` as the base budget and added `GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS = 5` as the upper bound.
+  - Implemented `evaluate_review_continuation`:
+    - **Early Impasse Detection ($r \ge 2$)**: Stops early on `BLOCKED` when blocker count does not decrease ($B_r \ge B_{r-1}$) and $\ge 50\%$ of current blockers match the previous round's normalized file + summary token signature.
+    - **Monotonic Convergence Grace ($3 \le r < 5$)**: Grants a grace round (`effective_max_rounds = min(5, r + 1)`) when blocker count strictly decreased ($B_r < B_{r-1}$).
+    - **Fresh Budget on User Steer / Resume**: Explicitly steering or resuming a `BLOCKED` Goal resets `strict_review_rounds`, `strict_review_max_rounds`, and `strict_review_history`.
+  - Updated `GoalStatusBar.vue` to compute `strictMaxRounds` dynamically so grace rounds render as `4/4` or `5/5`.
 
-## Behavior and boundaries
-
-- **Setup UI (`GoalSetupDialog.vue`, `ChatGoalSetup.vue`, `useChatGoal.ts`)**:
-  - Adds a `Strict cross-review` option card alongside `Plan first`, defaulting
-    on (`Consensus gate` badge) and remembered in `localStorage`.
-  - Existing API/CLI/Feishu callers that omit `strict_review` default to
-    `strict_review: false`, preserving existing start and completion behavior
-    byte for byte.
-- **Execution ownership (`services/goal_run/native.py`, `controller.py`)**:
-  - Provider-native Goals (e.g., Codex `thread/goal/*`) never route completions
-    through Hub continuation gates. When `strict_review=True`, creation bypasses
-    provider-native Goal ownership (after checking that no unfinished native
-    Goal already occupies the thread) and runs as `hub_managed`, enabling both
-    the cross-model review gate and `Plan first` on Codex Chats.
-- **Cross-model review gate (`services/goal_run/strict_review.py`)**:
-  - When an implementing Goal turn emits `<goal-status state="complete">`,
-    `GoalRunController` enters `strict_review_in_progress=True` and invokes an
-    ephemeral read-only reviewer via `SubagentService` (`solo_mode=True`,
-    `keep=False`).
-  - Reviewer selection picks a heterogeneous model/provider relative to the
-    parent tab (e.g., Codex -> MASO Gemini Argon High; MASO Argon -> MASO
-    GPT-6-Astra High / Codex).
-  - Parsing `<goal-review>` fails closed: any `P0` or `P1` finding forces a
-    `BLOCK` verdict even if the reviewer prose or label says `PASS`.
-  - On `PASS`, the Goal transitions to `complete` and records the round in
-    `strict_review_history`.
-  - On `BLOCK` below `strict_review_max_rounds` (3), the controller formats the
-    blocking defects into `strict_review_feedback` and automatically dispatches
-    the next Goal continuation turn.
-  - Reaching `strict_review_max_rounds` without `PASS` (or encountering an
-    unrecoverable reviewer transport error) parks the Goal on `blocked` for
-    human inspection/steering. Pausing or clearing cancels an in-flight review.
+## Verification
+- `./scripts/verify.sh backend-format`
+- `./scripts/verify.sh backend-types`
+- `./scripts/verify.sh docs`
+- `./scripts/verify.sh backend-tests -- tests/test_goal_strict_review.py tests/test_cross_reviewer_quota.py tests/test_goal_run.py -q`
+- `./scripts/verify.sh frontend-types`
+- `./scripts/verify.sh frontend-lint`
+- `./scripts/verify.sh frontend-tests`
+- `./scripts/verify.sh frontend-build`
