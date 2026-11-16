@@ -105,7 +105,8 @@ class WorkspaceTaskCreate(BaseModel):
             ):
                 self.session_kind = SessionKind.CHAT
         elif (
-            "session_kind" not in self.model_fields_set
+            self.recipe != WorkspaceTaskRecipe.STANDARD
+            and "session_kind" not in self.model_fields_set
             and not self.session_id
             and self.agent_type in {AgentType.MASO, AgentType.ANTIGRAVITY}
         ):

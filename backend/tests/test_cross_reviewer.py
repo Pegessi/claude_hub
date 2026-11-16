@@ -435,7 +435,7 @@ async def test_workspace_manager_prefers_heterogeneous_reviewer_and_cleans_up_ep
 
 
 @pytest.mark.asyncio
-async def test_implicit_default_maso_worker_rejects_same_model_reviewer_and_spawns_cross_reviewer(
+async def test_reviewer_selection_reuses_independent_same_model_reviewer_and_falls_back_cleanly(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -499,11 +499,14 @@ async def test_implicit_default_maso_worker_rejects_same_model_reviewer_and_spaw
             session_kind=SessionKind.CHAT,
             role=WorkspaceSessionRole.ORCHESTRATOR,
             cwd=str(repo),
-            env={"MASO_BASE_URL": "http://127.0.0.1:11004"},
+            env={
+                "MASO_BASE_URL": "http://127.0.0.1:11004",
+                "CLAUDE_HUB_TAB_ID": "worker-tab-do-not-leak",
+            },
             reuse_existing=False,
         ),
     )
-    # Create an idle Argon reviewer (homogeneous with the worker's effective default model)
+    # Create an idle persistent Argon reviewer (same model family, independent REVIEWER session)
     idle_argon_reviewer = await manager.ensure_workspace_agent(
         workspace.id,
         EnsureWorkspaceAgentRequest(
@@ -527,22 +530,51 @@ async def test_implicit_default_maso_worker_rejects_same_model_reviewer_and_spaw
         workspace.id,
         WorkspaceTaskCreate(
             title="Implicit default MASO task",
-            prompt="Check cross reviewer selection",
+            prompt="Check independent reviewer selection",
             agent_type=AgentType.MASO,
             session_kind=SessionKind.CHAT,
             auto_worktree=False,
             auto_push_remote=False,
         ),
     )
-    # Even if task.review_session_id was previously set to the homogeneous Argon reviewer,
-    # _select_or_create_reviewer must reject it and spawn a heterogeneous Astra reviewer!
+    # 2. Existing explicit or idle independent REVIEWER session on the checkout is reused
+    # even when it runs the same model family as the worker.
     manager.tasks[task.id] = task.model_copy(
         update={"session_id": worker.id, "review_session_id": idle_argon_reviewer.id}
     )
-    selected_reviewer = await manager._select_or_create_reviewer(
-        workspace,
-        manager.tasks[task.id],
-    )
-    assert selected_reviewer.id != idle_argon_reviewer.id
-    assert selected_reviewer.agent_type == AgentType.MASO
-    assert selected_reviewer.env["MASO_MODEL"] == DEFAULT_ASTRA_REVIEW_MODEL
+    reused_explicit = await manager._select_or_create_reviewer(workspace, manager.tasks[task.id])
+    assert reused_explicit.id == idle_argon_reviewer.id
+
+    manager.tasks[task.id] = task.model_copy(update={"session_id": worker.id})
+    reused_idle = await manager._select_or_create_reviewer(workspace, manager.tasks[task.id])
+    assert reused_idle.id == idle_argon_reviewer.id
+
+    # 3. When no idle reviewer exists on the checkout and heterogeneous Astra is available,
+    # auto-spawning prefers the heterogeneous Astra cross-reviewer.
+    manager.sessions.pop(idle_argon_reviewer.id, None)
+    spawned_cross = await manager._select_or_create_reviewer(workspace, manager.tasks[task.id])
+    assert spawned_cross.id != worker.id
+    assert spawned_cross.role == WorkspaceSessionRole.REVIEWER
+    assert spawned_cross.ephemeral is True
+    assert spawned_cross.env["MASO_MODEL"] == DEFAULT_ASTRA_REVIEW_MODEL
+    manager.sessions.pop(spawned_cross.id, None)
+
+    # 4. When heterogeneous models are unavailable (e.g., MASO catalog only serves Argon),
+    # auto-spawning seamlessly creates a clean-context independent same-model REVIEWER session.
+    async def argon_only_discover(_env: dict[str, str]):
+        return (
+            "http://127.0.0.1:11004",
+            _maso_catalog(include_argon=True, include_astra=False),
+            "gemini-4-argon_reasoning_high",
+        )
+
+    monkeypatch.setattr(maso_discovery, "discover_maso_service", argon_only_discover)
+    monkeypatch.setattr(cross_reviewer, "discover_maso_service", argon_only_discover)
+
+    spawned_same_model = await manager._select_or_create_reviewer(workspace, manager.tasks[task.id])
+    assert spawned_same_model.id != worker.id
+    assert spawned_same_model.role == WorkspaceSessionRole.REVIEWER
+    assert spawned_same_model.ephemeral is True
+    assert spawned_same_model.caller_owned_ephemeral is False
+    assert spawned_same_model.env["MASO_BASE_URL"] == "http://127.0.0.1:11004"
+    assert "CLAUDE_HUB_TAB_ID" not in spawned_same_model.env

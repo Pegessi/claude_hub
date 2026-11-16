@@ -20,6 +20,7 @@ from ..prompts import (
     RETIRED_WAKE_MESSAGES,
     TIDY_MESSAGE,
     WAKE_MESSAGE,
+    format_task_brief,
 )
 from ..storage.cards import FOCUS_LIMIT, Card, now_iso, utc_now
 from ..storage.store import DotStore

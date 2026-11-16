@@ -27,6 +27,7 @@ from claude_hub.services.dot.runtime.common import (
     _worker_report,
     _worker_return,
     asyncio,
+    format_task_brief,
     lesson_score,
     lint_brief,
     logger,
@@ -254,13 +255,14 @@ class DotWorkService(DotSessionService, ABC):
             warnings = lint_brief(done_when=checks, context=effective_context, output=output)
             if warnings and not (confirm or replay):
                 return {"held": True, "warnings": warnings, "work": None}
-            brief = BRIEF_TEMPLATE.format(
+            brief = format_task_brief(
                 goal=goal.strip(),
                 context=effective_context.strip() or "(none given)",
                 done_when="\n".join(f"{number}. {item}" for number, item in enumerate(checks, 1)),
                 output=output.strip() or "(not given; say in the report where the result is)",
                 out_of_scope=out_of_scope.strip() or "(none given)",
                 constraints=constraints.strip() or "(none)",
+                recipe=recipe,
             )
             fields: dict[str, Any] = {
                 "title": title.strip(),

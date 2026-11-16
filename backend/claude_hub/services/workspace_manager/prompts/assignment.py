@@ -55,16 +55,20 @@ class _AssignmentPromptsMixin(_BootstrapPromptsMixin):
             task.goal_packet is not None
             and task.goal_packet.status == GoalPacketStatus.PENDING_REVIEW
         )
-        if task.recipe == WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW and not explicit_gp_gate:
+        streamlined_spec_pipeline = (
+            task.recipe == WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW and not explicit_gp_gate
+        )
+        if streamlined_spec_pipeline:
             gp_workflow_block = (
                 "Pipeline execution (spec_implement_review): Do NOT stop and wait for a separate "
                 "Goal Packet approval round before coding. Proceed straight through implementation "
                 f"in your isolated feature worktree ({task.worktree_path or session.workspace_path}) "
                 f"on branch {task.worktree_branch or 'your feature branch'}, run local verification, "
                 "commit your changes cleanly on the feature branch, and submit a `completed` report "
-                'with `review_decision="request"` so the heterogeneous cross-reviewer can audit '
+                'with `review_decision="request"` so an independent reviewer session can audit '
                 "your diff.\n\n"
             )
+            gp_example_block = ""
         else:
             gp_workflow_block = (
                 "Before substantive implementation, derive a Goal Packet from the task prompt and include it "
@@ -74,6 +78,17 @@ class _AssignmentPromptsMixin(_BootstrapPromptsMixin):
                 "tasks the Goal Packet is an approval gate: after posting it, stop and wait for reviewer "
                 "feedback; do not begin substantive implementation until the backend continues the task after "
                 "review_passed.\n\n"
+            )
+            gp_example_block = (
+                "Goal Packet report example (first working report for reviewed tasks):\n"
+                f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
+                "-H 'Content-Type: application/json' "
+                f'-d \'{{"task_id":"{task.id}","state":"working",'
+                f'"call_id":"{goal_packet_call_id}",'
+                '"message":"Goal Packet; awaiting approval.","message_en":"Goal Packet; awaiting approval.",'
+                '"message_zh":"目标包已创建，等待审核。","goal_packet":{'
+                '"objective":"...","acceptance_criteria":["..."],"validation_plan":["..."],'
+                '"assumptions":["..."],"out_of_scope":["..."],"handoff_requirements":["..."]}}\'\n\n'
             )
         return (
             "New workspace task assigned.\n\n"
@@ -106,15 +121,7 @@ class _AssignmentPromptsMixin(_BootstrapPromptsMixin):
             "follow-up, or trivial low-risk changes only; still requires human acceptance), or "
             "review_decision=auto (workspace default). The backend may still force review for nontrivial "
             "changes.\n\n"
-            "Goal Packet report example (first working report for reviewed tasks):\n"
-            f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
-            "-H 'Content-Type: application/json' "
-            f'-d \'{{"task_id":"{task.id}","state":"working",'
-            f'"call_id":"{goal_packet_call_id}",'
-            '"message":"Goal Packet; awaiting approval.","message_en":"Goal Packet; awaiting approval.",'
-            '"message_zh":"目标包已创建，等待审核。","goal_packet":{'
-            '"objective":"...","acceptance_criteria":["..."],"validation_plan":["..."],'
-            '"assumptions":["..."],"out_of_scope":["..."],"handoff_requirements":["..."]}}\'\n\n'
+            f"{gp_example_block}"
             "Every report must include message_en (concise English) and message_zh (concise 中文); keep "
             "the legacy `message` field as a short English fallback. Final reports must include "
             "task_id/state/message/message_en/message_zh/changed_files/validation/risks/acceptance_check/"
@@ -277,12 +284,12 @@ class _AssignmentPromptsMixin(_BootstrapPromptsMixin):
             wt_path = task.worktree_path or session.workspace_path or workspace.path
             wt_branch = task.worktree_branch or "feature-branch"
             return (
-                "Pipeline recipe: spec_implement_review (Isolated Worktree Implementation & Heterogeneous Cross-Review)\n"
+                "Pipeline recipe: spec_implement_review (Isolated Worktree Implementation & Independent Review)\n"
                 f"{demand_line}"
                 f"- Assigned isolated worktree: {wt_path} (branch: {wt_branch}). NEVER edit the primary main checkout.\n"
                 "- Implement the change and unit/integration tests directly in this worktree without waiting for a separate Goal Packet round.\n"
                 '- Run local verification, commit your changes on the feature branch, and submit `completed` with `review_decision="request"`.\n'
-                "- After heterogeneous cross-review passes, the Hub will automatically push the feature branch to `origin`.\n\n"
+                "- After independent review passes, the Hub will automatically push the feature branch to `origin`.\n\n"
             )
         if task.recipe == WorkspaceTaskRecipe.EVAL_AND_REPORT:
             return (
