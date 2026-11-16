@@ -18,8 +18,9 @@ from claude_hub.cli.client import HubError
 from claude_hub.cli.output import emit, print_rows, truncate
 
 CARD_KINDS = ["user", "work", "knowledge", "concept"]
-AGENT_TYPES = ["codex", "claude", "cursor", "traex"]
-TASK_MODES = ["direct", "reviewed", "autonomous"]
+AGENT_TYPES = ["codex", "claude", "cursor", "traex", "maso", "antigravity"]
+TASK_MODES = ["direct", "reviewed", "autonomous", "subagent"]
+RECIPES = ["standard", "triage_diagnose", "spec_implement_review", "eval_and_report"]
 
 
 def _call(
@@ -452,6 +453,19 @@ def dot_unwatch(ctx: click.Context, task_id: str) -> None:
 @click.option("--constraints", default="", help="Limits: style, tools, budget.")
 @click.option("--agent", "agent_type", type=click.Choice(AGENT_TYPES), default="codex")
 @click.option("--mode", "task_mode", type=click.Choice(TASK_MODES), default=None)
+@click.option(
+    "--model", default=None, help="Explicit provider model ID for a dedicated Chat session."
+)
+@click.option("--env-preset", "env_preset", default=None, help="Provider env preset name or id.")
+@click.option(
+    "--recipe", type=click.Choice(RECIPES), default=None, help="Standardized pipeline recipe."
+)
+@click.option("--demand-id", "demand_id", default=None, help="Linked InfoWall demand ID.")
+@click.option(
+    "--ephemeral/--no-ephemeral",
+    default=None,
+    help="Provision a dedicated task-scoped ephemeral session.",
+)
 @click.option("--no-start", is_flag=True, help="Register only; do not dispatch.")
 @click.option("--request-key", default=None, help="Idempotency key for safe retries.")
 @click.option(
@@ -480,6 +494,11 @@ def dot_delegate(
     constraints: str,
     agent_type: str,
     task_mode: Optional[str],
+    model: Optional[str],
+    env_preset: Optional[str],
+    recipe: Optional[str],
+    demand_id: Optional[str],
+    ephemeral: Optional[bool],
     no_start: bool,
     request_key: Optional[str],
     stall_hours: Optional[float],
@@ -506,6 +525,16 @@ def dot_delegate(
     }
     if task_mode:
         body["task_mode"] = task_mode
+    if model:
+        body["model"] = model
+    if env_preset:
+        body["env_preset"] = env_preset
+    if recipe:
+        body["recipe"] = recipe
+    if demand_id:
+        body["demand_id"] = demand_id
+    if ephemeral is not None:
+        body["ephemeral"] = ephemeral
     if request_key:
         body["request_key"] = request_key
     if stall_hours is not None:

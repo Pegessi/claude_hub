@@ -100,14 +100,28 @@ class _SessionInventoryMixin(_WorkspaceManagerBase):
         session_id: str,
         *,
         exclude_task_id: str | None = None,
+        allow_completed_review_for_task_id: str | None = None,
     ) -> list[WorkspaceTask]:
-        return [
-            other
-            for other in self.tasks.values()
-            if other.id != exclude_task_id
-            and (other.session_id == session_id or other.review_session_id == session_id)
-            and other.status not in self._TERMINAL_TASK_STATUSES_FOR_REUSE
-        ]
+        result: list[WorkspaceTask] = []
+        for other in self.tasks.values():
+            if other.id == exclude_task_id:
+                continue
+            if other.status in self._TERMINAL_TASK_STATUSES_FOR_REUSE:
+                continue
+            if other.session_id == session_id:
+                result.append(other)
+                continue
+            if other.review_session_id == session_id:
+                if (
+                    allow_completed_review_for_task_id is not None
+                    and other.id == allow_completed_review_for_task_id
+                    and not state_policy.review_in_flight(
+                        other.review_requested_at, other.review_completed_at
+                    )
+                ):
+                    continue
+                result.append(other)
+        return result
 
     def _session_raw_task_bindings_block_cleanup(
         self,

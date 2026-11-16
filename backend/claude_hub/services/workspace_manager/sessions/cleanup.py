@@ -12,7 +12,11 @@ class _SessionCleanupMixin(_WorkspaceManagerBase):
     )
 
     async def delete_session(
-        self, session_id: str, *, before_delete: Callable[[], bool] | None = None
+        self,
+        session_id: str,
+        *,
+        before_delete: Callable[[], bool] | None = None,
+        allow_completed_review_for_task_id: str | None = None,
     ) -> None:
         session = self.sessions.get(session_id)
         if not session:
@@ -22,9 +26,18 @@ class _SessionCleanupMixin(_WorkspaceManagerBase):
             session = self.sessions.get(session_id)
             if session is None:
                 raise KeyError(session_id)
-            blocking = self._non_terminal_tasks_referencing_session(session_id)
+            blocking = self._non_terminal_tasks_referencing_session(
+                session_id,
+                allow_completed_review_for_task_id=allow_completed_review_for_task_id,
+            )
             if blocking:
                 raise RuntimeError("Cannot delete an agent with queued, working, or review tasks")
+            if allow_completed_review_for_task_id is not None and (
+                self._session_raw_task_bindings_block_cleanup(
+                    session, exclude_task_id=allow_completed_review_for_task_id
+                )
+            ):
+                raise RuntimeError("Cannot delete an agent with active raw task binding")
 
             pump_lock = self._pump_locks.setdefault(session_id, asyncio.Lock())
             async with pump_lock:

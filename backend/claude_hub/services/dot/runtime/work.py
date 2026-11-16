@@ -8,7 +8,6 @@ from claude_hub.services.dot.runtime.common import (
     _QUESTION_REPORT_STATES,
     _TERMINAL_TASK_STATES,
     BRIEF_TEMPLATE,
-    DEFAULT_STALL_HOURS,
     REVIEW_CAUSES,
     REVIEW_VERDICTS,
     STATS_WINDOW,
@@ -28,7 +27,7 @@ from claude_hub.services.dot.runtime.common import (
     _worker_report,
     _worker_return,
     asyncio,
-    datetime,
+    format_task_brief,
     lesson_score,
     lint_brief,
     logger,
@@ -36,7 +35,6 @@ from claude_hub.services.dot.runtime.common import (
     same_rule,
     session_rules,
     time,
-    timedelta,
 )
 from claude_hub.services.dot.runtime.session import DotSessionService
 
@@ -101,6 +99,11 @@ class DotWorkService(DotSessionService, ABC):
         constraints: str = "",
         agent_type: str = "codex",
         task_mode: Optional[str] = None,
+        model: Optional[str] = None,
+        env_preset: Optional[str] = None,
+        recipe: Optional[str] = None,
+        demand_id: Optional[str] = None,
+        ephemeral: Optional[bool] = None,
         start: bool = True,
         request_key: Optional[str] = None,
         stall_hours: Optional[float] = None,
@@ -117,18 +120,30 @@ class DotWorkService(DotSessionService, ABC):
         """
         from ....models.schemas import (
             AgentType,
+            EnsureWorkspaceAgentRequest,
+            SessionKind,
             StartTaskRequest,
             TaskSourceReference,
             WorkspaceSessionRole,
             WorkspaceTaskCreate,
             WorkspaceTaskMode,
+            WorkspaceTaskRecipe,
         )
         from ... import workspace_manager
+        from ...agent_stream.providers.spec import get_spec
+        from ...maso_discovery import discover_maso_service
+        from ...work_pipeline import provision_task_worktree, read_infowall_demand_summary
         from ...workspace_manager._task_execution import TaskExecutionConflict
 
         checks = [" ".join(item.split()) for item in done_when if item.strip()]
         if not title.strip() or not goal.strip() or not checks:
             raise ValueError("title, goal and done_when are required")
+
+        cleaned_demand_id = (
+            demand_id.strip() if isinstance(demand_id, str) and demand_id.strip() else None
+        )
+        caller_context = context.strip()
+
         session_kind = None
         if session_id:
             target = workspace_manager.sessions.get(session_id)
@@ -141,78 +156,266 @@ class DotWorkService(DotSessionService, ABC):
             # The task runs as that agent, on its surface (terminal or Chat).
             agent_type = getattr(target.agent_type, "value", str(target.agent_type))
             session_kind = target.session_kind
-        self.store.ensure()
-        warnings = lint_brief(done_when=checks, context=context, output=output)
-        replay = bool(request_key) and any(
-            item.get("request_key") == request_key
-            for item in self.store.list_work(include_closed=True)
+        else:
+            parsed_agent = AgentType(agent_type)
+            if (
+                parsed_agent in {AgentType.MASO, AgentType.ANTIGRAVITY}
+                or model
+                or env_preset
+                or ephemeral is not None
+                or recipe == "triage_diagnose"
+            ) and parsed_agent in {
+                AgentType.CLAUDE,
+                AgentType.CODEX,
+                AgentType.CURSOR,
+                AgentType.MASO,
+                AgentType.ANTIGRAVITY,
+            }:
+                session_kind = SessionKind.CHAT
+
+        import contextlib
+        import hashlib
+
+        actor_key_hash = hashlib.sha256((actor_key or "").encode("utf-8")).hexdigest()
+        req_locks: dict[tuple[str, str, str], asyncio.Lock] | None = getattr(
+            self, "_delegate_request_locks", None
         )
-        if warnings and not (confirm or replay):
-            return {"held": True, "warnings": warnings, "work": None}
-        brief = BRIEF_TEMPLATE.format(
-            goal=goal.strip(),
-            context=context.strip() or "(none given)",
-            done_when="\n".join(f"{number}. {item}" for number, item in enumerate(checks, 1)),
-            output=output.strip() or "(not given; say in the report where the result is)",
-            out_of_scope=out_of_scope.strip() or "(none given)",
-            constraints=constraints.strip() or "(none)",
+        if req_locks is None:
+            req_locks = {}
+            setattr(self, "_delegate_request_locks", req_locks)
+        req_lock_cm: Any = (
+            req_locks.setdefault((workspace_id, actor_key_hash, request_key), asyncio.Lock())
+            if request_key
+            else contextlib.nullcontext()
         )
-        fields: dict[str, Any] = {
-            "title": title.strip(),
-            "prompt": brief,
-            "agent_type": AgentType(agent_type),
-            "request_key": request_key,
-        }
-        tab_id = self.tab_id()
-        if tab_id:
-            fields["source"] = TaskSourceReference(kind="chat", tab_id=tab_id)
-        if task_mode:
-            fields["task_mode"] = WorkspaceTaskMode(task_mode)
-        if session_kind is not None:
-            fields["session_kind"] = session_kind
-        task, _replayed = await workspace_manager.register_task(
-            workspace_id, WorkspaceTaskCreate(**fields), actor_key
-        )
-        # Tracked before it starts: a task that fails to start is still Dot's.
-        item = self.store.upsert_work(
-            task.id,
-            workspace_id=workspace_id,
-            title=task.title,
-            goal=goal.strip(),
-            done_when=checks,
-            output=output.strip() or None,
-            agent_type=agent_type,
-            # A replayed task may have moved on since the last poll; the watcher must
-            # still see that change, or its result event is lost.
-            status=None if replay else task.status.value,
-            stall_hours=stall_hours,
-            request_key=request_key,
-            # Kept so a later review can see which warnings Dot sent past.
-            brief_warnings=warnings or None,
-            # Dot's own, even if the watcher saw it first (it watches Dot's tasks).
-            watched=False,
-        )
-        try:
-            if start and task.status.value == "todo":
-                try:
-                    task = await workspace_manager.start_task(
-                        task.id,
-                        StartTaskRequest(
-                            agent_type=AgentType(agent_type), target_session_id=session_id
-                        ),
+        async with req_lock_cm:
+            self.store.ensure()
+            work_items = self.store.list_work(include_closed=True) if request_key else []
+            existing_work = next(
+                (
+                    item
+                    for item in work_items
+                    if item.get("request_key") == request_key
+                    and item.get("workspace_id") == workspace_id
+                    and item.get("actor_key_hash") == actor_key_hash
+                ),
+                None,
+            )
+            if existing_work is None and request_key:
+                for item in work_items:
+                    if (
+                        item.get("request_key") == request_key
+                        and item.get("workspace_id") == workspace_id
+                        and item.get("actor_key_hash") is None
+                    ):
+                        linked_task = getattr(workspace_manager, "tasks", {}).get(
+                            str(item.get("task_id") or "")
+                        )
+                        if (
+                            linked_task is not None
+                            and getattr(linked_task, "creation_actor_key", None) == actor_key
+                        ):
+                            existing_work = item
+                            break
+            replay = existing_work is not None
+            caller_fp = [
+                workspace_id,
+                title.strip(),
+                goal.strip(),
+                checks,
+                output.strip(),
+                caller_context,
+                out_of_scope.strip(),
+                constraints.strip(),
+                agent_type,
+                task_mode,
+                recipe,
+                cleaned_demand_id,
+            ]
+            if (
+                replay
+                and existing_work is not None
+                and existing_work.get("caller_fp") == caller_fp
+                and isinstance(existing_work.get("enriched_context"), str)
+            ):
+                effective_context = existing_work["enriched_context"]
+            elif cleaned_demand_id:
+                demand_summary = await read_infowall_demand_summary(cleaned_demand_id)
+                if demand_summary:
+                    effective_context = (
+                        f"{caller_context}\n\n{demand_summary}"
+                        if caller_context
+                        else demand_summary
                     )
-                except TaskExecutionConflict:
-                    raise
-                except Exception as exc:
-                    raise DelegateNotStarted(
-                        f"Task {task.id} was created but did not start: {exc}"
-                    ) from exc
-                # Outside the "did not start" net: it did start, whatever this write does.
-                if not replay:
-                    item = self.store.upsert_work(task.id, status=task.status.value)
-        finally:
-            await asyncio.to_thread(self.store.commit, f"dot: delegate {task.id}")
-        return {"held": False, "warnings": warnings, "work": item}
+                else:
+                    effective_context = caller_context
+            else:
+                effective_context = caller_context
+
+            warnings = lint_brief(done_when=checks, context=effective_context, output=output)
+            if warnings and not (confirm or replay):
+                return {"held": True, "warnings": warnings, "work": None}
+            brief = format_task_brief(
+                goal=goal.strip(),
+                context=effective_context.strip() or "(none given)",
+                done_when="\n".join(f"{number}. {item}" for number, item in enumerate(checks, 1)),
+                output=output.strip() or "(not given; say in the report where the result is)",
+                out_of_scope=out_of_scope.strip() or "(none given)",
+                constraints=constraints.strip() or "(none)",
+                recipe=recipe,
+            )
+            fields: dict[str, Any] = {
+                "title": title.strip(),
+                "prompt": brief,
+                "agent_type": AgentType(agent_type),
+                "request_key": request_key,
+            }
+            tab_id = self.tab_id()
+            if tab_id:
+                fields["source"] = TaskSourceReference(kind="chat", tab_id=tab_id)
+            if task_mode:
+                fields["task_mode"] = WorkspaceTaskMode(task_mode)
+            if recipe:
+                fields["recipe"] = WorkspaceTaskRecipe(recipe)
+            if cleaned_demand_id:
+                fields["infowall_demand_id"] = cleaned_demand_id
+            if session_kind is not None:
+                fields["session_kind"] = session_kind
+            task, _replayed = await workspace_manager.register_task(
+                workspace_id, WorkspaceTaskCreate(**fields), actor_key
+            )
+            # Tracked before it starts: a task that fails to start is still Dot's.
+            item = self.store.upsert_work(
+                task.id,
+                workspace_id=workspace_id,
+                title=task.title,
+                goal=goal.strip(),
+                done_when=checks,
+                output=output.strip() or None,
+                agent_type=agent_type,
+                # A replayed task may have moved on since the last poll; the watcher must
+                # still see that change, or its result event is lost.
+                status=None if replay else task.status.value,
+                stall_hours=stall_hours,
+                request_key=request_key,
+                actor_key_hash=actor_key_hash if request_key else None,
+                caller_fp=caller_fp if request_key else None,
+                enriched_context=effective_context if request_key else None,
+                # Kept so a later review can see which warnings Dot sent past.
+                brief_warnings=warnings or None,
+                # Dot's own, even if the watcher saw it first (it watches Dot's tasks).
+                watched=False,
+            )
+            try:
+                if start and task.status.value == "todo":
+                    created_ephemeral_session_id: str | None = None
+                    try:
+                        target_session_id = session_id or getattr(task, "session_id", None)
+                        if not target_session_id and (
+                            model
+                            or env_preset
+                            or ephemeral is not None
+                            or AgentType(agent_type) == AgentType.MASO
+                        ):
+                            ws_obj = getattr(workspace_manager, "workspaces", {}).get(workspace_id)
+                            provisioned_wt_path: str | None = None
+                            if (
+                                ws_obj is not None
+                                and getattr(task, "auto_worktree", False)
+                                and not getattr(task, "worktree_path", None)
+                            ):
+                                wt_path, _wt_branch = await provision_task_worktree(ws_obj, task)
+                                live_after_wt = getattr(workspace_manager, "tasks", {}).get(task.id)
+                                if live_after_wt is not None:
+                                    if live_after_wt.status.value != "todo":
+                                        raise RuntimeError(
+                                            f"Task {task.id} changed to {live_after_wt.status.value} before start"
+                                        )
+                                    task = live_after_wt
+                                if getattr(task, "auto_worktree", False):
+                                    provisioned_wt_path = wt_path
+                            agent_env: dict[str, str] = {}
+                            parsed_agent = AgentType(agent_type)
+                            if parsed_agent == AgentType.MASO:
+                                base_url, _models, _default = await discover_maso_service(agent_env)
+                                agent_env["MASO_BASE_URL"] = base_url
+                            if model:
+                                spec = get_spec(parsed_agent)
+                                if spec.model_env_key:
+                                    agent_env[spec.model_env_key] = model.strip()
+                            use_ephemeral = True if ephemeral is None else bool(ephemeral)
+                            live_before_agent = getattr(workspace_manager, "tasks", {}).get(task.id)
+                            if live_before_agent is not None:
+                                if live_before_agent.status.value != "todo":
+                                    raise RuntimeError(
+                                        f"Task {task.id} changed to {live_before_agent.status.value} before start"
+                                    )
+                                task = live_before_agent
+                            target_cwd = (
+                                provisioned_wt_path
+                                if getattr(task, "auto_worktree", False) and provisioned_wt_path
+                                else getattr(task, "worktree_path", None)
+                                or (ws_obj.path if ws_obj is not None else None)
+                            )
+                            created_session = await workspace_manager.ensure_workspace_agent(
+                                workspace_id,
+                                EnsureWorkspaceAgentRequest(
+                                    agent_type=parsed_agent,
+                                    session_kind=session_kind or SessionKind.CHAT,
+                                    role=WorkspaceSessionRole.ORCHESTRATOR,
+                                    reuse_existing=not use_ephemeral,
+                                    ephemeral=use_ephemeral,
+                                    caller_owned_ephemeral=use_ephemeral,
+                                    cwd=target_cwd,
+                                    env=agent_env,
+                                    env_preset=env_preset,
+                                ),
+                            )
+                            if use_ephemeral:
+                                created_ephemeral_session_id = created_session.id
+                            target_session_id = created_session.id
+
+                        task = await workspace_manager.start_task(
+                            task.id,
+                            StartTaskRequest(
+                                agent_type=AgentType(agent_type),
+                                target_session_id=target_session_id,
+                            ),
+                        )
+                    except TaskExecutionConflict:
+                        raise
+                    except Exception as exc:
+                        raise DelegateNotStarted(
+                            f"Task {task.id} was created but did not start: {exc}"
+                        ) from exc
+                    finally:
+                        if created_ephemeral_session_id is not None:
+                            live_task = getattr(workspace_manager, "tasks", {}).get(task.id)
+                            live_session_id = (
+                                getattr(live_task, "session_id", None)
+                                if live_task is not None
+                                else getattr(task, "session_id", None)
+                            )
+                            if live_session_id != created_ephemeral_session_id:
+                                if hasattr(workspace_manager, "_best_effort_delete_session"):
+                                    await asyncio.shield(
+                                        workspace_manager._best_effort_delete_session(
+                                            created_ephemeral_session_id
+                                        )
+                                    )
+                                elif hasattr(workspace_manager, "delete_session"):
+                                    with contextlib.suppress(Exception):
+                                        await asyncio.shield(
+                                            workspace_manager.delete_session(
+                                                created_ephemeral_session_id
+                                            )
+                                        )
+                    # Outside the "did not start" net: it did start, whatever this write does.
+                    if not replay:
+                        item = self.store.upsert_work(task.id, status=task.status.value)
+            finally:
+                await asyncio.to_thread(self.store.commit, f"dot: delegate {task.id}")
+            return {"held": False, "warnings": warnings, "work": item}
 
     async def review(
         self,

@@ -92,6 +92,7 @@ class _StateMixin(_WorkspaceManagerBase):
         # "dead" (no start edge and the provider is idle), or "unknown".
         self._scheduled_chat_liveness: ScheduledChatLiveness | None = None
         self._dispatch_locks: dict[str, asyncio.Lock] = {}
+        self._task_start_locks: dict[str, asyncio.Lock] = {}
         self._feedback_summary_locks: dict[str, asyncio.Lock] = {}
         # Per-session pump locks: serialize _pump_session_messages so two
         # concurrent pump cycles cannot both send the same pending call_id

@@ -51,6 +51,10 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                 payload.session_kind is not None,
                 payload.parent_task_id is not None,
                 payload.depends_on_task_ids is not None,
+                payload.recipe is not None,
+                "infowall_demand_id" in payload.model_fields_set,
+                payload.auto_worktree is not None,
+                payload.auto_push_remote is not None,
                 "agent_tag" in payload.model_fields_set,
             ]
         )
@@ -147,6 +151,37 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                 raise ValueError("The selected agent does not match the Task execution surface")
         if "agent_tag" in payload.model_fields_set:
             update["agent_tag"] = payload.agent_tag
+        if "infowall_demand_id" in payload.model_fields_set:
+            update["infowall_demand_id"] = (payload.infowall_demand_id or "").strip() or None
+        if payload.recipe is not None:
+            update["recipe"] = payload.recipe
+            if payload.recipe == WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW:
+                if payload.auto_worktree is None:
+                    update["auto_worktree"] = True
+                if payload.auto_push_remote is None:
+                    update["auto_push_remote"] = True
+            elif payload.recipe == WorkspaceTaskRecipe.TRIAGE_DIAGNOSE:
+                if payload.task_mode is None:
+                    update["task_mode"] = WorkspaceTaskMode.SUBAGENT
+                    update["autonomy_policy"] = None
+                    update["autonomous_run"] = None
+                if (
+                    payload.session_kind is None
+                    and not (payload.session_id or task.session_id)
+                    and task.agent_type
+                    in {
+                        AgentType.CLAUDE,
+                        AgentType.CODEX,
+                        AgentType.CURSOR,
+                        AgentType.MASO,
+                        AgentType.ANTIGRAVITY,
+                    }
+                ):
+                    update["session_kind"] = SessionKind.CHAT
+        if payload.auto_worktree is not None:
+            update["auto_worktree"] = payload.auto_worktree
+        if payload.auto_push_remote is not None:
+            update["auto_push_remote"] = payload.auto_push_remote
         if payload.goal_packet is not None:
             update["goal_packet"] = payload.goal_packet
         if payload.review_profiles is not None:
@@ -265,10 +300,13 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
             reviewer_tabs: list[str] = []
             review_report: AgentReport | None = None
             rename_session_id: str | None = None
+            worker_incarnation: tuple[str, str, datetime] | None = None
+            reviewer_incarnation: tuple[str, str, datetime] | None = None
             status = payload.status
             outcome: Literal["committed", "uncommitted", "unknown"] = "uncommitted"
             save_error: BaseException | None = None
             staged = False
+            was_already_done = task.status == WorkspaceTaskStatus.DONE
             try:
                 self._write_prepared_attachments(plan.prepared_attachments, created_paths)
                 staged = True
@@ -276,7 +314,42 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                 for descendant_id, fields in plan.descendants.items():
                     self.tasks[descendant_id] = self.tasks[descendant_id].model_copy(update=fields)
                 current = self.tasks[task.id]
-                if status == WorkspaceTaskStatus.DONE and self._workspace_owns_task(current):
+                if (
+                    status == WorkspaceTaskStatus.DONE
+                    and not was_already_done
+                    and self._workspace_owns_task(current)
+                ):
+                    if current.session_id:
+                        w_sess = self.sessions.get(current.session_id)
+                        if (
+                            w_sess is not None
+                            and w_sess.ephemeral
+                            and w_sess.role
+                            in {WorkspaceSessionRole.ORCHESTRATOR, WorkspaceSessionRole.WORKER}
+                            and (
+                                current.recipe != WorkspaceTaskRecipe.STANDARD
+                                or current.worktree_path is not None
+                            )
+                        ):
+                            worker_incarnation = (w_sess.id, w_sess.tab_id, w_sess.created_at)
+                    if current.review_session_id:
+                        r_sess = self.sessions.get(current.review_session_id)
+                        cutoff_at = (
+                            current.review_completed_at
+                            or current.review_requested_at
+                            or task.completed_at
+                            or task.updated_at
+                        )
+                        if (
+                            r_sess is not None
+                            and r_sess.ephemeral
+                            and not r_sess.caller_owned_ephemeral
+                            and r_sess.role == WorkspaceSessionRole.REVIEWER
+                            and r_sess.task_id in {None, current.id}
+                            and r_sess.current_task_id in {None, current.id}
+                            and (cutoff_at is None or r_sess.created_at <= cutoff_at)
+                        ):
+                            reviewer_incarnation = (r_sess.id, r_sess.tab_id, r_sess.created_at)
                     self._release_task_session(current)
                     reviewer_tabs = await self._cleanup_reviewer_for_terminal_task(
                         current, updated_at=now, delete_tabs=False
@@ -369,6 +442,50 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                         list(task.feedback_lesson_ids),
                         success=True,
                         now=now,
+                    )
+                if current.infowall_demand_id:
+                    from claude_hub.services.work_pipeline import sync_task_progress_to_infowall
+
+                    summary_text = self._task_record_final_summary(
+                        [
+                            r
+                            for r in self.reports_for_workspace(current.workspace_id)
+                            if r.task_id == current.id
+                        ]
+                    )
+                    synced = await sync_task_progress_to_infowall(
+                        current,
+                        milestone="done",
+                        summary=summary_text or f"Task {current.title} accepted and marked done.",
+                    )
+                    if synced and current.id in self.tasks:
+                        self.tasks[current.id] = self.tasks[current.id].model_copy(
+                            update={"infowall_synced_at": self._runtime_now()}
+                        )
+                        self._save_workspace_state(current.workspace_id)
+                if worker_incarnation is not None:
+                    w_id, w_tab, w_created = worker_incarnation
+                    await self._best_effort_delete_session(
+                        w_id,
+                        before_delete=lambda: (
+                            (cur := self.sessions.get(w_id)) is not None
+                            and cur.tab_id == w_tab
+                            and cur.created_at == w_created
+                            and cur.task_id in {None, current.id}
+                            and cur.current_task_id in {None, current.id}
+                        ),
+                    )
+                if reviewer_incarnation is not None:
+                    r_id, r_tab, r_created = reviewer_incarnation
+                    await self._best_effort_delete_session(
+                        r_id,
+                        before_delete=lambda: (
+                            (cur := self.sessions.get(r_id)) is not None
+                            and cur.tab_id == r_tab
+                            and cur.created_at == r_created
+                            and cur.task_id in {None, current.id}
+                            and cur.current_task_id in {None, current.id}
+                        ),
                     )
             elif rename_session_id is not None:
                 session = self.sessions.get(rename_session_id)
