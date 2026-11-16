@@ -716,3 +716,37 @@ test('a turn that began while the tab was hidden is backfilled on return', async
     'returning to the tab backfills the turn that started while it was hidden',
   )
 })
+
+test('ChatMessageInbox recovery or Retry status triggers parent stream retry when connectionState is failed', async t => {
+  const h = await mount(t)
+  const stream = h.state.streams[0]
+  stream.connectionState.value = 'failed'
+  stream.errorMessage.value = 'capabilities HTTP 503'
+  await flush()
+
+  const inboxType = (await h.load('features/chat/components/ChatMessageInbox.vue')).default
+  const inboxInstance = collectInstances(h.vm.$.subTree).find(i => i.type === inboxType)
+  assert.ok(inboxInstance, 'ChatMessageInbox must be mounted in StructuredPane')
+  assert.equal(inboxInstance.props.active, true)
+
+  const startsBefore = h.state.calls.filter(c => c[0] === 'start').length
+  inboxInstance.emit('retry')
+  await flush()
+  const startsAfterRetry = h.state.calls.filter(c => c[0] === 'start').length
+  assert.equal(startsAfterRetry, startsBefore + 1, 'Retry status must trigger parent stream retry when failed')
+  assert.equal(stream.connectionState.value, 'live')
+
+  stream.connectionState.value = 'failed'
+  await flush()
+  inboxInstance.emit('recovered')
+  await flush()
+  const startsAfterRecovered = h.state.calls.filter(c => c[0] === 'start').length
+  assert.equal(startsAfterRecovered, startsAfterRetry + 1, 'Inbox recovery must trigger parent stream retry when failed')
+  assert.equal(stream.connectionState.value, 'live')
+
+  // Deactivating the pane pauses ChatMessageInbox via :active="isPaneActivated".
+  h.selected.value = 'two'
+  await flush()
+  assert.equal(inboxInstance.props.active, false)
+})
+

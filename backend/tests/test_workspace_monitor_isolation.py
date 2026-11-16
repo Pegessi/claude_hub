@@ -631,3 +631,113 @@ async def test_cancel_during_completed_wait_for_window_stops_monitor_loop(
     assert [call for call in calls if call[0] == "dispatch_workspace"] == [
         ("dispatch_workspace", "ws-a")
     ]
+
+
+@pytest.mark.asyncio
+async def test_refresh_one_session_status_saves_only_when_meaningful_fields_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import datetime, timedelta
+
+    from claude_hub.models import (
+        AgentRuntimeStatus,
+        AgentType,
+        ManagedSession,
+        ManagedSessionStatus,
+        SessionKind,
+        TerminalAgentStatus,
+        WorkspaceSessionRole,
+    )
+
+    refresh_module = importlib.import_module(
+        "claude_hub.services.workspace_manager.monitoring.refresh"
+    )
+    _StatusRefreshMixin = refresh_module._StatusRefreshMixin
+
+    t0 = datetime(2026, 11, 16, 12, 0, 0)
+    session = ManagedSession(
+        id="worker-1",
+        title="Worker 1",
+        workspace_id="ws-1",
+        workspace_path="/tmp/ws",
+        tab_id="tab-1",
+        tmux_session="tmux-1",
+        agent_type=AgentType.CODEX,
+        session_kind=SessionKind.TERMINAL,
+        role=WorkspaceSessionRole.ORCHESTRATOR,
+        status=ManagedSessionStatus.IDLE,
+        runtime_status=AgentRuntimeStatus.IDLE,
+        task_id="task-1",
+        current_task_id="task-1",
+        created_at=t0,
+        updated_at=t0,
+        last_activity_at=t0,
+    )
+    saves: list[str] = []
+    status_sample = TerminalAgentStatus(
+        tab_id="tab-1",
+        tab_name="Worker 1",
+        agent_type=AgentType.CODEX,
+        status=AgentRuntimeStatus.IDLE,
+        status_text="Idle",
+        detail="idle",
+        tmux_session="tmux-1",
+        last_changed_at=t0,
+        sampled_at=t0 + timedelta(seconds=5),
+    )
+
+    sessions: dict[str, ManagedSession] = {session.id: session}
+    fake = SimpleNamespace(
+        sessions=sessions,
+        _monitor_refresh_sessions=lambda _workspace_id=None: [sessions[session.id]],
+        _collect_session_agent_statuses=AsyncMock(return_value={"tab-1": status_sample}),
+        _map_runtime_status=lambda sample: (
+            ManagedSessionStatus.WORKING
+            if sample.status == AgentRuntimeStatus.WORKING
+            else ManagedSessionStatus.IDLE
+        ),
+        _is_spawn_grace_period=lambda _s: False,
+        _save_state=lambda: saves.append("saved"),
+    )
+    fake._refresh_one_session_status = _StatusRefreshMixin._refresh_one_session_status.__get__(fake)
+    fake._refresh_session_statuses = _StatusRefreshMixin._refresh_session_statuses.__get__(fake)
+
+    # Unchanged status/runtime_status/current_task_id/last_activity_at (even with newer sampled_at)
+    # must return False, keep the existing model instance, and skip _save_state().
+    await fake._refresh_session_statuses()
+    assert saves == []
+    assert fake.sessions[session.id] is session
+
+    # None last_changed_at also leaves last_activity_at unchanged.
+    fake._collect_session_agent_statuses = AsyncMock(
+        return_value={
+            "tab-1": status_sample.model_copy(
+                update={"last_changed_at": None, "sampled_at": t0 + timedelta(seconds=10)}
+            )
+        }
+    )
+    assert (
+        await fake._refresh_one_session_status(
+            fake.sessions[session.id],
+            {"tab-1": status_sample.model_copy(update={"last_changed_at": None})},
+        )
+        is False
+    )
+
+    # A real activity timestamp advance updates the session and triggers _save_state().
+    t1 = t0 + timedelta(seconds=15)
+    changed_sample = status_sample.model_copy(
+        update={
+            "status": AgentRuntimeStatus.WORKING,
+            "last_changed_at": t1,
+            "sampled_at": t1,
+        }
+    )
+    fake._collect_session_agent_statuses = AsyncMock(return_value={"tab-1": changed_sample})
+    await fake._refresh_session_statuses()
+    assert saves == ["saved"]
+    updated = fake.sessions[session.id]
+    assert updated.status == ManagedSessionStatus.WORKING
+    assert updated.runtime_status == AgentRuntimeStatus.WORKING
+    assert updated.last_activity_at == t1
+    assert updated.updated_at == t1

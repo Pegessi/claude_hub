@@ -57,32 +57,29 @@ async def inspect_chat_delivery(
 ) -> InboxEvidence:
     """Read durable native evidence without creating a runtime (both front doors)."""
     from ..models import AgentStreamEventType
-    from .agent_stream.store import AgentStreamStore
+    from .agent_stream.store import AgentStreamStore, _complete_io
 
     store = AgentStreamStore("terminal-tabs", f"terminal-tab-{tab_id}")
-    cursor, started = -1, False
-    while True:
-        page = await store.read_since(cursor, limit=5000)
-        for event in page.events:
-            if event.turn_id != turn_id:
+    events = await _complete_io(store._read_rows, -1, None, turn_id)
+    started = False
+    for event in events:
+        if event.turn_id != turn_id:
+            continue
+        if event.type == AgentStreamEventType.TURN_STARTED:
+            started = True
+        elif event.type == AgentStreamEventType.TURN_COMPLETED:
+            if event.payload.get("delivery_rejected"):
+                started = True  # synthetic rejection is never absence evidence
                 continue
-            if event.type == AgentStreamEventType.TURN_STARTED:
-                started = True
-            elif event.type == AgentStreamEventType.TURN_COMPLETED:
-                if event.payload.get("delivery_rejected"):
-                    started = True  # synthetic rejection is never absence evidence
-                    continue
-                status = event.payload.get("status")
-                return InboxEvidence(
-                    "completed"
-                    if status in {"completed", "success", "ok"}
-                    else ("cancelled" if status in {"cancelled", "canceled"} else "failed")
-                )
-            elif legacy_errors_terminal and event.type == AgentStreamEventType.ERROR:
-                return InboxEvidence("failed")
-        if not page.has_more:
-            return InboxEvidence("started" if started else "absent")
-        cursor = page.next_sequence
+            status = event.payload.get("status")
+            return InboxEvidence(
+                "completed"
+                if status in {"completed", "success", "ok"}
+                else ("cancelled" if status in {"cancelled", "canceled"} else "failed")
+            )
+        elif legacy_errors_terminal and event.type == AgentStreamEventType.ERROR:
+            return InboxEvidence("failed")
+    return InboxEvidence("started" if started else "absent")
 
 
 class ChatMessageInbox:
@@ -348,12 +345,12 @@ class ChatMessageInbox:
             return self._owned(tab_id, message_id, principal).receipt()
 
     async def list(self, tab_id: str, principal: str) -> list[ChatMessageReceipt]:
-        async with self._lock:
-            return [
-                m.receipt()
-                for m in sorted(self.messages.values(), key=lambda m: m.sequence)
-                if m.tab_id == tab_id and m.principal == principal and not m.expired
-            ]
+        snapshot = list(self.messages.values())
+        return [
+            m.receipt()
+            for m in sorted(snapshot, key=lambda m: m.sequence)
+            if m.tab_id == tab_id and m.principal == principal and not m.expired
+        ]
 
     async def cancel(self, tab_id: str, message_id: str, principal: str) -> ChatMessageReceipt:
         async with self._lock:
@@ -457,6 +454,12 @@ class ChatMessageInbox:
             ):
                 if current_time - self._aware(old.updated_at) < timedelta(minutes=10):
                     continue
+                if old.recovery_checked_at and current_time - self._aware(
+                    old.recovery_checked_at
+                ) < timedelta(seconds=60):
+                    continue
+                old.recovery_checked_at = current_time
+            if not old.scheduled_run_id and old.state == "uncertain" and not restarting:
                 if old.recovery_checked_at and current_time - self._aware(
                     old.recovery_checked_at
                 ) < timedelta(seconds=60):

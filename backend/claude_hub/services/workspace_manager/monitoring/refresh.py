@@ -87,6 +87,15 @@ class _StatusRefreshMixin(_WorkspaceManagerBase):
             return changed
 
         current_task_id = session.current_task_id or session.task_id
+        next_last_activity_at = status.last_changed_at or session.last_activity_at
+        if (
+            next_status == session.status
+            and runtime_status == session.runtime_status
+            and current_task_id == session.current_task_id
+            and next_last_activity_at == session.last_activity_at
+        ):
+            return changed
+
         update: dict[str, Any] = {
             "status": next_status,
             "runtime_status": runtime_status,
