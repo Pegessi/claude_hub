@@ -31,6 +31,7 @@ from .agent_stream.maso_http import (
     MasoServiceUnavailable,
     configured_maso_base_url,
     maso_endpoint_labels,
+    pinned_deployment_labels,
 )
 from .maso_discovery import discover_maso_service, local_maso_registry_ports
 
@@ -392,10 +393,11 @@ def _maso_absent_from_deployment() -> bool:
         return False
 
 
-# MASO enforces quota for endpoints it does not list as models (a rotated or
-# retired endpoint keeps its own ledger row), so no model name exists for them.
-# Saying what they are beats printing a bare id as if it were a model name; the
-# endpoint itself stays in `scope` for the row's tooltip.
+# MASO enforces quota per upstream deployment, including ones its `/api/models`
+# catalog does not name: Router pins a model to a deployment (`pinned_deployment_labels`
+# holds the ones this catalog lags), and a deployed id nothing names keeps a row
+# of its own. Naming it what it is beats printing a bare id as if it were a model
+# name; the deployment itself stays in `scope` for the row's tooltip.
 _UNLISTED_ENDPOINT_LABEL = "Unlisted endpoint · {}"
 
 
@@ -435,10 +437,11 @@ def _maso_unlisted_labels(endpoints: Iterable[str]) -> Dict[str, str]:
 def _maso_limits(rows: Any, labels: Optional[Mapping[str, str]] = None) -> List[QuotaLimit]:
     """Map MASO's per-model rows, preferring its grant-adjusted figures.
 
-    The row's ``model`` is an upstream endpoint, so the label is the catalog's
-    model name for that endpoint (`seed-stable`), and an endpoint no catalog row
-    names is labelled as unlisted instead of posing as a model; ``scope`` keeps
-    the endpoint itself, which is what MASO enforces.
+    The row's ``model`` is an upstream deployment, so the label is the model
+    name known for it — the catalog's (`seed-stable`), or the model Router pinned
+    to it when the catalog predates that pin — and a deployment neither names is
+    labelled as unlisted instead of posing as a model; ``scope`` keeps the
+    deployment itself, which is what MASO enforces.
     """
     limits: List[QuotaLimit] = []
     if not isinstance(rows, list):
@@ -482,11 +485,14 @@ async def read_maso_quota(refresh: bool = False) -> ProviderQuota:
     # Discovery already fetched the catalog: each option names its upstream
     # endpoint (`description`) and the model a person selects (`label`). A
     # catalog that repeats an endpoint without a primary marker keeps the first
-    # name rather than the last.
-    labels: Dict[str, str] = {}
+    # name rather than the last. `labels` starts from the deployments Router
+    # pinned after this catalog was built and lets every catalog row override
+    # them, so a reloaded catalog always wins over the stopgap.
+    named: Dict[str, str] = {}
     for option in models:
-        if option.description and option.label and option.description not in labels:
-            labels[option.description] = option.label
+        if option.description and option.label and option.description not in named:
+            named[option.description] = option.label
+    labels: Dict[str, str] = {**pinned_deployment_labels(), **named}
     try:
         async with httpx.AsyncClient(
             base_url=base_url, trust_env=False, timeout=_MASO_TIMEOUT_S
@@ -502,8 +508,9 @@ async def read_maso_quota(refresh: bool = False) -> ProviderQuota:
             # one of them) or an endpoint MASO does not list at all, so ask the
             # raw catalog once before labelling anything unlisted.
             endpoints = _maso_endpoints(payload.get("models"))
-            if any(endpoint not in labels for endpoint in endpoints):
-                labels = {**labels, **await maso_endpoint_labels(client)}
+            if any(endpoint not in named for endpoint in endpoints):
+                named = {**named, **await maso_endpoint_labels(client)}
+                labels = {**pinned_deployment_labels(), **named}
     except (httpx.HTTPError, TimeoutError, ValueError):
         # Upstream status text may quote request detail; report Hub's own.
         logger.warning("maso quota: request failed", exc_info=True)

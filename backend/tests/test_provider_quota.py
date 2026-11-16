@@ -605,6 +605,107 @@ async def test_maso_quota_names_unlisted_endpoints_with_the_catalog_failing(
     ]
 
 
+@pytest.mark.asyncio
+async def test_maso_quota_names_a_deployment_the_served_catalog_hides(
+    maso_service,
+) -> None:
+    """A deployment Router pinned after this catalog was built still gets a name.
+
+    The catalog MASO serves names `gpt-6-astra` by its logical model, but Router
+    pins that model to `ep-20261112202608-ktzs4` and its quota ledger names the
+    deployment, so the catalog has no row for the quota row's id.
+    """
+    state, calls = maso_service
+    state["payload"] = {
+        "state": "within",
+        "models": [
+            {
+                "model": "ep-20261112202608-ktzs4",
+                "state": "within",
+                "effectiveState": "within",
+                "effectiveUsedPercent": 34,
+                "resetAt": "2026-11-16T16:00:00.000Z",
+            }
+        ],
+        "grants": [],
+        "enforcing": True,
+        "fetchedAt": 1792036198.71,
+    }
+
+    quota = await pq.read_maso_quota()
+
+    assert [(limit.label, limit.scope) for limit in quota.limits] == [
+        # The label names the model; scope keeps what MASO enforces.
+        ("gpt-6-astra", "ep-20261112202608-ktzs4"),
+    ]
+    assert quota.limits[0].used_percent == 34
+    assert quota.limits[0].remaining_percent == 66
+    # The raw catalog is still asked first, so a catalog that names the
+    # deployment keeps the last word over the pin.
+    assert calls == ["http://maso.test/api/llm-quota", "http://maso.test/api/models"]
+
+
+@pytest.mark.asyncio
+async def test_maso_quota_names_every_model_a_shared_deployment_serves(
+    maso_service,
+) -> None:
+    """One ceiling covers several models, so its row names all of them."""
+    state, _calls = maso_service
+    state["payload"] = {
+        "state": "within",
+        "models": [
+            {"model": "ep-20261112202714-lmdcb", "state": "within", "effectiveUsedPercent": 3}
+        ],
+        "grants": [],
+        "enforcing": True,
+        "fetchedAt": 1792036198.71,
+    }
+
+    quota = await pq.read_maso_quota()
+
+    assert [limit.label for limit in quota.limits] == ["gpt56_sol · es1-grape-g61s"]
+    assert [limit.scope for limit in quota.limits] == ["ep-20261112202714-lmdcb"]
+
+
+@pytest.mark.asyncio
+async def test_maso_catalog_name_wins_over_the_pinned_deployment_label(
+    maso_service,
+) -> None:
+    """A catalog that does name the deployment is authoritative, not the pin."""
+    state, _calls = maso_service
+    state["catalog"] = [
+        {
+            "key": "gpt-6-astra",
+            "model_name": "ep-20261112202608-ktzs4",
+            "display_name": "gpt-6-astra",
+            "selector_primary_key": "gpt-6-astra",
+        }
+    ]
+    state["payload"] = {
+        "state": "within",
+        "models": [
+            {"model": "ep-20261112202608-ktzs4", "state": "within", "effectiveUsedPercent": 34}
+        ],
+        "grants": [],
+        "enforcing": True,
+        "fetchedAt": 1792036198.71,
+    }
+
+    quota = await pq.read_maso_quota()
+
+    # Same name here because the catalog agrees; a catalog that renamed it would
+    # win outright, which is what lets the pin retire without a code change.
+    assert [limit.label for limit in quota.limits] == ["gpt-6-astra"]
+
+
+def test_maso_pinned_deployment_labels_are_not_shared_state() -> None:
+    """Callers get a copy, so one reading cannot rename another's deployments."""
+    labels = maso_http.pinned_deployment_labels()
+    labels["ep-20261112202608-ktzs4"] = "renamed"
+
+    assert maso_http.pinned_deployment_labels()["ep-20261112202608-ktzs4"] == "gpt-6-astra"
+
+
 def test_maso_unlisted_labels_stay_distinct_when_codes_collide() -> None:
     """Two endpoints sharing a trailing code keep their full ids."""
     limits = pq._maso_limits(

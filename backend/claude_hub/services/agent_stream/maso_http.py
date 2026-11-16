@@ -79,6 +79,42 @@ def maso_base_url(env: Dict[str, str]) -> str:
     return value
 
 
+# Upstream deployments that Code Router pins a model to while the catalog MASO
+# serves still names that model logically, so `/api/models` carries no row
+# naming the deployment and a quota row for it would read as unlisted.
+#
+# Router's quota ledger names deployments (`ep-<timestamp>-<code>`), and the
+# catalog names what a person selects; the two agree only when the config MASO
+# loaded already carries the deployment id. Router moved three in-house models
+# onto explicit Ark deployments on 2026-11-12, and the MASO process serving this
+# Hub still holds the config from before that, so:
+#
+#   gpt-6-astra -> ep-20261112202608-ktzs4
+#   gpt56_sol, gpt-6.1-sol, es1-grape-g61s -> ep-20261112202714-lmdcb
+#
+# One ceiling can cover several models, so the label names every model the
+# deployment serves (joined the way MASO's own quota rows join grouped
+# variants). `gpt-6.1-sol` is left out because this catalog has no such key to
+# select. Re-derive the table from Router with:
+#
+#   curl -sX POST https://seed-code-router.bytedance.net/api/v1/zti-authorize \
+#     -H "Authorization: Bearer $(cat /etc/tce_dynamic/identity.token)" \
+#     | jq -r '.providers[] | "\(.model)\t\(.name)"'
+#
+# This is a stopgap, not a second identity: a catalog that does name the
+# deployment wins, and an id absent here keeps the honest unlisted fallback, so
+# a rotated deployment under-reports rather than mislabels.
+_PINNED_DEPLOYMENT_LABELS = {
+    "ep-20261112202608-ktzs4": "gpt-6-astra",
+    "ep-20261112202714-lmdcb": "gpt56_sol · es1-grape-g61s",
+}
+
+
+def pinned_deployment_labels() -> Dict[str, str]:
+    """Model names for deployments the catalog MASO serves cannot name yet."""
+    return dict(_PINNED_DEPLOYMENT_LABELS)
+
+
 def _model_options(rows: Any) -> List[StreamModelOption]:
     if not isinstance(rows, list):
         raise RuntimeError("MASO returned an invalid model catalog")

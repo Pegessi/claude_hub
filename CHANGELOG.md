@@ -302,6 +302,23 @@
   WebKit phone/rotation/keyboard/selection/dismissal checks and Chromium
   regression pass; this does not claim a native iOS keyboard test.
 
+### fix(quota): name the MASO deployments Router pinned after this catalog
+
+- Two MASO quota rows still read `Unlisted endpoint · ktzs4` / `· lmdcb`: Code
+  Router moved `gpt-6-astra` and `gpt56_sol` / `es1-grape-g61s` onto explicit
+  in-house Ark deployments on 2026-11-12, while the catalog the running MASO
+  serves was built before that pin, so it names those keys by their logical model
+  and no catalog row carries the deployment id the quota ledger names. Router's
+  own ledger and quota payload state no name at all.
+- The Hub now seeds its endpoint-label map with those pinned deployments
+  (`pinned_deployment_labels`), so the rows read `gpt-6-astra` and
+  `gpt56_sol · es1-grape-g61s` — every selectable model one ceiling covers —
+  while `scope` keeps the deployment and the tooltip still shows
+  `gpt-6-astra (ep-20261112202608-ktzs4)`. Catalog names win outright, so a
+  reloaded MASO catalog retires the table by itself, and a deployment id absent
+  from both keeps the honest `Unlisted endpoint · <code>` fallback instead of
+  inheriting a stale name.
+
 ### fix(quota): name MASO quota rows after their model, not the endpoint id
 
 - MASO's `/api/llm-quota` reports one row per upstream endpoint and names it
