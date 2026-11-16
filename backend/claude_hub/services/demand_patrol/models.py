@@ -14,20 +14,24 @@ PatrolChannel = Literal["all", "feishu", "daily"]
 class PatrolNotifier(Protocol):
     def is_set_up(self) -> bool: ...
 
-    async def notify(self, text: str, *, title: str | None = None, tone: str = "info") -> str: ...
+    async def notify(
+        self, text: str, *, title: str | None = None, tone: str = "info"
+    ) -> str: ...
 
 
 class PatrolConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = True
+    enabled: bool = False
     timezone: str = "Asia/Shanghai"
     feishu_enabled: bool = True
     feishu_interval_minutes: int = Field(default=20, ge=1, le=1440)
     feishu_window_start: str = "09:30"
     feishu_window_end: str = "22:30"
     daily_enabled: bool = True
-    daily_slots: list[str] = Field(default_factory=lambda: ["11:00", "17:30"], max_length=24)
+    daily_slots: list[str] = Field(
+        default_factory=lambda: ["11:00", "17:30"], max_length=24
+    )
     stalled_hours: float = Field(default=48.0, gt=0, le=8760, allow_inf_nan=False)
     pending_top_n: int = Field(default=5, ge=1, le=50)
     max_triage_per_run: int = Field(default=3, ge=1, le=20)
@@ -94,10 +98,12 @@ class PatrolState(BaseModel):
 
     def bound_history(self) -> None:
         # Keep the most recent occurrence when a recovery overlap revisits a message.
-        self.processed_feishu_ids = list(dict.fromkeys(reversed(self.processed_feishu_ids)))[:500][
-            ::-1
-        ]
-        self.fired_daily_slots = list(dict.fromkeys(reversed(self.fired_daily_slots)))[:60][::-1]
+        self.processed_feishu_ids = list(
+            dict.fromkeys(reversed(self.processed_feishu_ids))
+        )[:500][::-1]
+        self.fired_daily_slots = list(dict.fromkeys(reversed(self.fired_daily_slots)))[
+            :60
+        ][::-1]
         self.recent_runs = self.recent_runs[-20:]
         self.mr_snapshots = dict(list(self.mr_snapshots.items())[-500:])
 

@@ -26,7 +26,11 @@ from claude_hub.auth.dependencies import get_current_user
 from claude_hub.cli import main as cli_main
 from claude_hub.cli.client import HubClient
 from claude_hub.services.demand_patrol import commands
-from claude_hub.services.demand_patrol.models import PatrolConfig, PatrolRunRecord, PatrolState
+from claude_hub.services.demand_patrol.models import (
+    PatrolConfig,
+    PatrolRunRecord,
+    PatrolState,
+)
 from claude_hub.services.demand_patrol.service import (
     DemandPatrolService,
     due_daily_slots,
@@ -46,7 +50,9 @@ class FakeDot:
     def is_set_up(self) -> bool:
         return self.ready
 
-    async def notify(self, text: str, *, title: str | None = None, tone: str = "info") -> str:
+    async def notify(
+        self, text: str, *, title: str | None = None, tone: str = "info"
+    ) -> str:
         self.calls.append((text, title, tone))
         return self.result
 
@@ -75,7 +81,9 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PatrolStateStore:
     return PatrolStateStore()
 
 
-def service(store: PatrolStateStore, dot: FakeDot, runner: EmptyRunner) -> DemandPatrolService:
+def service(
+    store: PatrolStateStore, dot: FakeDot, runner: EmptyRunner
+) -> DemandPatrolService:
     return DemandPatrolService(
         store=store,
         dot=dot,
@@ -99,11 +107,17 @@ def service(store: PatrolStateStore, dot: FakeDot, runner: EmptyRunner) -> Deman
     ],
 )
 def test_exact_shanghai_daily_due_windows(offset: int, slots: list[str]) -> None:
-    assert due_daily_slots(PatrolState(), NOW + timedelta(minutes=offset)) == slots
+    assert due_daily_slots(PatrolState(), NOW + timedelta(minutes=offset)) == []
+    enabled_state = PatrolState(config=PatrolConfig(enabled=True))
+    assert due_daily_slots(enabled_state, NOW + timedelta(minutes=offset)) == slots
 
 
-def test_default_config_and_validation() -> None:
-    assert PatrolConfig().daily_slots == ["11:00", "17:30"]
+def test_default_config_is_disabled_and_validation() -> None:
+    default_cfg = PatrolConfig()
+    assert default_cfg.enabled is False
+    assert default_cfg.feishu_enabled is True
+    assert default_cfg.daily_enabled is True
+    assert default_cfg.daily_slots == ["11:00", "17:30"]
     for changes in [
         {"timezone": "not/a-zone"},
         {"feishu_window_start": "9:30"},
@@ -122,7 +136,8 @@ def test_state_roundtrip_bounded_history_and_isolation(store: PatrolStateStore) 
         processed_feishu_ids=[f"message-{i}" for i in range(520)],
         fired_daily_slots=[f"slot-{i}" for i in range(80)],
         recent_runs=[
-            PatrolRunRecord(channel="daily", started_at=NOW.isoformat()) for _ in range(30)
+            PatrolRunRecord(channel="daily", started_at=NOW.isoformat())
+            for _ in range(30)
         ],
     )
     store.save(state)
@@ -137,7 +152,8 @@ def test_state_roundtrip_bounded_history_and_isolation(store: PatrolStateStore) 
 
 
 def test_feishu_work_window_and_interval() -> None:
-    state = PatrolState()
+    assert not feishu_due(PatrolState(), NOW)
+    state = PatrolState(config=PatrolConfig(enabled=True))
     assert not feishu_due(state, NOW - timedelta(minutes=91))
     assert feishu_due(state, NOW - timedelta(minutes=90))
     assert feishu_due(state, NOW + timedelta(hours=11, minutes=30))
@@ -150,8 +166,10 @@ def test_feishu_work_window_and_interval() -> None:
     assert due_daily_slots(state, NOW) == []
 
 
-async def test_daily_claim_survives_restart_and_concurrent_ticks(store: PatrolStateStore) -> None:
-    state = PatrolState(config=PatrolConfig(feishu_enabled=False))
+async def test_daily_claim_survives_restart_and_concurrent_ticks(
+    store: PatrolStateStore,
+) -> None:
+    state = PatrolState(config=PatrolConfig(enabled=True, feishu_enabled=False))
     store.save(state)
     dot, runner = FakeDot(), EmptyRunner()
     first = service(store, dot, runner)
@@ -164,7 +182,17 @@ async def test_daily_claim_survives_restart_and_concurrent_ticks(store: PatrolSt
     assert len(runner.calls) == 1
 
 
-async def test_no_notify_dry_run_and_setup_gate(store: PatrolStateStore) -> None:
+async def test_default_disabled_gate_no_notify_dry_run_and_setup_gate(
+    store: PatrolStateStore,
+) -> None:
+    # Even when Dot is set up, default disabled patrol never runs on scheduled ticks.
+    ready_dot, ready_runner = FakeDot(ready=True), EmptyRunner()
+    assert await service(store, ready_dot, ready_runner).tick() == []
+    assert ready_runner.calls == []
+    assert ready_dot.calls == []
+
+    # Once enabled, still requires Dot setup to tick.
+    store.save(PatrolState(config=PatrolConfig(enabled=True)))
     dot, runner = FakeDot(ready=False), EmptyRunner()
     patrol = service(store, dot, runner)
     assert await patrol.tick() == []
@@ -179,7 +207,10 @@ async def test_no_notify_dry_run_and_setup_gate(store: PatrolStateStore) -> None
     assert store.load().fired_daily_slots == []
 
 
-async def test_status_and_disable_remain_responsive_during_run(store: PatrolStateStore) -> None:
+async def test_status_and_disable_remain_responsive_during_run(
+    store: PatrolStateStore,
+) -> None:
+    store.save(PatrolState(config=PatrolConfig(enabled=True)))
     entered, release = asyncio.Event(), asyncio.Event()
 
     class BlockingRunner(EmptyRunner):
@@ -193,7 +224,9 @@ async def test_status_and_disable_remain_responsive_during_run(store: PatrolStat
         ) -> Any:
             entered.set()
             await release.wait()
-            return await super().__call__(argv, timeout=timeout, input_text=input_text, env=env)
+            return await super().__call__(
+                argv, timeout=timeout, input_text=input_text, env=env
+            )
 
     patrol = service(store, FakeDot(), BlockingRunner())
     run = asyncio.create_task(patrol.run(channel="daily", notify=False))
@@ -210,8 +243,10 @@ async def test_status_and_disable_remain_responsive_during_run(store: PatrolStat
     assert (await patrol.status())["running"] is False
 
 
-async def test_failed_notice_retains_claim_and_records_outcome(store: PatrolStateStore) -> None:
-    store.save(PatrolState(config=PatrolConfig(feishu_enabled=False)))
+async def test_failed_notice_retains_claim_and_records_outcome(
+    store: PatrolStateStore,
+) -> None:
+    store.save(PatrolState(config=PatrolConfig(enabled=True, feishu_enabled=False)))
     dot, runner = FakeDot(result="failed"), EmptyRunner()
     records = await service(store, dot, runner).tick()
     assert records[0].notified == 0
@@ -241,21 +276,43 @@ async def test_rest_status_partial_config_run_and_auth(
     store: PatrolStateStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from claude_hub.api import dot as dot_api
+
     dot, runner = FakeDot(), EmptyRunner()
-    monkeypatch.setattr(patrol_api, "demand_patrol_service", service(store, dot, runner))
+    svc = service(store, dot, runner)
+    monkeypatch.setattr(patrol_api, "demand_patrol_service", svc)
     app = FastAPI()
     app.include_router(patrol_api.router)
-    monkeypatch.setattr(auth_dependencies, "settings", SimpleNamespace(auth_enabled=True))
-    monkeypatch.setattr(auth_dependencies, "is_local_network_request", lambda request: False)
+    app.include_router(dot_api.router)
+    monkeypatch.setattr(
+        auth_dependencies, "settings", SimpleNamespace(auth_enabled=True)
+    )
+    monkeypatch.setattr(
+        auth_dependencies, "is_local_network_request", lambda request: False
+    )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app), base_url="http://test"
     ) as client:
         denied = await client.get("/api/patrol/status")
         assert denied.status_code in {401, 403}
+        denied_dot = await client.get("/api/dot/patrol")
+        assert denied_dot.status_code in {401, 403}
         app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="test")
         status = await client.get("/api/patrol/status")
         assert status.status_code == 200
+        assert status.json()["config"]["enabled"] is False
         assert status.json()["config"]["daily_slots"] == ["11:00", "17:30"]
+        dot_status = await client.get("/api/dot/patrol")
+        assert dot_status.status_code == 200
+        assert dot_status.json()["config"]["enabled"] is False
+        dot_enabled = await client.patch(
+            "/api/dot/patrol",
+            json={"enabled": True, "feishu_enabled": False},
+        )
+        assert dot_enabled.status_code == 200
+        assert dot_enabled.json()["enabled"] is True
+        assert dot_enabled.json()["feishu_enabled"] is False
+        assert dot_enabled.json()["daily_enabled"] is True
         changed = await client.put("/api/patrol/config", json={"enabled": False})
         assert changed.status_code == 200
         assert changed.json()["enabled"] is False
@@ -264,7 +321,11 @@ async def test_rest_status_partial_config_run_and_auth(
         assert bad.status_code == 422
         bad = await client.put("/api/patrol/config", json={"typo": True})
         assert bad.status_code == 422
-        result = await client.post("/api/patrol/run", json={"channel": "daily", "dry_run": True})
+        bad_dot = await client.patch("/api/dot/patrol", json={"typo": True})
+        assert bad_dot.status_code == 422
+        result = await client.post(
+            "/api/patrol/run", json={"channel": "daily", "dry_run": True}
+        )
         assert result.status_code == 200
         assert result.json()["runs"][0]["llm_invoked"] == 0
         assert result.json()["markdown"]
@@ -276,17 +337,20 @@ async def test_rest_status_partial_config_run_and_auth(
 @pytest.mark.parametrize(
     "args,method,path,payload",
     [
-        (["status"], "GET", "/api/patrol/status", None),
+        (["patrol", "status"], "GET", "/api/patrol/status", None),
         (
-            ["run", "--channel", "daily", "--dry-run", "--no-notify"],
+            ["patrol", "run", "--channel", "daily", "--dry-run", "--no-notify"],
             "POST",
             "/api/patrol/run",
             {"channel": "daily", "dry_run": True, "notify": False},
         ),
         (
             [
+                "patrol",
                 "config",
-                "--disable",
+                "--enable",
+                "--no-feishu",
+                "--daily",
                 "--daily-slot",
                 "11:00",
                 "--daily-slot",
@@ -301,12 +365,21 @@ async def test_rest_status_partial_config_run_and_auth(
             "PUT",
             "/api/patrol/config",
             {
-                "enabled": False,
+                "enabled": True,
+                "feishu_enabled": False,
+                "daily_enabled": True,
                 "daily_slots": ["11:00", "17:30"],
                 "feishu_interval_minutes": 30,
                 "feishu_window_start": "10:00",
                 "feishu_window_end": "22:00",
             },
+        ),
+        (["dot", "patrol"], "GET", "/api/dot/patrol", None),
+        (
+            ["dot", "patrol", "--enable", "--no-daily"],
+            "PATCH",
+            "/api/dot/patrol",
+            {"enabled": True, "daily_enabled": False},
         ),
     ],
 )
@@ -321,7 +394,9 @@ def test_cli_commands_use_real_hub_client(
 
     def handle(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(200, json={"config": {}, "runs": [], "markdown": "preview"})
+        return httpx.Response(
+            200, json={"config": {"enabled": False}, "runs": [], "markdown": "preview"}
+        )
 
     monkeypatch.setattr(
         cli_main,
@@ -332,7 +407,7 @@ def test_cli_commands_use_real_hub_client(
         ),
     )
     result = CliRunner().invoke(
-        cli_main.cli, ["--base-url", "http://test", "--json", "patrol", *args]
+        cli_main.cli, ["--base-url", "http://test", "--json", *args]
     )
     assert result.exit_code == 0, result.output
     assert len(requests) == 1
@@ -343,7 +418,9 @@ def test_cli_commands_use_real_hub_client(
         assert request.extensions["timeout"]["read"] > 1800
 
 
-async def test_cli_json_transport_timeout_and_output_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_cli_json_transport_timeout_and_output_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     assert await commands.run_command([sys.executable, "-c", 'print("{}")']) == {}
     with pytest.raises(commands.CommandError, match="timed out"):
         await commands.run_command(
@@ -391,7 +468,9 @@ def test_infowall_loopback_bypasses_inherited_proxies(
     assert env["NO_PROXY"] == env["no_proxy"] == "127.0.0.1,localhost,::1"
 
 
-def test_infowall_remote_endpoint_keeps_proxy_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_infowall_remote_endpoint_keeps_proxy_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("INFOWALL_URL", "https://infowall.example.test")
     env = commands.infowall_env()
     assert "NO_PROXY" not in env and "no_proxy" not in env
@@ -404,7 +483,9 @@ def test_infowall_remote_endpoint_keeps_proxy_policy(monkeypatch: pytest.MonkeyP
         ("lark-cli", ".local/bin/lark-cli"),
     ],
 )
-@pytest.mark.parametrize("location", ["path", "home", "home-nonexecutable", "host", "missing"])
+@pytest.mark.parametrize(
+    "location", ["path", "home", "home-nonexecutable", "host", "missing"]
+)
 def test_cli_executable_resolution_order(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -447,7 +528,9 @@ def test_cli_executable_resolution_order(
     }
     assert actual == expected[location]
     assert checked == (
-        [] if location == "path" else candidates[:1] if location == "home" else candidates
+        []
+        if location == "path"
+        else candidates[:1] if location == "home" else candidates
     )
 
 
@@ -468,7 +551,9 @@ async def test_cli_cleanup_preserves_primary_error_and_closes_transport(
         _transport=transport,
     )
     monkeypatch.setattr(commands, "_MAX_OUTPUT_BYTES", 16)
-    monkeypatch.setattr(commands.asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
+    monkeypatch.setattr(
+        commands.asyncio, "create_subprocess_exec", AsyncMock(return_value=process)
+    )
     kill = Mock(side_effect=AssertionError("an exited process must not be signalled"))
     monkeypatch.setattr(commands.os, "killpg", kill)
     with pytest.raises(commands.CommandError, match="output budget"):

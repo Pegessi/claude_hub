@@ -17,6 +17,7 @@ import {
   loadDotHealth,
   loadDotInbox,
   loadDotLessons,
+  loadDotPatrol,
   loadDotStatus,
   loadDotWork,
   recallDot,
@@ -24,6 +25,7 @@ import {
   updateDotFocus,
   updateDotIdentity,
   updateDotLesson,
+  updateDotPatrol,
   uploadDotAvatar,
   watchDotTask,
   type DotCard,
@@ -32,6 +34,7 @@ import {
   type DotHealth,
   type DotInboxEvent,
   type DotLesson,
+  type DotPatrolConfig,
   type DotReviewStats,
   type DotSearchHit,
   type DotStatus,
@@ -87,6 +90,8 @@ export function useDotPanel(props: Readonly<DotPanelProps>, events: DotPanelEven
   const terminalStore = useTerminalStore()
   const editingIdentity = ref(false)
   const executionBusy = ref(false)
+  const patrolConfig = ref<DotPatrolConfig | null>(null)
+  const patrolSaving = ref(false)
   const nameDraft = ref('')
   const avatarDraft = ref('')
   let searchTimer: ReturnType<typeof setTimeout> | null = null
@@ -127,10 +132,30 @@ export function useDotPanel(props: Readonly<DotPanelProps>, events: DotPanelEven
       status.value = await loadDotStatus()
       if (status.value.identity) setIdentity(status.value.identity)
       if (section.value === 'focus') focus.value = await loadDotFocus()
-      else if (section.value === 'work') [work.value, inbox.value] = await Promise.all([loadDotWork(), loadDotInbox()])
-      else if (section.value === 'lessons') await loadLessons()
+      else if (section.value === 'work') {
+        const [workItems, inboxItems, patrolStatus] = await Promise.all([
+          loadDotWork(),
+          loadDotInbox(),
+          loadDotPatrol(),
+        ])
+        work.value = workItems
+        inbox.value = inboxItems
+        patrolConfig.value = patrolStatus.config
+      } else if (section.value === 'lessons') await loadLessons()
       else if (section.value === 'memory') await loadCards()
       else health.value = await loadDotHealth()
+    })
+  }
+
+  function changePatrol(changes: Partial<DotPatrolConfig>) {
+    if (patrolSaving.value || executionBusy.value) return
+    patrolSaving.value = true
+    void run(async () => {
+      try {
+        patrolConfig.value = await updateDotPatrol(changes)
+      } finally {
+        patrolSaving.value = false
+      }
     })
   }
 
@@ -216,6 +241,11 @@ export function useDotPanel(props: Readonly<DotPanelProps>, events: DotPanelEven
     editingIdentity.value = !editingIdentity.value
     nameDraft.value = identity.value.name
     avatarDraft.value = identity.value.avatar
+    if (editingIdentity.value) {
+      void run(async () => {
+        patrolConfig.value = (await loadDotPatrol()).config
+      })
+    }
   }
 
   function setExecutionBusy(busy: boolean) {
@@ -371,6 +401,8 @@ export function useDotPanel(props: Readonly<DotPanelProps>, events: DotPanelEven
       identity,
       editingIdentity,
       executionBusy,
+      patrolConfig,
+      patrolSaving,
       nameDraft,
       avatarDraft,
       causeText,
@@ -384,6 +416,7 @@ export function useDotPanel(props: Readonly<DotPanelProps>, events: DotPanelEven
       dropLesson,
       toggleIdentityEditor,
       setExecutionBusy,
+      changePatrol,
       closePanel,
       loadSection,
       saveIdentity,

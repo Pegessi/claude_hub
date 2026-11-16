@@ -55,7 +55,11 @@ def patrol_run(ctx: click.Context, channel: str, dry_run: bool, notify: bool) ->
 
 @patrol.command("config")
 @click.option("--enable/--disable", "enabled", default=None)
-@click.option("--daily-slot", multiple=True, help="Replace daily slots (HH:MM); repeat for each.")
+@click.option("--feishu/--no-feishu", "feishu_enabled", default=None)
+@click.option("--daily/--no-daily", "daily_enabled", default=None)
+@click.option(
+    "--daily-slot", multiple=True, help="Replace daily slots (HH:MM); repeat for each."
+)
 @click.option("--feishu-interval", type=click.IntRange(1, 1440), default=None)
 @click.option("--window-start", default=None)
 @click.option("--window-end", default=None)
@@ -63,6 +67,8 @@ def patrol_run(ctx: click.Context, channel: str, dry_run: bool, notify: bool) ->
 def patrol_config(
     ctx: click.Context,
     enabled: bool | None,
+    feishu_enabled: bool | None,
+    daily_enabled: bool | None,
     daily_slot: tuple[str, ...],
     feishu_interval: int | None,
     window_start: str | None,
@@ -71,6 +77,8 @@ def patrol_config(
     changes: dict[str, Any] = {}
     for name, value in (
         ("enabled", enabled),
+        ("feishu_enabled", feishu_enabled),
+        ("daily_enabled", daily_enabled),
         ("feishu_interval_minutes", feishu_interval),
         ("feishu_window_start", window_start),
         ("feishu_window_end", window_end),
