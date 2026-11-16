@@ -28,6 +28,7 @@ from claude_hub.cli.task_commands.read import (
     _resolve_call_id,
     _resolve_ws_id,
     _task_status_payload,
+    task_brief,
     task_get,
     task_list,
     task_report,

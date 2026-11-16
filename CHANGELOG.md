@@ -7,6 +7,7 @@
 
 ## Released
 
+<<<<<<< HEAD
 ### fix(chat): eliminate Hub message status refresh stalls and Chat composer lockout
 
 - Skip unconditional `_save_state()` writes in `_refresh_one_session_status()`
@@ -27,6 +28,23 @@
   even before capabilities succeed, and report active recovery as reconciling.
   Repeated malformed successful inbox responses now expose the error and retry
   control rather than resetting the failure count before validation.
+=======
+### feat(workspace): unified Linear Triage Pro surface with cross-workspace scope, initiator actions, and AI handoff brief
+
+- Agent Workspace defaults to a unified two-pane `Triage View` (`NEEDS YOU` / `ACTIVE` /
+  `RECENT` rail with a `Current ⇄ All Workspaces` scope switcher + structured Decision
+  Gate, Summary & Key Takeaways, inline/modal previewable Deliverables, Verification &
+  Caveats, and adaptive Key Milestones that fold long runs and completed histories),
+  while retaining a persisted `Classic Board` toggle (`?ws_layout=board|triage`).
+- Initiator-controlled tasks gain in-place `Reply inline…` (automatically restoring
+  archived Chats before delivery) and one-click `Mark Done` for orphaned sessions;
+  accepting a Workspace-controlled task automatically invokes
+  `POST /api/workspaces/tasks/{id}/cleanup` for caller-owned ephemeral sessions.
+- Add `GET /api/workspaces/board-overview`, `GET /api/workspaces/{ws}/tasks/{id}/brief`,
+  `claude-hub task list --all-workspaces`, `claude-hub task brief`, `snapshot.md`
+  initiator progress projection, and `Copy AI Brief` / `Continue in New Chat` (<2 KB
+  handoff packet) in the detail header.
+>>>>>>> feat/workspace-ui-demos
 
 ### fix(ui): keep mobile Chat sidebar drawer above its backdrop
 

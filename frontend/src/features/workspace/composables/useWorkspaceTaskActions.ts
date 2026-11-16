@@ -96,6 +96,7 @@ export function useWorkspaceTaskActions(inputs: WorkspaceTaskActionsInputs) {
     if (selectedTaskId.value !== taskId) {
       detailMessage.value = ''
       resetDraftAttachments(detailAttachments.value)
+      detailAttachments.value = []
       isDetailActionsExpanded.value = false
       expandedArtifactKey.value = null
     }
@@ -110,6 +111,7 @@ export function useWorkspaceTaskActions(inputs: WorkspaceTaskActionsInputs) {
     selectedTaskId.value = null
     detailMessage.value = ''
     resetDraftAttachments(detailAttachments.value)
+    detailAttachments.value = []
     isDetailActionsExpanded.value = false
     expandedArtifactKey.value = null
     closeMarkdownPreviewModal()
@@ -203,6 +205,53 @@ export function useWorkspaceTaskActions(inputs: WorkspaceTaskActionsInputs) {
     )
   }
 
+  async function runEphemeralSessionCleanup(taskId: string, workspaceId: string) {
+    try {
+      const result = await workspaceStore.cleanupTaskSession(taskId, workspaceId)
+      if (result.action === 'deleted') {
+        await terminalStore.fetchTabs({ force: true })
+        return
+      }
+      const benignReasons = new Set([
+        'session no longer exists',
+        'task has no session_id',
+        'session is not caller-owned ephemeral',
+        'initiator task does not own managed sessions',
+      ])
+      if (result.action === 'skipped' && result.reason && !benignReasons.has(result.reason)) {
+        workspaceStore.pushNotification({
+          type: 'warning',
+          message: `Task accepted, but temporary session cleanup was deferred (${result.reason}). Use "Release session" when idle.`,
+          autoDismissMs: 9000,
+        })
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'request failed'
+      workspaceStore.pushNotification({
+        type: 'warning',
+        message: `Task accepted, but temporary session cleanup failed (${msg}). Use "Release session" to retry.`,
+        autoDismissMs: 9000,
+      })
+    }
+  }
+
+  async function acceptAndCleanupTask(task: WorkspaceTask) {
+    const shouldCleanupSession = Boolean(workspaceStore.sessionForTask(task)?.ephemeral)
+    const originWorkspaceId = task.workspace_id
+    await runPending(taskActionKey('mark-done', task.id), async () => {
+      await workspaceStore.updateTaskStatus(task.id, 'done')
+      if (shouldCleanupSession) {
+        await runEphemeralSessionCleanup(task.id, originWorkspaceId)
+      }
+    })
+  }
+
+  async function cleanupCompletedTaskSession(task: WorkspaceTask) {
+    await runPending(taskActionKey('cleanup-session', task.id), async () => {
+      await runEphemeralSessionCleanup(task.id, task.workspace_id)
+    })
+  }
+
   async function requestReview(task: WorkspaceTask) {
     const message = window.prompt(
       'Tell the reviewer what to check:',
@@ -248,6 +297,8 @@ export function useWorkspaceTaskActions(inputs: WorkspaceTaskActionsInputs) {
     startTask,
     openEditTaskModal,
     markTask,
+    acceptAndCleanupTask,
+    cleanupCompletedTaskSession,
     requestReview,
     abortTask,
     deleteTask,

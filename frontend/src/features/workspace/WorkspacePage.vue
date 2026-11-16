@@ -2,13 +2,19 @@
   <section class="workspace-view">
     <WorkspaceHeader />
 
-    <WorkspaceSummary />
+    <WorkspaceTriagePro
+      v-if="runtime.workspaceLayoutMode.value === 'triage' && (Boolean(runtime.activeWorkspaceId.value) || runtime.workspaces.value.length > 0)"
+    />
 
-    <WorkspaceAgentStatus />
+    <template v-else>
+      <WorkspaceSummary />
 
-    <WorkspaceBoard />
+      <WorkspaceAgentStatus />
 
-    <TaskDetailDialog />
+      <WorkspaceBoard />
+
+      <TaskDetailDialog />
+    </template>
 
     <ArtifactPreviewDialogs />
 
@@ -39,6 +45,7 @@ import WorkspaceHeader from './components/WorkspaceHeader.vue'
 import WorkspaceSummary from './components/WorkspaceSummary.vue'
 import WorkspaceAgentStatus from './components/WorkspaceAgentStatus.vue'
 import WorkspaceBoard from './components/WorkspaceBoard.vue'
+import WorkspaceTriagePro from './components/WorkspaceTriagePro.vue'
 import TaskDetailDialog from './components/TaskDetailDialog.vue'
 import ArtifactPreviewDialogs from './components/ArtifactPreviewDialogs.vue'
 import WorkspaceEditorDialog from './components/WorkspaceEditorDialog.vue'
@@ -251,6 +258,10 @@ provideWorkspaceRuntimeContext({
   envPresets: runtime.envPresets,
   workspaceNotifications: runtime.workspaceNotifications,
   dismissToast: runtime.dismissToast,
+  workspaceLayoutMode: runtime.workspaceLayoutMode,
+  setWorkspaceLayoutMode: runtime.setWorkspaceLayoutMode,
+  toggleWorkspaceLayoutMode: runtime.toggleWorkspaceLayoutMode,
+  taskCreateFlow: runtime.taskCreateFlow,
 })
 provideWorkspaceEditorContext({
   openWorkspaceModal: editor.openWorkspaceModal,
@@ -384,6 +395,8 @@ provideWorkspaceTaskActionsContext({
   startTask: tasks.startTask,
   openEditTaskModal: tasks.openEditTaskModal,
   markTask: tasks.markTask,
+  acceptAndCleanupTask: tasks.acceptAndCleanupTask,
+  cleanupCompletedTaskSession: tasks.cleanupCompletedTaskSession,
   requestReview: tasks.requestReview,
   abortTask: tasks.abortTask,
   deleteTask: tasks.deleteTask,

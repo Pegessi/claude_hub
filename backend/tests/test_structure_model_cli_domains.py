@@ -175,6 +175,7 @@ EXPECTED_TASK_COMMANDS = (
     "status",
     "report",
     "review",
+    "brief",
     "create",
     "run",
     "start",
@@ -222,6 +223,7 @@ def test_task_facade_preserves_single_click_group_and_registration_order() -> No
     assert isinstance(task_facade.task, click.Group)
     assert tuple(task_facade.task.commands) == EXPECTED_TASK_COMMANDS
     assert task_facade.task_list is task_read.task_list
+    assert task_facade.task_brief is task_read.task_brief
     assert task_facade.task_create is task_creation.task_create
     assert task_facade.task_start is task_lifecycle.task_start
     assert task_facade.task_wait is task_observation.task_wait

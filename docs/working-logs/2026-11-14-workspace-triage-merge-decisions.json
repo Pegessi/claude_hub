@@ -1,0 +1,114 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "87011ec34a55e1f5b121b3d4d51c9c53deb578e0",
+  "parents": [
+    "ce46e96fb7ef61f234f57c67816af865212207c2",
+    "7c211de71190b591cbc5b692f340cfeb1ece297f"
+  ],
+  "base": "c2a97baad057659450a207ef5ae59f188040af29",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "6acba64678c5443f38f1f6bb96e18eeb49559ea7",
+  "reconstructed_tree": "f91d6cff88581df608b4b985f8cb03f02e3cb575",
+  "conflicts": [
+    "CHANGELOG.md",
+    "frontend/tests/browser_agent_workspace_task_create.py"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "14846a428cf07a24984518d5eba33fd78daca58e"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "3908777c53293d769f783b180cf31204ad98287d"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0c501787c4182755ef7315683853947658e87ee7"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "b102e2b3d2bfef431bfb6af161fd0c7f348c9718"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "58d8091457655b973112caef4439942820f1b26b"
+      },
+      "reason": "Keep all released entries from main and place the updated unified Workspace Triage entry at the top of Released.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/src/features/workspace/WorkspacePage.vue",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d4ed94432bf30a1750abc4e17fd4b413eb659b72"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "7cbb7e2d6242794a9f0bb668ae1382b38d71aaaa"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "a849f2aa4ae6dbd09b651bfb5aa3bd6fe8c02972"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c349748dd4f5afb3be901c5053241f687953fb69"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "d3aded4caa6ebd73faa6c8ac99c85d3531ea852d"
+      },
+      "reason": "Preserve openAppearanceFromMenu from main alongside WorkspaceTriagePro, falling back to WorkspaceBoard's themed empty-board when zero workspaces exist.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "frontend/tests/browser_agent_workspace_task_create.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "bb3e89cbdf9d6ac13f35fea9bab7c176fe6b8c24"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2b14f49e5538d11ebf0906583002c93f29767207"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "7a83777ee559449c3e13c9641d32cdef50c9593d"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "9ad89034bee85afc7893aca84de72c07cacaeaac"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "72a3e00c93938a7785a34991661d7dfb1315b8fa"
+      },
+      "reason": "Keep both the default Triage-to-Classic-Board switch assertion and main's 12-theme primary button press/focus assertions.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}

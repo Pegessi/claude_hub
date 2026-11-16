@@ -308,6 +308,14 @@ class HubClient:
         """PATCH /api/workspaces/{workspace_id}."""
         return self._request("PATCH", f"/api/workspaces/{workspace_id}", json=body)
 
+    def get_board_overview(self, *, done_per_workspace: int = 8) -> Any:
+        """GET /api/workspaces/board-overview."""
+        return self._request(
+            "GET",
+            "/api/workspaces/board-overview",
+            params={"done_per_workspace": done_per_workspace},
+        )
+
     def get_board(self, workspace_id: str, *, include_archived: bool = False) -> Any:
         """GET /api/workspaces/{workspace_id}/board."""
         params = {"include_archived": True} if include_archived else None
@@ -390,6 +398,10 @@ class HubClient:
     def get_task_reports(self, workspace_id: str, task_id: str) -> Any:
         """GET /api/workspaces/{workspace_id}/tasks/{task_id}/reports."""
         return self._request("GET", f"/api/workspaces/{workspace_id}/tasks/{task_id}/reports")
+
+    def get_task_brief(self, workspace_id: str, task_id: str) -> Any:
+        """GET /api/workspaces/{workspace_id}/tasks/{task_id}/brief."""
+        return self._request("GET", f"/api/workspaces/{workspace_id}/tasks/{task_id}/brief")
 
     def list_task_tree(self, workspace_id: str, task_id: Optional[str] = None) -> Any:
         """GET /api/workspaces/{workspace_id}/tasks/tree or .../tasks/{task_id}/tree."""

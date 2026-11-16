@@ -74,6 +74,22 @@ export function useWorkspaceRuntime() {
 
   const taskCreateFlow = useTaskCreateFlow()
 
+  const STORAGE_KEY_LAYOUT_MODE = 'claude_hub_workspace_layout_mode'
+  const storedLayoutMode = typeof localStorage !== 'undefined'
+    ? localStorage.getItem(STORAGE_KEY_LAYOUT_MODE)
+    : null
+  const queryLayoutParam = typeof window !== 'undefined' && window.location?.search
+    ? new URLSearchParams(window.location.search).get('ws_layout')
+    : null
+  const workspaceLayoutMode = ref<'triage' | 'board'>(
+    queryLayoutParam === 'board' || (queryLayoutParam !== 'triage' && storedLayoutMode === 'board')
+      ? 'board'
+      : 'triage',
+  )
+  function toggleWorkspaceLayoutMode() {
+    setWorkspaceLayoutMode(workspaceLayoutMode.value === 'triage' ? 'board' : 'triage')
+  }
+
   const {
     colorScheme,
   } = storeToRefs(appStore)
@@ -122,6 +138,18 @@ export function useWorkspaceRuntime() {
   const selectedWorkspaceId = ref(activeWorkspaceId.value || '')
 
   const selectedTaskId = ref<string | null>(null)
+
+  function setWorkspaceLayoutMode(mode: 'triage' | 'board') {
+    if (mode === 'board' && workspaceLayoutMode.value === 'triage') {
+      selectedTaskId.value = null
+    }
+    workspaceLayoutMode.value = mode
+    try {
+      localStorage.setItem(STORAGE_KEY_LAYOUT_MODE, mode)
+    } catch {
+      // Ignore storage quota / private mode errors.
+    }
+  }
 
   const workspaceSessionView = ref<WorkspaceSessionView>('agents')
 
@@ -575,6 +603,9 @@ export function useWorkspaceRuntime() {
     envPresets,
     workspaceNotifications,
     dismissToast,
+    workspaceLayoutMode,
+    setWorkspaceLayoutMode,
+    toggleWorkspaceLayoutMode,
     taskCreateFlow,
     defaultPresetTextForAgent,
     workspaceStore,

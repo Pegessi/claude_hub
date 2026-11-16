@@ -76,10 +76,36 @@ async def main(browser_run: BrowserRun) -> None:
                 "One helper signature widened; every in-repo caller was updated "
                 "in the same commit, but out-of-tree consumers would notice."
             ),
-            "artifact_refs": ["docs/parsers.md", "reports/parser-diff.md"],
+            "artifact_refs": [
+                "outputs/gb200-nearzero-20261113/NEXT_EXPERIMENT.md",
+                "docs/parsers.md",
+                "reports/parser-diff.md",
+            ],
             "call_id": "call-deep",
             "execution_epoch": 2,
             "reported_at": "2026-10-24T09:30:00",
+        },
+    }
+
+    orphan = {
+        **task_fixture(
+            "orphan-init-task",
+            "ws-1",
+            "Initiator GB200 overhead audit",
+            execution_control="initiator",
+            source={"kind": "chat", "tab_id": "tab-init-1", "agent_id": None},
+        ),
+        "status": "working",
+        "progress_revision": 1,
+        "latest_progress": {
+            "state": "needs_input",
+            "summary": "Diagnostic complete. Decision needed: merge or hold.",
+            "validation": "pytest 12 passed",
+            "risks": None,
+            "artifact_refs": ["outputs/NEXT_EXPERIMENT.md"],
+            "call_id": "call-init-1",
+            "execution_epoch": 1,
+            "reported_at": "2026-10-24T09:40:00",
         },
     }
 
@@ -107,7 +133,7 @@ async def main(browser_run: BrowserRun) -> None:
     def board() -> dict:
         return {
             "workspace": WORKSPACES[0],
-            "tasks": [task, held, deep],
+            "tasks": [task, held, deep, orphan],
             "sessions": [],
             "reports": [],
             "markdown_documents": [],
@@ -115,7 +141,7 @@ async def main(browser_run: BrowserRun) -> None:
             "tasks_pagination": {
                 "next_cursor": None,
                 "has_more": False,
-                "status_counts": {"todo": 1, "review": 2},
+                "status_counts": {"todo": 1, "review": 2, "working": 1},
             },
             "task_lifecycles": {
                 "detail-task": lifecycle(
@@ -127,6 +153,23 @@ async def main(browser_run: BrowserRun) -> None:
                     "reviewer_needs_input",
                     "AI reviewer has a question for you",
                     True,
+                ),
+                "orphan-init-task": (
+                    lifecycle(
+                        "orphan-init-task",
+                        "done",
+                        "completed",
+                        "Completed",
+                        False,
+                    )
+                    if orphan["status"] == "done"
+                    else lifecycle(
+                        "orphan-init-task",
+                        "orphaned",
+                        "initiator_chat_gone",
+                        "The originating Chat was archived or deleted",
+                        True,
+                    )
                 ),
             },
         }
@@ -163,7 +206,17 @@ async def main(browser_run: BrowserRun) -> None:
             ):
                 body = []
             elif method == "GET" and path == "/api/workspaces":
-                body = [WORKSPACES[0]]
+                body = WORKSPACES
+            elif method == "GET" and path == "/api/workspaces/board-overview":
+                ws1 = board()
+                body = {
+                    "workspaces": WORKSPACES,
+                    "tasks": ws1["tasks"],
+                    "reports": [],
+                    "sessions": [],
+                    "task_lifecycles": ws1["task_lifecycles"],
+                    "attention_counts": {"ws-1": 2, "ws-2": 0},
+                }
             elif method == "GET" and path == "/api/tabs/sidebar-preferences":
                 body = {"pinned_chat_ids": []}
             elif method == "POST" and path == "/api/tabs/sidebar-preferences/migrate-browser-pins":
@@ -178,8 +231,52 @@ async def main(browser_run: BrowserRun) -> None:
                 "/api/workspaces/ws-1/tasks/detail-task/reports",
                 "/api/workspaces/ws-1/tasks/deep-review-task/reports",
                 "/api/workspaces/ws-1/tasks/held-task/reports",
+                "/api/workspaces/ws-1/tasks/orphan-init-task/reports",
+                "/api/workspaces/ws-1/tasks/orphan-init-task/events",
             ):
                 body = []
+            elif (
+                method == "GET"
+                and path == "/api/workspaces/ws-1/artifacts/preview"
+                and parse_qs(parsed.query).get("path")
+                == ["outputs/gb200-nearzero-20261113/NEXT_EXPERIMENT.md"]
+            ):
+                body = {
+                    "path": "outputs/gb200-nearzero-20261113/NEXT_EXPERIMENT.md",
+                    "filename": "NEXT_EXPERIMENT.md",
+                    "content": "# Next Experiment\n\nVerified near-zero plan.",
+                    "size_bytes": 42,
+                    "truncated": False,
+                }
+            elif (
+                method == "POST"
+                and path == "/api/workspaces/ws-1/tasks/orphan-init-task/progress/manual"
+            ):
+                payload = request.post_data_json
+                assert payload["state"] == "completed"
+                orphan["status"] = "done"
+                orphan["progress_revision"] = 2
+                orphan["completed_at"] = "2026-10-24T10:00:00"
+                body = {
+                    "task": orphan,
+                    "event": {
+                        "sequence": 99,
+                        "call_id": f"task-execution:orphan-init-task:{payload['call_id']}",
+                        "fingerprint": "fp",
+                        "task_id": "orphan-init-task",
+                        "actor_session_id": None,
+                        "actor_role": "human",
+                        "type": "completed",
+                        "action": "task_manual_progress",
+                        "target": "orphan-init-task",
+                        "consumer_key": "task:orphan-init-task",
+                        "payload": payload,
+                        "created_at": "2026-10-24T10:00:00",
+                        "review_cycle": 1,
+                        "report_id": None,
+                    },
+                    "replayed": False,
+                }
             elif method == "POST" and path == "/api/workspaces/tasks/detail-task/start":
                 payload = request.post_data_json
                 assert payload == {
@@ -209,7 +306,7 @@ async def main(browser_run: BrowserRun) -> None:
         for width in (390, 720, 1280):
             task["status"] = "todo"
             await page.set_viewport_size({"width": width, "height": 844})
-            await page.goto(url, wait_until="networkidle")
+            await page.goto(f"{url}?ws_layout=board", wait_until="networkidle")
             held_card = page.locator(".task-card--review").filter(has_text=held["title"])
             note = held_card.locator(".lifecycle-note--attention")
             await expect(note).to_have_text("Needs you · AI reviewer has a question for you")
@@ -269,11 +366,85 @@ async def main(browser_run: BrowserRun) -> None:
             await panel.get_by_role("button", name="Close task detail", exact=True).click()
             await expect(panel).to_be_hidden()
 
-        # A review task whose evidence fills the screen must still offer the
-        # decision without hunting for it: the compact bar appears while the
-        # Decision section is off screen, jumps to it, then retires itself.
+        # Also exercise the unified Triage surface across 1280px and 390px:
+        # no A/B toggle clutter, inline Markdown preview, All Workspaces scope,
+        # one-click Mark Done on orphaned initiator tasks, and Start Task.
+        task["status"] = "todo"
+        orphan["status"] = "working"
+        orphan["progress_revision"] = 1
+        await page.set_viewport_size({"width": 1280, "height": 860})
+        await page.goto(f"{url}?ws_layout=triage", wait_until="networkidle")
+        await expect(page.locator(".tp-shell")).to_be_visible()
+        await expect(page.locator(".tp-rail-footer")).to_have_count(0)
+        await expect(page.locator(".tp-mode-switch")).to_have_count(0)
+        held_row = page.locator(".tp-row").filter(has_text=held["title"])
+        await expect(held_row).to_be_visible()
+        deep_row = page.locator(".tp-row").filter(has_text=deep["title"])
+        await deep_row.click()
+        await expect(page.locator(".tp-title")).to_have_text(deep["title"])
+        await expect(page.get_by_label("Key milestones")).to_be_visible()
+        # Deliverables buttons (Inline / Preview / Copy) must stay strictly inside their card
+        # with zero horizontal clipping or cross-card collision across widths.
+        for check_w in (1280, 920, 390):
+            await page.set_viewport_size({"width": check_w, "height": 860})
+            deliv_card = page.get_by_label("Deliverables", exact=True)
+            verif_card = page.get_by_label("Verification and caveats", exact=True)
+            await expect(deliv_card).to_be_visible()
+            await expect(verif_card).to_be_visible()
+            c_box = await deliv_card.bounding_box()
+            v_box = await verif_card.bounding_box()
+            assert c_box and v_box
+            for btn in await deliv_card.locator("button").all():
+                b_box = await btn.bounding_box()
+                assert b_box is not None
+                assert b_box["x"] >= c_box["x"] - 1 and (
+                    b_box["x"] + b_box["width"] <= c_box["x"] + c_box["width"] + 1
+                ), f"deliverable button overflowed card at {check_w}px: btn={b_box} card={c_box}"
+            assert (
+                c_box["y"] + c_box["height"] <= v_box["y"] + 1
+            ), f"deliverables and verification cards overlapped at {check_w}px: {c_box} vs {v_box}"
+        await page.set_viewport_size({"width": 1280, "height": 860})
+        # Exercise unified inline Markdown preview inside Deliverables card
+        await page.get_by_label("Deliverables", exact=True).get_by_role(
+            "button", name="Inline"
+        ).first.click()
+        await expect(page.locator(".tp-inline-md-box")).to_contain_text("Verified near-zero plan.")
+        await page.screenshot(path=str(output / "triage-pro-dark-1280.png"))
+        await page.evaluate("() => document.documentElement.setAttribute('data-theme', 'light')")
+        await page.screenshot(path=str(output / "triage-pro-light-1280.png"))
+        await page.evaluate("() => document.documentElement.setAttribute('data-theme', 'dark')")
+
+        # Exercise All Workspaces scope bar & one-click Mark Done on orphaned initiator task
+        await page.get_by_role("button", name="All Workspaces").click()
+        orphan_row = page.locator(".tp-row").filter(has_text=orphan["title"])
+        await expect(orphan_row).to_be_visible()
+        await orphan_row.click()
+        mark_done_btn = page.locator(".tp-spec-gate").get_by_role(
+            "button", name="Mark Done", exact=True
+        )
+        await expect(mark_done_btn).to_be_visible()
+        await mark_done_btn.click()
+        await expect(page.locator(".tp-status-pill")).to_contain_text("Done")
+        # Completed tasks automatically fold Key Milestones by default
+        assert not await page.get_by_label("Key milestones").evaluate("el => el.open")
+
+        detail_row = page.locator(".tp-row").filter(has_text=task["title"])
+        await detail_row.click()
+        await expect(page.locator(".tp-title")).to_have_text(task["title"])
+        start_triage = page.locator(".tp-spec-gate").get_by_role(
+            "button", name="Start Task", exact=True
+        )
+        await expect(start_triage).to_be_enabled()
+        await start_triage.click()
+        await expect(page.locator(".tp-status-pill")).to_contain_text("Working")
         await page.set_viewport_size({"width": 390, "height": 844})
-        await page.goto(url, wait_until="networkidle")
+        assert await page.locator(".tp-shell").evaluate(
+            "el => el.scrollWidth <= el.clientWidth + 1"
+        )
+        await page.screenshot(path=str(output / "triage-pro-mobile-390.png"))
+
+        # Restore Classic Board for the deep-review sticky-bar assertions below.
+        await page.goto(f"{url}?ws_layout=board", wait_until="networkidle")
         await page.locator(".task-card h3").filter(has_text=deep["title"]).click()
         panel = page.locator(".task-detail-panel")
         await expect(panel).to_be_visible()
@@ -325,7 +496,7 @@ async def main(browser_run: BrowserRun) -> None:
         )
         await panel.get_by_role("button", name="Close task detail", exact=True).click()
         await expect(panel).to_be_hidden()
-        assert len(starts) == 3
+        assert len(starts) == 4
         assert not page_errors, page_errors
         assert not console_errors, console_errors
         assert not blocked, blocked
