@@ -18,6 +18,7 @@ from claude_hub.services.dot.prompts import (
     TOOL_GUIDE,
     TURN_RULES,
     WAKE_MESSAGE,
+    format_task_brief,
 )
 
 
@@ -41,6 +42,18 @@ def test_guidance_preserves_choices_and_explicit_tool_contracts() -> None:
     assert "2–4 concrete options" in TURN_RULES
     assert "one-line tradeoff" in TURN_RULES
     assert "[--session <agent-session-id>]" in TOOL_GUIDE
+    assert "[--recipe standard|triage_diagnose|spec_implement_review|eval_and_report]" in TOOL_GUIDE
+    for std_recipe in (None, "standard", "eval_and_report"):
+        rendered_std = format_task_brief(
+            goal="G",
+            context="C",
+            done_when="1. D",
+            output="O",
+            out_of_scope="N",
+            constraints="K",
+            recipe=std_recipe,
+        )
+        assert "Post your plan (Goal Packet) before substantial work" in rendered_std
     assert "--title" in TOOL_GUIDE and "--tone" in WAKE_MESSAGE
     assert "open gap" in BRIEF_TEMPLATE
     assert "Follow the repository rules" in BRIEF_TEMPLATE

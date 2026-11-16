@@ -66,10 +66,14 @@ TOOL_GUIDE = """\
 - `claude-hub dot work list` — tracked tasks (delegated or watched) and their state
 - `claude-hub dot delegate --workspace <id> --title "..." --goal "..." \
 --done-when "<check>" [--done-when "<check>" ...] --output "<what, and where it goes>" \
-[--context "..."] [--out-of-scope "..."] [--constraints "..."] [--agent codex|claude] \
-[--session <agent-session-id>] [--stall-hours N]`. Keep one goal per task, with checkable done-when items and
-  a clear output location. A brief warning holds the task; revise it or use
-  `--confirm` when the warning does not apply.
+[--context "..."] [--out-of-scope "..."] [--constraints "..."] \
+[--agent codex|claude|cursor|maso|antigravity] [--model <id>] [--env-preset <name>] \
+[--recipe standard|triage_diagnose|spec_implement_review|eval_and_report] \
+[--demand-id <id>] [--session <agent-session-id>] [--stall-hours N]`. Keep one goal per task,
+  with checkable done-when items and a clear output location (`spec_implement_review` for
+  isolated-worktree code + independent review + branch push; `triage_diagnose` for read-only
+  diagnosis; `eval_and_report` for evaluations). A brief warning holds the task; revise it or
+  use `--confirm` when the warning does not apply.
 - `claude-hub dot review <task-id> --verdict ok|redo|skip \
 [--cause brief|env|worker|change] [--note "..."] [--lesson "<rule>" | --lesson-id <id>]` —
   records a judgment for a task you delegated, not a watched task or human acceptance.
@@ -100,6 +104,11 @@ Your memory home is your working directory. Cards are markdown files under
 `memory/<kind>/`; the raw talk log is under `journal/`; stored files are
 under `files/`. You may read them directly.
 """
+
+_BRIEF_GOAL_PACKET_LINE = (
+    "- Post your plan (Goal Packet) before substantial work; the user sees it and may\n"
+    "  redirect you through a follow-up message."
+)
 
 BRIEF_TEMPLATE = """\
 # Task brief from Dot
@@ -135,6 +144,43 @@ BRIEF_TEMPLATE = """\
 Lead with the result and its location. Map each "Done when" item to evidence
 or an open gap, then summarize validation and risks. Keep the report concise.
 """
+
+
+def format_task_brief(
+    *,
+    goal: str,
+    context: str,
+    done_when: str,
+    output: str,
+    out_of_scope: str,
+    constraints: str,
+    recipe: str | None = None,
+) -> str:
+    """Format Dot's delegated task brief with recipe-aligned execution guidance."""
+    rendered = BRIEF_TEMPLATE.format(
+        goal=goal,
+        context=context,
+        done_when=done_when,
+        output=output,
+        out_of_scope=out_of_scope,
+        constraints=constraints,
+    )
+    if recipe == "spec_implement_review":
+        return rendered.replace(
+            _BRIEF_GOAL_PACKET_LINE,
+            "- Execute end-to-end in your isolated feature worktree without pausing for a\n"
+            "  separate Goal Packet approval round; commit verified changes and request review.",
+            1,
+        )
+    if recipe == "triage_diagnose":
+        return rendered.replace(
+            _BRIEF_GOAL_PACKET_LINE,
+            "- Perform read-only investigation directly within scope without a separate\n"
+            "  Goal Packet round; never edit repository files or push branches.",
+            1,
+        )
+    return rendered
+
 
 # A wake or tidy turn answered with exactly this is hidden from the chat and the journal.
 QUIET_REPLY = "[quiet]"

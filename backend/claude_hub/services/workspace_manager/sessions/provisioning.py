@@ -179,9 +179,25 @@ class _SessionProvisioningMixin(_WorkspaceManagerBase):
             for tab in [*ttyd_manager.list_tabs(), *ttyd_manager.list_archived_tabs()]
             if tab.managed_session_id
         }
+        task_reserved_ids = {
+            ref_id
+            for task_item in self.tasks.values()
+            if task_item.workspace_id == workspace.id
+            for ref_id in (
+                (
+                    task_item.session_id
+                    if task_item.status
+                    not in {WorkspaceTaskStatus.DONE, WorkspaceTaskStatus.FAILED}
+                    else None
+                ),
+                task_item.review_session_id,
+            )
+            if ref_id
+        }
         while (
             session_id in self.sessions
             or session_id in tab_reserved_ids
+            or session_id in task_reserved_ids
             or managed_chat.has_residual_state(workspace.id, session_id)
         ):
             session_id = f"{session_id}-{uuid.uuid4().hex[:6]}"

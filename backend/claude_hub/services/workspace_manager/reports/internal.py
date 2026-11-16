@@ -12,12 +12,86 @@ class _InternalReportHandlingMixin(_ReportReviewRequestMixin):
         task: WorkspaceTask,
         report: AgentReport,
     ) -> bool:
+        if task.recipe == WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW:
+            return (
+                task.task_mode == WorkspaceTaskMode.REVIEWED
+                and report.state == AgentReportState.WORKING
+                and task.goal_packet is not None
+                and task.goal_packet.status == GoalPacketStatus.PENDING_REVIEW
+            )
         return (
             task.task_mode == WorkspaceTaskMode.REVIEWED
             and report.state == AgentReportState.WORKING
             and task.goal_packet is not None
             and task.goal_packet.status == GoalPacketStatus.PENDING_REVIEW
         )
+
+    async def _handle_triage_diagnose_completion(
+        self,
+        task: WorkspaceTask,
+        session: ManagedSession,
+        report: AgentReport,
+    ) -> None:
+        from claude_hub.services.work_pipeline import sync_task_progress_to_infowall
+
+        now = self._runtime_now()
+        reason = "triage_diagnose pipeline auto-accepted after evidence report"
+        updated = apply_task_update(
+            self.tasks[task.id],
+            {
+                "status": WorkspaceTaskStatus.DONE,
+                "review_skipped_at": now,
+                "review_skip_reason": reason,
+                "completed_at": now,
+                "human_acceptance_requested_at": None,
+                "human_accepted_at": now,
+                "updated_at": now,
+            },
+            cause="internal_report",
+        )
+        self.tasks[task.id] = updated
+        self._record_system_task_audit(
+            task=updated,
+            message=reason,
+            message_zh="triage_diagnose 流水线已在收到证据报告后自动验收归档。",
+            validation=(
+                f"completion_report_id={report.id}; session_id={session.id}; "
+                "recipe=triage_diagnose; review_gate=auto_accepted"
+            ),
+            session_id=session.id,
+        )
+        expected_worker_id = session.id
+        expected_worker_tab = session.tab_id
+        expected_worker_created = session.created_at
+        should_delete_worker = bool(session.ephemeral)
+        self._write_task_record(updated)
+        self._release_task_session(updated)
+        self._save_state()
+        if updated.infowall_demand_id:
+            synced = await sync_task_progress_to_infowall(
+                updated,
+                milestone="done",
+                summary=report.message,
+                links=list(report.artifact_refs or []),
+            )
+            if synced and updated.id in self.tasks:
+                updated = self.tasks[updated.id].model_copy(
+                    update={"infowall_synced_at": self._runtime_now()}
+                )
+                self.tasks[updated.id] = updated
+                self._save_state()
+        if should_delete_worker:
+            await self._best_effort_delete_session(
+                expected_worker_id,
+                before_delete=lambda: (
+                    (cur := self.sessions.get(expected_worker_id)) is not None
+                    and cur.tab_id == expected_worker_tab
+                    and cur.created_at == expected_worker_created
+                    and cur.task_id in {None, updated.id}
+                    and cur.current_task_id in {None, updated.id}
+                ),
+            )
+        await self.dispatch_workspace(updated.workspace_id)
 
     async def _handle_internal_task_report(
         self,
@@ -164,6 +238,8 @@ class _InternalReportHandlingMixin(_ReportReviewRequestMixin):
     ) -> bool:
         if trigger_kind != "agent_report":
             return True
+        if task.recipe == WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW:
+            return True
         can_skip_review = False
         if (
             report.review_decision == ReviewDecision.SKIP
@@ -178,6 +254,8 @@ class _InternalReportHandlingMixin(_ReportReviewRequestMixin):
         )
 
     async def _can_skip_task_review(self, task: WorkspaceTask, report: AgentReport) -> bool:
+        if task.recipe == WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW:
+            return False
         return state_policy.can_skip_task_review(
             state_policy.ReviewSkipContext(
                 report_state=report.state,

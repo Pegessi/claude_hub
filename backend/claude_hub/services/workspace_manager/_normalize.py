@@ -33,6 +33,21 @@ class _NormalizeMixin(_WorkspaceManagerBase):
             normalized.setdefault("queued_at", normalized.get("updated_at"))
         if normalized.get("task_mode") not in {"direct", "reviewed", "autonomous", "subagent"}:
             normalized["task_mode"] = WorkspaceTaskMode.REVIEWED.value
+        if normalized.get("recipe") not in {recipe.value for recipe in WorkspaceTaskRecipe}:
+            normalized["recipe"] = WorkspaceTaskRecipe.STANDARD.value
+        raw_demand_id = normalized.get("infowall_demand_id")
+        normalized["infowall_demand_id"] = (
+            raw_demand_id.strip()
+            if isinstance(raw_demand_id, str) and raw_demand_id.strip()
+            else None
+        )
+        normalized["auto_worktree"] = bool(normalized.get("auto_worktree", False))
+        normalized["auto_push_remote"] = bool(normalized.get("auto_push_remote", False))
+        normalized.setdefault("worktree_path", None)
+        normalized.setdefault("worktree_branch", None)
+        normalized.setdefault("remote_pushed_ref", None)
+        normalized.setdefault("remote_push_error", None)
+        normalized.setdefault("infowall_synced_at", None)
         if normalized.get("execution_complexity") not in {"auto", "simple", "complex"}:
             normalized["execution_complexity"] = WorkspaceTaskExecutionComplexity.AUTO.value
         if normalized.get("origin") not in {"human", "resident"}:

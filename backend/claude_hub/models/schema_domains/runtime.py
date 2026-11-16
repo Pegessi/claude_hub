@@ -186,6 +186,15 @@ class WorkspaceTaskMode(str, Enum):
     SUBAGENT = "subagent"
 
 
+class WorkspaceTaskRecipe(str, Enum):
+    """Standardized execution pipeline recipe for a workspace task."""
+
+    STANDARD = "standard"
+    TRIAGE_DIAGNOSE = "triage_diagnose"
+    SPEC_IMPLEMENT_REVIEW = "spec_implement_review"
+    EVAL_AND_REPORT = "eval_and_report"
+
+
 class WorkspaceTaskExecutionComplexity(str, Enum):
     """Execution complexity hint for a workspace task."""
 

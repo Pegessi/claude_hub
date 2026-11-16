@@ -50,12 +50,53 @@ class _AssignmentPromptsMixin(_BootstrapPromptsMixin):
         progress_call_id = self._report_prompt_call_id(
             task.id, "assignment-progress", attempt=assignment_attempt
         )
+        recipe_block = self._recipe_assignment_block(workspace, task, session)
+        explicit_gp_gate = (
+            task.goal_packet is not None
+            and task.goal_packet.status == GoalPacketStatus.PENDING_REVIEW
+        )
+        streamlined_spec_pipeline = (
+            task.recipe == WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW and not explicit_gp_gate
+        )
+        if streamlined_spec_pipeline:
+            gp_workflow_block = (
+                "Pipeline execution (spec_implement_review): Do NOT stop and wait for a separate "
+                "Goal Packet approval round before coding. Proceed straight through implementation "
+                f"in your isolated feature worktree ({task.worktree_path or session.workspace_path}) "
+                f"on branch {task.worktree_branch or 'your feature branch'}, run local verification, "
+                "commit your changes cleanly on the feature branch, and submit a `completed` report "
+                'with `review_decision="request"` so an independent reviewer session can audit '
+                "your diff.\n\n"
+            )
+            gp_example_block = ""
+        else:
+            gp_workflow_block = (
+                "Before substantive implementation, derive a Goal Packet from the task prompt and include it "
+                "in your first working report. The packet must preserve the user's outcome, record assumptions "
+                "(do not silently narrow ambiguous scope), and include concrete reviewer-checkable acceptance "
+                "criteria, a validation plan, out-of-scope boundaries, and handoff requirements. For reviewed "
+                "tasks the Goal Packet is an approval gate: after posting it, stop and wait for reviewer "
+                "feedback; do not begin substantive implementation until the backend continues the task after "
+                "review_passed.\n\n"
+            )
+            gp_example_block = (
+                "Goal Packet report example (first working report for reviewed tasks):\n"
+                f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
+                "-H 'Content-Type: application/json' "
+                f'-d \'{{"task_id":"{task.id}","state":"working",'
+                f'"call_id":"{goal_packet_call_id}",'
+                '"message":"Goal Packet; awaiting approval.","message_en":"Goal Packet; awaiting approval.",'
+                '"message_zh":"目标包已创建，等待审核。","goal_packet":{'
+                '"objective":"...","acceptance_criteria":["..."],"validation_plan":["..."],'
+                '"assumptions":["..."],"out_of_scope":["..."],"handoff_requirements":["..."]}}\'\n\n'
+            )
         return (
             "New workspace task assigned.\n\n"
             f"Workspace: {workspace.name}\n"
             f"Task ID: {task.id}\n"
             f"Task title: {task.title}\n"
             f"Task mode: {task.task_mode.value}\n"
+            f"Task recipe: {task.recipe.value}\n"
             f"Task execution complexity: {task.execution_complexity.value}\n"
             f"{self._session_environment_lines(workspace, session)}\n"
             f"State snapshot: {self.snapshot_path(workspace.id)}\n"
@@ -65,18 +106,13 @@ class _AssignmentPromptsMixin(_BootstrapPromptsMixin):
             f"Task description:\n{task.prompt}\n\n"
             f"{attachment_note}"
             f"{lesson_context_block}"
+            f"{recipe_block}"
             f"{self._execution_complexity_assignment_block(task)}"
             f"{self._autonomous_assignment_block(task, session.agent_type)}"
             f"{self._task_context_contract_block()}"
             "Start by reading the state snapshot; use the task description to choose the correct project "
             "directory. Check for uncommitted changes before editing.\n\n"
-            "Before substantive implementation, derive a Goal Packet from the task prompt and include it "
-            "in your first working report. The packet must preserve the user's outcome, record assumptions "
-            "(do not silently narrow ambiguous scope), and include concrete reviewer-checkable acceptance "
-            "criteria, a validation plan, out-of-scope boundaries, and handoff requirements. For reviewed "
-            "tasks the Goal Packet is an approval gate: after posting it, stop and wait for reviewer "
-            "feedback; do not begin substantive implementation until the backend continues the task after "
-            "review_passed.\n\n"
+            f"{gp_workflow_block}"
             "Report state: started -> working (as you progress) -> blocked/needs_input if stuck -> "
             "ready_for_review when ready for AI reviewer -> completed when fully done. The task is not "
             "done until a human accepts it.\n\n"
@@ -85,15 +121,7 @@ class _AssignmentPromptsMixin(_BootstrapPromptsMixin):
             "follow-up, or trivial low-risk changes only; still requires human acceptance), or "
             "review_decision=auto (workspace default). The backend may still force review for nontrivial "
             "changes.\n\n"
-            "Goal Packet report example (first working report for reviewed tasks):\n"
-            f"{INTERNAL_API_CURL} -X POST {self._report_base_url(session)}/api/workspaces/sessions/{session.id}/reports "
-            "-H 'Content-Type: application/json' "
-            f'-d \'{{"task_id":"{task.id}","state":"working",'
-            f'"call_id":"{goal_packet_call_id}",'
-            '"message":"Goal Packet; awaiting approval.","message_en":"Goal Packet; awaiting approval.",'
-            '"message_zh":"目标包已创建，等待审核。","goal_packet":{'
-            '"objective":"...","acceptance_criteria":["..."],"validation_plan":["..."],'
-            '"assumptions":["..."],"out_of_scope":["..."],"handoff_requirements":["..."]}}\'\n\n'
+            f"{gp_example_block}"
             "Every report must include message_en (concise English) and message_zh (concise 中文); keep "
             "the legacy `message` field as a short English fallback. Final reports must include "
             "task_id/state/message/message_en/message_zh/changed_files/validation/risks/acceptance_check/"
@@ -178,11 +206,13 @@ class _AssignmentPromptsMixin(_BootstrapPromptsMixin):
         completed_call_id = self._report_prompt_call_id(
             task.id, "completed", attempt=assignment_attempt
         )
+        recipe_block = self._recipe_assignment_block(workspace, task, session)
         return (
             "New workspace task assigned (subagent mode).\n\n"
             f"Workspace: {workspace.name}\n"
             f"Task ID: {task.id}\n"
             f"Task title: {task.title}\n"
+            f"Task recipe: {task.recipe.value}\n"
             f"{self._session_environment_lines(workspace, session)}\n"
             f"State snapshot: {self.snapshot_path(workspace.id)}\n\n"
             f"{clear_note}"
@@ -190,6 +220,7 @@ class _AssignmentPromptsMixin(_BootstrapPromptsMixin):
             f"Task description:\n{task.prompt}\n\n"
             f"{attachment_note}"
             f"{lesson_context_block}"
+            f"{recipe_block}"
             "You are a sub-agent executing a task delegated by another agent.\n"
             "The caller owns acceptance and any required review; no separate Goal Packet or bilingual "
             "messages are required here. Work only within the delegated inputs, scope and ownership. "
@@ -228,6 +259,49 @@ class _AssignmentPromptsMixin(_BootstrapPromptsMixin):
             "`acked_call_ids` of your next report. The dispatch call_id "
             f"`dispatch:{task.id}:{{attempt}}` is ACKed automatically; do NOT list it.\n"
         )
+
+    def _recipe_assignment_block(
+        self,
+        workspace: Workspace,
+        task: WorkspaceTask,
+        session: ManagedSession,
+    ) -> str:
+        demand_line = (
+            f"Linked InfoWall demand ID: {task.infowall_demand_id}\n"
+            if task.infowall_demand_id
+            else ""
+        )
+        if task.recipe == WorkspaceTaskRecipe.TRIAGE_DIAGNOSE:
+            return (
+                "Pipeline recipe: triage_diagnose (Read-Only Diagnosis & Evidence Verification)\n"
+                f"{demand_line}"
+                "- Perform read-only investigation only: do NOT modify repository code or push branches.\n"
+                "- Verify logs, MRs, stack traces, or metrics against the real codebase/system.\n"
+                "- In your final `completed` report `message`, include: (1) verified root cause & concrete "
+                "evidence, (2) recommended next action, and (3) a copy-paste reply draft.\n\n"
+            )
+        if task.recipe == WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW:
+            wt_path = task.worktree_path or session.workspace_path or workspace.path
+            wt_branch = task.worktree_branch or "feature-branch"
+            return (
+                "Pipeline recipe: spec_implement_review (Isolated Worktree Implementation & Independent Review)\n"
+                f"{demand_line}"
+                f"- Assigned isolated worktree: {wt_path} (branch: {wt_branch}). NEVER edit the primary main checkout.\n"
+                "- Implement the change and unit/integration tests directly in this worktree without waiting for a separate Goal Packet round.\n"
+                '- Run local verification, commit your changes on the feature branch, and submit `completed` with `review_decision="request"`.\n'
+                "- After independent review passes, the Hub will automatically push the feature branch to `origin`.\n\n"
+            )
+        if task.recipe == WorkspaceTaskRecipe.EVAL_AND_REPORT:
+            return (
+                "Pipeline recipe: eval_and_report (3-Stage Evaluation & Evidence Report)\n"
+                f"{demand_line}"
+                "- Stage 1 (Setup & Baseline): Verify target configuration, dataset/checkpoint inputs, and baseline metrics.\n"
+                "- Stage 2 (Execution & Collection): Run the evaluation/benchmark/experiment and capture reproducible logs and quantitative results.\n"
+                "- Stage 3 (Structured Report Handoff): Synthesize metric comparisons, canonical URLs/artifact paths, and residual risks in your final report.\n\n"
+            )
+        if demand_line:
+            return f"{demand_line}\n"
+        return ""
 
     def _lesson_context_payload(self, workspace: Workspace, query: str) -> list[dict[str, Any]]:
         return self._feedback_store().lesson_context_payload(
