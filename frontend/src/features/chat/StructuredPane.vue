@@ -102,6 +102,9 @@
     <ChatMessageInbox
       v-if="!isManagedChat && currentTab && !currentTab.archived && ['claude', 'codex', 'cursor', 'maso', 'antigravity'].includes(currentTab.agent_type ?? '')"
       :tab-id="props.tabId"
+      :active="isPaneActivated"
+      @retry="reconnectStreamIfFailed"
+      @recovered="reconnectStreamIfFailed"
     />
 
     <!-- Composer -->
@@ -190,6 +193,7 @@ const {
   capabilities,
   start,
   loadHistoryDetail,
+  reconnect,
   retry: retryStream,
   refreshCapabilities,
   setMode,
@@ -217,6 +221,11 @@ function retry() {
     return
   }
   void retryStream(streamSourceId.value, streamSource.value)
+}
+function reconnectStreamIfFailed() {
+  if (isPaneActivated.value && connectionState.value === 'failed') {
+    void reconnect(streamSourceId.value, streamSource.value)
+  }
 }
 function suspendStreamForDeactivation() {
   stop()
