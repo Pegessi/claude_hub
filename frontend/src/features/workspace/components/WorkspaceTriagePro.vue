@@ -252,9 +252,11 @@
                   {{
                     activeItem.bucket === 'needs_you'
                       ? 'Decision needed'
-                      : activeItem.bucket === 'done'
-                        ? 'Completed'
-                        : 'Current status'
+                      : activeItem.bucket === 'review'
+                        ? 'Ready for review'
+                        : activeItem.bucket === 'done'
+                          ? 'Completed'
+                          : 'Current status'
                   }}
                 </span>
                 <span class="tp-decision-copy">

@@ -402,6 +402,40 @@ async def test_sqlite_stream_summary_and_mr_cache_drive_tab_review_and_auto_done
         assert tab_st.review_state == "mr_open"
         assert tab_st.review_label == "MR !1483"
 
+        # Dispatcher tabs (e.g. Dot / Ted) that spawned a workspace-controlled task
+        # with source.tab_id must NOT inherit task_review from their dispatched tasks!
+        ted_tab_id = "ted-dispatcher-tab"
+        ted_proc = SimpleNamespace(
+            tab_id=ted_tab_id,
+            name="Ted",
+            agent_type=AgentType.CURSOR,
+            session_kind=SessionKind.CHAT,
+            cursor_transport="acp",
+            tmux_session="tmux-ted",
+            workspace_id=None,
+            managed_session_id=None,
+            subagent_id=None,
+            parent_tab_id=None,
+            last_viewed_at=None,
+        )
+        fake_mgr.processes[ted_tab_id] = ted_proc  # type: ignore[assignment]
+        dispatched = manager.create_task(
+            ws.id,
+            WorkspaceTaskCreate(
+                title="Background task dispatched from Ted",
+                prompt="Run review",
+                execution_control=TaskExecutionControl.WORKSPACE,
+                source=TaskSourceReference(kind="chat", tab_id=ted_tab_id),
+            ),
+        )
+        manager.tasks[dispatched.id] = dispatched.model_copy(
+            update={"status": WorkspaceTaskStatus.REVIEW}
+        )
+        ted_st = await fake_mgr.get_tab_agent_status(ted_tab_id, use_cache=False)
+        assert ted_st is not None
+        assert ted_st.review_state is None
+        assert ted_st.review_label is None
+
         # Once the MR transitions to state="merged", board overview naturally settles
         # the task to DONE with closed_reason="mr_merged" and clears the tab's review pill!
         mr_status_cache.seed(MRStateSnapshot(url=mr_url, state="merged", title="Split trace"))

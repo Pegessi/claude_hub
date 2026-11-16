@@ -277,7 +277,7 @@ class ManagerStatusMixin(ManagerHost):
         """Project calm delivery review status (open MR or task in review) without blocking."""
         if process.subagent_id or process.parent_tab_id:
             return None, None, None
-        from ....models import WorkspaceTaskStatus
+        from ....models.schemas import TaskExecutionControl, WorkspaceTaskStatus
         from ...mr_status_cache import (
             extract_codebase_mr_urls,
             format_mr_badge_label,
@@ -295,7 +295,11 @@ class ManagerStatusMixin(ManagerHost):
                 if task.status in {WorkspaceTaskStatus.DONE, WorkspaceTaskStatus.FAILED}:
                     continue
                 matched = bool(
-                    (task.source and task.source.tab_id == process.tab_id)
+                    (
+                        task.execution_control == TaskExecutionControl.INITIATOR
+                        and task.source
+                        and task.source.tab_id == process.tab_id
+                    )
                     or (
                         process.managed_session_id and task.session_id == process.managed_session_id
                     )

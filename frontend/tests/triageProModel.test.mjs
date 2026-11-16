@@ -69,7 +69,23 @@ test('deriveTaskCode extracts MR/PR identifiers or falls back to clean short has
 })
 
 test('classifyTriageBucket routes review, failed, attention, working, and done accurately', () => {
-  assert.equal(triage.classifyTriageBucket(makeTask({ status: 'review' })), 'needs_you')
+  assert.equal(triage.classifyTriageBucket(makeTask({ status: 'review' })), 'review')
+  assert.equal(
+    triage.classifyTriageBucket(makeTask({ status: 'working' }), {
+      task_id: 'x',
+      phase: 'running',
+      reason: 'mr_open',
+      reason_text: 'MR !4164 open',
+      owner: { kind: 'tab', state: 'idle' },
+      attention: false,
+      holds_session: false,
+      delivery_mr_state: 'open',
+      delivery_mr_label: 'MR !4164',
+      since: '2026-11-13T10:00:00Z',
+      legacy_status: 'working',
+    }),
+    'review',
+  )
   assert.equal(triage.classifyTriageBucket(makeTask({ status: 'failed' })), 'needs_you')
   assert.equal(triage.classifyTriageBucket(makeTask({ status: 'working' })), 'working')
   assert.equal(
@@ -185,7 +201,8 @@ test('buildTriageTaskViewModel constructs consensus, artifact links, and multi-r
   })
 
   assert.equal(vm.code, 'MR-3953')
-  assert.equal(vm.bucket, 'needs_you')
+  assert.equal(vm.bucket, 'review')
+  assert.equal(vm.statusTone, 'review')
   assert.equal(vm.statusLabel, 'R2 Review PASS')
   assert.equal(vm.consensus.implementer, 'Argon High')
   assert.equal(vm.consensus.reviewer, '[redacted]')
@@ -198,8 +215,9 @@ test('buildTriageTaskViewModel constructs consensus, artifact links, and multi-r
   assert.equal(vm.spine[3].badge, 'VERDICT PASS')
 
   const groups = triage.groupTriageTasks([vm])
-  assert.equal(groups[0].key, 'needs_you')
-  assert.equal(groups[0].items.length, 1)
+  assert.deepEqual(groups.map(g => g.label), ['NEEDS YOU', 'WORKING', 'REVIEW', 'DONE'])
+  assert.equal(groups[2].key, 'review')
+  assert.equal(groups[2].items.length, 1)
   assert.equal(vm.hasIndependentReview, true)
   assert.equal(vm.reviewSummaryChip, 'Argon High → [redacted] · R2 PASS')
   assert.equal(vm.milestones.at(-1).isCurrentEcho, true)
