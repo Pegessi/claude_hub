@@ -92,6 +92,10 @@ class NativeGoalCoordinator:
         if raw is None:
             if previous is None:
                 return None
+            if previous.execution_owner == "hub_managed" and previous.strict_review:
+                # Strict cross-review Goals remain Hub-managed even on providers
+                # that expose a native Goal RPC (so Hub owns the review gate).
+                return self.store.current_for_tab(tab_id)
             if (
                 previous.execution_owner == "provider_native"
                 and previous.provider_thread_id == snapshot["thread_id"]
@@ -257,6 +261,13 @@ class NativeGoalCoordinator:
 
     async def refresh(self, tab_id: str) -> tuple[bool, GoalRun | None]:
         async with self.lock(tab_id):
+            existing = self.store.current_for_tab(tab_id)
+            if (
+                existing is not None
+                and existing.execution_owner == "hub_managed"
+                and existing.strict_review
+            ):
+                return False, existing
             connection = await self.connect(tab_id)
             if connection is None:
                 return False, self.store.current_for_tab(tab_id)
@@ -276,6 +287,24 @@ class NativeGoalCoordinator:
         self._put(goal)
 
     async def create(self, tab_id: str, request: GoalRunCreate) -> GoalRun | None:
+        if request.strict_review:
+            # Strict cross-review requires Hub-managed turn interception so the
+            # independent reviewer subagent gate runs before completion.
+            async with self.lock(tab_id):
+                connection = await self.connect(tab_id)
+                if connection is not None and connection.snapshot["goal"] is not None:
+                    current = await self.synchronize(tab_id, connection)
+                    if current is not None and current.status not in TERMINAL_GOAL_STATUSES:
+                        raise GoalPolicyError("tab already has an unfinished provider Goal")
+                    # Clear any terminal provider-native Goal on the thread so
+                    # clearing this Hub-managed Goal later cannot resurrect it.
+                    await connection.clear_goal()
+                    connection.snapshot = {
+                        "thread_id": connection.snapshot["thread_id"],
+                        "goal": None,
+                    }
+                    await self.synchronize(tab_id, connection)
+            return None
         async with self.lock(tab_id):
             connection = await self.connect(tab_id)
             if connection is None:
@@ -382,6 +411,8 @@ class NativeGoalCoordinator:
         image_digest: str = "",
     ) -> GoalRun | None:
         original = self.store.get(goal_id)
+        if original.execution_owner == "hub_managed" and original.strict_review:
+            return None
         async with self.lock(original.tab_id):
             connection = await self.connect(original.tab_id)
             if connection is None:

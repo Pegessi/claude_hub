@@ -68,32 +68,61 @@
           <section
             v-if="!editing"
             class="goal-dialog-option"
-            :data-on="planFirst ? 'true' : 'false'"
-            :data-disabled="planFirstDisabledReason ? 'true' : 'false'"
+            :data-on="effectivePlanFirst ? 'true' : 'false'"
+            :data-disabled="effectivePlanFirstDisabledReason ? 'true' : 'false'"
           >
             <div class="goal-dialog-plan-row">
               <label class="goal-dialog-plan-toggle">
                 <input
                   type="checkbox"
-                  :checked="planFirst"
-                  :disabled="busy || Boolean(planFirstDisabledReason)"
+                  :checked="effectivePlanFirst"
+                  :disabled="busy || Boolean(effectivePlanFirstDisabledReason)"
                   @change="togglePlanFirst"
                 >
                 <span>Plan first</span>
               </label>
-              <span class="goal-dialog-option-badge">{{ planFirst ? 'Review first' : 'Off' }}</span>
+              <span class="goal-dialog-option-badge">{{ effectivePlanFirst ? 'Review first' : 'Off' }}</span>
             </div>
             <p class="goal-dialog-plan-note">
-              <template v-if="planFirstDisabledReason">
-                {{ planFirstDisabledReason }}
+              <template v-if="effectivePlanFirstDisabledReason">
+                {{ effectivePlanFirstDisabledReason }}
               </template>
-              <template v-else-if="planFirst">
+              <template v-else-if="effectivePlanFirst">
                 The first turn proposes the scope, steps and execution budget
                 (sub-agents, models, parallelism). Nothing starts until you approve.
               </template>
               <template v-else>
                 The Goal starts working immediately. Tick this to review its plan
                 before any work begins.
+              </template>
+            </p>
+          </section>
+
+          <section
+            v-if="!editing"
+            class="goal-dialog-option goal-dialog-option--strict"
+            :data-on="strictReview ? 'true' : 'false'"
+          >
+            <div class="goal-dialog-plan-row">
+              <label class="goal-dialog-plan-toggle">
+                <input
+                  type="checkbox"
+                  :checked="strictReview"
+                  :disabled="busy"
+                  @change="toggleStrictReview"
+                >
+                <span>Strict cross-review</span>
+              </label>
+              <span class="goal-dialog-option-badge">{{ strictReview ? 'Consensus gate' : 'Off' }}</span>
+            </div>
+            <p class="goal-dialog-plan-note goal-dialog-strict-note">
+              <template v-if="strictReview">
+                Before completing, Claude Hub runs an independent cross-model reviewer
+                against the changes and checks. Blocking P0/P1 defects automatically
+                continue the Goal until consensus is reached.
+              </template>
+              <template v-else>
+                The Goal finishes as soon as the active agent reports verified completion.
               </template>
             </p>
           </section>
@@ -154,7 +183,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 
 /** The objective's storage bound; the counter reads it instead of a literal. */
 const MAX_OBJECTIVE = 4000
@@ -170,10 +199,12 @@ const props = defineProps<{
   initialPlanFirst?: boolean
   /** Why the provider cannot plan first, or null when it can. */
   planFirstDisabledReason?: string | null
+  /** Remembered strict cross-review gate choice for a new Goal. */
+  initialStrictReview?: boolean
 }>()
 const emit = defineEmits<{
   close: []
-  submit: [value: { objective: string; planFirst: boolean }]
+  submit: [value: { objective: string; planFirst: boolean; strictReview: boolean }]
   /** A paste inside the objective field. The parent decides whether the
    *  clipboard carries images; the dialog only forwards the raw event so it
    *  stays free of attachment state. */
@@ -181,12 +212,25 @@ const emit = defineEmits<{
 }>()
 const objective = ref('')
 const planFirst = ref(false)
+const strictReview = ref(true)
 const validationError = ref<string | null>(null)
 const objectiveEl = ref<HTMLTextAreaElement | null>(null)
 let returnFocusEl: HTMLElement | null = null
 
+const effectivePlanFirstDisabledReason = computed(() =>
+  strictReview.value ? null : (props.planFirstDisabledReason ?? null),
+)
+
+const effectivePlanFirst = computed(() =>
+  planFirst.value && !effectivePlanFirstDisabledReason.value,
+)
+
 function togglePlanFirst(event: Event) {
   planFirst.value = (event.target as HTMLInputElement).checked
+}
+
+function toggleStrictReview(event: Event) {
+  strictReview.value = (event.target as HTMLInputElement).checked
 }
 
 function close() {
@@ -215,7 +259,8 @@ function trapFocus(event: KeyboardEvent) {
 watch(() => props.open, open => {
   if (open) {
     if (props.editing) objective.value = props.initialObjective ?? ''
-    planFirst.value = Boolean(props.initialPlanFirst ?? false) && !props.planFirstDisabledReason
+    strictReview.value = Boolean(props.initialStrictReview ?? true)
+    planFirst.value = Boolean(props.initialPlanFirst ?? false)
     returnFocusEl = document.activeElement instanceof HTMLElement ? document.activeElement : null
     validationError.value = null
     void nextTick(() => objectiveEl.value?.focus())
@@ -230,7 +275,7 @@ function submit() {
   if (props.busy || props.submitDisabled) return
   if (!trimmed) { validationError.value = 'Objective is required.'; return }
   validationError.value = null
-  emit('submit', { objective: trimmed, planFirst: planFirst.value })
+  emit('submit', { objective: trimmed, planFirst: effectivePlanFirst.value, strictReview: strictReview.value })
 }
 </script>
 

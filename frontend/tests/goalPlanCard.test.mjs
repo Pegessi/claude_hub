@@ -238,3 +238,19 @@ test('a value remembered while the option was on by default is not carried over'
   assert.equal(preference.readPlanFirstPreference(legacy), false)
   assert.equal(preference.planFirstChoice({ requested: false, disabledReason: null }).effective, false)
 })
+
+test('strict cross-review defaults on and survives round trips and storage failures', () => {
+  const store = new Map()
+  const storage = {
+    getItem: key => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => store.set(key, value),
+  }
+  assert.equal(preference.readStrictReviewPreference(storage), true)
+  preference.writeStrictReviewPreference(storage, false)
+  assert.equal(preference.readStrictReviewPreference(storage), false)
+  preference.writeStrictReviewPreference(storage, true)
+  assert.equal(preference.readStrictReviewPreference(storage), true)
+  assert.equal(preference.readStrictReviewPreference({ getItem: () => { throw new Error('denied') } }), true)
+  preference.writeStrictReviewPreference({ setItem: () => { throw new Error('denied') } }, false)
+  assert.equal(preference.readStrictReviewPreference(null), true)
+})

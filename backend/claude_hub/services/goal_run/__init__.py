@@ -10,6 +10,11 @@ from .controller import (
 from .native import NativeGoalResolver
 from .policy import GoalPolicyError
 from .store import GoalRunStore
+from .strict_review import (
+    StrictReviewerCallback,
+    StrictReviewerTarget,
+    StrictReviewOutcome,
+)
 
 GOAL_SNAPSHOT_PATH = resolve_runtime_home() / "goal_runs.json"
 goal_run_store = GoalRunStore(GOAL_SNAPSHOT_PATH)
@@ -27,10 +32,12 @@ def configure_goal_dispatch(
     *,
     cancel: CancelCallback | None = None,
     provider_resolver: NativeGoalResolver | None = None,
+    strict_reviewer: StrictReviewerCallback | None = None,
 ) -> None:
     goal_run_controller.set_dispatch_callback(callback)
     goal_run_controller.set_cancel_callback(cancel)
     goal_run_controller.native.resolver = provider_resolver
+    goal_run_controller.set_strict_reviewer_callback(strict_reviewer)
 
 
 def get_goal_manager() -> GoalRunController:
@@ -43,6 +50,9 @@ __all__ = [
     "GoalPolicyError",
     "GoalRunController",
     "GoalRunStore",
+    "StrictReviewerCallback",
+    "StrictReviewerTarget",
+    "StrictReviewOutcome",
     "configure_goal_dispatch",
     "build_continuation_prompt",
     "get_goal_manager",

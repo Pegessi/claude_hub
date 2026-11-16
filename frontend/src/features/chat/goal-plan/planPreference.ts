@@ -12,6 +12,7 @@
  * change removes, so the legacy key is deliberately not read.
  */
 const STORAGE_KEY = 'claude-hub.goal-plan-first.v2'
+const STRICT_REVIEW_STORAGE_KEY = 'claude-hub.goal-strict-review.v1'
 
 export function readPlanFirstPreference(storage: Pick<Storage, 'getItem'> | null | undefined): boolean {
   try {
@@ -46,6 +47,30 @@ export function writePlanFirstPreference(
 ): void {
   try {
     storage?.setItem(STORAGE_KEY, planFirst ? 'true' : 'false')
+  } catch {
+    // Private-mode or quota failures keep the in-page choice only.
+  }
+}
+
+export function readStrictReviewPreference(
+  storage: Pick<Storage, 'getItem'> | null | undefined,
+): boolean {
+  try {
+    const raw = storage?.getItem(STRICT_REVIEW_STORAGE_KEY)
+    // Default on: iterative cross-model verification is the default Goal mode
+    // until the user explicitly turns it off.
+    return raw === null || raw === undefined ? true : raw === 'true'
+  } catch {
+    return true
+  }
+}
+
+export function writeStrictReviewPreference(
+  storage: Pick<Storage, 'setItem'> | null | undefined,
+  strictReview: boolean,
+): void {
+  try {
+    storage?.setItem(STRICT_REVIEW_STORAGE_KEY, strictReview ? 'true' : 'false')
   } catch {
     // Private-mode or quota failures keep the in-page choice only.
   }
