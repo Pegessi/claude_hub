@@ -7,7 +7,71 @@
 
 ## Released
 
-<<<<<<< HEAD
+### feat(patrol): demand digest, Feishu `merge_forward` triage, and default-off Dot proactive radar
+
+- Expand Feishu `merge_forward` bundles on inbound WebSocket/HTTP dispatch with
+  bounded untrusted evidence wrapping, child-message image downloads, and default
+  read-only triage intent for bare P2P forwards.
+- Add `DemandPatrolService` (`services/demand_patrol/`), `/api/patrol/{status,config,run}`,
+  `/api/dot/patrol`, `claude-hub patrol`, and `claude-hub dot patrol`:
+  - **Default-off Dot toggle** (`PatrolConfig.enabled = False`), controllable from
+    Dot's `Edit -> Proactive radar` (master + Feishu/Daily sub-channel switches),
+    the `Work` tab quick bar, or `claude-hub dot patrol --enable|--disable`.
+  - **Channel A (work-hours Feishu triage)**: deterministic relevance & unanswered
+    filtering (`p2p`, explicit `@user`, or participated threads with technical
+    signals) followed by bounded read-only subagent diagnosis, idempotent InfoWall
+    sync, and private reply-draft cards via `dot.notify`.
+  - **Channel B (daily deterministic digest)**: zero-LLM reconciliation across
+    InfoWall open demands (`32 MiB` bounded pipe reader), Codebase MR status/CI
+    transitions (`bytedcli`), Hub attention tasks, and `pending` inbox summary.
+
+### feat(pipeline): standardized Work pipeline recipes, auto-worktree isolation, and independent review routing
+
+- Add `WorkspaceTaskRecipe` (`standard`, `triage_diagnose`, `spec_implement_review`,
+  `eval_and_report`), InfoWall demand linking (`--demand-id`), fail-closed isolated
+  Git feature worktree provisioning (`<repo>_worktree/<slug>` on `feat/<slug>`),
+  post-`REVIEW_PASSED` protected-branch-guarded immutable-SHA `git push -u origin <sha>:refs/heads/<branch>`,
+  and idempotent InfoWall progress writeback (`claude-hub-pipeline:<task_id>:<milestone>`).
+- Upgrade `WorkspaceManager._select_or_create_reviewer` with `services/cross_reviewer.py`:
+  reuse valid explicit or idle independent `REVIEWER` sessions on the matching
+  checkout (preferring idle heterogeneous reviewers first while permitting
+  same-model independent reviewers), prefer quota-available cross-model targets
+  when spawning temporary Chat reviewers, fall back cleanly to independent
+  same-model temporary reviewers, and auto-retire temporary reviewers on pass.
+- Extend `claude-hub dot delegate` and `claude-hub task create` with `--recipe`,
+  `--demand-id`, MASO/Antigravity model & preset flags, and recipe-scoped briefs
+  that preserve `standard` Goal Packet behavior untouched.
+
+### feat(goal): strict cross-review gate with quota-aware routing, situational diff context, and adaptive convergence
+
+- Add optional Hub-managed `strict_review` gate on Chat Goals (`GoalSetupDialog` +
+  `GoalStatusBar` + `services/goal_run/strict_review.py`): intercepts
+  `<goal-status state="complete">` and runs a read-only independent reviewer
+  subagent (`keep=False`), preferring quota-available heterogeneous models and
+  retaining a clean-context same-model subagent fallback at the tail.
+- Automatically collect bounded read-only situational context (`git status` /
+  `git diff --stat` across target and referenced `*_worktree` directories, matched
+  Workspace `Feedback Lessons`, and symlink-safe `REVIEW.md`), enforce causal
+  `P0/P1` counterexample bars with evidence-backed rebuttal fairness, and adapt
+  round budgets (`early impasse stop` on repeated blockers vs. monotonic
+  convergence grace up to 5 rounds).
+
+### feat(workspace): unified Linear Triage Pro surface with cross-workspace scope, initiator actions, and AI handoff brief
+
+- Agent Workspace defaults to a unified two-pane `Triage View` (`NEEDS YOU` / `ACTIVE` /
+  `RECENT` rail with a `Current ⇄ All Workspaces` scope switcher + structured Decision
+  Gate, Summary & Key Takeaways, inline/modal previewable Deliverables, Verification &
+  Caveats, and adaptive Key Milestones that fold long runs and completed histories),
+  while retaining a persisted `Classic Board` toggle (`?ws_layout=board|triage`).
+- Initiator-controlled tasks gain in-place `Reply inline…` (automatically restoring
+  archived Chats before delivery) and one-click `Mark Done` for orphaned sessions;
+  accepting a Workspace-controlled task automatically invokes
+  `POST /api/workspaces/tasks/{id}/cleanup` for caller-owned ephemeral sessions.
+- Add `GET /api/workspaces/board-overview`, `GET /api/workspaces/{ws}/tasks/{id}/brief`,
+  `claude-hub task list --all-workspaces`, `claude-hub task brief`, `snapshot.md`
+  initiator progress projection, and `Copy AI Brief` / `Continue in New Chat` (<2 KB
+  handoff packet) in the detail header.
+
 ### fix(chat): eliminate Hub message status refresh stalls and Chat composer lockout
 
 - Skip unconditional `_save_state()` writes in `_refresh_one_session_status()`
@@ -28,23 +92,6 @@
   even before capabilities succeed, and report active recovery as reconciling.
   Repeated malformed successful inbox responses now expose the error and retry
   control rather than resetting the failure count before validation.
-=======
-### feat(workspace): unified Linear Triage Pro surface with cross-workspace scope, initiator actions, and AI handoff brief
-
-- Agent Workspace defaults to a unified two-pane `Triage View` (`NEEDS YOU` / `ACTIVE` /
-  `RECENT` rail with a `Current ⇄ All Workspaces` scope switcher + structured Decision
-  Gate, Summary & Key Takeaways, inline/modal previewable Deliverables, Verification &
-  Caveats, and adaptive Key Milestones that fold long runs and completed histories),
-  while retaining a persisted `Classic Board` toggle (`?ws_layout=board|triage`).
-- Initiator-controlled tasks gain in-place `Reply inline…` (automatically restoring
-  archived Chats before delivery) and one-click `Mark Done` for orphaned sessions;
-  accepting a Workspace-controlled task automatically invokes
-  `POST /api/workspaces/tasks/{id}/cleanup` for caller-owned ephemeral sessions.
-- Add `GET /api/workspaces/board-overview`, `GET /api/workspaces/{ws}/tasks/{id}/brief`,
-  `claude-hub task list --all-workspaces`, `claude-hub task brief`, `snapshot.md`
-  initiator progress projection, and `Copy AI Brief` / `Continue in New Chat` (<2 KB
-  handoff packet) in the detail header.
->>>>>>> feat/workspace-ui-demos
 
 ### fix(ui): keep mobile Chat sidebar drawer above its backdrop
 
