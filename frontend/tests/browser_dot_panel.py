@@ -351,9 +351,7 @@ async def main(browser_run: BrowserRun) -> None:
                     )
                     body = lessons[-1]
                 elif path.startswith("/api/dot/lessons/"):
-                    lesson = next(
-                        item for item in lessons if item["id"] == path.rsplit("/", 1)[1]
-                    )
+                    lesson = next(item for item in lessons if item["id"] == path.rsplit("/", 1)[1])
                     if method == "PATCH":
                         lesson["rule"] = data["rule"]
                     else:
@@ -378,9 +376,7 @@ async def main(browser_run: BrowserRun) -> None:
                 )
 
             def wrote(method: str, path: str) -> list:
-                return [
-                    item[2] for item in writes if item[0] == method and item[1] == path
-                ]
+                return [item[2] for item in writes if item[0] == method and item[1] == path]
 
             async def shot(name: str) -> None:
                 await page.screenshot(path=str(output / name))
@@ -397,9 +393,7 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(launchers).to_have_count(1)
             launcher = launchers.first
             await expect(launcher).to_be_visible()
-            assert "dot-launcher--compact" in (
-                await launcher.get_attribute("class") or ""
-            )
+            assert "dot-launcher--compact" in (await launcher.get_attribute("class") or "")
             # The compact launcher shares a row with the other toolbar controls.
             # Check physical boxes across phone widths and the mobile breakpoint.
             report["toolbar_geometry"] = []
@@ -410,11 +404,7 @@ async def main(browser_run: BrowserRun) -> None:
                 launcher_box = await launcher.bounding_box()
                 add_box = await page.locator(".add-tab").bounding_box()
                 menu_box = await page.locator(".mobile-app-menu-trigger").bounding_box()
-                assert (
-                    launcher_box is not None
-                    and add_box is not None
-                    and menu_box is not None
-                )
+                assert launcher_box is not None and add_box is not None and menu_box is not None
                 report["toolbar_geometry"].append(
                     {
                         "width": width,
@@ -424,17 +414,15 @@ async def main(browser_run: BrowserRun) -> None:
                     }
                 )
                 for neighbor in (add_box, menu_box):
-                    assert (
-                        abs(launcher_box["height"] - neighbor["height"]) <= 1
-                    ), report["toolbar_geometry"][-1]
-                    assert abs(launcher_box["y"] - neighbor["y"]) <= 1, report[
+                    assert abs(launcher_box["height"] - neighbor["height"]) <= 1, report[
                         "toolbar_geometry"
                     ][-1]
+                    assert abs(launcher_box["y"] - neighbor["y"]) <= 1, report["toolbar_geometry"][
+                        -1
+                    ]
                 for button in (".dot-launcher__open", ".dot-launcher__memory"):
                     box = await launcher.locator(button).bounding_box()
-                    assert (
-                        box is not None and box["height"] >= 24 and box["width"] >= 36
-                    ), box
+                    assert box is not None and box["height"] >= 24 and box["width"] >= 36, box
                     assert 0 <= box["x"] and box["x"] + box["width"] <= width, box
                 # The phone keeps the inbox entry but never opens a surface by
                 # itself; the old hidden summary markup is gone with it.
@@ -449,12 +437,8 @@ async def main(browser_run: BrowserRun) -> None:
             status_reads = report["api_requests"].count(["GET", "/api/tabs/status"])
             assert status_reads > 0
             agent_status = "attention"
-            await expect(indicator).to_have_attribute(
-                "data-status", "attention", timeout=12000
-            )
-            assert (
-                report["api_requests"].count(["GET", "/api/tabs/status"]) > status_reads
-            )
+            await expect(indicator).to_have_attribute("data-status", "attention", timeout=12000)
+            assert report["api_requests"].count(["GET", "/api/tabs/status"]) > status_reads
             # A status transition must not pop the panel open on a phone.
             await expect(page.locator(".tab-bar .inbox-panel")).to_have_count(0)
             await expect(page.get_by_test_id("inbox-sheet")).to_have_count(0)
@@ -470,9 +454,7 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(panel).to_be_visible()
             panel_box = await panel.bounding_box()
             assert panel_box is not None and panel_box["width"] == 390, panel_box
-            close_box = await panel.get_by_role(
-                "button", name="Close Dot memory"
-            ).bounding_box()
+            close_box = await panel.get_by_role("button", name="Close Dot memory").bounding_box()
             assert close_box is not None and close_box["height"] >= 44, close_box
 
             # Rename and set an emoji; the tab list is refreshed for the new tab name.
@@ -483,65 +465,47 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(patrol_editor).to_be_visible()
             patrol_master = patrol_editor.get_by_label("Enable proactive radar")
             await expect(patrol_master).not_to_be_checked()
-            await expect(
-                patrol_editor.get_by_label("Work-hours Feishu triage")
-            ).to_have_count(0)
+            await expect(patrol_editor.get_by_label("Work-hours Feishu triage")).to_have_count(0)
             await patrol_master.check()
             await expect(patrol_master).to_be_checked()
-            await expect(
-                patrol_editor.get_by_label("Work-hours Feishu triage")
-            ).to_be_checked()
-            await expect(
-                patrol_editor.get_by_label("Daily demand digest")
-            ).to_be_checked()
+            await expect(patrol_editor.get_by_label("Work-hours Feishu triage")).to_be_checked()
+            await expect(patrol_editor.get_by_label("Daily demand digest")).to_be_checked()
             await patrol_editor.get_by_label("Work-hours Feishu triage").uncheck()
-            await expect(
-                patrol_editor.get_by_label("Work-hours Feishu triage")
-            ).not_to_be_checked()
+            await expect(patrol_editor.get_by_label("Work-hours Feishu triage")).not_to_be_checked()
             assert wrote("PATCH", "/api/dot/patrol") == [
                 {"enabled": True},
                 {"feishu_enabled": False},
             ]
-            await expect(
-                execution_editor.get_by_label("Execution backend")
-            ).to_have_value("claude")
+            await expect(execution_editor.get_by_label("Execution backend")).to_have_value("claude")
             initial_preset = await execution_editor.get_by_label(
                 "Dot environment preset"
             ).input_value()
             assert initial_preset != "custom", initial_preset
             await expect(execution_editor).to_contain_text("Currently legacy-provider")
             backend_select = execution_editor.get_by_label("Execution backend")
-            await expect(
-                backend_select.locator("option", has_text="Antigravity")
-            ).to_have_count(1)
+            await expect(backend_select.locator("option", has_text="Antigravity")).to_have_count(1)
             await backend_select.select_option("antigravity")
-            await expect(
-                execution_editor.get_by_label("Dot environment preset")
-            ).to_have_value("none")
+            await expect(execution_editor.get_by_label("Dot environment preset")).to_have_value(
+                "none"
+            )
             await expect(execution_editor).to_contain_text(
                 "Applying this creates a fresh Dot chat and archives the current chat."
             )
             await expect(execution_editor).to_contain_text("Feishu Bot must be unbound")
-            await execution_editor.get_by_role(
-                "button", name="Switch backend", exact=True
-            ).click()
+            await execution_editor.get_by_role("button", name="Switch backend", exact=True).click()
             await expect(execution_editor).to_contain_text(
                 "Unbind the Feishu Bot before switching Dot's backend"
             )
-            await expect(
-                execution_editor.get_by_label("Execution backend")
-            ).to_have_value("antigravity")
-            await expect(
-                execution_editor.get_by_label("Dot environment preset")
-            ).to_have_value("none")
-            await execution_editor.get_by_role(
-                "button", name="Retry", exact=True
-            ).click()
+            await expect(execution_editor.get_by_label("Execution backend")).to_have_value(
+                "antigravity"
+            )
+            await expect(execution_editor.get_by_label("Dot environment preset")).to_have_value(
+                "none"
+            )
+            await execution_editor.get_by_role("button", name="Retry", exact=True).click()
             await asyncio.wait_for(execution_apply_started.wait(), timeout=5)
             try:
-                await expect(
-                    editor.get_by_role("button", name="Save", exact=True)
-                ).to_be_disabled()
+                await expect(editor.get_by_role("button", name="Save", exact=True)).to_be_disabled()
                 await expect(editor.locator('input[type="file"]')).to_be_disabled()
                 await expect(editor.get_by_label("Name", exact=True)).to_be_disabled()
                 # A submitted identity form must not unmount the pending execution
@@ -568,9 +532,7 @@ async def main(browser_run: BrowserRun) -> None:
             }
             assert switch_payloads == [expected_switch, expected_switch]
             assert "old-provider-secret" not in json.dumps(switch_payloads)
-            await execution_editor.get_by_role(
-                "button", name="Retry tab refresh"
-            ).click()
+            await execution_editor.get_by_role("button", name="Retry tab refresh").click()
             await expect(
                 execution_editor.get_by_role("button", name="Retry tab refresh")
             ).to_be_hidden()
@@ -578,14 +540,12 @@ async def main(browser_run: BrowserRun) -> None:
                 expected_switch,
                 expected_switch,
             ]
-            await expect(
-                page.locator('.tab[data-tab-id="dot-tab-next"]')
-            ).to_have_class(re.compile(r"\bactive\b"))
+            await expect(page.locator('.tab[data-tab-id="dot-tab-next"]')).to_have_class(
+                re.compile(r"\bactive\b")
+            )
             name_input = editor.get_by_label("Name")
             font = await name_input.evaluate("el => getComputedStyle(el).fontSize")
-            assert (
-                font == "16px"
-            ), f"phone inputs must be 16px to avoid iOS zoom, got {font}"
+            assert font == "16px", f"phone inputs must be 16px to avoid iOS zoom, got {font}"
             tab_reads = report["api_requests"].count(["GET", "/api/tabs"])
             await name_input.fill("Jarvis")
             await editor.get_by_label("Emoji").fill("🦊")
@@ -594,14 +554,10 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(editor).to_be_hidden()
             await expect(panel.locator(".dot-panel__title")).to_have_text("Jarvis")
             await expect(panel.locator(".dot-avatar__text").first).to_have_text("🦊")
-            assert wrote("PATCH", "/api/dot/identity") == [
-                {"name": "Jarvis", "avatar": "🦊"}
-            ]
+            assert wrote("PATCH", "/api/dot/identity") == [{"name": "Jarvis", "avatar": "🦊"}]
             deadline = asyncio.get_running_loop().time() + 5
             while report["api_requests"].count(["GET", "/api/tabs"]) == tab_reads:
-                assert (
-                    asyncio.get_running_loop().time() < deadline
-                ), "tabs were not refreshed"
+                assert asyncio.get_running_loop().time() < deadline, "tabs were not refreshed"
                 await asyncio.sleep(0.05)
 
             # Work: the stuck alarm is flagged, a bad id shows the server error,
@@ -612,15 +568,11 @@ async def main(browser_run: BrowserRun) -> None:
             await patrol_bar.get_by_role("button", name="Disable", exact=True).click()
             await expect(patrol_bar).to_contain_text("radar off")
             assert wrote("PATCH", "/api/dot/patrol")[-1] == {"enabled": False}
-            await expect(panel.locator(".dot-item__badge--warn")).to_have_text(
-                "stalled"
-            )
+            await expect(panel.locator(".dot-item__badge--warn")).to_have_text("stalled")
             watch_form = page.get_by_test_id("dot-watch-form")
             await watch_form.get_by_label("Task id to watch").fill("no-such-task")
             await watch_form.get_by_role("button", name="Watch").click()
-            await expect(panel.locator(".dot-panel__error")).to_have_text(
-                "Task not found"
-            )
+            await expect(panel.locator(".dot-panel__error")).to_have_text("Task not found")
             await watch_form.get_by_label("Task id to watch").fill("task-7")
             await watch_form.get_by_label("Stuck alarm after").select_option("4")
             await watch_form.get_by_role("button", name="Watch").click()
@@ -641,9 +593,7 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(page.get_by_test_id("dot-lesson-stats")).to_contain_text(
                 "First pass 3/4 (75%)"
             )
-            await expect(page.get_by_test_id("dot-lesson-stats")).to_contain_text(
-                "brief 1"
-            )
+            await expect(page.get_by_test_id("dot-lesson-stats")).to_contain_text("brief 1")
             await expect(page.get_by_test_id("dot-lesson-stats")).to_contain_text(
                 "judged 4/5 returned"
             )
@@ -651,22 +601,16 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(rows).to_have_count(1)
             await expect(rows.first).to_contain_text("always")
             lesson_form = page.get_by_test_id("dot-lesson-form")
-            await lesson_form.get_by_label("New lesson").fill(
-                "Split goals over 7 checks"
-            )
+            await lesson_form.get_by_label("New lesson").fill("Split goals over 7 checks")
             await lesson_form.get_by_role("button", name="Add").click()
             await expect(rows).to_have_count(2)
-            assert wrote("POST", "/api/dot/lessons") == [
-                {"rule": "Split goals over 7 checks"}
-            ]
+            assert wrote("POST", "/api/dot/lessons") == [{"rule": "Split goals over 7 checks"}]
             await shot("dot-mobile-lessons.png")
             await rows.first.get_by_role("button", name="Edit").click()
             await rows.first.get_by_label("Lesson rule").fill("Name the paper version")
             await rows.first.get_by_role("button", name="Save").click()
             await expect(rows.first).to_contain_text("Name the paper version")
-            assert wrote("PATCH", "/api/dot/lessons/l-1") == [
-                {"rule": "Name the paper version"}
-            ]
+            assert wrote("PATCH", "/api/dot/lessons/l-1") == [{"rule": "Name the paper version"}]
             await rows.nth(1).get_by_role("button", name="Drop").click()
             await expect(rows).to_have_count(1)
             assert wrote("DELETE", "/api/dot/lessons/l-2") == [None]
@@ -694,9 +638,7 @@ async def main(browser_run: BrowserRun) -> None:
             report["error_type"] = type(exc).__name__
             if page is not None:
                 try:
-                    await page.screenshot(
-                        path=str(output / "failure.png"), full_page=True
-                    )
+                    await page.screenshot(path=str(output / "failure.png"), full_page=True)
                 except Exception:
                     pass
 

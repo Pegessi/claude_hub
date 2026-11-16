@@ -50,9 +50,7 @@ class FakeDot:
     def is_set_up(self) -> bool:
         return self.ready
 
-    async def notify(
-        self, text: str, *, title: str | None = None, tone: str = "info"
-    ) -> str:
+    async def notify(self, text: str, *, title: str | None = None, tone: str = "info") -> str:
         self.calls.append((text, title, tone))
         return self.result
 
@@ -81,9 +79,7 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PatrolStateStore:
     return PatrolStateStore()
 
 
-def service(
-    store: PatrolStateStore, dot: FakeDot, runner: EmptyRunner
-) -> DemandPatrolService:
+def service(store: PatrolStateStore, dot: FakeDot, runner: EmptyRunner) -> DemandPatrolService:
     return DemandPatrolService(
         store=store,
         dot=dot,
@@ -136,8 +132,7 @@ def test_state_roundtrip_bounded_history_and_isolation(store: PatrolStateStore) 
         processed_feishu_ids=[f"message-{i}" for i in range(520)],
         fired_daily_slots=[f"slot-{i}" for i in range(80)],
         recent_runs=[
-            PatrolRunRecord(channel="daily", started_at=NOW.isoformat())
-            for _ in range(30)
+            PatrolRunRecord(channel="daily", started_at=NOW.isoformat()) for _ in range(30)
         ],
     )
     store.save(state)
@@ -224,9 +219,7 @@ async def test_status_and_disable_remain_responsive_during_run(
         ) -> Any:
             entered.set()
             await release.wait()
-            return await super().__call__(
-                argv, timeout=timeout, input_text=input_text, env=env
-            )
+            return await super().__call__(argv, timeout=timeout, input_text=input_text, env=env)
 
     patrol = service(store, FakeDot(), BlockingRunner())
     run = asyncio.create_task(patrol.run(channel="daily", notify=False))
@@ -284,12 +277,8 @@ async def test_rest_status_partial_config_run_and_auth(
     app = FastAPI()
     app.include_router(patrol_api.router)
     app.include_router(dot_api.router)
-    monkeypatch.setattr(
-        auth_dependencies, "settings", SimpleNamespace(auth_enabled=True)
-    )
-    monkeypatch.setattr(
-        auth_dependencies, "is_local_network_request", lambda request: False
-    )
+    monkeypatch.setattr(auth_dependencies, "settings", SimpleNamespace(auth_enabled=True))
+    monkeypatch.setattr(auth_dependencies, "is_local_network_request", lambda request: False)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app), base_url="http://test"
     ) as client:
@@ -323,9 +312,7 @@ async def test_rest_status_partial_config_run_and_auth(
         assert bad.status_code == 422
         bad_dot = await client.patch("/api/dot/patrol", json={"typo": True})
         assert bad_dot.status_code == 422
-        result = await client.post(
-            "/api/patrol/run", json={"channel": "daily", "dry_run": True}
-        )
+        result = await client.post("/api/patrol/run", json={"channel": "daily", "dry_run": True})
         assert result.status_code == 200
         assert result.json()["runs"][0]["llm_invoked"] == 0
         assert result.json()["markdown"]
@@ -406,9 +393,7 @@ def test_cli_commands_use_real_hub_client(
             transport=httpx.MockTransport(handle),
         ),
     )
-    result = CliRunner().invoke(
-        cli_main.cli, ["--base-url", "http://test", "--json", *args]
-    )
+    result = CliRunner().invoke(cli_main.cli, ["--base-url", "http://test", "--json", *args])
     assert result.exit_code == 0, result.output
     assert len(requests) == 1
     request = requests[0]
@@ -483,9 +468,7 @@ def test_infowall_remote_endpoint_keeps_proxy_policy(
         ("lark-cli", ".local/bin/lark-cli"),
     ],
 )
-@pytest.mark.parametrize(
-    "location", ["path", "home", "home-nonexecutable", "host", "missing"]
-)
+@pytest.mark.parametrize("location", ["path", "home", "home-nonexecutable", "host", "missing"])
 def test_cli_executable_resolution_order(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -528,9 +511,7 @@ def test_cli_executable_resolution_order(
     }
     assert actual == expected[location]
     assert checked == (
-        []
-        if location == "path"
-        else candidates[:1] if location == "home" else candidates
+        [] if location == "path" else candidates[:1] if location == "home" else candidates
     )
 
 
@@ -551,9 +532,7 @@ async def test_cli_cleanup_preserves_primary_error_and_closes_transport(
         _transport=transport,
     )
     monkeypatch.setattr(commands, "_MAX_OUTPUT_BYTES", 16)
-    monkeypatch.setattr(
-        commands.asyncio, "create_subprocess_exec", AsyncMock(return_value=process)
-    )
+    monkeypatch.setattr(commands.asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
     kill = Mock(side_effect=AssertionError("an exited process must not be signalled"))
     monkeypatch.setattr(commands.os, "killpg", kill)
     with pytest.raises(commands.CommandError, match="output budget"):
