@@ -93,6 +93,8 @@ export interface UseAgentStreamApi {
   start: (sourceId: string, source?: StreamSource) => Promise<void>
   /** Fetch a folded historical turn's full process without advancing the live cursor. */
   loadHistoryDetail: (turnId: string) => Promise<void>
+  /** Recover failed observation without preempting hydration or replacing the provider. */
+  reconnect: (sourceId: string, source?: StreamSource) => Promise<void>
   /** Replace a failed provider transport, then hydrate its resumed stream. */
   retry: (sourceId: string, source?: StreamSource) => Promise<void>
   /** Refresh active-session capabilities without restarting timeline delivery. */
@@ -650,7 +652,7 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
 
   async function start(sourceId: string, source: StreamSource = 'managed-session', retryAttempt = 0) {
     const streamPath = streamBasePath(sourceId, source)
-    const retainedHistory = retryAttempt > 0 && currentStreamPath === streamPath && historyReady.value
+    const retainedHistory = currentStreamPath === streamPath && historyReady.value
       ? currentHistorySnapshot()
       : undefined
     const previousError = retryAttempt > 0 ? errorMessage.value : null
@@ -658,7 +660,7 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
     stopped = false
     currentSessionId = sourceId
     currentStreamPath = streamPath
-    const cached = agentStreamHistoryCache.get(streamPath) ?? retainedHistory
+    const cached = retainedHistory ?? agentStreamHistoryCache.get(streamPath)
     reset(cached)
     if (previousError) errorMessage.value = previousError
 
@@ -666,7 +668,6 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
     // Cached history is immediately renderable. Keep input disabled while a
     // background capabilities check and incremental catch-up reconcile it.
     connectionState.value = cached ? 'reconciling' : 'hydrating'
-    if (retryAttempt > 0) connectionState.value = 'failed'
 
     // Abort controller for the current generation's hydration fetches. A newer
     // start() (or stop()) will abort these, so a stale fetch cannot resolve
@@ -705,7 +706,7 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
       // delta-only page before that transition, even with rAF suspended.
       batcher.flushAndCancel()
       historyReady.value = true
-      if (retryAttempt === 0) connectionState.value = 'reconciling'
+      connectionState.value = 'reconciling'
       const result = await prepared
       if (stopped || !stateMachine.isCurrent(generationId)) return
       if (configuration() !== requestConfiguration) {
@@ -847,6 +848,13 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
     } finally {
       if (historyDetailRequests.get(turnId)?.id === requestId) historyDetailRequests.delete(turnId)
     }
+  }
+
+  async function reconnect(sourceId: string, source: StreamSource = 'managed-session') {
+    // Inbox status recovery is observation-only. Let an existing retry chain
+    // keep its generation and bounded budget, including while it backs off.
+    if (connectionState.value !== 'failed' || hydrationRetryTimer !== null) return
+    await start(sourceId, source)
   }
 
   async function retry(sourceId: string, source: StreamSource = 'managed-session') {
@@ -1008,6 +1016,7 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
     historyReady,
     start,
     loadHistoryDetail,
+    reconnect,
     retry,
     refreshCapabilities,
     setMode,

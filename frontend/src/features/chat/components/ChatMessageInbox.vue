@@ -76,8 +76,8 @@ async function refresh() {
     const result: unknown = await response.json()
     if (!polling || identity !== generation) return
     const hadFailure = consecutiveFailures > 0 || Boolean(error.value)
-    consecutiveFailures = 0
     receipts.value = pendingMessageReceipts(result)
+    consecutiveFailures = 0
     error.value = ''
     if (hadFailure) emit('recovered')
   } catch {

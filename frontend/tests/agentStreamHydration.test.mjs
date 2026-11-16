@@ -977,3 +977,75 @@ test('start stops automatic hydration retries after exhausting the bounded retry
   assert.equal(stream.connectionState.value, 'failed')
 })
 
+test('observation reconnect coalesces backoff and preserves unprepared history after budget exhaustion', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const event = { stream_sequence: 0, type: 'text_delta', payload: { text: 'readable without capabilities' } }
+  let capabilityCalls = 0
+  let holdHistory = false
+  let finishHistory
+  const requests = []
+  t.mock.method(globalThis, 'fetch', async (url, options = {}) => {
+    requests.push(url)
+    if (url.endsWith('/capabilities')) {
+      capabilityCalls += 1
+      return Response.json({}, { status: 503 })
+    }
+    if (url.includes('/events?')) {
+      if (holdHistory) return new Promise(resolve => { finishHistory = resolve })
+      const since = Number(new URL(url, 'http://test').searchParams.get('since_sequence'))
+      return Response.json({ events: since < 0 ? [event] : [], next_sequence: 0, has_more: false })
+    }
+    return pendingUntilAbort(options)
+  })
+  const { stream, unmount } = mountStream()
+  t.after(unmount)
+  await stream.start('reconnect-history', 'terminal-tab')
+  for (const delayMs of [1000, 2000, 4000, 8000]) {
+    const before = capabilityCalls
+    await stream.reconnect('reconnect-history', 'terminal-tab')
+    assert.equal(capabilityCalls, before, 'inbox recovery must not reset an existing backoff chain')
+    t.mock.timers.tick(delayMs)
+    await nextImmediate()
+  }
+  assert.equal(capabilityCalls, 5)
+  assert.equal(stream.capabilities.value, null)
+  holdHistory = true
+  const reconnecting = stream.reconnect('reconnect-history', 'terminal-tab')
+  await nextImmediate()
+  assert.equal(stream.connectionState.value, 'reconciling')
+  assert.equal(stream.historyReady.value, true)
+  assert.deepEqual(stream.events.value, [event])
+  finishHistory(Response.json({}, { status: 503 }))
+  await reconnecting
+  assert.deepEqual(stream.events.value, [event], 'another history-read failure must not hide the transcript')
+  assert.ok(!requests.some(url => url.endsWith('/retry')))
+  stream.stop()
+  const stoppedCalls = capabilityCalls
+  t.mock.timers.tick(30000)
+  await nextImmediate()
+  assert.equal(capabilityCalls, stoppedCalls, 'stop retires the pending hydration retry')
+})
+
+for (const teardown of ['stop', 'unmount', 'manual retry']) {
+  test(`${teardown} retires scheduled automatic hydration without a late restart`, async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    let capabilityCalls = 0
+    let retryCalls = 0
+    t.mock.method(globalThis, 'fetch', async url => {
+      if (url.endsWith('/capabilities')) { capabilityCalls += 1; return Response.json({}, { status: 503 }) }
+      if (url.endsWith('/retry')) { retryCalls += 1; return Response.json({}, { status: 503 }) }
+      return Response.json({ events: [], next_sequence: -1, has_more: false })
+    })
+    const { stream, unmount } = mountStream()
+    t.after(unmount)
+    await stream.start(`retire-auto-${teardown}`, 'terminal-tab')
+    if (teardown === 'manual retry') await stream.retry(`retire-auto-${teardown}`, 'terminal-tab')
+    else if (teardown === 'unmount') unmount()
+    else stream.stop()
+    t.mock.timers.tick(30000)
+    await nextImmediate()
+    assert.equal(capabilityCalls, 1)
+    assert.equal(retryCalls, teardown === 'manual retry' ? 1 : 0)
+  })
+}
+

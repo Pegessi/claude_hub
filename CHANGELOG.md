@@ -14,7 +14,7 @@
   `last_activity_at` are unchanged, use the indexed `turn_id` query in
   `inspect_chat_delivery()`, throttle repeated `reconcile()` checks on
   uncertain direct messages to 60 seconds, and read a lock-free snapshot in
-  `ChatMessageInbox.list()` so status polling never blocks on `pump()`/`save()`.
+  `ChatMessageInbox.list()` so status reads do not wait for the pump lock.
 - Perform bounded automatic retry with exponential backoff on transient
   hydration/capability failures in `useAgentStream.start()`, trigger parent
   stream recovery when `ChatMessageInbox` retries or recovers while
@@ -22,6 +22,11 @@
   deactivated in `<KeepAlive>`, suppress the error banner on a single transient
   poll failure when `receipts` is empty, and stop automatic 3s polling on HTTP
   401/403.
+- Keep inbox-triggered recovery observation-only: coalesce pending hydration
+  retries without replacing the provider, preserve readable same-Chat history
+  even before capabilities succeed, and report active recovery as reconciling.
+  Repeated malformed successful inbox responses now expose the error and retry
+  control rather than resetting the failure count before validation.
 
 ### fix(ui): keep mobile Chat sidebar drawer above its backdrop
 
