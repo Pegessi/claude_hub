@@ -136,6 +136,36 @@ test('inbox stops 3s polling on 401/403 and pauses while deactivated', async t =
   assert.equal(calls.filter(url => url.includes('tab-inactive')).length, 0)
 })
 
+test('repeated malformed successful inbox responses surface an error and recover explicitly', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let calls = 0
+  let valid = false
+  let recovered = 0
+  t.mock.method(globalThis, 'fetch', async () => {
+    calls += 1
+    return Response.json(valid ? { messages: [] } : {})
+  })
+  const root = { children: [] }
+  const nodes = node => [node, ...(node.children ?? []).flatMap(nodes)]
+  const app = makeRenderer().createApp(Inbox, { tabId: 'malformed', onRecovered: () => { recovered += 1 } })
+  app.mount(root)
+  t.after(() => app.unmount())
+  await setImmediate()
+  assert.equal(nodes(root).some(node => node.tag === 'button'), false)
+  for (let i = 0; i < 3; i += 1) {
+    t.mock.timers.tick(3000)
+    await setImmediate()
+    assert.ok(nodes(root).some(node => node.text?.includes('unreadable')), 'repeated invalid envelopes must not reset the failure streak')
+  }
+  assert.equal(calls, 4)
+  assert.equal(recovered, 0)
+  valid = true
+  nodes(root).find(node => node.tag === 'button').attributes.onClick()
+  await setImmediate()
+  assert.equal(recovered, 1)
+  assert.equal(nodes(root).some(node => node.tag === 'button'), false)
+})
+
 test('user bubble separates Hub badge from Feishu avatar and inbox lifecycle clears polling', async () => {
   const bubble = await readFile(new URL('../src/features/chat/components/ChatUserMessage.vue', import.meta.url), 'utf8')
   assert.match(bubble, /turn.origin === 'feishu' \|\| turn.origin === 'hub_message'/)

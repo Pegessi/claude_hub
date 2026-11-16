@@ -139,7 +139,7 @@ const stubs = {
           historyDetails.value = { ...historyDetails.value, [id]: { ...entry, status: 'loaded' } }
         }
       }
-      const stream = { events, historyReady, historyDetails, historyDetailRevision, attributedToolIds, connectionState, errorMessage, capabilities, start, stop, loadHistoryDetail, retry: start, refreshCapabilities: async () => {}, setMode: async () => {}, nudge() {}, reset() {} }
+      const stream = { events, historyReady, historyDetails, historyDetailRevision, attributedToolIds, connectionState, errorMessage, capabilities, start, stop, loadHistoryDetail, reconnect: start, retry: async (...args) => { globalThis.__chatLifecycleTest.calls.push(['retry', ...args]); await start(...args) }, refreshCapabilities: async () => {}, setMode: async () => {}, nudge() {}, reset() {} }
       globalThis.__chatLifecycleTest.streams.push(stream)
       return stream
     }
@@ -185,9 +185,19 @@ function collectInstances(vnode, result = []) {
   return result
 }
 
-async function mount(t) {
+async function mount(t, { realStream = false, fetch } = {}) {
   const env = runtime(t)
-  const load = moduleLoader(stubs)
+  if (fetch) t.mock.method(globalThis, 'fetch', fetch)
+  const moduleStubs = { ...stubs }
+  if (realStream) delete moduleStubs['composables/useAgentStream.ts']
+  const load = moduleLoader(moduleStubs)
+  if (realStream) {
+    const { agentStreamHistoryCache } = await load('utils/agentStreamHistoryCache.ts')
+    const { agentStreamCapabilitiesCache } = await load('utils/agentStreamCapabilitiesCache.ts')
+    agentStreamHistoryCache.clear()
+    agentStreamCapabilitiesCache.clear()
+    t.after(() => { agentStreamHistoryCache.clear(); agentStreamCapabilitiesCache.clear() })
+  }
   const direct = (await load('features/chat/StructuredPane.vue')).default
   const legacy = (await load('components/StructuredPane.vue')).default
   assert.equal(legacy, direct, 'the compatibility SFC exports the same component object')
@@ -717,7 +727,48 @@ test('a turn that began while the tab was hidden is backfilled on return', async
   )
 })
 
-test('ChatMessageInbox recovery or Retry status triggers parent stream retry when connectionState is failed', async t => {
+test('inbox recovery does not preempt real automatic hydration or replace the provider', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let capabilityCalls = 0
+  let inboxCalls = 0
+  let resolveCapabilities
+  let hydrationSignal
+  const writes = []
+  const h = await mount(t, { realStream: true, fetch: async (url, options = {}) => {
+    if (url.endsWith('/capabilities')) {
+      capabilityCalls += 1
+      if (capabilityCalls === 1) return Response.json({}, { status: 503 })
+      hydrationSignal = options.signal
+      return new Promise(resolve => { resolveCapabilities = resolve })
+    }
+    if (url.includes('/events?')) return Response.json({ events: [], next_sequence: -1, has_more: false })
+    if (url.endsWith('/messages')) {
+      inboxCalls += 1
+      return inboxCalls === 1 ? Response.json({}, { status: 503 }) : Response.json({ messages: [] })
+    }
+    if (url.endsWith('/wait')) return new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted'))))
+    if (options.method === 'POST') writes.push(url)
+    return Response.json({}, { status: 503 })
+  } })
+  const delivery = h.owner(h.keys.chatDeliveryKey)
+  delivery.draftMessage.value = 'retain unsent text'
+  assert.equal(capabilityCalls, 1)
+  assert.equal(delivery.isSubmissionReady.value, false)
+  t.mock.timers.tick(1000)
+  await flush()
+  assert.equal(capabilityCalls, 2)
+  t.mock.timers.tick(2000)
+  await flush()
+  assert.equal(inboxCalls, 2)
+  assert.equal(hydrationSignal.aborted, false, 'status recovery must not abort the successful auto hydration')
+  assert.deepEqual(writes, [], 'an observation event must not POST provider retry')
+  resolveCapabilities(Response.json({ structured: true, can_send: true, available_models: [] }))
+  await flush()
+  assert.equal(delivery.isSubmissionReady.value, true)
+  assert.equal(delivery.draftMessage.value, 'retain unsent text')
+})
+
+test('ChatMessageInbox recovery or Retry status reconnects observation when connectionState is failed', async t => {
   const h = await mount(t)
   const stream = h.state.streams[0]
   stream.connectionState.value = 'failed'

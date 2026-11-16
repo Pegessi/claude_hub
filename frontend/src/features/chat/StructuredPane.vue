@@ -103,8 +103,8 @@
       v-if="!isManagedChat && currentTab && !currentTab.archived && ['claude', 'codex', 'cursor', 'maso', 'antigravity'].includes(currentTab.agent_type ?? '')"
       :tab-id="props.tabId"
       :active="isPaneActivated"
-      @retry="retryStreamIfFailed"
-      @recovered="retryStreamIfFailed"
+      @retry="reconnectStreamIfFailed"
+      @recovered="reconnectStreamIfFailed"
     />
 
     <!-- Composer -->
@@ -193,6 +193,7 @@ const {
   capabilities,
   start,
   loadHistoryDetail,
+  reconnect,
   retry: retryStream,
   refreshCapabilities,
   setMode,
@@ -221,9 +222,9 @@ function retry() {
   }
   void retryStream(streamSourceId.value, streamSource.value)
 }
-function retryStreamIfFailed() {
-  if (connectionState.value === 'failed') {
-    retry()
+function reconnectStreamIfFailed() {
+  if (isPaneActivated.value && connectionState.value === 'failed') {
+    void reconnect(streamSourceId.value, streamSource.value)
   }
 }
 function suspendStreamForDeactivation() {
