@@ -8,8 +8,8 @@ Chat Goals support an optional `strict_review` gate where `<goal-status state="c
 
 ## Design Decisions (Guidance-First, Zero Rigid Ceremony)
 - **Single Quota-Aware Cross-Reviewer Router (`backend/claude_hub/services/cross_reviewer.py`)**:
-  - Unified `CrossReviewCandidate`, `is_candidate_quota_exhausted`, `select_cross_reviewer_candidates`, and `resolve_cross_reviewer_target` in `cross_reviewer.py` while keeping all existing Workspace Task signatures backward-compatible.
-  - Resolved implicit MASO service defaults via `maso_model_family(parent_env, default_model=default_maso_model)` and removed silent same-model fallback.
+  - Unified `CrossReviewCandidate`, `is_candidate_quota_exhausted`, `select_cross_reviewer_candidates`, `resolve_active_maso_tab_model`, and `resolve_cross_reviewer_target` in `cross_reviewer.py` while keeping all existing Workspace Task signatures backward-compatible.
+  - Resolved implicit MASO service defaults via `maso_model_family(parent_env, default_model=default_maso_model)` so heterogeneous models are tried first, while appending a quota-filtered clean-context same-model/same-provider independent subagent candidate (`keep=False`) at the tail so independent review still completes when cross-providers are unavailable or over quota.
   - Added non-blocking cached quota filtering (`read_cached_quota_map`) that skips `codex`/`traex` when `state == "over"`, `maso` models only when `enforcing is True` and the matching model limit is `"over"`, and `antigravity` when its matching family bucket is `"over"`.
 - **Situational Context & Surgical Review Guidance (`services/goal_run/strict_review.py`, `controller.py`)**:
   - Added worker situational guidance in `_strict_review_prompt` (worktree hygiene when modifying a Git repo on a shared branch, baseline evidence for perf/memory work, and evidence-backed rebuttals for false positives) without imposing rigid Git worktree/commit/push gates on read-only or non-Git Goals.

@@ -161,22 +161,28 @@ def test_maso_distinct_endpoints_in_same_family_do_not_false_exhaust() -> None:
     assert is_candidate_quota_exhausted(seed_stable_cand, quota_seed_nightly_over) is False
 
 
-def test_select_cross_reviewer_candidates_filters_quota_and_fixes_implicit_maso_default() -> None:
-    # 1. Implicit MASO default model (MASO_MODEL unset in tab.env, service default is Argon)
-    # Must route to MASO Astra -> Codex -> Claude, NEVER Argon self-review!
+def test_select_cross_reviewer_candidates_filters_quota_and_keeps_same_model_clean_subagent_tail() -> (
+    None
+):
+    # 1. Implicit MASO default model (MASO_MODEL unset in tab.env, service default is Argon):
+    # Heterogeneous candidates (Astra -> Codex -> Claude) come first, with a clean-context
+    # same-model Argon subagent appended at the tail as fallback.
     implicit_argon_candidates = select_cross_reviewer_candidates(
         AgentType.MASO,
-        {},
+        {"CLAUDE_HUB_TAB_ID": "parent-tab-do-not-leak"},
         maso_base_url="http://127.0.0.1:11004",
         maso_models=["gemini-4-argon", "gpt-6-astra"],
         default_maso_model="gemini-4-argon_reasoning_high",
     )
-    assert [c.provider for c in implicit_argon_candidates] == ["maso", "codex", "claude"]
+    assert [c.provider for c in implicit_argon_candidates] == ["maso", "codex", "claude", "maso"]
     assert implicit_argon_candidates[0].model == DEFAULT_ASTRA_REVIEW_MODEL
-    assert all(c.model != DEFAULT_ARGON_REVIEW_MODEL for c in implicit_argon_candidates)
+    assert all(c.model != DEFAULT_ARGON_REVIEW_MODEL for c in implicit_argon_candidates[:-1])
+    assert implicit_argon_candidates[-1].model == DEFAULT_ARGON_REVIEW_MODEL
+    assert "CLAUDE_HUB_TAB_ID" not in (implicit_argon_candidates[-1].env or {})
 
     # 2. Parent Claude when MASO Argon is over (enforcing=True) and Codex is over:
-    # Must skip both Argon and Codex, selecting MASO Astra!
+    # Must skip both Argon and Codex, preferring heterogeneous MASO Astra first and
+    # retaining clean-context Claude subagent as tail fallback.
     quota_map = {
         "maso": ProviderQuota(
             provider="maso",
@@ -197,17 +203,18 @@ def test_select_cross_reviewer_candidates_filters_quota_and_fixes_implicit_maso_
     }
     claude_candidates = select_cross_reviewer_candidates(
         AgentType.CLAUDE,
-        {},
+        {"ANTHROPIC_BASE_URL": "https://custom.anthropic.local", "CLAUDE_HUB_TAB_ID": "tab-1"},
         maso_base_url="http://127.0.0.1:11004",
         maso_models=["gemini-4-argon", "gpt-6-astra"],
         quota_by_provider=quota_map,
     )
-    assert len(claude_candidates) == 1
-    assert claude_candidates[0].provider == "maso"
+    assert [c.provider for c in claude_candidates] == ["maso", "claude"]
     assert claude_candidates[0].model == DEFAULT_ASTRA_REVIEW_MODEL
+    assert claude_candidates[1].env == {"ANTHROPIC_BASE_URL": "https://custom.anthropic.local"}
 
-    # 3. Zero silent same-model fallback when all heterogeneous candidates are exhausted
-    all_exhausted_quota = {
+    # 3. When all heterogeneous candidates are exhausted, clean-context same-model subagent
+    # remains available unless its own quota is also exhausted.
+    cross_exhausted_quota = {
         "maso": ProviderQuota(
             provider="maso",
             available=True,
@@ -223,6 +230,23 @@ def test_select_cross_reviewer_candidates_filters_quota_and_fixes_implicit_maso_
             available=True,
             state="over",
             limits=[QuotaLimit(scope="5h", label="5-hour limit", state="over")],
+        ),
+    }
+    same_provider_fallback = select_cross_reviewer_candidates(
+        AgentType.CLAUDE,
+        {},
+        maso_base_url="http://127.0.0.1:11004",
+        maso_models=["gemini-4-argon", "gpt-6-astra"],
+        quota_by_provider=cross_exhausted_quota,
+    )
+    assert [c.provider for c in same_provider_fallback] == ["claude"]
+
+    all_exhausted_quota = {
+        **cross_exhausted_quota,
+        "claude": ProviderQuota(
+            provider="claude",
+            available=True,
+            state="over",
         ),
     }
     empty_candidates = select_cross_reviewer_candidates(

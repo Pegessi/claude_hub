@@ -137,7 +137,9 @@ def test_select_cross_reviewer_candidates_picks_heterogeneous_models() -> None:
     )
     assert codex_targets[0].provider == "maso"
     assert codex_targets[0].model == "gemini-4-argon_reasoning_high"
-    assert all(t.provider != "codex" for t in codex_targets)
+    assert all(t.provider != "codex" for t in codex_targets[:-1])
+    assert codex_targets[-1].provider == "codex"
+    assert codex_targets[-1].effort == "high"
 
     argon_targets = select_cross_reviewer_candidates(
         AgentType.MASO,
@@ -148,7 +150,9 @@ def test_select_cross_reviewer_candidates_picks_heterogeneous_models() -> None:
     assert argon_targets[0].provider == "maso"
     assert argon_targets[0].model == "gpt-6-astra_reasoning_high"
     assert any(t.provider == "codex" for t in argon_targets)
-    assert all(t.model != "gemini-4-argon_reasoning_high" for t in argon_targets)
+    assert all(t.model != "gemini-4-argon_reasoning_high" for t in argon_targets[:-1])
+    assert argon_targets[-1].provider == "maso"
+    assert argon_targets[-1].model == "gemini-4-argon_reasoning_high"
 
 
 @pytest.mark.asyncio
@@ -592,21 +596,28 @@ def test_build_strict_review_prompt_includes_prior_blocker_ledger_and_rebuttal_r
 
 
 @pytest.mark.asyncio
-async def test_run_subagent_strict_review_no_eligible_reviewer_parks_goal_blocked(
+async def test_run_subagent_strict_review_falls_back_to_same_model_clean_subagent_and_parks_only_when_all_exhausted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from claude_hub.models.subagent import SubagentTurnStatus
+    from claude_hub.services import subagents as subagents_mod
     from claude_hub.services.goal_run import strict_review as sr_mod
     from claude_hub.services.ttyd_manager import ttyd_manager
 
     fake_tab = SimpleNamespace(
         id="tab-no-rev",
         agent_type=AgentType.CLAUDE,
-        env={},
+        env={
+            "ANTHROPIC_BASE_URL": "https://custom.claude.local",
+            "CLAUDE_HUB_TAB_ID": "tab-no-rev",
+        },
         cwd=str(tmp_path),
     )
     monkeypatch.setattr(ttyd_manager, "get_tab", lambda tab_id: fake_tab)
 
-    async def exhausted_quota():
+    # 1. When cross-providers (Codex/MASO) are exhausted/unavailable, falls back to an
+    # independent clean-context same-provider subagent (keep=False).
+    async def cross_exhausted_quota():
         return {
             "codex": ProviderQuota(
                 provider="codex",
@@ -616,12 +627,74 @@ async def test_run_subagent_strict_review_no_eligible_reviewer_parks_goal_blocke
             )
         }
 
-    monkeypatch.setattr(sr_mod, "read_cached_quota_map", exhausted_quota)
+    monkeypatch.setattr(sr_mod, "read_cached_quota_map", cross_exhausted_quota)
+    spawned: list[Any] = []
+
+    class FakeCleanSubagentService:
+        def __init__(self) -> None:
+            self._last: Any = None
+
+        async def create(self, req: Any):
+            spawned.append(req)
+            rec = SimpleNamespace(
+                id="sa-same-clean-1",
+                name=req.name,
+                agent_type=req.agent_type,
+                model=req.model,
+            )
+            turn = SimpleNamespace(
+                turn_id="t-clean-1",
+                status=SubagentTurnStatus.COMPLETED,
+                final_text='<goal-review>{"verdict":"PASS","summary":"Verified via clean independent subagent","findings":[]}</goal-review>',
+            )
+            self._last = (rec, turn)
+            return rec, turn
+
+        async def wait_turn(self, subagent_id: str, turn_id: str, wait_seconds: float = 30.0):
+            return self._last
+
+    monkeypatch.setattr(subagents_mod, "get_subagent_service", lambda: FakeCleanSubagentService())
 
     async def dispatch(goal: GoalRun, prompt: str) -> str | None:
         return goal.pending_step_id
 
     ctrl = GoalRunController(GoalRunStore(tmp_path / "goals.json"), dispatch=dispatch)
+    goal_ok = await ctrl.create_and_start(
+        "tab-no-rev",
+        GoalRunCreate(
+            objective="Fallback to independent same-model subagent",
+            client_request_id="req-same-subagent",
+            strict_review=True,
+        ),
+    )
+    assert goal_ok.current_turn_id is not None
+    settled_ok = await ctrl.on_turn_completed(
+        "tab-no-rev", goal_ok.current_turn_id, "completed", complete_envelope()
+    )
+    assert settled_ok is not None
+    assert settled_ok.status == GoalRunStatus.COMPLETE
+    assert len(spawned) == 1
+    assert spawned[0].agent_type == AgentType.CLAUDE
+    assert spawned[0].keep is False
+    assert spawned[0].env == {"ANTHROPIC_BASE_URL": "https://custom.claude.local"}
+
+    # 2. When ALL candidates including same-provider are over quota, parks Goal BLOCKED.
+    async def all_exhausted_quota():
+        return {
+            "codex": ProviderQuota(
+                provider="codex",
+                available=True,
+                state="over",
+                limits=[QuotaLimit(scope="5h", label="5h", state="over")],
+            ),
+            "claude": ProviderQuota(
+                provider="claude",
+                available=True,
+                state="over",
+            ),
+        }
+
+    monkeypatch.setattr(sr_mod, "read_cached_quota_map", all_exhausted_quota)
     goal = await ctrl.create_and_start(
         "tab-no-rev",
         GoalRunCreate(
@@ -636,7 +709,7 @@ async def test_run_subagent_strict_review_no_eligible_reviewer_parks_goal_blocke
     )
     assert settled is not None
     assert settled.status == GoalRunStatus.BLOCKED
-    assert "No eligible heterogeneous Chat provider" in (settled.status_message or "")
+    assert "No eligible Chat reviewer subagent candidate" in (settled.status_message or "")
 
 
 @pytest.mark.asyncio
