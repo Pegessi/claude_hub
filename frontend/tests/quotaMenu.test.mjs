@@ -165,6 +165,33 @@ test('a label that describes a limit keeps the identifier in its tooltip', () =>
   assert.equal(rows['[redacted]'].labelTitle, '[redacted] ([redacted])')
 })
 
+test('a deployment shared by several models keeps every name and its id', () => {
+  // Router's ledger keeps one ceiling per deployment, so one row can cover more
+  // than one selectable model; the names are the label and the deployment stays
+  // the identifier behind it.
+  const provider = {
+    provider: 'maso',
+    as_of: at(-30_000),
+    enforcing: true,
+    limits: [
+      limit({
+        scope: '[redacted]',
+        label: '[redacted] · [redacted]',
+        used_percent: 4,
+        remaining_percent: 96,
+      }),
+    ],
+  }
+  const rows = rowsOf(viewOf({ providers: [provider] })[0])
+
+  assert.equal(rows['[redacted]'].label, '[redacted] · [redacted]')
+  assert.equal(
+    rows['[redacted]'].labelTitle,
+    '[redacted] · [redacted] ([redacted])',
+  )
+  assert.equal(rows['[redacted]'].value, '96% left')
+})
+
 test('a missing percentage never renders as zero and keeps its reason', () => {
   const [, maso] = viewOf(fullPayload)
   const rows = rowsOf(maso)
