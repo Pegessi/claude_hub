@@ -66,8 +66,9 @@ class _ReviewMixin(_WorkspaceManagerBase):
     ) -> ManagedSession:
         from claude_hub.services.cross_reviewer import (
             CrossReviewerTarget,
-            is_heterogeneous_reviewer,
+            resolve_active_maso_tab_model,
             resolve_cross_reviewer_target,
+            sanitize_reviewer_env,
         )
 
         task = self._require_workspace_execution(task)
@@ -75,38 +76,18 @@ class _ReviewMixin(_WorkspaceManagerBase):
         worker = self.sessions.get(task.session_id) if task.session_id else None
         expected_kind = worker.session_kind if worker is not None else task.session_kind
         worker_agent_type = worker.agent_type if worker is not None else task.agent_type
-        worker_env = dict(worker.env) if worker is not None else {}
+        worker_env = sanitize_reviewer_env(worker.env) if worker is not None else {}
+        if (
+            worker is not None
+            and worker.agent_type == AgentType.MASO
+            and not worker_env.get("MASO_MODEL")
+            and worker.tab_id
+        ):
+            active_model = resolve_active_maso_tab_model(worker.tab_id)
+            if active_model:
+                worker_env["MASO_MODEL"] = active_model
         is_local_chat = (
             placement["target"] == ExecutionTarget.LOCAL and expected_kind == SessionKind.CHAT
-        )
-
-        cross_target: CrossReviewerTarget | None = None
-        default_maso_model: str | None = None
-        if is_local_chat:
-            cross_target = await resolve_cross_reviewer_target(
-                worker_agent_type,
-                worker_env,
-            )
-            if cross_target is not None:
-                default_maso_model = cross_target.default_maso_model
-
-        has_heterogeneous_idle_candidate = is_local_chat and (
-            self._first_available_reviewer(
-                workspace.id,
-                target=placement["target"],
-                cwd=placement["cwd"],
-                remote_profile_id=placement["remote_profile_id"],
-                remote_cwd=placement["remote_cwd"],
-                session_kind=expected_kind,
-                worker_agent_type=worker_agent_type,
-                worker_env=worker_env,
-                default_maso_model=default_maso_model,
-                require_heterogeneous=True,
-            )
-            is not None
-        )
-        enforce_heterogeneity = is_local_chat and (
-            cross_target is not None or has_heterogeneous_idle_candidate
         )
 
         if task.review_session_id:
@@ -119,25 +100,25 @@ class _ReviewMixin(_WorkspaceManagerBase):
                 and not reviewer.chat_paused
                 and not self._reviewer_is_busy_with_other_task(reviewer, task.id)
                 and self._reviewer_matches_placement(reviewer, workspace, task)
-                and (
-                    not enforce_heterogeneity
-                    or is_heterogeneous_reviewer(
-                        worker_agent_type,
-                        worker_env,
-                        reviewer.agent_type,
-                        reviewer.env,
-                        default_maso_model=default_maso_model,
-                    )
-                )
             ):
                 return reviewer
             if reviewer and reviewer.status != ManagedSessionStatus.STOPPED:
                 logger.info(
-                    "Reviewer %s is unavailable, homogeneous, or on a different checkout; "
+                    "Reviewer %s is unavailable or on a different checkout; "
                     "trying an available reviewer for task_id=%s",
                     reviewer.id,
                     task.id,
                 )
+
+        cross_target: CrossReviewerTarget | None = None
+        default_maso_model: str | None = None
+        if is_local_chat:
+            cross_target = await resolve_cross_reviewer_target(
+                worker_agent_type,
+                worker_env,
+            )
+            if cross_target is not None:
+                default_maso_model = cross_target.default_maso_model
 
         reviewer = self._first_available_reviewer(
             workspace.id,
@@ -149,7 +130,7 @@ class _ReviewMixin(_WorkspaceManagerBase):
             worker_agent_type=worker_agent_type if is_local_chat else None,
             worker_env=worker_env,
             default_maso_model=default_maso_model,
-            require_heterogeneous=enforce_heterogeneity,
+            require_heterogeneous=False,
         )
         if reviewer:
             return reviewer
@@ -178,7 +159,7 @@ class _ReviewMixin(_WorkspaceManagerBase):
             except Exception:
                 logger.warning(
                     "Failed to spawn heterogeneous cross-reviewer for task_id=%s; "
-                    "falling back to homogeneous reviewer",
+                    "falling back to clean-context same-model reviewer",
                     task.id,
                     exc_info=True,
                 )
@@ -202,6 +183,11 @@ class _ReviewMixin(_WorkspaceManagerBase):
         # reused reviewers (_first_available_reviewer above) are untouched.
         worker = self.sessions.get(task.session_id) if task.session_id else None
         worker_env_preset = worker.env_preset if worker is not None else None
+        fallback_session_env = (
+            dict(worker_env)
+            if worker is not None and worker.session_kind == SessionKind.CHAT
+            else {}
+        )
         return await self.ensure_workspace_agent(
             workspace.id,
             EnsureWorkspaceAgentRequest(
@@ -211,11 +197,7 @@ class _ReviewMixin(_WorkspaceManagerBase):
                     else task.agent_type
                 ),
                 session_kind=expected_kind,
-                env=(
-                    dict(worker.env)
-                    if worker is not None and worker.session_kind == SessionKind.CHAT
-                    else {}
-                ),
+                env=fallback_session_env,
                 title=f"{workspace.name} Temporary Reviewer",
                 role=WorkspaceSessionRole.REVIEWER,
                 reuse_existing=False,

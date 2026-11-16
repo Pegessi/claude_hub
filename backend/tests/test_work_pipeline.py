@@ -279,6 +279,7 @@ async def test_spec_implement_review_worktree_cross_review_and_remote_push(
     prompt_text = manager._build_task_assignment_prompt(ws, started, worker)
     assert "Pipeline recipe: spec_implement_review" in prompt_text
     assert "Do NOT stop and wait for a separate Goal Packet approval round" in prompt_text
+    assert "Goal Packet; awaiting approval." not in prompt_text
 
     # Worker posts a working report with a Goal Packet: must NOT stop-and-wait in REVIEW!
     await manager.create_report(
@@ -693,6 +694,8 @@ async def test_dot_delegate_maso_model_recipe_and_cli(
         assert task.recipe == WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW
         assert task.infowall_demand_id == "dem-kv-1"
         assert "InfoWall Demand [dem-kv-1]" in task.prompt
+        assert "Post your plan (Goal Packet) before substantial work" not in task.prompt
+        assert "without pausing for a\n  separate Goal Packet approval round" in task.prompt
         assert task.worktree_path is not None
         assert Path(task.worktree_path).exists()
         assert task.session_id is not None

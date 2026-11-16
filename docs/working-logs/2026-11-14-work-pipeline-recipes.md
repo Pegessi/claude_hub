@@ -14,9 +14,9 @@ This change introduces standardized pipeline recipes (`WorkspaceTaskRecipe`), a 
    - `SPEC_IMPLEMENT_REVIEW` defaults `auto_worktree=True` and `auto_push_remote=True`.
    - `TRIAGE_DIAGNOSE` defaults to `WorkspaceTaskMode.SUBAGENT` and `SessionKind.CHAT`.
 
-2. **Heterogeneous Cross-Reviewer Router (`services/cross_reviewer.py`, `workspace_manager/_review.py`, `tmux/review_resources.py`)**:
-   - Implemented `is_heterogeneous_reviewer` and `resolve_cross_reviewer_target` to pair MASO Argon (`[redacted]_reasoning_high`) workers with MASO Astra (`[redacted]_reasoning_high`) reviewers, and MASO Astra / Claude / Codex / Cursor workers with MASO Argon reviewers when a local MASO service is available, without leaking incompatible provider credentials.
-   - Preferred idle heterogeneous reviewers in `_first_available_reviewer`.
+2. **Heterogeneous-Preferred Independent Reviewer Router (`services/cross_reviewer.py`, `workspace_manager/_review.py`, `tmux/review_resources.py`)**:
+   - Implemented `is_heterogeneous_reviewer` and `resolve_cross_reviewer_target` to prefer pairing MASO Argon (`[redacted]_reasoning_high`) workers with MASO Astra (`[redacted]_reasoning_high`) reviewers, and MASO Astra / Claude / Codex / Cursor workers with MASO Argon reviewers when a local MASO service and quota are available, without leaking incompatible provider credentials or parent tab identity env vars.
+   - Reused existing explicit or idle independent `REVIEWER` sessions on the matching checkout (preferring idle heterogeneous reviewers first when both exist, while allowing same-model independent reviewers) and seamlessly fell back to spawning a clean-context same-model temporary `REVIEWER` session when cross-providers are unavailable or over quota.
    - Auto-released and deleted temporary non-caller-owned ephemeral reviewers upon `REVIEW_PASSED` (and terminal task acceptance) so temporary reviewer tabs never accumulate.
 
 3. **End-to-End Work Pipeline Automation (`services/work_pipeline.py`, `dispatching/start.py`, `prompts/assignment.py`, `reports/internal.py`, `_task_updates.py`)**:
@@ -37,9 +37,10 @@ This change introduces standardized pipeline recipes (`WorkspaceTaskRecipe`), a 
    - `provision_task_worktree` now raises `RuntimeError` if a local `auto_worktree` task cannot provision or validate an isolated Git worktree, never falling back to `workspace.path`.
 2. **Per-Task Start Serialization & Ephemeral Session Compensation**:
    - Added `_task_start_locks` to serialize `_start_task_workspace` per `task_id`, validating admission inputs before provisioning worktrees or sessions, re-reading live task state after every `await`, and retiring unattached ephemeral sessions on start/delegate failure.
-3. **Strict Reviewer Heterogeneity & Implicit MASO Default Model Handling**:
-   - Updated `maso_model_family`, `is_heterogeneous_reviewer`, and `resolve_cross_reviewer_target` to account for MASO's discovered `default_model` when `MASO_MODEL` is unset in `worker.env`.
-   - `_select_or_create_reviewer` resolves `cross_target` up front for local Chat reviews and requires heterogeneity when `cross_target` or an idle heterogeneous reviewer is available.
+3. **Independent Reviewer Routing & Implicit MASO Default Model Handling**:
+   - Updated `maso_model_family`, `is_heterogeneous_reviewer`, `select_cross_reviewer_candidates`, and `resolve_cross_reviewer_target` to account for live MASO tab models and discovered `default_model` when `MASO_MODEL` is unset in `worker.env`.
+   - `_select_or_create_reviewer` reuses valid explicit or idle independent `REVIEWER` sessions (preferring heterogeneous idle reviewers first), prefers `cross_target` when spawning a temporary Chat reviewer, and falls back to a clean-context same-model temporary `REVIEWER` session when cross-providers are unavailable or over quota.
+   - Aligned Dot's `TOOL_GUIDE` and `format_task_brief` with `--recipe` so `spec_implement_review` and `triage_diagnose` delegations omit contradictory Goal Packet pause instructions while `standard` tasks preserve the existing workflow untouched.
 4. **Canonical Locked Session Retirement & Multi-Round Remote Push**:
    - Removed manual `self.sessions.pop` bypasses; temporary reviewers and completed ephemeral workers are retired exclusively via `delete_session` (`allow_completed_review_for_task_id=task.id`).
    - `push_task_feature_branch` compares `task.remote_pushed_ref` against `origin/<branch>@<current_head_sha[:7]>`, pushing new commits on subsequent review rounds.
