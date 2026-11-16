@@ -238,7 +238,7 @@ const detailsId = computed(() => `goal-status-details-${props.goal.id}`)
 const statusText = computed(() => {
   if (needsReconciliation.value) return 'Stop unconfirmed'
   if (props.goal.strict_review_in_progress) return 'Cross-reviewing'
-  return goalStatusLabel(props.goal.status)
+  return goalStatusLabel(props.goal.status) ?? ''
 })
 const strictMaxRounds = computed(() =>
   Math.max(
@@ -254,7 +254,9 @@ const strictPillText = computed(() => {
   if (rounds > 0) return `Strict ${rounds}/${max}`
   return 'Strict'
 })
-const liveStatus = computed(() => `Goal ${statusText.value.toLowerCase()}`)
+const liveStatus = computed(() =>
+  statusText.value ? `Goal ${statusText.value.toLowerCase()}` : 'Goal',
+)
 function formatReviewerLabel(provider: string, model?: string | null): string {
   return model ? `${provider}/${model}` : provider
 }
