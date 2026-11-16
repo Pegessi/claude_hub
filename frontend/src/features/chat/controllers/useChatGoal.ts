@@ -7,7 +7,14 @@ import { useChatGoal as useGoalResource } from '@/composables/useChatGoal'
 import { goalBlocksPlan, goalPlanLockReason, isGoalTerminal } from '@/utils/chatGoalPolicy'
 import { hasChatStatusRefreshBoundary } from '@/utils/chatTurnLifecycle'
 import { goalObservationVersion, goalTurnCompletionReflected, latestNativeGoalNotification, nativeGoalNotificationReflected } from '@/utils/chatGoalObservation'
-import { browserStorage, planFirstChoice, readPlanFirstPreference, writePlanFirstPreference } from '../goal-plan/planPreference'
+import {
+  browserStorage,
+  planFirstChoice,
+  readPlanFirstPreference,
+  readStrictReviewPreference,
+  writePlanFirstPreference,
+  writeStrictReviewPreference,
+} from '../goal-plan/planPreference'
 
 interface Dependencies {
   attachments: Ref<DraftAttachment[]>
@@ -68,12 +75,13 @@ export function useChatGoal(deps: Dependencies) {
   // A remembered preference for new Goals. Provider-native Goals never accept a
   // Hub turn, so they cannot plan first; say so instead of failing on submit.
   const planFirstPreferred = ref(readPlanFirstPreference(browserStorage()))
+  const strictReviewPreferred = ref(readStrictReviewPreference(browserStorage()))
 
   const planFirstDisabledReason = computed(() => deps.capabilities.value?.goal_execution_owner === 'provider_native'
-    ? 'This provider runs Goals itself, so it cannot plan a first turn. Start without it.'
+    ? 'This provider runs Goals itself, so it cannot plan a first turn unless Strict cross-review is on.'
     : null)
 
-  async function startGoal(input: { objective: string; planFirst?: boolean }) {
+  async function startGoal(input: { objective: string; planFirst?: boolean; strictReview?: boolean }) {
     if (isGoalEditing.value) {
       if (await updateGoalObjective(input.objective)) isGoalSetupOpen.value = false
       return
@@ -82,12 +90,14 @@ export function useChatGoal(deps: Dependencies) {
       goalError.value = goalSetupDisabledReason.value
       return
     }
-    // The request always carries the effective value. Only a Chat that can
-    // actually offer the option may change the remembered preference: one
-    // provider-native Goal must not turn Plan first off everywhere.
+    const strictEnabled = Boolean(input.strictReview)
+    writeStrictReviewPreference(browserStorage(), strictEnabled)
+    strictReviewPreferred.value = strictEnabled
+    // The request always carries the effective value. When strict_review is on,
+    // Hub owns execution so plan_first is also supported.
     const choice = planFirstChoice({
       requested: Boolean(input.planFirst),
-      disabledReason: planFirstDisabledReason.value,
+      disabledReason: strictEnabled ? null : planFirstDisabledReason.value,
     })
     if (choice.remember !== null) {
       writePlanFirstPreference(browserStorage(), choice.remember)
@@ -97,6 +107,7 @@ export function useChatGoal(deps: Dependencies) {
     const saved = await createGoal({
       objective: input.objective,
       plan_first: choice.effective,
+      strict_review: strictEnabled,
       attachments: imageSnapshot.map(toStreamSendAttachment),
     })
     if (saved) {
@@ -157,9 +168,38 @@ export function useChatGoal(deps: Dependencies) {
     return null
   })
 
-  function cancelGoalRefresh() { goalRefreshEpoch++ }
+  let strictReviewPollTimer: ReturnType<typeof setTimeout> | null = null
+  function stopStrictReviewPoll() {
+    if (strictReviewPollTimer !== null) {
+      clearTimeout(strictReviewPollTimer)
+      strictReviewPollTimer = null
+    }
+  }
+  function scheduleStrictReviewPoll() {
+    stopStrictReviewPoll()
+    if (deps.timelineDisposed || deps.isManagedChat.value || !goal.value?.strict_review_in_progress) return
+    strictReviewPollTimer = setTimeout(async () => {
+      strictReviewPollTimer = null
+      if (deps.timelineDisposed || !goal.value?.strict_review_in_progress) return
+      await hydrateGoal()
+      if (goal.value?.strict_review_in_progress) scheduleStrictReviewPoll()
+    }, 2000)
+  }
+
+  function cancelGoalRefresh() {
+    goalRefreshEpoch++
+    stopStrictReviewPoll()
+  }
 
   function registerWatchers() {
+    watch(
+      () => Boolean(goal.value?.strict_review_in_progress),
+      reviewing => {
+        if (reviewing) scheduleStrictReviewPoll()
+        else stopStrictReviewPoll()
+      },
+      { immediate: true },
+    )
     // Chat lifecycle edges are authoritative status boundaries. Refresh the tab
     // status once per committed boundary. Goal completion gets a bounded poll
     // because its observer updates the separate control plane asynchronously.
@@ -211,6 +251,7 @@ export function useChatGoal(deps: Dependencies) {
     goalInputBlocked,
     startGoal,
     planFirstPreferred,
+    strictReviewPreferred,
     planFirstDisabledReason,
     GOAL_REFRESH_DELAYS_MS,
     goalSnapshotVersion,

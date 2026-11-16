@@ -17,6 +17,9 @@ GOAL_CHECKPOINT_HISTORY_LIMIT = 10
 GOAL_RECENT_TURN_IDS_LIMIT = 100
 GOAL_PLAN_STEPS_LIMIT = 30
 GOAL_PLAN_HELPERS_LIMIT = 10
+GOAL_STRICT_REVIEW_MAX_ROUNDS = 3
+GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS = 5
+GOAL_STRICT_REVIEW_HISTORY_LIMIT = 10
 
 
 def utc_now() -> datetime:
@@ -130,6 +133,34 @@ class GoalPlan(BaseModel):
     budget: GoalPlanBudget = Field(default_factory=GoalPlanBudget)
 
 
+class GoalStrictReviewFinding(BaseModel):
+    """One structured defect reported by the independent cross-model reviewer."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    severity: Literal["P0", "P1", "P2", "P3"]
+    file: str | None = Field(default=None, max_length=500)
+    summary: str = Field(min_length=1, max_length=1000)
+    fix: str | None = Field(default=None, max_length=1000)
+
+
+class GoalStrictReviewRound(BaseModel):
+    """Durable record of one cross-model review gate round."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cycle: int = Field(default=1, ge=1)
+    round_number: int = Field(ge=1, le=GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS)
+    worker_turn_id: str = Field(min_length=1, max_length=128)
+    reviewer_subagent_id: str | None = Field(default=None, max_length=128)
+    reviewer_provider: str = Field(min_length=1, max_length=80)
+    reviewer_model: str | None = Field(default=None, max_length=120)
+    verdict: Literal["PASS", "BLOCK"]
+    summary: str = Field(min_length=1, max_length=2000)
+    findings: list[GoalStrictReviewFinding] = Field(default_factory=list, max_length=30)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 class GoalRun(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     tab_id: str
@@ -175,6 +206,21 @@ class GoalRun(BaseModel):
     plan_turn_id: str | None = None
     plan_answered: bool = False
     plan_warning: str | None = None
+    # Additive ``strict_review`` cross-model consensus gate. When enabled, the
+    # Goal stays Hub-managed and intercepts ``complete`` to run an independent
+    # cross-model review subagent before allowing completion.
+    strict_review: bool = False
+    strict_review_cycle: int = Field(default=1, ge=1)
+    strict_review_rounds: int = Field(default=0, ge=0, le=GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS)
+    strict_review_max_rounds: int = Field(
+        default=GOAL_STRICT_REVIEW_MAX_ROUNDS, ge=1, le=GOAL_STRICT_REVIEW_HARD_MAX_ROUNDS
+    )
+    strict_review_in_progress: bool = False
+    strict_review_subagent_id: str | None = None
+    strict_review_feedback: str | None = Field(default=None, max_length=GOAL_STEER_INPUT_MAX_LENGTH)
+    strict_review_history: list[GoalStrictReviewRound] = Field(
+        default_factory=list, max_length=GOAL_STRICT_REVIEW_HISTORY_LIMIT
+    )
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     paused_at: datetime | None = None
@@ -197,6 +243,7 @@ class GoalRunCreate(BaseModel):
     # Additive and optional: absent callers keep the previous start-immediately
     # behaviour byte for byte.
     plan_first: bool = False
+    strict_review: bool = False
 
     @field_validator("objective", "client_request_id")
     @classmethod

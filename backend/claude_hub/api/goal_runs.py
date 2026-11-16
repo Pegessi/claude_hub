@@ -53,6 +53,8 @@ async def _dispatch_goal_turn(goal: GoalRun, prompt: str) -> str:
         # The first ``plan_first`` turn plans only; label it as such rather
         # than as an ordinary continuation.
         visible_text = "Plan this Goal before starting"
+    elif goal.strict_review and goal.strict_review_feedback:
+        visible_text = f"Address strict cross-review round {goal.strict_review_rounds} findings"
     else:
         visible_text = "Continue active Goal"
     await _send_to_native(

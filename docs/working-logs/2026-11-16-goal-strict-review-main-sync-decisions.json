@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "b8b3eaa0d173fbc409e6138a2f2a938b7179d718",
+  "parents": [
+    "83c7ec4db1ae6149fc62d75ee6fa6c07de694371",
+    "35666bb4ac5a0c18d2c46d8db81304a362c3b68f"
+  ],
+  "base": "c2a97baad057659450a207ef5ae59f188040af29",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "1a6da2c12cb0c329d2fb3670152feabe015b3d30",
+  "reconstructed_tree": "e7f45049a164ade95eaccff464478cba3a713383",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "14846a428cf07a24984518d5eba33fd78daca58e"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "e404ebbc51022dd09bba41bb9c70759ebb7ac875"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0c501787c4182755ef7315683853947658e87ee7"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "fcbfca9908e429a7dfa2dec60cb900d22d76b56c"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0c501787c4182755ef7315683853947658e87ee7"
+      },
+      "reason": "Retain main's Released changelog entries while feat/goal-strict-review remains an unmerged feature branch; final changelog entry is added on integration to main.",
+      "disposition": "retain-parent",
+      "destinations": []
+    }
+  ]
+}
