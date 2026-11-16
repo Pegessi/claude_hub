@@ -1,8 +1,9 @@
-"""Heterogeneous, quota-aware cross-reviewer routing for Workspace tasks and Chat Goals.
+"""Quota-aware cross-reviewer routing for Workspace tasks and Chat Goals.
 
-Selects an independent reviewer from a different model family or provider than
-the worker that produced the implementation, preventing same-model self-review
-and skipping quota-exhausted reviewer targets when readings are available.
+Prefers an independent reviewer from a different model family or provider than
+the worker that produced the implementation, while allowing a clean-context
+same-model reviewer subagent/session as fallback and skipping quota-exhausted
+targets when authoritative readings are available.
 """
 
 from __future__ import annotations
@@ -28,6 +29,13 @@ _MASO_VARIANT_SUFFIX_RE = re.compile(
     r"(?:[_-]reasoning(?:[_-](?:xhigh|high|medium|low|max))?"
     r"|[_-]thinking(?:[_-](?:xhigh|high|medium|low|max))?)$",
     re.IGNORECASE,
+)
+_INTERNAL_TAB_ENV_KEYS = frozenset(
+    {
+        "CLAUDE_HUB_TAB_ID",
+        "CLAUDE_HUB_SUBAGENT_ID",
+        "CLAUDE_HUB_SESSION_ID",
+    }
 )
 
 MasoProbeFn = Callable[
@@ -187,7 +195,54 @@ def is_candidate_quota_exhausted(
                 return True
         return False
 
+    quota = quota_by_provider.get(provider)
+    if quota is not None and not quota.stale and quota.available and quota.enforcing is not False:
+        if quota.state == "over":
+            return True
+        return any(limit.state == "over" for limit in (quota.limits or []))
     return False
+
+
+def sanitize_reviewer_env(env: Mapping[str, str] | None) -> dict[str, str]:
+    """Copy provider environment without parent tab/subagent identity markers."""
+    if not env:
+        return {}
+    return {k: v for k, v in env.items() if k not in _INTERNAL_TAB_ENV_KEYS}
+
+
+def resolve_active_maso_tab_model(tab_id: str | None) -> str | None:
+    """Inspect active native provider transport for ``tab_id`` to read its live ``current_model()``."""
+    if not tab_id:
+        return None
+    try:
+        from .agent_stream.tailer import _TAILER_MANAGERS
+
+        for manager in list(_TAILER_MANAGERS):
+            direct = manager.get_tailer(tab_id)
+            if direct is not None and getattr(direct, "native_transport", None) is not None:
+                model_fn = getattr(direct.native_transport, "current_model", None)
+                if callable(model_fn):
+                    model = model_fn()
+                    if isinstance(model, str) and model.strip():
+                        return model.strip()
+            tailers_fn = getattr(manager, "tailers", None)
+            if not callable(tailers_fn):
+                continue
+            for tailer in tailers_fn():
+                transport = getattr(tailer, "native_transport", None)
+                if (
+                    transport is None
+                    or getattr(getattr(transport, "session", None), "tab_id", None) != tab_id
+                ):
+                    continue
+                model_fn = getattr(transport, "current_model", None)
+                if callable(model_fn):
+                    model = model_fn()
+                    if isinstance(model, str) and model.strip():
+                        return model.strip()
+    except Exception:
+        logger.debug("Could not inspect active provider model for tab %s", tab_id, exc_info=True)
+    return None
 
 
 async def read_cached_quota_map() -> dict[str, ProviderQuota]:
@@ -276,9 +331,15 @@ def select_cross_reviewer_candidates(
     maso_models: Sequence[str | StreamModelOption] | None = None,
     default_maso_model: str | None = None,
     quota_by_provider: Mapping[str, ProviderQuota] | None = None,
+    allow_same_model_fallback: bool = True,
 ) -> list[CrossReviewCandidate]:
-    """Choose strictly heterogeneous, quota-filtered reviewer candidates for ``parent_agent_type``."""
-    env = dict(parent_env or {})
+    """Choose quota-filtered independent reviewer subagent candidates for ``parent_agent_type``.
+
+    Heterogeneous models/providers come first; when ``allow_same_model_fallback`` is True,
+    a clean-context same-model/same-provider subagent candidate is appended at the tail so
+    independent review still proceeds when cross-providers are unavailable or over quota.
+    """
+    env = sanitize_reviewer_env(parent_env)
     candidates: list[CrossReviewCandidate] = []
     model_seq: Sequence[str | StreamModelOption] = list(maso_models or [])
     parent_family = maso_model_family(env, default_model=default_maso_model)
@@ -352,6 +413,43 @@ def select_cross_reviewer_candidates(
         add_maso("[redacted]", DEFAULT_ASTRA_REVIEW_MODEL, "astra")
         candidates.append(CrossReviewCandidate(provider=AgentType.CODEX.value, effort="high"))
         candidates.append(CrossReviewCandidate(provider=AgentType.CLAUDE.value))
+
+    if allow_same_model_fallback and parent_agent_type != AgentType.TERMINAL:
+        if parent_agent_type == AgentType.MASO:
+            effective_maso_url = (maso_base_url or env.get("MASO_BASE_URL") or "").strip()
+            same_model = str(env.get("MASO_MODEL") or default_maso_model or "").strip()
+            if not same_model and model_seq:
+                same_model = _pick_alternate_non_family_model(model_seq, "") or ""
+            if (
+                effective_maso_url
+                and same_model
+                and not any(
+                    c.provider == AgentType.MASO.value and c.model == same_model for c in candidates
+                )
+            ):
+                fallback_env = {k: v for k, v in env.items() if k != "MASO_MODEL"}
+                fallback_env["MASO_BASE_URL"] = effective_maso_url
+                candidates.append(
+                    CrossReviewCandidate(
+                        provider=AgentType.MASO.value,
+                        model=same_model,
+                        env=fallback_env,
+                    )
+                )
+        elif not any(c.provider == parent_agent_type.value for c in candidates):
+            fallback_effort = (
+                "high"
+                if parent_agent_type in {AgentType.CODEX, AgentType.TRAEX}
+                and not any(k in env for k in ("CODEX_REASONING_EFFORT", "OPENAI_REASONING_EFFORT"))
+                else None
+            )
+            candidates.append(
+                CrossReviewCandidate(
+                    provider=parent_agent_type.value,
+                    effort=fallback_effort,
+                    env=env or None,
+                )
+            )
 
     return [
         candidate

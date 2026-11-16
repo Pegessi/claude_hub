@@ -31,6 +31,7 @@ from ..cross_reviewer import (
     canonical_maso_base_model,
     is_candidate_quota_exhausted,
     read_cached_quota_map,
+    resolve_active_maso_tab_model,
     select_cross_reviewer_candidates,
 )
 from ..maso_discovery import discover_maso_service
@@ -822,39 +823,6 @@ def format_strict_review_feedback(round_record: GoalStrictReviewRound) -> str:
     return "\n".join(lines)
 
 
-def _resolve_active_tab_model(tab_id: str) -> str | None:
-    """Inspect active native provider transport for tab_id to read its live current_model()."""
-    try:
-        from ..agent_stream.tailer import _TAILER_MANAGERS
-
-        for manager in list(_TAILER_MANAGERS):
-            direct = manager.get_tailer(tab_id)
-            if direct is not None and getattr(direct, "native_transport", None) is not None:
-                model_fn = getattr(direct.native_transport, "current_model", None)
-                if callable(model_fn):
-                    model = model_fn()
-                    if isinstance(model, str) and model.strip():
-                        return model.strip()
-            tailers_fn = getattr(manager, "tailers", None)
-            if not callable(tailers_fn):
-                continue
-            for tailer in tailers_fn():
-                transport = getattr(tailer, "native_transport", None)
-                if (
-                    transport is None
-                    or getattr(getattr(transport, "session", None), "tab_id", None) != tab_id
-                ):
-                    continue
-                model_fn = getattr(transport, "current_model", None)
-                if callable(model_fn):
-                    model = model_fn()
-                    if isinstance(model, str) and model.strip():
-                        return model.strip()
-    except Exception:
-        logger.debug("Could not inspect active provider model for tab %s", tab_id, exc_info=True)
-    return None
-
-
 async def run_subagent_strict_review(
     goal: GoalRun,
     assistant_text: str,
@@ -870,7 +838,7 @@ async def run_subagent_strict_review(
         raise RuntimeError(f"Goal tab {goal.tab_id} no longer exists")
     parent_env = dict(tab.env or {})
     if tab.agent_type == AgentType.MASO and not parent_env.get("MASO_MODEL"):
-        active_model = _resolve_active_tab_model(goal.tab_id)
+        active_model = resolve_active_maso_tab_model(goal.tab_id)
         if active_model:
             parent_env["MASO_MODEL"] = active_model
 
@@ -908,7 +876,7 @@ async def run_subagent_strict_review(
     )
     if not candidates:
         raise RuntimeError(
-            "No eligible heterogeneous Chat provider available for strict cross-review"
+            "No eligible Chat reviewer subagent candidate available for strict cross-review"
         )
 
     context = await collect_strict_review_context(
