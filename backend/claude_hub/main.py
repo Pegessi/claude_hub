@@ -220,9 +220,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await start_feishu_websockets()
         except Exception:
             logger.exception("Feishu Bot WebSocket startup failed")
+        from .services.demand_patrol.service import demand_patrol_service
+
+        demand_patrol_service.start()
         try:
             yield
         finally:
+            # Stop new patrol work before draining its Subagent/Dot transports.
+            await demand_patrol_service.stop()
             # Shutdown
             logger.info("Shutting down Claude Hub Backend")
             from .api.agent_stream import _quiesce_tailer_managers

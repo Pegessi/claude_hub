@@ -32,6 +32,8 @@ else:
 # Unit and integration tests must never probe a developer's configured provider
 # endpoint. Tests for route selection pass an explicit environment and probe.
 os.environ["CLAUDE_HUB_PROVIDER_NETWORK_MODE"] = "inherit"
+# Lifespan and child-backend tests must never run resident external patrols.
+os.environ["CLAUDE_HUB_DISABLE_PATROL_LOOP"] = "1"
 
 # Import only after owned-test isolation is installed. Importing this module
 # initializes the services package, whose managers bind runtime paths eagerly.

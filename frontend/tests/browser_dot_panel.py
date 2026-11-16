@@ -68,7 +68,14 @@ async def main(browser_run: BrowserRun) -> None:
             "LEGACY_PROVIDER_MODEL": "legacy-old",
         },
         "revision": REVISION_1,
-        "supported_agent_types": ["claude", "codex", "cursor", "antigravity", "traex", "maso"],
+        "supported_agent_types": [
+            "claude",
+            "codex",
+            "cursor",
+            "antigravity",
+            "traex",
+            "maso",
+        ],
     }
     execution_put_attempts = 0
     execution_apply_started = asyncio.Event()
@@ -106,6 +113,19 @@ async def main(browser_run: BrowserRun) -> None:
         "judged": 4,
         "returned": 5,
         "window": 20,
+    }
+    patrol_config = {
+        "enabled": False,
+        "timezone": "Asia/Shanghai",
+        "feishu_enabled": True,
+        "feishu_interval_minutes": 20,
+        "feishu_window_start": "09:30",
+        "feishu_window_end": "22:30",
+        "daily_enabled": True,
+        "daily_slots": ["11:00", "17:30"],
+        "stalled_hours": 48.0,
+        "pending_top_n": 5,
+        "max_triage_per_run": 3,
     }
     writes: list[list] = []
     report = {
@@ -290,6 +310,13 @@ async def main(browser_run: BrowserRun) -> None:
                 elif path == "/api/dot/inbox/ack":
                     inbox.clear()
                     body = {"acked": 1}
+                elif path == "/api/dot/patrol" and method == "GET":
+                    body = {"config": patrol_config, "running": False}
+                elif path == "/api/dot/patrol" and method == "PATCH":
+                    patrol_config.update(
+                        {key: value for key, value in data.items() if value is not None}
+                    )
+                    body = patrol_config
                 elif path == "/api/dot/work/no-such-task/watch":
                     code, body = 404, {"detail": "Task not found"}
                 elif path == "/api/dot/work/task-7/watch":
@@ -434,6 +461,21 @@ async def main(browser_run: BrowserRun) -> None:
             await panel.get_by_role("button", name="Edit").click()
             editor = page.get_by_test_id("dot-identity-editor")
             execution_editor = page.get_by_test_id("dot-execution-editor")
+            patrol_editor = page.get_by_test_id("dot-patrol-editor")
+            await expect(patrol_editor).to_be_visible()
+            patrol_master = patrol_editor.get_by_label("Enable proactive radar")
+            await expect(patrol_master).not_to_be_checked()
+            await expect(patrol_editor.get_by_label("Work-hours Feishu triage")).to_have_count(0)
+            await patrol_master.check()
+            await expect(patrol_master).to_be_checked()
+            await expect(patrol_editor.get_by_label("Work-hours Feishu triage")).to_be_checked()
+            await expect(patrol_editor.get_by_label("Daily demand digest")).to_be_checked()
+            await patrol_editor.get_by_label("Work-hours Feishu triage").uncheck()
+            await expect(patrol_editor.get_by_label("Work-hours Feishu triage")).not_to_be_checked()
+            assert wrote("PATCH", "/api/dot/patrol") == [
+                {"enabled": True},
+                {"feishu_enabled": False},
+            ]
             await expect(execution_editor.get_by_label("Execution backend")).to_have_value("claude")
             initial_preset = await execution_editor.get_by_label(
                 "Dot environment preset"
@@ -521,6 +563,11 @@ async def main(browser_run: BrowserRun) -> None:
             # Work: the stuck alarm is flagged, a bad id shows the server error,
             # a good one is watched with the chosen alarm and can be stopped.
             await panel.get_by_role("tab", name="Work").click()
+            patrol_bar = page.get_by_test_id("dot-patrol-bar")
+            await expect(patrol_bar).to_contain_text("radar on")
+            await patrol_bar.get_by_role("button", name="Disable", exact=True).click()
+            await expect(patrol_bar).to_contain_text("radar off")
+            assert wrote("PATCH", "/api/dot/patrol")[-1] == {"enabled": False}
             await expect(panel.locator(".dot-item__badge--warn")).to_have_text("stalled")
             watch_form = page.get_by_test_id("dot-watch-form")
             await watch_form.get_by_label("Task id to watch").fill("no-such-task")

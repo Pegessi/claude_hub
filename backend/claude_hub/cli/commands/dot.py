@@ -89,6 +89,78 @@ def dot_health(ctx: click.Context) -> None:
         click.echo(f"{mark} {check.get('name')}: {check.get('detail')}")
 
 
+@dot.command("patrol")
+@click.option(
+    "--enable/--disable",
+    "enabled",
+    default=None,
+    help="Turn Dot's proactive demand and Feishu radar on or off (default: off).",
+)
+@click.option(
+    "--feishu/--no-feishu",
+    "feishu_enabled",
+    default=None,
+    help="Enable or disable work-hours unanswered Feishu triage.",
+)
+@click.option(
+    "--daily/--no-daily",
+    "daily_enabled",
+    default=None,
+    help="Enable or disable daily InfoWall & MR status digest.",
+)
+@click.option("--daily-slot", multiple=True, help="Replace daily slots (HH:MM); repeat for each.")
+@click.option(
+    "--feishu-interval",
+    type=click.IntRange(1, 1440),
+    default=None,
+    help="Feishu check interval in minutes.",
+)
+@click.option("--window-start", default=None, help="Feishu work-hours start (HH:MM).")
+@click.option("--window-end", default=None, help="Feishu work-hours end (HH:MM).")
+@click.pass_context
+def dot_patrol(
+    ctx: click.Context,
+    enabled: Optional[bool],
+    feishu_enabled: Optional[bool],
+    daily_enabled: Optional[bool],
+    daily_slot: Tuple[str, ...],
+    feishu_interval: Optional[int],
+    window_start: Optional[str],
+    window_end: Optional[str],
+) -> None:
+    """Show or toggle Dot's proactive demand and Feishu triage radar (off by default)."""
+    changes: Dict[str, Any] = {}
+    for name, value in (
+        ("enabled", enabled),
+        ("feishu_enabled", feishu_enabled),
+        ("daily_enabled", daily_enabled),
+        ("feishu_interval_minutes", feishu_interval),
+        ("feishu_window_start", window_start),
+        ("feishu_window_end", window_end),
+    ):
+        if value is not None:
+            changes[name] = value
+    if daily_slot:
+        changes["daily_slots"] = list(daily_slot)
+    if changes:
+        data = _call(ctx, "PATCH", "/patrol", json=changes)
+    else:
+        data = _call(ctx, "GET", "/patrol")
+    if cli_main.as_json(ctx):
+        emit(data, True)
+        return
+    cfg = data.get("config", data)
+    master = "on" if cfg.get("enabled") else "off"
+    feishu_flag = "on" if cfg.get("feishu_enabled") else "off"
+    daily_flag = "on" if cfg.get("daily_enabled") else "off"
+    slots = ", ".join(cfg.get("daily_slots") or []) or "none"
+    click.echo(
+        f"patrol: {master} (feishu={feishu_flag} {cfg.get('feishu_window_start')}–"
+        f"{cfg.get('feishu_window_end')} every {cfg.get('feishu_interval_minutes')}m; "
+        f"daily={daily_flag} at {slots})"
+    )
+
+
 @dot.command("identity")
 @click.option("--name", default=None, help="Dot's new name (1-40 characters).")
 @click.option("--avatar", default=None, help="Short emoji or text; '' clears it.")
@@ -116,7 +188,10 @@ def dot_identity(
         data = _call(ctx, "DELETE", "/identity/avatar")
     if name is not None or avatar is not None:
         data = _call(ctx, "PATCH", "/identity", json={"name": name, "avatar": avatar})
-    emit(data if data is not None else _call(ctx, "GET", "/identity"), cli_main.as_json(ctx))
+    emit(
+        data if data is not None else _call(ctx, "GET", "/identity"),
+        cli_main.as_json(ctx),
+    )
 
 
 @dot.command("rotate")
@@ -129,7 +204,9 @@ def dot_rotate(ctx: click.Context) -> None:
 @dot.command("notify")
 @click.argument("text", default="")
 @click.option(
-    "--question-ref", default=None, help="Mirror an existing live question in the Dot Chat."
+    "--question-ref",
+    default=None,
+    help="Mirror an existing live question in the Dot Chat.",
 )
 @click.option("--title", default=None, help="Card title; without it a plain message is sent.")
 @click.option(
@@ -141,7 +218,11 @@ def dot_rotate(ctx: click.Context) -> None:
 )
 @click.pass_context
 def dot_notify(
-    ctx: click.Context, text: str, title: Optional[str], tone: str, question_ref: Optional[str]
+    ctx: click.Context,
+    text: str,
+    title: Optional[str],
+    tone: str,
+    question_ref: Optional[str],
 ) -> None:
     """Send a short message to the user's Feishu chat (the bot bound to the Dot Chat)."""
     body: dict[str, Any] = {"text": text, "tone": tone}
@@ -168,7 +249,11 @@ def dot_recall(
     params: Dict[str, Any] = {"q": query, "limit": limit, "include_archived": archived}
     if kind:
         params["kind"] = kind
-    _rows(ctx, _call(ctx, "GET", "/recall", params=params), ["id", "kind", "title", "summary"])
+    _rows(
+        ctx,
+        _call(ctx, "GET", "/recall", params=params),
+        ["id", "kind", "title", "summary"],
+    )
 
 
 @dot.command("cards")
@@ -233,7 +318,10 @@ def _upload(ctx: click.Context, path: str) -> str:
 @click.option("--importance", type=click.IntRange(1, 5), default=None)
 @click.option("--link", "links", multiple=True, help="Related card id (repeatable).")
 @click.option(
-    "--file", "files", multiple=True, help="Local file to store with the card (repeatable)."
+    "--file",
+    "files",
+    multiple=True,
+    help="Local file to store with the card (repeatable).",
 )
 @click.option("--source", default=None, help="Where this came from (URL, task id, ...).")
 @click.pass_context
@@ -416,7 +504,10 @@ def dot_work_list(ctx: click.Context, include_all: bool) -> None:
 def dot_watch(ctx: click.Context, task_id: str, stall_hours: Optional[float]) -> None:
     """Watch an existing Hub Task: Dot is woken when it ends, needs input, or stalls."""
     item = _call(
-        ctx, "POST", f"/work/{quote(task_id, safe='')}/watch", json={"stall_hours": stall_hours}
+        ctx,
+        "POST",
+        f"/work/{quote(task_id, safe='')}/watch",
+        json={"stall_hours": stall_hours},
     )
     if cli_main.as_json(ctx):
         emit(item, True)
@@ -597,7 +688,12 @@ def dot_review(
     lesson_id: Optional[str],
 ) -> None:
     """Judge a task Dot delegated, once it came back."""
-    body: Dict[str, Any] = {"verdict": verdict, "cause": cause, "note": note, "lesson": lesson}
+    body: Dict[str, Any] = {
+        "verdict": verdict,
+        "cause": cause,
+        "note": note,
+        "lesson": lesson,
+    }
     if lesson_id:
         body["lesson_id"] = lesson_id
     result = _call(ctx, "POST", f"/work/{quote(task_id, safe='')}/review", json=body)
@@ -678,7 +774,10 @@ def dot_lessons_edit(ctx: click.Context, lesson_id: str, rule: str) -> None:
 @click.pass_context
 def dot_lessons_drop(ctx: click.Context, lesson_id: str) -> None:
     """Drop a lesson that was wrong or no longer applies."""
-    emit(_call(ctx, "DELETE", f"/lessons/{quote(lesson_id, safe='')}"), cli_main.as_json(ctx))
+    emit(
+        _call(ctx, "DELETE", f"/lessons/{quote(lesson_id, safe='')}"),
+        cli_main.as_json(ctx),
+    )
 
 
 @dot_lessons.command("merge")
