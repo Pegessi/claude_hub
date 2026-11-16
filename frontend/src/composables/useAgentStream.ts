@@ -53,11 +53,30 @@ const HYDRATION_PAGE_LIMIT = 5_000
 const LONG_POLL_MAX_RETRIES = 60
 const LONG_POLL_RETRY_BASE_MS = 1_000
 const LONG_POLL_RETRY_MAX_MS = 5_000
+const HYDRATION_MAX_RETRIES = 4
+const HYDRATION_RETRY_BASE_MS = 1_000
+const HYDRATION_RETRY_MAX_MS = 8_000
 
 class StreamWaitError extends Error {
   constructor(readonly status: number, detail?: string) {
     super(`wait HTTP ${status}${detail ? `: ${detail}` : ''}`)
   }
+}
+
+class StreamHydrationError extends Error {
+  constructor(kind: 'capabilities' | 'events', readonly status: number) {
+    super(`${kind} HTTP ${status}`)
+  }
+}
+
+class StreamUnavailableError extends Error {}
+
+function isRetryableHydrationError(err: unknown): boolean {
+  if (err instanceof StreamUnavailableError) return false
+  if (err instanceof StreamHydrationError) {
+    return err.status === 408 || err.status === 429 || err.status >= 500
+  }
+  return true
 }
 
 export interface UseAgentStreamApi {
@@ -74,6 +93,8 @@ export interface UseAgentStreamApi {
   start: (sourceId: string, source?: StreamSource) => Promise<void>
   /** Fetch a folded historical turn's full process without advancing the live cursor. */
   loadHistoryDetail: (turnId: string) => Promise<void>
+  /** Recover failed observation without preempting hydration or replacing the provider. */
+  reconnect: (sourceId: string, source?: StreamSource) => Promise<void>
   /** Replace a failed provider transport, then hydrate its resumed stream. */
   retry: (sourceId: string, source?: StreamSource) => Promise<void>
   /** Refresh active-session capabilities without restarting timeline delivery. */
@@ -147,6 +168,7 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
   let waitRequestAbort: AbortController | null = null
   /** Aborts the in-flight capabilities / events hydration fetches. */
   let hydrationAbort: AbortController | null = null
+  let hydrationRetryTimer: ReturnType<typeof setTimeout> | null = null
   /** Latest-wins owner for requests that replace active capabilities. */
   let capabilitiesUpdateAbort: AbortController | null = null
   let pendingCapabilitiesUpdate: Promise<void> | null = null
@@ -253,6 +275,10 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
   }
 
   function abortHydration() {
+    if (hydrationRetryTimer !== null) {
+      clearTimeout(hydrationRetryTimer)
+      hydrationRetryTimer = null
+    }
     if (hydrationAbort) {
       hydrationAbort.abort()
       hydrationAbort = null
@@ -450,7 +476,7 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
   ): Promise<StreamCapabilities> {
     const suffix = refresh ? '?refresh=true' : ''
     const res = await fetchWithTimeout(`${streamPath}/capabilities${suffix}`, { signal }, HYDRATION_FETCH_TIMEOUT_MS)
-    if (!res.ok) throw new Error(`capabilities HTTP ${res.status}`)
+    if (!res.ok) throw new StreamHydrationError('capabilities', res.status)
     return (await res.json()) as StreamCapabilities
   }
 
@@ -474,7 +500,7 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
       { signal },
       HYDRATION_FETCH_TIMEOUT_MS,
     )
-    if (!res.ok) throw new Error(`events HTTP ${res.status}`)
+    if (!res.ok) throw new StreamHydrationError('events', res.status)
     return (await res.json()) as AgentStreamEventPage
   }
 
@@ -624,15 +650,19 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
     })
   }
 
-  async function start(sourceId: string, source: StreamSource = 'managed-session') {
+  async function start(sourceId: string, source: StreamSource = 'managed-session', retryAttempt = 0) {
+    const streamPath = streamBasePath(sourceId, source)
+    const retainedHistory = currentStreamPath === streamPath && historyReady.value
+      ? currentHistorySnapshot()
+      : undefined
+    const previousError = retryAttempt > 0 ? errorMessage.value : null
     stop()
     stopped = false
     currentSessionId = sourceId
-
-    const streamPath = streamBasePath(sourceId, source)
     currentStreamPath = streamPath
-    const cached = agentStreamHistoryCache.get(streamPath)
+    const cached = retainedHistory ?? agentStreamHistoryCache.get(streamPath)
     reset(cached)
+    if (previousError) errorMessage.value = previousError
 
     const generationId = stateMachine.start()
     // Cached history is immediately renderable. Keep input disabled while a
@@ -655,6 +685,7 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
       : fetchCapabilities(streamPath, signal)
     ).then(value => ({ value }), error => ({ error }))
 
+    let supersededBySettings = false
     try {
       // A cold mount pulls full history. A remount resumes at the cached
       // contiguous cursor and fetches only events published while hidden.
@@ -686,6 +717,7 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
       // Wait for its result rather than admitting input with the older snapshot.
       let pending = pendingCapabilitiesUpdate
       while (pending) {
+        supersededBySettings = true
         try {
           await pending
         } catch (error) {
@@ -705,7 +737,7 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
       const caps = capabilities.value
       if (!caps?.structured) {
         agentStreamCapabilitiesCache.delete(streamPath)
-        throw new Error(caps?.unavailable_reason || 'structured observation unavailable for this session')
+        throw new StreamUnavailableError(caps?.unavailable_reason || 'structured observation unavailable for this session')
       }
       // A legacy transcript can be imported during first-time preparation.
       // Preserve summary/detail folding instead of replaying that whole import
@@ -721,6 +753,7 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
         batcher.flushAndCancel()
       }
       if (stateMachine.success(generationId)) {
+        errorMessage.value = null
         connectionState.value = 'live'
       }
 
@@ -740,6 +773,15 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
       if (stateMachine.fail(generationId, message)) {
         errorMessage.value = message
         connectionState.value = 'failed'
+        if (!supersededBySettings && !signal.aborted && isRetryableHydrationError(err) && retryAttempt < HYDRATION_MAX_RETRIES) {
+          const delay = Math.min(HYDRATION_RETRY_BASE_MS * 2 ** retryAttempt, HYDRATION_RETRY_MAX_MS)
+          hydrationRetryTimer = setTimeout(() => {
+            hydrationRetryTimer = null
+            if (!stopped && currentSessionId === sourceId && currentStreamPath === streamPath && stateMachine.isCurrent(generationId)) {
+              void start(sourceId, source, retryAttempt + 1)
+            }
+          }, delay)
+        }
       }
     }
   }
@@ -806,6 +848,13 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
     } finally {
       if (historyDetailRequests.get(turnId)?.id === requestId) historyDetailRequests.delete(turnId)
     }
+  }
+
+  async function reconnect(sourceId: string, source: StreamSource = 'managed-session') {
+    // Inbox status recovery is observation-only. Let an existing retry chain
+    // keep its generation and bounded budget, including while it backs off.
+    if (connectionState.value !== 'failed' || hydrationRetryTimer !== null) return
+    await start(sourceId, source)
   }
 
   async function retry(sourceId: string, source: StreamSource = 'managed-session') {
@@ -967,6 +1016,7 @@ export function useAgentStream(configuration: () => string = () => ''): UseAgent
     historyReady,
     start,
     loadHistoryDetail,
+    reconnect,
     retry,
     refreshCapabilities,
     setMode,

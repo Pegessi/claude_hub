@@ -563,3 +563,117 @@ async def test_unexpected_pump_failure_keeps_periodic_backoff(tmp_path):
         assert h.inbox.messages[row.message_id].state == "queued"
     finally:
         await h.inbox.stop()
+
+
+@pytest.mark.asyncio
+async def test_inspect_chat_delivery_uses_indexed_turn_query_without_full_stream_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.models import AgentStreamEvent, AgentStreamEventType, AgentType
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+    from claude_hub.services.chat_message_inbox import inspect_chat_delivery
+
+    monkeypatch.setenv("CLAUDE_HUB_STATE_ROOT", str(tmp_path / "streams"))
+    store = AgentStreamStore("terminal-tabs", "terminal-tab-tab-indexed")
+    now = utc_now()
+    for seq, turn_id, kind, payload in [
+        (0, "other-turn", AgentStreamEventType.TURN_STARTED, {"summary": "other"}),
+        (1, "target-turn", AgentStreamEventType.TURN_STARTED, {"summary": "target"}),
+        (2, "target-turn", AgentStreamEventType.TURN_COMPLETED, {"status": "completed"}),
+    ]:
+        await store.append(
+            AgentStreamEvent(
+                stream_sequence=seq,
+                created_at=now,
+                session_id="terminal-tab-tab-indexed",
+                tab_id="tab-indexed",
+                agent_type=AgentType.CODEX,
+                type=kind,
+                turn_id=turn_id,
+                run_epoch=1,
+                payload=payload,
+            )
+        )
+
+    read_rows_calls: list[tuple[int, int | None, str | None]] = []
+    original_read_rows = AgentStreamStore._read_rows
+
+    def spy_read_rows(
+        self: AgentStreamStore,
+        since: int = -1,
+        limit: int | None = None,
+        turn_id: str | None = None,
+        through: int | None = None,
+        kind: str | None = None,
+    ) -> list[AgentStreamEvent]:
+        read_rows_calls.append((since, limit, turn_id))
+        return original_read_rows(self, since, limit, turn_id, through, kind)
+
+    monkeypatch.setattr(
+        AgentStreamStore,
+        "read_since",
+        Mock(side_effect=AssertionError("inspect_chat_delivery must not scan via read_since")),
+    )
+    monkeypatch.setattr(AgentStreamStore, "_read_rows", spy_read_rows)
+
+    evidence = await inspect_chat_delivery("tab-indexed", "target-turn")
+    assert evidence.state == "completed"
+    assert read_rows_calls == [(-1, None, "target-turn")]
+
+    absent = await inspect_chat_delivery("tab-indexed", "missing-turn")
+    assert absent.state == "absent"
+    assert read_rows_calls[-1] == (-1, None, "missing-turn")
+
+
+@pytest.mark.asyncio
+async def test_reconcile_throttles_repeated_checks_on_uncertain_direct_messages(
+    tmp_path: Path,
+) -> None:
+    h = Harness(tmp_path / "store.json")
+    row = await h.enqueue()
+    h.mode = "ambiguous"
+    await h.inbox.pump("tab")
+    assert (await h.inbox.get("tab", row.message_id, "actor")).state == "uncertain"
+
+    evidence_calls = 0
+
+    async def counting_evidence(item: object) -> InboxEvidence:
+        nonlocal evidence_calls
+        evidence_calls += 1
+        return h.proof
+
+    h.inbox.evidence = counting_evidence
+    h.proof = InboxEvidence("started")
+    t0 = utc_now()
+
+    await h.inbox.reconcile(now=t0)
+    assert evidence_calls == 1
+
+    # Repeated coordinator passes inside the 60s window are throttled.
+    await h.inbox.reconcile(now=t0 + timedelta(seconds=10))
+    await h.inbox.reconcile(now=t0 + timedelta(seconds=59))
+    assert evidence_calls == 1
+
+    # Once 60s have elapsed, reconcile probes evidence again and resolves when terminal.
+    h.proof = InboxEvidence("completed")
+    await h.inbox.reconcile(now=t0 + timedelta(seconds=60))
+    assert evidence_calls == 2
+    assert (await h.inbox.get("tab", row.message_id, "actor")).state == "completed"
+
+
+@pytest.mark.asyncio
+async def test_list_reads_lock_free_snapshot_without_blocking_on_held_lock(
+    tmp_path: Path,
+) -> None:
+    h = Harness(tmp_path / "store.json")
+    first = await h.enqueue("call-1", "one")
+    second = await h.enqueue("call-2", "two")
+    await h.enqueue("call-other", "other", principal="other")
+
+    await h.inbox._lock.acquire()
+    try:
+        receipts = await asyncio.wait_for(h.inbox.list("tab", "actor"), timeout=0.1)
+    finally:
+        h.inbox._lock.release()
+
+    assert [r.message_id for r in receipts] == [first.message_id, second.message_id]

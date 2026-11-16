@@ -65,26 +65,104 @@ test('message status errors distinguish timeout, network, authentication and HTT
 test('manual inbox retry issues its own GET without advancing the automatic poll timer', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const calls = []
+  const retryEvents = []
+  const recoveredEvents = []
   t.mock.method(globalThis, 'fetch', async (url, options) => {
     calls.push({ url, method: options.method ?? 'GET' })
-    return calls.length === 1
+    return calls.length <= 2
       ? new Response('{}', { status: 503 })
       : new Response(JSON.stringify({ messages: [{ message_id: 'fresh', state: 'waiting' }] }))
   })
   const root = { children: [] }
-  const app = makeRenderer().createApp(Inbox, { tabId: 'tab-1' })
+  const app = makeRenderer().createApp(Inbox, {
+    tabId: 'tab-1',
+    onRetry: () => retryEvents.push('retry'),
+    onRecovered: () => recoveredEvents.push('recovered'),
+  })
   app.mount(root)
   t.after(() => app.unmount())
   await setImmediate()
   const nodes = node => [node, ...(node.children ?? []).flatMap(nodes)]
-  const button = nodes(root).find(node => node.tag === 'button')
-  assert.ok(button, 'failed status read offers the retry control')
   assert.equal(calls.length, 1)
+  assert.equal(nodes(root).some(node => node.tag === 'button'), false, 'single transient error with empty receipts suppresses noisy banner')
+
+  // Second consecutive failure surfaces the error banner and Retry status button.
+  t.mock.timers.tick(3000)
+  await setImmediate()
+  const button = nodes(root).find(node => node.tag === 'button')
+  assert.ok(button, 'consecutive failed status reads offer the retry control')
+  assert.equal(calls.length, 2)
   button.attributes.onClick()
   await setImmediate()
-  assert.equal(calls.length, 2, 'retry must fetch even when automatic timers never advance')
-  assert.deepEqual(calls, Array(2).fill({ url: '/api/workspaces/tabs/tab-1/messages', method: 'GET' }))
+  assert.equal(calls.length, 3, 'retry must fetch even when automatic timers never advance')
+  assert.deepEqual(calls, Array(3).fill({ url: '/api/workspaces/tabs/tab-1/messages', method: 'GET' }))
+  assert.deepEqual(retryEvents, ['retry'])
+  assert.deepEqual(recoveredEvents, ['recovered'])
   assert.ok(nodes(root).some(node => node.text?.includes('fresh')))
+  assert.equal(nodes(root).some(node => node.tag === 'button'), false)
+})
+
+test('inbox stops 3s polling on 401/403 and pauses while deactivated', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const calls = []
+  let status = 401
+  t.mock.method(globalThis, 'fetch', async url => {
+    calls.push(url)
+    return status === 200
+      ? new Response(JSON.stringify({ messages: [] }))
+      : new Response('{}', { status })
+  })
+  const root = { children: [] }
+  const app = makeRenderer().createApp(Inbox, { tabId: 'tab-auth' })
+  app.mount(root)
+  t.after(() => app.unmount())
+  await setImmediate()
+  const nodes = node => [node, ...(node.children ?? []).flatMap(nodes)]
+  assert.equal(calls.length, 1)
+  assert.ok(nodes(root).some(node => node.text?.includes('HTTP 401')), '401 surfaces immediately even with empty receipts')
+
+  t.mock.timers.tick(15000)
+  await setImmediate()
+  assert.equal(calls.length, 1, '401/403 must stop automatic 3s polling')
+
+  // Mounting with active=false does not start polling while deactivated.
+  const inactiveRoot = { children: [] }
+  const inactiveApp = makeRenderer().createApp(Inbox, { tabId: 'tab-inactive', active: false })
+  inactiveApp.mount(inactiveRoot)
+  t.after(() => inactiveApp.unmount())
+  await setImmediate()
+  t.mock.timers.tick(6000)
+  await setImmediate()
+  assert.equal(calls.filter(url => url.includes('tab-inactive')).length, 0)
+})
+
+test('repeated malformed successful inbox responses surface an error and recover explicitly', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let calls = 0
+  let valid = false
+  let recovered = 0
+  t.mock.method(globalThis, 'fetch', async () => {
+    calls += 1
+    return Response.json(valid ? { messages: [] } : {})
+  })
+  const root = { children: [] }
+  const nodes = node => [node, ...(node.children ?? []).flatMap(nodes)]
+  const app = makeRenderer().createApp(Inbox, { tabId: 'malformed', onRecovered: () => { recovered += 1 } })
+  app.mount(root)
+  t.after(() => app.unmount())
+  await setImmediate()
+  assert.equal(nodes(root).some(node => node.tag === 'button'), false)
+  for (let i = 0; i < 3; i += 1) {
+    t.mock.timers.tick(3000)
+    await setImmediate()
+    assert.ok(nodes(root).some(node => node.text?.includes('unreadable')), 'repeated invalid envelopes must not reset the failure streak')
+  }
+  assert.equal(calls, 4)
+  assert.equal(recovered, 0)
+  valid = true
+  nodes(root).find(node => node.tag === 'button').attributes.onClick()
+  await setImmediate()
+  assert.equal(recovered, 1)
   assert.equal(nodes(root).some(node => node.tag === 'button'), false)
 })
 
