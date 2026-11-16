@@ -87,6 +87,29 @@ test('classifyTriageBucket routes review, failed, attention, working, and done a
     'needs_you',
   )
   assert.equal(triage.classifyTriageBucket(makeTask({ status: 'done' })), 'done')
+  const archivedDone = triage.buildTriageTaskViewModel({
+    task: makeTask({ status: 'done', closed_reason: 'chat_archived', human_accepted_at: null }),
+    workspaceName: 'evo_workspace',
+    reports: [],
+    events: [],
+    sessionsById: new Map(),
+    nowMs: NOW_MS,
+  })
+  assert.equal(archivedDone.bucket, 'done')
+  assert.equal(archivedDone.statusLabel, 'Archived')
+  assert.equal(archivedDone.checksLabel, 'Closed by archive')
+  assert.equal(archivedDone.consensus.verdictLabel, 'CLOSED BY ARCHIVE')
+
+  const mergedDone = triage.buildTriageTaskViewModel({
+    task: makeTask({ status: 'done', closed_reason: 'mr_merged', human_accepted_at: null }),
+    workspaceName: 'evo_workspace',
+    reports: [],
+    events: [],
+    sessionsById: new Map(),
+    nowMs: NOW_MS,
+  })
+  assert.equal(mergedDone.statusLabel, 'MR Merged')
+  assert.equal(mergedDone.checksLabel, 'MR merged')
 })
 
 test('buildTriageTaskViewModel constructs consensus, artifact links, and multi-round spine', () => {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from contextlib import asynccontextmanager
 from functools import partial
@@ -295,13 +296,14 @@ class ManagerRetirementMixin(ManagerHost):
             self._save_state()
 
         # ensure_tab_running acquires this same lock; do not recursively hold it.
-        try:
-            await self.ensure_tab_running(tab_id)
-        except Exception:
-            logger.exception(
-                "Best-effort restart after unarchive failed for tab %s; cold recovery will retry on open",
-                tab_id,
-            )
+        if os.environ.get("CLAUDE_HUB_SAFE_PREVIEW") != "1":
+            try:
+                await self.ensure_tab_running(tab_id)
+            except Exception:
+                logger.exception(
+                    "Best-effort restart after unarchive failed for tab %s; cold recovery will retry on open",
+                    tab_id,
+                )
         # Deletion may have won while the best-effort restart was waiting.
         return self.get_tab(tab_id)
 

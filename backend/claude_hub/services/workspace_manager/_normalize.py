@@ -116,6 +116,17 @@ class _NormalizeMixin(_WorkspaceManagerBase):
         normalized.setdefault("timeout_seconds", None)
         normalized.setdefault("failure_reason", None)
         normalized.setdefault("failed_at", None)
+        normalized.setdefault("closed_reason", None)
+        normalized.setdefault("archive_closure", None)
+        if normalized.get("closed_reason") not in {
+            "accepted",
+            "completed",
+            "chat_archived",
+            "mr_merged",
+        }:
+            normalized["closed_reason"] = None
+        if not isinstance(normalized.get("archive_closure"), dict):
+            normalized["archive_closure"] = None
         normalized["goal_packet"] = self._normalize_goal_packet(normalized.get("goal_packet"))
         normalized["autonomy_policy"] = self._normalize_autonomy_policy(
             normalized.get("autonomy_policy"),

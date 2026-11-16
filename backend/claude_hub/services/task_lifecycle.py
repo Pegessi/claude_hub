@@ -80,8 +80,10 @@ def session_owner_state(session: Optional[ManagedSession]) -> TaskOwnerState:
 def chat_owner_state(task: WorkspaceTask, tab: Optional[ChatTabFacts]) -> TaskOwnerState:
     if tab is None:
         return TaskOwnerState.UNKNOWN
-    if not tab.exists or tab.archived:
+    if not tab.exists:
         return TaskOwnerState.GONE
+    if tab.archived:
+        return TaskOwnerState.IDLE
     observation = task.runtime_observation
     if observation and observation.execution_epoch == task.execution_epoch:
         if observation.status == "active":
@@ -142,8 +144,13 @@ def _derive(
     task = facts.task
     status = task.status
     if status == WorkspaceTaskStatus.DONE:
-        reason = "accepted" if task.human_accepted_at else "completed"
-        return TaskPhase.DONE, reason, TaskOwner(kind=TaskOwnerKind.NONE), task.completed_at
+        reason = task.closed_reason or ("accepted" if task.human_accepted_at else "completed")
+        return (
+            TaskPhase.DONE,
+            reason,
+            TaskOwner(kind=TaskOwnerKind.NONE),
+            task.completed_at or task.updated_at,
+        )
     if status == WorkspaceTaskStatus.FAILED:
         return TaskPhase.FAILED, "failed", TaskOwner(kind=TaskOwnerKind.NONE), task.failed_at
     liveness = task.liveness
@@ -199,6 +206,14 @@ def _derive_initiator(
     since = progress.reported_at if progress else None
     if task.execution_released or (progress and progress.state == TaskProgressState.RELEASED):
         return TaskPhase.ORPHANED, "initiator_released", owner, since
+    if facts.chat_tab is not None and facts.chat_tab.exists and facts.chat_tab.archived:
+        # Intentional Chat archive settles initiator work without raising Session lost.
+        return (
+            TaskPhase.DONE,
+            "chat_archived",
+            TaskOwner(kind=TaskOwnerKind.NONE),
+            since or task.updated_at,
+        )
     if task.status == WorkspaceTaskStatus.TODO:
         if owner.state == TaskOwnerState.GONE:
             return TaskPhase.ORPHANED, "initiator_chat_gone", owner, None
@@ -331,6 +346,8 @@ REASON_TEXT = {
     "registered_not_started": "Registered but not started",
     "accepted": "Accepted",
     "completed": "Completed",
+    "chat_archived": "Closed when originating Chat was archived",
+    "mr_merged": "Associated MR merged",
 }
 
 # Notice text handed to Dot, in the user's language for Dot to relay.
@@ -369,6 +386,8 @@ NOTICE_REASON_TEXT = {
     "registered_not_started": "已登記但尚未開始",
     "accepted": "已驗收",
     "completed": "已完成",
+    "chat_archived": "發起的 Chat 已歸檔並收口",
+    "mr_merged": "關聯 MR 已合入",
 }
 
 # Next steps differ by board status: `task continue` only reopens review or

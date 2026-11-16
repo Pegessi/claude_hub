@@ -218,14 +218,20 @@ class _TaskUpdatesMixin(_WorkspaceManagerBase):
                 update["started_at"] = task.started_at or now
                 update["human_acceptance_requested_at"] = None
                 update["human_accepted_at"] = None
+                update["closed_reason"] = None
+                update["archive_closure"] = None
             elif status == WorkspaceTaskStatus.REVIEW:
                 update["reviewed_at"] = now
                 update["human_acceptance_requested_at"] = task.human_acceptance_requested_at or now
+                update["closed_reason"] = None
+                update["archive_closure"] = None
             elif status == WorkspaceTaskStatus.DONE:
                 # Saving a done task as done again is not a new completion.
                 already_done = task.status == WorkspaceTaskStatus.DONE
                 update["completed_at"] = (task.completed_at if already_done else None) or now
                 update["human_accepted_at"] = now
+                update["closed_reason"] = "accepted"
+                update["archive_closure"] = None
 
         return _TaskEditPlan(
             update=update,

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import sys
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
@@ -178,114 +179,126 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception:
             logger.exception("Cursor image temp cleanup failed at startup")
 
-        # Start all saved tabs
-        await ttyd_manager.start_all_tabs()
-        try:
-            from .services.subagents import get_subagent_service
-
-            # Before restart continuation: closing an interrupted non-kept
-            # subagent archives its tab and vetoes that tab's continuation.
-            await get_subagent_service().start()
-        except Exception:
-            logger.exception("Subagent service failed to start")
-        from .services.restart_continuation import (
-            capture_interrupted_chats,
-            continue_interrupted_chats,
-        )
-
-        continuation_task = asyncio.create_task(continue_interrupted_chats())
-        from .api.task_notifications import deliver_task_notice, task_liveness_watch
-
-        # Task notices (questions, acceptance, owner loss, plans) go out from the
-        # monitor; Feishu routing lives in the API layer.
-        workspace_manager.configure_task_notifier(deliver_task_notice)
-        workspace_manager.configure_liveness_watch(task_liveness_watch)
-        workspace_manager.start_background_monitor()
-        from .api.routes.agent_stream.messages import start_inbox
-
-        try:
-            await start_inbox()
-        except Exception:
-            # Corrupt delivery evidence disables the inbox, not unrelated Chats.
-            logger.exception("Chat message inbox unavailable; refusing inbox delivery")
-        try:
-            from .services.dot import get_dot_service
-
-            get_dot_service().start()
-        except Exception:
-            logger.exception("Dot work watcher failed to start")
-        try:
-            from .api.feishu_bot import start_feishu_websockets
-
-            await start_feishu_websockets()
-        except Exception:
-            logger.exception("Feishu Bot WebSocket startup failed")
-        from .services.demand_patrol.service import demand_patrol_service
-
-        demand_patrol_service.start()
-        try:
-            yield
-        finally:
-            # Stop new patrol work before draining its Subagent/Dot transports.
-            await demand_patrol_service.stop()
-            # Shutdown
-            logger.info("Shutting down Claude Hub Backend")
-            from .api.agent_stream import _quiesce_tailer_managers
-
-            _quiesce_tailer_managers()
-            from .api.routes.agent_stream.messages import stop_inbox
-
-            try:
-                await stop_inbox()
-            except Exception:
-                logger.exception("Chat inbox shutdown failed")
+        safe_preview = os.environ.get("CLAUDE_HUB_SAFE_PREVIEW") == "1"
+        continuation_task: asyncio.Task[Any] | None = None
+        if not safe_preview:
+            # Start all saved tabs
+            await ttyd_manager.start_all_tabs()
             try:
                 from .services.subagents import get_subagent_service
 
-                await get_subagent_service().stop()
+                # Before restart continuation: closing an interrupted non-kept
+                # subagent archives its tab and vetoes that tab's continuation.
+                await get_subagent_service().start()
             except Exception:
-                logger.exception("Subagent shutdown failed")
-            continuation_task.cancel()
-            await asyncio.gather(continuation_task, return_exceptions=True)
+                logger.exception("Subagent service failed to start")
+            from .services.restart_continuation import continue_interrupted_chats
+
+            continuation_task = asyncio.create_task(continue_interrupted_chats())
+            from .api.task_notifications import deliver_task_notice, task_liveness_watch
+
+            # Task notices (questions, acceptance, owner loss, plans) go out from the
+            # monitor; Feishu routing lives in the API layer.
+            workspace_manager.configure_task_notifier(deliver_task_notice)
+            workspace_manager.configure_liveness_watch(task_liveness_watch)
+            workspace_manager.start_background_monitor()
+            from .api.routes.agent_stream.messages import start_inbox
+
             try:
-                try:
-                    from .api.feishu_bot import quiesce_feishu_websockets
+                await start_inbox()
+            except Exception:
+                # Corrupt delivery evidence disables the inbox, not unrelated Chats.
+                logger.exception("Chat message inbox unavailable; refusing inbox delivery")
+            try:
+                from .services.dot import get_dot_service
 
-                    await quiesce_feishu_websockets()
-                except Exception:
-                    logger.exception("Failed to quiesce Feishu Bot WebSockets")
-                try:
-                    from .services.dot import get_dot_service
+                get_dot_service().start()
+            except Exception:
+                logger.exception("Dot work watcher failed to start")
+            try:
+                from .api.feishu_bot import start_feishu_websockets
 
-                    await get_dot_service().stop()
-                except Exception:
-                    logger.exception("Failed to stop the Dot work watcher")
-                # Stop new scheduled dispatch before draining its transports.
-                try:
-                    await workspace_manager.stop_background_monitor()
-                except Exception:
-                    logger.exception("Failed to stop the workspace background monitor")
-                try:
-                    await capture_interrupted_chats()
-                except Exception:
-                    logger.exception("Could not capture restart Chat continuations")
-            finally:
-                try:
-                    from .api.agent_stream import _stop_all_tailer_managers
+                await start_feishu_websockets()
+            except Exception:
+                logger.exception("Feishu Bot WebSocket startup failed")
+            from .services.demand_patrol.service import demand_patrol_service
 
-                    await _stop_all_tailer_managers()
+            demand_patrol_service.start()
+        else:
+            logger.info("Starting Claude Hub Backend in CLAUDE_HUB_SAFE_PREVIEW mode")
+        try:
+            yield
+        finally:
+            from .services.mr_status_cache import mr_status_cache
+
+            await mr_status_cache.stop()
+            if not safe_preview:
+                from .services.demand_patrol.service import demand_patrol_service
+                from .services.restart_continuation import capture_interrupted_chats
+
+                # Stop new patrol work before draining its Subagent/Dot transports.
+                await demand_patrol_service.stop()
+                # Shutdown
+                logger.info("Shutting down Claude Hub Backend")
+                from .api.agent_stream import _quiesce_tailer_managers
+
+                _quiesce_tailer_managers()
+                from .api.routes.agent_stream.messages import stop_inbox
+
+                try:
+                    await stop_inbox()
                 except Exception:
-                    logger.exception("Failed to stop agent-stream tailers")
+                    logger.exception("Chat inbox shutdown failed")
+                try:
+                    from .services.subagents import get_subagent_service
+
+                    await get_subagent_service().stop()
+                except Exception:
+                    logger.exception("Subagent shutdown failed")
+                if continuation_task is not None:
+                    continuation_task.cancel()
+                    await asyncio.gather(continuation_task, return_exceptions=True)
+                try:
+                    try:
+                        from .api.feishu_bot import quiesce_feishu_websockets
+
+                        await quiesce_feishu_websockets()
+                    except Exception:
+                        logger.exception("Failed to quiesce Feishu Bot WebSockets")
+                    try:
+                        from .services.dot import get_dot_service
+
+                        await get_dot_service().stop()
+                    except Exception:
+                        logger.exception("Failed to stop the Dot work watcher")
+                    # Stop new scheduled dispatch before draining its transports.
+                    try:
+                        await workspace_manager.stop_background_monitor()
+                    except Exception:
+                        logger.exception("Failed to stop the workspace background monitor")
+                    try:
+                        await capture_interrupted_chats()
+                    except Exception:
+                        logger.exception("Could not capture restart Chat continuations")
                 finally:
                     try:
-                        await ttyd_manager.cleanup()
+                        from .api.agent_stream import _stop_all_tailer_managers
+
+                        await _stop_all_tailer_managers()
+                    except Exception:
+                        logger.exception("Failed to stop agent-stream tailers")
                     finally:
                         try:
-                            from .api.feishu_bot import stop_feishu_websockets
+                            await ttyd_manager.cleanup()
+                        finally:
+                            try:
+                                from .api.feishu_bot import stop_feishu_websockets
 
-                            await stop_feishu_websockets(drain_timeout_seconds=0)
-                        except Exception:
-                            logger.exception("Failed to stop Feishu Bot WebSockets")
+                                await stop_feishu_websockets(drain_timeout_seconds=0)
+                            except Exception:
+                                logger.exception("Failed to stop Feishu Bot WebSockets")
+            else:
+                logger.info("Shutting down Claude Hub SAFE_PREVIEW Backend")
 
 
 app = FastAPI(

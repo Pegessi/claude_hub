@@ -264,6 +264,7 @@ export interface WorkspaceTask {
   execution_released?: boolean
   latest_progress?: WorkspaceTaskProgress | null
   runtime_observation?: WorkspaceTaskRuntimeObservation | null
+  closed_reason?: 'accepted' | 'completed' | 'chat_archived' | 'mr_merged' | null
   agent_tag?: string | null
   autonomy_policy?: AutonomyPolicy | null
   autonomous_run?: AutonomousRun | null
