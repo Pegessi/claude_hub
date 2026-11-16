@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "3f02644f3ffce0c9bda6784fce812daeee4107ea",
+  "parents": [
+    "d36cb49d132624713bf2fcccecd43886628868be",
+    "2a3a8e9db6194fab3a104bcc50d7e0a81dcc9b39"
+  ],
+  "base": "7c211de71190b591cbc5b692f340cfeb1ece297f",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "5d8bbf9c248c91793f2d92a8961ba7ad6ecf5e2e",
+  "reconstructed_tree": "0cc654a98ee74a34433a2157b913122052f453e3",
+  "conflicts": [
+    "CHANGELOG.md"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0c501787c4182755ef7315683853947658e87ee7"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2f37b2a5d2c1cddf2ba5b0b77031d94aae60db87"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "58d8091457655b973112caef4439942820f1b26b"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "94c3552864c159f0fcbdaef9f011a5903e82eefa"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0fad6a7208ebad8b183f7592784431a6adfd8182"
+      },
+      "reason": "Retain both the workspace Triage Pro release entry and main's message-status refresh fix entry under the single ## Released heading.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
