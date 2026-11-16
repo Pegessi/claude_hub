@@ -41,7 +41,10 @@ def _rows(ctx: click.Context, data: Any, columns: List[str]) -> None:
     if cli_main.as_json(ctx):
         emit(data, True)
         return
-    rows = [{column: truncate(item.get(column, "")) for column in columns} for item in data or []]
+    rows = [
+        {column: truncate(item.get(column, "")) for column in columns}
+        for item in data or []
+    ]
     print_rows(rows, columns)
 
 
@@ -65,7 +68,9 @@ def dot_setup(ctx: click.Context, env_preset: Optional[str]) -> None:
         or settings.env_preset_for_agent_type("claude")
         or getattr(settings, "default_env_preset", None)
     )
-    emit(_call(ctx, "POST", "/setup", json={"env_preset": preset}), cli_main.as_json(ctx))
+    emit(
+        _call(ctx, "POST", "/setup", json={"env_preset": preset}), cli_main.as_json(ctx)
+    )
 
 
 @dot.command("status")
@@ -88,10 +93,86 @@ def dot_health(ctx: click.Context) -> None:
         click.echo(f"{mark} {check.get('name')}: {check.get('detail')}")
 
 
+@dot.command("patrol")
+@click.option(
+    "--enable/--disable",
+    "enabled",
+    default=None,
+    help="Turn Dot's proactive demand and Feishu radar on or off (default: off).",
+)
+@click.option(
+    "--feishu/--no-feishu",
+    "feishu_enabled",
+    default=None,
+    help="Enable or disable work-hours unanswered Feishu triage.",
+)
+@click.option(
+    "--daily/--no-daily",
+    "daily_enabled",
+    default=None,
+    help="Enable or disable daily InfoWall & MR status digest.",
+)
+@click.option(
+    "--daily-slot", multiple=True, help="Replace daily slots (HH:MM); repeat for each."
+)
+@click.option(
+    "--feishu-interval",
+    type=click.IntRange(1, 1440),
+    default=None,
+    help="Feishu check interval in minutes.",
+)
+@click.option("--window-start", default=None, help="Feishu work-hours start (HH:MM).")
+@click.option("--window-end", default=None, help="Feishu work-hours end (HH:MM).")
+@click.pass_context
+def dot_patrol(
+    ctx: click.Context,
+    enabled: Optional[bool],
+    feishu_enabled: Optional[bool],
+    daily_enabled: Optional[bool],
+    daily_slot: Tuple[str, ...],
+    feishu_interval: Optional[int],
+    window_start: Optional[str],
+    window_end: Optional[str],
+) -> None:
+    """Show or toggle Dot's proactive demand and Feishu triage radar (off by default)."""
+    changes: Dict[str, Any] = {}
+    for name, value in (
+        ("enabled", enabled),
+        ("feishu_enabled", feishu_enabled),
+        ("daily_enabled", daily_enabled),
+        ("feishu_interval_minutes", feishu_interval),
+        ("feishu_window_start", window_start),
+        ("feishu_window_end", window_end),
+    ):
+        if value is not None:
+            changes[name] = value
+    if daily_slot:
+        changes["daily_slots"] = list(daily_slot)
+    if changes:
+        data = _call(ctx, "PATCH", "/patrol", json=changes)
+    else:
+        data = _call(ctx, "GET", "/patrol")
+    if cli_main.as_json(ctx):
+        emit(data, True)
+        return
+    cfg = data.get("config", data)
+    master = "on" if cfg.get("enabled") else "off"
+    feishu_flag = "on" if cfg.get("feishu_enabled") else "off"
+    daily_flag = "on" if cfg.get("daily_enabled") else "off"
+    slots = ", ".join(cfg.get("daily_slots") or []) or "none"
+    click.echo(
+        f"patrol: {master} (feishu={feishu_flag} {cfg.get('feishu_window_start')}–"
+        f"{cfg.get('feishu_window_end')} every {cfg.get('feishu_interval_minutes')}m; "
+        f"daily={daily_flag} at {slots})"
+    )
+
+
 @dot.command("identity")
 @click.option("--name", default=None, help="Dot's new name (1-40 characters).")
 @click.option("--avatar", default=None, help="Short emoji or text; '' clears it.")
-@click.option("--avatar-image", default=None, help="PNG, JPEG, GIF or WebP file (max 2 MB).")
+@click.option(
+    "--avatar-image", default=None, help="PNG, JPEG, GIF or WebP file (max 2 MB)."
+)
 @click.option("--clear-image", is_flag=True, help="Remove the avatar image.")
 @click.pass_context
 def dot_identity(
@@ -115,7 +196,10 @@ def dot_identity(
         data = _call(ctx, "DELETE", "/identity/avatar")
     if name is not None or avatar is not None:
         data = _call(ctx, "PATCH", "/identity", json={"name": name, "avatar": avatar})
-    emit(data if data is not None else _call(ctx, "GET", "/identity"), cli_main.as_json(ctx))
+    emit(
+        data if data is not None else _call(ctx, "GET", "/identity"),
+        cli_main.as_json(ctx),
+    )
 
 
 @dot.command("rotate")
@@ -128,9 +212,13 @@ def dot_rotate(ctx: click.Context) -> None:
 @dot.command("notify")
 @click.argument("text", default="")
 @click.option(
-    "--question-ref", default=None, help="Mirror an existing live question in the Dot Chat."
+    "--question-ref",
+    default=None,
+    help="Mirror an existing live question in the Dot Chat.",
 )
-@click.option("--title", default=None, help="Card title; without it a plain message is sent.")
+@click.option(
+    "--title", default=None, help="Card title; without it a plain message is sent."
+)
 @click.option(
     "--tone",
     type=click.Choice(["done", "failed", "decision", "info"]),
@@ -140,7 +228,11 @@ def dot_rotate(ctx: click.Context) -> None:
 )
 @click.pass_context
 def dot_notify(
-    ctx: click.Context, text: str, title: Optional[str], tone: str, question_ref: Optional[str]
+    ctx: click.Context,
+    text: str,
+    title: Optional[str],
+    tone: str,
+    question_ref: Optional[str],
 ) -> None:
     """Send a short message to the user's Feishu chat (the bot bound to the Dot Chat)."""
     body: dict[str, Any] = {"text": text, "tone": tone}
@@ -167,7 +259,11 @@ def dot_recall(
     params: Dict[str, Any] = {"q": query, "limit": limit, "include_archived": archived}
     if kind:
         params["kind"] = kind
-    _rows(ctx, _call(ctx, "GET", "/recall", params=params), ["id", "kind", "title", "summary"])
+    _rows(
+        ctx,
+        _call(ctx, "GET", "/recall", params=params),
+        ["id", "kind", "title", "summary"],
+    )
 
 
 @dot.command("cards")
@@ -217,14 +313,22 @@ def _upload(ctx: click.Context, path: str) -> str:
     try:
         data = base64.b64encode(file_path.read_bytes()).decode("ascii")
     except OSError as exc:
-        raise click.ClickException(f"Cannot read {path}: {exc.strerror or exc}") from exc
-    result = _call(ctx, "POST", "/files", json={"filename": file_path.name, "data_base64": data})
+        raise click.ClickException(
+            f"Cannot read {path}: {exc.strerror or exc}"
+        ) from exc
+    result = _call(
+        ctx, "POST", "/files", json={"filename": file_path.name, "data_base64": data}
+    )
     return str(result["path"])
 
 
 @dot.command("remember")
-@click.option("--id", "card_id", default=None, help="Update this card instead of creating one.")
-@click.option("--kind", type=click.Choice(CARD_KINDS), default=None, help="Default: knowledge.")
+@click.option(
+    "--id", "card_id", default=None, help="Update this card instead of creating one."
+)
+@click.option(
+    "--kind", type=click.Choice(CARD_KINDS), default=None, help="Default: knowledge."
+)
 @click.option("--title", default=None)
 @click.option("--summary", default=None, help="One line. Shown in context packs.")
 @click.option("--body", default=None, help="Full text. Use '-' to read stdin.")
@@ -232,9 +336,14 @@ def _upload(ctx: click.Context, path: str) -> str:
 @click.option("--importance", type=click.IntRange(1, 5), default=None)
 @click.option("--link", "links", multiple=True, help="Related card id (repeatable).")
 @click.option(
-    "--file", "files", multiple=True, help="Local file to store with the card (repeatable)."
+    "--file",
+    "files",
+    multiple=True,
+    help="Local file to store with the card (repeatable).",
 )
-@click.option("--source", default=None, help="Where this came from (URL, task id, ...).")
+@click.option(
+    "--source", default=None, help="Where this came from (URL, task id, ...)."
+)
 @click.pass_context
 def dot_remember(
     ctx: click.Context,
@@ -304,7 +413,9 @@ def dot_remember(
 @click.pass_context
 def dot_forget(ctx: click.Context, card_id: str, hard: bool) -> None:
     """Archive (or delete) a memory card. Git history keeps old versions."""
-    data = _call(ctx, "DELETE", f"/cards/{quote(card_id, safe='')}", params={"hard": hard})
+    data = _call(
+        ctx, "DELETE", f"/cards/{quote(card_id, safe='')}", params={"hard": hard}
+    )
     emit(data, cli_main.as_json(ctx))
 
 
@@ -332,7 +443,9 @@ FOCUS_COLUMNS = ["id", "priority", "status", "title", "why"]
 
 
 @dot_focus.command("list")
-@click.option("--all", "include_all", is_flag=True, help="Include done and dropped items.")
+@click.option(
+    "--all", "include_all", is_flag=True, help="Include done and dropped items."
+)
 @click.pass_context
 def dot_focus_list(ctx: click.Context, include_all: bool) -> None:
     _rows(ctx, _call(ctx, "GET", "/focus", params={"all": include_all}), FOCUS_COLUMNS)
@@ -344,7 +457,9 @@ def dot_focus_list(ctx: click.Context, include_all: bool) -> None:
 @click.option("--priority", type=click.IntRange(1, 5), default=3, show_default=True)
 @click.pass_context
 def dot_focus_add(ctx: click.Context, title: str, why: str, priority: int) -> None:
-    item = _call(ctx, "POST", "/focus", json={"title": title, "why": why, "priority": priority})
+    item = _call(
+        ctx, "POST", "/focus", json={"title": title, "why": why, "priority": priority}
+    )
     emit(item, cli_main.as_json(ctx))
 
 
@@ -415,12 +530,17 @@ def dot_work_list(ctx: click.Context, include_all: bool) -> None:
 def dot_watch(ctx: click.Context, task_id: str, stall_hours: Optional[float]) -> None:
     """Watch an existing Hub Task: Dot is woken when it ends, needs input, or stalls."""
     item = _call(
-        ctx, "POST", f"/work/{quote(task_id, safe='')}/watch", json={"stall_hours": stall_hours}
+        ctx,
+        "POST",
+        f"/work/{quote(task_id, safe='')}/watch",
+        json={"stall_hours": stall_hours},
     )
     if cli_main.as_json(ctx):
         emit(item, True)
     else:
-        click.echo(f"watching {item['task_id']} ({item.get('status')}): {item.get('title')}")
+        click.echo(
+            f"watching {item['task_id']} ({item.get('status')}): {item.get('title')}"
+        )
 
 
 @dot.command("unwatch")
@@ -448,7 +568,9 @@ def dot_unwatch(ctx: click.Context, task_id: str) -> None:
 )
 @click.option("--output", default="", help="What the result is and where it goes.")
 @click.option("--context", default="", help="Facts, paths and links the worker needs.")
-@click.option("--out-of-scope", default="", help="What the worker must not do or change.")
+@click.option(
+    "--out-of-scope", default="", help="What the worker must not do or change."
+)
 @click.option("--constraints", default="", help="Limits: style, tools, budget.")
 @click.option("--agent", "agent_type", type=click.Choice(AGENT_TYPES), default="codex")
 @click.option("--mode", "task_mode", type=click.Choice(TASK_MODES), default=None)
@@ -521,7 +643,9 @@ def dot_delegate(
         for warning in result.get("warnings") or []:
             click.echo(f"- {warning}")
         if result.get("held"):
-            click.echo("Fix the brief and send again, or add --confirm if these do not apply.")
+            click.echo(
+                "Fix the brief and send again, or add --confirm if these do not apply."
+            )
         else:
             item = result.get("work") or {}
             click.echo(
@@ -568,7 +692,12 @@ def dot_review(
     lesson_id: Optional[str],
 ) -> None:
     """Judge a task Dot delegated, once it came back."""
-    body: Dict[str, Any] = {"verdict": verdict, "cause": cause, "note": note, "lesson": lesson}
+    body: Dict[str, Any] = {
+        "verdict": verdict,
+        "cause": cause,
+        "note": note,
+        "lesson": lesson,
+    }
     if lesson_id:
         body["lesson_id"] = lesson_id
     result = _call(ctx, "POST", f"/work/{quote(task_id, safe='')}/review", json=body)
@@ -587,7 +716,9 @@ def dot_review(
 
 
 @dot.group("lessons", invoke_without_command=True)
-@click.option("--all", "include_all", is_flag=True, help="Include dropped and merged lessons.")
+@click.option(
+    "--all", "include_all", is_flag=True, help="Include dropped and merged lessons."
+)
 @click.pass_context
 def dot_lessons(ctx: click.Context, include_all: bool) -> None:
     """Rules for briefs, learned from tasks that came back wrong."""
@@ -618,7 +749,8 @@ def dot_lessons(ctx: click.Context, include_all: bool) -> None:
             "id": lesson.get("id"),
             "votes": lesson.get("votes"),
             "score": lesson.get("score"),
-            "shown": lesson.get("reach") or ("always" if lesson.get("in_session") else "hidden"),
+            "shown": lesson.get("reach")
+            or ("always" if lesson.get("in_session") else "hidden"),
             "rule": truncate(lesson.get("rule", "")),
         }
         for lesson in data.get("lessons") or []
@@ -649,14 +781,19 @@ def dot_lessons_edit(ctx: click.Context, lesson_id: str, rule: str) -> None:
 @click.pass_context
 def dot_lessons_drop(ctx: click.Context, lesson_id: str) -> None:
     """Drop a lesson that was wrong or no longer applies."""
-    emit(_call(ctx, "DELETE", f"/lessons/{quote(lesson_id, safe='')}"), cli_main.as_json(ctx))
+    emit(
+        _call(ctx, "DELETE", f"/lessons/{quote(lesson_id, safe='')}"),
+        cli_main.as_json(ctx),
+    )
 
 
 @dot_lessons.command("merge")
 @click.argument("keep_id")
 @click.argument("other_ids", nargs=-1, required=True)
 @click.pass_context
-def dot_lessons_merge(ctx: click.Context, keep_id: str, other_ids: Tuple[str, ...]) -> None:
+def dot_lessons_merge(
+    ctx: click.Context, keep_id: str, other_ids: Tuple[str, ...]
+) -> None:
     """Fold lessons that say the same thing into KEEP_ID (strength and votes add up)."""
     body = {"keep": keep_id, "others": list(other_ids)}
     emit(_call(ctx, "POST", "/lessons/merge", json=body), cli_main.as_json(ctx))

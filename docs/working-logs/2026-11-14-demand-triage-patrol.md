@@ -26,11 +26,16 @@ the integration owner will add the changelog entry.
   Codebase MR observations and the existing Hub lifecycle projection. This
   branch's API is `workspace_manager.task_lifecycles` / `derive_task_lifecycle`,
   not the `compute_task_lifecycle` name in the task brief.
-- `DemandPatrolService` serializes manual and scheduled runs. Daily windows are
-  `[11:00, 12:30)` and `[17:30, 19:00)` in Asia/Shanghai by default. A scheduled
-  notification claims its date/slot durably **before** delivery to avoid duplicate
-  pushes after an ambiguous crash. Failed or uncertain delivery retains its claim
-  and is observable in recent runs; use a manual daily run for explicit retry.
+- `DemandPatrolService` serializes manual and scheduled runs. Proactive scheduled
+  patrols are **disabled by default** (`PatrolConfig.enabled = False`) and are
+  explicitly toggled through Dot (`GET/PATCH /api/dot/patrol`, `claude-hub dot patrol`,
+  Dot panel `Edit -> Proactive radar` and `Work` quick bar) or `/api/patrol/config` /
+  `claude-hub patrol config --enable|--disable` (plus `--feishu/--no-feishu` and
+  `--daily/--no-daily`). Daily windows are `[11:00, 12:30)` and `[17:30, 19:00)`
+  in Asia/Shanghai by default. A scheduled notification claims its date/slot
+  durably **before** delivery to avoid duplicate pushes after an ambiguous crash.
+  Failed or uncertain delivery retains its claim and is observable in recent runs;
+  use a manual daily run for explicit retry.
 - API: authenticated `GET /api/patrol/status`, partial `PUT /api/patrol/config`,
   and `POST /api/patrol/run`. CLI: `claude-hub patrol status|config|run`.
   CLI registration follows the current `cli/main.py` registrar (the package

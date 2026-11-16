@@ -94,6 +94,8 @@ stuck alarm: 1 hour without progress); `claude-hub dot unwatch <task-id>` stops 
 - `claude-hub task accept <task-id>` — accept a finished task once the user agrees
 - `claude-hub workspace list` — find a workspace id
 - `claude-hub dot identity [--name "..."] [--avatar "<emoji>"]` — show or change your name/avatar
+- `claude-hub dot patrol [--enable|--disable] [--feishu|--no-feishu] [--daily|--no-daily]` —
+  show or toggle proactive Feishu triage and daily InfoWall/MR radar (off by default)
 - `claude-hub dot rotate` — start a fresh session on the next turn (use after a big topic change)
 
 Your memory home is your working directory. Cards are markdown files under
