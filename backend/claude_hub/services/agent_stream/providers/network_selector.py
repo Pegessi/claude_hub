@@ -7,6 +7,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Mapping, Optional, Tuple
 
+from ...provider_proxy import configured_provider_proxy_url
 from ...proxy_rules import bypasses_proxy
 from .network_config import (
     _codex_endpoint_for_login_mode,
@@ -102,18 +103,22 @@ class NetworkSelectorCore(ABC):
                 selected_env=resolved_env,
             )
             return resolved_env
+        configured_proxy = configured_provider_proxy_url(provider)
         proxy_material = None
         if mode != "direct":
             proxy_material = [
                 (name, resolved_env.get(name))
                 for name in (*PROXY_ENV_NAMES, "no_proxy", "NO_PROXY")
             ]
+            if configured_proxy is not None:
+                proxy_material.append(("_configured_provider_proxy", configured_proxy))
         key = _selection_key(provider, endpoint, mode, proxy_material)
         selection = await self._cached_selection(
             key,
             endpoint=endpoint,
             mode=mode,
             env=resolved_env,
+            configured_proxy=configured_proxy,
         )
         if selection.route == "direct":
             selected_env = _without_proxy(resolved_env)
@@ -193,6 +198,7 @@ class NetworkSelectorCore(ABC):
         endpoint: str,
         mode: str,
         env: Mapping[str, str],
+        configured_proxy: Optional[str] = None,
     ) -> _Selection:
         now = time.monotonic()
         async with self._lock:
@@ -210,6 +216,7 @@ class NetworkSelectorCore(ABC):
                         endpoint=endpoint,
                         mode=mode,
                         env=env,
+                        configured_proxy=configured_proxy,
                     )
                 )
                 self._inflight[key] = task
@@ -223,6 +230,7 @@ class NetworkSelectorCore(ABC):
         endpoint: str,
         mode: str,
         env: Mapping[str, str],
+        configured_proxy: Optional[str] = None,
     ) -> _Selection:
         task = asyncio.current_task()
         try:
@@ -230,6 +238,7 @@ class NetworkSelectorCore(ABC):
                 endpoint=endpoint,
                 mode=mode,
                 env=env,
+                configured_proxy=configured_proxy,
             )
         except ProviderNetworkError as exc:
             async with self._lock:
@@ -273,9 +282,25 @@ class NetworkSelectorCore(ABC):
         endpoint: str,
         mode: str,
         env: Mapping[str, str],
+        configured_proxy: Optional[str] = None,
     ) -> _Selection:
         async with self._semaphore:
-            if mode in {"auto", "direct"}:
+            parsed = _parse_endpoint(endpoint)
+            prefer_configured_proxy = False
+            if mode == "auto" and configured_proxy is not None:
+                # When a deployment explicitly configures <PROVIDER>_PROXY_URL
+                # in backend/.env (e.g. CURSOR_PROXY_URL for geo-restricted
+                # model catalogs), do not let a transport-reachable direct edge
+                # strip the provider's dedicated proxy unless the session
+                # overrode/cleared it or NO_PROXY bypasses the endpoint.
+                try:
+                    cand_proxy, cand_no_proxy = _proxy_for_endpoint(parsed, env)
+                except ProviderNetworkError:
+                    cand_proxy, cand_no_proxy = None, None
+                prefer_configured_proxy = cand_proxy == configured_proxy and not bypasses_proxy(
+                    parsed, cand_no_proxy
+                )
+            if mode == "direct" or (mode == "auto" and not prefer_configured_proxy):
                 direct = await self._probe(endpoint, None)
                 if direct.reachable:
                     return _Selection(route="direct", direct=direct)
@@ -284,7 +309,6 @@ class NetworkSelectorCore(ABC):
             else:
                 direct = None
 
-            parsed = _parse_endpoint(endpoint)
             proxy_url, no_proxy = _proxy_for_endpoint(parsed, env)
             if proxy_url is None or bypasses_proxy(parsed, no_proxy):
                 if mode == "auto" and direct is not None and direct.phase == "timeout":

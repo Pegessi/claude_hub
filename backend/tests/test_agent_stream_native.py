@@ -5904,6 +5904,70 @@ async def test_cursor_acp_cold_discarded_rotation_recovers_and_preserves_clean_l
         await native.stop()
 
 
+@pytest.mark.asyncio
+async def test_cursor_acp_session_load_process_exit_does_not_fall_back_to_session_new(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """When ``agent acp`` exits during ``session/load`` (e.g. ``Cannot use this
+    model``) or times out, ``start()`` must fail closed instead of falling back
+    to ``session/new`` on a dead/stalled server."""
+    monkeypatch.setattr(
+        "claude_hub.services.agent_stream.providers.cursor._migrate_legacy_cli_store_for_acp",
+        lambda *args, **kwargs: None,
+    )
+    sess = _session(AgentType.CURSOR)
+    sess.agent_session_id = "verified-existing-sid"
+    sess.agent_session_id_verified = True
+    persisted: List[str] = []
+    native = CursorNativeSession(sess, conversation_id_persist=persisted.append)
+    native._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
+
+    proc = _InteractiveAcpProc(session_id="should-never-be-created")
+    proc.stderr = _InteractiveAcpStream(eof=False)
+    orig_on_stdin = proc._on_stdin
+
+    def crash_on_load(msg: Dict[str, Any]) -> None:
+        if msg.get("method") == "session/load":
+            proc.requests.append(msg)
+            proc.crash(exit_code=1, stderr_msg="Cannot use this model: [redacted]-high")
+            return
+        orig_on_stdin(msg)
+
+    proc.stdin._handler = crash_on_load
+    native._spawn_subprocess = AsyncMock(return_value=proc)  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="Cannot use this model: [redacted]-high"):
+        await native.start()
+
+    assert [r.get("method") for r in proc.requests] == ["initialize", "session/load"]
+    assert persisted == []
+    assert native._conversation_id == "verified-existing-sid"
+
+    # Timeout during session/load also fails closed without falling back to session/new.
+    monkeypatch.setattr(
+        "claude_hub.services.agent_stream.providers.cursor._ACP_SESSION_INIT_TIMEOUT_S",
+        0.03,
+    )
+    proc_timeout = _InteractiveAcpProc(session_id="should-never-be-created-on-timeout")
+    orig_timeout_stdin = proc_timeout._on_stdin
+
+    def stall_on_load(msg: Dict[str, Any]) -> None:
+        if msg.get("method") == "session/load":
+            proc_timeout.requests.append(msg)
+            return
+        orig_timeout_stdin(msg)
+
+    proc_timeout.stdin._handler = stall_on_load
+    native._spawn_subprocess = AsyncMock(return_value=proc_timeout)  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="session/load timed out"):
+        await native.start()
+
+    assert [r.get("method") for r in proc_timeout.requests] == ["initialize", "session/load"]
+    assert persisted == []
+    assert native._conversation_id == "verified-existing-sid"
+
+
 def test_cursor_acp_task_tool_and_subagent_spawned_correlate_by_tool_call_id() -> None:
     adapter = CursorCliTranscriptAdapter()
     ctx = NormalizeContext(
