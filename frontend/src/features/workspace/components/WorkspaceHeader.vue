@@ -69,6 +69,13 @@
       </button>
       <button
         type="button"
+        class="tool-button workspace-desktop-action workspace-layout-toggle"
+        @click="toggleWorkspaceLayoutMode"
+      >
+        {{ workspaceLayoutMode === 'triage' ? 'Classic Board' : 'Triage View' }}
+      </button>
+      <button
+        type="button"
         class="primary-button"
         :disabled="!activeWorkspaceId"
         @click="openTaskModal"
@@ -101,6 +108,13 @@
           >
             <span>Workspace</span>
             <strong>Current</strong>
+          </button>
+          <button
+            type="button"
+            class="workspace-mobile-menu-item"
+            @click="toggleWorkspaceLayoutMode(); closeWorkspaceMobileMenu()"
+          >
+            {{ workspaceLayoutMode === 'triage' ? 'Classic Board' : 'Triage View' }}
           </button>
           <button
             type="button"
@@ -180,6 +194,8 @@ const {
   activeWorkspaceId,
   openTaskModal,
   colorScheme,
+  workspaceLayoutMode,
+  toggleWorkspaceLayoutMode,
 } = useWorkspaceRuntimeContext()
 const {
   openWorkspaceModal,

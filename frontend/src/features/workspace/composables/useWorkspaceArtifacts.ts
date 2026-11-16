@@ -134,8 +134,27 @@ export function useWorkspaceArtifacts(inputs: WorkspaceArtifactsInputs) {
         trimmedPath,
         report?.id,
       )
-    } catch (e) {
-      markdownPreviewModalError.value = e instanceof Error ? e.message : 'Failed to load Markdown preview'
+    } catch (primaryErr) {
+      // Initiator-controlled tasks often write Markdown reports inside the
+      // originating Chat's working directory rather than the target Workspace's
+      // git checkout. Fall back to the tab's scoped markdown reader if present.
+      const sourceTabId = selectedTask.value?.source?.tab_id
+      if (sourceTabId) {
+        try {
+          const fallbackRes = await fetch(
+            `/api/workspaces/tabs/${encodeURIComponent(sourceTabId)}/stream/markdown?path=${encodeURIComponent(trimmedPath)}`,
+            { credentials: 'same-origin' },
+          )
+          if (fallbackRes.ok) {
+            markdownPreviewModalContent.value = (await fallbackRes.json()) as WorkspaceArtifactPreview
+            return
+          }
+        } catch {
+          // Retain primary error message below.
+        }
+      }
+      markdownPreviewModalError.value =
+        primaryErr instanceof Error ? primaryErr.message : 'Failed to load Markdown preview'
     } finally {
       markdownPreviewModalLoading.value = false
     }

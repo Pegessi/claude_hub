@@ -122,6 +122,13 @@ async function parseTaskMutationResponse(
   return value as unknown as WorkspaceTaskMutationResult
 }
 
+export interface TaskCleanupResponse {
+  task_id: string
+  session_id?: string | null
+  action: string
+  reason?: string | null
+}
+
 interface WorkspaceActionsRuntime {
   activeWorkspaceId: Ref<string | null>
   isLoading: Ref<boolean>
@@ -371,12 +378,25 @@ export function createWorkspaceActions(runtime: WorkspaceActionsRuntime) {
   }
 
 
+  async function cleanupTaskSession(taskId: string, workspaceId?: string): Promise<TaskCleanupResponse> {
+    const response = await fetch(`${API_BASE}/workspaces/tasks/${encodeURIComponent(taskId)}/cleanup`, {
+      method: 'POST',
+    })
+    if (!response.ok) throw new Error(await readError(response))
+    const result = (await response.json()) as TaskCleanupResponse
+    if (!workspaceId || activeWorkspaceId.value === workspaceId) {
+      await fetchBoard()
+    }
+    return result
+  }
+
   return {
     createTask,
     reportTaskProgressManually,
     handoffTask,
     updateTask,
     updateTaskStatus,
+    cleanupTaskSession,
     deleteTask,
     ensureWorkspaceAgent,
     deleteSession,

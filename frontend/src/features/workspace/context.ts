@@ -83,6 +83,10 @@ type WorkspaceRuntimeContext = Pick<ReturnType<typeof useWorkspaceRuntime>,
   | 'envPresets'
   | 'workspaceNotifications'
   | 'dismissToast'
+  | 'workspaceLayoutMode'
+  | 'setWorkspaceLayoutMode'
+  | 'toggleWorkspaceLayoutMode'
+  | 'taskCreateFlow'
 >
 const runtimeKey: InjectionKey<WorkspaceRuntimeContext> = Symbol('WorkspaceRuntimeContext')
 export function provideWorkspaceRuntimeContext(value: WorkspaceRuntimeContext) { provide(runtimeKey, value) }
@@ -264,6 +268,8 @@ type WorkspaceTaskActionsContext = Pick<ReturnType<typeof useWorkspaceTaskAction
   | 'startTask'
   | 'openEditTaskModal'
   | 'markTask'
+  | 'acceptAndCleanupTask'
+  | 'cleanupCompletedTaskSession'
   | 'requestReview'
   | 'abortTask'
   | 'deleteTask'

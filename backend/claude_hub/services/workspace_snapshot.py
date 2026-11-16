@@ -32,6 +32,8 @@ def _excerpt(value: Any, limit: int = 500) -> str:
 def _next_step(task: WorkspaceTask, blockers: list[str]) -> str:
     if task.uncertain_call_ids:
         return "Inspect uncertain delivery before any explicit retry; do not resend blindly."
+    if task.latest_progress and task.latest_progress.state.value in {"needs_input", "blocked"}:
+        return "Inspect the latest initiator progress blocker/question before continuing."
     if task.status == WorkspaceTaskStatus.WORKING:
         return "Read the current task and reports; resume only the work assigned to your session."
     if blockers and task.status != WorkspaceTaskStatus.DONE:
@@ -120,7 +122,12 @@ def render_workspace_snapshot(
             [
                 "",
                 f"### {task.id}",
-                f"- status={task.status.value}, mode={task.task_mode.value}, title={_excerpt(task.title, 200)}",
+                (
+                    f"- status={task.status.value}, control={task.execution_control.value}, "
+                    f"epoch={task.execution_epoch}, rev={task.progress_revision}, "
+                    f"released={task.execution_released}, mode={task.task_mode.value}, "
+                    f"title={_excerpt(task.title, 200)}"
+                ),
                 f"- Worker: {task.session_id or 'unassigned'}; reviewer: {task.review_session_id or 'unassigned'}; review cycle: {task.review_cycle}",
                 f"- Parent: {task.parent_task_id or 'none'}; prerequisites: {_excerpt(', '.join(task.depends_on_task_ids) or 'none', 600)}",
                 f"- Goal excerpt: {_excerpt(goal, 700)}",
@@ -139,11 +146,23 @@ def render_workspace_snapshot(
                     f"- Risks excerpt: {_excerpt(latest_report.risks, 300)}",
                 ]
             )
+        elif task.latest_progress:
+            prog = task.latest_progress
+            lines.extend(
+                [
+                    f"- Latest initiator progress: state={prog.state.value}; epoch={prog.execution_epoch}; rev={task.progress_revision}; at={prog.reported_at.isoformat()}",
+                    f"- Progress excerpt: {_excerpt(prog.summary, 500)}",
+                    f"- Validation excerpt (reported, not independently verified): {_excerpt(prog.validation, 500)}",
+                    f"- Artifact references: {_excerpt(', '.join(prog.artifact_refs[:5]), 500)}; omitted={max(0, len(prog.artifact_refs) - 5)}",
+                    f"- Risks excerpt: {_excerpt(prog.risks, 300)}",
+                ]
+            )
         else:
             lines.append("- Latest report: none; validation evidence unknown.")
         lines.extend(
             [
                 f"- Next step (derived from lifecycle): {_next_step(task, blockers)}",
+                f"- Compact AI handoff brief: claude-hub task brief {task.id} --workspace-id {task.workspace_id}",
                 f"- Full contract: claude-hub --json task status {task.id} --workspace-id {task.workspace_id}",
             ]
         )
