@@ -7,6 +7,22 @@
 
 ## Released
 
+### fix(chat): eliminate Hub message status refresh stalls and Chat composer lockout
+
+- Skip unconditional `_save_state()` writes in `_refresh_one_session_status()`
+  when a terminal session's `status`, `runtime_status`, `current_task_id`, and
+  `last_activity_at` are unchanged, use the indexed `turn_id` query in
+  `inspect_chat_delivery()`, throttle repeated `reconcile()` checks on
+  uncertain direct messages to 60 seconds, and read a lock-free snapshot in
+  `ChatMessageInbox.list()` so status polling never blocks on `pump()`/`save()`.
+- Perform bounded automatic retry with exponential backoff on transient
+  hydration/capability failures in `useAgentStream.start()`, trigger parent
+  stream recovery when `ChatMessageInbox` retries or recovers while
+  `connectionState === 'failed'`, pause `ChatMessageInbox` polling when
+  deactivated in `<KeepAlive>`, suppress the error banner on a single transient
+  poll failure when `receipts` is empty, and stop automatic 3s polling on HTTP
+  401/403.
+
 ### fix(ui): keep mobile Chat sidebar drawer above its backdrop
 
 - Render `.chat-drawer-edge-band` and `.chat-drawer-backdrop` as siblings of
