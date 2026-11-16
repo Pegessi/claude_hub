@@ -184,7 +184,8 @@ async def _commit(service: DotService, message: str) -> None:
 def _actor_key(user: User) -> str:
     return hashlib.sha256(
         json.dumps(
-            {"user": user.open_id, "oauth_app": settings.feishu_app_id or ""}, sort_keys=True
+            {"user": user.open_id, "oauth_app": settings.feishu_app_id or ""},
+            sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
 
@@ -279,7 +280,9 @@ async def dot_update_execution(
 
 
 @router.get("/identity")
-async def dot_identity(current_user: User = Depends(get_current_user)) -> dict[str, Any]:
+async def dot_identity(
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
     return _service().store.read_identity()
 
 
@@ -307,7 +310,9 @@ async def dot_upload_avatar(
 
 
 @router.delete("/identity/avatar")
-async def dot_clear_avatar(current_user: User = Depends(get_current_user)) -> dict[str, Any]:
+async def dot_clear_avatar(
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
     return await _service().update_identity(avatar_image="")
 
 
@@ -328,7 +333,10 @@ async def dot_notify(
         q = answers.inbox().questions.get(payload.question_ref)
         if q is None or q.tab_id != _service().tab_id():
             raise HTTPException(404, "Question not found in current Dot Chat")
-        return {"sent": await mirror_question(q, remirror=True), "question_ref": q.question_ref}
+        return {
+            "sent": await mirror_question(q, remirror=True),
+            "question_ref": q.question_ref,
+        }
     if not payload.text.strip():
         raise HTTPException(status_code=422, detail="text is empty")
     result = await _service().notify(payload.text, title=payload.title, tone=payload.tone)
@@ -350,6 +358,31 @@ async def dot_health(current_user: User = Depends(get_current_user)) -> dict[str
     return await asyncio.to_thread(_service().health)
 
 
+@router.get("/patrol")
+async def dot_patrol_status(
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    from .patrol import demand_patrol_service
+
+    return await demand_patrol_service.status()
+
+
+@router.patch("/patrol")
+async def dot_patrol_update(
+    changes: dict[str, Any],
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    from pydantic import ValidationError
+
+    from .patrol import demand_patrol_service
+
+    try:
+        config = await demand_patrol_service.configure(changes)
+    except ValidationError as exc:
+        raise HTTPException(422, exc.errors(include_context=False, include_input=False)) from exc
+    return config.model_dump(mode="json")
+
+
 # ── memory ──────────────────────────────────────────────────────────────
 
 
@@ -362,7 +395,11 @@ async def dot_recall(
     current_user: User = Depends(get_current_user),
 ) -> List[dict[str, Any]]:
     hits = await asyncio.to_thread(
-        _service().index.search, q, kind=kind, limit=limit, include_archived=include_archived
+        _service().index.search,
+        q,
+        kind=kind,
+        limit=limit,
+        include_archived=include_archived,
     )
     return [hit.__dict__ for hit in hits]
 

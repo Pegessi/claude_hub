@@ -166,6 +166,25 @@ export interface DotHealth {
   cards: number
 }
 
+export interface DotPatrolConfig {
+  enabled: boolean
+  timezone: string
+  feishu_enabled: boolean
+  feishu_interval_minutes: number
+  feishu_window_start: string
+  feishu_window_end: string
+  daily_enabled: boolean
+  daily_slots: string[]
+  stalled_hours: number
+  pending_top_n: number
+  max_triage_per_run: number
+}
+
+export interface DotPatrolStatus {
+  config: DotPatrolConfig
+  running: boolean
+}
+
 const ROOT = '/api/dot'
 
 export class DotRequestError extends Error {
@@ -218,6 +237,12 @@ export function setupDot(env?: Record<string, string>): Promise<DotStatus> {
 }
 export function loadDotHealth(): Promise<DotHealth> {
   return requestJson('/health')
+}
+export function loadDotPatrol(): Promise<DotPatrolStatus> {
+  return requestJson('/patrol')
+}
+export function updateDotPatrol(changes: Partial<DotPatrolConfig>): Promise<DotPatrolConfig> {
+  return requestJson('/patrol', jsonRequest('PATCH', changes))
 }
 export function recallDot(q: string, kind?: DotCardKind): Promise<DotSearchHit[]> {
   return requestJson(`/recall${query({ q, kind, limit: 30 })}`)

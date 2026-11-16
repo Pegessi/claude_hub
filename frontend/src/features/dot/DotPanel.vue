@@ -120,6 +120,58 @@
             @updated="loadSection"
           />
 
+          <section
+            v-if="editingIdentity && patrolConfig"
+            class="dot-patrol"
+            data-testid="dot-patrol-editor"
+          >
+            <div class="dot-patrol__head">
+              <div>
+                <h3>Proactive radar</h3>
+                <p>Off by default. Pushes Feishu triage drafts and daily InfoWall &amp; MR digests.</p>
+              </div>
+              <label class="dot-patrol__switch">
+                <input
+                  type="checkbox"
+                  :checked="patrolConfig.enabled"
+                  :disabled="patrolSaving || executionBusy"
+                  aria-label="Enable proactive radar"
+                  @change="changePatrol({ enabled: ($event.target as HTMLInputElement).checked })"
+                >
+                <span>{{ patrolConfig.enabled ? 'On' : 'Off' }}</span>
+              </label>
+            </div>
+            <div
+              v-if="patrolConfig.enabled"
+              class="dot-patrol__channels"
+            >
+              <label class="dot-patrol__channel">
+                <input
+                  type="checkbox"
+                  :checked="patrolConfig.feishu_enabled"
+                  :disabled="patrolSaving || executionBusy"
+                  aria-label="Work-hours Feishu triage"
+                  @change="changePatrol({ feishu_enabled: ($event.target as HTMLInputElement).checked })"
+                >
+                <span>
+                  Feishu unanswered triage ({{ patrolConfig.feishu_window_start }}–{{ patrolConfig.feishu_window_end }}, every {{ patrolConfig.feishu_interval_minutes }}m)
+                </span>
+              </label>
+              <label class="dot-patrol__channel">
+                <input
+                  type="checkbox"
+                  :checked="patrolConfig.daily_enabled"
+                  :disabled="patrolSaving || executionBusy"
+                  aria-label="Daily demand digest"
+                  @change="changePatrol({ daily_enabled: ($event.target as HTMLInputElement).checked })"
+                >
+                <span>
+                  Daily InfoWall &amp; MR digest ({{ patrolConfig.daily_slots.join(', ') || 'none' }})
+                </span>
+              </label>
+            </div>
+          </section>
+
           <div class="dot-panel__tabs">
             <div
               class="ch-segmented"
@@ -220,6 +272,26 @@
 
             <!-- Work: delegated tasks and new events. -->
             <template v-else-if="section === 'work'">
+              <div
+                v-if="patrolConfig"
+                class="dot-patrol-bar"
+                data-testid="dot-patrol-bar"
+              >
+                <span :class="['dot-item__badge', { 'dot-item__badge--ok': patrolConfig.enabled }]">
+                  {{ patrolConfig.enabled ? 'radar on' : 'radar off' }}
+                </span>
+                <span class="dot-item__sub dot-patrol-bar__summary">
+                  {{ patrolConfig.enabled ? 'Proactive Feishu & InfoWall checks active' : 'Proactive radar is off' }}
+                </span>
+                <button
+                  type="button"
+                  class="ch-btn ch-btn--ghost ch-btn--sm"
+                  :disabled="patrolSaving || executionBusy"
+                  @click="changePatrol({ enabled: !patrolConfig.enabled })"
+                >
+                  {{ patrolConfig.enabled ? 'Disable' : 'Enable' }}
+                </button>
+              </div>
               <form
                 class="dot-row-form"
                 data-testid="dot-watch-form"
@@ -579,9 +651,10 @@ const {
   SECTIONS, KINDS, DEFAULT_STALL_HOURS, STALL_CHOICES, ALERT_EVENTS, section, loading, errorText, status,
   focus, work, inbox, cards, health, lessons, reviewStats, newLesson, editingLesson,
   lessonDraft, selectedCard, newFocus, newPriority, searchText, kindFilter, watchId,
-  watchStallHours, identity, editingIdentity, executionBusy, nameDraft, avatarDraft, causeText, cardTotal,
+  watchStallHours, identity, editingIdentity, executionBusy, patrolConfig, patrolSaving,
+  nameDraft, avatarDraft, causeText, cardTotal,
   ago, addFocus, closeFocus, addLesson, editLesson, saveLesson, dropLesson,
-  toggleIdentityEditor, setExecutionBusy, closePanel, loadSection, saveIdentity, uploadAvatar, removeAvatar,
+  toggleIdentityEditor, setExecutionBusy, changePatrol, closePanel, loadSection, saveIdentity, uploadAvatar, removeAvatar,
   watchTask, unwatchTask, ackInbox, openCard, closeCard, archiveCard, formatFirstPass, formatReviewCoverage,
 } = useDotPanel(props, { close: () => emit('close') })
 </script>
