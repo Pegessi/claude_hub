@@ -47,6 +47,7 @@ SCHEMA_MODULE_CLASSES: Dict[str, Tuple[str, ...]] = {
         "TaskExecutionReference",
         "TaskProgressSnapshot",
         "TaskRuntimeObservation",
+        "TaskArchiveClosure",
         "TaskProgressRequest",
         "TaskManualProgressRequest",
         "TaskExecutionHandoffRequest",

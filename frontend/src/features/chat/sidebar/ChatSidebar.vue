@@ -136,6 +136,8 @@
             :status="getTabStatus(tab)"
             :awaiting="isAwaitingAnswer(tab)"
             :status-label="getTabStatusAriaLabel(tab)"
+            :review-label="getTabReviewLabel?.(tab) ?? null"
+            :activity-time="getTabActivityTime?.(tab) ?? tab.created_at"
             :renaming="renamingTabId === tab.id"
             :set-rename-input-ref="setRenameInputRef"
             @row-pointerdown="onRowPointerDown"
@@ -341,7 +343,13 @@ const mobilePanelStyle = computed(() => {
 })
 
 // Tab-status logic is shared with the TabBar via useTabStatus.
-const { getTabStatus, getTabStatusLabel, isAwaitingAnswer } = useTabStatus(agentStatuses)
+const {
+  getTabStatus,
+  getTabStatusLabel,
+  isAwaitingAnswer,
+  getTabReviewLabel,
+  getTabActivityTime,
+} = useTabStatus(agentStatuses)
 
 function getTabStatusAriaLabel(tab: TerminalTab): string {
   // An outstanding question is not an unread result: `getTabStatusLabel`

@@ -4,7 +4,7 @@ import ipaddress
 import re
 import uuid
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -255,6 +255,13 @@ class TerminalAgentStatus(BaseModel):
     # a fallback to an earlier turn (the newest turn has written no text yet),
     # so an old answer can never read as "just now".
     last_reply_at: Optional[datetime] = None
+    # Newest durable turn/reply timestamp for honest sidebar age rendering.
+    last_activity_at: Optional[datetime] = None
+    # Non-blocking delivery review projection when the session is idle/waiting
+    # with an open Codebase MR or an active Workspace Task review.
+    review_state: Optional[Literal["mr_open", "task_review"]] = None
+    review_label: Optional[str] = None
+    review_url: Optional[str] = None
 
 
 # SSH destinations are passed as an argv element, so a value beginning with

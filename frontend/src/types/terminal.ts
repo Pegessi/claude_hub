@@ -173,4 +173,10 @@ export interface TerminalAgentStatus {
   last_reply_excerpt?: string | null
   /** When that reply landed. */
   last_reply_at?: string | null
+  /** Newest durable turn/reply timestamp for honest sidebar age rendering. */
+  last_activity_at?: string | null
+  /** Delivery review projection when idle with an open MR or active Task review. */
+  review_state?: 'mr_open' | 'task_review' | null
+  review_label?: string | null
+  review_url?: string | null
 }

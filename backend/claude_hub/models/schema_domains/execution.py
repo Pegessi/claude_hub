@@ -6,7 +6,11 @@ from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from claude_hub.models.schema_domains.runtime import AgentType, SessionKind
+from claude_hub.models.schema_domains.runtime import (
+    AgentType,
+    SessionKind,
+    WorkspaceTaskStatus,
+)
 
 
 class TaskExecutionControl(str, Enum):
@@ -62,6 +66,18 @@ class TaskRuntimeObservation(BaseModel):
     observed_at: datetime
     turn_id: Optional[str] = Field(default=None, max_length=256)
     detail: Optional[str] = Field(default=None, max_length=512)
+
+
+class TaskArchiveClosure(BaseModel):
+    """Provenance recorded when an active initiator Task is auto-closed by Chat archive."""
+
+    model_config = {"extra": "forbid"}
+
+    tab_id: str = Field(min_length=1, max_length=256)
+    execution_epoch: int = Field(ge=1, strict=True)
+    previous_status: WorkspaceTaskStatus
+    last_stream_sequence: int = Field(default=-1, ge=-1, strict=True)
+    closed_at: datetime
 
 
 class TaskProgressRequest(BaseModel):

@@ -26,7 +26,7 @@ from ..records import _ReplyExcerptCacheEntry
 from .host import ManagerHost
 
 if TYPE_CHECKING:
-    from ...agent_stream.store import ReplyExcerpt
+    from ...agent_stream.store import ReplyExcerpt, StreamSummary
     from ...ttyd_manager import TTYDProcess
 
 
@@ -251,41 +251,98 @@ class ManagerStatusMixin(ManagerHost):
         self._save_state()
         return True
 
-    async def _reply_excerpt(self, process: TTYDProcess) -> "Optional[ReplyExcerpt]":
-        """Newest assistant text for this tab, reused until the stream grows.
-
-        The status endpoint is polled for ~40 tabs every 5 seconds, so this
-        stays cheap and off the event loop: the stat and any tail scan run in a
-        worker thread, and a streaming turn does not reach here at all (see the
-        caller, which skips the read while the turn is working).
-        """
+    async def _stream_summary(self, process: TTYDProcess) -> "Optional[StreamSummary]":
+        """Cached stream summary (SQLite-authoritative with legacy JSONL fallback)."""
         from ...agent_stream.store import AgentStreamStore
-
-        # Owners built without ``ManagerStateMixin.__init__`` (constructed
-        # directly in tests) have no cache yet; create it on first use instead
-        # of failing a best-effort status read.
-        cache: Optional[Dict[Tuple[str, str], _ReplyExcerptCacheEntry]] = getattr(
-            self, "_reply_excerpt_cache", None
-        )
-        if cache is None:
-            cache = {}
-            self._reply_excerpt_cache = cache
 
         store = AgentStreamStore(
             *tab_stream_identity(process.tab_id, process.workspace_id, process.managed_session_id)
         )
-        cache_key = (process.tab_id, str(store.path))
-        cached = cache.get(cache_key)
         try:
-            entry = await asyncio.to_thread(_reply_excerpt_entry, store.path, cached)
+            return await store.stream_summary()
         except Exception as e:  # pragma: no cover - defensive, best effort only
-            logger.debug(f"Unable to read reply excerpt for tab {process.tab_id}: {e}")
-            entry = None
-        if entry is None:
-            cache.pop(cache_key, None)
+            logger.debug(f"Unable to read stream summary for tab {process.tab_id}: {e}")
             return None
-        cache[cache_key] = entry
-        return entry.excerpt
+
+    async def _reply_excerpt(self, process: TTYDProcess) -> "Optional[ReplyExcerpt]":
+        """Newest assistant text for this tab, reused until the stream grows."""
+        summary = await self._stream_summary(process)
+        return summary.excerpt if summary is not None else None
+
+    def _derive_tab_review_projection(
+        self,
+        process: TTYDProcess,
+        summary: "Optional[StreamSummary]",
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """Project calm delivery review status (open MR or task in review) without blocking."""
+        if process.subagent_id or process.parent_tab_id:
+            return None, None, None
+        from ....models import WorkspaceTaskStatus
+        from ...mr_status_cache import (
+            extract_codebase_mr_urls,
+            format_mr_badge_label,
+            mr_short_label,
+            mr_status_cache,
+        )
+
+        candidate_urls: list[str] = []
+        has_task_in_review = False
+        has_linked_open_task = False
+        try:
+            from ... import workspace_manager
+
+            for task in list(getattr(workspace_manager, "tasks", {}).values()):
+                if task.status in {WorkspaceTaskStatus.DONE, WorkspaceTaskStatus.FAILED}:
+                    continue
+                matched = bool(
+                    (task.source and task.source.tab_id == process.tab_id)
+                    or (
+                        process.managed_session_id and task.session_id == process.managed_session_id
+                    )
+                )
+                if not matched:
+                    continue
+                has_linked_open_task = True
+                if task.status == WorkspaceTaskStatus.REVIEW:
+                    has_task_in_review = True
+                lp = task.latest_progress
+                texts: list[Optional[str]] = [
+                    *(lp.artifact_refs if lp else []),
+                    lp.summary if lp else None,
+                ]
+                for url in extract_codebase_mr_urls(texts):
+                    if url not in candidate_urls:
+                        candidate_urls.append(url)
+        except Exception:
+            pass
+
+        if summary is not None and summary.assistant_mr_urls:
+            tab_name = (process.name or "").lower()
+            for url in summary.assistant_mr_urls:
+                iid = mr_short_label(url).lstrip("!")
+                if (
+                    summary.has_delivery_mutation
+                    or has_linked_open_task
+                    or (iid and iid in tab_name)
+                ):
+                    if url not in candidate_urls:
+                        candidate_urls.append(url)
+
+        snapshots = mr_status_cache.observe(candidate_urls) if candidate_urls else {}
+        open_urls = [
+            url
+            for url in candidate_urls
+            if (snap := snapshots.get(url)) is not None and snap.state == "open"
+        ]
+        if open_urls:
+            return "mr_open", format_mr_badge_label(open_urls), open_urls[0]
+        all_confirmed_merged = bool(candidate_urls) and all(
+            (snap := snapshots.get(url)) is not None and snap.state == "merged"
+            for url in candidate_urls
+        )
+        if has_task_in_review and not all_confirmed_merged:
+            return "task_review", "In review", None
+        return None, None, None
 
     async def compute_tab_unread(self, process: TTYDProcess) -> bool:
         """Return True when the tab's latest completed turn is unread.
@@ -364,10 +421,28 @@ class ManagerStatusMixin(ManagerHost):
             # skipped and the activity line speaks for it. A turn that is ALSO
             # blocked on a question is the top "Waiting for your answer" row:
             # that row keeps its preview.
-            excerpt = (
+            summary = (
                 None
                 if (native_runtime_status == AgentRuntimeStatus.WORKING and not pending_question)
-                else await self._reply_excerpt(process)
+                else await self._stream_summary(process)
+            )
+            excerpt = summary.excerpt if summary is not None else None
+            review_state: Optional[str] = None
+            review_label: Optional[str] = None
+            review_url: Optional[str] = None
+            if native_runtime_status == AgentRuntimeStatus.IDLE and not pending_question:
+                review_state, review_label, review_url = self._derive_tab_review_projection(
+                    process, summary
+                )
+            effective_activity_at = (
+                activity_since
+                if native_runtime_status == AgentRuntimeStatus.WORKING
+                and activity_since is not None
+                else (
+                    summary.last_activity_at
+                    if summary is not None and summary.last_activity_at is not None
+                    else (excerpt.written_at if excerpt is not None else activity_since)
+                )
             )
             return TerminalAgentStatus(
                 tab_id=process.tab_id,
@@ -384,6 +459,10 @@ class ManagerStatusMixin(ManagerHost):
                 activity_since=activity_since,
                 last_reply_excerpt=excerpt.text if excerpt else None,
                 last_reply_at=excerpt.written_at if excerpt else None,
+                last_activity_at=effective_activity_at,
+                review_state=review_state,  # type: ignore[arg-type]
+                review_label=review_label,
+                review_url=review_url,
             )
 
         cached = self._status_cache.get(tab_id)

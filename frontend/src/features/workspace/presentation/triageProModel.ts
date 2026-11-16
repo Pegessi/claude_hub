@@ -128,7 +128,7 @@ export function classifyTriageBucket(
   task: WorkspaceTask,
   lifecycle?: TaskLifecycle,
 ): TriageBucket {
-  if (task.status === 'done') return 'done'
+  if (task.status === 'done' || lifecycle?.phase === 'done') return 'done'
   if (task.status === 'review' || task.status === 'failed') return 'needs_you'
   if (lifecycle?.attention || lifecycle?.phase === 'needs_user' || lifecycle?.phase === 'awaiting_acceptance' || lifecycle?.phase === 'orphaned') {
     return 'needs_you'
@@ -156,8 +156,12 @@ export function deriveStatusLabel(
   lifecycle?: TaskLifecycle,
 ): string {
   if (task.status === 'failed') return 'Failed'
-  if (task.status === 'done') {
-    return task.human_accepted_at ? 'Accepted' : 'Done'
+  if (task.status === 'done' || lifecycle?.phase === 'done') {
+    const reason = task.closed_reason || lifecycle?.reason
+    if (task.human_accepted_at || reason === 'accepted') return 'Accepted'
+    if (reason === 'chat_archived') return 'Archived'
+    if (reason === 'mr_merged') return 'MR Merged'
+    return 'Done'
   }
   const reviewReports = reports.filter(r => r.state.startsWith('review_'))
   const latestReview = reviewReports[reviewReports.length - 1]
@@ -169,6 +173,9 @@ export function deriveStatusLabel(
     if (latestReview?.state === 'review_failed') return 'Changes requested'
     if (latestReview?.state === 'review_needs_input') return 'Reviewer question'
     if (task.review_skipped_at) return 'Ready to accept'
+    if (lifecycle?.delivery_mr_state === 'open' && lifecycle.delivery_mr_label) {
+      return `${lifecycle.delivery_mr_label} · Open`
+    }
     return 'In review'
   }
   if (lifecycle?.phase === 'orphaned') return 'Session lost'
@@ -183,6 +190,9 @@ export function deriveStatusLabel(
   if (task.status === 'todo') return 'Todo'
   if (latestReview?.state === 'review_started') {
     return `Reviewing · R${Math.max(1, (task.review_attempts || 0) + 1)}`
+  }
+  if (lifecycle?.delivery_mr_state === 'open' && lifecycle.delivery_mr_label && lifecycle.owner?.state === 'idle') {
+    return `${lifecycle.delivery_mr_label} · Open`
   }
   return 'Working'
 }
@@ -462,13 +472,18 @@ export function buildTriageTaskViewModel(input: {
   })
 
   const passedChecks = ev.acceptance.filter(c => c.status === 'passed').length
+  const closeReason = task.closed_reason || lifecycle?.reason
   const checksLabel =
     ev.acceptance.length > 0
       ? `${passedChecks}/${ev.acceptance.length} criteria passed`
       : ev.validation
         ? evidenceLine(ev.validation).slice(0, 48)
-        : task.status === 'done'
-          ? 'Verified'
+        : (task.status === 'done' || lifecycle?.phase === 'done')
+          ? (closeReason === 'chat_archived'
+              ? 'Closed by archive'
+              : closeReason === 'mr_merged'
+                ? 'MR merged'
+                : 'Verified')
           : 'Pending verification'
 
   const implementer = workerSession?.title || task.execution_ref?.provider || task.agent_type || 'Agent'
@@ -483,9 +498,15 @@ export function buildTriageTaskViewModel(input: {
   if (task.status === 'failed') {
     verdictLabel = 'FAILED'
     verdictTone = 'warn'
-  } else if (latestVerdict?.state === 'review_passed' || task.status === 'done') {
-    verdictLabel = latestVerdict?.state === 'review_passed' ? 'PASS · VERIFIED' : 'COMPLETED'
-    verdictTone = 'pass'
+  } else if (latestVerdict?.state === 'review_passed' || task.status === 'done' || lifecycle?.phase === 'done') {
+    verdictLabel = latestVerdict?.state === 'review_passed'
+      ? 'PASS · VERIFIED'
+      : closeReason === 'chat_archived'
+        ? 'CLOSED BY ARCHIVE'
+        : closeReason === 'mr_merged'
+          ? 'MR MERGED'
+          : 'COMPLETED'
+    verdictTone = closeReason === 'chat_archived' ? 'auto' : 'pass'
   } else if (latestVerdict?.state === 'review_failed' || latestVerdict?.state === 'review_needs_input') {
     verdictLabel = 'CHANGES REQUESTED'
     verdictTone = 'warn'

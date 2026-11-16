@@ -32,6 +32,8 @@ export interface TaskLifecycle {
   holds_session: boolean
   since: string
   legacy_status: string
+  delivery_mr_state?: 'open' | 'merged' | null
+  delivery_mr_label?: string | null
 }
 
 export interface WorkspaceBoard {

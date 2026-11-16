@@ -58,12 +58,25 @@ TRANSITIONS: dict[tuple[WorkspaceTaskStatus, WorkspaceTaskStatus], frozenset[str
     (WORKING, WORKING): frozenset(),
     # Completion.
     # An aborted Feedback Reaper summary is closed rather than requeued.
-    (REVIEW, DONE): frozenset({"accept", "internal_report", "feedback_reaper", "abort"}),
-    (WORKING, DONE): frozenset(
-        {"initiator_progress", "internal_report", "feedback_reaper", "abort"}
+    (REVIEW, DONE): frozenset(
+        {"accept", "internal_report", "feedback_reaper", "abort", "chat_archive", "mr_merged"}
     ),
-    (TODO, DONE): frozenset({"initiator_progress", "internal_report", "feedback_reaper"}),
+    (WORKING, DONE): frozenset(
+        {
+            "initiator_progress",
+            "internal_report",
+            "feedback_reaper",
+            "abort",
+            "chat_archive",
+            "mr_merged",
+        }
+    ),
+    (TODO, DONE): frozenset(
+        {"initiator_progress", "internal_report", "feedback_reaper", "chat_archive", "mr_merged"}
+    ),
     (QUEUED, DONE): frozenset({"internal_report", "feedback_reaper", "abort"}),
+    (DONE, WORKING): frozenset({"initiator_progress", "archive_reopen"}),
+    (DONE, REVIEW): frozenset({"archive_reopen"}),
     # Failure.
     # "reconcile": the lifecycle reconciler resolving a Task whose owner is gone.
     (WORKING, FAILED): frozenset(
@@ -78,7 +91,7 @@ TRANSITIONS: dict[tuple[WorkspaceTaskStatus, WorkspaceTaskStatus], frozenset[str
     (REVIEW, TODO): frozenset({"abort", "handoff", "feedback_reaper"}),
     (FAILED, TODO): frozenset({"abort", "handoff", "feedback_reaper"}),
     # Handoff may reopen a closed record for a new executor.
-    (DONE, TODO): frozenset({"feedback_reaper", "handoff"}),
+    (DONE, TODO): frozenset({"feedback_reaper", "handoff", "archive_reopen"}),
 }
 
 

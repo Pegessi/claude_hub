@@ -1,10 +1,15 @@
 """Workspace board projection and tab metadata synchronization."""
 
+from typing import Literal
+
 from claude_hub.models.schemas import (
+    TaskArchiveClosure,
     TaskExecutionControl,
     TaskLifecycle,
+    TaskProgressState,
     redact_managed_sessions_for_public,
 )
+from claude_hub.services import mr_status_cache as mr_cache_mod
 from claude_hub.services.board_pagination import paginate_board_tasks
 from claude_hub.services.task_brief import build_task_brief_payload
 from claude_hub.services.task_dependencies import task_dependency_blockers
@@ -13,6 +18,8 @@ from claude_hub.services.task_lifecycle import (
     LifecycleFacts,
     derive_task_lifecycle,
 )
+from claude_hub.services.task_transitions import apply_task_update
+from claude_hub.services.ttyd_manager import get_tab_native_runtime_snapshot
 from claude_hub.services.workspace_manager._base import _WorkspaceManagerBase
 from claude_hub.services.workspace_manager._constants import *  # noqa: F401,F403
 from claude_hub.services.workspace_state_policy import TERMINAL_REVIEW_STATES
@@ -84,8 +91,150 @@ class _WorkspaceBoardMixin(_WorkspaceManagerBase):
                 blocked_by_task_id=blocked_by,
                 now=now,
             )
-            lifecycles[task.id] = derive_task_lifecycle(facts)
+            lifecycle = derive_task_lifecycle(facts)
+            mr_state, mr_label = self._task_delivery_mr_projection(task)
+            if mr_state is not None:
+                lifecycle = lifecycle.model_copy(
+                    update={
+                        "delivery_mr_state": mr_state,
+                        "delivery_mr_label": mr_label,
+                    }
+                )
+            lifecycles[task.id] = lifecycle
         return lifecycles
+
+    def _task_delivery_mr_urls(self, task: WorkspaceTask) -> list[str]:
+        """Extract MR URLs exclusively from explicit delivery artifacts/completion evidence (never title/prompt)."""
+        texts: list[str | None] = []
+        if task.latest_progress is not None:
+            texts.extend(task.latest_progress.artifact_refs)
+            if task.latest_progress.state != TaskProgressState.STARTED:
+                texts.append(task.latest_progress.summary)
+        for report in self.reports.values():
+            if report.task_id != task.id or report.review_cycle != task.review_cycle:
+                continue
+            texts.extend(report.artifact_refs)
+            if report.state in {
+                AgentReportState.READY_FOR_REVIEW,
+                AgentReportState.COMPLETED,
+                AgentReportState.REVIEW_PASSED,
+            }:
+                texts.extend((report.message, report.message_zh, report.message_en))
+        return mr_cache_mod.extract_codebase_mr_urls(texts)
+
+    def _task_delivery_mr_projection(
+        self, task: WorkspaceTask
+    ) -> tuple[Literal["open", "merged"] | None, str | None]:
+        urls = self._task_delivery_mr_urls(task)
+        if not urls:
+            return None, None
+        snapshots = mr_cache_mod.mr_status_cache.observe(urls)
+        open_urls = [
+            url for url in urls if (snap := snapshots.get(url)) is not None and snap.state == "open"
+        ]
+        if open_urls:
+            return "open", mr_cache_mod.format_mr_badge_label(open_urls)
+        if all((snap := snapshots.get(url)) is not None and snap.state == "merged" for url in urls):
+            return "merged", mr_cache_mod.format_mr_badge_label(urls)
+        return None, None
+
+    def _task_executor_is_busy(self, task: WorkspaceTask) -> bool:
+        if task.review_requested_at and task.review_completed_at is None:
+            return True
+        if task.execution_control == TaskExecutionControl.WORKSPACE:
+            worker = self.sessions.get(task.session_id) if task.session_id else None
+            if worker is not None and (
+                worker.status == ManagedSessionStatus.SPAWNING
+                or worker.runtime_status == AgentRuntimeStatus.WORKING
+            ):
+                return True
+            reviewer = self.sessions.get(task.review_session_id) if task.review_session_id else None
+            if reviewer is not None and (
+                reviewer.status == ManagedSessionStatus.SPAWNING
+                or reviewer.runtime_status == AgentRuntimeStatus.WORKING
+            ):
+                return True
+            return False
+        if (
+            task.runtime_observation is not None
+            and task.runtime_observation.execution_epoch == task.execution_epoch
+            and task.runtime_observation.status == "active"
+        ):
+            return True
+        if task.source and task.source.tab_id:
+            native = get_tab_native_runtime_snapshot(task.source.tab_id)
+            if native is not None and getattr(native, "status", None) == AgentRuntimeStatus.WORKING:
+                return True
+        return False
+
+    def _reconcile_natural_done_signals(self, workspace_id: str) -> bool:
+        """Persist natural DONE transitions (archived originating Chat or confirmed merged MR)."""
+        changed = False
+        now = self._runtime_now()
+        for task_id, task in list(self.tasks.items()):
+            if task.workspace_id != workspace_id:
+                continue
+            if task.status not in {
+                WorkspaceTaskStatus.TODO,
+                WorkspaceTaskStatus.WORKING,
+                WorkspaceTaskStatus.REVIEW,
+            }:
+                continue
+            if (
+                task.execution_control == TaskExecutionControl.INITIATOR
+                and not task.execution_released
+                and task.source is not None
+                and task.source.tab_id
+            ):
+                facts = self._task_chat_tab_facts(task)
+                if facts is not None and facts.exists and facts.archived:
+                    obs_seq = (
+                        task.runtime_observation.stream_sequence
+                        if task.runtime_observation is not None
+                        else -1
+                    )
+                    closure = TaskArchiveClosure(
+                        tab_id=task.source.tab_id,
+                        execution_epoch=task.execution_epoch,
+                        previous_status=task.status,
+                        last_stream_sequence=obs_seq,
+                        closed_at=now,
+                    )
+                    self.tasks[task_id] = apply_task_update(
+                        task,
+                        {
+                            "status": WorkspaceTaskStatus.DONE,
+                            "completed_at": now,
+                            "closed_reason": "chat_archived",
+                            "archive_closure": closure,
+                            "updated_at": now,
+                        },
+                        cause="chat_archive",
+                    )
+                    changed = True
+                    continue
+
+            if task.status in {WorkspaceTaskStatus.WORKING, WorkspaceTaskStatus.REVIEW}:
+                if self._task_executor_is_busy(task):
+                    continue
+                mr_state, _ = self._task_delivery_mr_projection(task)
+                if mr_state == "merged":
+                    self.tasks[task_id] = apply_task_update(
+                        task,
+                        {
+                            "status": WorkspaceTaskStatus.DONE,
+                            "completed_at": now,
+                            "closed_reason": "mr_merged",
+                            "archive_closure": None,
+                            "updated_at": now,
+                        },
+                        cause="mr_merged",
+                    )
+                    changed = True
+
+        if changed:
+            self._save_workspace_state(workspace_id)
+        return changed
 
     def _task_chat_tab_facts(self, task: WorkspaceTask) -> ChatTabFacts | None:
         tab_id = task.source.tab_id if task.source else None
@@ -110,6 +259,7 @@ class _WorkspaceBoardMixin(_WorkspaceManagerBase):
 
         await self._refresh_session_statuses(workspace_id)
         self._reconcile_task_report_statuses(workspace_id)
+        self._reconcile_natural_done_signals(workspace_id)
         self._reconcile_workspace_session_pointers(workspace_id)
         self._cleanup_stale_orchestrator_assignments(workspace_id)
         await self._prune_orphan_workspace_tabs(workspace_id)
@@ -166,6 +316,7 @@ class _WorkspaceBoardMixin(_WorkspaceManagerBase):
         attention_counts: dict[str, int] = {}
 
         for ws in workspaces:
+            self._reconcile_natural_done_signals(ws.id)
             ws_tasks = [
                 (
                     task.model_copy(

@@ -8,7 +8,7 @@ const load = createSidebarLoader({
   'stores/appStore.ts': `import { ref } from 'vue'; const store = { mode: ref('terminal') }; export const useAppStore = () => store`,
   'composables/useViewport.ts': `import { ref } from 'vue'; export const mobile = ref(false); export const useViewport = () => ({ isMobile: mobile })`,
   'composables/useEdgeSwipeDrawer.ts': `import { ref } from 'vue'; export const calls = []; export function useEdgeSwipeDrawer(options) { calls.push(options); return { dragging: ref(false), translatePx: ref(0), backdropOpacity: ref(0) } }`,
-  'composables/useTabStatus.ts': `export const useTabStatus = () => ({ getTabStatus: () => 'idle', getTabStatusLabel: () => 'Idle', isAwaitingAnswer: () => false })`,
+  'composables/useTabStatus.ts': `export const useTabStatus = () => ({ getTabStatus: () => 'idle', getTabStatusLabel: () => 'Idle', isAwaitingAnswer: () => false, getTabReviewLabel: () => null, getTabActivityTime: tab => tab.created_at })`,
   'components/TabActionsMenu.vue': `<template><button class="menu-stub" /></template><script setup>defineProps(['tab', 'variant'])</script>`,
   'components/ChatSidebarWorkingEffect.vue': `<template><div class="working-effect" /></template><script setup>defineProps(['seed'])</script>`,
 })
