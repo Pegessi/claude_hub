@@ -718,27 +718,49 @@ class _ReviewMixin(_WorkspaceManagerBase):
         if expected_created_at is None and initial_reviewer is not None:
             expected_created_at = initial_reviewer.created_at
 
+        approved_cycle = int(report.review_cycle or task.review_cycle)
         if task.auto_push_remote:
             worker = self.sessions.get(task.session_id) if task.session_id else None
             target_cwd = task.worktree_path or (
                 worker.workspace_path if worker and worker.workspace_path else workspace.path
             )
-            pushed_ref, push_error = await push_task_feature_branch(
-                workspace,
-                task,
-                cwd=target_cwd,
-            )
-            if pushed_ref != task.remote_pushed_ref or push_error != task.remote_push_error:
-                now = self._runtime_now()
-                task = self.tasks[task_id].model_copy(
-                    update={
-                        "remote_pushed_ref": pushed_ref,
-                        "remote_push_error": push_error,
-                        "updated_at": now,
-                    }
+
+            def _still_approved_for_cycle() -> bool:
+                cur = self.tasks.get(task_id)
+                return (
+                    cur is not None
+                    and self._workspace_owns_task(cur)
+                    and cur.status in {WorkspaceTaskStatus.REVIEW, WorkspaceTaskStatus.DONE}
+                    and cur.review_cycle == approved_cycle
+                    and cur.reviewed_cycle >= approved_cycle
                 )
-                self.tasks[task_id] = task
-                self._save_state()
+
+            if _still_approved_for_cycle():
+                pushed_ref, push_error = await push_task_feature_branch(
+                    workspace,
+                    task,
+                    cwd=target_cwd,
+                    before_push=_still_approved_for_cycle,
+                )
+                live_after_push = self.tasks.get(task_id)
+                if (
+                    live_after_push is not None
+                    and live_after_push.review_cycle == approved_cycle
+                    and (
+                        pushed_ref != live_after_push.remote_pushed_ref
+                        or push_error != live_after_push.remote_push_error
+                    )
+                ):
+                    now = self._runtime_now()
+                    task = live_after_push.model_copy(
+                        update={
+                            "remote_pushed_ref": pushed_ref,
+                            "remote_push_error": push_error,
+                            "updated_at": now,
+                        }
+                    )
+                    self.tasks[task_id] = task
+                    self._save_state()
 
         task = self.tasks.get(task_id)
         if task is not None and task.infowall_demand_id:

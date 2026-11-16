@@ -318,21 +318,22 @@ class DotWorkService(DotSessionService, ABC):
                             or AgentType(agent_type) == AgentType.MASO
                         ):
                             ws_obj = getattr(workspace_manager, "workspaces", {}).get(workspace_id)
+                            provisioned_wt_path: str | None = None
                             if (
                                 ws_obj is not None
                                 and getattr(task, "auto_worktree", False)
                                 and not getattr(task, "worktree_path", None)
                             ):
-                                wt_path, wt_branch = await provision_task_worktree(ws_obj, task)
-                                if hasattr(task, "model_copy"):
-                                    task = task.model_copy(
-                                        update={
-                                            "worktree_path": wt_path,
-                                            "worktree_branch": wt_branch,
-                                        }
-                                    )
-                                    if task.id in getattr(workspace_manager, "tasks", {}):
-                                        workspace_manager.tasks[task.id] = task
+                                wt_path, _wt_branch = await provision_task_worktree(ws_obj, task)
+                                live_after_wt = getattr(workspace_manager, "tasks", {}).get(task.id)
+                                if live_after_wt is not None:
+                                    if live_after_wt.status.value != "todo":
+                                        raise RuntimeError(
+                                            f"Task {task.id} changed to {live_after_wt.status.value} before start"
+                                        )
+                                    task = live_after_wt
+                                if getattr(task, "auto_worktree", False):
+                                    provisioned_wt_path = wt_path
                             agent_env: dict[str, str] = {}
                             parsed_agent = AgentType(agent_type)
                             if parsed_agent == AgentType.MASO:
@@ -343,8 +344,18 @@ class DotWorkService(DotSessionService, ABC):
                                 if spec.model_env_key:
                                     agent_env[spec.model_env_key] = model.strip()
                             use_ephemeral = True if ephemeral is None else bool(ephemeral)
-                            target_cwd = getattr(task, "worktree_path", None) or (
-                                ws_obj.path if ws_obj is not None else None
+                            live_before_agent = getattr(workspace_manager, "tasks", {}).get(task.id)
+                            if live_before_agent is not None:
+                                if live_before_agent.status.value != "todo":
+                                    raise RuntimeError(
+                                        f"Task {task.id} changed to {live_before_agent.status.value} before start"
+                                    )
+                                task = live_before_agent
+                            target_cwd = (
+                                provisioned_wt_path
+                                if getattr(task, "auto_worktree", False) and provisioned_wt_path
+                                else getattr(task, "worktree_path", None)
+                                or (ws_obj.path if ws_obj is not None else None)
                             )
                             created_session = await workspace_manager.ensure_workspace_agent(
                                 workspace_id,

@@ -1,6 +1,7 @@
 """Task admission and dispatch-target selection."""
 
 from claude_hub.models.schemas import validate_workspace_session_surface
+from claude_hub.services import work_pipeline, workspace_identity
 from claude_hub.services.task_dependencies import require_task_dependencies
 from claude_hub.services.task_transitions import apply_task_update
 from claude_hub.services.workspace_manager._base import _WorkspaceManagerBase
@@ -98,10 +99,9 @@ class _TaskStartMixin(_WorkspaceManagerBase):
             created_ephemeral_session_id: str | None = None
             try:
                 if workspace.target == ExecutionTarget.LOCAL and task.auto_worktree:
-                    from claude_hub.services.work_pipeline import provision_task_worktree
-                    from claude_hub.services.workspace_identity import resolve_path
-
-                    wt_path, wt_branch = await provision_task_worktree(workspace, task)
+                    wt_path, wt_branch = await work_pipeline.provision_task_worktree(
+                        workspace, task
+                    )
                     task = self.tasks[task_id]
                     if task.worktree_path != wt_path or task.worktree_branch != wt_branch:
                         task = task.model_copy(
@@ -118,7 +118,7 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                         return task
                     self._validate_start_admission_inputs(workspace, task, payload)
 
-                    wanted_wt = resolve_path(wt_path)
+                    wanted_wt = workspace_identity.resolve_path(wt_path)
                     selected_in_wt = False
                     inherited_env: dict[str, str] = {}
                     inherited_preset: str | None = None
@@ -130,7 +130,9 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                             if (
                                 candidate.role == WorkspaceSessionRole.ORCHESTRATOR
                                 and candidate.session_kind == task.session_kind
-                                and resolve_path(candidate.workspace_path or workspace.path)
+                                and workspace_identity.resolve_path(
+                                    candidate.workspace_path or workspace.path
+                                )
                                 == wanted_wt
                             ):
                                 selected_in_wt = True
@@ -141,7 +143,9 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                             and candidate.workspace_id == workspace.id
                             and candidate.role == WorkspaceSessionRole.ORCHESTRATOR
                             and candidate.session_kind == task.session_kind
-                            and resolve_path(candidate.workspace_path or workspace.path)
+                            and workspace_identity.resolve_path(
+                                candidate.workspace_path or workspace.path
+                            )
                             == wanted_wt
                         ):
                             payload = payload.model_copy(update={"target_session_id": candidate.id})
@@ -237,14 +241,14 @@ class _TaskStartMixin(_WorkspaceManagerBase):
                     return latest_task
                 self._validate_start_admission_inputs(workspace, latest_task, payload)
                 if workspace.target == ExecutionTarget.LOCAL and latest_task.auto_worktree:
-                    from claude_hub.services.workspace_identity import resolve_path
-
                     wt_path_str = latest_task.worktree_path
                     wt_ok = (
                         wt_path_str is not None
                         and bool(wt_path_str)
-                        and resolve_path(wt_path_str) != resolve_path(workspace.path)
-                        and resolve_path(target.workspace_path or "") == resolve_path(wt_path_str)
+                        and workspace_identity.resolve_path(wt_path_str)
+                        != workspace_identity.resolve_path(workspace.path)
+                        and workspace_identity.resolve_path(target.workspace_path or "")
+                        == workspace_identity.resolve_path(wt_path_str)
                     )
                     if not wt_ok:
                         continue

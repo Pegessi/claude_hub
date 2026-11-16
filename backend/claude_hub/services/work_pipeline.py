@@ -12,7 +12,7 @@ import re
 import shutil
 import signal
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 from claude_hub.models import ExecutionTarget, Workspace, WorkspaceTask
@@ -309,16 +309,20 @@ async def push_task_feature_branch(
     task: WorkspaceTask,
     *,
     cwd: str | None = None,
+    before_push: Callable[[], bool] | None = None,
 ) -> tuple[str | None, str | None]:
-    """Push the task's feature branch to origin (never main/master/default_branch, never --force).
+    """Push the task's reviewed commit on its feature branch to origin (never protected/default, never --force).
 
-    Returns ``(remote_pushed_ref, remote_push_error)``. If ``task.remote_pushed_ref``
-    already matches ``origin/<branch>@<current_head_sha[:7]>``, returns immediately
-    without re-pushing; if a newer commit was created on a subsequent review round,
-    pushes the updated branch and returns the new ``origin/<branch>@<new_sha[:7]>``.
+    Returns ``(remote_pushed_ref, remote_push_error)``. Pushes the immutable
+    ``<head_sha>:refs/heads/<branch>`` refspec and checks ``before_push`` after
+    sampling ``HEAD`` so a concurrent reopen into a new review round can never
+    publish an unreviewed commit or record a mismatched SHA.
     """
     if workspace.target != ExecutionTarget.LOCAL:
         return None, "Remote branch push is only supported for local workspaces"
+
+    if before_push is not None and not before_push():
+        return task.remote_pushed_ref, task.remote_push_error
 
     target_cwd = cwd or task.worktree_path or workspace.path
     if not target_cwd or not Path(target_cwd).exists():
@@ -353,13 +357,16 @@ async def push_task_feature_branch(
             task.remote_pushed_ref,
             f"git rev-parse HEAD failed: {err_sha or sha_out}"[:300],
         )
+    if before_push is not None and not before_push():
+        return task.remote_pushed_ref, task.remote_push_error
+
     head_sha = sha_out.strip()
     expected_ref = f"origin/{branch}@{head_sha[:7]}"
     if task.remote_pushed_ref == expected_ref:
         return expected_ref, None
 
     rc_push, out_push, err_push = await _run_git(
-        ["push", "-u", "origin", branch],
+        ["push", "-u", "origin", f"{head_sha}:refs/heads/{branch}"],
         cwd=target_cwd,
         timeout=30.0,
     )
