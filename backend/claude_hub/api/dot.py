@@ -187,9 +187,7 @@ def _decode_base64(text: str) -> bytes:
     try:
         return base64.b64decode(text, validate=True)
     except (binascii.Error, ValueError):
-        raise HTTPException(
-            status_code=400, detail="data_base64 is not valid base64"
-        ) from None
+        raise HTTPException(status_code=400, detail="data_base64 is not valid base64") from None
 
 
 @router.get("/status")
@@ -286,9 +284,7 @@ async def dot_update_identity(
     payload: IdentityUpdate, current_user: User = Depends(get_current_user)
 ) -> dict[str, Any]:
     try:
-        return await _service().update_identity(
-            name=payload.name, avatar=payload.avatar
-        )
+        return await _service().update_identity(name=payload.name, avatar=payload.avatar)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
@@ -336,9 +332,7 @@ async def dot_notify(
         }
     if not payload.text.strip():
         raise HTTPException(status_code=422, detail="text is empty")
-    result = await _service().notify(
-        payload.text, title=payload.title, tone=payload.tone
-    )
+    result = await _service().notify(payload.text, title=payload.title, tone=payload.tone)
     if result == "sent":
         return {"sent": True}
     if result == "repeat":
@@ -378,9 +372,7 @@ async def dot_patrol_update(
     try:
         config = await demand_patrol_service.configure(changes)
     except ValidationError as exc:
-        raise HTTPException(
-            422, exc.errors(include_context=False, include_input=False)
-        ) from exc
+        raise HTTPException(422, exc.errors(include_context=False, include_input=False)) from exc
     return config.model_dump(mode="json")
 
 
@@ -441,16 +433,12 @@ async def dot_save_card(
         if existing and link in existing.links:
             continue
         if service.store.get_card(link) is None:
-            raise HTTPException(
-                status_code=400, detail=f"Linked card not found: {link}"
-            )
+            raise HTTPException(status_code=400, detail=f"Linked card not found: {link}")
     for path in payload.files:
         if existing and path in existing.files:
             continue
         if service.store.resolve_home_path(path) is None:
-            raise HTTPException(
-                status_code=400, detail=f"File not found in Dot home: {path}"
-            )
+            raise HTTPException(status_code=400, detail=f"File not found in Dot home: {path}")
     card = Card(
         id=card_id,
         kind=payload.kind,
@@ -539,9 +527,7 @@ async def dot_journal(
     if chosen:
         try:
             # A write cut off mid-character must not hide the whole day.
-            text = store.journal_path(chosen).read_text(
-                encoding="utf-8", errors="replace"
-            )
+            text = store.journal_path(chosen).read_text(encoding="utf-8", errors="replace")
         except OSError:
             text = ""
     return {"days": days, "day": chosen, "text": text}
@@ -580,9 +566,7 @@ async def dot_update_focus(
 ) -> dict[str, Any]:
     service = _service()
     try:
-        item = service.store.update_focus(
-            focus_id, **payload.model_dump(exclude_none=True)
-        )
+        item = service.store.update_focus(focus_id, **payload.model_dump(exclude_none=True))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     if item is None:
@@ -604,9 +588,7 @@ async def dot_delegate(
     payload: DelegateRequest, current_user: User = Depends(get_current_user)
 ) -> dict[str, Any]:
     try:
-        return await _service().delegate(
-            **payload.model_dump(), actor_key=_actor_key(current_user)
-        )
+        return await _service().delegate(**payload.model_dump(), actor_key=_actor_key(current_user))
     except DelegateNotStarted as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     except TaskExecutionConflict as exc:
@@ -614,9 +596,7 @@ async def dot_delegate(
     except KeyError:
         raise HTTPException(status_code=404, detail="Workspace not found") from None
     except ValueError as exc:
-        raise HTTPException(
-            status_code=400, detail=str(exc) or "invalid_delegate"
-        ) from None
+        raise HTTPException(status_code=400, detail=str(exc) or "invalid_delegate") from None
 
 
 @router.post("/work/{task_id}/review")
@@ -626,13 +606,9 @@ async def dot_review(
     try:
         return await _service().review(task_id, **payload.model_dump())
     except LessonNotFound as exc:
-        raise HTTPException(
-            status_code=404, detail=f"Lesson not found: {exc.args[0]}"
-        ) from None
+        raise HTTPException(status_code=404, detail=f"Lesson not found: {exc.args[0]}") from None
     except KeyError:
-        raise HTTPException(
-            status_code=404, detail="Dot is not tracking this task"
-        ) from None
+        raise HTTPException(status_code=404, detail="Dot is not tracking this task") from None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
@@ -700,9 +676,7 @@ async def dot_merge_lessons(
     try:
         lesson = service.store.merge_lessons(payload.keep, payload.others)
     except KeyError as exc:
-        raise HTTPException(
-            status_code=404, detail=f"Lesson not found: {exc.args[0]}"
-        ) from None
+        raise HTTPException(status_code=404, detail=f"Lesson not found: {exc.args[0]}") from None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     await _commit(service, f"dot: merge lessons into {payload.keep}")
@@ -716,9 +690,7 @@ async def dot_watch(
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     try:
-        return await _service().watch(
-            task_id, stall_hours=payload.stall_hours if payload else None
-        )
+        return await _service().watch(task_id, stall_hours=payload.stall_hours if payload else None)
     except KeyError:
         raise HTTPException(status_code=404, detail="Task not found") from None
     except ValueError as exc:
