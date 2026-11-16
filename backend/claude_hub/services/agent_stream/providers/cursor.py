@@ -355,7 +355,7 @@ class CursorSession(ProcessSession):
                     timeout=_ACP_SESSION_INIT_TIMEOUT_S,
                 )
                 loaded_ok = True
-            except RuntimeError:
+            except ProviderRpcError:
                 if self._required_conversation_id is not None:
                     raise
                 self._runtime.logger().warning(
@@ -769,9 +769,7 @@ class CursorSession(ProcessSession):
             self._last_error = f"cursor acp {method} write failed: {exc}"
             raise RuntimeError(self._last_error) from exc
         if (
-            self._process is None
-            or self._process.returncode is not None
-            or (self._reader_task is not None and self._reader_task.done())
+            self._process is None or self._reader_task is None or self._reader_task.done()
         ) and not future.done():
             self._pending_requests.pop(req_id, None)
             self._last_error = self._exit_error or f"cursor acp {method} failed: server exited"

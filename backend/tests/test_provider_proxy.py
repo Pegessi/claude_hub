@@ -392,3 +392,78 @@ def test_session_home_profile_still_discovers_provider(
     assert result.stdout == (
         "http://login.example.test:9090" if url is None else "" if url == "direct" else PROXY
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("proxy_probe_phase", ["http", "timeout"])
+async def test_auto_mode_preserves_configured_provider_proxy_when_direct_edge_is_reachable(
+    monkeypatch: pytest.MonkeyPatch,
+    private_deployment: Settings,
+    proxy_probe_phase: str,
+) -> None:
+    """Production regression: in ``auto`` network mode (when
+    ``CLAUDE_HUB_PROVIDER_NETWORK_MODE`` is not set in ``os.environ``), a
+    deployment-configured ``CURSOR_PROXY_URL`` must not be stripped just
+    because ``https://api2.cursor.sh`` responds 200 OK to an unproxied HEAD
+    probe from a geo-restricted network."""
+    from claude_hub.services.agent_stream import provider_network
+    from claude_hub.services.agent_stream.provider_network import (
+        PROVIDER_NETWORK_MODE_ENV,
+        ProbeResult,
+        ProviderNetworkSelector,
+    )
+
+    monkeypatch.delenv(PROVIDER_NETWORK_MODE_ENV, raising=False)
+    calls: list[tuple[str, str | None]] = []
+
+    async def probe(endpoint: str, proxy_url: str | None) -> ProbeResult:
+        calls.append((endpoint, proxy_url))
+        if proxy_url is None:
+            return ProbeResult(True, "http", 200)
+        if proxy_probe_phase == "timeout":
+            return ProbeResult(False, "timeout")
+        return ProbeResult(True, "http", 200)
+
+    selector = ProviderNetworkSelector(probe=probe)
+    monkeypatch.setattr(provider_network, "_default_selector", selector)
+
+    session = _session(AgentType.CURSOR)
+    session.env = {}
+    request_env = await CursorNativeSession(session)._build_provider_env()
+    assert calls == [("https://api2.cursor.sh", PROXY)]
+    assert request_env["HTTP_PROXY"] == request_env["HTTPS_PROXY"] == PROXY
+
+    # Endpoints matching CURSOR_NO_PROXY still use the direct route.
+    calls.clear()
+    internal_session = _session(AgentType.CURSOR)
+    internal_session.env = {"CURSOR_API_ENDPOINT": "https://api.internal.test"}
+    internal_env = await CursorNativeSession(internal_session)._build_provider_env()
+    assert calls == [("https://api.internal.test", None)]
+    assert "HTTPS_PROXY" not in internal_env
+
+    # Explicit mode="direct" or clearing the proxy in session.env restores direct route.
+    calls.clear()
+    direct_session = _session(AgentType.CURSOR)
+    direct_session.env = {PROVIDER_NETWORK_MODE_ENV: "direct"}
+    direct_env = await CursorNativeSession(direct_session)._build_provider_env()
+    assert calls == [("https://api2.cursor.sh", None)]
+    assert "HTTPS_PROXY" not in direct_env
+
+    calls.clear()
+    cleared_session = _session(AgentType.CURSOR)
+    cleared_session.env = {"https_proxy": "", "http_proxy": ""}
+    cleared_env = await CursorNativeSession(cleared_session)._build_provider_env()
+    assert calls == [("https://api2.cursor.sh", None)]
+    assert "HTTPS_PROXY" not in cleared_env
+
+    # Toggling deployment cursor_proxy_url to None partitions the cache key even
+    # if the same proxy URL is inherited from os.environ.
+    calls.clear()
+    monkeypatch.setattr(provider_proxy, "settings", Settings(_env_file=None))
+    monkeypatch.setenv("HTTPS_PROXY", PROXY)
+    monkeypatch.setenv("HTTP_PROXY", PROXY)
+    ambient_session = _session(AgentType.CURSOR)
+    ambient_session.env = {}
+    ambient_env = await CursorNativeSession(ambient_session)._build_provider_env()
+    assert calls == [("https://api2.cursor.sh", None)]
+    assert "HTTPS_PROXY" not in ambient_env

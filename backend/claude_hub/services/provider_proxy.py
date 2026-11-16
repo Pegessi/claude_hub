@@ -29,6 +29,24 @@ def has_provider_proxy_settings(provider: str) -> bool:
     )
 
 
+def configured_provider_proxy_url(provider: str) -> Optional[str]:
+    """Return the deployment-configured proxy URL for ``provider``, if any.
+
+    Returns ``None`` when the provider has no deployment proxy URL or is
+    explicitly set to ``direct``.
+    """
+    normalized = provider.strip().lower()
+    if normalized not in _PROVIDERS:
+        return None
+    url = getattr(settings, f"{normalized}_proxy_url")
+    if url is None:
+        return None
+    raw = str(url.get_secret_value()).strip()
+    if not raw or raw == "direct":
+        return None
+    return raw
+
+
 def provider_subprocess_env(
     provider: str,
     inherited: Mapping[str, str],
