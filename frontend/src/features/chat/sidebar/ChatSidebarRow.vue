@@ -31,12 +31,6 @@
         :title="statusLabel"
       />
       <span class="chat-sidebar__item-name">{{ tab.name || 'Untitled' }}</span>
-      <span
-        v-if="reviewLabel"
-        class="chat-sidebar__item-review"
-        data-review="true"
-        :title="`Open delivery in review: ${reviewLabel}`"
-      >{{ reviewLabel }}</span>
       <span class="chat-sidebar__item-time">{{ relativeTime(activityTime || tab.created_at) }}</span>
     </button>
     <input
@@ -76,8 +70,6 @@ defineProps<{
   statusLabel: string
   /** A question card is waiting for this user; not the same as unread work. */
   awaiting?: boolean
-  /** Calm delivery review badge when an open Codebase MR or Task review remains open. */
-  reviewLabel?: string | null
   /** Newest meaningful turn/reply timestamp, falling back to tab creation time. */
   activityTime?: string | null
   renaming: boolean
@@ -314,25 +306,6 @@ const emit = defineEmits<{
 .chat-sidebar__item-time {
   font-size: var(--ch-font-size-xs);
   color: var(--ch-color-text-subtle);
-}
-
-.chat-sidebar__item-review {
-  flex: 0 0 auto;
-  padding: 1px 5px;
-  border-radius: var(--ch-radius-sm);
-  border: 1px solid color-mix(in srgb, var(--ch-color-accent) 42%, transparent);
-  background: color-mix(in srgb, var(--ch-color-accent) 12%, transparent);
-  color: var(--ch-color-accent);
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 1.25;
-  letter-spacing: 0.01em;
-  white-space: nowrap;
-}
-
-.chat-sidebar__item:hover .chat-sidebar__item-review,
-.chat-sidebar__item:focus-within .chat-sidebar__item-review {
-  visibility: hidden;
 }
 
 .chat-sidebar__item.active .chat-sidebar__item-time {

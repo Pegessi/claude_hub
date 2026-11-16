@@ -119,6 +119,7 @@
 }
 .tp-dot--attention { background: var(--tp-amber); }
 .tp-dot--working,
+.tp-dot--review,
 .tp-pulse-dot { background: var(--tp-accent-text); }
 .tp-dot--done { background: var(--tp-green); }
 .tp-dot--failed { background: var(--tp-red); }
@@ -302,6 +303,7 @@
 }
 .tp-row-state--attention { color: var(--tp-amber); }
 .tp-row-state--working { color: var(--tp-accent-text); }
+.tp-row-state--review { color: var(--tp-accent-text); }
 .tp-row-state--done { color: var(--tp-green); }
 .tp-row-state--failed { color: var(--tp-red); }
 .tp-row-elapsed { font-size: 11px; color: var(--tp-fg-3); flex: 0 0 auto; }
@@ -371,6 +373,7 @@
 }
 .tp-status-pill--attention { color: var(--tp-amber); background: var(--tp-amber-bg); border-color: var(--tp-amber-border); }
 .tp-status-pill--working { color: var(--tp-accent-text); background: var(--tp-live-bg); }
+.tp-status-pill--review { color: var(--tp-accent-text); background: var(--tp-live-bg); border-color: var(--tp-line-strong); }
 .tp-status-pill--done { color: var(--tp-green); background: var(--tp-green-bg); border-color: var(--tp-green-border); }
 .tp-status-pill--failed { color: var(--tp-red); background: var(--tp-red-bg); border-color: var(--tp-red-border); }
 

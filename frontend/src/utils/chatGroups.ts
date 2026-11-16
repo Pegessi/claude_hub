@@ -1,4 +1,13 @@
-import type { TerminalTab } from '@/types'
+import type { TerminalAgentStatus, TerminalTab } from '@/types'
+
+export type ChatStatusBucket = 'needs_you' | 'working' | 'review' | 'done'
+
+const STATUS_BUCKET_META: readonly { key: ChatStatusBucket; label: string }[] = [
+  { key: 'needs_you', label: 'Needs you' },
+  { key: 'working', label: 'Working' },
+  { key: 'review', label: 'Review' },
+  { key: 'done', label: 'Done' },
+]
 
 export interface ChatCwdGroup {
   /** Raw cwd path; the empty-cwd sentinel is the literal 'No directory'. */
@@ -46,11 +55,124 @@ export const CHAT_GROUP_PREVIEW_SIZE = 6
 
 export interface ChatSidebarGroup extends ChatCwdGroup {
   key: string
+  label?: string
+  statusBucket?: ChatStatusBucket
   pinned: boolean
   collapsed: boolean
   expanded: boolean
   visibleTabs: TerminalTab[]
   hiddenCount: number
+}
+
+export function classifyChatStatusBucket(
+  tab: TerminalTab,
+  status?: TerminalAgentStatus,
+): ChatStatusBucket {
+  if (status?.pending_question) return 'needs_you'
+  const runtime = status?.status ?? (tab.session_kind === 'chat' ? 'offline' : tab.is_active ? 'idle' : 'offline')
+  if (runtime === 'working') return 'working'
+  if (tab.is_unread || runtime === 'attention') return 'needs_you'
+  if (status?.review_state || status?.review_label) return 'review'
+  return 'done'
+}
+
+function activityTimestampMs(tab: TerminalTab, status?: TerminalAgentStatus): number {
+  const raw =
+    status?.last_activity_at ||
+    status?.last_reply_at ||
+    status?.activity_since ||
+    tab.created_at
+  if (!raw) return 0
+  const parsed = Date.parse(raw)
+  return Number.isNaN(parsed) ? 0 : parsed
+}
+
+/** Group chats into Pinned + Needs you / Working / Review / Done status buckets. */
+export function buildChatSidebarStatusGroups(
+  tabs: TerminalTab[],
+  pinnedIds: ReadonlySet<string>,
+  statusesByTabId: Readonly<Record<string, TerminalAgentStatus | undefined>>,
+  options: {
+    query: string
+    activeTabId: string | null
+    collapsed: ReadonlySet<string>
+    expanded: ReadonlySet<string>
+    pinnedCollapsed?: boolean
+  },
+): ChatSidebarGroup[] {
+  const query = options.query.trim().toLowerCase()
+  const matches = (tab: TerminalTab) => !query ||
+    (tab.name || '').toLowerCase().includes(query) ||
+    (tab.cwd || '').toLowerCase().includes(query)
+
+  const groups: ChatSidebarGroup[] = []
+  const pinned = tabs.filter(tab => pinnedIds.has(tab.id) && matches(tab))
+  if (pinned.length) {
+    const collapsed = !query && Boolean(options.pinnedCollapsed)
+    const active = pinned.find(tab => tab.id === options.activeTabId)
+    const visibleTabs = collapsed ? (active ? [active] : []) : pinned
+    groups.push({
+      key: 'pinned',
+      cwd: '',
+      label: 'Pinned',
+      pinned: true,
+      tabs: pinned,
+      visibleTabs,
+      collapsed,
+      expanded: true,
+      hiddenCount: pinned.length - visibleTabs.length,
+    })
+  }
+
+  const buckets: Record<ChatStatusBucket, TerminalTab[]> = {
+    needs_you: [],
+    working: [],
+    review: [],
+    done: [],
+  }
+  for (const tab of tabs) {
+    if (pinnedIds.has(tab.id) || !matches(tab)) continue
+    const bucket = classifyChatStatusBucket(tab, statusesByTabId[tab.id])
+    buckets[bucket].push(tab)
+  }
+
+  for (const meta of STATUS_BUCKET_META) {
+    const bucketTabs = buckets[meta.key]
+    if (!bucketTabs.length) continue
+    bucketTabs.sort(
+      (a, b) =>
+        activityTimestampMs(b, statusesByTabId[b.id]) -
+        activityTimestampMs(a, statusesByTabId[a.id]),
+    )
+    const groupId = `status:${meta.key}`
+    const collapsed = !query && options.collapsed.has(groupId)
+    const expanded = Boolean(query) || meta.key !== 'done' || options.expanded.has(groupId)
+    const active = bucketTabs.find(tab => tab.id === options.activeTabId)
+    const previewCap = meta.key === 'done' ? CHAT_GROUP_PREVIEW_SIZE : bucketTabs.length
+    let visibleTabs = collapsed
+      ? []
+      : expanded
+        ? bucketTabs
+        : bucketTabs.slice(0, previewCap)
+    if (active && !visibleTabs.includes(active)) {
+      visibleTabs = collapsed
+        ? [active]
+        : [...visibleTabs.slice(0, Math.max(0, previewCap - 1)), active]
+    }
+    groups.push({
+      key: groupId,
+      cwd: groupId,
+      label: meta.label,
+      statusBucket: meta.key,
+      pinned: false,
+      tabs: bucketTabs,
+      visibleTabs,
+      collapsed,
+      expanded,
+      hiddenCount: bucketTabs.length - visibleTabs.length,
+    })
+  }
+  return groups
 }
 
 /** Search the full collection before applying directory folds or row limits. */
@@ -105,8 +227,9 @@ export function buildChatSidebarGroups(
 /** Never interpret a cross-directory drag as changing a session's cwd. */
 export function canDropChatInGroup(
   tab: TerminalTab,
-  group: Pick<ChatSidebarGroup, 'pinned' | 'cwd'>,
+  group: Pick<ChatSidebarGroup, 'pinned' | 'cwd' | 'statusBucket'>,
 ): boolean {
+  if (group.statusBucket && !group.pinned) return false
   return !tab.workspace_id && tab.session_kind === 'chat' &&
     (group.pinned || (tab.cwd || 'No directory') === group.cwd)
 }

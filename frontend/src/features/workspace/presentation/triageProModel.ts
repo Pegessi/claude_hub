@@ -28,8 +28,8 @@ export type {
   StructuredValidation,
 }
 
-export type TriageBucket = 'needs_you' | 'working' | 'done'
-export type TriageTone = 'attention' | 'working' | 'done' | 'failed' | 'neutral'
+export type TriageBucket = 'needs_you' | 'working' | 'review' | 'done'
+export type TriageTone = 'attention' | 'working' | 'review' | 'done' | 'failed' | 'neutral'
 export type SpineNodeTone = 'neutral' | 'warn' | 'pass' | 'live'
 export type SpineActorRole = 'orchestrator' | 'worker' | 'reviewer'
 
@@ -110,8 +110,9 @@ export interface TriageGroup {
 
 const GROUP_LABELS: Record<TriageBucket, string> = {
   needs_you: 'NEEDS YOU',
-  working: 'ACTIVE',
-  done: 'RECENT',
+  working: 'WORKING',
+  review: 'REVIEW',
+  done: 'DONE',
 }
 
 export function deriveTaskCode(task: WorkspaceTask, sources: readonly (string | null | undefined)[]): string {
@@ -129,11 +130,20 @@ export function classifyTriageBucket(
   lifecycle?: TaskLifecycle,
 ): TriageBucket {
   if (task.status === 'done' || lifecycle?.phase === 'done') return 'done'
-  if (task.status === 'review' || task.status === 'failed') return 'needs_you'
-  if (lifecycle?.attention || lifecycle?.phase === 'needs_user' || lifecycle?.phase === 'awaiting_acceptance' || lifecycle?.phase === 'orphaned') {
+  if (task.status === 'failed') return 'needs_you'
+  if (lifecycle?.phase === 'needs_user' || lifecycle?.phase === 'orphaned') {
     return 'needs_you'
   }
   if (task.latest_progress?.state === 'needs_input' || task.latest_progress?.state === 'blocked') {
+    return 'needs_you'
+  }
+  if (task.status === 'review' || lifecycle?.phase === 'awaiting_acceptance') {
+    return 'review'
+  }
+  if (lifecycle?.delivery_mr_state === 'open' && lifecycle?.owner?.state === 'idle') {
+    return 'review'
+  }
+  if (lifecycle?.attention) {
     return 'needs_you'
   }
   return 'working'
@@ -145,6 +155,7 @@ export function classifyStatusTone(
 ): TriageTone {
   if (task.status === 'failed') return 'failed'
   if (bucket === 'needs_you') return 'attention'
+  if (bucket === 'review') return 'review'
   if (bucket === 'done') return 'done'
   if (task.status === 'todo') return 'neutral'
   return 'working'
@@ -541,12 +552,16 @@ export function buildTriageTaskViewModel(input: {
     bucket === 'needs_you'
       ? (lifecycle?.attention && lifecycle.reason_text
           ? lifecycle.reason_text
-          : latestVerdict?.state === 'review_passed'
-            ? 'Independent review passed. Ready for your acceptance.'
-            : task.status === 'failed'
-              ? (task.failure_reason || 'Task stopped with an error; steer to retry or abort.')
-              : 'Waiting for your review or steering instructions.')
-      : ''
+          : task.status === 'failed'
+            ? (task.failure_reason || 'Task stopped with an error; steer to retry or abort.')
+            : 'Waiting for your answer or steering instructions.')
+      : bucket === 'review'
+        ? (latestVerdict?.state === 'review_passed'
+            ? 'Independent review passed. Ready for acceptance or merge.'
+            : lifecycle?.delivery_mr_state === 'open' && lifecycle.delivery_mr_label
+              ? `${lifecycle.delivery_mr_label} is open — closes automatically once merged.`
+              : 'Deliverable ready for review or acceptance.')
+        : ''
 
   const liveStep =
     bucket === 'working'
@@ -631,6 +646,7 @@ export function groupTriageTasks(items: readonly TriageTaskViewModel[]): TriageG
   const buckets: Record<TriageBucket, TriageTaskViewModel[]> = {
     needs_you: [],
     working: [],
+    review: [],
     done: [],
   }
   for (const item of items) {
@@ -641,9 +657,10 @@ export function groupTriageTasks(items: readonly TriageTaskViewModel[]): TriageG
 
   buckets.needs_you.sort(byUpdatedDesc)
   buckets.working.sort(byUpdatedDesc)
+  buckets.review.sort(byUpdatedDesc)
   buckets.done.sort(byUpdatedDesc)
 
-  return (['needs_you', 'working', 'done'] as TriageBucket[]).map(key => ({
+  return (['needs_you', 'working', 'review', 'done'] as TriageBucket[]).map(key => ({
     key,
     label: GROUP_LABELS[key],
     items: buckets[key],
