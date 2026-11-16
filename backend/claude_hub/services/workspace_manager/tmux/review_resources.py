@@ -1,5 +1,6 @@
 """Review resource selection, tab cleanup and historical report parsing."""
 
+from claude_hub.services import cross_reviewer
 from claude_hub.services.workspace_manager._constants import (
     ORPHAN_TAB_PRUNE_GRACE_SECONDS,
     AgentReport,
@@ -138,7 +139,6 @@ class _ReviewResourcesMixin(_WorkspaceManagerBase):
         ``_find_compatible_workspace_agent`` instead.
         """
 
-        from claude_hub.services.cross_reviewer import is_heterogeneous_reviewer
         from claude_hub.services.workspace_identity import normalize_remote_cwd, resolve_path
 
         wanted_remote_cwd = (
@@ -174,7 +174,7 @@ class _ReviewResourcesMixin(_WorkspaceManagerBase):
             reviewers = [
                 session
                 for session in reviewers
-                if is_heterogeneous_reviewer(
+                if cross_reviewer.is_heterogeneous_reviewer(
                     worker_agent_type,
                     worker_env or {},
                     session.agent_type,
@@ -189,7 +189,7 @@ class _ReviewResourcesMixin(_WorkspaceManagerBase):
             key=lambda session: (
                 (
                     (
-                        not is_heterogeneous_reviewer(
+                        not cross_reviewer.is_heterogeneous_reviewer(
                             worker_agent_type,
                             worker_env or {},
                             session.agent_type,

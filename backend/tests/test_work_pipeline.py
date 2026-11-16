@@ -1371,3 +1371,170 @@ async def test_concurrent_todo_edit_to_auto_worktree_and_reviewer_incarnation_sa
     assert old_worker_d_id in manager.sessions
     assert manager.sessions[old_worker_d_id].tab_id == replacement_worker.tab_id
     assert replacement_worker.tab_id in _wm.ttyd_manager.processes
+
+
+@pytest.mark.asyncio
+async def test_dot_delegate_concurrent_done_and_push_immutable_sha_fences(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo, bare_origin = _init_git_repo_with_bare_origin(tmp_path)
+    manager, _ = _setup_fake_chat_runtime(monkeypatch, tmp_path)
+
+    from claude_hub.services import work_pipeline as wp_mod
+    from claude_hub.services import workspace_manager as global_wm
+    from claude_hub.services.dot import runtime as dot_runtime_pkg  # noqa: F401
+    from claude_hub.services.dot.runtime.common import DelegateNotStarted
+
+    ws = manager.create_workspace(
+        WorkspaceCreate(name="Fence Repo", path=str(repo), default_branch="main")
+    )
+    monkeypatch.setattr(global_wm, "workspaces", manager.workspaces)
+    monkeypatch.setattr(global_wm, "tasks", manager.tasks)
+    monkeypatch.setattr(global_wm, "sessions", manager.sessions)
+    monkeypatch.setattr(global_wm, "register_task", manager.register_task)
+    monkeypatch.setattr(global_wm, "ensure_workspace_agent", manager.ensure_workspace_agent)
+    monkeypatch.setattr(global_wm, "start_task", manager.start_task)
+    monkeypatch.setattr(
+        global_wm, "_best_effort_delete_session", manager._best_effort_delete_session
+    )
+
+    async def fake_discover_maso(_env: dict[str, str]):
+        return (
+            "http://127.0.0.1:11004",
+            [StreamModelOption(id="gemini-4-argon", label="gemini-4-argon")],
+            "gemini-4-argon",
+        )
+
+    monkeypatch.setattr(maso_discovery, "discover_maso_service", fake_discover_maso)
+
+    # 1. Concurrent TODO -> DONE + prompt edit while Dot awaits provision_task_worktree
+    # must NOT be overwritten by Dot's pre-await registration snapshot!
+    orig_provision = wp_mod.provision_task_worktree
+
+    async def concurrent_done_provision(workspace_arg, task_arg):
+        wt_path, wt_branch = await orig_provision(workspace_arg, task_arg)
+        await manager.update_task(
+            task_arg.id,
+            WorkspaceTaskUpdate(
+                prompt="Updated prompt before completion",
+            ),
+        )
+        await manager.update_task(
+            task_arg.id,
+            WorkspaceTaskUpdate(
+                status=WorkspaceTaskStatus.DONE,
+            ),
+        )
+        return wt_path, wt_branch
+
+    monkeypatch.setattr(wp_mod, "provision_task_worktree", concurrent_done_provision)
+
+    dot_store = DotStore(tmp_path / "dot_fence")
+    dot_store.ensure()
+    dot_store.update_state(tab_id="dot-fence-tab")
+    dot_service = DotService(dot_store)
+    reset_dot_service(dot_service)
+    try:
+        with pytest.raises(DelegateNotStarted, match="changed to done before start"):
+            await dot_service.delegate(
+                workspace_id=ws.id,
+                title="Concurrent done task",
+                goal="Verify concurrent completion is preserved",
+                done_when=["status stays done"],
+                output="out.txt",
+                agent_type="maso",
+                model="gemini-4-argon_reasoning_high",
+                recipe="spec_implement_review",
+                ephemeral=True,
+                confirm=True,
+                actor_key="actor-fence",
+            )
+    finally:
+        reset_dot_service(None)
+        monkeypatch.setattr(wp_mod, "provision_task_worktree", orig_provision)
+
+    preserved_tasks = [t for t in manager.tasks.values() if t.title == "Concurrent done task"]
+    assert len(preserved_tasks) == 1
+    assert preserved_tasks[0].status == WorkspaceTaskStatus.DONE
+    assert preserved_tasks[0].prompt == "Updated prompt before completion"
+
+    # 2. Immutable SHA refspec in push_task_feature_branch: even if the branch advances
+    # to commit B between sampling HEAD (commit A) and running `git push`, origin receives
+    # ONLY reviewed commit A (never unreviewed commit B).
+    push_task = manager.create_task(
+        ws.id,
+        WorkspaceTaskCreate(
+            title="Immutable push SHA",
+            prompt="Commit A then advance to B before push",
+            recipe=WorkspaceTaskRecipe.SPEC_IMPLEMENT_REVIEW,
+            agent_type=AgentType.MASO,
+        ),
+    )
+    started = await manager.start_task(push_task.id)
+    wt_dir = Path(started.worktree_path or "")
+    (wt_dir / "reviewed.py").write_text("A = 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(wt_dir), "add", "reviewed.py"], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "-C", str(wt_dir), "commit", "-m", "feat: reviewed commit A"],
+        check=True,
+        capture_output=True,
+    )
+    sha_a = subprocess.run(
+        ["git", "-C", str(wt_dir), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    orig_run_git = wp_mod._run_git
+    advanced_to_b: list[str] = []
+
+    async def intercept_push_git(args: list[str], *, cwd: str, timeout: float = 15.0):
+        if args and args[0] == "push":
+            # Advance local branch HEAD to an unreviewed commit B right before `git push` runs!
+            (wt_dir / "unreviewed.py").write_text("B = 2\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", str(wt_dir), "add", "unreviewed.py"],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(wt_dir), "commit", "-m", "wip: unreviewed commit B"],
+                check=True,
+                capture_output=True,
+            )
+            sha_b = subprocess.run(
+                ["git", "-C", str(wt_dir), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            advanced_to_b.append(sha_b)
+        return await orig_run_git(args, cwd=cwd, timeout=timeout)
+
+    monkeypatch.setattr(wp_mod, "_run_git", intercept_push_git)
+    pushed_ref, push_err = await push_task_feature_branch(
+        ws, manager.tasks[push_task.id], cwd=str(wt_dir)
+    )
+    monkeypatch.setattr(wp_mod, "_run_git", orig_run_git)
+
+    assert push_err is None
+    assert len(advanced_to_b) == 1
+    assert pushed_ref == f"origin/{started.worktree_branch}@{sha_a[:7]}"
+    remote_sha = subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(bare_origin),
+            "rev-parse",
+            f"refs/heads/{started.worktree_branch}",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert remote_sha == sha_a
+    assert remote_sha != advanced_to_b[0]
