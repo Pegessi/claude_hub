@@ -1,18 +1,4 @@
-"""Feishu personal ``/ai <instruction>`` command pipeline and configuration store.
-
-Implements Option 1 from the Feishu ``/ai`` research design:
-- Matches the owner's own ``/ai <instruction>`` messages (ignoring bots and other users),
-  with optional inline overrides ``--provider``, ``--model``, and ``--effort`` /
-  ``--reasoning-effort`` / ``--thinking``.
-- Reuses ``FeishuMessageDedupStore`` for at-most-once claim/finish/release semantics.
-- Fetches thread and chat context via ``FeishuUserClient`` and extracts Codebase MR
-  references (``group/project!1234``), commit SHAs, and Feishu doc/wiki URLs.
-- Manages the two-stage user reaction lifecycle (``OnIt`` -> delete -> ``DONE``).
-- Posts both interim (``正在派 Subagent...``) and final replies as the user
-  (``msg_type="post"``) with the ``> 🤖 AI 代答，仅供参考`` footer and idempotent UUIDs.
-- Dispatches work to a Hub Chat session configured with the resolved
-  ``(provider, model, reasoning_effort)`` via ``dispatch_tab_chat_and_wait``.
-"""
+"""Feishu personal ``/ai <instruction>`` command pipeline and configuration store."""
 
 from __future__ import annotations
 
@@ -23,10 +9,9 @@ import inspect
 import logging
 import os
 import re
-import shlex
 import threading
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
@@ -55,7 +40,11 @@ from claude_hub.services.feishu_user_token_store import (
     FeishuUserTokenStore,
     get_feishu_user_token_store,
 )
-from claude_hub.services.local_storage import document_exists, read_document, write_document
+from claude_hub.services.local_storage import (
+    document_exists,
+    read_document,
+    write_document,
+)
 from claude_hub.services.runtime_isolation import resolve_runtime_home
 from claude_hub.services.terminal_runtime.defaults import DEFAULT_CLAUDE_LAUNCH_ENV
 
@@ -66,65 +55,101 @@ DEFAULT_AI_COMMAND_PREFIX = "/ai"
 DEFAULT_AI_COMMAND_ACK_EMOJI = "OnIt"
 DEFAULT_AI_COMMAND_DONE_EMOJI = "DONE"
 DEFAULT_AI_COMMAND_FOOTER = "> 🤖 AI 代答，仅供参考"
-DEFAULT_AI_COMMAND_PROVIDER = AgentType.CLAUDE
-DEFAULT_AI_COMMAND_MODEL = "[redacted]"
+DEFAULT_AI_COMMAND_PROVIDER = AgentType.CODEX
+DEFAULT_AI_COMMAND_MODEL = "gpt-5.4"
 DEFAULT_AI_COMMAND_REASONING_EFFORT = "high"
 DEFAULT_POLL_INTERVAL_SECONDS = 15.0
 DEFAULT_MAX_ACTIVE_CHATS = 10
 DEFAULT_MAX_CONTEXT_MESSAGES = 20
 _REACTION_TIMEOUT_SECONDS = 3.0
 _MAX_RECENT_RUNS = 30
+_MAX_PENDING_QUEUE = 256
 
-SUPPORTED_AI_COMMAND_PROVIDERS: tuple[AgentType, ...] = (
-    AgentType.CLAUDE,
-    AgentType.CODEX,
-    AgentType.TRAEX,
-    AgentType.MASO,
-    AgentType.CURSOR,
-    AgentType.ANTIGRAVITY,
+SUPPORTED_AI_COMMAND_PROVIDERS: tuple[AgentType, ...] = tuple(
+    AgentType(x) for x in "claude codex traex maso cursor antigravity".split()
 )
-
 SUPPORTED_REASONING_EFFORTS: tuple[str, ...] = (
     "",
-    "none",
-    "minimal",
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-    "max",
-    "ultra",
+    *"none minimal low medium high xhigh max ultra".split(),
+)
+PROVIDER_SUPPORTED_REASONING_EFFORTS: dict[str, tuple[str, ...]] = {
+    "claude": (),
+    "codex": tuple("none minimal low medium high xhigh".split()),
+    "traex": tuple("none minimal low medium high xhigh".split()),
+    "maso": tuple("none low medium high xhigh max".split()),
+    "cursor": tuple("none minimal low medium high xhigh max".split()),
+    "antigravity": (),
+}
+DEFAULT_PROVIDER_MODELS: dict[str, tuple[str, ...]] = {
+    "claude": ("[redacted]", "claude-sonnet-4-6", "claude-opus-4-8"),
+    "codex": ("gpt-5.4", "[redacted]", "gpt-5.3-codex", "o3"),
+    "traex": ("gpt-5.4", "[redacted]", "[redacted]"),
+    "maso": tuple(
+        "[redacted]_reasoning_high [redacted]_reasoning_medium "
+        "[redacted] [redacted]_reasoning_high [redacted]-reasoning-high".split()
+    ),
+    "cursor": (
+        "gpt-5.3-codex-high",
+        "claude-opus-4-8-thinking-high",
+        "claude-4.6-sonnet-medium-thinking",
+    ),
+    "antigravity": ("[redacted]-high", "gemini-2.5-pro", "claude-sonnet-4-6"),
+}
+_MASO_VARIANT_SUFFIX_RE = re.compile(
+    r"(?:[_-]reasoning(?:[_-](?:xhigh|high|medium|low|max))?"
+    r"|[_-]thinking(?:[_-](?:xhigh|high|medium|low|max))?)$",
+    re.IGNORECASE,
 )
 
-DEFAULT_PROVIDER_MODELS: dict[str, tuple[str, ...]] = {
-    AgentType.CLAUDE.value: (
-        "[redacted]",
-        "claude-sonnet-4-6",
-        "claude-opus-4-6",
-    ),
-    AgentType.CODEX.value: (
-        "gpt-5.4",
-        "gpt-5.3-codex",
-        "o3",
-    ),
-    AgentType.TRAEX.value: (
-        "gpt-5.4",
-        "[redacted]",
-    ),
-    AgentType.MASO.value: (
-        "[redacted]_reasoning_high",
-        "[redacted]_reasoning_high",
-        "[redacted]-reasoning-high",
-    ),
-    AgentType.CURSOR.value: (
-        "gpt-5.3-codex-high",
-        "claude-4.6-sonnet-thinking",
-    ),
-    AgentType.ANTIGRAVITY.value: (
-        "gemini-2.5-pro",
-        "claude-sonnet-4-6",
-    ),
+
+def _maso_std_variants(base: str, *, has_max: bool = True) -> dict[str, str]:
+    hi, xhi = f"{base}_reasoning_high", f"{base}_reasoning_xhigh"
+    out = {"none": base, "low": base, "medium": hi, "high": hi, "xhigh": xhi}
+    if has_max:
+        out["max"] = f"{base}_reasoning_max"
+    return out
+
+
+_MASO_MODEL_VARIANTS: dict[str, dict[str, str]] = {
+    "[redacted]": {
+        "none": "[redacted]",
+        "low": "[redacted]",
+        "medium": "[redacted]_reasoning_medium",
+        "high": "[redacted]_reasoning_high",
+    },
+    "[redacted]": _maso_std_variants("[redacted]"),
+    "[redacted]": _maso_std_variants("[redacted]"),
+    "[redacted]": _maso_std_variants("[redacted]", has_max=False),
+    "[redacted]": _maso_std_variants("[redacted]"),
+    **{
+        b: {
+            "none": b,
+            "low": b,
+            "medium": f"{b}_thinking",
+            "high": f"{b}_thinking",
+            "xhigh": f"{b}_thinking_max",
+            "max": f"{b}_thinking_max",
+        }
+        for b in ("[redacted]", "[redacted]")
+    },
+    **{
+        b: {"none": b, "low": b, "medium": f"{b}-reasoning", "high": f"{b}-reasoning-high"}
+        for b in ("[redacted]", "[redacted]", "[redacted]")
+    },
+    "[redacted]": {
+        "none": "[redacted]",
+        "low": "[redacted]",
+        "medium": "[redacted]-reasoning",
+        "high": "[redacted]-reasoning",
+        "xhigh": "[redacted]-reasoning-xhigh",
+    },
 }
+_CURSOR_EFFORT_SUFFIXES: tuple[str, ...] = tuple(
+    "extra-high minimal medium xhigh high none low max".split()
+)
+_CURSOR_NON_EFFORT_MODELS: frozenset[str] = frozenset(
+    "auto auto-smart composer-1.5 claude-4.5-sonnet gpt-5.2".split()
+)
 
 _CODEBASE_MR_URL_RE = re.compile(
     r"https?://[redacted]/(?P<repo>[\w.-]+(?:/[\w.-]+)+)/merge_requests/(?P<iid>\d+)",
@@ -147,6 +172,81 @@ _FEISHU_DOC_URL_RE = re.compile(
     r"(?:docx|wiki|sheets|base|docs|minutes)/[A-Za-z0-9_-]+(?:\?[^\s<>\"')]*)?",
     re.IGNORECASE,
 )
+
+
+def _resolve_cursor_model_with_effort(model: str, effort: str) -> str:
+    clean_model = (model or "gpt-5.3-codex").strip()
+    if not effort:
+        return clean_model
+    if clean_model.lower() in _CURSOR_NON_EFFORT_MODELS:
+        raise ValueError(
+            f"Cursor model {clean_model!r} does not support reasoning_effort={effort!r}"
+        )
+    speed_suffix = ""
+    stem = clean_model
+    for tail in ("-fast", "-standard"):
+        if stem.endswith(tail):
+            speed_suffix = tail
+            stem = stem[: -len(tail)]
+            break
+
+    if stem.endswith("-thinking"):
+        pre_thinking = stem[: -len("-thinking")]
+        for cand in _CURSOR_EFFORT_SUFFIXES:
+            if pre_thinking.endswith(f"-{cand}"):
+                base = pre_thinking[: -(len(cand) + 1)]
+                if not base or base.lower() in _CURSOR_NON_EFFORT_MODELS:
+                    raise ValueError(
+                        f"Cursor model {clean_model!r} does not support reasoning_effort={effort!r}"
+                    )
+                return f"{base}-{effort}-thinking{speed_suffix}"
+
+    for cand in _CURSOR_EFFORT_SUFFIXES:
+        if stem.endswith(f"-{cand}"):
+            if cand == "max" and stem.endswith("-codex-max"):
+                break
+            stem = stem[: -(len(cand) + 1)]
+            break
+    if not stem or stem.lower() in _CURSOR_NON_EFFORT_MODELS:
+        raise ValueError(
+            f"Cursor model {clean_model!r} does not support reasoning_effort={effort!r}"
+        )
+    suffix_effort = "extra-high" if (effort == "xhigh" and stem.endswith("-codex-max")) else effort
+    return f"{stem}-{suffix_effort}{speed_suffix}"
+
+
+def _resolve_maso_model_with_effort(model: str, effort: str) -> str:
+    clean_model = (model or "[redacted]_reasoning_high").strip()
+    if not effort:
+        return clean_model
+    base = _MASO_VARIANT_SUFFIX_RE.sub("", clean_model)
+    base_lower = base.lower()
+    if base_lower in _MASO_MODEL_VARIANTS:
+        variants = _MASO_MODEL_VARIANTS[base_lower]
+        if effort not in variants:
+            allowed = ", ".join(variants.keys())
+            raise ValueError(
+                f"MASO model {base_lower!r} does not support reasoning_effort={effort!r}; "
+                f"supported efforts: {allowed}"
+            )
+        return variants[effort]
+    if _MASO_VARIANT_SUFFIX_RE.search(clean_model):
+        return base if effort == "none" else f"{base}_reasoning_{effort}"
+    for cand in (
+        "extra-high",
+        "minimal",
+        "medium",
+        "xhigh",
+        "high",
+        "none",
+        "low",
+        "max",
+    ):
+        if clean_model.endswith(f"-{cand}"):
+            stem = clean_model[: -(len(cand) + 1)]
+            if stem:
+                return f"{stem}-{effort}"
+    raise ValueError(f"MASO model {clean_model!r} has no variant for reasoning_effort={effort!r}")
 
 
 def validate_ai_command_agent_config(
@@ -182,6 +282,30 @@ def validate_ai_command_agent_config(
             f"Invalid reasoning_effort {reasoning_effort!r}; "
             f"expected empty or one of: {allowed_efforts}"
         )
+
+    spec = get_spec(resolved_provider)
+    allowed_provider_efforts = PROVIDER_SUPPORTED_REASONING_EFFORTS.get(resolved_provider.value, ())
+    if resolved_effort:
+        if not allowed_provider_efforts or spec.reasoning_effort in {
+            ReasoningEffortKind.NONE,
+            ReasoningEffortKind.MODEL_SELECTION,
+        }:
+            raise ValueError(
+                f"Provider {resolved_provider.value!r} does not support a separate "
+                f"reasoning_effort={resolved_effort!r}; choose a model variant instead "
+                f"or leave reasoning_effort empty"
+            )
+        if resolved_effort not in allowed_provider_efforts:
+            allowed_str = ", ".join(allowed_provider_efforts)
+            raise ValueError(
+                f"Provider {resolved_provider.value!r} does not support "
+                f"reasoning_effort={resolved_effort!r}; supported efforts: {allowed_str}"
+            )
+        if spec.reasoning_effort == ReasoningEffortKind.MODEL_ID_SUFFIX:
+            resolved_model = _resolve_cursor_model_with_effort(resolved_model, resolved_effort)
+        elif spec.reasoning_effort == ReasoningEffortKind.MODEL_VARIANTS:
+            resolved_model = _resolve_maso_model_with_effort(resolved_model, resolved_effort)
+
     return resolved_provider, resolved_model, resolved_effort
 
 
@@ -193,7 +317,7 @@ def resolve_ai_command_agent_env(
     base_env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Build the provider launch/switch environment for ``(provider, model, reasoning_effort)``."""
-    resolved_provider, resolved_model, resolved_effort = validate_ai_command_agent_config(
+    resolved_provider, effective_model, resolved_effort = validate_ai_command_agent_config(
         provider, model, reasoning_effort
     )
     env: dict[str, str] = dict(base_env or {})
@@ -201,44 +325,22 @@ def resolve_ai_command_agent_env(
         env.update(DEFAULT_CLAUDE_LAUNCH_ENV)
 
     spec = get_spec(resolved_provider)
-    effective_model = resolved_model
-
-    if spec.reasoning_effort == ReasoningEffortKind.MODEL_ID_SUFFIX and resolved_effort:
-        if effective_model:
-            suffix = "-extra-high" if resolved_effort == "xhigh" else f"-{resolved_effort}"
-            if (
-                resolved_effort not in {"none", "default"}
-                and not effective_model.endswith(suffix)
-                and not any(
-                    effective_model.endswith(f"-{eff}")
-                    for eff in ("low", "medium", "high", "extra-high", "max")
-                )
-            ):
-                effective_model = f"{effective_model}{suffix}"
-
-    if spec.model_env_key:
-        if effective_model:
-            env[spec.model_env_key] = effective_model
-            if resolved_provider == AgentType.CLAUDE:
-                env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = effective_model
-                env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = effective_model
-                env["CLAUDE_CODE_SUBAGENT_MODEL"] = effective_model
+    if spec.model_env_key and effective_model:
+        env[spec.model_env_key] = effective_model
+        if resolved_provider == AgentType.CLAUDE:
+            env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = effective_model
+            env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = effective_model
+            env["CLAUDE_CODE_SUBAGENT_MODEL"] = effective_model
 
     if spec.effort_env_keys:
-        if resolved_effort:
-            for key in spec.effort_env_keys:
+        for key in spec.effort_env_keys:
+            if resolved_effort:
                 env[key] = resolved_effort
-        else:
-            for key in spec.effort_env_keys:
+            else:
                 env.pop(key, None)
-
-    if resolved_effort:
-        env["CLAUDE_HUB_REASONING_EFFORT"] = resolved_effort
-        if resolved_provider == AgentType.CLAUDE:
-            env["CLAUDE_CODE_EFFORT_LEVEL"] = resolved_effort
     else:
-        env.pop("CLAUDE_HUB_REASONING_EFFORT", None)
-        env.pop("CLAUDE_CODE_EFFORT_LEVEL", None)
+        for key in ("CODEX_REASONING_EFFORT", "TRAEX_REASONING_EFFORT"):
+            env.pop(key, None)
 
     return env
 
@@ -265,27 +367,13 @@ class FeishuAiCommandConfig:
     reply_in_thread: bool = True
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "enabled": self.enabled,
-            "prefix": self.prefix,
-            "owner_open_id": self.owner_open_id,
-            "app_id": self.app_id,
-            "provider": self.provider.value,
-            "model": self.model,
-            "reasoning_effort": self.reasoning_effort,
-            "cwd": self.cwd,
-            "watch_chats": list(self.watch_chats),
-            "poll_interval_seconds": self.poll_interval_seconds,
-            "max_active_chats": self.max_active_chats,
-            "max_context_messages": self.max_context_messages,
-            "ack_emoji": self.ack_emoji,
-            "done_emoji": self.done_emoji,
-            "footer": self.footer,
-            "reply_in_thread": self.reply_in_thread,
-        }
+        out = asdict(self)
+        out["provider"] = self.provider.value
+        out["watch_chats"] = list(self.watch_chats)
+        return out
 
     @classmethod
-    def from_mapping(cls, data: Mapping[str, Any]) -> "FeishuAiCommandConfig":
+    def from_mapping(cls, data: Mapping[str, Any]) -> FeishuAiCommandConfig:
         raw_provider = data.get("provider", DEFAULT_AI_COMMAND_PROVIDER.value)
         raw_model = data.get("model", DEFAULT_AI_COMMAND_MODEL)
         raw_effort = data.get("reasoning_effort", DEFAULT_AI_COMMAND_REASONING_EFFORT)
@@ -301,42 +389,48 @@ class FeishuAiCommandConfig:
         watch_chats: list[str] = []
         if isinstance(raw_watch, str):
             watch_chats = [
-                part.strip()
+                item.strip()
                 for part in raw_watch.replace(",", " ").splitlines()
                 for item in part.split()
                 if item.strip()
             ]
         elif isinstance(raw_watch, (list, tuple, set)):
-            watch_chats = [
-                str(item).strip() for item in raw_watch if isinstance(item, str) and item.strip()
-            ]
-        poll_interval = float(data.get("poll_interval_seconds", DEFAULT_POLL_INTERVAL_SECONDS))
-        poll_interval = max(2.0, min(poll_interval, 300.0))
-        max_active = int(data.get("max_active_chats", DEFAULT_MAX_ACTIVE_CHATS))
-        max_active = max(1, min(max_active, 50))
-        max_ctx = int(data.get("max_context_messages", DEFAULT_MAX_CONTEXT_MESSAGES))
-        max_ctx = max(1, min(max_ctx, 100))
-        ack_emoji = str(data.get("ack_emoji") or DEFAULT_AI_COMMAND_ACK_EMOJI).strip()
-        done_emoji = str(data.get("done_emoji") or DEFAULT_AI_COMMAND_DONE_EMOJI).strip()
-        footer = str(data.get("footer") or DEFAULT_AI_COMMAND_FOOTER).strip()
-        return cls(
-            enabled=bool(data.get("enabled", False)),
-            prefix=prefix,
-            owner_open_id=str(data.get("owner_open_id") or "").strip(),
-            app_id=str(data.get("app_id") or "").strip(),
-            provider=provider,
-            model=model,
-            reasoning_effort=effort,
-            cwd=str(data.get("cwd") or "").strip(),
-            watch_chats=tuple(dict.fromkeys(watch_chats)),
-            poll_interval_seconds=poll_interval,
-            max_active_chats=max_active,
-            max_context_messages=max_ctx,
-            ack_emoji=ack_emoji,
-            done_emoji=done_emoji,
-            footer=footer,
-            reply_in_thread=bool(data.get("reply_in_thread", True)),
+            watch_chats = [str(i).strip() for i in raw_watch if isinstance(i, str) and i.strip()]
+        poll_interval = max(
+            2.0,
+            min(
+                float(data.get("poll_interval_seconds", DEFAULT_POLL_INTERVAL_SECONDS)),
+                300.0,
+            ),
         )
+        max_active = max(1, min(int(data.get("max_active_chats", DEFAULT_MAX_ACTIVE_CHATS)), 50))
+        max_ctx = max(
+            1,
+            min(int(data.get("max_context_messages", DEFAULT_MAX_CONTEXT_MESSAGES)), 100),
+        )
+
+        def s(key: str, default: str = "") -> str:
+            return str(data.get(key) or default).strip()
+
+        kw: dict[str, Any] = {
+            "enabled": bool(data.get("enabled", False)),
+            "prefix": prefix,
+            "owner_open_id": s("owner_open_id"),
+            "app_id": s("app_id"),
+            "provider": provider,
+            "model": model,
+            "reasoning_effort": effort,
+            "cwd": s("cwd"),
+            "watch_chats": tuple(dict.fromkeys(watch_chats)),
+            "poll_interval_seconds": poll_interval,
+            "max_active_chats": max_active,
+            "max_context_messages": max_ctx,
+            "ack_emoji": s("ack_emoji", DEFAULT_AI_COMMAND_ACK_EMOJI),
+            "done_emoji": s("done_emoji", DEFAULT_AI_COMMAND_DONE_EMOJI),
+            "footer": s("footer", DEFAULT_AI_COMMAND_FOOTER),
+            "reply_in_thread": bool(data.get("reply_in_thread", True)),
+        }
+        return cls(**kw)
 
 
 @dataclass(frozen=True)
@@ -396,31 +490,18 @@ class AiCommandExecutionResult:
     final_message_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "handled": self.handled,
-            "dry_run": self.dry_run,
-            "message_id": self.message_id,
-            "chat_id": self.chat_id,
-            "thread_id": self.thread_id,
-            "status": self.status,
-            "reason": self.reason,
-            "instruction": self.parsed.instruction if self.parsed else "",
-            "provider": self.parsed.provider.value if self.parsed else None,
-            "model": self.parsed.model if self.parsed else None,
-            "reasoning_effort": self.parsed.reasoning_effort if self.parsed else None,
-            "inline_overrides": dict(self.parsed.inline_overrides) if self.parsed else {},
-            "effective_env": self.parsed.effective_env if self.parsed else {},
-            "refs": self.refs.to_dict(),
-            "ack_reaction": self.ack_reaction,
-            "done_reaction": self.done_reaction,
-            "interim_text": self.interim_text,
-            "interim_post": dict(self.interim_post),
-            "final_text": self.final_text,
-            "final_post": dict(self.final_post),
-            "tab_id": self.tab_id,
-            "interim_message_id": self.interim_message_id,
-            "final_message_id": self.final_message_id,
-        }
+        p = self.parsed
+        out = {k: v for k, v in asdict(self).items() if k not in {"parsed", "refs"}}
+        out["instruction"] = p.instruction if p else ""
+        out["provider"] = p.provider.value if p else None
+        out["model"] = p.model if p else None
+        out["reasoning_effort"] = p.reasoning_effort if p else None
+        out["inline_overrides"] = dict(p.inline_overrides) if p else {}
+        out["effective_env"] = p.effective_env if p else {}
+        out["refs"] = self.refs.to_dict()
+        out["interim_post"] = dict(self.interim_post)
+        out["final_post"] = dict(self.final_post)
+        return out
 
 
 _LEADING_FLAG_RE = re.compile(
@@ -433,9 +514,7 @@ _LEADING_FLAG_RE = re.compile(
 
 
 def _strip_quotes(val: str) -> str:
-    if len(val) >= 2 and val[0] == val[-1] and val[0] in {'"', "'"}:
-        return val[1:-1]
-    return val
+    return val[1:-1] if len(val) >= 2 and val[0] == val[-1] and val[0] in {'"', "'"} else val
 
 
 def parse_ai_command(
@@ -447,18 +526,10 @@ def parse_ai_command(
     default_reasoning_effort: str = DEFAULT_AI_COMMAND_REASONING_EFFORT,
     footer: str = DEFAULT_AI_COMMAND_FOOTER,
 ) -> ParsedAiCommand | None:
-    """Parse an inbound message for the ``/ai`` prefix and optional inline flags.
-
-    Supports leading flags while preserving multi-line/quoted instruction formatting:
-    - ``--provider <provider>`` / ``--agent-type <provider>`` / ``-p <provider>``
-    - ``--model <model>`` / ``-m <model>``
-    - ``--effort <effort>`` / ``--reasoning-effort <effort>`` / ``--thinking <effort>`` / ``-e <effort>``
-    """
+    """Parse an inbound message for the ``/ai`` prefix and optional inline flags."""
     if not isinstance(text, str):
         return None
-    if footer and footer in text:
-        return None
-    if DEFAULT_AI_COMMAND_FOOTER in text:
+    if (footer and footer in text) or DEFAULT_AI_COMMAND_FOOTER in text:
         return None
 
     clean_prefix = (prefix or DEFAULT_AI_COMMAND_PREFIX).strip()
@@ -470,10 +541,8 @@ def parse_ai_command(
     if not match:
         return None
 
-    rest = (match.group("rest") or "").strip()
     overrides: dict[str, str] = {}
-    remaining = rest
-
+    remaining = (match.group("rest") or "").strip()
     while remaining.startswith("-"):
         flag_match = _LEADING_FLAG_RE.match(remaining)
         if not flag_match:
@@ -496,14 +565,8 @@ def parse_ai_command(
             overrides["reasoning_effort"] = val
         remaining = (flag_match.group("tail") or "").strip()
 
-    instruction = remaining
-
     provider_in = overrides.get("provider", default_provider)
-    # If provider was overridden inline without an explicit --model, only keep default_model
-    # if the provider did not change; otherwise use the new provider's primary default model.
-    base_provider, _, _ = validate_ai_command_agent_config(
-        default_provider, default_model, default_reasoning_effort
-    )
+    base_provider, _, _ = validate_ai_command_agent_config(default_provider, "", "")
     target_provider, _, _ = validate_ai_command_agent_config(provider_in, "", "")
     if "model" in overrides:
         model_in = overrides["model"]
@@ -513,20 +576,24 @@ def parse_ai_command(
     else:
         model_in = default_model
 
-    effort_in = overrides.get("reasoning_effort", default_reasoning_effort)
+    if "reasoning_effort" in overrides:
+        effort_in = overrides["reasoning_effort"]
+    elif not PROVIDER_SUPPORTED_REASONING_EFFORTS.get(target_provider.value):
+        effort_in = ""
+    elif (
+        target_provider != base_provider
+        and default_reasoning_effort
+        not in PROVIDER_SUPPORTED_REASONING_EFFORTS.get(target_provider.value, ())
+    ):
+        effort_in = "high"
+    else:
+        effort_in = default_reasoning_effort
+
     resolved_provider, resolved_model, resolved_effort = validate_ai_command_agent_config(
-        target_provider,
-        model_in,
-        effort_in,
+        target_provider, model_in, effort_in
     )
     return ParsedAiCommand(
-        raw_text=text,
-        prefix=clean_prefix,
-        instruction=instruction,
-        provider=resolved_provider,
-        model=resolved_model,
-        reasoning_effort=resolved_effort,
-        inline_overrides=overrides,
+        text, clean_prefix, remaining, resolved_provider, resolved_model, resolved_effort, overrides
     )
 
 
@@ -540,59 +607,45 @@ def extract_context_references(
     mr_refs: list[str] = []
     commit_refs: list[str] = []
     doc_refs: list[str] = []
-
     known_repos: list[str] = []
+
     if chat_name:
         for repo_match in _REPO_NAME_RE.finditer(chat_name):
-            candidate = repo_match.group(1)
-            if not candidate.startswith(("http", "open-apis")):
-                known_repos.append(candidate)
+            cand = repo_match.group(1)
+            if not cand.startswith(("http", "open-apis")):
+                known_repos.append(cand)
 
     for text in combined_texts:
-        for m in _CODEBASE_MR_URL_RE.finditer(text):
-            repo = m.group("repo")
-            iid = m.group("iid")
-            if repo not in known_repos:
-                known_repos.append(repo)
-            ref = f"{repo}!{iid}"
-            if ref not in mr_refs:
-                mr_refs.append(ref)
-        for m in _REPO_BANG_MR_RE.finditer(text):
-            repo = m.group("repo")
-            iid = m.group("iid")
-            if repo not in known_repos:
-                known_repos.append(repo)
-            ref = f"{repo}!{iid}"
-            if ref not in mr_refs:
-                mr_refs.append(ref)
+        for regex in (_CODEBASE_MR_URL_RE, _REPO_BANG_MR_RE):
+            for m in regex.finditer(text):
+                repo, iid = m.group("repo"), m.group("iid")
+                if repo not in known_repos:
+                    known_repos.append(repo)
+                ref = f"{repo}!{iid}"
+                if ref not in mr_refs:
+                    mr_refs.append(ref)
 
     default_repo = known_repos[0] if known_repos else ""
     for text in combined_texts:
         for m in _BARE_BANG_MR_RE.finditer(text):
             iid = m.group("iid")
-            if any(existing.endswith(f"!{iid}") for existing in mr_refs):
-                continue
-            ref = f"{default_repo}!{iid}" if default_repo else f"!{iid}"
-            if ref not in mr_refs:
-                mr_refs.append(ref)
+            if not any(existing.endswith(f"!{iid}") for existing in mr_refs):
+                ref = f"{default_repo}!{iid}" if default_repo else f"!{iid}"
+                if ref not in mr_refs:
+                    mr_refs.append(ref)
 
     for text in combined_texts:
-        for m in _COMMIT_URL_RE.finditer(text):
-            sha = m.group("sha").lower()[:10]
-            if sha not in commit_refs:
-                commit_refs.append(sha)
-        for m in _COMMIT_TEXT_RE.finditer(text):
-            sha = m.group("sha").lower()[:10]
-            if sha not in commit_refs:
-                commit_refs.append(sha)
+        for regex in (_COMMIT_URL_RE, _COMMIT_TEXT_RE):
+            for m in regex.finditer(text):
+                sha = m.group("sha").lower()[:10]
+                if sha not in commit_refs:
+                    commit_refs.append(sha)
         for m in _HEX_SHA_RE.finditer(text):
             sha = m.group("sha").lower()
-            # Filter out purely numeric strings so message IDs/timestamps are not mistaken for SHAs
-            if sha.isdigit():
-                continue
-            short_sha = sha[:10]
-            if short_sha not in commit_refs:
-                commit_refs.append(short_sha)
+            if not sha.isdigit():
+                short_sha = sha[:10]
+                if short_sha not in commit_refs:
+                    commit_refs.append(short_sha)
         for m in _FEISHU_DOC_URL_RE.finditer(text):
             url = m.group(0)
             if url not in doc_refs:
@@ -606,10 +659,8 @@ def extract_context_references(
 
 
 def ensure_ai_footer(text: str, footer: str = DEFAULT_AI_COMMAND_FOOTER) -> str:
-    clean_body = text.strip()
+    clean_body = text.strip() or "已完成处理。"
     clean_footer = (footer or DEFAULT_AI_COMMAND_FOOTER).strip()
-    if not clean_body:
-        clean_body = "已完成处理。"
     if clean_footer in clean_body:
         return clean_body
     max_body = max(200, FEISHU_MESSAGE_MAX_CHARS - len(clean_footer) - 10)
@@ -641,15 +692,15 @@ def build_interim_reply_text(
     action_desc = parsed.instruction.strip()
     if refs.mr_refs:
         primary_mr = refs.mr_refs[0]
-        if refs.commit_refs:
-            target = f"{primary_mr}（最新 commit {refs.commit_refs[0][:10]}）"
-        else:
-            target = primary_mr
+        target = (
+            f"{primary_mr}（最新 commit {refs.commit_refs[0][:10]}）"
+            if refs.commit_refs
+            else primary_mr
+        )
         if not action_desc or "review" in action_desc.lower() or "审查" in action_desc:
             task_phrase = "做逐文件深度审查"
         else:
-            short_inst = action_desc.splitlines()[0][:48]
-            task_phrase = f"执行「{short_inst}」"
+            task_phrase = f"执行「{action_desc.splitlines()[0][:48]}」"
         body = f"正在派 Subagent 对 {target}{task_phrase}，待审查完成后执行回复。"
     else:
         short_inst = (action_desc or "当前上下文").splitlines()[0][:48]
@@ -687,7 +738,6 @@ def build_ai_dispatch_prompt(
         lines.append(f"Extracted commit SHAs: {', '.join(refs.commit_refs)}")
     if refs.doc_refs:
         lines.append(f"Extracted document links: {', '.join(refs.doc_refs)}")
-
     if context_messages:
         lines.append("")
         lines.append('<feishu_thread_context trust="untrusted">')
@@ -697,14 +747,10 @@ def build_ai_dispatch_prompt(
                 f"[{ctx.message_id} · sender={ctx.sender_open_id} · type={ctx.msg_type}] {safe_text}"
             )
         lines.append("</feishu_thread_context>")
-
     return "\n".join(lines)
 
 
-AiTurnDispatcher = Callable[
-    [str, str, str, str, Mapping[str, Any]],
-    Awaitable[str],
-]
+AiTurnDispatcher = Callable[[str, str, str, str, Mapping[str, Any]], Awaitable[str]]
 
 
 class FeishuAiCommandService:
@@ -741,6 +787,7 @@ class FeishuAiCommandService:
             "watermarks": {},
             "channel_tabs": {},
             "recent_runs": [],
+            "pending_queue": [],
         }
         if not document_exists(self._state_path):
             return default_doc
@@ -748,9 +795,7 @@ class FeishuAiCommandService:
             raw = read_document(self._state_path)
         except (FileNotFoundError, ValueError, OSError):
             return default_doc
-        if not isinstance(raw, Mapping):
-            return default_doc
-        return dict(raw)
+        return dict(raw) if isinstance(raw, Mapping) else default_doc
 
     def _save_state(self, state: Mapping[str, Any]) -> None:
         write_document(self._state_path, dict(state))
@@ -760,28 +805,23 @@ class FeishuAiCommandService:
         with self._lock:
             if not document_exists(self._state_path):
                 return False
-            state = self._load_state()
-            raw_cfg = state.get("config")
+            raw_cfg = self._load_state().get("config")
             return bool(isinstance(raw_cfg, Mapping) and raw_cfg.get("enabled"))
 
     def get_config(self, *, auto_import_lark_cli: bool | None = None) -> FeishuAiCommandConfig:
         with self._lock:
-            state = self._load_state()
-            raw_cfg = state.get("config")
+            raw_cfg = self._load_state().get("config")
             cfg = (
                 FeishuAiCommandConfig.from_mapping(raw_cfg)
                 if isinstance(raw_cfg, Mapping)
                 else FeishuAiCommandConfig()
             )
-            should_auto_import = (
-                cfg.enabled if auto_import_lark_cli is None else auto_import_lark_cli
-            )
-            # Auto-fill owner_open_id / app_id from token store if not explicitly set
+            should_auto = cfg.enabled if auto_import_lark_cli is None else auto_import_lark_cli
             if not cfg.owner_open_id or not cfg.app_id:
                 record = self._token_store.resolve_token(
                     open_id=cfg.owner_open_id or None,
-                    app_id=cfg.app_id or settings.feishu_app_id or None,
-                    auto_import_lark_cli=should_auto_import,
+                    app_id=cfg.app_id or None,
+                    auto_import_lark_cli=should_auto,
                 )
                 if record is not None:
                     cfg = replace(
@@ -800,63 +840,132 @@ class FeishuAiCommandService:
                 if isinstance(current_raw, Mapping)
                 else FeishuAiCommandConfig().to_dict()
             )
+            old_provider = str(merged.get("provider") or DEFAULT_AI_COMMAND_PROVIDER.value)
             for key, value in patch.items():
                 if value is not None:
                     merged[key] = value
+            new_provider = str(merged.get("provider") or old_provider).strip().lower()
+            if "provider" in patch and patch["provider"] is not None:
+                if "model" not in patch or patch["model"] is None:
+                    if new_provider != old_provider.strip().lower():
+                        defaults = DEFAULT_PROVIDER_MODELS.get(new_provider, ())
+                        if defaults:
+                            merged["model"] = defaults[0]
+                if "reasoning_effort" not in patch or patch["reasoning_effort"] is None:
+                    supported = PROVIDER_SUPPORTED_REASONING_EFFORTS.get(new_provider, ())
+                    if not supported:
+                        merged["reasoning_effort"] = ""
+                    elif str(merged.get("reasoning_effort") or "") not in supported:
+                        merged["reasoning_effort"] = "high" if "high" in supported else supported[0]
             updated = FeishuAiCommandConfig.from_mapping(merged)
             state["config"] = updated.to_dict()
             self._save_state(state)
             return updated
 
-    def get_watermarks(self) -> dict[str, int]:
+    def enqueue_pending_command(
+        self,
+        message: FeishuUserMessage,
+        *,
+        source: str = "poller",
+        seeded_context: Sequence[FeishuUserMessage] | None = None,
+    ) -> bool:
+        """Durably record an accepted ``/ai`` command before advancing the poller watermark."""
         with self._lock:
             state = self._load_state()
-            wm = state.get("watermarks")
+            queue: list[dict[str, Any]] = [
+                dict(item)
+                for item in (state.get("pending_queue") or [])
+                if isinstance(item, Mapping)
+            ]
+            if any(
+                isinstance(item.get("message"), Mapping)
+                and item["message"].get("message_id") == message.message_id
+                for item in queue
+            ):
+                return False
+            queue.append(
+                {
+                    "message": message.to_dict(),
+                    "source": source,
+                    "seeded_context": (
+                        [m.to_dict() for m in seeded_context]
+                        if seeded_context is not None
+                        else None
+                    ),
+                    "enqueued_at": time.time(),
+                }
+            )
+            state["pending_queue"] = queue[-_MAX_PENDING_QUEUE:]
+            self._save_state(state)
+            return True
+
+    def dequeue_pending_command(self, message_id: str) -> None:
+        """Remove a completed/handled command from the durable pending queue."""
+        with self._lock:
+            state = self._load_state()
+            state["pending_queue"] = [
+                dict(item)
+                for item in (state.get("pending_queue") or [])
+                if isinstance(item, Mapping)
+                and not (
+                    isinstance(item.get("message"), Mapping)
+                    and item["message"].get("message_id") == message_id
+                )
+            ]
+            self._save_state(state)
+
+    def list_pending_commands(self) -> list[dict[str, Any]]:
+        """Return all durably enqueued ``/ai`` commands awaiting execution."""
+        with self._lock:
+            return [
+                dict(item)
+                for item in (self._load_state().get("pending_queue") or [])
+                if isinstance(item, Mapping)
+            ]
+
+    def get_watermarks(self) -> dict[str, int]:
+        with self._lock:
+            wm = self._load_state().get("watermarks")
             if not isinstance(wm, Mapping):
                 return {}
-            out: dict[str, int] = {}
-            for k, v in wm.items():
-                if isinstance(k, str) and isinstance(v, (int, float)):
-                    out[k] = int(v)
-            return out
+            return {
+                k: int(v)
+                for k, v in wm.items()
+                if isinstance(k, str) and isinstance(v, (int, float))
+            }
 
     def set_watermark(self, chat_id: str, create_time_ms: int) -> None:
         with self._lock:
             state = self._load_state()
             wm = dict(state.get("watermarks") or {})
-            prev = int(wm.get(chat_id) or 0)
-            if create_time_ms > prev:
+            if create_time_ms > int(wm.get(chat_id) or 0):
                 wm[chat_id] = int(create_time_ms)
                 state["watermarks"] = wm
                 self._save_state(state)
 
     def get_recent_runs(self) -> list[dict[str, Any]]:
         with self._lock:
-            state = self._load_state()
-            runs = state.get("recent_runs")
+            runs = self._load_state().get("recent_runs")
             return list(runs) if isinstance(runs, list) else []
 
     def _record_run(self, result: AiCommandExecutionResult, *, source: str) -> None:
         with self._lock:
             state = self._load_state()
             runs = list(state.get("recent_runs") or [])
-            runs.insert(
-                0,
-                {
-                    "message_id": result.message_id,
-                    "chat_id": result.chat_id,
-                    "thread_id": result.thread_id,
-                    "source": source,
-                    "status": result.status,
-                    "reason": result.reason,
-                    "provider": result.parsed.provider.value if result.parsed else None,
-                    "model": result.parsed.model if result.parsed else None,
-                    "reasoning_effort": (result.parsed.reasoning_effort if result.parsed else None),
-                    "refs": result.refs.to_dict(),
-                    "tab_id": result.tab_id,
-                    "at": time.time(),
-                },
+            d = result.to_dict()
+            keys = (
+                "message_id",
+                "chat_id",
+                "thread_id",
+                "status",
+                "reason",
+                "provider",
+                "model",
+                "reasoning_effort",
+                "refs",
+                "tab_id",
             )
+            runs.insert(0, {k: d[k] for k in keys} | {"source": source, "at": time.time()})
             state["recent_runs"] = runs[:_MAX_RECENT_RUNS]
             self._save_state(state)
 
@@ -870,24 +979,22 @@ class FeishuAiCommandService:
             app_id=cfg.app_id or settings.feishu_app_id or None,
         )
 
-    def preflight_status(
-        self,
-        *,
-        auto_import_lark_cli: bool = True,
-    ) -> FeishuScopePreflightResult:
+    def preflight_status(self, *, auto_import_lark_cli: bool = True) -> FeishuScopePreflightResult:
         cfg = self.get_config()
         record = self._token_store.resolve_token(
             open_id=cfg.owner_open_id or None,
-            app_id=cfg.app_id or settings.feishu_app_id or None,
+            app_id=cfg.app_id or None,
             auto_import_lark_cli=auto_import_lark_cli,
         )
-        client = self.build_user_client(cfg)
-        return client.preflight_scopes(record)
+        return self.build_user_client(cfg).preflight_scopes(record)
 
     def capabilities_dict(self) -> dict[str, Any]:
         return {
             "providers": [p.value for p in SUPPORTED_AI_COMMAND_PROVIDERS],
             "reasoning_efforts": [e for e in SUPPORTED_REASONING_EFFORTS if e],
+            "provider_reasoning_efforts": {
+                k: list(v) for k, v in PROVIDER_SUPPORTED_REASONING_EFFORTS.items()
+            },
             "provider_models": {k: list(v) for k, v in DEFAULT_PROVIDER_MODELS.items()},
         }
 
@@ -900,11 +1007,7 @@ class FeishuAiCommandService:
         config: FeishuAiCommandConfig | None = None,
     ) -> bool:
         cfg = config or self.get_config()
-        if not cfg.enabled:
-            return False
-        if sender_type != "user":
-            return False
-        if not cfg.owner_open_id or not sender_open_id:
+        if not cfg.enabled or sender_type != "user" or not cfg.owner_open_id or not sender_open_id:
             return False
         if not hmac.compare_digest(sender_open_id.strip(), cfg.owner_open_id.strip()):
             return False
@@ -930,7 +1033,6 @@ class FeishuAiCommandService:
         seeded_context: Sequence[FeishuUserMessage] | None = None,
     ) -> tuple[list[FeishuUserMessage], AiCommandContextRefs]:
         context_msgs: list[FeishuUserMessage] = list(seeded_context or [])
-        chat_name = ""
         if not context_msgs:
             if message.thread_id:
                 try:
@@ -942,7 +1044,7 @@ class FeishuAiCommandService:
                     )
                 except Exception:
                     logger.warning(
-                        "Failed to list Feishu thread messages for %s; falling back to chat tail",
+                        "Failed to list Feishu thread messages for %s",
                         message.thread_id,
                     )
             if not context_msgs and message.chat_id:
@@ -955,10 +1057,7 @@ class FeishuAiCommandService:
                     )
                     context_msgs = list(reversed(desc_msgs))
                 except Exception:
-                    logger.warning(
-                        "Failed to list Feishu chat messages for %s",
-                        message.chat_id,
-                    )
+                    logger.warning("Failed to list Feishu chat messages for %s", message.chat_id)
             if message.parent_id and all(m.message_id != message.parent_id for m in context_msgs):
                 try:
                     parent_msg = await client.get_message(message.parent_id)
@@ -970,8 +1069,7 @@ class FeishuAiCommandService:
         texts = [m.text for m in context_msgs if m.text]
         if message.text and message.text not in texts:
             texts.append(message.text)
-        refs = extract_context_references(texts, chat_name=chat_name)
-        return context_msgs, refs
+        return context_msgs, extract_context_references(texts)
 
     async def _ensure_execution_tab(
         self,
@@ -981,9 +1079,7 @@ class FeishuAiCommandService:
     ) -> str:
         channel_key = f"{message.chat_id}:{message.thread_id or 'main'}:{parsed.provider.value}"
         with self._lock:
-            state = self._load_state()
-            channel_tabs = dict(state.get("channel_tabs") or {})
-            existing_tab_id = channel_tabs.get(channel_key)
+            existing_tab_id = dict(self._load_state().get("channel_tabs") or {}).get(channel_key)
 
         target_env = parsed.effective_env
         if existing_tab_id:
@@ -1004,9 +1100,8 @@ class FeishuAiCommandService:
         if not os.path.isdir(cwd):
             cwd = str(Path.home())
         short_target = (message.thread_id or message.chat_id)[-6:]
-        tab_name = f"Feishu /ai · {short_target}"[:64]
         created = await self._create_tab(
-            name=tab_name,
+            name=f"Feishu /ai · {short_target}"[:64],
             session_kind=SessionKind.CHAT,
             agent_type=parsed.provider,
             cwd=cwd,
@@ -1032,13 +1127,7 @@ class FeishuAiCommandService:
 
         return ttyd_manager.get_tab(tab_id)
 
-    async def _switch_tab_env(
-        self,
-        tab_id: str,
-        env: dict[str, str],
-        *,
-        tab: Any = None,
-    ) -> None:
+    async def _switch_tab_env(self, tab_id: str, env: dict[str, str], *, tab: Any = None) -> None:
         if self._tab_env_switcher is not None:
             res = self._tab_env_switcher(tab_id, env)
             if inspect.isawaitable(res):
@@ -1053,21 +1142,32 @@ class FeishuAiCommandService:
         from claude_hub.services import ttyd_manager
 
         res = ttyd_manager.switch_env(tab_id, env)
-        if inspect.isawaitable(res):
-            await res
+        updated_tab = await res if inspect.isawaitable(res) else res
+        try:
+            from claude_hub.api.agent_stream import (
+                _get_tab_tailer_manager,
+                _terminal_tab_stream_session,
+            )
+
+            stream_session = _terminal_tab_stream_session(tab_id)
+            if stream_session is not None:
+                effective_env = dict(getattr(updated_tab, "env", None) or env)
+                _get_tab_tailer_manager().set_env(stream_session, effective_env)
+        except Exception:
+            logger.debug(
+                "Could not sync live stream tailer env for tab %s",
+                tab_id,
+                exc_info=True,
+            )
 
     async def _create_tab(self, **kwargs: Any) -> Any:
         if self._tab_creator is not None:
             res = self._tab_creator(**kwargs)
-            if inspect.isawaitable(res):
-                return await res
-            return res
+            return await res if inspect.isawaitable(res) else res
         from claude_hub.services import ttyd_manager
 
         res = ttyd_manager.create_tab(**kwargs)
-        if inspect.isawaitable(res):
-            return await res
-        return res
+        return await res if inspect.isawaitable(res) else res
 
     async def _dispatch_turn(
         self,
@@ -1089,6 +1189,17 @@ class FeishuAiCommandService:
             turn_metadata=dict(turn_metadata),
         )
 
+    def _skip_result(self, msg: FeishuUserMessage, **kw: Any) -> AiCommandExecutionResult:
+        kw.setdefault("status", "skipped")
+        return AiCommandExecutionResult(
+            False, bool(kw.pop("dry_run", False)), msg.message_id, msg.chat_id, msg.thread_id, **kw
+        )
+
+    def _done_result(self, msg: FeishuUserMessage, **kw: Any) -> AiCommandExecutionResult:
+        tid = kw.pop("thread_id", msg.thread_id)
+        dry = bool(kw.pop("dry_run", False))
+        return AiCommandExecutionResult(True, dry, msg.message_id, msg.chat_id, tid, **kw)
+
     async def handle_message(
         self,
         message: FeishuUserMessage,
@@ -1100,46 +1211,14 @@ class FeishuAiCommandService:
         """Run the full ``/ai`` command pipeline for one candidate message."""
         cfg = self.get_config()
         if not dry_run and not cfg.enabled:
-            return AiCommandExecutionResult(
-                handled=False,
-                dry_run=dry_run,
-                message_id=message.message_id,
-                chat_id=message.chat_id,
-                thread_id=message.thread_id,
-                status="skipped",
-                reason="disabled",
-            )
+            return self._skip_result(message, dry_run=dry_run, reason="disabled")
         if message.sender_type != "user":
-            return AiCommandExecutionResult(
-                handled=False,
-                dry_run=dry_run,
-                message_id=message.message_id,
-                chat_id=message.chat_id,
-                thread_id=message.thread_id,
-                status="skipped",
-                reason="not_user_sender",
-            )
+            return self._skip_result(message, dry_run=dry_run, reason="not_user_sender")
         if not dry_run:
             if not cfg.owner_open_id.strip():
-                return AiCommandExecutionResult(
-                    handled=False,
-                    dry_run=dry_run,
-                    message_id=message.message_id,
-                    chat_id=message.chat_id,
-                    thread_id=message.thread_id,
-                    status="skipped",
-                    reason="no_owner_open_id",
-                )
+                return self._skip_result(message, dry_run=dry_run, reason="no_owner_open_id")
             if not hmac.compare_digest(message.sender_open_id.strip(), cfg.owner_open_id.strip()):
-                return AiCommandExecutionResult(
-                    handled=False,
-                    dry_run=dry_run,
-                    message_id=message.message_id,
-                    chat_id=message.chat_id,
-                    thread_id=message.thread_id,
-                    status="skipped",
-                    reason="sender_not_owner",
-                )
+                return self._skip_result(message, dry_run=dry_run, reason="sender_not_owner")
 
         try:
             parsed = parse_ai_command(
@@ -1151,40 +1230,22 @@ class FeishuAiCommandService:
                 footer=cfg.footer,
             )
         except ValueError as exc:
-            return AiCommandExecutionResult(
-                handled=False,
-                dry_run=dry_run,
-                message_id=message.message_id,
-                chat_id=message.chat_id,
-                thread_id=message.thread_id,
-                status="invalid_flags",
-                reason=str(exc),
+            return self._skip_result(
+                message, dry_run=dry_run, status="invalid_flags", reason=str(exc)
             )
 
         if parsed is None:
-            return AiCommandExecutionResult(
-                handled=False,
-                dry_run=dry_run,
-                message_id=message.message_id,
-                chat_id=message.chat_id,
-                thread_id=message.thread_id,
-                status="skipped",
-                reason="prefix_not_matched",
-            )
+            return self._skip_result(message, dry_run=dry_run, reason="prefix_not_matched")
 
         dedup_claim_key = f"ai_cmd:{cfg.owner_open_id or 'owner'}:{message.message_id}"
-        if not dry_run:
-            if not self._dedup.claim(dedup_claim_key):
-                return AiCommandExecutionResult(
-                    handled=False,
-                    dry_run=dry_run,
-                    message_id=message.message_id,
-                    chat_id=message.chat_id,
-                    thread_id=message.thread_id,
-                    status="duplicate",
-                    reason="already_claimed",
-                    parsed=parsed,
-                )
+        if not dry_run and not self._dedup.claim(dedup_claim_key):
+            return self._skip_result(
+                message,
+                dry_run=dry_run,
+                status="duplicate",
+                reason="already_claimed",
+                parsed=parsed,
+            )
 
         user_client = self.build_user_client(cfg)
         ack_reaction_id: str | None = None
@@ -1210,28 +1271,21 @@ class FeishuAiCommandService:
                     f"reasoning_effort={parsed.reasoning_effort or '(default)'}.",
                     footer=cfg.footer,
                 )
-                final_post = build_ai_post_payload(preview_final, footer=cfg.footer)
-                return AiCommandExecutionResult(
-                    handled=True,
-                    dry_run=True,
-                    message_id=message.message_id,
-                    chat_id=message.chat_id,
-                    thread_id=message.thread_id,
+                return self._done_result(
+                    message,
                     status="dry_run",
                     parsed=parsed,
+                    dry_run=True,
                     refs=refs,
                     interim_text=interim_text,
                     interim_post=interim_post,
                     final_text=preview_final,
-                    final_post=final_post,
+                    final_post=build_ai_post_payload(preview_final, footer=cfg.footer),
                     ack_reaction=cfg.ack_emoji,
                     done_reaction=cfg.done_emoji,
                 )
 
-            # Verify scope upfront before posting reactions/replies
             user_client.require_send_as_user_scope()
-
-            # Stage 1: Add OnIt reaction as user
             if cfg.ack_emoji:
                 try:
                     async with asyncio.timeout(_REACTION_TIMEOUT_SECONDS):
@@ -1240,15 +1294,14 @@ class FeishuAiCommandService:
                         )
                 except Exception:
                     logger.warning(
-                        "Failed to add %s reaction on %s", cfg.ack_emoji, message.message_id
+                        "Failed to add %s reaction on %s",
+                        cfg.ack_emoji,
+                        message.message_id,
                     )
 
-            # Stage 2: Fetch thread/chat context & extract MR/commit/doc references
             context_msgs, refs = await self._fetch_context_and_refs(
                 user_client, message, cfg, seeded_context=seeded_context
             )
-
-            # Stage 3: Post interim reply ('正在派 Subagent...') as user (msg_type=post)
             interim_text = build_interim_reply_text(parsed, refs, footer=cfg.footer)
             interim_post = build_ai_post_payload(interim_text, footer=cfg.footer)
             interim_receipt = await user_client.reply_as_user(
@@ -1259,7 +1312,6 @@ class FeishuAiCommandService:
                 uuid=bounded_message_uuid(message.message_id, "interim"),
             )
 
-            # Stage 4: Dispatch work to Hub Chat turn (serialized per channel)
             lock_key = f"{message.chat_id}:{message.thread_id or 'main'}"
             with self._lock:
                 channel_lock = self._channel_locks.setdefault(lock_key, asyncio.Lock())
@@ -1267,29 +1319,25 @@ class FeishuAiCommandService:
             async with channel_lock:
                 tab_id = await self._ensure_execution_tab(message, parsed, cfg)
                 prompt = build_ai_dispatch_prompt(message, parsed, context_msgs, refs)
-                turn_id = f"feishu-ai-{message.message_id}"
                 turn_metadata = {
                     "origin": "feishu_ai_command",
                     "source": source,
                     "message_id": message.message_id,
                     "chat_id": message.chat_id,
                     "thread_id": message.thread_id,
-                    "mr_refs": list(refs.mr_refs),
-                    "commit_refs": list(refs.commit_refs),
-                    "doc_refs": list(refs.doc_refs),
                     "provider": parsed.provider.value,
                     "model": parsed.model,
                     "reasoning_effort": parsed.reasoning_effort,
+                    **refs.to_dict(),
                 }
                 answer = await self._dispatch_turn(
                     tab_id,
                     prompt,
-                    turn_id,
+                    f"feishu-ai-{message.message_id}",
                     parsed.instruction or message.text,
                     turn_metadata,
                 )
 
-            # Stage 5: Post final reply as user (msg_type=post) with footer
             final_text = ensure_ai_footer(answer, footer=cfg.footer)
             final_post = build_ai_post_payload(final_text, footer=cfg.footer)
             final_receipt = await user_client.reply_as_user(
@@ -1299,15 +1347,11 @@ class FeishuAiCommandService:
                 reply_in_thread=reply_in_thread,
                 uuid=bounded_message_uuid(message.message_id, "final"),
             )
-
-            result = AiCommandExecutionResult(
-                handled=True,
-                dry_run=False,
-                message_id=message.message_id,
-                chat_id=message.chat_id,
-                thread_id=message.thread_id or interim_receipt.thread_id,
+            result = self._done_result(
+                message,
                 status="completed",
                 parsed=parsed,
+                thread_id=message.thread_id or interim_receipt.thread_id,
                 refs=refs,
                 interim_text=interim_text,
                 interim_post=interim_post,
@@ -1323,25 +1367,14 @@ class FeishuAiCommandService:
             return result
 
         except FeishuUserScopeError as exc:
-            status_val = "scope_blocked"
-            reason_val = str(exc)
+            status_val, reason_val = "scope_blocked", str(exc)
             logger.error("Feishu /ai command blocked by missing scope: %s", exc)
-            result = AiCommandExecutionResult(
-                handled=True,
-                dry_run=False,
-                message_id=message.message_id,
-                chat_id=message.chat_id,
-                thread_id=message.thread_id,
-                status=status_val,
-                reason=reason_val,
-                parsed=parsed,
-            )
+            result = self._done_result(message, status=status_val, reason=reason_val, parsed=parsed)
             self._record_run(result, source=source)
             return result
 
         except asyncio.CancelledError:
-            status_val = "cancelled"
-            reason_val = "cancelled"
+            status_val, reason_val = "cancelled", "cancelled"
             if tab_id is None:
                 self._dedup.release(dedup_claim_key)
             raise
@@ -1365,12 +1398,8 @@ class FeishuAiCommandService:
                 )
             except Exception:
                 logger.warning("Failed to post /ai error fallback reply for %s", message.message_id)
-            result = AiCommandExecutionResult(
-                handled=True,
-                dry_run=False,
-                message_id=message.message_id,
-                chat_id=message.chat_id,
-                thread_id=message.thread_id,
+            result = self._done_result(
+                message,
                 status=status_val,
                 reason=reason_val,
                 parsed=parsed,
@@ -1428,19 +1457,23 @@ class FeishuAiCommandService:
         ):
             return False
         user_msg = FeishuUserMessage(
-            message_id=event.message_id,
-            chat_id=event.chat_id,
-            sender_open_id=event.sender_open_id,
-            sender_type="user",
-            msg_type=event.message_type,
-            text=event.text,
-            create_time_ms=event.message_created_at_ms,
-            thread_id=event.thread_id,
-            parent_id=event.parent_id,
-            root_id=event.root_id,
+            event.message_id,
+            event.chat_id,
+            event.sender_open_id,
+            "user",
+            event.message_type,
+            event.text,
+            event.message_created_at_ms,
+            event.thread_id,
+            event.parent_id,
+            event.root_id,
         )
         outcome = await self.handle_message(user_msg, source="websocket")
-        return outcome.handled or outcome.status in {"duplicate", "scope_blocked", "failed"}
+        return outcome.handled or outcome.status in {
+            "duplicate",
+            "scope_blocked",
+            "failed",
+        }
 
 
 _DEFAULT_AI_COMMAND_SERVICE: FeishuAiCommandService | None = None

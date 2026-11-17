@@ -7,14 +7,10 @@ reaction/reply implementation across Bot and User identities.
 
 from __future__ import annotations
 
-import json
 import logging
-import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping, TypeVar
 from urllib.parse import quote
-
-_T = TypeVar("_T")
 
 import httpx
 
@@ -38,6 +34,7 @@ from claude_hub.services.feishu_user_token_store import (
     get_feishu_user_token_store,
 )
 
+_T = TypeVar("_T")
 logger = logging.getLogger(__name__)
 
 REQUIRED_SEND_AS_USER_SCOPE = "im:message.send_as_user"
@@ -52,7 +49,14 @@ RECOMMENDED_AI_COMMAND_SCOPES: tuple[str, ...] = (
     "search:message",
     "im:message:readonly",
 )
-_EXPIRED_TOKEN_CODES = {99991677, 99991663, 99991668, "99991677", "99991663", "99991668"}
+_EXPIRED_TOKEN_CODES = {
+    99991677,
+    99991663,
+    99991668,
+    "99991677",
+    "99991663",
+    "99991668",
+}
 
 
 class FeishuUserScopeError(FeishuBotConfigurationError):
@@ -127,6 +131,29 @@ class FeishuUserMessage:
     parent_id: str | None = None
     root_id: str | None = None
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "message_id": self.message_id,
+            "chat_id": self.chat_id,
+            "sender_open_id": self.sender_open_id,
+            "sender_type": self.sender_type,
+            "msg_type": self.msg_type,
+            "text": self.text,
+            "create_time_ms": self.create_time_ms,
+            "thread_id": self.thread_id,
+            "parent_id": self.parent_id,
+            "root_id": self.root_id,
+        }
+
+
+@dataclass(frozen=True)
+class FeishuMessagePage:
+    """One paginated page of messages from ``GET /open-apis/im/v1/messages``."""
+
+    items: tuple[FeishuUserMessage, ...]
+    has_more: bool = False
+    page_token: str = ""
+
 
 def build_auth_login_command(
     scopes: tuple[str, ...] = RECOMMENDED_AI_COMMAND_SCOPES,
@@ -163,7 +190,10 @@ def evaluate_scope_preflight(
             can_send_as_user=False,
             can_react_as_user=False,
             can_read_messages=False,
-            missing_required_scopes=(REQUIRED_SEND_AS_USER_SCOPE, REQUIRED_IM_MESSAGE_SCOPE),
+            missing_required_scopes=(
+                REQUIRED_SEND_AS_USER_SCOPE,
+                REQUIRED_IM_MESSAGE_SCOPE,
+            ),
             missing_recommended_scopes=RECOMMENDED_AI_COMMAND_SCOPES,
             auth_login_command=cmd,
             remediation_steps=steps,
@@ -374,38 +404,33 @@ class FeishuUserClient:
         return target
 
     async def refresh_token(self, record: FeishuUserTokenRecord) -> FeishuUserTokenRecord:
-        if not record.refresh_token:
-            raise FeishuBotConfigurationError(
-                f"Feishu user token for {record.open_id} expired and has no refresh_token"
+        with self._store.refresh_lock():
+            now_ts = float(self._store._now())
+            # Re-read store + lark-cli keychain under the refresh lock in case another
+            # consumer already rotated the single-use refresh token.
+            latest = self._store.resolve_token(
+                open_id=record.open_id,
+                app_id=record.app_id,
+                auto_import_lark_cli=True,
             )
-        refreshed = await self._token_refresher(
-            record.refresh_token,
-            app_id=record.app_id,
-            app_secret=record.app_secret or None,
-        )
-        if not isinstance(refreshed, Mapping) or not refreshed.get("access_token"):
-            raise FeishuBotError("Feishu user access token refresh failed")
-        now = time.time()
-        expires_in = refreshed.get("expires_in")
-        refresh_expires_in = refreshed.get("refresh_expires_in")
-        updated = replace(
-            record,
-            access_token=str(refreshed["access_token"]).strip(),
-            refresh_token=str(refreshed.get("refresh_token") or record.refresh_token).strip(),
-            expires_at=(
-                now + float(expires_in)
-                if isinstance(expires_in, (int, float)) and expires_in > 0
-                else record.expires_at
-            ),
-            refresh_expires_at=(
-                now + float(refresh_expires_in)
-                if isinstance(refresh_expires_in, (int, float)) and refresh_expires_in > 0
-                else record.refresh_expires_at
-            ),
-            scope=str(refreshed.get("scope") or record.scope).strip(),
-            updated_at=now,
-        )
-        return self._store.upsert_token(updated)
+            active = latest if latest is not None else record
+            if (
+                active.access_token != record.access_token or active.generation > record.generation
+            ) and not active.is_expired(now=now_ts, skew_seconds=300.0):
+                return active
+
+            if not active.refresh_token:
+                raise FeishuBotConfigurationError(
+                    f"Feishu user token for {active.open_id} expired and has no refresh_token"
+                )
+            refreshed = await self._token_refresher(
+                active.refresh_token,
+                app_id=active.app_id,
+                app_secret=active.app_secret or None,
+            )
+            if not isinstance(refreshed, Mapping) or not refreshed.get("access_token"):
+                raise FeishuBotError("Feishu user access token refresh failed")
+            return self._store.save_refreshed_token(active, refreshed, now=now_ts)
 
     async def get_user_token(
         self, *, force_refresh: bool = False
@@ -419,7 +444,10 @@ class FeishuUserClient:
                 missing_scopes=preflight.missing_required_scopes,
                 auth_login_command=preflight.auth_login_command,
             )
-        if (force_refresh or record.is_expired(skew_seconds=300.0)) and record.refresh_token:
+        now_ts = float(self._store._now())
+        if (
+            force_refresh or record.is_expired(now=now_ts, skew_seconds=300.0)
+        ) and record.refresh_token:
             try:
                 record = await self.refresh_token(record)
             except Exception:
@@ -593,27 +621,30 @@ class FeishuUserClient:
 
         return await self._with_user_token_retry(_call)
 
-    async def list_messages(
+    async def list_messages_page(
         self,
         *,
         container_id_type: str = "chat",
         container_id: str,
         sort_type: str = "ByCreateTimeDesc",
         page_size: int = 50,
+        page_token: str | None = None,
         start_time: str | None = None,
         end_time: str | None = None,
-    ) -> list[FeishuUserMessage]:
-        """List messages in a ``chat`` or ``thread`` container using the user token."""
+    ) -> FeishuMessagePage:
+        """Fetch one page of messages in a ``chat`` or ``thread`` container."""
         if container_id_type not in {"chat", "thread"}:
             raise ValueError("container_id_type must be 'chat' or 'thread'")
 
-        async def _call(token: str) -> list[FeishuUserMessage]:
+        async def _call(token: str) -> FeishuMessagePage:
             params: dict[str, Any] = {
                 "container_id_type": container_id_type,
                 "container_id": container_id,
                 "sort_type": sort_type,
                 "page_size": max(1, min(page_size, 50)),
             }
+            if page_token:
+                params["page_token"] = page_token
             if start_time:
                 params["start_time"] = start_time
             if end_time:
@@ -639,7 +670,7 @@ class FeishuUserClient:
             data = payload.get("data")
             items = data.get("items") if isinstance(data, Mapping) else None
             if not isinstance(items, list):
-                return []
+                return FeishuMessagePage(items=())
             messages: list[FeishuUserMessage] = []
             default_chat_id = container_id if container_id_type == "chat" else ""
             for raw_item in items:
@@ -648,9 +679,73 @@ class FeishuUserClient:
                 parsed = _parse_user_message(raw_item, default_chat_id=default_chat_id)
                 if parsed is not None:
                     messages.append(parsed)
-            return messages
+            has_more = bool(data.get("has_more")) if isinstance(data, Mapping) else False
+            next_token = (
+                str(data.get("page_token") or "").strip() if isinstance(data, Mapping) else ""
+            )
+            return FeishuMessagePage(
+                items=tuple(messages),
+                has_more=has_more,
+                page_token=next_token,
+            )
 
         return await self._with_user_token_retry(_call)
+
+    async def list_messages(
+        self,
+        *,
+        container_id_type: str = "chat",
+        container_id: str,
+        sort_type: str = "ByCreateTimeDesc",
+        page_size: int = 50,
+        page_token: str | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        min_create_time_ms: int | None = None,
+        max_pages: int = 1,
+    ) -> list[FeishuUserMessage]:
+        """List messages in a ``chat`` or ``thread`` container using the user token.
+
+        When ``max_pages > 1`` or ``min_create_time_ms`` is supplied, follows
+        ``page_token`` across pages until reaching ``min_create_time_ms`` or ``max_pages``.
+        """
+        effective_max_pages = max(1, max_pages)
+        if min_create_time_ms is not None and max_pages == 1:
+            effective_max_pages = 25
+
+        collected: list[FeishuUserMessage] = []
+        seen_ids: set[str] = set()
+        seen_tokens: set[str] = set()
+        cursor = page_token
+
+        for _ in range(effective_max_pages):
+            page = await self.list_messages_page(
+                container_id_type=container_id_type,
+                container_id=container_id,
+                sort_type=sort_type,
+                page_size=page_size,
+                page_token=cursor,
+                start_time=start_time,
+                end_time=end_time,
+            )
+            for item in page.items:
+                if item.message_id not in seen_ids:
+                    seen_ids.add(item.message_id)
+                    collected.append(item)
+            if not page.items or not page.has_more or not page.page_token:
+                break
+            if page.page_token in seen_tokens:
+                break
+            if (
+                min_create_time_ms is not None
+                and sort_type == "ByCreateTimeDesc"
+                and min(m.create_time_ms for m in page.items) <= min_create_time_ms
+            ):
+                break
+            seen_tokens.add(page.page_token)
+            cursor = page.page_token
+
+        return collected
 
     async def get_message(self, message_id: str) -> FeishuUserMessage | None:
         """Fetch one message by ``message_id`` using the user token."""
@@ -700,7 +795,10 @@ class FeishuUserClient:
             response = await self._request(
                 "POST",
                 "/open-apis/search/v2/message",
-                params={"page_size": max(1, min(page_size, 50)), "user_id_type": "open_id"},
+                params={
+                    "page_size": max(1, min(page_size, 50)),
+                    "user_id_type": "open_id",
+                },
                 headers={"Authorization": f"Bearer {token}"},
                 json=body,
             )

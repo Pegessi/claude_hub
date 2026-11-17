@@ -10,7 +10,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from claude_hub.services.feishu_ai_command import (
     FeishuAiCommandService,
     get_feishu_ai_command_service,
-    validate_ai_command_agent_config,
 )
 from claude_hub.services.feishu_ai_poller import (
     FeishuAiPoller,
@@ -56,6 +55,7 @@ class FeishuAiCommandTokenImportInput(BaseModel):
 
     app_id: Optional[str] = Field(default=None, max_length=128)
     open_id: Optional[str] = Field(default=None, max_length=128)
+    profile: Optional[str] = Field(default=None, max_length=128)
 
 
 def build_ai_command_status_payload(
@@ -99,17 +99,7 @@ def register_ai_command_routes(
     ) -> dict[str, Any]:
         service = service_getter()
         poller = poller_getter()
-        current = service.get_config()
         try:
-            validate_ai_command_agent_config(
-                body.provider if body.provider is not None else current.provider,
-                body.model if body.model is not None else current.model,
-                (
-                    body.reasoning_effort
-                    if body.reasoning_effort is not None
-                    else current.reasoning_effort
-                ),
-            )
             patch_dict = body.model_dump(exclude_none=True)
             service.update_config(patch_dict)
         except ValueError as exc:
@@ -127,18 +117,19 @@ def register_ai_command_routes(
     ) -> dict[str, Any]:
         service = service_getter()
         poller = poller_getter()
-        cfg = service.get_config()
-        app_id = (body.app_id if body and body.app_id else cfg.app_id) or None
-        open_id = (body.open_id if body and body.open_id else cfg.owner_open_id) or None
+        explicit_app_id = (body.app_id.strip() if body and body.app_id else "") or None
+        explicit_open_id = (body.open_id.strip() if body and body.open_id else "") or None
+        explicit_profile = (body.profile.strip() if body and body.profile else "") or None
         imported = service._token_store.import_from_lark_cli(
-            app_id=app_id,
-            open_id=open_id,
+            app_id=explicit_app_id,
+            open_id=explicit_open_id,
+            profile=explicit_profile,
         )
-        if imported is not None and (not cfg.owner_open_id or not cfg.app_id):
+        if imported is not None:
             service.update_config(
                 {
-                    "owner_open_id": cfg.owner_open_id or imported.open_id,
-                    "app_id": cfg.app_id or imported.app_id,
+                    "owner_open_id": imported.open_id,
+                    "app_id": imported.app_id,
                 }
             )
         await poller.reconcile()

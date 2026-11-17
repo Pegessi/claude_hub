@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Request, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from ..auth import (
+    DEFAULT_FEISHU_OAUTH_SCOPES,
     create_session,
     delete_session,
     get_feishu_auth_url,
@@ -78,7 +79,7 @@ async def login(request: Request) -> RedirectResponse:
     # Random state stored in an httponly cookie and verified on callback to
     # protect the login flow against CSRF.
     state = secrets.token_urlsafe(32)
-    auth_url = get_feishu_auth_url(state)
+    auth_url = get_feishu_auth_url(state, scope=DEFAULT_FEISHU_OAUTH_SCOPES)
     response = RedirectResponse(url=auth_url)
     response.set_cookie(
         key=OAUTH_STATE_COOKIE_NAME,
@@ -159,6 +160,11 @@ async def callback(request: Request, code: str, state: str = "") -> Response:
             from ..services.feishu_user_token_store import get_feishu_user_token_store
 
             token_meta = pop_user_access_token_metadata(access_token)
+            granted_scope = str(
+                token_meta.get("scope")
+                or (user_info.get("scope") if isinstance(user_info.get("scope"), str) else "")
+                or ""
+            )
             get_feishu_user_token_store().save_oauth_token(
                 open_id=user.open_id,
                 user_name=user.name or "",
@@ -167,12 +173,13 @@ async def callback(request: Request, code: str, state: str = "") -> Response:
                 refresh_token=refresh_token,
                 expires_in=token_meta.get("expires_in"),
                 refresh_expires_in=token_meta.get("refresh_expires_in"),
-                scope=str(token_meta.get("scope") or ""),
+                scope=granted_scope,
                 app_secret=settings.feishu_app_secret or "",
             )
         except Exception:
             logger.warning(
-                "Failed to persist Feishu OAuth user token for /ai command", exc_info=True
+                "Failed to persist Feishu OAuth user token for /ai command",
+                exc_info=True,
             )
 
     # Set session cookie and redirect to frontend
