@@ -87,6 +87,37 @@ def _normalize_scopes(raw: Any) -> str:
     return ""
 
 
+_CLI_META_ALIASES: tuple[tuple[str, ...], ...] = (
+    ("accessToken", "access_token"),
+    ("refreshToken", "refresh_token"),
+    ("appSecret", "app_secret"),
+    ("expiresAt", "expires_at"),
+    ("refreshExpiresAt", "refresh_expires_at"),
+    ("userName", "user_name"),
+    ("scope",),
+)
+
+
+def _normalize_cli_meta(raw: Mapping[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for group in _CLI_META_ALIASES:
+        canon = group[0]
+        for k in group:
+            if k not in raw or raw[k] is None:
+                continue
+            val = raw[k]
+            if canon == "scope" and isinstance(val, (str, list, tuple, set)):
+                out[canon] = val
+                break
+            if isinstance(val, str) and val.strip():
+                out[canon] = val.strip()
+                break
+            if canon in {"expiresAt", "refreshExpiresAt"} and isinstance(val, (int, float)):
+                out[canon] = val
+                break
+    return out
+
+
 class _LibcryptoAesGcm:
     """Thin ctypes wrapper around OpenSSL EVP_aes_256_gcm (no third-party deps)."""
 
@@ -241,22 +272,22 @@ def _ensure_0600_key(key_path: Path) -> bytes:
     return new_key
 
 
+def _xor_hmac_stream(key: bytes, nonce: bytes, data: bytes) -> bytes:
+    stream, counter = bytearray(), 0
+    while len(stream) < len(data):
+        stream.extend(hmac.new(key, nonce + counter.to_bytes(4, "big"), hashlib.sha256).digest())
+        counter += 1
+    return bytes(a ^ b for a, b in zip(data, stream[: len(data)]))
+
+
 def _seal_secret(key: bytes, value: str) -> str:
     if not value:
         return ""
-    gcm = _get_aes_gcm()
-    raw = value.encode("utf-8")
+    gcm, raw = _get_aes_gcm(), value.encode("utf-8")
     if gcm is not None:
-        blob = gcm.encrypt(key, raw)
-        return _ENC_PREFIX + base64.urlsafe_b64encode(blob).decode("ascii")
+        return _ENC_PREFIX + base64.urlsafe_b64encode(gcm.encrypt(key, raw)).decode("ascii")
     nonce = secrets.token_bytes(16)
-    stream = bytearray()
-    counter = 0
-    while len(stream) < len(raw):
-        block = hmac.new(key, nonce + counter.to_bytes(4, "big"), hashlib.sha256).digest()
-        stream.extend(block)
-        counter += 1
-    ct = bytes(a ^ b for a, b in zip(raw, stream[: len(raw)]))
+    ct = _xor_hmac_stream(key, nonce, raw)
     mac = hmac.new(key, nonce + ct, hashlib.sha256).digest()
     return _FALLBACK_PREFIX + base64.urlsafe_b64encode(nonce + ct + mac).decode("ascii")
 
@@ -272,17 +303,9 @@ def _unseal_secret(key: bytes, stored: str) -> str:
         if len(blob) < 48:
             raise ValueError("Corrupted fallback encrypted secret")
         nonce, ct, mac = blob[:16], blob[16:-32], blob[-32:]
-        expected = hmac.new(key, nonce + ct, hashlib.sha256).digest()
-        if not hmac.compare_digest(mac, expected):
+        if not hmac.compare_digest(mac, hmac.new(key, nonce + ct, hashlib.sha256).digest()):
             raise ValueError("Secret MAC verification failed")
-        stream = bytearray()
-        counter = 0
-        while len(stream) < len(ct):
-            block = hmac.new(key, nonce + counter.to_bytes(4, "big"), hashlib.sha256).digest()
-            stream.extend(block)
-            counter += 1
-        return bytes(a ^ b for a, b in zip(ct, stream[: len(ct)])).decode("utf-8")
-    # Plaintext migration compatibility
+        return _xor_hmac_stream(key, nonce, ct).decode("utf-8")
     return stored
 
 
@@ -361,25 +384,15 @@ class FeishuUserTokenStore:
             data = read_document(self._path)
         except (FileNotFoundError, ValueError, OSError):
             return {}
-        if not isinstance(data, Mapping):
-            return {}
-        tokens = data.get("tokens")
+        tokens = data.get("tokens") if isinstance(data, Mapping) else None
         if not isinstance(tokens, Mapping):
             return {}
-        out: dict[str, dict[str, Any]] = {}
-        for k, v in tokens.items():
-            if isinstance(k, str) and isinstance(v, Mapping):
-                out[k] = dict(v)
-        return out
+        return {
+            k: dict(v) for k, v in tokens.items() if isinstance(k, str) and isinstance(v, Mapping)
+        }
 
     def _save_raw(self, tokens: Mapping[str, dict[str, Any]]) -> None:
-        write_document(
-            self._path,
-            {
-                "version": _STORE_VERSION,
-                "tokens": dict(tokens),
-            },
-        )
+        write_document(self._path, {"version": _STORE_VERSION, "tokens": dict(tokens)})
 
     def _record_to_row(self, record: FeishuUserTokenRecord) -> dict[str, Any]:
         key = self._master_key()
@@ -741,11 +754,9 @@ class FeishuUserTokenStore:
                         if allowed_pairs is not None and (e_app, e_uid) not in allowed_pairs:
                             continue
                         b_name, b_meta = base_meta_by_pair.get((e_app, e_uid), ("", {}))
-                        e_name = (
-                            str(item.get("userName") or item.get("user_name") or "").strip()
-                            or b_name
-                        )
-                        candidates.append((e_app, e_uid, e_name, {**b_meta, **dict(item)}))
+                        merged = {**_normalize_cli_meta(b_meta), **_normalize_cli_meta(item)}
+                        e_name = str(merged.get("userName") or b_name).strip()
+                        candidates.append((e_app, e_uid, e_name, merged))
         if not candidates and not has_config_apps:
             for search_dir in (keychain_dir, cfg_dir, cfg_dir / "keychain"):
                 if not search_dir.is_dir():
@@ -804,6 +815,9 @@ class FeishuUserTokenStore:
                         (d / f"{c_app}_{c_open}.enc").is_file()
                         for d in (keychain_dir, cfg_dir, cfg_dir / "keychain")
                     ):
+                        return c_app, c_open
+                for c_app, c_open, _, meta in candidates:
+                    if str(meta.get("accessToken") or meta.get("access_token") or "").strip():
                         return c_app, c_open
                 return candidates[0][0], candidates[0][1]
         if prefer_cli_config:
@@ -1297,8 +1311,9 @@ class FeishuUserTokenStore:
                         app_secret = raw_sec
                     except Exception:
                         app_secret = ""
-                if not app_secret and isinstance(meta.get("appSecret"), str):
-                    app_secret = meta["appSecret"].strip()
+                raw_meta_sec = meta.get("appSecret") or meta.get("app_secret")
+                if not app_secret and isinstance(raw_meta_sec, str):
+                    app_secret = raw_meta_sec.strip()
 
                 scope_str = (
                     _normalize_scopes(token_obj.get("scope") or meta.get("scope")) or fallback_scope
