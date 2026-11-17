@@ -123,7 +123,7 @@ class FeishuAiPoller:
 
     async def reconcile(self) -> None:
         """Wake the poller loop immediately after a configuration or token change."""
-        cfg = self._service.get_config()
+        cfg = await self._service.aget_config()
         if cfg.enabled and not self.running and not self._stopping:
             await self.start()
         self._wake_event.set()
@@ -157,7 +157,7 @@ class FeishuAiPoller:
 
     async def _run_loop(self) -> None:
         while not self._stopping:
-            cfg = self._service.get_config()
+            cfg = await self._service.aget_config()
             interval = max(2.0, cfg.poll_interval_seconds)
             if cfg.enabled:
                 try:
@@ -330,14 +330,20 @@ class FeishuAiPoller:
         and dispatches execution in background tasks so long-running turns never
         block intake across chats.
         """
-        cfg = self._service.get_config()
+        cfg = await self._service.aget_config()
         if not cfg.enabled:
             return []
 
         self._poll_count += 1
         self._last_poll_at = time.time()
         user_client = self._service.build_user_client(cfg)
-        record = user_client.resolve_record()
+        if hasattr(user_client, "aresolve_record"):
+            record = await user_client.aresolve_record()
+        else:
+            async with self._service._token_store.async_file_lock(
+                app_id=cfg.app_id, open_id=cfg.owner_open_id
+            ):
+                record = user_client.resolve_record()
         if record is None:
             self._last_error = "no_user_token"
             return []

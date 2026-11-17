@@ -680,10 +680,9 @@ class FeishuUserTokenStore:
         if resolved_dirs is not None:
             cfg_dir, _ = resolved_dirs
             cli_locks_dir = cfg_dir / "locks"
-            if clean_app and clean_open:
-                if create_cli_lock_dir or cli_locks_dir.is_dir():
-                    lock_paths.append(cli_locks_dir / f"refresh_{clean_app}_{clean_open}.lock")
-            elif cli_locks_dir.is_dir():
+            if clean_app and clean_open and (create_cli_lock_dir or cli_locks_dir.is_dir()):
+                lock_paths.append(cli_locks_dir / f"refresh_{clean_app}_{clean_open}.lock")
+            if cli_locks_dir.is_dir():
                 for existing_lock in sorted(cli_locks_dir.glob("refresh_*.lock")):
                     if existing_lock not in lock_paths:
                         lock_paths.append(existing_lock)
@@ -715,10 +714,15 @@ class FeishuUserTokenStore:
                     if key in self._held_lock_fds:
                         continue
                 fd = os.open(str(lp), os.O_CREAT | os.O_RDWR, 0o600)
+                acquired = False
                 try:
                     while True:
                         try:
                             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            acquired = True
+                            with self._lock:
+                                self._held_lock_fds[key] = fd
+                            newly_opened.append((key, fd))
                             break
                         except (BlockingIOError, PermissionError, OSError) as exc:
                             if not isinstance(exc, BlockingIOError) and getattr(
@@ -730,12 +734,12 @@ class FeishuUserTokenStore:
                                     f"Timed out waiting for Feishu token lock {lp}"
                                 ) from exc
                             await asyncio.sleep(0.005)
-                except Exception:
-                    os.close(fd)
-                    raise
-                with self._lock:
-                    self._held_lock_fds[key] = fd
-                newly_opened.append((key, fd))
+                finally:
+                    if not acquired:
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
             yield
         finally:
             for key, fd in reversed(newly_opened):
@@ -792,7 +796,7 @@ class FeishuUserTokenStore:
                     fd = os.open(str(lp), os.O_CREAT | os.O_RDWR, 0o600)
                     try:
                         fcntl.flock(fd, fcntl.LOCK_EX)
-                    except Exception:
+                    except BaseException:
                         os.close(fd)
                         raise
                     self._held_lock_fds[key] = fd
@@ -1337,6 +1341,82 @@ class FeishuUserTokenStore:
             if imported is not None:
                 return imported
         return record
+
+    async def aresolve_token(
+        self,
+        *,
+        open_id: str | None = None,
+        app_id: str | None = None,
+        auto_import_lark_cli: bool = True,
+    ) -> FeishuUserTokenRecord | None:
+        """Resolve a user token under ``async_file_lock`` without blocking the event loop."""
+        async with self.async_file_lock(app_id=app_id or "", open_id=open_id or ""):
+            return self.resolve_token(
+                open_id=open_id,
+                app_id=app_id,
+                auto_import_lark_cli=auto_import_lark_cli,
+            )
+
+    async def aimport_from_lark_cli(
+        self,
+        *,
+        lark_cli_dir: Path | None = None,
+        data_dir: Path | None = None,
+        app_id: str | None = None,
+        open_id: str | None = None,
+        profile: str | None = None,
+    ) -> FeishuUserTokenRecord | None:
+        """Import a ``lark-cli`` user token under ``async_file_lock``."""
+        async with self.async_file_lock(app_id=app_id or "", open_id=open_id or ""):
+            return self.import_from_lark_cli(
+                lark_cli_dir=lark_cli_dir,
+                data_dir=data_dir,
+                app_id=app_id,
+                open_id=open_id,
+                profile=profile,
+            )
+
+    async def asave_oauth_token(
+        self,
+        *,
+        open_id: str,
+        app_id: str,
+        access_token: str,
+        refresh_token: str = "",
+        user_name: str = "",
+        expires_in: int | float | None = None,
+        refresh_expires_in: int | float | None = None,
+        scope: str = "",
+        app_secret: str = "",
+        source: str = "hub_oauth",
+    ) -> FeishuUserTokenRecord:
+        """Persist an OAuth user token under ``async_file_lock`` without blocking asyncio."""
+        async with self.async_file_lock(app_id=app_id, open_id=open_id):
+            return self.save_oauth_token(
+                open_id=open_id,
+                app_id=app_id,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                user_name=user_name,
+                expires_in=expires_in,
+                refresh_expires_in=refresh_expires_in,
+                scope=scope,
+                app_secret=app_secret,
+                source=source,
+            )
+
+    async def asave_refreshed_token(
+        self,
+        previous: FeishuUserTokenRecord,
+        refreshed: Mapping[str, Any],
+        *,
+        now: float | None = None,
+    ) -> FeishuUserTokenRecord:
+        """Persist a refreshed token under ``async_file_lock`` without blocking asyncio."""
+        async with self.async_file_lock(
+            app_id=previous.app_id, open_id=previous.open_id, create_cli_lock_dir=True
+        ):
+            return self.save_refreshed_token(previous, refreshed, now=now)
 
 
 _DEFAULT_TOKEN_STORE: FeishuUserTokenStore | None = None

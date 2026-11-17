@@ -20,9 +20,10 @@
     persist only granted scopes (`api/auth.py`, `auth/feishu.py`).
   - Import local `lark-cli` user tokens from `~/.lark-cli/config.json` and the
     AES-256-GCM encrypted keychain under `~/.local/share/lark-cli/` honoring
-    `currentApp` profile precedence, coordinate single-use refresh rotation with
-    in-process `async_refresh_lock` and non-blocking `async_file_lock` (`LOCK_NB`
-    polling across Hub and `lark-cli` `locks/refresh_<app>_<open>.lock`),
+    `currentApp` profile precedence, coordinate single-use refresh rotation and
+    all async token resolution/preflight/OAuth-save entrypoints with in-process
+    `async_refresh_lock` and cancellation-safe non-blocking `async_file_lock`
+    (`LOCK_NB` polling across Hub and `lark-cli` `locks/refresh_<app>_<open>.lock`),
     compare against the captured pre-refresh generation/fingerprint, keep
     returned scopes authoritative without unioning stale CLI scopes, and write
     millisecond `expiresAt`/`refreshExpiresAt` back to `lark-cli`.
