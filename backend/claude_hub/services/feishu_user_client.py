@@ -405,7 +405,9 @@ class FeishuUserClient:
 
     async def refresh_token(self, record: FeishuUserTokenRecord) -> FeishuUserTokenRecord:
         async with self._store.async_refresh_lock(app_id=record.app_id, open_id=record.open_id):
-            with self._store.refresh_lock(app_id=record.app_id, open_id=record.open_id):
+            async with self._store.async_file_lock(
+                app_id=record.app_id, open_id=record.open_id, create_cli_lock_dir=False
+            ):
                 now_ts = float(self._store._now())
                 # Re-read store + lark-cli keychain under the per-account lock in case
                 # another consumer already rotated the single-use refresh token.
@@ -433,12 +435,18 @@ class FeishuUserClient:
             )
             if not isinstance(refreshed, Mapping) or not refreshed.get("access_token"):
                 raise FeishuBotError("Feishu user access token refresh failed")
-            return self._store.save_refreshed_token(active, refreshed, now=now_ts)
+            async with self._store.async_file_lock(
+                app_id=active.app_id, open_id=active.open_id, create_cli_lock_dir=True
+            ):
+                return self._store.save_refreshed_token(active, refreshed, now=now_ts)
 
     async def get_user_token(
         self, *, force_refresh: bool = False
     ) -> tuple[str, FeishuUserTokenRecord]:
-        record = self.resolve_record()
+        async with self._store.async_file_lock(
+            app_id=self._app_id or "", open_id=self._open_id or ""
+        ):
+            record = self.resolve_record()
         if record is None:
             preflight = evaluate_scope_preflight(None)
             raise FeishuUserScopeError(

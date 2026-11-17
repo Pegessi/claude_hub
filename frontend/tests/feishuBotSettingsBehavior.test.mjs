@@ -568,3 +568,93 @@ test('Personal /ai Assistant handles Reload during initial GET, re-entry draft p
   assert.match(state.error, /MASO model '[redacted]' does not support reasoning_effort='xhigh'/)
 })
 
+test('Personal /ai navigation retires pending load and conflict adoption respects busy lock', async t => {
+  const h = harness(t)
+  const pendingLoad = deferred()
+  const pendingSave = deferred()
+  let currentCfg = {
+    enabled: false,
+    prefix: '/ai',
+    owner_open_id: 'ou_owner',
+    app_id: 'cli_app',
+    provider: 'codex',
+    model: 'gpt-5.4',
+    reasoning_effort: 'high',
+    cwd: '/srv',
+    watch_chats: [],
+    poll_interval_seconds: 15,
+    max_active_chats: 10,
+    max_context_messages: 20,
+    ack_emoji: 'OnIt',
+    done_emoji: 'DONE',
+    footer: 'footer',
+    reply_in_thread: true,
+  }
+  const makeStatus = () => ({
+    config: { ...currentCfg },
+    capabilities: {
+      providers: ['codex', 'claude'],
+      provider_models: { codex: ['gpt-5.4'], claude: ['[redacted]'] },
+      reasoning_efforts: ['low', 'high'],
+      provider_reasoning_efforts: { codex: ['low', 'high'], claude: [] },
+    },
+  })
+  let getCount = 0
+  let submittedBody = null
+  h.setTransport(async (url, init = {}) => {
+    if (String(url).endsWith('/ai-command')) {
+      if (init.method === 'PATCH') {
+        submittedBody = JSON.parse(init.body)
+        return pendingSave.promise
+      }
+      getCount += 1
+      return getCount === 1 ? pendingLoad.promise : response(makeStatus())
+    }
+    return response(h.server())
+  })
+
+  const state = await mountSettings(t, h)
+  // R3-05a: Navigating away to a Bot during initial /ai GET retires aiCommandLoading immediately
+  const opening = state.openAiCommand()
+  await flush()
+  assert.equal(state.aiCommandLoading, true)
+  state.select(h.store.botById('b'))
+  await flush()
+  assert.equal(state.selectedId, 'b')
+  assert.equal(state.aiCommandActive, false)
+  assert.equal(state.aiCommandLoading, false)
+  pendingLoad.resolve(response(makeStatus()))
+  await opening
+  await flush()
+  assert.equal(state.aiCommandLoading, false)
+  assert.equal(state.aiCommandLoaded, false)
+
+  // R3-05b: Use server values button is disabled and guarded while Save is in flight
+  await state.openAiCommand()
+  await flush()
+  assert.equal(state.aiCommandLoaded, true)
+  state.aiEdit.reasoning_effort = 'low'
+  currentCfg = { ...currentCfg, provider: 'claude', model: '[redacted]', reasoning_effort: '' }
+  await state.refresh()
+  await flush()
+  assert.ok(state.aiTupleConflict)
+
+  const saving = state.saveAiCommand()
+  await flush()
+  assert.equal(state.busy, true)
+  const acceptBtn = findByTestId(state.$root, 'feishu-ai-accept-server-tuple-btn')
+  assert.equal(Boolean(acceptBtn?.props.disabled), true)
+  state.acceptServerAiTuple()
+  await flush()
+  // Guarded while busy: conflict remains until settled or user clicks after Save finishes
+  assert.equal(state.aiEdit.provider, 'codex')
+  assert.ok(state.aiTupleConflict)
+
+  currentCfg = { ...currentCfg, ...submittedBody }
+  pendingSave.resolve(response(makeStatus()))
+  await saving
+  await flush()
+  assert.equal(state.busy, false)
+  assert.equal(state.aiEdit.provider, 'codex')
+  assert.equal(state.aiEdit.reasoning_effort, 'low')
+})

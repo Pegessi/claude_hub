@@ -21,22 +21,27 @@
   - Import local `lark-cli` user tokens from `~/.lark-cli/config.json` and the
     AES-256-GCM encrypted keychain under `~/.local/share/lark-cli/` honoring
     `currentApp` profile precedence, coordinate single-use refresh rotation with
-    async-safe per-account locking (`async_refresh_lock`) plus `lark-cli` shared
-    account lock (`locks/refresh_<app>_<open>.lock`), CAS adoption of newer CLI
-    generations, and millisecond `expiresAt`/`refreshExpiresAt` writeback.
+    in-process `async_refresh_lock` and non-blocking `async_file_lock` (`LOCK_NB`
+    polling across Hub and `lark-cli` `locks/refresh_<app>_<open>.lock`),
+    compare against the captured pre-refresh generation/fingerprint, keep
+    returned scopes authoritative without unioning stale CLI scopes, and write
+    millisecond `expiresAt`/`refreshExpiresAt` back to `lark-cli`.
   - Reuse `FeishuBotClient`, `create_feishu_http_client`, and
     `FeishuBotRemoteError` for user-identity messages, replies, reactions, and
     paginated chat/thread history reads, and provide `preflight_scopes()` with
     actionable `lark-cli auth login --scope "im:message.send_as_user ..."`
     remediation.
-- Add `FeishuAiCommandService` (`services/feishu_ai_command.py`),
-  `FeishuAiPoller` (`services/feishu_ai_poller.py`), and WebSocket event hook
+- Add `FeishuAiCommandService` (`services/feishu_ai_command.py`,
+  `services/feishu_ai_command_models.py`), `FeishuAiPoller`
+  (`services/feishu_ai_poller.py`), and WebSocket event hook
   (`api/feishu_bot.py`):
   - Detect the owner's own `/ai <instruction>` messages (ignoring bots, other
     senders, and messages already bearing the AI reply footer) via both
-    paginated active-chat polling (with durable pending-command queue and
-    non-blocking background dispatch) and WebSocket events when a Hub Bot is
-    present in the chat.
+    paginated active-chat polling (with durable pending-command queue, persisted
+    `scan_cursors` past the 25-page per-tick cap, and evidence-backed recovery
+    that resumes only final reply delivery for completed turns while preserving
+    uncertain claims) and WebSocket events when a Hub Bot is present in the
+    chat.
   - Reuse `FeishuMessageDedupStore` for at-most-once message claiming, fetch
     thread/chat context, extract Codebase MR (`group/project!1234`), commit SHA,
     and Feishu doc references, manage the two-stage user reaction lifecycle

@@ -331,6 +331,9 @@ async def main(browser_run: BrowserRun) -> None:
                 ai_get_calls += 1
                 if ai_get_calls == 1:
                     await ai_get_gate.wait()
+                    await fulfill_json(route, ai_command_payload())
+                    return
+                if ai_get_calls == 2:
                     await fulfill_json(
                         route,
                         {
@@ -778,8 +781,27 @@ async def main(browser_run: BrowserRun) -> None:
         await settings.get_by_test_id("feishu-ai-command-nav").click()
         await expect(settings.get_by_test_id("feishu-ai-loading")).to_be_visible()
         await expect(settings.get_by_test_id("feishu-ai-settings-form")).to_have_count(0)
+        await expect(
+            settings.locator("footer").get_by_role("button", name="Reload", exact=True)
+        ).to_be_disabled()
 
+        # Navigating away to a Bot during initial /ai GET immediately restores Bot Reload
+        await (
+            settings.locator('[aria-label="Bots"]')
+            .locator("button")
+            .filter(has_text="Occupied Bot")
+            .click()
+        )
+        await expect(
+            settings.locator("footer").get_by_role("button", name="Reload", exact=True)
+        ).to_be_enabled()
         ai_get_gate.set()
+        await expect(
+            settings.locator("footer").get_by_role("button", name="Reload", exact=True)
+        ).to_be_enabled()
+
+        # Re-open Personal /ai: GET #2 fails with 500 -> error state -> Retry (GET #3) hydrates form
+        await settings.get_by_test_id("feishu-ai-command-nav").click()
         await expect(settings.get_by_test_id("feishu-ai-load-error")).to_be_visible()
         await expect(settings.get_by_test_id("feishu-ai-settings-form")).to_have_count(0)
         assert not any(

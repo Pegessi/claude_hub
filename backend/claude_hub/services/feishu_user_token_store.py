@@ -661,6 +661,96 @@ class FeishuUserTokenStore:
         keychain_dir = self._lark_cli_data_dir or cfg_dir
         return cfg_dir, keychain_dir
 
+    def _lock_paths(
+        self,
+        *,
+        app_id: str = "",
+        open_id: str = "",
+        create_cli_lock_dir: bool = False,
+    ) -> list[Path]:
+        clean_app = app_id.strip()
+        clean_open = open_id.strip()
+        if (not clean_app or not clean_open) and document_exists(self._path):
+            rec = self.get_token(open_id=clean_open or None, app_id=clean_app or None)
+            if rec is not None:
+                clean_app = clean_app or rec.app_id
+                clean_open = clean_open or rec.open_id
+        lock_paths: list[Path] = []
+        resolved_dirs = self._resolve_lark_cli_dirs_with_overrides()
+        if resolved_dirs is not None:
+            cfg_dir, _ = resolved_dirs
+            cli_locks_dir = cfg_dir / "locks"
+            if clean_app and clean_open:
+                if create_cli_lock_dir or cli_locks_dir.is_dir():
+                    lock_paths.append(cli_locks_dir / f"refresh_{clean_app}_{clean_open}.lock")
+            elif cli_locks_dir.is_dir():
+                for existing_lock in sorted(cli_locks_dir.glob("refresh_*.lock")):
+                    if existing_lock not in lock_paths:
+                        lock_paths.append(existing_lock)
+        hub_lock = self._key_path.parent / "feishu_user_tokens.refresh.lock"
+        if hub_lock not in lock_paths:
+            lock_paths.append(hub_lock)
+        return lock_paths
+
+    @asynccontextmanager
+    async def async_file_lock(
+        self,
+        *,
+        app_id: str = "",
+        open_id: str = "",
+        create_cli_lock_dir: bool = False,
+        timeout: float = 15.0,
+    ) -> AsyncIterator[None]:
+        """Acquire inter-process file locks via non-blocking ``LOCK_NB`` polling."""
+        lock_paths = self._lock_paths(
+            app_id=app_id, open_id=open_id, create_cli_lock_dir=create_cli_lock_dir
+        )
+        newly_opened: list[tuple[str, int]] = []
+        deadline = time.monotonic() + max(0.1, timeout)
+        try:
+            for lp in lock_paths:
+                lp.parent.mkdir(parents=True, exist_ok=True)
+                key = str(lp.resolve())
+                with self._lock:
+                    if key in self._held_lock_fds:
+                        continue
+                fd = os.open(str(lp), os.O_CREAT | os.O_RDWR, 0o600)
+                try:
+                    while True:
+                        try:
+                            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except (BlockingIOError, PermissionError, OSError) as exc:
+                            if not isinstance(exc, BlockingIOError) and getattr(
+                                exc, "errno", None
+                            ) not in {11, 13, 35}:
+                                raise
+                            if time.monotonic() >= deadline:
+                                raise TimeoutError(
+                                    f"Timed out waiting for Feishu token lock {lp}"
+                                ) from exc
+                            await asyncio.sleep(0.005)
+                except Exception:
+                    os.close(fd)
+                    raise
+                with self._lock:
+                    self._held_lock_fds[key] = fd
+                newly_opened.append((key, fd))
+            yield
+        finally:
+            for key, fd in reversed(newly_opened):
+                with self._lock:
+                    self._held_lock_fds.pop(key, None)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+                finally:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+
     @asynccontextmanager
     async def async_refresh_lock(
         self,
@@ -688,24 +778,9 @@ class FeishuUserTokenStore:
         create_cli_lock_dir: bool = False,
     ) -> Iterator[None]:
         """Acquire thread and inter-process file locks (including ``lark-cli`` account lock)."""
-        clean_app = app_id.strip()
-        clean_open = open_id.strip()
-        lock_paths: list[Path] = []
-        resolved_dirs = self._resolve_lark_cli_dirs_with_overrides()
-        if resolved_dirs is not None and clean_app and clean_open:
-            cfg_dir, _ = resolved_dirs
-            cli_locks_dir = cfg_dir / "locks"
-            if create_cli_lock_dir or cli_locks_dir.is_dir():
-                lock_paths.append(cli_locks_dir / f"refresh_{clean_app}_{clean_open}.lock")
-        hub_lock_name = (
-            f"refresh_{clean_app}_{clean_open}.lock"
-            if (clean_app and clean_open)
-            else "feishu_user_tokens.refresh.lock"
+        lock_paths = self._lock_paths(
+            app_id=app_id, open_id=open_id, create_cli_lock_dir=create_cli_lock_dir
         )
-        hub_lock = self._key_path.parent / hub_lock_name
-        if hub_lock not in lock_paths:
-            lock_paths.append(hub_lock)
-
         with self._lock:
             newly_opened: list[tuple[str, int]] = []
             try:
@@ -817,8 +892,8 @@ class FeishuUserTokenStore:
                     cli_fp = _credential_fingerprint(cli_at, cli_rt)
                     if cli_at and cli_fp and cli_fp not in expected_fingerprints:
                         # External lark-cli login/refresh updated the shared keychain concurrently;
-                        # preserve the newer CLI credentials + scopes instead of overwriting them.
-                        cli_scope = _normalize_scopes(existing_obj.get("scope")) or record.scope
+                        # preserve the newer CLI credentials + authoritative scopes instead of overwriting.
+                        cli_scope = _normalize_scopes(existing_obj.get("scope"))
                         adopted = replace(
                             record,
                             access_token=cli_at,
@@ -843,9 +918,6 @@ class FeishuUserTokenStore:
                         )
                         return False, adopted
 
-                merged_scope = _normalize_scopes(
-                    [record.scope, str(existing_obj.get("scope") or "")]
-                )
                 existing_obj.update(
                     {
                         "appId": record.app_id,
@@ -861,7 +933,7 @@ class FeishuUserTokenStore:
                             if record.refresh_expires_at > 0
                             else 0
                         ),
-                        "scope": merged_scope or record.scope,
+                        "scope": record.scope,
                     }
                 )
                 encrypted = aes_256_gcm_encrypt(
@@ -904,13 +976,23 @@ class FeishuUserTokenStore:
         with self.refresh_lock(
             app_id=previous.app_id, open_id=previous.open_id, create_cli_lock_dir=True
         ):
-            existing = self.get_token(open_id=previous.open_id, app_id=previous.app_id) or previous
+            prev_fp = _credential_fingerprint(previous.access_token, previous.refresh_token)
+            existing = self.get_token(open_id=previous.open_id, app_id=previous.app_id)
+            if existing is not None:
+                exist_fp = _credential_fingerprint(existing.access_token, existing.refresh_token)
+                # CAS against the captured `previous` credential generation: if Hub was updated
+                # concurrently (e.g. fresh OAuth callback or newly imported CLI login) while the
+                # refresh request was in flight, adopt/keep the newer Hub generation instead of
+                # rolling it back with the stale refresh result.
+                if existing.generation > previous.generation or exist_fp != prev_fp:
+                    return existing
+            else:
+                existing = previous
+
             new_access = str(refreshed.get("access_token") or "").strip()
             if not new_access:
                 raise ValueError("Refreshed token payload is missing access_token")
-            new_refresh = str(
-                refreshed.get("refresh_token") or existing.refresh_token or previous.refresh_token
-            ).strip()
+            new_refresh = str(refreshed.get("refresh_token") or previous.refresh_token).strip()
             expires_in = refreshed.get("expires_in")
             refresh_expires_in = refreshed.get("refresh_expires_in") or refreshed.get(
                 "refresh_token_expires_in"
@@ -918,36 +1000,29 @@ class FeishuUserTokenStore:
             expires_at = (
                 current_now + float(expires_in)
                 if isinstance(expires_in, (int, float)) and expires_in > 0
-                else existing.expires_at
+                else previous.expires_at
             )
             refresh_expires_at = (
                 current_now + float(refresh_expires_in)
                 if isinstance(refresh_expires_in, (int, float)) and refresh_expires_in > 0
-                else existing.refresh_expires_at
+                else previous.refresh_expires_at
             )
             next_gen = max(previous.generation, existing.generation) + 1
-            prev_fp = _credential_fingerprint(previous.access_token, previous.refresh_token)
-            exist_fp = _credential_fingerprint(existing.access_token, existing.refresh_token)
-            expected_fps = {
-                fp
-                for fp in (
-                    prev_fp,
-                    previous.imported_fingerprint,
-                    exist_fp,
-                    existing.imported_fingerprint,
-                )
-                if fp
-            }
+            expected_fps = {fp for fp in (prev_fp, previous.imported_fingerprint) if fp}
+            has_explicit_scope = "scope" in refreshed and refreshed.get("scope") is not None
+            authoritative_scope = (
+                _normalize_scopes(refreshed.get("scope")) if has_explicit_scope else previous.scope
+            )
             updated = replace(
                 existing,
                 access_token=new_access,
                 refresh_token=new_refresh,
                 expires_at=expires_at,
                 refresh_expires_at=refresh_expires_at,
-                scope=_normalize_scopes(refreshed.get("scope")) or existing.scope,
+                scope=authoritative_scope,
                 updated_at=current_now,
                 generation=next_gen,
-                imported_fingerprint=existing.imported_fingerprint or prev_fp,
+                imported_fingerprint=previous.imported_fingerprint or prev_fp,
             )
             synced, adopted = self._sync_or_adopt_lark_cli(
                 updated, expected_fingerprints=expected_fps

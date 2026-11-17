@@ -1623,3 +1623,338 @@ async def test_r2_poller_quiesce_preserves_unstarted_commands_and_resumes_capped
     assert b_svc.get_scan_cursor("oc_chat") is None
     assert b_client.page_offsets[25:] == [500]
     await b_poller.stop()
+
+
+@pytest.mark.asyncio
+async def test_cycle3_token_cas_async_lock_scope_authority_and_turn_recovery(
+    tmp_path: Path,
+) -> None:
+    """Regression tests for R3-01, R3-02, R3-03, and R3-04."""
+    import fcntl
+    import subprocess
+    import sys
+    import time
+    from collections.abc import Mapping
+    from datetime import datetime, timezone
+
+    from claude_hub.api.routes.agent_stream.dispatch import ExternalDispatchRetired
+    from claude_hub.models import AgentStreamEvent, AgentStreamEventType
+    from claude_hub.services.agent_stream.store import AgentStreamStore
+    from claude_hub.services.feishu_bot import FeishuReplyReceipt
+    from claude_hub.services.feishu_user_client import FeishuMessagePage
+    from claude_hub.services.feishu_user_token_store import aes_256_gcm_decrypt
+
+    # 1. R3-01a: Newer Hub OAuth save during in-flight refresh is not overwritten
+    t0 = 1_800_000_000.0
+    oauth_store = FeishuUserTokenStore(
+        path=tmp_path / "oauth_cas.json",
+        key_path=tmp_path / "oauth_cas.key",
+        now=lambda: t0,
+    )
+    oauth_store.save_oauth_token(
+        open_id="ou_cas",
+        app_id="cli_cas",
+        access_token="old-at",
+        refresh_token="old-rt",
+        expires_in=1,
+        scope="im:message im:message.send_as_user",
+    )
+
+    async def stale_oauth_refresher(_rt: str, **_kw: Any) -> dict[str, Any]:
+        oauth_store.save_oauth_token(
+            open_id="ou_cas",
+            app_id="cli_cas",
+            access_token="fresh-oauth-at",
+            refresh_token="fresh-oauth-rt",
+            expires_in=14_000,
+            scope="im:message im:message.send_as_user im:message.reactions:write_only",
+        )
+        return {
+            "access_token": "stale-refresh-at",
+            "refresh_token": "stale-refresh-rt",
+            "expires_in": 7200,
+            "scope": "im:message im:message.send_as_user",
+        }
+
+    oauth_client = FeishuUserClient(
+        oauth_store,
+        open_id="ou_cas",
+        app_id="cli_cas",
+        token_refresher=stale_oauth_refresher,
+    )
+    _, after_oauth = await oauth_client.get_user_token()
+    assert after_oauth.access_token == "fresh-oauth-at"
+    assert after_oauth.has_scope("im:message.reactions:write_only")
+
+    # 2. R3-01b: Already-imported fresh CLI login during in-flight refresh is preserved in Hub & CLI
+    cli_cfg = tmp_path / "cli_cas_cfg"
+    cli_data = tmp_path / "cli_cas_data"
+    cli_cfg.mkdir(parents=True)
+    cli_data.mkdir(parents=True)
+    master_key = secrets.token_bytes(32)
+    (cli_data / "master.key").write_bytes(master_key)
+    (cli_cfg / "config.json").write_text(
+        json.dumps(
+            {
+                "currentApp": "cli_cas",
+                "apps": [{"appId": "cli_cas", "users": [{"userOpenId": "ou_cas"}]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    enc_path = cli_data / "cli_cas_ou_cas.enc"
+    enc_path.write_bytes(
+        aes_256_gcm_encrypt(
+            master_key,
+            json.dumps(
+                {
+                    "appId": "cli_cas",
+                    "userOpenId": "ou_cas",
+                    "accessToken": "init-cli-at",
+                    "refreshToken": "init-cli-rt",
+                    "expiresAt": int((t0 + 1) * 1000),
+                    "refreshExpiresAt": int((t0 + 600_000) * 1000),
+                    "scope": "im:message im:message.send_as_user",
+                }
+            ).encode("utf-8"),
+        )
+    )
+    imp_store = FeishuUserTokenStore(
+        path=tmp_path / "imp_cas.json",
+        key_path=tmp_path / "imp_cas.key",
+        lark_cli_dir=cli_cfg,
+        lark_cli_data_dir=cli_data,
+        now=lambda: t0,
+    )
+    imp_store.import_from_lark_cli()
+
+    async def stale_cli_refresher(_rt: str, **_kw: Any) -> dict[str, Any]:
+        enc_path.write_bytes(
+            aes_256_gcm_encrypt(
+                master_key,
+                json.dumps(
+                    {
+                        "appId": "cli_cas",
+                        "userOpenId": "ou_cas",
+                        "accessToken": "fresh-cli-at",
+                        "refreshToken": "fresh-cli-rt",
+                        "expiresAt": int((t0 + 14_000) * 1000),
+                        "refreshExpiresAt": int((t0 + 900_000) * 1000),
+                        "scope": "im:message im:message.send_as_user im:message.reactions:write_only",
+                    }
+                ).encode("utf-8"),
+            )
+        )
+        imported_mid = imp_store.resolve_token(open_id="ou_cas", app_id="cli_cas")
+        assert imported_mid is not None and imported_mid.access_token == "fresh-cli-at"
+        return {
+            "access_token": "stale-refresh-at",
+            "refresh_token": "stale-refresh-rt",
+            "expires_in": 7200,
+            "scope": "im:message im:message.send_as_user",
+        }
+
+    imp_client = FeishuUserClient(
+        imp_store,
+        open_id="ou_cas",
+        app_id="cli_cas",
+        token_refresher=stale_cli_refresher,
+    )
+    _, after_imp = await imp_client.get_user_token()
+    disk_cli = json.loads(aes_256_gcm_decrypt(master_key, enc_path.read_bytes()).decode("utf-8"))
+    assert after_imp.access_token == "fresh-cli-at"
+    assert disk_cli["refreshToken"] == "fresh-cli-rt"
+
+    # 3. R3-02: External CLI lock holder does not block asyncio heartbeat
+    lock_file = cli_cfg / "locks" / "refresh_cli_cas_ou_cas.lock"
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    holder_code = (
+        "import fcntl, sys, time\n"
+        "with open(sys.argv[1], 'w') as f:\n"
+        "    fcntl.flock(f, fcntl.LOCK_EX)\n"
+        "    print('LOCK_HELD', flush=True)\n"
+        "    time.sleep(0.25)\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-u", "-c", holder_code, str(lock_file)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert proc.stdout is not None and proc.stdout.readline().strip() == "LOCK_HELD"
+    t_start = time.monotonic()
+
+    async def heartbeat() -> float:
+        await asyncio.sleep(0.02)
+        return time.monotonic() - t_start
+
+    hb_task = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0)
+    _, current_imp = await imp_client.get_user_token(force_refresh=True)
+    hb_delay = await hb_task
+    proc.communicate(timeout=3)
+    assert hb_delay < 0.15
+
+    # 4. R3-03: Authoritative reduced scope on refresh does not union prior CLI scopes
+    reduced = imp_store.save_refreshed_token(
+        current_imp,
+        {
+            "access_token": "reduced-at",
+            "refresh_token": "reduced-rt",
+            "expires_in": 7200,
+            "refresh_expires_in": 604_800,
+            "scope": "im:message:readonly",
+        },
+        now=t0,
+    )
+    assert not reduced.has_scope("im:message.send_as_user")
+    reduced_cli = json.loads(aes_256_gcm_decrypt(master_key, enc_path.read_bytes()).decode("utf-8"))
+    assert "im:message.send_as_user" not in reduced_cli["scope"].split()
+
+    # 5. R3-04: Completed turn interrupted during final reply resumes only final reply (no re-dispatch);
+    # uncertain turn retirement preserves dedup claim without re-executing
+    cmd_msg = FeishuUserMessage(
+        "om_done_turn", "oc_chat", "ou_owner", "user", "text", "/ai run once", 2000
+    )
+    final_gate = asyncio.Event()
+    dispatched_turns: list[str] = []
+    final_attempts = 0
+
+    class RecoveryClient:
+        def resolve_record(self) -> Any:
+            return SimpleNamespace(open_id="ou_owner")
+
+        def require_send_as_user_scope(self) -> None:
+            return None
+
+        async def list_messages_page(self, **_kw: Any) -> FeishuMessagePage:
+            return FeishuMessagePage((cmd_msg,), False, "")
+
+        async def list_messages(self, **_kw: Any) -> list[FeishuUserMessage]:
+            return [cmd_msg]
+
+        async def add_reaction_as_user(self, *_a: Any) -> str:
+            return "rx_1"
+
+        async def delete_reaction_as_user(self, *_a: Any) -> None:
+            return None
+
+        async def reply_as_user(self, *_a: Any, **kw: Any) -> FeishuReplyReceipt:
+            nonlocal final_attempts
+            if str(kw.get("uuid") or "").startswith("ai:final:"):
+                final_attempts += 1
+                if final_attempts == 1:
+                    final_gate.set()
+                    await asyncio.Event().wait()
+            return FeishuReplyReceipt(message_id="om_reply", thread_id=None)
+
+    async def once_dispatcher(
+        _tab_id: str, _prompt: str, turn_id: str, _vis: str, _meta: Mapping[str, Any]
+    ) -> str:
+        dispatched_turns.append(turn_id)
+        return "Completed once."
+
+    tabs: dict[str, Any] = {}
+
+    def make_tab(**kw: Any) -> Any:
+        t = SimpleNamespace(id="tab_rec", env=kw["env"], archived=False)
+        tabs["tab_rec"] = t
+        return t
+
+    rec_svc = FeishuAiCommandService(
+        state_path=tmp_path / "rec_state.json",
+        token_store=oauth_store,
+        dedup_store=FeishuMessageDedupStore(tmp_path / "rec_dedup.json"),
+        user_client_factory=lambda _cfg: RecoveryClient(),  # type: ignore[arg-type,return-value]
+        tab_creator=make_tab,
+        tab_getter=lambda ident: tabs.get(ident),
+        turn_dispatcher=once_dispatcher,
+    )
+    rec_svc.update_config(
+        {
+            "enabled": True,
+            "owner_open_id": "ou_owner",
+            "app_id": "cli_cas",
+            "watch_chats": ["oc_chat"],
+        }
+    )
+    rec_svc.set_watermark("oc_chat", 1000)
+    p1 = FeishuAiPoller(rec_svc)
+    await p1.poll_once()
+    await asyncio.wait_for(final_gate.wait(), timeout=1.0)
+    await p1.quiesce()
+    assert dispatched_turns == ["feishu-ai-om_done_turn"]
+    assert rec_svc.get_pending_command("om_done_turn")["dispatch_state"] == "turn_completed"  # type: ignore[index]
+
+    p2 = FeishuAiPoller(rec_svc)
+    await p2.poll_once()
+    await p2.wait_for_inflight()
+    assert dispatched_turns == ["feishu-ai-om_done_turn"]
+    assert final_attempts == 2
+    assert rec_svc.list_pending_commands() == []
+    assert rec_svc.get_recent_runs()[0]["status"] == "completed"
+    await p2.stop()
+
+    # Uncertain in-flight interruption preserves claim and does not replay
+    unc_msg = FeishuUserMessage(
+        "om_uncertain", "oc_chat", "ou_owner", "user", "text", "/ai uncertain", 3000
+    )
+    rec_svc.enqueue_pending_command(unc_msg)
+    assert rec_svc._dedup.claim("ai_cmd:ou_owner:om_uncertain")
+    rec_svc.mark_pending_command_state(
+        "om_uncertain",
+        "interrupted",
+        dispatch_state="uncertain",
+        tab_id="tab_rec",
+        turn_id="feishu-ai-om_uncertain",
+    )
+    assert rec_svc.reconcile_interrupted_command("om_uncertain") is False
+    assert rec_svc.get_recent_runs()[0]["status"] == "interrupted_uncertain"
+    assert rec_svc._dedup.claim("ai_cmd:ou_owner:om_uncertain") is False
+
+    # Retry-safe retired turn (`ExternalDispatchRetired`) releases claim and replays
+    ret_msg = FeishuUserMessage(
+        "om_retired", "oc_chat", "ou_owner", "user", "text", "/ai retired", 4000
+    )
+    rec_svc.enqueue_pending_command(ret_msg)
+
+    async def retired_dispatcher(*_a: Any) -> str:
+        raise ExternalDispatchRetired("feishu-ai-om_retired")
+
+    rec_svc._turn_dispatcher = retired_dispatcher
+    with pytest.raises(asyncio.CancelledError):
+        await rec_svc.handle_message(ret_msg)
+    assert rec_svc.get_pending_command("om_retired")["dispatch_state"] == "retired_retry_safe"  # type: ignore[index]
+    assert rec_svc.reconcile_interrupted_command("om_retired") is True
+
+    # Durable AgentStreamStore TURN_COMPLETED evidence promotes dispatched item to turn_completed
+    stream_msg = FeishuUserMessage(
+        "om_stream_done", "oc_chat", "ou_owner", "user", "text", "/ai stream done", 5000
+    )
+    rec_svc.enqueue_pending_command(stream_msg)
+    assert rec_svc._dedup.claim("ai_cmd:ou_owner:om_stream_done")
+    stream_store = AgentStreamStore("terminal-tabs", "terminal-tab-tab_rec")
+    await stream_store.append(
+        AgentStreamEvent(
+            stream_sequence=0,
+            session_id="terminal-tab-tab_rec",
+            tab_id="tab_rec",
+            agent_type=AgentType.CODEX,
+            type=AgentStreamEventType.TURN_COMPLETED,
+            turn_id="feishu-ai-om_stream_done",
+            created_at=datetime.now(timezone.utc),
+            payload={
+                "status": "completed",
+                "final_text": "Recovered from durable stream store.",
+            },
+        )
+    )
+    rec_svc.mark_pending_command_state(
+        "om_stream_done",
+        "interrupted",
+        dispatch_state="dispatched",
+        tab_id="tab_rec",
+        turn_id="feishu-ai-om_stream_done",
+    )
+    assert rec_svc.reconcile_interrupted_command("om_stream_done") is True
+    assert rec_svc.get_pending_command("om_stream_done")["dispatch_state"] == "turn_completed"  # type: ignore[index]
