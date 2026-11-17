@@ -762,6 +762,7 @@ async def main(browser_run: BrowserRun) -> None:
                     const box = el.getBoundingClientRect()
                     return { height: box.height, bottom: box.bottom, top: box.top }
                 }""")
+            assert sheet_hint["top"] >= -1, sheet_hint
             assert sheet_hint["height"] <= 480 - 24 + 1, sheet_hint
             assert sheet_hint["bottom"] <= 480 + 1, sheet_hint
             start_button = await dialog.get_by_role(
@@ -769,10 +770,47 @@ async def main(browser_run: BrowserRun) -> None:
             ).bounding_box()
             assert start_button, "the sheet footer lost its actions"
             assert start_button["y"] + start_button["height"] <= 480 + 1, start_button
+            # Also verify with a panned visualViewport (offsetTop: 60px, height: 420px)
+            # that the GoalSetupDialog stays within [60, 480] and focusing the objective
+            # textarea keeps it scrolled into view inside .goal-dialog-body.
+            panned_goal_sheet = await dialog.evaluate("""async el => {
+                    const root = document.documentElement
+                    root.style.setProperty('--visual-viewport-offset-top', '60px')
+                    root.style.setProperty('--visual-viewport-height', '420px')
+                    root.style.setProperty('--keyboard-height', '364px')
+                    const box = el.getBoundingClientRect()
+                    const textarea = el.querySelector('#goal-dialog-objective')
+                    const body = el.querySelector('.goal-dialog-body')
+                    body.scrollTop = body.scrollHeight
+                    textarea.focus({ preventScroll: true })
+                    textarea.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
+                    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+                    const taBox = textarea.getBoundingClientRect()
+                    const bodyBox = body.getBoundingClientRect()
+                    const headBox = el.querySelector('.goal-dialog-head').getBoundingClientRect()
+                    const footBox = el.querySelector('.goal-dialog-actions').getBoundingClientRect()
+                    return {
+                      top: box.top,
+                      bottom: box.bottom,
+                      taTop: taBox.top,
+                      taBottom: taBox.bottom,
+                      bodyTop: bodyBox.top,
+                      bodyBottom: bodyBox.bottom,
+                      headBottom: headBox.bottom,
+                      footTop: footBox.top,
+                    }
+                }""")
+            assert panned_goal_sheet["top"] >= 60 - 1, panned_goal_sheet
+            assert abs(panned_goal_sheet["bottom"] - 480) <= 1, panned_goal_sheet
+            assert panned_goal_sheet["taTop"] >= panned_goal_sheet["bodyTop"] - 1, panned_goal_sheet
+            assert (
+                panned_goal_sheet["taBottom"] <= panned_goal_sheet["footTop"] + 1
+            ), panned_goal_sheet
             await page.screenshot(path=str(output / "goal-setup-keyboard-sheet.png"))
             report["screenshots"].append("goal-setup-keyboard-sheet.png")
-            await dialog.evaluate("""() => {
+            await page.evaluate("""() => {
                     const root = document.documentElement
+                    root.style.removeProperty('--visual-viewport-offset-top')
                     root.style.removeProperty('--visual-viewport-height')
                     root.style.removeProperty('--keyboard-height')
                 }""")

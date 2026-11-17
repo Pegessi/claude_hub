@@ -1323,6 +1323,88 @@ async def main(browser_run: BrowserRun) -> None:
         box = await preflight.bounding_box()
         assert box and box["x"] >= 0 and box["x"] + box["width"] <= 390
         await page.screenshot(path=str(output / "maso-unavailable-mobile.png"), full_page=True)
+        # Simulate the mobile soft keyboard opening while SessionCreator is open on 390x844
+        # (shrinking visualViewport to 420px + panning offsetTop by 80px) and focusing inputs
+        # inside the modal (#tabName and #tabCwd). Verify the modal stays in the visible upper
+        # viewport [offsetTop, offsetTop + height] without pushing off the top or leaving a
+        # blank blurred padding gap, and focused inputs scroll into view above the sticky footer.
+        kb_creator_state = await page.evaluate("""async () => {
+          const vv = window.visualViewport;
+          const origHeight = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(vv), 'height');
+          const origOffsetTop = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(vv), 'offsetTop');
+          Object.defineProperty(vv, 'height', { configurable: true, get: () => 420 });
+          Object.defineProperty(vv, 'offsetTop', { configurable: true, get: () => 80 });
+          try {
+            const modal = document.querySelector('.modal');
+            modal.scrollTop = modal.scrollHeight;
+            const tabName = document.querySelector('#tabName');
+            tabName.focus({ preventScroll: true });
+            tabName.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+            vv.dispatchEvent(new Event('resize'));
+            vv.dispatchEvent(new Event('scroll'));
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const overlay = document.querySelector('.modal-overlay');
+            const overlayRect = overlay.getBoundingClientRect();
+            const modalRectAfterName = modal.getBoundingClientRect();
+            const nameRect = tabName.getBoundingClientRect();
+            const footerRect = modal.querySelector('.modal-actions').getBoundingClientRect();
+
+            const tabCwd = document.querySelector('#tabCwd');
+            modal.scrollTop = 0;
+            tabCwd.focus({ preventScroll: true });
+            tabCwd.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+            vv.dispatchEvent(new Event('resize'));
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const cwdRect = tabCwd.getBoundingClientRect();
+            const footerRectAfterCwd = modal.querySelector('.modal-actions').getBoundingClientRect();
+            const modalRectAfterCwd = modal.getBoundingClientRect();
+            return {
+              overlayTop: overlayRect.top,
+              overlayBottom: overlayRect.bottom,
+              overlayHeight: overlayRect.height,
+              overlayScrollTop: overlay.scrollTop,
+              modalTopAfterName: modalRectAfterName.top,
+              modalBottomAfterName: modalRectAfterName.bottom,
+              nameTop: nameRect.top,
+              nameBottom: nameRect.bottom,
+              footerTopAfterName: footerRect.top,
+              cwdTop: cwdRect.top,
+              cwdBottom: cwdRect.bottom,
+              footerTopAfterCwd: footerRectAfterCwd.top,
+              modalTopAfterCwd: modalRectAfterCwd.top,
+              modalBottomAfterCwd: modalRectAfterCwd.bottom,
+              inputFontSize: parseFloat(getComputedStyle(tabCwd).fontSize),
+            };
+          } finally {
+            if (origHeight) Object.defineProperty(vv, 'height', origHeight);
+            else delete vv.height;
+            if (origOffsetTop) Object.defineProperty(vv, 'offsetTop', origOffsetTop);
+            else delete vv.offsetTop;
+            vv.dispatchEvent(new Event('resize'));
+            vv.dispatchEvent(new Event('scroll'));
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          }
+        }""")
+        assert abs(kb_creator_state["overlayTop"] - 80) <= 1, kb_creator_state
+        assert abs(kb_creator_state["overlayBottom"] - 500) <= 1, kb_creator_state
+        assert kb_creator_state["overlayScrollTop"] == 0, kb_creator_state
+        assert kb_creator_state["modalTopAfterName"] >= 80 - 1, kb_creator_state
+        assert abs(kb_creator_state["modalBottomAfterName"] - 500) <= 1, kb_creator_state
+        assert (
+            kb_creator_state["nameTop"] >= kb_creator_state["modalTopAfterName"] - 1
+        ), kb_creator_state
+        assert (
+            kb_creator_state["nameBottom"] <= kb_creator_state["footerTopAfterName"] + 1
+        ), kb_creator_state
+        assert kb_creator_state["modalTopAfterCwd"] >= 80 - 1, kb_creator_state
+        assert abs(kb_creator_state["modalBottomAfterCwd"] - 500) <= 1, kb_creator_state
+        assert (
+            kb_creator_state["cwdTop"] >= kb_creator_state["modalTopAfterCwd"] - 1
+        ), kb_creator_state
+        assert (
+            kb_creator_state["cwdBottom"] <= kb_creator_state["footerTopAfterCwd"] + 1
+        ), kb_creator_state
+        assert kb_creator_state["inputFontSize"] >= 16, kb_creator_state
         await page.locator(".modal").get_by_role("button", name="Cancel", exact=True).click()
         await page.locator(f'.tab-bar .tab[data-tab-id="{TAB}"]').click()
         state["include_terminal_tab"] = False

@@ -215,6 +215,7 @@ import { useTerminalStore } from '@/stores/terminalStore'
 import { useAuthStore } from '@/stores/authStore'
 import { parseTabDeepLink } from '@/utils/deepLink'
 import { isAttachmentNavigation } from '@/utils/attachmentHistory'
+import { isMobileOrCoarseViewport, MODAL_SURFACE_SELECTOR, syncModalViewportScroll } from '@/utils/mobileInputFocus'
 import { useViewport } from '@/composables/useViewport'
 
 const appStore = useAppStore()
@@ -278,10 +279,13 @@ const KEYBOARD_CLOSE_THRESHOLD_PX = 12
 const KEYBOARD_CLOSE_DELAY_MS = 160
 
 function setupMobileViewportSync() {
+  window.addEventListener('resize', handleFallbackResize)
+  window.addEventListener('scroll', handleWindowScroll, { passive: true })
+  document.addEventListener('focusin', handleModalFocusIn)
+
   const vv = window.visualViewport
   if (!vv) {
     // Fallback for browsers without visualViewport: listen to window resize
-    window.addEventListener('resize', handleFallbackResize)
     handleFallbackResize()
     return
   }
@@ -301,7 +305,23 @@ function setupMobileViewportSync() {
 }
 
 function handleFallbackResize() {
-  scheduleViewportMetricsUpdate()
+  updateViewportMetrics(window.visualViewport ?? undefined)
+}
+
+function handleWindowScroll() {
+  const vv = window.visualViewport
+  if (vv && Math.abs(vv.scale - 1) > 0.01) return
+  if (isMobileOrCoarseViewport(window) && (window.scrollY !== 0 || window.scrollX !== 0)) {
+    window.scrollTo(0, 0)
+  }
+  scheduleViewportMetricsUpdate(vv ?? undefined)
+}
+
+function handleModalFocusIn(event: FocusEvent) {
+  const target = event.target
+  if (!(target instanceof HTMLElement) || !target.closest(MODAL_SURFACE_SELECTOR)) return
+  syncModalViewportScroll(document, window)
+  scheduleViewportMetricsUpdate(window.visualViewport ?? undefined)
 }
 
 function scheduleViewportMetricsUpdate(vv?: VisualViewport) {
@@ -379,7 +399,7 @@ function updateViewportMetrics(vv?: VisualViewport) {
   const offsetTop = vv?.offsetTop ?? 0
   const isMobileViewport = window.innerWidth <= 768
 
-  if (Math.abs(viewportWidth - lastVisualViewportWidth) > 24) {
+  if (Math.abs(viewportWidth - lastVisualViewportWidth) > 24 || (!vv || viewportHeight >= window.innerHeight - 2)) {
     largestVisualViewportHeight = viewportHeight
     lastVisualViewportWidth = viewportWidth
   } else if (!largestVisualViewportHeight || viewportHeight > largestVisualViewportHeight) {
@@ -421,6 +441,8 @@ function updateViewportMetrics(vv?: VisualViewport) {
     lastAppliedControlsViewportShift = controlsViewportShiftValue
   }
 
+  syncModalViewportScroll(document, window)
+
   if (!isMobileViewport) {
     clearKeyboardCloseTimer()
     if (keyboardOpenState) {
@@ -457,6 +479,8 @@ function cleanupMobileViewportSync() {
     if (vvScrollHandler) vv.removeEventListener('scroll', vvScrollHandler)
   }
   window.removeEventListener('resize', handleFallbackResize)
+  window.removeEventListener('scroll', handleWindowScroll)
+  document.removeEventListener('focusin', handleModalFocusIn)
   clearKeyboardCloseTimer()
   if (viewportUpdateFrame !== null) {
     window.cancelAnimationFrame(viewportUpdateFrame)
