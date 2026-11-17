@@ -162,7 +162,7 @@ def register_ai_command_routes(
         _user: Any = Depends(require_hub_user),
     ) -> dict[str, Any]:
         service = service_getter()
-        cfg = await service.aget_config()
+        cfg, preflight = await service.aget_config_and_preflight()
         sender = (body.sender_open_id or cfg.owner_open_id or "ou_dry_run_owner").strip()
         msg = FeishuUserMessage(
             message_id=body.message_id,
@@ -192,8 +192,8 @@ def register_ai_command_routes(
             source="dry_run",
             dry_run=True,
             seeded_context=seeded,
+            config=cfg,
         )
-        preflight = await service.apreflight_status(config=cfg)
         return {
             "dry_run": result.to_dict(),
             "token_status": preflight.to_dict(),

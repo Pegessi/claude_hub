@@ -2430,3 +2430,37 @@ async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
             assert body["config"]["owner_open_id"] == body["token_status"]["open_id"]
         finally:
             holder_a_race.communicate(timeout=3)
+
+        # 9. R7-01: Unknown or conflicting explicit profile selector returns imported=False without rebinding
+        r6_svc.update_config({"enabled": False, "app_id": "cli_other", "owner_open_id": "ou_other"})
+        unk_resp = await asgi_client.post(
+            "/api/feishu/bot/ai-command/import-token",
+            json={"profile": "does-not-exist"},
+        )
+        assert unk_resp.status_code == 200
+        unk_body = unk_resp.json()
+        assert unk_body["imported"] is False
+        assert unk_body["config"]["app_id"] == "cli_other"
+        assert unk_body["config"]["owner_open_id"] == "ou_other"
+
+        conflict_resp = await asgi_client.post(
+            "/api/feishu/bot/ai-command/import-token",
+            json={"profile": "secondary", "app_id": "cli_c4"},
+        )
+        assert conflict_resp.status_code == 200
+        assert conflict_resp.json()["imported"] is False
+
+        # 10. R7-02: Failed import / empty token store preflight with auto_import_lark_cli=False
+        # does not synchronously auto-import or block on CLI locks
+        r6_store.delete_token("ou_c4", app_id="cli_c4")
+        r6_store.delete_token("ou_other", app_id="cli_other")
+        r6_svc.update_config({"enabled": False, "app_id": "cli_c4", "owner_open_id": "ou_c4"})
+        d_miss = await measure_heartbeat(
+            asgi_client.post(
+                "/api/feishu/bot/ai-command/import-token",
+                json={"app_id": "cli_missing", "open_id": "ou_missing"},
+            ),
+            lock_target=cli_lock_path,
+        )
+        assert d_miss < 0.12
+        assert r6_store.get_token(open_id="ou_c4", app_id="cli_c4") is None
