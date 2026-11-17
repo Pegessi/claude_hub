@@ -8,11 +8,13 @@
       @keydown.tab="trapFocus"
     >
       <form
+        ref="dialogEl"
         class="goal-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="goal-dialog-title"
         aria-describedby="goal-dialog-tips"
+        tabindex="-1"
         @submit.prevent="submit"
       >
         <header class="goal-dialog-head">
@@ -183,7 +185,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { shouldAutoFocusTextInput } from '@/utils/mobileInputFocus'
 
 /** The objective's storage bound; the counter reads it instead of a literal. */
@@ -215,6 +217,7 @@ const objective = ref('')
 const planFirst = ref(false)
 const strictReview = ref(true)
 const validationError = ref<string | null>(null)
+const dialogEl = ref<HTMLFormElement | null>(null)
 const objectiveEl = ref<HTMLTextAreaElement | null>(null)
 let returnFocusEl: HTMLElement | null = null
 
@@ -239,7 +242,7 @@ function close() {
 }
 
 function trapFocus(event: KeyboardEvent) {
-  const dialog = objectiveEl.value?.closest<HTMLElement>('.goal-dialog')
+  const dialog = dialogEl.value ?? objectiveEl.value?.closest<HTMLElement>('.goal-dialog')
   if (!dialog) return
   const focusable = [...dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), textarea:not(:disabled)')]
   const first = focusable[0]
@@ -247,7 +250,7 @@ function trapFocus(event: KeyboardEvent) {
   if (!first || !last) return
   if (!focusable.includes(document.activeElement as HTMLElement)) {
     event.preventDefault()
-    first.focus()
+    ;(event.shiftKey ? last : first).focus()
   } else if (event.shiftKey && document.activeElement === first) {
     event.preventDefault()
     last.focus()
@@ -257,6 +260,20 @@ function trapFocus(event: KeyboardEvent) {
   }
 }
 
+function onDocumentKeydown(event: KeyboardEvent) {
+  if (event.defaultPrevented) return
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    close()
+  } else if (event.key === 'Tab') {
+    trapFocus(event)
+  }
+}
+
+onBeforeUnmount(() => {
+  document.removeEventListener('keydown', onDocumentKeydown)
+})
+
 watch(() => props.open, open => {
   if (open) {
     if (props.editing) objective.value = props.initialObjective ?? ''
@@ -264,10 +281,16 @@ watch(() => props.open, open => {
     planFirst.value = Boolean(props.initialPlanFirst ?? false)
     returnFocusEl = document.activeElement instanceof HTMLElement ? document.activeElement : null
     validationError.value = null
-    if (shouldAutoFocusTextInput()) {
-      void nextTick(() => objectiveEl.value?.focus())
-    }
+    document.addEventListener('keydown', onDocumentKeydown)
+    void nextTick(() => {
+      if (returnFocusEl && !returnFocusEl.isConnected && document.activeElement instanceof HTMLElement) {
+        returnFocusEl = document.activeElement
+      }
+      const target = shouldAutoFocusTextInput() ? objectiveEl.value : dialogEl.value
+      target?.focus()
+    })
   } else {
+    document.removeEventListener('keydown', onDocumentKeydown)
     returnFocusEl?.focus()
     returnFocusEl = null
   }
@@ -307,6 +330,10 @@ function submit() {
   background: var(--ch-color-surface);
   box-shadow: var(--ch-shadow-dialog);
   overflow: hidden;
+}
+
+.goal-dialog:focus {
+  outline: none;
 }
 
 .goal-dialog-head {

@@ -15,10 +15,16 @@
   `useChatSettings.ts` (`toggleModelMenu`), so opening a modal or tapping non-input
   selector/toolbar buttons on mobile (`<= 768px` or `(any-pointer: coarse)`) never
   pops up the soft keyboard unless the user explicitly taps a text field.
+- Move initial mobile focus onto the non-editable modal container (`tabindex="-1"`)
+  in `GoalSetupDialog.vue`, `SessionCreator.vue`, `TaskCreateDialog.vue`,
+  `WorkspaceEditorDialog.vue`, and `TaskEditDialog.vue`, and guard `GoalStatusBar.vue`
+  mobile sheet close focus restoration so opening `Edit Goal` from the sheet keeps
+  `Escape` / `Tab` focus trapped inside the dialog instead of stranding focus on
+  background Goal controls.
 - Lower `.mobile-controls-overlay` `z-index` from `1000` to `800` in
-  `MobileControls.vue` so the terminal keyboard backdrop blur never covers
-  `SessionCreator` or `CloseTabDialog` (`.modal-overlay` at `z-index: 1000`), and
-  remove conflicting `@media (max-width: 640px)` `.modal-overlay`/`.modal` geometry
+  `MobileControls.vue` so the terminal keyboard backdrop blur and floating controls
+  never cover `SessionCreator` or `CloseTabDialog` (`.modal-overlay` at `z-index: 1000`),
+  and remove conflicting `@media (max-width: 640px)` `.modal-overlay`/`.modal` geometry
   overrides in `session-creator.css` and `CloseTabDialog.vue` so mobile modals use
   the shared `overlays.css` bottom-sheet layout and `--visual-viewport-height` sizing.
 

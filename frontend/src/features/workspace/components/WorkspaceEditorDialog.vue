@@ -4,7 +4,11 @@
     class="workspace-modal-overlay"
     @click.self="closeWorkspaceModal"
   >
-    <div class="workspace-modal">
+    <div
+      ref="modalRef"
+      class="workspace-modal"
+      tabindex="-1"
+    >
       <h3>{{ workspaceModalMode === 'edit' ? 'Edit Workspace' : 'Create Workspace' }}</h3>
       <form @submit.prevent="handleSubmitWorkspace">
         <div class="modal-field">
@@ -175,6 +179,7 @@ import {
   useWorkspaceEditorContext,
   useWorkspaceRuntimeContext,
 } from '../context'
+const modalRef = ref<HTMLDivElement | null>(null)
 const nameInputRef = ref<HTMLInputElement | null>(null)
 const {
   showWorkspaceModal,
@@ -195,8 +200,11 @@ const {
 } = useWorkspaceRuntimeContext()
 
 watch(showWorkspaceModal, open => {
-  if (open && shouldAutoFocusTextInput()) {
-    void nextTick(() => nameInputRef.value?.focus())
+  if (open) {
+    void nextTick(() => {
+      const target = shouldAutoFocusTextInput() ? nameInputRef.value : modalRef.value
+      target?.focus()
+    })
   }
 })
 </script>

@@ -290,6 +290,7 @@ const summaryErrorId = computed(() => `goal-status-error-${props.goal.id}`)
 // The dialog opened by an action (Edit Goal) must not sit under the sheet.
 function runFromSheet(action: GoalAction) {
   expanded.value = false
+  summaryEl.value?.focus()
   action.run()
 }
 
@@ -348,7 +349,17 @@ watch([expanded, isPhone], ([open, phone], [wasOpen, wasPhone]) => {
   }
   setSheetOpen(open && phone)
   if (!phone) return
-  void nextTick(() => (open ? closeEl.value : summaryEl.value)?.focus())
+  void nextTick(() => {
+    if (open) {
+      closeEl.value?.focus()
+    } else if (
+      !document.activeElement ||
+      document.activeElement === document.body ||
+      !document.activeElement.isConnected
+    ) {
+      summaryEl.value?.focus()
+    }
+  })
 })
 </script>
 

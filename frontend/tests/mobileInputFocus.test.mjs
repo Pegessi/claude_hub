@@ -71,7 +71,7 @@ test('shouldAutoFocusTextInput suppresses automatic text-input focus on mobile w
   )
 })
 
-test('modal and selector surfaces gate text-input auto-focus with shouldAutoFocusTextInput', () => {
+test('modal and selector surfaces gate text-input auto-focus and move mobile focus to the modal container', () => {
   const sessionCreator = read('../src/features/terminal/components/SessionCreator.vue')
   const taskCreate = read('../src/components/TaskCreateDialog.vue')
   const workspaceEditor = read('../src/features/workspace/components/WorkspaceEditorDialog.vue')
@@ -79,17 +79,18 @@ test('modal and selector surfaces gate text-input auto-focus with shouldAutoFocu
   const goalSetup = read('../src/components/GoalSetupDialog.vue')
   const chatSettings = read('../src/features/chat/controllers/useChatSettings.ts')
 
-  // None of the form dialogs keep an unconditional HTML autofocus attribute on a text input.
-  for (const [name, source] of [
-    ['SessionCreator.vue', sessionCreator],
-    ['TaskCreateDialog.vue', taskCreate],
-    ['WorkspaceEditorDialog.vue', workspaceEditor],
-    ['TaskEditDialog.vue', taskEdit],
-    ['GoalSetupDialog.vue', goalSetup],
+  // None of the form dialogs keep an unconditional HTML autofocus attribute on a text input,
+  // and each focuses its non-editable modal container when shouldAutoFocusTextInput() is false.
+  for (const [name, source, expectedFallback] of [
+    ['SessionCreator.vue', sessionCreator, /shouldAutoFocusTextInput\(\)\s*\?\s*tabNameInputRef\.value\s*:\s*createModalRef\.value/],
+    ['TaskCreateDialog.vue', taskCreate, /shouldAutoFocusTextInput\(\)\s*\?\s*titleInputRef\.value\s*:\s*modalRef\.value/],
+    ['WorkspaceEditorDialog.vue', workspaceEditor, /shouldAutoFocusTextInput\(\)\s*\?\s*nameInputRef\.value\s*:\s*modalRef\.value/],
+    ['TaskEditDialog.vue', taskEdit, /shouldAutoFocusTextInput\(\)\s*\?\s*titleInputRef\.value\s*:\s*modalRef\.value/],
+    ['GoalSetupDialog.vue', goalSetup, /shouldAutoFocusTextInput\(\)\s*\?\s*objectiveEl\.value\s*:\s*dialogEl\.value/],
   ]) {
     assert.doesNotMatch(source, /<input[^>]*\bautofocus\b/i, `${name} must not have unconditional input autofocus`)
     assert.doesNotMatch(source, /<textarea[^>]*\bautofocus\b/i, `${name} must not have unconditional textarea autofocus`)
-    assert.match(source, /shouldAutoFocusTextInput\(\)/, `${name} must gate initial focus with shouldAutoFocusTextInput()`)
+    assert.match(source, expectedFallback, `${name} must focus its modal container when shouldAutoFocusTextInput() is false`)
   }
 
   // ChatModelPicker search input focus is gated so tapping the model selector on mobile does not pop up the soft keyboard.

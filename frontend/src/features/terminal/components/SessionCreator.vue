@@ -6,7 +6,11 @@
     data-drawer-swipe-ignore
     @click.self="closeCreateModal"
   >
-    <div class="modal">
+    <div
+      ref="createModalRef"
+      class="modal"
+      tabindex="-1"
+    >
       <h3>Create New Session</h3>
       <form @submit.prevent="handleCreateTab">
         <div class="form-group">
@@ -427,6 +431,7 @@ const { defaultPresetTextForAgent } = useLaunchEnvPresets()
 const { isPending, runPending } = usePendingActions()
 const showModal = ref(false)
 const showFileBrowser = ref(false)
+const createModalRef = ref<HTMLDivElement | null>(null)
 const tabNameInputRef = ref<HTMLInputElement | null>(null)
 const cwdInputWrapperRef = ref<HTMLDivElement | null>(null)
 const cwdChoicesRef = ref<HTMLDivElement | null>(null)
@@ -704,9 +709,10 @@ function openCreateModal() {
   }
   showModal.value = true
   fetchRemoteProfiles()
-  if (shouldAutoFocusTextInput()) {
-    void nextTick(() => tabNameInputRef.value?.focus())
-  }
+  void nextTick(() => {
+    const target = shouldAutoFocusTextInput() ? tabNameInputRef.value : createModalRef.value
+    target?.focus()
+  })
 }
 function closeCreateModal() {
   showModal.value = false
