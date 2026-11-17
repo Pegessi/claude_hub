@@ -504,3 +504,16 @@ const {
 </style>
 
 <style scoped src="../styles/shared-compact-layout.css"></style>
+
+<style scoped>
+@media (max-width: 760px) {
+  .resident-agent-modal {
+    overflow-y: auto;
+  }
+
+  .resident-agent-modal .resident-config-body {
+    flex: 1 0 auto;
+    overflow-y: visible;
+  }
+}
+</style>

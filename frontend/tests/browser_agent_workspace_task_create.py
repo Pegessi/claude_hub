@@ -12,7 +12,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from appearance_assertions import (
     PALETTES,
@@ -291,6 +291,20 @@ async def main(browser_run: BrowserRun) -> None:
             body = None
             if method == "GET" and path == "/api/env-presets" and not parsed.query:
                 body = {"custom_presets": [], "hidden_builtin_ids": []}
+            elif method == "GET" and path == "/api/filesystem/list":
+                requested = parse_qs(parsed.query).get("path", ["/Users/me/workspace"])[0]
+                body = {
+                    "current_path": requested,
+                    "parent_path": "/",
+                    "items": [
+                        {
+                            "name": f"folder-{idx:02d}",
+                            "path": f"{requested.rstrip('/')}/folder-{idx:02d}",
+                            "is_dir": True,
+                        }
+                        for idx in range(20)
+                    ],
+                }
             elif method == "GET" and path == "/api/remote/profiles" and not parsed.query:
                 body = []
             elif method == "GET" and path == "/api/workspaces" and not parsed.query:
@@ -1237,6 +1251,93 @@ async def main(browser_run: BrowserRun) -> None:
         await page.screenshot(path=str(output / "task-create-mobile.png"))
         await cancel.click()
         await expect(page.get_by_role("heading", name="Add Task")).to_have_count(0)
+
+        # Also verify Workspace Manage Agents -> Browse (AgentDirectoryDialog) with 20
+        # populated directories under a 300px soft-keyboard visualViewport (offsetTop=70):
+        # the compact path bar keeps a usable nonzero directory list area so wheel-scrolling
+        # to the bottom exposes folder-19 above the sticky footer for click navigation.
+        await page.locator(".workspace-mobile-menu-trigger").click()
+        await page.locator(".workspace-mobile-menu-panel").get_by_role(
+            "button", name="Manage Agents", exact=True
+        ).click()
+        agent_modal = page.locator(".agent-manager-modal")
+        await expect(agent_modal).to_be_visible()
+        await agent_modal.get_by_role("button", name="Browse", exact=True).click()
+        ws_fb_modal = page.locator(".file-browser-modal")
+        await expect(ws_fb_modal).to_be_visible()
+        await expect(ws_fb_modal.locator(".file-item.is-dir")).to_have_count(21)
+        await ws_fb_modal.locator(".file-browser-path input").focus()
+        await page.evaluate("""async () => {
+          const root = document.documentElement;
+          root.style.setProperty('--visual-viewport-offset-top', '70px');
+          root.style.setProperty('--visual-viewport-height', '300px');
+          const vv = window.visualViewport;
+          Object.defineProperty(vv, 'height', { configurable: true, get: () => 300 });
+          Object.defineProperty(vv, 'offsetTop', { configurable: true, get: () => 70 });
+          vv.dispatchEvent(new Event('resize'));
+          vv.dispatchEvent(new Event('scroll'));
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        }""")
+        try:
+            await ws_fb_modal.locator(".file-browser-list").hover()
+            await page.mouse.wheel(0, 1200)
+            ws_fb_kb_state = await page.evaluate("""async () => {
+              await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+              const modal = document.querySelector('.file-browser-modal');
+              const pathBar = modal.querySelector('.file-browser-path');
+              const list = modal.querySelector('.file-browser-list');
+              const footer = modal.querySelector('.modal-actions');
+              const items = modal.querySelectorAll('.file-item.is-dir');
+              const last = items[items.length - 1];
+              const mr = modal.getBoundingClientRect();
+              const pr = pathBar.getBoundingClientRect();
+              const lr = list.getBoundingClientRect();
+              const fr = footer.getBoundingClientRect();
+              const ir = last.getBoundingClientRect();
+              const hit = document.elementFromPoint(ir.left + ir.width / 2, ir.top + ir.height / 2);
+              return {
+                modalTop: mr.top,
+                modalBottom: mr.bottom,
+                pathHeight: pr.height,
+                listTop: lr.top,
+                listBottom: lr.bottom,
+                listClientHeight: list.clientHeight,
+                listScrollTop: list.scrollTop,
+                footerTop: fr.top,
+                lastTop: ir.top,
+                lastBottom: ir.bottom,
+                lastHit: Boolean(hit && (last === hit || last.contains(hit))),
+              };
+            }""")
+            assert ws_fb_kb_state["modalTop"] >= 70 - 1, ws_fb_kb_state
+            assert abs(ws_fb_kb_state["modalBottom"] - 370) <= 1, ws_fb_kb_state
+            assert ws_fb_kb_state["pathHeight"] <= 56, ws_fb_kb_state
+            assert ws_fb_kb_state["listClientHeight"] >= 72, ws_fb_kb_state
+            assert ws_fb_kb_state["listBottom"] <= ws_fb_kb_state["footerTop"] + 1, ws_fb_kb_state
+            assert ws_fb_kb_state["listScrollTop"] > 0, ws_fb_kb_state
+            assert ws_fb_kb_state["lastTop"] >= ws_fb_kb_state["listTop"] - 1, ws_fb_kb_state
+            assert ws_fb_kb_state["lastBottom"] <= ws_fb_kb_state["footerTop"] + 1, ws_fb_kb_state
+            assert ws_fb_kb_state["lastHit"], ws_fb_kb_state
+            await ws_fb_modal.locator(".file-item.is-dir").last.click()
+            await expect(ws_fb_modal.locator(".file-browser-path input")).to_have_value(
+                "/fixture/one/folder-19"
+            )
+        finally:
+            await page.evaluate("""async () => {
+              const root = document.documentElement;
+              const vv = window.visualViewport;
+              delete vv.height;
+              delete vv.offsetTop;
+              root.style.removeProperty('--visual-viewport-offset-top');
+              root.style.removeProperty('--visual-viewport-height');
+              vv.dispatchEvent(new Event('resize'));
+              vv.dispatchEvent(new Event('scroll'));
+              await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            }""")
+        await ws_fb_modal.get_by_role("button", name="Cancel", exact=True).click()
+        await expect(ws_fb_modal).to_have_count(0)
+        await agent_modal.get_by_role("button", name="Cancel", exact=True).click()
+        await expect(agent_modal).to_have_count(0)
         assert await browser_create_count() == mobile_create_count
 
         # Verify WorkspaceEditorDialog and TaskEditDialog at 390x844 do not

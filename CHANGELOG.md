@@ -28,9 +28,10 @@
   `EnvPresetManager.vue`, `feishu-bot-settings-dialog.css`, `AppearanceDialog.vue`,
   and `tab-actions-menu.css` with `--visual-viewport-height`, and set
   `.file-browser-list` `min-height: 0` in `session-creator.css` and
-  `AgentDirectoryDialog.vue` so populated directory lists shrink and scroll
-  cleanly above the sticky footer when the soft keyboard reduces `visualViewport`
-  height.
+  `AgentDirectoryDialog.vue` (with compact single-row mobile `.file-browser-path`
+  chrome in `AgentDirectoryDialog.vue`) so populated directory lists keep a
+  usable scroll area and expose their final rows above the sticky footer when
+  the soft keyboard reduces `visualViewport` height to 340px–300px.
 - Enforce `font-size: max(var(--ch-font-size-md), 16px)` on editable fields inside
   modals and mobile sheets (including `.inbox-sheet` / `.inbox-reply-input` and
   `.dot-panel`) on mobile/coarse viewports so focusing an input never triggers iOS
