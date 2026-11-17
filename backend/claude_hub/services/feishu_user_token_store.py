@@ -747,6 +747,7 @@ class FeishuUserTokenStore:
         app_id: str = "",
         open_id: str = "",
         profile: str = "",
+        prefer_cli_config: bool = False,
     ) -> tuple[str, str]:
         """Resolve the target ``(app_id, open_id)`` without locking unrelated CLI profiles."""
         clean_app = app_id.strip()
@@ -754,7 +755,7 @@ class FeishuUserTokenStore:
         clean_profile = profile.strip()
         if clean_app and clean_open:
             return clean_app, clean_open
-        if not clean_profile and document_exists(self._path):
+        if not prefer_cli_config and not clean_profile and document_exists(self._path):
             rec = self.get_token(open_id=clean_open or None, app_id=clean_app or None)
             if rec is not None:
                 clean_app = clean_app or rec.app_id
@@ -762,28 +763,34 @@ class FeishuUserTokenStore:
                 if clean_app and clean_open:
                     return clean_app, clean_open
         resolved_dirs = self._resolve_lark_cli_dirs_with_overrides()
-        if resolved_dirs is None:
-            return clean_app, clean_open
-        cfg_dir, keychain_dir = resolved_dirs
-        _, dangling, candidates = self._select_config_candidates(
-            cfg_dir / "config.json",
-            target_app_id=clean_app,
-            target_open_id=clean_open,
-            target_profile=clean_profile,
-        )
-        if dangling:
-            return clean_app, clean_open
-        if candidates:
-            return clean_app or candidates[0][0], clean_open or candidates[0][1]
-        if keychain_dir.is_dir():
-            for enc_file in sorted(keychain_dir.glob("*.enc")):
-                parts = enc_file.stem.split("_ou_", 1)
-                if len(parts) == 2:
-                    f_app, f_open = parts[0], f"ou_{parts[1]}"
-                    if (not clean_app or f_app == clean_app) and (
-                        not clean_open or f_open == clean_open
-                    ):
-                        return clean_app or f_app, clean_open or f_open
+        if resolved_dirs is not None:
+            cfg_dir, keychain_dir = resolved_dirs
+            _, dangling, candidates = self._select_config_candidates(
+                cfg_dir / "config.json",
+                target_app_id=clean_app,
+                target_open_id=clean_open,
+                target_profile=clean_profile,
+            )
+            if dangling:
+                return clean_app, clean_open
+            if candidates:
+                for c_app, c_open, _, _ in candidates:
+                    if (keychain_dir / f"{c_app}_{c_open}.enc").is_file():
+                        return clean_app or c_app, clean_open or c_open
+                return clean_app or candidates[0][0], clean_open or candidates[0][1]
+            if keychain_dir.is_dir():
+                for enc_file in sorted(keychain_dir.glob("*.enc")):
+                    parts = enc_file.stem.split("_ou_", 1)
+                    if len(parts) == 2:
+                        f_app, f_open = parts[0], f"ou_{parts[1]}"
+                        if (not clean_app or f_app == clean_app) and (
+                            not clean_open or f_open == clean_open
+                        ):
+                            return clean_app or f_app, clean_open or f_open
+        if prefer_cli_config and not clean_profile and document_exists(self._path):
+            rec = self.get_token(open_id=clean_open or None, app_id=clean_app or None)
+            if rec is not None:
+                return clean_app or rec.app_id, clean_open or rec.open_id
         return clean_app, clean_open
 
     def _lock_paths(
@@ -1412,11 +1419,18 @@ class FeishuUserTokenStore:
         profile: str | None = None,
     ) -> FeishuUserTokenRecord | None:
         """Import a ``lark-cli`` user token under ``async_file_lock`` for the selected account."""
-        async with self.async_file_lock(
-            app_id=app_id or "", open_id=open_id or "", profile=profile or ""
-        ):
+        init_app, init_open = self._resolve_lock_account(
+            app_id=app_id or "",
+            open_id=open_id or "",
+            profile=profile or "",
+            prefer_cli_config=True,
+        )
+        async with self.async_file_lock(app_id=init_app, open_id=init_open, profile=profile or ""):
             resolved_app, resolved_open = self._resolve_lock_account(
-                app_id=app_id or "", open_id=open_id or "", profile=profile or ""
+                app_id=app_id or "",
+                open_id=open_id or "",
+                profile=profile or "",
+                prefer_cli_config=True,
             )
             async with self.async_file_lock(
                 app_id=resolved_app, open_id=resolved_open, profile=profile or ""
@@ -1424,8 +1438,8 @@ class FeishuUserTokenStore:
                 return self.import_from_lark_cli(
                     lark_cli_dir=lark_cli_dir,
                     data_dir=data_dir,
-                    app_id=app_id,
-                    open_id=open_id,
+                    app_id=app_id or (resolved_app or None),
+                    open_id=open_id or (resolved_open or None),
                     profile=profile,
                 )
 

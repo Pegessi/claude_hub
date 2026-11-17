@@ -2322,3 +2322,111 @@ async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
         assert st_recovered["poll_count"] >= 1
         assert st_recovered["last_error"] is None
         await r5_poller.stop()
+
+    # 7. R6-01: Default import after CLI currentApp switch locks and imports currentApp B non-blockingly
+    from fastapi import APIRouter, FastAPI
+
+    from claude_hub.api.routes.feishu_bot.ai_command import register_ai_command_routes
+
+    (cli_cfg / "config.json").write_text(
+        json.dumps(
+            {
+                "currentApp": "secondary",
+                "apps": [
+                    {"appId": "cli_c4", "name": "primary", "users": [{"userOpenId": "ou_c4"}]},
+                    {
+                        "appId": "cli_other",
+                        "name": "secondary",
+                        "users": [{"userOpenId": "ou_other"}],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (cli_data / "cli_other_ou_other.enc").write_bytes(
+        aes_256_gcm_encrypt(
+            master_key,
+            json.dumps(
+                {
+                    "appId": "cli_other",
+                    "userOpenId": "ou_other",
+                    "accessToken": "c6-active-b-at",
+                    "refreshToken": "c6-active-b-rt",
+                    "expiresAt": int((time.time() + 14_000) * 1000),
+                    "refreshExpiresAt": int((time.time() + 600_000) * 1000),
+                    "scope": "im:message im:message.send_as_user",
+                }
+            ).encode("utf-8"),
+        )
+    )
+    r6_store = FeishuUserTokenStore(
+        path=tmp_path / "r6_tok.json",
+        key_path=tmp_path / "r6_tok.key",
+        lark_cli_dir=cli_cfg,
+        lark_cli_data_dir=cli_data,
+    )
+    r6_store.save_oauth_token(
+        open_id="ou_c4",
+        app_id="cli_c4",
+        access_token="cached-a-at",
+        refresh_token="cached-a-rt",
+        expires_in=7200,
+        scope="im:message:readonly",
+    )
+    r6_svc = FeishuAiCommandService(
+        state_path=tmp_path / "r6_state.json",
+        token_store=r6_store,
+    )
+    r6_svc.update_config({"enabled": False, "app_id": "cli_c4", "owner_open_id": "ou_c4"})
+    r6_poller = FeishuAiPoller(r6_svc)
+
+    async def allow_user() -> Any:
+        return SimpleNamespace(open_id="ou_c4")
+
+    r6_app = FastAPI()
+    r6_router = APIRouter(prefix="/api/feishu/bot")
+    register_ai_command_routes(
+        r6_router,
+        require_hub_user=allow_user,
+        service_getter=lambda: r6_svc,
+        poller_getter=lambda: r6_poller,
+    )
+    r6_app.include_router(r6_router)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=r6_app), base_url="http://test.local"
+    ) as asgi_client:
+        d_imp = await measure_heartbeat(
+            asgi_client.post("/api/feishu/bot/ai-command/import-token"),
+            lock_target=unrelated_lock,
+        )
+        assert d_imp < 0.12
+        assert r6_svc.get_config(auto_import_lark_cli=False).app_id == "cli_other"
+        assert r6_svc.get_config(auto_import_lark_cli=False).owner_open_id == "ou_other"
+
+        # 8. R6-02: Concurrent GET and PATCH return a single coherent account snapshot
+        r6_store.save_oauth_token(
+            open_id="ou_c4",
+            app_id="cli_c4",
+            access_token="expired-a-at",
+            expires_in=1,
+            scope="im:message:readonly",
+        )
+        r6_svc.update_config({"enabled": False, "app_id": "cli_c4", "owner_open_id": ""})
+        holder_a_race = spawn_lock_holder(cli_lock_path, 0.25)
+        try:
+            get_task = asyncio.create_task(asgi_client.get("/api/feishu/bot/ai-command"))
+            await asyncio.sleep(0.025)
+            assert not get_task.done()
+            patch_resp = await asgi_client.patch(
+                "/api/feishu/bot/ai-command",
+                json={"owner_open_id": "ou_other", "app_id": "cli_other"},
+            )
+            assert patch_resp.status_code == 200
+            get_resp = await asyncio.wait_for(get_task, timeout=2.0)
+            assert get_resp.status_code == 200
+            body = get_resp.json()
+            assert body["config"]["app_id"] == body["token_status"]["app_id"]
+            assert body["config"]["owner_open_id"] == body["token_status"]["open_id"]
+        finally:
+            holder_a_race.communicate(timeout=3)

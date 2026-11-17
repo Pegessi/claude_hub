@@ -187,16 +187,19 @@ class FeishuAiCommandService:
                     )
             return cfg
 
-    async def aget_config(
-        self, *, auto_import_lark_cli: bool | None = None
-    ) -> FeishuAiCommandConfig:
+    def _read_persisted_config(self) -> FeishuAiCommandConfig:
         with self._lock:
             raw_cfg = self._load_state().get("config")
-            cfg = (
+            return (
                 FeishuAiCommandConfig.from_mapping(raw_cfg)
                 if isinstance(raw_cfg, Mapping)
                 else FeishuAiCommandConfig()
             )
+
+    async def aget_config(
+        self, *, auto_import_lark_cli: bool | None = None
+    ) -> FeishuAiCommandConfig:
+        cfg = self._read_persisted_config()
         should_auto = cfg.enabled if auto_import_lark_cli is None else auto_import_lark_cli
         if not cfg.owner_open_id or not cfg.app_id:
             record = await self._token_store.aresolve_token(
@@ -204,7 +207,22 @@ class FeishuAiCommandService:
                 app_id=cfg.app_id or None,
                 auto_import_lark_cli=should_auto,
             )
-            if record is not None:
+            latest_cfg = self._read_persisted_config()
+            if latest_cfg != cfg:
+                cfg = latest_cfg
+                if cfg.owner_open_id and cfg.app_id:
+                    return cfg
+                should_auto = cfg.enabled if auto_import_lark_cli is None else auto_import_lark_cli
+                record = await self._token_store.aresolve_token(
+                    open_id=cfg.owner_open_id or None,
+                    app_id=cfg.app_id or None,
+                    auto_import_lark_cli=should_auto,
+                )
+            if (
+                record is not None
+                and (not cfg.app_id or record.app_id == cfg.app_id)
+                and (not cfg.owner_open_id or record.open_id == cfg.owner_open_id)
+            ):
                 cfg = replace(
                     cfg,
                     owner_open_id=cfg.owner_open_id or record.open_id,
@@ -468,8 +486,13 @@ class FeishuAiCommandService:
             app_id=cfg.app_id or settings.feishu_app_id or None,
         )
 
-    def preflight_status(self, *, auto_import_lark_cli: bool = True) -> FeishuScopePreflightResult:
-        cfg = self.get_config()
+    def preflight_status(
+        self,
+        *,
+        auto_import_lark_cli: bool = True,
+        config: FeishuAiCommandConfig | None = None,
+    ) -> FeishuScopePreflightResult:
+        cfg = config or self.get_config(auto_import_lark_cli=auto_import_lark_cli)
         rec = self._token_store.resolve_token(
             open_id=cfg.owner_open_id or None,
             app_id=cfg.app_id or None,
@@ -478,15 +501,50 @@ class FeishuAiCommandService:
         return self.build_user_client(cfg).preflight_scopes(rec)
 
     async def apreflight_status(
-        self, *, auto_import_lark_cli: bool = True
+        self,
+        *,
+        auto_import_lark_cli: bool = True,
+        config: FeishuAiCommandConfig | None = None,
     ) -> FeishuScopePreflightResult:
-        cfg = await self.aget_config(auto_import_lark_cli=auto_import_lark_cli)
+        cfg = config or await self.aget_config(auto_import_lark_cli=auto_import_lark_cli)
         rec = await self._token_store.aresolve_token(
             open_id=cfg.owner_open_id or None,
             app_id=cfg.app_id or None,
             auto_import_lark_cli=auto_import_lark_cli,
         )
         return self.build_user_client(cfg).preflight_scopes(rec)
+
+    async def aget_config_and_preflight(
+        self, *, auto_import_lark_cli: bool = True
+    ) -> tuple[FeishuAiCommandConfig, FeishuScopePreflightResult]:
+        """Return a coherent ``(config, preflight)`` pair bound to the same account snapshot."""
+        for _ in range(3):
+            base_cfg = self._read_persisted_config()
+            rec = await self._token_store.aresolve_token(
+                open_id=base_cfg.owner_open_id or None,
+                app_id=base_cfg.app_id or None,
+                auto_import_lark_cli=auto_import_lark_cli,
+            )
+            latest_cfg = self._read_persisted_config()
+            if latest_cfg != base_cfg:
+                continue
+            cfg = base_cfg
+            if (
+                rec is not None
+                and (not cfg.app_id or rec.app_id == cfg.app_id)
+                and (not cfg.owner_open_id or rec.open_id == cfg.owner_open_id)
+            ):
+                cfg = replace(
+                    cfg,
+                    owner_open_id=cfg.owner_open_id or rec.open_id,
+                    app_id=cfg.app_id or rec.app_id,
+                )
+            return cfg, self.build_user_client(cfg).preflight_scopes(rec)
+        cfg = await self.aget_config(auto_import_lark_cli=auto_import_lark_cli)
+        preflight = await self.apreflight_status(
+            auto_import_lark_cli=auto_import_lark_cli, config=cfg
+        )
+        return cfg, preflight
 
     def capabilities_dict(self) -> dict[str, Any]:
         model_efforts: dict[str, list[str]] = {}
