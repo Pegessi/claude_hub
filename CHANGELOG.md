@@ -7,6 +7,15 @@
 
 ## Released
 
+### feat(chat): classify Chat sessions active within the last 4 hours into `Review`
+
+- Keep read, idle Chat sessions active within the last 4 hours (`<= 4h`) in `Review`
+  (`TerminalAgentStatus.review_state = "recent_active"` on backend `/api/tabs/status` and
+  `CHAT_RECENT_REVIEW_WINDOW_MS = 4 * 60 * 60 * 1000` in `utils/chatGroups.ts`), so active
+  research and local coding iterations stay in the `Review` bucket instead of dropping into
+  `Done` immediately after reading a reply, and settle automatically to `Done` after 4 hours
+  of inactivity unless holding an open MR or active Task review.
+
 ### fix(agent-stream): keep chat turn text whole — a 128,000-char budget instead of the 4,000-char field cap
 
 - Widen `services/agent_stream/redaction.py` into a per-field budget: the chat

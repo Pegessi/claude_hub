@@ -52,6 +52,7 @@ export function groupChatsByCwd(
 }
 
 export const CHAT_GROUP_PREVIEW_SIZE = 6
+export const CHAT_RECENT_REVIEW_WINDOW_MS = 4 * 60 * 60 * 1000
 
 export interface ChatSidebarGroup extends ChatCwdGroup {
   key: string
@@ -67,12 +68,15 @@ export interface ChatSidebarGroup extends ChatCwdGroup {
 export function classifyChatStatusBucket(
   tab: TerminalTab,
   status?: TerminalAgentStatus,
+  nowMs: number = Date.now(),
 ): ChatStatusBucket {
   if (status?.pending_question) return 'needs_you'
   const runtime = status?.status ?? (tab.session_kind === 'chat' ? 'offline' : tab.is_active ? 'idle' : 'offline')
   if (runtime === 'working') return 'working'
   if (tab.is_unread || runtime === 'attention') return 'needs_you'
   if (status?.review_state || status?.review_label) return 'review'
+  const activeAt = activityTimestampMs(tab, status)
+  if (activeAt > 0 && nowMs - activeAt <= CHAT_RECENT_REVIEW_WINDOW_MS) return 'review'
   return 'done'
 }
 
@@ -81,6 +85,7 @@ function activityTimestampMs(tab: TerminalTab, status?: TerminalAgentStatus): nu
     status?.last_activity_at ||
     status?.last_reply_at ||
     status?.activity_since ||
+    status?.last_changed_at ||
     tab.created_at
   if (!raw) return 0
   const parsed = Date.parse(raw)
@@ -98,8 +103,10 @@ export function buildChatSidebarStatusGroups(
     collapsed: ReadonlySet<string>
     expanded: ReadonlySet<string>
     pinnedCollapsed?: boolean
+    nowMs?: number
   },
 ): ChatSidebarGroup[] {
+  const nowMs = options.nowMs ?? Date.now()
   const query = options.query.trim().toLowerCase()
   const matches = (tab: TerminalTab) => !query ||
     (tab.name || '').toLowerCase().includes(query) ||
@@ -132,7 +139,7 @@ export function buildChatSidebarStatusGroups(
   }
   for (const tab of tabs) {
     if (pinnedIds.has(tab.id) || !matches(tab)) continue
-    const bucket = classifyChatStatusBucket(tab, statusesByTabId[tab.id])
+    const bucket = classifyChatStatusBucket(tab, statusesByTabId[tab.id], nowMs)
     buckets[bucket].push(tab)
   }
 

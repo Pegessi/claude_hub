@@ -10,7 +10,7 @@ Unified the `Review` vs `Done` lifecycle across Chat sessions (`ChatSidebarRow`,
 2. **Non-Blocking Delivery MR Cache & 4-Bucket Status Projection (`services/mr_status_cache.py`, `manager/status.py`, `tmux/board.py`, `chatGroups.ts`, `triageProModel.ts`)**:
    - Added a bounded stale-while-refresh `MRStatusCache` (`bytedcli --json codebase mr get <url>` off-request with concurrency cap 3, TTL 180s, error backoff 120s, disabled by default in pytest).
    - Restricted `task.source.tab_id` review projection strictly to `TaskExecutionControl.INITIATOR` (or matching `managed_session_id`) so dispatcher chats (e.g. Dot / `Ted`) never inherit `task_review` from background workspace tasks.
-   - Added a `Folders | Status` view switch in `ChatSidebar.vue` (defaulting to `Folders`, with `Status` bucketing chats into `Pinned` + `Needs you` / `Working` / `Review` / `Done` without inline MR tag capsules).
+   - Added a `Folders | Status` view switch in `ChatSidebar.vue` (defaulting to `Folders`, with `Status` bucketing chats into `Pinned` + `Needs you` / `Working` / `Review` / `Done` without inline MR tag capsules), keeping read & idle Chat sessions active within the last 4 hours (`review_state="recent_active"` / `CHAT_RECENT_REVIEW_WINDOW_MS`) in `Review` before aging into `Done`.
    - Upgraded `WorkspaceTriagePro.vue` (`triageProModel.ts`) to a 4-bucket rail (`NEEDS YOU` / `WORKING` / `REVIEW` / `DONE`) with collapsible section headers and a bounded 5-item default preview + `Show more (N)` / `Show less` on `DONE`.
    - Confirmed `merged` delivery MRs automatically transition open tasks to `DONE` (`closed_reason="mr_merged"`).
 3. **Intentional Chat Archive -> `Done` & Lazy Reopen on Restore (`_task_execution.py`, `task_lifecycle.py`, `api/tabs.py`)**:
