@@ -772,9 +772,10 @@ class FeishuAiCommandService:
         source: str = "poller",
         dry_run: bool = False,
         seeded_context: Sequence[FeishuUserMessage] | None = None,
+        config: FeishuAiCommandConfig | None = None,
     ) -> AiCommandExecutionResult:
         """Run the full ``/ai`` command pipeline for one candidate message."""
-        cfg = await self.aget_config()
+        cfg = config or await self.aget_config()
         if not dry_run and not cfg.enabled:
             return self._skip_result(message, dry_run=dry_run, reason="disabled")
         if message.sender_type != "user":

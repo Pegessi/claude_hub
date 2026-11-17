@@ -691,14 +691,16 @@ class FeishuUserTokenStore:
         ]
         selected: list[Mapping[str, Any]] = []
         if target_profile or target_app_id:
-            selector = target_profile or target_app_id
             for e in valid_apps:
                 e_id = str(e.get("appId") or e.get("app_id") or "").strip()
                 e_name = str(e.get("name") or e.get("profile") or "").strip()
-                if target_app_id and e_id == target_app_id:
-                    selected.append(e)
-                elif target_profile and selector in {e_id, e_name}:
-                    selected.append(e)
+                if target_profile and target_profile not in {e_id, e_name}:
+                    continue
+                if target_app_id and e_id != target_app_id:
+                    continue
+                selected.append(e)
+            if not selected:
+                return True, True, candidates
         elif current_app:
             for e in valid_apps:
                 e_id = str(e.get("appId") or e.get("app_id") or "").strip()
@@ -765,20 +767,20 @@ class FeishuUserTokenStore:
         resolved_dirs = self._resolve_lark_cli_dirs_with_overrides()
         if resolved_dirs is not None:
             cfg_dir, keychain_dir = resolved_dirs
-            _, dangling, candidates = self._select_config_candidates(
+            has_config_apps, dangling, candidates = self._select_config_candidates(
                 cfg_dir / "config.json",
                 target_app_id=clean_app,
                 target_open_id=clean_open,
                 target_profile=clean_profile,
             )
-            if dangling:
+            if dangling or (clean_profile and not candidates):
                 return clean_app, clean_open
             if candidates:
                 for c_app, c_open, _, _ in candidates:
                     if (keychain_dir / f"{c_app}_{c_open}.enc").is_file():
                         return clean_app or c_app, clean_open or c_open
                 return clean_app or candidates[0][0], clean_open or candidates[0][1]
-            if keychain_dir.is_dir():
+            if not has_config_apps and not clean_profile and keychain_dir.is_dir():
                 for enc_file in sorted(keychain_dir.glob("*.enc")):
                     parts = enc_file.stem.split("_ou_", 1)
                     if len(parts) == 2:
@@ -1220,7 +1222,7 @@ class FeishuUserTokenStore:
             target_open_id=target_open_id,
             target_profile=target_profile,
         )
-        if dangling_current_app:
+        if dangling_current_app or (target_profile and not candidates):
             return None
 
         # Check standalone plaintext token files in cfg_dir (tokens.json / user_token.json)

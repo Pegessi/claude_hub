@@ -331,6 +331,9 @@ def _parse_user_message(
     )
 
 
+_RECORD_OMITTED = object()
+
+
 class FeishuUserClient:
     """User-identity Feishu client reusing ``FeishuBotClient`` HTTP/reaction/reply primitives."""
 
@@ -388,23 +391,38 @@ class FeishuUserClient:
 
     def preflight_scopes(
         self,
-        record: FeishuUserTokenRecord | None = None,
+        record: FeishuUserTokenRecord | None | object = _RECORD_OMITTED,
+        *,
+        auto_import_lark_cli: bool = True,
     ) -> FeishuScopePreflightResult:
-        target = record if record is not None else self.resolve_record()
+        if record is _RECORD_OMITTED:
+            target = self.resolve_record(auto_import_lark_cli=auto_import_lark_cli)
+        else:
+            target = record if isinstance(record, FeishuUserTokenRecord) else None
         return evaluate_scope_preflight(target)
 
     async def apreflight_scopes(
         self,
-        record: FeishuUserTokenRecord | None = None,
+        record: FeishuUserTokenRecord | None | object = _RECORD_OMITTED,
+        *,
+        auto_import_lark_cli: bool = True,
     ) -> FeishuScopePreflightResult:
-        target = record if record is not None else await self.aresolve_record()
+        if record is _RECORD_OMITTED:
+            target = await self.aresolve_record(auto_import_lark_cli=auto_import_lark_cli)
+        else:
+            target = record if isinstance(record, FeishuUserTokenRecord) else None
         return evaluate_scope_preflight(target)
 
     def require_send_as_user_scope(
         self,
-        record: FeishuUserTokenRecord | None = None,
+        record: FeishuUserTokenRecord | None | object = _RECORD_OMITTED,
+        *,
+        auto_import_lark_cli: bool = True,
     ) -> FeishuUserTokenRecord:
-        target = record if record is not None else self.resolve_record()
+        if record is _RECORD_OMITTED:
+            target = self.resolve_record(auto_import_lark_cli=auto_import_lark_cli)
+        else:
+            target = record if isinstance(record, FeishuUserTokenRecord) else None
         preflight = evaluate_scope_preflight(target)
         if target is None:
             raise FeishuUserScopeError(
@@ -426,9 +444,14 @@ class FeishuUserClient:
 
     async def arequire_send_as_user_scope(
         self,
-        record: FeishuUserTokenRecord | None = None,
+        record: FeishuUserTokenRecord | None | object = _RECORD_OMITTED,
+        *,
+        auto_import_lark_cli: bool = True,
     ) -> FeishuUserTokenRecord:
-        target = record if record is not None else await self.aresolve_record()
+        if record is _RECORD_OMITTED:
+            target = await self.aresolve_record(auto_import_lark_cli=auto_import_lark_cli)
+        else:
+            target = record if isinstance(record, FeishuUserTokenRecord) else None
         return self.require_send_as_user_scope(target)
 
     async def refresh_token(self, record: FeishuUserTokenRecord) -> FeishuUserTokenRecord:
