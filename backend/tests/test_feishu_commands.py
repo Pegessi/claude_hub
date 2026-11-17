@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-from typing import Callable, List
+from typing import Any, Callable, List
 
 import httpx
+import pytest
 from click.testing import CliRunner
 
 from claude_hub.cli import main as cli_main
@@ -370,7 +371,104 @@ def test_parse_action_empty_errors() -> None:
 # -- group wiring -----------------------------------------------------------
 
 
-def test_feishu_group_has_only_two_commands() -> None:
+def test_feishu_group_commands() -> None:
     from claude_hub.cli.commands.feishu import feishu
 
-    assert set(feishu.commands) == {"build-card", "parse-action"}
+    assert set(feishu.commands) == {"build-card", "parse-action", "ai-command"}
+
+
+def test_feishu_ai_command_cli_subcommands(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        body = json.loads(req.content.decode("utf-8")) if req.content else None
+        calls.append((req.method, req.url.path, body))
+        if req.url.path == "/api/feishu/bot/ai-command/auth-guide":
+            return httpx.Response(
+                200,
+                json={
+                    "token_status": {"can_send_as_user": False},
+                    "auth_login_command": 'lark-cli auth login --scope "im:message.send_as_user" --no-wait --json',
+                    "remediation_steps": ["Step 1"],
+                },
+            )
+        if req.url.path == "/api/feishu/bot/ai-command/dry-run":
+            return httpx.Response(
+                200,
+                json={
+                    "dry_run": {
+                        "handled": True,
+                        "provider": "codex",
+                        "model": "gpt-5.4",
+                        "reasoning_effort": "xhigh",
+                    },
+                    "token_status": {"can_send_as_user": True},
+                },
+            )
+        if req.url.path == "/api/feishu/bot/ai-command/import-token":
+            return httpx.Response(
+                200,
+                json={"imported": True, "config": {"enabled": True}},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "config": {
+                    "enabled": True,
+                    "provider": (body or {}).get("provider", "claude"),
+                    "model": (body or {}).get("model", "[redacted]"),
+                    "reasoning_effort": (body or {}).get("reasoning_effort", "high"),
+                },
+                "token_status": {"can_send_as_user": True},
+                "poller_status": {"running": True},
+            },
+        )
+
+    client = HubClient("http://hub.local", transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(cli_main, "get_client", lambda _ctx: client)
+    runner = CliRunner()
+
+    res_status = runner.invoke(cli, ["feishu", "ai-command", "status"])
+    assert res_status.exit_code == 0, res_status.output
+    assert json.loads(res_status.output)["config"]["enabled"] is True
+
+    res_cfg = runner.invoke(
+        cli,
+        [
+            "feishu",
+            "ai-command",
+            "configure",
+            "--enabled",
+            "--provider",
+            "codex",
+            "--model",
+            "gpt-5.4",
+            "--effort",
+            "xhigh",
+            "--import-lark-cli",
+        ],
+    )
+    assert res_cfg.exit_code == 0, res_cfg.output
+    cfg_out = json.loads(res_cfg.output)
+    assert cfg_out["config"]["provider"] == "codex"
+    assert cfg_out["config"]["model"] == "gpt-5.4"
+    assert cfg_out["config"]["reasoning_effort"] == "xhigh"
+
+    res_dry = runner.invoke(
+        cli,
+        [
+            "feishu",
+            "ai-command",
+            "dry-run",
+            "/ai --provider codex --model gpt-5.4 --effort xhigh review !4045",
+            "--context",
+            "https://[redacted]/[redacted]/merge_requests/4045 commit 2a0bab453f",
+        ],
+    )
+    assert res_dry.exit_code == 0, res_dry.output
+    assert json.loads(res_dry.output)["dry_run"]["provider"] == "codex"
+
+    res_guide = runner.invoke(cli, ["feishu", "ai-command", "auth-guide"])
+    assert res_guide.exit_code == 0, res_guide.output
+    assert "im:message.send_as_user" in json.loads(res_guide.output)["auth_login_command"]
+    assert len(calls) == 5

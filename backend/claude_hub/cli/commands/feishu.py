@@ -50,6 +50,13 @@ from claude_hub.cli.feishu_cards import (
     parse_card_action,
 )
 from claude_hub.cli.output import emit
+from claude_hub.services.feishu_ai_command import (
+    SUPPORTED_AI_COMMAND_PROVIDERS,
+    SUPPORTED_REASONING_EFFORTS,
+)
+
+AI_COMMAND_PROVIDER_CHOICES = [p.value for p in SUPPORTED_AI_COMMAND_PROVIDERS]
+AI_COMMAND_EFFORT_CHOICES = [e for e in SUPPORTED_REASONING_EFFORTS if e]
 
 
 @click.group()
@@ -425,3 +432,225 @@ def feishu_parse_action(ctx: click.Context, payload: Optional[str]) -> None:
         emit(None, as_json=True)
         ctx.exit(1)
     emit(decision, as_json=True)
+
+
+# -- Personal /ai command management ----------------------------------------
+
+
+@feishu.group("ai-command")
+def feishu_ai_command() -> None:
+    """Inspect, configure, dry-run, and check auth for the personal Feishu /ai command."""
+
+
+@feishu_ai_command.command("status")
+@click.pass_context
+def feishu_ai_command_status(ctx: click.Context) -> None:
+    """Show current Feishu /ai command configuration, user token scopes, and poller status."""
+    client = cli_main.get_client(ctx)
+    try:
+        payload = client._request("GET", "/api/feishu/bot/ai-command")
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(payload, as_json=True)
+
+
+@feishu_ai_command.command("configure")
+@click.option(
+    "--enabled/--disabled", "enabled", default=None, help="Enable or disable /ai command."
+)
+@click.option(
+    "--provider",
+    type=click.Choice(AI_COMMAND_PROVIDER_CHOICES, case_sensitive=False),
+    default=None,
+    help="Default execution agent provider (claude, codex, traex, maso, cursor, antigravity).",
+)
+@click.option("--model", default=None, help="Default execution model ID.")
+@click.option(
+    "--reasoning-effort",
+    "--effort",
+    "reasoning_effort",
+    type=click.Choice(["", *AI_COMMAND_EFFORT_CHOICES], case_sensitive=False),
+    default=None,
+    help="Default thinking intensity / reasoning effort.",
+)
+@click.option("--prefix", default=None, help="Command prefix (default: /ai).")
+@click.option("--owner-open-id", default=None, help="Owner Feishu open_id (ou_...).")
+@click.option("--app-id", default=None, help="Feishu App ID (cli_...).")
+@click.option("--cwd", default=None, help="Default working directory for spawned /ai Chat tabs.")
+@click.option(
+    "--watch-chat",
+    "watch_chats",
+    multiple=True,
+    help="Chat ID (oc_...) to watch (repeatable).",
+)
+@click.option(
+    "--clear-watch-chats",
+    is_flag=True,
+    default=False,
+    help="Clear watched chat list (poll top active chats instead).",
+)
+@click.option(
+    "--poll-interval",
+    "poll_interval_seconds",
+    type=float,
+    default=None,
+    help="Polling interval in seconds (2-300).",
+)
+@click.option(
+    "--max-context-messages",
+    type=int,
+    default=None,
+    help="Maximum thread/chat context messages to fetch (1-100).",
+)
+@click.option("--ack-emoji", default=None, help="Initial reaction emoji (default: OnIt).")
+@click.option("--done-emoji", default=None, help="Completion reaction emoji (default: DONE).")
+@click.option("--footer", default=None, help="Reply footer appended to /ai posts.")
+@click.option(
+    "--reply-in-thread/--no-reply-in-thread",
+    default=None,
+    help="Whether replies default to thread mode.",
+)
+@click.option(
+    "--import-lark-cli",
+    is_flag=True,
+    default=False,
+    help="Also import user token from ~/.lark-cli.",
+)
+@click.pass_context
+def feishu_ai_command_configure(
+    ctx: click.Context,
+    enabled: Optional[bool],
+    provider: Optional[str],
+    model: Optional[str],
+    reasoning_effort: Optional[str],
+    prefix: Optional[str],
+    owner_open_id: Optional[str],
+    app_id: Optional[str],
+    cwd: Optional[str],
+    watch_chats: tuple[str, ...],
+    clear_watch_chats: bool,
+    poll_interval_seconds: Optional[float],
+    max_context_messages: Optional[int],
+    ack_emoji: Optional[str],
+    done_emoji: Optional[str],
+    footer: Optional[str],
+    reply_in_thread: Optional[bool],
+    import_lark_cli: bool,
+) -> None:
+    """Update Feishu /ai command settings and default execution agent configuration."""
+    patch_body: Dict[str, Any] = {}
+    if enabled is not None:
+        patch_body["enabled"] = enabled
+    if provider is not None:
+        patch_body["provider"] = provider.lower()
+    if model is not None:
+        patch_body["model"] = model
+    if reasoning_effort is not None:
+        patch_body["reasoning_effort"] = reasoning_effort.lower()
+    if prefix is not None:
+        patch_body["prefix"] = prefix
+    if owner_open_id is not None:
+        patch_body["owner_open_id"] = owner_open_id
+    if app_id is not None:
+        patch_body["app_id"] = app_id
+    if cwd is not None:
+        patch_body["cwd"] = cwd
+    if clear_watch_chats:
+        patch_body["watch_chats"] = []
+    elif watch_chats:
+        patch_body["watch_chats"] = list(watch_chats)
+    if poll_interval_seconds is not None:
+        patch_body["poll_interval_seconds"] = poll_interval_seconds
+    if max_context_messages is not None:
+        patch_body["max_context_messages"] = max_context_messages
+    if ack_emoji is not None:
+        patch_body["ack_emoji"] = ack_emoji
+    if done_emoji is not None:
+        patch_body["done_emoji"] = done_emoji
+    if footer is not None:
+        patch_body["footer"] = footer
+    if reply_in_thread is not None:
+        patch_body["reply_in_thread"] = reply_in_thread
+
+    client = cli_main.get_client(ctx)
+    try:
+        if import_lark_cli:
+            payload = client._request(
+                "POST",
+                "/api/feishu/bot/ai-command/import-token",
+                json={"app_id": app_id, "open_id": owner_open_id},
+            )
+            if patch_body:
+                payload = client._request(
+                    "PATCH",
+                    "/api/feishu/bot/ai-command",
+                    json=patch_body,
+                )
+        else:
+            payload = client._request(
+                "PATCH",
+                "/api/feishu/bot/ai-command",
+                json=patch_body,
+            )
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(payload, as_json=True)
+
+
+@feishu_ai_command.command("dry-run")
+@click.argument("text", required=False)
+@click.option("--text", "text_opt", default=None, help="Full /ai message text to dry-run.")
+@click.option("--chat-id", default="oc_dry_run_chat", help="Simulated chat_id.")
+@click.option("--thread-id", default="omt_dry_run_thread", help="Simulated thread_id.")
+@click.option("--message-id", default="om_dry_run_msg", help="Simulated message_id.")
+@click.option(
+    "--context",
+    "context_messages",
+    multiple=True,
+    help="Simulated prior thread/chat message text (repeatable).",
+)
+@click.pass_context
+def feishu_ai_command_dry_run(
+    ctx: click.Context,
+    text: Optional[str],
+    text_opt: Optional[str],
+    chat_id: str,
+    thread_id: str,
+    message_id: str,
+    context_messages: tuple[str, ...],
+) -> None:
+    """Preview /ai command parsing, inline flag overrides, reference extraction, and post payloads without sending to Feishu."""
+    resolved_text = text_opt if text_opt is not None else (text or "/ai review一下 没问题approve")
+    body = {
+        "text": resolved_text,
+        "chat_id": chat_id,
+        "thread_id": thread_id or None,
+        "message_id": message_id,
+        "context_messages": list(context_messages),
+    }
+    client = cli_main.get_client(ctx)
+    try:
+        payload = client._request("POST", "/api/feishu/bot/ai-command/dry-run", json=body)
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(payload, as_json=True)
+
+
+@feishu_ai_command.command("auth-guide")
+@click.option(
+    "--import-lark-cli",
+    is_flag=True,
+    default=False,
+    help="Import ~/.lark-cli token before checking scopes.",
+)
+@click.pass_context
+def feishu_ai_command_auth_guide(ctx: click.Context, import_lark_cli: bool) -> None:
+    """Check im:message.send_as_user scope readiness and print auth login remediation steps."""
+    client = cli_main.get_client(ctx)
+    try:
+        if import_lark_cli:
+            client._request("POST", "/api/feishu/bot/ai-command/import-token", json={})
+        payload = client._request("GET", "/api/feishu/bot/ai-command/auth-guide")
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(payload, as_json=True)

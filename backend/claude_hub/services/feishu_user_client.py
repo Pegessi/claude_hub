@@ -1,0 +1,723 @@
+"""Feishu user-identity OpenAPI client for the personal ``/ai`` assistant workflow.
+
+Reuses ``FeishuBotClient``, ``create_feishu_http_client``, ``FeishuBotRemoteError``,
+and message parsing helpers from ``feishu_bot.py`` so there is one HTTP and
+reaction/reply implementation across Bot and User identities.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from dataclasses import dataclass, replace
+from typing import Any, Awaitable, Callable, Mapping, TypeVar
+from urllib.parse import quote
+
+_T = TypeVar("_T")
+
+import httpx
+
+from claude_hub.auth.feishu import refresh_user_access_token_bundle
+from claude_hub.services.feishu_bot import (
+    FeishuBotClient,
+    FeishuBotConfig,
+    FeishuBotConfigurationError,
+    FeishuBotError,
+    FeishuBotRemoteError,
+    FeishuChatInfo,
+    FeishuReplyReceipt,
+    _chat_info_from_payload,
+    _forward_body,
+    _forward_content,
+    create_feishu_http_client,
+)
+from claude_hub.services.feishu_user_token_store import (
+    FeishuUserTokenRecord,
+    FeishuUserTokenStore,
+    get_feishu_user_token_store,
+)
+
+logger = logging.getLogger(__name__)
+
+REQUIRED_SEND_AS_USER_SCOPE = "im:message.send_as_user"
+REQUIRED_IM_MESSAGE_SCOPE = "im:message"
+RECOMMENDED_AI_COMMAND_SCOPES: tuple[str, ...] = (
+    "im:message",
+    "im:message.send_as_user",
+    "im:message.reactions:write_only",
+    "im:chat:read",
+    "im:message.group_msg:get_as_user",
+    "im:message.p2p_msg:get_as_user",
+    "search:message",
+    "im:message:readonly",
+)
+_EXPIRED_TOKEN_CODES = {99991677, 99991663, 99991668, "99991677", "99991663", "99991668"}
+
+
+class FeishuUserScopeError(FeishuBotConfigurationError):
+    """Raised when the user token lacks ``im:message.send_as_user``."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        missing_scopes: tuple[str, ...] = (REQUIRED_SEND_AS_USER_SCOPE,),
+        auth_login_command: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.missing_scopes = missing_scopes
+        self.auth_login_command = auth_login_command
+
+
+@dataclass(frozen=True)
+class FeishuScopePreflightResult:
+    """Scope readiness and remediation guidance for ``/ai`` user-identity actions."""
+
+    has_token: bool
+    open_id: str | None
+    user_name: str | None
+    app_id: str | None
+    source: str | None
+    expires_at: float
+    token_expired: bool
+    granted_scopes: tuple[str, ...]
+    required_send_scope: str
+    can_send_as_user: bool
+    can_react_as_user: bool
+    can_read_messages: bool
+    missing_required_scopes: tuple[str, ...]
+    missing_recommended_scopes: tuple[str, ...]
+    auth_login_command: str
+    remediation_steps: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "has_token": self.has_token,
+            "open_id": self.open_id,
+            "user_name": self.user_name,
+            "app_id": self.app_id,
+            "source": self.source,
+            "expires_at": self.expires_at,
+            "token_expired": self.token_expired,
+            "granted_scopes": list(self.granted_scopes),
+            "required_send_scope": self.required_send_scope,
+            "can_send_as_user": self.can_send_as_user,
+            "can_react_as_user": self.can_react_as_user,
+            "can_read_messages": self.can_read_messages,
+            "missing_required_scopes": list(self.missing_required_scopes),
+            "missing_recommended_scopes": list(self.missing_recommended_scopes),
+            "auth_login_command": self.auth_login_command,
+            "remediation_steps": list(self.remediation_steps),
+        }
+
+
+@dataclass(frozen=True)
+class FeishuUserMessage:
+    """Normalized message record returned by user-identity IM read APIs."""
+
+    message_id: str
+    chat_id: str
+    sender_open_id: str
+    sender_type: str
+    msg_type: str
+    text: str
+    create_time_ms: int
+    thread_id: str | None = None
+    parent_id: str | None = None
+    root_id: str | None = None
+
+
+def build_auth_login_command(
+    scopes: tuple[str, ...] = RECOMMENDED_AI_COMMAND_SCOPES,
+) -> str:
+    scope_arg = " ".join(scopes)
+    return f'lark-cli auth login --scope "{scope_arg}" --no-wait --json'
+
+
+def evaluate_scope_preflight(
+    record: FeishuUserTokenRecord | None,
+    *,
+    now: float | None = None,
+) -> FeishuScopePreflightResult:
+    """Inspect a user token record and produce clear scope & auth guidance."""
+    cmd = build_auth_login_command()
+    if record is None:
+        steps = (
+            "1. In Feishu Developer Console, enable user-identity permission "
+            "`im:message.send_as_user` (plus `im:message`, `im:message.reactions:write_only`, "
+            "`im:chat:read`, `im:message.group_msg:get_as_user`, `search:message`) and publish a version.",
+            f"2. Authenticate via lark-cli: `{cmd}` (or sign in via Hub Feishu OAuth).",
+            "3. Run `claude-hub feishu ai-command status` or click 'Import ~/.lark-cli Token' in Settings.",
+        )
+        return FeishuScopePreflightResult(
+            has_token=False,
+            open_id=None,
+            user_name=None,
+            app_id=None,
+            source=None,
+            expires_at=0.0,
+            token_expired=True,
+            granted_scopes=(),
+            required_send_scope=REQUIRED_SEND_AS_USER_SCOPE,
+            can_send_as_user=False,
+            can_react_as_user=False,
+            can_read_messages=False,
+            missing_required_scopes=(REQUIRED_SEND_AS_USER_SCOPE, REQUIRED_IM_MESSAGE_SCOPE),
+            missing_recommended_scopes=RECOMMENDED_AI_COMMAND_SCOPES,
+            auth_login_command=cmd,
+            remediation_steps=steps,
+        )
+
+    granted = record.scopes_set()
+    # If Hub OAuth did not return a scope string in the v1 token response,
+    # granted may be empty; when scope metadata is present we enforce exact checks.
+    can_send = REQUIRED_SEND_AS_USER_SCOPE in granted
+    can_react = bool(granted & {"im:message.reactions:write_only", "im:message"})
+    can_read = bool(
+        granted
+        & {
+            "im:message:readonly",
+            "im:message",
+            "im:message.group_msg:get_as_user",
+            "im:message.p2p_msg:get_as_user",
+        }
+    )
+    missing_req: list[str] = []
+    if REQUIRED_SEND_AS_USER_SCOPE not in granted:
+        missing_req.append(REQUIRED_SEND_AS_USER_SCOPE)
+    if REQUIRED_IM_MESSAGE_SCOPE not in granted:
+        missing_req.append(REQUIRED_IM_MESSAGE_SCOPE)
+    missing_rec = [s for s in RECOMMENDED_AI_COMMAND_SCOPES if s not in granted]
+
+    steps_list: list[str] = []
+    if missing_req:
+        steps_list.append(
+            f"1. In Feishu Developer Console for app `{record.app_id}`, grant user permission "
+            f"`{', '.join(missing_req)}`, create an app version, and publish/approve it."
+        )
+        steps_list.append(
+            f"2. Re-authorize your user token with: `{cmd}` and complete device verification."
+        )
+        steps_list.append(
+            "3. Reload the token with `claude-hub feishu ai-command configure --import-lark-cli` "
+            "or via the Hub Feishu Settings UI."
+        )
+    else:
+        steps_list.append(
+            "User token includes `im:message.send_as_user` and is ready to send as user."
+        )
+
+    return FeishuScopePreflightResult(
+        has_token=True,
+        open_id=record.open_id,
+        user_name=record.user_name or None,
+        app_id=record.app_id,
+        source=record.source,
+        expires_at=record.expires_at,
+        token_expired=record.is_expired(now=now, skew_seconds=0.0),
+        granted_scopes=tuple(sorted(granted)),
+        required_send_scope=REQUIRED_SEND_AS_USER_SCOPE,
+        can_send_as_user=can_send,
+        can_react_as_user=can_react,
+        can_read_messages=can_read,
+        missing_required_scopes=tuple(missing_req),
+        missing_recommended_scopes=tuple(missing_rec),
+        auth_login_command=cmd,
+        remediation_steps=tuple(steps_list),
+    )
+
+
+def _extract_item_text(item: Mapping[str, Any]) -> str:
+    msg_type = str(item.get("msg_type") or item.get("message_type") or "text")
+    body = _forward_body(item)
+    if msg_type == "text":
+        if isinstance(body, Mapping):
+            raw = body.get("text")
+            if isinstance(raw, str):
+                text = raw
+            else:
+                text = ""
+        elif isinstance(body, str):
+            text = body
+        else:
+            text = ""
+    else:
+        text, _ = _forward_content(body)
+    # Substitute mention placeholders (@_user_1) when mentions metadata is present
+    mentions = item.get("mentions")
+    if isinstance(mentions, list) and text:
+        for mention in mentions:
+            if not isinstance(mention, Mapping):
+                continue
+            key = mention.get("key")
+            name = mention.get("name")
+            if isinstance(key, str) and key and isinstance(name, str) and name:
+                text = text.replace(key, f"@{name}")
+    return text.strip()
+
+
+def _parse_user_message(
+    item: Mapping[str, Any], default_chat_id: str = ""
+) -> FeishuUserMessage | None:
+    if item.get("deleted") is True:
+        return None
+    message_id = str(item.get("message_id") or item.get("id") or "").strip()
+    if not message_id:
+        return None
+    chat_id = str(item.get("chat_id") or default_chat_id or "").strip()
+    sender = item.get("sender")
+    if isinstance(sender, Mapping):
+        sender_open_id = str(
+            sender.get("id") or sender.get("open_id") or sender.get("sender_id") or ""
+        ).strip()
+        sender_type = str(sender.get("sender_type") or "user").strip()
+    else:
+        sender_open_id = str(item.get("sender_open_id") or "").strip()
+        sender_type = str(item.get("sender_type") or "user").strip()
+    msg_type = str(item.get("msg_type") or item.get("message_type") or "text").strip()
+    raw_ctime = item.get("create_time")
+    try:
+        ctime_val = int(str(raw_ctime).strip()) if raw_ctime is not None else 0
+        if 0 < ctime_val < 10_000_000_000:
+            ctime_val *= 1000
+    except (ValueError, TypeError):
+        ctime_val = 0
+    thread_id = str(item.get("thread_id") or "").strip() or None
+    parent_id = str(item.get("parent_id") or "").strip() or None
+    root_id = str(item.get("root_id") or "").strip() or None
+    text = _extract_item_text(item)
+    return FeishuUserMessage(
+        message_id=message_id,
+        chat_id=chat_id,
+        sender_open_id=sender_open_id,
+        sender_type=sender_type,
+        msg_type=msg_type,
+        text=text,
+        create_time_ms=ctime_val,
+        thread_id=thread_id,
+        parent_id=parent_id,
+        root_id=root_id,
+    )
+
+
+class FeishuUserClient:
+    """User-identity Feishu client reusing ``FeishuBotClient`` HTTP/reaction/reply primitives."""
+
+    def __init__(
+        self,
+        token_store: FeishuUserTokenStore | None = None,
+        *,
+        open_id: str | None = None,
+        app_id: str | None = None,
+        api_base_url: str = "https://open.feishu.cn",
+        client: httpx.AsyncClient | None = None,
+        token_refresher: Callable[..., Any] | None = None,
+    ) -> None:
+        self._store = token_store or get_feishu_user_token_store()
+        self._open_id = (open_id or "").strip() or None
+        self._app_id = (app_id or "").strip() or None
+        self._api_base_url = api_base_url.rstrip("/")
+        self._client = client
+        self._token_refresher = token_refresher or refresh_user_access_token_bundle
+        self._bot_client = FeishuBotClient(
+            FeishuBotConfig(
+                app_id=self._app_id or "user-client",
+                app_secret="unused-for-user-token",
+                api_base_url=self._api_base_url,
+            ),
+            client=client,
+        )
+
+    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        if self._client is not None:
+            return await self._client.request(method, path, **kwargs)
+        async with create_feishu_http_client(self._api_base_url, timeout=15.0) as client:
+            return await client.request(method, path, **kwargs)
+
+    def resolve_record(self, *, auto_import_lark_cli: bool = True) -> FeishuUserTokenRecord | None:
+        return self._store.resolve_token(
+            open_id=self._open_id,
+            app_id=self._app_id,
+            auto_import_lark_cli=auto_import_lark_cli,
+        )
+
+    def preflight_scopes(
+        self,
+        record: FeishuUserTokenRecord | None = None,
+    ) -> FeishuScopePreflightResult:
+        target = record if record is not None else self.resolve_record()
+        return evaluate_scope_preflight(target)
+
+    def require_send_as_user_scope(
+        self,
+        record: FeishuUserTokenRecord | None = None,
+    ) -> FeishuUserTokenRecord:
+        target = record if record is not None else self.resolve_record()
+        preflight = evaluate_scope_preflight(target)
+        if target is None:
+            raise FeishuUserScopeError(
+                "No Feishu user access token is available. "
+                f"Run `{preflight.auth_login_command}` or sign in via Hub Feishu OAuth.",
+                missing_scopes=preflight.missing_required_scopes,
+                auth_login_command=preflight.auth_login_command,
+            )
+        if not preflight.can_send_as_user:
+            raise FeishuUserScopeError(
+                f"Feishu user token for {target.open_id} is missing required scope "
+                f"`{REQUIRED_SEND_AS_USER_SCOPE}`. "
+                f"Run `{preflight.auth_login_command}` after enabling `{REQUIRED_SEND_AS_USER_SCOPE}` "
+                f"on app `{target.app_id}`.",
+                missing_scopes=preflight.missing_required_scopes,
+                auth_login_command=preflight.auth_login_command,
+            )
+        return target
+
+    async def refresh_token(self, record: FeishuUserTokenRecord) -> FeishuUserTokenRecord:
+        if not record.refresh_token:
+            raise FeishuBotConfigurationError(
+                f"Feishu user token for {record.open_id} expired and has no refresh_token"
+            )
+        refreshed = await self._token_refresher(
+            record.refresh_token,
+            app_id=record.app_id,
+            app_secret=record.app_secret or None,
+        )
+        if not isinstance(refreshed, Mapping) or not refreshed.get("access_token"):
+            raise FeishuBotError("Feishu user access token refresh failed")
+        now = time.time()
+        expires_in = refreshed.get("expires_in")
+        refresh_expires_in = refreshed.get("refresh_expires_in")
+        updated = replace(
+            record,
+            access_token=str(refreshed["access_token"]).strip(),
+            refresh_token=str(refreshed.get("refresh_token") or record.refresh_token).strip(),
+            expires_at=(
+                now + float(expires_in)
+                if isinstance(expires_in, (int, float)) and expires_in > 0
+                else record.expires_at
+            ),
+            refresh_expires_at=(
+                now + float(refresh_expires_in)
+                if isinstance(refresh_expires_in, (int, float)) and refresh_expires_in > 0
+                else record.refresh_expires_at
+            ),
+            scope=str(refreshed.get("scope") or record.scope).strip(),
+            updated_at=now,
+        )
+        return self._store.upsert_token(updated)
+
+    async def get_user_token(
+        self, *, force_refresh: bool = False
+    ) -> tuple[str, FeishuUserTokenRecord]:
+        record = self.resolve_record()
+        if record is None:
+            preflight = evaluate_scope_preflight(None)
+            raise FeishuUserScopeError(
+                "No Feishu user access token is configured. "
+                f"Run `{preflight.auth_login_command}`.",
+                missing_scopes=preflight.missing_required_scopes,
+                auth_login_command=preflight.auth_login_command,
+            )
+        if (force_refresh or record.is_expired(skew_seconds=300.0)) and record.refresh_token:
+            try:
+                record = await self.refresh_token(record)
+            except Exception:
+                if force_refresh:
+                    raise
+                logger.warning("Proactive Feishu user token refresh failed; trying current token")
+        return record.access_token, record
+
+    async def _with_user_token_retry(self, op: Callable[[str], Awaitable[_T]]) -> _T:
+        token, record = await self.get_user_token(force_refresh=False)
+        try:
+            return await op(token)
+        except FeishuBotRemoteError as exc:
+            if exc.code in _EXPIRED_TOKEN_CODES and record.refresh_token:
+                refreshed_token, _ = await self.get_user_token(force_refresh=True)
+                return await op(refreshed_token)
+            raise
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 401 and record.refresh_token:
+                refreshed_token, _ = await self.get_user_token(force_refresh=True)
+                return await op(refreshed_token)
+            raise
+
+    async def send_as_user(
+        self,
+        chat_id: str,
+        msg_type: str,
+        content: Mapping[str, object],
+        *,
+        uuid: str | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Send a message to ``chat_id`` as the authenticated user."""
+        if dry_run:
+            preflight = self.preflight_scopes()
+            return {
+                "dry_run": True,
+                "action": "send_as_user",
+                "chat_id": chat_id,
+                "msg_type": msg_type,
+                "content": dict(content),
+                "uuid": uuid,
+                "can_send_as_user": preflight.can_send_as_user,
+                "missing_required_scopes": list(preflight.missing_required_scopes),
+            }
+        self.require_send_as_user_scope()
+
+        async def _call(token: str) -> dict[str, Any]:
+            message_id = await self._bot_client.send_message_with_identity(
+                chat_id,
+                msg_type,
+                content,
+                uuid=uuid,
+                access_token=token,
+            )
+            return {"message_id": message_id, "chat_id": chat_id, "msg_type": msg_type}
+
+        return await self._with_user_token_retry(_call)
+
+    async def reply_as_user(
+        self,
+        message_id: str,
+        msg_type: str,
+        content: Mapping[str, object],
+        *,
+        reply_in_thread: bool = False,
+        uuid: str | None = None,
+        dry_run: bool = False,
+    ) -> FeishuReplyReceipt:
+        """Reply to ``message_id`` as the authenticated user."""
+        if dry_run:
+            return FeishuReplyReceipt(
+                message_id=f"dry-run:{uuid or message_id}",
+                thread_id="dry-run-thread" if reply_in_thread else None,
+            )
+        self.require_send_as_user_scope()
+
+        async def _call(token: str) -> FeishuReplyReceipt:
+            return await self._bot_client._reply_message_payload(
+                message_id,
+                msg_type,
+                content,
+                access_token=token,
+                reply_in_thread=reply_in_thread,
+                uuid=uuid,
+            )
+
+        return await self._with_user_token_retry(_call)
+
+    async def add_reaction_as_user(
+        self,
+        message_id: str,
+        emoji_type: str,
+        *,
+        dry_run: bool = False,
+    ) -> str:
+        """Add an emoji reaction (e.g. ``OnIt`` or ``DONE``) as the user."""
+        if dry_run:
+            return f"dry-run-reaction:{emoji_type}"
+
+        async def _call(token: str) -> str:
+            return await self._bot_client.add_reaction(
+                message_id,
+                emoji_type,
+                access_token=token,
+            )
+
+        return await self._with_user_token_retry(_call)
+
+    async def delete_reaction_as_user(
+        self,
+        message_id: str,
+        reaction_id: str,
+        *,
+        dry_run: bool = False,
+    ) -> None:
+        """Delete a reaction previously added by the user."""
+        if dry_run:
+            return
+
+        async def _call(token: str) -> None:
+            await self._bot_client.delete_reaction(
+                message_id,
+                reaction_id,
+                access_token=token,
+            )
+
+        await self._with_user_token_retry(_call)
+
+    async def list_chats(
+        self,
+        *,
+        sort_type: str = "ByActiveTimeDesc",
+        page_size: int = 20,
+    ) -> list[FeishuChatInfo]:
+        """List recent chats for the authenticated user."""
+
+        async def _call(token: str) -> list[FeishuChatInfo]:
+            response = await self._request(
+                "GET",
+                "/open-apis/im/v1/chats",
+                params={
+                    "sort_type": sort_type,
+                    "page_size": max(1, min(page_size, 100)),
+                    "user_id_type": "open_id",
+                },
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            payload = response.json()
+            if (
+                response.is_error
+                and isinstance(payload, dict)
+                and payload.get("code") not in (None, 0)
+            ):
+                raise FeishuBotClient._remote_error(response, payload, "the user chat list")
+            response.raise_for_status()
+            if not isinstance(payload, dict) or payload.get("code") != 0:
+                if isinstance(payload, dict) and payload.get("code") is not None:
+                    raise FeishuBotClient._remote_error(response, payload, "the user chat list")
+                raise FeishuBotError("Feishu refused the user chat list")
+            data = payload.get("data")
+            items = data.get("items") if isinstance(data, Mapping) else None
+            if not isinstance(items, list):
+                return []
+            chats: list[FeishuChatInfo] = []
+            for item in items:
+                info = _chat_info_from_payload(item) if isinstance(item, Mapping) else None
+                if info is not None:
+                    chats.append(info)
+            return chats
+
+        return await self._with_user_token_retry(_call)
+
+    async def list_messages(
+        self,
+        *,
+        container_id_type: str = "chat",
+        container_id: str,
+        sort_type: str = "ByCreateTimeDesc",
+        page_size: int = 50,
+        start_time: str | None = None,
+        end_time: str | None = None,
+    ) -> list[FeishuUserMessage]:
+        """List messages in a ``chat`` or ``thread`` container using the user token."""
+        if container_id_type not in {"chat", "thread"}:
+            raise ValueError("container_id_type must be 'chat' or 'thread'")
+
+        async def _call(token: str) -> list[FeishuUserMessage]:
+            params: dict[str, Any] = {
+                "container_id_type": container_id_type,
+                "container_id": container_id,
+                "sort_type": sort_type,
+                "page_size": max(1, min(page_size, 50)),
+            }
+            if start_time:
+                params["start_time"] = start_time
+            if end_time:
+                params["end_time"] = end_time
+            response = await self._request(
+                "GET",
+                "/open-apis/im/v1/messages",
+                params=params,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            payload = response.json()
+            if (
+                response.is_error
+                and isinstance(payload, dict)
+                and payload.get("code") not in (None, 0)
+            ):
+                raise FeishuBotClient._remote_error(response, payload, "the user message list")
+            response.raise_for_status()
+            if not isinstance(payload, dict) or payload.get("code") != 0:
+                if isinstance(payload, dict) and payload.get("code") is not None:
+                    raise FeishuBotClient._remote_error(response, payload, "the user message list")
+                raise FeishuBotError("Feishu refused the user message list")
+            data = payload.get("data")
+            items = data.get("items") if isinstance(data, Mapping) else None
+            if not isinstance(items, list):
+                return []
+            messages: list[FeishuUserMessage] = []
+            default_chat_id = container_id if container_id_type == "chat" else ""
+            for raw_item in items:
+                if not isinstance(raw_item, Mapping):
+                    continue
+                parsed = _parse_user_message(raw_item, default_chat_id=default_chat_id)
+                if parsed is not None:
+                    messages.append(parsed)
+            return messages
+
+        return await self._with_user_token_retry(_call)
+
+    async def get_message(self, message_id: str) -> FeishuUserMessage | None:
+        """Fetch one message by ``message_id`` using the user token."""
+
+        async def _call(token: str) -> FeishuUserMessage | None:
+            response = await self._request(
+                "GET",
+                f"/open-apis/im/v1/messages/{quote(message_id, safe='')}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            payload = response.json()
+            if (
+                response.is_error
+                and isinstance(payload, dict)
+                and payload.get("code") not in (None, 0)
+            ):
+                raise FeishuBotClient._remote_error(response, payload, "the user message lookup")
+            response.raise_for_status()
+            if not isinstance(payload, dict) or payload.get("code") != 0:
+                return None
+            data = payload.get("data")
+            items = data.get("items") if isinstance(data, Mapping) else None
+            if isinstance(items, list) and items and isinstance(items[0], Mapping):
+                return _parse_user_message(items[0])
+            if isinstance(data, Mapping):
+                return _parse_user_message(data)
+            return None
+
+        return await self._with_user_token_retry(_call)
+
+    async def search_messages(
+        self,
+        query: str,
+        *,
+        page_size: int = 20,
+        start_time: str | None = None,
+        end_time: str | None = None,
+    ) -> list[str]:
+        """Search messages via ``/open-apis/search/v2/message`` and return message IDs."""
+
+        async def _call(token: str) -> list[str]:
+            body: dict[str, Any] = {"query": query}
+            if start_time:
+                body["start_time"] = start_time
+            if end_time:
+                body["end_time"] = end_time
+            response = await self._request(
+                "POST",
+                "/open-apis/search/v2/message",
+                params={"page_size": max(1, min(page_size, 50)), "user_id_type": "open_id"},
+                headers={"Authorization": f"Bearer {token}"},
+                json=body,
+            )
+            payload = response.json()
+            if (
+                response.is_error
+                and isinstance(payload, dict)
+                and payload.get("code") not in (None, 0)
+            ):
+                raise FeishuBotClient._remote_error(response, payload, "the user message search")
+            response.raise_for_status()
+            if not isinstance(payload, dict) or payload.get("code") != 0:
+                return []
+            data = payload.get("data")
+            items = data.get("items") if isinstance(data, Mapping) else None
+            if not isinstance(items, list):
+                return []
+            return [str(item).strip() for item in items if isinstance(item, str) and item.strip()]
+
+        return await self._with_user_token_retry(_call)

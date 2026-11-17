@@ -355,6 +355,7 @@ def message_event_from_sdk(
     expected_bot_open_id: str | None = None,
     owns_sent_message: Callable[[str | None], bool] | None = None,
     owns_sent_thread: Callable[[str | None], bool] | None = None,
+    require_group_mention: bool = True,
 ) -> FeishuMessageEvent:
     """Normalize the SDK model after the long connection authenticated it.
 
@@ -382,20 +383,24 @@ def message_event_from_sdk(
     mention_key = None
     mention_keys: tuple[str, ...] = ()
     if chat_type == "group":
-        if expected_bot_open_id is None:
+        if expected_bot_open_id is None and require_group_mention:
             raise ValueError("Feishu Bot open_id is unavailable for group messages")
         try:
-            mention_key, mention_keys = _mentioned_bot_key(message, expected_bot_open_id)
+            if expected_bot_open_id is not None:
+                mention_key, mention_keys = _mentioned_bot_key(message, expected_bot_open_id)
+            elif require_group_mention:
+                raise ValueError("Feishu Bot open_id is unavailable for group messages")
         except ValueError:
-            # A follow-up inside a topic this Bot answered needs no new @mention:
-            # either it replies to one of our messages, or it belongs to a
-            # topic we already answered in.
-            continues_thread = (
-                owns_sent_message is not None
-                and (owns_sent_message(parent_id) or owns_sent_message(root_id))
-            ) or (owns_sent_thread is not None and owns_sent_thread(thread_id))
-            if not continues_thread:
-                raise
+            if require_group_mention:
+                # A follow-up inside a topic this Bot answered needs no new @mention:
+                # either it replies to one of our messages, or it belongs to a
+                # topic we already answered in.
+                continues_thread = (
+                    owns_sent_message is not None
+                    and (owns_sent_message(parent_id) or owns_sent_message(root_id))
+                ) or (owns_sent_thread is not None and owns_sent_thread(thread_id))
+                if not continues_thread:
+                    raise
     message_type = getattr(message, "message_type", None)
     if message_type not in {"text", "post", "merge_forward"}:
         raise ValueError("Only Feishu text, post and merge_forward messages are supported")

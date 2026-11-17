@@ -142,7 +142,93 @@ export interface FeishuGroupBindInput {
   expected_revision: number
 }
 
+export type FeishuAiCommandProvider =
+  | 'claude'
+  | 'codex'
+  | 'traex'
+  | 'maso'
+  | 'cursor'
+  | 'antigravity'
+
+export type FeishuAiCommandReasoningEffort =
+  | ''
+  | 'none'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max'
+  | 'ultra'
+
+export interface FeishuAiCommandConfig {
+  enabled: boolean
+  prefix: string
+  owner_open_id: string
+  app_id: string
+  provider: FeishuAiCommandProvider
+  model: string
+  reasoning_effort: FeishuAiCommandReasoningEffort
+  cwd: string
+  watch_chats: string[]
+  poll_interval_seconds: number
+  max_active_chats: number
+  max_context_messages: number
+  ack_emoji: string
+  done_emoji: string
+  footer: string
+  reply_in_thread: boolean
+}
+
+export interface FeishuAiCommandTokenStatus {
+  has_token: boolean
+  open_id: string | null
+  user_name: string | null
+  app_id: string | null
+  source: string | null
+  expires_at: number
+  token_expired: boolean
+  granted_scopes: string[]
+  required_send_scope: string
+  can_send_as_user: boolean
+  can_react_as_user: boolean
+  can_read_messages: boolean
+  missing_required_scopes: string[]
+  missing_recommended_scopes: string[]
+  auth_login_command: string
+  remediation_steps: string[]
+}
+
+export interface FeishuAiCommandPollerStatus {
+  running: boolean
+  poll_count: number
+  last_poll_at: number | null
+  last_error: string | null
+  commands_detected: number
+  commands_succeeded: number
+  commands_failed: number
+  skipped_count: number
+  watermarks_count: number
+}
+
+export interface FeishuAiCommandCapabilities {
+  providers: FeishuAiCommandProvider[]
+  reasoning_efforts: string[]
+  provider_models: Record<string, string[]>
+}
+
+export interface FeishuAiCommandStatusResponse {
+  config: FeishuAiCommandConfig
+  token_status: FeishuAiCommandTokenStatus
+  poller_status: FeishuAiCommandPollerStatus
+  capabilities: FeishuAiCommandCapabilities
+  imported?: boolean
+}
+
+export type FeishuAiCommandPatchInput = Partial<FeishuAiCommandConfig>
+
 const ROOT = '/api/feishu/bot/bots'
+const AI_COMMAND_ROOT = '/api/feishu/bot/ai-command'
 const ERROR_CODES = new Set([
   'bot_revision_conflict', 'bot_pool_unavailable', 'bot_operation_busy',
   'hub_access_required', 'app_id_already_in_pool', 'app_id_immutable',
@@ -156,6 +242,7 @@ const ERROR_CODES = new Set([
   'bot_chats_unavailable', 'chat_not_group', 'chat_not_visible',
   'invalid_bot_request', 'bot_occupied', 'tab_occupied',
   'bot_has_active_bindings', 'chat_tab_create_failed',
+  'invalid_ai_command_config',
 ])
 
 export class FeishuBotRequestError extends Error {
@@ -291,4 +378,23 @@ export function listBotChats(botId: string, signal?: AbortSignal): Promise<Feish
 }
 export function bindBotGroup(botId: string, input: FeishuGroupBindInput, signal?: AbortSignal): Promise<FeishuBotPoolResponse> {
   return requestJson(botUrl(botId, '/bindings/group'), jsonRequest('POST', input, signal))
+}
+
+export function loadFeishuAiCommand(signal?: AbortSignal): Promise<FeishuAiCommandStatusResponse> {
+  return requestJson(AI_COMMAND_ROOT, { signal })
+}
+export function updateFeishuAiCommand(input: FeishuAiCommandPatchInput, signal?: AbortSignal): Promise<FeishuAiCommandStatusResponse> {
+  return requestJson(AI_COMMAND_ROOT, jsonRequest('PATCH', input, signal))
+}
+export function importFeishuAiCommandToken(
+  input: { app_id?: string; open_id?: string } = {},
+  signal?: AbortSignal,
+): Promise<FeishuAiCommandStatusResponse> {
+  return requestJson(`${AI_COMMAND_ROOT}/import-token`, jsonRequest('POST', input, signal))
+}
+export function dryRunFeishuAiCommand(
+  input: { text: string; chat_id?: string; thread_id?: string | null; context_messages?: string[] },
+  signal?: AbortSignal,
+): Promise<{ dry_run: Record<string, unknown>; token_status: FeishuAiCommandTokenStatus }> {
+  return requestJson(`${AI_COMMAND_ROOT}/dry-run`, jsonRequest('POST', input, signal))
 }

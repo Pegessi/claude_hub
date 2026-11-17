@@ -1109,6 +1109,21 @@ async def _handle_sdk_event(bot_id: str, data: Any) -> None:
     try:
         effective = _pool.effective(bot_id)
         message = getattr(getattr(data, "event", None), "message", None)
+        # Check personal /ai command hook first (does not require @bot group mention)
+        ai_service = get_feishu_ai_command_service()
+        if ai_service.is_enabled():
+            try:
+                raw_event = message_event_from_sdk(
+                    data,
+                    expected_app_id=effective.app_id,
+                    expected_bot_open_id=effective.feishu_open_id,
+                    require_group_mention=False,
+                )
+            except ValueError:
+                raw_event = None
+            if raw_event is not None and await ai_service.handle_ws_event(raw_event):
+                return
+
         if getattr(message, "chat_type", None) == "group":
             effective = await _refresh_missing_profile(
                 effective, FeishuBotClient(effective.config), require_open_id=True
@@ -1149,13 +1164,17 @@ _ws_supervisor = FeishuBotWebSocketSupervisor(_pool, _handle_sdk_event)
 
 async def start_feishu_websockets() -> None:
     await _ws_supervisor.start()
+    if get_feishu_ai_command_service().is_enabled():
+        await get_feishu_ai_poller().start()
 
 
 async def quiesce_feishu_websockets() -> None:
+    await get_feishu_ai_poller().quiesce()
     await _ws_supervisor.quiesce()
 
 
 async def stop_feishu_websockets(*, drain_timeout_seconds: float | None = None) -> None:
+    await get_feishu_ai_poller().stop()
     await _ws_supervisor.stop(drain_timeout_seconds=drain_timeout_seconds)
 
 
@@ -1168,6 +1187,10 @@ __all__ = [
 ]
 
 
+from ..services.feishu_ai_command import get_feishu_ai_command_service
+from ..services.feishu_ai_poller import get_feishu_ai_poller
+from .routes.feishu_bot.ai_command import register_ai_command_routes
 from .routes.feishu_bot.card_actions import register_card_routes
 
 register_card_routes(router)
+register_ai_command_routes(router, require_hub_user=require_hub_user)
