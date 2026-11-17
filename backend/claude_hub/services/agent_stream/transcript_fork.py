@@ -209,8 +209,8 @@ def hash_provider_text(text: str) -> str:
 
     The ``turn_started`` event stores this digest instead of the full
     provider-bound text: the stored ``summary`` is redacted (masked secrets,
-    truncated at 4000 chars), so it cannot identify a long or secret-like
-    message.  A digest of the normalized text can.
+    bounded at ``MAX_CHAT_TEXT_CHARS``), so it cannot identify a secret-like or
+    over-budget message.  A digest of the normalized text can.
     """
     return hashlib.sha256(_normalize_text(text).encode("utf-8")).hexdigest()
 
@@ -236,8 +236,9 @@ def _find_target_line(
     When ``provider_text_sha256`` is supplied the candidate messages are
     matched by the digest of their normalized text instead of by content
     comparison.  This is authoritative for modern turns: the stored
-    ``summary`` is redacted, so it is truncated (4000 chars) and secret-masked
-    and would never equal a long or secret-bearing provider message.  Turns
+    ``summary`` is redacted, so it is bounded (``MAX_CHAT_TEXT_CHARS``) and
+    secret-masked and would not equal a secret-bearing or over-budget provider
+    message.  Turns
     written before that digest was recorded have no hash and keep the content
     path.
 

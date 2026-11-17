@@ -48,6 +48,7 @@ from claude_hub.services.agent_stream.base import (
     TranscriptSnapshot,
 )
 from claude_hub.services.agent_stream.native import ProviderSession
+from claude_hub.services.agent_stream.redaction import MAX_CHAT_TEXT_CHARS, MAX_FIELD_CHARS
 from claude_hub.services.agent_stream.store import AgentStreamStore
 from claude_hub.services.agent_stream.tailer import (
     ExternalTurnRetirement,
@@ -1100,20 +1101,96 @@ def test_redact_event_masks_token_literals():
     assert "[REDACTED]" in text
 
 
-def test_redact_event_truncates_long_fields():
-    long_text = "x" * 5000
-    ev = AgentStreamEvent(
+def _stream_event(event_type: AgentStreamEventType, payload: Dict[str, Any]) -> AgentStreamEvent:
+    return AgentStreamEvent(
         stream_sequence=0,
         session_id="s1",
         tab_id="t1",
         agent_type=AgentType.CLAUDE,
-        type=AgentStreamEventType.TEXT_DELTA,
-        payload={"text": long_text},
+        type=event_type,
+        payload=payload,
         created_at=datetime.now(timezone.utc),
     )
-    out = redact_event(ev)
-    assert len(out.payload["text"]) <= 4000
+
+
+def test_redact_event_keeps_chat_text_above_the_tool_cap():
+    """A 10k-char answer is chat text, not a tool payload: it must survive whole.
+
+    Redaction runs before persistence and fanout, and history serves the stored
+    row verbatim, so truncating here loses the tail for good (a 4,000-char cap
+    cut the final 6,103 chars of a real 10,583-char reply).
+    """
+    long_text = "x" * 10_583
+    out = redact_event(_stream_event(AgentStreamEventType.TEXT_DELTA, {"text": long_text}))
+    assert out.payload["text"] == long_text
+
+
+def test_redact_event_keeps_every_chat_text_field_kind():
+    """Delta text, assistant text, final text and the reader's own summary."""
+    long_text = "y" * 20_000
+    cases = [
+        (AgentStreamEventType.TEXT_DELTA, "text"),
+        (AgentStreamEventType.THINKING_DELTA, "text"),
+        (AgentStreamEventType.TURN_STARTED, "summary"),
+        (AgentStreamEventType.TURN_COMPLETED, "assistant_text"),
+        (AgentStreamEventType.TURN_COMPLETED, "final_text"),
+        (AgentStreamEventType.TURN_COMPLETED, "text"),
+    ]
+    for event_type, key in cases:
+        out = redact_event(_stream_event(event_type, {key: long_text}))
+        assert out.payload[key] == long_text, (event_type, key)
+
+
+def test_redact_event_masks_secrets_inside_long_chat_text():
+    """Widening the budget must not weaken secret masking."""
+    long_text = "sk-1234567890abcdef " + ("z" * 50_000)
+    out = redact_event(_stream_event(AgentStreamEventType.TEXT_DELTA, {"text": long_text}))
+    text = out.payload["text"]
+    assert "sk-1234567890abcdef" not in text
+    assert text.startswith("[REDACTED] ")
+    assert len(text) > MAX_FIELD_CHARS
+
+
+def test_redact_event_truncates_oversized_chat_text():
+    """Chat text is still bounded per event, just at the chat budget."""
+    out = redact_event(
+        _stream_event(AgentStreamEventType.TEXT_DELTA, {"text": "x" * (MAX_CHAT_TEXT_CHARS + 1)})
+    )
+    assert len(out.payload["text"]) == MAX_CHAT_TEXT_CHARS
     assert out.payload["text"].endswith("…[truncated]")
+
+
+def test_redact_event_truncates_long_tool_fields():
+    """Tool args/results and other payload fields keep the 4,000-char cap."""
+    long_text = "x" * 5000
+    cases = [
+        (AgentStreamEventType.TOOL_CALL_STARTED, {"args": {"command": long_text}}),
+        (AgentStreamEventType.TOOL_CALL_COMPLETED, {"result": long_text}),
+        (AgentStreamEventType.STATUS, {"text": long_text}),
+        (AgentStreamEventType.TURN_COMPLETED, {"stop_reason": long_text}),
+    ]
+    for event_type, payload in cases:
+        out = redact_event(_stream_event(event_type, payload))
+        for key, value in out.payload.items():
+            if isinstance(value, dict):
+                value = value["command"]
+            assert len(value) <= MAX_FIELD_CHARS, (event_type, key)
+            assert value.endswith("…[truncated]"), (event_type, key)
+
+
+def test_redact_event_keeps_nested_fields_on_the_tool_cap():
+    """Only top-level chat text is widened; nested metadata cannot ride along."""
+    nested = "x" * 5000
+    out = redact_event(
+        _stream_event(
+            AgentStreamEventType.TURN_STARTED,
+            {"summary": "hi", "metadata": {"note": nested}, "attachments": [nested]},
+        )
+    )
+    assert out.payload["summary"] == "hi"
+    assert len(out.payload["metadata"]["note"]) <= MAX_FIELD_CHARS
+    assert out.payload["metadata"]["note"].endswith("…[truncated]")
+    assert len(out.payload["attachments"][0]) <= MAX_FIELD_CHARS
 
 
 def test_redact_event_does_not_mutate_input():

@@ -1,8 +1,9 @@
 """Server-side redaction for structured-stream events.
 
 Strips environment variable values, masks known secret patterns, and truncates
-oversized payload fields before events leave the backend. The original event is
-never mutated; a copy with ``redacted=True`` is returned.
+oversized payload fields before events leave the backend. Chat turn text fields
+get a much larger budget than tool payloads; see ``MAX_CHAT_TEXT_CHARS``. The
+original event is never mutated; a copy with ``redacted=True`` is returned.
 """
 
 from __future__ import annotations
@@ -40,7 +41,25 @@ _TOKEN_PATTERNS = [
 
 # Any single string field longer than this is truncated.
 MAX_FIELD_CHARS = 4000
+# Reader-visible chat text is not a diagnostic field. Redaction runs before the
+# event is persisted and before it is fanned out, and history reads serve the
+# stored row verbatim, so the 4,000-char cap used to cut the tail of every long
+# answer (and of the reader's own message) with no way to recover it Hub-side.
+# These fields get a budget that still bounds one event, while tool arguments,
+# tool results and every other payload field keep ``MAX_FIELD_CHARS``.
+MAX_CHAT_TEXT_CHARS = 128_000
 _TRUNCATION_MARKER = "…[truncated]"
+
+# The payload keys, per event type, that carry chat text rather than a tool or
+# diagnostic payload. Only these keys, and only at the top level of the payload,
+# receive ``MAX_CHAT_TEXT_CHARS``; nested values (metadata, attachments) stay
+# on ``MAX_FIELD_CHARS`` so an unbounded field cannot ride along with a turn.
+_CHAT_TEXT_KEYS: Dict[AgentStreamEventType, frozenset[str]] = {
+    AgentStreamEventType.TEXT_DELTA: frozenset({"text"}),
+    AgentStreamEventType.THINKING_DELTA: frozenset({"text"}),
+    AgentStreamEventType.TURN_STARTED: frozenset({"summary"}),
+    AgentStreamEventType.TURN_COMPLETED: frozenset({"text", "assistant_text", "final_text"}),
+}
 
 
 def _mask_string(value: str) -> str:
@@ -55,7 +74,8 @@ def mask_secrets(text: str) -> str:
     return _mask_string(text)
 
 
-def _redact_value(key: str, value: Any) -> Any:
+def _redact_value(key: str, value: Any, *, limit: int = MAX_FIELD_CHARS) -> Any:
+    """Mask and bound one payload value; ``limit`` applies to this string only."""
     if isinstance(value, dict):
         if key in _ENV_VALUE_KEYS:
             # Keep keys, drop values.
@@ -69,8 +89,8 @@ def _redact_value(key: str, value: Any) -> Any:
         masked = _mask_string(value)
         if key.lower() in {"message", "error", "detail", "stderr", "reason"}:
             masked = redact_provider_proxy_diagnostic(masked)
-        if len(masked) > MAX_FIELD_CHARS:
-            return masked[: MAX_FIELD_CHARS - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
+        if len(masked) > limit:
+            return masked[: limit - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
         return masked
     return value
 
@@ -79,7 +99,13 @@ def redact_event(event: AgentStreamEvent) -> AgentStreamEvent:
     """Return a redacted copy of ``event``; never mutates the input."""
     if not event.payload:
         return event.model_copy(update={"redacted": True})
-    redacted_payload: Dict[str, Any] = {k: _redact_value(k, v) for k, v in event.payload.items()}
+    chat_text_keys = _CHAT_TEXT_KEYS.get(event.type, frozenset())
+    redacted_payload: Dict[str, Any] = {
+        k: _redact_value(
+            k, v, limit=MAX_CHAT_TEXT_CHARS if k in chat_text_keys else MAX_FIELD_CHARS
+        )
+        for k, v in event.payload.items()
+    }
     if event.type in {AgentStreamEventType.STATUS, AgentStreamEventType.ERROR}:
         text = redacted_payload.get("text")
         if isinstance(text, str):

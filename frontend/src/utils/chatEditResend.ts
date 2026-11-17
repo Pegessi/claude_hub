@@ -9,11 +9,12 @@
  *    workspace or schedule turn) sent a *different* text to the provider than
  *    the summary the reader sees, so it cannot be replayed as the reader's own
  *    message. Such turns must never offer the form.
- *  - A turn the reader wrote is stored redacted: over 4000 characters are cut
- *    with a truncation marker and secret-looking tokens are masked. The stored
- *    copy is then not the message that was sent, so the reader has to be told
- *    before they edit a partial text — otherwise a successful resend would
- *    quietly send a mangled message.
+ *  - A turn the reader wrote is stored redacted: text beyond the chat-text
+ *    budget (``MAX_CHAT_TEXT_CHARS``, 128,000 chars) is cut with a truncation
+ *    marker and secret-looking tokens are masked. The stored copy is then not
+ *    the message that was sent, so the reader has to be told before they edit a
+ *    partial text — otherwise a successful resend would quietly send a mangled
+ *    message.
  *  - The fork cuts at the edited turn, so the resend removes every later turn.
  *    The count comes back from the backend and is reported, because a silent
  *    history deletion reads as a bug.
@@ -78,9 +79,9 @@ export function editUnavailableReason(gate: EditGate): string | null {
 /** What to tell the reader when the stored copy of their message is partial.
  *
  *  ``stored_text_incomplete`` is set by the backend when redaction changed the
- *  summary it persisted (truncation at 4000 characters or a masked
- *  secret-looking token). The provider still has the full text, so the resend
- *  itself works; only the prefill is partial. */
+ *  summary it persisted (a message longer than the chat-text budget, 128,000
+ *  chars, or a masked secret-looking token). The provider still has the full
+ *  text, so the resend itself works; only the prefill is partial. */
 export function storedCopyWarning(incomplete: boolean): string | null {
   if (!incomplete) return null
   return 'The Hub stores only a partial copy of this message (it was shortened or '
