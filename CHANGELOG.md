@@ -7,6 +7,28 @@
 
 ## Released
 
+### feat(lifecycle): unified `Review` vs `Done` lifecycle, MR merge auto-closure, and 4-bucket Chat & Workspace views
+
+- Repair post-SQLite migration `ReplyExcerpt` reads in `services/agent_stream/store.py`
+  with a cached `read_stream_summary_sync` projection over `stream_events`, surfacing
+  `last_activity_at` on `TerminalAgentStatus` so `ChatSidebarRow` displays newest turn/reply
+  activity timestamps rather than `tab.created_at`.
+- Add non-blocking `MRStatusCache` (`services/mr_status_cache.py`) backed by background
+  `bytedcli --json codebase mr get` refreshes (concurrency-capped, TTL + error backoff,
+  off-by-default in pytest):
+  - Project open delivery MRs (`review_state="mr_open"` / `delivery_mr_state="open"`) onto
+    idle initiator/managed sessions without polluting dispatcher chats (`Ted` / Dot).
+  - Automatically transition idle tasks whose delivery MRs all confirm `merged` into `DONE`
+    (`closed_reason="mr_merged"`), excluding reference-only MR URLs in titles/prompts.
+- Settle active initiator-controlled Tasks to `DONE` (`closed_reason="chat_archived"`,
+  persisting `TaskArchiveClosure` provenance) when the user archives the originating Chat
+  instead of flagging `Session lost`, and lazily reopen (`DONE -> WORKING`) on restore
+  only when a genuinely new main-thread turn starts or active task progress is reported.
+- Align `Chats` sidebar (`Folders | Status` toggle, defaulting to `Folders`) and
+  `Agent Workspace` Triage Pro rail onto unified `Needs you` / `Working` / `Review` / `Done`
+  4-bucket grouping, with collapsible Triage headers and a bounded 5-item `DONE` preview
+  (`Show more` / `Show less`).
+
 ### feat(patrol): demand digest, Feishu `merge_forward` triage, and default-off Dot proactive radar
 
 - Expand Feishu `merge_forward` bundles on inbound WebSocket/HTTP dispatch with
