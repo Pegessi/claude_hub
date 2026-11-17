@@ -13,13 +13,17 @@
   `FeishuUserClient` (`services/feishu_user_client.py`):
   - Persist Feishu OAuth user tokens at rest with AES-256-GCM encryption
     (`0600` key file), request `DEFAULT_FEISHU_OAUTH_SCOPES` (including
-    `im:message.send_as_user`) on `/api/auth/login`, exchange/refresh via OAuth
-    v2 / OIDC v1 / legacy v1 (`/open-apis/authen/v1/refresh_access_token`), and
+    `im:message.send_as_user` and `offline_access`) on `/api/auth/login`, accept
+    access-only OAuth tokens when `offline_access` is omitted, exchange/refresh
+    via OAuth v2 / OIDC v1 / legacy v1 (`/open-apis/authen/v1/refresh_access_token`)
+    with fallback when v2 returns `20026` for legacy v1 refresh tokens, and
     persist only granted scopes (`api/auth.py`, `auth/feishu.py`).
   - Import local `lark-cli` user tokens from `~/.lark-cli/config.json` and the
     AES-256-GCM encrypted keychain under `~/.local/share/lark-cli/` honoring
     `currentApp` profile precedence, coordinate single-use refresh rotation with
-    `generation` tracking, and sync rotated tokens back to `lark-cli`.
+    async-safe per-account locking (`async_refresh_lock`) plus `lark-cli` shared
+    account lock (`locks/refresh_<app>_<open>.lock`), CAS adoption of newer CLI
+    generations, and millisecond `expiresAt`/`refreshExpiresAt` writeback.
   - Reuse `FeishuBotClient`, `create_feishu_http_client`, and
     `FeishuBotRemoteError` for user-identity messages, replies, reactions, and
     paginated chat/thread history reads, and provide `preflight_scopes()` with

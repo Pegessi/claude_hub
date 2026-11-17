@@ -404,25 +404,28 @@ class FeishuUserClient:
         return target
 
     async def refresh_token(self, record: FeishuUserTokenRecord) -> FeishuUserTokenRecord:
-        with self._store.refresh_lock():
-            now_ts = float(self._store._now())
-            # Re-read store + lark-cli keychain under the refresh lock in case another
-            # consumer already rotated the single-use refresh token.
-            latest = self._store.resolve_token(
-                open_id=record.open_id,
-                app_id=record.app_id,
-                auto_import_lark_cli=True,
-            )
-            active = latest if latest is not None else record
-            if (
-                active.access_token != record.access_token or active.generation > record.generation
-            ) and not active.is_expired(now=now_ts, skew_seconds=300.0):
-                return active
-
-            if not active.refresh_token:
-                raise FeishuBotConfigurationError(
-                    f"Feishu user token for {active.open_id} expired and has no refresh_token"
+        async with self._store.async_refresh_lock(app_id=record.app_id, open_id=record.open_id):
+            with self._store.refresh_lock(app_id=record.app_id, open_id=record.open_id):
+                now_ts = float(self._store._now())
+                # Re-read store + lark-cli keychain under the per-account lock in case
+                # another consumer already rotated the single-use refresh token.
+                latest = self._store.resolve_token(
+                    open_id=record.open_id,
+                    app_id=record.app_id,
+                    auto_import_lark_cli=True,
                 )
+                active = latest if latest is not None else record
+                if (
+                    active.access_token != record.access_token
+                    or active.generation > record.generation
+                ) and not active.is_expired(now=now_ts, skew_seconds=300.0):
+                    return active
+
+                if not active.refresh_token:
+                    raise FeishuBotConfigurationError(
+                        f"Feishu user token for {active.open_id} expired and has no refresh_token"
+                    )
+
             refreshed = await self._token_refresher(
                 active.refresh_token,
                 app_id=active.app_id,

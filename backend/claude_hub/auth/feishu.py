@@ -24,7 +24,7 @@ FEISHU_USER_INFO_URL = "https://open.feishu.cn/open-apis/authen/v1/user_info"
 
 DEFAULT_FEISHU_OAUTH_SCOPES = (
     "im:message im:message.send_as_user im:message.reactions:write_only "
-    "im:message:readonly im:chat:readonly"
+    "im:message:readonly im:chat:readonly offline_access"
 )
 
 # The shared factory requires an explicit timeout. Keeping HTTPX's own
@@ -270,10 +270,17 @@ async def refresh_user_access_token_bundle(
             v2_bundle = _extract_oauth_v2_bundle(v2_data, fallback_refresh_token=refresh_token)
             if v2_bundle is not None and v2_bundle.get("scope"):
                 return _remember_token_bundle(v2_bundle)
+            v2_code = v2_data.get("code") if isinstance(v2_data, dict) else None
+            # Legacy v1 refresh tokens do not use the v2 `rt-` prefix and return
+            # HTTP 400 / code 20026 (`invalid_refresh_token`) on `/v2/oauth/token`.
+            # Allow legacy-shaped tokens to fall through to the v1 refresh endpoints
+            # while still failing fast for genuinely invalid v2 (`rt-...`) tokens.
+            is_v2_token_shape = refresh_token.startswith("rt-")
             if (
                 v2_response.status_code != 404
                 and isinstance(v2_data, dict)
-                and v2_data.get("code") not in (0, None)
+                and v2_code not in (0, None)
+                and (is_v2_token_shape or v2_code not in {20001, 20024, 20026})
             ):
                 logger.error(f"Failed to refresh user access token via OAuth v2: {v2_data}")
                 return None
@@ -297,9 +304,10 @@ async def refresh_user_access_token_bundle(
                 if oidc_bundle.get("access_token"):
                     oidc_bundle.setdefault("refresh_token", refresh_token)
                     return _remember_token_bundle(oidc_bundle)
-            elif oidc_resp.status_code != 404 and oidc_data.get("code") not in (
-                0,
-                None,
+            elif (
+                oidc_resp.status_code != 404
+                and oidc_data.get("code") not in (0, None, 20001, 20024, 20026)
+                and is_v2_token_shape
             ):
                 logger.error(f"Failed to refresh user access token via OIDC v1: {oidc_data}")
                 return None

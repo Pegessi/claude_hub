@@ -232,16 +232,7 @@ def _resolve_maso_model_with_effort(model: str, effort: str) -> str:
         return variants[effort]
     if _MASO_VARIANT_SUFFIX_RE.search(clean_model):
         return base if effort == "none" else f"{base}_reasoning_{effort}"
-    for cand in (
-        "extra-high",
-        "minimal",
-        "medium",
-        "xhigh",
-        "high",
-        "none",
-        "low",
-        "max",
-    ):
+    for cand in _CURSOR_EFFORT_SUFFIXES:
         if clean_model.endswith(f"-{cand}"):
             stem = clean_model[: -(len(cand) + 1)]
             if stem:
@@ -598,33 +589,26 @@ def parse_ai_command(
 
 
 def extract_context_references(
-    texts: Sequence[str],
-    *,
-    chat_name: str = "",
+    texts: Sequence[str], *, chat_name: str = ""
 ) -> AiCommandContextRefs:
     """Extract MR references, commit SHAs, and Feishu doc URLs from thread/chat texts."""
     combined_texts = [t for t in texts if isinstance(t, str) and t.strip()]
     mr_refs: list[str] = []
     commit_refs: list[str] = []
     doc_refs: list[str] = []
-    known_repos: list[str] = []
-
-    if chat_name:
-        for repo_match in _REPO_NAME_RE.finditer(chat_name):
-            cand = repo_match.group(1)
-            if not cand.startswith(("http", "open-apis")):
-                known_repos.append(cand)
-
+    known_repos = [
+        m.group(1)
+        for m in (_REPO_NAME_RE.finditer(chat_name) if chat_name else ())
+        if not m.group(1).startswith(("http", "open-apis"))
+    ]
     for text in combined_texts:
         for regex in (_CODEBASE_MR_URL_RE, _REPO_BANG_MR_RE):
             for m in regex.finditer(text):
                 repo, iid = m.group("repo"), m.group("iid")
                 if repo not in known_repos:
                     known_repos.append(repo)
-                ref = f"{repo}!{iid}"
-                if ref not in mr_refs:
-                    mr_refs.append(ref)
-
+                if f"{repo}!{iid}" not in mr_refs:
+                    mr_refs.append(f"{repo}!{iid}")
     default_repo = known_repos[0] if known_repos else ""
     for text in combined_texts:
         for m in _BARE_BANG_MR_RE.finditer(text):
@@ -633,8 +617,6 @@ def extract_context_references(
                 ref = f"{default_repo}!{iid}" if default_repo else f"!{iid}"
                 if ref not in mr_refs:
                     mr_refs.append(ref)
-
-    for text in combined_texts:
         for regex in (_COMMIT_URL_RE, _COMMIT_TEXT_RE):
             for m in regex.finditer(text):
                 sha = m.group("sha").lower()[:10]
@@ -642,20 +624,12 @@ def extract_context_references(
                     commit_refs.append(sha)
         for m in _HEX_SHA_RE.finditer(text):
             sha = m.group("sha").lower()
-            if not sha.isdigit():
-                short_sha = sha[:10]
-                if short_sha not in commit_refs:
-                    commit_refs.append(short_sha)
+            if not sha.isdigit() and sha[:10] not in commit_refs:
+                commit_refs.append(sha[:10])
         for m in _FEISHU_DOC_URL_RE.finditer(text):
-            url = m.group(0)
-            if url not in doc_refs:
-                doc_refs.append(url)
-
-    return AiCommandContextRefs(
-        mr_refs=tuple(mr_refs),
-        commit_refs=tuple(commit_refs),
-        doc_refs=tuple(doc_refs),
-    )
+            if m.group(0) not in doc_refs:
+                doc_refs.append(m.group(0))
+    return AiCommandContextRefs(tuple(mr_refs), tuple(commit_refs), tuple(doc_refs))
 
 
 def ensure_ai_footer(text: str, footer: str = DEFAULT_AI_COMMAND_FOOTER) -> str:
@@ -669,12 +643,7 @@ def ensure_ai_footer(text: str, footer: str = DEFAULT_AI_COMMAND_FOOTER) -> str:
     return f"{clean_body}\n{clean_footer}"
 
 
-def build_ai_post_payload(
-    text: str,
-    *,
-    footer: str = DEFAULT_AI_COMMAND_FOOTER,
-) -> dict[str, Any]:
-    """Build a ``msg_type="post"`` content dictionary with the mandatory AI footer."""
+def build_ai_post_payload(text: str, *, footer: str = DEFAULT_AI_COMMAND_FOOTER) -> dict[str, Any]:
     with_footer = ensure_ai_footer(text, footer=footer)
     try:
         return dict(build_feishu_post_content(with_footer))
@@ -683,25 +652,15 @@ def build_ai_post_payload(
 
 
 def build_interim_reply_text(
-    parsed: ParsedAiCommand,
-    refs: AiCommandContextRefs,
-    *,
-    footer: str = DEFAULT_AI_COMMAND_FOOTER,
+    parsed: ParsedAiCommand, refs: AiCommandContextRefs, *, footer: str = DEFAULT_AI_COMMAND_FOOTER
 ) -> str:
-    """Format the immediate ``正在派 Subagent...`` status post matching Feishu ``/ai`` UX."""
     action_desc = parsed.instruction.strip()
     if refs.mr_refs:
-        primary_mr = refs.mr_refs[0]
-        target = (
-            f"{primary_mr}（最新 commit {refs.commit_refs[0][:10]}）"
-            if refs.commit_refs
-            else primary_mr
-        )
-        if not action_desc or "review" in action_desc.lower() or "审查" in action_desc:
-            task_phrase = "做逐文件深度审查"
-        else:
-            task_phrase = f"执行「{action_desc.splitlines()[0][:48]}」"
-        body = f"正在派 Subagent 对 {target}{task_phrase}，待审查完成后执行回复。"
+        mr = refs.mr_refs[0]
+        target = f"{mr}（最新 commit {refs.commit_refs[0][:10]}）" if refs.commit_refs else mr
+        is_rev = not action_desc or "review" in action_desc.lower() or "审查" in action_desc
+        phrase = "做逐文件深度审查" if is_rev else f"执行「{action_desc.splitlines()[0][:48]}」"
+        body = f"正在派 Subagent 对 {target}{phrase}，待审查完成后执行回复。"
     else:
         short_inst = (action_desc or "当前上下文").splitlines()[0][:48]
         body = f"正在派 Subagent 处理「{short_inst}」，待完成后执行回复。"
@@ -709,7 +668,6 @@ def build_interim_reply_text(
 
 
 def bounded_message_uuid(message_id: str, stage: str) -> str:
-    """Return a deterministic Feishu idempotency UUID <= 50 characters."""
     digest = hashlib.sha256(f"{message_id}:{stage}".encode("utf-8")).hexdigest()[:32]
     return f"ai:{stage[:8]}:{digest}"[:50]
 
@@ -720,7 +678,6 @@ def build_ai_dispatch_prompt(
     context_messages: Sequence[FeishuUserMessage],
     refs: AiCommandContextRefs,
 ) -> str:
-    """Format the full prompt sent to the execution agent."""
     lines: list[str] = [
         "You are executing a personal Feishu `/ai` command on behalf of the account owner.",
         "Respond with a clear, concise, evidence-backed Chinese reply suitable for posting "
@@ -739,8 +696,7 @@ def build_ai_dispatch_prompt(
     if refs.doc_refs:
         lines.append(f"Extracted document links: {', '.join(refs.doc_refs)}")
     if context_messages:
-        lines.append("")
-        lines.append('<feishu_thread_context trust="untrusted">')
+        lines.extend(["", '<feishu_thread_context trust="untrusted">'])
         for ctx in context_messages[-30:]:
             safe_text = ctx.text.replace("<", "&lt;").replace(">", "&gt;")
             lines.append(
@@ -756,27 +712,24 @@ AiTurnDispatcher = Callable[[str, str, str, str, Mapping[str, Any]], Awaitable[s
 class FeishuAiCommandService:
     """Coordinates ``/ai`` configuration, deduplication, context fetch, reactions, and replies."""
 
-    def __init__(
-        self,
-        *,
-        state_path: Path | None = None,
-        token_store: FeishuUserTokenStore | None = None,
-        dedup_store: FeishuMessageDedupStore | None = None,
-        user_client_factory: Callable[[FeishuAiCommandConfig], FeishuUserClient] | None = None,
-        tab_creator: Callable[..., Any] | None = None,
-        tab_getter: Callable[[str], Any] | None = None,
-        tab_env_switcher: Callable[[str, dict[str, str]], Any] | None = None,
-        turn_dispatcher: AiTurnDispatcher | None = None,
-    ) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         runtime_home = resolve_runtime_home()
-        self._state_path = state_path or (runtime_home / "feishu_ai_command.json")
-        self._token_store = token_store or get_feishu_user_token_store()
-        self._dedup = dedup_store or FeishuMessageDedupStore()
-        self._user_client_factory = user_client_factory
-        self._tab_creator = tab_creator
-        self._tab_getter = tab_getter
-        self._tab_env_switcher = tab_env_switcher
-        self._turn_dispatcher = turn_dispatcher
+        self._state_path: Path = kwargs.get("state_path") or (
+            runtime_home / "feishu_ai_command.json"
+        )
+        self._token_store: FeishuUserTokenStore = (
+            kwargs.get("token_store") or get_feishu_user_token_store()
+        )
+        self._dedup: FeishuMessageDedupStore = (
+            kwargs.get("dedup_store") or FeishuMessageDedupStore()
+        )
+        self._user_client_factory: Callable[[FeishuAiCommandConfig], FeishuUserClient] | None = (
+            kwargs.get("user_client_factory")
+        )
+        self._tab_creator = kwargs.get("tab_creator")
+        self._tab_getter = kwargs.get("tab_getter")
+        self._tab_env_switcher = kwargs.get("tab_env_switcher")
+        self._turn_dispatcher: AiTurnDispatcher | None = kwargs.get("turn_dispatcher")
         self._lock = threading.RLock()
         self._channel_locks: dict[str, asyncio.Lock] = {}
 
@@ -785,6 +738,7 @@ class FeishuAiCommandService:
             "version": _STATE_VERSION,
             "config": FeishuAiCommandConfig().to_dict(),
             "watermarks": {},
+            "scan_cursors": {},
             "channel_tabs": {},
             "recent_runs": [],
             "pending_queue": [],
@@ -872,31 +826,68 @@ class FeishuAiCommandService:
         """Durably record an accepted ``/ai`` command before advancing the poller watermark."""
         with self._lock:
             state = self._load_state()
-            queue: list[dict[str, Any]] = [
-                dict(item)
-                for item in (state.get("pending_queue") or [])
-                if isinstance(item, Mapping)
-            ]
+            queue = [dict(x) for x in (state.get("pending_queue") or []) if isinstance(x, Mapping)]
+            mid = message.message_id
             if any(
-                isinstance(item.get("message"), Mapping)
-                and item["message"].get("message_id") == message.message_id
-                for item in queue
+                isinstance(x.get("message"), Mapping) and x["message"].get("message_id") == mid
+                for x in queue
             ):
                 return False
+            if any(
+                isinstance(r, Mapping) and r.get("message_id") == mid
+                for r in (state.get("recent_runs") or [])
+            ):
+                return False
+            seeded = [m.to_dict() for m in seeded_context] if seeded_context is not None else None
             queue.append(
                 {
                     "message": message.to_dict(),
                     "source": source,
-                    "seeded_context": (
-                        [m.to_dict() for m in seeded_context]
-                        if seeded_context is not None
-                        else None
-                    ),
+                    "seeded_context": seeded,
+                    "state": "queued",
                     "enqueued_at": time.time(),
                 }
             )
-            state["pending_queue"] = queue[-_MAX_PENDING_QUEUE:]
+            state["pending_queue"] = queue
             self._save_state(state)
+            return True
+
+    def mark_pending_command_state(self, message_id: str, cmd_state: str) -> None:
+        """Update lifecycle state (`queued`/`in_flight`/`interrupted`) of a pending command."""
+        with self._lock:
+            state = self._load_state()
+            changed = False
+            queue: list[dict[str, Any]] = []
+            for item in state.get("pending_queue") or []:
+                if not isinstance(item, Mapping):
+                    continue
+                row = dict(item)
+                msg = row.get("message")
+                if (
+                    isinstance(msg, Mapping)
+                    and msg.get("message_id") == message_id
+                    and row.get("state") != cmd_state
+                ):
+                    row["state"] = cmd_state
+                    changed = True
+                queue.append(row)
+            if changed:
+                state["pending_queue"] = queue
+                self._save_state(state)
+
+    def reconcile_interrupted_command(self, message_id: str) -> bool:
+        """Reconcile an interrupted in-flight command on restart; returns True if runnable."""
+        with self._lock:
+            state = self._load_state()
+            if any(
+                isinstance(r, Mapping) and r.get("message_id") == message_id
+                for r in (state.get("recent_runs") or [])
+            ):
+                self.dequeue_pending_command(message_id)
+                return False
+            cfg = FeishuAiCommandConfig.from_mapping(state.get("config") or {})
+            self._dedup.release(f"ai_cmd:{cfg.owner_open_id or 'owner'}:{message_id}")
+            self.mark_pending_command_state(message_id, "queued")
             return True
 
     def dequeue_pending_command(self, message_id: str) -> None:
@@ -904,12 +895,12 @@ class FeishuAiCommandService:
         with self._lock:
             state = self._load_state()
             state["pending_queue"] = [
-                dict(item)
-                for item in (state.get("pending_queue") or [])
-                if isinstance(item, Mapping)
+                dict(x)
+                for x in (state.get("pending_queue") or [])
+                if isinstance(x, Mapping)
                 and not (
-                    isinstance(item.get("message"), Mapping)
-                    and item["message"].get("message_id") == message_id
+                    isinstance(x.get("message"), Mapping)
+                    and x["message"].get("message_id") == message_id
                 )
             ]
             self._save_state(state)
@@ -918,21 +909,42 @@ class FeishuAiCommandService:
         """Return all durably enqueued ``/ai`` commands awaiting execution."""
         with self._lock:
             return [
-                dict(item)
-                for item in (self._load_state().get("pending_queue") or [])
-                if isinstance(item, Mapping)
+                dict(x)
+                for x in (self._load_state().get("pending_queue") or [])
+                if isinstance(x, Mapping)
             ]
+
+    def get_scan_cursor(self, chat_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            cursors = self._load_state().get("scan_cursors")
+            raw = cursors.get(chat_id) if isinstance(cursors, Mapping) else None
+            return dict(raw) if isinstance(raw, Mapping) else None
+
+    def set_scan_cursor(self, chat_id: str, cursor_state: Mapping[str, Any] | None) -> None:
+        with self._lock:
+            state = self._load_state()
+            cursors = dict(state.get("scan_cursors") or {})
+            if cursor_state is None:
+                if chat_id not in cursors:
+                    return
+                cursors.pop(chat_id, None)
+            else:
+                cursors[chat_id] = dict(cursor_state)
+            state["scan_cursors"] = cursors
+            self._save_state(state)
 
     def get_watermarks(self) -> dict[str, int]:
         with self._lock:
             wm = self._load_state().get("watermarks")
-            if not isinstance(wm, Mapping):
-                return {}
-            return {
-                k: int(v)
-                for k, v in wm.items()
-                if isinstance(k, str) and isinstance(v, (int, float))
-            }
+            return (
+                {
+                    k: int(v)
+                    for k, v in wm.items()
+                    if isinstance(k, str) and isinstance(v, (int, float))
+                }
+                if isinstance(wm, Mapping)
+                else {}
+            )
 
     def set_watermark(self, chat_id: str, create_time_ms: int) -> None:
         with self._lock:
@@ -953,18 +965,7 @@ class FeishuAiCommandService:
             state = self._load_state()
             runs = list(state.get("recent_runs") or [])
             d = result.to_dict()
-            keys = (
-                "message_id",
-                "chat_id",
-                "thread_id",
-                "status",
-                "reason",
-                "provider",
-                "model",
-                "reasoning_effort",
-                "refs",
-                "tab_id",
-            )
+            keys = "message_id chat_id thread_id status reason provider model reasoning_effort refs tab_id".split()
             runs.insert(0, {k: d[k] for k in keys} | {"source": source, "at": time.time()})
             state["recent_runs"] = runs[:_MAX_RECENT_RUNS]
             self._save_state(state)
@@ -981,20 +982,27 @@ class FeishuAiCommandService:
 
     def preflight_status(self, *, auto_import_lark_cli: bool = True) -> FeishuScopePreflightResult:
         cfg = self.get_config()
-        record = self._token_store.resolve_token(
+        rec = self._token_store.resolve_token(
             open_id=cfg.owner_open_id or None,
             app_id=cfg.app_id or None,
             auto_import_lark_cli=auto_import_lark_cli,
         )
-        return self.build_user_client(cfg).preflight_scopes(record)
+        return self.build_user_client(cfg).preflight_scopes(rec)
 
     def capabilities_dict(self) -> dict[str, Any]:
+        model_efforts: dict[str, list[str]] = {}
+        for base, variants in _MASO_MODEL_VARIANTS.items():
+            effs = list(variants.keys())
+            model_efforts[base] = effs
+            for v in set(variants.values()):
+                model_efforts[v] = effs
         return {
             "providers": [p.value for p in SUPPORTED_AI_COMMAND_PROVIDERS],
             "reasoning_efforts": [e for e in SUPPORTED_REASONING_EFFORTS if e],
             "provider_reasoning_efforts": {
                 k: list(v) for k, v in PROVIDER_SUPPORTED_REASONING_EFFORTS.items()
             },
+            "model_reasoning_efforts": model_efforts,
             "provider_models": {k: list(v) for k, v in DEFAULT_PROVIDER_MODELS.items()},
         }
 
