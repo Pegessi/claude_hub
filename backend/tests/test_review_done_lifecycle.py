@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
@@ -270,10 +270,12 @@ async def test_sqlite_stream_summary_and_mr_cache_drive_tab_review_and_auto_done
     assert format_mr_badge_label([mr_url]) == "MR !1483"
 
     # Write events purely to SQLite AgentStreamStore (no .jsonl file on disk!)
+    # Use >4h ago so once the MR merges below, the 4h recent-active window has already elapsed.
+    now_utc = datetime.now(timezone.utc)
     tab_id = "sqlite-mr-tab"
     store = AgentStreamStore("terminal-tabs", f"terminal-tab-{tab_id}")
-    t0 = datetime(2026, 11, 16, 10, 15, 0, tzinfo=timezone.utc)
-    t1 = datetime(2026, 11, 16, 10, 22, 0, tzinfo=timezone.utc)
+    t0 = (now_utc - timedelta(hours=10, minutes=7)).replace(microsecond=0)
+    t1 = (now_utc - timedelta(hours=10)).replace(microsecond=0)
     await store.append(
         AgentStreamEvent(
             stream_sequence=0,
@@ -454,6 +456,115 @@ async def test_sqlite_stream_summary_and_mr_cache_drive_tab_review_and_auto_done
         assert tab_st_after is not None
         assert tab_st_after.review_state is None
         assert tab_st_after.review_label is None
+
+        # Idle top-level Chat sessions active within the last 4 hours project
+        # review_state="recent_active" (with review_label=None), then settle to None after 4h.
+        recent_tab_id = "recent-2h-tab"
+        recent_store = AgentStreamStore("terminal-tabs", f"terminal-tab-{recent_tab_id}")
+        await recent_store.append(
+            AgentStreamEvent(
+                stream_sequence=0,
+                session_id=f"terminal-tab-{recent_tab_id}",
+                tab_id=recent_tab_id,
+                agent_type=AgentType.CURSOR,
+                type=AgentStreamEventType.TURN_COMPLETED,
+                run_epoch=1,
+                turn_id="t-recent",
+                payload={"status": "completed", "assistant_text": "Investigated slot transfer."},
+                created_at=now_utc - timedelta(hours=2),
+            )
+        )
+        fake_mgr.processes[recent_tab_id] = SimpleNamespace(  # type: ignore[assignment]
+            tab_id=recent_tab_id,
+            name="slot传输调研",
+            agent_type=AgentType.CURSOR,
+            session_kind=SessionKind.CHAT,
+            cursor_transport="acp",
+            tmux_session="tmux-recent",
+            workspace_id=None,
+            managed_session_id=None,
+            subagent_id=None,
+            parent_tab_id=None,
+            last_viewed_at=now_utc,
+        )
+        recent_st = await fake_mgr.get_tab_agent_status(recent_tab_id, use_cache=False)
+        assert recent_st is not None
+        assert recent_st.review_state == "recent_active"
+        assert recent_st.review_label is None
+
+        # A freshly created Chat with zero turns yet falls back to created_at (<= 4h -> recent_active),
+        # whereas subagent child tabs never project top-level review state.
+        fresh_tab_id = "fresh-empty-tab"
+        fake_mgr.processes[fresh_tab_id] = SimpleNamespace(  # type: ignore[assignment]
+            tab_id=fresh_tab_id,
+            name="new chat",
+            agent_type=AgentType.CURSOR,
+            session_kind=SessionKind.CHAT,
+            cursor_transport="acp",
+            tmux_session="tmux-fresh",
+            workspace_id=None,
+            managed_session_id=None,
+            subagent_id=None,
+            parent_tab_id=None,
+            created_at=datetime.now() - timedelta(minutes=20),
+            last_viewed_at=now_utc,
+        )
+        fresh_st = await fake_mgr.get_tab_agent_status(fresh_tab_id, use_cache=False)
+        assert fresh_st is not None
+        assert fresh_st.review_state == "recent_active"
+
+        sub_tab_id = "recent-subagent-tab"
+        fake_mgr.processes[sub_tab_id] = SimpleNamespace(  # type: ignore[assignment]
+            tab_id=sub_tab_id,
+            name="subagent worker",
+            agent_type=AgentType.CURSOR,
+            session_kind=SessionKind.CHAT,
+            cursor_transport="acp",
+            tmux_session="tmux-sub",
+            workspace_id=None,
+            managed_session_id=None,
+            subagent_id="sub-1",
+            parent_tab_id=recent_tab_id,
+            created_at=datetime.now() - timedelta(minutes=5),
+            last_viewed_at=now_utc,
+        )
+        sub_st = await fake_mgr.get_tab_agent_status(sub_tab_id, use_cache=False)
+        assert sub_st is not None
+        assert sub_st.review_state is None
+
+        stale_tab_id = "stale-5h-tab"
+        stale_store = AgentStreamStore("terminal-tabs", f"terminal-tab-{stale_tab_id}")
+        await stale_store.append(
+            AgentStreamEvent(
+                stream_sequence=0,
+                session_id=f"terminal-tab-{stale_tab_id}",
+                tab_id=stale_tab_id,
+                agent_type=AgentType.CURSOR,
+                type=AgentStreamEventType.TURN_COMPLETED,
+                run_epoch=1,
+                turn_id="t-stale",
+                payload={"status": "completed", "assistant_text": "Old finished Q&A."},
+                created_at=now_utc - timedelta(hours=5),
+            )
+        )
+        fake_mgr.processes[stale_tab_id] = SimpleNamespace(  # type: ignore[assignment]
+            tab_id=stale_tab_id,
+            name="h800预估",
+            agent_type=AgentType.CURSOR,
+            session_kind=SessionKind.CHAT,
+            cursor_transport="acp",
+            tmux_session="tmux-stale",
+            workspace_id=None,
+            managed_session_id=None,
+            subagent_id=None,
+            parent_tab_id=None,
+            created_at=datetime.now() - timedelta(hours=5),
+            last_viewed_at=now_utc,
+        )
+        stale_st = await fake_mgr.get_tab_agent_status(stale_tab_id, use_cache=False)
+        assert stale_st is not None
+        assert stale_st.review_state is None
+        assert stale_st.review_label is None
 
         # Verify reference-only MR URLs in title/prompt do NOT prematurely complete unfinished work!
         ref_only_url = "https://code.byted.org/seed/llmserver/merge_requests/3001"
