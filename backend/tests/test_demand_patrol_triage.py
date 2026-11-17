@@ -117,7 +117,43 @@ class FakeRunner:
         if argv[:3] == ["lark-cli", "auth", "status"]:
             return self.identity
         if "+messages-search" in argv:
-            return {"ok": True, "data": {"messages": self.messages, "has_more": self.has_more}}
+            rows = list(self.messages)
+            if "--is-at-me" in argv:
+                rows = [
+                    row
+                    for row in rows
+                    if ME
+                    in {
+                        triage_module._identity_id(mention.get("id", mention))
+                        for mention in (row.get("mentions") or [])
+                        if isinstance(mention, dict)
+                    }
+                ]
+            if "--chat-type" in argv:
+                chat_type = argv[argv.index("--chat-type") + 1]
+                rows = [row for row in rows if row.get("chat_type") == chat_type]
+            if "--sender" in argv:
+                sender_filter = argv[argv.index("--sender") + 1]
+                rows = [
+                    row
+                    for row in rows
+                    if triage_module._identity_id(
+                        (row.get("sender") or {}).get("id")
+                        if isinstance(row.get("sender"), dict)
+                        else row.get("sender", row.get("sender_id", {}))
+                    )
+                    == sender_filter
+                    or triage_module._identity_id(
+                        (row.get("sender") or {}).get("sender_id")
+                        if isinstance(row.get("sender"), dict)
+                        else {}
+                    )
+                    == sender_filter
+                ]
+            if "--chat-id" in argv:
+                allowed_chats = set(argv[argv.index("--chat-id") + 1].split(","))
+                rows = [row for row in rows if row.get("chat_id") in allowed_chats]
+            return {"ok": True, "data": {"messages": rows, "has_more": self.has_more}}
         assert argv[0] == "infowall", "No real subprocess is permitted"
         assert env is not None and env["INFOWALL_API_KEY_FILE"] == KEY_PATH
         if argv[1] == "health":
@@ -172,7 +208,8 @@ async def test_quiet_gate_uses_no_model_infowall_or_notification(
     )
     assert (result.candidates, result.llm_invoked, result.notified) == (0, 0, 0)
     assert state.feishu_watermark_iso == NOW.isoformat()
-    assert len(runner.calls) == 2 and not dot.calls
+    assert len(runner.calls) == 4 and not dot.calls
+    assert all(argv[0] == "lark-cli" for argv, _, _ in runner.calls)
     callback.assert_not_awaited()
     caps.assert_not_awaited()
     search = runner.calls[1][0]
@@ -184,6 +221,8 @@ async def test_quiet_gate_uses_no_model_infowall_or_notification(
         timespec="seconds"
     )
     assert "--is-at-me" in search
+    assert "--chat-type" in runner.calls[2][0] and "p2p" in runner.calls[2][0]
+    assert "--sender" in runner.calls[3][0] and ME in runner.calls[3][0]
     assert search[search.index("--as") + 1] == "user"
     assert search[search.index("--page-limit") + 1] == "10"
     assert "--no-reactions" in search
@@ -708,43 +747,7 @@ async def test_rc3_rc4_non_threaded_group_unrelated_own_message_does_not_mark_an
         ),
         "reply_to": "om_replied",
     }
-
-    # Simulate real lark-cli: first search (--is-at-me) returns only @me messages;
-    # second search (--sender ME --chat-id oc_chat) returns user's own messages in that chat.
-    class SplitSearchRunner(FakeRunner):
-        async def __call__(
-            self,
-            argv: list[str],
-            *,
-            timeout: float = 30,
-            input_text: str | None = None,
-            env: dict[str, str] | None = None,
-        ) -> Any:
-            self.calls.append((argv, input_text, env))
-            if argv[:3] == ["lark-cli", "auth", "status"]:
-                return self.identity
-            if "+messages-search" in argv:
-                if "--is-at-me" in argv:
-                    return {
-                        "ok": True,
-                        "data": {
-                            "messages": [mention_unanswered, mention_replied],
-                            "has_more": False,
-                        },
-                    }
-                if "--sender" in argv:
-                    assert argv[argv.index("--sender") + 1] == ME
-                    assert argv[argv.index("--chat-id") + 1] == "oc_chat"
-                    return {
-                        "ok": True,
-                        "data": {
-                            "messages": [own_unrelated, own_direct_reply],
-                            "has_more": False,
-                        },
-                    }
-            raise AssertionError(f"Unexpected command: {argv}")
-
-    runner = SplitSearchRunner()
+    runner = FakeRunner([mention_unanswered, mention_replied, own_unrelated, own_direct_reply])
     result = await run_feishu_triage(
         PatrolState(),
         now=NOW,
@@ -756,7 +759,119 @@ async def test_rc3_rc4_non_threaded_group_unrelated_own_message_does_not_mark_an
     assert result.candidates == 1
     assert result.details["candidate_ids"] == ["om_unanswered"]
     assert result.details["answered_skipped"] == 1
-    assert len(runner.calls) == 3
+
+
+async def test_f1_f2_f3_scoped_discovery_reply_anchoring_and_self_mention_coverage() -> None:
+    # F1: unmentioned P2P question ('dm') and unmentioned follow-up in participated thread ('followup')
+    dm = message("dm", chat_type="p2p", mentions=[], minutes_ago=15, text="服务为什么挂了？")
+    own_thread = message(
+        "own-thread",
+        chat_type="group",
+        sender=ME,
+        thread="omt_part",
+        minutes_ago=30,
+        text="我先看下",
+    )
+    followup = message(
+        "followup",
+        chat_type="group",
+        sender="ou_colleague",
+        thread="omt_part",
+        mentions=[],
+        minutes_ago=10,
+        text="日志还是报错 OOM",
+    )
+    # F2: Alice asks two non-threaded group questions; user replies anchored to second-question
+    # while mentioning Alice. first-question must NOT be marked answered.
+    first_question = message(
+        "first-question",
+        chat_type="group",
+        thread="",
+        sender="ou_alice",
+        mentions=[{"id": ME}],
+        minutes_ago=25,
+        text="@王泽华 第一个问题：服务是不是挂了",
+    )
+    second_question = message(
+        "second-question",
+        chat_type="group",
+        thread="",
+        sender="ou_alice",
+        mentions=[{"id": ME}],
+        minutes_ago=20,
+        text="@王泽华 第二个问题：配置怎么不对",
+    )
+    own_second_answer = {
+        **message(
+            "own-second-answer",
+            chat_type="group",
+            thread="",
+            sender=ME,
+            mentions=[{"id": "ou_alice"}],
+            minutes_ago=12,
+            text="@Alice 第二个问题修好了",
+        ),
+        "reply_to": "second-question",
+    }
+    # F3: Self-mention in oc_other plus an incoming @me question in oc_group2 and an own reply in oc_group2
+    self_mention = {
+        **message(
+            "self-mention",
+            chat_type="group",
+            sender=ME,
+            mentions=[{"id": ME}],
+            minutes_ago=18,
+            text="备忘 @王泽华",
+        ),
+        "chat_id": "oc_other",
+    }
+    group2_question = {
+        **message(
+            "group2-question",
+            chat_type="group",
+            thread="omt_g2",
+            sender="ou_bob",
+            mentions=[{"id": ME}],
+            minutes_ago=16,
+            text="@王泽华 帮忙看看这个报错",
+        ),
+        "chat_id": "oc_group2",
+    }
+    group2_own_reply = {
+        **message(
+            "group2-own-reply",
+            chat_type="group",
+            thread="omt_g2",
+            sender=ME,
+            mentions=[],
+            minutes_ago=8,
+            text="已定位并修复",
+        ),
+        "chat_id": "oc_group2",
+    }
+    runner = FakeRunner(
+        [
+            dm,
+            own_thread,
+            followup,
+            first_question,
+            second_question,
+            own_second_answer,
+            self_mention,
+            group2_question,
+            group2_own_reply,
+        ]
+    )
+    result = await run_feishu_triage(
+        PatrolState(),
+        now=NOW,
+        dot=FakeDot(),
+        runner=runner,
+        dry_run=True,
+    )
+    assert not result.errors
+    assert result.details["candidate_ids"] == ["first-question", "dm", "followup"]
+    assert result.details["answered_skipped"] == 2
 
 
 async def test_rc5_rc6_maso_effort_model_discovery_and_prompt_metadata(
