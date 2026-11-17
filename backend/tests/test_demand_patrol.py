@@ -407,6 +407,46 @@ async def test_cli_json_transport_timeout_and_output_bound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert await commands.run_command([sys.executable, "-c", 'print("{}")']) == {}
+    err_script = (
+        "import json, sys; "
+        "sys.stderr.write(json.dumps({'ok': False, 'error': {'subtype': 'invalid_parameters', "
+        "'code': 99992402, 'message': 'field validation failed token=secret123'}})); "
+        "sys.exit(1)"
+    )
+    with pytest.raises(
+        commands.CommandError,
+        match=r"exited with status 1: invalid_parameters \(code=99992402\): field validation failed \[redacted\]",
+    ):
+        await commands.run_command([sys.executable, "-c", err_script])
+    # Unrecognized JSON diagnostic structures fail closed without echoing keys/values
+    unrecognized_json = (
+        "import json, sys; "
+        "sys.stderr.write(json.dumps({'access_token': 'SYNTHETIC_ONLY_SECRET', "
+        "'appSecret': 'SYNTHETIC_ONLY_SECRET'})); sys.exit(1)"
+    )
+    with pytest.raises(commands.CommandError) as exc_info:
+        await commands.run_command([sys.executable, "-c", unrecognized_json])
+    assert "SYNTHETIC_ONLY_SECRET" not in str(exc_info.value)
+    assert str(exc_info.value).endswith("exited with status 1")
+    # Quoted JSON keys and credential URLs inside error messages or plain stderr are redacted
+    for script in [
+        (
+            "import json, sys; "
+            "sys.stderr.write(json.dumps({'ok': False, 'error': {'code': 401, "
+            '\'message\': \'{"access_token": "SYNTHETIC_ONLY_SECRET", "appSecret": "SYNTHETIC_ONLY_SECRET"} '
+            "https://user:SYNTHETIC_ONLY_SECRET@host.example/api'}})); sys.exit(1)"
+        ),
+        (
+            "import sys; "
+            "sys.stderr.write('connect failed: https://user:SYNTHETIC_ONLY_SECRET@host.example/v1 "
+            '"access_token": "SYNTHETIC_ONLY_SECRET" "appSecret": "SYNTHETIC_ONLY_SECRET"\\n\'); '
+            "sys.exit(1)"
+        ),
+    ]:
+        with pytest.raises(commands.CommandError) as redacted_exc:
+            await commands.run_command([sys.executable, "-c", script])
+        assert "SYNTHETIC_ONLY_SECRET" not in str(redacted_exc.value)
+        assert "https://[redacted]@host.example" in str(redacted_exc.value)
     with pytest.raises(commands.CommandError, match="timed out"):
         await commands.run_command(
             [sys.executable, "-c", "import time; time.sleep(30)"], timeout=0.05

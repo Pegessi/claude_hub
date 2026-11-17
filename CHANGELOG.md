@@ -7,6 +7,12 @@
 
 ## Released
 
+### fix(patrol): fix Feishu @mention proactive patrol pipeline (RC1-RC6) for live `lark-cli` output
+
+- Format `lark-cli im +messages-search` `--start` and `--end` flags with second precision (`isoformat(timespec="seconds")`) in the configured patrol timezone, floor `_search_start()` to the minute so minute-precision `create_time` boundaries never drop messages, and surface sanitized CLI `stderr`/JSON error details on `CommandError` while failing closed on unrecognized structures and redacting quoted sensitive keys and URL userinfo (`services/demand_patrol/feishu_triage.py`, `services/demand_patrol/commands.py`).
+- Attach `ZoneInfo(state.config.timezone)` in `_timestamp()` when `lark-cli` returns naive local `"YYYY-MM-DD HH:MM"` timestamps, replace unfiltered all-chat search with bounded scoped discovery (`--is-at-me`, `--chat-type p2p`, `--sender <uid>`, plus descending window-aware pagination via `lark-cli im +threads-messages-list --thread <thread_id> --order desc` for exact participated group threads) so busy windows, >500-message noisy groups, and >500-message long-history threads never trigger the truncation deadlock while preserving P2P and participated-thread follow-ups, and require matching thread/`reply_to` conversation evidence in `_is_answered_by()` while broadening `_ACTIONABLE` for real Chinese triage phrasings and `larkoffice.com` / `[redacted]` URLs.
+- Match `_PREFERRED_MODEL` against both `option.id` and `supported_reasoning_efforts[].provider_model_id` in `diagnose_message()`, include `chat_id`, `thread_id`, and `reply_to` in `_diagnosis_prompt()`, and widen `TriageDiagnosis.reply_draft` validation bounds to `20..600` characters.
+
 ### fix(mobile-ui): suppress automatic text-input focus on mobile/coarse-pointer dialogs and model picker
 
 - Add `shouldAutoFocusTextInput` (`frontend/src/utils/mobileInputFocus.ts`) and gate
