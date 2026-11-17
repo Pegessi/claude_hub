@@ -75,8 +75,9 @@ TRANSITIONS: dict[tuple[WorkspaceTaskStatus, WorkspaceTaskStatus], frozenset[str
         {"initiator_progress", "internal_report", "feedback_reaper", "chat_archive", "mr_merged"}
     ),
     (QUEUED, DONE): frozenset({"internal_report", "feedback_reaper", "abort"}),
-    (DONE, WORKING): frozenset({"initiator_progress", "archive_reopen"}),
-    (DONE, REVIEW): frozenset({"archive_reopen"}),
+    # Lazy reopen of an archive-closed initiator Task on a fresh main-thread turn
+    # or authenticated active progress update.
+    (DONE, WORKING): frozenset({"archive_reopen"}),
     # Failure.
     # "reconcile": the lifecycle reconciler resolving a Task whose owner is gone.
     (WORKING, FAILED): frozenset(
@@ -91,7 +92,7 @@ TRANSITIONS: dict[tuple[WorkspaceTaskStatus, WorkspaceTaskStatus], frozenset[str
     (REVIEW, TODO): frozenset({"abort", "handoff", "feedback_reaper"}),
     (FAILED, TODO): frozenset({"abort", "handoff", "feedback_reaper"}),
     # Handoff may reopen a closed record for a new executor.
-    (DONE, TODO): frozenset({"feedback_reaper", "handoff", "archive_reopen"}),
+    (DONE, TODO): frozenset({"feedback_reaper", "handoff"}),
 }
 
 
