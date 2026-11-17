@@ -102,10 +102,16 @@ export interface TriageTaskViewModel {
   }
 }
 
+export const TRIAGE_DONE_PREVIEW_SIZE = 5
+
 export interface TriageGroup {
   key: TriageBucket
   label: string
   items: TriageTaskViewModel[]
+  visibleItems: TriageTaskViewModel[]
+  hiddenCount: number
+  collapsed: boolean
+  expanded: boolean
 }
 
 const GROUP_LABELS: Record<TriageBucket, string> = {
@@ -642,7 +648,16 @@ export function buildTriageTaskViewModel(input: {
   }
 }
 
-export function groupTriageTasks(items: readonly TriageTaskViewModel[]): TriageGroup[] {
+export interface GroupTriageOptions {
+  collapsed?: ReadonlySet<TriageBucket>
+  doneExpanded?: boolean
+  selectedTaskId?: string | null
+}
+
+export function groupTriageTasks(
+  items: readonly TriageTaskViewModel[],
+  options?: GroupTriageOptions,
+): TriageGroup[] {
   const buckets: Record<TriageBucket, TriageTaskViewModel[]> = {
     needs_you: [],
     working: [],
@@ -660,9 +675,33 @@ export function groupTriageTasks(items: readonly TriageTaskViewModel[]): TriageG
   buckets.review.sort(byUpdatedDesc)
   buckets.done.sort(byUpdatedDesc)
 
-  return (['needs_you', 'working', 'review', 'done'] as TriageBucket[]).map(key => ({
-    key,
-    label: GROUP_LABELS[key],
-    items: buckets[key],
-  }))
+  return (['needs_you', 'working', 'review', 'done'] as TriageBucket[]).map(key => {
+    const all = buckets[key]
+    const collapsed = Boolean(options?.collapsed?.has(key))
+    const isDone = key === 'done'
+    const expanded = !isDone || Boolean(options?.doneExpanded)
+    const previewCap = isDone ? TRIAGE_DONE_PREVIEW_SIZE : all.length
+    const active = options?.selectedTaskId
+      ? all.find(item => item.id === options.selectedTaskId)
+      : undefined
+    let visibleItems = collapsed
+      ? []
+      : expanded
+        ? all
+        : all.slice(0, previewCap)
+    if (active && !visibleItems.includes(active)) {
+      visibleItems = collapsed
+        ? [active]
+        : [...visibleItems.slice(0, Math.max(0, previewCap - 1)), active]
+    }
+    return {
+      key,
+      label: GROUP_LABELS[key],
+      items: all,
+      visibleItems,
+      hiddenCount: all.length - visibleItems.length,
+      collapsed,
+      expanded,
+    }
+  })
 }

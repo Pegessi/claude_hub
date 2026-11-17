@@ -84,20 +84,40 @@
             :key="group.key"
             class="tp-group"
           >
-            <header class="tp-group-header">
+            <button
+              type="button"
+              class="tp-group-header"
+              :aria-expanded="!group.collapsed"
+              @click="toggleBucketCollapse(group.key)"
+            >
               <span>{{ group.label }}</span>
-              <span class="tp-num">{{ group.items.length }}</span>
-            </header>
+              <span class="tp-group-header-right">
+                <span class="tp-num">{{ group.items.length }}</span>
+                <svg
+                  class="tp-group-chevron"
+                  :class="{ collapsed: group.collapsed }"
+                  viewBox="0 0 16 16"
+                  width="12"
+                  height="12"
+                  aria-hidden="true"
+                >
+                  <path
+                    fill="currentColor"
+                    d="M4.5 6 8 9.5 11.5 6l.9.9L8 11.3 3.6 6.9z"
+                  />
+                </svg>
+              </span>
+            </button>
 
             <div
-              v-if="group.items.length === 0"
+              v-if="!group.collapsed && group.items.length === 0"
               class="tp-group-empty"
             >
               No {{ group.label.toLowerCase() }} tasks
             </div>
 
             <button
-              v-for="item in group.items"
+              v-for="item in group.visibleItems"
               :key="item.id"
               type="button"
               :class="['tp-row', { active: activeItem?.id === item.id }]"
@@ -121,17 +141,33 @@
                 {{ item.title }}
               </div>
             </button>
+
+            <button
+              v-if="group.key === 'done' && !group.collapsed && group.items.length > TRIAGE_DONE_PREVIEW_SIZE"
+              type="button"
+              class="tp-show-more"
+              :aria-expanded="group.expanded"
+              @click="doneExpanded = !doneExpanded"
+            >
+              {{ group.expanded ? 'Show less' : `Show more (${group.hiddenCount})` }}
+            </button>
           </section>
 
           <div
-            v-if="scopeMode === 'current' && boardTasksPagination && boardOlderTasksRemaining > 0"
+            v-if="
+              scopeMode === 'current' &&
+              boardTasksPagination &&
+              boardOlderTasksRemaining > 0 &&
+              !collapsedBuckets.has('done') &&
+              (doneExpanded || doneGroupCount <= TRIAGE_DONE_PREVIEW_SIZE)
+            "
             class="tp-load-more-wrap"
           >
             <button
               type="button"
               class="tp-ghost-btn tp-load-more-btn"
               :disabled="boardLoadMoreLoading"
-              @click="handleLoadOlderTasks"
+              @click="onLoadOlderDone"
             >
               {{
                 boardLoadMoreLoading
@@ -958,10 +994,12 @@ import {
   useWorkspaceTaskPresentationContext,
 } from '../context'
 import {
+  TRIAGE_DONE_PREVIEW_SIZE,
   buildTriageTaskViewModel,
   groupTriageTasks,
   type DeliverableItem,
   type MilestoneStep,
+  type TriageBucket,
   type TriageTaskViewModel,
 } from '../presentation/triageProModel'
 
@@ -1283,7 +1321,31 @@ const triageItems = computed<TriageTaskViewModel[]>(() => {
   })
 })
 
-const groupedTasks = computed(() => groupTriageTasks(triageItems.value))
+const collapsedBuckets = ref<Set<TriageBucket>>(new Set())
+const doneExpanded = ref(false)
+
+function toggleBucketCollapse(bucket: TriageBucket) {
+  const next = new Set(collapsedBuckets.value)
+  if (next.has(bucket)) next.delete(bucket)
+  else next.add(bucket)
+  collapsedBuckets.value = next
+}
+
+async function onLoadOlderDone() {
+  doneExpanded.value = true
+  await handleLoadOlderTasks()
+}
+
+const groupedTasks = computed(() =>
+  groupTriageTasks(triageItems.value, {
+    collapsed: collapsedBuckets.value,
+    doneExpanded: doneExpanded.value,
+    selectedTaskId: selectedTaskId.value,
+  }),
+)
+const doneGroupCount = computed(
+  () => groupedTasks.value.find(g => g.key === 'done')?.items.length ?? 0,
+)
 const orderedVisibleItems = computed(() => groupedTasks.value.flatMap(g => g.items))
 
 let pendingCrossWorkspaceSelectionId: string | null = null
