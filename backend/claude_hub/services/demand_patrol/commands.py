@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import signal
 from pathlib import Path
@@ -12,10 +13,64 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 _MAX_OUTPUT_BYTES = 32 * 1024 * 1024
+_SECRET_RE = re.compile(
+    r"(?i)(?:bearer\s+\S+|(?:token|secret|password|api[_-]?key)\s*[=:]\s*\S+"
+    r"|\b(?:cli|u|t)-[a-z0-9_-]{8,}\b)"
+)
 
 
 class CommandError(RuntimeError):
     """A CLI did not return a usable, complete JSON response."""
+
+
+def _sanitize_error_text(text: str) -> str:
+    cleaned = " ".join(_SECRET_RE.sub("[redacted]", text).split())
+    return cleaned[:240]
+
+
+def extract_cli_error_detail(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    error = payload.get("error")
+    if isinstance(error, dict):
+        code = error.get("code")
+        subtype = error.get("subtype") or error.get("type")
+        msg = error.get("message") or error.get("msg")
+        parts: list[str] = []
+        if isinstance(subtype, str) and subtype.strip():
+            parts.append(subtype.strip())
+        if isinstance(code, (int, str)) and not isinstance(code, bool) and str(code).strip():
+            parts.append(f"code={code}")
+        header = f"{parts[0]} ({parts[1]})" if len(parts) == 2 else " ".join(parts)
+        if isinstance(msg, str) and msg.strip():
+            detail = f"{header}: {msg.strip()}" if header else msg.strip()
+        else:
+            detail = header
+        return _sanitize_error_text(detail)
+    if isinstance(error, str) and error.strip():
+        return _sanitize_error_text(error)
+    msg = payload.get("message") or payload.get("msg")
+    if isinstance(msg, str) and msg.strip():
+        return _sanitize_error_text(msg)
+    return ""
+
+
+def _stream_error_detail(stdout: bytes, stderr: bytes) -> str:
+    for raw in (stderr, stdout):
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, UnicodeError):
+            continue
+        detail = extract_cli_error_detail(parsed)
+        if detail:
+            return detail
+    if stderr:
+        text = stderr.decode("utf-8", errors="replace").strip()
+        if text:
+            return _sanitize_error_text(text.splitlines()[0])
+    return ""
 
 
 class CommandRunner(Protocol):
@@ -87,27 +142,33 @@ async def run_command(
             *argv[1:],
             stdin=asyncio.subprocess.PIPE if input_text is not None else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
             env={**os.environ, **(env or {})},
             start_new_session=os.name == "posix",
         )
     except OSError as exc:
         raise CommandError(f"{argv[0]} is unavailable") from exc
     reader: asyncio.Task[bytes] | None = None
+    stderr_reader: asyncio.Task[bytes] | None = None
     try:
         async with asyncio.timeout(timeout):
             assert proc.stdout is not None
             reader = asyncio.create_task(_read_bounded(proc.stdout))
+            stderr_stream = getattr(proc, "stderr", None)
+            if stderr_stream is not None:
+                stderr_reader = asyncio.create_task(_read_bounded(stderr_stream))
             if input_text is not None:
                 assert proc.stdin is not None
                 proc.stdin.write(input_text.encode("utf-8"))
                 await proc.stdin.drain()
                 proc.stdin.close()
             stdout = await reader
+            stderr = await stderr_reader if stderr_reader is not None else b""
             await proc.wait()
         if proc.returncode != 0:
-            # CLI stderr may contain tokens or raw private message bodies.
-            raise CommandError(f"{argv[0]} exited with status {proc.returncode}")
+            detail = _stream_error_detail(stdout, stderr)
+            suffix = f": {detail}" if detail else ""
+            raise CommandError(f"{argv[0]} exited with status {proc.returncode}{suffix}")
         try:
             return json.loads(stdout)
         except (ValueError, UnicodeError) as exc:
@@ -115,9 +176,10 @@ async def run_command(
     except TimeoutError as exc:
         raise CommandError(f"{argv[0]} timed out after {timeout:g}s") from exc
     finally:
-        if reader is not None and not reader.done():
-            reader.cancel()
-            await asyncio.gather(reader, return_exceptions=True)
+        for task in (reader, stderr_reader):
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         # Wrappers may leave descendants holding stdout open. Only this owned
         # session is killed; killing the direct PID alone cannot bound proc.wait().
         try:
