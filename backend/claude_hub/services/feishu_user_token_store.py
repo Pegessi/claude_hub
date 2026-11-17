@@ -99,83 +99,28 @@ class _LibcryptoAesGcm:
         )
         lib = ctypes.CDLL(lib_name)
         self._lib = lib
-
-        self._ctx_new = lib.EVP_CIPHER_CTX_new
-        self._ctx_new.restype = ctypes.c_void_p
-        self._ctx_new.argtypes = []
-
-        self._ctx_free = lib.EVP_CIPHER_CTX_free
-        self._ctx_free.restype = None
-        self._ctx_free.argtypes = [ctypes.c_void_p]
-
-        self._aes_256_gcm = lib.EVP_aes_256_gcm
-        self._aes_256_gcm.restype = ctypes.c_void_p
-        self._aes_256_gcm.argtypes = []
-
-        self._ctx_ctrl = lib.EVP_CIPHER_CTX_ctrl
-        self._ctx_ctrl.restype = ctypes.c_int
-        self._ctx_ctrl.argtypes = [
+        vp, cp, ci, cip = (
             ctypes.c_void_p,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_void_p,
-        ]
-
-        self._enc_init = lib.EVP_EncryptInit_ex
-        self._enc_init.restype = ctypes.c_int
-        self._enc_init.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_char_p,
-            ctypes.c_char_p,
-        ]
-
-        self._enc_update = lib.EVP_EncryptUpdate
-        self._enc_update.restype = ctypes.c_int
-        self._enc_update.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_char_p,
-            ctypes.POINTER(ctypes.c_int),
             ctypes.c_char_p,
             ctypes.c_int,
-        ]
-
-        self._enc_final = lib.EVP_EncryptFinal_ex
-        self._enc_final.restype = ctypes.c_int
-        self._enc_final.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_char_p,
             ctypes.POINTER(ctypes.c_int),
-        ]
+        )
 
-        self._dec_init = lib.EVP_DecryptInit_ex
-        self._dec_init.restype = ctypes.c_int
-        self._dec_init.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_char_p,
-            ctypes.c_char_p,
-        ]
+        def _bind(sym: str, restype: Any, argtypes: list[Any]) -> Any:
+            fn = getattr(lib, sym)
+            fn.restype, fn.argtypes = restype, argtypes
+            return fn
 
-        self._dec_update = lib.EVP_DecryptUpdate
-        self._dec_update.restype = ctypes.c_int
-        self._dec_update.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_char_p,
-            ctypes.POINTER(ctypes.c_int),
-            ctypes.c_char_p,
-            ctypes.c_int,
-        ]
-
-        self._dec_final = lib.EVP_DecryptFinal_ex
-        self._dec_final.restype = ctypes.c_int
-        self._dec_final.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_char_p,
-            ctypes.POINTER(ctypes.c_int),
-        ]
+        self._ctx_new = _bind("EVP_CIPHER_CTX_new", vp, [])
+        self._ctx_free = _bind("EVP_CIPHER_CTX_free", None, [vp])
+        self._aes_256_gcm = _bind("EVP_aes_256_gcm", vp, [])
+        self._ctx_ctrl = _bind("EVP_CIPHER_CTX_ctrl", ci, [vp, ci, ci, vp])
+        self._enc_init = _bind("EVP_EncryptInit_ex", ci, [vp, vp, vp, cp, cp])
+        self._enc_update = _bind("EVP_EncryptUpdate", ci, [vp, cp, cip, cp, ci])
+        self._enc_final = _bind("EVP_EncryptFinal_ex", ci, [vp, cp, cip])
+        self._dec_init = _bind("EVP_DecryptInit_ex", ci, [vp, vp, vp, cp, cp])
+        self._dec_update = _bind("EVP_DecryptUpdate", ci, [vp, cp, cip, cp, ci])
+        self._dec_final = _bind("EVP_DecryptFinal_ex", ci, [vp, cp, cip])
 
     def encrypt(self, key: bytes, plaintext: bytes, nonce: bytes | None = None) -> bytes:
         if len(key) != 32:
@@ -743,6 +688,76 @@ class FeishuUserTokenStore:
                     candidates.append((e_app, u_open, u_name, dict(app_entry)))
         return True, False, candidates
 
+    def _select_cli_candidates(
+        self,
+        *,
+        lark_cli_dir: Path | None = None,
+        data_dir: Path | None = None,
+        target_app_id: str = "",
+        target_open_id: str = "",
+        target_profile: str = "",
+    ) -> tuple[Path, Path, list[tuple[str, str, str, dict[str, Any]]]] | None:
+        resolved_dirs = self._resolve_lark_cli_dirs_with_overrides(
+            lark_cli_dir=lark_cli_dir, data_dir=data_dir
+        )
+        if resolved_dirs is None:
+            return None
+        cfg_dir, keychain_dir = resolved_dirs
+        has_config_apps, dangling, candidates = self._select_config_candidates(
+            cfg_dir / "config.json",
+            target_app_id=target_app_id,
+            target_open_id=target_open_id,
+            target_profile=target_profile,
+        )
+        if dangling or (target_profile and not candidates) or (has_config_apps and not candidates):
+            return cfg_dir, keychain_dir, []
+        if not has_config_apps:
+            for token_filename in ("tokens.json", "user_token.json", "credentials.json"):
+                token_file = cfg_dir / token_filename
+                if token_file.is_file():
+                    try:
+                        raw_obj = json.loads(token_file.read_text(encoding="utf-8"))
+                    except Exception:
+                        continue
+                    entries = raw_obj if isinstance(raw_obj, list) else [raw_obj]
+                    for item in entries:
+                        if not isinstance(item, Mapping):
+                            continue
+                        e_app = str(
+                            item.get("appId") or item.get("app_id") or target_app_id
+                        ).strip()
+                        e_uid = str(
+                            item.get("userOpenId") or item.get("open_id") or target_open_id
+                        ).strip()
+                        if e_app and e_uid:
+                            if target_app_id and e_app != target_app_id:
+                                continue
+                            if target_open_id and e_uid != target_open_id:
+                                continue
+                            e_name = str(
+                                item.get("userName") or item.get("user_name") or ""
+                            ).strip()
+                            candidates.append((e_app, e_uid, e_name, dict(item)))
+            if not candidates:
+                for search_dir in (keychain_dir, cfg_dir, cfg_dir / "keychain"):
+                    if not search_dir.is_dir():
+                        continue
+                    for enc_file in sorted(search_dir.glob("cli_*_ou_*.enc")):
+                        stem = enc_file.stem
+                        idx = stem.find("_ou_")
+                        if idx <= 0:
+                            continue
+                        c_app = stem[:idx]
+                        c_uid = stem[idx + 1 :]
+                        if target_app_id and c_app != target_app_id:
+                            continue
+                        if target_open_id and c_uid != target_open_id:
+                            continue
+                        candidates.append((c_app, c_uid, "", {}))
+                    if candidates:
+                        break
+        return cfg_dir, keychain_dir, candidates
+
     def _resolve_lock_account(
         self,
         *,
@@ -750,12 +765,14 @@ class FeishuUserTokenStore:
         open_id: str = "",
         profile: str = "",
         prefer_cli_config: bool = False,
+        lark_cli_dir: Path | None = None,
+        data_dir: Path | None = None,
     ) -> tuple[str, str]:
         """Resolve the target ``(app_id, open_id)`` without locking unrelated CLI profiles."""
         clean_app = app_id.strip()
         clean_open = open_id.strip()
         clean_profile = profile.strip()
-        if clean_app and clean_open:
+        if clean_app and clean_open and not clean_profile and not prefer_cli_config:
             return clean_app, clean_open
         if not prefer_cli_config and not clean_profile and document_exists(self._path):
             rec = self.get_token(open_id=clean_open or None, app_id=clean_app or None)
@@ -764,36 +781,30 @@ class FeishuUserTokenStore:
                 clean_open = clean_open or rec.open_id
                 if clean_app and clean_open:
                     return clean_app, clean_open
-        resolved_dirs = self._resolve_lark_cli_dirs_with_overrides()
-        if resolved_dirs is not None:
-            cfg_dir, keychain_dir = resolved_dirs
-            has_config_apps, dangling, candidates = self._select_config_candidates(
-                cfg_dir / "config.json",
-                target_app_id=clean_app,
-                target_open_id=clean_open,
-                target_profile=clean_profile,
-            )
-            if dangling or (clean_profile and not candidates):
-                return clean_app, clean_open
+        cli_sel = self._select_cli_candidates(
+            lark_cli_dir=lark_cli_dir,
+            data_dir=data_dir,
+            target_app_id=clean_app,
+            target_open_id=clean_open,
+            target_profile=clean_profile,
+        )
+        if cli_sel is not None:
+            cfg_dir, keychain_dir, candidates = cli_sel
             if candidates:
                 for c_app, c_open, _, _ in candidates:
-                    if (keychain_dir / f"{c_app}_{c_open}.enc").is_file():
-                        return clean_app or c_app, clean_open or c_open
-                return clean_app or candidates[0][0], clean_open or candidates[0][1]
-            if not has_config_apps and not clean_profile and keychain_dir.is_dir():
-                for enc_file in sorted(keychain_dir.glob("*.enc")):
-                    parts = enc_file.stem.split("_ou_", 1)
-                    if len(parts) == 2:
-                        f_app, f_open = parts[0], f"ou_{parts[1]}"
-                        if (not clean_app or f_app == clean_app) and (
-                            not clean_open or f_open == clean_open
-                        ):
-                            return clean_app or f_app, clean_open or f_open
-        if prefer_cli_config and not clean_profile and document_exists(self._path):
-            rec = self.get_token(open_id=clean_open or None, app_id=clean_app or None)
-            if rec is not None:
-                return clean_app or rec.app_id, clean_open or rec.open_id
-        return clean_app, clean_open
+                    if any(
+                        (d / f"{c_app}_{c_open}.enc").is_file()
+                        for d in (keychain_dir, cfg_dir, cfg_dir / "keychain")
+                    ):
+                        return c_app, c_open
+                return candidates[0][0], candidates[0][1]
+        if prefer_cli_config:
+            return "", ""
+        return (
+            (clean_app, clean_open)
+            if (clean_app and clean_open and not clean_profile)
+            else ("", "")
+        )
 
     def _lock_paths(
         self,
@@ -802,10 +813,14 @@ class FeishuUserTokenStore:
         open_id: str = "",
         profile: str = "",
         create_cli_lock_dir: bool = False,
+        resolve_account: bool = True,
     ) -> list[Path]:
-        clean_app, clean_open = self._resolve_lock_account(
-            app_id=app_id, open_id=open_id, profile=profile
-        )
+        if resolve_account:
+            clean_app, clean_open = self._resolve_lock_account(
+                app_id=app_id, open_id=open_id, profile=profile
+            )
+        else:
+            clean_app, clean_open = app_id.strip(), open_id.strip()
         lock_paths: list[Path] = []
         resolved_dirs = self._resolve_lark_cli_dirs_with_overrides()
         if resolved_dirs is not None:
@@ -826,6 +841,7 @@ class FeishuUserTokenStore:
         open_id: str = "",
         profile: str = "",
         create_cli_lock_dir: bool = False,
+        resolve_account: bool = True,
         timeout: float = 15.0,
     ) -> AsyncIterator[None]:
         """Acquire inter-process file locks via non-blocking ``LOCK_NB`` polling."""
@@ -834,6 +850,7 @@ class FeishuUserTokenStore:
             open_id=open_id,
             profile=profile,
             create_cli_lock_dir=create_cli_lock_dir,
+            resolve_account=resolve_account,
         )
         newly_opened: list[tuple[str, int]] = []
         deadline = time.monotonic() + max(0.1, timeout)
@@ -1188,18 +1205,24 @@ class FeishuUserTokenStore:
         explicit ``profile`` / ``app_id`` > ``currentApp`` (by ``name`` or ``appId``) > ``apps[0]``.
         A dangling ``currentApp`` does not fall back to ``apps[0]``.
         """
-        if lark_cli_dir is not None or data_dir is not None:
-            cfg_dir = lark_cli_dir or self._lark_cli_dir or (data_dir or Path.home() / ".lark-cli")
-            keychain_dir = data_dir or self._lark_cli_data_dir or cfg_dir
-        else:
-            resolved_dirs = self._resolve_default_lark_cli_dirs()
-            if resolved_dirs is None:
-                return None
-            cfg_dir, keychain_dir = resolved_dirs
-
-        target_app_id = (app_id or "").strip()
-        target_open_id = (open_id or "").strip()
-        target_profile = (profile or "").strip()
+        if (
+            lark_cli_dir is None
+            and data_dir is None
+            and self._resolve_default_lark_cli_dirs() is None
+        ):
+            return None
+        cli_sel = self._select_cli_candidates(
+            lark_cli_dir=lark_cli_dir,
+            data_dir=data_dir,
+            target_app_id=(app_id or "").strip(),
+            target_open_id=(open_id or "").strip(),
+            target_profile=(profile or "").strip(),
+        )
+        if cli_sel is None:
+            return None
+        cfg_dir, keychain_dir, candidates = cli_sel
+        if not candidates:
+            return None
 
         # Gather only explicitly granted scopes from cache if any exist (never unapproved requested_scope)
         cached_scopes: list[str] = []
@@ -1216,39 +1239,6 @@ class FeishuUserTokenStore:
                     continue
         fallback_scope = _normalize_scopes(cached_scopes)
 
-        has_config_apps, dangling_current_app, candidates = self._select_config_candidates(
-            cfg_dir / "config.json",
-            target_app_id=target_app_id,
-            target_open_id=target_open_id,
-            target_profile=target_profile,
-        )
-        if dangling_current_app or (target_profile and not candidates):
-            return None
-
-        # Check standalone plaintext token files in cfg_dir (tokens.json / user_token.json)
-        for token_filename in ("tokens.json", "user_token.json", "credentials.json"):
-            token_file = cfg_dir / token_filename
-            if token_file.is_file():
-                try:
-                    raw_obj = json.loads(token_file.read_text(encoding="utf-8"))
-                except Exception:
-                    continue
-                entries = raw_obj if isinstance(raw_obj, list) else [raw_obj]
-                for item in entries:
-                    if not isinstance(item, Mapping):
-                        continue
-                    e_app = str(item.get("appId") or item.get("app_id") or target_app_id).strip()
-                    e_uid = str(
-                        item.get("userOpenId") or item.get("open_id") or target_open_id
-                    ).strip()
-                    if e_app and e_uid:
-                        if target_app_id and e_app != target_app_id:
-                            continue
-                        if target_open_id and e_uid != target_open_id:
-                            continue
-                        e_name = str(item.get("userName") or item.get("user_name") or "").strip()
-                        candidates.append((e_app, e_uid, e_name, dict(item)))
-
         # Try encrypted keychain store if master.key exists
         for search_dir in (keychain_dir, cfg_dir, cfg_dir / "keychain"):
             master_key_file = search_dir / "master.key"
@@ -1260,21 +1250,6 @@ class FeishuUserTokenStore:
                 continue
             if len(master_key) != 32:
                 continue
-
-            # If no config.json apps were defined, scan *.enc files
-            if not candidates and not has_config_apps:
-                for enc_file in sorted(search_dir.glob("cli_*_ou_*.enc")):
-                    stem = enc_file.stem
-                    idx = stem.find("_ou_")
-                    if idx <= 0:
-                        continue
-                    c_app = stem[:idx]
-                    c_uid = stem[idx + 1 :]
-                    if target_app_id and c_app != target_app_id:
-                        continue
-                    if target_open_id and c_uid != target_open_id:
-                        continue
-                    candidates.append((c_app, c_uid, "", {}))
 
             for c_app, c_uid, c_name, meta in candidates:
                 enc_token_path = search_dir / f"{c_app}_{c_uid}.enc"
@@ -1383,10 +1358,7 @@ class FeishuUserTokenStore:
         if record is not None and not record.is_expired(now=now_ts):
             return record
         if auto_import_lark_cli:
-            imported = self.import_from_lark_cli(
-                app_id=app_id or (record.app_id if record else None),
-                open_id=open_id or (record.open_id if record else None),
-            )
+            imported = self.import_from_lark_cli(app_id=app_id, open_id=open_id)
             if imported is not None:
                 return imported
         return record
@@ -1405,10 +1377,7 @@ class FeishuUserTokenStore:
             return record
         if not auto_import_lark_cli:
             return record
-        imported = await self.aimport_from_lark_cli(
-            app_id=app_id or (record.app_id if record else None),
-            open_id=open_id or (record.open_id if record else None),
-        )
+        imported = await self.aimport_from_lark_cli(app_id=app_id, open_id=open_id)
         return imported if imported is not None else record
 
     async def aimport_from_lark_cli(
@@ -1426,22 +1395,28 @@ class FeishuUserTokenStore:
             open_id=open_id or "",
             profile=profile or "",
             prefer_cli_config=True,
+            lark_cli_dir=lark_cli_dir,
+            data_dir=data_dir,
         )
-        async with self.async_file_lock(app_id=init_app, open_id=init_open, profile=profile or ""):
+        async with self.async_file_lock(app_id=init_app, open_id=init_open, resolve_account=False):
             resolved_app, resolved_open = self._resolve_lock_account(
                 app_id=app_id or "",
                 open_id=open_id or "",
                 profile=profile or "",
                 prefer_cli_config=True,
+                lark_cli_dir=lark_cli_dir,
+                data_dir=data_dir,
             )
+            if not (resolved_app and resolved_open):
+                return None
             async with self.async_file_lock(
-                app_id=resolved_app, open_id=resolved_open, profile=profile or ""
+                app_id=resolved_app, open_id=resolved_open, resolve_account=False
             ):
                 return self.import_from_lark_cli(
                     lark_cli_dir=lark_cli_dir,
                     data_dir=data_dir,
-                    app_id=app_id or (resolved_app or None),
-                    open_id=open_id or (resolved_open or None),
+                    app_id=resolved_app,
+                    open_id=resolved_open,
                     profile=profile,
                 )
 
