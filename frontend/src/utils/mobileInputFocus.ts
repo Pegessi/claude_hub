@@ -100,6 +100,57 @@ export function findModalScrollContainer(
   return fallback ?? modal
 }
 
+function collectModalScrollContainers(
+  field: HTMLElement,
+  modal: HTMLElement,
+  win: Window = window,
+): HTMLElement[] {
+  const overflowing: HTMLElement[] = []
+  const scrollables: HTMLElement[] = []
+  let current: HTMLElement | null = field.parentElement
+  while (current) {
+    const overflowY = win.getComputedStyle(current).overflowY
+    if (isScrollableOverflow(overflowY)) {
+      scrollables.push(current)
+      if (current.scrollHeight > current.clientHeight + 1) {
+        overflowing.push(current)
+      }
+    }
+    if (current === modal) break
+    current = current.parentElement
+  }
+  if (!scrollables.includes(modal) && modal.scrollHeight > modal.clientHeight + 1) {
+    overflowing.push(modal)
+  }
+  if (overflowing.length > 0) {
+    return overflowing.reverse()
+  }
+  if (scrollables.length > 0) {
+    return scrollables.reverse()
+  }
+  return [modal]
+}
+
+function resolveVisibleContainerBounds(
+  scrollContainer: HTMLElement,
+  modal: HTMLElement,
+): { top: number; bottom: number } {
+  const rawRect = scrollContainer.getBoundingClientRect()
+  if (scrollContainer === modal) {
+    return { top: rawRect.top, bottom: rawRect.bottom }
+  }
+  const modalRect = modal.getBoundingClientRect()
+  if (modalRect.bottom <= modalRect.top) {
+    return { top: rawRect.top, bottom: rawRect.bottom }
+  }
+  const clampedTop = Math.max(rawRect.top, modalRect.top)
+  const clampedBottom = Math.min(rawRect.bottom, modalRect.bottom)
+  if (clampedBottom > clampedTop) {
+    return { top: clampedTop, bottom: clampedBottom }
+  }
+  return { top: modalRect.top, bottom: modalRect.bottom }
+}
+
 export function computeModalFieldScrollDelta(
   fieldRect: VerticalRect,
   containerRect: { top: number; bottom: number },
@@ -174,33 +225,39 @@ export function syncModalViewportScroll(
   const modal = active.closest<HTMLElement>(MODAL_SURFACE_SELECTOR)
   if (!modal) return false
 
-  const scrollContainer = findModalScrollContainer(active, modal, win)
-  const stickyCandidates = scrollContainer.querySelectorAll<HTMLElement>(STICKY_MODAL_CHROME_SELECTOR)
-  const stickyRegions: VerticalRect[] = []
-  for (const stickyEl of stickyCandidates) {
-    if (stickyEl.contains(active)) continue
-    const position = win.getComputedStyle(stickyEl).position
-    if (position !== 'sticky' && position !== 'fixed') continue
-    const rect = stickyEl.getBoundingClientRect()
-    if (rect.height > 0) {
-      stickyRegions.push({ top: rect.top, bottom: rect.bottom, height: rect.height })
+  const scrollContainers = collectModalScrollContainers(active, modal, win)
+  let didScrollAny = false
+
+  for (const scrollContainer of scrollContainers) {
+    const stickyCandidates = scrollContainer.querySelectorAll<HTMLElement>(STICKY_MODAL_CHROME_SELECTOR)
+    const stickyRegions: VerticalRect[] = []
+    for (const stickyEl of stickyCandidates) {
+      if (stickyEl.contains(active)) continue
+      const position = win.getComputedStyle(stickyEl).position
+      if (position !== 'sticky' && position !== 'fixed') continue
+      const rect = stickyEl.getBoundingClientRect()
+      if (rect.height > 0) {
+        stickyRegions.push({ top: rect.top, bottom: rect.bottom, height: rect.height })
+      }
     }
+
+    const fieldRect = active.getBoundingClientRect()
+    const containerBounds = resolveVisibleContainerBounds(scrollContainer, modal)
+    const delta = computeModalFieldScrollDelta(
+      { top: fieldRect.top, bottom: fieldRect.bottom, height: fieldRect.height },
+      containerBounds,
+      stickyRegions,
+    )
+
+    if (Math.abs(delta) < 1) continue
+
+    const maxScrollTop = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight)
+    const nextScrollTop = Math.max(0, Math.min(maxScrollTop, Math.round(scrollContainer.scrollTop + delta)))
+    if (nextScrollTop === scrollContainer.scrollTop) continue
+
+    scrollContainer.scrollTop = nextScrollTop
+    didScrollAny = true
   }
 
-  const fieldRect = active.getBoundingClientRect()
-  const containerRect = scrollContainer.getBoundingClientRect()
-  const delta = computeModalFieldScrollDelta(
-    { top: fieldRect.top, bottom: fieldRect.bottom, height: fieldRect.height },
-    { top: containerRect.top, bottom: containerRect.bottom },
-    stickyRegions,
-  )
-
-  if (Math.abs(delta) < 1) return false
-
-  const maxScrollTop = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight)
-  const nextScrollTop = Math.max(0, Math.min(maxScrollTop, Math.round(scrollContainer.scrollTop + delta)))
-  if (nextScrollTop === scrollContainer.scrollTop) return false
-
-  scrollContainer.scrollTop = nextScrollTop
-  return true
+  return didScrollAny
 }

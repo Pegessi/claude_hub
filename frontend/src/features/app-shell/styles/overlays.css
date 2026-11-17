@@ -90,13 +90,32 @@ dialog::backdrop {
     max-height: calc(var(--visual-viewport-height, 100dvh) - 32px - env(safe-area-inset-top, 0px));
   }
 
+  :root:root :is(.inbox-sheet, .native-subagent-window, .dot-panel, .archive-panel) {
+    max-height: var(--visual-viewport-height, 100dvh);
+  }
+
+  :root:root .subagent-sheet {
+    max-height: min(70dvh, calc(var(--visual-viewport-height, 100dvh) - 24px - env(safe-area-inset-top, 0px)));
+  }
+
+  :root:root .dot-panel {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  :root:root .dot-panel .dot-panel__body {
+    flex: 1 0 auto;
+    min-height: auto;
+    overflow-y: visible;
+  }
+
   :root:root dialog[open]:not(.attachment-preview-dialog) {
     inset: var(--visual-viewport-offset-top, 0px) 0 calc(100dvh - var(--visual-viewport-offset-top, 0px) - var(--visual-viewport-height, 100dvh)) 0;
     max-height: calc(var(--visual-viewport-height, 100dvh) - 32px - env(safe-area-inset-top, 0px));
   }
 
   /* Keep focus on editable fields inside modals from triggering iOS Safari auto-zoom. */
-  :root:root :is(.modal, .workspace-modal, .goal-dialog, .quota-modal, .tam-modal, .task-detail-panel, .dot-panel, dialog[open]) :is(input:not([type='checkbox']):not([type='radio']):not([type='file']):not([type='hidden']), textarea, select) {
+  :root:root :is(.modal, .workspace-modal, .goal-dialog, .quota-modal, .tam-modal, .task-detail-panel, .subagent-sheet, .native-subagent-window, .inbox-sheet, .goal-status-details--sheet, .dot-panel, .archive-panel, dialog[open]) :is(input:not([type='checkbox']):not([type='radio']):not([type='file']):not([type='hidden']), textarea, select) {
     font-size: max(var(--ch-font-size-md), 16px);
   }
 }

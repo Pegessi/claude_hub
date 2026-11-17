@@ -266,7 +266,7 @@ const {
 <style scoped>
 @media (max-width: 760px) {
   .file-browser-modal {
-    height: calc(100dvh - 20px);
+    height: calc(var(--visual-viewport-height, 100dvh) - 20px);
   }
 }
 </style>
