@@ -897,11 +897,12 @@ export function buildKeyMilestones(input: {
 export function buildMacroStageBar(
   task: WorkspaceTask,
   milestones: readonly MilestoneStep[],
-  bucket: 'needs_you' | 'working' | 'done',
+  bucket: 'needs_you' | 'working' | 'review' | 'done',
 ): MacroStagePill[] {
   const hasStarted = task.status !== 'todo'
   const hasReview =
     task.task_mode === 'reviewed' ||
+    bucket === 'review' ||
     milestones.some(m => m.phase === 'review' || m.phase === 'plan')
   const reviewRounds = milestones.filter(m => m.phase === 'review').length
 
@@ -916,7 +917,7 @@ export function buildMacroStageBar(
       label: '2. Execution',
       state: !hasStarted
         ? 'upcoming'
-        : bucket === 'done' || task.status === 'review' || milestones.some(m => m.phase === 'review')
+        : bucket === 'done' || bucket === 'review' || task.status === 'review' || milestones.some(m => m.phase === 'review')
           ? 'done'
           : bucket === 'needs_you'
             ? 'warn'
@@ -925,7 +926,7 @@ export function buildMacroStageBar(
   ]
 
   if (hasReview) {
-    const inReview = task.status === 'review'
+    const inReview = task.status === 'review' || bucket === 'review'
     stages.push({
       key: 'review',
       label: reviewRounds > 0 ? `3. Review (R${reviewRounds})` : '3. Review',
@@ -949,7 +950,9 @@ export function buildMacroStageBar(
         ? 'done'
         : bucket === 'needs_you'
           ? 'warn'
-          : 'upcoming',
+          : bucket === 'review'
+            ? 'current'
+            : 'upcoming',
   })
 
   return stages

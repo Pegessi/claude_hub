@@ -528,6 +528,23 @@ async def archive_tab(
         tab = await ttyd_manager.archive_tab(tab_id)
         if not tab:
             raise HTTPException(status_code=404, detail="Tab not found")
+        last_seq = -1
+        try:
+            from ..services.agent_stream.store import AgentStreamStore
+
+            summary = await AgentStreamStore(
+                "terminal-tabs", f"terminal-tab-{tab_id}"
+            ).stream_summary()
+            if summary is not None:
+                last_seq = summary.max_sequence
+        except Exception:
+            last_seq = -1
+        try:
+            await workspace_manager.close_initiator_tasks_for_archived_chat(
+                tab_id, last_stream_sequence=last_seq
+            )
+        except Exception:
+            logger.exception("Failed to settle initiator tasks for archived tab %s", tab_id)
         return tab
 
 

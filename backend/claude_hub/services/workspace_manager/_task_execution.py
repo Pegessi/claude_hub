@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from ...models.agent_stream import AgentStreamEvent, AgentStreamEventType
 from ...models.schemas import (
+    TaskArchiveClosure,
     TaskExecutionControl,
     TaskExecutionHandoffRequest,
     TaskExecutionMutationResult,
@@ -264,8 +265,19 @@ class _TaskExecutionMixin(_WorkspaceManagerBase):
             )
             if task.execution_released:
                 raise TaskExecutionConflict("task_execution_already_released")
+            can_reopen_archived = (
+                task.status == WorkspaceTaskStatus.DONE
+                and task.archive_closure is not None
+                and payload.state
+                in {
+                    TaskProgressState.STARTED,
+                    TaskProgressState.WORKING,
+                    TaskProgressState.BLOCKED,
+                    TaskProgressState.NEEDS_INPUT,
+                }
+            )
             terminal = task.status in {WorkspaceTaskStatus.DONE, WorkspaceTaskStatus.FAILED}
-            if terminal and payload.state != TaskProgressState.RELEASED:
+            if terminal and payload.state != TaskProgressState.RELEASED and not can_reopen_archived:
                 raise TaskExecutionConflict("task_record_is_terminal")
             now = self._runtime_now()
             artifact_refs = payload.artifact_refs
@@ -301,19 +313,29 @@ class _TaskExecutionMixin(_WorkspaceManagerBase):
             if payload.state == TaskProgressState.RELEASED:
                 changes["execution_released"] = True
             elif payload.state == TaskProgressState.COMPLETED:
-                changes.update(status=WorkspaceTaskStatus.DONE, completed_at=now)
+                changes.update(
+                    status=WorkspaceTaskStatus.DONE,
+                    completed_at=now,
+                    closed_reason="completed",
+                    archive_closure=None,
+                )
                 event_type = TaskEventType.COMPLETED
             elif payload.state == TaskProgressState.FAILED:
                 changes.update(
                     status=WorkspaceTaskStatus.FAILED,
                     failed_at=now,
                     failure_reason=payload.summary,
+                    closed_reason=None,
+                    archive_closure=None,
                 )
                 event_type = TaskEventType.FAILED
             else:
                 changes.update(
                     status=WorkspaceTaskStatus.WORKING,
                     started_at=task.started_at or now,
+                    completed_at=None,
+                    closed_reason=None,
+                    archive_closure=None,
                 )
             return self._commit_execution_change(
                 task,
@@ -324,7 +346,11 @@ class _TaskExecutionMixin(_WorkspaceManagerBase):
                 actor_role=TaskActorRole.HUMAN if manual else TaskActorRole.INITIATOR,
                 event_type=event_type,
                 event_payload=body,
-                cause="manual" if manual else "initiator_progress",
+                cause=(
+                    "manual"
+                    if manual
+                    else ("archive_reopen" if can_reopen_archived else "initiator_progress")
+                ),
             )
 
     def _require_quiescent_workspace_task(self, task: WorkspaceTask) -> None:
@@ -420,6 +446,8 @@ class _TaskExecutionMixin(_WorkspaceManagerBase):
                 "started_at",
                 "reviewed_at",
                 "completed_at",
+                "closed_reason",
+                "archive_closure",
             ):
                 changes[field] = None
             return self._commit_execution_change(
@@ -509,6 +537,17 @@ class _TaskExecutionMixin(_WorkspaceManagerBase):
         child_id = event.payload.get("subagent_thread")
         child_id = child_id if isinstance(child_id, str) and child_id else None
         main_id = event.payload.get("_hub_main_thread_id")
+        if (
+            event.type == AgentStreamEventType.TURN_STARTED
+            and child_id is None
+            and event.tab_id
+            and event.session_id == f"terminal-tab-{event.tab_id}"
+        ):
+            await self.reopen_archived_chat_tasks_on_turn(
+                event.tab_id,
+                event=event,
+                main_thread_id=main_id if isinstance(main_id, str) and main_id else None,
+            )
         for task in list(self.tasks.values()):
             expected = task.execution_ref
             if (
@@ -543,3 +582,157 @@ class _TaskExecutionMixin(_WorkspaceManagerBase):
             except KeyError:
                 # Deletion is allowed while a stream observation is queued.
                 continue
+
+    async def close_initiator_tasks_for_archived_chat(
+        self,
+        tab_id: str,
+        *,
+        last_stream_sequence: int = -1,
+    ) -> list[str]:
+        """Auto-close active initiator-controlled Tasks when the user archives their Chat.
+
+        Records ``archive_closure`` provenance only on Tasks actually closed by
+        this archive, so historical ``DONE`` Tasks are never reopened on Restore.
+        """
+        if not tab_id:
+            return []
+        affected_by_ws: dict[str, list[str]] = {}
+        for task in list(self.tasks.values()):
+            if (
+                task.execution_control != TaskExecutionControl.INITIATOR
+                or task.execution_released
+                or task.status
+                not in {
+                    WorkspaceTaskStatus.TODO,
+                    WorkspaceTaskStatus.WORKING,
+                    WorkspaceTaskStatus.REVIEW,
+                }
+                or task.source is None
+                or task.source.tab_id != tab_id
+            ):
+                continue
+            affected_by_ws.setdefault(task.workspace_id, []).append(task.id)
+
+        closed_ids: list[str] = []
+        for ws_id, task_ids in affected_by_ws.items():
+            async with self.workspace_mutation_lock(ws_id):
+                now = self._runtime_now()
+                ws_changed = False
+                for tid in task_ids:
+                    live = self.tasks.get(tid)
+                    if (
+                        live is None
+                        or live.execution_control != TaskExecutionControl.INITIATOR
+                        or live.execution_released
+                        or live.status
+                        not in {
+                            WorkspaceTaskStatus.TODO,
+                            WorkspaceTaskStatus.WORKING,
+                            WorkspaceTaskStatus.REVIEW,
+                        }
+                        or live.source is None
+                        or live.source.tab_id != tab_id
+                    ):
+                        continue
+                    obs_seq = (
+                        live.runtime_observation.stream_sequence
+                        if live.runtime_observation is not None
+                        else -1
+                    )
+                    effective_seq = max(last_stream_sequence, obs_seq)
+                    closure = TaskArchiveClosure(
+                        tab_id=tab_id,
+                        execution_epoch=live.execution_epoch,
+                        previous_status=live.status,
+                        last_stream_sequence=effective_seq,
+                        closed_at=now,
+                    )
+                    self.tasks[tid] = apply_task_update(
+                        live,
+                        {
+                            "status": WorkspaceTaskStatus.DONE,
+                            "completed_at": now,
+                            "closed_reason": "chat_archived",
+                            "archive_closure": closure,
+                            "updated_at": now,
+                        },
+                        cause="chat_archive",
+                    )
+                    closed_ids.append(tid)
+                    ws_changed = True
+                if ws_changed:
+                    self._save_workspace_state(ws_id)
+        return closed_ids
+
+    async def reopen_archived_chat_tasks_on_turn(
+        self,
+        tab_id: str,
+        *,
+        event: AgentStreamEvent,
+        main_thread_id: str | None = None,
+    ) -> list[str]:
+        """Lazily reopen an archive-closed initiator Task when a genuinely new turn starts."""
+        if not tab_id or event.run_epoch is None or not event.turn_id:
+            return []
+        candidates: list[WorkspaceTask] = []
+        for task in list(self.tasks.values()):
+            closure = task.archive_closure
+            if (
+                closure is None
+                or task.status != WorkspaceTaskStatus.DONE
+                or task.closed_reason != "chat_archived"
+                or task.execution_control != TaskExecutionControl.INITIATOR
+                or task.execution_released
+                or closure.tab_id != tab_id
+                or closure.execution_epoch != task.execution_epoch
+                or event.stream_sequence <= closure.last_stream_sequence
+            ):
+                continue
+            candidates.append(task)
+
+        if len(candidates) != 1:
+            # Ambiguous multi-task Chat: do not guess; explicit `task progress` reopens by ID.
+            return []
+
+        target = candidates[0]
+        ws_id = target.workspace_id
+        async with self.workspace_mutation_lock(ws_id):
+            live = self.tasks.get(target.id)
+            if (
+                live is None
+                or live.archive_closure is None
+                or live.status != WorkspaceTaskStatus.DONE
+                or live.closed_reason != "chat_archived"
+                or live.execution_control != TaskExecutionControl.INITIATOR
+                or live.execution_released
+                or live.archive_closure.tab_id != tab_id
+                or live.archive_closure.execution_epoch != live.execution_epoch
+                or event.stream_sequence <= live.archive_closure.last_stream_sequence
+            ):
+                return []
+            now = self._runtime_now()
+            new_ref = TaskExecutionReference(
+                provider=event.agent_type.value,
+                session_id=event.session_id,
+                thread_id=main_thread_id,
+                turn_id=event.turn_id,
+                run_epoch=event.run_epoch,
+            )
+            reopened = apply_task_update(
+                live,
+                {
+                    "status": WorkspaceTaskStatus.WORKING,
+                    "started_at": live.started_at or now,
+                    "completed_at": None,
+                    "closed_reason": None,
+                    "archive_closure": None,
+                    "execution_ref": new_ref,
+                    "runtime_observation": None,
+                    "updated_at": now,
+                },
+                cause="archive_reopen",
+            )
+            self.tasks[live.id] = reopened
+            self._task_activity_cursors.pop(live.id, None)
+            self._save_workspace_state(ws_id)
+            return [live.id]

@@ -180,7 +180,7 @@ export function useSidebarPointerDrag(dependencies: SidebarDragDependencies) {
     const target = document.elementFromPoint(clientX, clientY)
     const element = target?.closest<HTMLElement>('.chat-sidebar__group')
     const group = groupFromElement(element ?? null)
-    if (!group || group.pinned || group.cwd === draggedGroupCwd.value) return
+    if (!group || group.pinned || group.statusBucket || group.cwd === draggedGroupCwd.value) return
     const header = element!.querySelector<HTMLElement>('.chat-sidebar__group-header')
     const rect = header?.getBoundingClientRect() ?? element!.getBoundingClientRect()
     groupDropTarget.value = {
@@ -239,7 +239,7 @@ export function useSidebarPointerDrag(dependencies: SidebarDragDependencies) {
 
   function onGroupPointerDown(event: PointerEvent, group: ChatSidebarGroup) {
     if (
-      event.button !== 0 || !event.isPrimary || group.pinned ||
+      event.button !== 0 || !event.isPrimary || group.pinned || group.statusBucket ||
       filterText.value.trim() || draggedTabId.value
     ) return
     groupPointerDrag = {

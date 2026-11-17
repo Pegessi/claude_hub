@@ -31,7 +31,7 @@
         :title="statusLabel"
       />
       <span class="chat-sidebar__item-name">{{ tab.name || 'Untitled' }}</span>
-      <span class="chat-sidebar__item-time">{{ relativeTime(tab.created_at) }}</span>
+      <span class="chat-sidebar__item-time">{{ relativeTime(activityTime || tab.created_at) }}</span>
     </button>
     <input
       v-else
@@ -70,6 +70,8 @@ defineProps<{
   statusLabel: string
   /** A question card is waiting for this user; not the same as unread work. */
   awaiting?: boolean
+  /** Newest meaningful turn/reply timestamp, falling back to tab creation time. */
+  activityTime?: string | null
   renaming: boolean
   setRenameInputRef: (element: unknown) => void
 }>()

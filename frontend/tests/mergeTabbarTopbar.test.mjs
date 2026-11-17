@@ -71,7 +71,7 @@ test('a status light in the sidebar shows working, idle, attention, and offline'
   // the sidebar uses the shared useTabStatus composable (no duplicated logic)
   assert.match(
     chatSidebar,
-    /const \{ getTabStatus, getTabStatusLabel, isAwaitingAnswer \} = useTabStatus\(agentStatuses\)/
+    /const \{\s*getTabStatus,\s*getTabStatusLabel,\s*isAwaitingAnswer[\s\S]*?\}\s*=\s*useTabStatus\(agentStatuses\)/
   )
   // the status logic lives in the composable
   assert.match(useTabStatus, /const tabStatusById = computed/)

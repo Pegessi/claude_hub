@@ -1,7 +1,7 @@
 """Workspace task and attachment schemas."""
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -11,6 +11,7 @@ from claude_hub.models.schema_domains.evaluation import (
     GoalPacket,
 )
 from claude_hub.models.schema_domains.execution import (
+    TaskArchiveClosure,
     TaskExecutionControl,
     TaskExecutionReference,
     TaskProgressSnapshot,
@@ -185,6 +186,8 @@ class WorkspaceTask(BaseModel):
     execution_released: bool = False
     latest_progress: Optional[TaskProgressSnapshot] = None
     runtime_observation: Optional[TaskRuntimeObservation] = None
+    closed_reason: Optional[Literal["accepted", "completed", "chat_archived", "mr_merged"]] = None
+    archive_closure: Optional[TaskArchiveClosure] = None
     # Last observed lifecycle phase and its notification state (Hub-maintained).
     lifecycle_mark: Optional[TaskLifecycleMark] = None
     liveness: Optional[TaskLiveness] = None
