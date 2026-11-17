@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("claude_hub.services.ttyd_manager")
+_RECENT_ACTIVE_REVIEW_SECONDS = 4 * 3600
 
 
 def tab_stream_identity(
@@ -273,8 +274,11 @@ class ManagerStatusMixin(ManagerHost):
         self,
         process: TTYDProcess,
         summary: "Optional[StreamSummary]",
+        *,
+        effective_activity_at: Optional[datetime] = None,
+        sampled_at: Optional[datetime] = None,
     ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-        """Project calm delivery review status (open MR or task in review) without blocking."""
+        """Project calm review status (open MR, task in review, or active <= 4h) without blocking."""
         if process.subagent_id or process.parent_tab_id:
             return None, None, None
         from ....models.schemas import TaskExecutionControl, WorkspaceTaskStatus
@@ -346,6 +350,14 @@ class ManagerStatusMixin(ManagerHost):
         )
         if has_task_in_review and not all_confirmed_merged:
             return "task_review", "In review", None
+
+        activity_dt = effective_activity_at or getattr(process, "created_at", None)
+        if isinstance(activity_dt, datetime):
+            ref_dt = (
+                sampled_at if isinstance(sampled_at, datetime) else self._runtime.datetime.now()
+            )
+            if ref_dt.timestamp() - activity_dt.timestamp() <= _RECENT_ACTIVE_REVIEW_SECONDS:
+                return "recent_active", None, None
         return None, None, None
 
     async def compute_tab_unread(self, process: TTYDProcess) -> bool:
@@ -431,13 +443,6 @@ class ManagerStatusMixin(ManagerHost):
                 else await self._stream_summary(process)
             )
             excerpt = summary.excerpt if summary is not None else None
-            review_state: Optional[str] = None
-            review_label: Optional[str] = None
-            review_url: Optional[str] = None
-            if native_runtime_status == AgentRuntimeStatus.IDLE and not pending_question:
-                review_state, review_label, review_url = self._derive_tab_review_projection(
-                    process, summary
-                )
             effective_activity_at = (
                 activity_since
                 if native_runtime_status == AgentRuntimeStatus.WORKING
@@ -448,6 +453,16 @@ class ManagerStatusMixin(ManagerHost):
                     else (excerpt.written_at if excerpt is not None else activity_since)
                 )
             )
+            review_state: Optional[str] = None
+            review_label: Optional[str] = None
+            review_url: Optional[str] = None
+            if native_runtime_status == AgentRuntimeStatus.IDLE and not pending_question:
+                review_state, review_label, review_url = self._derive_tab_review_projection(
+                    process,
+                    summary,
+                    effective_activity_at=effective_activity_at,
+                    sampled_at=sampled_at,
+                )
             return TerminalAgentStatus(
                 tab_id=process.tab_id,
                 tab_name=process.name,
