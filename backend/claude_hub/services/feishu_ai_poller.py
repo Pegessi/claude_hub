@@ -123,7 +123,7 @@ class FeishuAiPoller:
 
     async def reconcile(self) -> None:
         """Wake the poller loop immediately after a configuration or token change."""
-        cfg = await self._service.aget_config()
+        cfg = self._service.get_config(auto_import_lark_cli=False)
         if cfg.enabled and not self.running and not self._stopping:
             await self.start()
         self._wake_event.set()
@@ -157,16 +157,22 @@ class FeishuAiPoller:
 
     async def _run_loop(self) -> None:
         while not self._stopping:
-            cfg = await self._service.aget_config()
-            interval = max(2.0, cfg.poll_interval_seconds)
-            if cfg.enabled:
-                try:
+            interval = 15.0
+            try:
+                cfg = await self._service.aget_config()
+                interval = max(2.0, cfg.poll_interval_seconds)
+                if cfg.enabled:
                     await self.poll_once()
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    self._last_error = str(exc) or type(exc).__name__
-                    logger.warning("Feishu /ai poller tick failed: %s", self._last_error)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._last_error = str(exc) or type(exc).__name__
+                logger.warning("Feishu /ai poller tick failed: %s", self._last_error)
+                try:
+                    raw_cfg = self._service.get_config(auto_import_lark_cli=False)
+                    interval = max(2.0, raw_cfg.poll_interval_seconds)
+                except Exception:
+                    interval = 2.0
             self._wake_event.clear()
             try:
                 await asyncio.wait_for(self._wake_event.wait(), timeout=interval)
@@ -330,20 +336,32 @@ class FeishuAiPoller:
         and dispatches execution in background tasks so long-running turns never
         block intake across chats.
         """
-        cfg = await self._service.aget_config()
+        try:
+            cfg = await self._service.aget_config()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._last_error = str(exc) or type(exc).__name__
+            raise
         if not cfg.enabled:
             return []
 
+        user_client = self._service.build_user_client(cfg)
+        try:
+            if hasattr(user_client, "aresolve_record"):
+                record = await user_client.aresolve_record()
+            else:
+                async with self._service._token_store.async_file_lock(
+                    app_id=cfg.app_id, open_id=cfg.owner_open_id
+                ):
+                    record = user_client.resolve_record()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._last_error = str(exc) or type(exc).__name__
+            raise
         self._poll_count += 1
         self._last_poll_at = time.time()
-        user_client = self._service.build_user_client(cfg)
-        if hasattr(user_client, "aresolve_record"):
-            record = await user_client.aresolve_record()
-        else:
-            async with self._service._token_store.async_file_lock(
-                app_id=cfg.app_id, open_id=cfg.owner_open_id
-            ):
-                record = user_client.resolve_record()
         if record is None:
             self._last_error = "no_user_token"
             return []

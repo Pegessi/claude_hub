@@ -190,8 +190,27 @@ class FeishuAiCommandService:
     async def aget_config(
         self, *, auto_import_lark_cli: bool | None = None
     ) -> FeishuAiCommandConfig:
-        async with self._token_store.async_file_lock():
-            return self.get_config(auto_import_lark_cli=auto_import_lark_cli)
+        with self._lock:
+            raw_cfg = self._load_state().get("config")
+            cfg = (
+                FeishuAiCommandConfig.from_mapping(raw_cfg)
+                if isinstance(raw_cfg, Mapping)
+                else FeishuAiCommandConfig()
+            )
+        should_auto = cfg.enabled if auto_import_lark_cli is None else auto_import_lark_cli
+        if not cfg.owner_open_id or not cfg.app_id:
+            record = await self._token_store.aresolve_token(
+                open_id=cfg.owner_open_id or None,
+                app_id=cfg.app_id or None,
+                auto_import_lark_cli=should_auto,
+            )
+            if record is not None:
+                cfg = replace(
+                    cfg,
+                    owner_open_id=cfg.owner_open_id or record.open_id,
+                    app_id=cfg.app_id or record.app_id,
+                )
+        return cfg
 
     def update_config(self, patch: Mapping[str, Any]) -> FeishuAiCommandConfig:
         with self._lock:
@@ -461,8 +480,13 @@ class FeishuAiCommandService:
     async def apreflight_status(
         self, *, auto_import_lark_cli: bool = True
     ) -> FeishuScopePreflightResult:
-        async with self._token_store.async_file_lock():
-            return self.preflight_status(auto_import_lark_cli=auto_import_lark_cli)
+        cfg = await self.aget_config(auto_import_lark_cli=auto_import_lark_cli)
+        rec = await self._token_store.aresolve_token(
+            open_id=cfg.owner_open_id or None,
+            app_id=cfg.app_id or None,
+            auto_import_lark_cli=auto_import_lark_cli,
+        )
+        return self.build_user_client(cfg).preflight_scopes(rec)
 
     def capabilities_dict(self) -> dict[str, Any]:
         model_efforts: dict[str, list[str]] = {}

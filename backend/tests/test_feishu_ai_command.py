@@ -2231,3 +2231,94 @@ async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
         assert cancel_store._held_lock_fds == {}
     finally:
         holder_b.communicate(timeout=3)
+
+    # 5. R5-02: Unrelated CLI profile lock does not delay or fail target account reads/sends
+    (cli_cfg / "config.json").write_text(
+        json.dumps(
+            {
+                "currentApp": "cli_c4",
+                "apps": [
+                    {"appId": "cli_c4", "users": [{"userOpenId": "ou_c4"}]},
+                    {"appId": "cli_other", "users": [{"userOpenId": "ou_other"}]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    unrelated_lock = cli_cfg / "locks" / "refresh_cli_other_ou_other.lock"
+    holder_other = spawn_lock_holder(unrelated_lock, 0.35)
+    try:
+        t_start = time.monotonic()
+        rec_no_import = await store_1.aresolve_token(
+            open_id="ou_c4", app_id="cli_c4", auto_import_lark_cli=False
+        )
+        assert rec_no_import is not None and rec_no_import.access_token == "c4-cli-at"
+        assert (time.monotonic() - t_start) < 0.08
+
+        # Normal auto-import client path for cli_c4 also skips cli_other's lock
+        store_auto = FeishuUserTokenStore(
+            path=tmp_path / "s_auto.json",
+            key_path=tmp_path / "s_auto.key",
+            lark_cli_dir=cli_cfg,
+            lark_cli_data_dir=cli_data,
+        )
+        t_auto = time.monotonic()
+        rec_auto = await store_auto.aresolve_token(open_id="ou_c4", app_id="cli_c4")
+        assert rec_auto is not None and rec_auto.access_token == "c4-cli-at"
+        assert (time.monotonic() - t_auto) < 0.08
+    finally:
+        holder_other.communicate(timeout=3)
+
+    # 6. R5-01: Poller start() / _run_loop() survives transient config/token lock timeout and recovers
+    async with httpx.AsyncClient(
+        base_url="https://open.feishu.cn", transport=httpx.MockTransport(handler)
+    ) as poll_http:
+        r5_store = FeishuUserTokenStore(
+            path=tmp_path / "r5_tok.json",
+            key_path=tmp_path / "r5_tok.key",
+            lark_cli_dir=cli_cfg,
+            lark_cli_data_dir=cli_data,
+        )
+        r5_client = FeishuUserClient(r5_store, open_id="ou_c4", app_id="cli_c4", client=poll_http)
+        r5_svc = FeishuAiCommandService(
+            state_path=tmp_path / "r5_state.json",
+            token_store=r5_store,
+            user_client_factory=lambda _cfg: r5_client,
+        )
+        r5_svc.update_config(
+            {
+                "enabled": True,
+                "app_id": "cli_c4",
+                "owner_open_id": "",
+                "watch_chats": ["oc_1"],
+                "poll_interval_seconds": 2.0,
+            }
+        )
+        orig_aget = r5_svc.aget_config
+        calls = 0
+
+        async def flaky_aget_config(*a: Any, **kw: Any) -> Any:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise TimeoutError(
+                    "Timed out waiting for Feishu token lock refresh_cli_c4_ou_c4.lock"
+                )
+            return await orig_aget(*a, **kw)
+
+        monkeypatch.setattr(r5_svc, "aget_config", flaky_aget_config)
+        r5_poller = FeishuAiPoller(r5_svc)
+        await r5_poller.start()
+        await asyncio.sleep(0.05)
+        st_failed = r5_poller.status_dict()
+        assert r5_poller.running is True
+        assert "Timed out waiting for Feishu token lock" in str(st_failed["last_error"])
+        assert st_failed["poll_count"] == 0
+        # Wake the poller for the next tick without manual restart/save; it recovers automatically
+        r5_poller._wake_event.set()
+        await asyncio.sleep(0.05)
+        st_recovered = r5_poller.status_dict()
+        assert r5_poller.running is True
+        assert st_recovered["poll_count"] >= 1
+        assert st_recovered["last_error"] is None
+        await r5_poller.stop()

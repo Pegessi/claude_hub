@@ -23,7 +23,8 @@
     `currentApp` profile precedence, coordinate single-use refresh rotation and
     all async token resolution/preflight/OAuth-save entrypoints with in-process
     `async_refresh_lock` and cancellation-safe non-blocking `async_file_lock`
-    (`LOCK_NB` polling across Hub and `lark-cli` `locks/refresh_<app>_<open>.lock`),
+    (`LOCK_NB` polling across Hub and the selected account's `lark-cli`
+    `locks/refresh_<app>_<open>.lock` without locking unrelated CLI profiles),
     compare against the captured pre-refresh generation/fingerprint, keep
     returned scopes authoritative without unioning stale CLI scopes, and write
     millisecond `expiresAt`/`refreshExpiresAt` back to `lark-cli`.

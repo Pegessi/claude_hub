@@ -661,20 +661,142 @@ class FeishuUserTokenStore:
         keychain_dir = self._lark_cli_data_dir or cfg_dir
         return cfg_dir, keychain_dir
 
+    @staticmethod
+    def _select_config_candidates(
+        config_path: Path,
+        *,
+        target_app_id: str = "",
+        target_open_id: str = "",
+        target_profile: str = "",
+    ) -> tuple[bool, bool, list[tuple[str, str, str, dict[str, Any]]]]:
+        candidates: list[tuple[str, str, str, dict[str, Any]]] = []
+        if not config_path.is_file():
+            return False, False, candidates
+        try:
+            cfg = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            cfg = {}
+        apps = cfg.get("apps") if isinstance(cfg, Mapping) else None
+        current_app = (
+            str(cfg.get("currentApp") or cfg.get("current_app") or "").strip()
+            if isinstance(cfg, Mapping)
+            else ""
+        )
+        if not isinstance(apps, list) or not apps:
+            return False, False, candidates
+        valid_apps = [
+            e
+            for e in apps
+            if isinstance(e, Mapping) and str(e.get("appId") or e.get("app_id") or "").strip()
+        ]
+        selected: list[Mapping[str, Any]] = []
+        if target_profile or target_app_id:
+            selector = target_profile or target_app_id
+            for e in valid_apps:
+                e_id = str(e.get("appId") or e.get("app_id") or "").strip()
+                e_name = str(e.get("name") or e.get("profile") or "").strip()
+                if target_app_id and e_id == target_app_id:
+                    selected.append(e)
+                elif target_profile and selector in {e_id, e_name}:
+                    selected.append(e)
+        elif current_app:
+            for e in valid_apps:
+                e_id = str(e.get("appId") or e.get("app_id") or "").strip()
+                e_name = str(e.get("name") or e.get("profile") or "").strip()
+                if current_app in {e_id, e_name}:
+                    selected.append(e)
+                    break
+            if not selected:
+                return True, True, candidates
+        elif valid_apps:
+            selected = [valid_apps[0]]
+        for app_entry in selected:
+            e_app = str(app_entry.get("appId") or app_entry.get("app_id") or "").strip()
+            pref = str(
+                app_entry.get("currentUser")
+                or app_entry.get("defaultUser")
+                or app_entry.get("userOpenId")
+                or ""
+            ).strip()
+            users = app_entry.get("users")
+            if isinstance(users, list) and users:
+                umaps = [u for u in users if isinstance(u, Mapping)]
+                if not target_open_id and pref:
+                    umaps.sort(
+                        key=lambda u: (
+                            0
+                            if str(u.get("userOpenId") or u.get("open_id") or "").strip() == pref
+                            else 1
+                        )
+                    )
+                for u in umaps:
+                    u_open = str(u.get("userOpenId") or u.get("open_id") or "").strip()
+                    if u_open and (not target_open_id or u_open == target_open_id):
+                        u_name = str(u.get("userName") or u.get("name") or "").strip()
+                        candidates.append((e_app, u_open, u_name, {**dict(app_entry), **dict(u)}))
+            else:
+                u_open = str(app_entry.get("userOpenId") or app_entry.get("open_id") or "").strip()
+                if u_open and (not target_open_id or u_open == target_open_id):
+                    u_name = str(app_entry.get("userName") or app_entry.get("name") or "").strip()
+                    candidates.append((e_app, u_open, u_name, dict(app_entry)))
+        return True, False, candidates
+
+    def _resolve_lock_account(
+        self,
+        *,
+        app_id: str = "",
+        open_id: str = "",
+        profile: str = "",
+    ) -> tuple[str, str]:
+        """Resolve the target ``(app_id, open_id)`` without locking unrelated CLI profiles."""
+        clean_app = app_id.strip()
+        clean_open = open_id.strip()
+        clean_profile = profile.strip()
+        if clean_app and clean_open:
+            return clean_app, clean_open
+        if not clean_profile and document_exists(self._path):
+            rec = self.get_token(open_id=clean_open or None, app_id=clean_app or None)
+            if rec is not None:
+                clean_app = clean_app or rec.app_id
+                clean_open = clean_open or rec.open_id
+                if clean_app and clean_open:
+                    return clean_app, clean_open
+        resolved_dirs = self._resolve_lark_cli_dirs_with_overrides()
+        if resolved_dirs is None:
+            return clean_app, clean_open
+        cfg_dir, keychain_dir = resolved_dirs
+        _, dangling, candidates = self._select_config_candidates(
+            cfg_dir / "config.json",
+            target_app_id=clean_app,
+            target_open_id=clean_open,
+            target_profile=clean_profile,
+        )
+        if dangling:
+            return clean_app, clean_open
+        if candidates:
+            return clean_app or candidates[0][0], clean_open or candidates[0][1]
+        if keychain_dir.is_dir():
+            for enc_file in sorted(keychain_dir.glob("*.enc")):
+                parts = enc_file.stem.split("_ou_", 1)
+                if len(parts) == 2:
+                    f_app, f_open = parts[0], f"ou_{parts[1]}"
+                    if (not clean_app or f_app == clean_app) and (
+                        not clean_open or f_open == clean_open
+                    ):
+                        return clean_app or f_app, clean_open or f_open
+        return clean_app, clean_open
+
     def _lock_paths(
         self,
         *,
         app_id: str = "",
         open_id: str = "",
+        profile: str = "",
         create_cli_lock_dir: bool = False,
     ) -> list[Path]:
-        clean_app = app_id.strip()
-        clean_open = open_id.strip()
-        if (not clean_app or not clean_open) and document_exists(self._path):
-            rec = self.get_token(open_id=clean_open or None, app_id=clean_app or None)
-            if rec is not None:
-                clean_app = clean_app or rec.app_id
-                clean_open = clean_open or rec.open_id
+        clean_app, clean_open = self._resolve_lock_account(
+            app_id=app_id, open_id=open_id, profile=profile
+        )
         lock_paths: list[Path] = []
         resolved_dirs = self._resolve_lark_cli_dirs_with_overrides()
         if resolved_dirs is not None:
@@ -682,10 +804,6 @@ class FeishuUserTokenStore:
             cli_locks_dir = cfg_dir / "locks"
             if clean_app and clean_open and (create_cli_lock_dir or cli_locks_dir.is_dir()):
                 lock_paths.append(cli_locks_dir / f"refresh_{clean_app}_{clean_open}.lock")
-            if cli_locks_dir.is_dir():
-                for existing_lock in sorted(cli_locks_dir.glob("refresh_*.lock")):
-                    if existing_lock not in lock_paths:
-                        lock_paths.append(existing_lock)
         hub_lock = self._key_path.parent / "feishu_user_tokens.refresh.lock"
         if hub_lock not in lock_paths:
             lock_paths.append(hub_lock)
@@ -697,12 +815,16 @@ class FeishuUserTokenStore:
         *,
         app_id: str = "",
         open_id: str = "",
+        profile: str = "",
         create_cli_lock_dir: bool = False,
         timeout: float = 15.0,
     ) -> AsyncIterator[None]:
         """Acquire inter-process file locks via non-blocking ``LOCK_NB`` polling."""
         lock_paths = self._lock_paths(
-            app_id=app_id, open_id=open_id, create_cli_lock_dir=create_cli_lock_dir
+            app_id=app_id,
+            open_id=open_id,
+            profile=profile,
+            create_cli_lock_dir=create_cli_lock_dir,
         )
         newly_opened: list[tuple[str, int]] = []
         deadline = time.monotonic() + max(0.1, timeout)
@@ -1085,96 +1207,14 @@ class FeishuUserTokenStore:
                     continue
         fallback_scope = _normalize_scopes(cached_scopes)
 
-        # Read ~/.lark-cli/config.json if available
-        candidates: list[tuple[str, str, str, dict[str, Any]]] = []
-        config_path = cfg_dir / "config.json"
-        has_config_apps = False
-        if config_path.is_file():
-            try:
-                cfg = json.loads(config_path.read_text(encoding="utf-8"))
-            except Exception:
-                cfg = {}
-            apps = cfg.get("apps") if isinstance(cfg, Mapping) else None
-            current_app = (
-                str(cfg.get("currentApp") or cfg.get("current_app") or "").strip()
-                if isinstance(cfg, Mapping)
-                else ""
-            )
-            if isinstance(apps, list) and apps:
-                has_config_apps = True
-                valid_apps: list[Mapping[str, Any]] = [
-                    entry
-                    for entry in apps
-                    if isinstance(entry, Mapping)
-                    and str(entry.get("appId") or entry.get("app_id") or "").strip()
-                ]
-                selected_apps: list[Mapping[str, Any]] = []
-                if target_profile or target_app_id:
-                    selector = target_profile or target_app_id
-                    for entry in valid_apps:
-                        e_id = str(entry.get("appId") or entry.get("app_id") or "").strip()
-                        e_name = str(entry.get("name") or entry.get("profile") or "").strip()
-                        if target_app_id and e_id == target_app_id:
-                            selected_apps.append(entry)
-                        elif target_profile and selector in {e_id, e_name}:
-                            selected_apps.append(entry)
-                elif current_app:
-                    for entry in valid_apps:
-                        e_id = str(entry.get("appId") or entry.get("app_id") or "").strip()
-                        e_name = str(entry.get("name") or entry.get("profile") or "").strip()
-                        if current_app in {e_id, e_name}:
-                            selected_apps.append(entry)
-                            break
-                    # Dangling currentApp must NOT fall back to apps[0]
-                    if not selected_apps:
-                        return None
-                elif valid_apps:
-                    selected_apps = [valid_apps[0]]
-
-                for app_entry in selected_apps:
-                    entry_app_id = str(
-                        app_entry.get("appId") or app_entry.get("app_id") or ""
-                    ).strip()
-                    preferred_user = str(
-                        app_entry.get("currentUser")
-                        or app_entry.get("defaultUser")
-                        or app_entry.get("userOpenId")
-                        or ""
-                    ).strip()
-                    users = app_entry.get("users")
-                    if isinstance(users, list) and users:
-                        user_mappings = [u for u in users if isinstance(u, Mapping)]
-                        if not target_open_id and preferred_user:
-                            user_mappings.sort(
-                                key=lambda u: (
-                                    0
-                                    if str(u.get("userOpenId") or u.get("open_id") or "").strip()
-                                    == preferred_user
-                                    else 1
-                                )
-                            )
-                        for user_entry in user_mappings:
-                            u_open_id = str(
-                                user_entry.get("userOpenId") or user_entry.get("open_id") or ""
-                            ).strip()
-                            if not u_open_id:
-                                continue
-                            if target_open_id and u_open_id != target_open_id:
-                                continue
-                            u_name = str(
-                                user_entry.get("userName") or user_entry.get("name") or ""
-                            ).strip()
-                            merged = {**dict(app_entry), **dict(user_entry)}
-                            candidates.append((entry_app_id, u_open_id, u_name, merged))
-                    else:
-                        u_open_id = str(
-                            app_entry.get("userOpenId") or app_entry.get("open_id") or ""
-                        ).strip()
-                        if u_open_id and (not target_open_id or u_open_id == target_open_id):
-                            u_name = str(
-                                app_entry.get("userName") or app_entry.get("name") or ""
-                            ).strip()
-                            candidates.append((entry_app_id, u_open_id, u_name, dict(app_entry)))
+        has_config_apps, dangling_current_app, candidates = self._select_config_candidates(
+            cfg_dir / "config.json",
+            target_app_id=target_app_id,
+            target_open_id=target_open_id,
+            target_profile=target_profile,
+        )
+        if dangling_current_app:
+            return None
 
         # Check standalone plaintext token files in cfg_dir (tokens.json / user_token.json)
         for token_filename in ("tokens.json", "user_token.json", "credentials.json"):
@@ -1350,12 +1390,17 @@ class FeishuUserTokenStore:
         auto_import_lark_cli: bool = True,
     ) -> FeishuUserTokenRecord | None:
         """Resolve a user token under ``async_file_lock`` without blocking the event loop."""
-        async with self.async_file_lock(app_id=app_id or "", open_id=open_id or ""):
-            return self.resolve_token(
-                open_id=open_id,
-                app_id=app_id,
-                auto_import_lark_cli=auto_import_lark_cli,
-            )
+        now_ts = float(self._now())
+        record = self.get_token(open_id=open_id, app_id=app_id)
+        if record is not None and not record.is_expired(now=now_ts):
+            return record
+        if not auto_import_lark_cli:
+            return record
+        imported = await self.aimport_from_lark_cli(
+            app_id=app_id or (record.app_id if record else None),
+            open_id=open_id or (record.open_id if record else None),
+        )
+        return imported if imported is not None else record
 
     async def aimport_from_lark_cli(
         self,
@@ -1366,15 +1411,23 @@ class FeishuUserTokenStore:
         open_id: str | None = None,
         profile: str | None = None,
     ) -> FeishuUserTokenRecord | None:
-        """Import a ``lark-cli`` user token under ``async_file_lock``."""
-        async with self.async_file_lock(app_id=app_id or "", open_id=open_id or ""):
-            return self.import_from_lark_cli(
-                lark_cli_dir=lark_cli_dir,
-                data_dir=data_dir,
-                app_id=app_id,
-                open_id=open_id,
-                profile=profile,
+        """Import a ``lark-cli`` user token under ``async_file_lock`` for the selected account."""
+        async with self.async_file_lock(
+            app_id=app_id or "", open_id=open_id or "", profile=profile or ""
+        ):
+            resolved_app, resolved_open = self._resolve_lock_account(
+                app_id=app_id or "", open_id=open_id or "", profile=profile or ""
             )
+            async with self.async_file_lock(
+                app_id=resolved_app, open_id=resolved_open, profile=profile or ""
+            ):
+                return self.import_from_lark_cli(
+                    lark_cli_dir=lark_cli_dir,
+                    data_dir=data_dir,
+                    app_id=app_id,
+                    open_id=open_id,
+                    profile=profile,
+                )
 
     async def asave_oauth_token(
         self,
