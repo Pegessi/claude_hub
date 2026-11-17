@@ -13,6 +13,7 @@ using a ``0600`` per-runtime-home master key file.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import ctypes
 import ctypes.util
@@ -25,10 +26,10 @@ import os
 import secrets
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, AsyncIterator, Iterator, Mapping
 
 from claude_hub.services.local_storage import (
     document_exists,
@@ -402,6 +403,8 @@ class FeishuUserTokenStore:
         self._lark_cli_data_dir = lark_cli_data_dir
         self._now = now
         self._lock = threading.RLock()
+        self._held_lock_fds: dict[str, int] = {}
+        self._async_locks: dict[tuple[int, str, str], asyncio.Lock] = {}
 
     def _master_key(self) -> bytes:
         return _ensure_0600_key(self._key_path)
@@ -535,34 +538,37 @@ class FeishuUserTokenStore:
         app_secret: str = "",
         source: str = "hub_oauth",
     ) -> FeishuUserTokenRecord:
-        now = float(self._now())
-        existing = self.get_token(open_id=open_id, app_id=app_id)
-        expires_at = (
-            now + float(expires_in)
-            if isinstance(expires_in, (int, float)) and expires_in > 0
-            else (existing.expires_at if existing else 0.0)
-        )
-        refresh_expires_at = (
-            now + float(refresh_expires_in)
-            if isinstance(refresh_expires_in, (int, float)) and refresh_expires_in > 0
-            else (existing.refresh_expires_at if existing else 0.0)
-        )
-        merged_scope = _normalize_scopes(scope) or (existing.scope if existing else "")
-        merged_secret = app_secret.strip() or (existing.app_secret if existing else "")
-        record = FeishuUserTokenRecord(
-            open_id=open_id,
-            app_id=app_id,
-            access_token=access_token,
-            refresh_token=refresh_token or (existing.refresh_token if existing else ""),
-            app_secret=merged_secret,
-            user_name=user_name or (existing.user_name if existing else ""),
-            expires_at=expires_at,
-            refresh_expires_at=refresh_expires_at,
-            scope=merged_scope,
-            source=source,
-            updated_at=now,
-        )
-        return self.upsert_token(record)
+        with self.refresh_lock(app_id=app_id, open_id=open_id):
+            now = float(self._now())
+            existing = self.get_token(open_id=open_id, app_id=app_id)
+            expires_at = (
+                now + float(expires_in)
+                if isinstance(expires_in, (int, float)) and expires_in > 0
+                else (existing.expires_at if existing else 0.0)
+            )
+            refresh_expires_at = (
+                now + float(refresh_expires_in)
+                if isinstance(refresh_expires_in, (int, float)) and refresh_expires_in > 0
+                else (existing.refresh_expires_at if existing else 0.0)
+            )
+            merged_scope = _normalize_scopes(scope) or (existing.scope if existing else "")
+            merged_secret = app_secret.strip() or (existing.app_secret if existing else "")
+            next_gen = (existing.generation + 1) if existing is not None else 1
+            record = FeishuUserTokenRecord(
+                open_id=open_id,
+                app_id=app_id,
+                access_token=access_token,
+                refresh_token=refresh_token or (existing.refresh_token if existing else ""),
+                app_secret=merged_secret,
+                user_name=user_name or (existing.user_name if existing else ""),
+                expires_at=expires_at,
+                refresh_expires_at=refresh_expires_at,
+                scope=merged_scope,
+                source=source,
+                updated_at=now,
+                generation=next_gen,
+            )
+            return self.upsert_token(record)
 
     def list_tokens(self) -> list[FeishuUserTokenRecord]:
         with self._lock:
@@ -636,25 +642,103 @@ class FeishuUserTokenStore:
         keychain_dir = self._lark_cli_data_dir or default_data_dir
         return cfg_dir, keychain_dir
 
-    @contextmanager
-    def refresh_lock(self) -> Iterator[None]:
-        """Acquire both thread and inter-process file locks for single-use token rotation."""
-        lock_file = self._key_path.parent / "feishu_user_tokens.refresh.lock"
-        lock_file.parent.mkdir(parents=True, exist_ok=True)
+    def _resolve_lark_cli_dirs_with_overrides(
+        self,
+        *,
+        lark_cli_dir: Path | None = None,
+        data_dir: Path | None = None,
+    ) -> tuple[Path, Path] | None:
+        if lark_cli_dir is not None or data_dir is not None:
+            cfg_dir = lark_cli_dir or self._lark_cli_dir or (data_dir or Path.home() / ".lark-cli")
+            keychain_dir = data_dir or self._lark_cli_data_dir or cfg_dir
+            return cfg_dir, keychain_dir
+        resolved_dirs = self._resolve_default_lark_cli_dirs()
+        if resolved_dirs is not None:
+            return resolved_dirs
+        if self._lark_cli_dir is None and self._lark_cli_data_dir is None:
+            return None
+        cfg_dir = self._lark_cli_dir or (self._lark_cli_data_dir or Path.home() / ".lark-cli")
+        keychain_dir = self._lark_cli_data_dir or cfg_dir
+        return cfg_dir, keychain_dir
+
+    @asynccontextmanager
+    async def async_refresh_lock(
+        self,
+        *,
+        app_id: str = "",
+        open_id: str = "",
+    ) -> AsyncIterator[None]:
+        """Serialize in-process async refreshers without blocking the event loop thread."""
+        loop = asyncio.get_running_loop()
+        key = (id(loop), app_id.strip(), open_id.strip())
         with self._lock:
-            fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR, 0o600)
+            async_lock = self._async_locks.get(key)
+            if async_lock is None:
+                async_lock = asyncio.Lock()
+                self._async_locks[key] = async_lock
+        async with async_lock:
+            yield
+
+    @contextmanager
+    def refresh_lock(
+        self,
+        *,
+        app_id: str = "",
+        open_id: str = "",
+        create_cli_lock_dir: bool = False,
+    ) -> Iterator[None]:
+        """Acquire thread and inter-process file locks (including ``lark-cli`` account lock)."""
+        clean_app = app_id.strip()
+        clean_open = open_id.strip()
+        lock_paths: list[Path] = []
+        resolved_dirs = self._resolve_lark_cli_dirs_with_overrides()
+        if resolved_dirs is not None and clean_app and clean_open:
+            cfg_dir, _ = resolved_dirs
+            cli_locks_dir = cfg_dir / "locks"
+            if create_cli_lock_dir or cli_locks_dir.is_dir():
+                lock_paths.append(cli_locks_dir / f"refresh_{clean_app}_{clean_open}.lock")
+        hub_lock_name = (
+            f"refresh_{clean_app}_{clean_open}.lock"
+            if (clean_app and clean_open)
+            else "feishu_user_tokens.refresh.lock"
+        )
+        hub_lock = self._key_path.parent / hub_lock_name
+        if hub_lock not in lock_paths:
+            lock_paths.append(hub_lock)
+
+        with self._lock:
+            newly_opened: list[tuple[str, int]] = []
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX)
+                for lp in lock_paths:
+                    lp.parent.mkdir(parents=True, exist_ok=True)
+                    key = str(lp.resolve())
+                    if key in self._held_lock_fds:
+                        continue
+                    fd = os.open(str(lp), os.O_CREAT | os.O_RDWR, 0o600)
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX)
+                    except Exception:
+                        os.close(fd)
+                        raise
+                    self._held_lock_fds[key] = fd
+                    newly_opened.append((key, fd))
                 yield
             finally:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-                finally:
-                    os.close(fd)
+                for key, fd in reversed(newly_opened):
+                    self._held_lock_fds.pop(key, None)
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+                    finally:
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
 
     def _merge_imported_record(self, candidate: FeishuUserTokenRecord) -> FeishuUserTokenRecord:
         """Persist an imported ``lark-cli`` token without rolling back newer rotated credentials."""
-        with self._lock:
+        with self.refresh_lock(app_id=candidate.app_id, open_id=candidate.open_id):
             existing = self.get_token(open_id=candidate.open_id, app_id=candidate.app_id)
             cand_fp = _credential_fingerprint(candidate.access_token, candidate.refresh_token)
             if existing is not None:
@@ -692,19 +776,20 @@ class FeishuUserTokenStore:
             )
             return self.upsert_token(to_save)
 
-    def sync_to_lark_cli(self, record: FeishuUserTokenRecord) -> bool:
-        """Write rotated user credentials back to the shared ``lark-cli`` keychain when present."""
-        resolved_dirs = self._resolve_default_lark_cli_dirs()
+    def _sync_or_adopt_lark_cli(
+        self,
+        record: FeishuUserTokenRecord,
+        *,
+        expected_fingerprints: set[str] | None = None,
+    ) -> tuple[bool, FeishuUserTokenRecord | None]:
+        """CAS-sync rotated credentials to ``lark-cli`` or adopt a newer external CLI login."""
+        resolved_dirs = self._resolve_lark_cli_dirs_with_overrides()
         if resolved_dirs is None:
-            if self._lark_cli_dir is None and self._lark_cli_data_dir is None:
-                return False
-            cfg_dir = self._lark_cli_dir or (self._lark_cli_data_dir or Path.home() / ".lark-cli")
-            keychain_dir = self._lark_cli_data_dir or cfg_dir
-        else:
-            cfg_dir, keychain_dir = resolved_dirs
+            return False, None
+        cfg_dir, keychain_dir = resolved_dirs
 
         synced = False
-        for search_dir in (keychain_dir, cfg_dir, cfg_dir / "keychain"):
+        for search_dir in dict.fromkeys((keychain_dir, cfg_dir, cfg_dir / "keychain")):
             master_key_file = search_dir / "master.key"
             enc_token_path = search_dir / f"{record.app_id}_{record.open_id}.enc"
             if not master_key_file.is_file() or not enc_token_path.is_file():
@@ -721,6 +806,46 @@ class FeishuUserTokenStore:
                         existing_obj = dict(parsed)
                 except Exception:
                     existing_obj = {}
+
+                if expected_fingerprints and existing_obj:
+                    cli_at = str(
+                        existing_obj.get("accessToken") or existing_obj.get("access_token") or ""
+                    ).strip()
+                    cli_rt = str(
+                        existing_obj.get("refreshToken") or existing_obj.get("refresh_token") or ""
+                    ).strip()
+                    cli_fp = _credential_fingerprint(cli_at, cli_rt)
+                    if cli_at and cli_fp and cli_fp not in expected_fingerprints:
+                        # External lark-cli login/refresh updated the shared keychain concurrently;
+                        # preserve the newer CLI credentials + scopes instead of overwriting them.
+                        cli_scope = _normalize_scopes(existing_obj.get("scope")) or record.scope
+                        adopted = replace(
+                            record,
+                            access_token=cli_at,
+                            refresh_token=cli_rt or record.refresh_token,
+                            user_name=str(
+                                existing_obj.get("userName")
+                                or existing_obj.get("user_name")
+                                or record.user_name
+                            ).strip(),
+                            expires_at=_normalize_epoch_seconds(
+                                existing_obj.get("expiresAt") or existing_obj.get("expires_at")
+                            )
+                            or record.expires_at,
+                            refresh_expires_at=_normalize_epoch_seconds(
+                                existing_obj.get("refreshExpiresAt")
+                                or existing_obj.get("refresh_expires_at")
+                            )
+                            or record.refresh_expires_at,
+                            scope=cli_scope,
+                            source="lark_cli",
+                            imported_fingerprint=cli_fp,
+                        )
+                        return False, adopted
+
+                merged_scope = _normalize_scopes(
+                    [record.scope, str(existing_obj.get("scope") or "")]
+                )
                 existing_obj.update(
                     {
                         "appId": record.app_id,
@@ -728,11 +853,15 @@ class FeishuUserTokenStore:
                         "userName": record.user_name,
                         "accessToken": record.access_token,
                         "refreshToken": record.refresh_token,
-                        "expiresAt": (int(record.expires_at) if record.expires_at > 0 else 0),
-                        "refreshExpiresAt": (
-                            int(record.refresh_expires_at) if record.refresh_expires_at > 0 else 0
+                        "expiresAt": (
+                            int(round(record.expires_at * 1000)) if record.expires_at > 0 else 0
                         ),
-                        "scope": record.scope,
+                        "refreshExpiresAt": (
+                            int(round(record.refresh_expires_at * 1000))
+                            if record.refresh_expires_at > 0
+                            else 0
+                        ),
+                        "scope": merged_scope or record.scope,
                     }
                 )
                 encrypted = aes_256_gcm_encrypt(
@@ -753,7 +882,15 @@ class FeishuUserTokenStore:
                     enc_token_path,
                     exc_info=True,
                 )
-        return synced
+        return synced, None
+
+    def sync_to_lark_cli(self, record: FeishuUserTokenRecord) -> bool:
+        """Write rotated user credentials back to the shared ``lark-cli`` keychain when present."""
+        with self.refresh_lock(
+            app_id=record.app_id, open_id=record.open_id, create_cli_lock_dir=True
+        ):
+            synced, _ = self._sync_or_adopt_lark_cli(record)
+            return synced
 
     def save_refreshed_token(
         self,
@@ -762,9 +899,11 @@ class FeishuUserTokenStore:
         *,
         now: float | None = None,
     ) -> FeishuUserTokenRecord:
-        """Persist a refreshed user token generation and sync shared ``lark-cli`` storage."""
+        """Persist a refreshed user token generation and CAS-sync shared ``lark-cli`` storage."""
         current_now = float(self._now()) if now is None else float(now)
-        with self._lock:
+        with self.refresh_lock(
+            app_id=previous.app_id, open_id=previous.open_id, create_cli_lock_dir=True
+        ):
             existing = self.get_token(open_id=previous.open_id, app_id=previous.app_id) or previous
             new_access = str(refreshed.get("access_token") or "").strip()
             if not new_access:
@@ -787,6 +926,18 @@ class FeishuUserTokenStore:
                 else existing.refresh_expires_at
             )
             next_gen = max(previous.generation, existing.generation) + 1
+            prev_fp = _credential_fingerprint(previous.access_token, previous.refresh_token)
+            exist_fp = _credential_fingerprint(existing.access_token, existing.refresh_token)
+            expected_fps = {
+                fp
+                for fp in (
+                    prev_fp,
+                    previous.imported_fingerprint,
+                    exist_fp,
+                    existing.imported_fingerprint,
+                )
+                if fp
+            }
             updated = replace(
                 existing,
                 access_token=new_access,
@@ -796,20 +947,21 @@ class FeishuUserTokenStore:
                 scope=_normalize_scopes(refreshed.get("scope")) or existing.scope,
                 updated_at=current_now,
                 generation=next_gen,
-                imported_fingerprint=existing.imported_fingerprint
-                or _credential_fingerprint(previous.access_token, previous.refresh_token),
+                imported_fingerprint=existing.imported_fingerprint or prev_fp,
             )
-            saved = self.upsert_token(updated)
-            if self.sync_to_lark_cli(saved):
-                saved = self.upsert_token(
-                    replace(
-                        saved,
-                        imported_fingerprint=_credential_fingerprint(
-                            saved.access_token, saved.refresh_token
-                        ),
-                    )
+            synced, adopted = self._sync_or_adopt_lark_cli(
+                updated, expected_fingerprints=expected_fps
+            )
+            if adopted is not None:
+                return self.upsert_token(adopted)
+            if synced:
+                updated = replace(
+                    updated,
+                    imported_fingerprint=_credential_fingerprint(
+                        updated.access_token, updated.refresh_token
+                    ),
                 )
-            return saved
+            return self.upsert_token(updated)
 
     def import_from_lark_cli(
         self,

@@ -185,21 +185,29 @@ class FeishuAiPoller:
         self._in_flight_ids.add(msg.message_id)
 
         async def _runner() -> None:
+            started_dispatch = False
+            completed_terminal = False
             try:
                 async with self._dispatch_sem:
+                    started_dispatch = True
+                    self._service.mark_pending_command_state(msg.message_id, "in_flight")
                     result = await self._service.handle_message(
                         msg,
                         source=source,
                         seeded_context=seeded_context,
                     )
+                completed_terminal = True
                 if result.handled:
                     if result.status == "completed":
                         self._commands_succeeded += 1
                     elif result.status in {"failed", "scope_blocked"}:
                         self._commands_failed += 1
             except asyncio.CancelledError:
+                if started_dispatch:
+                    self._service.mark_pending_command_state(msg.message_id, "interrupted")
                 raise
             except Exception:
+                completed_terminal = True
                 self._commands_failed += 1
                 logger.warning(
                     "Feishu /ai background command execution failed for %s",
@@ -207,7 +215,8 @@ class FeishuAiPoller:
                     exc_info=True,
                 )
             finally:
-                self._service.dequeue_pending_command(msg.message_id)
+                if completed_terminal:
+                    self._service.dequeue_pending_command(msg.message_id)
                 self._in_flight_ids.discard(msg.message_id)
 
         task = asyncio.create_task(_runner(), name=f"feishu-ai-cmd-{msg.message_id}")
@@ -215,17 +224,29 @@ class FeishuAiPoller:
         task.add_done_callback(self._worker_tasks.discard)
         return task
 
-    def _schedule_durable_pending_queue(self) -> list[asyncio.Task[None]]:
+    def _schedule_durable_pending_queue(self) -> tuple[list[asyncio.Task[None]], list[str]]:
         spawned: list[asyncio.Task[None]] = []
-        for entry in self._service.list_pending_commands():
+        scheduled_ids: list[str] = []
+        entries = self._service.list_pending_commands()
+        # Dispatch proven-unstarted (`queued`) jobs before interrupted in-flight jobs
+        ordered = sorted(
+            enumerate(entries),
+            key=lambda pair: (
+                0 if str(pair[1].get("state") or "queued") == "queued" else 1,
+                pair[0],
+            ),
+        )
+        for _, entry in ordered:
             raw_msg = entry.get("message")
             if not isinstance(raw_msg, Mapping):
                 continue
             msg = _message_from_dict(raw_msg)
-            if msg is None:
+            if msg is None or msg.message_id in self._in_flight_ids:
                 continue
-            if msg.message_id in self._in_flight_ids:
-                continue
+            cmd_state = str(entry.get("state") or "queued")
+            if cmd_state in {"in_flight", "interrupted"}:
+                if not self._service.reconcile_interrupted_command(msg.message_id):
+                    continue
             raw_ctx = entry.get("seeded_context")
             seeded: list[FeishuUserMessage] | None = None
             if isinstance(raw_ctx, list):
@@ -240,7 +261,8 @@ class FeishuAiPoller:
             task = self._spawn_command_worker(msg, source=source, seeded_context=seeded)
             if task is not None:
                 spawned.append(task)
-        return spawned
+                scheduled_ids.append(msg.message_id)
+        return spawned, scheduled_ids
 
     async def _collect_unprocessed_chat_messages(
         self,
@@ -249,19 +271,23 @@ class FeishuAiPoller:
         *,
         watermark_ms: int,
         cfg: FeishuAiCommandConfig,
-    ) -> tuple[list[FeishuUserMessage], bool]:
-        """Page backwards from newest until ``watermark_ms`` is reached.
+        resume_cursor: str | None = None,
+        resume_upper_ms: int = 0,
+    ) -> tuple[list[FeishuUserMessage], bool, str | None, int]:
+        """Page backwards from newest (or ``resume_cursor``) until ``watermark_ms`` is reached.
 
-        Returns ``(messages, reached_watermark)``. When ``reached_watermark`` is
-        True, the caller has seen the complete ``(watermark_ms, max_seen_ms]``
-        interval without gaps.
+        Returns ``(messages, reached_watermark, next_cursor, scan_upper_ms)``.
         """
         page_size = min(50, max(20, cfg.max_context_messages))
         collected: list[FeishuUserMessage] = []
         seen_ids: set[str] = set()
         seen_tokens: set[str] = set()
-        cursor: str | None = None
+        cursor: str | None = resume_cursor or None
+        if cursor:
+            seen_tokens.add(cursor)
         reached_watermark = False
+        next_cursor: str | None = None
+        scan_upper_ms = max(watermark_ms, int(resume_upper_ms or 0))
 
         for _ in range(self._max_pages_per_chat):
             page = await user_client.list_messages_page(
@@ -272,23 +298,29 @@ class FeishuAiPoller:
                 page_token=cursor,
             )
             for item in page.items:
+                if item.create_time_ms > scan_upper_ms:
+                    scan_upper_ms = item.create_time_ms
                 if item.message_id not in seen_ids:
                     seen_ids.add(item.message_id)
                     collected.append(item)
             if not page.items:
                 reached_watermark = True
+                next_cursor = None
                 break
             oldest_on_page = min(m.create_time_ms for m in page.items)
             if oldest_on_page <= watermark_ms:
                 reached_watermark = True
+                next_cursor = None
                 break
             if not page.has_more or not page.page_token or page.page_token in seen_tokens:
                 reached_watermark = True
+                next_cursor = None
                 break
             seen_tokens.add(page.page_token)
             cursor = page.page_token
+            next_cursor = page.page_token
 
-        return collected, reached_watermark
+        return collected, reached_watermark, next_cursor, scan_upper_ms
 
     async def poll_once(self) -> list[str]:
         """Execute one polling pass across watched or active chats.
@@ -315,7 +347,12 @@ class FeishuAiPoller:
             self._last_error = "no_owner_open_id"
             return []
 
-        spawned_tasks: list[asyncio.Task[None]] = self._schedule_durable_pending_queue()
+        spawned_tasks, processed_ids = self._schedule_durable_pending_queue()
+        if len(self._service.list_pending_commands()) >= 256:
+            if spawned_tasks:
+                await asyncio.wait(spawned_tasks, timeout=0.05)
+            self._last_error = "pending_queue_backpressure"
+            return processed_ids
 
         chat_ids: list[str] = list(cfg.watch_chats)
         if not chat_ids:
@@ -327,7 +364,6 @@ class FeishuAiPoller:
 
         watermarks = self._service.get_watermarks()
         now_ms = int(time.time() * 1000)
-        processed_ids: list[str] = []
 
         last_chat_error: str | None = None
         for chat_id in chat_ids:
@@ -336,12 +372,28 @@ class FeishuAiPoller:
                 watermark_ms = max(0, now_ms - self._initial_lookback_ms)
                 self._service.set_watermark(chat_id, watermark_ms)
 
+            saved_scan = self._service.get_scan_cursor(chat_id)
+            resume_cursor: str | None = None
+            resume_upper_ms = watermark_ms
+            if (
+                isinstance(saved_scan, Mapping)
+                and int(saved_scan.get("watermark_ms") or 0) == watermark_ms
+            ):
+                raw_cur = saved_scan.get("cursor")
+                if isinstance(raw_cur, str) and raw_cur:
+                    resume_cursor = raw_cur
+                resume_upper_ms = max(watermark_ms, int(saved_scan.get("upper_ms") or 0))
+
             try:
-                messages, _reached = await self._collect_unprocessed_chat_messages(
-                    user_client,
-                    chat_id,
-                    watermark_ms=watermark_ms,
-                    cfg=cfg,
+                messages, _reached, next_cursor, scan_upper_ms = (
+                    await self._collect_unprocessed_chat_messages(
+                        user_client,
+                        chat_id,
+                        watermark_ms=watermark_ms,
+                        cfg=cfg,
+                        resume_cursor=resume_cursor,
+                        resume_upper_ms=resume_upper_ms,
+                    )
                 )
             except asyncio.CancelledError:
                 raise
@@ -350,11 +402,15 @@ class FeishuAiPoller:
                 logger.warning("Feishu /ai poller could not read chat %s: %s", chat_id, exc)
                 continue
             if not messages:
+                if _reached:
+                    self._service.set_scan_cursor(chat_id, None)
+                    if scan_upper_ms > watermark_ms:
+                        self._service.set_watermark(chat_id, scan_upper_ms)
                 continue
 
             # Process in chronological order (oldest -> newest above watermark)
             ascending = sorted(messages, key=lambda item: (item.create_time_ms, item.message_id))
-            max_seen_ms = watermark_ms
+            max_seen_ms = scan_upper_ms
             for idx, msg in enumerate(ascending):
                 if msg.create_time_ms > max_seen_ms:
                     max_seen_ms = msg.create_time_ms
@@ -394,7 +450,8 @@ class FeishuAiPoller:
                 if enqueued or msg.message_id not in self._in_flight_ids:
                     if enqueued:
                         self._commands_detected += 1
-                    processed_ids.append(msg.message_id)
+                    if msg.message_id not in processed_ids:
+                        processed_ids.append(msg.message_id)
                     task = self._spawn_command_worker(
                         msg,
                         source="poller",
@@ -403,8 +460,19 @@ class FeishuAiPoller:
                     if task is not None:
                         spawned_tasks.append(task)
 
-            if _reached and max_seen_ms > watermark_ms:
-                self._service.set_watermark(chat_id, max_seen_ms)
+            if _reached:
+                self._service.set_scan_cursor(chat_id, None)
+                if max_seen_ms > watermark_ms:
+                    self._service.set_watermark(chat_id, max_seen_ms)
+            elif next_cursor:
+                self._service.set_scan_cursor(
+                    chat_id,
+                    {
+                        "cursor": next_cursor,
+                        "upper_ms": max_seen_ms,
+                        "watermark_ms": watermark_ms,
+                    },
+                )
 
         if spawned_tasks:
             # Give fast dispatchers a short bounded yield while leaving slow turns in background

@@ -266,6 +266,28 @@
             >
           </label>
 
+          <div
+            v-if="aiTupleConflict"
+            class="inline-notice inline-notice--warning"
+            data-testid="feishu-ai-tuple-conflict"
+          >
+            <p>
+              Server execution settings changed to
+              <code>{{ aiTupleConflict.provider }} · {{ aiTupleConflict.model || 'default' }} · {{ aiTupleConflict.reasoning_effort || 'default' }}</code>
+              while you were editing. Your local draft was preserved as a coherent unit.
+            </p>
+            <div class="section-actions">
+              <button
+                type="button"
+                class="ch-btn"
+                data-testid="feishu-ai-accept-server-tuple-btn"
+                @click="acceptServerAiTuple"
+              >
+                Use server values
+              </button>
+            </div>
+          </div>
+
           <label class="field">
             <span class="field-label">Provider</span>
             <select
@@ -743,7 +765,7 @@
         <button
           type="button"
           class="ch-btn ch-btn--ghost"
-          :disabled="busy"
+          :disabled="busy || aiCommandLoading"
           @click="refresh"
         >
           Reload
@@ -792,6 +814,7 @@ const aiCapabilities = ref<FeishuAiCommandCapabilities | null>(null)
 const aiWatchChatsText = ref('')
 const aiServerSnapshot = ref<FeishuAiCommandConfig | null>(null)
 const aiServerWatchChatsText = ref('')
+const aiTupleConflict = ref<Pick<FeishuAiCommandConfig, 'provider' | 'model' | 'reasoning_effort'> | null>(null)
 const DEFAULT_PROVIDER_EFFORTS: Record<FeishuAiCommandProvider, string[]> = {
   claude: [],
   codex: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
@@ -824,6 +847,9 @@ const aiProviderOptions = computed<FeishuAiCommandProvider[]>(() => (
     : ['claude', 'codex', 'traex', 'maso', 'cursor', 'antigravity']
 ))
 const aiEffortOptions = computed<string[]>(() => {
+  const modelKey = aiEdit.model.trim()
+  const perModel = modelKey ? aiCapabilities.value?.model_reasoning_efforts?.[modelKey] : undefined
+  if (Array.isArray(perModel)) return perModel
   const perProvider = aiCapabilities.value?.provider_reasoning_efforts?.[aiEdit.provider]
   if (Array.isArray(perProvider)) return perProvider
   return DEFAULT_PROVIDER_EFFORTS[aiEdit.provider] ?? []
@@ -968,15 +994,36 @@ function applyAiCommandStatus(
   if (!options.preserveDraft || !prev) {
     Object.assign(aiEdit, payload.config)
     aiWatchChatsText.value = nextWatchText
+    aiTupleConflict.value = null
   } else {
-    const keys: Array<keyof FeishuAiCommandConfig> = [
+    const tupleDirty = (
+      aiEdit.provider !== prev.provider
+      || aiEdit.model !== prev.model
+      || aiEdit.reasoning_effort !== prev.reasoning_effort
+    )
+    const serverTupleChanged = (
+      payload.config.provider !== prev.provider
+      || payload.config.model !== prev.model
+      || payload.config.reasoning_effort !== prev.reasoning_effort
+    )
+    if (!tupleDirty) {
+      aiEdit.provider = payload.config.provider
+      aiEdit.model = payload.config.model
+      aiEdit.reasoning_effort = payload.config.reasoning_effort
+      aiTupleConflict.value = null
+    } else if (serverTupleChanged) {
+      aiTupleConflict.value = {
+        provider: payload.config.provider,
+        model: payload.config.model,
+        reasoning_effort: payload.config.reasoning_effort,
+      }
+    }
+
+    const scalarKeys: Array<Exclude<keyof FeishuAiCommandConfig, 'provider' | 'model' | 'reasoning_effort' | 'watch_chats'>> = [
       'enabled',
       'prefix',
       'owner_open_id',
       'app_id',
-      'provider',
-      'model',
-      'reasoning_effort',
       'cwd',
       'poll_interval_seconds',
       'max_active_chats',
@@ -986,7 +1033,7 @@ function applyAiCommandStatus(
       'footer',
       'reply_in_thread',
     ]
-    for (const key of keys) {
+    for (const key of scalarKeys) {
       const currentVal = aiEdit[key]
       const prevVal = prev[key]
       const isIdentityKey = key === 'owner_open_id' || key === 'app_id'
@@ -1006,14 +1053,24 @@ function applyAiCommandStatus(
   }
   aiServerWatchChatsText.value = nextWatchText
 }
+function acceptServerAiTuple() {
+  if (!aiTupleConflict.value) return
+  aiEdit.provider = aiTupleConflict.value.provider
+  aiEdit.model = aiTupleConflict.value.model
+  aiEdit.reasoning_effort = aiTupleConflict.value.reasoning_effort
+  aiTupleConflict.value = null
+}
 function onAiProviderChange(nextProvider: FeishuAiCommandProvider) {
   aiEdit.provider = nextProvider
+  aiTupleConflict.value = null
   const suggestions = aiCapabilities.value?.provider_models?.[nextProvider]
   if (suggestions && suggestions.length > 0) {
     aiEdit.model = suggestions[0]
   }
+  const modelKey = aiEdit.model.trim()
   const supportedEfforts = (
-    aiCapabilities.value?.provider_reasoning_efforts?.[nextProvider]
+    (modelKey ? aiCapabilities.value?.model_reasoning_efforts?.[modelKey] : undefined)
+    ?? aiCapabilities.value?.provider_reasoning_efforts?.[nextProvider]
     ?? DEFAULT_PROVIDER_EFFORTS[nextProvider]
     ?? []
   )
@@ -1028,11 +1085,12 @@ function onAiProviderChange(nextProvider: FeishuAiCommandProvider) {
 async function openAiCommand() {
   if (busy.value || closed) return
   const current = ++viewEpoch
+  const preserveExistingDraft = aiCommandLoaded.value
   fillSelection(null)
   aiCommandActive.value = true
   aiCommandLoadError.value = null
   error.value = null; success.value = null
-  if (!aiCommandLoaded.value) {
+  if (!preserveExistingDraft) {
     aiCommandLoading.value = true
   }
   try {
@@ -1040,12 +1098,14 @@ async function openAiCommand() {
     if (closed || current !== viewEpoch) return
     aiCommandLoaded.value = true
     aiCommandLoadError.value = null
-    applyAiCommandStatus(status, { preserveDraft: false })
+    applyAiCommandStatus(status, { preserveDraft: preserveExistingDraft })
   } catch (cause) {
     if (closed || current !== viewEpoch) return
     const reqErr = cause instanceof FeishuBotRequestError ? cause : null
     const msg = reqErr?.message ?? 'Failed to load /ai command settings.'
-    aiCommandLoadError.value = msg
+    if (!aiCommandLoaded.value) {
+      aiCommandLoadError.value = msg
+    }
     error.value = msg
   } finally {
     if (current === viewEpoch) aiCommandLoading.value = false
@@ -1123,19 +1183,31 @@ async function refresh() {
   if (busy.value || closed) return
   const current = ++viewEpoch
   error.value = null
-  const value = await store.refresh()
-  if (closed || current !== viewEpoch || !value) return
-  if (selectedId.value) fillSelection(store.botById(selectedId.value))
-  if (aiCommandActive.value) {
-    try {
-      const status = await loadFeishuAiCommand()
-      if (!closed && current === viewEpoch) {
-        aiCommandLoaded.value = true
-        aiCommandLoadError.value = null
-        applyAiCommandStatus(status, { preserveDraft: true })
+  try {
+    const value = await store.refresh()
+    if (closed || current !== viewEpoch || !value) return
+    if (selectedId.value) fillSelection(store.botById(selectedId.value))
+    if (aiCommandActive.value) {
+      try {
+        const status = await loadFeishuAiCommand()
+        if (!closed && current === viewEpoch) {
+          const preserve = aiCommandLoaded.value
+          aiCommandLoaded.value = true
+          aiCommandLoadError.value = null
+          applyAiCommandStatus(status, { preserveDraft: preserve })
+        }
+      } catch (cause) {
+        if (!closed && current === viewEpoch && !aiCommandLoaded.value) {
+          const reqErr = cause instanceof FeishuBotRequestError ? cause : null
+          const msg = reqErr?.message ?? 'Failed to load /ai command settings.'
+          aiCommandLoadError.value = msg
+          error.value = msg
+        }
       }
-    } catch {
-      // Keep pool refresh result visible even if /ai status reload fails
+    }
+  } finally {
+    if (current === viewEpoch && aiCommandActive.value) {
+      aiCommandLoading.value = false
     }
   }
 }

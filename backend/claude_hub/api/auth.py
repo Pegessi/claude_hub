@@ -107,10 +107,11 @@ async def callback(request: Request, code: str, state: str = "") -> Response:
         logger.warning("OAuth callback rejected: missing or mismatched state")
         return _callback_error(request, status.HTTP_400_BAD_REQUEST, "Invalid OAuth state")
 
-    # Exchange code for access token
+    # Exchange code for access token (refresh_token is optional when offline_access is not granted)
     access_token, refresh_token = await get_user_access_token(code)
-    if not access_token or not refresh_token:
+    if not access_token:
         return _callback_error(request, status.HTTP_400_BAD_REQUEST, "Failed to get access token")
+    refresh_token = refresh_token or ""
 
     # Get user info
     user_info = await get_user_info(access_token)

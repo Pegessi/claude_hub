@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { activeBinding, bot, deferred, flush, harness, mountSettings, pool, response } from './feishuBotUiTestHarness.mjs'
+import { activeBinding, bot, deferred, findByTestId, flush, harness, mountSettings, pool, response } from './feishuBotUiTestHarness.mjs'
 
 const emptyCreate = { name: '', app_id: '', app_secret: '' }
 const input = { name: 'Created', app_id: 'app-c', app_secret: 'create-secret' }
@@ -444,3 +444,127 @@ test('Personal /ai Assistant blocks save before initial hydration and preserves 
   assert.equal(state.aiEdit.owner_open_id, 'ou_imported')
   assert.equal(state.aiEdit.app_id, 'cli_imported')
 })
+
+test('Personal /ai Assistant handles Reload during initial GET, re-entry draft preservation, coherent provider tuple conflict, and backend validation detail', async t => {
+  const h = harness(t)
+  const pendingInitial = deferred()
+  const pendingReopen = deferred()
+  const baseCfg = {
+    enabled: false,
+    prefix: '/ai',
+    owner_open_id: 'ou_owner',
+    app_id: 'cli_app',
+    provider: 'codex',
+    model: 'gpt-5.4',
+    reasoning_effort: 'high',
+    cwd: '/srv',
+    watch_chats: [],
+    poll_interval_seconds: 15,
+    max_active_chats: 10,
+    max_context_messages: 20,
+    ack_emoji: 'OnIt',
+    done_emoji: 'DONE',
+    footer: '> 🤖 AI 代答，仅供参考',
+    reply_in_thread: true,
+  }
+  let currentCfg = { ...baseCfg }
+  const makeStatus = (overrides = {}) => ({
+    config: { ...currentCfg, ...overrides },
+    capabilities: {
+      providers: ['codex', 'claude', 'maso'],
+      provider_models: {
+        codex: ['gpt-5.4', 'o3'],
+        claude: ['doubao-seed-2.0-code'],
+        maso: ['gemini-4-argon_reasoning_high'],
+      },
+      reasoning_efforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      provider_reasoning_efforts: {
+        codex: ['low', 'high', 'xhigh'],
+        claude: [],
+        maso: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      },
+      model_reasoning_efforts: {
+        'gemini-4-argon_reasoning_high': ['none', 'low', 'medium', 'high'],
+      },
+    },
+  })
+
+  let aiGets = 0
+  h.setTransport(async (url, init = {}) => {
+    if (String(url).endsWith('/ai-command')) {
+      if (init.method === 'PATCH') {
+        const body = JSON.parse(init.body)
+        if (body.provider === 'maso' && body.reasoning_effort === 'xhigh') {
+          return response({
+            detail: {
+              code: 'invalid_ai_command_config',
+              message: "MASO model 'gemini-4-argon' does not support reasoning_effort='xhigh'; supported efforts: none, low, medium, high",
+            },
+          }, 400)
+        }
+        currentCfg = { ...currentCfg, ...body }
+        return response(makeStatus())
+      }
+      aiGets += 1
+      if (aiGets === 1) return pendingInitial.promise
+      if (aiGets === 3) return pendingReopen.promise
+      return response(makeStatus())
+    }
+    return response(h.server())
+  })
+
+  const state = await mountSettings(t, h)
+  // 1. R2-07a: Reload during initial GET settles loading cleanly and allows saving
+  const opening = state.openAiCommand()
+  await flush()
+  assert.equal(state.aiCommandLoading, true)
+  await state.refresh()
+  await flush()
+  pendingInitial.resolve(response(makeStatus()))
+  await opening
+  await flush()
+  assert.equal(state.aiCommandLoaded, true)
+  assert.equal(state.aiCommandLoading, false)
+  assert.equal(findByTestId(state.$root, 'feishu-ai-save-btn')?.props.disabled, false)
+
+  // 2. R2-07b: Re-entering /ai while already loaded preserves draft edits made during GET
+  const reopening = state.openAiCommand()
+  await flush()
+  state.aiEdit.model = 'o3'
+  pendingReopen.resolve(response(makeStatus()))
+  await reopening
+  await flush()
+  assert.equal(state.aiEdit.model, 'o3')
+  // Reset model to server snapshot before testing effort-only edit
+  state.aiEdit.model = 'gpt-5.4'
+
+  // 3. R2-07c: Editing effort then refreshing after external provider change keeps coherent tuple
+  state.aiEdit.reasoning_effort = 'low'
+  currentCfg = { ...baseCfg, provider: 'claude', model: 'doubao-seed-2.0-code', reasoning_effort: '' }
+  await state.refresh()
+  await flush()
+  assert.equal(state.aiEdit.provider, 'codex')
+  assert.equal(state.aiEdit.model, 'gpt-5.4')
+  assert.equal(state.aiEdit.reasoning_effort, 'low')
+  assert.equal(findByTestId(state.$root, 'feishu-ai-effort-select')?.props.disabled, false)
+  assert.ok(state.aiTupleConflict)
+  assert.equal(state.aiTupleConflict.provider, 'claude')
+  // User can explicitly adopt server values from the conflict banner
+  state.acceptServerAiTuple()
+  await flush()
+  assert.equal(state.aiTupleConflict, null)
+  assert.equal(state.aiEdit.provider, 'claude')
+  assert.equal(state.aiEdit.model, 'doubao-seed-2.0-code')
+  assert.equal(state.aiEdit.reasoning_effort, '')
+
+  // 4. Actionable backend validation message is preserved on 400 invalid_ai_command_config
+  state.onAiProviderChange('maso')
+  await flush()
+  // Model-aware effort filtering limits gemini-4-argon_reasoning_high to none/low/medium/high
+  assert.deepEqual([...state.aiEffortOptions], ['none', 'low', 'medium', 'high'])
+  state.aiEdit.reasoning_effort = 'xhigh'
+  assert.equal(await state.saveAiCommand(), false)
+  await flush()
+  assert.match(state.error, /MASO model 'gemini-4-argon' does not support reasoning_effort='xhigh'/)
+})
+

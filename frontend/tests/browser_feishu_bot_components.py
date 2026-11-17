@@ -918,6 +918,13 @@ async def main(browser_run: BrowserRun) -> None:
             mobile_ai_box["x"] + mobile_ai_box["width"]
             <= settings_box["x"] + settings_box["width"] + 1
         )
+        mobile_save_btn = settings.get_by_test_id("feishu-ai-save-btn")
+        await mobile_save_btn.scroll_into_view_if_needed()
+        await expect(mobile_save_btn).to_be_visible()
+        await mobile_save_btn.click()
+        await expect(
+            settings.get_by_role("status").filter(has_text="/ai command settings saved.")
+        ).to_be_visible()
         await page.screenshot(path=str(output / "feishu-ai-command-mobile.png"), full_page=True)
         await settings.locator("footer").get_by_role("button", name="Close", exact=True).click()
         await expect(settings).to_have_count(0)

@@ -31,12 +31,14 @@ from claude_hub.services.feishu_bot import FeishuMessageDedupStore
 from claude_hub.services.feishu_bot_websocket import message_event_from_sdk
 from claude_hub.services.feishu_user_client import (
     REQUIRED_SEND_AS_USER_SCOPE,
+    FeishuMessagePage,
     FeishuUserClient,
     FeishuUserMessage,
     FeishuUserScopeError,
 )
 from claude_hub.services.feishu_user_token_store import (
     FeishuUserTokenStore,
+    aes_256_gcm_decrypt,
     aes_256_gcm_encrypt,
 )
 
@@ -1258,3 +1260,366 @@ def test_f4_maso_transport_boundary_consumes_resolved_reasoning_effort(
         "gemini-4-argon_reasoning_high",
     ]
     assert len(set(seen_models)) == 3
+
+
+@pytest.mark.asyncio
+async def test_r2_oauth_offline_access_no_rt_login_and_legacy_v1_20026_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from urllib.parse import parse_qs, urlparse
+
+    from starlette.requests import Request
+
+    from claude_hub.api import auth as api_auth_mod
+    from claude_hub.auth import feishu as feishu_auth_mod
+
+    fake_settings = SimpleNamespace(
+        auth_enabled=True,
+        feishu_app_id="cli_r2_app",
+        feishu_app_secret="sec_r2_app",
+        feishu_redirect_uri="https://hub.example.test/api/auth/callback",
+        frontend_url="https://hub.example.test",
+        public_url="",
+        session_cookie_name="hub_session",
+        session_expire_days=1,
+        allowed_open_ids_list=[],
+        allowed_emails_list=[],
+    )
+    monkeypatch.setattr(feishu_auth_mod, "settings", fake_settings)
+    monkeypatch.setattr(api_auth_mod, "settings", fake_settings)
+
+    login_url = feishu_auth_mod.get_feishu_auth_url(state="state-r2")
+    scopes = set(parse_qs(urlparse(login_url).query)["scope"][0].split())
+    assert "offline_access" in scopes
+    assert "im:message.send_as_user" in scopes
+
+    seen_paths: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen_paths.append(req.url.path)
+        if req.url.path.endswith("/app_access_token/internal"):
+            return httpx.Response(200, json={"code": 0, "app_access_token": "t-app"})
+        if req.url.path.endswith("/v2/oauth/token"):
+            body = json.loads(req.content.decode("utf-8"))
+            if body.get("grant_type") == "authorization_code":
+                # Valid OAuth v2 response without refresh_token
+                return httpx.Response(
+                    200,
+                    json={
+                        "code": 0,
+                        "access_token": "u-no-rt-token",
+                        "expires_in": 7200,
+                        "scope": "im:message im:message.send_as_user",
+                    },
+                )
+            # Legacy v1 refresh token rejected by v2 endpoint with code 20026
+            return httpx.Response(
+                400,
+                json={"code": 20026, "error": "invalid_refresh_token"},
+            )
+        if req.url.path.endswith("/authen/v1/user_info"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "open_id": "ou_no_rt_user",
+                        "name": "No RT User",
+                        "email": "nort@example.com",
+                    },
+                },
+            )
+        if req.url.path.endswith("/refresh_access_token"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "access_token": "u-legacy-refreshed",
+                        "refresh_token": "ur-legacy-rt2",
+                        "expires_in": 7200,
+                    },
+                },
+            )
+        return httpx.Response(404)
+
+    monkeypatch.setattr(
+        feishu_auth_mod,
+        "create_async_client",
+        lambda *_a, **_kw: httpx.AsyncClient(
+            base_url="https://open.feishu.cn",
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+    store = FeishuUserTokenStore(
+        path=tmp_path / "tokens.json",
+        key_path=tmp_path / "tokens.key",
+        lark_cli_dir=tmp_path / "empty_lark",
+        lark_cli_data_dir=tmp_path / "empty_lark_data",
+    )
+    monkeypatch.setattr(
+        "claude_hub.services.feishu_user_token_store.get_feishu_user_token_store",
+        lambda: store,
+    )
+
+    request = Request(
+        {
+            "type": "http",
+            "scheme": "https",
+            "method": "GET",
+            "path": "/api/auth/callback",
+            "query_string": b"",
+            "headers": [(b"cookie", b"claude_hub_oauth_state=state-r2")],
+        }
+    )
+    resp = await api_auth_mod.callback(request, code="code-r2", state="state-r2")
+    assert resp.status_code == 307
+    saved = store.get_token(open_id="ou_no_rt_user", app_id="cli_r2_app")
+    assert saved is not None
+    assert saved.access_token == "u-no-rt-token"
+    assert saved.refresh_token == ""
+
+    # Legacy v1 refresh token falls through on v2 20026 and refreshes via v1/OIDC endpoint
+    refreshed = await feishu_auth_mod.refresh_user_access_token_bundle(
+        "ur-legacy-rt1",
+        app_id="cli_r2_app",
+        app_secret="sec_r2_app",
+    )
+    assert refreshed is not None
+    assert refreshed["access_token"] == "u-legacy-refreshed"
+    assert any(p.endswith("/refresh_access_token") for p in seen_paths)
+
+
+@pytest.mark.asyncio
+async def test_r2_async_refresh_no_deadlock_cli_ms_units_and_shared_cas(
+    tmp_path: Path,
+) -> None:
+    now_val = 1_800_000_000.0
+    cfg_dir = tmp_path / "lark_cfg"
+    data_dir = tmp_path / "lark_data"
+    cfg_dir.mkdir()
+    data_dir.mkdir()
+    (cfg_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "currentApp": "cli_r2",
+                "apps": [{"appId": "cli_r2", "users": [{"userOpenId": "ou_r2"}]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    master_key = b"\x33" * 32
+    (data_dir / "master.key").write_bytes(master_key)
+    enc_path = data_dir / "cli_r2_ou_r2.enc"
+    enc_path.write_bytes(
+        aes_256_gcm_encrypt(
+            master_key,
+            json.dumps(
+                {
+                    "appId": "cli_r2",
+                    "userOpenId": "ou_r2",
+                    "accessToken": "u-at0",
+                    "refreshToken": "rt-0",
+                    "expiresAt": int((now_val - 10) * 1000),
+                    "refreshExpiresAt": int((now_val + 86400) * 1000),
+                    "scope": "im:message im:message.send_as_user",
+                }
+            ).encode("utf-8"),
+        )
+    )
+
+    store = FeishuUserTokenStore(
+        path=tmp_path / "tokens.json",
+        key_path=tmp_path / "tokens.key",
+        lark_cli_dir=cfg_dir,
+        lark_cli_data_dir=data_dir,
+        now=lambda: now_val,
+    )
+    imported = store.import_from_lark_cli()
+    assert imported is not None
+
+    # 1. Concurrent async refresh callers with a yielding network refresher must not deadlock
+    refresh_calls = 0
+
+    async def yielding_refresher(rt: str, **_kw: Any) -> dict[str, Any]:
+        nonlocal refresh_calls
+        refresh_calls += 1
+        await asyncio.sleep(0.05)
+        return {
+            "access_token": "u-at1",
+            "refresh_token": "rt-1",
+            "expires_in": 7200,
+            "refresh_expires_in": 604800,
+        }
+
+    c1 = FeishuUserClient(
+        store, open_id="ou_r2", app_id="cli_r2", token_refresher=yielding_refresher
+    )
+    c2 = FeishuUserClient(
+        store, open_id="ou_r2", app_id="cli_r2", token_refresher=yielding_refresher
+    )
+    res1, res2 = await asyncio.wait_for(
+        asyncio.gather(c1.get_user_token(), c2.get_user_token()),
+        timeout=0.5,
+    )
+    assert res1[0] == "u-at1"
+    assert res2[0] == "u-at1"
+    assert refresh_calls == 1
+
+    # 2. Verify CLI writeback uses Unix milliseconds (not seconds)
+    decrypted = json.loads(aes_256_gcm_decrypt(master_key, enc_path.read_bytes()).decode("utf-8"))
+    assert decrypted["expiresAt"] == int((now_val + 7200) * 1000)
+    assert decrypted["refreshExpiresAt"] == int((now_val + 604800) * 1000)
+    assert now_val * 1000 < decrypted["expiresAt"] - 300_000
+
+    # 3. Simulate concurrent external lark-cli re-login during in-flight Hub refresh (CAS)
+    now_val += 8000.0
+
+    async def cas_refresher(rt: str, **_kw: Any) -> dict[str, Any]:
+        # External CLI writer updates keychain with a fresh login + extra scope while Hub awaits network
+        fresh_cli = {
+            "appId": "cli_r2",
+            "userOpenId": "ou_r2",
+            "accessToken": "u-cli-fresh-login",
+            "refreshToken": "rt-cli-fresh-login",
+            "expiresAt": int((now_val + 14400) * 1000),
+            "refreshExpiresAt": int((now_val + 900000) * 1000),
+            "scope": "im:message im:message.send_as_user im:message.reactions:write_only",
+        }
+        enc_path.write_bytes(aes_256_gcm_encrypt(master_key, json.dumps(fresh_cli).encode("utf-8")))
+        return {
+            "access_token": "u-stale-hub-refresh",
+            "refresh_token": "rt-stale-hub-refresh",
+            "expires_in": 7200,
+            "refresh_expires_in": 604800,
+        }
+
+    c3 = FeishuUserClient(store, open_id="ou_r2", app_id="cli_r2", token_refresher=cas_refresher)
+    tok, rec = await c3.get_user_token()
+    assert tok == "u-cli-fresh-login"
+    assert rec.refresh_token == "rt-cli-fresh-login"
+    assert "im:message.reactions:write_only" in rec.scopes_set()
+    after_cli = json.loads(aes_256_gcm_decrypt(master_key, enc_path.read_bytes()).decode("utf-8"))
+    assert after_cli["refreshToken"] == "rt-cli-fresh-login"
+    assert "im:message.reactions:write_only" in after_cli["scope"]
+
+
+@pytest.mark.asyncio
+async def test_r2_poller_quiesce_preserves_unstarted_commands_and_resumes_capped_pagination(
+    tmp_path: Path,
+) -> None:
+    def make_msg(mid: str, ts: int, *, owner: bool = True) -> FeishuUserMessage:
+        return FeishuUserMessage(
+            message_id=mid,
+            chat_id="oc_chat",
+            sender_open_id="ou_owner" if owner else "ou_peer",
+            sender_type="user",
+            msg_type="text",
+            text="/ai run check" if owner else "chat noise",
+            create_time_ms=ts,
+        )
+
+    class PagedClient:
+        def __init__(self, msgs: list[FeishuUserMessage]) -> None:
+            self.messages = sorted(msgs, key=lambda m: m.create_time_ms, reverse=True)
+            self.page_offsets: list[int] = []
+
+        def resolve_record(self) -> Any:
+            return SimpleNamespace(open_id="ou_owner")
+
+        async def list_messages_page(self, **kwargs: Any) -> FeishuMessagePage:
+            offset = int(kwargs.get("page_token") or 0)
+            size = int(kwargs["page_size"])
+            self.page_offsets.append(offset)
+            items = self.messages[offset : offset + size]
+            more = offset + size < len(self.messages)
+            return FeishuMessagePage(tuple(items), more, str(offset + size) if more else "")
+
+    # Part 1: Graceful quiesce preserves waiting command and replays it on restart
+    q_client = PagedClient([make_msg("om_active", 2000), make_msg("om_waiting", 2001)])
+    q_store = FeishuUserTokenStore(path=tmp_path / "q_tok.json", key_path=tmp_path / "q_tok.key")
+    q_svc = FeishuAiCommandService(
+        state_path=tmp_path / "q_state.json",
+        token_store=q_store,
+        dedup_store=FeishuMessageDedupStore(tmp_path / "q_dedup.json"),
+        user_client_factory=lambda _cfg: q_client,  # type: ignore[arg-type,return-value]
+    )
+    q_svc.update_config(
+        {
+            "enabled": True,
+            "owner_open_id": "ou_owner",
+            "app_id": "cli_app",
+            "watch_chats": ["oc_chat"],
+        }
+    )
+    q_svc.set_watermark("oc_chat", 1000)
+
+    entered: list[str] = []
+    blocker = asyncio.Event()
+
+    async def blocking_handle(msg: FeishuUserMessage, **_kwargs: Any) -> Any:
+        entered.append(msg.message_id)
+        if msg.message_id == "om_active" and not blocker.is_set():
+            await blocker.wait()
+        return SimpleNamespace(handled=True, status="completed")
+
+    q_svc.handle_message = blocking_handle  # type: ignore[method-assign,assignment]
+    poller1 = FeishuAiPoller(q_svc, max_concurrent_dispatches=1)
+    await poller1.poll_once()
+    assert entered == ["om_active"]
+    await poller1.quiesce()
+    pending_after_quiesce = [row["message"]["message_id"] for row in q_svc.list_pending_commands()]
+    assert "om_waiting" in pending_after_quiesce
+
+    blocker.set()
+    poller2 = FeishuAiPoller(q_svc, max_concurrent_dispatches=1)
+    replay = await poller2.poll_once()
+    await poller2.wait_for_inflight()
+    assert "om_waiting" in replay
+    assert "om_waiting" in entered
+    assert q_svc.list_pending_commands() == []
+    await poller2.stop()
+
+    # Part 2: Backlog exceeding 25-page per-tick cap resumes on subsequent poll
+    burst_msgs = [make_msg("om_oldest_cmd", 2000, owner=True)] + [
+        make_msg(f"om_peer_{i}", 2001 + i, owner=False) for i in range(500)
+    ]
+    b_client = PagedClient(burst_msgs)
+    b_store = FeishuUserTokenStore(path=tmp_path / "b_tok.json", key_path=tmp_path / "b_tok.key")
+    b_svc = FeishuAiCommandService(
+        state_path=tmp_path / "b_state.json",
+        token_store=b_store,
+        dedup_store=FeishuMessageDedupStore(tmp_path / "b_dedup.json"),
+        user_client_factory=lambda _cfg: b_client,  # type: ignore[arg-type,return-value]
+    )
+    b_svc.update_config(
+        {
+            "enabled": True,
+            "owner_open_id": "ou_owner",
+            "app_id": "cli_app",
+            "watch_chats": ["oc_chat"],
+            "max_context_messages": 20,
+        }
+    )
+    b_svc.set_watermark("oc_chat", 1000)
+    b_handled: list[str] = []
+
+    async def fast_handle(msg: FeishuUserMessage, **_kwargs: Any) -> Any:
+        b_handled.append(msg.message_id)
+        return SimpleNamespace(handled=True, status="completed")
+
+    b_svc.handle_message = fast_handle  # type: ignore[method-assign,assignment]
+    b_poller = FeishuAiPoller(b_svc)
+    first_pass = await b_poller.poll_once()
+    assert first_pass == []
+    assert b_svc.get_watermarks()["oc_chat"] == 1000
+    assert b_svc.get_scan_cursor("oc_chat") is not None
+
+    second_pass = await b_poller.poll_once()
+    await b_poller.wait_for_inflight()
+    assert second_pass == ["om_oldest_cmd"]
+    assert b_handled == ["om_oldest_cmd"]
+    assert b_svc.get_watermarks()["oc_chat"] == 2500
+    assert b_svc.get_scan_cursor("oc_chat") is None
+    assert b_client.page_offsets[25:] == [500]
+    await b_poller.stop()

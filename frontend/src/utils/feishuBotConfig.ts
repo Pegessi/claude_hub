@@ -215,6 +215,7 @@ export interface FeishuAiCommandCapabilities {
   providers: FeishuAiCommandProvider[]
   reasoning_efforts: string[]
   provider_reasoning_efforts?: Record<string, string[]>
+  model_reasoning_efforts?: Record<string, string[]>
   provider_models: Record<string, string[]>
 }
 
@@ -257,10 +258,14 @@ export class FeishuBotRequestError extends Error {
   }
 }
 
-function fixedMessage(status: number, code: string | null): string {
+function fixedMessage(status: number, code: string | null, detailMessage: string | null = null): string {
   if (status === 400 || status === 422) {
     if (code === 'chat_not_group') return 'Choose a group chat. A private conversation cannot be bound this way.'
     if (code === 'chat_not_visible') return 'This Bot cannot see that group. Add the Bot to the group and reload the group list.'
+    if (code === 'invalid_ai_command_config') {
+      if (detailMessage && detailMessage.length <= 240) return detailMessage
+      return 'Invalid Personal /ai configuration. Check the provider, model, and reasoning effort fields.'
+    }
     return 'The Bot request was rejected. Check the fields and try again.'
   }
   if (status === 401) return 'Sign in to use the Feishu Bot pool.'
@@ -313,7 +318,7 @@ function fixedMessage(status: number, code: string | null): string {
   return 'The Feishu Bot request failed. Try again.'
 }
 
-async function responseCode(response: Response): Promise<string | null> {
+async function responseErrorInfo(response: Response): Promise<{ code: string | null, detailMessage: string | null }> {
   try {
     const body = await response.json() as { detail?: unknown }
     const candidate = typeof body.detail === 'string'
@@ -321,15 +326,20 @@ async function responseCode(response: Response): Promise<string | null> {
       : body.detail && typeof body.detail === 'object' && 'code' in body.detail
         ? (body.detail as { code?: unknown }).code
         : null
-    return typeof candidate === 'string' && ERROR_CODES.has(candidate) ? candidate : null
-  } catch { return null }
+    const rawMsg = body.detail && typeof body.detail === 'object' && 'message' in body.detail
+      ? (body.detail as { message?: unknown }).message
+      : null
+    const code = typeof candidate === 'string' && ERROR_CODES.has(candidate) ? candidate : null
+    const detailMessage = typeof rawMsg === 'string' && rawMsg.trim() ? rawMsg.trim() : null
+    return { code, detailMessage }
+  } catch { return { code: null, detailMessage: null } }
 }
 
 async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(url, { ...init, credentials: 'same-origin' })
   if (!response.ok) {
-    const code = await responseCode(response)
-    throw new FeishuBotRequestError(response.status, code, fixedMessage(response.status, code))
+    const { code, detailMessage } = await responseErrorInfo(response)
+    throw new FeishuBotRequestError(response.status, code, fixedMessage(response.status, code, detailMessage))
   }
   return await response.json() as T
 }
