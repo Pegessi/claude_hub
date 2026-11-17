@@ -8,11 +8,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
 
-from claude_hub.models import AgentType, StreamModelOption
+from claude_hub.models import AgentType, StreamModelOption, StreamReasoningEffortOption
 from claude_hub.models.subagent import Subagent, SubagentCreate, SubagentTurn, SubagentTurnStatus
 from claude_hub.services.demand_patrol import feishu_triage as triage_module
 from claude_hub.services.demand_patrol.commands import CommandError
@@ -116,7 +117,99 @@ class FakeRunner:
         if argv[:3] == ["lark-cli", "auth", "status"]:
             return self.identity
         if "+messages-search" in argv:
-            return {"ok": True, "data": {"messages": self.messages, "has_more": self.has_more}}
+            rows = list(self.messages)
+            if "--start" in argv and "--end" in argv:
+                start_bound = triage_module._timestamp(argv[argv.index("--start") + 1])
+                end_bound = triage_module._timestamp(argv[argv.index("--end") + 1])
+                filtered_rows = []
+                for row in rows:
+                    try:
+                        row_ts = triage_module._timestamp(row.get("create_time"))
+                    except (CommandError, ValueError):
+                        filtered_rows.append(row)
+                    else:
+                        if start_bound <= row_ts <= end_bound:
+                            filtered_rows.append(row)
+                rows = filtered_rows
+            if "--is-at-me" in argv:
+                rows = [
+                    row
+                    for row in rows
+                    if ME
+                    in {
+                        triage_module._identity_id(mention.get("id", mention))
+                        for mention in (row.get("mentions") or [])
+                        if isinstance(mention, dict)
+                    }
+                ]
+            if "--chat-type" in argv:
+                chat_type = argv[argv.index("--chat-type") + 1]
+                rows = [row for row in rows if row.get("chat_type") == chat_type]
+            if "--sender" in argv:
+                sender_filter = argv[argv.index("--sender") + 1]
+                rows = [
+                    row
+                    for row in rows
+                    if triage_module._identity_id(
+                        (row.get("sender") or {}).get("id")
+                        if isinstance(row.get("sender"), dict)
+                        else row.get("sender", row.get("sender_id", {}))
+                    )
+                    == sender_filter
+                    or triage_module._identity_id(
+                        (row.get("sender") or {}).get("sender_id")
+                        if isinstance(row.get("sender"), dict)
+                        else {}
+                    )
+                    == sender_filter
+                ]
+            if "--chat-id" in argv:
+                allowed_chats = set(argv[argv.index("--chat-id") + 1].split(","))
+                rows = [row for row in rows if row.get("chat_id") in allowed_chats]
+            has_more = self.has_more or len(rows) > 500
+            return {"ok": True, "data": {"messages": rows[:500], "has_more": has_more}}
+        if "+threads-messages-list" in argv:
+            thread_filter = argv[argv.index("--thread") + 1]
+            rows = [
+                row
+                for row in self.messages
+                if (row.get("thread_id") or row.get("root_id")) == thread_filter
+            ]
+            order = argv[argv.index("--order") + 1] if "--order" in argv else "asc"
+            rows = sorted(
+                rows,
+                key=lambda row: triage_module._timestamp(row.get("create_time")),
+                reverse=(order == "desc"),
+            )
+            page_size = int(argv[argv.index("--page-size") + 1]) if "--page-size" in argv else 50
+            offset = int(argv[argv.index("--page-token") + 1]) if "--page-token" in argv else 0
+            if "--page-all" in argv:
+                page_limit = (
+                    int(argv[argv.index("--page-limit") + 1]) if "--page-limit" in argv else 10
+                )
+                limit = page_size * page_limit
+            else:
+                limit = page_size
+            sliced = rows[offset : offset + limit]
+            next_offset = offset + len(sliced)
+            has_more = self.has_more or next_offset < len(rows)
+            next_token = str(next_offset) if next_offset < len(rows) else ""
+            return {
+                "ok": True,
+                "data": {
+                    "messages": sliced,
+                    "has_more": has_more,
+                    "page_token": next_token,
+                },
+                "meta": {
+                    "pagination": {
+                        "complete": not has_more,
+                        "pages": 1,
+                        "items": len(sliced),
+                        "next_token": next_token,
+                    }
+                },
+            }
         assert argv[0] == "infowall", "No real subprocess is permitted"
         assert env is not None and env["INFOWALL_API_KEY_FILE"] == KEY_PATH
         if argv[1] == "health":
@@ -171,11 +264,21 @@ async def test_quiet_gate_uses_no_model_infowall_or_notification(
     )
     assert (result.candidates, result.llm_invoked, result.notified) == (0, 0, 0)
     assert state.feishu_watermark_iso == NOW.isoformat()
-    assert len(runner.calls) == 2 and not dot.calls
+    assert len(runner.calls) == 4 and not dot.calls
+    assert all(argv[0] == "lark-cli" for argv, _, _ in runner.calls)
     callback.assert_not_awaited()
     caps.assert_not_awaited()
     search = runner.calls[1][0]
-    assert search[search.index("--start") + 1] == (NOW - timedelta(hours=2)).isoformat()
+    shanghai = ZoneInfo("Asia/Shanghai")
+    assert search[search.index("--start") + 1] == (NOW - timedelta(hours=2)).astimezone(
+        shanghai
+    ).isoformat(timespec="seconds")
+    assert search[search.index("--end") + 1] == NOW.astimezone(shanghai).isoformat(
+        timespec="seconds"
+    )
+    assert "--is-at-me" in search
+    assert "--chat-type" in runner.calls[2][0] and "p2p" in runner.calls[2][0]
+    assert "--sender" in runner.calls[3][0] and ME in runner.calls[3][0]
     assert search[search.index("--as") + 1] == "user"
     assert search[search.index("--page-limit") + 1] == "10"
     assert "--no-reactions" in search
@@ -398,7 +501,9 @@ async def test_cold_recovery_is_bounded_and_processed_lru_is_capped() -> None:
         notify=False,
     )
     argv = runner.calls[1][0]
-    assert argv[argv.index("--start") + 1] == (NOW - timedelta(hours=4)).isoformat()
+    assert argv[argv.index("--start") + 1] == (NOW - timedelta(hours=4)).astimezone(
+        ZoneInfo("Asia/Shanghai")
+    ).isoformat(timespec="seconds")
     assert len(state.processed_feishu_ids) == 500 and state.processed_feishu_ids[-1] == "one"
 
 
@@ -563,8 +668,21 @@ async def test_readback_is_required_before_claiming_infowall_sync() -> None:
 
 
 def test_reply_draft_length_and_evidence_url_are_validated() -> None:
-    with pytest.raises(ValueError, match="at least 80"):
+    with pytest.raises(ValueError, match="at least 20"):
         TriageDiagnosis.model_validate({**diagnosis().model_dump(), "reply_draft": "太短"})
+    with pytest.raises(ValueError, match="at most 600"):
+        TriageDiagnosis.model_validate({**diagnosis().model_dump(), "reply_draft": "长" * 601})
+    short_ok = TriageDiagnosis.model_validate(
+        {
+            **diagnosis().model_dump(),
+            "reply_draft": "已核查失败日志，确认是启动阶段缓存显存不足导致，请先调整缓存比例。",
+        }
+    )
+    assert 20 <= len(short_ok.reply_draft) < 80
+    long_ok = TriageDiagnosis.model_validate(
+        {**diagnosis().model_dump(), "reply_draft": "详" * 220}
+    )
+    assert 150 < len(long_ok.reply_draft) <= 600
     with pytest.raises(ValueError, match="absolute HTTP"):
         TriageEvidenceLink(title="unsafe", url="javascript:alert(1)")
 
@@ -584,3 +702,465 @@ async def test_uncontrolled_infowall_http_is_rejected_before_any_cli(
     )
     assert result.errors and result.notified == 1
     assert all(argv[0] == "lark-cli" for argv, _, _ in runner.calls)
+
+
+async def test_rc1_rc2_minute_precision_naive_timestamps_and_microsecond_now() -> None:
+    now_with_us = datetime(2026, 11, 17, 9, 31, 37, 467034, tzinfo=timezone.utc)
+    # 2026-11-17 09:31:37 UTC == 17:31:37 Asia/Shanghai; 2h window start floors to 15:31:00+08:00
+    boundary_row = {
+        "message_id": "om_boundary",
+        "chat_id": "oc_group",
+        "chat_name": "MMPE-debug群",
+        "chat_type": "group",
+        "thread_id": "omt_1",
+        "create_time": "2026-11-17 15:31",
+        "sender": {"id": "ou_colleague", "name": "沈昱辰"},
+        "content": "<p>@王泽华 看起来升级了相比xgpt也不太正常，求看看</p>",
+        "mentions": [{"id": ME, "name": "王泽华"}],
+        "message_app_link": "https://applink.feishu.cn/client/message/om_boundary",
+    }
+    runner = FakeRunner([boundary_row])
+    result = await run_feishu_triage(
+        PatrolState(),
+        now=now_with_us,
+        dot=FakeDot(),
+        runner=runner,
+        dry_run=True,
+    )
+    assert not result.errors
+    assert result.candidates == 1
+    assert result.details["candidate_ids"] == ["om_boundary"]
+    search_argv = runner.calls[1][0]
+    assert search_argv[search_argv.index("--start") + 1] == "2026-11-17T15:31:00+08:00"
+    assert search_argv[search_argv.index("--end") + 1] == "2026-11-17T17:31:37+08:00"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "<p>@王泽华 看起来升级了相比xgpt也不太正常，求看看</p>",
+        "@冯子原 @王泽华 这里又遇到一个问题。",
+        "![Image](img_v3_123)\n@王泽华 server是不是没成功启动",
+        "可以帮我检查下吗 @陈亮强 @田浩炜 @王泽华",
+        "@王泽华 麻烦看下这个指标异常",
+        "@王泽华 帮忙瞅瞅 https://bytedance.larkoffice.com/docx/abc123",
+        "@王泽华 https://seed.byteintl.net/evaluation/arena/123",
+        "@王泽华 https://megavision.byteintl.net/job/456",
+    ],
+)
+async def test_rc4_broadened_actionable_phrases_and_internal_urls(text: str) -> None:
+    row = message(
+        "om_real",
+        chat_type="group",
+        mentions=[{"id": ME, "name": "王泽华"}],
+        text=text,
+    )
+    result = await run_feishu_triage(
+        PatrolState(),
+        now=NOW,
+        dot=FakeDot(),
+        runner=FakeRunner([row]),
+        dry_run=True,
+    )
+    assert result.candidates == 1
+
+
+async def test_rc3_rc4_non_threaded_group_unrelated_own_message_does_not_mark_answered() -> None:
+    mention_unanswered = message(
+        "om_unanswered",
+        chat_type="group",
+        thread="",
+        minutes_ago=25,
+        sender="ou_alice",
+        mentions=[{"id": ME}],
+        text="@王泽华 这里又遇到一个问题。",
+    )
+    mention_replied = message(
+        "om_replied",
+        chat_type="group",
+        thread="",
+        minutes_ago=20,
+        sender="ou_bob",
+        mentions=[{"id": ME}],
+        text="@王泽华 可以帮我检查下吗",
+    )
+    own_unrelated = message(
+        "om_own_unrelated",
+        chat_type="group",
+        thread="",
+        minutes_ago=10,
+        sender=ME,
+        text="qwen4 max好像也没打过dpsk",
+    )
+    own_direct_reply = {
+        **message(
+            "om_own_reply",
+            chat_type="group",
+            thread="",
+            minutes_ago=5,
+            sender=ME,
+            text="我看下",
+        ),
+        "reply_to": "om_replied",
+    }
+    runner = FakeRunner([mention_unanswered, mention_replied, own_unrelated, own_direct_reply])
+    result = await run_feishu_triage(
+        PatrolState(),
+        now=NOW,
+        dot=FakeDot(),
+        runner=runner,
+        dry_run=True,
+    )
+    assert not result.errors
+    assert result.candidates == 1
+    assert result.details["candidate_ids"] == ["om_unanswered"]
+    assert result.details["answered_skipped"] == 1
+
+
+async def test_f1_f2_f3_scoped_discovery_reply_anchoring_and_self_mention_coverage() -> None:
+    # F1: unmentioned P2P question ('dm') and unmentioned follow-up in participated thread ('followup')
+    dm = message("dm", chat_type="p2p", mentions=[], minutes_ago=15, text="服务为什么挂了？")
+    own_thread = message(
+        "own-thread",
+        chat_type="group",
+        sender=ME,
+        thread="omt_part",
+        minutes_ago=30,
+        text="我先看下",
+    )
+    followup = message(
+        "followup",
+        chat_type="group",
+        sender="ou_colleague",
+        thread="omt_part",
+        mentions=[],
+        minutes_ago=10,
+        text="日志还是报错 OOM",
+    )
+    # F2: Alice asks two non-threaded group questions; user replies anchored to second-question
+    # while mentioning Alice. first-question must NOT be marked answered.
+    first_question = message(
+        "first-question",
+        chat_type="group",
+        thread="",
+        sender="ou_alice",
+        mentions=[{"id": ME}],
+        minutes_ago=25,
+        text="@王泽华 第一个问题：服务是不是挂了",
+    )
+    second_question = message(
+        "second-question",
+        chat_type="group",
+        thread="",
+        sender="ou_alice",
+        mentions=[{"id": ME}],
+        minutes_ago=20,
+        text="@王泽华 第二个问题：配置怎么不对",
+    )
+    own_second_answer = {
+        **message(
+            "own-second-answer",
+            chat_type="group",
+            thread="",
+            sender=ME,
+            mentions=[{"id": "ou_alice"}],
+            minutes_ago=12,
+            text="@Alice 第二个问题修好了",
+        ),
+        "reply_to": "second-question",
+    }
+    # F3: Self-mention in oc_other plus an incoming @me question in oc_group2 and an own reply in oc_group2
+    self_mention = {
+        **message(
+            "self-mention",
+            chat_type="group",
+            sender=ME,
+            mentions=[{"id": ME}],
+            minutes_ago=18,
+            text="备忘 @王泽华",
+        ),
+        "chat_id": "oc_other",
+    }
+    group2_question = {
+        **message(
+            "group2-question",
+            chat_type="group",
+            thread="omt_g2",
+            sender="ou_bob",
+            mentions=[{"id": ME}],
+            minutes_ago=16,
+            text="@王泽华 帮忙看看这个报错",
+        ),
+        "chat_id": "oc_group2",
+    }
+    group2_own_reply = {
+        **message(
+            "group2-own-reply",
+            chat_type="group",
+            thread="omt_g2",
+            sender=ME,
+            mentions=[],
+            minutes_ago=8,
+            text="已定位并修复",
+        ),
+        "chat_id": "oc_group2",
+    }
+    runner = FakeRunner(
+        [
+            dm,
+            own_thread,
+            followup,
+            first_question,
+            second_question,
+            own_second_answer,
+            self_mention,
+            group2_question,
+            group2_own_reply,
+        ]
+    )
+    result = await run_feishu_triage(
+        PatrolState(),
+        now=NOW,
+        dot=FakeDot(),
+        runner=runner,
+        dry_run=True,
+    )
+    assert not result.errors
+    assert result.details["candidate_ids"] == ["first-question", "dm", "followup"]
+    assert result.details["answered_skipped"] == 2
+
+
+async def test_f5_participated_thread_in_busy_group_with_over_500_irrelevant_rows() -> None:
+    quiet_mention = {
+        **message(
+            "quiet-mention",
+            chat_type="group",
+            sender="ou_alice",
+            mentions=[{"id": ME}],
+            minutes_ago=15,
+            text="@王泽华 这个配置怎么报错了？",
+        ),
+        "chat_id": "oc_quiet",
+        "chat_name": "安静排障群",
+    }
+    own_active = {
+        **message(
+            "own-active",
+            chat_type="group",
+            sender=ME,
+            thread="omt_active",
+            minutes_ago=25,
+            text="我先看一下",
+        ),
+        "chat_id": "oc_busy",
+        "chat_name": "高并发告警大群",
+    }
+    active_followup = {
+        "message_id": "active-followup",
+        "chat_id": "oc_busy",
+        "thread_id": "omt_active",
+        "create_time": "2026-11-14 10:50",
+        "sender": {"id": "ou_bob", "name": "Bob"},
+        "content": "重试还是失败 OOM",
+        "mentions": [],
+        "message_app_link": "https://applink.feishu.cn/client/message/active-followup",
+    }
+    irrelevant_rows = [
+        {
+            **message(
+                f"noise-{i}",
+                chat_type="group",
+                sender=f"ou_other_{i % 7}",
+                thread=f"omt_other_{i % 20}",
+                minutes_ago=1 + (i % 40),
+                text=f"其他话题高频消息 {i} 报错？",
+            ),
+            "chat_id": "oc_busy",
+            "chat_name": "高并发告警大群",
+        }
+        for i in range(520)
+    ]
+    runner = FakeRunner([quiet_mention, own_active, active_followup, *irrelevant_rows])
+    result = await run_feishu_triage(
+        PatrolState(),
+        now=NOW,
+        dot=FakeDot(),
+        runner=runner,
+        dry_run=True,
+    )
+    assert not result.errors
+    assert result.candidates == 2
+    assert result.details["candidate_ids"] == ["quiet-mention", "active-followup"]
+    assert "高并发告警大群 / Bob: active-followup" in result.markdown
+    thread_calls = [argv for argv, _, _ in runner.calls if "+threads-messages-list" in argv]
+    assert len(thread_calls) == 1
+    assert thread_calls[0][thread_calls[0].index("--thread") + 1] == "omt_active"
+    assert thread_calls[0][thread_calls[0].index("--order") + 1] == "desc"
+
+
+async def test_f6_participated_thread_with_over_500_historical_rows_in_same_thread() -> None:
+    quiet_mention = {
+        **message(
+            "quiet-mention",
+            chat_type="group",
+            sender="ou_alice",
+            mentions=[{"id": ME}],
+            minutes_ago=30,
+            text="@王泽华 这个配置怎么报错了？",
+        ),
+        "chat_id": "oc_quiet",
+        "chat_name": "安静排障群",
+    }
+    own_active = {
+        **message(
+            "own-active",
+            chat_type="group",
+            sender=ME,
+            thread="omt_active",
+            minutes_ago=25,
+            text="我先看一下",
+        ),
+        "chat_id": "oc_busy",
+        "chat_name": "长历史话题群",
+    }
+    active_followup = {
+        "message_id": "active-followup",
+        "chat_id": "oc_busy",
+        "thread_id": "omt_active",
+        "create_time": "2026-11-14 10:50",
+        "sender": {"id": "ou_bob", "name": "Bob"},
+        "content": "重试还是失败 OOM",
+        "mentions": [],
+        "message_app_link": "https://applink.feishu.cn/client/message/active-followup",
+    }
+    historical_same_thread = [
+        {
+            "message_id": f"old-history-{i}",
+            "chat_id": "oc_busy",
+            "thread_id": "omt_active",
+            "create_time": f"2026-11-01 {10 + (i // 60):02d}:{i % 60:02d}",
+            "sender": {"id": ME if i % 10 == 0 else "ou_bob", "name": "Bob"},
+            "content": f"历史讨论 {i} 报错？",
+            "mentions": [{"id": ME}] if i % 15 == 0 else [],
+            "message_app_link": f"https://applink.feishu.cn/client/message/old-history-{i}",
+        }
+        for i in range(505)
+    ]
+    runner = FakeRunner([*historical_same_thread, quiet_mention, own_active, active_followup])
+    result = await run_feishu_triage(
+        PatrolState(),
+        now=NOW,
+        dot=FakeDot(),
+        runner=runner,
+        dry_run=True,
+    )
+    assert not result.errors
+    assert result.candidates == 2
+    assert result.details["candidate_ids"] == ["quiet-mention", "active-followup"]
+    thread_calls = [argv for argv, _, _ in runner.calls if "+threads-messages-list" in argv]
+    assert len(thread_calls) == 1
+    assert "--page-token" not in thread_calls[0]
+
+    # Multi-page in-window thread (65 recent rows across 2 pages + 505 historical rows)
+    recent_thread_replies = [
+        {
+            "message_id": f"recent-reply-{i}",
+            "chat_id": "oc_busy",
+            "thread_id": "omt_active",
+            "create_time": "2026-11-14 10:40",
+            "sender": {"id": "ou_peer", "name": "Peer"},
+            "content": f"收到 {i}",
+            "mentions": [],
+            "message_app_link": f"https://applink.feishu.cn/client/message/recent-reply-{i}",
+        }
+        for i in range(65)
+    ]
+    multi_runner = FakeRunner(
+        [
+            *historical_same_thread,
+            quiet_mention,
+            own_active,
+            *recent_thread_replies,
+            active_followup,
+        ]
+    )
+    multi_result = await run_feishu_triage(
+        PatrolState(),
+        now=NOW,
+        dot=FakeDot(),
+        runner=multi_runner,
+        dry_run=True,
+    )
+    assert not multi_result.errors
+    assert multi_result.details["candidate_ids"] == ["quiet-mention", "active-followup"]
+    multi_thread_calls = [
+        argv for argv, _, _ in multi_runner.calls if "+threads-messages-list" in argv
+    ]
+    assert len(multi_thread_calls) == 2
+    assert "--page-token" in multi_thread_calls[1]
+
+    # Current-window overflow (>500 rows in the same thread inside [start, now]) still fails closed
+    overflow_recent = [
+        {
+            "message_id": f"window-overflow-{i}",
+            "chat_id": "oc_busy",
+            "thread_id": "omt_active",
+            "create_time": "2026-11-14 10:45",
+            "sender": {"id": "ou_peer", "name": "Peer"},
+            "content": f"窗口内刷屏 {i}",
+            "mentions": [],
+            "message_app_link": f"https://applink.feishu.cn/client/message/window-overflow-{i}",
+        }
+        for i in range(505)
+    ]
+    state = PatrolState(feishu_watermark_iso="2026-11-14T10:00:00+08:00")
+    overflow_runner = FakeRunner([quiet_mention, own_active, *overflow_recent])
+    overflow_result = await run_feishu_triage(
+        state,
+        now=NOW,
+        dot=FakeDot(),
+        runner=overflow_runner,
+        dry_run=False,
+    )
+    assert overflow_result.errors == ["Feishu search is incomplete; watermark retained"]
+    assert state.feishu_watermark_iso == "2026-11-14T10:00:00+08:00"
+
+
+async def test_rc5_rc6_maso_effort_model_discovery_and_prompt_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    service = FakeSubagentService()
+    monkeypatch.setattr(triage_module, "get_subagent_service", lambda: service)
+    discovery = AsyncMock(
+        return_value=(
+            "http://127.0.0.1:11004",
+            [
+                StreamModelOption(
+                    id="gemini-4-argon",
+                    label="Gemini 4 Argon",
+                    supported_reasoning_efforts=[
+                        StreamReasoningEffortOption(
+                            id="high",
+                            label="High",
+                            provider_model_id="gemini-4-argon_reasoning_high",
+                        )
+                    ],
+                )
+            ],
+            "gemini-4-argon",
+        )
+    )
+    monkeypatch.setattr(triage_module, "discover_maso_service", discovery)
+    row = {
+        **message("om_reply_mention", thread="omt_thread_123", text="@王泽华 泽华，帮忙看看这个"),
+        "reply_to": "om_parent_456",
+    }
+    candidate = triage_module._candidate(row)
+    assert candidate.reply_to == "om_parent_456"
+    await diagnose_message(candidate)
+    req = service.requests[0]
+    assert req.agent_type == AgentType.MASO
+    assert req.model == "gemini-4-argon_reasoning_high"
+    assert '"chat_id": "oc_chat"' in req.prompt
+    assert '"thread_id": "omt_thread_123"' in req.prompt
+    assert '"reply_to": "om_parent_456"' in req.prompt
