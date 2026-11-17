@@ -102,12 +102,6 @@ export function useTabStatus(agentStatuses: Ref<readonly TerminalAgentStatus[]>)
     return `${statusLabel} — ${detail}`
   }
 
-  function getTabReviewLabel(tab: TerminalTab): string | null {
-    if (isAwaitingAnswer(tab) || getTabStatus(tab) !== 'idle') return null
-    const label = reportedStatus(tab)?.review_label?.trim()
-    return label || null
-  }
-
   function getTabActivityTime(tab: TerminalTab): string {
     const reported = reportedStatus(tab)
     return (
@@ -122,7 +116,6 @@ export function useTabStatus(agentStatuses: Ref<readonly TerminalAgentStatus[]>)
     getTabStatus,
     getTabStatusLabel,
     isAwaitingAnswer,
-    getTabReviewLabel,
     getTabActivityTime,
   }
 }
