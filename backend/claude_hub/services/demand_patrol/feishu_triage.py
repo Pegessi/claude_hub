@@ -204,17 +204,17 @@ def _candidate(
 def _is_answered_by(message: FeishuCandidate, own: FeishuCandidate) -> bool:
     if own.chat_id != message.chat_id:
         return False
-    if own.reply_to and own.reply_to == message.message_id:
-        return own.created_at >= message.created_at
+    if own.reply_to:
+        if own.reply_to == message.message_id:
+            return own.created_at >= message.created_at
+        if message.reply_to and own.reply_to == message.reply_to:
+            return own.created_at > message.created_at
+        return False
     if own.created_at <= message.created_at:
         return False
-    if message.thread_id:
-        return own.thread_id == message.thread_id
-    if message.chat_type == "p2p":
-        return True
-    if message.reply_to and own.reply_to == message.reply_to:
-        return True
-    return message.sender_id in own.mentioned_ids
+    if message.thread_id or own.thread_id:
+        return bool(message.thread_id) and own.thread_id == message.thread_id
+    return message.chat_type == "p2p"
 
 
 def filter_unanswered(
@@ -283,6 +283,31 @@ def _search_start(state: PatrolState, now: datetime) -> datetime:
         start = now - timedelta(hours=2)
     bounded = max(now - timedelta(hours=4), min(start, now))
     return bounded.replace(second=0, microsecond=0)
+
+
+def _search_command(start_iso: str, end_iso: str, *extra_flags: str) -> list[str]:
+    return [
+        "lark-cli",
+        "im",
+        "+messages-search",
+        "--query",
+        "",
+        *extra_flags,
+        "--start",
+        start_iso,
+        "--end",
+        end_iso,
+        "--page-all",
+        "--page-size",
+        "50",
+        "--page-limit",
+        "10",
+        "--no-reactions",
+        "--format",
+        "json",
+        "--as",
+        "user",
+    ]
 
 
 def _diagnosis_prompt(candidate: FeishuCandidate) -> str:
@@ -586,74 +611,41 @@ async def run_feishu_triage(
         start = _search_start(state, now)
         start_iso = start.astimezone(tz).isoformat(timespec="seconds")
         end_iso = now.astimezone(tz).isoformat(timespec="seconds")
-        payload = await runner(
-            [
-                "lark-cli",
-                "im",
-                "+messages-search",
-                "--query",
-                "",
-                "--is-at-me",
-                "--start",
-                start_iso,
-                "--end",
-                end_iso,
-                "--page-all",
-                "--page-size",
-                "50",
-                "--page-limit",
-                "10",
-                "--no-reactions",
-                "--format",
-                "json",
-                "--as",
-                "user",
-            ],
-            timeout=60,
-        )
-        messages = [
-            item for item in _search_messages(payload, tz=tz) if start <= item.created_at <= now
-        ]
-        candidates, answered = filter_unanswered(messages, uid, state.processed_feishu_ids)
-        if candidates and not any(item.sender_id == uid for item in messages):
-            chat_ids = sorted({item.chat_id for item in candidates})
-            own_payload = await runner(
-                [
-                    "lark-cli",
-                    "im",
-                    "+messages-search",
-                    "--query",
-                    "",
-                    "--sender",
-                    uid,
-                    "--chat-id",
-                    ",".join(chat_ids),
-                    "--start",
-                    start_iso,
-                    "--end",
-                    end_iso,
-                    "--page-all",
-                    "--page-size",
-                    "50",
-                    "--page-limit",
-                    "10",
-                    "--no-reactions",
-                    "--format",
-                    "json",
-                    "--as",
-                    "user",
-                ],
+        by_id: dict[str, FeishuCandidate] = {}
+        for extra_flags in (
+            ("--is-at-me",),
+            ("--chat-type", "p2p"),
+            ("--sender", uid),
+        ):
+            payload = await runner(
+                _search_command(start_iso, end_iso, *extra_flags),
                 timeout=60,
             )
-            own_messages = [
-                item
-                for item in _search_messages(own_payload, tz=tz)
-                if start <= item.created_at <= now and item.sender_id == uid
-            ]
-            if own_messages:
-                known_ids = {item.message_id for item in messages}
-                messages.extend(item for item in own_messages if item.message_id not in known_ids)
-                candidates, answered = filter_unanswered(messages, uid, state.processed_feishu_ids)
+            for item in _search_messages(payload, tz=tz):
+                if start <= item.created_at <= now:
+                    by_id.setdefault(item.message_id, item)
+        participated_chat_ids = sorted(
+            {
+                item.chat_id
+                for item in by_id.values()
+                if item.sender_id == uid and item.thread_id and item.chat_type != "p2p"
+            }
+        )
+        if participated_chat_ids:
+            thread_payload = await runner(
+                _search_command(
+                    start_iso,
+                    end_iso,
+                    "--chat-id",
+                    ",".join(participated_chat_ids),
+                ),
+                timeout=60,
+            )
+            for item in _search_messages(thread_payload, tz=tz):
+                if start <= item.created_at <= now:
+                    by_id.setdefault(item.message_id, item)
+        messages = list(by_id.values())
+        candidates, answered = filter_unanswered(messages, uid, state.processed_feishu_ids)
     except (CommandError, ValueError, OSError) as exc:
         result.errors.append(str(exc))
         result.markdown = "飞书巡检未完成；未推进水位。"

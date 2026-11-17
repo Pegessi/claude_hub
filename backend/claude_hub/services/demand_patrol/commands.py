@@ -13,9 +13,21 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 _MAX_OUTPUT_BYTES = 32 * 1024 * 1024
-_SECRET_RE = re.compile(
-    r"(?i)(?:bearer\s+\S+|(?:token|secret|password|api[_-]?key)\s*[=:]\s*\S+"
-    r"|\b(?:cli|u|t)-[a-z0-9_-]{8,}\b)"
+_SAFE_CODE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+_SENSITIVE_KEY_NAME_RE = re.compile(
+    r"(?i)(?:token|secret|password|passwd|pwd|api[_-]?key|app[_-]?key|client[_-]?key"
+    r"|private[_-]?key|access[_-]?key|session[_-]?key|auth|authorization|cookie|credential|jwt)"
+)
+_URL_USERINFO_RE = re.compile(r"\b([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s:@]+(?::[^/\s@]*)?@")
+_SENSITIVE_KV_RE = re.compile(
+    r"""(?i)['"]?[a-z0-9_.-]*(?:token|secret|password|passwd|pwd|api[_-]?key|app[_-]?key"""
+    r"""|client[_-]?key|private[_-]?key|access[_-]?key|session[_-]?key|auth|authorization"""
+    r"""|cookie|credential|jwt)[a-z0-9_.-]*['"]?\s*[:=]\s*(?:bearer\s+)?"""
+    r"""(?:'[^']*'|"[^"]*"|[^\s,;}\]]+)"""
+)
+_TOKEN_PREFIX_RE = re.compile(
+    r"""(?i)\b(?:bearer\s+[^\s,;"'}\]]+|(?:cli|u|t|sk)-[a-z0-9_-]{6,}"""
+    r"""|eyJ[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,})\b"""
 )
 
 
@@ -24,12 +36,17 @@ class CommandError(RuntimeError):
 
 
 def _sanitize_error_text(text: str) -> str:
-    cleaned = " ".join(_SECRET_RE.sub("[redacted]", text).split())
+    cleaned = _URL_USERINFO_RE.sub(r"\1[redacted]@", text)
+    cleaned = _SENSITIVE_KV_RE.sub("[redacted]", cleaned)
+    cleaned = _TOKEN_PREFIX_RE.sub("[redacted]", cleaned)
+    cleaned = " ".join(cleaned.split())
     return cleaned[:240]
 
 
 def extract_cli_error_detail(payload: Any) -> str:
     if not isinstance(payload, dict):
+        return ""
+    if "error" not in payload and payload.get("ok") is not False:
         return ""
     error = payload.get("error")
     if isinstance(error, dict):
@@ -37,25 +54,38 @@ def extract_cli_error_detail(payload: Any) -> str:
         subtype = error.get("subtype") or error.get("type")
         msg = error.get("message") or error.get("msg")
         parts: list[str] = []
-        if isinstance(subtype, str) and subtype.strip():
+        if (
+            isinstance(subtype, str)
+            and subtype.strip()
+            and _SAFE_CODE_RE.fullmatch(subtype.strip())
+            and not _SENSITIVE_KEY_NAME_RE.search(subtype)
+        ):
             parts.append(subtype.strip())
-        if isinstance(code, (int, str)) and not isinstance(code, bool) and str(code).strip():
-            parts.append(f"code={code}")
+        if (
+            isinstance(code, (int, str))
+            and not isinstance(code, bool)
+            and str(code).strip()
+            and _SAFE_CODE_RE.fullmatch(str(code).strip())
+        ):
+            parts.append(f"code={str(code).strip()}")
         header = f"{parts[0]} ({parts[1]})" if len(parts) == 2 else " ".join(parts)
         if isinstance(msg, str) and msg.strip():
-            detail = f"{header}: {msg.strip()}" if header else msg.strip()
+            sanitized_msg = _sanitize_error_text(msg.strip())
+            detail = f"{header}: {sanitized_msg}" if header else sanitized_msg
         else:
             detail = header
         return _sanitize_error_text(detail)
     if isinstance(error, str) and error.strip():
         return _sanitize_error_text(error)
-    msg = payload.get("message") or payload.get("msg")
-    if isinstance(msg, str) and msg.strip():
-        return _sanitize_error_text(msg)
+    if payload.get("ok") is False:
+        msg = payload.get("message") or payload.get("msg")
+        if isinstance(msg, str) and msg.strip():
+            return _sanitize_error_text(msg)
     return ""
 
 
 def _stream_error_detail(stdout: bytes, stderr: bytes) -> str:
+    saw_structured = False
     for raw in (stderr, stdout):
         if not raw:
             continue
@@ -63,13 +93,20 @@ def _stream_error_detail(stdout: bytes, stderr: bytes) -> str:
             parsed = json.loads(raw)
         except (ValueError, UnicodeError):
             continue
+        saw_structured = True
         detail = extract_cli_error_detail(parsed)
         if detail:
             return detail
+    if saw_structured:
+        # Unrecognized JSON payloads fail closed rather than echoing raw keys/values.
+        return ""
     if stderr:
         text = stderr.decode("utf-8", errors="replace").strip()
         if text:
-            return _sanitize_error_text(text.splitlines()[0])
+            first_line = text.splitlines()[0].strip()
+            if first_line.startswith(("{", "[")):
+                return ""
+            return _sanitize_error_text(first_line)
     return ""
 
 
