@@ -633,7 +633,9 @@ class DotSessionService(object):
                         ended.append(
                             (asked_at, event.created_at, status == "failed", status == "cancelled")
                         )
-                        from_hub = asked.lstrip().startswith("[Dot ")
+                        from_hub = asked.lstrip().startswith("[Dot ") or (
+                            event.turn_id or ""
+                        ).startswith("scheduled-")
                         if from_hub and (answer.strip() == QUIET_REPLY or status == "cancelled"):
                             # Nothing needed the user, or the turn gave way to the user
                             # and runs again later; keep it out of the recent talk.

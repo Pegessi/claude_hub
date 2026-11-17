@@ -88,6 +88,8 @@ class SessionState(ABC):
         # the turn completes. Every provider event normalized while this is set
         # is stamped with it so the frontend can upsert by identity.
         self._active_turn_id: Optional[str] = None
+        self._active_turn_metadata: Optional[Dict[str, Any]] = None
+        self._active_turn_summary: str = ""
         self._assistant_text: str = ""
         # Approval cards (``approval_required``) awaiting an answer, keyed by
         # the card's ``call_id``. Each entry captures the turn the card was
@@ -192,6 +194,7 @@ class SessionState(ABC):
         # kill/relaunch and reaches the fresh server.
         self._turn_teardown_task: Optional["asyncio.Task[None]"] = None
         self._turn_teardown_pending = False
+        self._teardown_turn_id: Optional[str] = None
 
         # Semantic coalescer for text_delta / thinking_delta bursts. Merges
         # consecutive same-stream deltas within a ~60ms window so the fanout
