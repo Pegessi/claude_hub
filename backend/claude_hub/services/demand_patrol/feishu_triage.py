@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -22,6 +23,7 @@ from claude_hub.services.agent_stream.maso_http import MasoServiceUnavailable
 from claude_hub.services.demand_patrol.commands import (
     CommandError,
     CommandRunner,
+    extract_cli_error_detail,
     infowall_env,
     run_command,
 )
@@ -31,8 +33,11 @@ from claude_hub.services.runtime_isolation import resolve_runtime_home
 from claude_hub.services.subagents import SubagentError, get_subagent_service
 
 _ACTIONABLE = re.compile(
-    r"seed\.bytedance\.net|code\.byted\.org|feishu\.cn/(?:docx|wiki|sheets)|grafana"
-    r"|[?？]|报错|失败|挂了|卡住|超时|慢|怎么|为什么|帮忙|看一下|排查|\b(?:oom|error\w*|crash\w*|hang\w*|fail\w*)\b",
+    r"(?:seed|megavision)\.(?:bytedance|byteintl)\.net|code\.byted\.org"
+    r"|(?:feishu\.cn|larkoffice\.com)/(?:docx|wiki|sheets|base)|grafana"
+    r"|[?？]|报错|失败|挂了|卡住|超时|慢|怎么|为什么|帮忙|看一下|看看|看下|瞅瞅|排查|检查"
+    r"|问题|异常|不对|不正常|不行|是不是|能否|能不能|吗"
+    r"|\b(?:oom|error\w*|crash\w*|hang\w*|fail\w*)\b",
     re.IGNORECASE,
 )
 _PREFERRED_MODEL = "gemini-4-argon_reasoning_high"
@@ -51,10 +56,15 @@ class FeishuCandidate:
     text: str
     permalink: str
     mentioned_ids: tuple[str, ...]
+    reply_to: str = ""
 
     @property
     def group_key(self) -> tuple[str, str]:
-        return self.chat_id, self.thread_id or self.chat_id
+        if self.thread_id:
+            return self.chat_id, self.thread_id
+        if self.chat_type == "p2p":
+            return self.chat_id, self.chat_id
+        return self.chat_id, self.reply_to or self.message_id
 
     @property
     def source_label(self) -> str:
@@ -81,7 +91,7 @@ class TriageDiagnosis(BaseModel):
     headline: str = Field(min_length=1, max_length=200)
     root_cause: str = Field(min_length=1, max_length=2000)
     evidence_links: list[TriageEvidenceLink] = Field(default_factory=list, max_length=20)
-    reply_draft: str = Field(min_length=80, max_length=150)
+    reply_draft: str = Field(min_length=20, max_length=600)
     project_hint: str = Field(default="", max_length=200)
     next_action: str = Field(default="", max_length=1000)
     needs_code_fix: bool = False
@@ -105,15 +115,22 @@ def _http_url(value: Any) -> str:
 
 def _object(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or value.get("ok") is False:
-        raise CommandError("CLI returned an unsuccessful or malformed response")
+        detail = extract_cli_error_detail(value)
+        suffix = f": {detail}" if detail else ""
+        raise CommandError(f"CLI returned an unsuccessful or malformed response{suffix}")
     data = value.get("data", value)
     if not isinstance(data, dict):
         raise CommandError("CLI response data must be an object")
     return data
 
 
-def _timestamp(value: Any) -> datetime:
-    if isinstance(value, (str, int, float)) and str(value).replace(".", "", 1).isdigit():
+def _timestamp(
+    value: Any,
+    tz: str | ZoneInfo | timezone = "Asia/Shanghai",
+) -> datetime:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise CommandError("Feishu response contains an invalid timestamp")
+    if str(value).replace(".", "", 1).isdigit():
         seconds = float(value)
         if seconds > 100_000_000_000:
             seconds /= 1000
@@ -122,11 +139,12 @@ def _timestamp(value: Any) -> datetime:
         except (ValueError, OSError, OverflowError) as exc:
             raise CommandError("Feishu timestamp is outside the supported range") from exc
     try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
     except ValueError as exc:
         raise CommandError("Feishu response contains an invalid timestamp") from exc
     if parsed.tzinfo is None:
-        raise CommandError("Feishu response timestamp has no timezone")
+        tz_info = ZoneInfo(tz) if isinstance(tz, str) else tz
+        return parsed.replace(tzinfo=tz_info)
     return parsed
 
 
@@ -138,7 +156,11 @@ def _identity_id(value: Any) -> str:
     return ""
 
 
-def _candidate(row: Mapping[str, Any]) -> FeishuCandidate:
+def _candidate(
+    row: Mapping[str, Any],
+    *,
+    tz: str | ZoneInfo | timezone = "Asia/Shanghai",
+) -> FeishuCandidate:
     message_id, chat_id = row.get("message_id"), row.get("chat_id")
     if (
         not isinstance(message_id, str)
@@ -171,42 +193,67 @@ def _candidate(row: Mapping[str, Any]) -> FeishuCandidate:
         sender_id=sender_id,
         sender_name=str(sender.get("name") or sender.get("sender_name") or ""),
         chat_name=str(row.get("chat_name") or ""),
-        created_at=_timestamp(row.get("create_time")),
+        created_at=_timestamp(row.get("create_time"), tz=tz),
         text=content[:6000],
         permalink=_http_url(row.get("message_app_link") or row.get("url")),
         mentioned_ids=tuple(mention_ids),
+        reply_to=str(row.get("reply_to") or row.get("parent_id") or ""),
     )
+
+
+def _is_answered_by(message: FeishuCandidate, own: FeishuCandidate) -> bool:
+    if own.chat_id != message.chat_id:
+        return False
+    if own.reply_to and own.reply_to == message.message_id:
+        return own.created_at >= message.created_at
+    if own.created_at <= message.created_at:
+        return False
+    if message.thread_id:
+        return own.thread_id == message.thread_id
+    if message.chat_type == "p2p":
+        return True
+    if message.reply_to and own.reply_to == message.reply_to:
+        return True
+    return message.sender_id in own.mentioned_ids
 
 
 def filter_unanswered(
     messages: Sequence[FeishuCandidate], user_open_id: str, processed_ids: Sequence[str]
 ) -> tuple[list[FeishuCandidate], list[str]]:
     """Admit only direct, explicitly mentioned, or participated-thread questions."""
-    own_messages: dict[tuple[str, str], list[datetime]] = {}
-    for message in messages:
-        if message.sender_id == user_open_id:
-            own_messages.setdefault(message.group_key, []).append(message.created_at)
+    own_messages = [message for message in messages if message.sender_id == user_open_id]
     seen = set(processed_ids)
     candidates, answered = [], []
     for message in sorted(messages, key=lambda item: item.created_at):
         if message.message_id in seen or message.sender_id == user_open_id:
             continue
         seen.add(message.message_id)
-        own_times = own_messages.get(message.group_key, [])
-        if any(at > message.created_at for at in own_times):
+        if any(_is_answered_by(message, own) for own in own_messages):
             answered.append(message.message_id)
             continue
         relevant = (
             message.chat_type == "p2p"
             or user_open_id in message.mentioned_ids
-            or (bool(message.thread_id) and any(at < message.created_at for at in own_times))
+            or (
+                bool(message.thread_id)
+                and any(
+                    own.chat_id == message.chat_id
+                    and own.thread_id == message.thread_id
+                    and own.created_at < message.created_at
+                    for own in own_messages
+                )
+            )
         )
         if relevant and _ACTIONABLE.search(message.text):
             candidates.append(message)
     return candidates, answered
 
 
-def _search_messages(payload: Any) -> list[FeishuCandidate]:
+def _search_messages(
+    payload: Any,
+    *,
+    tz: str | ZoneInfo | timezone = "Asia/Shanghai",
+) -> list[FeishuCandidate]:
     data = _object(payload)
     if (
         data.get("has_more") is True
@@ -223,16 +270,19 @@ def _search_messages(payload: Any) -> list[FeishuCandidate]:
         if not isinstance(row, dict):
             raise CommandError("Feishu search returned a malformed message")
         if not row.get("deleted"):
-            messages.append(_candidate(row))
+            messages.append(_candidate(row, tz=tz))
     return messages
 
 
 def _search_start(state: PatrolState, now: datetime) -> datetime:
     if state.feishu_watermark_iso:
-        start = _timestamp(state.feishu_watermark_iso) - timedelta(minutes=5)
+        start = _timestamp(state.feishu_watermark_iso, tz=state.config.timezone) - timedelta(
+            minutes=5
+        )
     else:
         start = now - timedelta(hours=2)
-    return max(now - timedelta(hours=4), min(start, now))
+    bounded = max(now - timedelta(hours=4), min(start, now))
+    return bounded.replace(second=0, microsecond=0)
 
 
 def _diagnosis_prompt(candidate: FeishuCandidate) -> str:
@@ -240,6 +290,9 @@ def _diagnosis_prompt(candidate: FeishuCandidate) -> str:
         json.dumps(
             {
                 "message_id": candidate.message_id,
+                "chat_id": candidate.chat_id,
+                "thread_id": candidate.thread_id,
+                "reply_to": candidate.reply_to,
                 "sender": candidate.sender_name or candidate.sender_id,
                 "chat": candidate.chat_name or candidate.chat_id,
                 "message_time": candidate.created_at.isoformat(),
@@ -267,6 +320,24 @@ def _diagnosis_prompt(candidate: FeishuCandidate) -> str:
     )
 
 
+def _has_maso_model(models: Sequence[Any], target: str) -> bool:
+    for option in models:
+        if (
+            getattr(option, "id", None) == target
+            or getattr(option, "provider_model_id", None) == target
+        ):
+            return True
+        for effort in getattr(option, "supported_reasoning_efforts", None) or ():
+            effort_model = (
+                effort.get("provider_model_id")
+                if isinstance(effort, Mapping)
+                else getattr(effort, "provider_model_id", None)
+            )
+            if effort_model == target:
+                return True
+    return False
+
+
 async def diagnose_message(candidate: FeishuCandidate) -> TriageDiagnosis:
     """Use one disposable native Chat; cancellation retires its provider turn."""
     agent_type, model, env = AgentType.CODEX, None, {}
@@ -276,7 +347,7 @@ async def diagnose_message(candidate: FeishuCandidate) -> TriageDiagnosis:
             if os.environ.get("MASO_BASE_URL")
             else {}
         )
-        if any(option.id == _PREFERRED_MODEL for option in models):
+        if _has_maso_model(models, _PREFERRED_MODEL):
             agent_type, model, env = AgentType.MASO, _PREFERRED_MODEL, {"MASO_BASE_URL": base_url}
     except MasoServiceUnavailable:
         pass
@@ -510,7 +581,11 @@ async def run_feishu_triage(
             or not user_open_id.strip()
         ):
             raise CommandError("Feishu user identity unavailable; watermark retained")
+        uid = user_open_id.strip()
+        tz = ZoneInfo(state.config.timezone)
         start = _search_start(state, now)
+        start_iso = start.astimezone(tz).isoformat(timespec="seconds")
+        end_iso = now.astimezone(tz).isoformat(timespec="seconds")
         payload = await runner(
             [
                 "lark-cli",
@@ -518,10 +593,11 @@ async def run_feishu_triage(
                 "+messages-search",
                 "--query",
                 "",
+                "--is-at-me",
                 "--start",
-                start.isoformat(),
+                start_iso,
                 "--end",
-                now.isoformat(),
+                end_iso,
                 "--page-all",
                 "--page-size",
                 "50",
@@ -535,10 +611,49 @@ async def run_feishu_triage(
             ],
             timeout=60,
         )
-        messages = [item for item in _search_messages(payload) if start <= item.created_at <= now]
-        candidates, answered = filter_unanswered(
-            messages, user_open_id.strip(), state.processed_feishu_ids
-        )
+        messages = [
+            item for item in _search_messages(payload, tz=tz) if start <= item.created_at <= now
+        ]
+        candidates, answered = filter_unanswered(messages, uid, state.processed_feishu_ids)
+        if candidates and not any(item.sender_id == uid for item in messages):
+            chat_ids = sorted({item.chat_id for item in candidates})
+            own_payload = await runner(
+                [
+                    "lark-cli",
+                    "im",
+                    "+messages-search",
+                    "--query",
+                    "",
+                    "--sender",
+                    uid,
+                    "--chat-id",
+                    ",".join(chat_ids),
+                    "--start",
+                    start_iso,
+                    "--end",
+                    end_iso,
+                    "--page-all",
+                    "--page-size",
+                    "50",
+                    "--page-limit",
+                    "10",
+                    "--no-reactions",
+                    "--format",
+                    "json",
+                    "--as",
+                    "user",
+                ],
+                timeout=60,
+            )
+            own_messages = [
+                item
+                for item in _search_messages(own_payload, tz=tz)
+                if start <= item.created_at <= now and item.sender_id == uid
+            ]
+            if own_messages:
+                known_ids = {item.message_id for item in messages}
+                messages.extend(item for item in own_messages if item.message_id not in known_ids)
+                candidates, answered = filter_unanswered(messages, uid, state.processed_feishu_ids)
     except (CommandError, ValueError, OSError) as exc:
         result.errors.append(str(exc))
         result.markdown = "飞书巡检未完成；未推进水位。"

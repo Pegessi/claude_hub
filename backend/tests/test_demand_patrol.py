@@ -407,6 +407,17 @@ async def test_cli_json_transport_timeout_and_output_bound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert await commands.run_command([sys.executable, "-c", 'print("{}")']) == {}
+    err_script = (
+        "import json, sys; "
+        "sys.stderr.write(json.dumps({'ok': False, 'error': {'subtype': 'invalid_parameters', "
+        "'code': 99992402, 'message': 'field validation failed token=secret123'}})); "
+        "sys.exit(1)"
+    )
+    with pytest.raises(
+        commands.CommandError,
+        match=r"exited with status 1: invalid_parameters \(code=99992402\): field validation failed \[redacted\]",
+    ):
+        await commands.run_command([sys.executable, "-c", err_script])
     with pytest.raises(commands.CommandError, match="timed out"):
         await commands.run_command(
             [sys.executable, "-c", "import time; time.sleep(30)"], timeout=0.05

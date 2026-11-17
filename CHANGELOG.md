@@ -7,6 +7,12 @@
 
 ## Released
 
+### fix(patrol): fix Feishu @mention proactive patrol pipeline (RC1-RC6) for live `lark-cli` output
+
+- Format `lark-cli im +messages-search` `--start` and `--end` flags with second precision (`isoformat(timespec="seconds")`) in the configured patrol timezone, floor `_search_start()` to the minute so minute-precision `create_time` boundaries never drop messages, and surface sanitized CLI `stderr`/JSON error details on `CommandError` (`services/demand_patrol/feishu_triage.py`, `services/demand_patrol/commands.py`).
+- Attach `ZoneInfo(state.config.timezone)` in `_timestamp()` when `lark-cli` returns naive local `"YYYY-MM-DD HH:MM"` timestamps, scope `lark-cli im +messages-search` with `--is-at-me` plus a targeted `--sender <uid> --chat-id <chat_ids>` follow-up so busy windows never hit the 500-message all-chat truncation deadlock, and prevent unrelated non-threaded group messages from falsely marking `@mentions` as answered while broadening `_ACTIONABLE` for real Chinese triage phrasings (`求看看`, `遇到一个问题`, `是不是`, `检查`, `异常`, etc.) and `larkoffice.com` / `byteintl.net` URLs.
+- Match `_PREFERRED_MODEL` against both `option.id` and `supported_reasoning_efforts[].provider_model_id` in `diagnose_message()`, include `chat_id`, `thread_id`, and `reply_to` in `_diagnosis_prompt()`, and widen `TriageDiagnosis.reply_draft` validation bounds to `20..600` characters.
+
 ### fix(mobile-ui): suppress automatic text-input focus on mobile/coarse-pointer dialogs and model picker
 
 - Add `shouldAutoFocusTextInput` (`frontend/src/utils/mobileInputFocus.ts`) and gate
