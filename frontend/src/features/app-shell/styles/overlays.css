@@ -12,7 +12,7 @@
 @keyframes ch-popover-in { from { opacity: 0; transform: translateY(-4px) scale(0.98); } }
 
 /* Backdrop: tinted scrim with a subtle blur. */
-:root:root :is(.modal-overlay, .workspace-modal-overlay, .goal-dialog-backdrop, .quota-modal-backdrop, .task-detail-overlay):not(.image-lightbox-overlay) {
+:root:root :is(.modal-overlay, .workspace-modal-overlay, .goal-dialog-backdrop, .quota-modal-backdrop, .task-detail-overlay, .tam-overlay):not(.image-lightbox-overlay) {
   background: var(--ch-color-backdrop);
   -webkit-backdrop-filter: blur(var(--ch-backdrop-blur));
   backdrop-filter: blur(var(--ch-backdrop-blur));
@@ -20,7 +20,7 @@
 }
 
 /* Dialog surface. */
-:root:root :is(.modal-overlay, .workspace-modal-overlay, .goal-dialog-backdrop, .quota-modal-backdrop):not(.image-lightbox-overlay) > :is(.modal, .workspace-modal, .goal-dialog, .quota-modal),
+:root:root :is(.modal-overlay, .workspace-modal-overlay, .goal-dialog-backdrop, .quota-modal-backdrop, .tam-overlay):not(.image-lightbox-overlay) > :is(.modal, .workspace-modal, .goal-dialog, .quota-modal, .tam-modal),
 :root:root .task-detail-overlay > .task-detail-panel {
   border-color: var(--ch-color-border);
   border-radius: var(--ch-radius-overlay);
@@ -29,7 +29,7 @@
 }
 
 /* Dialog titles share one scale. */
-:root:root :is(.modal, .workspace-modal) > h3,
+:root:root :is(.modal, .workspace-modal, .tam-modal) > h3,
 :root:root .goal-dialog h2,
 :root:root .restart-dialog h2 {
   color: var(--ch-color-text-strong);
@@ -58,20 +58,77 @@ dialog::backdrop {
 }
 :root:root .composer-add-options { transform-origin: bottom left; animation-name: ch-popover-in; }
 
-/* Phones: dialogs become bottom sheets that respect the safe area. */
-@media (max-width: 640px) {
-  :root:root :is(.modal-overlay, .workspace-modal-overlay, .goal-dialog-backdrop, .quota-modal-backdrop):not(.image-lightbox-overlay) {
-    align-items: flex-end;
-    place-items: end center;
-    /* Bottom-align to the visual viewport, not the layout viewport: with the
-       keyboard open the sheet would otherwise keep its bottom at the layout
-       edge and sit behind the keyboard. App.vue already computes the height the
-       keyboard steals (zoom- and offset-safe), so use it rather than re-deriving
-       `100dvh - visual viewport` here. Zero when no keyboard is open. */
-    padding: 0 0 var(--keyboard-height, 0px);
+/* Mobile & coarse-pointer viewports: anchor all modal/sheet overlays directly to
+   the visualViewport rectangle (matching App.vue / shell.css for ChatUI) so an
+   on-screen keyboard or iOS visualViewport pan never pushes a dialog off the
+   top edge or leaves a blank blurred padding gap above the keyboard. */
+@media (max-width: 768px), (any-pointer: coarse) {
+  :root:root :is(
+    .modal-overlay,
+    .workspace-modal-overlay,
+    .goal-dialog-backdrop,
+    .quota-modal-backdrop,
+    .task-detail-overlay,
+    .tam-overlay,
+    .subagent-sheet-backdrop,
+    .native-subagent-backdrop,
+    .inbox-sheet-backdrop,
+    .goal-sheet-backdrop,
+    .dot-overlay,
+    .archive-overlay
+  ) {
+    top: var(--visual-viewport-offset-top, 0px);
+    right: 0;
+    bottom: auto;
+    left: 0;
+    height: var(--visual-viewport-height, 100dvh);
+    max-height: var(--visual-viewport-height, 100dvh);
+    overflow: hidden;
   }
 
-  :root:root :is(.modal-overlay, .workspace-modal-overlay, .goal-dialog-backdrop, .quota-modal-backdrop):not(.image-lightbox-overlay) > :is(.modal, .workspace-modal, .goal-dialog, .quota-modal) {
+  :root:root :is(.modal-overlay, .workspace-modal-overlay, .goal-dialog-backdrop, .quota-modal-backdrop, .tam-overlay):not(.image-lightbox-overlay) > :is(.modal, .workspace-modal, .goal-dialog, .quota-modal, .tam-modal) {
+    max-height: calc(var(--visual-viewport-height, 100dvh) - 32px - env(safe-area-inset-top, 0px));
+  }
+
+  :root:root :is(.inbox-sheet, .native-subagent-window, .dot-panel, .archive-panel) {
+    max-height: var(--visual-viewport-height, 100dvh);
+  }
+
+  :root:root .subagent-sheet {
+    max-height: min(70dvh, calc(var(--visual-viewport-height, 100dvh) - 24px - env(safe-area-inset-top, 0px)));
+  }
+
+  :root:root .dot-panel {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  :root:root .dot-panel .dot-panel__body {
+    flex: 1 0 auto;
+    min-height: auto;
+    overflow-y: visible;
+  }
+
+  :root:root dialog[open]:not(.attachment-preview-dialog) {
+    inset: var(--visual-viewport-offset-top, 0px) 0 calc(100dvh - var(--visual-viewport-offset-top, 0px) - var(--visual-viewport-height, 100dvh)) 0;
+    max-height: calc(var(--visual-viewport-height, 100dvh) - 32px - env(safe-area-inset-top, 0px));
+  }
+
+  /* Keep focus on editable fields inside modals from triggering iOS Safari auto-zoom. */
+  :root:root :is(.modal, .workspace-modal, .goal-dialog, .quota-modal, .tam-modal, .task-detail-panel, .subagent-sheet, .native-subagent-window, .inbox-sheet, .goal-status-details--sheet, .dot-panel, .archive-panel, dialog[open]) :is(input:not([type='checkbox']):not([type='radio']):not([type='file']):not([type='hidden']), textarea, select) {
+    font-size: max(var(--ch-font-size-md), 16px);
+  }
+}
+
+/* Phones: dialogs become bottom sheets that respect the safe area. */
+@media (max-width: 640px) {
+  :root:root :is(.modal-overlay, .workspace-modal-overlay, .goal-dialog-backdrop, .quota-modal-backdrop, .tam-overlay):not(.image-lightbox-overlay) {
+    align-items: flex-end;
+    place-items: end center;
+    padding: 0;
+  }
+
+  :root:root :is(.modal-overlay, .workspace-modal-overlay, .goal-dialog-backdrop, .quota-modal-backdrop, .tam-overlay):not(.image-lightbox-overlay) > :is(.modal, .workspace-modal, .goal-dialog, .quota-modal, .tam-modal) {
     width: 100%;
     min-width: 0;
     max-width: 100%;
@@ -86,13 +143,15 @@ dialog::backdrop {
 
   /* The Goal dialog's own footer owns the bottom inset (it draws the safe-area
      band and the actions); padding it here too left an empty strip below it. */
-  :root:root :is(.modal-overlay, .workspace-modal-overlay):not(.image-lightbox-overlay) > :is(.modal, .workspace-modal) {
+  :root:root :is(.modal-overlay, .workspace-modal-overlay, .tam-overlay):not(.image-lightbox-overlay) > :is(.modal, .workspace-modal, .tam-modal) {
     padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
   }
 
   :root:root dialog.restart-dialog[open],
-  :root:root dialog.bot-pool[open] {
-    inset: auto 0 var(--keyboard-height, 0px) 0;
+  :root:root dialog.bot-pool[open],
+  :root:root dialog.appearance-dialog[open],
+  :root:root .goal-status-details--sheet {
+    inset: auto 0 calc(100dvh - var(--visual-viewport-offset-top, 0px) - var(--visual-viewport-height, 100dvh)) 0;
     margin: 0;
     width: 100%;
     max-width: 100%;
@@ -106,10 +165,17 @@ dialog::backdrop {
     max-height: calc(var(--visual-viewport-height, 100dvh) - 24px - env(safe-area-inset-top, 0px));
     overflow-y: auto;
   }
+  :root:root dialog.appearance-dialog[open] {
+    max-height: calc(var(--visual-viewport-height, 100dvh) - 16px - env(safe-area-inset-top, 0px));
+  }
+  :root:root .goal-status-details--sheet {
+    max-height: min(85dvh, calc(var(--visual-viewport-height, 100dvh) - 24px - env(safe-area-inset-top, 0px)));
+  }
   /* Full-height sheet: bound it by the visual viewport too, or lifting it above
      the keyboard would push its header and close button off the top. */
   :root:root dialog.bot-pool[open] {
     height: calc(var(--visual-viewport-height, 100dvh) - 24px - env(safe-area-inset-top, 0px));
+    max-height: calc(var(--visual-viewport-height, 100dvh) - 24px - env(safe-area-inset-top, 0px));
   }
 
   /* Anchored popovers must not overflow the narrow viewport. */

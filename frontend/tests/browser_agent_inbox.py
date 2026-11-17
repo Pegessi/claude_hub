@@ -373,6 +373,51 @@ async def main(browser_run: BrowserRun) -> None:
             assert (
                 await sheet.get_by_role("button", name="Done").count() == 1
             ), "phone sheet keeps its Done control"
+            # Expand the reply-capable row on mobile: verify 16px input font-size (no iOS zoom)
+            # and verify soft-keyboard visualViewport shrink+pan keeps the sheet and focused
+            # reply input inside the visible upper viewport.
+            await sheet.locator('.inbox-group[data-group="needs"] .inbox-row-expand').nth(1).click()
+            mobile_reply = sheet.locator(".inbox-reply-input").first
+            await expect(mobile_reply).to_be_visible()
+            inbox_kb_probe = await page.evaluate("""async () => {
+              const vv = window.visualViewport;
+              Object.defineProperty(vv, 'height', { configurable: true, get: () => 420 });
+              Object.defineProperty(vv, 'offsetTop', { configurable: true, get: () => 60 });
+              try {
+                const sheetEl = document.querySelector('[data-testid="inbox-sheet"]');
+                const input = sheetEl.querySelector('.inbox-reply-input');
+                input.focus({ preventScroll: true });
+                input.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+                vv.dispatchEvent(new Event('resize'));
+                vv.dispatchEvent(new Event('scroll'));
+                await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+                const sr = sheetEl.getBoundingClientRect();
+                const ir = input.getBoundingClientRect();
+                const hit = document.elementFromPoint(ir.left + ir.width / 2, ir.top + ir.height / 2);
+                return {
+                  fontSize: getComputedStyle(input).fontSize,
+                  sheetTop: sr.top,
+                  sheetBottom: sr.bottom,
+                  inputTop: ir.top,
+                  inputBottom: ir.bottom,
+                  hit: Boolean(hit && (input === hit || input.contains(hit))),
+                };
+              } finally {
+                delete vv.height;
+                delete vv.offsetTop;
+                vv.dispatchEvent(new Event('resize'));
+                vv.dispatchEvent(new Event('scroll'));
+                await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+              }
+            }""")
+            assert inbox_kb_probe["fontSize"] == "16px", inbox_kb_probe
+            assert abs(inbox_kb_probe["sheetTop"] - 60) <= 1, inbox_kb_probe
+            assert abs(inbox_kb_probe["sheetBottom"] - 480) <= 1, inbox_kb_probe
+            assert inbox_kb_probe["inputTop"] >= inbox_kb_probe["sheetTop"] - 1, inbox_kb_probe
+            assert (
+                inbox_kb_probe["inputBottom"] <= inbox_kb_probe["sheetBottom"] + 1
+            ), inbox_kb_probe
+            assert inbox_kb_probe["hit"], inbox_kb_probe
             await page.keyboard.press("Escape")
             await expect(sheet).to_have_count(0)
 

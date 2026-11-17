@@ -522,7 +522,7 @@ const {
   flex-direction: column;
 
   /* Keep the whole modal within a single viewport height. */
-  max-height: calc(100dvh - 32px);
+  max-height: calc(var(--visual-viewport-height, 100dvh) - 32px);
   overflow: hidden;
 }
 
@@ -628,6 +628,15 @@ const {
 
 <style scoped>
 @media (max-width: 760px) {
+  .agent-manager-modal {
+    overflow-y: auto;
+  }
+
+  .agent-manager-modal .agent-create-form {
+    flex: 1 0 auto;
+    overflow-y: visible;
+  }
+
   .agent-manager-modal .modal-field-row {
     flex-direction: column;
     gap: 0;

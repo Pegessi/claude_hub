@@ -788,7 +788,7 @@ watch(visible, open => {
 
   .workspace-modal {
     width: 100%;
-    max-height: calc(100dvh - 20px);
+    max-height: calc(var(--visual-viewport-height, 100dvh) - 20px);
     padding: 14px;
     border-radius: var(--ch-radius-md);
   }

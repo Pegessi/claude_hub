@@ -229,7 +229,7 @@ const decisionHint = computed(() => {
 
 .task-detail-panel {
   width: min(1040px, calc(100vw - 48px));
-  max-height: min(860px, calc(100dvh - 48px));
+  max-height: min(860px, calc(var(--visual-viewport-height, 100dvh) - 48px));
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -434,8 +434,8 @@ const decisionHint = computed(() => {
 
   .task-detail-panel {
     width: 100%;
-    height: 100dvh;
-    max-height: 100dvh;
+    height: var(--visual-viewport-height, 100dvh);
+    max-height: var(--visual-viewport-height, 100dvh);
     border-radius: 0;
     border-left: 0;
     border-right: 0;

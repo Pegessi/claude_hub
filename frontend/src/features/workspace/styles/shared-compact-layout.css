@@ -6,18 +6,16 @@
 
   .workspace-modal {
     width: 100%;
-    max-height: calc(100dvh - 20px);
+    max-height: calc(var(--visual-viewport-height, 100dvh) - 20px);
     padding: 14px;
     border-radius: var(--ch-radius-md);
   }
 
-  .path-input-row,
-  .file-browser-path {
+  .path-input-row {
     flex-wrap: wrap;
   }
 
-  .path-input-row .tool-button,
-  .file-browser-path input {
+  .path-input-row .tool-button {
     flex: 1 1 100%;
   }
 

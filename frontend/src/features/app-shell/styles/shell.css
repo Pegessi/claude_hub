@@ -290,7 +290,7 @@
      otherwise the whole header moves above the visible screen. Fixed avoids
      document scroll contributing a second shift. Do not transform the shell:
      its dialogs must retain their normal fixed-position containing block. */
-  .app[data-mode='terminal'][data-active-pane-chat='true'] {
+  .app {
     position: fixed;
     top: var(--visual-viewport-offset-top, 0px);
     left: 0;

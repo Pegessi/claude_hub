@@ -487,6 +487,10 @@
     height: 36px;
   }
 
+  .inbox-reply-input {
+    font-size: max(var(--ch-font-size-md), 16px);
+  }
+
   .inbox-scope button {
     height: 32px;
   }

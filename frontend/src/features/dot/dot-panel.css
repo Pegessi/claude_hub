@@ -12,11 +12,21 @@
   bottom: 0;
   width: 420px;
   max-width: 100vw;
+  max-height: var(--visual-viewport-height, 100dvh);
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--ch-color-surface);
   border-left: 1px solid var(--ch-color-border);
   box-shadow: var(--ch-shadow-soft);
+}
+
+.dot-panel__header,
+.dot-identity,
+.dot-patrol,
+.dot-panel__tabs {
+  flex-shrink: 0;
 }
 
 .dot-panel__header {
@@ -421,6 +431,9 @@
   }
 
   .dot-panel__body {
+    flex: 1 0 auto;
+    min-height: auto;
+    overflow-y: visible;
     padding: 10px 8px;
   }
 
