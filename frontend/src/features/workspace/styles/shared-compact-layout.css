@@ -11,13 +11,11 @@
     border-radius: var(--ch-radius-md);
   }
 
-  .path-input-row,
-  .file-browser-path {
+  .path-input-row {
     flex-wrap: wrap;
   }
 
-  .path-input-row .tool-button,
-  .file-browser-path input {
+  .path-input-row .tool-button {
     flex: 1 1 100%;
   }
 

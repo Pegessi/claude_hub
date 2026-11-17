@@ -158,6 +158,8 @@ test('shared visualViewport modal layout anchors mobile overlays to visualViewpo
   assert.match(agentDirectory, /height:\s*min\(620px,\s*calc\(var\(--visual-viewport-height, 100dvh\)\s*-\s*32px\)\)/)
   assert.match(agentDirectory, /\.file-browser-list \{[\s\S]*?min-height:\s*0;/)
   assert.doesNotMatch(agentDirectory, /\.file-browser-list \{[\s\S]*?min-height:\s*160px;/)
+  assert.match(agentDirectory, /@media \(max-width: 760px\)[\s\S]*?\.file-browser-path \{[\s\S]*?flex-wrap:\s*nowrap;/)
+  assert.doesNotMatch(sharedCompact, /\.file-browser-path input \{\s*flex:\s*1 1 100%;/)
   assert.match(taskDetail, /height:\s*var\(--visual-viewport-height, 100dvh\)/)
   assert.match(envPresetManager, /max-height:\s*calc\(var\(--visual-viewport-height, 100dvh\)\s*-\s*20px\)/)
   assert.match(feishuBotCss, /height:\s*calc\(var\(--visual-viewport-height, 100dvh\)\s*-\s*16px\)/)

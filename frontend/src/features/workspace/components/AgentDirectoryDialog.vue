@@ -268,6 +268,37 @@ const {
 @media (max-width: 760px) {
   .file-browser-modal {
     height: calc(var(--visual-viewport-height, 100dvh) - 20px);
+    padding: 12px;
+  }
+
+  .file-browser-header {
+    margin-bottom: 8px;
+  }
+
+  .file-browser-path {
+    flex-wrap: nowrap;
+    gap: 6px;
+    padding: 6px;
+  }
+
+  .file-browser-path input {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .path-nav-button {
+    flex-shrink: 0;
+    padding: 0 8px;
+    font-size: 12px;
+  }
+
+  .file-browser-list {
+    margin-top: 8px;
+  }
+
+  .modal-actions {
+    margin-top: 8px;
+    padding-top: 8px;
   }
 }
 </style>
