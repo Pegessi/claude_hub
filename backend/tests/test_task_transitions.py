@@ -80,14 +80,16 @@ def test_non_status_updates_never_need_an_edge() -> None:
     assert apply_task_update(task, {"title": "Renamed"}, cause="anything").title == "Renamed"
 
 
-def test_done_is_only_reopened_by_handoff_or_the_feedback_reaper() -> None:
-    reopeners = {
-        cause
-        for (current, _target), causes in task_transitions.TRANSITIONS.items()
-        if current == WorkspaceTaskStatus.DONE
-        for cause in causes
+def test_done_is_only_reopened_by_handoff_the_feedback_reaper_or_archive_reopen() -> None:
+    done_edges = {
+        target: set(causes)
+        for (current, target), causes in task_transitions.TRANSITIONS.items()
+        if current == WorkspaceTaskStatus.DONE and causes
     }
-    assert reopeners == {"handoff", "feedback_reaper"}
+    assert done_edges == {
+        WorkspaceTaskStatus.TODO: {"handoff", "feedback_reaper"},
+        WorkspaceTaskStatus.WORKING: {"archive_reopen"},
+    }
 
 
 def _literal_task_status_writes(path: Path) -> list[str]:
