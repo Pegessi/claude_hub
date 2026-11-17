@@ -153,6 +153,27 @@ async def callback(request: Request, code: str, state: str = "") -> Response:
 
     # Create session
     session = create_session(user, access_token, refresh_token)
+    if user.open_id and settings.feishu_app_id:
+        try:
+            from ..auth.feishu import pop_user_access_token_metadata
+            from ..services.feishu_user_token_store import get_feishu_user_token_store
+
+            token_meta = pop_user_access_token_metadata(access_token)
+            get_feishu_user_token_store().save_oauth_token(
+                open_id=user.open_id,
+                user_name=user.name or "",
+                app_id=settings.feishu_app_id,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                expires_in=token_meta.get("expires_in"),
+                refresh_expires_in=token_meta.get("refresh_expires_in"),
+                scope=str(token_meta.get("scope") or ""),
+                app_secret=settings.feishu_app_secret or "",
+            )
+        except Exception:
+            logger.warning(
+                "Failed to persist Feishu OAuth user token for /ai command", exc_info=True
+            )
 
     # Set session cookie and redirect to frontend
     response = RedirectResponse(url=settings.frontend_url)

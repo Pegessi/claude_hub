@@ -192,3 +192,102 @@ test('renaming or toggling enabled on a Bot with active channels omits mode from
   assert.equal('mode' in payload, false)
   assert.equal(state.success, 'Bot details saved.')
 })
+
+test('Personal /ai Assistant panel loads status, updates provider/model/reasoning_effort, and imports ~/.lark-cli token', async t => {
+  const h = harness(t)
+  const aiStatus = (overrides = {}) => ({
+    config: {
+      enabled: false,
+      prefix: '/ai',
+      owner_open_id: 'ou_owner_1',
+      app_id: 'cli_app_1',
+      provider: 'claude',
+      model: 'doubao-seed-2.0-code',
+      reasoning_effort: 'high',
+      cwd: '',
+      watch_chats: ['oc_chat_1'],
+      poll_interval_seconds: 15,
+      max_active_chats: 10,
+      max_context_messages: 20,
+      ack_emoji: 'OnIt',
+      done_emoji: 'DONE',
+      footer: '> 🤖 AI 代答，仅供参考',
+      reply_in_thread: true,
+      ...overrides,
+    },
+    token_status: {
+      has_token: true,
+      open_id: 'ou_owner_1',
+      user_name: 'Owner',
+      app_id: 'cli_app_1',
+      source: 'lark_cli',
+      expires_at: 9999999999,
+      token_expired: false,
+      granted_scopes: ['im:message', 'im:message.send_as_user'],
+      required_send_scope: 'im:message.send_as_user',
+      can_send_as_user: true,
+      can_react_as_user: true,
+      can_read_messages: true,
+      missing_required_scopes: [],
+      missing_recommended_scopes: [],
+      auth_login_command: 'lark-cli auth login --scope "im:message.send_as_user"',
+      remediation_steps: [],
+    },
+    poller_status: {
+      running: false,
+      poll_count: 0,
+      last_poll_at: null,
+      last_error: null,
+      commands_detected: 0,
+      commands_succeeded: 0,
+      commands_failed: 0,
+      skipped_count: 0,
+      watermarks_count: 0,
+    },
+    capabilities: {
+      providers: ['claude', 'codex', 'traex', 'maso', 'cursor', 'antigravity'],
+      reasoning_efforts: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+      provider_models: {
+        claude: ['doubao-seed-2.0-code'],
+        codex: ['gpt-5.4', 'o3'],
+        maso: ['gemini-4-argon_reasoning_high'],
+      },
+    },
+    imported: true,
+  })
+  h.setTransport(async (url, init = {}) => {
+    if (String(url).includes('/api/feishu/bot/ai-command/import-token')) {
+      return response(aiStatus({ enabled: true }))
+    }
+    if (String(url).includes('/api/feishu/bot/ai-command')) {
+      if (init.method === 'PATCH') {
+        const body = JSON.parse(init.body)
+        return response(aiStatus(body))
+      }
+      return response(aiStatus())
+    }
+    return response(h.server())
+  })
+  const state = await mountSettings(t, h)
+  await state.openAiCommand()
+  assert.equal(state.aiCommandActive, true)
+  assert.equal(state.aiEdit.provider, 'claude')
+  assert.equal(state.aiWatchChatsText, 'oc_chat_1')
+
+  state.onAiProviderChange('codex')
+  assert.equal(state.aiEdit.provider, 'codex')
+  assert.equal(state.aiEdit.model, 'gpt-5.4')
+  state.aiEdit.enabled = true
+  state.aiEdit.reasoning_effort = 'xhigh'
+  state.aiWatchChatsText = 'oc_chat_1, oc_chat_2'
+
+  assert.equal(await state.saveAiCommand(), true)
+  assert.equal(state.aiEdit.provider, 'codex')
+  assert.equal(state.aiEdit.model, 'gpt-5.4')
+  assert.equal(state.aiEdit.reasoning_effort, 'xhigh')
+  assert.deepEqual([...state.aiEdit.watch_chats], ['oc_chat_1', 'oc_chat_2'])
+  assert.equal(state.success, '/ai command settings saved.')
+
+  assert.equal(await state.importAiToken(), true)
+  assert.match(state.success, /Imported user token/)
+})

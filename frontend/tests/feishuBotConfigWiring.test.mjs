@@ -18,4 +18,8 @@ test('Bot pool dialog retains shared controls and explicit selection and secret 
   }
   assert.ok(dialog.includes(':aria-pressed="bot.bot_id === selectedId"'))
   assert.ok(dialog.includes("? 'set' : 'missing'"))
+  assert.ok(dialog.includes('data-testid="feishu-ai-command-panel"'))
+  assert.ok(dialog.includes('data-testid="feishu-ai-provider-select"'))
+  assert.ok(dialog.includes('data-testid="feishu-ai-model-input"'))
+  assert.ok(dialog.includes('data-testid="feishu-ai-effort-select"'))
 })

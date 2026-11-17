@@ -132,10 +132,239 @@
         <div class="bot-sidebar__hint">
           One Bot can connect to one Chat at a time.
         </div>
+        <div class="bot-sidebar__title">
+          <span>Personal /ai</span>
+        </div>
+        <button
+          :disabled="busy"
+          type="button"
+          class="bot-row"
+          :class="{ selected: aiCommandActive }"
+          :aria-pressed="aiCommandActive"
+          data-testid="feishu-ai-command-nav"
+          @click="openAiCommand"
+        >
+          <span
+            class="bot-row__mark"
+            aria-hidden="true"
+          >AI</span>
+          <span class="bot-row__content">
+            <span class="bot-row__name">
+              <strong>/ai Assistant</strong>
+            </span>
+            <span class="bot-row__meta">{{ aiEdit.enabled ? `${aiEdit.provider} · ${aiEdit.model || 'default'}` : 'Personal account reply' }}</span>
+          </span>
+          <svg
+            class="bot-row__chevron"
+            viewBox="0 0 16 16"
+            aria-hidden="true"
+          ><path d="m6 3 5 5-5 5" /></svg>
+        </button>
       </aside>
 
       <section
-        v-if="selected"
+        v-if="aiCommandActive"
+        class="detail"
+        data-testid="feishu-ai-command-panel"
+      >
+        <div class="detail-header">
+          <div>
+            <div class="detail-title-row">
+              <h3>Personal /ai Assistant</h3>
+              <span
+                class="status-chip"
+                :class="aiEdit.enabled ? 'is-enabled' : 'is-disabled'"
+              >{{ aiEdit.enabled ? 'Enabled' : 'Disabled' }}</span>
+              <span
+                v-if="aiTokenStatus"
+                class="source-chip"
+              >{{ aiTokenStatus.can_send_as_user ? 'Scope ready' : 'Missing send_as_user' }}</span>
+            </div>
+            <p>Detect your own <code>{{ aiEdit.prefix || '/ai' }} &lt;instruction&gt;</code> messages, react <code>{{ aiEdit.ack_emoji }}</code> &rarr; <code>{{ aiEdit.done_emoji }}</code>, and reply as your personal Feishu account.</p>
+          </div>
+        </div>
+
+        <div
+          class="connection-card"
+          :data-state="aiTokenStatus?.can_send_as_user ? 'connected' : 'failed'"
+          data-testid="feishu-ai-token-card"
+        >
+          <span
+            class="connection-card__dot"
+            aria-hidden="true"
+          />
+          <div>
+            <span class="section-eyebrow">User access token &amp; scope check</span>
+            <strong>{{ aiTokenSummary }}</strong>
+            <small v-if="aiTokenStatus?.auth_login_command && !aiTokenStatus?.can_send_as_user">
+              Run: <code>{{ aiTokenStatus.auth_login_command }}</code>
+            </small>
+            <div class="section-actions">
+              <button
+                type="button"
+                class="ch-btn"
+                :disabled="busy"
+                data-testid="feishu-ai-import-token-btn"
+                @click="importAiToken"
+              >
+                Import ~/.lark-cli Token
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <form
+          class="settings-section"
+          data-testid="feishu-ai-settings-form"
+          @submit.prevent="saveAiCommand"
+        >
+          <div class="section-heading">
+            <div>
+              <h4>Default execution agent</h4>
+              <p>Choose the default provider, model, and thinking intensity for <code>/ai</code> commands. Override per message with <code>/ai --provider &hellip; --model &hellip; --effort &hellip;</code>.</p>
+            </div>
+          </div>
+
+          <label class="toggle-row">
+            <span>
+              <strong>Enable /ai personal command</strong>
+              <small>Poll active/watched chats and hook WebSocket events for your own <code>/ai</code> instructions.</small>
+            </span>
+            <input
+              v-model="aiEdit.enabled"
+              :disabled="busy"
+              type="checkbox"
+              data-testid="feishu-ai-enabled-toggle"
+            >
+          </label>
+
+          <label class="field">
+            <span class="field-label">Provider</span>
+            <select
+              v-model="aiEdit.provider"
+              class="ch-input"
+              :disabled="busy"
+              data-testid="feishu-ai-provider-select"
+              @change="onAiProviderChange(($event.target as HTMLSelectElement).value as FeishuAiCommandProvider)"
+            >
+              <option
+                v-for="prov in aiProviderOptions"
+                :key="prov"
+                :value="prov"
+              >{{ prov }}</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Model</span>
+            <input
+              v-model="aiEdit.model"
+              class="ch-input"
+              :disabled="busy"
+              placeholder="e.g. doubao-seed-2.0-code, gpt-5.4, gemini-4-argon_reasoning_high"
+              data-testid="feishu-ai-model-input"
+            >
+          </label>
+
+          <label class="field">
+            <span class="field-label">Thinking intensity (reasoning_effort)</span>
+            <select
+              v-model="aiEdit.reasoning_effort"
+              class="ch-input"
+              :disabled="busy"
+              data-testid="feishu-ai-effort-select"
+              @change="aiEdit.reasoning_effort = ($event.target as HTMLSelectElement).value as FeishuAiCommandReasoningEffort"
+            >
+              <option value="">Provider default</option>
+              <option
+                v-for="eff in aiEffortOptions"
+                :key="eff"
+                :value="eff"
+              >{{ eff }}</option>
+            </select>
+          </label>
+
+          <div class="create-grid">
+            <label class="field">
+              <span class="field-label">Command prefix</span>
+              <input
+                v-model="aiEdit.prefix"
+                class="ch-input"
+                :disabled="busy"
+                placeholder="/ai"
+              >
+            </label>
+            <label class="field">
+              <span class="field-label">Owner Open ID</span>
+              <input
+                v-model="aiEdit.owner_open_id"
+                class="ch-input"
+                :disabled="busy"
+                placeholder="ou_…"
+              >
+            </label>
+            <label class="field">
+              <span class="field-label">Ack reaction</span>
+              <input
+                v-model="aiEdit.ack_emoji"
+                class="ch-input"
+                :disabled="busy"
+                placeholder="OnIt"
+              >
+            </label>
+            <label class="field">
+              <span class="field-label">Done reaction</span>
+              <input
+                v-model="aiEdit.done_emoji"
+                class="ch-input"
+                :disabled="busy"
+                placeholder="DONE"
+              >
+            </label>
+            <label class="field">
+              <span class="field-label">Poll interval (seconds)</span>
+              <input
+                v-model.number="aiEdit.poll_interval_seconds"
+                class="ch-input"
+                type="number"
+                min="2"
+                max="300"
+                :disabled="busy"
+              >
+            </label>
+            <label class="field">
+              <span class="field-label">Watched chats (comma-separated oc_…)</span>
+              <input
+                v-model="aiWatchChatsText"
+                class="ch-input"
+                :disabled="busy"
+                placeholder="oc_xxx, oc_yyy (blank = active chats)"
+              >
+            </label>
+            <label class="field field--wide">
+              <span class="field-label">Reply footer</span>
+              <input
+                v-model="aiEdit.footer"
+                class="ch-input"
+                :disabled="busy"
+              >
+            </label>
+          </div>
+
+          <div class="section-actions section-actions--end">
+            <button
+              class="ch-btn ch-btn--primary"
+              :disabled="busy"
+              data-testid="feishu-ai-save-btn"
+            >
+              {{ busy ? 'Saving…' : 'Save /ai settings' }}
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <section
+        v-else-if="selected"
         class="detail"
       >
         <div class="detail-header">
@@ -485,7 +714,11 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useFeishuBotPoolStore } from '@/stores/feishuBotPoolStore'
 import {
   botBindings, botMode, createFeishuBot, deleteFeishuBot, FeishuBotRequestError,
-  replaceFeishuBotSecrets, updateFeishuBot,
+  importFeishuAiCommandToken, loadFeishuAiCommand, replaceFeishuBotSecrets,
+  updateFeishuAiCommand, updateFeishuBot,
+  type FeishuAiCommandCapabilities, type FeishuAiCommandConfig,
+  type FeishuAiCommandProvider, type FeishuAiCommandReasoningEffort,
+  type FeishuAiCommandStatusResponse, type FeishuAiCommandTokenStatus,
   type FeishuBotMode, type FeishuBotPoolResponse, type FeishuBotSummary,
 } from '@/utils/feishuBotConfig'
 
@@ -499,6 +732,45 @@ const confirmDelete = ref(false), editName = ref(''), editEnabled = ref(true)
 const editMode = ref<FeishuBotMode>('single')
 const appSecret = ref('')
 const create = reactive({ name: '', app_id: '', app_secret: '' })
+const aiCommandActive = ref(false)
+const aiTokenStatus = ref<FeishuAiCommandTokenStatus | null>(null)
+const aiCapabilities = ref<FeishuAiCommandCapabilities | null>(null)
+const aiWatchChatsText = ref('')
+const aiEdit = reactive<FeishuAiCommandConfig>({
+  enabled: false,
+  prefix: '/ai',
+  owner_open_id: '',
+  app_id: '',
+  provider: 'claude',
+  model: 'doubao-seed-2.0-code',
+  reasoning_effort: 'high',
+  cwd: '',
+  watch_chats: [],
+  poll_interval_seconds: 15,
+  max_active_chats: 10,
+  max_context_messages: 20,
+  ack_emoji: 'OnIt',
+  done_emoji: 'DONE',
+  footer: '> 🤖 AI 代答，仅供参考',
+  reply_in_thread: true,
+})
+const aiProviderOptions = computed<FeishuAiCommandProvider[]>(() => (
+  aiCapabilities.value?.providers?.length
+    ? aiCapabilities.value.providers
+    : ['claude', 'codex', 'traex', 'maso', 'cursor', 'antigravity']
+))
+const aiEffortOptions = computed<string[]>(() => (
+  aiCapabilities.value?.reasoning_efforts?.length
+    ? aiCapabilities.value.reasoning_efforts
+    : ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']
+))
+const aiTokenSummary = computed(() => {
+  const tok = aiTokenStatus.value
+  if (!tok || !tok.has_token) return 'No user token loaded yet (sign in via Feishu OAuth or import ~/.lark-cli token)'
+  const userLabel = tok.user_name ? `${tok.user_name} (${tok.open_id})` : (tok.open_id ?? 'User')
+  if (tok.can_send_as_user) return `Ready: ${userLabel} · im:message.send_as_user granted`
+  return `${userLabel} · Missing required scope: ${tok.missing_required_scopes.join(', ') || 'im:message.send_as_user'}`
+})
 const selected = computed(() => store.botById(selectedId.value))
 const selectedBindings = computed(() => botBindings(selected.value))
 const selectedMode = computed(() => botMode(selected.value))
@@ -606,15 +878,110 @@ function selectMode(mode: FeishuBotMode) {
 function select(bot: FeishuBotSummary) {
   if (busy.value || closed) return
   viewEpoch += 1
+  aiCommandActive.value = false
   fillSelection(bot)
   error.value = null; success.value = null
 }
 function beginCreate() {
   if (busy.value || closed) return
   viewEpoch += 1
+  aiCommandActive.value = false
   fillSelection(null)
   clearCreate()
   error.value = null; success.value = null
+}
+function applyAiCommandStatus(payload: FeishuAiCommandStatusResponse) {
+  if (payload.config) {
+    Object.assign(aiEdit, payload.config)
+    aiWatchChatsText.value = (payload.config.watch_chats ?? []).join(', ')
+  }
+  if (payload.token_status) aiTokenStatus.value = payload.token_status
+  if (payload.capabilities) aiCapabilities.value = payload.capabilities
+}
+function onAiProviderChange(nextProvider: FeishuAiCommandProvider) {
+  aiEdit.provider = nextProvider
+  const suggestions = aiCapabilities.value?.provider_models?.[nextProvider]
+  if (suggestions && suggestions.length > 0) {
+    aiEdit.model = suggestions[0]
+  }
+}
+async function openAiCommand() {
+  if (busy.value || closed) return
+  const current = ++viewEpoch
+  fillSelection(null)
+  aiCommandActive.value = true
+  error.value = null; success.value = null
+  try {
+    const status = await loadFeishuAiCommand()
+    if (closed || current !== viewEpoch) return
+    applyAiCommandStatus(status)
+  } catch (cause) {
+    if (closed || current !== viewEpoch) return
+    const reqErr = cause instanceof FeishuBotRequestError ? cause : null
+    error.value = reqErr?.message ?? 'Failed to load /ai command settings.'
+  }
+}
+async function saveAiCommand() {
+  if (busy.value || closed) return false
+  const current = ++viewEpoch
+  busy.value = true; error.value = null; success.value = null
+  const watchChats = aiWatchChatsText.value
+    .split(/[\s,]+/)
+    .map(item => item.trim())
+    .filter(Boolean)
+  try {
+    const next = await updateFeishuAiCommand({
+      enabled: aiEdit.enabled,
+      prefix: aiEdit.prefix.trim() || '/ai',
+      owner_open_id: aiEdit.owner_open_id.trim(),
+      app_id: aiEdit.app_id.trim(),
+      provider: aiEdit.provider,
+      model: aiEdit.model.trim(),
+      reasoning_effort: aiEdit.reasoning_effort,
+      cwd: aiEdit.cwd.trim(),
+      watch_chats: watchChats,
+      poll_interval_seconds: Number(aiEdit.poll_interval_seconds) || 15,
+      ack_emoji: aiEdit.ack_emoji.trim() || 'OnIt',
+      done_emoji: aiEdit.done_emoji.trim() || 'DONE',
+      footer: aiEdit.footer.trim() || '> 🤖 AI 代答，仅供参考',
+      reply_in_thread: aiEdit.reply_in_thread,
+    })
+    if (closed || current !== viewEpoch) return false
+    applyAiCommandStatus(next)
+    success.value = '/ai command settings saved.'
+    return true
+  } catch (cause) {
+    if (closed || current !== viewEpoch) return false
+    const reqErr = cause instanceof FeishuBotRequestError ? cause : null
+    error.value = reqErr?.message ?? 'Failed to save /ai command settings.'
+    return false
+  } finally {
+    if (current === viewEpoch) busy.value = false
+  }
+}
+async function importAiToken() {
+  if (busy.value || closed) return false
+  const current = ++viewEpoch
+  busy.value = true; error.value = null; success.value = null
+  try {
+    const next = await importFeishuAiCommandToken({
+      app_id: aiEdit.app_id.trim() || undefined,
+      open_id: aiEdit.owner_open_id.trim() || undefined,
+    })
+    if (closed || current !== viewEpoch) return false
+    applyAiCommandStatus(next)
+    success.value = next.imported
+      ? 'Imported user token from ~/.lark-cli.'
+      : 'No matching ~/.lark-cli user token found.'
+    return true
+  } catch (cause) {
+    if (closed || current !== viewEpoch) return false
+    const reqErr = cause instanceof FeishuBotRequestError ? cause : null
+    error.value = reqErr?.message ?? 'Failed to import ~/.lark-cli token.'
+    return false
+  } finally {
+    if (current === viewEpoch) busy.value = false
+  }
 }
 async function refresh() {
   if (busy.value || closed) return
@@ -623,6 +990,14 @@ async function refresh() {
   const value = await store.refresh()
   if (closed || current !== viewEpoch || !value) return
   if (selectedId.value) fillSelection(store.botById(selectedId.value))
+  if (aiCommandActive.value) {
+    try {
+      const status = await loadFeishuAiCommand()
+      if (!closed && current === viewEpoch) applyAiCommandStatus(status)
+    } catch {
+      // Keep pool refresh result visible even if /ai status reload fails
+    }
+  }
 }
 function shouldReconcile(cause: unknown): boolean {
   if (!(cause instanceof FeishuBotRequestError)) return true

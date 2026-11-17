@@ -7,6 +7,40 @@
 
 ## Released
 
+### feat(feishu): personal `/ai <instruction>` command workflow with configurable provider, model, and reasoning_effort
+
+- Add `FeishuUserTokenStore` (`services/feishu_user_token_store.py`) and
+  `FeishuUserClient` (`services/feishu_user_client.py`):
+  - Persist Feishu OAuth user tokens at rest with AES-256-GCM encryption
+    (`0600` key file) and automatically save tokens on Hub OAuth callback
+    (`api/auth.py`).
+  - Import local `lark-cli` user tokens from `~/.lark-cli/config.json` and the
+    AES-256-GCM encrypted keychain under `~/.local/share/lark-cli/` (plus scope
+    cache fallback).
+  - Reuse `FeishuBotClient`, `create_feishu_http_client`, and
+    `FeishuBotRemoteError` for user-identity messages, replies, reactions, and
+    chat/thread history reads, and provide `preflight_scopes()` with actionable
+    `lark-cli auth login --scope "im:message.send_as_user ..."` remediation.
+- Add `FeishuAiCommandService` (`services/feishu_ai_command.py`),
+  `FeishuAiPoller` (`services/feishu_ai_poller.py`), and WebSocket event hook
+  (`api/feishu_bot.py`):
+  - Detect the owner's own `/ai <instruction>` messages (ignoring bots, other
+    senders, and messages already bearing the AI reply footer) via both
+    active-chat polling (with per-chat watermarks) and WebSocket events when a
+    Hub Bot is present in the chat.
+  - Reuse `FeishuMessageDedupStore` for at-most-once message claiming, fetch
+    thread/chat context, extract Codebase MR (`group/project!1234`), commit SHA,
+    and Feishu doc references, manage the two-stage user reaction lifecycle
+    (`OnIt` -> delete -> `DONE`), post interim (`正在派 Subagent...`) and final
+    replies as the user (`msg_type="post"`) with the `> 🤖 AI 代答，仅供参考`
+    footer, and dispatch turns via `dispatch_tab_chat_and_wait`.
+- Expose configurable default execution agent (`provider`, `model`,
+  `reasoning_effort`, plus inline `/ai --provider ... --model ... --effort ...`
+  overrides) across `/api/feishu/bot/ai-command` (`api/routes/feishu_bot/ai_command.py`),
+  `claude-hub feishu ai-command status|configure|dry-run|auth-guide`
+  (`cli/commands/feishu.py`), and the Personal `/ai` Assistant panel in
+  `FeishuBotSettingsDialog.vue`.
+
 ### fix(agent-stream): keep chat turn text whole — a 128,000-char budget instead of the 4,000-char field cap
 
 - Widen `services/agent_stream/redaction.py` into a per-field budget: the chat
