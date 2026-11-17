@@ -291,16 +291,14 @@ class InputMixin(SessionState):
             #    _run_epoch are never overwritten — unless the caller steers.
             if transport.turn_in_flight:
                 active_meta = self._active_turn_metadata or {}
+                active_origin = active_meta.get("origin")
                 active_id = self._active_turn_id or ""
-                active_summary = self._active_turn_summary.lstrip()
-                is_bg_active = (
-                    bool(active_meta.get("yields_to_user"))
-                    or active_meta.get("origin")
-                    in {"scheduled_task", "hub_message", "wake", "tidy"}
-                    or active_id.startswith(
-                        ("scheduled-", "wake-", "tidy-", "dot-wake", "dot-tidy", "hub-message-")
+                is_bg_active = bool(active_meta.get("yields_to_user")) or (
+                    active_origin not in {"web", "feishu", "hub_message"}
+                    and (
+                        active_origin in {"scheduled_task", "wake", "tidy"}
+                        or (active_origin is None and active_id.startswith("scheduled-"))
                     )
-                    or active_summary.startswith(("[Dot wake]", "[Dot tidy]"))
                 )
                 incoming_origin = (turn_metadata or {}).get("origin")
                 if delivery == "steer" or (is_bg_active and incoming_origin == "feishu"):
