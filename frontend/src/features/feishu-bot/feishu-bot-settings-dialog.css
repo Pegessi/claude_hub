@@ -1,6 +1,6 @@
 .bot-pool {
   width: min(940px, calc(100vw - 32px));
-  height: min(720px, calc(100dvh - 32px));
+  height: min(720px, calc(var(--visual-viewport-height, 100dvh) - 32px));
   max-width: none;
   max-height: none;
   box-sizing: border-box;
@@ -267,7 +267,7 @@
 .button-icon { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; }
 
 @media (max-width: 700px) {
-  .bot-pool { width: calc(100vw - 16px); height: calc(100dvh - 16px); }
+  .bot-pool { width: calc(100vw - 16px); height: calc(var(--visual-viewport-height, 100dvh) - 16px); }
   .bot-pool__header { min-height: 64px; padding: 10px 12px; }
   .bot-pool__heading p { display: none; }
   .bot-pool__mark { width: 32px; height: 32px; flex-basis: 32px; }

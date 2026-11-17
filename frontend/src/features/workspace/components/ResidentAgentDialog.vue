@@ -456,7 +456,7 @@ const {
   /* Fixed target height clamped to the viewport: the modal does not
      shrink-to-fit when Enable is unchecked vs checked. Width stays the
      inherited min(520px, 100%) from .workspace-modal. */
-  height: min(720px, calc(100dvh - 32px));
+  height: min(720px, calc(var(--visual-viewport-height, 100dvh) - 32px));
   overflow: hidden;
 }
 

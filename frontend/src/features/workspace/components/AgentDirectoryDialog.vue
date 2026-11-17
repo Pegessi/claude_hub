@@ -148,7 +148,7 @@ const {
 <style scoped>
 .file-browser-modal {
   width: min(720px, 100%);
-  height: min(70dvh, 620px);
+  height: min(620px, calc(var(--visual-viewport-height, 100dvh) - 32px));
   display: flex;
   flex-direction: column;
 }

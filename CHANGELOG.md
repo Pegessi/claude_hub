@@ -7,6 +7,33 @@
 
 ## Released
 
+### fix(mobile-ui): anchor modal dialogs to visualViewport and scroll focused inputs above sticky footers
+
+- Anchor mobile/coarse-pointer modal and sheet overlays (`.modal-overlay`,
+  `.workspace-modal-overlay`, `.goal-dialog-backdrop`, `.quota-modal-backdrop`,
+  `.task-detail-overlay`, `.tam-overlay`, `.subagent-sheet-backdrop`,
+  `.native-subagent-backdrop`, `.inbox-sheet-backdrop`, `.goal-sheet-backdrop`,
+  `.dot-overlay`, `.archive-overlay`, and native `<dialog>[open]`) directly to
+  `top: var(--visual-viewport-offset-top, 0px)` and
+  `height: var(--visual-viewport-height, 100dvh)` with `overflow: hidden` in
+  `overlays.css`, replacing the `inset: 0` + `padding: 0 0 var(--keyboard-height, 0px)`
+  bottom-sheet rule that subtracted keyboard height a second time when the
+  layout viewport resized or left `.modal` pushed above `visualViewport.offsetTop`
+  over a blank blurred padding gap.
+- Broaden `.app` `position: fixed; top: var(--visual-viewport-offset-top, 0px)`
+  in `shell.css` across all modes on `@media (max-width: 768px), (any-pointer: coarse)`
+  (not only Chat panes), and replace remaining raw `100dvh` / `70dvh` modal height
+  bounds in `TaskCreateDialog.vue`, `shared-compact-layout.css`,
+  `ResidentAgentDialog.vue`, `AgentDirectoryDialog.vue`, `TaskDetailDialog.vue`,
+  `EnvPresetManager.vue`, `feishu-bot-settings-dialog.css`, `AppearanceDialog.vue`,
+  and `tab-actions-menu.css` with `--visual-viewport-height`.
+- Enforce `font-size: max(var(--ch-font-size-md), 16px)` on editable fields inside
+  modals on mobile/coarse viewports so focusing an input never triggers iOS Safari
+  auto-zoom, and add `syncModalViewportScroll` / `computeModalFieldScrollDelta`
+  (`frontend/src/utils/mobileInputFocus.ts`, wired into `App.vue` `visualViewport`
+  and `focusin` listeners) so focused inputs inside modals scroll into the visible
+  region above sticky action footers while keeping window and backdrop scroll at `0`.
+
 ### fix(mobile-ui): suppress automatic text-input focus on mobile/coarse-pointer dialogs and model picker
 
 - Add `shouldAutoFocusTextInput` (`frontend/src/utils/mobileInputFocus.ts`) and gate

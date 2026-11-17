@@ -1182,6 +1182,58 @@ async def main(browser_run: BrowserRun) -> None:
         assert cancel_box is not None
         assert cancel_box["y"] >= 0, cancel_box
         assert cancel_box["y"] + cancel_box["height"] <= 844, cancel_box
+        # Simulate soft-keyboard opening on 390x844 (visualViewport height 420px + offsetTop 70px)
+        # while focusing the description textarea in TaskCreateDialog. Verify the modal stays
+        # bounded within [70, 490] and scrolls the focused textarea above the sticky footer.
+        kb_task_create = await page.evaluate("""async () => {
+          const root = document.documentElement;
+          root.style.setProperty('--visual-viewport-offset-top', '70px');
+          root.style.setProperty('--visual-viewport-height', '420px');
+          const vv = window.visualViewport;
+          const origHeight = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(vv), 'height');
+          const origOffsetTop = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(vv), 'offsetTop');
+          Object.defineProperty(vv, 'height', { configurable: true, get: () => 420 });
+          Object.defineProperty(vv, 'offsetTop', { configurable: true, get: () => 70 });
+          try {
+            const { syncModalViewportScroll } = await import('/src/utils/mobileInputFocus.ts');
+            const modal = document.querySelector('.workspace-modal');
+            modal.scrollTop = 0;
+            const textarea = modal.querySelector('textarea');
+            textarea.focus({ preventScroll: true });
+            syncModalViewportScroll(document, window);
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const overlay = document.querySelector('.workspace-modal-overlay');
+            const overlayRect = overlay.getBoundingClientRect();
+            const modalRect = modal.getBoundingClientRect();
+            const fieldRect = textarea.getBoundingClientRect();
+            const footerRect = modal.querySelector('.modal-actions').getBoundingClientRect();
+            return {
+              overlayTop: overlayRect.top,
+              overlayBottom: overlayRect.bottom,
+              modalTop: modalRect.top,
+              modalBottom: modalRect.bottom,
+              fieldTop: fieldRect.top,
+              fieldBottom: fieldRect.bottom,
+              footerTop: footerRect.top,
+              fontSize: parseFloat(getComputedStyle(textarea).fontSize),
+            };
+          } finally {
+            if (origHeight) Object.defineProperty(vv, 'height', origHeight);
+            else delete vv.height;
+            if (origOffsetTop) Object.defineProperty(vv, 'offsetTop', origOffsetTop);
+            else delete vv.offsetTop;
+            root.style.removeProperty('--visual-viewport-offset-top');
+            root.style.removeProperty('--visual-viewport-height');
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          }
+        }""")
+        assert abs(kb_task_create["overlayTop"] - 70) <= 1, kb_task_create
+        assert abs(kb_task_create["overlayBottom"] - 490) <= 1, kb_task_create
+        assert kb_task_create["modalTop"] >= 70 - 1, kb_task_create
+        assert kb_task_create["modalBottom"] <= 490 + 1, kb_task_create
+        assert kb_task_create["fieldTop"] >= kb_task_create["modalTop"] - 1, kb_task_create
+        assert kb_task_create["fieldBottom"] <= kb_task_create["footerTop"] + 1, kb_task_create
+        assert kb_task_create["fontSize"] >= 16, kb_task_create
         await page.screenshot(path=str(output / "task-create-mobile.png"))
         await cancel.click()
         await expect(page.get_by_role("heading", name="Add Task")).to_have_count(0)

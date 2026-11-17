@@ -122,3 +122,138 @@ test('mobile modal overlays stay above MobileControls and do not override bottom
 
   assert.match(overlaysCss, /@media \(max-width: 640px\)[\s\S]*?max-height: calc\(var\(--visual-viewport-height, 100dvh\)/)
 })
+
+test('shared visualViewport modal layout anchors mobile overlays to visualViewport top/height without keyboard padding double-subtraction', () => {
+  const overlaysCss = read('../src/features/app-shell/styles/overlays.css')
+  const shellCss = read('../src/features/app-shell/styles/shell.css')
+  const appVue = read('../src/App.vue')
+  const taskCreate = read('../src/components/TaskCreateDialog.vue')
+  const sharedCompact = read('../src/features/workspace/styles/shared-compact-layout.css')
+  const residentAgent = read('../src/features/workspace/components/ResidentAgentDialog.vue')
+  const agentDirectory = read('../src/features/workspace/components/AgentDirectoryDialog.vue')
+  const taskDetail = read('../src/features/workspace/components/TaskDetailDialog.vue')
+  const envPresetManager = read('../src/components/EnvPresetManager.vue')
+  const feishuBotCss = read('../src/features/feishu-bot/feishu-bot-settings-dialog.css')
+
+  // App shell anchors .app to visualViewport offsetTop across all modes on mobile/coarse viewports.
+  assert.match(
+    shellCss,
+    /@media \(max-width: 768px\), \(any-pointer: coarse\)[\s\S]*?\.app\s*\{\s*position:\s*fixed;\s*top:\s*var\(--visual-viewport-offset-top, 0px\);/,
+  )
+
+  // overlays.css anchors modal/sheet backdrops to visualViewport offsetTop + height with overflow: hidden
+  // and does not use padding: 0 0 var(--keyboard-height, 0px) on backdrop overlays.
+  assert.match(
+    overlaysCss,
+    /@media \(max-width: 768px\), \(any-pointer: coarse\)[\s\S]*?top:\s*var\(--visual-viewport-offset-top, 0px\);[\s\S]*?height:\s*var\(--visual-viewport-height, 100dvh\);[\s\S]*?max-height:\s*var\(--visual-viewport-height, 100dvh\);[\s\S]*?overflow:\s*hidden;/,
+  )
+  assert.doesNotMatch(overlaysCss, /padding:\s*0\s+0\s+var\(--keyboard-height/)
+
+  // Modal dialogs use --visual-viewport-height instead of raw 100dvh / 70dvh so they shrink above the keyboard.
+  assert.match(taskCreate, /max-height:\s*calc\(var\(--visual-viewport-height, 100dvh\)\s*-\s*20px\)/)
+  assert.match(sharedCompact, /max-height:\s*calc\(var\(--visual-viewport-height, 100dvh\)\s*-\s*20px\)/)
+  assert.match(residentAgent, /height:\s*min\(720px,\s*calc\(var\(--visual-viewport-height, 100dvh\)\s*-\s*32px\)\)/)
+  assert.match(agentDirectory, /height:\s*min\(620px,\s*calc\(var\(--visual-viewport-height, 100dvh\)\s*-\s*32px\)\)/)
+  assert.match(taskDetail, /height:\s*var\(--visual-viewport-height, 100dvh\)/)
+  assert.match(envPresetManager, /max-height:\s*calc\(var\(--visual-viewport-height, 100dvh\)\s*-\s*20px\)/)
+  assert.match(feishuBotCss, /height:\s*calc\(var\(--visual-viewport-height, 100dvh\)\s*-\s*16px\)/)
+
+  // App.vue syncs modal viewport scroll on visualViewport updates and focusin inside modals.
+  assert.match(appVue, /syncModalViewportScroll\(document,\s*window\)/)
+  assert.match(appVue, /document\.addEventListener\('focusin',\s*handleModalFocusIn\)/)
+})
+
+test('computeModalFieldScrollDelta and syncModalViewportScroll keep focused modal inputs visible above sticky footers', async () => {
+  const { computeModalFieldScrollDelta, syncModalViewportScroll } = await loadMobileInputFocus()
+
+  // Input already visible between header and sticky footer produces zero scroll delta.
+  assert.equal(
+    computeModalFieldScrollDelta(
+      { top: 140, bottom: 180, height: 40 },
+      { top: 60, bottom: 440 },
+      [{ top: 380, bottom: 440, height: 60 }],
+    ),
+    0,
+  )
+
+  // Input obscured by sticky footer at the bottom of a shrunk modal scrolls down so it clears the footer + padding.
+  const downDelta = computeModalFieldScrollDelta(
+    { top: 360, bottom: 410, height: 50 },
+    { top: 60, bottom: 440 },
+    [{ top: 380, bottom: 440, height: 60 }],
+  )
+  assert.ok(downDelta > 0, `expected positive scroll delta, got ${downDelta}`)
+  assert.equal(downDelta, 410 - (380 - 12))
+
+  // Input clipped above the top of the modal container scrolls up.
+  const upDelta = computeModalFieldScrollDelta(
+    { top: 40, bottom: 80, height: 40 },
+    { top: 60, bottom: 440 },
+    [],
+  )
+  assert.ok(upDelta < 0, `expected negative scroll delta, got ${upDelta}`)
+  assert.equal(upDelta, 40 - (60 + 12))
+
+  // syncModalViewportScroll resets overlay/window scroll and scrolls the modal container for a focused input.
+  const FakeHTMLElement = class {}
+  const origHTMLElement = globalThis.HTMLElement
+  globalThis.HTMLElement = FakeHTMLElement
+  try {
+    const overlay = Object.assign(new FakeHTMLElement(), { scrollTop: 95, scrollLeft: 12 })
+    const stickyFooter = Object.assign(new FakeHTMLElement(), {
+      contains: () => false,
+      getBoundingClientRect: () => ({ top: 380, bottom: 440, height: 60 }),
+    })
+    const modal = Object.assign(new FakeHTMLElement(), {
+      scrollTop: 20,
+      scrollHeight: 720,
+      clientHeight: 380,
+      parentElement: overlay,
+      querySelectorAll: () => [stickyFooter],
+      getBoundingClientRect: () => ({ top: 60, bottom: 440, height: 380 }),
+    })
+    const input = Object.assign(new FakeHTMLElement(), {
+      parentElement: modal,
+      matches: () => true,
+      closest: () => modal,
+      getBoundingClientRect: () => ({ top: 370, bottom: 410, height: 40 }),
+    })
+
+    let scrolledTo = null
+    const fakeWin = {
+      innerWidth: 390,
+      scrollY: 120,
+      scrollX: 0,
+      scrollTo: (x, y) => {
+        scrolledTo = [x, y]
+      },
+      matchMedia: () => ({ matches: true }),
+      getComputedStyle: el => {
+        if (el === modal) return { overflowY: 'auto', position: 'relative' }
+        if (el === stickyFooter) return { overflowY: 'visible', position: 'sticky' }
+        return { overflowY: 'visible', position: 'static' }
+      },
+    }
+    const fakeDoc = {
+      activeElement: input,
+      documentElement: { scrollTop: 45, scrollLeft: 0 },
+      body: { scrollTop: 30, scrollLeft: 0 },
+      querySelectorAll: selector => {
+        if (selector.includes('.modal-overlay')) return [overlay]
+        return [modal]
+      },
+    }
+
+    const didScroll = syncModalViewportScroll(fakeDoc, fakeWin)
+    assert.equal(didScroll, true)
+    assert.equal(overlay.scrollTop, 0)
+    assert.equal(overlay.scrollLeft, 0)
+    assert.deepEqual(scrolledTo, [0, 0])
+    assert.equal(fakeDoc.documentElement.scrollTop, 0)
+    assert.equal(fakeDoc.body.scrollTop, 0)
+    assert.equal(modal.scrollTop, 20 + (410 - (380 - 12)))
+  } finally {
+    globalThis.HTMLElement = origHTMLElement
+  }
+})
+

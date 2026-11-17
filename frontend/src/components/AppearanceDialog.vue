@@ -176,7 +176,7 @@ onUnmounted(() => {
 .theme-preview-content b { align-self: flex-end; width: 58%; height: 15px; border-radius: 4px; background: var(--ch-color-message-user-bg); }
 .appearance-footer { padding: 14px 24px; flex-shrink: 0; border-top: 1px solid var(--ch-color-border-muted); color: var(--ch-color-text-muted); font-size: 12px; line-height: 1.5; }
 @media (max-width: 640px) {
-  .appearance-dialog[open] { inset: auto 0 0; margin: 0; width: 100%; max-height: calc(100dvh - 16px - env(safe-area-inset-top, 0px)); border-radius: var(--ch-radius-overlay) var(--ch-radius-overlay) 0 0; border-width: 1px 0 0; box-shadow: var(--ch-shadow-sheet); animation-name: ch-sheet-in; }
+  .appearance-dialog[open] { inset: auto 0 calc(100dvh - var(--visual-viewport-offset-top, 0px) - var(--visual-viewport-height, 100dvh)) 0; margin: 0; width: 100%; max-height: calc(var(--visual-viewport-height, 100dvh) - 16px - env(safe-area-inset-top, 0px)); border-radius: var(--ch-radius-overlay) var(--ch-radius-overlay) 0 0; border-width: 1px 0 0; box-shadow: var(--ch-shadow-sheet); animation-name: ch-sheet-in; }
   .appearance-header { padding: 20px 20px 16px; }
   .appearance-header h2 { font-size: 19px; }
   .appearance-body { padding: 0 20px 20px; }
