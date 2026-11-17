@@ -257,9 +257,9 @@ class TerminalAgentStatus(BaseModel):
     last_reply_at: Optional[datetime] = None
     # Newest durable turn/reply timestamp for honest sidebar age rendering.
     last_activity_at: Optional[datetime] = None
-    # Non-blocking delivery review projection when the session is idle/waiting
-    # with an open Codebase MR or an active Workspace Task review.
-    review_state: Optional[Literal["mr_open", "task_review"]] = None
+    # Non-blocking review projection when the session is idle/waiting:
+    # open Codebase MR, active Workspace Task review, or active within the last 4 hours.
+    review_state: Optional[Literal["mr_open", "task_review", "recent_active"]] = None
     review_label: Optional[str] = None
     review_url: Optional[str] = None
 
