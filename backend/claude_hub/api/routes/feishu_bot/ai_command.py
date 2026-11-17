@@ -64,8 +64,8 @@ def build_ai_command_status_payload(
     *,
     auto_import_lark_cli: bool = True,
 ) -> dict[str, Any]:
-    cfg = service.get_config()
-    preflight = service.preflight_status(auto_import_lark_cli=auto_import_lark_cli)
+    cfg = service.get_config(auto_import_lark_cli=auto_import_lark_cli)
+    preflight = service.preflight_status(auto_import_lark_cli=auto_import_lark_cli, config=cfg)
     return {
         "config": cfg.to_dict(),
         "token_status": preflight.to_dict(),
@@ -80,8 +80,9 @@ async def abuild_ai_command_status_payload(
     *,
     auto_import_lark_cli: bool = True,
 ) -> dict[str, Any]:
-    cfg = await service.aget_config(auto_import_lark_cli=auto_import_lark_cli)
-    preflight = await service.apreflight_status(auto_import_lark_cli=auto_import_lark_cli)
+    cfg, preflight = await service.aget_config_and_preflight(
+        auto_import_lark_cli=auto_import_lark_cli
+    )
     return {
         "config": cfg.to_dict(),
         "token_status": preflight.to_dict(),
@@ -192,7 +193,7 @@ def register_ai_command_routes(
             dry_run=True,
             seeded_context=seeded,
         )
-        preflight = await service.apreflight_status()
+        preflight = await service.apreflight_status(config=cfg)
         return {
             "dry_run": result.to_dict(),
             "token_status": preflight.to_dict(),
