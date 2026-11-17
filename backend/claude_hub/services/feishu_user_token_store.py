@@ -1,14 +1,8 @@
 """Persistent Feishu user access token store and ``~/.lark-cli`` loader.
 
-Supports two token sources for the personal ``/ai`` assistant workflow:
-1. Hub's own Feishu OAuth login callback (``backend/claude_hub/api/auth.py``).
-2. Local ``lark-cli`` credentials (``~/.lark-cli/config.json`` plus the
-   AES-256-GCM keychain store under ``~/.local/share/lark-cli/`` or plaintext
-   JSON token files).
-
-Tokens are persisted in the Hub SQLite document store under
-``secrets/feishu_user_tokens.json`` with sensitive fields encrypted at rest
-using a ``0600`` per-runtime-home master key file.
+Supports Hub's Feishu OAuth login callback and local ``lark-cli`` credentials
+(``~/.lark-cli/config.json`` plus AES-256-GCM keychain or plaintext JSON token
+files), persisted in Hub SQLite storage with ``0600`` key encryption at rest.
 """
 
 from __future__ import annotations
@@ -50,27 +44,18 @@ def _normalize_epoch_seconds(value: Any) -> float:
         return 0.0
     if isinstance(value, (int, float)):
         ts = float(value)
-        if ts > 100_000_000_000:
-            ts /= 1000.0
-        return max(0.0, ts)
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return 0.0
+        return max(0.0, ts / 1000.0 if ts > 100_000_000_000 else ts)
+    if isinstance(value, str) and (stripped := value.strip()):
         try:
             ts = float(stripped)
-            if ts > 100_000_000_000:
-                ts /= 1000.0
-            return max(0.0, ts)
+            return max(0.0, ts / 1000.0 if ts > 100_000_000_000 else ts)
         except ValueError:
-            pass
-        try:
             from datetime import datetime
 
-            parsed = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
-            return max(0.0, parsed.timestamp())
-        except ValueError:
-            return 0.0
+            try:
+                return max(0.0, datetime.fromisoformat(stripped.replace("Z", "+00:00")).timestamp())
+            except ValueError:
+                return 0.0
     return 0.0
 
 
@@ -509,7 +494,10 @@ class FeishuUserTokenStore:
                 if isinstance(refresh_expires_in, (int, float)) and refresh_expires_in > 0
                 else (existing.refresh_expires_at if existing else 0.0)
             )
-            merged_scope = _normalize_scopes(scope) or (existing.scope if existing else "")
+            same_token = existing is not None and existing.access_token == access_token
+            merged_scope = _normalize_scopes(scope) or (
+                existing.scope if (same_token and existing is not None) else ""
+            )
             merged_secret = app_secret.strip() or (existing.app_secret if existing else "")
             next_gen = (existing.generation + 1) if existing is not None else 1
             record = FeishuUserTokenRecord(
@@ -985,7 +973,9 @@ class FeishuUserTokenStore:
                         except OSError:
                             pass
 
-    def _merge_imported_record(self, candidate: FeishuUserTokenRecord) -> FeishuUserTokenRecord:
+    def _merge_imported_record(
+        self, candidate: FeishuUserTokenRecord, *, has_explicit_scope: bool = False
+    ) -> FeishuUserTokenRecord:
         """Persist an imported ``lark-cli`` token without rolling back newer rotated credentials."""
         with self.refresh_lock(app_id=candidate.app_id, open_id=candidate.open_id):
             existing = self.get_token(open_id=candidate.open_id, app_id=candidate.app_id)
@@ -994,15 +984,19 @@ class FeishuUserTokenStore:
                 existing_fp = _credential_fingerprint(existing.access_token, existing.refresh_token)
                 # Same credential snapshot as currently active or previously imported before rotation
                 if cand_fp in {existing_fp, existing.imported_fingerprint}:
+                    same_active = cand_fp == existing_fp and existing.source == "lark_cli"
+                    merged_scope = (
+                        candidate.scope
+                        if (same_active and has_explicit_scope)
+                        else (existing.scope or candidate.scope)
+                    )
                     enriched = replace(
                         existing,
                         app_secret=existing.app_secret or candidate.app_secret,
                         user_name=existing.user_name or candidate.user_name,
-                        scope=existing.scope or candidate.scope,
+                        scope=merged_scope,
                     )
-                    if enriched != existing:
-                        return self.upsert_token(enriched)
-                    return existing
+                    return self.upsert_token(enriched) if enriched != existing else existing
                 # Never overwrite a newer rotated token with an older/equal expiry from lark-cli
                 if (
                     existing.expires_at > 0
@@ -1018,7 +1012,7 @@ class FeishuUserTokenStore:
                 candidate,
                 app_secret=candidate.app_secret or (existing.app_secret if existing else ""),
                 user_name=candidate.user_name or (existing.user_name if existing else ""),
-                scope=candidate.scope or (existing.scope if existing else ""),
+                scope=candidate.scope,
                 generation=next_gen,
                 imported_fingerprint=cand_fp,
                 updated_at=float(self._now()),
@@ -1315,9 +1309,13 @@ class FeishuUserTokenStore:
                 if not app_secret and isinstance(raw_meta_sec, str):
                     app_secret = raw_meta_sec.strip()
 
-                scope_str = (
-                    _normalize_scopes(token_obj.get("scope") or meta.get("scope")) or fallback_scope
+                raw_sc = (
+                    token_obj.get("scope")
+                    if token_obj.get("scope") is not None
+                    else meta.get("scope")
                 )
+                has_exp_enc_scope = raw_sc is not None
+                scope_str = _normalize_scopes(raw_sc) if has_exp_enc_scope else fallback_scope
                 record = FeishuUserTokenRecord(
                     open_id=str(token_obj.get("userOpenId") or c_uid).strip(),
                     app_id=str(token_obj.get("appId") or c_app).strip(),
@@ -1336,7 +1334,7 @@ class FeishuUserTokenStore:
                     updated_at=float(self._now()),
                     imported_fingerprint=_credential_fingerprint(access_token, refresh_token),
                 )
-                return self._merge_imported_record(record)
+                return self._merge_imported_record(record, has_explicit_scope=has_exp_enc_scope)
 
         # Fallback: plaintext token fields inside candidates
         for c_app, c_uid, c_name, meta in candidates:
@@ -1346,7 +1344,8 @@ class FeishuUserTokenStore:
             refresh_token = str(meta.get("refreshToken") or meta.get("refresh_token") or "").strip()
             raw_secret = meta.get("appSecret") or meta.get("app_secret")
             app_secret = raw_secret.strip() if isinstance(raw_secret, str) else ""
-            scope_str = _normalize_scopes(meta.get("scope")) or fallback_scope
+            has_exp_pt_scope = "scope" in meta and meta.get("scope") is not None
+            scope_str = _normalize_scopes(meta.get("scope")) if has_exp_pt_scope else fallback_scope
             record = FeishuUserTokenRecord(
                 open_id=c_uid,
                 app_id=c_app,
@@ -1365,7 +1364,7 @@ class FeishuUserTokenStore:
                 updated_at=float(self._now()),
                 imported_fingerprint=_credential_fingerprint(access_token, refresh_token),
             )
-            return self._merge_imported_record(record)
+            return self._merge_imported_record(record, has_explicit_scope=has_exp_pt_scope)
 
         return None
 
