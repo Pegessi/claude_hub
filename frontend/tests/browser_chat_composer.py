@@ -573,8 +573,20 @@ async def main(browser_run: BrowserRun) -> None:
 
             path = parsed.path
             method = request.method
-            if IPHONE_WEBKIT and method == "GET" and path == "/api/filesystem/list":
+            if method == "GET" and path == "/api/filesystem/list":
                 requested = parse_qs(parsed.query).get("path", ["/fixture"])[0]
+                items = (
+                    [
+                        {
+                            "name": f"folder-{idx:02d}",
+                            "path": f"{requested.rstrip('/')}/folder-{idx:02d}",
+                            "is_dir": True,
+                        }
+                        for idx in range(20)
+                    ]
+                    if state.get("populate_filesystem_dirs")
+                    else []
+                )
                 await route.fulfill(
                     status=200,
                     content_type="application/json",
@@ -582,7 +594,7 @@ async def main(browser_run: BrowserRun) -> None:
                         {
                             "current_path": requested,
                             "parent_path": "/",
-                            "items": [],
+                            "items": items,
                         }
                     ),
                 )
@@ -1449,6 +1461,73 @@ async def main(browser_run: BrowserRun) -> None:
         assert android_kb_state["nameTop"] >= android_kb_state["modalTop"] - 1, android_kb_state
         assert android_kb_state["nameBottom"] <= android_kb_state["footerTop"] + 1, android_kb_state
         await page.set_viewport_size({"width": 390, "height": 844})
+        # Also verify SessionCreator's nested directory picker (.file-browser-modal) with 20
+        # populated directories under a 340px keyboard visualViewport (offsetTop=70): the
+        # directory list must shrink above the sticky footer so wheel-scrolling to the bottom
+        # exposes the final directory (folder-19) for normal click navigation.
+        state["populate_filesystem_dirs"] = True
+        await page.locator(".modal").get_by_role("button", name="Browse", exact=True).click()
+        fb_modal = page.locator(".file-browser-modal")
+        await expect(fb_modal).to_be_visible()
+        await expect(fb_modal.locator(".file-item.is-dir")).to_have_count(20)
+        await fb_modal.locator(".current-path-input").focus()
+        await page.evaluate("""async () => {
+          const vv = window.visualViewport;
+          Object.defineProperty(vv, 'height', { configurable: true, get: () => 340 });
+          Object.defineProperty(vv, 'offsetTop', { configurable: true, get: () => 70 });
+          vv.dispatchEvent(new Event('resize'));
+          vv.dispatchEvent(new Event('scroll'));
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        }""")
+        try:
+            await fb_modal.locator(".file-browser-list").hover()
+            await page.mouse.wheel(0, 1200)
+            fb_kb_state = await page.evaluate("""async () => {
+              await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+              const modal = document.querySelector('.file-browser-modal');
+              const list = modal.querySelector('.file-browser-list');
+              const footer = modal.querySelector('.file-browser-footer');
+              const items = modal.querySelectorAll('.file-item.is-dir');
+              const last = items[items.length - 1];
+              const mr = modal.getBoundingClientRect();
+              const lr = list.getBoundingClientRect();
+              const fr = footer.getBoundingClientRect();
+              const ir = last.getBoundingClientRect();
+              const hit = document.elementFromPoint(ir.left + ir.width / 2, ir.top + ir.height / 2);
+              return {
+                modalTop: mr.top,
+                modalBottom: mr.bottom,
+                listTop: lr.top,
+                listBottom: lr.bottom,
+                listClientHeight: list.clientHeight,
+                listScrollTop: list.scrollTop,
+                footerTop: fr.top,
+                lastTop: ir.top,
+                lastBottom: ir.bottom,
+                lastHit: Boolean(hit && (last === hit || last.contains(hit))),
+              };
+            }""")
+            assert fb_kb_state["modalTop"] >= 70 - 1, fb_kb_state
+            assert abs(fb_kb_state["modalBottom"] - 410) <= 1, fb_kb_state
+            assert fb_kb_state["listBottom"] <= fb_kb_state["footerTop"] + 1, fb_kb_state
+            assert fb_kb_state["listScrollTop"] > 0, fb_kb_state
+            assert fb_kb_state["lastTop"] >= fb_kb_state["listTop"] - 1, fb_kb_state
+            assert fb_kb_state["lastBottom"] <= fb_kb_state["footerTop"] + 1, fb_kb_state
+            assert fb_kb_state["lastHit"], fb_kb_state
+            await fb_modal.locator(".file-item.is-dir").last.click()
+            await expect(fb_modal.locator(".current-path-input")).to_have_value("~/folder-19")
+        finally:
+            state["populate_filesystem_dirs"] = False
+            await page.evaluate("""async () => {
+              const vv = window.visualViewport;
+              delete vv.height;
+              delete vv.offsetTop;
+              vv.dispatchEvent(new Event('resize'));
+              vv.dispatchEvent(new Event('scroll'));
+              await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            }""")
+        await fb_modal.get_by_role("button", name="Cancel", exact=True).click()
+        await expect(fb_modal).to_have_count(0)
         await page.locator(".modal").get_by_role("button", name="Cancel", exact=True).click()
         await page.locator(f'.tab-bar .tab[data-tab-id="{TAB}"]').click()
         state["include_terminal_tab"] = False

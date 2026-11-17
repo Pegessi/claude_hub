@@ -115,6 +115,8 @@ test('mobile modal overlays stay above MobileControls and do not override bottom
   assert.doesNotMatch(mobileCreatorBlock, /align-items:\s*flex-start/)
   assert.doesNotMatch(mobileCreatorBlock, /\.modal\s*\{[^}]*max-height:\s*calc\(100dvh/)
   assert.match(mobileCreatorBlock, /\.file-browser-modal \{[\s\S]*?var\(--visual-viewport-height, 100dvh\)/)
+  assert.match(sessionCreatorCss, /\.file-browser-list \{[\s\S]*?min-height:\s*0;/)
+  assert.doesNotMatch(sessionCreatorCss, /\.file-browser-list \{[\s\S]*?min-height:\s*200px;/)
 
   const mobileCloseBlock = closeTabDialog.slice(closeTabDialog.indexOf('@media (max-width: 640px)'))
   assert.doesNotMatch(mobileCloseBlock, /align-items:\s*flex-start/)
@@ -154,6 +156,8 @@ test('shared visualViewport modal layout anchors mobile overlays to visualViewpo
   assert.match(sharedCompact, /max-height:\s*calc\(var\(--visual-viewport-height, 100dvh\)\s*-\s*20px\)/)
   assert.match(residentAgent, /height:\s*min\(720px,\s*calc\(var\(--visual-viewport-height, 100dvh\)\s*-\s*32px\)\)/)
   assert.match(agentDirectory, /height:\s*min\(620px,\s*calc\(var\(--visual-viewport-height, 100dvh\)\s*-\s*32px\)\)/)
+  assert.match(agentDirectory, /\.file-browser-list \{[\s\S]*?min-height:\s*0;/)
+  assert.doesNotMatch(agentDirectory, /\.file-browser-list \{[\s\S]*?min-height:\s*160px;/)
   assert.match(taskDetail, /height:\s*var\(--visual-viewport-height, 100dvh\)/)
   assert.match(envPresetManager, /max-height:\s*calc\(var\(--visual-viewport-height, 100dvh\)\s*-\s*20px\)/)
   assert.match(feishuBotCss, /height:\s*calc\(var\(--visual-viewport-height, 100dvh\)\s*-\s*16px\)/)
