@@ -201,7 +201,14 @@ def _is_background_turn(
     session: Optional[ManagedSession] = None,
     manager: Optional[TailerManager] = None,
 ) -> tuple[bool, bool]:
-    """Return ``(is_background, is_dot_system)`` for an active Chat turn."""
+    """Return ``(is_background, is_dot_system)`` for an active Chat turn.
+
+    Only trustworthy scheduled/system provenance (or explicit ``yields_to_user``
+    metadata) qualifies as a background turn. Ordinary user turns — including
+    ``origin="web"``, ``origin="feishu"``, and authenticated ``origin="hub_message"``
+    CLI messages — are never background even if their user-supplied text starts
+    with ``[Dot wake]`` or ``[Dot tidy]``.
+    """
     if not turn_id:
         return False, False
     from claude_hub.services import workspace_manager
@@ -211,6 +218,32 @@ def _is_background_turn(
     is_dot_tab = service.is_dot_tab(tab_id)
     if is_dot_tab and service.is_system_turn(turn_id):
         return True, True
+
+    tailer_meta: Optional[Dict[str, Any]] = None
+    if manager is not None and session is not None and hasattr(manager, "get_tailer"):
+        try:
+            tailer = manager.get_tailer(getattr(session, "id", ""))
+            if tailer is not None and getattr(tailer, "_active_turn_id", None) == turn_id:
+                raw_meta = getattr(tailer, "_active_turn_metadata", None)
+                if isinstance(raw_meta, dict):
+                    tailer_meta = raw_meta
+        except Exception:
+            pass
+
+    if tailer_meta is not None:
+        origin = tailer_meta.get("origin")
+        if bool(tailer_meta.get("yields_to_user")):
+            return True, is_dot_tab and (
+                service.is_system_schedule(tailer_meta.get("scheduled_task_id"))
+                or origin in {"wake", "tidy"}
+            )
+        if origin in {"web", "feishu", "hub_message"}:
+            return False, False
+        if origin in {"scheduled_task", "wake", "tidy"}:
+            return True, is_dot_tab and (
+                service.is_system_schedule(tailer_meta.get("scheduled_task_id"))
+                or origin in {"wake", "tidy"}
+            )
 
     runs = [
         run
@@ -240,33 +273,20 @@ def _is_background_turn(
         for item in list(get_inbox().messages.values()):
             if item.turn_id == turn_id and item.tab_id == tab_id:
                 meta = item.turn_metadata or {}
+                if bool(meta.get("yields_to_user")):
+                    return True, is_dot_tab and service.is_system_schedule(item.scheduled_task_id)
                 if (
                     item.scheduled_run_id is not None
                     or item.actor == "scheduler"
-                    or meta.get("origin") in {"scheduled_task", "hub_message", "wake", "tidy"}
-                    or bool(meta.get("yields_to_user"))
+                    or meta.get("origin") in {"scheduled_task", "wake", "tidy"}
                 ):
-                    return True, False
+                    return True, is_dot_tab and service.is_system_schedule(item.scheduled_task_id)
+                return False, False
     except Exception:
         pass
 
-    if manager is not None and session is not None and hasattr(manager, "get_tailer"):
-        try:
-            tailer = manager.get_tailer(getattr(session, "id", ""))
-            if tailer is not None and getattr(tailer, "_active_turn_id", None) == turn_id:
-                meta = getattr(tailer, "_active_turn_metadata", None) or {}
-                summary = str(getattr(tailer, "_active_turn_summary", "") or "").lstrip()
-                if (
-                    bool(meta.get("yields_to_user"))
-                    or meta.get("origin") in {"scheduled_task", "hub_message", "wake", "tidy"}
-                    or summary.startswith(("[Dot wake]", "[Dot tidy]"))
-                ):
-                    return True, is_dot_tab and summary.startswith(("[Dot wake]", "[Dot tidy]"))
-        except Exception:
-            pass
-
-    if turn_id.startswith(("scheduled-", "wake-", "tidy-", "dot-wake", "dot-tidy", "hub-message-")):
-        return True, is_dot_tab and turn_id.startswith(("wake-", "tidy-", "dot-wake", "dot-tidy"))
+    if turn_id.startswith("scheduled-"):
+        return True, False
 
     return False, False
 

@@ -786,9 +786,176 @@ async def test_atomic_send_lock_preempts_in_flight_background_turn_for_feishu_us
                 turn_metadata={"origin": "feishu"},
             )
         assert await manager.active_turn_id(session) == "feishu:msg-1"
+
+        # 4. Ordinary authenticated CLI message (origin=hub_message, hub-message-*) must NOT
+        # be treated as background or cancelled by preempt_background_turn or send_message.
+        await manager.cancel_turn(session, expected_turn_id="feishu:msg-1")
+        await manager.send_message(
+            session,
+            "[Dot wake] ordinary CLI message that happens to start with Dot prefix",
+            [],
+            "hub-message-cli-1",
+            turn_metadata={
+                "origin": "hub_message",
+                "hub_message": {"message_id": "cli-1", "actor": "local"},
+            },
+        )
+        assert await manager.active_turn_id(session) == "hub-message-cli-1"
+        from claude_hub.api.routes.agent_stream.dispatch import preempt_background_turn
+
+        await preempt_background_turn(tab.id, session, manager)
+        assert await manager.active_turn_id(session) == "hub-message-cli-1"
+        with pytest.raises(RuntimeError, match="turn is already in flight"):
+            await manager.send_message(
+                session,
+                "feishu arriving during CLI message",
+                [],
+                "feishu:msg-3",
+                turn_metadata={"origin": "feishu"},
+            )
+        assert await manager.active_turn_id(session) == "hub-message-cli-1"
+
+        # 5. Ordinary web user turn pasting "[Dot wake] ..." must NOT be treated as background.
+        await manager.cancel_turn(session, expected_turn_id="hub-message-cli-1")
+        await manager.send_message(
+            session,
+            "[Dot wake] pasted by web user",
+            [],
+            "4f2b8a91-0000-4000-8000-000000000001",
+            turn_metadata={"origin": "web"},
+        )
+        await preempt_background_turn(tab.id, session, manager)
+        assert await manager.active_turn_id(session) == "4f2b8a91-0000-4000-8000-000000000001"
+        with pytest.raises(RuntimeError, match="turn is already in flight"):
+            await manager.send_message(
+                session,
+                "feishu arriving during web user turn",
+                [],
+                "feishu:msg-4",
+                turn_metadata={"origin": "feishu"},
+            )
+        assert await manager.active_turn_id(session) == "4f2b8a91-0000-4000-8000-000000000001"
     finally:
         await manager.stop_all()
         stream_api._tab_tailer_manager = None
+
+
+async def test_scheduled_inbox_defers_while_feishu_batch_active_and_wakes_on_promotion(
+    dispatch: DispatchHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a Feishu batch is queued or active on a tab, scheduled chat_turn
+    preparation and inbox _submit defer with a waiting status, and _promote_tab_dispatch
+    wakes the inbox once the Feishu queue drains."""
+    from datetime import datetime, timezone
+
+    from claude_hub.models import AgentType, ScheduledTaskRunStatus, SessionKind
+    from claude_hub.models.chat_message import ChatMessageEnvelope
+    from claude_hub.services import goal_run, ttyd_manager, workspace_manager
+    from claude_hub.services.chat_message_inbox import InboxError, InboxTarget
+
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(messages_api, "_target", lambda tid: InboxTarget("inc-1", "conv-1", None))
+    monkeypatch.setattr(
+        stream_api,
+        "_terminal_tab_session_or_404",
+        lambda tid: SimpleNamespace(id=f"terminal-tab-{tid}", session_kind=SessionKind.CHAT),
+    )
+    run = SimpleNamespace(
+        id="sched-run-defer",
+        scheduled_task_id="sched-task-defer",
+        tab_id="tab",
+        client_turn_id="scheduled-sched-run-defer",
+        status=ScheduledTaskRunStatus.QUEUED,
+        waiting_reason=None,
+        error=None,
+        dispatch_attempts=0,
+        dispatched_at=None,
+        completed_at=None,
+        scheduled_for=now,
+        queued_at=now,
+    )
+    task = SimpleNamespace(
+        id="sched-task-defer",
+        tab_id="tab",
+        enabled=True,
+        run_at=None,
+        last_run_at=None,
+        next_run_at=now,
+        agent_type=AgentType.CLAUDE,
+    )
+    tab = SimpleNamespace(
+        id="tab",
+        session_kind=SessionKind.CHAT,
+        workspace_role=None,
+        agent_type=AgentType.CLAUDE,
+        archived=False,
+        created_at=now,
+        target=SimpleNamespace(value="local"),
+        cwd="/tmp",
+        env={},
+        chat_mode=SimpleNamespace(value="default"),
+        cursor_transport="native",
+        agent_session_id="conv-1",
+        agent_session_id_verified=True,
+    )
+    monkeypatch.setattr(workspace_manager, "scheduled_task_runs", {run.id: run})
+    monkeypatch.setattr(workspace_manager, "scheduled_tasks", {task.id: task})
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda tid: tab if tid == "tab" else None)
+    monkeypatch.setattr(
+        goal_run,
+        "get_goal_manager",
+        lambda: SimpleNamespace(
+            current=lambda tid: None,
+            refresh_current=AsyncMock(return_value=None),
+        ),
+    )
+
+    envelope = ChatMessageEnvelope(
+        message_id=run.id,
+        call_id=run.id,
+        tab_id="tab",
+        turn_id=run.client_turn_id,
+        state="queued",
+        created_at=now,
+        updated_at=now,
+        status_url="",
+        principal="scheduler",
+        actor="scheduler",
+        incarnation="inc-1",
+        fingerprint=run.id,
+        message="[Scheduled Task] check",
+        sequence=1,
+        attempts=0,
+        scheduled_run_id=run.id,
+        scheduled_task_id=task.id,
+        turn_metadata={"origin": "scheduled_task"},
+    )
+
+    woken: list[bool] = []
+    fake_inbox = SimpleNamespace(
+        questions={},
+        wake=lambda: woken.append(True),
+        cancel_scheduled=lambda *_a, **_kw: None,
+    )
+    monkeypatch.setattr(messages_api, "_inbox", fake_inbox)
+
+    # Reserve a Feishu message so feishu_dispatch_in_progress("tab") is True.
+    item = dispatch.reserve("hello")
+    queue = bot_api._tab_dispatch_queues["tab"]
+    assert bot_api.feishu_dispatch_in_progress("tab")
+
+    reason = await workspace_manager._prepare_scheduled_intent(envelope)
+    assert reason == "waiting for the current Chat response"
+
+    with pytest.raises(InboxError) as exc_info:
+        await messages_api._submit(envelope, lambda: None)
+    assert exc_info.value.status == 409
+
+    # Once the Feishu batch finishes and queue drains, _promote_tab_dispatch wakes the inbox.
+    assert await dispatch.run(item, queue) == "completed"
+    assert not bot_api.feishu_dispatch_in_progress("tab")
+    assert woken, "inbox.wake() must be called when Feishu dispatch queue drains"
 
 
 async def test_v3_dispatch_metadata_reconstructs_exact_provider_text(dispatch):
