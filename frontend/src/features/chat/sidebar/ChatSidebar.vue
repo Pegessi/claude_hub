@@ -87,19 +87,19 @@
         >
           <button
             type="button"
-            :class="['chat-sidebar__view-btn', { active: groupByMode === 'status' }]"
-            :aria-pressed="groupByMode === 'status'"
-            @click="setGroupByMode('status')"
-          >
-            Status
-          </button>
-          <button
-            type="button"
             :class="['chat-sidebar__view-btn', { active: groupByMode === 'cwd' }]"
             :aria-pressed="groupByMode === 'cwd'"
             @click="setGroupByMode('cwd')"
           >
             Folders
+          </button>
+          <button
+            type="button"
+            :class="['chat-sidebar__view-btn', { active: groupByMode === 'status' }]"
+            :aria-pressed="groupByMode === 'status'"
+            @click="setGroupByMode('status')"
+          >
+            Status
           </button>
         </div>
         <div class="chat-sidebar__search">
@@ -373,24 +373,9 @@ const {
   getTabActivityTime,
 } = useTabStatus(agentStatuses)
 
-const SIDEBAR_GROUP_MODE_KEY = 'claude_hub_chat_sidebar_group_by'
-function readInitialGroupByMode(): 'status' | 'cwd' {
-  try {
-    const stored = typeof localStorage !== 'undefined' ? localStorage.getItem(SIDEBAR_GROUP_MODE_KEY) : null
-    if (stored === 'cwd' || stored === 'status') return stored
-  } catch {
-    // Ignore storage access errors.
-  }
-  return 'status'
-}
-const groupByMode = ref<'status' | 'cwd'>(readInitialGroupByMode())
-function setGroupByMode(next: 'status' | 'cwd') {
+const groupByMode = ref<'cwd' | 'status'>('cwd')
+function setGroupByMode(next: 'cwd' | 'status') {
   groupByMode.value = next
-  try {
-    if (typeof localStorage !== 'undefined') localStorage.setItem(SIDEBAR_GROUP_MODE_KEY, next)
-  } catch {
-    // Ignore storage access errors.
-  }
 }
 
 const statusesByTabId = computed<Record<string, TerminalAgentStatus | undefined>>(() => {
