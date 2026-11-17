@@ -305,7 +305,7 @@ async def test_long_answer_split_image_link_is_retained_before_truncated_complet
 ) -> None:
     from claude_hub.api.agent_stream import _terminal_tab_session_or_404
     from claude_hub.models import AgentStreamEvent
-    from claude_hub.services.agent_stream.redaction import redact_event
+    from claude_hub.services.agent_stream.redaction import MAX_CHAT_TEXT_CHARS, redact_event
     from claude_hub.services.agent_stream.registry import get_adapter_for_session
     from claude_hub.services.agent_stream.tailer import SessionTailer
 
@@ -316,7 +316,12 @@ async def test_long_answer_split_image_link_is_retained_before_truncated_complet
     assert adapter is not None
     tailer = SessionTailer(session.workspace_id, session.id, adapter, lambda: session)
     tailer._is_live = True
-    chunks = ["x" * 3000, "y" * 1500 + "\n[Open result](", str(outside) + ")"]
+    # The answer fills the chat-text budget exactly, so the trailing link lands
+    # beyond it: the completion summary is still truncated (at
+    # MAX_CHAT_TEXT_CHARS, not at the old 4,000-char cap) and retention must
+    # therefore come from the deltas, not from the summary.
+    budget = MAX_CHAT_TEXT_CHARS // 2
+    chunks = ["x" * budget, "y" * budget + "\n[Open result](", str(outside) + ")"]
     base: dict[str, Any] = dict(
         stream_sequence=-1,
         tab_id="tab-a",

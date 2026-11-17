@@ -722,13 +722,13 @@ async def test_edit_resend_cleans_hub_and_external_provider_snapshots(
 
 
 def _redacted_summary(text: str) -> str:
-    """The ``summary`` the Hub persists for ``text`` (masked, then truncated)."""
-    from claude_hub.services.agent_stream.redaction import MAX_FIELD_CHARS, mask_secrets
+    """The ``summary`` the Hub persists for ``text`` (masked, then bounded)."""
+    from claude_hub.services.agent_stream.redaction import MAX_CHAT_TEXT_CHARS, mask_secrets
 
     masked = mask_secrets(text)
     marker = "…[truncated]"
-    if len(masked) > MAX_FIELD_CHARS:
-        return masked[: MAX_FIELD_CHARS - len(marker)] + marker
+    if len(masked) > MAX_CHAT_TEXT_CHARS:
+        return masked[: MAX_CHAT_TEXT_CHARS - len(marker)] + marker
     return masked
 
 
@@ -740,10 +740,11 @@ async def test_edit_resend_matches_redacted_message_by_recorded_digest(
 ) -> None:
     """A long or secret-bearing message is matched by its recorded digest.
 
-    The stored ``summary`` is redacted (secret-masked and truncated at 4000
-    chars), so comparing it with the full provider text can never match.  The
-    digest recorded on ``turn_started`` identifies the real provider message;
-    a turn without one (historical) still fails cleanly and destructively-free.
+    The stored ``summary`` is redacted (secret-masked, and bounded at
+    ``MAX_CHAT_TEXT_CHARS``), so comparing it with the full provider text can
+    never match.  The digest recorded on ``turn_started`` identifies the real
+    provider message; a turn without one (historical) still fails cleanly and
+    destructively-free.
     """
     from claude_hub.services.agent_stream.transcript_fork import hash_provider_text
 

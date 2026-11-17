@@ -184,8 +184,8 @@ export interface TimelineTurn {
    *  must refuse turns the Hub wrote, not only the ones a source badge shows. */
   providerOrigin: string | null
   /** The stored summary is not the text the provider received: redaction
-   *  truncated it (over 4000 characters) or masked a secret-looking token, so
-   *  the editor cannot prefill the whole message. */
+   *  bounded it (past the 128,000-char chat-text budget) or masked a
+   *  secret-looking token, so the editor cannot prefill the whole message. */
   storedTextIncomplete: boolean
   /** Verified Feishu callback identity, present only when origin is feishu. */
   feishu: TimelineFeishuProvenance | null

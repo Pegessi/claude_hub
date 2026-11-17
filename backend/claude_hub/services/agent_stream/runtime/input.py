@@ -442,9 +442,9 @@ class InputMixin(SessionState):
                 turn_started_payload,
             )
             turn_started = redact_event(turn_started)
-            # The persisted ``summary`` is redacted (secret-masked and truncated
-            # at MAX_FIELD_CHARS), so it cannot identify the provider-bound text
-            # that edit-resend must match. Record a digest of the provider text
+            # The persisted ``summary`` is redacted (secret-masked and bounded
+            # at MAX_CHAT_TEXT_CHARS), so it cannot identify the provider-bound
+            # text that edit-resend must match. Record a digest of the provider text
             # (never the text itself) plus whether the stored copy is a partial
             # view, so the composer can warn that its prefill is incomplete.
             # Both keys are additive and keep any caller-supplied metadata.

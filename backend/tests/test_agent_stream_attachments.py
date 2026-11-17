@@ -1743,11 +1743,11 @@ def test_turn_started_flags_incomplete_summary_without_leaking_text(
     state_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A masked/truncated summary is flagged, and only its digest is stored."""
-    from claude_hub.services.agent_stream.redaction import MAX_FIELD_CHARS
+    from claude_hub.services.agent_stream.redaction import MAX_CHAT_TEXT_CHARS
     from claude_hub.services.agent_stream.transcript_fork import hash_provider_text
 
     secret = "sk-abcd1234efgh5678"
-    text = secret + " " + ("x" * 4200)
+    text = secret + " " + ("x" * (MAX_CHAT_TEXT_CHARS + 200))
     tailer = _send(text)
     turn_started = _turn_started_event(tailer)
     metadata = turn_started.payload["metadata"]
@@ -1755,10 +1755,25 @@ def test_turn_started_flags_incomplete_summary_without_leaking_text(
     assert metadata["provider_text_sha256"] == hash_provider_text(text)
     # The stored copy is masked and bounded, and cannot identify the message.
     summary = turn_started.payload["summary"]
-    assert len(summary) <= MAX_FIELD_CHARS
+    assert len(summary) <= MAX_CHAT_TEXT_CHARS
     assert "[REDACTED]" in summary
+    assert summary.endswith("…[truncated]")
     assert metadata["provider_text_sha256"] != hash_provider_text(summary)
     assert secret not in turn_started.model_dump_json()
+
+
+def test_turn_started_keeps_a_long_user_message_whole(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A long but bounded user message is stored in full, so edit-resend prefills it."""
+    from claude_hub.services.agent_stream.transcript_fork import hash_provider_text
+
+    text = "请审查这份 diff：\n" + ("y" * 20_000)
+    tailer = _send(text)
+    turn_started = _turn_started_event(tailer)
+    assert turn_started.payload["summary"] == text
+    assert turn_started.payload["metadata"]["stored_text_incomplete"] is False
+    assert turn_started.payload["metadata"]["provider_text_sha256"] == hash_provider_text(text)
 
 
 def test_reused_attachments_keep_prefix_and_persist_extra_previews(

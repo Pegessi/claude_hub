@@ -7,6 +7,30 @@
 
 ## Released
 
+### fix(agent-stream): keep chat turn text whole — a 128,000-char budget instead of the 4,000-char field cap
+
+- Widen `services/agent_stream/redaction.py` into a per-field budget: the chat
+  text fields of `text_delta`/`thinking_delta` (`text`), `turn_started`
+  (`summary`) and `turn_completed` (`text`/`assistant_text`/`final_text`) get
+  `MAX_CHAT_TEXT_CHARS = 128,000`; tool arguments/results, `status`/`error`
+  text and every other payload field keep `MAX_FIELD_CHARS = 4,000`. The larger
+  budget applies only to top-level payload keys, so nested metadata cannot ride
+  along, and secret masking/provider-proxy diagnostics are unchanged.
+- Root cause of the "…[truncated]" cut in Chat bubbles: redaction runs before
+  persistence *and* before SSE fanout, and history serves the stored row
+  verbatim, so a coarse provider delta of 10,091 chars was stored as 3,988
+  chars plus a marker and the tail was unrecoverable Hub-side (a 10,583-char
+  MASO reply lost its last 6,103 chars).
+- Also fixes the same cut on `turn_completed.assistant_text`/`final_text`
+  (Feishu delivery, journal, delivery-length backstop) and on
+  `turn_started.summary` (fork seed and edit-resend prefill), where it now only
+  applies past the chat budget.
+- Tests: `test_agent_stream.py` replaces `test_redact_event_truncates_long_fields`
+  with seven cases pinning the widened chat budget, the unchanged tool/status
+  cap, nested-field bounding and masking inside long text;
+  `test_agent_stream_attachments.py`, `test_edit_resend_recovery.py` and
+  `test_agent_stream_agent_image.py` no longer encode the 4,000-char premise.
+
 ### feat(lifecycle): unified `Review` vs `Done` lifecycle, MR merge auto-closure, and 4-bucket Chat & Workspace views
 
 - Repair post-SQLite migration `ReplyExcerpt` reads in `services/agent_stream/store.py`
