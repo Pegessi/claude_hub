@@ -1240,6 +1240,51 @@ async def test_only_dot_system_turns_give_way(
 
 
 @pytest.mark.asyncio
+async def test_feishu_user_message_preempts_scheduled_chat_turn_on_dot_or_bound_tab(
+    service: DotService, monkeypatch: MonkeyPatch
+) -> None:
+    from claude_hub.api import agent_stream as stream_api
+
+    runs = _system_runs(service, monkeypatch)
+    runs["r-other"].tab_id = TAB_ID
+    runs["r-bound"] = SimpleNamespace(
+        id="r-bound",
+        tab_id="tab-bound",
+        client_turn_id="scheduled-r-bound",
+        scheduled_task_id="sched-bound",
+        status=ScheduledTaskRunStatus.RUNNING,
+    )
+    calls: list[Any] = []
+    turns = _Turns(calls, "scheduled-r-other")
+    _install_tab_dispatch(monkeypatch, turns, calls)
+
+    async def feishu_user(tab_id: str, text: str) -> None:
+        await stream_api._dispatch_tab_stream_input(
+            tab_id,
+            stream_api.AgentStreamSendRequest(text=text, client_turn_id=f"feishu:{text}"),
+            turn_metadata={"origin": "feishu"},
+            allow_question_answer=False,
+        )
+
+    await feishu_user(TAB_ID, "disk status?")
+    assert calls == [("cancel", "scheduled-r-other"), ("send", "disk status?")]
+    assert runs["r-tidy-next"].status == ScheduledTaskRunStatus.CANCELLED
+    assert service._wake_pending, "dropping a queued system run marks Dot wake pending"
+    service._wake_pending = False
+
+    calls.clear()
+    turns.active = "scheduled-r-bound"
+    await feishu_user("tab-bound", "hello bound tab")
+    assert calls == [("cancel", "scheduled-r-bound"), ("send", "hello bound tab")]
+    assert not service._wake_pending, "non-Dot scheduled turns do not mark Dot wake pending"
+
+    calls.clear()
+    turns.active = "feishu:earlier-user"
+    await feishu_user(TAB_ID, "follow-up")
+    assert calls == [("send", "follow-up")], "active user turns are not preempted as background"
+
+
+@pytest.mark.asyncio
 async def test_the_users_message_is_sent_when_giving_way_fails(
     service: DotService, monkeypatch: MonkeyPatch
 ) -> None:

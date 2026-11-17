@@ -36,6 +36,8 @@ class TabDispatchItem:
     processing_reaction_id: str | None = None
     dispatch_started: bool = False
     native_bridge_started: bool = False
+    native_handoff_pending: bool = False
+    native_handoff_done: asyncio.Event = field(default_factory=asyncio.Event)
     admission_time_rejection: FeishuMessageTimeStatus | None = None
     cancelled: bool = False
     # Stopped by a newer message (Dot Chat): answered together with it, no reply.

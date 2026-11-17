@@ -136,6 +136,18 @@ _create_gate = asyncio.Lock()
 _tab_dispatch_queues: dict[str, _TabDispatchQueue] = {}
 
 
+def feishu_dispatch_in_progress(tab_id: str) -> bool:
+    """Return whether a Feishu message batch is coalescing or executing on ``tab_id``."""
+    queue = _tab_dispatch_queues.get(tab_id)
+    if queue is None:
+        return False
+    return bool(
+        queue.active
+        or queue.processor is not None
+        or any(not item.cancelled for item in queue.pending)
+    )
+
+
 def _promote_tab_dispatch(tab_id: str, queue: _TabDispatchQueue) -> None:
     if queue.processor is not None or queue.active:
         return
@@ -145,12 +157,16 @@ def _promote_tab_dispatch(tab_id: str, queue: _TabDispatchQueue) -> None:
         if not queue.processor.start.done():
             queue.processor.start.set_result(None)
         queue.changed.set()
-    elif (
-        not queue.active
-        and not queue.interrupted_text
-        and _tab_dispatch_queues.get(tab_id) is queue
-    ):
-        del _tab_dispatch_queues[tab_id]
+    else:
+        if not queue.interrupted_text and _tab_dispatch_queues.get(tab_id) is queue:
+            del _tab_dispatch_queues[tab_id]
+        try:
+            from .routes.agent_stream import messages as messages_api
+
+            if messages_api._inbox is not None:
+                messages_api._inbox.wake()
+        except Exception:
+            pass
 
 
 def _reserve_tab_dispatch(
@@ -264,6 +280,12 @@ async def _stop_superseded_answer(
 
     stopped = False
     try:
+        if (
+            active
+            and active[0].native_handoff_pending
+            and not active[0].native_handoff_done.is_set()
+        ):
+            await active[0].native_handoff_done.wait()
         session = stream_api._terminal_tab_session_or_404(tab_id)
         manager = stream_api._get_tab_tailer_manager()
         stopped = bool(await manager.cancel_turn(session, expected_turn_id=turn_id))
@@ -287,6 +309,7 @@ def _cancel_tab_dispatch(tab_id: str, item: _TabDispatchItem) -> None:
     if queue is None or item.cancelled:
         return
     item.cancelled = True
+    item.native_handoff_done.set()
     item.reaction_finished.set()
     if not item.dispatch_started:
         try:
