@@ -368,16 +368,8 @@
 }
 
 @media (max-width: 640px) {
-  .tam-overlay {
-    align-items: flex-start;
-    padding: 10px;
-  }
-
   .tam-modal {
-    width: 100%;
-    max-height: calc(100dvh - 20px);
     padding: 16px;
-    border-radius: var(--ch-radius-md);
   }
 
   .tam-modal-actions {

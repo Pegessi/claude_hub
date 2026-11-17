@@ -544,17 +544,24 @@ watch(
   .modal {
     min-width: 0;
     width: 100%;
-    max-height: calc(100dvh - 20px);
+    max-height: calc(var(--visual-viewport-height, 100dvh) - 20px);
     padding: 16px;
   }
 
   .env-manage-body {
     flex-direction: column;
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
 
   .env-manage-sidebar {
     width: 100%;
     max-height: 160px;
+  }
+
+  .env-manage-editor {
+    flex-shrink: 0;
+    overflow: visible;
   }
 
   .env-textarea-large {

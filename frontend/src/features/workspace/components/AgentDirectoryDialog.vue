@@ -148,7 +148,7 @@ const {
 <style scoped>
 .file-browser-modal {
   width: min(720px, 100%);
-  height: min(70dvh, 620px);
+  height: min(620px, calc(var(--visual-viewport-height, 100dvh) - 32px));
   display: flex;
   flex-direction: column;
 }
@@ -158,6 +158,7 @@ const {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .file-browser-header {
@@ -208,7 +209,7 @@ const {
 
 .file-browser-list {
   flex: 1;
-  min-height: 160px;
+  min-height: 0;
   overflow-y: auto;
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-md);
@@ -266,7 +267,38 @@ const {
 <style scoped>
 @media (max-width: 760px) {
   .file-browser-modal {
-    height: calc(100dvh - 20px);
+    height: calc(var(--visual-viewport-height, 100dvh) - 20px);
+    padding: 12px;
+  }
+
+  .file-browser-header {
+    margin-bottom: 8px;
+  }
+
+  .file-browser-path {
+    flex-wrap: nowrap;
+    gap: 6px;
+    padding: 6px;
+  }
+
+  .file-browser-path input {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .path-nav-button {
+    flex-shrink: 0;
+    padding: 0 8px;
+    font-size: 12px;
+  }
+
+  .file-browser-list {
+    margin-top: 8px;
+  }
+
+  .modal-actions {
+    margin-top: 8px;
+    padding-top: 8px;
   }
 }
 </style>

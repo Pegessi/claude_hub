@@ -126,7 +126,7 @@ onBeforeUnmount(() => {
 
 .subagent-sheet {
   width: 100%;
-  max-height: 70vh;
+  max-height: min(70dvh, calc(var(--visual-viewport-height, 100dvh) - 24px - env(safe-area-inset-top, 0px)));
   display: flex;
   flex-direction: column;
   border: 1px solid var(--ch-color-border-muted);
