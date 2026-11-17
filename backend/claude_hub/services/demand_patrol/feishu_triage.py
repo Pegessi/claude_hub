@@ -316,24 +316,148 @@ def _search_command(start_iso: str, end_iso: str, *extra_flags: str) -> list[str
     ]
 
 
-def _thread_command(thread_id: str) -> list[str]:
-    return [
+_MAX_THREAD_PAGES = 10
+_MAX_SEARCH_ROWS = 500
+
+
+def _thread_command(thread_id: str, page_token: str | None = None) -> list[str]:
+    command = [
         "lark-cli",
         "im",
         "+threads-messages-list",
         "--thread",
         thread_id,
-        "--page-all",
+        "--order",
+        "desc",
         "--page-size",
         "50",
-        "--page-limit",
-        "10",
         "--no-reactions",
         "--format",
         "json",
         "--as",
         "user",
     ]
+    if page_token:
+        command.extend(["--page-token", page_token])
+    return command
+
+
+def _next_page_token(payload: Any, data: Mapping[str, Any]) -> str:
+    token = data.get("page_token")
+    if isinstance(token, str) and token.strip():
+        return token.strip()
+    if isinstance(payload, dict):
+        meta = payload.get("meta")
+        if isinstance(meta, dict):
+            pagination = meta.get("pagination")
+            if isinstance(pagination, dict):
+                next_token = pagination.get("next_token")
+                if isinstance(next_token, str) and next_token.strip():
+                    return next_token.strip()
+    return ""
+
+
+def _page_has_more(payload: Any, data: Mapping[str, Any], next_token: str) -> bool:
+    if data.get("has_more") is True:
+        return True
+    if isinstance(payload, dict):
+        meta = payload.get("meta")
+        if isinstance(meta, dict):
+            pagination = meta.get("pagination")
+            if isinstance(pagination, dict) and pagination.get("complete") is False:
+                return True
+    return data.get("has_more") is not False and bool(next_token)
+
+
+async def _thread_window_messages(
+    runner: CommandRunner,
+    thread_id: str,
+    *,
+    seed: FeishuCandidate,
+    start: datetime,
+    now: datetime,
+    tz: str | ZoneInfo | timezone = "Asia/Shanghai",
+) -> list[FeishuCandidate]:
+    defaults = {
+        "chat_id": seed.chat_id,
+        "chat_name": seed.chat_name,
+        "chat_type": seed.chat_type,
+        "thread_id": thread_id,
+    }
+    collected: list[FeishuCandidate] = []
+    seen_ids: set[str] = set()
+    seen_tokens: set[str] = set()
+    page_token: str | None = None
+    total_rows = 0
+    prev_created_at: datetime | None = None
+    descending_valid = True
+    saw_descending_step = False
+    saw_at_or_after_start = False
+    reached_before_start = False
+
+    for _ in range(_MAX_THREAD_PAGES):
+        payload = await runner(_thread_command(thread_id, page_token=page_token), timeout=60)
+        data = _object(payload)
+        if data.get("truncated") is True or data.get("errors"):
+            raise CommandError("Feishu search is incomplete; watermark retained")
+        rows = data.get("messages", data.get("items"))
+        if not isinstance(rows, list) or len(rows) > _MAX_SEARCH_ROWS:
+            raise CommandError("Feishu search did not return a bounded message list")
+        total_rows += len(rows)
+        if total_rows > _MAX_SEARCH_ROWS:
+            raise CommandError("Feishu search did not return a bounded message list")
+
+        for row in rows:
+            if not isinstance(row, dict):
+                raise CommandError("Feishu search returned a malformed message")
+            if row.get("deleted"):
+                if row.get("create_time") is not None:
+                    deleted_ts = _timestamp(row.get("create_time"), tz=tz)
+                    if prev_created_at is not None:
+                        if deleted_ts > prev_created_at:
+                            descending_valid = False
+                        elif deleted_ts < prev_created_at:
+                            saw_descending_step = True
+                    prev_created_at = deleted_ts
+                    if deleted_ts >= start:
+                        saw_at_or_after_start = True
+                    else:
+                        reached_before_start = True
+                continue
+            item = _candidate(row, tz=tz, defaults=defaults)
+            if prev_created_at is not None:
+                if item.created_at > prev_created_at:
+                    descending_valid = False
+                elif item.created_at < prev_created_at:
+                    saw_descending_step = True
+            prev_created_at = item.created_at
+            if item.created_at >= start:
+                saw_at_or_after_start = True
+            else:
+                reached_before_start = True
+            if start <= item.created_at <= now and item.message_id not in seen_ids:
+                seen_ids.add(item.message_id)
+                collected.append(item)
+
+        if not descending_valid:
+            raise CommandError("Feishu search is incomplete; watermark retained")
+        next_token = _next_page_token(payload, data)
+        has_more = _page_has_more(payload, data, next_token)
+        if not has_more:
+            return collected
+        if reached_before_start and (saw_at_or_after_start or saw_descending_step):
+            return collected
+        if (
+            not rows
+            or not next_token
+            or next_token in seen_tokens
+            or total_rows >= _MAX_SEARCH_ROWS
+        ):
+            raise CommandError("Feishu search is incomplete; watermark retained")
+        seen_tokens.add(next_token)
+        page_token = next_token
+
+    raise CommandError("Feishu search is incomplete; watermark retained")
 
 
 def _diagnosis_prompt(candidate: FeishuCandidate) -> str:
@@ -653,22 +777,20 @@ async def run_feishu_triage(
         participated_threads: dict[str, FeishuCandidate] = {}
         for item in by_id.values():
             if item.sender_id == uid and item.thread_id and item.chat_type != "p2p":
-                participated_threads.setdefault(item.thread_id, item)
+                existing = participated_threads.get(item.thread_id)
+                if existing is None or item.created_at > existing.created_at:
+                    participated_threads[item.thread_id] = item
         for thread_id in sorted(participated_threads):
             seed = participated_threads[thread_id]
-            thread_payload = await runner(_thread_command(thread_id), timeout=60)
-            for item in _search_messages(
-                thread_payload,
+            for item in await _thread_window_messages(
+                runner,
+                thread_id,
+                seed=seed,
+                start=start,
+                now=now,
                 tz=tz,
-                defaults={
-                    "chat_id": seed.chat_id,
-                    "chat_name": seed.chat_name,
-                    "chat_type": seed.chat_type,
-                    "thread_id": thread_id,
-                },
             ):
-                if start <= item.created_at <= now:
-                    by_id.setdefault(item.message_id, item)
+                by_id.setdefault(item.message_id, item)
         messages = list(by_id.values())
         candidates, answered = filter_unanswered(messages, uid, state.processed_feishu_ids)
     except (CommandError, ValueError, OSError) as exc:
