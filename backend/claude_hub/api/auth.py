@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Request, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from ..auth import (
+    DEFAULT_FEISHU_OAUTH_SCOPES,
     create_session,
     delete_session,
     get_feishu_auth_url,
@@ -78,7 +79,7 @@ async def login(request: Request) -> RedirectResponse:
     # Random state stored in an httponly cookie and verified on callback to
     # protect the login flow against CSRF.
     state = secrets.token_urlsafe(32)
-    auth_url = get_feishu_auth_url(state)
+    auth_url = get_feishu_auth_url(state, scope=DEFAULT_FEISHU_OAUTH_SCOPES)
     response = RedirectResponse(url=auth_url)
     response.set_cookie(
         key=OAUTH_STATE_COOKIE_NAME,
@@ -106,10 +107,11 @@ async def callback(request: Request, code: str, state: str = "") -> Response:
         logger.warning("OAuth callback rejected: missing or mismatched state")
         return _callback_error(request, status.HTTP_400_BAD_REQUEST, "Invalid OAuth state")
 
-    # Exchange code for access token
+    # Exchange code for access token (refresh_token is optional when offline_access is not granted)
     access_token, refresh_token = await get_user_access_token(code)
-    if not access_token or not refresh_token:
+    if not access_token:
         return _callback_error(request, status.HTTP_400_BAD_REQUEST, "Failed to get access token")
+    refresh_token = refresh_token or ""
 
     # Get user info
     user_info = await get_user_info(access_token)
@@ -153,6 +155,33 @@ async def callback(request: Request, code: str, state: str = "") -> Response:
 
     # Create session
     session = create_session(user, access_token, refresh_token)
+    if user.open_id and settings.feishu_app_id:
+        try:
+            from ..auth.feishu import pop_user_access_token_metadata
+            from ..services.feishu_user_token_store import get_feishu_user_token_store
+
+            token_meta = pop_user_access_token_metadata(access_token)
+            granted_scope = str(
+                token_meta.get("scope")
+                or (user_info.get("scope") if isinstance(user_info.get("scope"), str) else "")
+                or ""
+            )
+            await get_feishu_user_token_store().asave_oauth_token(
+                open_id=user.open_id,
+                user_name=user.name or "",
+                app_id=settings.feishu_app_id,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                expires_in=token_meta.get("expires_in"),
+                refresh_expires_in=token_meta.get("refresh_expires_in"),
+                scope=granted_scope,
+                app_secret=settings.feishu_app_secret or "",
+            )
+        except Exception:
+            logger.warning(
+                "Failed to persist Feishu OAuth user token for /ai command",
+                exc_info=True,
+            )
 
     # Set session cookie and redirect to frontend
     response = RedirectResponse(url=settings.frontend_url)

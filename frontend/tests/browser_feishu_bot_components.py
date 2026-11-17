@@ -95,6 +95,106 @@ async def main(browser_run: BrowserRun) -> None:
     response_bodies: list[str] = []
     pool_revision = 1
     shared_avatar_requests = 0
+    ai_get_calls = 0
+    ai_get_gate = asyncio.Event()
+    ai_config: dict = {
+        "enabled": False,
+        "prefix": "/ai",
+        "owner_open_id": "",
+        "app_id": "",
+        "provider": "maso",
+        "model": "gemini-4-argon_reasoning_high",
+        "reasoning_effort": "high",
+        "cwd": "/srv/persisted-ai",
+        "watch_chats": ["oc_persisted"],
+        "poll_interval_seconds": 15,
+        "max_active_chats": 10,
+        "max_context_messages": 20,
+        "ack_emoji": "OnIt",
+        "done_emoji": "DONE",
+        "footer": "> 🤖 AI 代答，仅供参考",
+        "reply_in_thread": True,
+    }
+    ai_token_status: dict = {
+        "has_token": False,
+        "open_id": None,
+        "user_name": None,
+        "app_id": None,
+        "source": None,
+        "expires_at": 0,
+        "token_expired": False,
+        "granted_scopes": [],
+        "required_send_scope": "im:message.send_as_user",
+        "can_send_as_user": False,
+        "can_react_as_user": False,
+        "can_read_messages": False,
+        "missing_required_scopes": ["im:message.send_as_user"],
+        "missing_recommended_scopes": [],
+        "auth_login_command": 'lark-cli auth login --scope "im:message.send_as_user"',
+        "remediation_steps": [],
+    }
+
+    def ai_command_payload(*, imported: bool | None = None) -> dict:
+        payload: dict = {
+            "config": json.loads(json.dumps(ai_config)),
+            "token_status": json.loads(json.dumps(ai_token_status)),
+            "poller_status": {
+                "running": bool(ai_config["enabled"]),
+                "poll_count": 1,
+                "last_poll_at": 1700000000.0,
+                "last_error": None,
+                "commands_detected": 0,
+                "commands_succeeded": 0,
+                "commands_failed": 0,
+                "skipped_count": 0,
+                "watermarks_count": 1,
+            },
+            "capabilities": {
+                "providers": [
+                    "claude",
+                    "codex",
+                    "traex",
+                    "maso",
+                    "cursor",
+                    "antigravity",
+                ],
+                "reasoning_efforts": [
+                    "none",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max",
+                    "ultra",
+                ],
+                "provider_reasoning_efforts": {
+                    "claude": [],
+                    "codex": ["none", "minimal", "low", "medium", "high", "xhigh"],
+                    "traex": ["none", "minimal", "low", "medium", "high", "xhigh"],
+                    "maso": ["none", "low", "medium", "high", "xhigh", "max"],
+                    "cursor": [
+                        "none",
+                        "minimal",
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh",
+                        "max",
+                    ],
+                    "antigravity": [],
+                },
+                "provider_models": {
+                    "claude": ["doubao-seed-2.0-code"],
+                    "codex": ["gpt-5.4", "o3"],
+                    "maso": ["gemini-4-argon_reasoning_high"],
+                },
+            },
+        }
+        if imported is not None:
+            payload["imported"] = imported
+        return payload
+
     bots = [
         bot_summary(
             "bot-env",
@@ -178,7 +278,7 @@ async def main(browser_run: BrowserRun) -> None:
             )
 
         async def route_all(route) -> None:
-            nonlocal pool_revision, shared_avatar_requests
+            nonlocal pool_revision, shared_avatar_requests, ai_get_calls
             request = route.request
             parsed = urlparse(request.url)
             if request.url == SHARED_AVATAR_URL:
@@ -225,6 +325,55 @@ async def main(browser_run: BrowserRun) -> None:
 
             if method == "GET" and path == "/api/feishu/bot/bots":
                 await fulfill_json(route, pool())
+                return
+
+            if method == "GET" and path == "/api/feishu/bot/ai-command":
+                ai_get_calls += 1
+                if ai_get_calls == 1:
+                    await ai_get_gate.wait()
+                    await fulfill_json(route, ai_command_payload())
+                    return
+                if ai_get_calls == 2:
+                    await fulfill_json(
+                        route,
+                        {
+                            "detail": {
+                                "code": "invalid_ai_command_config",
+                                "message": "Temporary /ai status error",
+                            }
+                        },
+                        status=500,
+                    )
+                    return
+                await fulfill_json(route, ai_command_payload())
+                return
+
+            if method == "POST" and path == "/api/feishu/bot/ai-command/import-token":
+                ai_config["owner_open_id"] = ai_config["owner_open_id"] or "ou_imported"
+                ai_config["app_id"] = ai_config["app_id"] or "cli_imported"
+                ai_token_status.update(
+                    {
+                        "has_token": True,
+                        "open_id": "ou_imported",
+                        "user_name": "Imported Owner",
+                        "app_id": "cli_imported",
+                        "source": "lark_cli",
+                        "expires_at": 9999999999,
+                        "token_expired": False,
+                        "granted_scopes": ["im:message", "im:message.send_as_user"],
+                        "can_send_as_user": True,
+                        "can_react_as_user": True,
+                        "can_read_messages": True,
+                        "missing_required_scopes": [],
+                    }
+                )
+                await fulfill_json(route, ai_command_payload(imported=True))
+                return
+
+            if method in {"PATCH", "PUT"} and path == "/api/feishu/bot/ai-command":
+                assert isinstance(submitted, dict)
+                ai_config.update(submitted)
+                await fulfill_json(route, ai_command_payload())
                 return
 
             if method == "POST" and path == "/api/feishu/bot/bots":
@@ -433,16 +582,22 @@ async def main(browser_run: BrowserRun) -> None:
         settings = page.get_by_test_id("feishu-bot-settings-dialog")
         await expect(settings).to_be_visible()
         await expect(settings.get_by_text("Loading Bot pool…", exact=True)).to_have_count(0)
-        await settings.locator('[aria-label="Bots"]').locator("button").filter(
-            has_text="Primary Bot"
-        ).click()
+        await (
+            settings.locator('[aria-label="Bots"]')
+            .locator("button")
+            .filter(has_text="Primary Bot")
+            .click()
+        )
         await expect(settings.get_by_label("App Secret", exact=True)).to_have_value("")
 
         # Environment credentials and deletion are read-only. Occupancy is
         # visible in settings and the occupied Bot cannot be selected later.
-        await settings.locator('[aria-label="Bots"]').locator("button").filter(
-            has_text="Environment Bot"
-        ).click()
+        await (
+            settings.locator('[aria-label="Bots"]')
+            .locator("button")
+            .filter(has_text="Environment Bot")
+            .click()
+        )
         await expect(settings.locator(".detail")).to_contain_text("environment")
         await expect(
             settings.get_by_role("heading", name="Replace credentials", exact=True)
@@ -617,6 +772,104 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(trigger).to_have_attribute("aria-label", re.compile(r"Not connected$"))
         await expect(page.get_by_test_id("feishu-binding-identity")).to_have_count(0)
 
+        # Exercise Personal /ai Assistant panel: delayed/error/retry hydration,
+        # draft preservation across ~/.lark-cli token import, and save/readback.
+        await page.get_by_role("button", name="Open Bot settings", exact=True).click()
+        settings = page.get_by_test_id("feishu-bot-settings-dialog")
+        await expect(settings).to_be_visible()
+        await expect(settings.get_by_text("Loading Bot pool…", exact=True)).to_have_count(0)
+        await settings.get_by_test_id("feishu-ai-command-nav").click()
+        await expect(settings.get_by_test_id("feishu-ai-loading")).to_be_visible()
+        await expect(settings.get_by_test_id("feishu-ai-settings-form")).to_have_count(0)
+        await expect(
+            settings.locator("footer").get_by_role("button", name="Reload", exact=True)
+        ).to_be_disabled()
+
+        # Navigating away to a Bot during initial /ai GET immediately restores Bot Reload
+        await (
+            settings.locator('[aria-label="Bots"]')
+            .locator("button")
+            .filter(has_text="Occupied Bot")
+            .click()
+        )
+        await expect(
+            settings.locator("footer").get_by_role("button", name="Reload", exact=True)
+        ).to_be_enabled()
+        ai_get_gate.set()
+        await expect(
+            settings.locator("footer").get_by_role("button", name="Reload", exact=True)
+        ).to_be_enabled()
+
+        # Re-open Personal /ai: GET #2 fails with 500 -> error state -> Retry (GET #3) hydrates form
+        await settings.get_by_test_id("feishu-ai-command-nav").click()
+        await expect(settings.get_by_test_id("feishu-ai-load-error")).to_be_visible()
+        await expect(settings.get_by_test_id("feishu-ai-settings-form")).to_have_count(0)
+        assert not any(
+            call["method"] in {"PATCH", "PUT"} and call["path"] == "/api/feishu/bot/ai-command"
+            for call in api_calls
+        )
+
+        await settings.get_by_test_id("feishu-ai-retry-btn").click()
+        ai_form = settings.get_by_test_id("feishu-ai-settings-form")
+        await expect(ai_form).to_be_visible()
+        await expect(settings.get_by_test_id("feishu-ai-provider-select")).to_have_value("maso")
+        await expect(settings.get_by_test_id("feishu-ai-model-input")).to_have_value(
+            "gemini-4-argon_reasoning_high"
+        )
+        await expect(settings.get_by_test_id("feishu-ai-effort-select")).to_have_value("high")
+        await expect(settings.get_by_test_id("feishu-ai-cwd-input")).to_have_value(
+            "/srv/persisted-ai"
+        )
+        await expect(settings.get_by_test_id("feishu-ai-watch-chats-input")).to_have_value(
+            "oc_persisted"
+        )
+
+        # Edit draft fields, then import ~/.lark-cli token before saving: draft edits must survive
+        await settings.get_by_test_id("feishu-ai-enabled-toggle").check()
+        await settings.get_by_test_id("feishu-ai-provider-select").select_option("codex")
+        await expect(settings.get_by_test_id("feishu-ai-model-input")).to_have_value("gpt-5.4")
+        await settings.get_by_test_id("feishu-ai-effort-select").select_option("xhigh")
+        await settings.get_by_test_id("feishu-ai-cwd-input").fill("/srv/draft-ai")
+        await settings.get_by_test_id("feishu-ai-watch-chats-input").fill("oc_chat_1, oc_chat_2")
+
+        await settings.get_by_test_id("feishu-ai-import-token-btn").click()
+        await expect(
+            settings.get_by_text("Imported user token from ~/.lark-cli.", exact=True)
+        ).to_be_visible()
+        await expect(settings.get_by_test_id("feishu-ai-provider-select")).to_have_value("codex")
+        await expect(settings.get_by_test_id("feishu-ai-model-input")).to_have_value("gpt-5.4")
+        await expect(settings.get_by_test_id("feishu-ai-effort-select")).to_have_value("xhigh")
+        await expect(settings.get_by_test_id("feishu-ai-cwd-input")).to_have_value("/srv/draft-ai")
+        await expect(settings.get_by_test_id("feishu-ai-watch-chats-input")).to_have_value(
+            "oc_chat_1, oc_chat_2"
+        )
+        await expect(settings.get_by_test_id("feishu-ai-owner-input")).to_have_value("ou_imported")
+        await expect(settings.get_by_test_id("feishu-ai-app-id-input")).to_have_value(
+            "cli_imported"
+        )
+
+        await settings.get_by_test_id("feishu-ai-save-btn").click()
+        await expect(
+            settings.get_by_text("/ai command settings saved.", exact=True)
+        ).to_be_visible()
+        ai_patches = [
+            call["body"]
+            for call in api_calls
+            if call["method"] == "PATCH" and call["path"] == "/api/feishu/bot/ai-command"
+        ]
+        assert len(ai_patches) == 1
+        assert ai_patches[0]["enabled"] is True
+        assert ai_patches[0]["provider"] == "codex"
+        assert ai_patches[0]["model"] == "gpt-5.4"
+        assert ai_patches[0]["reasoning_effort"] == "xhigh"
+        assert ai_patches[0]["cwd"] == "/srv/draft-ai"
+        assert ai_patches[0]["watch_chats"] == ["oc_chat_1", "oc_chat_2"]
+        assert ai_patches[0]["owner_open_id"] == "ou_imported"
+        assert ai_patches[0]["app_id"] == "cli_imported"
+        await page.screenshot(path=str(output / "feishu-ai-command-desktop.png"), full_page=True)
+        await settings.locator("footer").get_by_role("button", name="Close", exact=True).click()
+        await expect(settings).to_have_count(0)
+
         for forbidden in (
             CONFIRM_WORD,
             "create-secret",
@@ -624,6 +877,25 @@ async def main(browser_run: BrowserRun) -> None:
             "close-secret",
         ):
             assert all(forbidden not in body for body in response_bodies)
+
+        # Check narrow viewport (720x900) layout for Personal /ai Assistant panel
+        await page.set_viewport_size({"width": 720, "height": 900})
+        await page.get_by_role("button", name="Open Bot settings", exact=True).click()
+        settings = page.get_by_test_id("feishu-bot-settings-dialog")
+        await expect(settings).to_be_visible()
+        await settings.get_by_test_id("feishu-ai-command-nav").click()
+        await expect(settings.get_by_test_id("feishu-ai-settings-form")).to_be_visible()
+        narrow_settings_box = await settings.bounding_box()
+        narrow_ai_box = await settings.get_by_test_id("feishu-ai-settings-form").bounding_box()
+        assert narrow_settings_box is not None and narrow_ai_box is not None
+        assert narrow_settings_box["x"] >= 0
+        assert narrow_settings_box["x"] + narrow_settings_box["width"] <= 721
+        assert (
+            narrow_ai_box["x"] + narrow_ai_box["width"]
+            <= narrow_settings_box["x"] + narrow_settings_box["width"] + 1
+        )
+        await settings.locator("footer").get_by_role("button", name="Close", exact=True).click()
+        await expect(settings).to_have_count(0)
 
         # Both real components remain operable at mobile width.
         await page.set_viewport_size({"width": 390, "height": 844})
@@ -659,6 +931,23 @@ async def main(browser_run: BrowserRun) -> None:
         assert await settings.locator(".layout").evaluate(
             "element => getComputedStyle(element).overflowY === 'auto'"
         )
+        await settings.get_by_test_id("feishu-ai-command-nav").click()
+        await expect(settings.get_by_test_id("feishu-ai-settings-form")).to_be_visible()
+        mobile_ai_box = await settings.get_by_test_id("feishu-ai-settings-form").bounding_box()
+        assert mobile_ai_box is not None
+        assert mobile_ai_box["x"] >= settings_box["x"]
+        assert (
+            mobile_ai_box["x"] + mobile_ai_box["width"]
+            <= settings_box["x"] + settings_box["width"] + 1
+        )
+        mobile_save_btn = settings.get_by_test_id("feishu-ai-save-btn")
+        await mobile_save_btn.scroll_into_view_if_needed()
+        await expect(mobile_save_btn).to_be_visible()
+        await mobile_save_btn.click()
+        await expect(
+            settings.get_by_role("status").filter(has_text="/ai command settings saved.")
+        ).to_be_visible()
+        await page.screenshot(path=str(output / "feishu-ai-command-mobile.png"), full_page=True)
         await settings.locator("footer").get_by_role("button", name="Close", exact=True).click()
         await expect(settings).to_have_count(0)
 
