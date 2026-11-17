@@ -166,7 +166,7 @@ async def callback(request: Request, code: str, state: str = "") -> Response:
                 or (user_info.get("scope") if isinstance(user_info.get("scope"), str) else "")
                 or ""
             )
-            get_feishu_user_token_store().save_oauth_token(
+            await get_feishu_user_token_store().asave_oauth_token(
                 open_id=user.open_id,
                 user_name=user.name or "",
                 app_id=settings.feishu_app_id,

@@ -187,6 +187,12 @@ class FeishuAiCommandService:
                     )
             return cfg
 
+    async def aget_config(
+        self, *, auto_import_lark_cli: bool | None = None
+    ) -> FeishuAiCommandConfig:
+        async with self._token_store.async_file_lock():
+            return self.get_config(auto_import_lark_cli=auto_import_lark_cli)
+
     def update_config(self, patch: Mapping[str, Any]) -> FeishuAiCommandConfig:
         with self._lock:
             state = self._load_state()
@@ -452,6 +458,12 @@ class FeishuAiCommandService:
         )
         return self.build_user_client(cfg).preflight_scopes(rec)
 
+    async def apreflight_status(
+        self, *, auto_import_lark_cli: bool = True
+    ) -> FeishuScopePreflightResult:
+        async with self._token_store.async_file_lock():
+            return self.preflight_status(auto_import_lark_cli=auto_import_lark_cli)
+
     def capabilities_dict(self) -> dict[str, Any]:
         model_efforts: dict[str, list[str]] = {}
         for base, variants in _MASO_MODEL_VARIANTS.items():
@@ -680,7 +692,7 @@ class FeishuAiCommandService:
         seeded_context: Sequence[FeishuUserMessage] | None = None,
     ) -> AiCommandExecutionResult:
         """Run the full ``/ai`` command pipeline for one candidate message."""
-        cfg = self.get_config()
+        cfg = await self.aget_config()
         if not dry_run and not cfg.enabled:
             return self._skip_result(message, dry_run=dry_run, reason="disabled")
         if message.sender_type != "user":
@@ -775,10 +787,13 @@ class FeishuAiCommandService:
                     done_reaction=cfg.done_emoji,
                 )
 
-            async with self._token_store.async_file_lock(
-                app_id=cfg.app_id, open_id=cfg.owner_open_id
-            ):
-                user_client.require_send_as_user_scope()
+            if hasattr(user_client, "arequire_send_as_user_scope"):
+                await user_client.arequire_send_as_user_scope()
+            else:
+                async with self._token_store.async_file_lock(
+                    app_id=cfg.app_id, open_id=cfg.owner_open_id
+                ):
+                    user_client.require_send_as_user_scope()
             if resuming_completed and pending_item is not None:
                 raw_refs = pending_item.get("refs")
                 refs = (
@@ -1001,7 +1016,7 @@ class FeishuAiCommandService:
 
     async def handle_ws_event(self, event: FeishuMessageEvent) -> bool:
         """Handle a WebSocket ``FeishuMessageEvent`` if it matches the owner's ``/ai`` command."""
-        cfg = self.get_config()
+        cfg = await self.aget_config()
         if not self.is_owner_ai_command_candidate(
             sender_open_id=event.sender_open_id,
             sender_type="user",

@@ -372,11 +372,32 @@ class FeishuUserClient:
             auto_import_lark_cli=auto_import_lark_cli,
         )
 
+    async def aresolve_record(
+        self, *, auto_import_lark_cli: bool = True
+    ) -> FeishuUserTokenRecord | None:
+        if hasattr(self._store, "aresolve_token"):
+            return await self._store.aresolve_token(
+                open_id=self._open_id,
+                app_id=self._app_id,
+                auto_import_lark_cli=auto_import_lark_cli,
+            )
+        async with self._store.async_file_lock(
+            app_id=self._app_id or "", open_id=self._open_id or ""
+        ):
+            return self.resolve_record(auto_import_lark_cli=auto_import_lark_cli)
+
     def preflight_scopes(
         self,
         record: FeishuUserTokenRecord | None = None,
     ) -> FeishuScopePreflightResult:
         target = record if record is not None else self.resolve_record()
+        return evaluate_scope_preflight(target)
+
+    async def apreflight_scopes(
+        self,
+        record: FeishuUserTokenRecord | None = None,
+    ) -> FeishuScopePreflightResult:
+        target = record if record is not None else await self.aresolve_record()
         return evaluate_scope_preflight(target)
 
     def require_send_as_user_scope(
@@ -402,6 +423,13 @@ class FeishuUserClient:
                 auth_login_command=preflight.auth_login_command,
             )
         return target
+
+    async def arequire_send_as_user_scope(
+        self,
+        record: FeishuUserTokenRecord | None = None,
+    ) -> FeishuUserTokenRecord:
+        target = record if record is not None else await self.aresolve_record()
+        return self.require_send_as_user_scope(target)
 
     async def refresh_token(self, record: FeishuUserTokenRecord) -> FeishuUserTokenRecord:
         async with self._store.async_refresh_lock(app_id=record.app_id, open_id=record.open_id):
@@ -435,18 +463,12 @@ class FeishuUserClient:
             )
             if not isinstance(refreshed, Mapping) or not refreshed.get("access_token"):
                 raise FeishuBotError("Feishu user access token refresh failed")
-            async with self._store.async_file_lock(
-                app_id=active.app_id, open_id=active.open_id, create_cli_lock_dir=True
-            ):
-                return self._store.save_refreshed_token(active, refreshed, now=now_ts)
+            return await self._store.asave_refreshed_token(active, refreshed, now=now_ts)
 
     async def get_user_token(
         self, *, force_refresh: bool = False
     ) -> tuple[str, FeishuUserTokenRecord]:
-        async with self._store.async_file_lock(
-            app_id=self._app_id or "", open_id=self._open_id or ""
-        ):
-            record = self.resolve_record()
+        record = await self.aresolve_record()
         if record is None:
             preflight = evaluate_scope_preflight(None)
             raise FeishuUserScopeError(
@@ -493,7 +515,7 @@ class FeishuUserClient:
     ) -> dict[str, Any]:
         """Send a message to ``chat_id`` as the authenticated user."""
         if dry_run:
-            preflight = self.preflight_scopes()
+            preflight = await self.apreflight_scopes()
             return {
                 "dry_run": True,
                 "action": "send_as_user",
@@ -504,7 +526,7 @@ class FeishuUserClient:
                 "can_send_as_user": preflight.can_send_as_user,
                 "missing_required_scopes": list(preflight.missing_required_scopes),
             }
-        self.require_send_as_user_scope()
+        await self.arequire_send_as_user_scope()
 
         async def _call(token: str) -> dict[str, Any]:
             message_id = await self._bot_client.send_message_with_identity(
@@ -534,7 +556,7 @@ class FeishuUserClient:
                 message_id=f"dry-run:{uuid or message_id}",
                 thread_id="dry-run-thread" if reply_in_thread else None,
             )
-        self.require_send_as_user_scope()
+        await self.arequire_send_as_user_scope()
 
         async def _call(token: str) -> FeishuReplyReceipt:
             return await self._bot_client._reply_message_payload(

@@ -1958,3 +1958,276 @@ async def test_cycle3_token_cas_async_lock_scope_authority_and_turn_recovery(
     )
     assert rec_svc.reconcile_interrupted_command("om_stream_done") is True
     assert rec_svc.get_pending_command("om_stream_done")["dispatch_state"] == "turn_completed"  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression tests for R4-01 (all asyncio entrypoints non-blocking) and R4-02 (fd cleanup)."""
+    import os
+    import subprocess
+    import sys
+    import time
+
+    from starlette.requests import Request
+
+    from claude_hub.api import auth as api_auth
+    from claude_hub.auth import feishu as feishu_auth
+
+    cli_cfg = tmp_path / "c4_cli_cfg"
+    cli_data = tmp_path / "c4_cli_data"
+    cli_cfg.mkdir(parents=True)
+    cli_data.mkdir(parents=True)
+    master_key = secrets.token_bytes(32)
+    (cli_data / "master.key").write_bytes(master_key)
+    (cli_cfg / "config.json").write_text(
+        json.dumps(
+            {
+                "currentApp": "cli_c4",
+                "apps": [{"appId": "cli_c4", "users": [{"userOpenId": "ou_c4"}]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (cli_data / "cli_c4_ou_c4.enc").write_bytes(
+        aes_256_gcm_encrypt(
+            master_key,
+            json.dumps(
+                {
+                    "appId": "cli_c4",
+                    "userOpenId": "ou_c4",
+                    "accessToken": "c4-cli-at",
+                    "refreshToken": "c4-cli-rt",
+                    "expiresAt": int((time.time() + 7200) * 1000),
+                    "refreshExpiresAt": int((time.time() + 600_000) * 1000),
+                    "scope": "im:message im:message.send_as_user",
+                }
+            ).encode("utf-8"),
+        )
+    )
+    cli_lock_path = cli_cfg / "locks" / "refresh_cli_c4_ou_c4.lock"
+    cli_lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def spawn_lock_holder(lock_target: Path, duration: float = 0.25) -> subprocess.Popen[str]:
+        code = (
+            "import fcntl, sys, time\n"
+            "with open(sys.argv[1], 'w') as f:\n"
+            "    fcntl.flock(f, fcntl.LOCK_EX)\n"
+            "    print('LOCK_HELD', flush=True)\n"
+            "    time.sleep(float(sys.argv[2]))\n"
+        )
+        p = subprocess.Popen(
+            [sys.executable, "-u", "-c", code, str(lock_target), str(duration)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert p.stdout is not None and p.stdout.readline().strip() == "LOCK_HELD"
+        return p
+
+    async def measure_heartbeat(coro: Any, lock_target: Path = cli_lock_path) -> float:
+        holder = spawn_lock_holder(lock_target, 0.25)
+        t0 = time.monotonic()
+
+        async def hb() -> float:
+            await asyncio.sleep(0.02)
+            return time.monotonic() - t0
+
+        hb_task = asyncio.create_task(hb())
+        await asyncio.sleep(0)
+        try:
+            await coro
+            return await hb_task
+        finally:
+            holder.communicate(timeout=3)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/reply"):
+            return httpx.Response(200, json={"code": 0, "data": {"message_id": "om_c4_reply"}})
+        if request.url.path == "/open-apis/im/v1/messages":
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {"message_id": "om_c4_send", "items": [], "has_more": False},
+                },
+            )
+        if request.url.path.endswith("/app_access_token/internal"):
+            return httpx.Response(200, json={"code": 0, "app_access_token": "app-tok"})
+        if request.url.path.endswith("/oauth/token"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "access_token": "oauth-at",
+                    "refresh_token": "oauth-rt",
+                    "expires_in": 7200,
+                    "scope": "im:message im:message.send_as_user",
+                },
+            )
+        if request.url.path.endswith("/user_info"):
+            return httpx.Response(200, json={"code": 0, "data": {"open_id": "ou_c4", "name": "C4"}})
+        raise AssertionError(f"Unexpected path {request.url.path}")
+
+    async with httpx.AsyncClient(
+        base_url="https://open.feishu.cn", transport=httpx.MockTransport(handler)
+    ) as http_client:
+        # 1. reply_as_user and send_as_user do not block the event loop
+        store_1 = FeishuUserTokenStore(
+            path=tmp_path / "s1.json",
+            key_path=tmp_path / "s1.key",
+            lark_cli_dir=cli_cfg,
+            lark_cli_data_dir=cli_data,
+        )
+        u_client = FeishuUserClient(store_1, open_id="ou_c4", app_id="cli_c4", client=http_client)
+        d_reply = await measure_heartbeat(u_client.reply_as_user("om_1", "text", {"text": "hi"}))
+        assert d_reply < 0.12
+
+        store_2 = FeishuUserTokenStore(
+            path=tmp_path / "s2.json",
+            key_path=tmp_path / "s2.key",
+            lark_cli_dir=cli_cfg,
+            lark_cli_data_dir=cli_data,
+        )
+        u_client_2 = FeishuUserClient(store_2, open_id="ou_c4", app_id="cli_c4", client=http_client)
+        d_send = await measure_heartbeat(u_client_2.send_as_user("oc_1", "text", {"text": "hi"}))
+        assert d_send < 0.12
+
+        # 2. poll_once() and handle_message(dry_run=True) / apreflight_status() do not block
+        store_3 = FeishuUserTokenStore(
+            path=tmp_path / "s3.json",
+            key_path=tmp_path / "s3.key",
+            lark_cli_dir=cli_cfg,
+            lark_cli_data_dir=cli_data,
+        )
+        u_client_3 = FeishuUserClient(store_3, open_id="ou_c4", app_id="cli_c4", client=http_client)
+        svc_3 = FeishuAiCommandService(
+            state_path=tmp_path / "state3.json",
+            token_store=store_3,
+            user_client_factory=lambda _cfg: u_client_3,
+        )
+        svc_3.update_config(
+            {
+                "enabled": True,
+                "app_id": "cli_c4",
+                "owner_open_id": "ou_c4",
+                "watch_chats": ["oc_1"],
+            }
+        )
+        poller_3 = FeishuAiPoller(svc_3)
+        d_poll = await measure_heartbeat(poller_3.poll_once())
+        assert d_poll < 0.12
+        await poller_3.stop()
+
+        store_4 = FeishuUserTokenStore(
+            path=tmp_path / "s4.json",
+            key_path=tmp_path / "s4.key",
+            lark_cli_dir=cli_cfg,
+            lark_cli_data_dir=cli_data,
+        )
+        svc_4 = FeishuAiCommandService(
+            state_path=tmp_path / "state4.json",
+            token_store=store_4,
+        )
+        svc_4.update_config({"enabled": True})
+        d_preflight = await measure_heartbeat(svc_4.apreflight_status())
+        assert d_preflight < 0.12
+
+        # 3. OAuth callback does not block the event loop
+        store_5 = FeishuUserTokenStore(
+            path=tmp_path / "s5.json",
+            key_path=tmp_path / "s5.key",
+            lark_cli_dir=cli_cfg,
+            lark_cli_data_dir=cli_data,
+        )
+        fake_cfg = SimpleNamespace(
+            auth_enabled=True,
+            feishu_app_id="cli_c4",
+            feishu_app_secret="sec",
+            feishu_redirect_uri="https://hub.example.test/api/auth/callback",
+            frontend_url="https://hub.example.test",
+            public_url="",
+            session_cookie_name="sid",
+            session_expire_days=1,
+            allowed_open_ids_list=[],
+            allowed_emails_list=[],
+        )
+        monkeypatch.setattr(feishu_auth, "settings", fake_cfg)
+        monkeypatch.setattr(api_auth, "settings", fake_cfg)
+        monkeypatch.setattr(
+            feishu_auth,
+            "create_async_client",
+            lambda *_a, **_kw: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        monkeypatch.setattr(
+            api_auth, "create_session", lambda *_a: SimpleNamespace(session_id="sid-1")
+        )
+        monkeypatch.setattr(
+            "claude_hub.services.feishu_user_token_store.get_feishu_user_token_store",
+            lambda: store_5,
+        )
+        req = Request(
+            {
+                "type": "http",
+                "scheme": "https",
+                "method": "GET",
+                "path": "/api/auth/callback",
+                "query_string": b"",
+                "headers": [(b"cookie", b"claude_hub_oauth_state=st-1")],
+            }
+        )
+        d_oauth = await measure_heartbeat(api_auth.callback(req, code="code-1", state="st-1"))
+        assert d_oauth < 0.12
+        assert store_5.get_token(open_id="ou_c4", app_id="cli_c4") is not None
+
+    # 4. R4-02: Cancelled async_file_lock waiters on first lock and second lock leak 0 fds
+    def open_fds_for(targets: set[str]) -> list[int]:
+        if not Path("/proc/self/fd").is_dir():
+            return []
+        found: list[int] = []
+        for entry in os.listdir("/proc/self/fd"):
+            try:
+                if os.readlink(f"/proc/self/fd/{entry}") in targets:
+                    found.append(int(entry))
+            except OSError:
+                pass
+        return found
+
+    cancel_store = FeishuUserTokenStore(
+        path=tmp_path / "cancel.json",
+        key_path=tmp_path / "cancel.key",
+        lark_cli_dir=cli_cfg,
+        lark_cli_data_dir=cli_data,
+    )
+    hub_lock_path = tmp_path / "feishu_user_tokens.refresh.lock"
+    target_paths = {str(cli_lock_path.resolve()), str(hub_lock_path.resolve())}
+
+    # Case A: Cancel while waiting on the first lock (cli_lock_path)
+    before_a = open_fds_for(target_paths)
+    holder_a = spawn_lock_holder(cli_lock_path, 0.35)
+    try:
+        for _ in range(5):
+            with pytest.raises(asyncio.TimeoutError):
+                async with asyncio.timeout(0.015):
+                    async with cancel_store.async_file_lock(app_id="cli_c4", open_id="ou_c4"):
+                        pass
+        assert open_fds_for(target_paths) == before_a
+        assert cancel_store._held_lock_fds == {}
+    finally:
+        holder_a.communicate(timeout=3)
+
+    # Case B: Cancel while waiting on the second lock (hub_lock_path) after acquiring first lock
+    before_b = open_fds_for(target_paths)
+    holder_b = spawn_lock_holder(hub_lock_path, 0.35)
+    try:
+        for _ in range(5):
+            with pytest.raises(asyncio.TimeoutError):
+                async with asyncio.timeout(0.015):
+                    async with cancel_store.async_file_lock(app_id="cli_c4", open_id="ou_c4"):
+                        pass
+        assert open_fds_for(target_paths) == before_b
+        assert cancel_store._held_lock_fds == {}
+    finally:
+        holder_b.communicate(timeout=3)
