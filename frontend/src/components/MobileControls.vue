@@ -358,7 +358,7 @@ onUnmounted(() => {
   bottom: 0;
   left: 0;
   right: 0;
-  z-index: 1000;
+  z-index: 800;
   pointer-events: none;
   display: flex;
   flex-direction: column;

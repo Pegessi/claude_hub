@@ -274,6 +274,8 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(sheet).not_to_be_visible()
             dialog = page.get_by_role("dialog", name="Edit Goal", exact=True)
             await expect(dialog).to_be_visible()
+            # Opening Edit Goal on mobile must not auto-focus the objective textarea.
+            await expect(dialog.locator("#goal-dialog-objective")).not_to_be_focused()
             await expect(
                 dialog.get_by_role("button", name="Save Goal", exact=True)
             ).to_be_in_viewport()

@@ -7,6 +7,21 @@
 
 ## Released
 
+### fix(mobile-ui): suppress automatic text-input focus on mobile/coarse-pointer dialogs and model picker
+
+- Add `shouldAutoFocusTextInput` (`frontend/src/utils/mobileInputFocus.ts`) and gate
+  automatic text-input focus across `SessionCreator.vue`, `TaskCreateDialog.vue`,
+  `WorkspaceEditorDialog.vue`, `TaskEditDialog.vue`, `GoalSetupDialog.vue`, and
+  `useChatSettings.ts` (`toggleModelMenu`), so opening a modal or tapping non-input
+  selector/toolbar buttons on mobile (`<= 768px` or `(any-pointer: coarse)`) never
+  pops up the soft keyboard unless the user explicitly taps a text field.
+- Lower `.mobile-controls-overlay` `z-index` from `1000` to `800` in
+  `MobileControls.vue` so the terminal keyboard backdrop blur never covers
+  `SessionCreator` or `CloseTabDialog` (`.modal-overlay` at `z-index: 1000`), and
+  remove conflicting `@media (max-width: 640px)` `.modal-overlay`/`.modal` geometry
+  overrides in `session-creator.css` and `CloseTabDialog.vue` so mobile modals use
+  the shared `overlays.css` bottom-sheet layout and `--visual-viewport-height` sizing.
+
 ### feat(chat): classify Chat sessions active within the last 4 hours into `Review`
 
 - Keep read, idle Chat sessions active within the last 4 hours (`<= 4h`) in `Review`

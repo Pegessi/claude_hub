@@ -119,10 +119,10 @@
             <label for="task-create-title">Title</label>
             <input
               id="task-create-title"
+              ref="titleInputRef"
               v-model="form.title"
               placeholder="Implement a focused change"
               :disabled="!targetAvailable"
-              autofocus
             >
           </div>
           <div class="modal-field">
@@ -391,11 +391,14 @@
 </template>
 
 <script setup lang="ts">
+import { nextTick, ref, watch } from 'vue'
 import LoadingButton from '@/components/LoadingButton.vue'
 import { formatAttachmentSize } from '@/utils/draftAttachments'
+import { shouldAutoFocusTextInput } from '@/utils/mobileInputFocus'
 import type { TaskCreateFlow } from '@/composables/useTaskCreateFlow'
 
 const props = defineProps<{ flow: TaskCreateFlow }>()
+const titleInputRef = ref<HTMLInputElement | null>(null)
 const {
   visible, form, pendingAttempt, reporterRecovery, revealReporterKey,
   capabilities, capabilitiesStatus, capabilitiesError, submitDisabled,
@@ -403,6 +406,12 @@ const {
   discardPendingAttempt, onFormMutation, pasteAttachments, removeAttachment,
   toggleReporterKey, copyReporterCredential, persistReporterCredential, submit,
 } = props.flow
+
+watch(visible, open => {
+  if (open && shouldAutoFocusTextInput()) {
+    void nextTick(() => titleInputRef.value?.focus())
+  }
+})
 </script>
 
 <style scoped>

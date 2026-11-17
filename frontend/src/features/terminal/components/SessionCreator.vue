@@ -37,10 +37,10 @@
           <label for="tabName">Tab Name</label>
           <input
             id="tabName"
+            ref="tabNameInputRef"
             v-model="form.name"
             type="text"
             placeholder="Enter tab name"
-            autofocus
           >
         </div>
         <div class="form-group">
@@ -407,6 +407,7 @@ import { useCwdHistory } from '@/composables/useCwdHistory'
 import { useMasoPreflight } from '@/composables/useMasoPreflight'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { useTerminalStore } from '@/stores/terminalStore'
+import { shouldAutoFocusTextInput } from '@/utils/mobileInputFocus'
 import { remoteInteractive, remoteProfileBadge } from '@/utils/remoteProfiles'
 import type { AgentType, RemoteProfile, SessionKind } from '@/types'
 interface FileInfo {
@@ -426,6 +427,7 @@ const { defaultPresetTextForAgent } = useLaunchEnvPresets()
 const { isPending, runPending } = usePendingActions()
 const showModal = ref(false)
 const showFileBrowser = ref(false)
+const tabNameInputRef = ref<HTMLInputElement | null>(null)
 const cwdInputWrapperRef = ref<HTMLDivElement | null>(null)
 const cwdChoicesRef = ref<HTMLDivElement | null>(null)
 const cwdDropdownOpen = ref(false)
@@ -702,6 +704,9 @@ function openCreateModal() {
   }
   showModal.value = true
   fetchRemoteProfiles()
+  if (shouldAutoFocusTextInput()) {
+    void nextTick(() => tabNameInputRef.value?.focus())
+  }
 }
 function closeCreateModal() {
   showModal.value = false
