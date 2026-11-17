@@ -354,3 +354,57 @@ test('buildKeyMilestones folds 50+ iterative initiator working events into bound
   assert.ok(vm.milestones.some(m => (m.collapsedCount ?? 0) > 10))
   assert.equal(vm.milestones.at(-1).isCurrentEcho, true)
 })
+
+test('groupTriageTasks previews top 5 DONE tasks by default, supports Show more and section collapse, and keeps selected task visible', () => {
+  const doneVms = Array.from({ length: 12 }, (_, idx) =>
+    triage.buildTriageTaskViewModel({
+      task: makeTask({
+        id: `done-${idx}`,
+        title: `Done task ${idx}`,
+        status: 'done',
+        updated_at: `2026-11-${String(22 - idx).padStart(2, '0')}T10:00:00Z`,
+      }),
+      workspaceName: 'evo_workspace',
+      reports: [],
+      events: [],
+      sessionsById: new Map(),
+      nowMs: NOW_MS,
+    }),
+  )
+
+  const defaultDone = triage.groupTriageTasks(doneVms).find(g => g.key === 'done')
+  assert.equal(defaultDone.items.length, 12)
+  assert.equal(defaultDone.visibleItems.length, triage.TRIAGE_DONE_PREVIEW_SIZE)
+  assert.equal(defaultDone.hiddenCount, 7)
+  assert.equal(defaultDone.expanded, false)
+  assert.deepEqual(
+    defaultDone.visibleItems.map(i => i.id),
+    ['done-0', 'done-1', 'done-2', 'done-3', 'done-4'],
+  )
+
+  // Selecting an older DONE task keeps it visible in the 5th slot during preview
+  const withOlderSelected = triage
+    .groupTriageTasks(doneVms, { selectedTaskId: 'done-9' })
+    .find(g => g.key === 'done')
+  assert.deepEqual(
+    withOlderSelected.visibleItems.map(i => i.id),
+    ['done-0', 'done-1', 'done-2', 'done-3', 'done-9'],
+  )
+  assert.equal(withOlderSelected.hiddenCount, 7)
+
+  // Expanding DONE reveals all 12
+  const expandedDone = triage
+    .groupTriageTasks(doneVms, { doneExpanded: true })
+    .find(g => g.key === 'done')
+  assert.equal(expandedDone.visibleItems.length, 12)
+  assert.equal(expandedDone.hiddenCount, 0)
+  assert.equal(expandedDone.expanded, true)
+
+  // Collapsing DONE hides rows (except keeping active item visible if selected)
+  const collapsedDone = triage
+    .groupTriageTasks(doneVms, { collapsed: new Set(['done']) })
+    .find(g => g.key === 'done')
+  assert.equal(collapsedDone.collapsed, true)
+  assert.deepEqual(collapsedDone.visibleItems, [])
+  assert.equal(collapsedDone.hiddenCount, 12)
+})
