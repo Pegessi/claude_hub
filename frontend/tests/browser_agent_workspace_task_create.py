@@ -1136,6 +1136,7 @@ async def main(browser_run: BrowserRun) -> None:
         modal = await open_add_task()
         await expect(modal.locator("#task-create-title")).not_to_be_focused()
         await expect(modal.locator("#task-create-description")).not_to_be_focused()
+        assert await modal.evaluate("el => el.contains(document.activeElement)")
         three_column_controls = modal.locator(".segmented-control--three")
         await expect(three_column_controls).to_have_count(2)
         grid_column_counts = await three_column_controls.evaluate_all(
@@ -1185,6 +1186,39 @@ async def main(browser_run: BrowserRun) -> None:
         await cancel.click()
         await expect(page.get_by_role("heading", name="Add Task")).to_have_count(0)
         assert await browser_create_count() == mobile_create_count
+
+        # Verify WorkspaceEditorDialog and TaskEditDialog at 390x844 do not
+        # auto-focus text inputs and move focus into the modal container.
+        await page.locator(".workspace-mobile-menu-trigger").click()
+        await page.get_by_role("button", name="Edit Workspace", exact=True).click()
+        ws_modal = page.locator(".workspace-modal").filter(
+            has=page.get_by_role("heading", name="Edit Workspace", exact=True)
+        )
+        await expect(ws_modal).to_be_visible()
+        assert await ws_modal.evaluate("el => el.contains(document.activeElement)")
+        assert not await page.evaluate(
+            "['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName || '')"
+        )
+        await ws_modal.get_by_role("button", name="Cancel", exact=True).click()
+        await expect(ws_modal).to_have_count(0)
+
+        editable_card = (
+            page.locator(".task-card")
+            .filter(has=page.get_by_role("button", name="Edit", exact=True))
+            .first
+        )
+        await editable_card.get_by_role("button", name="Edit", exact=True).click()
+        edit_task_modal = page.locator(".workspace-modal").filter(
+            has=page.get_by_role("heading", name="Edit Task", exact=True)
+        )
+        await expect(edit_task_modal).to_be_visible()
+        assert await edit_task_modal.evaluate("el => el.contains(document.activeElement)")
+        assert not await page.evaluate(
+            "['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName || '')"
+        )
+        await edit_task_modal.get_by_role("button", name="Cancel", exact=True).click()
+        await expect(edit_task_modal).to_have_count(0)
+
         assert not blocked_requests, blocked_requests
         assert not unknown_requests, unknown_requests
         assert not page_errors, page_errors

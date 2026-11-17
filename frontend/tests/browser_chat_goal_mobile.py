@@ -274,13 +274,49 @@ async def main(browser_run: BrowserRun) -> None:
             await expect(sheet).not_to_be_visible()
             dialog = page.get_by_role("dialog", name="Edit Goal", exact=True)
             await expect(dialog).to_be_visible()
-            # Opening Edit Goal on mobile must not auto-focus the objective textarea.
+            # Opening Edit Goal on mobile must not auto-focus the objective textarea,
+            # while moving focus inside the dialog so Escape/Tab stay contained.
             await expect(dialog.locator("#goal-dialog-objective")).not_to_be_focused()
+            assert await dialog.evaluate("el => el.contains(document.activeElement)")
+            assert not await page.evaluate(
+                "['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName || '')"
+            )
             await expect(
                 dialog.get_by_role("button", name="Save Goal", exact=True)
             ).to_be_in_viewport()
+            await page.keyboard.press("Escape")
+            await expect(dialog).not_to_be_visible()
+            await expect(summary).to_be_focused()
+
+            # Verify 390x844 mobile viewport: Escape closes Edit Goal, and Tab/Enter
+            # remain trapped inside the modal without triggering background Pause.
+            await page.set_viewport_size({"width": 390, "height": 844})
+            await summary.click()
+            await sheet.get_by_role("button", name="Edit Goal", exact=True).click()
+            await expect(sheet).not_to_be_visible()
+            await expect(dialog).to_be_visible()
+            await expect(dialog.locator("#goal-dialog-objective")).not_to_be_focused()
+            assert await dialog.evaluate("el => el.contains(document.activeElement)")
+            await page.keyboard.press("Escape")
+            await expect(dialog).not_to_be_visible()
+            await expect(summary).to_be_focused()
+
+            await summary.click()
+            await sheet.get_by_role("button", name="Edit Goal", exact=True).click()
+            await expect(dialog).to_be_visible()
+            assert await dialog.evaluate("el => el.contains(document.activeElement)")
+            await page.keyboard.press("Tab")
+            await expect(dialog.locator("#goal-dialog-objective")).to_be_focused()
+            await page.keyboard.press("Tab")
+            await expect(dialog.get_by_role("button", name="Cancel", exact=True)).to_be_focused()
+            await page.keyboard.press("Tab")
+            await expect(dialog.get_by_role("button", name="Save Goal", exact=True)).to_be_focused()
+            await page.keyboard.press("Tab")
+            await expect(dialog.locator("#goal-dialog-objective")).to_be_focused()
+            assert report["goal_actions"] == []
             await dialog.get_by_role("button", name="Cancel", exact=True).click()
             await expect(dialog).not_to_be_visible()
+            await page.set_viewport_size(PHONE)
 
             await quick.click()
             await expect(bar.get_by_role("button", name="Resume", exact=True)).to_be_visible()
@@ -288,10 +324,15 @@ async def main(browser_run: BrowserRun) -> None:
             await page.screenshot(path=str(output / "goal-mobile-paused.png"))
             report["screenshots"].append("goal-mobile-paused.png")
 
-            # Wider screens keep the inline row of actions.
+            # Wider screens keep the inline row of actions and retain desktop textarea auto-focus.
             await page.set_viewport_size({"width": 1280, "height": 900})
             for label in ("Resume", "Edit Goal", "Complete", "Clear"):
                 await expect(bar.get_by_role("button", name=label, exact=True)).to_be_visible()
+            await bar.get_by_role("button", name="Edit Goal", exact=True).click()
+            await expect(dialog).to_be_visible()
+            await expect(dialog.locator("#goal-dialog-objective")).to_be_focused()
+            await page.keyboard.press("Escape")
+            await expect(dialog).not_to_be_visible()
 
             assert not report["unknown_requests"], report["unknown_requests"]
             assert not report["page_errors"], report["page_errors"]

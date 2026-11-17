@@ -4,7 +4,11 @@
     class="workspace-modal-overlay"
     @click.self="close"
   >
-    <div class="workspace-modal">
+    <div
+      ref="modalRef"
+      class="workspace-modal"
+      tabindex="-1"
+    >
       <h3>Add Task</h3>
       <form
         @submit.prevent="submit"
@@ -398,6 +402,7 @@ import { shouldAutoFocusTextInput } from '@/utils/mobileInputFocus'
 import type { TaskCreateFlow } from '@/composables/useTaskCreateFlow'
 
 const props = defineProps<{ flow: TaskCreateFlow }>()
+const modalRef = ref<HTMLDivElement | null>(null)
 const titleInputRef = ref<HTMLInputElement | null>(null)
 const {
   visible, form, pendingAttempt, reporterRecovery, revealReporterKey,
@@ -408,8 +413,11 @@ const {
 } = props.flow
 
 watch(visible, open => {
-  if (open && shouldAutoFocusTextInput()) {
-    void nextTick(() => titleInputRef.value?.focus())
+  if (open) {
+    void nextTick(() => {
+      const target = shouldAutoFocusTextInput() ? titleInputRef.value : modalRef.value
+      target?.focus()
+    })
   }
 })
 </script>
@@ -609,6 +617,10 @@ watch(visible, open => {
   background: var(--ch-color-surface);
   box-shadow: var(--ch-shadow-dialog);
   padding: 20px;
+}
+
+.workspace-modal:focus {
+  outline: none;
 }
 
 .workspace-modal h3 {

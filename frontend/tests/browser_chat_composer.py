@@ -611,6 +611,26 @@ async def main(browser_run: BrowserRun) -> None:
             elif method == "GET" and path == "/api/tabs":
                 body = [
                     tab,
+                    *(
+                        [
+                            {
+                                "id": "fixture-terminal-tab",
+                                "name": "Terminal fixture",
+                                "agent_type": "terminal",
+                                "session_kind": "terminal",
+                                "target": "local",
+                                "cwd": "/fixture/current",
+                                "is_active": False,
+                                "created_at": NOW,
+                                "workspace_id": None,
+                                "workspace_name": None,
+                                "workspace_role": None,
+                                "archived": False,
+                            }
+                        ]
+                        if state.get("include_terminal_tab")
+                        else []
+                    ),
                     {
                         "id": "fixture-managed-tab",
                         "name": "Workspace fixture",
@@ -857,9 +877,17 @@ async def main(browser_run: BrowserRun) -> None:
                 body = None
             elif method == "POST" and path in {
                 f"/api/tabs/{TAB}/view",
+                "/api/tabs/fixture-terminal-tab/view",
                 "/api/tabs/fixture-managed-tab/view",
             }:
                 body = {"ok": True}
+            elif method == "GET" and path == "/api/terminal/proxy/fixture-terminal-tab/":
+                await route.fulfill(
+                    status=200,
+                    content_type="text/html",
+                    body="<!doctype html><html><body></body></html>",
+                )
+                return
             elif method == "GET" and path == "/api/feishu/bot/bots":
                 body = {
                     "pool_revision": 0,
@@ -1139,9 +1167,65 @@ async def main(browser_run: BrowserRun) -> None:
         # The app remounts its top bar across the desktop/mobile breakpoint.
         # Exercise a fresh mobile dialog, rather than retaining a detached one.
         await page.set_viewport_size({"width": 390, "height": 844})
+        # Activate a real Terminal tab at 390x844 so App.vue mounts MobileControls
+        # (!activePaneIsChat), expand its controls panel, exercise non-input terminal
+        # toolbar buttons without editable focus, and verify SessionCreator (.modal-overlay)
+        # stacks cleanly above the overlapping MobileControls panel and toggle button.
+        state["include_terminal_tab"] = True
+        await page.evaluate("""async () => {
+          const { useTerminalStore } = await import('/src/stores/terminalStore.ts');
+          await useTerminalStore().fetchTabs();
+        }""")
+        terminal_tab_chip = page.locator('.tab-bar .tab[data-tab-id="fixture-terminal-tab"]')
+        await expect(terminal_tab_chip).to_be_visible()
+        await terminal_tab_chip.click()
+        assert not await page.evaluate(
+            "['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName || '')"
+        )
+        mobile_controls = page.locator(".mobile-controls-overlay")
+        await expect(mobile_controls).to_be_visible()
+        await page.evaluate("""() => {
+          window.__sentTerminalKeys = [];
+          window.__claudeHub = window.__claudeHub || {};
+          const orig = window.__claudeHub.sendTerminalKey;
+          window.__claudeHub.sendTerminalKey = (key, ctrl, shift) => {
+            window.__sentTerminalKeys.push({ key, ctrl, shift });
+            if (typeof orig === 'function') orig(key, ctrl, shift);
+          };
+        }""")
+        controls_toggle = mobile_controls.locator(".toggle-btn")
+        await expect(controls_toggle).to_be_visible()
+        await controls_toggle.dispatch_event("pointerdown")
+        await controls_toggle.dispatch_event("pointerup")
+        controls_panel = mobile_controls.locator(".controls-panel")
+        await expect(controls_panel).to_be_visible()
+        assert not await page.evaluate(
+            "['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName || '')"
+        )
+        ctrl_btn = controls_panel.get_by_role("button", name="Ctrl", exact=True)
+        await ctrl_btn.dispatch_event("pointerdown")
+        await expect(
+            controls_panel.get_by_role("button", name="Ctrl ON", exact=True)
+        ).to_be_visible()
+        await controls_panel.get_by_role("button", name="Ctrl ON", exact=True).dispatch_event(
+            "pointerdown"
+        )
+        await expect(ctrl_btn).to_be_visible()
+        for label in ("Esc", "Tab", "Ctrl+C"):
+            btn = controls_panel.get_by_role("button", name=label, exact=True)
+            await btn.dispatch_event("pointerdown")
+            await btn.dispatch_event("pointerup")
+            assert not await page.evaluate(
+                "['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName || '')"
+            )
+        sent_keys = await page.evaluate("window.__sentTerminalKeys")
+        assert [item["key"] for item in sent_keys] == ["Escape", "Tab", "c"], sent_keys
+
+        await page.evaluate("document.documentElement.dataset.keyboardOpen = 'true'")
         await page.locator(".add-tab").click()
         await expect(page.locator("#tabName")).not_to_be_focused()
         await expect(page.locator("#tabCwd")).not_to_be_focused()
+        assert await page.locator(".modal").evaluate("el => el.contains(document.activeElement)")
         # Tapping non-input selector buttons in SessionCreator on mobile must never
         # focus a text input or collapse/distort the modal or backdrop overlay.
         await (
@@ -1174,17 +1258,49 @@ async def main(browser_run: BrowserRun) -> None:
           const s = getComputedStyle(el);
           const modal = el.querySelector('.modal');
           const mr = modal.getBoundingClientRect();
-          const hit = document.elementFromPoint(mr.left + mr.width / 2, mr.top + 24);
+          const mc = document.querySelector('.mobile-controls-overlay');
+          const mcStyle = mc ? getComputedStyle(mc) : null;
+          const panel = document.querySelector('.mobile-controls-overlay .controls-panel');
+          const pr = panel ? panel.getBoundingClientRect() : null;
+          const toggle = document.querySelector('.mobile-controls-overlay .toggle-btn');
+          const tr = toggle ? toggle.getBoundingClientRect() : null;
+          const cancelBtn = modal.querySelector('.modal-actions button');
+          const cr = cancelBtn.getBoundingClientRect();
+          const hitHeader = document.elementFromPoint(mr.left + mr.width / 2, mr.top + 24);
+          const hitPanelOverlap = pr
+            ? document.elementFromPoint(pr.left + pr.width / 2, Math.max(mr.top + 12, pr.top + pr.height / 2))
+            : null;
+          const hitToggleOverlap = tr
+            ? document.elementFromPoint(tr.left + tr.width / 2, Math.min(mr.bottom - 8, tr.top + tr.height / 2))
+            : null;
+          const hitCancel = document.elementFromPoint(cr.left + cr.width / 2, cr.top + cr.height / 2);
           return {
             width: r.width,
             height: r.height,
             backdropFilter: s.backdropFilter || s.webkitBackdropFilter,
-            modalInHitTree: modal.contains(hit),
+            modalOverlayZ: Number(s.zIndex),
+            mobileControlsZ: mcStyle ? Number(mcStyle.zIndex) : null,
+            overlapsPanel: Boolean(pr && mr.bottom > pr.top && mr.top < pr.bottom),
+            modalInHeaderHit: modal.contains(hitHeader),
+            modalInPanelOverlapHit: Boolean(hitPanelOverlap && modal.contains(hitPanelOverlap)),
+            modalInToggleOverlapHit: Boolean(hitToggleOverlap && modal.contains(hitToggleOverlap)),
+            cancelInHit: cancelBtn.contains(hitCancel),
+            mobileControlsHitAnywhere: Boolean(
+              mc && (mc.contains(hitHeader) || mc.contains(hitPanelOverlap) || mc.contains(hitToggleOverlap) || mc.contains(hitCancel))
+            ),
           };
         }""")
         assert overlay_state["width"] == 390 and overlay_state["height"] == 844, overlay_state
         assert "blur" in overlay_state["backdropFilter"], overlay_state
-        assert overlay_state["modalInHitTree"], overlay_state
+        assert overlay_state["modalOverlayZ"] == 1000, overlay_state
+        assert overlay_state["mobileControlsZ"] == 800, overlay_state
+        assert overlay_state["overlapsPanel"], overlay_state
+        assert overlay_state["modalInHeaderHit"], overlay_state
+        assert overlay_state["modalInPanelOverlapHit"], overlay_state
+        assert overlay_state["modalInToggleOverlapHit"], overlay_state
+        assert overlay_state["cancelInHit"], overlay_state
+        assert not overlay_state["mobileControlsHitAnywhere"], overlay_state
+        await page.evaluate("delete document.documentElement.dataset.keyboardOpen")
         await page.get_by_label("Chat Provider", exact=True).select_option("maso")
         await preset.select_option("maso-missing")
         await expect(preflight).to_contain_text("MASO service is unavailable")
@@ -1208,6 +1324,12 @@ async def main(browser_run: BrowserRun) -> None:
         assert box and box["x"] >= 0 and box["x"] + box["width"] <= 390
         await page.screenshot(path=str(output / "maso-unavailable-mobile.png"), full_page=True)
         await page.locator(".modal").get_by_role("button", name="Cancel", exact=True).click()
+        await page.locator(f'.tab-bar .tab[data-tab-id="{TAB}"]').click()
+        state["include_terminal_tab"] = False
+        await page.evaluate("""async () => {
+          const { useTerminalStore } = await import('/src/stores/terminalStore.ts');
+          await useTerminalStore().fetchTabs();
+        }""")
         await page.set_viewport_size({"width": 1280, "height": 900})
 
         # Effort selection must send MASO's provider key, not Codex effort env,

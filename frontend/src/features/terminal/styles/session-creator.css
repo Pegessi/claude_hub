@@ -53,6 +53,10 @@
   flex-direction: column;
 }
 
+.modal:focus {
+  outline: none;
+}
+
 .file-browser-modal {
   min-width: 500px;
   width: 80%;

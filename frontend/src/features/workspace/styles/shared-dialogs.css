@@ -20,3 +20,7 @@
   box-shadow: var(--ch-shadow-dialog);
   padding: 20px;
 }
+
+.workspace-modal:focus {
+  outline: none;
+}
