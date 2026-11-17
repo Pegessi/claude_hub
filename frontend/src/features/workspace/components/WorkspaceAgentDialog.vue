@@ -522,7 +522,7 @@ const {
   flex-direction: column;
 
   /* Keep the whole modal within a single viewport height. */
-  max-height: calc(100dvh - 32px);
+  max-height: calc(var(--visual-viewport-height, 100dvh) - 32px);
   overflow: hidden;
 }
 

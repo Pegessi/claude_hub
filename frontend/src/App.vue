@@ -399,7 +399,7 @@ function updateViewportMetrics(vv?: VisualViewport) {
   const offsetTop = vv?.offsetTop ?? 0
   const isMobileViewport = window.innerWidth <= 768
 
-  if (Math.abs(viewportWidth - lastVisualViewportWidth) > 24 || (!vv || viewportHeight >= window.innerHeight - 2)) {
+  if (Math.abs(viewportWidth - lastVisualViewportWidth) > 24) {
     largestVisualViewportHeight = viewportHeight
     lastVisualViewportWidth = viewportWidth
   } else if (!largestVisualViewportHeight || viewportHeight > largestVisualViewportHeight) {

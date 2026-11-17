@@ -28,11 +28,15 @@
   `EnvPresetManager.vue`, `feishu-bot-settings-dialog.css`, `AppearanceDialog.vue`,
   and `tab-actions-menu.css` with `--visual-viewport-height`.
 - Enforce `font-size: max(var(--ch-font-size-md), 16px)` on editable fields inside
-  modals on mobile/coarse viewports so focusing an input never triggers iOS Safari
-  auto-zoom, and add `syncModalViewportScroll` / `computeModalFieldScrollDelta`
-  (`frontend/src/utils/mobileInputFocus.ts`, wired into `App.vue` `visualViewport`
-  and `focusin` listeners) so focused inputs inside modals scroll into the visible
-  region above sticky action footers while keeping window and backdrop scroll at `0`.
+  modals and mobile sheets (including `.inbox-sheet` / `.inbox-reply-input` and
+  `.dot-panel`) on mobile/coarse viewports so focusing an input never triggers iOS
+  Safari auto-zoom, make `.dot-panel` scrollable across its identity/execution/patrol
+  editors and body on mobile viewports, and add `syncModalViewportScroll` /
+  `computeModalFieldScrollDelta` (`frontend/src/utils/mobileInputFocus.ts`, wired
+  into `App.vue` `visualViewport` and `focusin` listeners while preserving the
+  `largestVisualViewportHeight` keyboard baseline when layout and visual viewports
+  shrink together) so focused inputs inside modals scroll into the visible region
+  above sticky action footers while keeping window and backdrop scroll at `0`.
 
 ### fix(mobile-ui): suppress automatic text-input focus on mobile/coarse-pointer dialogs and model picker
 

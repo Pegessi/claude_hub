@@ -158,9 +158,22 @@ test('shared visualViewport modal layout anchors mobile overlays to visualViewpo
   assert.match(envPresetManager, /max-height:\s*calc\(var\(--visual-viewport-height, 100dvh\)\s*-\s*20px\)/)
   assert.match(feishuBotCss, /height:\s*calc\(var\(--visual-viewport-height, 100dvh\)\s*-\s*16px\)/)
 
-  // App.vue syncs modal viewport scroll on visualViewport updates and focusin inside modals.
+  // App.vue syncs modal viewport scroll on visualViewport updates and focusin inside modals
+  // while preserving largestVisualViewportHeight when only height shrinks (layout-resizing keyboards).
   assert.match(appVue, /syncModalViewportScroll\(document,\s*window\)/)
   assert.match(appVue, /document\.addEventListener\('focusin',\s*handleModalFocusIn\)/)
+  assert.match(appVue, /if \(Math\.abs\(viewportWidth - lastVisualViewportWidth\) > 24\)/)
+  assert.doesNotMatch(appVue, /viewportHeight >= window\.innerHeight - 2/)
+
+  // DotPanel and AgentInbox mobile sheets participate in visualViewport height bounds and 16px editable font rules.
+  const dotPanelCss = read('../src/features/dot/dot-panel.css')
+  const agentInboxCss = read('../src/features/agent-status/agent-inbox.css')
+  const agentInboxPanel = read('../src/features/agent-status/AgentInboxPanel.vue')
+  assert.match(dotPanelCss, /\.dot-panel \{[\s\S]*?max-height:\s*var\(--visual-viewport-height, 100dvh\);[\s\S]*?overflow-y:\s*auto;/)
+  assert.match(dotPanelCss, /@media \(max-width: 768px\)[\s\S]*?\.dot-panel__body \{[\s\S]*?flex:\s*1 0 auto;[\s\S]*?overflow-y:\s*visible;/)
+  assert.match(overlaysCss, /:is\([^)]*\.inbox-sheet[^)]*\.dot-panel[^)]*\) :is\(input/)
+  assert.match(agentInboxCss, /@media \(max-width: 768px\), \(pointer: coarse\)[\s\S]*?\.inbox-reply-input \{[\s\S]*?font-size:\s*max\(var\(--ch-font-size-md\), 16px\);/)
+  assert.match(agentInboxPanel, /\.inbox-sheet \{[\s\S]*?max-height:\s*var\(--visual-viewport-height, 100dvh\);/)
 })
 
 test('computeModalFieldScrollDelta and syncModalViewportScroll keep focused modal inputs visible above sticky footers', async () => {
@@ -252,8 +265,46 @@ test('computeModalFieldScrollDelta and syncModalViewportScroll keep focused moda
     assert.equal(fakeDoc.documentElement.scrollTop, 0)
     assert.equal(fakeDoc.body.scrollTop, 0)
     assert.equal(modal.scrollTop, 20 + (410 - (380 - 12)))
+
+    // When an inner scrollable body does not overflow itself (e.g. DotPanel .dot-panel__body
+    // pushed below [70, 490] by editors above it), syncModalViewportScroll scrolls the outer
+    // modal (.dot-panel) and clamps container bounds to the visible modal rectangle.
+    const dotPanel = Object.assign(new FakeHTMLElement(), {
+      scrollTop: 0,
+      scrollHeight: 960,
+      clientHeight: 420,
+      getBoundingClientRect: () => ({ top: 70, bottom: 490, height: 420 }),
+      querySelectorAll: () => [],
+    })
+    const dotBody = Object.assign(new FakeHTMLElement(), {
+      parentElement: dotPanel,
+      scrollTop: 0,
+      scrollHeight: 60,
+      clientHeight: 60,
+      getBoundingClientRect: () => ({ top: 880, bottom: 940, height: 60 }),
+      querySelectorAll: () => [],
+    })
+    const focusInput = Object.assign(new FakeHTMLElement(), {
+      parentElement: dotBody,
+      matches: selector => selector.includes('input'),
+      closest: () => dotPanel,
+      getBoundingClientRect: () => ({ top: 896, bottom: 936, height: 40 }),
+    })
+    const dotWin = {
+      ...fakeWin,
+      getComputedStyle: el => {
+        if (el === dotPanel || el === dotBody) return { overflowY: 'auto', position: 'relative' }
+        return { overflowY: 'visible', position: 'static' }
+      },
+    }
+    const dotDoc = {
+      ...fakeDoc,
+      activeElement: focusInput,
+      querySelectorAll: selector => (selector.includes('.modal-overlay') ? [] : [dotPanel]),
+    }
+    assert.equal(syncModalViewportScroll(dotDoc, dotWin), true)
+    assert.equal(dotPanel.scrollTop, 936 - (490 - 12))
   } finally {
     globalThis.HTMLElement = origHTMLElement
   }
 })
-

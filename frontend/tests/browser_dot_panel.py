@@ -546,6 +546,65 @@ async def main(browser_run: BrowserRun) -> None:
             name_input = editor.get_by_label("Name")
             font = await name_input.evaluate("el => getComputedStyle(el).fontSize")
             assert font == "16px", f"phone inputs must be 16px to avoid iOS zoom, got {font}"
+            # Verify mobile soft-keyboard adaptation (visualViewport height=420, offsetTop=70)
+            # while Dot memory Edit mode is open: all edit controls and the Focus form input/select
+            # scroll into the visible panel rectangle [70, 490] and remain clickable.
+            dot_kb_probe = await page.evaluate("""async () => {
+              const vv = window.visualViewport;
+              Object.defineProperty(vv, 'height', { configurable: true, get: () => 420 });
+              Object.defineProperty(vv, 'offsetTop', { configurable: true, get: () => 70 });
+              try {
+                vv.dispatchEvent(new Event('resize'));
+                vv.dispatchEvent(new Event('scroll'));
+                await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+                const panel = document.querySelector('[data-testid="dot-panel"]');
+                const controls = [
+                  ['Name', panel.querySelector('[data-testid="dot-identity-editor"] input')],
+                  ['Execution backend', panel.querySelector('select[aria-label="Execution backend"]')],
+                  ['Dot environment preset', panel.querySelector('select[aria-label="Dot environment preset"]')],
+                  ['Add a focus item', panel.querySelector('input[placeholder="Add a focus item"]')],
+                  ['Priority', panel.querySelector('select[aria-label="Priority"]')],
+                ];
+                const results = [];
+                for (const [label, el] of controls) {
+                  el.focus({ preventScroll: true });
+                  el.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+                  vv.dispatchEvent(new Event('resize'));
+                  vv.dispatchEvent(new Event('scroll'));
+                  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+                  const r = el.getBoundingClientRect();
+                  const pr = panel.getBoundingClientRect();
+                  const hitEl = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+                  results.push({
+                    field: label,
+                    top: r.top,
+                    bottom: r.bottom,
+                    panelTop: pr.top,
+                    panelBottom: pr.bottom,
+                    hit: Boolean(hitEl && (el === hitEl || el.contains(hitEl))),
+                    scrollTop: panel.scrollTop,
+                  });
+                }
+                panel.scrollTop = 0;
+                return results;
+              } finally {
+                delete vv.height;
+                delete vv.offsetTop;
+                vv.dispatchEvent(new Event('resize'));
+                vv.dispatchEvent(new Event('scroll'));
+                await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+              }
+            }""")
+            for item in dot_kb_probe:
+                assert abs(item["panelTop"] - 70) <= 1, item
+                assert abs(item["panelBottom"] - 490) <= 1, item
+                assert item["top"] >= item["panelTop"] - 1, item
+                assert item["bottom"] <= item["panelBottom"] + 1, item
+                assert item["hit"], item
+            assert any(
+                item["field"] == "Add a focus item" and item["scrollTop"] > 0
+                for item in dot_kb_probe
+            ), dot_kb_probe
             tab_reads = report["api_requests"].count(["GET", "/api/tabs"])
             await name_input.fill("Jarvis")
             await editor.get_by_label("Emoji").fill("🦊")

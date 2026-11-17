@@ -1330,8 +1330,6 @@ async def main(browser_run: BrowserRun) -> None:
         # blank blurred padding gap, and focused inputs scroll into view above the sticky footer.
         kb_creator_state = await page.evaluate("""async () => {
           const vv = window.visualViewport;
-          const origHeight = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(vv), 'height');
-          const origOffsetTop = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(vv), 'offsetTop');
           Object.defineProperty(vv, 'height', { configurable: true, get: () => 420 });
           Object.defineProperty(vv, 'offsetTop', { configurable: true, get: () => 80 });
           try {
@@ -1376,10 +1374,8 @@ async def main(browser_run: BrowserRun) -> None:
               inputFontSize: parseFloat(getComputedStyle(tabCwd).fontSize),
             };
           } finally {
-            if (origHeight) Object.defineProperty(vv, 'height', origHeight);
-            else delete vv.height;
-            if (origOffsetTop) Object.defineProperty(vv, 'offsetTop', origOffsetTop);
-            else delete vv.offsetTop;
+            delete vv.height;
+            delete vv.offsetTop;
             vv.dispatchEvent(new Event('resize'));
             vv.dispatchEvent(new Event('scroll'));
             await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -1405,6 +1401,54 @@ async def main(browser_run: BrowserRun) -> None:
             kb_creator_state["cwdBottom"] <= kb_creator_state["footerTopAfterCwd"] + 1
         ), kb_creator_state
         assert kb_creator_state["inputFontSize"] >= 16, kb_creator_state
+        # Also simulate Android/WebView layout+visual viewport shrink (390x844 -> 390x420)
+        # while #tabName is focused in Terminal mode: verify largestVisualViewportHeight
+        # preserves --stable-viewport-height (844px) and Terminal .app height (844px) while
+        # setting --keyboard-height (424px), data-keyboard-open="true", and shrinking the
+        # SessionCreator modal into [0, 420].
+        await page.wait_for_timeout(200)
+        assert await page.evaluate("document.documentElement.dataset.keyboardOpen ?? null") is None
+        await page.locator("#tabName").focus()
+        await page.set_viewport_size({"width": 390, "height": 420})
+        android_kb_state = await page.evaluate("""async () => {
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const root = document.documentElement;
+          const app = document.querySelector('.app');
+          const overlay = document.querySelector('.modal-overlay');
+          const modal = document.querySelector('.modal');
+          const tabName = document.querySelector('#tabName');
+          const footer = document.querySelector('.modal-actions');
+          const or = overlay.getBoundingClientRect();
+          const mr = modal.getBoundingClientRect();
+          const nr = tabName.getBoundingClientRect();
+          const fr = footer.getBoundingClientRect();
+          return {
+            stable: root.style.getPropertyValue('--stable-viewport-height'),
+            visual: root.style.getPropertyValue('--visual-viewport-height'),
+            keyboard: root.style.getPropertyValue('--keyboard-height'),
+            keyboardOpen: root.dataset.keyboardOpen ?? null,
+            appHeight: Math.round(app.getBoundingClientRect().height),
+            overlayTop: or.top,
+            overlayBottom: or.bottom,
+            modalTop: mr.top,
+            modalBottom: mr.bottom,
+            nameTop: nr.top,
+            nameBottom: nr.bottom,
+            footerTop: fr.top,
+          };
+        }""")
+        assert android_kb_state["stable"] == "844px", android_kb_state
+        assert android_kb_state["visual"] == "420px", android_kb_state
+        assert android_kb_state["keyboard"] == "424px", android_kb_state
+        assert android_kb_state["keyboardOpen"] == "true", android_kb_state
+        assert android_kb_state["appHeight"] == 844, android_kb_state
+        assert abs(android_kb_state["overlayTop"] - 0) <= 1, android_kb_state
+        assert abs(android_kb_state["overlayBottom"] - 420) <= 1, android_kb_state
+        assert android_kb_state["modalTop"] >= -1, android_kb_state
+        assert abs(android_kb_state["modalBottom"] - 420) <= 1, android_kb_state
+        assert android_kb_state["nameTop"] >= android_kb_state["modalTop"] - 1, android_kb_state
+        assert android_kb_state["nameBottom"] <= android_kb_state["footerTop"] + 1, android_kb_state
+        await page.set_viewport_size({"width": 390, "height": 844})
         await page.locator(".modal").get_by_role("button", name="Cancel", exact=True).click()
         await page.locator(f'.tab-bar .tab[data-tab-id="{TAB}"]').click()
         state["include_terminal_tab"] = False

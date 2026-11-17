@@ -28,11 +28,14 @@ On mobile, focusing a text input inside a modal dialog (for example `SessionCrea
   - Apply `position: fixed; top: var(--visual-viewport-offset-top, 0px); left: 0; width: 100%` to `.app` across all modes on `@media (max-width: 768px), (any-pointer: coarse)`.
 - Modal component styles (`TaskCreateDialog.vue`, `shared-compact-layout.css`, `ResidentAgentDialog.vue`, `AgentDirectoryDialog.vue`, `TaskDetailDialog.vue`, `EnvPresetManager.vue`, `feishu-bot-settings-dialog.css`, `AppearanceDialog.vue`, `tab-actions-menu.css`):
   - Replace raw `100dvh` / `70dvh` height/max-height bounds with `var(--visual-viewport-height, 100dvh)`.
+- `frontend/src/features/dot/dot-panel.css` & `frontend/src/features/agent-status/agent-inbox.css` & `frontend/src/features/agent-status/AgentInboxPanel.vue`:
+  - Make `.dot-panel` scrollable (`overflow-y: auto; max-height: var(--visual-viewport-height, 100dvh)`) with `flex: 1 0 auto; overflow-y: visible` on `.dot-panel__body` on mobile/coarse viewports so identity, execution, patrol, and focus/work/lesson controls all scroll into the reduced viewport when `Edit` is active.
+  - Include `.inbox-sheet` / `.inbox-reply-input` in the 16px mobile editable font-size rule and `--visual-viewport-height` bound.
 - `frontend/src/utils/mobileInputFocus.ts` & `frontend/src/App.vue`:
-  - Add `computeModalFieldScrollDelta`, `findModalScrollContainer`, and `syncModalViewportScroll` to keep `overlay.scrollTop = 0` and `window.scrollY = 0` while scrolling any focused modal input/textarea into the visible region between sticky headers and sticky action footers whenever `focusin` fires or `visualViewport` resizes/scrolls.
-  - Refresh `App.vue` viewport metrics synchronously on `window` `resize` and reset `largestVisualViewportHeight` when `viewportHeight` returns to `window.innerHeight`.
+  - Add `computeModalFieldScrollDelta`, `findModalScrollContainer`, `collectModalScrollContainers`, and `syncModalViewportScroll` (clamping scrollable container bounds to the visible modal rectangle) to keep `overlay.scrollTop = 0` and `window.scrollY = 0` while scrolling any focused modal input/textarea into the visible region between sticky headers and sticky action footers whenever `focusin` fires or `visualViewport` resizes/scrolls.
+  - Refresh `App.vue` viewport metrics synchronously on `window` `resize` while preserving `largestVisualViewportHeight` when only height shrinks at unchanged width (Android/WebView layout-resizing soft keyboards).
 
 ## Verification
 
 - `./scripts/verify.sh all` (docs, checkout-safety, backend-format, backend-types, backend-tests, frontend-lint, frontend-types, frontend-tests, frontend-build).
-- `CLAUDE_HUB_BROWSER_EXECUTABLE=... ./scripts/verify.sh browser-mocks` (25/25 Playwright browser scenarios passing, including mobile soft-keyboard `visualViewport` shrink + `offsetTop` pan + focused-input scroll checks in `browser_chat_composer.py`, `browser_agent_workspace_task_create.py`, `browser_chat_goal_steer.py`, and `browser_service_restart.py`).
+- `CLAUDE_HUB_BROWSER_EXECUTABLE=... ./scripts/verify.sh browser-mocks` (25/25 Playwright browser scenarios passing, including mobile soft-keyboard `visualViewport` shrink + `offsetTop` pan + focused-input scroll + layout-resize checks in `browser_chat_composer.py`, `browser_dot_panel.py`, `browser_agent_inbox.py`, `browser_agent_workspace_task_create.py`, `browser_chat_goal_steer.py`, and `browser_service_restart.py`).

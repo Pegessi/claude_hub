@@ -12,7 +12,7 @@
 
 .workspace-modal {
   width: min(520px, 100%);
-  max-height: calc(100dvh - 32px);
+  max-height: calc(var(--visual-viewport-height, 100dvh) - 32px);
   overflow-y: auto;
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-lg);
