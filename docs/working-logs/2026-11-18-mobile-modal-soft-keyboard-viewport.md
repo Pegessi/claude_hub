@@ -26,8 +26,8 @@ On mobile, focusing a text input inside a modal dialog (for example `SessionCrea
   - Enforce `font-size: max(var(--ch-font-size-md), 16px)` on editable controls inside modals on mobile/coarse viewports.
 - `frontend/src/features/app-shell/styles/shell.css`:
   - Apply `position: fixed; top: var(--visual-viewport-offset-top, 0px); left: 0; width: 100%` to `.app` across all modes on `@media (max-width: 768px), (any-pointer: coarse)`.
-- Modal component styles (`TaskCreateDialog.vue`, `shared-compact-layout.css`, `ResidentAgentDialog.vue`, `AgentDirectoryDialog.vue`, `TaskDetailDialog.vue`, `EnvPresetManager.vue`, `feishu-bot-settings-dialog.css`, `AppearanceDialog.vue`, `tab-actions-menu.css`):
-  - Replace raw `100dvh` / `70dvh` height/max-height bounds with `var(--visual-viewport-height, 100dvh)`.
+- Modal component styles (`TaskCreateDialog.vue`, `shared-compact-layout.css`, `ResidentAgentDialog.vue`, `AgentDirectoryDialog.vue`, `WorkspaceAgentDialog.vue`, `TaskDetailDialog.vue`, `EnvPresetManager.vue`, `feishu-bot-settings-dialog.css`, `AppearanceDialog.vue`, `tab-actions-menu.css`, `session-creator.css`, `scheduled-tasks-panel.css`, `shared-dialogs.css`, `ChatSubagentSheet.vue`):
+  - Replace raw `100dvh` / `70dvh` height/max-height bounds with `var(--visual-viewport-height, 100dvh)` and set `.file-browser-list` `min-height: 0` in `session-creator.css` and `AgentDirectoryDialog.vue` so populated directory lists shrink and scroll to their final row above sticky footers under 340px keyboard viewports.
 - `frontend/src/features/dot/dot-panel.css` & `frontend/src/features/agent-status/agent-inbox.css` & `frontend/src/features/agent-status/AgentInboxPanel.vue`:
   - Make `.dot-panel` scrollable (`overflow-y: auto; max-height: var(--visual-viewport-height, 100dvh)`) with `flex: 1 0 auto; overflow-y: visible` on `.dot-panel__body` on mobile/coarse viewports so identity, execution, patrol, and focus/work/lesson controls all scroll into the reduced viewport when `Edit` is active.
   - Include `.inbox-sheet` / `.inbox-reply-input` in the 16px mobile editable font-size rule and `--visual-viewport-height` bound.

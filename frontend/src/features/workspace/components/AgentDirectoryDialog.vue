@@ -158,6 +158,7 @@ const {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .file-browser-header {
@@ -208,7 +209,7 @@ const {
 
 .file-browser-list {
   flex: 1;
-  min-height: 160px;
+  min-height: 0;
   overflow-y: auto;
   border: 1px solid var(--ch-color-border);
   border-radius: var(--ch-radius-md);
