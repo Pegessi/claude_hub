@@ -986,9 +986,7 @@ class FeishuUserTokenStore:
                 if cand_fp in {existing_fp, existing.imported_fingerprint}:
                     same_active = cand_fp == existing_fp and existing.source == "lark_cli"
                     merged_scope = (
-                        candidate.scope
-                        if (same_active and has_explicit_scope)
-                        else (existing.scope or candidate.scope)
+                        candidate.scope if (same_active and has_explicit_scope) else existing.scope
                     )
                     enriched = replace(
                         existing,
