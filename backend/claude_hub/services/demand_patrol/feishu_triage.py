@@ -160,8 +160,11 @@ def _candidate(
     row: Mapping[str, Any],
     *,
     tz: str | ZoneInfo | timezone = "Asia/Shanghai",
+    defaults: Mapping[str, str] | None = None,
 ) -> FeishuCandidate:
-    message_id, chat_id = row.get("message_id"), row.get("chat_id")
+    fallback = defaults or {}
+    message_id = row.get("message_id")
+    chat_id = row.get("chat_id") or fallback.get("chat_id")
     if (
         not isinstance(message_id, str)
         or not message_id
@@ -188,11 +191,13 @@ def _candidate(
     return FeishuCandidate(
         message_id=message_id,
         chat_id=chat_id,
-        thread_id=str(row.get("thread_id") or row.get("root_id") or ""),
-        chat_type=str(row.get("chat_type", "")),
+        thread_id=str(
+            row.get("thread_id") or row.get("root_id") or fallback.get("thread_id") or ""
+        ),
+        chat_type=str(row.get("chat_type") or fallback.get("chat_type") or ""),
         sender_id=sender_id,
         sender_name=str(sender.get("name") or sender.get("sender_name") or ""),
-        chat_name=str(row.get("chat_name") or ""),
+        chat_name=str(row.get("chat_name") or fallback.get("chat_name") or ""),
         created_at=_timestamp(row.get("create_time"), tz=tz),
         text=content[:6000],
         permalink=_http_url(row.get("message_app_link") or row.get("url")),
@@ -253,6 +258,7 @@ def _search_messages(
     payload: Any,
     *,
     tz: str | ZoneInfo | timezone = "Asia/Shanghai",
+    defaults: Mapping[str, str] | None = None,
 ) -> list[FeishuCandidate]:
     data = _object(payload)
     if (
@@ -270,7 +276,7 @@ def _search_messages(
         if not isinstance(row, dict):
             raise CommandError("Feishu search returned a malformed message")
         if not row.get("deleted"):
-            messages.append(_candidate(row, tz=tz))
+            messages.append(_candidate(row, tz=tz, defaults=defaults))
     return messages
 
 
@@ -297,6 +303,26 @@ def _search_command(start_iso: str, end_iso: str, *extra_flags: str) -> list[str
         start_iso,
         "--end",
         end_iso,
+        "--page-all",
+        "--page-size",
+        "50",
+        "--page-limit",
+        "10",
+        "--no-reactions",
+        "--format",
+        "json",
+        "--as",
+        "user",
+    ]
+
+
+def _thread_command(thread_id: str) -> list[str]:
+    return [
+        "lark-cli",
+        "im",
+        "+threads-messages-list",
+        "--thread",
+        thread_id,
         "--page-all",
         "--page-size",
         "50",
@@ -624,24 +650,23 @@ async def run_feishu_triage(
             for item in _search_messages(payload, tz=tz):
                 if start <= item.created_at <= now:
                     by_id.setdefault(item.message_id, item)
-        participated_chat_ids = sorted(
-            {
-                item.chat_id
-                for item in by_id.values()
-                if item.sender_id == uid and item.thread_id and item.chat_type != "p2p"
-            }
-        )
-        if participated_chat_ids:
-            thread_payload = await runner(
-                _search_command(
-                    start_iso,
-                    end_iso,
-                    "--chat-id",
-                    ",".join(participated_chat_ids),
-                ),
-                timeout=60,
-            )
-            for item in _search_messages(thread_payload, tz=tz):
+        participated_threads: dict[str, FeishuCandidate] = {}
+        for item in by_id.values():
+            if item.sender_id == uid and item.thread_id and item.chat_type != "p2p":
+                participated_threads.setdefault(item.thread_id, item)
+        for thread_id in sorted(participated_threads):
+            seed = participated_threads[thread_id]
+            thread_payload = await runner(_thread_command(thread_id), timeout=60)
+            for item in _search_messages(
+                thread_payload,
+                tz=tz,
+                defaults={
+                    "chat_id": seed.chat_id,
+                    "chat_name": seed.chat_name,
+                    "chat_type": seed.chat_type,
+                    "thread_id": thread_id,
+                },
+            ):
                 if start <= item.created_at <= now:
                     by_id.setdefault(item.message_id, item)
         messages = list(by_id.values())

@@ -153,7 +153,17 @@ class FakeRunner:
             if "--chat-id" in argv:
                 allowed_chats = set(argv[argv.index("--chat-id") + 1].split(","))
                 rows = [row for row in rows if row.get("chat_id") in allowed_chats]
-            return {"ok": True, "data": {"messages": rows, "has_more": self.has_more}}
+            has_more = self.has_more or len(rows) > 500
+            return {"ok": True, "data": {"messages": rows[:500], "has_more": has_more}}
+        if "+threads-messages-list" in argv:
+            thread_filter = argv[argv.index("--thread") + 1]
+            rows = [
+                row
+                for row in self.messages
+                if (row.get("thread_id") or row.get("root_id")) == thread_filter
+            ]
+            has_more = self.has_more or len(rows) > 500
+            return {"ok": True, "data": {"messages": rows[:500], "has_more": has_more}}
         assert argv[0] == "infowall", "No real subprocess is permitted"
         assert env is not None and env["INFOWALL_API_KEY_FILE"] == KEY_PATH
         if argv[1] == "health":
@@ -872,6 +882,73 @@ async def test_f1_f2_f3_scoped_discovery_reply_anchoring_and_self_mention_covera
     assert not result.errors
     assert result.details["candidate_ids"] == ["first-question", "dm", "followup"]
     assert result.details["answered_skipped"] == 2
+
+
+async def test_f5_participated_thread_in_busy_group_with_over_500_irrelevant_rows() -> None:
+    quiet_mention = {
+        **message(
+            "quiet-mention",
+            chat_type="group",
+            sender="ou_alice",
+            mentions=[{"id": ME}],
+            minutes_ago=15,
+            text="@王泽华 这个配置怎么报错了？",
+        ),
+        "chat_id": "oc_quiet",
+        "chat_name": "安静排障群",
+    }
+    own_active = {
+        **message(
+            "own-active",
+            chat_type="group",
+            sender=ME,
+            thread="omt_active",
+            minutes_ago=25,
+            text="我先看一下",
+        ),
+        "chat_id": "oc_busy",
+        "chat_name": "高并发告警大群",
+    }
+    active_followup = {
+        "message_id": "active-followup",
+        "chat_id": "oc_busy",
+        "thread_id": "omt_active",
+        "create_time": "2026-11-14 10:50",
+        "sender": {"id": "ou_bob", "name": "Bob"},
+        "content": "重试还是失败 OOM",
+        "mentions": [],
+        "message_app_link": "https://applink.feishu.cn/client/message/active-followup",
+    }
+    irrelevant_rows = [
+        {
+            **message(
+                f"noise-{i}",
+                chat_type="group",
+                sender=f"ou_other_{i % 7}",
+                thread=f"omt_other_{i % 20}",
+                minutes_ago=1 + (i % 40),
+                text=f"其他话题高频消息 {i} 报错？",
+            ),
+            "chat_id": "oc_busy",
+            "chat_name": "高并发告警大群",
+        }
+        for i in range(520)
+    ]
+    runner = FakeRunner([quiet_mention, own_active, active_followup, *irrelevant_rows])
+    result = await run_feishu_triage(
+        PatrolState(),
+        now=NOW,
+        dot=FakeDot(),
+        runner=runner,
+        dry_run=True,
+    )
+    assert not result.errors
+    assert result.candidates == 2
+    assert result.details["candidate_ids"] == ["quiet-mention", "active-followup"]
+    assert "高并发告警大群 / Bob: active-followup" in result.markdown
+    thread_calls = [argv for argv, _, _ in runner.calls if "+threads-messages-list" in argv]
+    assert len(thread_calls) == 1
+    assert thread_calls[0][thread_calls[0].index("--thread") + 1] == "omt_active"
 
 
 async def test_rc5_rc6_maso_effort_model_discovery_and_prompt_metadata(
