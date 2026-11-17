@@ -711,51 +711,59 @@ class FeishuUserTokenStore:
         )
         if dangling or (target_profile and not candidates) or (has_config_apps and not candidates):
             return cfg_dir, keychain_dir, []
-        if not has_config_apps:
-            for token_filename in ("tokens.json", "user_token.json", "credentials.json"):
-                token_file = cfg_dir / token_filename
-                if token_file.is_file():
-                    try:
-                        raw_obj = json.loads(token_file.read_text(encoding="utf-8"))
-                    except Exception:
+        allowed_pairs = {(c[0], c[1]) for c in candidates} if has_config_apps else None
+        base_meta_by_pair = {(c[0], c[1]): (c[2], c[3]) for c in candidates}
+        default_app, default_uid = (
+            next(iter(allowed_pairs))
+            if allowed_pairs and len(allowed_pairs) == 1
+            else (target_app_id, target_open_id)
+        )
+        for token_filename in ("tokens.json", "user_token.json", "credentials.json"):
+            token_file = cfg_dir / token_filename
+            if token_file.is_file():
+                try:
+                    raw_obj = json.loads(token_file.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                entries = raw_obj if isinstance(raw_obj, list) else [raw_obj]
+                for item in entries:
+                    if not isinstance(item, Mapping):
                         continue
-                    entries = raw_obj if isinstance(raw_obj, list) else [raw_obj]
-                    for item in entries:
-                        if not isinstance(item, Mapping):
+                    e_app = str(item.get("appId") or item.get("app_id") or default_app).strip()
+                    e_uid = str(
+                        item.get("userOpenId") or item.get("open_id") or default_uid
+                    ).strip()
+                    if e_app and e_uid:
+                        if target_app_id and e_app != target_app_id:
                             continue
-                        e_app = str(
-                            item.get("appId") or item.get("app_id") or target_app_id
-                        ).strip()
-                        e_uid = str(
-                            item.get("userOpenId") or item.get("open_id") or target_open_id
-                        ).strip()
-                        if e_app and e_uid:
-                            if target_app_id and e_app != target_app_id:
-                                continue
-                            if target_open_id and e_uid != target_open_id:
-                                continue
-                            e_name = str(
-                                item.get("userName") or item.get("user_name") or ""
-                            ).strip()
-                            candidates.append((e_app, e_uid, e_name, dict(item)))
-            if not candidates:
-                for search_dir in (keychain_dir, cfg_dir, cfg_dir / "keychain"):
-                    if not search_dir.is_dir():
+                        if target_open_id and e_uid != target_open_id:
+                            continue
+                        if allowed_pairs is not None and (e_app, e_uid) not in allowed_pairs:
+                            continue
+                        b_name, b_meta = base_meta_by_pair.get((e_app, e_uid), ("", {}))
+                        e_name = (
+                            str(item.get("userName") or item.get("user_name") or "").strip()
+                            or b_name
+                        )
+                        candidates.append((e_app, e_uid, e_name, {**b_meta, **dict(item)}))
+        if not candidates and not has_config_apps:
+            for search_dir in (keychain_dir, cfg_dir, cfg_dir / "keychain"):
+                if not search_dir.is_dir():
+                    continue
+                for enc_file in sorted(search_dir.glob("cli_*_ou_*.enc")):
+                    stem = enc_file.stem
+                    idx = stem.find("_ou_")
+                    if idx <= 0:
                         continue
-                    for enc_file in sorted(search_dir.glob("cli_*_ou_*.enc")):
-                        stem = enc_file.stem
-                        idx = stem.find("_ou_")
-                        if idx <= 0:
-                            continue
-                        c_app = stem[:idx]
-                        c_uid = stem[idx + 1 :]
-                        if target_app_id and c_app != target_app_id:
-                            continue
-                        if target_open_id and c_uid != target_open_id:
-                            continue
-                        candidates.append((c_app, c_uid, "", {}))
-                    if candidates:
-                        break
+                    c_app = stem[:idx]
+                    c_uid = stem[idx + 1 :]
+                    if target_app_id and c_app != target_app_id:
+                        continue
+                    if target_open_id and c_uid != target_open_id:
+                        continue
+                    candidates.append((c_app, c_uid, "", {}))
+                if candidates:
+                    break
         return cfg_dir, keychain_dir, candidates
 
     def _resolve_lock_account(

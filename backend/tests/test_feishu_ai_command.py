@@ -2506,3 +2506,57 @@ async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
         assert match_open_resp.status_code == 200
         assert match_open_resp.json()["imported"] is True
         assert match_open_resp.json()["config"]["app_id"] == "cli_other"
+
+        # 12. R9-01: Matching config.json + plaintext credentials.json imports in both sync/async,
+        # while unrelated plaintext credentials are rejected when config.json selects another app
+        pt_cfg = tmp_path / "pt_cfg"
+        pt_data = tmp_path / "pt_data"
+        pt_cfg.mkdir()
+        pt_data.mkdir()
+        (pt_cfg / "config.json").write_text(
+            json.dumps(
+                {
+                    "currentApp": "primary",
+                    "apps": [
+                        {"name": "primary", "appId": "cli_pt", "users": [{"userOpenId": "ou_pt"}]},
+                        {
+                            "name": "secondary",
+                            "appId": "cli_pt2",
+                            "users": [{"userOpenId": "ou_pt2"}],
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (pt_cfg / "credentials.json").write_text(
+            json.dumps(
+                {
+                    "appId": "cli_pt",
+                    "userOpenId": "ou_pt",
+                    "accessToken": "pt-access-token",
+                    "refreshToken": "pt-refresh-token",
+                    "expiresAt": int((time.time() + 7200) * 1000),
+                    "refreshExpiresAt": int((time.time() + 600_000) * 1000),
+                    "scope": "im:message im:message.send_as_user",
+                }
+            ),
+            encoding="utf-8",
+        )
+        pt_store = FeishuUserTokenStore(
+            path=tmp_path / "pt_tokens.json",
+            key_path=tmp_path / "pt_tokens.key",
+            lark_cli_dir=pt_cfg,
+            lark_cli_data_dir=pt_data,
+        )
+        pt_sync = pt_store.import_from_lark_cli(app_id="cli_pt", open_id="ou_pt")
+        assert pt_sync is not None and pt_sync.access_token == "pt-access-token"
+        pt_async = await pt_store.aimport_from_lark_cli(app_id="cli_pt", open_id="ou_pt")
+        assert pt_async is not None and pt_async.access_token == "pt-access-token"
+        # Selecting secondary (which has no plaintext or encrypted token) must not fall back to cli_pt
+        assert pt_store.import_from_lark_cli(profile="secondary") is None
+        assert (await pt_store.aimport_from_lark_cli(profile="secondary")) is None
+        # Deleting config.json preserves no-config plaintext credentials.json import
+        (pt_cfg / "config.json").unlink()
+        assert pt_store.import_from_lark_cli(app_id="cli_pt", open_id="ou_pt") is not None
+        assert (await pt_store.aimport_from_lark_cli(app_id="cli_pt", open_id="ou_pt")) is not None
