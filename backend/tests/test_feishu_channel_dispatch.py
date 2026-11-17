@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
@@ -581,6 +582,380 @@ async def test_legacy_dm_binding_keeps_two_root_group_events_separate(dispatch, 
         assert "chat_name" not in context
         assert "Private DM" not in call["text"]
         assert provider_text_for_stored_turn(call["visible"], call["metadata"]) == call["text"]
+
+
+async def test_consecutive_user_messages_during_background_turn_preemption_do_not_drop_or_reject(
+    dispatch: DispatchHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a1 is inside _admit_batch_dispatch preempting a background scheduled turn
+    (so its own turn_id is not yet the active turn) and a2 arrives from the same
+    user on Dot, _stop_superseded_answer must wait for a1's native handoff before
+    calling cancel_turn(expected_turn_id=turn_id_for(a1)), then coalesce [上一条] a1 + a2
+    into a single response without any busy rejection reply."""
+
+    in_preemption = asyncio.Event()
+    release_preemption = asyncio.Event()
+    active_turn: dict[str, str | None] = {"id": "scheduled-bg-1"}
+
+    async def slow_preempt_dispatch(
+        tab_id: str,
+        text: str,
+        turn_id: str,
+        *,
+        admission_guard: Any,
+        visible_text: str,
+        turn_metadata: dict[str, Any],
+        **kwargs: Any,
+    ) -> str:
+        message = turn_metadata["feishu"]["message_id"]
+        async with admission_guard():
+            if message == "a1":
+                in_preemption.set()
+                await release_preemption.wait()
+            active_turn["id"] = turn_id
+            dispatch.submitted.append(
+                {"text": text, "visible": visible_text, "metadata": turn_metadata}
+            )
+            if message in dispatch.blocked:
+                dispatch.completions[turn_id] = asyncio.get_running_loop().create_future()
+        dispatch.started.put_nowait(message)
+        if message in dispatch.blocked:
+            return await dispatch.completions[turn_id]
+        return f"answer-{message}"
+
+    async def cancel_only_if_active(session: Any, *, expected_turn_id: str) -> bool:
+        if active_turn["id"] != expected_turn_id:
+            return False
+        future = dispatch.completions.get(expected_turn_id)
+        if future is None or future.done():
+            return False
+        active_turn["id"] = None
+        future.set_exception(RuntimeError("provider turn stopped"))
+        return True
+
+    dispatch.blocked.add("a1")
+    dispatch.stop.side_effect = cancel_only_if_active
+    monkeypatch.setattr(bot_api, "dispatch_tab_chat_and_wait", slow_preempt_dispatch)
+
+    first = dispatch.reserve("a1")
+    queue = bot_api._tab_dispatch_queues["tab"]
+    assert bot_api.feishu_dispatch_in_progress("tab")
+    running_a1 = asyncio.create_task(dispatch.run(first, queue))
+    await asyncio.wait_for(in_preemption.wait(), timeout=2)
+
+    # a2 arrives while a1 is still preempting the background turn inside admission_guard.
+    second = dispatch.reserve("a2")
+    assert first.superseded
+    assert first.stop_task is not None
+    await asyncio.sleep(0)
+    assert not first.stop_task.done(), "stop_task must wait for a1 native handoff to complete"
+
+    release_preemption.set()
+    assert await running_a1 == "superseded"
+    assert await first.stop_task is True
+    assert dict(queue.interrupted_text) == {first.channel_key: "a1"}
+
+    assert await dispatch.run(second, queue) == "completed"
+    assert "[上一条]\na1" in dispatch.submitted[1]["visible"]
+    assert "[新消息 1]\na2" in dispatch.submitted[1]["visible"]
+    dispatch.reply.assert_awaited_once()
+    assert dispatch.reply.await_args is not None
+    assert dispatch.reply.await_args.args[1].message_id == "a2"
+    assert "正在处理其他消息" not in dispatch.reply.await_args.args[3]
+    assert not bot_api.feishu_dispatch_in_progress("tab")
+
+
+async def test_atomic_send_lock_preempts_in_flight_background_turn_for_feishu_user(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even if a background scheduled/wake turn starts in the window right before
+    tailer.send_message acquires _send_lock, InputMixin.send_message atomically cancels
+    the background turn (await_teardown=True) for an incoming Feishu user message
+    instead of raising 'a turn is already in flight' (409 chat_busy), while still
+    rejecting concurrent user-vs-user sends without steer."""
+    from datetime import datetime
+
+    from claude_hub.models import AgentType, ChatMode, ExecutionTarget, SessionKind
+    from claude_hub.services import goal_run, ttyd_manager, workspace_manager
+    from claude_hub.services.agent_stream import tailer as tailer_module
+    from claude_hub.services.agent_stream.native import ProviderSession
+    from claude_hub.services.goal_run.controller import GoalRunController
+    from claude_hub.services.goal_run.store import GoalRunStore
+
+    class InMemoryTransport(ProviderSession):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.sent: list[str] = []
+            self.cancelled_count = 0
+
+        def _build_command(self) -> list[str]:
+            return []
+
+        async def _send_text(self, text: str) -> None:
+            pass
+
+        async def send_message(self, text: str, images: list[bytes]) -> None:
+            self.sent.append(text)
+            await super().send_message(text, images)
+
+        async def cancel_active_turn(self) -> None:
+            self.cancelled_count += 1
+            await super().cancel_active_turn()
+
+    monkeypatch.setattr(stream_api, "_tab_tailer_manager", None)
+    monkeypatch.setattr(stream_api, "_native_input_shutting_down", False)
+    monkeypatch.setattr(workspace_manager, "sessions", {})
+    monkeypatch.setattr(workspace_manager, "scheduled_task_runs", {})
+    monkeypatch.setattr(
+        goal_run,
+        "goal_run_controller",
+        GoalRunController(GoalRunStore(tmp_path / "goals.json")),
+    )
+    monkeypatch.setattr(goal_run, "_tab_admission_locks", {})
+    tab = SimpleNamespace(
+        id="atomic-tab",
+        name="Chat",
+        cwd=str(tmp_path),
+        env={},
+        agent_type=AgentType.CLAUDE,
+        session_kind=SessionKind.CHAT,
+        chat_mode=ChatMode.DEFAULT,
+        target=ExecutionTarget.LOCAL,
+        remote_cwd=None,
+        remote_profile_id=None,
+        remote_reconnect=True,
+        solo_mode=True,
+        cursor_transport="native",
+        cursor_data_dir=None,
+        cursor_cli_version=None,
+        cursor_transcript_path=None,
+        cursor_transcript_schema=None,
+        agent_session_id="conv-atomic",
+        agent_session_id_verified=True,
+        archived=False,
+        workspace_id=None,
+        workspace_role=None,
+        managed_session_id=None,
+        created_at=datetime.now(),
+    )
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda tid: tab if tid == tab.id else None)
+    transports: list[InMemoryTransport] = []
+
+    def make_transport(*args: Any, **kwargs: Any) -> InMemoryTransport:
+        t = InMemoryTransport(*args, **kwargs)
+        transports.append(t)
+        return t
+
+    monkeypatch.setattr(tailer_module, "create_native_session", make_transport)
+    session = stream_api._terminal_tab_session_or_404(tab.id)
+    manager = stream_api._get_tab_tailer_manager()
+    try:
+        # 1. Start a background scheduled turn.
+        await manager.send_message(
+            session,
+            "[Scheduled Task: Disk 90% alert]",
+            [],
+            "scheduled-run-1",
+            turn_metadata={"origin": "scheduled_task", "yields_to_user": True},
+        )
+        assert await manager.active_turn_id(session) == "scheduled-run-1"
+        assert transports[0].turn_in_flight
+
+        # 2. Directly send a Feishu user turn without calling preempt_background_turn first
+        # (simulating the race where the background turn started just before _send_lock).
+        await manager.send_message(
+            session,
+            "user feishu question",
+            [],
+            "feishu:msg-1",
+            turn_metadata={"origin": "feishu"},
+        )
+        assert transports[0].cancelled_count == 1
+        assert await manager.active_turn_id(session) == "feishu:msg-1"
+        assert transports[0].sent == ["[Scheduled Task: Disk 90% alert]", "user feishu question"]
+
+        # 3. While the user turn is active, a second non-steer send must still raise busy.
+        with pytest.raises(RuntimeError, match="turn is already in flight"):
+            await manager.send_message(
+                session,
+                "concurrent user turn without steer",
+                [],
+                "feishu:msg-2",
+                turn_metadata={"origin": "feishu"},
+            )
+        assert await manager.active_turn_id(session) == "feishu:msg-1"
+
+        # 4. Ordinary authenticated CLI message (origin=hub_message, hub-message-*) must NOT
+        # be treated as background or cancelled by preempt_background_turn or send_message.
+        await manager.cancel_turn(session, expected_turn_id="feishu:msg-1")
+        await manager.send_message(
+            session,
+            "[Dot wake] ordinary CLI message that happens to start with Dot prefix",
+            [],
+            "hub-message-cli-1",
+            turn_metadata={
+                "origin": "hub_message",
+                "hub_message": {"message_id": "cli-1", "actor": "local"},
+            },
+        )
+        assert await manager.active_turn_id(session) == "hub-message-cli-1"
+        from claude_hub.api.routes.agent_stream.dispatch import preempt_background_turn
+
+        await preempt_background_turn(tab.id, session, manager)
+        assert await manager.active_turn_id(session) == "hub-message-cli-1"
+        with pytest.raises(RuntimeError, match="turn is already in flight"):
+            await manager.send_message(
+                session,
+                "feishu arriving during CLI message",
+                [],
+                "feishu:msg-3",
+                turn_metadata={"origin": "feishu"},
+            )
+        assert await manager.active_turn_id(session) == "hub-message-cli-1"
+
+        # 5. Ordinary web user turn pasting "[Dot wake] ..." must NOT be treated as background.
+        await manager.cancel_turn(session, expected_turn_id="hub-message-cli-1")
+        await manager.send_message(
+            session,
+            "[Dot wake] pasted by web user",
+            [],
+            "4f2b8a91-0000-4000-8000-000000000001",
+            turn_metadata={"origin": "web"},
+        )
+        await preempt_background_turn(tab.id, session, manager)
+        assert await manager.active_turn_id(session) == "4f2b8a91-0000-4000-8000-000000000001"
+        with pytest.raises(RuntimeError, match="turn is already in flight"):
+            await manager.send_message(
+                session,
+                "feishu arriving during web user turn",
+                [],
+                "feishu:msg-4",
+                turn_metadata={"origin": "feishu"},
+            )
+        assert await manager.active_turn_id(session) == "4f2b8a91-0000-4000-8000-000000000001"
+    finally:
+        await manager.stop_all()
+        stream_api._tab_tailer_manager = None
+
+
+async def test_scheduled_inbox_defers_while_feishu_batch_active_and_wakes_on_promotion(
+    dispatch: DispatchHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a Feishu batch is queued or active on a tab, scheduled chat_turn
+    preparation and inbox _submit defer with a waiting status, and _promote_tab_dispatch
+    wakes the inbox once the Feishu queue drains."""
+    from datetime import datetime, timezone
+
+    from claude_hub.models import AgentType, ScheduledTaskRunStatus, SessionKind
+    from claude_hub.models.chat_message import ChatMessageEnvelope
+    from claude_hub.services import goal_run, ttyd_manager, workspace_manager
+    from claude_hub.services.chat_message_inbox import InboxError, InboxTarget
+
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(messages_api, "_target", lambda tid: InboxTarget("inc-1", "conv-1", None))
+    monkeypatch.setattr(
+        stream_api,
+        "_terminal_tab_session_or_404",
+        lambda tid: SimpleNamespace(id=f"terminal-tab-{tid}", session_kind=SessionKind.CHAT),
+    )
+    run = SimpleNamespace(
+        id="sched-run-defer",
+        scheduled_task_id="sched-task-defer",
+        tab_id="tab",
+        client_turn_id="scheduled-sched-run-defer",
+        status=ScheduledTaskRunStatus.QUEUED,
+        waiting_reason=None,
+        error=None,
+        dispatch_attempts=0,
+        dispatched_at=None,
+        completed_at=None,
+        scheduled_for=now,
+        queued_at=now,
+    )
+    task = SimpleNamespace(
+        id="sched-task-defer",
+        tab_id="tab",
+        enabled=True,
+        run_at=None,
+        last_run_at=None,
+        next_run_at=now,
+        agent_type=AgentType.CLAUDE,
+    )
+    tab = SimpleNamespace(
+        id="tab",
+        session_kind=SessionKind.CHAT,
+        workspace_role=None,
+        agent_type=AgentType.CLAUDE,
+        archived=False,
+        created_at=now,
+        target=SimpleNamespace(value="local"),
+        cwd="/tmp",
+        env={},
+        chat_mode=SimpleNamespace(value="default"),
+        cursor_transport="native",
+        agent_session_id="conv-1",
+        agent_session_id_verified=True,
+    )
+    monkeypatch.setattr(workspace_manager, "scheduled_task_runs", {run.id: run})
+    monkeypatch.setattr(workspace_manager, "scheduled_tasks", {task.id: task})
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda tid: tab if tid == "tab" else None)
+    monkeypatch.setattr(
+        goal_run,
+        "get_goal_manager",
+        lambda: SimpleNamespace(
+            current=lambda tid: None,
+            refresh_current=AsyncMock(return_value=None),
+        ),
+    )
+
+    envelope = ChatMessageEnvelope(
+        message_id=run.id,
+        call_id=run.id,
+        tab_id="tab",
+        turn_id=run.client_turn_id,
+        state="queued",
+        created_at=now,
+        updated_at=now,
+        status_url="",
+        principal="scheduler",
+        actor="scheduler",
+        incarnation="inc-1",
+        fingerprint=run.id,
+        message="[Scheduled Task] check",
+        sequence=1,
+        attempts=0,
+        scheduled_run_id=run.id,
+        scheduled_task_id=task.id,
+        turn_metadata={"origin": "scheduled_task"},
+    )
+
+    woken: list[bool] = []
+    fake_inbox = SimpleNamespace(
+        questions={},
+        wake=lambda: woken.append(True),
+        cancel_scheduled=lambda *_a, **_kw: None,
+    )
+    monkeypatch.setattr(messages_api, "_inbox", fake_inbox)
+
+    # Reserve a Feishu message so feishu_dispatch_in_progress("tab") is True.
+    item = dispatch.reserve("hello")
+    queue = bot_api._tab_dispatch_queues["tab"]
+    assert bot_api.feishu_dispatch_in_progress("tab")
+
+    reason = await workspace_manager._prepare_scheduled_intent(envelope)
+    assert reason == "waiting for the current Chat response"
+
+    with pytest.raises(InboxError) as exc_info:
+        await messages_api._submit(envelope, lambda: None)
+    assert exc_info.value.status == 409
+
+    # Once the Feishu batch finishes and queue drains, _promote_tab_dispatch wakes the inbox.
+    assert await dispatch.run(item, queue) == "completed"
+    assert not bot_api.feishu_dispatch_in_progress("tab")
+    assert woken, "inbox.wake() must be called when Feishu dispatch queue drains"
 
 
 async def test_v3_dispatch_metadata_reconstructs_exact_provider_text(dispatch):

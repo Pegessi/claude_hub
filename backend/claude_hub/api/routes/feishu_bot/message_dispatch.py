@@ -425,13 +425,19 @@ class FeishuMessageDispatcher:
     ) -> AsyncIterator[None]:
         """Validate the claimed batch and mark history only after native handoff."""
         leader = batch[0]
+        for item in batch:
+            item.native_handoff_pending = True
         # Coalesced items share a bot and pairing, but their timestamps differ.
         # Keep one gate through every check and the handoff; nested single-message
         # guards would reacquire the same non-reentrant lock.
-        async with self.bindings.gate(leader.effective.bot_id):
+        try:
+            async with self.bindings.gate(leader.effective.bot_id):
+                for item in batch:
+                    self._validate_binding_dispatch(item.effective, item.binding, item.event)
+                yield
+        finally:
             for item in batch:
-                self._validate_binding_dispatch(item.effective, item.binding, item.event)
-            yield
+                item.native_handoff_done.set()
         # The native handoff inside the guard succeeded, so this channel's
         # stopped-answer carryover has now been delivered with the new turn.
         queue.interrupted_text.pop(leader.channel_key, None)
@@ -741,6 +747,7 @@ class FeishuMessageDispatcher:
         self, tab_id: str, queue: _TabDispatchQueue, batch: list[_TabDispatchItem], status: str
     ) -> None:
         for item in batch:
+            item.native_handoff_done.set()
             if not item.outcome.done():
                 item.outcome.set_result(status)
             item.reaction_finished.set()

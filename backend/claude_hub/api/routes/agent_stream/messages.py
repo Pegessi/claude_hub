@@ -140,6 +140,11 @@ async def _submit(item: ChatMessageEnvelope, before_delivery: Callable[[], None]
             answers.guard_input(f"terminal-tab-{item.tab_id}", item.turn_id)
         except HTTPException as exc:
             raise InboxError(409, "Waiting for question answer reconciliation") from exc
+        if item.scheduled_run_id:
+            from ...feishu_bot import feishu_dispatch_in_progress
+
+            if feishu_dispatch_in_progress(item.tab_id):
+                raise InboxError(409, "Waiting for the current Chat turn")
         if await manager.turn_in_flight(session):
             raise InboxError(409, "Waiting for the current Chat turn")
         if not await ensure_chat_runtime(item.tab_id):

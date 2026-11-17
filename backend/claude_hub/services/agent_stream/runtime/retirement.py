@@ -35,14 +35,17 @@ class RetirementMixin(SessionState):
         # running is idempotent: the cancelled edge is already durable and the
         # guard is released, so report success without awaiting the teardown.
         if self._turn_teardown_pending:
-            return True
+            if expected_turn_id is None or self._teardown_turn_id == expected_turn_id:
+                return True
+            await self._await_turn_teardown()
         async with self._send_lock:
             # The first Stop's background teardown can win the race with a
             # second caller that was already queued on the lock. Do NOT cancel
             # again (that would persist a second terminal edge); report the
-            # in-flight Stop as the idempotent success it is.
+            # in-flight Stop as the idempotent success it is when it targets
+            # the same turn (or an untargeted manual Stop).
             if self._turn_teardown_pending:
-                return True
+                return expected_turn_id is None or self._teardown_turn_id == expected_turn_id
             if transport is not None and transport.turn_in_flight:
                 if expected_turn_id is not None and self._active_turn_id != expected_turn_id:
                     return False
@@ -237,6 +240,8 @@ class RetirementMixin(SessionState):
         # through arrive with no owning turn after the terminal edge and are
         # dropped as unattributed, so they cannot pin the next turn.
         self._active_turn_id = None
+        self._active_turn_metadata = None
+        self._active_turn_summary = ""
         # A cancelled turn can no longer answer a pending card or own an
         # outstanding tool wait; drop stale tracking so it cannot be resolved
         # against a later turn.
@@ -275,14 +280,17 @@ class RetirementMixin(SessionState):
                     raise RuntimeError("native provider turn cancellation failed") from exc
             finally:
                 self._turn_teardown_pending = False
+                self._teardown_turn_id = None
         else:
-            self._spawn_turn_teardown(transport)
+            self._spawn_turn_teardown(transport, turn_id)
         if publish_error is not None:
             raise RuntimeError("turn stopped but its cancelled state could not be persisted") from (
                 publish_error
             )
 
-    def _spawn_turn_teardown(self, transport: ProviderSession) -> None:
+    def _spawn_turn_teardown(
+        self, transport: ProviderSession, turn_id: Optional[str] = None
+    ) -> None:
         """Run ``transport.cancel_active_turn`` after the send lock is freed.
 
         The cancelled edge is already durable and the Hub guard is released;
@@ -296,6 +304,7 @@ class RetirementMixin(SessionState):
         if self._turn_teardown_task is not None or self._turn_teardown_pending:
             return
         self._turn_teardown_pending = True
+        self._teardown_turn_id = turn_id
         task = asyncio.create_task(
             self._run_turn_teardown(transport),
             name=f"agent-stream-cancel-teardown-{self.session_id[:8]}",
@@ -314,14 +323,17 @@ class RetirementMixin(SessionState):
                         self.session_id,
                     )
                 self._turn_teardown_pending = False
+                self._teardown_turn_id = None
         except asyncio.CancelledError:
             self._turn_teardown_pending = False
+            self._teardown_turn_id = None
             raise
 
     def _turn_teardown_done(self, task: "asyncio.Task[None]") -> None:
         if self._turn_teardown_task is task:
             self._turn_teardown_task = None
         self._turn_teardown_pending = False
+        self._teardown_turn_id = None
         if task.cancelled():
             return
         exc = task.exception()

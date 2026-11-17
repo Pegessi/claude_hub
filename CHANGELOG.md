@@ -27,6 +27,10 @@
   and remove conflicting `@media (max-width: 640px)` `.modal-overlay`/`.modal` geometry
   overrides in `session-creator.css` and `CloseTabDialog.vue` so mobile modals use
   the shared `overlays.css` bottom-sheet layout and `--visual-viewport-height` sizing.
+### fix(feishu): preempt background wake/scheduled turns on user Feishu messages and eliminate busy rejection replies
+
+- Preempt active background turns (`scheduled-*`, `wake`/`tidy`, `scheduled_task`, `yields_to_user`) on Dot and bound Chat tabs when a user Feishu message arrives (`preempt_background_turn` in `api/routes/agent_stream/dispatch.py`), and atomically cancel any in-flight background turn inside `InputMixin.send_message` (`await_teardown=True`) instead of returning HTTP 409 `chat_busy` (`"Claude Hub Chat 正在处理其他消息或等待网页回答，本条消息尚未执行。"`).
+- Defer scheduled `chat_turn` dispatches while Feishu batches are coalescing or active on the target tab (`feishu_dispatch_in_progress`), and synchronize `_stop_superseded_answer` with `native_handoff_done` (`api/feishu_bot.py`, `api/routes/feishu_bot/message_dispatch.py`) plus turn-scoped `_teardown_turn_id` in `RetirementMixin.cancel_turn` so rapid consecutive user Feishu messages cleanly supersede and coalesce `[上一条]` carryover during background turn preemption.
 
 ### feat(chat): classify Chat sessions active within the last 4 hours into `Review`
 

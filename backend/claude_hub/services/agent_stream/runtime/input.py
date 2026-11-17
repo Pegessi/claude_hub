@@ -290,10 +290,21 @@ class InputMixin(SessionState):
             #    flight, fail fast so the in-flight turn's _active_turn_id and
             #    _run_epoch are never overwritten — unless the caller steers.
             if transport.turn_in_flight:
-                if delivery == "steer":
-                    # Steer immediately re-sends on the same transport, so its
-                    # cancel must finish tearing down the old provider turn
-                    # (kill one-shot / interrupt persistent) before we deliver.
+                active_meta = self._active_turn_metadata or {}
+                active_origin = active_meta.get("origin")
+                active_id = self._active_turn_id or ""
+                is_bg_active = bool(active_meta.get("yields_to_user")) or (
+                    active_origin not in {"web", "feishu", "hub_message"}
+                    and (
+                        active_origin in {"scheduled_task", "wake", "tidy"}
+                        or (active_origin is None and active_id.startswith("scheduled-"))
+                    )
+                )
+                incoming_origin = (turn_metadata or {}).get("origin")
+                if delivery == "steer" or (is_bg_active and incoming_origin == "feishu"):
+                    # Steer or user Feishu preemption of a background turn
+                    # immediately re-sends on the same transport, so its cancel
+                    # must finish tearing down the old provider turn before delivery.
                     await self._cancel_active_turn_locked(transport, await_teardown=True)
                 else:
                     raise RuntimeError(
@@ -409,6 +420,8 @@ class InputMixin(SessionState):
             #    the provider does anything. This guarantees the turn exists in
             #    the store and is fanned out to subscribers.
             self._active_turn_id = client_turn_id
+            self._active_turn_metadata = dict(turn_metadata) if turn_metadata else None
+            self._active_turn_summary = text if visible_text is None else visible_text
             self._reset_turn_watchdog_state()
             self._goal_protocol_turn = bool(
                 turn_metadata and turn_metadata.get("protocol") == "goal-continuation-v1"
@@ -480,6 +493,8 @@ class InputMixin(SessionState):
                             "failed to clean up preview %s after publish failure", att_id
                         )
                 self._active_turn_id = None
+                self._active_turn_metadata = None
+                self._active_turn_summary = ""
                 raise
             self._native_terminal_status = None
 
@@ -588,6 +603,8 @@ class InputMixin(SessionState):
                     )
                 self._terminalize_native_runtime("failed")
                 self._active_turn_id = None
+                self._active_turn_metadata = None
+                self._active_turn_summary = ""
                 raise submit_exception
             # Provider submission reached its known accepted boundary. A
             # provider-owned uncertain response raises above while retaining
