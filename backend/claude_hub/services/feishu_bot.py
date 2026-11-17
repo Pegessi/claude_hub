@@ -442,11 +442,19 @@ class FeishuBotClient:
             raise FeishuBotError("Feishu Bot message content is not JSON serializable") from exc
 
     async def _send_message_payload(
-        self, chat_id: str, msg_type: str, content: Mapping[str, object], *, uuid: str | None = None
+        self,
+        chat_id: str,
+        msg_type: str,
+        content: Mapping[str, object],
+        *,
+        uuid: str | None = None,
+        access_token: str | None = None,
     ) -> dict[str, Any]:
         if uuid is not None and (not uuid.strip() or len(uuid) > 50):
             raise FeishuBotError("Feishu message UUID must contain 1–50 characters")
-        token = await self.get_tenant_token()
+        token = await self.get_tenant_token() if access_token is None else access_token
+        if not token.strip():
+            raise FeishuBotError("Feishu Bot tenant token is empty")
         response = await self._request(
             "POST",
             "/open-apis/im/v1/messages",
@@ -459,9 +467,17 @@ class FeishuBotClient:
                 **({"uuid": uuid} if uuid is not None else {}),
             },
         )
+        try:
+            payload = response.json()
+        except ValueError:
+            response.raise_for_status()
+            raise FeishuBotError("Feishu rejected the Bot message") from None
+        if response.is_error and isinstance(payload, dict) and payload.get("code") not in (None, 0):
+            raise self._remote_error(response, payload, "the Feishu message send")
         response.raise_for_status()
-        payload = response.json()
         if not isinstance(payload, dict) or payload.get("code") != 0:
+            if isinstance(payload, dict) and payload.get("code") is not None:
+                raise self._remote_error(response, payload, "the Feishu message send")
             raise FeishuBotError("Feishu rejected the Bot message")
         return payload
 
@@ -472,10 +488,18 @@ class FeishuBotClient:
         await self._send_message_payload(chat_id, msg_type, content)
 
     async def send_message_with_identity(
-        self, chat_id: str, msg_type: str, content: Mapping[str, object], *, uuid: str | None = None
+        self,
+        chat_id: str,
+        msg_type: str,
+        content: Mapping[str, object],
+        *,
+        uuid: str | None = None,
+        access_token: str | None = None,
     ) -> str:
         """Send a mirror using stable Feishu dedupe UUID and return exact message ID."""
-        payload = await self._send_message_payload(chat_id, msg_type, content, uuid=uuid)
+        payload = await self._send_message_payload(
+            chat_id, msg_type, content, uuid=uuid, access_token=access_token
+        )
         data = payload.get("data")
         message_id = data.get("message_id") if isinstance(data, dict) else None
         if not isinstance(message_id, str) or not message_id.strip():
@@ -584,6 +608,54 @@ class FeishuBotClient:
                 break
         return found
 
+    async def _reply_message_payload(
+        self,
+        message_id: str,
+        msg_type: str,
+        content: Mapping[str, object],
+        *,
+        access_token: str | None = None,
+        reply_in_thread: bool = False,
+        uuid: str | None = None,
+    ) -> FeishuReplyReceipt:
+        if uuid is not None and (not uuid.strip() or len(uuid) > 50):
+            raise FeishuBotError("Feishu message UUID must contain 1–50 characters")
+        token = await self.get_tenant_token() if access_token is None else access_token
+        if not token.strip():
+            raise FeishuBotError("Feishu Bot tenant token is empty")
+        response = await self._request(
+            "POST",
+            f"/open-apis/im/v1/messages/{quote(message_id, safe='')}/reply",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "msg_type": msg_type,
+                "content": self._message_content(content),
+                **({"reply_in_thread": True} if reply_in_thread else {}),
+                **({"uuid": uuid} if uuid is not None else {}),
+            },
+        )
+        try:
+            payload = response.json()
+        except ValueError:
+            response.raise_for_status()
+            raise FeishuBotError("Feishu rejected the Bot reply") from None
+        if response.is_error and isinstance(payload, dict) and payload.get("code") not in (None, 0):
+            raise self._remote_error(response, payload, "the Feishu message reply")
+        response.raise_for_status()
+        if not isinstance(payload, dict) or payload.get("code") != 0:
+            if isinstance(payload, dict) and payload.get("code") is not None:
+                raise self._remote_error(response, payload, "the Feishu message reply")
+            raise FeishuBotError("Feishu rejected the Bot reply")
+        data = payload.get("data")
+        if not isinstance(data, Mapping):
+            return FeishuReplyReceipt()
+        sent = data.get("message_id")
+        thread = data.get("thread_id")
+        return FeishuReplyReceipt(
+            message_id=sent if isinstance(sent, str) and sent.strip() else None,
+            thread_id=thread if isinstance(thread, str) and thread.strip() else None,
+        )
+
     async def reply_message(
         self,
         message_id: str,
@@ -598,32 +670,12 @@ class FeishuBotClient:
         Returns what Feishu reports about the sent message, so callers can
         recognise later follow-ups inside the same topic as their own.
         """
-
-        token = await self.get_tenant_token() if access_token is None else access_token
-        if not token.strip():
-            raise FeishuBotError("Feishu Bot tenant token is empty")
-        response = await self._request(
-            "POST",
-            f"/open-apis/im/v1/messages/{quote(message_id, safe='')}/reply",
-            headers={"Authorization": f"Bearer {token}"},
-            json={
-                "msg_type": msg_type,
-                "content": self._message_content(content),
-                **({"reply_in_thread": True} if reply_in_thread else {}),
-            },
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if payload.get("code") != 0:
-            raise FeishuBotError("Feishu rejected the Bot reply")
-        data = payload.get("data")
-        if not isinstance(data, Mapping):
-            return FeishuReplyReceipt()
-        sent = data.get("message_id")
-        thread = data.get("thread_id")
-        return FeishuReplyReceipt(
-            message_id=sent if isinstance(sent, str) and sent.strip() else None,
-            thread_id=thread if isinstance(thread, str) and thread.strip() else None,
+        return await self._reply_message_payload(
+            message_id,
+            msg_type,
+            content,
+            access_token=access_token,
+            reply_in_thread=reply_in_thread,
         )
 
     async def reply_text(

@@ -41,6 +41,59 @@
   `Done` immediately after reading a reply, and settle automatically to `Done` after 4 hours
   of inactivity unless holding an open MR or active Task review.
 
+### feat(feishu): personal `/ai <instruction>` command workflow with configurable provider, model, and reasoning_effort
+
+- Add `FeishuUserTokenStore` (`services/feishu_user_token_store.py`) and
+  `FeishuUserClient` (`services/feishu_user_client.py`):
+  - Persist Feishu OAuth user tokens at rest with AES-256-GCM encryption
+    (`0600` key file), request `DEFAULT_FEISHU_OAUTH_SCOPES` (including
+    `im:message.send_as_user` and `offline_access`) on `/api/auth/login`, accept
+    access-only OAuth tokens when `offline_access` is omitted, exchange/refresh
+    via OAuth v2 / OIDC v1 / legacy v1 (`/open-apis/authen/v1/refresh_access_token`)
+    with fallback when v2 returns `20026` for legacy v1 refresh tokens, and
+    persist only granted scopes (`api/auth.py`, `auth/feishu.py`).
+  - Import local `lark-cli` user tokens from `~/.lark-cli/config.json` and the
+    AES-256-GCM encrypted keychain under `~/.local/share/lark-cli/` honoring
+    `currentApp` profile precedence, coordinate single-use refresh rotation and
+    all async token resolution/preflight/OAuth-save entrypoints with in-process
+    `async_refresh_lock` and cancellation-safe non-blocking `async_file_lock`
+    (`LOCK_NB` polling across Hub and the selected account's `lark-cli`
+    `locks/refresh_<app>_<open>.lock` without locking unrelated CLI profiles),
+    compare against the captured pre-refresh generation/fingerprint, keep
+    returned scopes authoritative without unioning stale CLI scopes, and write
+    millisecond `expiresAt`/`refreshExpiresAt` back to `lark-cli`.
+  - Reuse `FeishuBotClient`, `create_feishu_http_client`, and
+    `FeishuBotRemoteError` for user-identity messages, replies, reactions, and
+    paginated chat/thread history reads, and provide `preflight_scopes()` with
+    actionable `lark-cli auth login --scope "im:message.send_as_user ..."`
+    remediation.
+- Add `FeishuAiCommandService` (`services/feishu_ai_command.py`,
+  `services/feishu_ai_command_models.py`), `FeishuAiPoller`
+  (`services/feishu_ai_poller.py`), and WebSocket event hook
+  (`api/feishu_bot.py`):
+  - Detect the owner's own `/ai <instruction>` messages (ignoring bots, other
+    senders, and messages already bearing the AI reply footer) via both
+    paginated active-chat polling (with durable pending-command queue, persisted
+    `scan_cursors` past the 25-page per-tick cap, and evidence-backed recovery
+    that resumes only final reply delivery for completed turns while preserving
+    uncertain claims) and WebSocket events when a Hub Bot is present in the
+    chat.
+  - Reuse `FeishuMessageDedupStore` for at-most-once message claiming, fetch
+    thread/chat context, extract Codebase MR (`group/project!1234`), commit SHA,
+    and Feishu doc references, manage the two-stage user reaction lifecycle
+    (`OnIt` -> delete -> `DONE`), post interim (`正在派 Subagent...`) and final
+    replies as the user (`msg_type="post"`) with the `> 🤖 AI 代答，仅供参考`
+    footer, and dispatch turns via `dispatch_tab_chat_and_wait`.
+- Expose configurable default execution agent (`provider`, `model`,
+  `reasoning_effort`, plus inline `/ai --provider ... --model ... --effort ...`
+  overrides) with provider-specific effort validation and variant/suffix
+  resolution across `/api/feishu/bot/ai-command`
+  (`api/routes/feishu_bot/ai_command.py`),
+  `claude-hub feishu ai-command status|configure|dry-run|auth-guide`
+  (`cli/commands/feishu.py`), and the Personal `/ai` Assistant panel in
+  `FeishuBotSettingsDialog.vue` (with hydration/retry guards, draft preservation
+  on token import, and `browser-mocks` UI acceptance coverage).
+
 ### fix(agent-stream): keep chat turn text whole — a 128,000-char budget instead of the 4,000-char field cap
 
 - Widen `services/agent_stream/redaction.py` into a per-field budget: the chat

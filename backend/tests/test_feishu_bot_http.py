@@ -94,7 +94,14 @@ async def test_every_oauth_call_builds_its_client_from_the_shared_factory(
         requested.append(str(request.url))
         if request.url.path.endswith("/app_access_token/internal"):
             return httpx.Response(200, json={"code": 0, "app_access_token": "app-token"})
-        if request.url.path.endswith("/authen/v1/access_token"):
+        if request.url.path.endswith(
+            (
+                "/authen/v1/access_token",
+                "/authen/v1/refresh_access_token",
+                "/authen/v1/oidc/access_token",
+                "/authen/v1/oidc/refresh_access_token",
+            )
+        ):
             return httpx.Response(
                 200,
                 json={"code": 0, "data": {"access_token": "user", "refresh_token": "refresh"}},
