@@ -280,6 +280,7 @@
               <button
                 type="button"
                 class="ch-btn"
+                :disabled="busy || aiCommandLoading || !aiCommandLoaded"
                 data-testid="feishu-ai-accept-server-tuple-btn"
                 @click="acceptServerAiTuple"
               >
@@ -872,6 +873,7 @@ const secretComplete = computed(() => !!appSecret.value)
 const createComplete = computed(() => Object.values(create).every(Boolean))
 const CONNECTION_REFRESH_MS = 2_000
 let viewEpoch = 0
+let aiLoadGeneration = 0
 let closed = false
 let connectionRefreshTimer: ReturnType<typeof setTimeout> | null = null
 let connectionRefreshController: AbortController | null = null
@@ -961,6 +963,10 @@ function fillSelection(bot: FeishuBotSummary | null, clear = true) {
   confirmDelete.value = false
   if (clear) clearSecrets()
 }
+function retireAiCommandLoad() {
+  aiLoadGeneration += 1
+  aiCommandLoading.value = false
+}
 function selectMode(mode: FeishuBotMode) {
   if (busy.value || closed || modeSwitchDisabled.value) return
   editMode.value = mode
@@ -968,6 +974,7 @@ function selectMode(mode: FeishuBotMode) {
 function select(bot: FeishuBotSummary) {
   if (busy.value || closed) return
   viewEpoch += 1
+  retireAiCommandLoad()
   aiCommandActive.value = false
   fillSelection(bot)
   error.value = null; success.value = null
@@ -975,6 +982,7 @@ function select(bot: FeishuBotSummary) {
 function beginCreate() {
   if (busy.value || closed) return
   viewEpoch += 1
+  retireAiCommandLoad()
   aiCommandActive.value = false
   fillSelection(null)
   clearCreate()
@@ -1054,13 +1062,14 @@ function applyAiCommandStatus(
   aiServerWatchChatsText.value = nextWatchText
 }
 function acceptServerAiTuple() {
-  if (!aiTupleConflict.value) return
+  if (busy.value || closed || aiCommandLoading.value || !aiCommandLoaded.value || !aiTupleConflict.value) return
   aiEdit.provider = aiTupleConflict.value.provider
   aiEdit.model = aiTupleConflict.value.model
   aiEdit.reasoning_effort = aiTupleConflict.value.reasoning_effort
   aiTupleConflict.value = null
 }
 function onAiProviderChange(nextProvider: FeishuAiCommandProvider) {
+  if (busy.value || closed || aiCommandLoading.value || !aiCommandLoaded.value) return
   aiEdit.provider = nextProvider
   aiTupleConflict.value = null
   const suggestions = aiCapabilities.value?.provider_models?.[nextProvider]
@@ -1085,6 +1094,7 @@ function onAiProviderChange(nextProvider: FeishuAiCommandProvider) {
 async function openAiCommand() {
   if (busy.value || closed) return
   const current = ++viewEpoch
+  const loadGen = ++aiLoadGeneration
   const preserveExistingDraft = aiCommandLoaded.value
   fillSelection(null)
   aiCommandActive.value = true
@@ -1095,12 +1105,12 @@ async function openAiCommand() {
   }
   try {
     const status = await loadFeishuAiCommand()
-    if (closed || current !== viewEpoch) return
+    if (closed || current !== viewEpoch || loadGen !== aiLoadGeneration) return
     aiCommandLoaded.value = true
     aiCommandLoadError.value = null
     applyAiCommandStatus(status, { preserveDraft: preserveExistingDraft })
   } catch (cause) {
-    if (closed || current !== viewEpoch) return
+    if (closed || current !== viewEpoch || loadGen !== aiLoadGeneration) return
     const reqErr = cause instanceof FeishuBotRequestError ? cause : null
     const msg = reqErr?.message ?? 'Failed to load /ai command settings.'
     if (!aiCommandLoaded.value) {
@@ -1108,7 +1118,7 @@ async function openAiCommand() {
     }
     error.value = msg
   } finally {
-    if (current === viewEpoch) aiCommandLoading.value = false
+    if (loadGen === aiLoadGeneration) aiCommandLoading.value = false
   }
 }
 async function retryLoadAiCommand() {
@@ -1118,6 +1128,7 @@ async function retryLoadAiCommand() {
 async function saveAiCommand() {
   if (busy.value || closed || aiCommandLoading.value || !aiCommandLoaded.value) return false
   const current = ++viewEpoch
+  retireAiCommandLoad()
   busy.value = true; error.value = null; success.value = null
   const watchChats = aiWatchChatsText.value
     .split(/[\s,]+/)
@@ -1156,6 +1167,7 @@ async function saveAiCommand() {
 async function importAiToken() {
   if (busy.value || closed || aiCommandLoading.value) return false
   const current = ++viewEpoch
+  retireAiCommandLoad()
   busy.value = true; error.value = null; success.value = null
   try {
     const next = await importFeishuAiCommandToken({
@@ -1182,6 +1194,10 @@ async function importAiToken() {
 async function refresh() {
   if (busy.value || closed) return
   const current = ++viewEpoch
+  const loadGen = aiCommandActive.value ? ++aiLoadGeneration : aiLoadGeneration
+  if (!aiCommandActive.value) {
+    retireAiCommandLoad()
+  }
   error.value = null
   try {
     const value = await store.refresh()
@@ -1190,14 +1206,14 @@ async function refresh() {
     if (aiCommandActive.value) {
       try {
         const status = await loadFeishuAiCommand()
-        if (!closed && current === viewEpoch) {
+        if (!closed && current === viewEpoch && loadGen === aiLoadGeneration) {
           const preserve = aiCommandLoaded.value
           aiCommandLoaded.value = true
           aiCommandLoadError.value = null
           applyAiCommandStatus(status, { preserveDraft: preserve })
         }
       } catch (cause) {
-        if (!closed && current === viewEpoch && !aiCommandLoaded.value) {
+        if (!closed && current === viewEpoch && loadGen === aiLoadGeneration && !aiCommandLoaded.value) {
           const reqErr = cause instanceof FeishuBotRequestError ? cause : null
           const msg = reqErr?.message ?? 'Failed to load /ai command settings.'
           aiCommandLoadError.value = msg
@@ -1206,7 +1222,7 @@ async function refresh() {
       }
     }
   } finally {
-    if (current === viewEpoch && aiCommandActive.value) {
+    if (aiCommandActive.value && loadGen === aiLoadGeneration) {
       aiCommandLoading.value = false
     }
   }
@@ -1289,6 +1305,7 @@ async function removeBot() {
 }
 function clearLocalState() {
   closed = true; viewEpoch += 1; busy.value = false
+  retireAiCommandLoad()
   stopConnectionRefresh()
   clearSecrets(); clearCreate()
 }

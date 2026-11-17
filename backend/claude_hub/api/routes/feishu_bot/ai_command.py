@@ -89,7 +89,8 @@ def register_ai_command_routes(
     ) -> dict[str, Any]:
         service = service_getter()
         poller = poller_getter()
-        return build_ai_command_status_payload(service, poller)
+        async with service._token_store.async_file_lock():
+            return build_ai_command_status_payload(service, poller)
 
     @router.put("/ai-command")
     @router.patch("/ai-command")
@@ -99,16 +100,17 @@ def register_ai_command_routes(
     ) -> dict[str, Any]:
         service = service_getter()
         poller = poller_getter()
-        try:
-            patch_dict = body.model_dump(exclude_none=True)
-            service.update_config(patch_dict)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"code": "invalid_ai_command_config", "message": str(exc)},
-            ) from exc
-        await poller.reconcile()
-        return build_ai_command_status_payload(service, poller)
+        async with service._token_store.async_file_lock():
+            try:
+                patch_dict = body.model_dump(exclude_none=True)
+                service.update_config(patch_dict)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"code": "invalid_ai_command_config", "message": str(exc)},
+                ) from exc
+            await poller.reconcile()
+            return build_ai_command_status_payload(service, poller)
 
     @router.post("/ai-command/import-token")
     async def import_lark_cli_user_token(
@@ -120,22 +122,25 @@ def register_ai_command_routes(
         explicit_app_id = (body.app_id.strip() if body and body.app_id else "") or None
         explicit_open_id = (body.open_id.strip() if body and body.open_id else "") or None
         explicit_profile = (body.profile.strip() if body and body.profile else "") or None
-        imported = service._token_store.import_from_lark_cli(
-            app_id=explicit_app_id,
-            open_id=explicit_open_id,
-            profile=explicit_profile,
-        )
-        if imported is not None:
-            service.update_config(
-                {
-                    "owner_open_id": imported.open_id,
-                    "app_id": imported.app_id,
-                }
+        async with service._token_store.async_file_lock(
+            app_id=explicit_app_id or "", open_id=explicit_open_id or ""
+        ):
+            imported = service._token_store.import_from_lark_cli(
+                app_id=explicit_app_id,
+                open_id=explicit_open_id,
+                profile=explicit_profile,
             )
-        await poller.reconcile()
-        payload = build_ai_command_status_payload(service, poller, auto_import_lark_cli=False)
-        payload["imported"] = imported is not None
-        return payload
+            if imported is not None:
+                service.update_config(
+                    {
+                        "owner_open_id": imported.open_id,
+                        "app_id": imported.app_id,
+                    }
+                )
+            await poller.reconcile()
+            payload = build_ai_command_status_payload(service, poller, auto_import_lark_cli=False)
+            payload["imported"] = imported is not None
+            return payload
 
     @router.post("/ai-command/dry-run")
     async def dry_run_ai_command(
