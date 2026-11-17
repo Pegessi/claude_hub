@@ -2614,6 +2614,65 @@ async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
             .can_send_as_user
             is False
         )
+        # 14. R12-01a: Same-active re-import when file omits scope and old CLI cache exists
+        # preserves the active known-empty scope verbatim
+        (pt_cfg / "credentials.json").write_text(
+            json.dumps(
+                {
+                    "appId": "cli_pt",
+                    "userOpenId": "ou_pt",
+                    "accessToken": "pt-empty-scope-at",
+                    "refreshToken": "pt-empty-scope-rt",
+                    "expiresAt": int((time.time() + 14_000) * 1000),
+                    "refreshExpiresAt": int((time.time() + 600_000) * 1000),
+                }
+            ),
+            encoding="utf-8",
+        )
+        rec_absent_same = await pt_store.aimport_from_lark_cli(app_id="cli_pt", open_id="ou_pt")
+        assert rec_absent_same is not None and rec_absent_same.scope == ""
+
+        # 14. R12-01b: Rotating a plaintext-imported token to scope="" and re-importing the
+        # unchanged pre-rotation plaintext source preserves the rotated credentials AND empty scope
+        (pt_cfg / "credentials.json").write_text(
+            json.dumps(
+                {
+                    "appId": "cli_pt",
+                    "userOpenId": "ou_pt",
+                    "accessToken": "pt-pre-rot-at",
+                    "refreshToken": "pt-pre-rot-rt",
+                    "expiresAt": int((time.time() + 18_000) * 1000),
+                    "refreshExpiresAt": int((time.time() + 600_000) * 1000),
+                    "scope": "im:message im:message.send_as_user",
+                }
+            ),
+            encoding="utf-8",
+        )
+        pre_rot = await pt_store.aimport_from_lark_cli(app_id="cli_pt", open_id="ou_pt")
+        assert pre_rot is not None and pre_rot.has_scope("im:message.send_as_user")
+
+        async def empty_scope_refresher(_rt: str, **_kw: Any) -> dict[str, Any]:
+            return {
+                "access_token": "pt-post-rot-at",
+                "refresh_token": "pt-post-rot-rt",
+                "expires_in": 24_000,
+                "refresh_expires_in": 600_000,
+                "scope": "",
+            }
+
+        rot_client = FeishuUserClient(
+            pt_store,
+            open_id="ou_pt",
+            app_id="cli_pt",
+            token_refresher=empty_scope_refresher,
+        )
+        post_rot = await rot_client.refresh_token(pre_rot)
+        assert post_rot.access_token == "pt-post-rot-at" and post_rot.scope == ""
+        reimp_rot = await pt_store.aimport_from_lark_cli(app_id="cli_pt", open_id="ou_pt")
+        assert reimp_rot is not None
+        assert reimp_rot.access_token == "pt-post-rot-at"
+        assert reimp_rot.scope == ""
+        assert rot_client.preflight_scopes(reimp_rot).can_send_as_user is False
         # Encrypted layout with explicit scope="" and prior CLI scope-cache also preserves empty scope
         (pt_cfg / "credentials.json").unlink()
         (pt_data / "master.key").write_bytes(master_key)
@@ -2626,7 +2685,7 @@ async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
                         "userOpenId": "ou_pt",
                         "accessToken": "enc-empty-scope-at",
                         "refreshToken": "enc-empty-scope-rt",
-                        "expiresAt": int((time.time() + 20_000) * 1000),
+                        "expiresAt": int((time.time() + 30_000) * 1000),
                         "refreshExpiresAt": int((time.time() + 600_000) * 1000),
                         "scope": "",
                     }
