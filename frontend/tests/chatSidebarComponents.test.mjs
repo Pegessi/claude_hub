@@ -151,3 +151,25 @@ test('group slots and row components preserve the original DOM hierarchy and acc
   await nextTick()
   app.unmount()
 })
+
+test('sidebar defaults to Folders view and manually switches to Status view', async t => {
+  installBrowser(t)
+  setStore(fakeStore())
+  const root = { children: [] }
+  const app = makeRenderer().createApp({ setup: () => () => h(Sidebar) })
+  app.mount(root)
+  const switcher = find(root, hasClass('chat-sidebar__view-switch'))
+  const buttons = (switcher?.children ?? []).filter(node => node.tag === 'button')
+  const textOf = node => (node?.text ?? (node?.children ?? []).map(c => c.text ?? '').join('')).trim()
+  assert.deepEqual(buttons.map(textOf), ['Folders', 'Status'])
+  assert.equal(buttons[0].attributes['aria-pressed'], true)
+  assert.equal(buttons[1].attributes['aria-pressed'], false)
+  assert.equal(textOf(find(root, hasClass('chat-sidebar__group-label'))), 'repo')
+
+  buttons[1].attributes.onClick()
+  await nextTick()
+  assert.equal(buttons[0].attributes['aria-pressed'], false)
+  assert.equal(buttons[1].attributes['aria-pressed'], true)
+  assert.equal(textOf(find(root, hasClass('chat-sidebar__group-label'))), 'Done')
+  app.unmount()
+})
