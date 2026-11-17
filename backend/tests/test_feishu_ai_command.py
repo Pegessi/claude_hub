@@ -2507,8 +2507,10 @@ async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
         assert match_open_resp.json()["imported"] is True
         assert match_open_resp.json()["config"]["app_id"] == "cli_other"
 
-        # 12. R9-01: Matching config.json + plaintext credentials.json imports in both sync/async,
-        # while unrelated plaintext credentials are rejected when config.json selects another app
+        # 12. R9-01 + R10-01 + R10-02: Matching config.json + plaintext credentials.json imports in
+        # both sync/async, preserves snake_case app_secret/user_name over config keychain-ref objects,
+        # selects the second user in multi-user plaintext layouts across sync/async, and rejects
+        # unrelated plaintext credentials when config.json selects another app
         pt_cfg = tmp_path / "pt_cfg"
         pt_data = tmp_path / "pt_data"
         pt_cfg.mkdir()
@@ -2518,7 +2520,16 @@ async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
                 {
                     "currentApp": "primary",
                     "apps": [
-                        {"name": "primary", "appId": "cli_pt", "users": [{"userOpenId": "ou_pt"}]},
+                        {
+                            "name": "primary",
+                            "appId": "cli_pt",
+                            "appSecret": {"source": "keychain", "id": "appsecret:cli_pt"},
+                            "scope": "im:message",
+                            "users": [
+                                {"userOpenId": "ou_pt_first", "userName": "First User"},
+                                {"userOpenId": "ou_pt", "userName": "Config Name"},
+                            ],
+                        },
                         {
                             "name": "secondary",
                             "appId": "cli_pt2",
@@ -2534,6 +2545,8 @@ async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
                 {
                     "appId": "cli_pt",
                     "userOpenId": "ou_pt",
+                    "user_name": "Credential Name",
+                    "app_secret": "pt-exported-secret",
                     "accessToken": "pt-access-token",
                     "refreshToken": "pt-refresh-token",
                     "expiresAt": int((time.time() + 7200) * 1000),
@@ -2549,11 +2562,19 @@ async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
             lark_cli_dir=pt_cfg,
             lark_cli_data_dir=pt_data,
         )
-        pt_sync = pt_store.import_from_lark_cli(app_id="cli_pt", open_id="ou_pt")
-        assert pt_sync is not None and pt_sync.access_token == "pt-access-token"
-        pt_async = await pt_store.aimport_from_lark_cli(app_id="cli_pt", open_id="ou_pt")
-        assert pt_async is not None and pt_async.access_token == "pt-access-token"
-        # Selecting secondary (which has no plaintext or encrypted token) must not fall back to cli_pt
+        # Multi-user app-only import selects ou_pt (second user) in both sync and async modes
+        pt_sync = pt_store.import_from_lark_cli(app_id="cli_pt")
+        assert pt_sync is not None and pt_sync.open_id == "ou_pt"
+        assert pt_sync.app_secret == "pt-exported-secret"
+        assert pt_sync.user_name == "Credential Name"
+        pt_async = await pt_store.aimport_from_lark_cli(app_id="cli_pt")
+        assert pt_async is not None and pt_async.open_id == "ou_pt"
+        assert pt_async.app_secret == "pt-exported-secret"
+        assert pt_async.user_name == "Credential Name"
+        # Explicit tokenless first user is rejected; selecting secondary is rejected without fallback
+        assert (
+            await pt_store.aimport_from_lark_cli(app_id="cli_pt", open_id="ou_pt_first")
+        ) is None
         assert pt_store.import_from_lark_cli(profile="secondary") is None
         assert (await pt_store.aimport_from_lark_cli(profile="secondary")) is None
         # Deleting config.json preserves no-config plaintext credentials.json import
