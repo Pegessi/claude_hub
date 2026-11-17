@@ -2464,3 +2464,45 @@ async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
         )
         assert d_miss < 0.12
         assert r6_store.get_token(open_id="ou_c4", app_id="cli_c4") is None
+
+        # 11. R8-01: open_id-only and partial selectors obey identical CLI app-selection
+        # contract across cold/warm Hub cache and sync/async import paths
+        r6_svc.update_config({"enabled": False, "app_id": "cli_other", "owner_open_id": "ou_other"})
+        # Cold Hub cache: open_id='ou_c4' does not belong to currentApp='secondary' ('cli_other')
+        assert r6_store.import_from_lark_cli(open_id="ou_c4") is None
+        cold_open_resp = await asgi_client.post(
+            "/api/feishu/bot/ai-command/import-token",
+            json={"open_id": "ou_c4"},
+        )
+        assert cold_open_resp.status_code == 200
+        assert cold_open_resp.json()["imported"] is False
+        assert cold_open_resp.json()["config"]["app_id"] == "cli_other"
+
+        # Warm Hub cache with cached (cli_c4, ou_c4): open_id='ou_c4' still fails closed against currentApp='secondary'
+        r6_store.save_oauth_token(
+            open_id="ou_c4",
+            app_id="cli_c4",
+            access_token="warm-cached-a-at",
+            refresh_token="warm-cached-a-rt",
+            expires_in=7200,
+            scope="im:message im:message.send_as_user",
+        )
+        assert r6_store.import_from_lark_cli(open_id="ou_c4") is None
+        warm_open_resp = await asgi_client.post(
+            "/api/feishu/bot/ai-command/import-token",
+            json={"open_id": "ou_c4"},
+        )
+        assert warm_open_resp.status_code == 200
+        assert warm_open_resp.json()["imported"] is False
+        assert warm_open_resp.json()["config"]["app_id"] == "cli_other"
+
+        # open_id='ou_other' matches currentApp='secondary' in both sync and async paths
+        sync_match = r6_store.import_from_lark_cli(open_id="ou_other")
+        assert sync_match is not None and sync_match.app_id == "cli_other"
+        match_open_resp = await asgi_client.post(
+            "/api/feishu/bot/ai-command/import-token",
+            json={"open_id": "ou_other"},
+        )
+        assert match_open_resp.status_code == 200
+        assert match_open_resp.json()["imported"] is True
+        assert match_open_resp.json()["config"]["app_id"] == "cli_other"
