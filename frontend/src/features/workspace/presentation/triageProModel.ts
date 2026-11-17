@@ -28,8 +28,8 @@ export type {
   StructuredValidation,
 }
 
-export type TriageBucket = 'needs_you' | 'working' | 'done'
-export type TriageTone = 'attention' | 'working' | 'done' | 'failed' | 'neutral'
+export type TriageBucket = 'needs_you' | 'working' | 'review' | 'done'
+export type TriageTone = 'attention' | 'working' | 'review' | 'done' | 'failed' | 'neutral'
 export type SpineNodeTone = 'neutral' | 'warn' | 'pass' | 'live'
 export type SpineActorRole = 'orchestrator' | 'worker' | 'reviewer'
 
@@ -102,16 +102,23 @@ export interface TriageTaskViewModel {
   }
 }
 
+export const TRIAGE_DONE_PREVIEW_SIZE = 5
+
 export interface TriageGroup {
   key: TriageBucket
   label: string
   items: TriageTaskViewModel[]
+  visibleItems: TriageTaskViewModel[]
+  hiddenCount: number
+  collapsed: boolean
+  expanded: boolean
 }
 
 const GROUP_LABELS: Record<TriageBucket, string> = {
   needs_you: 'NEEDS YOU',
-  working: 'ACTIVE',
-  done: 'RECENT',
+  working: 'WORKING',
+  review: 'REVIEW',
+  done: 'DONE',
 }
 
 export function deriveTaskCode(task: WorkspaceTask, sources: readonly (string | null | undefined)[]): string {
@@ -128,12 +135,21 @@ export function classifyTriageBucket(
   task: WorkspaceTask,
   lifecycle?: TaskLifecycle,
 ): TriageBucket {
-  if (task.status === 'done') return 'done'
-  if (task.status === 'review' || task.status === 'failed') return 'needs_you'
-  if (lifecycle?.attention || lifecycle?.phase === 'needs_user' || lifecycle?.phase === 'awaiting_acceptance' || lifecycle?.phase === 'orphaned') {
+  if (task.status === 'done' || lifecycle?.phase === 'done') return 'done'
+  if (task.status === 'failed') return 'needs_you'
+  if (lifecycle?.phase === 'needs_user' || lifecycle?.phase === 'orphaned') {
     return 'needs_you'
   }
   if (task.latest_progress?.state === 'needs_input' || task.latest_progress?.state === 'blocked') {
+    return 'needs_you'
+  }
+  if (task.status === 'review' || lifecycle?.phase === 'awaiting_acceptance') {
+    return 'review'
+  }
+  if (lifecycle?.delivery_mr_state === 'open' && lifecycle?.owner?.state === 'idle') {
+    return 'review'
+  }
+  if (lifecycle?.attention) {
     return 'needs_you'
   }
   return 'working'
@@ -145,6 +161,7 @@ export function classifyStatusTone(
 ): TriageTone {
   if (task.status === 'failed') return 'failed'
   if (bucket === 'needs_you') return 'attention'
+  if (bucket === 'review') return 'review'
   if (bucket === 'done') return 'done'
   if (task.status === 'todo') return 'neutral'
   return 'working'
@@ -156,8 +173,12 @@ export function deriveStatusLabel(
   lifecycle?: TaskLifecycle,
 ): string {
   if (task.status === 'failed') return 'Failed'
-  if (task.status === 'done') {
-    return task.human_accepted_at ? 'Accepted' : 'Done'
+  if (task.status === 'done' || lifecycle?.phase === 'done') {
+    const reason = task.closed_reason || lifecycle?.reason
+    if (task.human_accepted_at || reason === 'accepted') return 'Accepted'
+    if (reason === 'chat_archived') return 'Archived'
+    if (reason === 'mr_merged') return 'MR Merged'
+    return 'Done'
   }
   const reviewReports = reports.filter(r => r.state.startsWith('review_'))
   const latestReview = reviewReports[reviewReports.length - 1]
@@ -169,6 +190,9 @@ export function deriveStatusLabel(
     if (latestReview?.state === 'review_failed') return 'Changes requested'
     if (latestReview?.state === 'review_needs_input') return 'Reviewer question'
     if (task.review_skipped_at) return 'Ready to accept'
+    if (lifecycle?.delivery_mr_state === 'open' && lifecycle.delivery_mr_label) {
+      return `${lifecycle.delivery_mr_label} · Open`
+    }
     return 'In review'
   }
   if (lifecycle?.phase === 'orphaned') return 'Session lost'
@@ -183,6 +207,9 @@ export function deriveStatusLabel(
   if (task.status === 'todo') return 'Todo'
   if (latestReview?.state === 'review_started') {
     return `Reviewing · R${Math.max(1, (task.review_attempts || 0) + 1)}`
+  }
+  if (lifecycle?.delivery_mr_state === 'open' && lifecycle.delivery_mr_label && lifecycle.owner?.state === 'idle') {
+    return `${lifecycle.delivery_mr_label} · Open`
   }
   return 'Working'
 }
@@ -462,13 +489,18 @@ export function buildTriageTaskViewModel(input: {
   })
 
   const passedChecks = ev.acceptance.filter(c => c.status === 'passed').length
+  const closeReason = task.closed_reason || lifecycle?.reason
   const checksLabel =
     ev.acceptance.length > 0
       ? `${passedChecks}/${ev.acceptance.length} criteria passed`
       : ev.validation
         ? evidenceLine(ev.validation).slice(0, 48)
-        : task.status === 'done'
-          ? 'Verified'
+        : (task.status === 'done' || lifecycle?.phase === 'done')
+          ? (closeReason === 'chat_archived'
+              ? 'Closed by archive'
+              : closeReason === 'mr_merged'
+                ? 'MR merged'
+                : 'Verified')
           : 'Pending verification'
 
   const implementer = workerSession?.title || task.execution_ref?.provider || task.agent_type || 'Agent'
@@ -483,9 +515,15 @@ export function buildTriageTaskViewModel(input: {
   if (task.status === 'failed') {
     verdictLabel = 'FAILED'
     verdictTone = 'warn'
-  } else if (latestVerdict?.state === 'review_passed' || task.status === 'done') {
-    verdictLabel = latestVerdict?.state === 'review_passed' ? 'PASS · VERIFIED' : 'COMPLETED'
-    verdictTone = 'pass'
+  } else if (latestVerdict?.state === 'review_passed' || task.status === 'done' || lifecycle?.phase === 'done') {
+    verdictLabel = latestVerdict?.state === 'review_passed'
+      ? 'PASS · VERIFIED'
+      : closeReason === 'chat_archived'
+        ? 'CLOSED BY ARCHIVE'
+        : closeReason === 'mr_merged'
+          ? 'MR MERGED'
+          : 'COMPLETED'
+    verdictTone = closeReason === 'chat_archived' ? 'auto' : 'pass'
   } else if (latestVerdict?.state === 'review_failed' || latestVerdict?.state === 'review_needs_input') {
     verdictLabel = 'CHANGES REQUESTED'
     verdictTone = 'warn'
@@ -520,12 +558,16 @@ export function buildTriageTaskViewModel(input: {
     bucket === 'needs_you'
       ? (lifecycle?.attention && lifecycle.reason_text
           ? lifecycle.reason_text
-          : latestVerdict?.state === 'review_passed'
-            ? 'Independent review passed. Ready for your acceptance.'
-            : task.status === 'failed'
-              ? (task.failure_reason || 'Task stopped with an error; steer to retry or abort.')
-              : 'Waiting for your review or steering instructions.')
-      : ''
+          : task.status === 'failed'
+            ? (task.failure_reason || 'Task stopped with an error; steer to retry or abort.')
+            : 'Waiting for your answer or steering instructions.')
+      : bucket === 'review'
+        ? (latestVerdict?.state === 'review_passed'
+            ? 'Independent review passed. Ready for acceptance or merge.'
+            : lifecycle?.delivery_mr_state === 'open' && lifecycle.delivery_mr_label
+              ? `${lifecycle.delivery_mr_label} is open — closes automatically once merged.`
+              : 'Deliverable ready for review or acceptance.')
+        : ''
 
   const liveStep =
     bucket === 'working'
@@ -606,10 +648,20 @@ export function buildTriageTaskViewModel(input: {
   }
 }
 
-export function groupTriageTasks(items: readonly TriageTaskViewModel[]): TriageGroup[] {
+export interface GroupTriageOptions {
+  collapsed?: ReadonlySet<TriageBucket>
+  doneExpanded?: boolean
+  selectedTaskId?: string | null
+}
+
+export function groupTriageTasks(
+  items: readonly TriageTaskViewModel[],
+  options?: GroupTriageOptions,
+): TriageGroup[] {
   const buckets: Record<TriageBucket, TriageTaskViewModel[]> = {
     needs_you: [],
     working: [],
+    review: [],
     done: [],
   }
   for (const item of items) {
@@ -620,11 +672,36 @@ export function groupTriageTasks(items: readonly TriageTaskViewModel[]): TriageG
 
   buckets.needs_you.sort(byUpdatedDesc)
   buckets.working.sort(byUpdatedDesc)
+  buckets.review.sort(byUpdatedDesc)
   buckets.done.sort(byUpdatedDesc)
 
-  return (['needs_you', 'working', 'done'] as TriageBucket[]).map(key => ({
-    key,
-    label: GROUP_LABELS[key],
-    items: buckets[key],
-  }))
+  return (['needs_you', 'working', 'review', 'done'] as TriageBucket[]).map(key => {
+    const all = buckets[key]
+    const collapsed = Boolean(options?.collapsed?.has(key))
+    const isDone = key === 'done'
+    const expanded = !isDone || Boolean(options?.doneExpanded)
+    const previewCap = isDone ? TRIAGE_DONE_PREVIEW_SIZE : all.length
+    const active = options?.selectedTaskId
+      ? all.find(item => item.id === options.selectedTaskId)
+      : undefined
+    let visibleItems = collapsed
+      ? []
+      : expanded
+        ? all
+        : all.slice(0, previewCap)
+    if (active && !visibleItems.includes(active)) {
+      visibleItems = collapsed
+        ? [active]
+        : [...visibleItems.slice(0, Math.max(0, previewCap - 1)), active]
+    }
+    return {
+      key,
+      label: GROUP_LABELS[key],
+      items: all,
+      visibleItems,
+      hiddenCount: all.length - visibleItems.length,
+      collapsed,
+      expanded,
+    }
+  })
 }

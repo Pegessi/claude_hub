@@ -67,6 +67,8 @@ class TaskLifecycle(BaseModel):
     holds_session: bool = False
     since: datetime
     legacy_status: Literal["todo", "queued", "working", "review", "done", "failed"]
+    delivery_mr_state: Optional[Literal["open", "merged"]] = None
+    delivery_mr_label: Optional[str] = None
 
 
 class TaskLifecycleMark(BaseModel):

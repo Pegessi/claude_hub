@@ -79,30 +79,54 @@
 
     <!-- Expanded body (always rendered inside the mobile drawer) -->
     <template v-if="!sidebarCollapsed || isMobile">
-      <div class="chat-sidebar__search">
-        <ThemeChromeIcon
-          kind="search"
-          :size="13"
+      <div class="chat-sidebar__controls">
+        <div
+          class="chat-sidebar__view-switch"
+          role="group"
+          aria-label="Group chats by"
         >
-          <svg
-            viewBox="0 0 16 16"
-            width="13"
-            height="13"
-            aria-hidden="true"
+          <button
+            type="button"
+            :class="['chat-sidebar__view-btn', { active: groupByMode === 'cwd' }]"
+            :aria-pressed="groupByMode === 'cwd'"
+            @click="setGroupByMode('cwd')"
           >
-            <path
-              fill="currentColor"
-              d="M11.4 10.6a5.5 5.5 0 1 0-.8.8l3 3 .8-.8-3-3zM7 11.5a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z"
-            />
-          </svg>
-        </ThemeChromeIcon>
-        <input
-          v-model="filterText"
-          type="text"
-          class="chat-sidebar__search-input"
-          placeholder="Filter chats..."
-          aria-label="Filter chats"
-        >
+            Folders
+          </button>
+          <button
+            type="button"
+            :class="['chat-sidebar__view-btn', { active: groupByMode === 'status' }]"
+            :aria-pressed="groupByMode === 'status'"
+            @click="setGroupByMode('status')"
+          >
+            Status
+          </button>
+        </div>
+        <div class="chat-sidebar__search">
+          <ThemeChromeIcon
+            kind="search"
+            :size="13"
+          >
+            <svg
+              viewBox="0 0 16 16"
+              width="13"
+              height="13"
+              aria-hidden="true"
+            >
+              <path
+                fill="currentColor"
+                d="M11.4 10.6a5.5 5.5 0 1 0-.8.8l3 3 .8-.8-3-3zM7 11.5a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z"
+              />
+            </svg>
+          </ThemeChromeIcon>
+          <input
+            v-model="filterText"
+            type="text"
+            class="chat-sidebar__search-input"
+            placeholder="Filter chats..."
+            aria-label="Filter chats"
+          >
+        </div>
       </div>
 
       <div class="chat-sidebar__body">
@@ -136,6 +160,7 @@
             :status="getTabStatus(tab)"
             :awaiting="isAwaitingAnswer(tab)"
             :status-label="getTabStatusAriaLabel(tab)"
+            :activity-time="getTabActivityTime?.(tab) ?? tab.created_at"
             :renaming="renamingTabId === tab.id"
             :set-rename-input-ref="setRenameInputRef"
             @row-pointerdown="onRowPointerDown"
@@ -264,7 +289,7 @@ import { nextTick, ref, computed, watch, onUnmounted, toRef } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useTerminalStore } from '@/stores/terminalStore'
 import { useAppStore } from '@/stores/appStore'
-import { buildChatSidebarGroups } from '@/utils/chatGroups'
+import { buildChatSidebarGroups, buildChatSidebarStatusGroups } from '@/utils/chatGroups'
 import { useTabStatus } from '@/composables/useTabStatus'
 import { useViewport } from '@/composables/useViewport'
 import { useEdgeSwipeDrawer } from '@/composables/useEdgeSwipeDrawer'
@@ -274,7 +299,7 @@ import ThemeChromeIcon from '@/features/app-shell/components/ThemeChromeIcon.vue
 import { useSidebarPointerDrag } from './useSidebarPointerDrag'
 import { useSidebarRename } from './useSidebarRename'
 import { useSidebarResize, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH } from './useSidebarResize'
-import type { TerminalTab } from '@/types'
+import type { TerminalAgentStatus, TerminalTab } from '@/types'
 
 defineOptions({ inheritAttrs: false })
 
@@ -341,7 +366,27 @@ const mobilePanelStyle = computed(() => {
 })
 
 // Tab-status logic is shared with the TabBar via useTabStatus.
-const { getTabStatus, getTabStatusLabel, isAwaitingAnswer } = useTabStatus(agentStatuses)
+const {
+  getTabStatus,
+  getTabStatusLabel,
+  isAwaitingAnswer,
+  getTabActivityTime,
+} = useTabStatus(agentStatuses)
+
+const groupByMode = ref<'cwd' | 'status'>('cwd')
+function setGroupByMode(next: 'cwd' | 'status') {
+  groupByMode.value = next
+}
+
+const statusesByTabId = computed<Record<string, TerminalAgentStatus | undefined>>(() => {
+  const list = agentStatuses.value
+  if (!Array.isArray(list)) return {}
+  const map: Record<string, TerminalAgentStatus | undefined> = {}
+  for (const item of list) {
+    if (item && item.tab_id) map[item.tab_id] = item
+  }
+  return map
+})
 
 function getTabStatusAriaLabel(tab: TerminalTab): string {
   // An outstanding question is not an unread result: `getTabStatusLabel`
@@ -372,11 +417,18 @@ function toggleGroup(cwd: string) {
   collapsedGroups.value = next
 }
 
-const filteredGroups = computed(() => buildChatSidebarGroups(chatTabs.value, pinnedChatIds.value, {
-  query: filterText.value, activeTabId: activeTabId.value,
-  collapsed: collapsedGroups.value, expanded: expandedGroups.value,
-  pinnedCollapsed: pinnedCollapsed.value,
-}))
+const filteredGroups = computed(() => {
+  const options = {
+    query: filterText.value,
+    activeTabId: activeTabId.value,
+    collapsed: collapsedGroups.value,
+    expanded: expandedGroups.value,
+    pinnedCollapsed: pinnedCollapsed.value,
+  }
+  return groupByMode.value === 'status'
+    ? buildChatSidebarStatusGroups(chatTabs.value, pinnedChatIds.value, statusesByTabId.value, options)
+    : buildChatSidebarGroups(chatTabs.value, pinnedChatIds.value, options)
+})
 
 function toggleExpanded(cwd: string) {
   const next = new Set(expandedGroups.value)
@@ -535,12 +587,50 @@ watch(mobileDrawerOpen, isOpen => {
   transform: rotate(180deg);
 }
 
-/* Search */
+/* Controls & Search */
+.chat-sidebar__controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 10px 8px;
+}
+
+.chat-sidebar__view-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--ch-radius-md);
+  background: var(--ch-color-surface-sunken, var(--ch-color-surface-control));
+  border: 1px solid var(--ch-color-border-muted);
+}
+
+.chat-sidebar__view-btn {
+  height: 22px;
+  border: none;
+  border-radius: calc(var(--ch-radius-md) - 2px);
+  background: transparent;
+  color: var(--ch-color-text-muted);
+  font-size: var(--ch-font-size-xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--ch-motion-fast), color var(--ch-motion-fast);
+}
+
+.chat-sidebar__view-btn:hover {
+  color: var(--ch-color-text);
+}
+
+.chat-sidebar__view-btn.active {
+  background: var(--ch-color-surface-selected, var(--ch-color-surface));
+  color: var(--ch-color-text-selected, var(--ch-color-text-strong));
+  font-weight: 600;
+}
+
 .chat-sidebar__search {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin: 0 10px 8px;
   padding: 0 8px;
   height: 30px;
   border: 1px solid var(--ch-color-border-muted);

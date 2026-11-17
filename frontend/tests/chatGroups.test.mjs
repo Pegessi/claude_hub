@@ -11,7 +11,17 @@ const source = readFileSync(
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
 })
-const { groupChatsByCwd, cwdLabel, buildChatSidebarGroups, moveCwdGroup, moveTabById, canDropChatInGroup, parsePinnedChatIds } = await import(
+const {
+  groupChatsByCwd,
+  cwdLabel,
+  buildChatSidebarGroups,
+  buildChatSidebarStatusGroups,
+  classifyChatStatusBucket,
+  moveCwdGroup,
+  moveTabById,
+  canDropChatInGroup,
+  parsePinnedChatIds,
+} = await import(
   `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`
 )
 
@@ -225,4 +235,41 @@ test('directory drops preserve cwd while pinned groups accept sessions from any 
 test('pin preference parsing tolerates malformed storage and accepts only unique nonempty IDs', () => {
   for (const raw of [null, '', '{broken', 'null', '{}', '42']) assert.deepEqual([...parsePinnedChatIds(raw)], [])
   assert.deepEqual([...parsePinnedChatIds('["a",3,null,"","a","b"]')], ['a', 'b'])
+})
+
+test('buildChatSidebarStatusGroups buckets chats into Pinned + Needs you / Working / Review / Done', () => {
+  const tabs = [
+    makeTab({ id: 'pin-1', name: 'Pinned chat', cwd: '/repo' }),
+    makeTab({ id: 'unread-done', name: 'Unread answer', cwd: '/repo', is_unread: true }),
+    makeTab({ id: 'blocked-q', name: 'Pending question', cwd: '/repo' }),
+    makeTab({ id: 'working-1', name: 'Running task', cwd: '/repo' }),
+    makeTab({ id: 'review-mr', name: 'MR open chat', cwd: '/repo' }),
+    makeTab({ id: 'done-old', name: 'Old done', cwd: '/repo', created_at: '2026-11-10T00:00:00Z' }),
+    makeTab({ id: 'done-new', name: 'New done', cwd: '/repo', created_at: '2026-11-16T00:00:00Z' }),
+  ]
+  const statuses = {
+    'unread-done': { status: 'idle', last_activity_at: '2026-11-16T10:00:00Z' },
+    'blocked-q': { status: 'working', pending_question: true, last_activity_at: '2026-11-16T12:00:00Z' },
+    'working-1': { status: 'working', last_activity_at: '2026-11-16T11:00:00Z' },
+    'review-mr': { status: 'idle', review_state: 'mr_open', review_label: 'MR !4164', last_activity_at: '2026-11-16T09:00:00Z' },
+    'done-old': { status: 'idle', last_activity_at: '2026-11-10T00:00:00Z' },
+    'done-new': { status: 'idle', last_activity_at: '2026-11-16T08:00:00Z' },
+  }
+
+  assert.equal(classifyChatStatusBucket(tabs[1], statuses['unread-done']), 'needs_you')
+  assert.equal(classifyChatStatusBucket(tabs[2], statuses['blocked-q']), 'needs_you')
+  assert.equal(classifyChatStatusBucket(tabs[3], statuses['working-1']), 'working')
+  assert.equal(classifyChatStatusBucket(tabs[4], statuses['review-mr']), 'review')
+  assert.equal(classifyChatStatusBucket(tabs[5], statuses['done-old']), 'done')
+
+  const groups = buildChatSidebarStatusGroups(tabs, new Set(['pin-1']), statuses, sidebarOptions())
+  assert.deepEqual(groups.map(g => g.label), ['Pinned', 'Needs you', 'Working', 'Review', 'Done'])
+  assert.deepEqual(ids(groups[1].visibleTabs), ['blocked-q', 'unread-done'])
+  assert.deepEqual(ids(groups[2].visibleTabs), ['working-1'])
+  assert.deepEqual(ids(groups[3].visibleTabs), ['review-mr'])
+  assert.deepEqual(ids(groups[4].visibleTabs), ['done-new', 'done-old'])
+
+  // Status buckets are derived from live runtime, so drag-drop into non-pinned status buckets is disabled
+  assert.equal(canDropChatInGroup(tabs[5], groups[3]), false)
+  assert.equal(canDropChatInGroup(tabs[5], groups[0]), true)
 })

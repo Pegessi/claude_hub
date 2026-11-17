@@ -20,6 +20,7 @@ from claude_hub.models.schema_domains.evaluation import (
     RubricCriterion,
 )
 from claude_hub.models.schema_domains.execution import (
+    TaskArchiveClosure,
     TaskExecutionControl,
     TaskExecutionHandoffRequest,
     TaskExecutionReference,

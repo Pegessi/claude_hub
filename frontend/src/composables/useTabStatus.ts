@@ -102,5 +102,20 @@ export function useTabStatus(agentStatuses: Ref<readonly TerminalAgentStatus[]>)
     return `${statusLabel} — ${detail}`
   }
 
-  return { getTabStatus, getTabStatusLabel, isAwaitingAnswer }
+  function getTabActivityTime(tab: TerminalTab): string {
+    const reported = reportedStatus(tab)
+    return (
+      reported?.last_activity_at ||
+      reported?.last_reply_at ||
+      reported?.activity_since ||
+      tab.created_at
+    )
+  }
+
+  return {
+    getTabStatus,
+    getTabStatusLabel,
+    isAwaitingAnswer,
+    getTabActivityTime,
+  }
 }

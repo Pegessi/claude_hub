@@ -280,13 +280,17 @@ def test_draft_reasons(changes: dict[str, Any], reason: str) -> None:
     assert lifecycle.attention is False
 
 
-@pytest.mark.parametrize("tab", [ChatTabFacts(exists=False), ChatTabFacts(True, archived=True)])
-def test_initiator_task_whose_chat_is_gone_is_orphaned(tab: ChatTabFacts) -> None:
-    # Even an outstanding question cannot be answered in an archived Chat.
+def test_initiator_task_whose_chat_is_deleted_is_orphaned_while_archived_settles_done() -> None:
     task = _initiator(TaskProgressState.NEEDS_INPUT)
-    lifecycle = derive_task_lifecycle(LifecycleFacts(task=task, chat_tab=tab))
-    assert (lifecycle.phase, lifecycle.reason) == (TaskPhase.ORPHANED, "initiator_chat_gone")
-    assert lifecycle.owner.kind == TaskOwnerKind.CHAT
+    deleted = derive_task_lifecycle(LifecycleFacts(task=task, chat_tab=ChatTabFacts(exists=False)))
+    assert (deleted.phase, deleted.reason) == (TaskPhase.ORPHANED, "initiator_chat_gone")
+    assert deleted.owner.kind == TaskOwnerKind.CHAT
+
+    archived = derive_task_lifecycle(
+        LifecycleFacts(task=task, chat_tab=ChatTabFacts(exists=True, archived=True))
+    )
+    assert (archived.phase, archived.reason) == (TaskPhase.DONE, "chat_archived")
+    assert archived.attention is False
 
 
 @pytest.mark.parametrize(

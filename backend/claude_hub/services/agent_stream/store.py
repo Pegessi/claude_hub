@@ -96,12 +96,27 @@ class ReplyExcerpt:
     size: int
 
 
+@dataclass(frozen=True)
+class StreamSummary:
+    """Bounded cached projection of one stream's latest reply, activity, and delivery MRs."""
+
+    excerpt: Optional[ReplyExcerpt]
+    last_activity_at: Optional[datetime]
+    assistant_mr_urls: Tuple[str, ...] = ()
+    has_delivery_mutation: bool = False
+    max_sequence: int = -1
+
+
 # A reply excerpt only needs the trailing slice of the stream. Scanning this
 # much from EOF covers the final answer of any realistic turn without ever
 # parsing the whole log per poll.
 _REPLY_EXCERPT_SCAN_BYTES = 128 * 1024
 _REPLY_EXCERPT_MAX_CHARS = 160
 _REPLY_EXCERPT_MAX_COLLECTED = 4096
+_STREAM_SUMMARY_CACHE_MAX = 512
+_MUTATION_TOOL_NAMES = frozenset({"Edit", "Write", "MultiEdit", "StrReplace", "NotebookEdit"})
+_DELIVERY_SHELL_MARKERS = ("git push", "mr create", "mr update", "git commit", "worktree add")
+_STREAM_SUMMARY_CACHE: Dict[Tuple[str, str], Tuple[str, int, int, StreamSummary]] = {}
 
 
 def read_reply_excerpt(path: Path, max_chars: int, max_scan_bytes: int) -> Optional[ReplyExcerpt]:
@@ -193,6 +208,233 @@ def read_reply_excerpt(path: Path, max_chars: int, max_scan_bytes: int) -> Optio
         mtime_ns=stat_result.st_mtime_ns,
         size=size,
     )
+
+
+def _parse_event_utc(raw: Any) -> Optional[datetime]:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
+def _summarize_sqlite_events(
+    tail_events: List[Dict[str, Any]],
+    completed_events: List[Dict[str, Any]],
+    tool_events: List[Dict[str, Any]],
+    *,
+    max_chars: int,
+    generation: int,
+    max_seq: int,
+) -> StreamSummary:
+    from ..mr_status_cache import extract_codebase_mr_urls
+
+    turn_id: Optional[str] = None
+    pieces: List[str] = []
+    turn_written_at: Optional[datetime] = None
+    best: Optional[Tuple[str, str, Optional[datetime]]] = None
+    last_started: Optional[str] = None
+    last_activity_at: Optional[datetime] = None
+
+    for event in tail_events:
+        kind = event.get("type")
+        created_at = _parse_event_utc(event.get("created_at"))
+        if created_at is not None and kind in {
+            "turn_started",
+            "turn_completed",
+            "text_delta",
+            "tool_call_started",
+            "tool_call_completed",
+        }:
+            if last_activity_at is None or created_at > last_activity_at:
+                last_activity_at = created_at
+        event_turn = event.get("turn_id")
+        if not isinstance(event_turn, str) or not event_turn:
+            continue
+        if kind == "turn_started":
+            last_started = event_turn
+            if pieces and turn_id is not None:
+                best = ("".join(pieces), turn_id, turn_written_at)
+            turn_id = event_turn
+            pieces = []
+            turn_written_at = None
+            continue
+        if turn_id is None:
+            # Tail window started mid-turn; adopt this turn until a newer turn_started appears.
+            turn_id = event_turn
+            last_started = event_turn
+        if event_turn != turn_id:
+            continue
+        payload = event.get("payload")
+        payload_dict = payload if isinstance(payload, dict) else {}
+        if kind == "text_delta":
+            text = payload_dict.get("text")
+            if isinstance(text, str) and text:
+                pieces.append(text)
+                if created_at is not None:
+                    turn_written_at = created_at
+                if sum(len(piece) for piece in pieces) >= _REPLY_EXCERPT_MAX_COLLECTED:
+                    pieces = [text]
+        elif kind == "tool_call_completed" and pieces:
+            pieces = []
+        elif kind == "turn_completed" and not pieces:
+            assistant_text = payload_dict.get("assistant_text")
+            if isinstance(assistant_text, str) and assistant_text.strip():
+                pieces = [assistant_text]
+                if created_at is not None:
+                    turn_written_at = created_at
+
+    if pieces and turn_id is not None:
+        best = ("".join(pieces), turn_id, turn_written_at)
+
+    excerpt: Optional[ReplyExcerpt] = None
+    if best is not None:
+        newest, source_turn, source_at = best
+        collapsed = " ".join(newest.split())
+        if collapsed:
+            if len(collapsed) > max_chars:
+                collapsed = collapsed[: max_chars - 1].rstrip() + "…"
+            is_newest_turn = last_started is None or source_turn == last_started
+            excerpt = ReplyExcerpt(
+                text=collapsed,
+                written_at=source_at if is_newest_turn else None,
+                mtime_ns=generation,
+                size=max(0, max_seq),
+            )
+
+    mr_texts: List[str] = []
+    for comp in completed_events:
+        comp_at = _parse_event_utc(comp.get("created_at"))
+        if comp_at is not None and (last_activity_at is None or comp_at > last_activity_at):
+            last_activity_at = comp_at
+        payload = comp.get("payload")
+        if isinstance(payload, dict):
+            atxt = payload.get("assistant_text")
+            if isinstance(atxt, str) and atxt:
+                mr_texts.append(atxt)
+    assistant_mr_urls = tuple(extract_codebase_mr_urls(mr_texts))
+
+    has_mutation = False
+    for tool_ev in tool_events:
+        payload = tool_ev.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        name = str(payload.get("name") or "")
+        if name in _MUTATION_TOOL_NAMES:
+            has_mutation = True
+            break
+        if name in {"Bash", "Shell"}:
+            args_blob = json.dumps(payload.get("args") or {}, ensure_ascii=False).lower()
+            if any(marker in args_blob for marker in _DELIVERY_SHELL_MARKERS):
+                has_mutation = True
+                break
+
+    return StreamSummary(
+        excerpt=excerpt,
+        last_activity_at=last_activity_at,
+        assistant_mr_urls=assistant_mr_urls,
+        has_delivery_mutation=has_mutation,
+        max_sequence=max_seq,
+    )
+
+
+def read_stream_summary_sync(
+    path: Path,
+    max_chars: int = _REPLY_EXCERPT_MAX_CHARS,
+    max_scan_bytes: int = _REPLY_EXCERPT_SCAN_BYTES,
+) -> Optional[StreamSummary]:
+    """Read a cached SQLite stream summary, falling back to legacy JSONL only when unmigrated."""
+    db_file, logical_name = storage_location(path)
+    cache_key = (str(db_file), logical_name)
+    if db_file.exists():
+        try:
+            with connection(path) as db:
+                row = db.execute(
+                    "SELECT id, generation, dictionary FROM streams WHERE name=?",
+                    (logical_name,),
+                ).fetchone()
+                if row is not None:
+                    stream_id, generation, dictionary = int(row[0]), int(row[1]), bytes(row[2])
+                    max_seq = int(
+                        db.execute(
+                            "SELECT coalesce(max(sequence), -1) FROM stream_events WHERE name=?",
+                            (stream_id,),
+                        ).fetchone()[0]
+                    )
+                    cached = _STREAM_SUMMARY_CACHE.get(cache_key)
+                    if (
+                        cached is not None
+                        and cached[0] == "sqlite"
+                        and cached[1] == generation
+                        and cached[2] == max_seq
+                    ):
+                        return cached[3]
+                    if max_seq < 0:
+                        empty = StreamSummary(excerpt=None, last_activity_at=None, max_sequence=-1)
+                        _STREAM_SUMMARY_CACHE[cache_key] = ("sqlite", generation, max_seq, empty)
+                        return empty
+                    tail_rows = db.execute(
+                        "SELECT body FROM stream_events WHERE name=? ORDER BY sequence DESC LIMIT 200",
+                        (stream_id,),
+                    ).fetchall()
+                    comp_rows = db.execute(
+                        "SELECT body FROM stream_events WHERE name=? AND kind='turn_completed' "
+                        "ORDER BY sequence DESC LIMIT 12",
+                        (stream_id,),
+                    ).fetchall()
+                    tool_rows = db.execute(
+                        "SELECT body FROM stream_events WHERE name=? AND kind='tool_call_started' "
+                        "ORDER BY sequence DESC LIMIT 120",
+                        (stream_id,),
+                    ).fetchall()
+                    tail_events = [unpack(r[0], dictionary) for r in reversed(tail_rows)]
+                    comp_events = [unpack(r[0], dictionary) for r in comp_rows]
+                    tool_events = [unpack(r[0], dictionary) for r in tool_rows]
+                    summary = _summarize_sqlite_events(
+                        tail_events,
+                        comp_events,
+                        tool_events,
+                        max_chars=max_chars,
+                        generation=generation,
+                        max_seq=max_seq,
+                    )
+                    if len(_STREAM_SUMMARY_CACHE) >= _STREAM_SUMMARY_CACHE_MAX:
+                        _STREAM_SUMMARY_CACHE.pop(next(iter(_STREAM_SUMMARY_CACHE)), None)
+                    _STREAM_SUMMARY_CACHE[cache_key] = ("sqlite", generation, max_seq, summary)
+                    return summary
+        except OSError:
+            pass
+
+    try:
+        stat_result = path.stat()
+    except OSError:
+        _STREAM_SUMMARY_CACHE.pop(cache_key, None)
+        return None
+    cached = _STREAM_SUMMARY_CACHE.get(cache_key)
+    if (
+        cached is not None
+        and cached[0] == "jsonl"
+        and cached[1] == stat_result.st_mtime_ns
+        and cached[2] == stat_result.st_size
+    ):
+        return cached[3]
+    legacy_excerpt = read_reply_excerpt(path, max_chars, max_scan_bytes)
+    summary = StreamSummary(
+        excerpt=legacy_excerpt,
+        last_activity_at=legacy_excerpt.written_at if legacy_excerpt is not None else None,
+        max_sequence=-1,
+    )
+    if len(_STREAM_SUMMARY_CACHE) >= _STREAM_SUMMARY_CACHE_MAX:
+        _STREAM_SUMMARY_CACHE.pop(next(iter(_STREAM_SUMMARY_CACHE)), None)
+    _STREAM_SUMMARY_CACHE[cache_key] = (
+        "jsonl",
+        stat_result.st_mtime_ns,
+        stat_result.st_size,
+        summary,
+    )
+    return summary if legacy_excerpt is not None else None
 
 
 def compact_history_events(events: List[AgentStreamEvent]) -> List[AgentStreamEvent]:
@@ -630,21 +872,24 @@ class AgentStreamStore:
 
         return await _complete_io(last)
 
+    async def stream_summary(
+        self,
+        max_chars: int = _REPLY_EXCERPT_MAX_CHARS,
+        max_scan_bytes: int = _REPLY_EXCERPT_SCAN_BYTES,
+    ) -> Optional[StreamSummary]:
+        """Bounded cached summary of newest reply, activity timestamp, and delivery MRs."""
+        return await asyncio.to_thread(
+            read_stream_summary_sync, self._path, max_chars, max_scan_bytes
+        )
+
     async def reply_excerpt(
         self,
         max_chars: int = _REPLY_EXCERPT_MAX_CHARS,
         max_scan_bytes: int = _REPLY_EXCERPT_SCAN_BYTES,
     ) -> Optional[ReplyExcerpt]:
-        """Newest assistant text for this session, from a bounded tail scan.
-
-        Only the trailing ``max_scan_bytes`` of the stream are parsed, and the
-        answer after the turn's last tool call wins over earlier narration.
-        The scan is blocking file I/O, so it runs in a worker thread and the
-        caller caches the result by (mtime_ns, size).
-        """
-        if not self._path.exists():
-            return None
-        return await asyncio.to_thread(read_reply_excerpt, self._path, max_chars, max_scan_bytes)
+        """Newest assistant text for this session, backed by SQLite or legacy JSONL."""
+        summary = await self.stream_summary(max_chars=max_chars, max_scan_bytes=max_scan_bytes)
+        return summary.excerpt if summary is not None else None
 
     async def truncate_before(self, sequence: int) -> int:
         def truncate() -> int:

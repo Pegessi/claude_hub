@@ -39,14 +39,22 @@
       v-else
       type="button"
       class="chat-sidebar__group-header"
+      :class="{ 'chat-sidebar__status-header': Boolean(group.statusBucket) }"
       data-pointer-drop="group"
       :aria-expanded="!group.collapsed"
       :aria-controls="`chat-group-${group.key}`"
-      :title="`${group.cwd}. Click to collapse; drag to reorder workspaces`"
+      :title="group.statusBucket ? `${group.label}. Click to collapse` : `${group.cwd}. Click to collapse; drag to reorder workspaces`"
       @pointerdown="emit('group-pointerdown', $event, group)"
       @click="emit('group-click', group.cwd)"
     >
+      <span
+        v-if="group.statusBucket"
+        class="chat-sidebar__status-dot"
+        :data-bucket="group.statusBucket"
+        aria-hidden="true"
+      />
       <svg
+        v-else
         viewBox="0 0 16 16"
         width="14"
         height="14"
@@ -59,8 +67,8 @@
       </svg>
       <span
         class="chat-sidebar__group-label"
-        :title="group.cwd"
-      >{{ cwdLabel(group.cwd) }}</span>
+        :title="group.label || group.cwd"
+      >{{ group.label || cwdLabel(group.cwd) }}</span>
       <span class="chat-sidebar__group-count">{{ group.tabs.length }}</span>
       <svg
         class="chat-sidebar__group-chevron"
@@ -83,7 +91,7 @@
     >
       <slot />
       <button
-        v-if="!group.pinned && !group.collapsed && !filterText.trim() && group.tabs.length > CHAT_GROUP_PREVIEW_SIZE"
+        v-if="!group.pinned && !group.collapsed && !filterText.trim() && (!group.statusBucket || group.statusBucket === 'done') && group.tabs.length > CHAT_GROUP_PREVIEW_SIZE"
         type="button"
         class="chat-sidebar__show-more"
         :aria-expanded="group.expanded"
@@ -172,12 +180,37 @@ const emit = defineEmits<{
   background: var(--ch-color-surface-control-hover);
 }
 
-.chat-sidebar__group-header:not(.chat-sidebar__pinned-header) {
+.chat-sidebar__group-header:not(.chat-sidebar__pinned-header):not(.chat-sidebar__status-header) {
   cursor: grab;
 }
 
-.chat-sidebar__group-header:not(.chat-sidebar__pinned-header):active {
+.chat-sidebar__group-header:not(.chat-sidebar__pinned-header):not(.chat-sidebar__status-header):active {
   cursor: grabbing;
+}
+
+.chat-sidebar__status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 7px;
+  background: var(--ch-color-text-subtle);
+}
+
+.chat-sidebar__status-dot[data-bucket='needs_you'] {
+  background: var(--ch-color-warning);
+}
+
+.chat-sidebar__status-dot[data-bucket='working'] {
+  background: var(--ch-color-warning);
+  box-shadow: 0 0 5px var(--ch-color-warning-bg);
+}
+
+.chat-sidebar__status-dot[data-bucket='review'] {
+  background: var(--ch-color-accent);
+}
+
+.chat-sidebar__status-dot[data-bucket='done'] {
+  background: var(--ch-color-success);
 }
 
 .chat-sidebar__group-label {

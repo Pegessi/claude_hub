@@ -221,10 +221,12 @@ export function classifyRow(
 
   return row(
     'done',
-    status?.detail?.trim() || (runtimeStatus === 'idle' ? 'Idle' : 'Offline'),
+    status?.review_label
+      ? `Review · ${status.review_label}`
+      : (status?.detail?.trim() || (runtimeStatus === 'idle' ? 'Idle' : 'Offline')),
     replyExcerpt,
-    replyAtMs,
-    -(replyAtMs ?? 0),
+    replyAtMs ?? parseMs(status?.last_activity_at),
+    -(replyAtMs ?? parseMs(status?.last_activity_at) ?? 0),
   )
 }
 

@@ -8,7 +8,7 @@ const load = createSidebarLoader({
   'stores/appStore.ts': `import { ref } from 'vue'; const store = { mode: ref('terminal') }; export const useAppStore = () => store`,
   'composables/useViewport.ts': `import { ref } from 'vue'; export const mobile = ref(false); export const useViewport = () => ({ isMobile: mobile })`,
   'composables/useEdgeSwipeDrawer.ts': `import { ref } from 'vue'; export const calls = []; export function useEdgeSwipeDrawer(options) { calls.push(options); return { dragging: ref(false), translatePx: ref(0), backdropOpacity: ref(0) } }`,
-  'composables/useTabStatus.ts': `export const useTabStatus = () => ({ getTabStatus: () => 'idle', getTabStatusLabel: () => 'Idle', isAwaitingAnswer: () => false })`,
+  'composables/useTabStatus.ts': `export const useTabStatus = () => ({ getTabStatus: () => 'idle', getTabStatusLabel: () => 'Idle', isAwaitingAnswer: () => false, getTabActivityTime: tab => tab.created_at })`,
   'components/TabActionsMenu.vue': `<template><button class="menu-stub" /></template><script setup>defineProps(['tab', 'variant'])</script>`,
   'components/ChatSidebarWorkingEffect.vue': `<template><div class="working-effect" /></template><script setup>defineProps(['seed'])</script>`,
 })
@@ -149,5 +149,27 @@ test('group slots and row components preserve the original DOM hierarchy and acc
   button.attributes.onDblclick(click)
   assert.deepEqual(calls.at(-1), ['rename', testTab])
   await nextTick()
+  app.unmount()
+})
+
+test('sidebar defaults to Folders view and manually switches to Status view', async t => {
+  installBrowser(t)
+  setStore(fakeStore())
+  const root = { children: [] }
+  const app = makeRenderer().createApp({ setup: () => () => h(Sidebar) })
+  app.mount(root)
+  const switcher = find(root, hasClass('chat-sidebar__view-switch'))
+  const buttons = (switcher?.children ?? []).filter(node => node.tag === 'button')
+  const textOf = node => (node?.text ?? (node?.children ?? []).map(c => c.text ?? '').join('')).trim()
+  assert.deepEqual(buttons.map(textOf), ['Folders', 'Status'])
+  assert.equal(buttons[0].attributes['aria-pressed'], true)
+  assert.equal(buttons[1].attributes['aria-pressed'], false)
+  assert.equal(textOf(find(root, hasClass('chat-sidebar__group-label'))), 'repo')
+
+  buttons[1].attributes.onClick()
+  await nextTick()
+  assert.equal(buttons[0].attributes['aria-pressed'], false)
+  assert.equal(buttons[1].attributes['aria-pressed'], true)
+  assert.equal(textOf(find(root, hasClass('chat-sidebar__group-label'))), 'Done')
   app.unmount()
 })
