@@ -1134,6 +1134,8 @@ async def main(browser_run: BrowserRun) -> None:
         await page.set_viewport_size({"width": 390, "height": 844})
         mobile_create_count = await browser_create_count()
         modal = await open_add_task()
+        await expect(modal.locator("#task-create-title")).not_to_be_focused()
+        await expect(modal.locator("#task-create-description")).not_to_be_focused()
         three_column_controls = modal.locator(".segmented-control--three")
         await expect(three_column_controls).to_have_count(2)
         grid_column_counts = await three_column_controls.evaluate_all(
@@ -1144,6 +1146,13 @@ async def main(browser_run: BrowserRun) -> None:
         )
         assert grid_column_counts == [3, 3], grid_column_counts
         await modal.get_by_role("button", name="Autonomous", exact=True).click()
+        assert not await page.evaluate(
+            "['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName || '')"
+        )
+        await modal.get_by_role("button", name="Chat", exact=True).click()
+        assert not await page.evaluate(
+            "['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName || '')"
+        )
         autonomy_rows = modal.locator(".autonomy-form .form-row")
         await expect(autonomy_rows).to_have_count(2)
         row_directions = await autonomy_rows.evaluate_all(

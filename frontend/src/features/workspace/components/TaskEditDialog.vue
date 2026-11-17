@@ -13,8 +13,8 @@
         <div class="modal-field">
           <label>Title</label>
           <input
+            ref="titleInputRef"
             v-model="editTaskForm.title"
-            autofocus
           >
         </div>
         <div class="modal-field">
@@ -88,11 +88,14 @@
 </template>
 
 <script setup lang="ts">
+import { nextTick, ref, watch } from 'vue'
 import LoadingButton from '@/components/LoadingButton.vue'
+import { shouldAutoFocusTextInput } from '@/utils/mobileInputFocus'
 import {
   useWorkspaceTaskActionsContext,
   useWorkspaceRuntimeContext,
 } from '../context'
+const titleInputRef = ref<HTMLInputElement | null>(null)
 const {
   showEditTaskModal,
   closeEditTaskModal,
@@ -107,6 +110,12 @@ const {
   isPending,
   taskActionKey,
 } = useWorkspaceRuntimeContext()
+
+watch(showEditTaskModal, open => {
+  if (open && shouldAutoFocusTextInput()) {
+    void nextTick(() => titleInputRef.value?.focus())
+  }
+})
 </script>
 
 <style scoped src="../styles/shared-controls.css"></style>

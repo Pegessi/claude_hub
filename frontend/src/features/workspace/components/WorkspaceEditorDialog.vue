@@ -10,9 +10,9 @@
         <div class="modal-field">
           <label>Name</label>
           <input
+            ref="nameInputRef"
             v-model="workspaceForm.name"
             placeholder="claude_hub"
-            autofocus
           >
         </div>
         <div class="modal-field">
@@ -164,7 +164,9 @@
 </template>
 
 <script setup lang="ts">
+import { nextTick, ref, watch } from 'vue'
 import LoadingButton from '@/components/LoadingButton.vue'
+import { shouldAutoFocusTextInput } from '@/utils/mobileInputFocus'
 import {
   remoteProfileBadge,
   remoteInteractive,
@@ -173,6 +175,7 @@ import {
   useWorkspaceEditorContext,
   useWorkspaceRuntimeContext,
 } from '../context'
+const nameInputRef = ref<HTMLInputElement | null>(null)
 const {
   showWorkspaceModal,
   closeWorkspaceModal,
@@ -190,6 +193,12 @@ const {
   isLoading,
   isPending,
 } = useWorkspaceRuntimeContext()
+
+watch(showWorkspaceModal, open => {
+  if (open && shouldAutoFocusTextInput()) {
+    void nextTick(() => nameInputRef.value?.focus())
+  }
+})
 </script>
 
 <style scoped src="../styles/shared-workspace-layout.css"></style>

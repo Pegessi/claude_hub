@@ -92,18 +92,8 @@ defineEmits<{
 }
 
 @media (max-width: 640px) {
-  .modal-overlay {
-    align-items: flex-start;
-    justify-content: flex-start;
-    padding: 10px;
-  }
-
   .modal {
-    min-width: 0;
-    width: 100%;
-    max-height: calc(100dvh - 20px);
     padding: 16px;
-    border-radius: var(--ch-radius-md);
   }
 
   .modal-actions {

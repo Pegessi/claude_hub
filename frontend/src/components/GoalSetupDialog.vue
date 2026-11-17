@@ -184,6 +184,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
+import { shouldAutoFocusTextInput } from '@/utils/mobileInputFocus'
 
 /** The objective's storage bound; the counter reads it instead of a literal. */
 const MAX_OBJECTIVE = 4000
@@ -263,7 +264,9 @@ watch(() => props.open, open => {
     planFirst.value = Boolean(props.initialPlanFirst ?? false)
     returnFocusEl = document.activeElement instanceof HTMLElement ? document.activeElement : null
     validationError.value = null
-    void nextTick(() => objectiveEl.value?.focus())
+    if (shouldAutoFocusTextInput()) {
+      void nextTick(() => objectiveEl.value?.focus())
+    }
   } else {
     returnFocusEl?.focus()
     returnFocusEl = null

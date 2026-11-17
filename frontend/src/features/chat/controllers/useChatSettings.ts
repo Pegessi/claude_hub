@@ -3,6 +3,7 @@ import { type StreamCapabilities, type TerminalTab, StreamModelOption } from '@/
 import { type useAgentStream } from '@/composables/useAgentStream'
 import { type useTerminalStore } from '@/stores/terminalStore'
 import { getAvailableChatModes, getCurrentChatModeId } from '@/utils/chatModePolicy'
+import { shouldAutoFocusTextInput } from '@/utils/mobileInputFocus'
 import { LEGACY_TRAEX_REASONING_EFFORT_ENV, defaultModelReasoningEffortLabel, filterChatModels, isChatModelActive, isChatModelEffortActive, presentChatModel } from '@/features/chat/presentation/chatModelPresentation'
 
 interface Dependencies {
@@ -176,9 +177,11 @@ export function useChatSettings(deps: Dependencies) {
     }
     isModelMenuOpen.value = true
     selectedMenuModelId.value = currentModelOption.value?.id ?? filteredModelOptions.value[0]?.id ?? ''
-    void nextTick(() => {
-      modelSearchEl.value?.focus({ preventScroll: true })
-    })
+    if (shouldAutoFocusTextInput()) {
+      void nextTick(() => {
+        modelSearchEl.value?.focus({ preventScroll: true })
+      })
+    }
   }
 
   function handleModelOutsidePointer(e: PointerEvent) {

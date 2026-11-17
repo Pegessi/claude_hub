@@ -364,12 +364,12 @@ async def iphone_picker_scenario(page, output, model_changes, state) -> None:
             await page.wait_for_function(
                 "() => document.querySelector('.composer-model-menu')?.matches(':popover-open')"
             )
-            await expect(search).to_be_focused()
+            await expect(search).not_to_be_focused()
             await page.touchscreen.tap(2, 100)
             await expect(menu).to_have_count(0)
             assert await page.locator(":popover-open").count() == 0
             await trigger.tap()
-            await expect(search).to_be_focused()
+            await expect(search).not_to_be_focused()
         if height == 430:
             choices = menu.get_by_role("listbox", name="Models", exact=True)
             assert await menu.evaluate("el => el.scrollHeight > el.clientHeight")
@@ -430,6 +430,17 @@ async def iphone_picker_scenario(page, output, model_changes, state) -> None:
     )
     await page.locator(".add-tab").tap()
     name = page.locator("#tabName")
+    await expect(name).not_to_be_focused()
+    cwd = page.locator("#tabCwd")
+    await expect(cwd).not_to_be_focused()
+    await page.locator(".session-kind-control").get_by_role(
+        "button", name="Terminal", exact=True
+    ).tap()
+    await expect(name).not_to_be_focused()
+    await page.locator(".session-kind-control").get_by_role("button", name="Chat", exact=True).tap()
+    await expect(name).not_to_be_focused()
+    await page.locator(".cwd-choices-btn").tap()
+    await expect(cwd).not_to_be_focused()
     await check_field(name)
     await name.fill("iPhone fixture")
     cwd = page.locator("#tabCwd")
@@ -1129,6 +1140,51 @@ async def main(browser_run: BrowserRun) -> None:
         # Exercise a fresh mobile dialog, rather than retaining a detached one.
         await page.set_viewport_size({"width": 390, "height": 844})
         await page.locator(".add-tab").click()
+        await expect(page.locator("#tabName")).not_to_be_focused()
+        await expect(page.locator("#tabCwd")).not_to_be_focused()
+        # Tapping non-input selector buttons in SessionCreator on mobile must never
+        # focus a text input or collapse/distort the modal or backdrop overlay.
+        await (
+            page.locator(".session-kind-control")
+            .get_by_role("button", name="Terminal", exact=True)
+            .click()
+        )
+        assert not await page.evaluate(
+            "['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName || '')"
+        )
+        await (
+            page.locator(".modal .segmented-control")
+            .nth(1)
+            .get_by_role("button", name="Local", exact=True)
+            .click()
+        )
+        assert not await page.evaluate(
+            "['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName || '')"
+        )
+        await (
+            page.locator(".session-kind-control")
+            .get_by_role("button", name="Chat", exact=True)
+            .click()
+        )
+        assert not await page.evaluate(
+            "['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName || '')"
+        )
+        overlay_state = await page.locator(".modal-overlay").evaluate("""el => {
+          const r = el.getBoundingClientRect();
+          const s = getComputedStyle(el);
+          const modal = el.querySelector('.modal');
+          const mr = modal.getBoundingClientRect();
+          const hit = document.elementFromPoint(mr.left + mr.width / 2, mr.top + 24);
+          return {
+            width: r.width,
+            height: r.height,
+            backdropFilter: s.backdropFilter || s.webkitBackdropFilter,
+            modalInHitTree: modal.contains(hit),
+          };
+        }""")
+        assert overlay_state["width"] == 390 and overlay_state["height"] == 844, overlay_state
+        assert "blur" in overlay_state["backdropFilter"], overlay_state
+        assert overlay_state["modalInHitTree"], overlay_state
         await page.get_by_label("Chat Provider", exact=True).select_option("maso")
         await preset.select_option("maso-missing")
         await expect(preflight).to_contain_text("MASO service is unavailable")
@@ -1200,6 +1256,10 @@ async def main(browser_run: BrowserRun) -> None:
             assert bounds["y"] + bounds["height"] <= height, bounds
             search = page.get_by_role("textbox", name="Search models", exact=True)
             custom = page.get_by_placeholder("custom model id…", exact=True)
+            # Opening the model picker via the selector button on mobile/coarse-pointer
+            # must not auto-focus the search input or custom model input.
+            await expect(search).not_to_be_focused()
+            await expect(custom).not_to_be_focused()
             for field in (search, custom):
                 size = await field.evaluate("el => parseFloat(getComputedStyle(el).fontSize)")
                 assert size >= 16, (width, height, size)
