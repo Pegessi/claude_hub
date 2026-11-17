@@ -2,6 +2,7 @@
 
 from .dependencies import get_current_user, optional_user
 from .feishu import (
+    DEFAULT_FEISHU_OAUTH_SCOPES,
     get_feishu_auth_url,
     get_user_access_token,
     get_user_info,
@@ -15,6 +16,7 @@ from .session import (
 )
 
 __all__ = [
+    "DEFAULT_FEISHU_OAUTH_SCOPES",
     "get_feishu_auth_url",
     "get_user_access_token",
     "refresh_user_access_token",

@@ -166,6 +166,10 @@ function createNode(tag, text = '') {
     children: [],
     parent: null,
     open: false,
+    selectedIndex: -1,
+    get options() {
+      return this.children.filter(child => child.tag === 'option')
+    },
     addEventListener() {},
     removeEventListener() {},
     getRootNode() { return globalThis.document ?? { activeElement: null } },
@@ -191,6 +195,9 @@ function testRenderer() {
     patchProp(node, name, _previous, value) {
       node.props[name] = value
       node[name] = value
+      if (node.tag === 'option' && name === 'value') {
+        node._value = value
+      }
     },
     insert(node, parent, anchor = null) {
       if (node.parent) {

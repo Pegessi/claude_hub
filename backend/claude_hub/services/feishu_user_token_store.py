@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import ctypes
 import ctypes.util
+import fcntl
 import hashlib
 import hmac
 import json
@@ -24,11 +25,16 @@ import os
 import secrets
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
-from claude_hub.services.local_storage import document_exists, read_document, write_document
+from claude_hub.services.local_storage import (
+    document_exists,
+    read_document,
+    write_document,
+)
 from claude_hub.services.runtime_isolation import resolve_runtime_home
 
 logger = logging.getLogger(__name__)
@@ -107,7 +113,12 @@ class _LibcryptoAesGcm:
 
         self._ctx_ctrl = lib.EVP_CIPHER_CTX_ctrl
         self._ctx_ctrl.restype = ctypes.c_int
-        self._ctx_ctrl.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+        self._ctx_ctrl.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+        ]
 
         self._enc_init = lib.EVP_EncryptInit_ex
         self._enc_init.restype = ctypes.c_int
@@ -329,6 +340,11 @@ def _unseal_secret(key: bytes, stored: str) -> str:
     return stored
 
 
+def _credential_fingerprint(access_token: str, refresh_token: str) -> str:
+    raw = f"{access_token.strip()}:{refresh_token.strip()}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
 @dataclass(frozen=True)
 class FeishuUserTokenRecord:
     """One authenticated Feishu user's OAuth token record."""
@@ -344,6 +360,8 @@ class FeishuUserTokenRecord:
     scope: str = ""
     source: str = "hub_oauth"
     updated_at: float = 0.0
+    generation: int = 1
+    imported_fingerprint: str = field(default="", repr=False)
 
     def scopes_set(self) -> set[str]:
         return {part for part in self.scope.split() if part}
@@ -429,6 +447,9 @@ class FeishuUserTokenStore:
             "scope": _normalize_scopes(record.scope),
             "source": record.source,
             "updated_at": record.updated_at or float(self._now()),
+            "generation": max(1, int(record.generation or 1)),
+            "imported_fingerprint": record.imported_fingerprint
+            or _credential_fingerprint(record.access_token, record.refresh_token),
         }
 
     def _row_to_record(self, row: Mapping[str, Any]) -> FeishuUserTokenRecord | None:
@@ -446,6 +467,14 @@ class FeishuUserTokenStore:
             return None
         if not access_token:
             return None
+        raw_gen = row.get("generation")
+        try:
+            generation = max(1, int(raw_gen)) if raw_gen is not None else 1
+        except (TypeError, ValueError):
+            generation = 1
+        imported_fp = str(row.get("imported_fingerprint") or "").strip() or _credential_fingerprint(
+            access_token, refresh_token
+        )
         return FeishuUserTokenRecord(
             open_id=open_id,
             app_id=app_id,
@@ -458,6 +487,8 @@ class FeishuUserTokenStore:
             scope=_normalize_scopes(row.get("scope")),
             source=str(row.get("source") or "hub_oauth").strip(),
             updated_at=_normalize_epoch_seconds(row.get("updated_at")),
+            generation=generation,
+            imported_fingerprint=imported_fp,
         )
 
     @staticmethod
@@ -605,6 +636,181 @@ class FeishuUserTokenStore:
         keychain_dir = self._lark_cli_data_dir or default_data_dir
         return cfg_dir, keychain_dir
 
+    @contextmanager
+    def refresh_lock(self) -> Iterator[None]:
+        """Acquire both thread and inter-process file locks for single-use token rotation."""
+        lock_file = self._key_path.parent / "feishu_user_tokens.refresh.lock"
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                yield
+            finally:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(fd)
+
+    def _merge_imported_record(self, candidate: FeishuUserTokenRecord) -> FeishuUserTokenRecord:
+        """Persist an imported ``lark-cli`` token without rolling back newer rotated credentials."""
+        with self._lock:
+            existing = self.get_token(open_id=candidate.open_id, app_id=candidate.app_id)
+            cand_fp = _credential_fingerprint(candidate.access_token, candidate.refresh_token)
+            if existing is not None:
+                existing_fp = _credential_fingerprint(existing.access_token, existing.refresh_token)
+                # Same credential snapshot as currently active or previously imported before rotation
+                if cand_fp in {existing_fp, existing.imported_fingerprint}:
+                    enriched = replace(
+                        existing,
+                        app_secret=existing.app_secret or candidate.app_secret,
+                        user_name=existing.user_name or candidate.user_name,
+                        scope=existing.scope or candidate.scope,
+                    )
+                    if enriched != existing:
+                        return self.upsert_token(enriched)
+                    return existing
+                # Never overwrite a newer rotated token with an older/equal expiry from lark-cli
+                if (
+                    existing.expires_at > 0
+                    and candidate.expires_at > 0
+                    and candidate.expires_at <= existing.expires_at
+                ):
+                    return existing
+                next_gen = existing.generation + 1
+            else:
+                next_gen = max(1, candidate.generation)
+
+            to_save = replace(
+                candidate,
+                app_secret=candidate.app_secret or (existing.app_secret if existing else ""),
+                user_name=candidate.user_name or (existing.user_name if existing else ""),
+                scope=candidate.scope or (existing.scope if existing else ""),
+                generation=next_gen,
+                imported_fingerprint=cand_fp,
+                updated_at=float(self._now()),
+            )
+            return self.upsert_token(to_save)
+
+    def sync_to_lark_cli(self, record: FeishuUserTokenRecord) -> bool:
+        """Write rotated user credentials back to the shared ``lark-cli`` keychain when present."""
+        resolved_dirs = self._resolve_default_lark_cli_dirs()
+        if resolved_dirs is None:
+            if self._lark_cli_dir is None and self._lark_cli_data_dir is None:
+                return False
+            cfg_dir = self._lark_cli_dir or (self._lark_cli_data_dir or Path.home() / ".lark-cli")
+            keychain_dir = self._lark_cli_data_dir or cfg_dir
+        else:
+            cfg_dir, keychain_dir = resolved_dirs
+
+        synced = False
+        for search_dir in (keychain_dir, cfg_dir, cfg_dir / "keychain"):
+            master_key_file = search_dir / "master.key"
+            enc_token_path = search_dir / f"{record.app_id}_{record.open_id}.enc"
+            if not master_key_file.is_file() or not enc_token_path.is_file():
+                continue
+            try:
+                master_key = master_key_file.read_bytes()
+                if len(master_key) != 32:
+                    continue
+                existing_obj: dict[str, Any] = {}
+                try:
+                    raw = aes_256_gcm_decrypt(master_key, enc_token_path.read_bytes())
+                    parsed = json.loads(raw.decode("utf-8"))
+                    if isinstance(parsed, Mapping):
+                        existing_obj = dict(parsed)
+                except Exception:
+                    existing_obj = {}
+                existing_obj.update(
+                    {
+                        "appId": record.app_id,
+                        "userOpenId": record.open_id,
+                        "userName": record.user_name,
+                        "accessToken": record.access_token,
+                        "refreshToken": record.refresh_token,
+                        "expiresAt": (int(record.expires_at) if record.expires_at > 0 else 0),
+                        "refreshExpiresAt": (
+                            int(record.refresh_expires_at) if record.refresh_expires_at > 0 else 0
+                        ),
+                        "scope": record.scope,
+                    }
+                )
+                encrypted = aes_256_gcm_encrypt(
+                    master_key,
+                    json.dumps(existing_obj, ensure_ascii=False).encode("utf-8"),
+                )
+                tmp_path = enc_token_path.with_suffix(".enc.tmp")
+                fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                try:
+                    os.write(fd, encrypted)
+                finally:
+                    os.close(fd)
+                os.replace(tmp_path, enc_token_path)
+                synced = True
+            except Exception:
+                logger.warning(
+                    "Failed to sync rotated token back to lark-cli keychain %s",
+                    enc_token_path,
+                    exc_info=True,
+                )
+        return synced
+
+    def save_refreshed_token(
+        self,
+        previous: FeishuUserTokenRecord,
+        refreshed: Mapping[str, Any],
+        *,
+        now: float | None = None,
+    ) -> FeishuUserTokenRecord:
+        """Persist a refreshed user token generation and sync shared ``lark-cli`` storage."""
+        current_now = float(self._now()) if now is None else float(now)
+        with self._lock:
+            existing = self.get_token(open_id=previous.open_id, app_id=previous.app_id) or previous
+            new_access = str(refreshed.get("access_token") or "").strip()
+            if not new_access:
+                raise ValueError("Refreshed token payload is missing access_token")
+            new_refresh = str(
+                refreshed.get("refresh_token") or existing.refresh_token or previous.refresh_token
+            ).strip()
+            expires_in = refreshed.get("expires_in")
+            refresh_expires_in = refreshed.get("refresh_expires_in") or refreshed.get(
+                "refresh_token_expires_in"
+            )
+            expires_at = (
+                current_now + float(expires_in)
+                if isinstance(expires_in, (int, float)) and expires_in > 0
+                else existing.expires_at
+            )
+            refresh_expires_at = (
+                current_now + float(refresh_expires_in)
+                if isinstance(refresh_expires_in, (int, float)) and refresh_expires_in > 0
+                else existing.refresh_expires_at
+            )
+            next_gen = max(previous.generation, existing.generation) + 1
+            updated = replace(
+                existing,
+                access_token=new_access,
+                refresh_token=new_refresh,
+                expires_at=expires_at,
+                refresh_expires_at=refresh_expires_at,
+                scope=_normalize_scopes(refreshed.get("scope")) or existing.scope,
+                updated_at=current_now,
+                generation=next_gen,
+                imported_fingerprint=existing.imported_fingerprint
+                or _credential_fingerprint(previous.access_token, previous.refresh_token),
+            )
+            saved = self.upsert_token(updated)
+            if self.sync_to_lark_cli(saved):
+                saved = self.upsert_token(
+                    replace(
+                        saved,
+                        imported_fingerprint=_credential_fingerprint(
+                            saved.access_token, saved.refresh_token
+                        ),
+                    )
+                )
+            return saved
+
     def import_from_lark_cli(
         self,
         *,
@@ -612,8 +818,14 @@ class FeishuUserTokenStore:
         data_dir: Path | None = None,
         app_id: str | None = None,
         open_id: str | None = None,
+        profile: str | None = None,
     ) -> FeishuUserTokenRecord | None:
-        """Import a user token from ``~/.lark-cli`` and ``~/.local/share/lark-cli``."""
+        """Import a user token from ``~/.lark-cli`` and ``~/.local/share/lark-cli``.
+
+        Honors ``lark-cli``'s ``CurrentAppConfig`` resolution order:
+        explicit ``profile`` / ``app_id`` > ``currentApp`` (by ``name`` or ``appId``) > ``apps[0]``.
+        A dangling ``currentApp`` does not fall back to ``apps[0]``.
+        """
         if lark_cli_dir is not None or data_dir is not None:
             cfg_dir = lark_cli_dir or self._lark_cli_dir or (data_dir or Path.home() / ".lark-cli")
             keychain_dir = data_dir or self._lark_cli_data_dir or cfg_dir
@@ -625,6 +837,7 @@ class FeishuUserTokenStore:
 
         target_app_id = (app_id or "").strip()
         target_open_id = (open_id or "").strip()
+        target_profile = (profile or "").strip()
 
         # Gather only explicitly granted scopes from cache if any exist (never unapproved requested_scope)
         cached_scopes: list[str] = []
@@ -644,28 +857,72 @@ class FeishuUserTokenStore:
         # Read ~/.lark-cli/config.json if available
         candidates: list[tuple[str, str, str, dict[str, Any]]] = []
         config_path = cfg_dir / "config.json"
+        has_config_apps = False
         if config_path.is_file():
             try:
                 cfg = json.loads(config_path.read_text(encoding="utf-8"))
             except Exception:
                 cfg = {}
             apps = cfg.get("apps") if isinstance(cfg, Mapping) else None
-            if isinstance(apps, list):
-                for app_entry in apps:
-                    if not isinstance(app_entry, Mapping):
-                        continue
+            current_app = (
+                str(cfg.get("currentApp") or cfg.get("current_app") or "").strip()
+                if isinstance(cfg, Mapping)
+                else ""
+            )
+            if isinstance(apps, list) and apps:
+                has_config_apps = True
+                valid_apps: list[Mapping[str, Any]] = [
+                    entry
+                    for entry in apps
+                    if isinstance(entry, Mapping)
+                    and str(entry.get("appId") or entry.get("app_id") or "").strip()
+                ]
+                selected_apps: list[Mapping[str, Any]] = []
+                if target_profile or target_app_id:
+                    selector = target_profile or target_app_id
+                    for entry in valid_apps:
+                        e_id = str(entry.get("appId") or entry.get("app_id") or "").strip()
+                        e_name = str(entry.get("name") or entry.get("profile") or "").strip()
+                        if target_app_id and e_id == target_app_id:
+                            selected_apps.append(entry)
+                        elif target_profile and selector in {e_id, e_name}:
+                            selected_apps.append(entry)
+                elif current_app:
+                    for entry in valid_apps:
+                        e_id = str(entry.get("appId") or entry.get("app_id") or "").strip()
+                        e_name = str(entry.get("name") or entry.get("profile") or "").strip()
+                        if current_app in {e_id, e_name}:
+                            selected_apps.append(entry)
+                            break
+                    # Dangling currentApp must NOT fall back to apps[0]
+                    if not selected_apps:
+                        return None
+                elif valid_apps:
+                    selected_apps = [valid_apps[0]]
+
+                for app_entry in selected_apps:
                     entry_app_id = str(
                         app_entry.get("appId") or app_entry.get("app_id") or ""
                     ).strip()
-                    if not entry_app_id:
-                        continue
-                    if target_app_id and entry_app_id != target_app_id:
-                        continue
+                    preferred_user = str(
+                        app_entry.get("currentUser")
+                        or app_entry.get("defaultUser")
+                        or app_entry.get("userOpenId")
+                        or ""
+                    ).strip()
                     users = app_entry.get("users")
                     if isinstance(users, list) and users:
-                        for user_entry in users:
-                            if not isinstance(user_entry, Mapping):
-                                continue
+                        user_mappings = [u for u in users if isinstance(u, Mapping)]
+                        if not target_open_id and preferred_user:
+                            user_mappings.sort(
+                                key=lambda u: (
+                                    0
+                                    if str(u.get("userOpenId") or u.get("open_id") or "").strip()
+                                    == preferred_user
+                                    else 1
+                                )
+                            )
+                        for user_entry in user_mappings:
                             u_open_id = str(
                                 user_entry.get("userOpenId") or user_entry.get("open_id") or ""
                             ).strip()
@@ -724,8 +981,8 @@ class FeishuUserTokenStore:
             if len(master_key) != 32:
                 continue
 
-            # If no candidates were discovered from config.json, scan *.enc files
-            if not candidates:
+            # If no config.json apps were defined, scan *.enc files
+            if not candidates and not has_config_apps:
                 for enc_file in sorted(search_dir.glob("cli_*_ou_*.enc")):
                     stem = enc_file.stem
                     idx = stem.find("_ou_")
@@ -799,8 +1056,9 @@ class FeishuUserTokenStore:
                     scope=scope_str,
                     source="lark_cli",
                     updated_at=float(self._now()),
+                    imported_fingerprint=_credential_fingerprint(access_token, refresh_token),
                 )
-                return self.upsert_token(record)
+                return self._merge_imported_record(record)
 
         # Fallback: plaintext token fields inside candidates
         for c_app, c_uid, c_name, meta in candidates:
@@ -827,8 +1085,9 @@ class FeishuUserTokenStore:
                 scope=scope_str,
                 source="lark_cli",
                 updated_at=float(self._now()),
+                imported_fingerprint=_credential_fingerprint(access_token, refresh_token),
             )
-            return self.upsert_token(record)
+            return self._merge_imported_record(record)
 
         return None
 
@@ -839,11 +1098,15 @@ class FeishuUserTokenStore:
         app_id: str | None = None,
         auto_import_lark_cli: bool = True,
     ) -> FeishuUserTokenRecord | None:
+        now_ts = float(self._now())
         record = self.get_token(open_id=open_id, app_id=app_id)
-        if record is not None and not record.is_expired():
+        if record is not None and not record.is_expired(now=now_ts):
             return record
         if auto_import_lark_cli:
-            imported = self.import_from_lark_cli(app_id=app_id, open_id=open_id)
+            imported = self.import_from_lark_cli(
+                app_id=app_id or (record.app_id if record else None),
+                open_id=open_id or (record.open_id if record else None),
+            )
             if imported is not None:
                 return imported
         return record

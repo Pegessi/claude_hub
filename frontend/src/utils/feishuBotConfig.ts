@@ -214,6 +214,7 @@ export interface FeishuAiCommandPollerStatus {
 export interface FeishuAiCommandCapabilities {
   providers: FeishuAiCommandProvider[]
   reasoning_efforts: string[]
+  provider_reasoning_efforts?: Record<string, string[]>
   provider_models: Record<string, string[]>
 }
 

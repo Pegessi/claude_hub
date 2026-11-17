@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import secrets
 from pathlib import Path
@@ -17,7 +18,6 @@ from claude_hub.api.routes.feishu_bot.ai_command import register_ai_command_rout
 from claude_hub.models import AgentType
 from claude_hub.services.feishu_ai_command import (
     DEFAULT_AI_COMMAND_FOOTER,
-    FeishuAiCommandConfig,
     FeishuAiCommandService,
     build_ai_post_payload,
     build_interim_reply_text,
@@ -77,7 +77,10 @@ def test_user_token_store_oauth_and_encrypted_lark_cli_import(tmp_path: Path) ->
                 "apps": [
                     {
                         "appId": "cli_lark_app",
-                        "appSecret": {"source": "keychain", "id": "appsecret:cli_lark_app"},
+                        "appSecret": {
+                            "source": "keychain",
+                            "id": "appsecret:cli_lark_app",
+                        },
                         "brand": "feishu",
                         "users": [
                             {"userOpenId": "ou_lark_user", "userName": "王泽华"},
@@ -148,7 +151,10 @@ async def test_feishu_user_client_preflight_and_operations(tmp_path: Path) -> No
         if req.url.path.endswith("/reply") and req.method == "POST":
             return httpx.Response(
                 200,
-                json={"code": 0, "data": {"message_id": "om_reply_1", "thread_id": "omt_1"}},
+                json={
+                    "code": 0,
+                    "data": {"message_id": "om_reply_1", "thread_id": "omt_1"},
+                },
             )
         if req.url.path == "/open-apis/im/v1/chats":
             return httpx.Response(
@@ -282,10 +288,27 @@ def test_parse_ai_command_and_reference_extraction() -> None:
     with pytest.raises(ValueError, match="Unsupported /ai provider"):
         validate_ai_command_agent_config("unknown-provider", "m", "high")
     with pytest.raises(ValueError, match="Invalid reasoning_effort"):
-        validate_ai_command_agent_config("claude", "m", "super-duper")
+        validate_ai_command_agent_config("codex", "gpt-5.4", "super-duper")
+    with pytest.raises(ValueError, match="does not support a separate reasoning_effort"):
+        validate_ai_command_agent_config("claude", "doubao-seed-2.0-code", "high")
 
     cursor_env = resolve_ai_command_agent_env("cursor", "gpt-5.3-codex", "xhigh")
-    assert cursor_env["CURSOR_MODEL"] == "gpt-5.3-codex-extra-high"
+    assert cursor_env["CURSOR_MODEL"] == "gpt-5.3-codex-xhigh"
+    cursor_max_env = resolve_ai_command_agent_env("cursor", "gpt-5.1-codex-max", "xhigh")
+    assert cursor_max_env["CURSOR_MODEL"] == "gpt-5.1-codex-max-extra-high"
+    # Replaces existing suffix on Cursor models instead of appending a second suffix
+    cursor_replace_env = resolve_ai_command_agent_env("cursor", "gpt-5.3-codex-high", "low")
+    assert cursor_replace_env["CURSOR_MODEL"] == "gpt-5.3-codex-low"
+    cursor_fast_env = resolve_ai_command_agent_env("cursor", "gpt-5.3-codex-high-fast", "xhigh")
+    assert cursor_fast_env["CURSOR_MODEL"] == "gpt-5.3-codex-xhigh-fast"
+
+    # MASO maps reasoning_effort onto real model variants consumed by MasoHttpSession
+    maso_low_env = resolve_ai_command_agent_env("maso", "gemini-4-argon_reasoning_high", "low")
+    assert maso_low_env["MASO_MODEL"] == "gemini-4-argon"
+    maso_med_env = resolve_ai_command_agent_env("maso", "gemini-4-argon_reasoning_high", "medium")
+    assert maso_med_env["MASO_MODEL"] == "gemini-4-argon_reasoning_medium"
+    maso_seed_env = resolve_ai_command_agent_env("maso", "seed-stable-reasoning-high", "medium")
+    assert maso_seed_env["MASO_MODEL"] == "seed-stable-reasoning"
 
     refs = extract_context_references(
         [
@@ -335,12 +358,18 @@ async def test_ai_command_pipeline_poller_and_ws_hook(tmp_path: Path) -> None:
         if req.url.path.endswith("/reply") and req.method == "POST":
             return httpx.Response(
                 200,
-                json={"code": 0, "data": {"message_id": "om_reply", "thread_id": "omt_thread_1"}},
+                json={
+                    "code": 0,
+                    "data": {"message_id": "om_reply", "thread_id": "omt_thread_1"},
+                },
             )
         if req.url.path == "/open-apis/im/v1/chats":
             return httpx.Response(
                 200,
-                json={"code": 0, "data": {"items": [{"chat_id": "oc_group_1"}], "has_more": False}},
+                json={
+                    "code": 0,
+                    "data": {"items": [{"chat_id": "oc_group_1"}], "has_more": False},
+                },
             )
         if req.url.path == "/open-apis/im/v1/messages":
             container_type = req.url.params.get("container_id_type")
@@ -461,6 +490,7 @@ async def test_ai_command_pipeline_poller_and_ws_hook(tmp_path: Path) -> None:
         )
         poller = FeishuAiPoller(service)
         processed = await poller.poll_once()
+        await poller.wait_for_inflight()
         assert processed == ["om_owner_ai_1"]
         assert poller.status_dict()["commands_succeeded"] == 1
 
@@ -676,3 +706,555 @@ def test_ai_command_rest_api_routes(tmp_path: Path) -> None:
     res_guide = client.get("/api/feishu/bot/ai-command/auth-guide")
     assert res_guide.status_code == 200
     assert "lark-cli auth login" in res_guide.json()["auth_login_command"]
+
+
+@pytest.mark.asyncio
+async def test_f1_hub_oauth_login_scope_and_refresh_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.auth.feishu import (
+        DEFAULT_FEISHU_OAUTH_SCOPES,
+        FEISHU_USER_REFRESH_URL,
+        FEISHU_USER_TOKEN_URL,
+        get_feishu_auth_url,
+        get_user_access_token_bundle,
+        refresh_user_access_token_bundle,
+    )
+
+    monkeypatch.setattr("claude_hub.auth.feishu.settings.feishu_app_id", "cli_oauth_app")
+    monkeypatch.setattr("claude_hub.auth.feishu.settings.feishu_app_secret", "sec_oauth_app")
+    monkeypatch.setattr(
+        "claude_hub.auth.feishu.settings.feishu_redirect_uri",
+        "https://hub.example.com/api/auth/callback",
+    )
+
+    login_url = get_feishu_auth_url(state="state_123")
+    assert "im%3Amessage.send_as_user" in login_url or "im:message.send_as_user" in login_url
+    assert "im:message.send_as_user" in DEFAULT_FEISHU_OAUTH_SCOPES
+    assert FEISHU_USER_REFRESH_URL != FEISHU_USER_TOKEN_URL
+    assert FEISHU_USER_REFRESH_URL.endswith("/open-apis/authen/v1/refresh_access_token")
+
+    # Verify OIDC exchange + scope preservation and legacy v1 refresh endpoint
+    seen_paths: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen_paths.append(req.url.path)
+        if req.url.path == "/open-apis/auth/v3/app_access_token/internal":
+            return httpx.Response(200, json={"code": 0, "app_access_token": "aat-1"})
+        if req.url.path == "/open-apis/authen/v1/oidc/access_token":
+            body = json.loads(req.content.decode("utf-8"))
+            if body.get("grant_type") == "authorization_code":
+                return httpx.Response(
+                    200,
+                    json={
+                        "code": 0,
+                        "data": {
+                            "access_token": "u-oidc-token",
+                            "refresh_token": "ur-oidc-token",
+                            "expires_in": 7200,
+                            "refresh_expires_in": 2592000,
+                            "scope": "im:message im:message.send_as_user im:chat:read",
+                        },
+                    },
+                )
+        if req.url.path == "/open-apis/authen/v2/oauth/token":
+            # Force fallback to legacy v1 refresh endpoint
+            return httpx.Response(404, json={"code": 99991663, "msg": "not found"})
+        if req.url.path == "/open-apis/authen/v1/oidc/refresh_access_token":
+            return httpx.Response(404, json={"code": 0})
+        if req.url.path == "/open-apis/authen/v1/refresh_access_token":
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "access_token": "u-v1-refreshed",
+                        "refresh_token": "ur-v1-refreshed",
+                        "expires_in": 7200,
+                        "refresh_expires_in": 2592000,
+                        "scope": "im:message im:message.send_as_user",
+                    },
+                },
+            )
+        return httpx.Response(404)
+
+    def mock_create_client(base_url: str, **kwargs: Any) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url=base_url,
+            transport=httpx.MockTransport(handler),
+        )
+
+    monkeypatch.setattr("claude_hub.auth.feishu.create_async_client", mock_create_client)
+
+    bundle = await get_user_access_token_bundle("code_abc")
+    assert bundle is not None
+    assert "im:message.send_as_user" in str(bundle.get("scope", ""))
+
+    store = FeishuUserTokenStore(
+        path=tmp_path / "secrets" / "tokens.json",
+        key_path=tmp_path / "secrets" / "tokens.key",
+    )
+    store.save_oauth_token(
+        open_id="ou_oauth_1",
+        user_name="OAuth User",
+        app_id="cli_oauth_app",
+        access_token=str(bundle["access_token"]),
+        refresh_token=str(bundle["refresh_token"]),
+        expires_in=int(bundle["expires_in"]),
+        refresh_expires_in=int(bundle["refresh_expires_in"]),
+        scope=str(bundle["scope"]),
+    )
+    client = FeishuUserClient(store, open_id="ou_oauth_1", app_id="cli_oauth_app")
+    checked = client.require_send_as_user_scope()
+    assert checked.has_scope(REQUIRED_SEND_AS_USER_SCOPE) is True
+    assert client.preflight_scopes().can_send_as_user is True
+
+    refreshed = await refresh_user_access_token_bundle(
+        "ur-legacy-1",
+        app_id="cli_oauth_app",
+        app_secret="sec_oauth_app",
+    )
+    assert refreshed is not None
+    assert refreshed["access_token"] == "u-v1-refreshed"
+    assert "/open-apis/authen/v1/refresh_access_token" in seen_paths
+
+
+@pytest.mark.asyncio
+async def test_f2_f5_lark_cli_profile_selection_and_single_use_refresh_rotation(
+    tmp_path: Path,
+) -> None:
+    lark_config_dir = tmp_path / ".lark-cli"
+    lark_data_dir = tmp_path / ".local" / "share" / "lark-cli"
+    lark_config_dir.mkdir(parents=True)
+    lark_data_dir.mkdir(parents=True)
+
+    # Two encrypted profiles in config.json with currentApp selecting the second profile
+    (lark_config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "currentApp": "work-bot",
+                "apps": [
+                    {
+                        "name": "personal-bot",
+                        "appId": "cli_app_1",
+                        "brand": "feishu",
+                        "users": [{"userOpenId": "ou_user_1", "userName": "User One"}],
+                    },
+                    {
+                        "name": "work-bot",
+                        "appId": "cli_app_2",
+                        "brand": "feishu",
+                        "defaultUserOpenId": "ou_user_2",
+                        "users": [{"userOpenId": "ou_user_2", "userName": "User Two"}],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    master_key = secrets.token_bytes(32)
+    (lark_data_dir / "master.key").write_bytes(master_key)
+    for app_id, open_id, secret, at, rt in [
+        ("cli_app_1", "ou_user_1", "sec_1", "at-app1", "rt-app1"),
+        ("cli_app_2", "ou_user_2", "sec_2", "at-0", "rt-0"),
+    ]:
+        (lark_data_dir / f"appsecret_{app_id}.enc").write_bytes(
+            aes_256_gcm_encrypt(master_key, secret.encode("utf-8"))
+        )
+        token_payload = {
+            "userOpenId": open_id,
+            "appId": app_id,
+            "accessToken": at,
+            "refreshToken": rt,
+            "expiresAt": 1000.0,
+            "refreshExpiresAt": 9999999999.0,
+            "scope": "im:message im:message.send_as_user",
+        }
+        (lark_data_dir / f"{app_id}_{open_id}.enc").write_bytes(
+            aes_256_gcm_encrypt(master_key, json.dumps(token_payload).encode("utf-8"))
+        )
+
+    store = FeishuUserTokenStore(
+        path=tmp_path / "secrets" / "feishu_user_tokens.json",
+        key_path=tmp_path / "secrets" / "feishu_user_tokens.key",
+        lark_cli_dir=lark_config_dir,
+        lark_cli_data_dir=lark_data_dir,
+    )
+
+    # F5: Default import honors currentApp ("work-bot" -> cli_app_2 / ou_user_2)
+    imported = store.import_from_lark_cli()
+    assert imported is not None
+    assert imported.app_id == "cli_app_2"
+    assert imported.open_id == "ou_user_2"
+    assert imported.access_token == "at-0"
+    assert imported.refresh_token == "rt-0"
+    assert imported.generation == 1
+
+    # F5: Dangling currentApp fails closed instead of falling back to apps[0]
+    (lark_config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "currentApp": "nonexistent-profile",
+                "apps": [{"name": "personal-bot", "appId": "cli_app_1"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    dangling_store = FeishuUserTokenStore(
+        path=tmp_path / "secrets" / "dangling.json",
+        key_path=tmp_path / "secrets" / "dangling.key",
+        lark_cli_dir=lark_config_dir,
+        lark_cli_data_dir=lark_data_dir,
+    )
+    assert dangling_store.import_from_lark_cli() is None
+
+    # Restore valid config.json for F2 single-use refresh rotation test
+    (lark_config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "currentApp": "work-bot",
+                "apps": [
+                    {
+                        "name": "work-bot",
+                        "appId": "cli_app_2",
+                        "appSecret": {
+                            "source": "keychain",
+                            "id": "appsecret:cli_app_2",
+                        },
+                        "brand": "feishu",
+                        "defaultUserOpenId": "ou_user_2",
+                        "users": [{"userOpenId": "ou_user_2", "userName": "User Two"}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    used_refresh_tokens: list[str] = []
+    rotation_step = 0
+
+    def oauth_handler(req: httpx.Request) -> httpx.Response:
+        nonlocal rotation_step
+        body = json.loads(req.content.decode("utf-8"))
+        rt = body.get("refresh_token", "")
+        if rt in used_refresh_tokens:
+            return httpx.Response(
+                400,
+                json={"code": 20026, "error_description": "refresh_token already used"},
+            )
+        used_refresh_tokens.append(rt)
+        rotation_step += 1
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "access_token": f"at-{rotation_step}",
+                "refresh_token": f"rt-{rotation_step}",
+                "expires_in": 1000,
+                "refresh_token_expires_in": 86400,
+                "scope": "im:message im:message.send_as_user",
+            },
+        )
+
+    clock = [1100.0]
+    async with httpx.AsyncClient(
+        base_url="https://open.feishu.cn",
+        transport=httpx.MockTransport(oauth_handler),
+    ) as http_client:
+        # Re-import so app_secret from keychain is attached
+        store = FeishuUserTokenStore(
+            path=tmp_path / "secrets" / "feishu_user_tokens_rot.json",
+            key_path=tmp_path / "secrets" / "feishu_user_tokens_rot.key",
+            lark_cli_dir=lark_config_dir,
+            lark_cli_data_dir=lark_data_dir,
+            now=lambda: clock[0],
+        )
+        store.import_from_lark_cli()
+
+        async def fake_refresher(
+            refresh_token: str,
+            *,
+            app_id: str | None = None,
+            app_secret: str | None = None,
+        ) -> dict[str, Any]:
+            resp = await http_client.post(
+                "/open-apis/authen/v2/oauth/token",
+                json={
+                    "grant_type": "refresh_token",
+                    "client_id": app_id,
+                    "client_secret": app_secret,
+                    "refresh_token": refresh_token,
+                },
+            )
+            resp.raise_for_status()
+            return dict(resp.json())
+
+        client1 = FeishuUserClient(
+            store,
+            open_id="ou_user_2",
+            app_id="cli_app_2",
+            client=http_client,
+            token_refresher=fake_refresher,
+        )
+        # First refresh at t=1100 rotates at-0/rt-0 -> at-1/rt-1 (expires_at=2100, gen=2)
+        tok1, _ = await client1.get_user_token()
+        assert tok1 == "at-1"
+        rec1 = store.get_token(open_id="ou_user_2", app_id="cli_app_2")
+        assert rec1 is not None
+        assert rec1.refresh_token == "rt-1"
+        assert rec1.generation == 2
+
+        # Advance past first rotated expiry (t=2200 > 2100) and create a new store instance
+        # (simulating process restart); resolve_token + get_user_token must use rt-1, NEVER rt-0!
+        clock[0] = 2200.0
+        restarted_store = FeishuUserTokenStore(
+            path=tmp_path / "secrets" / "feishu_user_tokens_rot.json",
+            key_path=tmp_path / "secrets" / "feishu_user_tokens_rot.key",
+            lark_cli_dir=lark_config_dir,
+            lark_cli_data_dir=lark_data_dir,
+            now=lambda: clock[0],
+        )
+        client2 = FeishuUserClient(
+            restarted_store,
+            open_id="ou_user_2",
+            app_id="cli_app_2",
+            client=http_client,
+            token_refresher=fake_refresher,
+        )
+        tok2, _ = await client2.get_user_token()
+        assert tok2 == "at-2"
+        rec2 = restarted_store.get_token(open_id="ou_user_2", app_id="cli_app_2")
+        assert rec2 is not None
+        assert rec2.refresh_token == "rt-2"
+        assert rec2.generation == 3
+        assert used_refresh_tokens == ["rt-0", "rt-1"]
+
+
+@pytest.mark.asyncio
+async def test_f3_poller_pagination_under_burst_and_nonblocking_dispatch(
+    tmp_path: Path,
+) -> None:
+    store = FeishuUserTokenStore(
+        path=tmp_path / "secrets" / "tokens.json",
+        key_path=tmp_path / "secrets" / "tokens.key",
+    )
+    store.save_oauth_token(
+        open_id="ou_owner",
+        user_name="Owner",
+        app_id="cli_app_1",
+        access_token="u-owner-token",
+        scope="im:message im:message.send_as_user im:message.reactions:write_only im:chat:read",
+    )
+
+    # Burst scenario in oc_burst:
+    # Watermark is at 1000ms.
+    # Owner sent `/ai burst command` at 1005ms (on page 2), followed by 25 peer messages
+    # at 1010..1034ms (on page 1).
+    page_1_items = [
+        {
+            "message_id": f"om_noise_{i}",
+            "chat_id": "oc_burst",
+            "msg_type": "text",
+            "create_time": str(1034 - i),
+            "sender": {"id": "ou_peer", "sender_type": "user"},
+            "body": {"content": json.dumps({"text": f"noise {i}"})},
+        }
+        for i in range(25)
+    ]
+    page_2_items = [
+        {
+            "message_id": "om_burst_ai",
+            "chat_id": "oc_burst",
+            "thread_id": "omt_burst",
+            "msg_type": "text",
+            "create_time": "1005",
+            "sender": {"id": "ou_owner", "sender_type": "user"},
+            "body": {"content": json.dumps({"text": "/ai handle burst command"})},
+        },
+        {
+            "message_id": "om_before_watermark",
+            "chat_id": "oc_burst",
+            "msg_type": "text",
+            "create_time": "995",
+            "sender": {"id": "ou_peer", "sender_type": "user"},
+            "body": {"content": json.dumps({"text": "old message"})},
+        },
+    ]
+
+    slow_turn_started = asyncio.Event()
+    release_slow_turn = asyncio.Event()
+    dispatched_messages: list[str] = []
+
+    def feishu_handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/reactions") and req.method == "POST":
+            return httpx.Response(200, json={"code": 0, "data": {"reaction_id": "rx_1"}})
+        if "/reactions/" in req.url.path and req.method == "DELETE":
+            return httpx.Response(200, json={"code": 0, "data": {}})
+        if req.url.path.endswith("/reply") and req.method == "POST":
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {"message_id": "om_reply", "thread_id": "omt_1"},
+                },
+            )
+        if req.url.path == "/open-apis/im/v1/messages":
+            container_type = req.url.params.get("container_id_type")
+            container_id = req.url.params.get("container_id")
+            page_token = req.url.params.get("page_token")
+            if container_type == "thread":
+                return httpx.Response(
+                    200, json={"code": 0, "data": {"items": [], "has_more": False}}
+                )
+            if container_id == "oc_burst":
+                if not page_token:
+                    return httpx.Response(
+                        200,
+                        json={
+                            "code": 0,
+                            "data": {
+                                "items": page_1_items,
+                                "has_more": True,
+                                "page_token": "cursor_page_2",
+                            },
+                        },
+                    )
+                if page_token == "cursor_page_2":
+                    return httpx.Response(
+                        200,
+                        json={
+                            "code": 0,
+                            "data": {"items": page_2_items, "has_more": False},
+                        },
+                    )
+            if container_id == "oc_slow":
+                return httpx.Response(
+                    200,
+                    json={
+                        "code": 0,
+                        "data": {
+                            "items": [
+                                {
+                                    "message_id": "om_slow_ai",
+                                    "chat_id": "oc_slow",
+                                    "msg_type": "text",
+                                    "create_time": "2005",
+                                    "sender": {"id": "ou_owner", "sender_type": "user"},
+                                    "body": {"content": json.dumps({"text": "/ai slow task"})},
+                                }
+                            ],
+                            "has_more": False,
+                        },
+                    },
+                )
+        return httpx.Response(404)
+
+    async def fake_dispatch(
+        tab_id: str,
+        prompt: str,
+        turn_id: str,
+        visible_text: str,
+        metadata: Any,
+    ) -> str:
+        msg_id = metadata.get("message_id") or metadata.get("feishu_message_id") or ""
+        dispatched_messages.append(msg_id)
+        if msg_id == "om_slow_ai":
+            slow_turn_started.set()
+            await release_slow_turn.wait()
+        return f"done:{msg_id}"
+
+    async with httpx.AsyncClient(
+        base_url="https://open.feishu.cn",
+        transport=httpx.MockTransport(feishu_handler),
+    ) as http_client:
+        service = FeishuAiCommandService(
+            state_path=tmp_path / "ai_command.json",
+            token_store=store,
+            dedup_store=FeishuMessageDedupStore(tmp_path / "dedup.json"),
+            user_client_factory=lambda cfg: FeishuUserClient(
+                store,
+                open_id=cfg.owner_open_id,
+                app_id=cfg.app_id,
+                client=http_client,
+            ),
+            tab_creator=lambda **kw: SimpleNamespace(
+                id="tab-shared", env=dict(kw.get("env") or {}), archived=False
+            ),
+            tab_getter=lambda tid: SimpleNamespace(id=tid, env={}, archived=False),
+            turn_dispatcher=fake_dispatch,
+        )
+        service.update_config(
+            {
+                "enabled": True,
+                "owner_open_id": "ou_owner",
+                "app_id": "cli_app_1",
+                "watch_chats": ["oc_slow", "oc_burst"],
+                "max_context_messages": 20,
+            }
+        )
+        service.set_watermark("oc_slow", 2000)
+        service.set_watermark("oc_burst", 1000)
+
+        poller = FeishuAiPoller(service)
+        # poll_once must NOT block on oc_slow's long-running turn and must still page
+        # through oc_burst's page 1 + page 2 to discover om_burst_ai!
+        processed = await asyncio.wait_for(poller.poll_once(), timeout=2.0)
+        assert set(processed) == {"om_slow_ai", "om_burst_ai"}
+        await asyncio.wait_for(slow_turn_started.wait(), timeout=1.0)
+        # Wait briefly for om_burst_ai to finish while om_slow_ai is still blocked
+        for _ in range(40):
+            if "om_burst_ai" in dispatched_messages:
+                break
+            await asyncio.sleep(0.02)
+        assert "om_burst_ai" in dispatched_messages
+        assert service.get_watermarks()["oc_burst"] == 1034000
+
+        release_slow_turn.set()
+        await poller.wait_for_inflight()
+        assert poller.status_dict()["commands_succeeded"] == 2
+        assert service.list_pending_commands() == []
+
+
+def test_f4_maso_transport_boundary_consumes_resolved_reasoning_effort(
+    tmp_path: Path,
+) -> None:
+    from datetime import datetime, timezone
+
+    from claude_hub.models import (
+        ManagedSession,
+        ManagedSessionStatus,
+        SessionKind,
+        WorkspaceSessionRole,
+    )
+    from claude_hub.services.agent_stream.maso_http import MasoHttpSession
+
+    seen_models: list[str | None] = []
+    for effort in ("low", "medium", "high"):
+        env = resolve_ai_command_agent_env("maso", "gemini-4-argon_reasoning_high", effort)
+        env["MASO_BASE_URL"] = "http://127.0.0.1:9796"
+        ms = ManagedSession(
+            id=f"test-maso-{effort}",
+            workspace_id="ws-test",
+            tab_id=f"tab-maso-{effort}",
+            role=WorkspaceSessionRole.WORKER,
+            agent_type=AgentType.MASO,
+            session_kind=SessionKind.CHAT,
+            status=ManagedSessionStatus.IDLE,
+            title=f"test-maso-{effort}",
+            workspace_path=str(tmp_path),
+            tmux_session="inert",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            env=env,
+        )
+        transport = MasoHttpSession(ms, lambda _ev: None)
+        seen_models.append(transport.current_model())
+
+    assert seen_models == [
+        "gemini-4-argon",
+        "gemini-4-argon_reasoning_medium",
+        "gemini-4-argon_reasoning_high",
+    ]
+    assert len(set(seen_models)) == 3

@@ -203,7 +203,7 @@ test('Personal /ai Assistant panel loads status, updates provider/model/reasonin
       app_id: 'cli_app_1',
       provider: 'claude',
       model: 'doubao-seed-2.0-code',
-      reasoning_effort: 'high',
+      reasoning_effort: '',
       cwd: '',
       watch_chats: ['oc_chat_1'],
       poll_interval_seconds: 15,
@@ -247,6 +247,11 @@ test('Personal /ai Assistant panel loads status, updates provider/model/reasonin
     capabilities: {
       providers: ['claude', 'codex', 'traex', 'maso', 'cursor', 'antigravity'],
       reasoning_efforts: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+      provider_reasoning_efforts: {
+        claude: [],
+        codex: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
+        maso: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      },
       provider_models: {
         claude: ['doubao-seed-2.0-code'],
         codex: ['gpt-5.4', 'o3'],
@@ -270,18 +275,23 @@ test('Personal /ai Assistant panel loads status, updates provider/model/reasonin
   })
   const state = await mountSettings(t, h)
   await state.openAiCommand()
+  await flush()
   assert.equal(state.aiCommandActive, true)
+  assert.equal(state.aiCommandLoaded, true)
   assert.equal(state.aiEdit.provider, 'claude')
   assert.equal(state.aiWatchChatsText, 'oc_chat_1')
 
   state.onAiProviderChange('codex')
+  await flush()
   assert.equal(state.aiEdit.provider, 'codex')
   assert.equal(state.aiEdit.model, 'gpt-5.4')
+  assert.equal(state.aiEdit.reasoning_effort, 'high')
   state.aiEdit.enabled = true
   state.aiEdit.reasoning_effort = 'xhigh'
   state.aiWatchChatsText = 'oc_chat_1, oc_chat_2'
 
   assert.equal(await state.saveAiCommand(), true)
+  await flush()
   assert.equal(state.aiEdit.provider, 'codex')
   assert.equal(state.aiEdit.model, 'gpt-5.4')
   assert.equal(state.aiEdit.reasoning_effort, 'xhigh')
@@ -289,5 +299,148 @@ test('Personal /ai Assistant panel loads status, updates provider/model/reasonin
   assert.equal(state.success, '/ai command settings saved.')
 
   assert.equal(await state.importAiToken(), true)
+  await flush()
   assert.match(state.success, /Imported user token/)
+})
+
+test('Personal /ai Assistant blocks save before initial hydration and preserves unsaved draft edits during token import', async t => {
+  const h = harness(t)
+  const pendingLoad = deferred()
+  let failLoad = true
+  const persistedConfig = {
+    enabled: true,
+    prefix: '/ai',
+    owner_open_id: '',
+    app_id: '',
+    provider: 'maso',
+    model: 'gemini-4-argon_reasoning_high',
+    reasoning_effort: 'high',
+    cwd: '/srv/persisted',
+    watch_chats: ['oc_persisted'],
+    poll_interval_seconds: 20,
+    max_active_chats: 10,
+    max_context_messages: 20,
+    ack_emoji: 'OnIt',
+    done_emoji: 'DONE',
+    footer: '> 🤖 AI 代答，仅供参考',
+    reply_in_thread: true,
+  }
+  const makePayload = (cfgOverrides = {}, imported = false) => ({
+    config: { ...persistedConfig, ...cfgOverrides },
+    token_status: {
+      has_token: true,
+      open_id: 'ou_imported',
+      user_name: 'Imported Owner',
+      app_id: 'cli_imported',
+      source: 'lark_cli',
+      expires_at: 9999999999,
+      token_expired: false,
+      granted_scopes: ['im:message', 'im:message.send_as_user'],
+      required_send_scope: 'im:message.send_as_user',
+      can_send_as_user: true,
+      can_react_as_user: true,
+      can_read_messages: true,
+      missing_required_scopes: [],
+      missing_recommended_scopes: [],
+      auth_login_command: 'lark-cli auth login --scope "im:message.send_as_user"',
+      remediation_steps: [],
+    },
+    poller_status: {
+      running: true,
+      poll_count: 1,
+      last_poll_at: 1000,
+      last_error: null,
+      commands_detected: 0,
+      commands_succeeded: 0,
+      commands_failed: 0,
+      skipped_count: 0,
+      watermarks_count: 1,
+    },
+    capabilities: {
+      providers: ['claude', 'codex', 'traex', 'maso', 'cursor', 'antigravity'],
+      reasoning_efforts: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+      provider_reasoning_efforts: {
+        claude: [],
+        codex: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
+        maso: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      },
+      provider_models: {
+        codex: ['gpt-5.4'],
+        maso: ['gemini-4-argon_reasoning_high'],
+      },
+    },
+    imported,
+  })
+
+  let getCount = 0
+  h.setTransport(async (url, init = {}) => {
+    if (String(url).includes('/api/feishu/bot/ai-command/import-token')) {
+      return response(makePayload({ owner_open_id: 'ou_imported', app_id: 'cli_imported' }, true))
+    }
+    if (String(url).includes('/api/feishu/bot/ai-command')) {
+      if (init.method === 'PATCH') {
+        const body = JSON.parse(init.body)
+        return response(makePayload(body))
+      }
+      getCount += 1
+      if (getCount === 1) {
+        await pendingLoad.promise
+        if (failLoad) {
+          return response({ detail: 'ai_command_unavailable' }, 500)
+        }
+      }
+      return response(makePayload())
+    }
+    return response(h.server())
+  })
+
+  const state = await mountSettings(t, h)
+  const openPromise = state.openAiCommand()
+  await flush()
+  assert.equal(state.aiCommandLoading, true)
+  assert.equal(state.aiCommandLoaded, false)
+  // Cannot save while initial GET is still in flight
+  assert.equal(await state.saveAiCommand(), false)
+  assert.equal(
+    h.calls.some(call => call.init.method === 'PATCH' && String(call.url).includes('/ai-command')),
+    false,
+  )
+
+  // Fail initial GET: save remains blocked until retry succeeds
+  pendingLoad.resolve()
+  await openPromise
+  await flush()
+  assert.equal(state.aiCommandLoading, false)
+  assert.equal(state.aiCommandLoaded, false)
+  assert.ok(state.aiCommandLoadError)
+  assert.equal(await state.saveAiCommand(), false)
+
+  // Retry succeeds and hydrates persisted server values
+  await state.retryLoadAiCommand()
+  await flush()
+  assert.equal(state.aiCommandLoaded, true)
+  assert.equal(state.aiCommandLoadError, null)
+  assert.equal(state.aiEdit.provider, 'maso')
+  assert.equal(state.aiEdit.model, 'gemini-4-argon_reasoning_high')
+  assert.equal(state.aiEdit.cwd, '/srv/persisted')
+  assert.equal(state.aiWatchChatsText, 'oc_persisted')
+
+  // Make unsaved draft edits, then import ~/.lark-cli token: draft edits must be preserved
+  state.onAiProviderChange('codex')
+  state.aiEdit.model = 'o3'
+  state.aiEdit.reasoning_effort = 'low'
+  state.aiEdit.cwd = '/srv/draft-cwd'
+  state.aiWatchChatsText = 'oc_draft_1, oc_draft_2'
+  await flush()
+
+  assert.equal(await state.importAiToken(), true)
+  await flush()
+  assert.equal(state.aiEdit.provider, 'codex')
+  assert.equal(state.aiEdit.model, 'o3')
+  assert.equal(state.aiEdit.reasoning_effort, 'low')
+  assert.equal(state.aiEdit.cwd, '/srv/draft-cwd')
+  assert.equal(state.aiWatchChatsText, 'oc_draft_1, oc_draft_2')
+  // Untouched blank identity fields populate from the imported token
+  assert.equal(state.aiEdit.owner_open_id, 'ou_imported')
+  assert.equal(state.aiEdit.app_id, 'cli_imported')
 })
