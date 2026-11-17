@@ -2581,3 +2581,64 @@ async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
         (pt_cfg / "config.json").unlink()
         assert pt_store.import_from_lark_cli(app_id="cli_pt", open_id="ou_pt") is not None
         assert (await pt_store.aimport_from_lark_cli(app_id="cli_pt", open_id="ou_pt")) is not None
+
+        # 13. R11-01: Explicit empty scope in plaintext or encrypted CLI tokens never inherits
+        # prior CLI scope-cache grants or older warm Hub token grants
+        pt_scope_cache = pt_cfg / "cache" / "auth_login_scopes"
+        pt_scope_cache.mkdir(parents=True)
+        (pt_scope_cache / "prior.json").write_text(
+            json.dumps({"granted_scope": "im:message im:message.send_as_user"}),
+            encoding="utf-8",
+        )
+        (pt_cfg / "credentials.json").write_text(
+            json.dumps(
+                {
+                    "appId": "cli_pt",
+                    "userOpenId": "ou_pt",
+                    "accessToken": "pt-empty-scope-at",
+                    "refreshToken": "pt-empty-scope-rt",
+                    "expiresAt": int((time.time() + 14_000) * 1000),
+                    "refreshExpiresAt": int((time.time() + 600_000) * 1000),
+                    "scope": "",
+                }
+            ),
+            encoding="utf-8",
+        )
+        # Warm store had send_as_user on older token; importing new token with scope="" must be empty
+        rec_empty_pt = await pt_store.aimport_from_lark_cli(app_id="cli_pt", open_id="ou_pt")
+        assert rec_empty_pt is not None and rec_empty_pt.access_token == "pt-empty-scope-at"
+        assert rec_empty_pt.scope == ""
+        assert (
+            FeishuUserClient(pt_store, open_id="ou_pt", app_id="cli_pt")
+            .preflight_scopes(rec_empty_pt)
+            .can_send_as_user
+            is False
+        )
+        # Encrypted layout with explicit scope="" and prior CLI scope-cache also preserves empty scope
+        (pt_cfg / "credentials.json").unlink()
+        (pt_data / "master.key").write_bytes(master_key)
+        (pt_data / "cli_pt_ou_pt.enc").write_bytes(
+            aes_256_gcm_encrypt(
+                master_key,
+                json.dumps(
+                    {
+                        "appId": "cli_pt",
+                        "userOpenId": "ou_pt",
+                        "accessToken": "enc-empty-scope-at",
+                        "refreshToken": "enc-empty-scope-rt",
+                        "expiresAt": int((time.time() + 20_000) * 1000),
+                        "refreshExpiresAt": int((time.time() + 600_000) * 1000),
+                        "scope": "",
+                    }
+                ).encode("utf-8"),
+            )
+        )
+        rec_empty_enc = await pt_store.aimport_from_lark_cli(app_id="cli_pt", open_id="ou_pt")
+        assert rec_empty_enc is not None and rec_empty_enc.access_token == "enc-empty-scope-at"
+        assert rec_empty_enc.scope == ""
+        assert (
+            FeishuUserClient(pt_store, open_id="ou_pt", app_id="cli_pt")
+            .preflight_scopes(rec_empty_enc)
+            .can_send_as_user
+            is False
+        )
