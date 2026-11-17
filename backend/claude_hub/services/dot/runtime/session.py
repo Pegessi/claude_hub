@@ -120,10 +120,19 @@ class DotSessionService(object):
 
         if not turn_id:
             return False
-        return any(
-            run.client_turn_id == turn_id and self.is_system_schedule(run.scheduled_task_id)
+        runs = [
+            run
             for run in list(workspace_manager.scheduled_task_runs.values())
-        )
+            if getattr(run, "client_turn_id", None) == turn_id
+        ]
+        if runs:
+            return any(
+                self.is_system_schedule(getattr(run, "scheduled_task_id", None)) for run in runs
+            )
+        if turn_id.startswith(("wake-", "tidy-", "dot-wake", "dot-tidy")):
+            return True
+        sent = _sent_turns(self._peek_state())
+        return bool(sent and sent[-1].get("hub") and not turn_id.startswith(("web-", "feishu:")))
 
     def drop_queued_system_runs(self) -> None:
         """Queued wake-up or tidy runs would take the Chat when a stopped turn ends.
@@ -633,7 +642,9 @@ class DotSessionService(object):
                         ended.append(
                             (asked_at, event.created_at, status == "failed", status == "cancelled")
                         )
-                        from_hub = asked.lstrip().startswith("[Dot ")
+                        from_hub = asked.lstrip().startswith("[Dot ") or (
+                            event.turn_id or ""
+                        ).startswith("scheduled-")
                         if from_hub and (answer.strip() == QUIET_REPLY or status == "cancelled"):
                             # Nothing needed the user, or the turn gave way to the user
                             # and runs again later; keep it out of the recent talk.

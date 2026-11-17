@@ -325,6 +325,10 @@ class _ScheduledChatRunsMixin(_SchedulingHost):
             goal.status.value == "active" or goal.dispatch_state.value != "idle"
         ):
             return "waiting for the active Goal"
+        from ....api.feishu_bot import feishu_dispatch_in_progress
+
+        if feishu_dispatch_in_progress(run.tab_id):
+            return "waiting for the current Chat response"
         # Injected standalone transports retain their readiness contract. Native
         # production readiness is performed by the one shared inbox adapter.
         if self._chat_delivery_getter is None:

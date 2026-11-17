@@ -83,6 +83,8 @@ class PublicationMixin(SessionState):
             # (e.g. a long-running tool child). Done under the send lock so a
             # concurrent send cannot start a turn before the release.
             self._active_turn_id = None
+            self._active_turn_metadata = None
+            self._active_turn_summary = ""
             self._active_tool_call_ids.clear()
             self._blocking_approval_call_ids.clear()
             self._waiting_for_model_capacity = False
