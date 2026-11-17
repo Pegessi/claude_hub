@@ -118,6 +118,19 @@ class FakeRunner:
             return self.identity
         if "+messages-search" in argv:
             rows = list(self.messages)
+            if "--start" in argv and "--end" in argv:
+                start_bound = triage_module._timestamp(argv[argv.index("--start") + 1])
+                end_bound = triage_module._timestamp(argv[argv.index("--end") + 1])
+                filtered_rows = []
+                for row in rows:
+                    try:
+                        row_ts = triage_module._timestamp(row.get("create_time"))
+                    except (CommandError, ValueError):
+                        filtered_rows.append(row)
+                    else:
+                        if start_bound <= row_ts <= end_bound:
+                            filtered_rows.append(row)
+                rows = filtered_rows
             if "--is-at-me" in argv:
                 rows = [
                     row
@@ -162,8 +175,41 @@ class FakeRunner:
                 for row in self.messages
                 if (row.get("thread_id") or row.get("root_id")) == thread_filter
             ]
-            has_more = self.has_more or len(rows) > 500
-            return {"ok": True, "data": {"messages": rows[:500], "has_more": has_more}}
+            order = argv[argv.index("--order") + 1] if "--order" in argv else "asc"
+            rows = sorted(
+                rows,
+                key=lambda row: triage_module._timestamp(row.get("create_time")),
+                reverse=(order == "desc"),
+            )
+            page_size = int(argv[argv.index("--page-size") + 1]) if "--page-size" in argv else 50
+            offset = int(argv[argv.index("--page-token") + 1]) if "--page-token" in argv else 0
+            if "--page-all" in argv:
+                page_limit = (
+                    int(argv[argv.index("--page-limit") + 1]) if "--page-limit" in argv else 10
+                )
+                limit = page_size * page_limit
+            else:
+                limit = page_size
+            sliced = rows[offset : offset + limit]
+            next_offset = offset + len(sliced)
+            has_more = self.has_more or next_offset < len(rows)
+            next_token = str(next_offset) if next_offset < len(rows) else ""
+            return {
+                "ok": True,
+                "data": {
+                    "messages": sliced,
+                    "has_more": has_more,
+                    "page_token": next_token,
+                },
+                "meta": {
+                    "pagination": {
+                        "complete": not has_more,
+                        "pages": 1,
+                        "items": len(sliced),
+                        "next_token": next_token,
+                    }
+                },
+            }
         assert argv[0] == "infowall", "No real subprocess is permitted"
         assert env is not None and env["INFOWALL_API_KEY_FILE"] == KEY_PATH
         if argv[1] == "health":
@@ -949,6 +995,135 @@ async def test_f5_participated_thread_in_busy_group_with_over_500_irrelevant_row
     thread_calls = [argv for argv, _, _ in runner.calls if "+threads-messages-list" in argv]
     assert len(thread_calls) == 1
     assert thread_calls[0][thread_calls[0].index("--thread") + 1] == "omt_active"
+    assert thread_calls[0][thread_calls[0].index("--order") + 1] == "desc"
+
+
+async def test_f6_participated_thread_with_over_500_historical_rows_in_same_thread() -> None:
+    quiet_mention = {
+        **message(
+            "quiet-mention",
+            chat_type="group",
+            sender="ou_alice",
+            mentions=[{"id": ME}],
+            minutes_ago=30,
+            text="@[redacted] 这个配置怎么报错了？",
+        ),
+        "chat_id": "oc_quiet",
+        "chat_name": "安静排障群",
+    }
+    own_active = {
+        **message(
+            "own-active",
+            chat_type="group",
+            sender=ME,
+            thread="omt_active",
+            minutes_ago=25,
+            text="我先看一下",
+        ),
+        "chat_id": "oc_busy",
+        "chat_name": "长历史话题群",
+    }
+    active_followup = {
+        "message_id": "active-followup",
+        "chat_id": "oc_busy",
+        "thread_id": "omt_active",
+        "create_time": "2026-11-14 10:50",
+        "sender": {"id": "ou_bob", "name": "Bob"},
+        "content": "重试还是失败 OOM",
+        "mentions": [],
+        "message_app_link": "https://applink.feishu.cn/client/message/active-followup",
+    }
+    historical_same_thread = [
+        {
+            "message_id": f"old-history-{i}",
+            "chat_id": "oc_busy",
+            "thread_id": "omt_active",
+            "create_time": f"2026-11-01 {10 + (i // 60):02d}:{i % 60:02d}",
+            "sender": {"id": ME if i % 10 == 0 else "ou_bob", "name": "Bob"},
+            "content": f"历史讨论 {i} 报错？",
+            "mentions": [{"id": ME}] if i % 15 == 0 else [],
+            "message_app_link": f"https://applink.feishu.cn/client/message/old-history-{i}",
+        }
+        for i in range(505)
+    ]
+    runner = FakeRunner([*historical_same_thread, quiet_mention, own_active, active_followup])
+    result = await run_feishu_triage(
+        PatrolState(),
+        now=NOW,
+        dot=FakeDot(),
+        runner=runner,
+        dry_run=True,
+    )
+    assert not result.errors
+    assert result.candidates == 2
+    assert result.details["candidate_ids"] == ["quiet-mention", "active-followup"]
+    thread_calls = [argv for argv, _, _ in runner.calls if "+threads-messages-list" in argv]
+    assert len(thread_calls) == 1
+    assert "--page-token" not in thread_calls[0]
+
+    # Multi-page in-window thread (65 recent rows across 2 pages + 505 historical rows)
+    recent_thread_replies = [
+        {
+            "message_id": f"recent-reply-{i}",
+            "chat_id": "oc_busy",
+            "thread_id": "omt_active",
+            "create_time": "2026-11-14 10:40",
+            "sender": {"id": "ou_peer", "name": "Peer"},
+            "content": f"收到 {i}",
+            "mentions": [],
+            "message_app_link": f"https://applink.feishu.cn/client/message/recent-reply-{i}",
+        }
+        for i in range(65)
+    ]
+    multi_runner = FakeRunner(
+        [
+            *historical_same_thread,
+            quiet_mention,
+            own_active,
+            *recent_thread_replies,
+            active_followup,
+        ]
+    )
+    multi_result = await run_feishu_triage(
+        PatrolState(),
+        now=NOW,
+        dot=FakeDot(),
+        runner=multi_runner,
+        dry_run=True,
+    )
+    assert not multi_result.errors
+    assert multi_result.details["candidate_ids"] == ["quiet-mention", "active-followup"]
+    multi_thread_calls = [
+        argv for argv, _, _ in multi_runner.calls if "+threads-messages-list" in argv
+    ]
+    assert len(multi_thread_calls) == 2
+    assert "--page-token" in multi_thread_calls[1]
+
+    # Current-window overflow (>500 rows in the same thread inside [start, now]) still fails closed
+    overflow_recent = [
+        {
+            "message_id": f"window-overflow-{i}",
+            "chat_id": "oc_busy",
+            "thread_id": "omt_active",
+            "create_time": "2026-11-14 10:45",
+            "sender": {"id": "ou_peer", "name": "Peer"},
+            "content": f"窗口内刷屏 {i}",
+            "mentions": [],
+            "message_app_link": f"https://applink.feishu.cn/client/message/window-overflow-{i}",
+        }
+        for i in range(505)
+    ]
+    state = PatrolState(feishu_watermark_iso="2026-11-14T10:00:00+08:00")
+    overflow_runner = FakeRunner([quiet_mention, own_active, *overflow_recent])
+    overflow_result = await run_feishu_triage(
+        state,
+        now=NOW,
+        dot=FakeDot(),
+        runner=overflow_runner,
+        dry_run=False,
+    )
+    assert overflow_result.errors == ["Feishu search is incomplete; watermark retained"]
+    assert state.feishu_watermark_iso == "2026-11-14T10:00:00+08:00"
 
 
 async def test_rc5_rc6_maso_effort_model_discovery_and_prompt_metadata(
