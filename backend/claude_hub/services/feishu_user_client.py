@@ -22,6 +22,7 @@ from claude_hub.services.feishu_bot import (
     FeishuBotError,
     FeishuBotRemoteError,
     FeishuChatInfo,
+    FeishuDeliveryUncertainError,
     FeishuReplyReceipt,
     _chat_info_from_payload,
     _forward_body,
@@ -79,10 +80,6 @@ class FeishuUserScopeError(FeishuBotConfigurationError):
         super().__init__(message)
         self.missing_scopes = missing_scopes
         self.auth_login_command = auth_login_command
-
-
-class FeishuDeliveryUncertainError(FeishuBotError):
-    """Raised when a send/reply request may have been accepted by Feishu without a receipt."""
 
 
 @dataclass(frozen=True)

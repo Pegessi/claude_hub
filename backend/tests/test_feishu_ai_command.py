@@ -3042,6 +3042,67 @@ async def test_bot_fallback_reply_send_and_auto_invite_without_send_as_user(
         assert res_final_missing.final_message_id is None
         # Only 2 reply calls (1 interim + 1 final), no 3rd blind error-fallback reply after uncertain final delivery
         assert after_reply_calls - before_reply_calls == 2
+
+        # R2-remnant: Verify ReadError, RemoteProtocolError, and HTTP 200 malformed JSON on final reply
+        # are all classified as FeishuDeliveryUncertainError and suppress any 3rd error-fallback reply
+        for case_label, failure_mode in (
+            ("read_error", "read_error"),
+            ("remote_protocol_error", "remote_protocol_error"),
+            ("malformed_200_json", "malformed_200_json"),
+            ("unrecognizable_200_json", "unrecognizable_200_json"),
+        ):
+            case_reply_attempt = 0
+
+            def uncertain_final_handler(
+                request: httpx.Request,
+                *,
+                _mode: str = failure_mode,
+            ) -> httpx.Response:
+                nonlocal case_reply_attempt
+                if request.url.path.endswith("/reply"):
+                    case_reply_attempt += 1
+                    if case_reply_attempt >= 2:
+                        calls.append(
+                            (
+                                request.method,
+                                request.url.path,
+                                request.headers.get("Authorization", ""),
+                                (
+                                    json.loads(request.content.decode("utf-8"))
+                                    if request.content
+                                    else {}
+                                ),
+                            )
+                        )
+                        if _mode == "read_error":
+                            raise httpx.ReadError("connection reset after submit", request=request)
+                        if _mode == "remote_protocol_error":
+                            raise httpx.RemoteProtocolError(
+                                "server closed connection without response", request=request
+                            )
+                        if _mode == "malformed_200_json":
+                            return httpx.Response(200, text="<html>gateway cut off</html>")
+                        return httpx.Response(200, json={"unexpected": "shape"})
+                return orig_handler(request)
+
+            mock_http._transport = httpx.MockTransport(uncertain_final_handler)
+            msg_uncertain = FeishuUserMessage(
+                message_id=f"om_trigger_{case_label}",
+                chat_id="oc_group_fb",
+                sender_open_id="ou_fb",
+                sender_type="user",
+                msg_type="text",
+                text=f"/ai test {case_label}",
+                create_time_ms=int(time.time() * 1000),
+            )
+            before_case_replies = sum(1 for _, p, _, _ in calls if p.endswith("/reply"))
+            res_uncertain = await svc.handle_message(msg_uncertain, source="ws")
+            after_case_replies = sum(1 for _, p, _, _ in calls if p.endswith("/reply"))
+            assert res_uncertain.status == "failed", case_label
+            assert "delivery may have occurred" in (res_uncertain.reason or ""), case_label
+            assert res_uncertain.final_message_id is None, case_label
+            assert after_case_replies - before_case_replies == 2, case_label
+
         mock_http._transport = httpx.MockTransport(orig_handler)
 
         # F1 / R1: If cli_fb is registered in FeishuBotPoolStore and disabled, fallback is rejected even when keychain has secret
