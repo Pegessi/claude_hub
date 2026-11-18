@@ -415,6 +415,14 @@ class FeishuAiCommandService:
                         merged["reasoning_effort"] = ""
                     elif str(merged.get("reasoning_effort") or "") not in supported:
                         merged["reasoning_effort"] = "high" if "high" in supported else supported[0]
+            if (
+                "model" in patch
+                and patch["model"] is not None
+                and not str(patch["model"]).strip()
+                and ("reasoning_effort" not in patch or patch["reasoning_effort"] is None)
+                and new_provider in {"maso", "cursor", "claude", "antigravity"}
+            ):
+                merged["reasoning_effort"] = ""
             updated = FeishuAiCommandConfig.from_mapping(merged)
             state["config"] = updated.to_dict()
             self._save_state(state)

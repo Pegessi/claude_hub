@@ -1027,7 +1027,19 @@ function resolveEffortsForModel(
   modelId: string,
   option?: FeishuAiCommandModelOption | null,
 ): string[] {
-  const matched = option ?? resolveAiModelOptionsForProvider(provider).find(opt => matchesAiModelOption(opt, modelId)) ?? null
+  const clean = modelId.trim()
+  if (!clean) {
+    // Only ENV_KEY providers (codex, traex) have a separate effort channel when Provider default
+    // (model === '') is chosen; model-bound effort providers (maso, cursor) and non-effort
+    // providers (claude, antigravity) require a concrete model ID.
+    if (provider === 'maso' || provider === 'cursor' || provider === 'claude' || provider === 'antigravity') {
+      return []
+    }
+    const perProviderDefault = aiCapabilities.value?.provider_reasoning_efforts?.[provider]
+    if (Array.isArray(perProviderDefault)) return perProviderDefault
+    return DEFAULT_PROVIDER_EFFORTS[provider] ?? []
+  }
+  const matched = option ?? resolveAiModelOptionsForProvider(provider).find(opt => matchesAiModelOption(opt, clean)) ?? null
   if (matched && Array.isArray(matched.supported_reasoning_efforts)) {
     if (matched.supported_reasoning_efforts.length > 0) {
       return matched.supported_reasoning_efforts.map(item => item.id)
@@ -1036,8 +1048,7 @@ function resolveEffortsForModel(
       return []
     }
   }
-  const clean = modelId.trim()
-  const perModel = clean ? aiCapabilities.value?.model_reasoning_efforts?.[clean] : undefined
+  const perModel = aiCapabilities.value?.model_reasoning_efforts?.[clean]
   if (Array.isArray(perModel)) return perModel
   const perProvider = aiCapabilities.value?.provider_reasoning_efforts?.[provider]
   if (Array.isArray(perProvider)) return perProvider

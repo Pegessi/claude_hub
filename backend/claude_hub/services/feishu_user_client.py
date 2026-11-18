@@ -165,6 +165,15 @@ class FeishuUserMessage:
 
 
 @dataclass(frozen=True)
+class FeishuMessageSearchPage:
+    """One page of message IDs from ``POST /open-apis/search/v2/message``."""
+
+    items: tuple[str, ...]
+    has_more: bool
+    page_token: str | None = None
+
+
+@dataclass(frozen=True)
 class FeishuMessagePage:
     """One paginated page of messages from ``GET /open-apis/im/v1/messages``."""
 
@@ -1249,18 +1258,19 @@ class FeishuUserClient:
 
         return await self._with_user_token_retry(_call)
 
-    async def search_messages(
+    async def search_messages_page(
         self,
         query: str,
         *,
         page_size: int = 20,
+        page_token: str | None = None,
         start_time: str | None = None,
         end_time: str | None = None,
         from_ids: Sequence[str] | None = None,
-    ) -> list[str]:
-        """Search messages via ``/open-apis/search/v2/message`` and return message IDs."""
+    ) -> FeishuMessageSearchPage:
+        """Search messages via ``/open-apis/search/v2/message`` with pagination metadata."""
 
-        async def _call(token: str) -> list[str]:
+        async def _call(token: str) -> FeishuMessageSearchPage:
             body: dict[str, Any] = {"query": query}
             if start_time:
                 body["start_time"] = start_time
@@ -1270,13 +1280,16 @@ class FeishuUserClient:
                 cleaned_from = [s.strip() for s in from_ids if isinstance(s, str) and s.strip()]
                 if cleaned_from:
                     body["from_ids"] = cleaned_from
+            params: dict[str, Any] = {
+                "page_size": max(1, min(page_size, 50)),
+                "user_id_type": "open_id",
+            }
+            if page_token:
+                params["page_token"] = page_token
             response = await self._request(
                 "POST",
                 "/open-apis/search/v2/message",
-                params={
-                    "page_size": max(1, min(page_size, 50)),
-                    "user_id_type": "open_id",
-                },
+                params=params,
                 headers={"Authorization": f"Bearer {token}"},
                 json=body,
             )
@@ -1289,11 +1302,51 @@ class FeishuUserClient:
                 raise FeishuBotClient._remote_error(response, payload, "the user message search")
             response.raise_for_status()
             if not isinstance(payload, dict) or payload.get("code") != 0:
-                return []
+                return FeishuMessageSearchPage(items=(), has_more=False, page_token=None)
             data = payload.get("data")
-            items = data.get("items") if isinstance(data, Mapping) else None
-            if not isinstance(items, list):
-                return []
-            return [str(item).strip() for item in items if isinstance(item, str) and item.strip()]
+            if not isinstance(data, Mapping):
+                return FeishuMessageSearchPage(items=(), has_more=False, page_token=None)
+            raw_items = data.get("items")
+            items = (
+                tuple(
+                    str(item).strip()
+                    for item in raw_items
+                    if isinstance(item, str) and item.strip()
+                )
+                if isinstance(raw_items, list)
+                else ()
+            )
+            next_token = data.get("page_token")
+            clean_token = (
+                str(next_token).strip()
+                if isinstance(next_token, str) and str(next_token).strip()
+                else None
+            )
+            return FeishuMessageSearchPage(
+                items=items,
+                has_more=bool(data.get("has_more")) and bool(clean_token),
+                page_token=clean_token,
+            )
 
         return await self._with_user_token_retry(_call)
+
+    async def search_messages(
+        self,
+        query: str,
+        *,
+        page_size: int = 20,
+        page_token: str | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        from_ids: Sequence[str] | None = None,
+    ) -> list[str]:
+        """Search messages via ``/open-apis/search/v2/message`` and return message IDs."""
+        page = await self.search_messages_page(
+            query,
+            page_size=page_size,
+            page_token=page_token,
+            start_time=start_time,
+            end_time=end_time,
+            from_ids=from_ids,
+        )
+        return list(page.items)

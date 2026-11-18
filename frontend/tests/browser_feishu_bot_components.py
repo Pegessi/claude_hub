@@ -548,7 +548,59 @@ async def main(browser_run: BrowserRun) -> None:
 
             if method in {"PATCH", "PUT"} and path == "/api/feishu/bot/ai-command":
                 assert isinstance(submitted, dict)
-                ai_config.update(submitted)
+                merged = {**ai_config, **submitted}
+                prov = str(merged.get("provider") or "codex").strip().lower()
+                raw_model = str(merged.get("model") or "").strip()
+                raw_effort = str(merged.get("reasoning_effort") or "").strip().lower()
+                if prov in {"claude", "antigravity"}:
+                    assert (
+                        raw_effort == ""
+                    ), f"{prov} must not submit reasoning_effort={raw_effort!r}"
+                    merged["model"] = raw_model
+                    merged["reasoning_effort"] = ""
+                elif prov in {"maso", "cursor"}:
+                    if not raw_model:
+                        merged["model"] = ""
+                        merged["reasoning_effort"] = ""
+                    else:
+                        opts = ai_command_payload()["capabilities"]["provider_model_options"].get(
+                            prov, []
+                        )
+                        opt = next(
+                            (
+                                item
+                                for item in opts
+                                if item["id"] == raw_model
+                                or item.get("provider_model_id") == raw_model
+                                or any(
+                                    e.get("provider_model_id") == raw_model
+                                    for e in item.get("supported_reasoning_efforts", [])
+                                )
+                            ),
+                            None,
+                        )
+                        if raw_effort and opt and opt.get("supported_reasoning_efforts"):
+                            matched_eff = next(
+                                (
+                                    e
+                                    for e in opt["supported_reasoning_efforts"]
+                                    if e["id"] == raw_effort
+                                ),
+                                None,
+                            )
+                            assert (
+                                matched_eff is not None
+                            ), f"{prov} model {opt['id']} does not support {raw_effort}"
+                            merged["model"] = matched_eff["provider_model_id"]
+                            merged["reasoning_effort"] = raw_effort
+                        else:
+                            merged["model"] = raw_model
+                            merged["reasoning_effort"] = raw_effort
+                else:
+                    merged["model"] = raw_model
+                    merged["reasoning_effort"] = raw_effort
+                ai_config.clear()
+                ai_config.update(merged)
                 await fulfill_json(route, ai_command_payload())
                 return
 
@@ -1015,6 +1067,32 @@ async def main(browser_run: BrowserRun) -> None:
         # Switching MASO effort updates the resolved variant value on the logical Model <select>
         await effort_select.select_option("medium")
         await expect(model_select).to_have_value("[redacted]_reasoning_medium")
+        # Selecting MASO [redacted] + xhigh, then choosing Provider default ('') clears model-bound effort,
+        # disables effort select, saves ('maso', '', ''), and survives close + reopen without argon fallback
+        await model_select.select_option("[redacted]_reasoning_high")
+        await effort_select.select_option("xhigh")
+        await expect(model_select).to_have_value("[redacted]_reasoning_xhigh")
+        await model_select.select_option("")
+        await expect(model_select).to_have_value("")
+        await expect(effort_select).to_be_disabled()
+        await expect(effort_select).to_have_value("")
+        await settings.get_by_test_id("feishu-ai-save-btn").click()
+        await expect(
+            settings.get_by_text("/ai command settings saved.", exact=True)
+        ).to_be_visible()
+        await settings.locator("footer").get_by_role("button", name="Close", exact=True).click()
+        await expect(settings).to_have_count(0)
+        await page.get_by_role("button", name="Open Bot settings", exact=True).click()
+        settings = page.get_by_test_id("feishu-bot-settings-dialog")
+        await expect(settings).to_be_visible()
+        await settings.get_by_test_id("feishu-ai-command-nav").click()
+        model_select = settings.get_by_test_id("feishu-ai-model-input")
+        effort_select = settings.get_by_test_id("feishu-ai-effort-select")
+        token_card = settings.get_by_test_id("feishu-ai-token-card")
+        await expect(settings.get_by_test_id("feishu-ai-provider-select")).to_have_value("maso")
+        await expect(model_select).to_have_value("")
+        await expect(effort_select).to_be_disabled()
+        await expect(effort_select).to_have_value("")
         # Switching Provider to claude disables effort selection and lists Claude models
         await settings.get_by_test_id("feishu-ai-provider-select").select_option("claude")
         await expect(model_select).to_have_value("claude-opus-4-8")
@@ -1078,15 +1156,18 @@ async def main(browser_run: BrowserRun) -> None:
             for call in api_calls
             if call["method"] == "PATCH" and call["path"] == "/api/feishu/bot/ai-command"
         ]
-        assert len(ai_patches) == 1
-        assert ai_patches[0]["enabled"] is True
-        assert ai_patches[0]["provider"] == "codex"
-        assert ai_patches[0]["model"] == "[redacted]"
-        assert ai_patches[0]["reasoning_effort"] == "xhigh"
-        assert ai_patches[0]["cwd"] == "/srv/draft-ai"
-        assert ai_patches[0]["watch_chats"] == ["oc_chat_1", "oc_chat_2"]
-        assert ai_patches[0]["owner_open_id"] == "ou_imported"
-        assert ai_patches[0]["app_id"] == "cli_imported"
+        assert len(ai_patches) == 2
+        assert ai_patches[0]["provider"] == "maso"
+        assert ai_patches[0]["model"] == ""
+        assert ai_patches[0]["reasoning_effort"] == ""
+        assert ai_patches[1]["enabled"] is True
+        assert ai_patches[1]["provider"] == "codex"
+        assert ai_patches[1]["model"] == "[redacted]"
+        assert ai_patches[1]["reasoning_effort"] == "xhigh"
+        assert ai_patches[1]["cwd"] == "/srv/draft-ai"
+        assert ai_patches[1]["watch_chats"] == ["oc_chat_1", "oc_chat_2"]
+        assert ai_patches[1]["owner_open_id"] == "ou_imported"
+        assert ai_patches[1]["app_id"] == "cli_imported"
         await page.screenshot(path=str(output / "feishu-ai-command-desktop.png"), full_page=True)
         await settings.locator("footer").get_by_role("button", name="Close", exact=True).click()
         await expect(settings).to_have_count(0)
@@ -1210,6 +1291,8 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(
             settings.get_by_role("status").filter(has_text="/ai command settings saved.")
         ).to_be_visible()
+        await settings.get_by_test_id("feishu-ai-provider-select").scroll_into_view_if_needed()
+        await expect(mobile_model_select).to_be_visible()
         await page.screenshot(path=str(output / "feishu-ai-command-mobile.png"), full_page=True)
         await settings.locator("footer").get_by_role("button", name="Close", exact=True).click()
         await expect(settings).to_have_count(0)
