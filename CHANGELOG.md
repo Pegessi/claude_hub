@@ -7,6 +7,24 @@
 
 ## Released
 
+### fix(dot): preserve durable schedules across conversation and tab replacement
+
+- Direct Dot and native Chat scheduled follow-ups to Hub `chat_turn` schedules,
+  never provider-native `CreateCronJob`. Hub-owned MASO sessions now disable
+  `cron.enabled` on creation and confirm it before sending, including resumed
+  sessions, without removing the provider's required exit/finalizer fence.
+- Migrate every Dot-bound `chat_turn` schedule with wake/tidy schedules during
+  backend replacement and deleted-tab recovery. Preserve IDs, timing, messages,
+  enabled state and run history; roll custom targets back on failure/restart.
+- Keep deleted-but-still-Dot-owned targets fenced before setup begins and after
+  rollback, so scheduler ticks cannot disable schedules or consume one-shots.
+  Deleted-tab setup still upgrades retired standing defaults and reports
+  replacement conflicts/unavailability as HTTP 409/503 instead of unhandled errors.
+- MASO must expose per-session runtime options with an effective `cron.enabled`
+  switch (verified against the local v0.9.0 API); unsupported endpoints fail
+  before message delivery. Existing provider-native jobs are not converted into
+  Hub schedules and must be recreated explicitly if still needed.
+
 ### fix(codex): merge cached models with live discovery and current fallbacks
 
 - Read visible local Codex cache entries with model-specific reasoning efforts,

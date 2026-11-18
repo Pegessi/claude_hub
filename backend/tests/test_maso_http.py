@@ -104,6 +104,9 @@ class MasoServer:
         self.image_upload_entered: asyncio.Event | None = None
         self.image_upload_release: asyncio.Event | None = None
         self.session_creations = 0
+        self.runtime_overrides: dict[str, Any] = {"session_memory.extend": True}
+        self.fail_runtime_options = False
+        self.ignore_cron_policy = False
         self.fail_status = False
         self.malformed_status = False
 
@@ -167,6 +170,8 @@ class MasoServer:
                 if self.session_creations == 1
                 else f"opaque-sid-{self.session_creations}"
             )
+            if not self.ignore_cron_policy:
+                self.runtime_overrides.update(body.get("runtime_options", {}))
             return httpx.Response(201, json={"session_id": session_id, "agent_id": "main"})
         if path.endswith("/status"):
             if self.fail_status:
@@ -180,6 +185,24 @@ class MasoServer:
                     "is_running": self.running,
                     "status": "running" if self.running else "idle",
                     "model": self.model,
+                },
+            )
+        if path.endswith("/runtime-options"):
+            if self.fail_runtime_options:
+                return httpx.Response(503, json={"error": "runtime options unavailable"})
+            if request.method == "PATCH" and not self.ignore_cron_policy:
+                self.runtime_overrides = body["overrides"]
+            return httpx.Response(
+                200,
+                json={
+                    "active": True,
+                    "overrides": self.runtime_overrides,
+                    "options": [
+                        {
+                            "key": "cron.enabled",
+                            "effective": self.runtime_overrides.get("cron.enabled", True),
+                        }
+                    ],
                 },
             )
         if path.endswith("/model"):
@@ -1592,4 +1615,75 @@ async def test_stream_drops_before_successful_post_response_preserves_uncertaint
     finally:
         server.send_release.set()
         await asyncio.gather(send, return_exceptions=True)
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_new_and_rotated_sessions_disable_native_cron() -> None:
+    server = MasoServer()
+    provider = transport(server)
+    try:
+        await provider.send_message("first", [])
+        await provider.cancel_active_turn()
+        candidate = await provider.rotate_conversation()
+        provider.adopt_rotated_conversation(candidate)
+        await provider.send_message("after rotation", [])
+        creations = [
+            body
+            for method, path, body in server.calls
+            if method == "POST" and path == "/api/sessions"
+        ]
+        assert len(creations) == 2
+        assert all(body["runtime_options"] == {"cron.enabled": False} for body in creations)
+        assert ("POST", "/api/sessions/opaque-sid/exit", {}) in server.calls
+        assert any(path == f"/api/sessions/{candidate}/messages" for _, path, _ in server.calls)
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_resume_disables_native_cron_before_delivery_and_preserves_other_options() -> None:
+    server = MasoServer()
+    provider = transport(
+        server, session(agent_session_id="existing", agent_session_id_verified=True)
+    )
+    try:
+        await provider.send_message("scheduled work belongs to Hub", [])
+        patch = (
+            "PATCH",
+            "/api/sessions/existing/runtime-options",
+            {
+                "overrides": {"session_memory.extend": True, "cron.enabled": False},
+            },
+        )
+        assert patch in server.calls
+        message_index = next(
+            i for i, call in enumerate(server.calls) if call[1].endswith("/messages")
+        )
+        assert server.calls.index(patch) < message_index
+        assert server.session_creations == 0
+        assert server.runtime_overrides == {"session_memory.extend": True, "cron.enabled": False}
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.parametrize(
+    "failure", ["unsupported", "ignored"], ids=["no-api", "policy-not-applied"]
+)
+@pytest.mark.asyncio
+async def test_native_cron_policy_failure_is_fail_closed_and_retryable(failure: str) -> None:
+    server = MasoServer()
+    server.fail_runtime_options = failure == "unsupported"
+    server.ignore_cron_policy = failure == "ignored"
+    provider = transport(server)
+    try:
+        with pytest.raises(RuntimeError):
+            await provider.send_message("do not deliver without policy", [])
+        assert not any(path.endswith("/messages") for _, path, _ in server.calls)
+        assert not provider.turn_in_flight
+        server.fail_runtime_options = server.ignore_cron_policy = False
+        await provider.send_message("retry safely", [])
+        assert server.session_creations == 1
+        assert server.runtime_overrides["cron.enabled"] is False
+    finally:
         await provider.stop()

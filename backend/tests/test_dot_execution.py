@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Generator
@@ -24,6 +24,7 @@ from claude_hub.models import (
     ScheduledTaskKind,
     ScheduledTaskRun,
     ScheduledTaskRunStatus,
+    ScheduledTaskUpdate,
 )
 from claude_hub.models.schemas import User
 from claude_hub.services import ttyd_manager, workspace_manager
@@ -249,8 +250,8 @@ def test_busy_ownership_rejection_keeps_original_dot(
     elif conflict == "schedule":
         workspace_manager.create_scheduled_task(
             ScheduledTaskCreate(
-                name="External schedule",
-                kind=ScheduledTaskKind.CHAT_TURN,
+                name="Legacy terminal schedule",
+                kind=ScheduledTaskKind.TAB_MESSAGE,
                 tab_id=tab_id,
                 interval_seconds=3600,
                 message="External work",
@@ -890,3 +891,483 @@ async def test_deleted_dot_tab_pending_run_blocks_migration_until_settled(
     await workspace_manager._drain_scheduled_chat_runs(old_id)
     assert workspace_manager.scheduled_tasks[wake_id].tab_id == new_id
     assert workspace_manager.scheduled_tasks[wake_id].enabled
+
+
+def custom_schedules(tab_id: str) -> dict[str, dict[str, Any]]:
+    now = datetime.now()
+    result = {}
+    for name, enabled, timing in (
+        ("recurring", True, {"interval_seconds": 1234}),
+        ("disabled", False, {"cron": "17 8 * * *"}),
+        ("one-shot", True, {"run_at": now + timedelta(days=1)}),
+        ("completed", False, {"run_at": now - timedelta(days=1)}),
+    ):
+        task = workspace_manager.create_scheduled_task(
+            ScheduledTaskCreate(
+                name=name,
+                kind=ScheduledTaskKind.CHAT_TURN,
+                tab_id=tab_id,
+                message=f"User requested {name}",
+                enabled=enabled,
+                **timing,
+            )
+        )
+        task.run_count = 4
+        task.last_run_at = now - timedelta(days=2)
+        result[task.id] = task.model_dump(exclude={"updated_at"})
+    return result
+
+
+def assert_schedule_targets(
+    before: dict[str, dict[str, Any]], tab_id: str, provider: AgentType
+) -> None:
+    for schedule_id, fields in before.items():
+        assert workspace_manager.scheduled_tasks[schedule_id].model_dump(
+            exclude={"updated_at"}
+        ) == {**fields, "tab_id": tab_id, "agent_type": provider}
+
+
+@pytest.mark.parametrize("deleted", [False, True], ids=["switch", "deleted-tab"])
+@pytest.mark.asyncio
+async def test_all_custom_chat_schedules_follow_dot_without_rearming(
+    setup: SimpleNamespace, deleted: bool
+) -> None:
+    old = await execution.switch_execution(
+        setup.service,
+        expected_revision=execution.execution_view(setup.service)["revision"],
+        agent_type=AgentType.CLAUDE,
+        env={},
+    )
+    before = custom_schedules(old["tab_id"])
+    unrelated_tab = await setup.create(**setup.created[0])
+    unrelated = custom_schedules(unrelated_tab.id)
+    finished = scheduled_run(next(iter(before)), old["tab_id"], "historical")
+    finished.status = ScheduledTaskRunStatus.COMPLETED
+    workspace_manager.scheduled_task_runs[finished.id] = finished
+    if deleted:
+        setup.tabs.pop(old["tab_id"])
+        new_id = await setup.service.ensure_tab()
+        provider = AgentType.CLAUDE
+    else:
+        replacement = await execution.switch_execution(
+            setup.service,
+            expected_revision=old["revision"],
+            agent_type=AgentType.MASO,
+            env={},
+        )
+        new_id, provider = replacement["tab_id"], AgentType.MASO
+    assert new_id != old["tab_id"]
+    assert_schedule_targets(before, new_id, provider)
+    assert_schedule_targets(unrelated, unrelated_tab.id, AgentType.CLAUDE)
+    assert finished.tab_id == old["tab_id"], "history is not rewritten"
+    assert all(not setup.service.is_system_schedule(key) for key in before)
+    assert not set(before).intersection(setup.service.store.read_state()), "no custom state keys"
+
+
+@pytest.mark.parametrize("failure", ["partial", "commit", "deleted-tab"])
+@pytest.mark.asyncio
+async def test_custom_migration_failure_rolls_back_and_is_retryable(
+    setup: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    old = await execution.switch_execution(
+        setup.service,
+        expected_revision=execution.execution_view(setup.service)["revision"],
+        agent_type=AgentType.CLAUDE,
+        env={},
+    )
+    before = custom_schedules(old["tab_id"])
+    update_schedule = workspace_manager.update_scheduled_task
+    update_state = setup.service.store.update_state
+    if failure == "deleted-tab":
+        setup.tabs.pop(old["tab_id"])
+
+    def fail_schedule(schedule_id: str, payload: ScheduledTaskUpdate) -> Any:
+        result = update_schedule(schedule_id, payload)
+        if schedule_id == next(iter(before)):
+            raise RuntimeError("migration failed")
+        return result
+
+    def fail_commit(**changes: Any) -> Any:
+        if "execution_agent_type" in changes:
+            raise RuntimeError("migration failed")
+        return update_state(**changes)
+
+    if failure == "partial":
+        monkeypatch.setattr(workspace_manager, "update_scheduled_task", fail_schedule)
+    else:
+        monkeypatch.setattr(setup.service.store, "update_state", fail_commit)
+    with pytest.raises(RuntimeError, match="migration failed"):
+        if failure == "deleted-tab":
+            await setup.service.ensure_tab()
+        else:
+            await execution.switch_execution(
+                setup.service,
+                expected_revision=old["revision"],
+                agent_type=AgentType.MASO,
+                env={},
+            )
+    assert_schedule_targets(before, old["tab_id"], AgentType.CLAUDE)
+    assert setup.service.tab_id() == old["tab_id"]
+    assert setup.service.store.read_state().get("pending_execution") is None
+    assert setup.tabs["dot-2"].archived
+    monkeypatch.setattr(workspace_manager, "update_scheduled_task", update_schedule)
+    monkeypatch.setattr(setup.service.store, "update_state", update_state)
+    if failure == "deleted-tab":
+        new_id = await setup.service.ensure_tab()
+        provider = AgentType.CLAUDE
+    else:
+        result = await execution.switch_execution(
+            setup.service,
+            expected_revision=old["revision"],
+            agent_type=AgentType.MASO,
+            env={},
+        )
+        new_id, provider = result["tab_id"], AgentType.MASO
+    assert_schedule_targets(before, new_id, provider)
+
+
+@pytest.mark.asyncio
+async def test_interrupted_custom_migration_recovers_and_cancels_only_candidate_runs(
+    setup: SimpleNamespace,
+) -> None:
+    old = await execution.switch_execution(
+        setup.service,
+        expected_revision=execution.execution_view(setup.service)["revision"],
+        agent_type=AgentType.CLAUDE,
+        env={},
+    )
+    before = custom_schedules(old["tab_id"])
+    candidate = await setup.create(**{**setup.created[0], "agent_type": AgentType.MASO})
+    setup.service.store.update_state(
+        pending_execution={
+            "candidate_tab_id": candidate.id,
+            "previous_tab_id": old["tab_id"],
+            "previous_archived": False,
+            "schedules": execution._schedule_snapshot(setup.service),
+        }
+    )
+    setup.service.ensure_schedules(candidate.id, migrate=True)
+    await setup.archive(old["tab_id"])
+    schedule_id = next(iter(before))
+    candidate_run = scheduled_run(schedule_id, candidate.id, "candidate-custom")
+    old_run = scheduled_run(schedule_id, old["tab_id"], "old-custom")
+    workspace_manager.scheduled_task_runs.update(
+        {candidate_run.id: candidate_run, old_run.id: old_run}
+    )
+    assert await setup.service.ensure_tab() == old["tab_id"]
+    assert_schedule_targets(before, old["tab_id"], AgentType.CLAUDE)
+    assert candidate_run.status == ScheduledTaskRunStatus.CANCELLED
+    assert old_run.status == ScheduledTaskRunStatus.WAITING
+    assert candidate.archived
+
+
+@pytest.mark.asyncio
+async def test_custom_schedule_created_during_retirement_is_in_rollback_snapshot(
+    setup: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = await execution.switch_execution(
+        setup.service,
+        expected_revision=execution.execution_view(setup.service)["revision"],
+        agent_type=AgentType.CLAUDE,
+        env={},
+    )
+    before = {}
+
+    async def create_during_retirement(_session_id: str) -> None:
+        before.update(custom_schedules(old["tab_id"]))
+
+    setup.manager.forget_session.side_effect = create_during_retirement
+    update = setup.service.store.update_state
+
+    def fail_commit(**changes: Any) -> Any:
+        if changes.get("execution_agent_type") == "maso":
+            raise RuntimeError("commit failed")
+        return update(**changes)
+
+    monkeypatch.setattr(setup.service.store, "update_state", fail_commit)
+    with pytest.raises(RuntimeError, match="commit failed"):
+        await execution.switch_execution(
+            setup.service,
+            expected_revision=old["revision"],
+            agent_type=AgentType.MASO,
+            env={},
+        )
+    assert len(before) == 4
+    assert_schedule_targets(before, old["tab_id"], AgentType.CLAUDE)
+
+
+def test_pending_custom_run_still_blocks_dot_replacement(setup: SimpleNamespace) -> None:
+    assert apply(setup, "claude").status_code == 200
+    tab_id = setup.service.tab_id()
+    before = custom_schedules(tab_id)
+    run = scheduled_run(next(iter(before)), tab_id, "pending-custom")
+    workspace_manager.scheduled_task_runs[run.id] = run
+    assert apply(setup, "maso").status_code == 409
+    assert_schedule_targets(before, tab_id, AgentType.CLAUDE)
+    assert run.status == ScheduledTaskRunStatus.WAITING
+
+
+@pytest.mark.parametrize("edit", ["disable", "retarget"])
+@pytest.mark.parametrize("phase", ["retirement-failure", "recovery-before", "recovery-after"])
+@pytest.mark.asyncio
+async def test_rollback_preserves_concurrent_custom_schedule_edits(
+    setup: SimpleNamespace, edit: str, phase: str
+) -> None:
+    old = await execution.switch_execution(
+        setup.service,
+        expected_revision=execution.execution_view(setup.service)["revision"],
+        agent_type=AgentType.CLAUDE,
+        env={},
+    )
+    before = custom_schedules(old["tab_id"])
+    schedule_id = next(iter(before))
+    unrelated = await setup.create(**setup.created[0])
+    update = (
+        ScheduledTaskUpdate(enabled=False)
+        if edit == "disable"
+        else ScheduledTaskUpdate(tab_id=unrelated.id)
+    )
+
+    if phase == "retirement-failure":
+
+        async def fail_retirement(_session_id: str) -> None:
+            workspace_manager.update_scheduled_task(schedule_id, update)
+            raise RuntimeError("retirement failed")
+
+        setup.manager.forget_session.side_effect = fail_retirement
+        with pytest.raises(RuntimeError, match="retirement failed"):
+            await execution.switch_execution(
+                setup.service,
+                expected_revision=old["revision"],
+                agent_type=AgentType.MASO,
+                env={},
+            )
+    else:
+        candidate = await setup.create(**{**setup.created[0], "agent_type": AgentType.MASO})
+        setup.service.store.update_state(
+            pending_execution={
+                "candidate_tab_id": candidate.id,
+                "previous_tab_id": old["tab_id"],
+                "previous_archived": False,
+                "schedules": execution._schedule_snapshot(setup.service),
+            }
+        )
+        if phase == "recovery-after":
+            setup.service.ensure_schedules(candidate.id, migrate=True)
+        workspace_manager.update_scheduled_task(schedule_id, update)
+        assert await setup.service.ensure_tab() == old["tab_id"]
+
+    expected = before[schedule_id]
+    if edit == "disable":
+        expected["enabled"] = False
+    else:
+        expected["tab_id"] = unrelated.id
+    assert (
+        workspace_manager.scheduled_tasks[schedule_id].model_dump(exclude={"updated_at"})
+        == expected
+    )
+    assert setup.service.store.read_state().get("pending_execution") is None
+
+
+@pytest.mark.parametrize("migrated", [False, True], ids=["previous", "candidate"])
+@pytest.mark.asyncio
+async def test_pending_replacement_does_not_consume_a_due_one_shot(
+    setup: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, migrated: bool
+) -> None:
+    old = await execution.switch_execution(
+        setup.service,
+        expected_revision=execution.execution_view(setup.service)["revision"],
+        agent_type=AgentType.CLAUDE,
+        env={},
+    )
+    due = datetime.now() + timedelta(hours=1)
+    task = workspace_manager.create_scheduled_task(
+        ScheduledTaskCreate(
+            name="One reminder",
+            kind=ScheduledTaskKind.CHAT_TURN,
+            tab_id=old["tab_id"],
+            run_at=due,
+            message="Do not lose this reminder",
+        )
+    )
+    candidate = await setup.create(**{**setup.created[0], "agent_type": AgentType.MASO})
+    setup.service.store.update_state(
+        pending_execution={
+            "candidate_tab_id": candidate.id,
+            "previous_tab_id": old["tab_id"],
+            "previous_archived": False,
+            "schedules": execution._schedule_snapshot(setup.service),
+        }
+    )
+    if migrated:
+        setup.service.ensure_schedules(candidate.id, migrate=True)
+    # Exercise real timer stamping and queue creation, not provider delivery.
+    drain = AsyncMock()
+    monkeypatch.setattr(workspace_manager, "_drain_scheduled_chat_runs", drain)
+    task = workspace_manager.scheduled_tasks[task.id]
+    before = task.model_dump()
+    assert await workspace_manager._fire_scheduled_task(task, due) is None
+    assert workspace_manager.scheduled_tasks[task.id].model_dump() == before
+    with pytest.raises(RuntimeError, match="Dot.*replacement"):
+        await workspace_manager.run_scheduled_task(task.id)
+    assert not workspace_manager.scheduled_task_runs
+    drain.assert_not_awaited()
+
+    assert await setup.service.ensure_tab() == old["tab_id"]
+    task = workspace_manager.scheduled_tasks[task.id]
+    run = await workspace_manager._fire_scheduled_task(task, due)
+    assert run is not None and run.tab_id == old["tab_id"]
+    assert task.run_count == 1 and not task.enabled and task.next_run_at is None
+    assert await workspace_manager._fire_scheduled_task(task, due + timedelta(seconds=5)) is None
+    assert len(workspace_manager.scheduled_task_runs) == 1
+    drain.assert_awaited_once_with(old["tab_id"])
+
+
+@pytest.mark.parametrize("interrupted", [False, True], ids=["deleted", "rolled-back"])
+@pytest.mark.asyncio
+async def test_deleted_dot_schedules_survive_tick_before_setup(
+    setup: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, interrupted: bool
+) -> None:
+    old = await execution.switch_execution(
+        setup.service,
+        expected_revision=execution.execution_view(setup.service)["revision"],
+        agent_type=AgentType.CLAUDE,
+        env={},
+    )
+    custom = custom_schedules(old["tab_id"])
+    before = {
+        key: task.model_dump(exclude={"updated_at"})
+        for key, task in workspace_manager.scheduled_tasks.items()
+    }
+    snapshot = execution._schedule_snapshot(setup.service)
+    setup.tabs.pop(old["tab_id"])
+    if interrupted:
+        candidate = await setup.create(**setup.created[0])
+        setup.service.store.update_state(
+            pending_execution={
+                "candidate_tab_id": candidate.id,
+                "previous_tab_id": old["tab_id"],
+                "previous_archived": False,
+                "schedules": snapshot,
+            }
+        )
+        setup.service.ensure_schedules(candidate.id, migrate=True)
+        async with setup.service.setup_lock():
+            await execution.recover_execution_locked(setup.service)
+    assert setup.service.store.read_state().get("pending_execution") is None
+    monkeypatch.setattr(workspace_manager, "_scheduled_chat_recovery_pending", False)
+    monkeypatch.setattr(workspace_manager, "_reap_stale_scheduled_chat_runs", AsyncMock())
+    monkeypatch.setattr(workspace_manager, "_drain_scheduled_chat_runs", AsyncMock())
+    monkeypatch.setattr(
+        workspace_manager, "_runtime_now", lambda: datetime.now() + timedelta(days=2)
+    )
+    await workspace_manager._tick_scheduled_tasks()
+    assert_schedule_targets(before, old["tab_id"], AgentType.CLAUDE)
+    assert not workspace_manager.scheduled_task_runs
+    with pytest.raises(RuntimeError, match="Dot.*replacement"):
+        await workspace_manager.run_scheduled_task(next(iter(custom)))
+    new_id = await setup.service.ensure_tab()
+    assert_schedule_targets(custom, new_id, AgentType.CLAUDE)
+    for key in ("wake_schedule_id", "tidy_schedule_id"):
+        task = workspace_manager.scheduled_tasks[setup.service.store.read_state()[key]]
+        assert task.tab_id == new_id and task.enabled
+        assert task.next_run_at is not None and task.next_run_at > workspace_manager._runtime_now()
+    assert await setup.service.wake(), "the standing wake remains usable"
+
+
+@pytest.mark.asyncio
+async def test_deleted_dot_setup_upgrades_retired_standing_defaults(setup: SimpleNamespace) -> None:
+    from claude_hub.services.dot.prompts import (
+        RETIRED_TIDY_MESSAGES,
+        RETIRED_WAKE_MESSAGES,
+        TIDY_MESSAGE,
+        WAKE_MESSAGE,
+    )
+
+    old = await execution.switch_execution(
+        setup.service,
+        expected_revision=execution.execution_view(setup.service)["revision"],
+        agent_type=AgentType.CLAUDE,
+        env={},
+    )
+    state = setup.service.store.read_state()
+    wake = workspace_manager.scheduled_tasks[state["wake_schedule_id"]]
+    tidy = workspace_manager.scheduled_tasks[state["tidy_schedule_id"]]
+    wake.interval_seconds, wake.cron = None, "0 9 * * *"
+    wake.message = RETIRED_WAKE_MESSAGES[0]
+    tidy.cron, tidy.message = "12 5 * * *", RETIRED_TIDY_MESSAGES[0]
+    custom = custom_schedules(old["tab_id"])
+    setup.tabs.pop(old["tab_id"])
+    new_id = await setup.service.ensure_tab()
+    wake = workspace_manager.scheduled_tasks[wake.id]
+    tidy = workspace_manager.scheduled_tasks[tidy.id]
+    assert wake.enabled and wake.message == WAKE_MESSAGE
+    assert wake.interval_seconds == setup.service._wake_interval_seconds() and wake.cron is None
+    assert tidy.enabled and tidy.message == TIDY_MESSAGE and tidy.cron == "12 5 * * *"
+    assert_schedule_targets(custom, new_id, AgentType.CLAUDE)
+
+
+def test_deleted_dot_setup_conflict_is_http_409(setup: SimpleNamespace) -> None:
+    assert apply(setup, "claude").status_code == 200
+    old_id = setup.service.tab_id()
+    state = setup.service.store.read_state()
+    run = scheduled_run(state["wake_schedule_id"], old_id, "pending-deleted-dot")
+    workspace_manager.scheduled_task_runs[run.id] = run
+    setup.tabs.pop(old_id)
+    response = setup.client.post("/api/dot/setup", json={})
+    assert response.status_code == 409
+    assert "pending scheduled turns" in response.json()["detail"]
+    assert setup.service.tab_id() == old_id and len(setup.created) == 1
+
+
+@pytest.mark.parametrize("failure", ["runtime", "maso", "startup"])
+def test_deleted_dot_setup_runtime_error_is_http_503(
+    setup: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from claude_hub.services.agent_stream.maso_http import MasoServiceUnavailable
+    from claude_hub.services.ttyd_manager import TabStartupTimeoutError
+
+    assert apply(setup, "claude").status_code == 200
+    old_id = setup.service.tab_id()
+    setup.tabs.pop(old_id)
+    error_type = {
+        "runtime": RuntimeError,
+        "maso": MasoServiceUnavailable,
+        "startup": TabStartupTimeoutError,
+    }[failure]
+    monkeypatch.setattr(
+        ttyd_manager, "create_tab", AsyncMock(side_effect=error_type("replacement unavailable"))
+    )
+    response = setup.client.post("/api/dot/setup", json={})
+    assert response.status_code == 503
+    assert "replacement unavailable" in response.json()["detail"]
+    assert setup.service.tab_id() == old_id
+
+
+@pytest.mark.asyncio
+async def test_deleted_dot_setup_rearms_standing_schedules_but_not_custom_ones(
+    setup: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = await execution.switch_execution(
+        setup.service,
+        expected_revision=execution.execution_view(setup.service)["revision"],
+        agent_type=AgentType.CLAUDE,
+        env={},
+    )
+    custom = custom_schedules(old["tab_id"])
+    state = setup.service.store.read_state()
+    stale = datetime.now() - timedelta(days=1)
+    for key in ("wake_schedule_id", "tidy_schedule_id"):
+        task = workspace_manager.scheduled_tasks[state[key]]
+        task.enabled = False
+        task.last_error = "target Chat was deleted"
+        task.next_run_at = stale
+    setup.tabs.pop(old["tab_id"])
+    new_id = await setup.service.ensure_tab()
+    for key in ("wake_schedule_id", "tidy_schedule_id"):
+        task = workspace_manager.scheduled_tasks[state[key]]
+        assert task.tab_id == new_id and task.enabled
+        assert task.next_run_at is not None and task.next_run_at > datetime.now()
+    assert_schedule_targets(custom, new_id, AgentType.CLAUDE)
+    monkeypatch.setattr(workspace_manager, "_drain_scheduled_chat_runs", AsyncMock())
+    assert await setup.service.wake()

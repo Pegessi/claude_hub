@@ -195,6 +195,19 @@ class DotSessionService(object):
             await ttyd_manager.unarchive_tab(tab.id)
         if tab is None:
             agent_type = AgentType(self._peek_state().get("execution_agent_type", "claude"))
+            if tab_id:
+                from ..execution import execution_view, replace_execution_locked
+
+                # A deleted tab still owns custom schedules. Use the same durable
+                # replacement/rollback path as an explicit provider change.
+                result = await replace_execution_locked(
+                    self,
+                    expected_revision=execution_view(self)["revision"],
+                    agent_type=agent_type,
+                    env=dict(env or {}) if agent_type == AgentType.CLAUDE else {},
+                    restore_standing_schedules=True,
+                )
+                return str(result["tab_id"])
             # Legacy setup callers supply a Claude env. Never copy that into a
             # different backend when restoring a deleted Dot tab.
             created = await ttyd_manager.create_tab(
@@ -236,7 +249,7 @@ class DotSessionService(object):
         return current in ({}, DEFAULT_CLAUDE_LAUNCH_ENV) and current != dict(env or {})
 
     def ensure_schedules(self, tab_id: str, *, migrate: bool = False) -> None:
-        """Keep the wake-up and nightly tidy Chat schedules pointing at the Dot tab."""
+        """Keep standing schedules and migrate custom Chat schedules with their Dot tab."""
         from ....models.schemas import (
             ScheduledTaskCreate,
             ScheduledTaskKind,
@@ -245,6 +258,20 @@ class DotSessionService(object):
         from ... import workspace_manager
 
         state = self.store.read_state()
+        previous_tab_id = state.get("tab_id")
+        system_ids = {state.get("wake_schedule_id"), state.get("tidy_schedule_id")}
+        if previous_tab_id and previous_tab_id != tab_id:
+            for task in list(workspace_manager.scheduled_tasks.values()):
+                if (
+                    task.kind == ScheduledTaskKind.CHAT_TURN
+                    and task.tab_id == previous_tab_id
+                    and task.id not in system_ids
+                ):
+                    # Retarget only: keep disabled/completed one-shots, due times,
+                    # text and run history rather than recreating or rearming them.
+                    workspace_manager.update_scheduled_task(
+                        task.id, ScheduledTaskUpdate(tab_id=tab_id)
+                    )
         timings: tuple[tuple[str, str, dict[str, Any], str, tuple[str, ...]], ...] = (
             (
                 "wake_schedule_id",
