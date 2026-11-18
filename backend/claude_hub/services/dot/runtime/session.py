@@ -205,6 +205,7 @@ class DotSessionService(object):
                     expected_revision=execution_view(self)["revision"],
                     agent_type=agent_type,
                     env=dict(env or {}) if agent_type == AgentType.CLAUDE else {},
+                    restore_standing_schedules=True,
                 )
                 return str(result["tab_id"])
             # Legacy setup callers supply a Claude env. Never copy that into a

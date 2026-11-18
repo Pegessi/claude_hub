@@ -231,6 +231,7 @@ async def replace_execution_locked(
     expected_revision: str,
     agent_type: AgentType,
     env: dict[str, str],
+    restore_standing_schedules: bool = False,
 ) -> dict[str, Any]:
     """Replace a configured or deleted tab; caller owns the recovered setup lock."""
     current = execution_view(service)
@@ -288,8 +289,10 @@ async def replace_execution_locked(
             pending["schedules"] = _schedule_snapshot(service)
             service.store.update_state(pending_execution=pending)
             # No await between schedule retargeting and the identity commit.
-            # Disabled schedules and user-customized timing/text stay unchanged.
-            service.ensure_schedules(created.id, migrate=True)
+            # Explicit backend switches preserve all choices. Deleted-tab setup
+            # additionally repairs the standing wake/tidy schedules; custom
+            # schedules always retain their timing and enabled state.
+            service.ensure_schedules(created.id, migrate=not restore_standing_schedules)
             service.store.update_state(
                 tab_id=created.id,
                 execution_agent_type=agent_type.value,
