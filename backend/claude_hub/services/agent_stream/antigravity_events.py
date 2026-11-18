@@ -19,6 +19,7 @@ adapter (``supports_transcript_discovery=False``).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -30,7 +31,7 @@ from ...models import (
     ManagedSession,
 )
 from ...models.agent_stream import normalize_provider_usage
-from .base import AgentStreamAdapter, NormalizeContext
+from .base import AgentStreamAdapter, NormalizeContext, is_substantive_answer
 
 _USAGE_FIELDS = (
     "input_tokens",
@@ -40,6 +41,21 @@ _USAGE_FIELDS = (
     "total_tokens",
 )
 
+# agy records retryable model/SSE errors in the conversation trajectory as
+# ``step_type=17`` ("API error (attempt N): ...") and retries in place.
+# However, ``steps.BuildJSONOutput`` scans the entire conversation's steps via
+# ``LastStepError`` without scoping to the current turn or checking whether a
+# final ``agent_response`` succeeded after the retry, contaminating ``result``
+# on completed turns with ``status="ERROR"`` and the stale retry message.
+_TRANSIENT_RETRY_ERROR_RE = re.compile(r"^API error \(attempt \d+\):\s", re.IGNORECASE)
+_STREAM_GENERATE_EOF_RE = re.compile(
+    r"streamGenerateContent(?:\?alt=sse)?[\"']?:\s*(?:unexpected\s+)?EOF\b",
+    re.IGNORECASE,
+)
+# ``printmode.postResponseFailure`` appends this suffix when an error step
+# occurred AFTER the last response-bearing step in the turn.
+_TRUNCATED_RESPONSE_SUFFIX = "(response may be truncated)"
+
 
 @dataclass
 class _UsageState:
@@ -48,6 +64,10 @@ class _UsageState:
     conversation_id: Optional[str] = None
     previous_num_turns: Optional[int] = None
     previous_usage: Optional[Dict[str, int]] = None
+    saw_tool_step: bool = False
+    post_tool_text: str = ""
+    saw_error_step: bool = False
+    saw_error_after_response: bool = False
 
 
 class AntigravityEventAdapter(AgentStreamAdapter):
@@ -72,6 +92,10 @@ class AntigravityEventAdapter(AgentStreamAdapter):
             state.steps.clear()
             state.previous_num_turns = None
             state.previous_usage = None
+            state.saw_tool_step = False
+            state.post_tool_text = ""
+            state.saw_error_step = False
+            state.saw_error_after_response = False
             conversation_id = raw.get("conversation_id")
             state.conversation_id = (
                 conversation_id if isinstance(conversation_id, str) and conversation_id else None
@@ -95,11 +119,12 @@ class AntigravityEventAdapter(AgentStreamAdapter):
         state = raw.get("state")
         if not isinstance(step_index, int) or isinstance(step_index, bool) or step_index < 0:
             return []
+        turn_state = self._usage_state(ctx)
         usage = _usage_counters(raw.get("usage"))
         if usage is not None:
             # ACTIVE and DONE may both carry the same step's snapshot. Replacing
             # it also handles a final snapshot that differs from an early one.
-            self._usage_state(ctx).steps[step_index] = usage
+            turn_state.steps[step_index] = usage
         call_id = f"agy:{ctx.turn_id or 'turn'}:{step_index}"
 
         if step_type == "agent_response":
@@ -110,11 +135,18 @@ class AntigravityEventAdapter(AgentStreamAdapter):
             text = raw.get("text_delta")
             if isinstance(text, str) and text:
                 self._append_text_delta(ctx, text)
+                turn_state.post_tool_text += text
+                if is_substantive_answer(turn_state.post_tool_text):
+                    turn_state.saw_error_after_response = False
                 events.append(ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": text}))
         elif step_type == "tool":
             raw_info = raw.get("tool_info")
             tool_info: Dict[str, Any] = raw_info if isinstance(raw_info, dict) else {}
             name = raw.get("tool_name") or tool_info.get("name") or "tool"
+            if state in {"ACTIVE", "DONE"}:
+                turn_state.saw_tool_step = True
+                turn_state.post_tool_text = ""
+                turn_state.saw_error_after_response = False
             if state == "ACTIVE":
                 args = tool_info.get("parameters", {})
                 if not isinstance(args, dict):
@@ -146,6 +178,9 @@ class AntigravityEventAdapter(AgentStreamAdapter):
                         call_id=call_id,
                     )
                 )
+        elif step_type == "error_message" or state == "ERROR":
+            turn_state.saw_error_step = True
+            turn_state.saw_error_after_response = True
         return events
 
     # ── result ──────────────────────────────────────────────────────────────
@@ -178,14 +213,35 @@ class AntigravityEventAdapter(AgentStreamAdapter):
                         denied_names.append(str(label))
         headless_denied = bool(denied_names) and not response_text.strip()
 
+        turn_state = self._usage_state(ctx)
         if response_text:
             suffix = self._reconcile_text(ctx, response_text)
             if suffix:
                 self._append_text_delta(ctx, suffix)
+                turn_state.post_tool_text += suffix
                 events.append(ctx.event(AgentStreamEventType.TEXT_DELTA, {"text": suffix}))
 
+        has_substantive_final_reply = is_substantive_answer(
+            turn_state.post_tool_text
+            if turn_state.saw_tool_step
+            else (turn_state.post_tool_text or response_text)
+        )
+        raw_error = result.get("error")
+        error_text = raw_error.strip() if isinstance(raw_error, str) else ""
+
         status_value = str(result.get("status", "")).upper()
-        if status_value == "ERROR" or headless_denied:
+        if (
+            status_value == "ERROR"
+            and not headless_denied
+            and _is_recovered_turn_result_error(
+                error_text,
+                has_substantive_final_reply=has_substantive_final_reply,
+                saw_error_step=turn_state.saw_error_step,
+                saw_error_after_response=turn_state.saw_error_after_response,
+            )
+        ):
+            status = "completed"
+        elif status_value == "ERROR" or headless_denied:
             if headless_denied:
                 tools = ", ".join(dict.fromkeys(denied_names)) or "a tool"
                 message = (
@@ -193,9 +249,7 @@ class AntigravityEventAdapter(AgentStreamAdapter):
                     "permission. Enable Solo Mode for this Chat (auto-approves tools) and retry."
                 )
             else:
-                message = result.get("error") or "Antigravity turn failed"
-                if not isinstance(message, str) or not message.strip():
-                    message = "Antigravity turn failed"
+                message = error_text or "Antigravity turn failed"
                 message = _actionable_headless_error(message)
             events.append(ctx.event(AgentStreamEventType.ERROR, {"message": message}))
             status = "failed"
@@ -238,6 +292,10 @@ class AntigravityEventAdapter(AgentStreamAdapter):
             # the next turn. Conversation totals survive ordinary turn changes.
             state.turn_key = turn_key
             state.steps.clear()
+            state.saw_tool_step = False
+            state.post_tool_text = ""
+            state.saw_error_step = False
+            state.saw_error_after_response = False
         return state
 
     def _turn_usage(
@@ -278,7 +336,52 @@ class AntigravityEventAdapter(AgentStreamAdapter):
         state.previous_num_turns = num_turns
         state.previous_usage = cumulative
         state.steps.clear()
+        state.saw_tool_step = False
+        state.post_tool_text = ""
+        state.saw_error_step = False
+        state.saw_error_after_response = False
         return _normalize_usage(usage) if usage is not None else None
+
+
+def _is_recovered_turn_result_error(
+    error_message: str,
+    *,
+    has_substantive_final_reply: bool,
+    saw_error_step: bool,
+    saw_error_after_response: bool,
+) -> bool:
+    """Whether ``result`` carries a stale/recovered error after a completed reply.
+
+    ``agy``'s ``steps.BuildJSONOutput`` scans the entire conversation trajectory
+    via ``LastStepError`` even when ``runTurn`` succeeded and called
+    ``EmitFinal("SUCCESS")``. Any earlier ``step_type=17`` retry step (such as
+    ``API error (attempt 1): ... streamGenerateContent?alt=sse: EOF`` or
+    ``API error (attempt 1): ... stream idle timeout``) therefore overwrites
+    ``result.status`` to ``"ERROR"`` on that turn and every subsequent turn in
+    the conversation.
+
+    We suppress the false trailing error only when:
+    1. The turn delivered a substantive final reply (post-tool when tools ran),
+    2. ``agy`` did not mark the reply as truncated (``(response may be truncated)``),
+    3. No unrecovered ``error_message`` step occurred after the final
+       ``agent_response`` step, and
+    4. The error is a transient ``API error (attempt N): ...`` retry notice, a
+       trailing ``streamGenerateContent`` EOF after the full reply, or a
+       historical trajectory error from an earlier step/turn
+       (``not saw_error_step or not saw_error_after_response``) with a
+       recoverable retry/stream error signature.
+    """
+    if not has_substantive_final_reply or not error_message:
+        return False
+    if error_message.endswith(_TRUNCATED_RESPONSE_SUFFIX):
+        return False
+    if saw_error_after_response:
+        return False
+    if _TRANSIENT_RETRY_ERROR_RE.match(error_message):
+        return True
+    if _STREAM_GENERATE_EOF_RE.search(error_message):
+        return True
+    return False
 
 
 def _usage_counters(raw: Any) -> Optional[Dict[str, int]]:

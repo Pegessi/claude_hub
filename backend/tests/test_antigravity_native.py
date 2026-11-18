@@ -253,6 +253,311 @@ def test_adapter_result_error() -> None:
     assert out[1].payload["status"] == "failed"
 
 
+def test_adapter_suppresses_reproduced_1105_false_trailing_api_error_after_completed_reply() -> (
+    None
+):
+    # Exact reproduction of the 2026-11-18 11:05-11:06 CST turn
+    # (ebf25788-1524-45ca-92fd-6e04683c848c in tab 7f02320d-538b-4024-bab5-2dcf91ce8d97):
+    # 4 tool steps (1247, 1248, 1249, 1251), streamed final answer at step 1252,
+    # followed by result with status="ERROR", finished_reason="error", and the stale
+    # Turn-1 step 17 error:
+    # 'API error (attempt 1): request failed: Post "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse": EOF'
+    ad = AntigravityEventAdapter()
+    ctx = _ctx("ebf25788-1524-45ca-92fd-6e04683c848c")
+    full_reply = (
+        "红框里的 `b2-t256`（`B=2`）和 `b4-t3000-partial`（`B=4`）在 **Prefill Stage Breakdown** 表中 "
+        "`Attn (μs)`、`MoE (μs)`、`Attn%`、`MoE%` 显示为 `n/a`，原因有两层：\n\n"
+        "### 1. 直接原因：这两条 trace 里没有 `forward_ step` NVTX 区间\n"
+        "因此没有任何 kernel 落入 `in_fwd` 窗口。"
+    )
+    stale_eof_error = (
+        "API error (attempt 1): request failed: Post "
+        '"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse": EOF'
+    )
+    records = [
+        {"event": "init", "conversation_id": "5168cb90-af14-4d60-a821-d00fcb247a2a"},
+        _tool_step(1247, "ACTIVE"),
+        _tool_step(1247, "DONE", output=""),
+        _tool_step(1248, "ACTIVE"),
+        _tool_step(1248, "DONE", output="324 lines, 14753 bytes"),
+        _tool_step(1249, "ACTIVE"),
+        _tool_step(1249, "DONE", output="Command exited with code 0."),
+        _tool_step(1251, "ACTIVE"),
+        _tool_step(1251, "DONE", output="236 lines, 10945 bytes"),
+        {
+            "event": "step_update",
+            "step_update": {
+                "step_index": 1252,
+                "state": "ACTIVE",
+                "step_type": "agent_response",
+                "text_delta": full_reply[:40],
+            },
+        },
+        {
+            "event": "step_update",
+            "step_update": {
+                "step_index": 1252,
+                "state": "DONE",
+                "step_type": "agent_response",
+                "text_delta": full_reply[40:],
+                "usage": {
+                    "input_tokens": 291789,
+                    "cache_read_tokens": 568983,
+                    "output_tokens": 2851,
+                    "thinking_tokens": 1619,
+                    "total_tokens": 294640,
+                },
+            },
+        },
+        {
+            "event": "result",
+            "result": {
+                "conversation_id": "5168cb90-af14-4d60-a821-d00fcb247a2a",
+                "status": "ERROR",
+                "finished_reason": "error",
+                "response": full_reply,
+                "error": stale_eof_error,
+                "num_turns": 3,
+                "usage": {
+                    "input_tokens": 5000000,
+                    "cache_read_tokens": 120000000,
+                    "output_tokens": 540000,
+                    "thinking_tokens": 235000,
+                    "total_tokens": 5540000,
+                },
+            },
+        },
+    ]
+    events = [e for r in records for e in ad.normalize_line(r, ctx)]
+    assert [e.type.value for e in events if e.type == AgentStreamEventType.ERROR] == []
+    text = "".join(e.payload["text"] for e in events if e.type == AgentStreamEventType.TEXT_DELTA)
+    assert text == full_reply
+    completed = events[-1]
+    assert completed.type == AgentStreamEventType.TURN_COMPLETED
+    assert completed.payload["status"] == "completed"
+    assert completed.payload["usage"]["total"] == 294640
+
+
+def test_adapter_suppresses_in_turn_retry_error_step_when_followed_by_completed_reply() -> None:
+    # Turn 1 scenario (e.g. step 17 error_message followed by step 18..28 retry + full reply):
+    # PollPrintmode emits step_update(step_type="error_message", state="ERROR") mid-turn,
+    # then agy retries and emits tool steps + final agent_response, and BuildJSONOutput
+    # still stamps result.status="ERROR" with the attempt-1 error.
+    ad = AntigravityEventAdapter()
+    ctx = _ctx("turn-with-in-turn-retry")
+    records = [
+        {"event": "init", "conversation_id": "conv-retry"},
+        _tool_step(16, "ACTIVE"),
+        _tool_step(16, "DONE", output="Command exited with code 0."),
+        {
+            "event": "step_update",
+            "step_update": {
+                "step_index": 17,
+                "state": "ERROR",
+                "step_type": "error_message",
+            },
+        },
+        _tool_step(19, "ACTIVE"),
+        _tool_step(19, "DONE", output="Command exited with code 0."),
+        {
+            "event": "step_update",
+            "step_update": {
+                "step_index": 28,
+                "state": "DONE",
+                "step_type": "agent_response",
+                "text_delta": "已完整拉取并梳理了会话。",
+            },
+        },
+        {
+            "event": "result",
+            "result": {
+                "conversation_id": "conv-retry",
+                "status": "ERROR",
+                "finished_reason": "error",
+                "response": "已完整拉取并梳理了会话。",
+                "error": (
+                    "API error (attempt 1): request failed: Post "
+                    '"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse": EOF'
+                ),
+                "num_turns": 1,
+            },
+        },
+    ]
+    events = [e for r in records for e in ad.normalize_line(r, ctx)]
+    assert [e for e in events if e.type == AgentStreamEventType.ERROR] == []
+    assert events[-1].type == AgentStreamEventType.TURN_COMPLETED
+    assert events[-1].payload["status"] == "completed"
+
+
+@pytest.mark.parametrize(
+    "retry_error",
+    [
+        'API error (attempt 1): request failed: Post "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse": EOF',
+        "API error (attempt 1): request failed: stream idle timeout (5m0s): context deadline exceeded",
+        'API error (attempt 2): request failed: Post "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse": unexpected EOF',
+        'request failed: Post "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse": EOF',
+    ],
+)
+def test_adapter_suppresses_transient_retry_and_stream_eof_variants_after_reply(
+    retry_error: str,
+) -> None:
+    ad = AntigravityEventAdapter()
+    ctx = _ctx("variant-turn")
+    records = [
+        {
+            "event": "step_update",
+            "step_update": {
+                "step_index": 2,
+                "state": "DONE",
+                "step_type": "agent_response",
+                "text_delta": "Complete answer delivered.",
+            },
+        },
+        {
+            "event": "result",
+            "result": {
+                "status": "ERROR",
+                "response": "Complete answer delivered.",
+                "error": retry_error,
+            },
+        },
+    ]
+    events = [e for r in records for e in ad.normalize_line(r, ctx)]
+    assert [e for e in events if e.type == AgentStreamEventType.ERROR] == []
+    assert events[-1].payload["status"] == "completed"
+
+
+def test_adapter_surfaces_error_when_turn_produces_no_answer_or_fails_after_tool() -> None:
+    ad = AntigravityEventAdapter()
+    eof_err = (
+        "API error (attempt 1): request failed: Post "
+        '"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse": EOF'
+    )
+    # 1. Empty reply: genuine turn failure must surface ERROR.
+    empty_out = ad.normalize_line(
+        {
+            "event": "result",
+            "result": {"status": "ERROR", "response": "", "error": eof_err},
+        },
+        _ctx("empty-turn"),
+    )
+    assert [e.type.value for e in empty_out] == ["error", "turn_completed"]
+    assert empty_out[0].payload["message"] == eof_err
+    assert empty_out[1].payload["status"] == "failed"
+
+    # 2. Pre-tool text followed by a tool call and then failure with no post-tool reply:
+    # pre-tool preamble must NOT mask a post-tool failure.
+    post_tool_fail_ctx = _ctx("post-tool-fail")
+    records = [
+        {
+            "event": "step_update",
+            "step_update": {
+                "step_index": 1,
+                "state": "DONE",
+                "step_type": "agent_response",
+                "text_delta": "Let me check that file first.",
+            },
+        },
+        _tool_step(2, "ACTIVE"),
+        _tool_step(2, "DONE", output="Command exited with code 0."),
+        {
+            "event": "step_update",
+            "step_update": {
+                "step_index": 3,
+                "state": "ERROR",
+                "step_type": "error_message",
+            },
+        },
+        {
+            "event": "result",
+            "result": {
+                "status": "ERROR",
+                "response": "Let me check that file first.",
+                "error": eof_err,
+            },
+        },
+    ]
+    events = [e for r in records for e in ad.normalize_line(r, post_tool_fail_ctx)]
+    error_events = [e for e in events if e.type == AgentStreamEventType.ERROR]
+    assert len(error_events) == 1
+    assert error_events[0].payload["message"] == eof_err
+    assert events[-1].payload["status"] == "failed"
+
+
+def test_adapter_surfaces_truncated_response_and_post_response_error_step() -> None:
+    ad = AntigravityEventAdapter()
+    # 1. agy postResponseFailure appends "(response may be truncated)" when an
+    # error step occurred after partial output.
+    truncated_ctx = _ctx("truncated")
+    truncated_err = (
+        "API error (attempt 1): request failed: Post "
+        '"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse": EOF '
+        "(response may be truncated)"
+    )
+    records = [
+        {
+            "event": "step_update",
+            "step_update": {
+                "step_index": 1,
+                "state": "DONE",
+                "step_type": "agent_response",
+                "text_delta": "Partial answer before cut",
+            },
+        },
+        {
+            "event": "result",
+            "result": {
+                "status": "ERROR",
+                "response": "Partial answer before cut",
+                "error": truncated_err,
+            },
+        },
+    ]
+    events = [e for r in records for e in ad.normalize_line(r, truncated_ctx)]
+    assert [e.type.value for e in events] == ["text_delta", "error", "turn_completed"]
+    assert events[1].payload["message"] == truncated_err
+    assert events[2].payload["status"] == "failed"
+
+    # 2. An error_message step emitted AFTER the last agent_response step without
+    # any subsequent recovery response must surface as failed.
+    unrecovered_ctx = _ctx("unrecovered")
+    unrecovered_records = [
+        {
+            "event": "step_update",
+            "step_update": {
+                "step_index": 1,
+                "state": "DONE",
+                "step_type": "agent_response",
+                "text_delta": "Initial response",
+            },
+        },
+        {
+            "event": "step_update",
+            "step_update": {
+                "step_index": 2,
+                "state": "ERROR",
+                "step_type": "error_message",
+            },
+        },
+        {
+            "event": "result",
+            "result": {
+                "status": "ERROR",
+                "response": "Initial response",
+                "error": (
+                    "API error (attempt 1): request failed: Post "
+                    '"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse": EOF'
+                ),
+            },
+        },
+    ]
+    unrecovered_events = [
+        e for r in unrecovered_records for e in ad.normalize_line(r, unrecovered_ctx)
+    ]
+    assert [e.type.value for e in unrecovered_events] == ["text_delta", "error", "turn_completed"]
+    assert unrecovered_events[-1].payload["status"] == "failed"
+
+
 def test_adapter_headless_denied_action_is_actionable_failure() -> None:
     # agy headless auto-denies a tool: SUCCESS + denied_actions + empty response.
     ad = AntigravityEventAdapter()

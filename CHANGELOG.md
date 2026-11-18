@@ -7,6 +7,11 @@
 
 ## Released
 
+### fix(antigravity): suppress false trailing API error banners after completed replies
+
+- Track per-turn tool/response/error step ordering (`saw_tool_step`, `post_tool_text`, `saw_error_step`, `saw_error_after_response`) in `AntigravityEventAdapter` (`services/agent_stream/antigravity_events.py`) and suppress false `result.status = "ERROR"` banners when `agy`'s `steps.BuildJSONOutput` / `LastStepError` contaminates a completed turn's `result` with an earlier recovered `API error (attempt N): ...` retry notice or trailing `streamGenerateContent` EOF.
+- Preserve genuine failure surfacing when a turn produces no substantive post-tool reply, when `agy` marks the response with `(response may be truncated)`, or when an unrecovered `error_message` step occurs after the last `agent_response` step (`tests/test_antigravity_native.py`).
+
 ### fix(patrol): fix Feishu @mention proactive patrol pipeline (RC1-RC6) for live `lark-cli` output
 
 - Format `lark-cli im +messages-search` `--start` and `--end` flags with second precision (`isoformat(timespec="seconds")`) in the configured patrol timezone, floor `_search_start()` to the minute so minute-precision `create_time` boundaries never drop messages, and surface sanitized CLI `stderr`/JSON error details on `CommandError` while failing closed on unrecognized structures and redacting quoted sensitive keys and URL userinfo (`services/demand_patrol/feishu_triage.py`, `services/demand_patrol/commands.py`).
