@@ -2,25 +2,48 @@
 
 ## Problem & Investigation
 
-When authenticating `lark-cli` for the personal Feishu `/ai` command on `[redacted]` (`[redacted]`) / `[redacted]` (`[redacted]`), Feishu device verification rejected `im:message.send_as_user` because the scope is not enabled in the Feishu Developer Console.
+When authenticating `lark-cli` for the personal Feishu `/ai` command on `[redacted]` (`[redacted]`) / `[redacted]` (`[redacted]`) / `[redacted]` (`[redacted]`), Feishu device verification rejected `im:message.send_as_user` because that user-identity send scope is not enabled in the Feishu Developer Console.
 
-### Verified Findings
+### Verified Findings (Sanitized Probe & Codebase Evidence)
 
-1. **Direct Feishu OpenAPI behavior (`user_access_token` with `im:message` only)**:
-   - Calling `POST /open-apis/im/v1/messages` or `POST /open-apis/im/v1/messages/:message_id/reply` with a `user_access_token` that has `im:message` (plus 74 other scopes) but lacks `im:message.send_as_user` returns HTTP 400 `{"code": 230027, "msg": "Lack of necessary permissions, ext=requires im:message.send_as_user scope."}` from Feishu's server before message validation.
-   - Querying `GET /open-apis/application/v6/scopes` for all three configured apps (`[redacted]` `[redacted]`, `[redacted]` `[redacted]`, `[redacted]` `[redacted]`) confirmed none of them has `im:message.send_as_user` enabled in the Feishu Developer Console (`im:message.send_as_user` is also listed in `lark-cli`'s internal `recommend.deny` list). However, all three apps have `im:message:send_as_bot` active.
+1. **Direct Feishu OpenAPI & `lark-cli` behavior with `user_access_token` (`im:message` only)**:
+   - **Local `lark-cli` keychain & binary inspection**:
+     - `~/.lark-cli/config.json` and `~/.local/share/lark-cli/` contain encrypted user tokens (`token_cli_a9f715f8d6b89bcb_ou_a24354b644a3bef61a41bd05f07c1aac.enc` with 75 granted user scopes including `im:message`, `im:chat:read`, `im:chat.members:write_only`, and `im:message.reactions:write_only`; `token_cli_aa47b1efcd78dbdb_ou_e6c73de7313bf222d1951de75ef2c2ba.enc` with 210 granted user scopes) and AES-256-GCM encrypted bot secrets (`appsecret_cli_a9f715f8d6b89bcb.enc`, `appsecret_cli_aa47b1efcd78dbdb.enc`).
+     - Inspecting the `lark-cli` v1.1.0 binary (`~/.nvm/versions/node/v24.21.0/lib/node_modules/@larksuite/cli/bin/lark-cli`) confirmed that `lark-cli im +messages-send --as user` and `im +messages-reply --as user` call `POST /open-apis/im/v1/messages` and `POST /open-apis/im/v1/messages/:message_id/reply` with `user_access_token`, and that `im:message.send_as_user` is explicitly placed in `lark-cli`'s internal `recommend.deny` scope list (`cmd/lark-cli/scope_DefaultScopeSet.go`).
+   - **Sanitized live OpenAPI probe receipts**:
+     - Calling `POST https://open.feishu.cn/open-apis/im/v1/messages/om_invalid_dry_run_probe/reply` with the live `user_access_token` (`[redacted]`, 75 scopes including `im:message` but without `im:message.send_as_user`) returned HTTP 400 before message ID validation:
+       ```json
+       {
+         "code": 230027,
+         "msg": "Lack of necessary permissions, ext=requires im:message.send_as_user scope.",
+         "error": {
+           "permission_violations": [
+             {"type": "action_scope_required", "subject": "im:message.send_as_user"}
+           ]
+         }
+       }
+       ```
+     - Querying `GET https://open.feishu.cn/open-apis/application/v6/scopes` with each app's `tenant_access_token` confirmed that none of `[redacted]` (`[redacted]`, 284 active scopes), `[redacted]` (`[redacted]`, 666 active scopes), or `[redacted]` (`[redacted]`, 7 active scopes) has `im:message.send_as_user` enabled in the Feishu Developer Console, whereas all three apps have `im:message:send_as_bot` (`scope_status=1`) active.
 
 2. **How internal `openlark` / `lark-desk` / `lark-bridge` send `> 🤖 AI 代答，仅供参考` replies**:
-   - The public GitHub Rust crate `foxzool/openlark` is an unrelated OpenAPI wrapper.
-   - Internal ByteDance Codebase (`[redacted]`) repositories producing the `> 🤖 AI 代答，仅供参考` footer (`[redacted]` `mew/plugin/openlark-standin`, `[redacted]` `extensions/lark-desk`, and `[redacted]` `extensions/lark-bridge`) send messages as the user via either:
-     - an internal **OpenLark** local client daemon (`http://127.0.0.1:8081/agent/v1` or `:8095/agent/v1` `/messages/:id/replies`), or
-     - **`LarkAgentX` / `lark-desk`** Feishu web gateway protobuf calls (`https://internal-api-lark-api.feishu.cn/im/gateway/` using a QR web session in `~/.larkx/credentials.json`),
-     while using `lark-cli` strictly for reading/searching messages.
+   - The public GitHub Rust crate `foxzool/openlark` is an unrelated third-party OpenAPI SDK wrapper.
+   - Internal ByteDance Codebase (`[redacted]`) repositories producing the `> 🤖 AI 代答，仅供参考` personal reply footer were verified at pinned revisions:
+     - `[redacted]` (`branch=master`, file `mew/plugin/openlark-standin/src/channel.ts` lines 76–135 and `mew/plugin/openlark-standin/skills/openlark/SKILL.md` lines 1–90): connects to a local **OpenLark** desktop daemon (`http://127.0.0.1:8081/agent/v1` or `http://127.0.0.1:8095/agent/v1`) and posts replies via `POST /agent/v1/messages/:messageId/replies` (`client.replyMessage(targetMessageId, { type: "post", text: replyText })`).
+     - `[redacted]` (`branch=main`, file `extensions/lark-desk/index.ts` lines 1–48 and `extensions/lark-desk/src/send.ts` lines 1–95) and `[redacted]` (`branch=master`, file `extensions/lark-bridge/index.ts` lines 1–65): use `lark-cli` strictly for reading/searching messages while sending personal replies via **`LarkAgentX`** (`https://internal-api-lark-api.feishu.cn/im/gateway/`, command `PUT_MESSAGE=5` protobuf over an authenticated Feishu web session stored in `~/.larkx/credentials.json` via `larkx login` QR scan).
+   - **Chosen architectural strategy for Claude Hub**:
+     - Neither the local OpenLark desktop daemon (`127.0.0.1:8081`/`8095`) nor `~/.larkx/credentials.json` is installed on this host, whereas the user already has valid `lark-cli` user tokens (`im:message`, `im:message.reactions:write_only`) and bot `app_secret` credentials (`im:message:send_as_bot`) for the bound app.
+     - Claude Hub therefore uses a **hybrid single-app user-read/react + bot-send fallback**: when `im:message.send_as_user` is granted, `/ai` sends directly with `user_access_token` (`send_mode="user"`); when `im:message.send_as_user` is absent, `/ai` reads chat context and posts/removes `OnIt`/`DONE` reactions as the authenticated user via `user_access_token`, and sends the interim/final `/ai` reply via the single bound app's bot `tenant_access_token` (`send_mode="bot_fallback"`).
 
-## Solution
+## Solution & Safety Boundaries
 
-- Removed `im:message.send_as_user` from `RECOMMENDED_AI_COMMAND_SCOPES` so `lark-cli auth login` commands work on apps without `im:message.send_as_user`.
-- Added `_pool_bot_secret_state()`, `resolve_app_secret_for_app()`, and `resolve_fallback_bot_configs()` on `FeishuUserTokenStore` (`backend/claude_hub/services/feishu_user_token_store.py`) to resolve the bot `app_secret` strictly for the single selected/authorized `/ai` app (`record.app_id` or `preferred_app_id`) from the token record, `lark-cli` encrypted keychain (`appsecret_<appId>.enc`), or an enabled `FeishuBotPoolStore` bot, while rejecting disabled pool bots and never sweeping unrelated pool bots or other stored user-token records.
-- Updated `evaluate_scope_preflight()`, `require_send_as_user_scope()`, `send_as_user()`, `reply_as_user()`, and `FeishuAiCommandService.handle_message()` (`backend/claude_hub/services/feishu_user_client.py`, `backend/claude_hub/services/feishu_ai_command.py`), plus `FeishuBotSettingsDialog.vue` and `feishuBotConfig.ts`, so:
-  - `can_send_as_user` truthfully reports whether `im:message.send_as_user` is granted on the user token, while `can_send` (`send_mode="bot_fallback"`) reports operational readiness when bot fallback is available for the bound app.
-  - `/ai` reads context and adds/deletes emoji reactions (`OnIt` / `DONE`) using the user's token (`im:message`, `im:message.reactions:write_only`) and sends/replies via the single authorized bot `tenant_access_token` without cross-identity retries on uncertain delivery or unrequested group-membership mutations (`auto_invite_bot_to_chat=False` by default).
+- **Scope preflight & token import (`backend/claude_hub/services/feishu_user_token_store.py`)**:
+  - Removed `im:message.send_as_user` from `RECOMMENDED_AI_COMMAND_SCOPES` so `lark-cli auth login` commands succeed on apps without `im:message.send_as_user`.
+  - Added `_pool_bot_secret_state()`, `resolve_app_secret_for_app()`, and `resolve_fallback_bot_configs()` on `FeishuUserTokenStore` to resolve the bot `app_secret` strictly for the single selected/authorized `/ai` app (`record.app_id` or `preferred_app_id`) from the token record, `lark-cli` encrypted keychain (`appsecret_<appId>.enc`), or an enabled `FeishuBotPoolStore` bot.
+  - **Revocation tombstone & fail-closed pool state (`backend/claude_hub/services/bot_pool/store.py`, `feishu_user_token_store.py`)**: `FeishuBotPoolStore.delete_bot()` preserves `app_id` on secret-free tombstones (`revoked_at`), and `_pool_bot_secret_state()` checks both active pool bots and raw tombstoned entries while failing closed (`(False, "")`) on any `FeishuBotPoolStore` read/state error so disabled, deleted, or unreadable pool bots never re-enable cached secrets.
+- **Single-identity reply receipt validation & uncertain-delivery handling (`backend/claude_hub/services/feishu_user_client.py`, `backend/claude_hub/services/feishu_ai_command.py`)**:
+  - `FeishuUserClient.reply_as_user()` and `_reply_via_bot_fallback()` validate that `FeishuReplyReceipt.message_id` is a non-empty string via `_require_reply_receipt_identity()`, raising `FeishuDeliveryUncertainError` when Feishu returns HTTP 200 without a `message_id`.
+  - `FeishuAiCommandService.handle_message()` validates interim and final reply receipts, never switches identities after ambiguous delivery errors, and avoids posting a duplicate error fallback reply or `DONE` reaction when final reply delivery is uncertain (`FeishuDeliveryUncertainError` or `httpx.TimeoutException`).
+  - Default `auto_invite_bot_to_chat=False` prevents unrequested group membership mutations on `230002`.
+- **Truthful Settings UI & browser acceptance (`frontend/src/features/feishu-bot/FeishuBotSettingsDialog.vue`, `frontend/tests/feishuBotSettingsBehavior.test.mjs`, `frontend/tests/browser_feishu_bot_components.py`)**:
+  - `FeishuScopePreflightResult` separates `can_send_as_user` (`has_send_as_user_scope`) from `can_send` / `can_send_via_bot` / `send_mode` (`"user" | "bot_fallback" | "none"`).
+  - `FeishuBotSettingsDialog.vue` renders `Scope ready` (`send_mode="user"`), `Bot fallback (<fallback_bot_app_id>)` (`send_mode="bot_fallback"`, displaying both the user identity and fallback bot app ID), and `Missing send_as_user` (`send_mode="none"`, surfacing `remediation_steps[0]` and `auth_login_command`), verified by unit tests and the real Playwright browser harness across desktop (`1280x900`), narrow (`720x900`), and mobile (`390x844`) viewports.

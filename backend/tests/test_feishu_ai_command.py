@@ -2051,7 +2051,11 @@ async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
                 200,
                 json={
                     "code": 0,
-                    "data": {"message_id": "om_c4_send", "items": [], "has_more": False},
+                    "data": {
+                        "message_id": "om_c4_send",
+                        "items": [],
+                        "has_more": False,
+                    },
                 },
             )
         if request.url.path.endswith("/app_access_token/internal"):
@@ -2333,7 +2337,11 @@ async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
             {
                 "currentApp": "secondary",
                 "apps": [
-                    {"appId": "cli_c4", "name": "primary", "users": [{"userOpenId": "ou_c4"}]},
+                    {
+                        "appId": "cli_c4",
+                        "name": "primary",
+                        "users": [{"userOpenId": "ou_c4"}],
+                    },
                     {
                         "appId": "cli_other",
                         "name": "secondary",
@@ -2523,7 +2531,10 @@ async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
                         {
                             "name": "primary",
                             "appId": "cli_pt",
-                            "appSecret": {"source": "keychain", "id": "appsecret:cli_pt"},
+                            "appSecret": {
+                                "source": "keychain",
+                                "id": "appsecret:cli_pt",
+                            },
                             "scope": "im:message",
                             "users": [
                                 {"userOpenId": "ou_pt_first", "userName": "First User"},
@@ -2711,7 +2722,11 @@ async def test_bot_fallback_reply_send_and_auto_invite_without_send_as_user(
     """User token with im:message (no im:message.send_as_user) sends/replies via single authorized bot fallback."""
     import time
 
-    from claude_hub.services.feishu_bot import FeishuBotConfig, FeishuBotError, FeishuBotRemoteError
+    from claude_hub.services.feishu_bot import (
+        FeishuBotConfig,
+        FeishuBotError,
+        FeishuBotRemoteError,
+    )
     from claude_hub.services.feishu_bot_pool import FeishuBotPoolStore
 
     cli_cfg = tmp_path / "fb_cli_cfg"
@@ -2824,7 +2839,10 @@ async def test_bot_fallback_reply_send_and_auto_invite_without_send_as_user(
             if not bot_in_chat:
                 return httpx.Response(
                     400,
-                    json={"code": 230002, "msg": "Bot/User can NOT be out of the chat."},
+                    json={
+                        "code": 230002,
+                        "msg": "Bot/User can NOT be out of the chat.",
+                    },
                 )
             return httpx.Response(
                 200,
@@ -2842,7 +2860,10 @@ async def test_bot_fallback_reply_send_and_auto_invite_without_send_as_user(
             if not bot_in_chat:
                 return httpx.Response(
                     400,
-                    json={"code": 230002, "msg": "Bot/User can NOT be out of the chat."},
+                    json={
+                        "code": 230002,
+                        "msg": "Bot/User can NOT be out of the chat.",
+                    },
                 )
             return httpx.Response(
                 200,
@@ -2936,12 +2957,19 @@ async def test_bot_fallback_reply_send_and_auto_invite_without_send_as_user(
         assert send_res["message_id"] == "om_bot_send_1"
         assert send_res["send_mode"] == "bot_fallback"
 
-        # F2: Post-accept timeout or missing receipt raises immediately without switching/retrying another bot
+        # F2 / R2: Post-accept timeout or missing receipt raises immediately without switching/retrying another bot
         simulate_timeout = True
         before_calls = len(calls)
         with pytest.raises(httpx.ReadTimeout):
             await user_client.send_as_user("oc_group_fb", "text", {"text": "timeout-msg"})
         assert len(calls) == before_calls + 1
+        with pytest.raises(httpx.ReadTimeout):
+            await user_client.reply_as_user(
+                "om_trigger_fb",
+                "post",
+                {"zh_cn": {"content": [[{"tag": "text", "text": "timeout-reply"}]]}},
+                chat_id="oc_group_fb",
+            )
         simulate_timeout = False
 
         simulate_missing_id = True
@@ -2949,10 +2977,77 @@ async def test_bot_fallback_reply_send_and_auto_invite_without_send_as_user(
         with pytest.raises(FeishuBotError, match="delivery may have occurred"):
             await user_client.send_as_user("oc_group_fb", "text", {"text": "missing-id-msg"})
         assert len(calls) == before_calls + 1
+        with pytest.raises(FeishuBotError, match="delivery may have occurred"):
+            await user_client.reply_as_user(
+                "om_trigger_fb",
+                "post",
+                {"zh_cn": {"content": [[{"tag": "text", "text": "missing-id-reply"}]]}},
+                chat_id="oc_group_fb",
+            )
+        # R2: handle_message with missing reply receipt must NEVER report completed or send a duplicate error reply
+        msg_missing_receipt = FeishuUserMessage(
+            message_id="om_trigger_missing_receipt",
+            chat_id="oc_group_fb",
+            sender_open_id="ou_fb",
+            sender_type="user",
+            msg_type="text",
+            text="/ai test missing reply receipt",
+            create_time_ms=int(time.time() * 1000),
+        )
+        res_missing = await svc.handle_message(msg_missing_receipt, source="ws")
+        assert res_missing.status == "failed"
+        assert "delivery may have occurred" in (res_missing.reason or "")
+        assert res_missing.final_message_id is None
         simulate_missing_id = False
 
-        # F1: If cli_fb is registered in FeishuBotPoolStore and disabled, fallback is rejected even when keychain has secret
-        pool = FeishuBotPoolStore(path=tmp_path / "fb_pool.json")
+        # R2: Also verify final reply missing receipt (when interim reply succeeds but final reply returns empty data={})
+        reply_attempt = 0
+        orig_handler = handler
+
+        def final_missing_handler(request: httpx.Request) -> httpx.Response:
+            nonlocal reply_attempt
+            if request.url.path.endswith("/reply"):
+                reply_attempt += 1
+                if reply_attempt >= 2:
+                    calls.append(
+                        (
+                            request.method,
+                            request.url.path,
+                            request.headers.get("Authorization", ""),
+                            (
+                                json.loads(request.content.decode("utf-8"))
+                                if request.content
+                                else {}
+                            ),
+                        )
+                    )
+                    return httpx.Response(200, json={"code": 0, "data": {"message_id": "   "}})
+            return orig_handler(request)
+
+        mock_http._transport = httpx.MockTransport(final_missing_handler)
+        msg_final_missing = FeishuUserMessage(
+            message_id="om_trigger_final_missing",
+            chat_id="oc_group_fb",
+            sender_open_id="ou_fb",
+            sender_type="user",
+            msg_type="text",
+            text="/ai test final reply missing receipt",
+            create_time_ms=int(time.time() * 1000),
+        )
+        before_reply_calls = sum(1 for _, p, _, _ in calls if p.endswith("/reply"))
+        res_final_missing = await svc.handle_message(msg_final_missing, source="ws")
+        after_reply_calls = sum(1 for _, p, _, _ in calls if p.endswith("/reply"))
+        assert res_final_missing.status == "failed"
+        assert "delivery may have occurred" in (res_final_missing.reason or "")
+        assert res_final_missing.final_message_id is None
+        # Only 2 reply calls (1 interim + 1 final), no 3rd blind error-fallback reply after uncertain final delivery
+        assert after_reply_calls - before_reply_calls == 2
+        mock_http._transport = httpx.MockTransport(orig_handler)
+
+        # F1 / R1: If cli_fb is registered in FeishuBotPoolStore and disabled, fallback is rejected even when keychain has secret
+        pool = FeishuBotPoolStore(
+            path=tmp_path / "fb_pool.json", legacy_path=tmp_path / "fb_legacy.json"
+        )
         bot_id = pool.create_bot(
             name="FB Bot",
             config=FeishuBotConfig(app_id="cli_fb", app_secret="fb-bot-secret"),
@@ -2970,5 +3065,37 @@ async def test_bot_fallback_reply_send_and_auto_invite_without_send_as_user(
         assert disabled_pf.send_mode == "none"
         with pytest.raises(FeishuUserScopeError):
             await user_client.send_as_user("oc_group_fb", "text", {"text": "blocked-when-disabled"})
+
+        # R1: Deleting the bot from FeishuBotPoolStore preserves a revoked tombstone and does NOT re-enable cached credentials
+        del_rev = next(b.revision for b in pool.snapshot().bots if b.bot_id == bot_id)
+        pool.delete_bot(bot_id, expected_revision=del_rev)
+        assert store.resolve_fallback_bot_configs(preferred_app_id="cli_fb", record=rec) == []
+        deleted_pf = await user_client.apreflight_scopes(rec)
+        assert deleted_pf.can_send_via_bot is False
+        assert deleted_pf.can_send is False
+        assert deleted_pf.send_mode == "none"
+        with pytest.raises(FeishuUserScopeError):
+            await user_client.send_as_user("oc_group_fb", "text", {"text": "blocked-when-deleted"})
+
+        # R1: If FeishuBotPoolStore state cannot be read (raises FeishuBotPoolStateError), fail closed
+        from claude_hub.services.feishu_bot_pool import FeishuBotPoolStateError
+
+        class _UnreadablePool:
+            def snapshot(self) -> Any:
+                raise FeishuBotPoolStateError("simulated corrupt pool state")
+
+        monkeypatch.setattr(
+            "claude_hub.services.feishu_bot_pool.FeishuBotPoolStore",
+            lambda: _UnreadablePool(),
+        )
+        assert store.resolve_fallback_bot_configs(preferred_app_id="cli_fb", record=rec) == []
+        unreadable_pf = await user_client.apreflight_scopes(rec)
+        assert unreadable_pf.can_send_via_bot is False
+        assert unreadable_pf.can_send is False
+        assert unreadable_pf.send_mode == "none"
+        with pytest.raises(FeishuUserScopeError):
+            await user_client.send_as_user(
+                "oc_group_fb", "text", {"text": "blocked-when-pool-unreadable"}
+            )
     finally:
         await mock_http.aclose()
