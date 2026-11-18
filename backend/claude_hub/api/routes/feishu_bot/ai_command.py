@@ -83,11 +83,16 @@ async def abuild_ai_command_status_payload(
     cfg, preflight = await service.aget_config_and_preflight(
         auto_import_lark_cli=auto_import_lark_cli
     )
+    capabilities = (
+        await service.acapabilities_dict()
+        if hasattr(service, "acapabilities_dict")
+        else service.capabilities_dict()
+    )
     return {
         "config": cfg.to_dict(),
         "token_status": preflight.to_dict(),
         "poller_status": poller.status_dict(),
-        "capabilities": service.capabilities_dict(),
+        "capabilities": capabilities,
     }
 
 

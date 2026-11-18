@@ -192,9 +192,167 @@ async def main(browser_run: BrowserRun) -> None:
                     "antigravity": [],
                 },
                 "provider_models": {
-                    "claude": ["[redacted]"],
-                    "codex": ["gpt-5.4", "o3"],
-                    "maso": ["[redacted]_reasoning_high"],
+                    "claude": ["claude-opus-4-8", "[redacted]"],
+                    "codex": ["gpt-5.4", "[redacted]", "o3"],
+                    "maso": [
+                        "[redacted]_reasoning_high",
+                        "[redacted]_reasoning_high",
+                    ],
+                    "cursor": ["gpt-5.3-codex-high", "claude-4.5-sonnet"],
+                    "antigravity": ["[redacted]-high"],
+                },
+                "provider_model_options": {
+                    "claude": [
+                        {
+                            "id": "claude-opus-4-8",
+                            "label": "claude-opus-4-8",
+                            "provider_model_id": "claude-opus-4-8",
+                        },
+                        {
+                            "id": "[redacted]",
+                            "label": "[redacted]",
+                            "provider_model_id": "[redacted]",
+                        },
+                    ],
+                    "codex": [
+                        {
+                            "id": "gpt-5.4",
+                            "label": "gpt-5.4",
+                            "provider_model_id": "gpt-5.4",
+                            "default_reasoning_effort": "high",
+                            "supported_reasoning_efforts": [
+                                {
+                                    "id": "low",
+                                    "label": "Low",
+                                    "provider_model_id": "gpt-5.4",
+                                },
+                                {
+                                    "id": "high",
+                                    "label": "High",
+                                    "provider_model_id": "gpt-5.4",
+                                },
+                                {
+                                    "id": "xhigh",
+                                    "label": "Extra High",
+                                    "provider_model_id": "gpt-5.4",
+                                },
+                            ],
+                        },
+                        {
+                            "id": "[redacted]",
+                            "label": "[redacted]",
+                            "provider_model_id": "[redacted]",
+                            "default_reasoning_effort": "high",
+                            "supported_reasoning_efforts": [
+                                {
+                                    "id": "high",
+                                    "label": "High",
+                                    "provider_model_id": "[redacted]",
+                                },
+                                {
+                                    "id": "xhigh",
+                                    "label": "Extra High",
+                                    "provider_model_id": "[redacted]",
+                                },
+                                {
+                                    "id": "max",
+                                    "label": "Max",
+                                    "provider_model_id": "[redacted]",
+                                },
+                            ],
+                        },
+                    ],
+                    "maso": [
+                        {
+                            "id": "[redacted]",
+                            "label": "[redacted]",
+                            "provider_model_id": "[redacted]_reasoning_high",
+                            "default_reasoning_effort": "high",
+                            "supported_reasoning_efforts": [
+                                {
+                                    "id": "none",
+                                    "label": "None",
+                                    "provider_model_id": "[redacted]",
+                                },
+                                {
+                                    "id": "low",
+                                    "label": "Low",
+                                    "provider_model_id": "[redacted]",
+                                },
+                                {
+                                    "id": "high",
+                                    "label": "High",
+                                    "provider_model_id": "[redacted]_reasoning_high",
+                                },
+                                {
+                                    "id": "xhigh",
+                                    "label": "Extra High",
+                                    "provider_model_id": "[redacted]_reasoning_xhigh",
+                                },
+                            ],
+                        },
+                        {
+                            "id": "[redacted]",
+                            "label": "[redacted]",
+                            "provider_model_id": "[redacted]_reasoning_high",
+                            "default_reasoning_effort": "high",
+                            "supported_reasoning_efforts": [
+                                {
+                                    "id": "none",
+                                    "label": "None",
+                                    "provider_model_id": "[redacted]",
+                                },
+                                {
+                                    "id": "low",
+                                    "label": "Low",
+                                    "provider_model_id": "[redacted]",
+                                },
+                                {
+                                    "id": "medium",
+                                    "label": "Medium",
+                                    "provider_model_id": "[redacted]_reasoning_medium",
+                                },
+                                {
+                                    "id": "high",
+                                    "label": "High",
+                                    "provider_model_id": "[redacted]_reasoning_high",
+                                },
+                            ],
+                        },
+                    ],
+                    "cursor": [
+                        {
+                            "id": "gpt-5.3-codex",
+                            "label": "gpt-5.3-codex",
+                            "provider_model_id": "gpt-5.3-codex-high",
+                            "default_reasoning_effort": "high",
+                            "supported_reasoning_efforts": [
+                                {
+                                    "id": "low",
+                                    "label": "Low",
+                                    "provider_model_id": "gpt-5.3-codex-low",
+                                },
+                                {
+                                    "id": "high",
+                                    "label": "High",
+                                    "provider_model_id": "gpt-5.3-codex-high",
+                                },
+                            ],
+                        },
+                        {
+                            "id": "claude-4.5-sonnet",
+                            "label": "claude-4.5-sonnet",
+                            "provider_model_id": "claude-4.5-sonnet",
+                            "supported_reasoning_efforts": [],
+                        },
+                    ],
+                    "antigravity": [
+                        {
+                            "id": "[redacted]-high",
+                            "label": "[redacted]-high",
+                            "provider_model_id": "[redacted]-high",
+                        }
+                    ],
                 },
             },
         }
@@ -842,11 +1000,33 @@ async def main(browser_run: BrowserRun) -> None:
             "1. Configure app secret for `cli_unconfigured` (or enable `im:message.send_as_user` in Feishu Developer Console for `cli_unconfigured`)."
         )
         await expect(settings.get_by_test_id("feishu-ai-token-login-cmd")).to_be_visible()
+        model_select = settings.get_by_test_id("feishu-ai-model-input")
+        effort_select = settings.get_by_test_id("feishu-ai-effort-select")
+        # Verify Model control is a real HTML <select> (not a plain text <input>) with logical labels
+        assert await model_select.evaluate("el => el.tagName") == "SELECT"
+        assert await model_select.locator("option").all_text_contents() == [
+            "Provider default",
+            "[redacted]",
+            "[redacted]",
+        ]
         await expect(settings.get_by_test_id("feishu-ai-provider-select")).to_have_value("maso")
-        await expect(settings.get_by_test_id("feishu-ai-model-input")).to_have_value(
-            "[redacted]_reasoning_high"
-        )
-        await expect(settings.get_by_test_id("feishu-ai-effort-select")).to_have_value("high")
+        await expect(model_select).to_have_value("[redacted]_reasoning_high")
+        await expect(effort_select).to_have_value("high")
+        # Switching MASO effort updates the resolved variant value on the logical Model <select>
+        await effort_select.select_option("medium")
+        await expect(model_select).to_have_value("[redacted]_reasoning_medium")
+        # Switching Provider to claude disables effort selection and lists Claude models
+        await settings.get_by_test_id("feishu-ai-provider-select").select_option("claude")
+        await expect(model_select).to_have_value("claude-opus-4-8")
+        await expect(effort_select).to_be_disabled()
+        await expect(effort_select).to_have_value("")
+        # Switching Provider to cursor and selecting a non-effort model disables effort select
+        await settings.get_by_test_id("feishu-ai-provider-select").select_option("cursor")
+        await expect(model_select).to_have_value("gpt-5.3-codex-high")
+        await expect(effort_select).to_be_enabled()
+        await model_select.select_option("claude-4.5-sonnet")
+        await expect(effort_select).to_be_disabled()
+        await expect(effort_select).to_have_value("")
         await expect(settings.get_by_test_id("feishu-ai-cwd-input")).to_have_value(
             "/srv/persisted-ai"
         )
@@ -857,8 +1037,10 @@ async def main(browser_run: BrowserRun) -> None:
         # Edit draft fields, then import ~/.lark-cli token before saving: draft edits must survive
         await settings.get_by_test_id("feishu-ai-enabled-toggle").check()
         await settings.get_by_test_id("feishu-ai-provider-select").select_option("codex")
-        await expect(settings.get_by_test_id("feishu-ai-model-input")).to_have_value("gpt-5.4")
-        await settings.get_by_test_id("feishu-ai-effort-select").select_option("xhigh")
+        await expect(model_select).to_have_value("gpt-5.4")
+        await model_select.select_option("[redacted]")
+        await expect(model_select).to_have_value("[redacted]")
+        await effort_select.select_option("xhigh")
         await settings.get_by_test_id("feishu-ai-cwd-input").fill("/srv/draft-ai")
         await settings.get_by_test_id("feishu-ai-watch-chats-input").fill("oc_chat_1, oc_chat_2")
 
@@ -876,8 +1058,8 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(settings.get_by_test_id("feishu-ai-token-guidance")).to_have_count(0)
         await expect(settings.get_by_test_id("feishu-ai-token-login-cmd")).to_have_count(0)
         await expect(settings.get_by_test_id("feishu-ai-provider-select")).to_have_value("codex")
-        await expect(settings.get_by_test_id("feishu-ai-model-input")).to_have_value("gpt-5.4")
-        await expect(settings.get_by_test_id("feishu-ai-effort-select")).to_have_value("xhigh")
+        await expect(model_select).to_have_value("[redacted]")
+        await expect(effort_select).to_have_value("xhigh")
         await expect(settings.get_by_test_id("feishu-ai-cwd-input")).to_have_value("/srv/draft-ai")
         await expect(settings.get_by_test_id("feishu-ai-watch-chats-input")).to_have_value(
             "oc_chat_1, oc_chat_2"
@@ -899,7 +1081,7 @@ async def main(browser_run: BrowserRun) -> None:
         assert len(ai_patches) == 1
         assert ai_patches[0]["enabled"] is True
         assert ai_patches[0]["provider"] == "codex"
-        assert ai_patches[0]["model"] == "gpt-5.4"
+        assert ai_patches[0]["model"] == "[redacted]"
         assert ai_patches[0]["reasoning_effort"] == "xhigh"
         assert ai_patches[0]["cwd"] == "/srv/draft-ai"
         assert ai_patches[0]["watch_chats"] == ["oc_chat_1", "oc_chat_2"]
@@ -937,6 +1119,12 @@ async def main(browser_run: BrowserRun) -> None:
         assert narrow_settings_box["x"] + narrow_settings_box["width"] <= 721
         assert (
             narrow_ai_box["x"] + narrow_ai_box["width"]
+            <= narrow_settings_box["x"] + narrow_settings_box["width"] + 1
+        )
+        narrow_model_box = await settings.get_by_test_id("feishu-ai-model-input").bounding_box()
+        assert narrow_model_box is not None
+        assert (
+            narrow_model_box["x"] + narrow_model_box["width"]
             <= narrow_settings_box["x"] + narrow_settings_box["width"] + 1
         )
         await page.screenshot(path=str(output / "feishu-ai-command-narrow.png"), full_page=True)
@@ -1006,6 +1194,15 @@ async def main(browser_run: BrowserRun) -> None:
             mobile_ai_box["x"] + mobile_ai_box["width"]
             <= settings_box["x"] + settings_box["width"] + 1
         )
+        mobile_model_select = settings.get_by_test_id("feishu-ai-model-input")
+        mobile_model_box = await mobile_model_select.bounding_box()
+        assert mobile_model_box is not None
+        assert mobile_model_box["x"] >= settings_box["x"]
+        assert (
+            mobile_model_box["x"] + mobile_model_box["width"]
+            <= settings_box["x"] + settings_box["width"] + 1
+        )
+        await expect(mobile_model_select).to_have_value("[redacted]")
         mobile_save_btn = settings.get_by_test_id("feishu-ai-save-btn")
         await mobile_save_btn.scroll_into_view_if_needed()
         await expect(mobile_save_btn).to_be_visible()

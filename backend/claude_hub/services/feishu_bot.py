@@ -453,9 +453,12 @@ class FeishuBotClient:
         *,
         uuid: str | None = None,
         access_token: str | None = None,
+        receive_id_type: str = "chat_id",
     ) -> dict[str, Any]:
         if uuid is not None and (not uuid.strip() or len(uuid) > 50):
             raise FeishuBotError("Feishu message UUID must contain 1–50 characters")
+        if receive_id_type not in {"chat_id", "open_id", "user_id", "union_id", "email"}:
+            raise FeishuBotError(f"Unsupported Feishu receive_id_type: {receive_id_type!r}")
         serialized_content = self._message_content(content)
         token = await self.get_tenant_token() if access_token is None else access_token
         if not token.strip():
@@ -464,7 +467,7 @@ class FeishuBotClient:
             response = await self._request(
                 "POST",
                 "/open-apis/im/v1/messages",
-                params={"receive_id_type": "chat_id"},
+                params={"receive_id_type": receive_id_type},
                 headers={"Authorization": f"Bearer {token}"},
                 json={
                     "receive_id": chat_id,
@@ -514,10 +517,16 @@ class FeishuBotClient:
         *,
         uuid: str | None = None,
         access_token: str | None = None,
+        receive_id_type: str = "chat_id",
     ) -> str:
         """Send a mirror using stable Feishu dedupe UUID and return exact message ID."""
         payload = await self._send_message_payload(
-            chat_id, msg_type, content, uuid=uuid, access_token=access_token
+            chat_id,
+            msg_type,
+            content,
+            uuid=uuid,
+            access_token=access_token,
+            receive_id_type=receive_id_type,
         )
         data = payload.get("data")
         message_id = data.get("message_id") if isinstance(data, dict) else None

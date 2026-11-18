@@ -218,12 +218,29 @@ export interface FeishuAiCommandPollerStatus {
   watermarks_count: number
 }
 
+export interface FeishuAiCommandReasoningEffortOption {
+  id: string
+  label: string
+  description?: string
+  provider_model_id?: string | null
+}
+
+export interface FeishuAiCommandModelOption {
+  id: string
+  label: string
+  description?: string
+  provider_model_id?: string | null
+  default_reasoning_effort?: string | null
+  supported_reasoning_efforts?: FeishuAiCommandReasoningEffortOption[]
+}
+
 export interface FeishuAiCommandCapabilities {
   providers: FeishuAiCommandProvider[]
   reasoning_efforts: string[]
   provider_reasoning_efforts?: Record<string, string[]>
   model_reasoning_efforts?: Record<string, string[]>
   provider_models: Record<string, string[]>
+  provider_model_options?: Record<string, FeishuAiCommandModelOption[]>
 }
 
 export interface FeishuAiCommandStatusResponse {

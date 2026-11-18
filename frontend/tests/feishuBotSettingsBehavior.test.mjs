@@ -800,3 +800,216 @@ test('Personal /ai Assistant truthfully renders user mode, bot fallback with dis
   assert.equal(state.aiSidebarMeta, 'Personal account reply')
   assert.equal(findByTestId(state.$root, 'feishu-ai-token-card')?.props['data-state'], 'connected')
 })
+
+test('Personal /ai Model selector renders Provider-linked logical options, maps persisted variants without false dirty state, syncs efforts, and preserves custom models', async t => {
+  const h = harness(t)
+  let serverCfg = {
+    enabled: true,
+    prefix: '/ai',
+    owner_open_id: 'ou_owner',
+    app_id: 'cli_owner',
+    provider: 'maso',
+    model: '[redacted]_reasoning_high',
+    reasoning_effort: 'high',
+    cwd: '/srv/ai',
+    watch_chats: [],
+    poll_interval_seconds: 15,
+    max_active_chats: 10,
+    max_context_messages: 20,
+    ack_emoji: 'OnIt',
+    done_emoji: 'DONE',
+    footer: '> 🤖 AI 代答，仅供参考',
+    reply_in_thread: true,
+  }
+  const capabilities = {
+    providers: ['claude', 'codex', 'traex', 'maso', 'cursor', 'antigravity'],
+    reasoning_efforts: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+    provider_reasoning_efforts: {
+      claude: [],
+      codex: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+      traex: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+      maso: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      cursor: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+      antigravity: [],
+    },
+    provider_models: {
+      claude: ['claude-opus-4-8', '[redacted]'],
+      codex: ['gpt-5.4', '[redacted]'],
+      maso: ['[redacted]_reasoning_high', '[redacted]_reasoning_high'],
+      cursor: ['gpt-5.3-codex-high', 'claude-4.5-sonnet'],
+      antigravity: ['[redacted]-high'],
+    },
+    provider_model_options: {
+      claude: [
+        { id: 'claude-opus-4-8', label: 'claude-opus-4-8', provider_model_id: 'claude-opus-4-8' },
+        { id: '[redacted]', label: '[redacted]', provider_model_id: '[redacted]' },
+      ],
+      codex: [
+        {
+          id: 'gpt-5.4',
+          label: 'gpt-5.4',
+          provider_model_id: 'gpt-5.4',
+          default_reasoning_effort: 'high',
+          supported_reasoning_efforts: [
+            { id: 'low', label: 'Low', provider_model_id: 'gpt-5.4' },
+            { id: 'high', label: 'High', provider_model_id: 'gpt-5.4' },
+            { id: 'xhigh', label: 'Extra High', provider_model_id: 'gpt-5.4' },
+          ],
+        },
+        {
+          id: '[redacted]',
+          label: '[redacted]',
+          provider_model_id: '[redacted]',
+          default_reasoning_effort: 'high',
+          supported_reasoning_efforts: [
+            { id: 'medium', label: 'Medium', provider_model_id: '[redacted]' },
+            { id: 'high', label: 'High', provider_model_id: '[redacted]' },
+            { id: 'max', label: 'Max', provider_model_id: '[redacted]' },
+          ],
+        },
+      ],
+      maso: [
+        {
+          id: '[redacted]',
+          label: '[redacted]',
+          provider_model_id: '[redacted]_reasoning_high',
+          default_reasoning_effort: 'high',
+          supported_reasoning_efforts: [
+            { id: 'none', label: 'None', provider_model_id: '[redacted]' },
+            { id: 'low', label: 'Low', provider_model_id: '[redacted]' },
+            { id: 'medium', label: 'Medium', provider_model_id: '[redacted]_reasoning_high' },
+            { id: 'high', label: 'High', provider_model_id: '[redacted]_reasoning_high' },
+            { id: 'xhigh', label: 'Extra High', provider_model_id: '[redacted]_reasoning_xhigh' },
+            { id: 'max', label: 'Max', provider_model_id: '[redacted]_reasoning_max' },
+          ],
+        },
+        {
+          id: '[redacted]',
+          label: '[redacted]',
+          provider_model_id: '[redacted]_reasoning_high',
+          default_reasoning_effort: 'high',
+          supported_reasoning_efforts: [
+            { id: 'none', label: 'None', provider_model_id: '[redacted]' },
+            { id: 'low', label: 'Low', provider_model_id: '[redacted]' },
+            { id: 'medium', label: 'Medium', provider_model_id: '[redacted]_reasoning_medium' },
+            { id: 'high', label: 'High', provider_model_id: '[redacted]_reasoning_high' },
+          ],
+        },
+      ],
+      cursor: [
+        {
+          id: 'gpt-5.3-codex',
+          label: 'gpt-5.3-codex',
+          provider_model_id: 'gpt-5.3-codex-high',
+          default_reasoning_effort: 'high',
+          supported_reasoning_efforts: [
+            { id: 'low', label: 'Low', provider_model_id: 'gpt-5.3-codex-low' },
+            { id: 'high', label: 'High', provider_model_id: 'gpt-5.3-codex-high' },
+            { id: 'xhigh', label: 'Extra High', provider_model_id: 'gpt-5.3-codex-xhigh' },
+          ],
+        },
+        {
+          id: 'claude-4.5-sonnet',
+          label: 'claude-4.5-sonnet',
+          provider_model_id: 'claude-4.5-sonnet',
+          supported_reasoning_efforts: [],
+        },
+      ],
+      antigravity: [
+        { id: '[redacted]-high', label: '[redacted]-high', provider_model_id: '[redacted]-high' },
+      ],
+    },
+  }
+
+  let savedBody = null
+  h.setTransport(async (url, init = {}) => {
+    if (String(url).endsWith('/ai-command')) {
+      if (init.method === 'PATCH') {
+        savedBody = JSON.parse(init.body)
+        serverCfg = { ...serverCfg, ...savedBody }
+      }
+      return response({
+        config: { ...serverCfg },
+        capabilities,
+      })
+    }
+    return response(h.server())
+  })
+
+  const state = await mountSettings(t, h)
+  await state.openAiCommand()
+  await flush()
+
+  // 1. Model control is a <select>, shows logical labels (not duplicate _reasoning_* rows), and maps persisted variant cleanly
+  const modelSelect = findByTestId(state.$root, 'feishu-ai-model-input')
+  assert.equal(modelSelect?.tag, 'select')
+  assert.deepEqual(
+    state.aiModelSelectOptions.map(o => o.label),
+    ['[redacted]', '[redacted]'],
+  )
+  assert.equal(state.aiCustomModelOption, null)
+  assert.equal(state.aiSidebarMeta, 'maso · [redacted]')
+  assert.deepEqual([...state.aiEffortOptions], ['none', 'low', 'medium', 'high'])
+
+  // 2. Hydrating persisted variant did NOT mark server tuple dirty: external server change adopts cleanly without conflict
+  serverCfg = { ...serverCfg, model: '[redacted]_reasoning_medium', reasoning_effort: 'medium' }
+  await state.refresh()
+  await flush()
+  assert.equal(state.aiTupleConflict, null)
+  assert.equal(state.aiEdit.model, '[redacted]_reasoning_medium')
+  assert.equal(state.aiEdit.reasoning_effort, 'medium')
+
+  // 3. Changing effort on MASO updates variant provider_model_id; switching to [redacted] unlocks xhigh/max
+  state.onAiEffortChange('low')
+  await flush()
+  assert.equal(state.aiEdit.model, '[redacted]')
+  assert.equal(state.aiEdit.reasoning_effort, 'low')
+
+  state.onAiModelChange('[redacted]_reasoning_high')
+  await flush()
+  assert.deepEqual([...state.aiEffortOptions], ['none', 'low', 'medium', 'high', 'xhigh', 'max'])
+  state.onAiEffortChange('xhigh')
+  await flush()
+  assert.equal(state.aiEdit.model, '[redacted]_reasoning_xhigh')
+  assert.equal(state.aiEdit.reasoning_effort, 'xhigh')
+
+  // 4. Cursor effort-capable model preserves compatible xhigh effort as gpt-5.3-codex-xhigh; non-effort model disables effort select and clears effort
+  state.onAiProviderChange('cursor')
+  await flush()
+  assert.equal(state.aiEdit.model, 'gpt-5.3-codex-xhigh')
+  assert.equal(state.aiEdit.reasoning_effort, 'xhigh')
+  assert.deepEqual([...state.aiEffortOptions], ['low', 'high', 'xhigh'])
+  assert.equal(findByTestId(state.$root, 'feishu-ai-effort-select')?.props.disabled, false)
+
+  state.onAiModelChange('claude-4.5-sonnet')
+  await flush()
+  assert.equal(state.aiEdit.model, 'claude-4.5-sonnet')
+  assert.equal(state.aiEdit.reasoning_effort, '')
+  assert.deepEqual([...state.aiEffortOptions], [])
+  assert.equal(findByTestId(state.$root, 'feishu-ai-effort-select')?.props.disabled, true)
+
+  // 5. Custom/unlisted model ID is preserved via custom/current option and Provider default ('') works
+  serverCfg = { ...serverCfg, provider: 'codex', model: 'my-custom-codex-preview', reasoning_effort: 'high' }
+  await state.openAiCommand()
+  // Draft was dirty from cursor edit, accept server tuple to inspect custom model hydration
+  state.acceptServerAiTuple()
+  await flush()
+  assert.equal(state.aiEdit.provider, 'codex')
+  assert.equal(state.aiEdit.model, 'my-custom-codex-preview')
+  assert.deepEqual(state.aiCustomModelOption, {
+    value: 'my-custom-codex-preview',
+    label: 'my-custom-codex-preview (custom/current)',
+  })
+
+  state.onAiModelChange('')
+  await flush()
+  assert.equal(state.aiEdit.model, '')
+
+  state.onAiModelChange('[redacted]')
+  state.onAiEffortChange('max')
+  await flush()
+  assert.equal(await state.saveAiCommand(), true)
+  assert.equal(savedBody.provider, 'codex')
+  assert.equal(savedBody.model, '[redacted]')
+  assert.equal(savedBody.reasoning_effort, 'max')
+})

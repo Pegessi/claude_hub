@@ -43,26 +43,94 @@ SUPPORTED_REASONING_EFFORTS: tuple[str, ...] = (
 )
 PROVIDER_SUPPORTED_REASONING_EFFORTS: dict[str, tuple[str, ...]] = {
     "claude": (),
-    "codex": tuple("none minimal low medium high xhigh".split()),
-    "traex": tuple("none minimal low medium high xhigh".split()),
+    "codex": tuple("none minimal low medium high xhigh max ultra".split()),
+    "traex": tuple("none minimal low medium high xhigh max ultra".split()),
     "maso": tuple("none low medium high xhigh max".split()),
     "cursor": tuple("none minimal low medium high xhigh max".split()),
     "antigravity": (),
 }
 DEFAULT_PROVIDER_MODELS: dict[str, tuple[str, ...]] = {
-    "claude": ("[redacted]", "claude-sonnet-4-6", "claude-opus-4-8"),
-    "codex": ("gpt-5.4", "[redacted]", "gpt-5.3-codex", "o3"),
-    "traex": ("gpt-5.4", "[redacted]", "[redacted]"),
-    "maso": tuple(
-        "[redacted]_reasoning_high [redacted]_reasoning_medium "
-        "[redacted] [redacted]_reasoning_high [redacted]-reasoning-high".split()
+    "claude": (
+        "claude-opus-4-8",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+        "[redacted]",
+    ),
+    "codex": (
+        "gpt-5.4",
+        "[redacted]",
+        "[redacted]",
+        "[redacted]",
+        "[redacted]",
+        "[redacted]",
+        "[redacted]",
+        "[redacted]",
+        "[redacted]",
+        "[redacted]",
+        "[redacted]",
+        "gpt-5.5",
+        "gpt-5.4-mini",
+        "gpt-5.3-codex-spark",
+        "o3",
+    ),
+    "traex": (
+        "[redacted]",
+        "[redacted]",
+        "[redacted]",
+        "Seed-Code",
+        "Seed-[redacted]",
+        "[redacted]",
+        "[redacted]",
+        "[redacted]",
+        "[redacted]",
+        "GPT-5.5",
+        "GPT-5.4",
+        "GPT-5.2",
+        "[redacted]",
+        "[redacted]",
+        "Gemini-3.1-Pro-Preview",
+        "Gemini-3-Flash-Preview",
+    ),
+    "maso": (
+        "[redacted]_reasoning_high",
+        "[redacted]_reasoning_high",
+        "[redacted]_reasoning_high",
+        "[redacted]_reasoning_high",
+        "[redacted]_reasoning_high",
+        "[redacted]-reasoning-high",
+        "[redacted]_reasoning_high",
+        "[redacted]_reasoning_medium",
+        "[redacted]",
     ),
     "cursor": (
         "gpt-5.3-codex-high",
         "claude-opus-4-8-thinking-high",
+        "claude-opus-4-8-high",
         "claude-4.6-sonnet-medium-thinking",
+        "claude-4.6-sonnet-medium",
+        "claude-4.5-sonnet",
+        "gpt-5.2",
+        "gemini-3.7-flash-high",
+        "cursor-grok-4.6-high",
     ),
-    "antigravity": ("[redacted]-high", "gemini-2.5-pro", "claude-sonnet-4-6"),
+    "antigravity": (
+        "[redacted]-high",
+        "[redacted]-medium",
+        "[redacted]-low",
+        "[redacted]-high",
+        "[redacted]-medium",
+        "[redacted]-low",
+        "gemini-3.8-flash-high",
+        "gemini-3.8-flash-medium",
+        "gemini-3.8-flash-low",
+        "claude-opus-5-5-high",
+        "claude-opus-5-5-medium",
+        "claude-opus-5-5-low",
+        "claude-sonnet-5-5-high",
+        "claude-sonnet-5-5-medium",
+        "claude-sonnet-5-5-low",
+        "gpt-oss-120b-medium",
+    ),
 }
 _MASO_VARIANT_SUFFIX_RE = re.compile(
     r"(?:[_-]reasoning(?:[_-](?:xhigh|high|medium|low|max))?"
@@ -80,6 +148,9 @@ def _maso_std_variants(base: str, *, has_max: bool = True) -> dict[str, str]:
 
 
 _MASO_MODEL_VARIANTS: dict[str, dict[str, str]] = {
+    "[redacted]": _maso_std_variants("[redacted]"),
+    "[redacted]": _maso_std_variants("[redacted]"),
+    "[redacted]": _maso_std_variants("[redacted]"),
     "[redacted]": {
         "none": "[redacted]",
         "low": "[redacted]",
@@ -87,9 +158,13 @@ _MASO_MODEL_VARIANTS: dict[str, dict[str, str]] = {
         "high": "[redacted]_reasoning_high",
     },
     "[redacted]": _maso_std_variants("[redacted]"),
-    "[redacted]": _maso_std_variants("[redacted]"),
     "[redacted]": _maso_std_variants("[redacted]", has_max=False),
-    "[redacted]": _maso_std_variants("[redacted]"),
+    "[redacted]": {
+        "none": "[redacted]",
+        "low": "[redacted]",
+        "medium": "[redacted]_reasoning_medium",
+        "high": "[redacted]_reasoning_high",
+    },
     **{
         b: {
             "none": b,
