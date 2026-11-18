@@ -697,7 +697,7 @@ test('Cursor keeps its fallback card while a correlated native spawn uses the re
   assert.equal(regions[0].threads.length, 1)
   assert.equal(regions[0].threads[0].threadId, 'thread-1')
   assert.equal(regions[0].threads[0].launchTool.name, 'spawnAgent')
-  assert.equal(regions[0].threads[0].lifecycleStatus, 'unknown')
+  assert.equal(regions[0].threads[0].lifecycleStatus, 'completed')
 })
 
 test('a Cursor Task card shows the child report from its record result', () => {

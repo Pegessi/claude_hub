@@ -2070,16 +2070,8 @@ async def main(browser_run: BrowserRun) -> None:
             turn_id=interrupted_turn,
             message_id="reasoning:child-still-active",
         )
-        append_thinking_event(
-            "turn_completed",
-            {"status": "interrupted"},
-            turn_id=interrupted_turn,
-            message_id=interrupted_turn,
-        )
         cancelled = page.locator(".structured-turn").filter(has_text="Cancelled reasoning")
         main_cancelled_status = cancelled.locator(":scope > .reasoning-status")
-        await expect(main_cancelled_status).to_contain_text("Thinking interrupted")
-        await expect(main_cancelled_status.locator(".thinking-indicator--active")).to_have_count(0)
         child_region = cancelled.get_by_test_id("subagent-region")
         await expect(child_region).to_have_count(1)
         hidden_indicator = child_region.locator(".thinking-indicator--active")
@@ -2130,6 +2122,21 @@ async def main(browser_run: BrowserRun) -> None:
             )
             await fold.locator(":scope > summary").click()
             await expect(active_indicator).not_to_have_css("animation-name", "none")
+
+        # The fold/animation oracle above needs a genuinely unfinished turn.
+        # Its parent boundary must now stop both main and remaining child activity.
+        append_thinking_event(
+            "turn_completed",
+            {"status": "interrupted"},
+            turn_id=interrupted_turn,
+            message_id=interrupted_turn,
+        )
+        await expect(main_cancelled_status).to_contain_text("Thinking interrupted")
+        await expect(main_cancelled_status.locator(".thinking-indicator--active")).to_have_count(0)
+        await expect(active_child.locator(".reasoning-status")).to_contain_text(
+            "Thinking interrupted"
+        )
+        await expect(child_region.locator(".thinking-indicator--active")).to_have_count(0)
 
         await page.emulate_media(reduced_motion="reduce")
         append_thinking_event("turn_started", {"summary": "Errored reasoning"}, turn_id=error_turn)

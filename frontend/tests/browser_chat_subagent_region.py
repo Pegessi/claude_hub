@@ -452,7 +452,7 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(summary.locator(".subagent-badge")).to_have_text("Native sub-agents")
         await expect(summary.locator(".subagent-headline")).to_have_text("2 sub-agents")
         await expect(summary.locator(".subagent-region-status.failed")).to_have_text(
-            "1 failed · 1 active"
+            "1 failed · 1 completed"
         )
         assert not await region.evaluate("element => element.open")
         await region.locator(":scope > summary").click()
@@ -463,7 +463,7 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(rows.nth(0)).to_contain_text(F6)
         await expect(rows.nth(1)).to_contain_text(FEC)
         await expect(rows.nth(0).locator(":scope > summary .tool-status")).to_have_text("Failed")
-        await expect(rows.nth(1).locator(":scope > summary .tool-status")).to_have_text("Active")
+        await expect(rows.nth(1).locator(":scope > summary .tool-status")).to_have_text("Completed")
         await expect(page.locator(".subagent-card--standalone")).to_have_count(0)
 
         await rows.nth(0).locator(":scope > summary").click()

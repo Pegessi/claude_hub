@@ -5,6 +5,38 @@ import type { TimelineTurn, TimelineSubthread, TimelineSubagentLifecycle, Timeli
 import type { ReducerState, SubthreadState } from './state'
 import { payloadString, payloadRecord, statusText, toolResultText } from './eventValues'
 
+/** Provider child lifecycles can omit their terminal event. A closed parent
+ *  bounds activity, including late replay, without rewriting explicit outcomes. */
+export function closeTurnSubthreads(state: ReducerState, turn: TimelineTurn): void {
+  const status = turn.completionStatus === 'failed' ? 'failed'
+    : !turn.completed || ['cancelled', 'interrupted'].includes(turn.completionStatus ?? '')
+      ? 'cancelled' : 'completed'
+  let changed = false
+  for (const child of state.threadsByTurn.get(turn.turnId ?? turn.key)?.values() ?? []) {
+    let childChanged = false
+    if (child.thread.lifecycleStatus === 'active' || child.thread.lifecycleStatus === 'unknown') {
+      child.thread.lifecycleStatus = status
+      childChanged = true
+    }
+    for (const tool of child.tools) {
+      if (tool.status !== 'running') continue
+      tool.status = status
+      childChanged = true
+    }
+    if (childChanged) {
+      child.thread.renderRevision += 1
+      changed = true
+    }
+  }
+  for (const tool of turn.tools) {
+    if (tool.subagent && tool.status === 'running') {
+      tool.status = status
+      changed = true
+    }
+  }
+  if (changed) turn.renderRevision += 1
+}
+
 /** Create a per-thread TimelineTool view for a MASO Task/Fork call whose live
  *  status and resultText stay synchronized with the underlying tool call. */
 export function bindLaunchToolForThread(
@@ -239,10 +271,11 @@ export function applySubthreadEvent(
     attachPendingLaunchTool(turn, child.thread, launchCallId, subagentName)
   }
   let lifecycleChanged = false
-  if (lifecycle !== null && child.thread.lifecycleStatus !== lifecycle) {
+  const canRun = !turn.completed && turn === state.turns[state.turns.length - 1]
+  if (lifecycle !== null && (lifecycle !== 'active' || canRun) && child.thread.lifecycleStatus !== lifecycle) {
     child.thread.lifecycleStatus = lifecycle
     lifecycleChanged = true
-  } else if (lifecycle === null && childActivityRestartsLifecycle(event, child) &&
+  } else if (canRun && lifecycle === null && childActivityRestartsLifecycle(event, child) &&
              child.thread.lifecycleStatus !== 'active') {
     child.thread.lifecycleStatus = 'active'
     lifecycleChanged = true
