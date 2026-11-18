@@ -19,6 +19,27 @@
 - Invalidate child thinking and dock caches together; preserve genuinely live
   unfinished-turn activity. Cover stored MASO replay, negative-oracle regression,
   and completed/live browser rendering without changing provider transport.
+### perf(verify): run the standard targets concurrently with attributable logs
+
+- `./scripts/verify.sh all` schedules its nine standard targets through a bounded
+  pool (`CLAUDE_HUB_VERIFY_JOBS`, default 4) instead of a serial loop, so
+  `backend-tests` no longer holds the run while `docs`, `checkout-safety`,
+  `backend-format`, `backend-types` and the four frontend targets wait. Measured
+  back to back on one shared host: 310.37s -> 248.70s (-19.9%); the same overlap
+  on a faster coverage tracer moved 243.70s -> 178.81s (-26.6%)
+  (`scripts/verify.sh`, `verify-speedup-report.md`).
+- Every result stays attributable: each target publishes an atomic
+  `<target>.status` receipt that the scheduler reads instead of inferring a
+  verdict from child ordering, stdout and stderr stay separate and prefixed
+  `[<target>]`, per-target logs are retained (`CLAUDE_HUB_VERIFY_ALL_LOGS`), and
+  a per-target wall-clock table is printed at the end.
+- Loggers are forked by the scheduler subshell and handed to the target as
+  inherited descriptors. Forking them from the target instead makes
+  `check_verify_runtime.py` see live owned children, retain the runtime and fail
+  the target; the repository's own verify fixtures catch that.
+- No target, flag, scope or test selection changed: `-xvs`, coverage, mypy and
+  eslint scope and the default/labeled focused split are untouched, and
+  `CLAUDE_HUB_VERIFY_JOBS=1` restores the serial order for flake triage.
 
 ### feat(feishu): support bot tenant fallback for `/ai` without `im:message.send_as_user`
 
