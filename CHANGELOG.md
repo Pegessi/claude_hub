@@ -7,6 +7,18 @@
 
 ## Released
 
+### fix(maso): retain native child wake-ups on the session stream
+
+- Keep MASO SSE subscribed across root IDLE and child SendMessage wake-ups;
+  complete display turns only after tree-aware quiescence, and adopt late root
+  starts as attributed live/persisted turns instead of dropping their output.
+- Preserve the subscription without viewers, feed verified child-wait liveness
+  to the stream manager, and stop treating active resumed sessions as permission
+  to abort. Explicit Stop retains the cancellation/finalizer fence.
+- Quarantine interrupted/uncertain delivery without aborting unrelated native
+  work. MASO has no atomic pending-RPC settlement signal; see the protocol and
+  validation boundaries in [the working log](docs/working-logs/2026-11-18-maso-native-wakeups.md).
+
 ### feat(feishu): support bot tenant fallback for `/ai` without `im:message.send_as_user`
 
 - Remove `im:message.send_as_user` from `RECOMMENDED_AI_COMMAND_SCOPES` so `lark-cli auth login` commands succeed on Feishu apps that do not enable the restricted `im:message.send_as_user` permission in the Feishu Developer Console (`services/feishu_user_client.py`).

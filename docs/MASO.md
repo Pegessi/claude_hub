@@ -128,8 +128,19 @@ so partial streams and repeated snapshots do not duplicate the answer. Dropped
 response frames are ignored; content-bearing `turn_end` frames remain supported.
 This suffix repair does not replace conflicting prefixes or retract already
 persisted token deltas when a later response is dropped.
-`turn_end` ends one model call; only the root agent's `agent_end` completes the Hub
-turn. Child endings do not complete the parent. Durable tool calls/results and tool
+`turn_end` ends one model call and `agent_end` ends one agent run, **not** the
+whole delegated workflow. Hub keeps the same session SSE subscription while
+native children run and SendMessage wakes the root. Root wake-ups before tree
+quiescence retain the current Hub turn and its immutable display timeline.
+Tree activity includes nested running/waiting/paused/aborting agents and
+foreground condensation, not just the root's status.
+
+MASO 0.9.0 exposes no atomic tree-and-pending-RPC completion fence. Hub checks
+status twice without intervening activity before completing a quiescent display
+turn, but **does not close the subscription**: a later native root or child start opens a
+new attributed Hub turn, persisted and broadcast without user input or reload.
+Idle viewer eviction does not retire this subscription; explicit session Stop,
+rotation/deletion or service shutdown owns teardown. Durable tool calls/results and tool
 confirmation cards use the same Hub timeline as other providers.
 
 MASO owns condensation. It can archive and rewrite its live trajectory, and its
@@ -139,11 +150,21 @@ visible conversation with a rewritten snapshot nor resends the Hub transcript
 to reconstruct compressed context. Forks remain the existing explicit exception:
 a new conversation receives its selected history once.
 
-Each turn subscribes to SSE before posting its message. Initial snapshots/replay
-establish a baseline and are not appended as new conversation output. MASO's
-bounded event IDs can reset, so an interrupted connection fails the turn and
-attempts to stop it rather than claiming lossless replay. The next normal turn
-can continue on the same session after cleanup succeeds.
+The first send subscribes to SSE before posting; subsequent sends reuse that
+subscription. Native turn adoption shares the manager's send/Stop lock. A pending
+submission fences quiescence until its exact `message_injected` UUID echo proves
+MASO consumed the input; an unrelated native report cannot finish that user's
+turn while upload or POST is pending. Initial snapshots/replay establish a baseline and are not appended
+as new conversation output. A resumed session's active status does not authorize
+aborting its children or queued native reports. Explicit Stop still aborts and
+awaits exit/resume finalizers before allowing a fresh subscription.
+
+MASO's bounded event IDs can reset, so an interrupted connection or failed status
+monitor fails the display turn rather than claiming lossless replay. It does not
+automatically abort remote work. A possibly accepted POST or interrupted delivery
+is quarantined; inspect/stop the remote session in MASO and create a new Chat
+rather than retrying the prompt blindly. Reopening the UI after a backend crash
+is not a lossless backfill of provider output produced while disconnected.
 
 ## Hub-managed Goals
 
