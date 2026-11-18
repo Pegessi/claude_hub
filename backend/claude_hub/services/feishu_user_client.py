@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Mapping, TypeVar
+from typing import Any, Awaitable, Callable, Mapping, Sequence, TypeVar
 from urllib.parse import quote
 
 import httpx
@@ -162,6 +162,15 @@ class FeishuUserMessage:
             "parent_id": self.parent_id,
             "root_id": self.root_id,
         }
+
+
+@dataclass(frozen=True)
+class FeishuMessageSearchPage:
+    """One page of message IDs from ``POST /open-apis/search/v2/message``."""
+
+    items: tuple[str, ...]
+    has_more: bool
+    page_token: str | None = None
 
 
 @dataclass(frozen=True)
@@ -651,6 +660,47 @@ class FeishuUserClient:
             )
         return receipt
 
+    def _resolve_chat_bound_pool_bot_configs(
+        self, chat_id: str, *, exclude_app_id: str = ""
+    ) -> list[tuple[str, str]]:
+        """Return ``(app_id, app_secret)`` for enabled non-tombstoned pool bots bound to ``chat_id``."""
+        clean_chat = (chat_id or "").strip()
+        if not clean_chat:
+            return []
+        try:
+            from claude_hub.services.feishu_bot_pool import FeishuBotPoolStore
+
+            pool = FeishuBotPoolStore()
+            snapshot = pool.snapshot()
+            with pool._lock:
+                raw_bots = pool._load().get("bots", {})
+            revoked_apps = {
+                str(raw.get("app_id") or "").strip()
+                for raw in raw_bots.values()
+                if isinstance(raw, Mapping)
+                and (raw.get("revoked_at") is not None or not raw.get("enabled"))
+            }
+        except Exception:
+            return []
+
+        matched: list[tuple[str, str]] = []
+        seen_apps: set[str] = {exclude_app_id.strip()} if exclude_app_id else set()
+        for bot in snapshot.bots:
+            app_id = (bot.app_id or "").strip()
+            if (
+                not app_id
+                or app_id in seen_apps
+                or app_id in revoked_apps
+                or not bot.enabled
+                or bot.config is None
+                or not bot.config.app_secret.strip()
+            ):
+                continue
+            if any((b.chat_id or "").strip() == clean_chat for b in bot.bindings):
+                seen_apps.add(app_id)
+                matched.append((app_id, bot.config.app_secret.strip()))
+        return matched
+
     async def _send_via_bot_fallback(
         self,
         record: FeishuUserTokenRecord,
@@ -660,6 +710,7 @@ class FeishuUserClient:
         *,
         uuid: str | None = None,
         auto_invite_bot_to_chat: bool = False,
+        allow_bound_or_dm_fallback_on_not_in_chat: bool = False,
     ) -> dict[str, Any]:
         bot_configs = self._resolve_fallback_bot_configs(record)
         if not bot_configs:
@@ -687,22 +738,58 @@ class FeishuUserClient:
                 "bot_app_id": bot_app_id,
             }
         except FeishuBotRemoteError as exc:
-            if (
-                auto_invite_bot_to_chat
-                and exc.code in _BOT_NOT_IN_CHAT_CODES
-                and chat_id
-                and await self._ensure_bot_in_chat(chat_id, bot_app_id)
-            ):
-                msg_id = await bot_client.send_message_with_identity(
-                    chat_id, msg_type, content, uuid=uuid
-                )
-                return {
-                    "message_id": msg_id,
-                    "chat_id": chat_id,
-                    "msg_type": msg_type,
-                    "send_mode": "bot_fallback",
-                    "bot_app_id": bot_app_id,
-                }
+            if exc.code in _BOT_NOT_IN_CHAT_CODES:
+                if (
+                    auto_invite_bot_to_chat
+                    and chat_id
+                    and await self._ensure_bot_in_chat(chat_id, bot_app_id)
+                ):
+                    msg_id = await bot_client.send_message_with_identity(
+                        chat_id, msg_type, content, uuid=uuid
+                    )
+                    return {
+                        "message_id": msg_id,
+                        "chat_id": chat_id,
+                        "msg_type": msg_type,
+                        "send_mode": "bot_fallback",
+                        "bot_app_id": bot_app_id,
+                    }
+                if allow_bound_or_dm_fallback_on_not_in_chat:
+                    for bound_app_id, bound_secret in self._resolve_chat_bound_pool_bot_configs(
+                        chat_id, exclude_app_id=bot_app_id
+                    ):
+                        bound_client = self._get_fallback_bot_client(bound_app_id, bound_secret)
+                        try:
+                            msg_id = await bound_client.send_message_with_identity(
+                                chat_id, msg_type, content, uuid=uuid
+                            )
+                            return {
+                                "message_id": msg_id,
+                                "chat_id": chat_id,
+                                "msg_type": msg_type,
+                                "send_mode": "bot_fallback",
+                                "bot_app_id": bound_app_id,
+                            }
+                        except FeishuBotRemoteError as bound_exc:
+                            if bound_exc.code in _BOT_NOT_IN_CHAT_CODES:
+                                continue
+                            raise
+                    owner_open_id = record.open_id.strip()
+                    if owner_open_id and record.app_id.strip() == bot_app_id:
+                        dm_msg_id = await bot_client.send_message_with_identity(
+                            owner_open_id,
+                            msg_type,
+                            content,
+                            uuid=uuid,
+                            receive_id_type="open_id",
+                        )
+                        return {
+                            "message_id": dm_msg_id,
+                            "chat_id": chat_id,
+                            "msg_type": msg_type,
+                            "send_mode": "bot_fallback_dm",
+                            "bot_app_id": bot_app_id,
+                        }
             raise
 
     async def _reply_via_bot_fallback(
@@ -716,6 +803,7 @@ class FeishuUserClient:
         reply_in_thread: bool = False,
         uuid: str | None = None,
         auto_invite_bot_to_chat: bool = False,
+        allow_bound_or_dm_fallback_on_not_in_chat: bool = False,
     ) -> FeishuReplyReceipt:
         bot_configs = self._resolve_fallback_bot_configs(record)
         if not bot_configs:
@@ -741,17 +829,21 @@ class FeishuUserClient:
             )
             return self._require_reply_receipt_identity(receipt)
         except FeishuBotRemoteError as exc:
-            if auto_invite_bot_to_chat and exc.code in _BOT_NOT_IN_CHAT_CODES:
+            if exc.code in _BOT_NOT_IN_CHAT_CODES:
                 resolved_chat_id = (chat_id or "").strip()
-                if not resolved_chat_id:
+                if not resolved_chat_id and (
+                    auto_invite_bot_to_chat or allow_bound_or_dm_fallback_on_not_in_chat
+                ):
                     try:
                         msg_info = await self.get_message(message_id)
                         if msg_info is not None and msg_info.chat_id:
                             resolved_chat_id = msg_info.chat_id
                     except Exception:
                         pass
-                if resolved_chat_id and await self._ensure_bot_in_chat(
-                    resolved_chat_id, bot_app_id
+                if (
+                    auto_invite_bot_to_chat
+                    and resolved_chat_id
+                    and await self._ensure_bot_in_chat(resolved_chat_id, bot_app_id)
                 ):
                     receipt = await bot_client._reply_message_payload(
                         message_id,
@@ -761,6 +853,35 @@ class FeishuUserClient:
                         uuid=uuid,
                     )
                     return self._require_reply_receipt_identity(receipt)
+                if allow_bound_or_dm_fallback_on_not_in_chat:
+                    if resolved_chat_id:
+                        for bound_app_id, bound_secret in self._resolve_chat_bound_pool_bot_configs(
+                            resolved_chat_id, exclude_app_id=bot_app_id
+                        ):
+                            bound_client = self._get_fallback_bot_client(bound_app_id, bound_secret)
+                            try:
+                                receipt = await bound_client._reply_message_payload(
+                                    message_id,
+                                    msg_type,
+                                    content,
+                                    reply_in_thread=reply_in_thread,
+                                    uuid=uuid,
+                                )
+                                return self._require_reply_receipt_identity(receipt)
+                            except FeishuBotRemoteError as bound_exc:
+                                if bound_exc.code in _BOT_NOT_IN_CHAT_CODES:
+                                    continue
+                                raise
+                    owner_open_id = record.open_id.strip()
+                    if owner_open_id and record.app_id.strip() == bot_app_id:
+                        dm_msg_id = await bot_client.send_message_with_identity(
+                            owner_open_id,
+                            msg_type,
+                            content,
+                            uuid=uuid,
+                            receive_id_type="open_id",
+                        )
+                        return FeishuReplyReceipt(message_id=dm_msg_id, thread_id=None)
             raise
 
     async def send_as_user(
@@ -773,6 +894,7 @@ class FeishuUserClient:
         dry_run: bool = False,
         allow_bot_fallback: bool = True,
         auto_invite_bot_to_chat: bool = False,
+        allow_bound_or_dm_fallback_on_not_in_chat: bool = False,
     ) -> dict[str, Any]:
         """Send a message to ``chat_id`` as the authenticated user (or bot fallback when configured)."""
         if dry_run:
@@ -798,6 +920,7 @@ class FeishuUserClient:
                 content,
                 uuid=uuid,
                 auto_invite_bot_to_chat=auto_invite_bot_to_chat,
+                allow_bound_or_dm_fallback_on_not_in_chat=allow_bound_or_dm_fallback_on_not_in_chat,
             )
 
         async def _call(token: str) -> dict[str, Any]:
@@ -826,6 +949,7 @@ class FeishuUserClient:
                     content,
                     uuid=uuid,
                     auto_invite_bot_to_chat=auto_invite_bot_to_chat,
+                    allow_bound_or_dm_fallback_on_not_in_chat=allow_bound_or_dm_fallback_on_not_in_chat,
                 )
             raise
 
@@ -841,6 +965,7 @@ class FeishuUserClient:
         dry_run: bool = False,
         allow_bot_fallback: bool = True,
         auto_invite_bot_to_chat: bool = False,
+        allow_bound_or_dm_fallback_on_not_in_chat: bool = False,
     ) -> FeishuReplyReceipt:
         """Reply to ``message_id`` as the authenticated user (or bot fallback when configured)."""
         if dry_run:
@@ -859,6 +984,7 @@ class FeishuUserClient:
                 reply_in_thread=reply_in_thread,
                 uuid=uuid,
                 auto_invite_bot_to_chat=auto_invite_bot_to_chat,
+                allow_bound_or_dm_fallback_on_not_in_chat=allow_bound_or_dm_fallback_on_not_in_chat,
             )
 
         async def _call(token: str) -> FeishuReplyReceipt:
@@ -885,6 +1011,7 @@ class FeishuUserClient:
                     reply_in_thread=reply_in_thread,
                     uuid=uuid,
                     auto_invite_bot_to_chat=auto_invite_bot_to_chat,
+                    allow_bound_or_dm_fallback_on_not_in_chat=allow_bound_or_dm_fallback_on_not_in_chat,
                 )
             raise
 
@@ -933,18 +1060,22 @@ class FeishuUserClient:
         *,
         sort_type: str = "ByActiveTimeDesc",
         page_size: int = 20,
+        types: str = "p2p,group",
     ) -> list[FeishuChatInfo]:
-        """List recent chats for the authenticated user."""
+        """List recent chats (both P2P and group by default) for the authenticated user."""
 
         async def _call(token: str) -> list[FeishuChatInfo]:
+            params: dict[str, Any] = {
+                "sort_type": sort_type,
+                "page_size": max(1, min(page_size, 100)),
+                "user_id_type": "open_id",
+            }
+            if types and types.strip():
+                params["types"] = types.strip()
             response = await self._request(
                 "GET",
                 "/open-apis/im/v1/chats",
-                params={
-                    "sort_type": sort_type,
-                    "page_size": max(1, min(page_size, 100)),
-                    "user_id_type": "open_id",
-                },
+                params=params,
                 headers={"Authorization": f"Bearer {token}"},
             )
             payload = response.json()
@@ -1127,29 +1258,38 @@ class FeishuUserClient:
 
         return await self._with_user_token_retry(_call)
 
-    async def search_messages(
+    async def search_messages_page(
         self,
         query: str,
         *,
         page_size: int = 20,
+        page_token: str | None = None,
         start_time: str | None = None,
         end_time: str | None = None,
-    ) -> list[str]:
-        """Search messages via ``/open-apis/search/v2/message`` and return message IDs."""
+        from_ids: Sequence[str] | None = None,
+    ) -> FeishuMessageSearchPage:
+        """Search messages via ``/open-apis/search/v2/message`` with pagination metadata."""
 
-        async def _call(token: str) -> list[str]:
+        async def _call(token: str) -> FeishuMessageSearchPage:
             body: dict[str, Any] = {"query": query}
             if start_time:
                 body["start_time"] = start_time
             if end_time:
                 body["end_time"] = end_time
+            if from_ids:
+                cleaned_from = [s.strip() for s in from_ids if isinstance(s, str) and s.strip()]
+                if cleaned_from:
+                    body["from_ids"] = cleaned_from
+            params: dict[str, Any] = {
+                "page_size": max(1, min(page_size, 50)),
+                "user_id_type": "open_id",
+            }
+            if page_token:
+                params["page_token"] = page_token
             response = await self._request(
                 "POST",
                 "/open-apis/search/v2/message",
-                params={
-                    "page_size": max(1, min(page_size, 50)),
-                    "user_id_type": "open_id",
-                },
+                params=params,
                 headers={"Authorization": f"Bearer {token}"},
                 json=body,
             )
@@ -1162,11 +1302,51 @@ class FeishuUserClient:
                 raise FeishuBotClient._remote_error(response, payload, "the user message search")
             response.raise_for_status()
             if not isinstance(payload, dict) or payload.get("code") != 0:
-                return []
+                return FeishuMessageSearchPage(items=(), has_more=False, page_token=None)
             data = payload.get("data")
-            items = data.get("items") if isinstance(data, Mapping) else None
-            if not isinstance(items, list):
-                return []
-            return [str(item).strip() for item in items if isinstance(item, str) and item.strip()]
+            if not isinstance(data, Mapping):
+                return FeishuMessageSearchPage(items=(), has_more=False, page_token=None)
+            raw_items = data.get("items")
+            items = (
+                tuple(
+                    str(item).strip()
+                    for item in raw_items
+                    if isinstance(item, str) and item.strip()
+                )
+                if isinstance(raw_items, list)
+                else ()
+            )
+            next_token = data.get("page_token")
+            clean_token = (
+                str(next_token).strip()
+                if isinstance(next_token, str) and str(next_token).strip()
+                else None
+            )
+            return FeishuMessageSearchPage(
+                items=items,
+                has_more=bool(data.get("has_more")) and bool(clean_token),
+                page_token=clean_token,
+            )
 
         return await self._with_user_token_retry(_call)
+
+    async def search_messages(
+        self,
+        query: str,
+        *,
+        page_size: int = 20,
+        page_token: str | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        from_ids: Sequence[str] | None = None,
+    ) -> list[str]:
+        """Search messages via ``/open-apis/search/v2/message`` and return message IDs."""
+        page = await self.search_messages_page(
+            query,
+            page_size=page_size,
+            page_token=page_token,
+            start_time=start_time,
+            end_time=end_time,
+            from_ids=from_ids,
+        )
+        return list(page.items)

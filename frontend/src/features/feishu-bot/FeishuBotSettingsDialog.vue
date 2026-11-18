@@ -317,30 +317,41 @@
 
           <label class="field">
             <span class="field-label">Model</span>
-            <input
-              v-model="aiEdit.model"
+            <select
+              :value="aiEdit.model"
               class="ch-input"
               :disabled="busy || !aiCommandLoaded"
-              placeholder="e.g. gpt-5.4, [redacted], [redacted]_reasoning_high"
               data-testid="feishu-ai-model-input"
+              @change="onAiModelChange(($event.target as HTMLSelectElement).value)"
             >
+              <option value="">Provider default</option>
+              <option
+                v-if="aiCustomModelOption"
+                :value="aiCustomModelOption.value"
+              >{{ aiCustomModelOption.label }}</option>
+              <option
+                v-for="opt in aiModelSelectOptions"
+                :key="opt.key"
+                :value="opt.value"
+              >{{ opt.label }}</option>
+            </select>
           </label>
 
           <label class="field">
             <span class="field-label">Thinking intensity (reasoning_effort)</span>
             <select
-              v-model="aiEdit.reasoning_effort"
+              :value="aiEdit.reasoning_effort"
               class="ch-input"
               :disabled="busy || !aiCommandLoaded || aiEffortOptions.length === 0"
               data-testid="feishu-ai-effort-select"
-              @change="aiEdit.reasoning_effort = ($event.target as HTMLSelectElement).value as FeishuAiCommandReasoningEffort"
+              @change="onAiEffortChange(($event.target as HTMLSelectElement).value as FeishuAiCommandReasoningEffort)"
             >
               <option value="">Provider default</option>
               <option
                 v-for="eff in aiEffortOptions"
                 :key="eff"
                 :value="eff"
-              >{{ eff }}</option>
+              >{{ aiEffortLabel(eff) }}</option>
             </select>
           </label>
 
@@ -800,9 +811,10 @@ import {
   importFeishuAiCommandToken, loadFeishuAiCommand, replaceFeishuBotSecrets,
   updateFeishuAiCommand, updateFeishuBot,
   type FeishuAiCommandCapabilities, type FeishuAiCommandConfig,
-  type FeishuAiCommandProvider, type FeishuAiCommandReasoningEffort,
-  type FeishuAiCommandStatusResponse, type FeishuAiCommandTokenStatus,
-  type FeishuBotMode, type FeishuBotPoolResponse, type FeishuBotSummary,
+  type FeishuAiCommandModelOption, type FeishuAiCommandProvider,
+  type FeishuAiCommandReasoningEffort, type FeishuAiCommandStatusResponse,
+  type FeishuAiCommandTokenStatus, type FeishuBotMode,
+  type FeishuBotPoolResponse, type FeishuBotSummary,
 } from '@/utils/feishuBotConfig'
 
 const emit = defineEmits<{ close: [] }>()
@@ -827,11 +839,142 @@ const aiServerWatchChatsText = ref('')
 const aiTupleConflict = ref<Pick<FeishuAiCommandConfig, 'provider' | 'model' | 'reasoning_effort'> | null>(null)
 const DEFAULT_PROVIDER_EFFORTS: Record<FeishuAiCommandProvider, string[]> = {
   claude: [],
-  codex: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
-  traex: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
+  codex: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+  traex: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
   maso: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
   cursor: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
   antigravity: [],
+}
+const DEFAULT_PROVIDER_MODEL_OPTIONS: Record<FeishuAiCommandProvider, FeishuAiCommandModelOption[]> = {
+  claude: [
+    { id: 'claude-opus-4-8', label: 'claude-opus-4-8', provider_model_id: 'claude-opus-4-8' },
+    { id: 'claude-sonnet-4-6', label: 'claude-sonnet-4-6', provider_model_id: 'claude-sonnet-4-6' },
+    { id: 'claude-haiku-4-5', label: 'claude-haiku-4-5', provider_model_id: 'claude-haiku-4-5' },
+    { id: '[redacted]', label: '[redacted]', provider_model_id: '[redacted]' },
+  ],
+  codex: [
+    { id: 'gpt-5.4', label: 'gpt-5.4', provider_model_id: 'gpt-5.4' },
+    { id: '[redacted]', label: '[redacted]', provider_model_id: '[redacted]' },
+    { id: '[redacted]', label: '[redacted]', provider_model_id: '[redacted]' },
+    { id: '[redacted]', label: '[redacted]', provider_model_id: '[redacted]' },
+    { id: '[redacted]', label: '[redacted]', provider_model_id: '[redacted]' },
+    { id: '[redacted]', label: '[redacted]', provider_model_id: '[redacted]' },
+    { id: 'o3', label: 'o3', provider_model_id: 'o3' },
+  ],
+  traex: [
+    { id: '[redacted]', label: '[redacted]', provider_model_id: '[redacted]' },
+    { id: '[redacted]', label: '[redacted]', provider_model_id: '[redacted]' },
+    { id: '[redacted]', label: '[redacted]', provider_model_id: '[redacted]' },
+    { id: 'GPT-5.4', label: 'GPT-5.4', provider_model_id: 'GPT-5.4' },
+  ],
+  maso: [
+    {
+      id: '[redacted]',
+      label: '[redacted]',
+      provider_model_id: '[redacted]_reasoning_high',
+      default_reasoning_effort: 'high',
+      supported_reasoning_efforts: [
+        { id: 'none', label: 'None', provider_model_id: '[redacted]' },
+        { id: 'low', label: 'Low', provider_model_id: '[redacted]' },
+        { id: 'medium', label: 'Medium', provider_model_id: '[redacted]_reasoning_high' },
+        { id: 'high', label: 'High', provider_model_id: '[redacted]_reasoning_high' },
+        { id: 'xhigh', label: 'Extra High', provider_model_id: '[redacted]_reasoning_xhigh' },
+        { id: 'max', label: 'Max', provider_model_id: '[redacted]_reasoning_max' },
+      ],
+    },
+    {
+      id: '[redacted]',
+      label: '[redacted]',
+      provider_model_id: '[redacted]_reasoning_high',
+      default_reasoning_effort: 'high',
+      supported_reasoning_efforts: [
+        { id: 'none', label: 'None', provider_model_id: '[redacted]' },
+        { id: 'low', label: 'Low', provider_model_id: '[redacted]' },
+        { id: 'medium', label: 'Medium', provider_model_id: '[redacted]_reasoning_high' },
+        { id: 'high', label: 'High', provider_model_id: '[redacted]_reasoning_high' },
+        { id: 'xhigh', label: 'Extra High', provider_model_id: '[redacted]_reasoning_xhigh' },
+        { id: 'max', label: 'Max', provider_model_id: '[redacted]_reasoning_max' },
+      ],
+    },
+    {
+      id: '[redacted]',
+      label: '[redacted]',
+      provider_model_id: '[redacted]_reasoning_high',
+      default_reasoning_effort: 'high',
+      supported_reasoning_efforts: [
+        { id: 'none', label: 'None', provider_model_id: '[redacted]' },
+        { id: 'low', label: 'Low', provider_model_id: '[redacted]' },
+        { id: 'medium', label: 'Medium', provider_model_id: '[redacted]_reasoning_medium' },
+        { id: 'high', label: 'High', provider_model_id: '[redacted]_reasoning_high' },
+      ],
+    },
+    {
+      id: '[redacted]',
+      label: '[redacted]',
+      provider_model_id: '[redacted]_reasoning_high',
+      default_reasoning_effort: 'high',
+      supported_reasoning_efforts: [
+        { id: 'none', label: 'None', provider_model_id: '[redacted]' },
+        { id: 'low', label: 'Low', provider_model_id: '[redacted]' },
+        { id: 'medium', label: 'Medium', provider_model_id: '[redacted]_reasoning_medium' },
+        { id: 'high', label: 'High', provider_model_id: '[redacted]_reasoning_high' },
+      ],
+    },
+  ],
+  cursor: [
+    { id: 'gpt-5.3-codex', label: 'gpt-5.3-codex', provider_model_id: 'gpt-5.3-codex-high' },
+    { id: 'claude-opus-4-8-thinking', label: 'claude-opus-4-8-thinking', provider_model_id: 'claude-opus-4-8-thinking-high' },
+    { id: 'claude-4.5-sonnet', label: 'claude-4.5-sonnet', provider_model_id: 'claude-4.5-sonnet', supported_reasoning_efforts: [] },
+  ],
+  antigravity: [
+    { id: '[redacted]-high', label: '[redacted]-high', provider_model_id: '[redacted]-high' },
+    { id: 'gemini-3.8-flash-high', label: 'gemini-3.8-flash-high', provider_model_id: 'gemini-3.8-flash-high' },
+    { id: 'claude-sonnet-5-5-high', label: 'claude-sonnet-5-5-high', provider_model_id: 'claude-sonnet-5-5-high' },
+  ],
+}
+const EFFORT_DISPLAY_LABELS: Record<string, string> = {
+  none: 'None (none)',
+  minimal: 'Minimal (minimal)',
+  low: 'Low (low)',
+  medium: 'Medium (medium)',
+  high: 'High (high)',
+  xhigh: 'Extra High (xhigh)',
+  max: 'Max (max)',
+  ultra: 'Ultra (ultra)',
+}
+function aiEffortLabel(effort: string): string {
+  return EFFORT_DISPLAY_LABELS[effort] ?? effort
+}
+function matchesAiModelOption(option: FeishuAiCommandModelOption, modelId: string): boolean {
+  const clean = modelId.trim()
+  if (!clean) return false
+  if (option.id === clean || option.provider_model_id === clean) return true
+  return Boolean(option.supported_reasoning_efforts?.some(eff => eff.provider_model_id === clean))
+}
+function resolveAiModelOptionsForProvider(provider: FeishuAiCommandProvider): FeishuAiCommandModelOption[] {
+  const rich = aiCapabilities.value?.provider_model_options?.[provider]
+  if (Array.isArray(rich) && rich.length > 0) return rich
+  const legacyIds = aiCapabilities.value?.provider_models?.[provider]
+  if (Array.isArray(legacyIds) && legacyIds.length > 0) {
+    return legacyIds.map(id => ({ id, label: id, provider_model_id: id }))
+  }
+  return DEFAULT_PROVIDER_MODEL_OPTIONS[provider] ?? []
+}
+function resolveVariantModelId(
+  provider: FeishuAiCommandProvider,
+  option: FeishuAiCommandModelOption,
+  effort: string,
+): string {
+  if (provider === 'maso' || provider === 'cursor') {
+    const matchedEffort = option.supported_reasoning_efforts?.find(item => item.id === effort)
+    if (matchedEffort?.provider_model_id) return matchedEffort.provider_model_id
+    const defaultEff = option.default_reasoning_effort
+    const fallbackEffort = defaultEff
+      ? option.supported_reasoning_efforts?.find(item => item.id === defaultEff)
+      : undefined
+    if (fallbackEffort?.provider_model_id) return fallbackEffort.provider_model_id
+  }
+  return option.provider_model_id || option.id
 }
 const aiEdit = reactive<FeishuAiCommandConfig>({
   enabled: false,
@@ -856,16 +999,69 @@ const aiProviderOptions = computed<FeishuAiCommandProvider[]>(() => (
     ? aiCapabilities.value.providers
     : ['claude', 'codex', 'traex', 'maso', 'cursor', 'antigravity']
 ))
-const aiEffortOptions = computed<string[]>(() => {
+const aiProviderModelCatalog = computed<FeishuAiCommandModelOption[]>(() => (
+  resolveAiModelOptionsForProvider(aiEdit.provider)
+))
+const currentAiModelOption = computed<FeishuAiCommandModelOption | null>(() => {
   const modelKey = aiEdit.model.trim()
-  const perModel = modelKey ? aiCapabilities.value?.model_reasoning_efforts?.[modelKey] : undefined
-  if (Array.isArray(perModel)) return perModel
-  const perProvider = aiCapabilities.value?.provider_reasoning_efforts?.[aiEdit.provider]
-  if (Array.isArray(perProvider)) return perProvider
-  return DEFAULT_PROVIDER_EFFORTS[aiEdit.provider] ?? []
+  if (!modelKey) return null
+  return aiProviderModelCatalog.value.find(opt => matchesAiModelOption(opt, modelKey)) ?? null
 })
+const aiModelSelectOptions = computed<Array<{ key: string; value: string; label: string }>>(() => {
+  const activeModel = aiEdit.model.trim()
+  return aiProviderModelCatalog.value.map(opt => ({
+    key: opt.id,
+    value: matchesAiModelOption(opt, activeModel)
+      ? activeModel
+      : resolveVariantModelId(aiEdit.provider, opt, aiEdit.reasoning_effort),
+    label: opt.label || opt.id,
+  }))
+})
+const aiCustomModelOption = computed<{ value: string; label: string } | null>(() => {
+  const activeModel = aiEdit.model.trim()
+  if (!activeModel || currentAiModelOption.value) return null
+  return { value: activeModel, label: `${activeModel} (custom/current)` }
+})
+function resolveEffortsForModel(
+  provider: FeishuAiCommandProvider,
+  modelId: string,
+  option?: FeishuAiCommandModelOption | null,
+): string[] {
+  const clean = modelId.trim()
+  if (!clean) {
+    // Only ENV_KEY providers (codex, traex) have a separate effort channel when Provider default
+    // (model === '') is chosen; model-bound effort providers (maso, cursor) and non-effort
+    // providers (claude, antigravity) require a concrete model ID.
+    if (provider === 'maso' || provider === 'cursor' || provider === 'claude' || provider === 'antigravity') {
+      return []
+    }
+    const perProviderDefault = aiCapabilities.value?.provider_reasoning_efforts?.[provider]
+    if (Array.isArray(perProviderDefault)) return perProviderDefault
+    return DEFAULT_PROVIDER_EFFORTS[provider] ?? []
+  }
+  const matched = option ?? resolveAiModelOptionsForProvider(provider).find(opt => matchesAiModelOption(opt, clean)) ?? null
+  if (matched && Array.isArray(matched.supported_reasoning_efforts)) {
+    if (matched.supported_reasoning_efforts.length > 0) {
+      return matched.supported_reasoning_efforts.map(item => item.id)
+    }
+    if (provider === 'maso' || provider === 'cursor' || provider === 'claude' || provider === 'antigravity') {
+      return []
+    }
+  }
+  const perModel = aiCapabilities.value?.model_reasoning_efforts?.[clean]
+  if (Array.isArray(perModel)) return perModel
+  const perProvider = aiCapabilities.value?.provider_reasoning_efforts?.[provider]
+  if (Array.isArray(perProvider)) return perProvider
+  return DEFAULT_PROVIDER_EFFORTS[provider] ?? []
+}
+const aiEffortOptions = computed<string[]>(() => (
+  resolveEffortsForModel(aiEdit.provider, aiEdit.model, currentAiModelOption.value)
+))
 const aiSidebarMeta = computed(() => {
-  if (aiEdit.enabled) return `${aiEdit.provider} · ${aiEdit.model || 'default'}`
+  if (aiEdit.enabled) {
+    const modelLabel = currentAiModelOption.value?.label || aiEdit.model || 'default'
+    return `${aiEdit.provider} · ${modelLabel}`
+  }
   const tok = aiTokenStatus.value
   if (tok?.can_send_as_user) return 'Personal account reply'
   if (tok && (tok.send_mode === 'bot_fallback' || tok.can_send_via_bot)) {
@@ -1114,23 +1310,78 @@ function onAiProviderChange(nextProvider: FeishuAiCommandProvider) {
   if (busy.value || closed || aiCommandLoading.value || !aiCommandLoaded.value) return
   aiEdit.provider = nextProvider
   aiTupleConflict.value = null
-  const suggestions = aiCapabilities.value?.provider_models?.[nextProvider]
-  if (suggestions && suggestions.length > 0) {
-    aiEdit.model = suggestions[0]
-  }
-  const modelKey = aiEdit.model.trim()
-  const supportedEfforts = (
-    (modelKey ? aiCapabilities.value?.model_reasoning_efforts?.[modelKey] : undefined)
-    ?? aiCapabilities.value?.provider_reasoning_efforts?.[nextProvider]
-    ?? DEFAULT_PROVIDER_EFFORTS[nextProvider]
-    ?? []
+  const catalog = resolveAiModelOptionsForProvider(nextProvider)
+  const legacySuggestions = aiCapabilities.value?.provider_models?.[nextProvider]
+  const preferredId = legacySuggestions?.[0]
+  const preferredOpt = (preferredId
+    ? catalog.find(opt => matchesAiModelOption(opt, preferredId))
+    : undefined) ?? catalog[0] ?? null
+  const supportedEfforts = resolveEffortsForModel(
+    nextProvider,
+    preferredId ?? preferredOpt?.id ?? aiEdit.model,
+    preferredOpt,
   )
+  let nextEffort: FeishuAiCommandReasoningEffort = aiEdit.reasoning_effort
   if (supportedEfforts.length === 0) {
-    aiEdit.reasoning_effort = ''
-  } else if (!aiEdit.reasoning_effort || !supportedEfforts.includes(aiEdit.reasoning_effort)) {
-    aiEdit.reasoning_effort = (
-      supportedEfforts.includes('high') ? 'high' : supportedEfforts[0]
+    nextEffort = ''
+  } else if (!nextEffort || !supportedEfforts.includes(nextEffort)) {
+    const optDefault = preferredOpt?.default_reasoning_effort
+    nextEffort = (
+      (optDefault && supportedEfforts.includes(optDefault) ? optDefault : undefined)
+      ?? (supportedEfforts.includes('high') ? 'high' : supportedEfforts[0])
     ) as FeishuAiCommandReasoningEffort
+  }
+  aiEdit.reasoning_effort = nextEffort
+  if (preferredOpt) {
+    aiEdit.model = resolveVariantModelId(nextProvider, preferredOpt, nextEffort)
+  } else if (preferredId) {
+    aiEdit.model = preferredId
+  }
+}
+function onAiModelChange(nextModelValue: string) {
+  if (busy.value || closed || aiCommandLoading.value || !aiCommandLoaded.value) return
+  aiTupleConflict.value = null
+  const clean = nextModelValue.trim()
+  if (!clean) {
+    aiEdit.model = ''
+    const providerEfforts = resolveEffortsForModel(aiEdit.provider, '', null)
+    if (providerEfforts.length === 0) {
+      aiEdit.reasoning_effort = ''
+    } else if (aiEdit.reasoning_effort && !providerEfforts.includes(aiEdit.reasoning_effort)) {
+      aiEdit.reasoning_effort = (
+        providerEfforts.includes('high') ? 'high' : providerEfforts[0]
+      ) as FeishuAiCommandReasoningEffort
+    }
+    return
+  }
+  const matched = aiProviderModelCatalog.value.find(opt => matchesAiModelOption(opt, clean)) ?? null
+  const supportedEfforts = resolveEffortsForModel(aiEdit.provider, clean, matched)
+  let nextEffort: FeishuAiCommandReasoningEffort = aiEdit.reasoning_effort
+  if (supportedEfforts.length === 0) {
+    nextEffort = ''
+  } else if (!nextEffort || !supportedEfforts.includes(nextEffort)) {
+    const matchedVariantEffort = matched?.supported_reasoning_efforts?.find(
+      eff => eff.provider_model_id === clean,
+    )?.id
+    const optDefault = matched?.default_reasoning_effort
+    nextEffort = (
+      (matchedVariantEffort && supportedEfforts.includes(matchedVariantEffort) ? matchedVariantEffort : undefined)
+      ?? (optDefault && supportedEfforts.includes(optDefault) ? optDefault : undefined)
+      ?? (supportedEfforts.includes('high') ? 'high' : supportedEfforts[0])
+    ) as FeishuAiCommandReasoningEffort
+  }
+  aiEdit.reasoning_effort = nextEffort
+  aiEdit.model = matched
+    ? resolveVariantModelId(aiEdit.provider, matched, nextEffort)
+    : clean
+}
+function onAiEffortChange(nextEffort: FeishuAiCommandReasoningEffort) {
+  if (busy.value || closed || aiCommandLoading.value || !aiCommandLoaded.value) return
+  aiTupleConflict.value = null
+  aiEdit.reasoning_effort = nextEffort
+  const matched = currentAiModelOption.value
+  if (matched && nextEffort && (aiEdit.provider === 'maso' || aiEdit.provider === 'cursor')) {
+    aiEdit.model = resolveVariantModelId(aiEdit.provider, matched, nextEffort)
   }
 }
 async function openAiCommand() {
