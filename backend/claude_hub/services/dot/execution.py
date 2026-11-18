@@ -9,7 +9,7 @@ import logging
 from contextlib import AsyncExitStack
 from typing import Any
 
-from claude_hub.models import AgentType, SessionKind
+from claude_hub.models import AgentType, ScheduledTaskKind, SessionKind
 from claude_hub.services.agent_stream.providers.spec import Surface, providers_for_surface
 from claude_hub.services.dot.runtime.session import DotSessionService
 from claude_hub.services.goal_run import get_goal_admission_lock, get_goal_manager
@@ -70,11 +70,14 @@ def _check_switchable(service: DotSessionService, tab_id: str) -> None:
         raise DotExecutionConflict("Finish or stop Dot's current Goal before switching backend.")
     owned = {service._peek_state().get(key) for key in _SCHEDULE_KEYS}
     if any(
-        task.tab_id == tab_id and task.enabled and task.id not in owned
+        task.tab_id == tab_id
+        and task.kind != ScheduledTaskKind.CHAT_TURN
+        and task.enabled
+        and task.id not in owned
         for task in workspace_manager.scheduled_tasks.values()
     ):
         raise DotExecutionConflict(
-            "Disable or retarget other schedules for this chat before switching Dot's backend."
+            "Disable or retarget non-Chat schedules for this chat before switching Dot's backend."
         )
     if any(
         run.tab_id == tab_id and run.status.value in _ACTIVE_RUNS
@@ -110,8 +113,19 @@ async def _require_idle(service: DotSessionService, tab_id: str) -> None:
 def _schedule_snapshot(service: DotSessionService) -> dict[str, Any]:
     state = service._peek_state()
     result: dict[str, Any] = {}
-    for key in _SCHEDULE_KEYS:
-        schedule_id = state.get(key)
+    # System entries retain state keys so rollback can remove defaults created
+    # during setup. Custom entries use their durable schedule IDs instead.
+    schedule_ids = {key: state.get(key) for key in _SCHEDULE_KEYS}
+    if tab_id := service.tab_id():
+        system_ids = set(schedule_ids.values())
+        schedule_ids.update(
+            (task.id, task.id)
+            for task in workspace_manager.scheduled_tasks.values()
+            if task.kind == ScheduledTaskKind.CHAT_TURN
+            and task.tab_id == tab_id
+            and task.id not in system_ids
+        )
+    for key, schedule_id in schedule_ids.items():
         task = workspace_manager.scheduled_tasks.get(schedule_id or "")
         result[key] = {
             "id": schedule_id,
@@ -158,19 +172,23 @@ async def _rollback_execution(service: DotSessionService, pending: dict[str, Any
     state = service._peek_state()
     restored: dict[str, Any] = {}
     for key, before in pending["schedules"].items():
-        current_id = state.get(key)
+        current_id = state.get(key) if key in _SCHEDULE_KEYS else None
         if current_id and current_id != before["id"]:
             workspace_manager.delete_scheduled_task(current_id)
         schedule_id = before["id"]
+        current = workspace_manager.scheduled_tasks.get(schedule_id)
         if (
-            schedule_id in workspace_manager.scheduled_tasks
+            current is not None
+            and current.tab_id == candidate
             and before["tab_id"]
             and before["agent_type"]
         ):
             workspace_manager.restore_scheduled_chat_task_target(
                 schedule_id,
                 tab_id=before["tab_id"],
-                enabled=bool(before["enabled"]),
+                # Migration only changes the target. Never undo a user Stop
+                # or a one-shot firing while retirement/recovery was pending.
+                enabled=current.enabled,
                 agent_type=AgentType(before["agent_type"]),
             )
         restored[key] = schedule_id
@@ -185,7 +203,10 @@ async def _rollback_execution(service: DotSessionService, pending: dict[str, Any
             workspace_manager.drop_pending_scheduled_task_runs(
                 schedule_id, "Dot backend replacement was rolled back", tab_id=candidate
             )
-    service.store.update_state(**restored, pending_execution=None)
+    service.store.update_state(
+        **{key: value for key, value in restored.items() if key in _SCHEDULE_KEYS},
+        pending_execution=None,
+    )
 
 
 async def switch_execution(
@@ -199,84 +220,102 @@ async def switch_execution(
         raise ValueError("Unsupported Dot execution backend")
     async with service.setup_lock():
         await recover_execution_locked(service)
-        current = execution_view(service)
-        if current["revision"] != expected_revision:
-            raise DotExecutionConflict(
-                "Dot's configuration changed. Reload it before applying your settings."
-            )
-        old_id = service.tab_id()
-        old = ttyd_manager.get_tab(old_id) if old_id else None
-        if old and old.agent_type == agent_type and dict(old.env) == env:
-            return current
-        async with AsyncExitStack() as stack:
-            if old_id:
-                await _lock_tab_admission(stack, old_id)
-                # Deleting the tab does not delete its delivery/automation owners.
-                _check_switchable(service, old_id)
-                await _require_idle(service, old_id)
-            service.store.ensure()
-            created = await ttyd_manager.create_tab(
-                name=service.store.read_identity()["name"],
-                cwd=str(service.store.home),
-                solo_mode=True,
-                session_kind=SessionKind.CHAT,
-                agent_type=agent_type,
-                env=env,
-            )
-            await _lock_tab_admission(stack, created.id)
-            pending = {
-                "candidate_tab_id": created.id,
-                "previous_tab_id": old_id,
-                "previous_archived": bool(old and old.archived),
-                "schedules": _schedule_snapshot(service),
-            }
-            try:
-                service.store.update_state(pending_execution=pending)
-                if old_id:
-                    from claude_hub.api.agent_stream import _get_tab_tailer_manager
+        return await replace_execution_locked(
+            service, expected_revision=expected_revision, agent_type=agent_type, env=env
+        )
 
-                    # Admission is blocked; stop also drains the final observer so
-                    # the last exchange reaches memory before ownership changes.
-                    await _require_idle(service, old_id)
-                    await _get_tab_tailer_manager().forget_session(f"terminal-tab-{old_id}")
-                    await service.sync_journal()
-                    _check_switchable(service, old_id)
-                    if old:
-                        await ttyd_manager.archive_tab(old_id)
-                    _check_switchable(service, old_id)
-                if execution_view(service)["revision"] != expected_revision:
-                    raise DotExecutionConflict(
-                        "Dot's configuration changed. Reload it before applying your settings."
-                    )
-                # No await between schedule retargeting and the identity commit.
-                # Disabled schedules and user-customized timing/text stay unchanged.
-                service.ensure_schedules(created.id, migrate=True)
-                service.store.update_state(
-                    tab_id=created.id,
-                    execution_agent_type=agent_type.value,
-                    session_conversation_id=None,
-                    session_prepared_generation=None,
-                    session_turns=0,
-                    session_started_at=None,
-                    session_pack=None,
-                    sent_turns=[],
-                    journal_seq=-1,
-                    rotate_requested=None,
-                    pending_execution=None,
-                )
-            except BaseException:
-                cleanup = asyncio.create_task(_rollback_execution(service, pending))
-                while not cleanup.done():
-                    try:
-                        await asyncio.shield(cleanup)
-                    except asyncio.CancelledError:
-                        continue
-                await cleanup
-                raise
-        # Configuration is already durable. Git history is secondary evidence;
-        # its failure must not turn a committed switch into a misleading 503.
+
+async def replace_execution_locked(
+    service: DotSessionService,
+    *,
+    expected_revision: str,
+    agent_type: AgentType,
+    env: dict[str, str],
+) -> dict[str, Any]:
+    """Replace a configured or deleted tab; caller owns the recovered setup lock."""
+    current = execution_view(service)
+    if current["revision"] != expected_revision:
+        raise DotExecutionConflict(
+            "Dot's configuration changed. Reload it before applying your settings."
+        )
+    old_id = service.tab_id()
+    old = ttyd_manager.get_tab(old_id) if old_id else None
+    if old and old.agent_type == agent_type and dict(old.env) == env:
+        return current
+    async with AsyncExitStack() as stack:
+        if old_id:
+            await _lock_tab_admission(stack, old_id)
+            # Deleting the tab does not delete its delivery/automation owners.
+            _check_switchable(service, old_id)
+            await _require_idle(service, old_id)
+        service.store.ensure()
+        created = await ttyd_manager.create_tab(
+            name=service.store.read_identity()["name"],
+            cwd=str(service.store.home),
+            solo_mode=True,
+            session_kind=SessionKind.CHAT,
+            agent_type=agent_type,
+            env=env,
+        )
+        await _lock_tab_admission(stack, created.id)
+        pending = {
+            "candidate_tab_id": created.id,
+            "previous_tab_id": old_id,
+            "previous_archived": bool(old and old.archived),
+            "schedules": _schedule_snapshot(service),
+        }
         try:
-            await asyncio.to_thread(service.store.commit, "dot: execution backend")
-        except Exception:
-            logging.getLogger(__name__).exception("Dot execution saved; memory Git commit failed")
-        return execution_view(service)
+            service.store.update_state(pending_execution=pending)
+            if old_id:
+                from claude_hub.api.agent_stream import _get_tab_tailer_manager
+
+                # Admission is blocked; stop also drains the final observer so
+                # the last exchange reaches memory before ownership changes.
+                await _require_idle(service, old_id)
+                await _get_tab_tailer_manager().forget_session(f"terminal-tab-{old_id}")
+                await service.sync_journal()
+                _check_switchable(service, old_id)
+                if old:
+                    await ttyd_manager.archive_tab(old_id)
+                _check_switchable(service, old_id)
+            if execution_view(service)["revision"] != expected_revision:
+                raise DotExecutionConflict(
+                    "Dot's configuration changed. Reload it before applying your settings."
+                )
+            # Schedule edits can land while the provider is being retired.
+            # Snapshot again before the synchronous migration so even a newly
+            # created custom schedule participates in crash rollback.
+            pending["schedules"] = _schedule_snapshot(service)
+            service.store.update_state(pending_execution=pending)
+            # No await between schedule retargeting and the identity commit.
+            # Disabled schedules and user-customized timing/text stay unchanged.
+            service.ensure_schedules(created.id, migrate=True)
+            service.store.update_state(
+                tab_id=created.id,
+                execution_agent_type=agent_type.value,
+                session_conversation_id=None,
+                session_prepared_generation=None,
+                session_turns=0,
+                session_started_at=None,
+                session_pack=None,
+                sent_turns=[],
+                journal_seq=-1,
+                rotate_requested=None,
+                pending_execution=None,
+            )
+        except BaseException:
+            cleanup = asyncio.create_task(_rollback_execution(service, pending))
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            await cleanup
+            raise
+    # Configuration is already durable. Git history is secondary evidence;
+    # its failure must not turn a committed switch into a misleading 503.
+    try:
+        await asyncio.to_thread(service.store.commit, "dot: execution backend")
+    except Exception:
+        logging.getLogger(__name__).exception("Dot execution saved; memory Git commit failed")
+    return execution_view(service)

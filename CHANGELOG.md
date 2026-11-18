@@ -7,6 +7,20 @@
 
 ## Released
 
+### fix(dot): preserve durable schedules across conversation and tab replacement
+
+- Direct Dot and native Chat scheduled follow-ups to Hub `chat_turn` schedules,
+  never provider-native `CreateCronJob`. Hub-owned MASO sessions now disable
+  `cron.enabled` on creation and confirm it before sending, including resumed
+  sessions, without removing the provider's required exit/finalizer fence.
+- Migrate every Dot-bound `chat_turn` schedule with wake/tidy schedules during
+  backend replacement and deleted-tab recovery. Preserve IDs, timing, messages,
+  enabled state and run history; roll custom targets back on failure/restart.
+- MASO must expose per-session runtime options with an effective `cron.enabled`
+  switch (verified against the local v0.9.0 API); unsupported endpoints fail
+  before message delivery. Existing provider-native jobs are not converted into
+  Hub schedules and must be recreated explicitly if still needed.
+
 ### fix(antigravity): suppress false trailing API error banners after completed replies
 
 - Track per-turn tool/response/error step ordering (`saw_tool_step`, `post_tool_text`, `saw_error_step`, `saw_error_after_response`) in `AntigravityEventAdapter` (`services/agent_stream/antigravity_events.py`) and suppress false `result.status = "ERROR"` banners when `agy`'s `steps.BuildJSONOutput` / `LastStepError` contaminates a completed turn's `result` with an earlier recovered `API error (attempt N): ...` retry notice or trailing `streamGenerateContent` EOF.

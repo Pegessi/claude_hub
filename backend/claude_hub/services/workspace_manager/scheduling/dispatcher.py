@@ -32,6 +32,9 @@ class _ScheduleDispatcherMixin(_SchedulingHost):
         await self._drain_scheduled_chat_runs()
 
     def _disable_deleted_chat_targets(self, now: datetime) -> None:
+        from ...dot import get_dot_service
+        from ...dot.execution import execution_pending_for
+
         changed = False
         for task in self.scheduled_tasks.values():
             if (
@@ -39,6 +42,7 @@ class _ScheduleDispatcherMixin(_SchedulingHost):
                 or not task.enabled
                 or not task.tab_id
                 or ttyd_manager.get_tab(task.tab_id) is not None
+                or execution_pending_for(get_dot_service(), task.tab_id)
             ):
                 continue
             task.enabled = False
@@ -87,6 +91,19 @@ class _ScheduleDispatcherMixin(_SchedulingHost):
             if not manual and (task.next_run_at is None or task.next_run_at > now):
                 # Already advanced by a concurrent manual fire.
                 return None
+
+            if task.kind == ScheduledTaskKind.CHAT_TURN and task.tab_id:
+                from ...dot import get_dot_service
+                from ...dot.execution import execution_pending_for
+
+                # The scheduler can start before crash recovery finishes. Do
+                # not consume a one-shot on a candidate that rollback retires.
+                # This check and stamping are synchronous on the same loop as
+                # Dot's pending marker and target migration.
+                if execution_pending_for(get_dot_service(), task.tab_id):
+                    if manual:
+                        raise RuntimeError("Dot tab replacement is pending; retry after recovery")
+                    return None
 
             scheduled_for = now if manual else (task.next_run_at or now)
             # Stamp BEFORE the side effect (crash-idempotent, same pattern as

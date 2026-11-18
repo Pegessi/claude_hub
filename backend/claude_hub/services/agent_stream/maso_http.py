@@ -423,6 +423,9 @@ class MasoHttpSession(ProviderSession):
                 "model": self.session.env.get("MASO_MODEL") or None,
                 "isolation": "shared",
                 "inject_memory": False,
+                # Hub owns durable scheduling; provider jobs target identities
+                # retired by rotation/exit instead of the stable Hub tab.
+                "runtime_options": {"cron.enabled": False},
             },
         )
         conversation_id = created.get("session_id") if isinstance(created, dict) else None
@@ -493,7 +496,42 @@ class MasoHttpSession(ProviderSession):
         # Stop its still-running service-side execution before a new prompt.
         if status.get("status") in {"running", "waiting", "aborting"} or self._message_id:
             status = await self._abort_and_wait()
+        await self._disable_native_cron()
         return status
+
+    async def _disable_native_cron(self) -> None:
+        # Cover existing sessions as well as fresh ones, and retain unrelated
+        # overrides even on MASO versions where PATCH replaces the whole map.
+        path = self._path("runtime-options")
+        runtime = await self._request("GET", path)
+        if not isinstance(runtime, dict) or not isinstance(runtime.get("overrides"), dict):
+            raise RuntimeError(
+                "MASO cannot confirm durable-scheduling policy: invalid runtime options"
+            )
+        if runtime["overrides"].get("cron.enabled") is not False:
+            await self._request(
+                "PATCH",
+                path,
+                json={"overrides": {**runtime["overrides"], "cron.enabled": False}},
+            )
+            runtime = await self._request("GET", path)
+        options = runtime.get("options") if isinstance(runtime, dict) else None
+        if (
+            not isinstance(runtime, dict)
+            or not isinstance(runtime.get("overrides"), dict)
+            or runtime["overrides"].get("cron.enabled") is not False
+            or not isinstance(options, list)
+            or not any(
+                isinstance(option, dict)
+                and option.get("key") == "cron.enabled"
+                and option.get("effective") is False
+                for option in options
+            )
+        ):
+            raise RuntimeError(
+                "MASO must support disabling cron.enabled before Hub can send; "
+                "use claude-hub schedule for durable scheduled work"
+            )
 
     async def _abort_and_wait(self) -> Dict[str, Any]:
         self._needs_abort = True

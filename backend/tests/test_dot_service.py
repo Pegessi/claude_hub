@@ -226,6 +226,7 @@ def test_schedules_are_created_once_and_follow_the_tab(
         item = SimpleNamespace(
             id=f"s-{len(schedules) + 1}",
             tab_id=payload.tab_id,
+            kind=payload.kind,
             cron=payload.cron,
             interval_seconds=payload.interval_seconds,
             message=payload.message,
@@ -347,6 +348,7 @@ async def test_watch_wakes_dot_through_schedule(
         item = SimpleNamespace(
             id=f"new-{len(schedules)}",
             tab_id=payload.tab_id,
+            kind=payload.kind,
             cron=payload.cron,
             interval_seconds=payload.interval_seconds,
         )
