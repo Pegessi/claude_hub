@@ -413,6 +413,158 @@ def test_production_resolver_missing_pinned_id_falls_back_to_default(
     assert ws.id == "ws-default"
 
 
+def test_safe_session_cwd_none_when_request_empty(tmp_path: Path) -> None:
+    from claude_hub.services import feishu_ai_workspace as faw
+
+    workspace = SimpleNamespace(id="ws", path=str(tmp_path))
+    # Empty/whitespace cwd defers to workspace.path (None) rather than resolving
+    # to Path.home(), which could be outside the workspace and crash provisioning.
+    assert faw.safe_session_cwd(workspace, "") is None
+    assert faw.safe_session_cwd(workspace, "   ") is None
+
+
+def test_safe_session_cwd_forwarded_when_inside_workspace(tmp_path: Path) -> None:
+    from claude_hub.services import feishu_ai_workspace as faw
+
+    workspace = SimpleNamespace(id="ws", path=str(tmp_path))
+    sub = tmp_path / "nested" / "job"
+    sub.mkdir(parents=True)
+    assert faw.safe_session_cwd(workspace, str(sub)) == str(sub)
+    # Equal path is admissible.
+    assert faw.safe_session_cwd(workspace, str(tmp_path)) == str(tmp_path)
+
+
+def test_safe_session_cwd_falls_back_when_outside_workspace(tmp_path: Path) -> None:
+    from claude_hub.services import feishu_ai_workspace as faw
+
+    ws_root = tmp_path / "wsroot"
+    ws_root.mkdir()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    workspace = SimpleNamespace(id="ws", path=str(ws_root))
+
+    # An explicit but out-of-workspace cwd must not raise: it returns None so the
+    # platform defaults to workspace.path.
+    assert faw.safe_session_cwd(workspace, str(outside)) is None
+    # A non-existent cwd is treated the same way.
+    assert faw.safe_session_cwd(workspace, str(tmp_path / "missing")) is None
+
+
+def test_production_resolver_reuses_dedicated_workspace_that_allows_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.workspace_manager import workspace_manager
+
+    dedicated = _workspace("ws-feishu", DEFAULT_AI_COMMAND_WORKSPACE_NAME, str(tmp_path))
+    monkeypatch.setattr(workspace_manager, "workspaces", {dedicated.id: dedicated})
+
+    def fail_create(payload: Any) -> Any:
+        pytest.fail("must reuse the admissible dedicated workspace, not create one")
+
+    monkeypatch.setattr(workspace_manager, "create_workspace", fail_create)
+    service = FeishuAiCommandService(state_path=tmp_path / "reuse.json")
+
+    # cwd equals the workspace path -> admissible -> reused.
+    ws = service._resolve_workspace(FeishuAiCommandConfig(), str(tmp_path))
+    assert ws.id == "ws-feishu"
+
+
+def test_production_resolver_creates_when_dedicated_workspace_rejects_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from claude_hub.services.workspace_manager import workspace_manager
+
+    ws_root = tmp_path / "old-ws"
+    ws_root.mkdir()
+    new_cwd = tmp_path / "new-cwd"
+    new_cwd.mkdir()
+    # A pre-existing dedicated workspace rooted at a different (sibling) path.
+    stale = _workspace("ws-old", DEFAULT_AI_COMMAND_WORKSPACE_NAME, str(ws_root))
+    monkeypatch.setattr(workspace_manager, "workspaces", {stale.id: stale})
+
+    created: dict[str, Any] = {}
+
+    def fake_create(payload: Any) -> Any:
+        created["path"] = payload.path
+        created["allow_duplicate"] = payload.allow_duplicate
+        ws = _workspace("ws-fresh", payload.name, payload.path)
+        workspace_manager.workspaces[ws.id] = ws
+        return ws
+
+    monkeypatch.setattr(workspace_manager, "create_workspace", fake_create)
+    service = FeishuAiCommandService(state_path=tmp_path / "fresh.json")
+
+    # The new cwd is outside the old dedicated workspace, so the resolver must
+    # not reuse it (provisioning would reject the cwd) and creates a fresh one.
+    ws = service._resolve_workspace(FeishuAiCommandConfig(), str(new_cwd))
+    assert ws.id == "ws-fresh"
+    assert created["path"] == str(new_cwd)
+    assert created["allow_duplicate"] is True
+
+
+@pytest.mark.asyncio
+async def test_empty_cfg_cwd_provisions_without_crash_and_defers_to_workspace(
+    tmp_path: Path,
+) -> None:
+    """cfg.cwd='' must not resolve to Path.home() and crash against the workspace."""
+    manager = _FakeWorkspaceManager()
+    service = _make_service(tmp_path, fake_manager=manager)
+    # Leave cwd at its empty default; the fake workspace is rooted at tmp_path.
+    service.update_config({"enabled": True, "cwd": ""})
+
+    tab_id = await service._ensure_execution_tab(_message(), _parsed(), service.get_config())
+
+    assert tab_id == "tab-1"
+    # The session request carries None cwd (platform will use workspace.path),
+    # never a Path.home() path that the workspace cannot host.
+    assert manager.provision_calls[0]["cwd"] is None
+
+
+@pytest.mark.asyncio
+async def test_out_of_workspace_cwd_falls_back_instead_of_crashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit cwd outside the pinned workspace degrades to workspace.path."""
+    from claude_hub.services import feishu_ai_workspace as faw
+
+    manager = _FakeWorkspaceManager()
+    service = _make_service(tmp_path, fake_manager=manager)
+
+    ws_root = tmp_path / "pinned-root"
+    ws_root.mkdir()
+    outside = tmp_path / "outside-dir"
+    outside.mkdir()
+
+    # Pin a workspace rooted at ws_root; the harness resolver returns it.
+    pinned = SimpleNamespace(id="ws-pinned", name="Pinned", path=str(ws_root))
+    manager.workspaces[pinned.id] = pinned
+
+    def resolver(cfg: FeishuAiCommandConfig, cwd: str) -> SimpleNamespace:
+        return pinned
+
+    service._workspace_resolver = resolver  # type: ignore[method-assign]
+    service.update_config({"enabled": True, "workspace_id": "ws-pinned", "cwd": str(outside)})
+
+    # Spy on the safe helper to prove the fallback is exercised without raising.
+    called: dict[str, Any] = {}
+    original = faw.safe_session_cwd
+
+    def spy(workspace: Any, requested: str) -> str | None:
+        result = original(workspace, requested)
+        called["requested"] = requested
+        called["result"] = result
+        return result
+
+    monkeypatch.setattr(faw, "safe_session_cwd", spy)
+
+    tab_id = await service._ensure_execution_tab(_message(), _parsed(), service.get_config())
+
+    assert tab_id == "tab-1"
+    assert called["requested"] == str(outside)
+    assert called["result"] is None  # rejected -> defer to workspace.path
+    assert manager.provision_calls[0]["cwd"] is None
+
+
 def test_workspace_id_config_persists_and_clears(tmp_path: Path) -> None:
     service = FeishuAiCommandService(state_path=tmp_path / "cfg.json")
 

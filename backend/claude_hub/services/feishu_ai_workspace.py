@@ -39,6 +39,35 @@ def resolve_cwd(cfg: FeishuAiCommandConfig) -> str:
     return cwd
 
 
+def safe_session_cwd(workspace: Any, requested_cwd: str) -> str | None:
+    """Return a cwd admissible for ``workspace``, or ``None`` to defer to its path.
+
+    The workspace manager rejects (``ValueError``) a local agent cwd that is not
+    inside the workspace, so blindly forwarding an arbitrary /ai cwd would crash
+    provisioning. Rules:
+
+    - an empty/non-existent requested cwd yields ``None``; ``ensure_workspace_agent``
+      then defaults the session to ``workspace.path``;
+    - an explicit, admissible cwd is forwarded;
+    - an explicit cwd outside the workspace logs a warning and yields ``None``
+      rather than failing the command.
+    """
+    cwd = (requested_cwd or "").strip()
+    if not cwd or not os.path.isdir(cwd):
+        return None
+    from claude_hub.services.workspace_identity import local_agent_cwd_allowed_for_workspace
+
+    if local_agent_cwd_allowed_for_workspace(workspace.path, cwd):
+        return cwd
+    logger.warning(
+        "Feishu /ai cwd %s is outside workspace %s (%s); falling back to workspace path",
+        cwd,
+        getattr(workspace, "id", "?"),
+        workspace.path,
+    )
+    return None
+
+
 def normalize_channel_record(raw: Any) -> dict[str, str]:
     """Normalize a persisted channel_tabs entry (dict or legacy plain string)."""
     if isinstance(raw, Mapping):
@@ -162,13 +191,17 @@ async def ensure_execution_tab(service: Any, message: Any, parsed: Any, cfg: Any
     # renders under that workspace rather than the bare Terminal/cwd list.
     cwd = resolve_cwd(cfg)
     workspace = service._resolve_workspace(cfg, cwd)
+    # Forward only a cwd admissible for the resolved workspace; an empty cfg.cwd
+    # or an out-of-workspace path defers to workspace.path instead of crashing
+    # ensure_workspace_agent with ValueError.
+    session_cwd = safe_session_cwd(workspace, cfg.cwd)
     short_target = (message.thread_id or message.chat_id)[-6:]
     session = await service._provide_managed_session(
         workspace_id=str(workspace.id),
         agent_type=parsed.provider,
         env=target_env,
         title=f"Feishu /ai · {short_target}"[:64],
-        cwd=cwd,
+        cwd=session_cwd,
     )
     tab_id = str(getattr(session, "tab_id", "") or "").strip()
     session_id = str(getattr(session, "id", "") or "").strip()
@@ -201,6 +234,7 @@ def resolve_workspace(
         return resolver_seam(cfg, cwd)
 
     from claude_hub.models import WorkspaceCreate
+    from claude_hub.services.workspace_identity import local_agent_cwd_allowed_for_workspace
     from claude_hub.services.workspace_manager import workspace_manager
 
     requested = cfg.workspace_id.strip()
@@ -213,8 +247,15 @@ def resolve_workspace(
             requested,
         )
 
+    # Reuse an existing dedicated workspace only when it can host the requested
+    # cwd. A "Feishu /ai" workspace created for a different path/repo would reject
+    # the cwd at provision time, so skip it and create a dedicated workspace at
+    # the current cwd instead.
     for workspace in workspace_manager.list_workspaces():
-        if workspace.name == DEFAULT_AI_COMMAND_WORKSPACE_NAME:
+        if (
+            workspace.name == DEFAULT_AI_COMMAND_WORKSPACE_NAME
+            and local_agent_cwd_allowed_for_workspace(workspace.path, cwd)
+        ):
             return workspace
 
     # allow_duplicate=True: the cwd may already host another workspace (e.g. the

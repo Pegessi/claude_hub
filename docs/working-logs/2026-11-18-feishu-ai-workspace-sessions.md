@@ -46,10 +46,17 @@ Feishu → managed workspace Chat → synchronous answer, and was used as the re
      session through the channel map, and advisory workspace-manager reuse would hand one channel an
      idle WORKER session built for another. Before reusing a mapped managed record it now verifies
      the backing session is still live and non-archived (`_get_managed_session`); a stale/deleted
-     session falls through to fresh provisioning. The validated /ai cwd is propagated into the
-     request so a pinned workspace cannot silently relocate the session. The resulting tab carries
+     session falls through to fresh provisioning. The /ai cwd is forwarded only through
+     `safe_session_cwd()`: an empty/non-existent `cfg.cwd` yields `None` (so the platform defaults to
+     `workspace.path`, never `Path.home()`), an explicit admissible cwd is forwarded, and an explicit
+     cwd outside the resolved workspace logs a warning and yields `None` instead of letting
+     `ensure_workspace_agent` raise `ValueError`. The resulting tab carries
      `workspace_id` + `workspace_role` + `managed_session_id`, so it renders under the workspace and
      survives restart.
+   - `resolve_workspace()` reuse is cwd-gated: an existing `Feishu /ai` workspace is reused only when
+     `local_agent_cwd_allowed_for_workspace(workspace.path, cwd)` holds; otherwise a dedicated
+     workspace is created at the current cwd (`allow_duplicate=True`), so a workspace built for a
+     different path/repo never forces an invalid cwd at provision time.
    - `dispatch_turn()` / `dispatch_managed_turn()`: route managed sessions through the shared
      managed tailer (`subscribe_completion` + `send_message`), preserving the
      `feishu-ai-<message_id>` turn id and full turn metadata; await `TURN_COMPLETED` for the final
@@ -78,17 +85,19 @@ Feishu → managed workspace Chat → synchronous answer, and was used as the re
 
 ## Tests
 
-- `tests/test_feishu_ai_command_workspace.py` (22 tests): default resolution (reuse +
+- `tests/test_feishu_ai_command_workspace.py` (29 tests): default resolution (reuse +
   on-demand create with `allow_duplicate=True`), explicit `workspace_id`, missing-id fallback,
   channel reuse (no second session), managed dispatch routing, managed env hot-switch, TraeX
   standalone fallback, legacy string-record compatibility, config persist/clear, PATCH schema
   validation, plus the review-fix coverage: distinct channels provision distinct sessions
-  (`reuse_existing=False` + cwd propagation), stale/archived managed-session recovery, safe-retry
-  cancellation raising `ExternalDispatchRetired` (and claim preservation when not retry-safe), and a
+  (`reuse_existing=False`), stale/archived managed-session recovery, safe-retry
+  cancellation raising `ExternalDispatchRetired` (and claim preservation when not retry-safe), a
   real `provide_managed_session` → `workspace_manager.ensure_workspace_agent` →
   `ttyd_manager.create_tab` integration test asserting the runtime tab carries
   `workspace_id`/`workspace_role=WORKER`/`managed_session_id` and the request carries
-  `reuse_existing=False`.
+  `reuse_existing=False`, and the cwd-safety hardening: `safe_session_cwd` unit tests (empty →
+  `None`, admissible subdir forwarded, out-of-workspace → `None`), resolver reuse-vs-create cwd
+  gating, and end-to-end empty-cwd / pinned-workspace-out-of-cwd provisioning that never raises.
 - Existing `tests/test_feishu_ai_command.py` (19) unchanged and green; the combined feishu/workspace/
   agent-stream suites pass.
 - `./scripts/verify.sh` gates run locally with `NO_COLOR=1 FORCE_COLOR=` (the `docs` AI-metrics line
