@@ -116,22 +116,29 @@ async def main(browser_run: BrowserRun) -> None:
         "reply_in_thread": True,
     }
     ai_token_status: dict = {
-        "has_token": False,
-        "open_id": None,
-        "user_name": None,
-        "app_id": None,
-        "source": None,
-        "expires_at": 0,
+        "has_token": True,
+        "open_id": "ou_unconfigured",
+        "user_name": "Pending Owner",
+        "app_id": "cli_unconfigured",
+        "source": "lark_cli",
+        "expires_at": 9999999999,
         "token_expired": False,
-        "granted_scopes": [],
+        "granted_scopes": ["im:message"],
         "required_send_scope": "im:message.send_as_user",
+        "can_send": False,
         "can_send_as_user": False,
-        "can_react_as_user": False,
-        "can_read_messages": False,
+        "has_send_as_user_scope": False,
+        "can_send_via_bot": False,
+        "fallback_bot_app_id": None,
+        "send_mode": "none",
+        "can_react_as_user": True,
+        "can_read_messages": True,
         "missing_required_scopes": ["im:message.send_as_user"],
         "missing_recommended_scopes": [],
-        "auth_login_command": 'lark-cli auth login --scope "im:message.send_as_user"',
-        "remediation_steps": [],
+        "auth_login_command": 'lark-cli auth login --scope "im:message im:message.reactions:write_only"',
+        "remediation_steps": [
+            "1. Configure app secret for `cli_unconfigured` (or enable `im:message.send_as_user` in Feishu Developer Console for `cli_unconfigured`)."
+        ],
     }
 
     def ai_command_payload(*, imported: bool | None = None) -> dict:
@@ -360,11 +367,22 @@ async def main(browser_run: BrowserRun) -> None:
                         "source": "lark_cli",
                         "expires_at": 9999999999,
                         "token_expired": False,
-                        "granted_scopes": ["im:message", "im:message.send_as_user"],
-                        "can_send_as_user": True,
+                        "granted_scopes": [
+                            "im:message",
+                            "im:message.reactions:write_only",
+                        ],
+                        "can_send": True,
+                        "can_send_as_user": False,
+                        "has_send_as_user_scope": False,
+                        "can_send_via_bot": True,
+                        "fallback_bot_app_id": "cli_bot_fallback_1",
+                        "send_mode": "bot_fallback",
                         "can_react_as_user": True,
                         "can_read_messages": True,
-                        "missing_required_scopes": [],
+                        "missing_required_scopes": ["im:message.send_as_user"],
+                        "remediation_steps": [
+                            "Ready via bot fallback (`cli_bot_fallback_1`): user token reads context and reacts as ou_imported."
+                        ],
                     }
                 )
                 await fulfill_json(route, ai_command_payload(imported=True))
@@ -812,6 +830,18 @@ async def main(browser_run: BrowserRun) -> None:
         await settings.get_by_test_id("feishu-ai-retry-btn").click()
         ai_form = settings.get_by_test_id("feishu-ai-settings-form")
         await expect(ai_form).to_be_visible()
+        token_card = settings.get_by_test_id("feishu-ai-token-card")
+        await expect(token_card).to_have_attribute("data-state", "failed")
+        await expect(settings.locator(".detail-title-row .source-chip")).to_have_text(
+            "Missing send_as_user"
+        )
+        await expect(token_card.locator("strong")).to_have_text(
+            "Pending Owner (ou_unconfigured) · Missing required scope: im:message.send_as_user (and no bot fallback configured)"
+        )
+        await expect(settings.get_by_test_id("feishu-ai-token-guidance")).to_have_text(
+            "1. Configure app secret for `cli_unconfigured` (or enable `im:message.send_as_user` in Feishu Developer Console for `cli_unconfigured`)."
+        )
+        await expect(settings.get_by_test_id("feishu-ai-token-login-cmd")).to_be_visible()
         await expect(settings.get_by_test_id("feishu-ai-provider-select")).to_have_value("maso")
         await expect(settings.get_by_test_id("feishu-ai-model-input")).to_have_value(
             "[redacted]_reasoning_high"
@@ -836,6 +866,15 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(
             settings.get_by_text("Imported user token from ~/.lark-cli.", exact=True)
         ).to_be_visible()
+        await expect(token_card).to_have_attribute("data-state", "connected")
+        await expect(settings.locator(".detail-title-row .source-chip")).to_have_text(
+            "Bot fallback (cli_bot_fallback_1)"
+        )
+        await expect(token_card.locator("strong")).to_have_text(
+            "Ready (bot fallback: cli_bot_fallback_1): Imported Owner (ou_imported) · im:message.send_as_user not granted"
+        )
+        await expect(settings.get_by_test_id("feishu-ai-token-guidance")).to_have_count(0)
+        await expect(settings.get_by_test_id("feishu-ai-token-login-cmd")).to_have_count(0)
         await expect(settings.get_by_test_id("feishu-ai-provider-select")).to_have_value("codex")
         await expect(settings.get_by_test_id("feishu-ai-model-input")).to_have_value("gpt-5.4")
         await expect(settings.get_by_test_id("feishu-ai-effort-select")).to_have_value("xhigh")
@@ -878,13 +917,19 @@ async def main(browser_run: BrowserRun) -> None:
         ):
             assert all(forbidden not in body for body in response_bodies)
 
-        # Check narrow viewport (720x900) layout for Personal /ai Assistant panel
+        # Check narrow viewport (720x900) layout for Personal /ai Assistant panel (bot_fallback state)
         await page.set_viewport_size({"width": 720, "height": 900})
         await page.get_by_role("button", name="Open Bot settings", exact=True).click()
         settings = page.get_by_test_id("feishu-bot-settings-dialog")
         await expect(settings).to_be_visible()
         await settings.get_by_test_id("feishu-ai-command-nav").click()
         await expect(settings.get_by_test_id("feishu-ai-settings-form")).to_be_visible()
+        await expect(settings.get_by_test_id("feishu-ai-token-card")).to_have_attribute(
+            "data-state", "connected"
+        )
+        await expect(settings.locator(".detail-title-row .source-chip")).to_have_text(
+            "Bot fallback (cli_bot_fallback_1)"
+        )
         narrow_settings_box = await settings.bounding_box()
         narrow_ai_box = await settings.get_by_test_id("feishu-ai-settings-form").bounding_box()
         assert narrow_settings_box is not None and narrow_ai_box is not None
@@ -894,8 +939,22 @@ async def main(browser_run: BrowserRun) -> None:
             narrow_ai_box["x"] + narrow_ai_box["width"]
             <= narrow_settings_box["x"] + narrow_settings_box["width"] + 1
         )
+        await page.screenshot(path=str(output / "feishu-ai-command-narrow.png"), full_page=True)
         await settings.locator("footer").get_by_role("button", name="Close", exact=True).click()
         await expect(settings).to_have_count(0)
+
+        # Switch mock token_status to direct user scope before mobile check so all 3 states are verified in browser
+        ai_token_status.update(
+            {
+                "granted_scopes": ["im:message", "im:message.send_as_user"],
+                "can_send": True,
+                "can_send_as_user": True,
+                "has_send_as_user_scope": True,
+                "can_send_via_bot": True,
+                "send_mode": "user",
+                "missing_required_scopes": [],
+            }
+        )
 
         # Both real components remain operable at mobile width.
         await page.set_viewport_size({"width": 390, "height": 844})
@@ -933,6 +992,13 @@ async def main(browser_run: BrowserRun) -> None:
         )
         await settings.get_by_test_id("feishu-ai-command-nav").click()
         await expect(settings.get_by_test_id("feishu-ai-settings-form")).to_be_visible()
+        await expect(settings.get_by_test_id("feishu-ai-token-card")).to_have_attribute(
+            "data-state", "connected"
+        )
+        await expect(settings.locator(".detail-title-row .source-chip")).to_have_text("Scope ready")
+        await expect(
+            settings.get_by_test_id("feishu-ai-token-card").locator("strong")
+        ).to_have_text("Ready: Imported Owner (ou_imported) · im:message.send_as_user granted")
         mobile_ai_box = await settings.get_by_test_id("feishu-ai-settings-form").bounding_box()
         assert mobile_ai_box is not None
         assert mobile_ai_box["x"] >= settings_box["x"]

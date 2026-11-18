@@ -658,3 +658,145 @@ test('Personal /ai navigation retires pending load and conflict adoption respect
   assert.equal(state.aiEdit.provider, 'codex')
   assert.equal(state.aiEdit.reasoning_effort, 'low')
 })
+
+test('Personal /ai Assistant truthfully renders user mode, bot fallback with distinct user/bot identities, and unavailable fallback guidance', async t => {
+  const h = harness(t)
+  const baseCfg = {
+    enabled: false,
+    prefix: '/ai',
+    owner_open_id: 'ou_owner_fb',
+    app_id: 'cli_bot_fb',
+    provider: 'claude',
+    model: '[redacted]',
+    reasoning_effort: '',
+    cwd: '/srv',
+    watch_chats: ['oc_chat_fb'],
+    poll_interval_seconds: 15,
+    max_active_chats: 10,
+    max_context_messages: 20,
+    ack_emoji: 'OnIt',
+    done_emoji: 'DONE',
+    footer: '> 🤖 AI 代答，仅供参考',
+    reply_in_thread: true,
+  }
+  let tokenStatus = {
+    has_token: true,
+    open_id: 'ou_owner_fb',
+    user_name: '[redacted]',
+    app_id: 'cli_user_app',
+    source: 'lark_cli',
+    expires_at: 9999999999,
+    token_expired: false,
+    granted_scopes: ['im:message', 'im:message.reactions:write_only'],
+    required_send_scope: 'im:message.send_as_user',
+    can_send: false,
+    can_send_as_user: false,
+    has_send_as_user_scope: false,
+    can_send_via_bot: false,
+    fallback_bot_app_id: null,
+    send_mode: 'none',
+    can_react_as_user: true,
+    can_read_messages: true,
+    missing_required_scopes: ['im:message.send_as_user'],
+    missing_recommended_scopes: [],
+    auth_login_command: 'lark-cli auth login --scope "im:message im:message.reactions:write_only"',
+    remediation_steps: [
+      '1. Configure app secret for `cli_user_app` (or enable `im:message.send_as_user` in Feishu Developer Console for `cli_user_app`).',
+    ],
+  }
+  h.setTransport(async url => {
+    if (String(url).includes('/api/feishu/bot/ai-command')) {
+      return response({
+        config: { ...baseCfg },
+        token_status: { ...tokenStatus },
+        poller_status: {
+          running: false,
+          poll_count: 1,
+          last_poll_at: 1000,
+          last_error: null,
+          commands_detected: 0,
+          commands_succeeded: 0,
+          commands_failed: 0,
+          skipped_count: 0,
+          watermarks_count: 0,
+        },
+        capabilities: {
+          providers: ['claude', 'codex'],
+          provider_models: { claude: ['[redacted]'], codex: ['gpt-5.4'] },
+          reasoning_efforts: ['low', 'high'],
+          provider_reasoning_efforts: { claude: [], codex: ['low', 'high'] },
+        },
+      })
+    }
+    return response(h.server())
+  })
+
+  const state = await mountSettings(t, h)
+  await state.openAiCommand()
+  await flush()
+
+  // 1. Unavailable fallback state: failed card, Missing send_as_user chip, remediation guidance + login command visible
+  assert.equal(state.aiTokenCanSend, false)
+  assert.equal(state.aiTokenChipLabel, 'Missing send_as_user')
+  assert.equal(
+    state.aiTokenSummary,
+    '[redacted] (ou_owner_fb) · Missing required scope: im:message.send_as_user (and no bot fallback configured)',
+  )
+  assert.equal(
+    state.aiTokenGuidance,
+    '1. Configure app secret for `cli_user_app` (or enable `im:message.send_as_user` in Feishu Developer Console for `cli_user_app`).',
+  )
+  assert.equal(state.aiSidebarMeta, 'Personal account reply')
+  assert.equal(findByTestId(state.$root, 'feishu-ai-token-card')?.props['data-state'], 'failed')
+  assert.ok(findByTestId(state.$root, 'feishu-ai-token-guidance'))
+  assert.ok(findByTestId(state.$root, 'feishu-ai-token-login-cmd'))
+
+  // 2. Bot fallback state with distinct user open_id and fallback_bot_app_id
+  tokenStatus = {
+    ...tokenStatus,
+    can_send: true,
+    can_send_as_user: false,
+    has_send_as_user_scope: false,
+    can_send_via_bot: true,
+    fallback_bot_app_id: 'cli_bot_fallback_99',
+    send_mode: 'bot_fallback',
+    remediation_steps: [
+      'Ready via bot fallback (`cli_bot_fallback_99`): user token reads context and reacts as ou_owner_fb.',
+    ],
+  }
+  await state.refresh()
+  await flush()
+  assert.equal(state.aiTokenCanSend, true)
+  assert.equal(state.aiTokenChipLabel, 'Bot fallback (cli_bot_fallback_99)')
+  assert.equal(
+    state.aiTokenSummary,
+    'Ready (bot fallback: cli_bot_fallback_99): [redacted] (ou_owner_fb) · im:message.send_as_user not granted',
+  )
+  assert.equal(state.aiSidebarMeta, 'Bot fallback (cli_bot_fallback_99)')
+  assert.equal(state.aiTokenGuidance, '')
+  assert.equal(findByTestId(state.$root, 'feishu-ai-token-card')?.props['data-state'], 'connected')
+  assert.equal(findByTestId(state.$root, 'feishu-ai-token-guidance'), null)
+  assert.equal(findByTestId(state.$root, 'feishu-ai-token-login-cmd'), null)
+
+  // 3. Direct user scope state (im:message.send_as_user granted)
+  tokenStatus = {
+    ...tokenStatus,
+    granted_scopes: ['im:message', 'im:message.send_as_user'],
+    can_send: true,
+    can_send_as_user: true,
+    has_send_as_user_scope: true,
+    can_send_via_bot: true,
+    send_mode: 'user',
+    missing_required_scopes: [],
+  }
+  await state.refresh()
+  await flush()
+  assert.equal(state.aiTokenCanSend, true)
+  assert.equal(state.aiTokenChipLabel, 'Scope ready')
+  assert.equal(
+    state.aiTokenSummary,
+    'Ready: [redacted] (ou_owner_fb) · im:message.send_as_user granted',
+  )
+  assert.equal(state.aiSidebarMeta, 'Personal account reply')
+  assert.equal(findByTestId(state.$root, 'feishu-ai-token-card')?.props['data-state'], 'connected')
+})
