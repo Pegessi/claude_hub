@@ -129,7 +129,16 @@ async def ensure_execution_tab(service: Any, message: Any, parsed: Any, cfg: Any
     target_env = parsed.effective_env
     if existing and existing.get("tab_id"):
         tab = service._get_tab(str(existing["tab_id"]))
-        if tab is not None and not getattr(tab, "archived", False):
+        # A managed record is only reusable while its backing WORKER session is
+        # live and non-archived. The tab alone can survive (or be healed back to
+        # an ungrouped tab) after its managed session is deleted, so verify the
+        # session explicitly; otherwise fall through to provision a fresh one.
+        managed_session_id = existing.get("session_id")
+        managed_session_live = not managed_session_id or (
+            service._uses_legacy_tabs()
+            or service._get_managed_session(str(managed_session_id)) is not None
+        )
+        if tab is not None and not getattr(tab, "archived", False) and managed_session_live:
             current_env = dict(getattr(tab, "env", {}) or {})
             merged_env = resolve_ai_command_agent_env(
                 parsed.provider,
@@ -159,6 +168,7 @@ async def ensure_execution_tab(service: Any, message: Any, parsed: Any, cfg: Any
         agent_type=parsed.provider,
         env=target_env,
         title=f"Feishu /ai · {short_target}"[:64],
+        cwd=cwd,
     )
     tab_id = str(getattr(session, "tab_id", "") or "").strip()
     session_id = str(getattr(session, "id", "") or "").strip()
@@ -207,8 +217,16 @@ def resolve_workspace(
         if workspace.name == DEFAULT_AI_COMMAND_WORKSPACE_NAME:
             return workspace
 
+    # allow_duplicate=True: the cwd may already host another workspace (e.g. the
+    # user's primary workspace). The dedicated /ai workspace is keyed by name in
+    # the lookup above, so bypassing the identity-collision guard lets us create
+    # a second workspace at the same path instead of raising DuplicateWorkspaceError.
     return workspace_manager.create_workspace(
-        WorkspaceCreate(name=DEFAULT_AI_COMMAND_WORKSPACE_NAME, path=cwd)
+        WorkspaceCreate(
+            name=DEFAULT_AI_COMMAND_WORKSPACE_NAME,
+            path=cwd,
+            allow_duplicate=True,
+        )
     )
 
 
@@ -218,21 +236,32 @@ async def provide_managed_session(
     agent_type: AgentType,
     env: Mapping[str, str],
     title: str,
+    cwd: str | None = None,
     provider_seam: Callable[..., Any] | None = None,
 ) -> Any:
-    """Provision (or reuse) a managed WORKER Chat session in ``workspace_id``."""
+    """Provision a dedicated managed WORKER Chat session in ``workspace_id``.
+
+    ``reuse_existing`` is deliberately False: each Feishu channel owns its own
+    session via the service-level ``channel_tabs`` map. Allowing the workspace
+    manager's advisory reuse would hand an idle WORKER session created for one
+    Feishu chat/thread to a different channel, mixing their conversations.
+    """
     if provider_seam is not None:
         res = provider_seam(
             workspace_id=workspace_id,
             agent_type=agent_type,
             env=dict(env),
             title=title,
+            cwd=cwd,
         )
         return await res if inspect.isawaitable(res) else res
 
     from claude_hub.models import EnsureWorkspaceAgentRequest, WorkspaceSessionRole
     from claude_hub.services.workspace_manager import workspace_manager
 
+    # Propagate the /ai cwd so a pinned workspace does not silently relocate the
+    # session to the workspace root. ensure_workspace_agent validates that the
+    # cwd is inside the workspace (raising ValueError otherwise).
     return await workspace_manager.ensure_workspace_agent(
         workspace_id,
         EnsureWorkspaceAgentRequest(
@@ -241,7 +270,8 @@ async def provide_managed_session(
             role=WorkspaceSessionRole.WORKER,
             title=title,
             solo_mode=True,
-            reuse_existing=True,
+            reuse_existing=False,
+            cwd=cwd,
             env=dict(env),
         ),
         bootstrap=False,
@@ -353,13 +383,31 @@ async def dispatch_managed_turn(
         # Retire the matching native turn before the dedup claim is released,
         # mirroring the tab dispatch path so a provider turn is not left running
         # against a tailer that lifespan teardown is about to stop.
+        retirement = None
         try:
-            await asyncio.shield(manager.retire_external_turn(session, expected_turn_id=turn_id))
+            retirement = await asyncio.shield(
+                manager.retire_external_turn(session, expected_turn_id=turn_id)
+            )
         except Exception:
             logger.warning(
                 "Failed to retire Feishu /ai managed turn %s on cancellation",
                 turn_id,
                 exc_info=True,
+            )
+        else:
+            # When the matching turn was cancelled (or never started), the
+            # external dedup claim is safe to release for replay. Raising the
+            # same exception as the tab path lets handle_message mark the
+            # command retired_retry_safe; otherwise preserve the claim and
+            # re-raise the plain cancellation to avoid duplicate delivery.
+            if retirement.safe_to_retry:
+                from claude_hub.api.routes.agent_stream.dispatch import ExternalDispatchRetired
+
+                raise ExternalDispatchRetired(turn_id) from None
+            logger.warning(
+                "Preserving Feishu /ai delivery claim for turn %s after cancellation: %s",
+                turn_id,
+                retirement.value,
             )
         raise
     finally:
