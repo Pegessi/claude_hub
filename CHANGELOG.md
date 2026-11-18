@@ -7,6 +7,14 @@
 
 ## Released
 
+### fix(chat): bound native sub-agent running state to its parent turn
+
+- Close unresolved child activity on parent completion or a newer turn, preserving
+  explicit terminal outcomes and preventing late replay from reviving old dots.
+- Invalidate child thinking and dock caches together; preserve genuinely live
+  unfinished-turn activity. Cover stored MASO replay, negative-oracle regression,
+  and completed/live browser rendering without changing provider transport.
+
 ### feat(feishu): support bot tenant fallback for `/ai` without `im:message.send_as_user`
 
 - Remove `im:message.send_as_user` from `RECOMMENDED_AI_COMMAND_SCOPES` so `lark-cli auth login` commands succeed on Feishu apps that do not enable the restricted `im:message.send_as_user` permission in the Feishu Developer Console (`services/feishu_user_client.py`).

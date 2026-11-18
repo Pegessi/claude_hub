@@ -313,6 +313,13 @@ async def main(browser_run: BrowserRun) -> None:
                         if row["turn_id"] == turn_detail and since < row["stream_sequence"] <= upper
                     ]
                     details = []
+                elif state.get("live"):
+                    events = [
+                        row
+                        for row in full
+                        if row["type"] != "turn_completed" and row["stream_sequence"] > since
+                    ]
+                    details = []
                 elif not state["history"]:
                     # No history until the reload: the live stream owns the
                     # transcript, and an empty page must echo the cursor rather
@@ -351,6 +358,8 @@ async def main(browser_run: BrowserRun) -> None:
                 else:
                     batches = {}
                 batch = batches.get(cursor, [])
+                if state.get("live"):
+                    batch = [row for row in batch if row["type"] != "turn_completed"]
                 if not batch:
                     await asyncio.sleep(0.25)
                 body = {
@@ -408,7 +417,7 @@ async def main(browser_run: BrowserRun) -> None:
         # reachable from the dock without expanding anything first.
         pill = page.get_by_test_id("subagent-dock-pill")
         await expect(pill).to_be_visible(timeout=15000)
-        await expect(pill).to_contain_text("1 running")
+        await expect(pill).to_contain_text("2 done")
         await expect(page.get_by_test_id("native-subagent-overlay")).to_have_count(0)
 
         await pill.click()
@@ -416,7 +425,7 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(popover).to_be_visible()
         row = popover.get_by_test_id(ROW_ID)
         await expect(row).to_have_attribute("data-kind", "native")
-        await expect(row).to_have_attribute("data-state", "running")
+        await expect(row).to_have_attribute("data-state", "completed")
         await expect(row).to_contain_text("TraeX sub-agent")
         await expect(row).to_contain_text("child report ready")
         await expect(row).to_contain_text("View")
@@ -434,7 +443,7 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(window.locator(".native-subagent-badge")).to_have_text("Native sub-agent")
         await expect(window.locator(".native-subagent-thread")).to_have_text(THREAD)
         await expect(window.locator(".native-subagent-meta")).to_contain_text("Turn #1")
-        await expect(window.locator(".native-subagent-head .tool-status")).to_have_text("Active")
+        await expect(window.locator(".native-subagent-head .tool-status")).to_have_text("Completed")
         # Same rows as the transcript: delegated prompt plus the child's own
         # report, with the dispatch result one expansion away.
         await expect(window.locator(".subthread-launch .subthread-instruction-arrow")).to_have_text(
@@ -587,7 +596,7 @@ async def main(browser_run: BrowserRun) -> None:
             PARENT,
         )
         await expect(pill).to_be_visible()
-        await expect(pill).to_contain_text("1 running")
+        await expect(pill).to_contain_text("2 done")
         # The window was dropped on deactivation: nothing may reopen it.
         await expect(page.get_by_test_id("native-subagent-overlay")).to_have_count(0)
 
@@ -647,7 +656,7 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(page.locator(f'[data-subagent-thread-id="{THREAD}"]')).to_have_count(1)
         await expect(page.locator(f'[data-subagent-thread-id="{THREAD_FAILED}"]')).to_have_count(1)
         await expect(pill).to_be_visible()
-        await expect(pill).to_contain_text("1 running")
+        await expect(pill).to_contain_text("2 done")
         await page.screenshot(path=str(output / "06-historical-detail.png"))
 
         # A historical child opens the same window with the same rows.
@@ -672,7 +681,7 @@ async def main(browser_run: BrowserRun) -> None:
         await page.reload()
         await expect(page.get_by_text("Parent answer.", exact=True)).to_have_count(1)
         await expect(pill).to_be_visible()
-        await expect(pill).to_contain_text("1 running")
+        await expect(pill).to_contain_text("2 done")
         assert detail_requests == [], "shallow sub-agent dock must not eagerly fetch turn detail"
         await pill.click()
         await page.get_by_test_id("subagent-popover").get_by_test_id(ROW_ID).click()
@@ -682,9 +691,33 @@ async def main(browser_run: BrowserRun) -> None:
         await window.get_by_test_id("native-subagent-close").click()
         await expect(page.get_by_test_id("native-subagent-overlay")).to_have_count(0)
 
+        # Positive oracle: the same child in a genuinely unfinished parent
+        # turn must still have the live blue dot and running header count.
+        state["live"] = True
+        await page.reload()
+        await expect(pill).to_contain_text("1 running")
+        await pill.click()
+        live_row = page.get_by_test_id("subagent-popover").get_by_test_id(ROW_ID)
+        await expect(live_row).to_have_attribute("data-state", "running")
+        await page.screenshot(path=str(output / "08-live-running.png"))
+        await live_row.click()
+        await expect(window.locator(".native-subagent-head .tool-status")).to_have_text("Active")
+        await window.get_by_test_id("native-subagent-close").click()
+
+        # Replaying its completed history must clear that dot again.
+        state["live"] = False
+        await page.reload()
+        await expect(pill).to_contain_text("2 done")
+        await pill.click()
+        await expect(
+            page.get_by_test_id("subagent-popover").get_by_test_id(ROW_ID)
+        ).to_have_attribute("data-state", "completed")
+        await page.screenshot(path=str(output / "09-completed-no-running.png"))
+        await pill.click()
+
         # Let one poll interval pass so an unmocked request would surface.
         await page.wait_for_timeout(5600)
-        await expect(pill).to_contain_text("1 running")
+        await expect(pill).to_contain_text("2 done")
         assert not unknown_requests, unknown_requests
         assert not unexpected_external_requests, unexpected_external_requests
         assert not errors, errors
@@ -694,6 +727,7 @@ async def main(browser_run: BrowserRun) -> None:
         "result": "PASS",
         "coverage": [
             "native child appears in the pane-chrome Agents pill with no Hub children",
+            "completed parent clears running dots; unfinished parent retains one running child",
             "popover row carries the native kind, provider label, child report and View action",
             "clicking a native row opens the Chat body's detail window (popover closes)",
             "window replays the inline rows: delegated prompt, child report, dispatch result",

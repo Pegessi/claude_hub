@@ -102,7 +102,7 @@ test('ordinary status text and unknown reasoning values are never swallowed', ()
     'reasoning_status')
 })
 
-test('main and child thread projections stay independent, including parent completion', () => {
+test('parent completion settles both main and child thinking without mixing their content', () => {
   const events = [event(1, 'turn_started'), event(2, 'thinking_delta', { text: 'main' })]
   for (const [n, child] of ['child-full-a', 'child-full-b'].entries()) {
     events.push(event(n + 3, 'status', {
@@ -114,9 +114,9 @@ test('main and child thread projections stay independent, including parent compl
   const region = turn.parts.find(p => p.kind === 'subagents')
   assert.equal(region.threads.length, 2)
   for (const child of region.threads) {
-    assert.equal(child.lifecycleStatus, 'active')
+    assert.equal(child.lifecycleStatus, 'completed')
     assert.equal(child.parts[0].providerStatus, 'reasoning')
-    assert.equal(presentThinkingParts(child.parts, null)[0].state, 'active')
+    assert.equal(createSubthreadThinkingPresenter()(child)[0].state, 'done')
   }
   assert.equal(presentThinkingParts(turn.parts, 'done')[0].state, 'done')
 })
