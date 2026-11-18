@@ -1088,7 +1088,15 @@ class FeishuAiCommandService:
             reason_val = str(exc) or type(exc).__name__
             logger.exception("Feishu /ai command execution failed for %s", message.message_id)
             uncertain_final_delivery = final_reply_started and isinstance(
-                exc, (FeishuDeliveryUncertainError, httpx.TimeoutException)
+                exc,
+                (
+                    FeishuDeliveryUncertainError,
+                    httpx.TimeoutException,
+                    httpx.ReadError,
+                    httpx.WriteError,
+                    httpx.RemoteProtocolError,
+                    httpx.DecodingError,
+                ),
             )
             error_text = ""
             error_post: dict[str, Any] = {}
