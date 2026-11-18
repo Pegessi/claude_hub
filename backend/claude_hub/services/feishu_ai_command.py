@@ -30,12 +30,14 @@ from claude_hub.services.feishu_ai_command_models import (
     DEFAULT_AI_COMMAND_PREFIX,
     DEFAULT_AI_COMMAND_PROVIDER,
     DEFAULT_AI_COMMAND_REASONING_EFFORT,
+    DEFAULT_AI_COMMAND_SEND_MODE,
     DEFAULT_MAX_ACTIVE_CHATS,
     DEFAULT_MAX_CONTEXT_MESSAGES,
     DEFAULT_POLL_INTERVAL_SECONDS,
     DEFAULT_PROVIDER_MODELS,
     PROVIDER_SUPPORTED_REASONING_EFFORTS,
     SUPPORTED_AI_COMMAND_PROVIDERS,
+    SUPPORTED_AI_COMMAND_SEND_MODES,
     SUPPORTED_REASONING_EFFORTS,
     AiCommandContextRefs,
     AiCommandExecutionResult,
@@ -44,12 +46,22 @@ from claude_hub.services.feishu_ai_command_models import (
     bounded_message_uuid,
     build_ai_dispatch_prompt,
     build_ai_post_payload,
+)
+from claude_hub.services.feishu_ai_command_models import (
+    build_capabilities_payload as _build_capabilities_payload,
+)
+from claude_hub.services.feishu_ai_command_models import (
     build_interim_reply_text,
     ensure_ai_footer,
     extract_context_references,
     parse_ai_command,
     register_live_maso_model_variants,
     resolve_ai_command_agent_env,
+)
+from claude_hub.services.feishu_ai_command_models import (
+    serialize_model_option as _serialize_model_option,
+)
+from claude_hub.services.feishu_ai_command_models import (
     validate_ai_command_agent_config,
 )
 from claude_hub.services.feishu_bot import (
@@ -67,6 +79,11 @@ from claude_hub.services.feishu_user_client import (
 from claude_hub.services.feishu_user_token_store import (
     FeishuUserTokenStore,
     get_feishu_user_token_store,
+)
+from claude_hub.services.feishu_web_session import (
+    FeishuWebLoginManager,
+    FeishuWebSessionStore,
+    get_feishu_web_session_store,
 )
 from claude_hub.services.local_storage import (
     document_exists,
@@ -171,73 +188,6 @@ async def _async_provider_model_options() -> dict[str, list[StreamModelOption]]:
     return out
 
 
-def _serialize_model_option(option: StreamModelOption) -> dict[str, Any]:
-    return {
-        "id": option.id,
-        "label": option.label,
-        "description": option.description,
-        "provider_model_id": option.provider_model_id or option.id,
-        "default_reasoning_effort": option.default_reasoning_effort,
-        "supported_reasoning_efforts": [
-            {
-                "id": eff.id,
-                "label": eff.label,
-                "description": eff.description,
-                "provider_model_id": eff.provider_model_id,
-            }
-            for eff in option.supported_reasoning_efforts
-        ],
-    }
-
-
-def _build_capabilities_payload(
-    options_by_provider: Mapping[str, Sequence[StreamModelOption]],
-) -> dict[str, Any]:
-    model_efforts: dict[str, list[str]] = {}
-    for base, variants in _MASO_MODEL_VARIANTS.items():
-        effs = list(variants.keys())
-        model_efforts[base] = effs
-        for v in set(variants.values()):
-            model_efforts[v] = effs
-
-    provider_models: dict[str, list[str]] = {}
-    serialized_options: dict[str, list[dict[str, Any]]] = {}
-    for prov_enum in SUPPORTED_AI_COMMAND_PROVIDERS:
-        prov = prov_enum.value
-        opts = list(options_by_provider.get(prov, ()))
-        serialized_options[prov] = [_serialize_model_option(opt) for opt in opts]
-        seen_ids: list[str] = []
-        for opt in opts:
-            eff_ids = [eff.id for eff in opt.supported_reasoning_efforts]
-            if eff_ids:
-                model_efforts.setdefault(opt.id, eff_ids)
-                if opt.provider_model_id:
-                    model_efforts.setdefault(opt.provider_model_id, eff_ids)
-                for eff in opt.supported_reasoning_efforts:
-                    if eff.provider_model_id:
-                        model_efforts.setdefault(eff.provider_model_id, eff_ids)
-            elif prov in {"cursor", "maso"}:
-                model_efforts.setdefault(opt.id, [])
-            primary_id = opt.provider_model_id or opt.id
-            if primary_id and primary_id not in seen_ids:
-                seen_ids.append(primary_id)
-        for fallback_id in DEFAULT_PROVIDER_MODELS.get(prov, ()):
-            if fallback_id not in seen_ids:
-                seen_ids.append(fallback_id)
-        provider_models[prov] = seen_ids
-
-    return {
-        "providers": [p.value for p in SUPPORTED_AI_COMMAND_PROVIDERS],
-        "reasoning_efforts": [e for e in SUPPORTED_REASONING_EFFORTS if e],
-        "provider_reasoning_efforts": {
-            k: list(v) for k, v in PROVIDER_SUPPORTED_REASONING_EFFORTS.items()
-        },
-        "model_reasoning_efforts": model_efforts,
-        "provider_models": provider_models,
-        "provider_model_options": serialized_options,
-    }
-
-
 def _recover_completed_stream_answer(tab_id: str, turn_id: str) -> tuple[str, str | None]:
     """Inspect durable AgentStreamStore evidence for ``(tab_id, turn_id)`` without starting a runtime."""
     if not tab_id or not turn_id:
@@ -278,6 +228,8 @@ class FeishuAiCommandService:
         *,
         state_path: Path | None = None,
         token_store: FeishuUserTokenStore | None = None,
+        web_session_store: FeishuWebSessionStore | None = None,
+        web_login_manager: FeishuWebLoginManager | None = None,
         dedup_store: FeishuMessageDedupStore | None = None,
         user_client_factory: Callable[[FeishuAiCommandConfig], FeishuUserClient] | None = None,
         tab_creator: Callable[..., Any] | None = None,
@@ -288,6 +240,18 @@ class FeishuAiCommandService:
         runtime_home = resolve_runtime_home()
         self._state_path: Path = state_path or (runtime_home / "feishu_ai_command.json")
         self._token_store: FeishuUserTokenStore = token_store or get_feishu_user_token_store()
+        if web_session_store is not None:
+            self._web_session_store = web_session_store
+        elif state_path is not None:
+            self._web_session_store = FeishuWebSessionStore(
+                path=state_path.parent / "feishu_web_session.json",
+                key_path=state_path.parent / "feishu_web_session.key",
+            )
+        else:
+            self._web_session_store = get_feishu_web_session_store()
+        self._web_login_manager = web_login_manager or FeishuWebLoginManager(
+            self._web_session_store
+        )
         self._dedup: FeishuMessageDedupStore = dedup_store or FeishuMessageDedupStore()
         self._user_client_factory = user_client_factory
         self._tab_creator = tab_creator
@@ -296,6 +260,45 @@ class FeishuAiCommandService:
         self._turn_dispatcher: AiTurnDispatcher | None = turn_dispatcher
         self._lock = threading.RLock()
         self._channel_locks: dict[str, asyncio.Lock] = {}
+
+    @property
+    def web_session_store(self) -> FeishuWebSessionStore:
+        return self._web_session_store
+
+    @property
+    def web_login_manager(self) -> FeishuWebLoginManager:
+        return self._web_login_manager
+
+    def _apply_web_session_owner_fallback(
+        self, cfg: FeishuAiCommandConfig
+    ) -> FeishuAiCommandConfig:
+        if cfg.owner_open_id or cfg.send_mode == "openapi":
+            return cfg
+        sess = self._web_session_store.load(auto_import_larkx=False)
+        if sess is not None and sess.is_valid_structure():
+            eff_open = (sess.open_id or sess.user_id).strip()
+            if eff_open:
+                return replace(
+                    cfg,
+                    owner_open_id=eff_open,
+                    app_id=cfg.app_id or "web_session",
+                )
+        return cfg
+
+    def _matches_owner_sender(self, sender_id: str, cfg: FeishuAiCommandConfig) -> bool:
+        clean_sender = (sender_id or "").strip()
+        if not clean_sender:
+            return False
+        if cfg.owner_open_id and hmac.compare_digest(clean_sender, cfg.owner_open_id.strip()):
+            return True
+        if cfg.send_mode != "openapi":
+            sess = self._web_session_store.load(auto_import_larkx=False)
+            if sess is not None and sess.is_valid_structure():
+                for candidate in (sess.user_id, sess.open_id):
+                    c = (candidate or "").strip()
+                    if c and hmac.compare_digest(clean_sender, c):
+                        return True
+        return False
 
     def _load_state(self) -> dict[str, Any]:
         default_doc: dict[str, Any] = {
@@ -347,7 +350,7 @@ class FeishuAiCommandService:
                         owner_open_id=cfg.owner_open_id or record.open_id,
                         app_id=cfg.app_id or record.app_id,
                     )
-            return cfg
+            return self._apply_web_session_owner_fallback(cfg)
 
     def _read_persisted_config(self) -> FeishuAiCommandConfig:
         with self._lock:
@@ -390,7 +393,7 @@ class FeishuAiCommandService:
                     owner_open_id=cfg.owner_open_id or record.open_id,
                     app_id=cfg.app_id or record.app_id,
                 )
-        return cfg
+        return self._apply_web_session_owner_fallback(cfg)
 
     def update_config(self, patch: Mapping[str, Any]) -> FeishuAiCommandConfig:
         with self._lock:
@@ -654,6 +657,8 @@ class FeishuAiCommandService:
             self._token_store,
             open_id=cfg.owner_open_id or None,
             app_id=cfg.app_id or settings.feishu_app_id or None,
+            web_session_store=self._web_session_store,
+            send_mode=cfg.send_mode,
         )
 
     def preflight_status(
@@ -709,6 +714,7 @@ class FeishuAiCommandService:
                     owner_open_id=cfg.owner_open_id or rec.open_id,
                     app_id=cfg.app_id or rec.app_id,
                 )
+            cfg = self._apply_web_session_owner_fallback(cfg)
             return cfg, self.build_user_client(cfg).preflight_scopes(rec)
         cfg = await self.aget_config(auto_import_lark_cli=auto_import_lark_cli)
         preflight = await self.apreflight_status(
@@ -749,9 +755,9 @@ class FeishuAiCommandService:
         config: FeishuAiCommandConfig | None = None,
     ) -> bool:
         cfg = config or self.get_config()
-        if not cfg.enabled or sender_type != "user" or not cfg.owner_open_id or not sender_open_id:
+        if not cfg.enabled or sender_type != "user" or not sender_open_id:
             return False
-        if not hmac.compare_digest(sender_open_id.strip(), cfg.owner_open_id.strip()):
+        if not self._matches_owner_sender(sender_open_id, cfg):
             return False
         return self._is_valid_ai_command_text(text, cfg)
 
@@ -1038,7 +1044,7 @@ class FeishuAiCommandService:
         if not dry_run:
             if not cfg.owner_open_id.strip():
                 return self._skip_result(message, dry_run=dry_run, reason="no_owner_open_id")
-            if not hmac.compare_digest(message.sender_open_id.strip(), cfg.owner_open_id.strip()):
+            if not self._matches_owner_sender(message.sender_open_id, cfg):
                 return self._skip_result(message, dry_run=dry_run, reason="sender_not_owner")
 
         try:
