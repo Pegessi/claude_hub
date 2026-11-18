@@ -478,6 +478,21 @@ def feishu_ai_command_status(ctx: click.Context) -> None:
 @click.option("--app-id", default=None, help="Feishu App ID (cli_...).")
 @click.option("--cwd", default=None, help="Default working directory for spawned /ai Chat tabs.")
 @click.option(
+    "--workspace-id",
+    "workspace_id",
+    default=None,
+    help=(
+        "Agent Workspace id that owns spawned /ai Chat tabs. When unset, /ai reuses or "
+        "creates a dedicated 'Feishu /ai' workspace."
+    ),
+)
+@click.option(
+    "--clear-workspace-id",
+    is_flag=True,
+    default=False,
+    help="Clear the pinned workspace id so the dedicated default workspace is used.",
+)
+@click.option(
     "--watch-chat",
     "watch_chats",
     multiple=True,
@@ -527,6 +542,8 @@ def feishu_ai_command_configure(
     owner_open_id: Optional[str],
     app_id: Optional[str],
     cwd: Optional[str],
+    workspace_id: Optional[str],
+    clear_workspace_id: bool,
     watch_chats: tuple[str, ...],
     clear_watch_chats: bool,
     poll_interval_seconds: Optional[float],
@@ -555,6 +572,10 @@ def feishu_ai_command_configure(
         patch_body["app_id"] = app_id
     if cwd is not None:
         patch_body["cwd"] = cwd
+    if clear_workspace_id:
+        patch_body["workspace_id"] = ""
+    elif workspace_id is not None:
+        patch_body["workspace_id"] = workspace_id.strip()
     if clear_watch_chats:
         patch_body["watch_chats"] = []
     elif watch_chats:
