@@ -152,6 +152,7 @@ export type FeishuAiCommandProvider =
 
 export type FeishuAiCommandReasoningEffort =
   | ''
+  | 'default'
   | 'none'
   | 'minimal'
   | 'low'

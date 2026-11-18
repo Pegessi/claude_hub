@@ -823,12 +823,12 @@ test('Personal /ai Model selector renders Provider-linked logical options, maps 
   }
   const capabilities = {
     providers: ['claude', 'codex', 'traex', 'maso', 'cursor', 'antigravity'],
-    reasoning_efforts: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+    reasoning_efforts: ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
     provider_reasoning_efforts: {
       claude: [],
       codex: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
       traex: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
-      maso: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      maso: ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max'],
       cursor: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
       antigravity: [],
     },
@@ -872,12 +872,10 @@ test('Personal /ai Model selector renders Provider-linked logical options, maps 
         {
           id: '[redacted]',
           label: '[redacted]',
-          provider_model_id: '[redacted]_reasoning_high',
-          default_reasoning_effort: 'high',
+          provider_model_id: '[redacted]',
+          default_reasoning_effort: 'default',
           supported_reasoning_efforts: [
-            { id: 'none', label: 'None', provider_model_id: '[redacted]' },
-            { id: 'low', label: 'Low', provider_model_id: '[redacted]' },
-            { id: 'medium', label: 'Medium', provider_model_id: '[redacted]_reasoning_high' },
+            { id: 'default', label: 'Default', provider_model_id: '[redacted]' },
             { id: 'high', label: 'High', provider_model_id: '[redacted]_reasoning_high' },
             { id: 'xhigh', label: 'Extra High', provider_model_id: '[redacted]_reasoning_xhigh' },
             { id: 'max', label: 'Max', provider_model_id: '[redacted]_reasoning_max' },
@@ -886,10 +884,9 @@ test('Personal /ai Model selector renders Provider-linked logical options, maps 
         {
           id: '[redacted]',
           label: '[redacted]',
-          provider_model_id: '[redacted]_reasoning_high',
-          default_reasoning_effort: 'high',
+          provider_model_id: '[redacted]',
+          default_reasoning_effort: 'low',
           supported_reasoning_efforts: [
-            { id: 'none', label: 'None', provider_model_id: '[redacted]' },
             { id: 'low', label: 'Low', provider_model_id: '[redacted]' },
             { id: 'medium', label: 'Medium', provider_model_id: '[redacted]_reasoning_medium' },
             { id: 'high', label: 'High', provider_model_id: '[redacted]_reasoning_high' },
@@ -977,7 +974,7 @@ test('Personal /ai Model selector renders Provider-linked logical options, maps 
   )
   assert.equal(state.aiCustomModelOption, null)
   assert.equal(state.aiSidebarMeta, 'maso · [redacted]')
-  assert.deepEqual([...state.aiEffortOptions], ['none', 'low', 'medium', 'high'])
+  assert.deepEqual([...state.aiEffortOptions], ['low', 'medium', 'high'])
 
   // 2. Hydrating persisted variant did NOT mark server tuple dirty: external server change adopts cleanly without conflict
   serverCfg = { ...serverCfg, model: '[redacted]_reasoning_medium', reasoning_effort: 'medium' }
@@ -987,15 +984,29 @@ test('Personal /ai Model selector renders Provider-linked logical options, maps 
   assert.equal(state.aiEdit.model, '[redacted]_reasoning_medium')
   assert.equal(state.aiEdit.reasoning_effort, 'medium')
 
-  // 3. Changing effort on MASO updates variant provider_model_id; switching to [redacted] unlocks xhigh/max
+  // 3. Changing effort on MASO updates variant provider_model_id; switching to live-shaped [redacted]
+  //    supports mode='default' ('[redacted]') across selection -> PATCH -> reload as well as xhigh/max!
   state.onAiEffortChange('low')
   await flush()
   assert.equal(state.aiEdit.model, '[redacted]')
   assert.equal(state.aiEdit.reasoning_effort, 'low')
 
-  state.onAiModelChange('[redacted]_reasoning_high')
+  state.onAiModelChange('[redacted]')
   await flush()
-  assert.deepEqual([...state.aiEffortOptions], ['none', 'low', 'medium', 'high', 'xhigh', 'max'])
+  assert.deepEqual([...state.aiEffortOptions], ['default', 'high', 'xhigh', 'max'])
+  assert.equal(state.aiEdit.model, '[redacted]')
+  assert.equal(state.aiEdit.reasoning_effort, 'default')
+  assert.equal(await state.saveAiCommand(), true)
+  assert.deepEqual(
+    { provider: savedBody.provider, model: savedBody.model, reasoning_effort: savedBody.reasoning_effort },
+    { provider: 'maso', model: '[redacted]', reasoning_effort: 'default' },
+  )
+  await state.openAiCommand()
+  await flush()
+  assert.equal(state.aiTupleConflict, null)
+  assert.equal(state.aiEdit.model, '[redacted]')
+  assert.equal(state.aiEdit.reasoning_effort, 'default')
+
   state.onAiEffortChange('xhigh')
   await flush()
   assert.equal(state.aiEdit.model, '[redacted]_reasoning_xhigh')

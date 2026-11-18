@@ -48,6 +48,7 @@ from claude_hub.services.feishu_ai_command_models import (
     ensure_ai_footer,
     extract_context_references,
     parse_ai_command,
+    register_live_maso_model_variants,
     resolve_ai_command_agent_env,
     validate_ai_command_agent_config,
 )
@@ -81,6 +82,7 @@ AiTurnDispatcher = Callable[[str, str, str, str, Mapping[str, Any]], Awaitable[s
 
 _AI_MASO_CATALOG_CACHE: tuple[float, list[StreamModelOption]] | None = None
 _AI_EFFORT_LABELS: dict[str, str] = {
+    "default": "Default",
     "none": "None",
     "minimal": "Minimal",
     "low": "Low",
@@ -161,6 +163,7 @@ async def _async_provider_model_options() -> dict[str, list[StreamModelOption]]:
             async with asyncio.timeout(0.8):
                 live_maso, _ = await check_maso_service(dict(os.environ))
             if live_maso:
+                register_live_maso_model_variants(live_maso)
                 _AI_MASO_CATALOG_CACHE = (time.monotonic() + 120.0, list(live_maso))
                 out["maso"] = list(live_maso)
         except Exception:
