@@ -15,6 +15,7 @@ import asyncio
 import hmac
 import logging
 import time
+from collections import OrderedDict
 from collections.abc import Mapping
 from typing import Any
 
@@ -24,7 +25,11 @@ from claude_hub.services.feishu_ai_command import (
     get_feishu_ai_command_service,
     parse_ai_command,
 )
-from claude_hub.services.feishu_user_client import FeishuUserClient, FeishuUserMessage
+from claude_hub.services.feishu_user_client import (
+    FeishuMessageSearchPage,
+    FeishuUserClient,
+    FeishuUserMessage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +38,8 @@ logger = logging.getLogger(__name__)
 _INITIAL_WATERMARK_LOOKBACK_MS = 5 * 60 * 1000
 _MAX_POLL_PAGES_PER_CHAT = 25
 _MAX_CONCURRENT_DISPATCHES = 4
+_MAX_SEARCH_PAGES_PER_POLL = 5
+_MAX_SEARCH_MESSAGE_CACHE = 512
 
 
 def _message_from_dict(raw: Mapping[str, Any]) -> FeishuUserMessage | None:
@@ -84,6 +91,7 @@ class FeishuAiPoller:
         self._task: asyncio.Task[None] | None = None
         self._worker_tasks: set[asyncio.Task[None]] = set()
         self._in_flight_ids: set[str] = set()
+        self._search_msg_cache: OrderedDict[str, FeishuUserMessage | None] = OrderedDict()
         self._wake_event = asyncio.Event()
         self._stopping = False
         self._poll_count = 0
@@ -328,6 +336,51 @@ class FeishuAiPoller:
 
         return collected, reached_watermark, next_cursor, scan_upper_ms
 
+    def _remember_search_message(self, message_id: str, fetched: FeishuUserMessage | None) -> None:
+        self._search_msg_cache[message_id] = fetched
+        self._search_msg_cache.move_to_end(message_id)
+        while len(self._search_msg_cache) > _MAX_SEARCH_MESSAGE_CACHE:
+            self._search_msg_cache.popitem(last=False)
+
+    async def _fetch_search_page(
+        self,
+        user_client: FeishuUserClient,
+        query: str,
+        *,
+        page_size: int,
+        page_token: str | None,
+        start_time: str,
+        owner_open_id: str,
+    ) -> FeishuMessageSearchPage:
+        if hasattr(user_client, "search_messages_page"):
+            return await user_client.search_messages_page(
+                query,
+                page_size=page_size,
+                page_token=page_token,
+                start_time=start_time,
+                from_ids=[owner_open_id],
+            )
+        kwargs: dict[str, Any] = {
+            "page_size": page_size,
+            "start_time": start_time,
+            "from_ids": [owner_open_id],
+        }
+        if page_token:
+            kwargs["page_token"] = page_token
+        try:
+            items = await user_client.search_messages(query, **kwargs)
+        except TypeError:
+            kwargs.pop("page_token", None)
+            try:
+                items = await user_client.search_messages(query, **kwargs)
+            except TypeError:
+                items = await user_client.search_messages(
+                    query,
+                    page_size=page_size,
+                    start_time=start_time,
+                )
+        return FeishuMessageSearchPage(items=tuple(items or ()), has_more=False, page_token=None)
+
     async def _discover_recent_owner_command_chats(
         self,
         user_client: FeishuUserClient,
@@ -337,34 +390,23 @@ class FeishuAiPoller:
         now_ms: int,
         known_chat_ids: set[str],
     ) -> list[str]:
-        """Supplement active-chat polling with a bounded owner ``/ai`` message search."""
-        if not hasattr(user_client, "search_messages") or not hasattr(user_client, "get_message"):
+        """Supplement active-chat polling with a bounded owner ``/ai`` message search.
+
+        Already-queued, in-flight, completed, non-owner, and watermarked hits are
+        skipped BEFORE consuming the per-tick ``get_message`` / chat-discovery
+        budget, and search paginates across pages when earlier hits are settled.
+        """
+        has_search = hasattr(user_client, "search_messages_page") or hasattr(
+            user_client, "search_messages"
+        )
+        if not has_search or not hasattr(user_client, "get_message"):
             return []
         query = cfg.prefix.lstrip("/").strip() or "ai"
         lookback_sec = max(60, int(self._initial_lookback_ms / 1000))
         start_time = str(max(0, int(now_ms / 1000) - lookback_sec))
-        try:
-            async with asyncio.timeout(5.0):
-                try:
-                    msg_ids = await user_client.search_messages(
-                        query,
-                        page_size=min(20, max(10, cfg.max_active_chats)),
-                        start_time=start_time,
-                        from_ids=[owner_open_id],
-                    )
-                except TypeError:
-                    msg_ids = await user_client.search_messages(
-                        query,
-                        page_size=min(20, max(10, cfg.max_active_chats)),
-                        start_time=start_time,
-                    )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.debug("Feishu /ai message search supplement unavailable", exc_info=True)
-            return []
-        if not msg_ids:
-            return []
+        max_discover = max(10, min(20, cfg.max_active_chats))
+        max_fetches = max_discover
+        page_size = min(50, max(20, max_discover * 2))
 
         seen_msg_ids = {
             str(entry["message"]["message_id"])
@@ -375,25 +417,84 @@ class FeishuAiPoller:
             for run in self._service.get_recent_runs()
             if isinstance(run, Mapping) and run.get("message_id")
         }
+        watermarks = self._service.get_watermarks()
+
         discovered: list[str] = []
-        for mid in msg_ids[:10]:
-            if mid in seen_msg_ids or mid in self._in_flight_ids:
-                continue
-            try:
-                async with asyncio.timeout(3.0):
-                    fetched = await user_client.get_message(mid)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                continue
-            if fetched is None or not fetched.chat_id:
-                continue
-            if fetched.chat_id in known_chat_ids or fetched.chat_id in discovered:
-                continue
-            if fetched.sender_type == "user" and hmac.compare_digest(
-                fetched.sender_open_id.strip(), owner_open_id
-            ):
-                discovered.append(fetched.chat_id)
+        fetches = 0
+        cursor: str | None = None
+        seen_tokens: set[str] = set()
+
+        try:
+            async with asyncio.timeout(8.0):
+                for _ in range(_MAX_SEARCH_PAGES_PER_POLL):
+                    try:
+                        async with asyncio.timeout(5.0):
+                            page = await self._fetch_search_page(
+                                user_client,
+                                query,
+                                page_size=page_size,
+                                page_token=cursor,
+                                start_time=start_time,
+                                owner_open_id=owner_open_id,
+                            )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.debug(
+                            "Feishu /ai message search supplement unavailable", exc_info=True
+                        )
+                        break
+
+                    if not page.items:
+                        break
+
+                    for mid in page.items:
+                        if mid in seen_msg_ids or mid in self._in_flight_ids:
+                            continue
+                        if mid in self._search_msg_cache:
+                            fetched = self._search_msg_cache[mid]
+                            self._search_msg_cache.move_to_end(mid)
+                        else:
+                            if fetches >= max_fetches:
+                                break
+                            fetches += 1
+                            try:
+                                async with asyncio.timeout(3.0):
+                                    fetched = await user_client.get_message(mid)
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception:
+                                continue
+                            self._remember_search_message(mid, fetched)
+
+                        if fetched is None or not fetched.chat_id:
+                            continue
+                        if fetched.chat_id in known_chat_ids or fetched.chat_id in discovered:
+                            continue
+                        wm = watermarks.get(fetched.chat_id)
+                        if (
+                            wm is not None
+                            and fetched.create_time_ms > 0
+                            and fetched.create_time_ms <= wm
+                        ):
+                            continue
+                        if fetched.sender_type == "user" and hmac.compare_digest(
+                            fetched.sender_open_id.strip(), owner_open_id
+                        ):
+                            discovered.append(fetched.chat_id)
+                            if len(discovered) >= max_discover:
+                                break
+
+                    if len(discovered) >= max_discover or fetches >= max_fetches:
+                        break
+                    if not page.has_more or not page.page_token or page.page_token in seen_tokens:
+                        break
+                    seen_tokens.add(page.page_token)
+                    cursor = page.page_token
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            logger.debug("Feishu /ai message search supplement timed out", exc_info=True)
         return discovered
 
     async def poll_once(self) -> list[str]:

@@ -3608,3 +3608,334 @@ async def test_live_feishu_p2p_discovery_search_cross_app_ws_owner_and_230002_fa
         )
         assert await service.handle_ws_event(ws_spoof_event) is False
         assert len(dispatched_prompts) == 3
+
+
+async def test_bounded_owner_search_advances_past_processed_and_paginates(
+    tmp_path: Path,
+) -> None:
+    """Bounded owner search discovery must advance beyond completed/known hits across ticks and pages."""
+    import time
+
+    from claude_hub.services.feishu_user_client import FeishuMessageSearchPage
+
+    store = FeishuUserTokenStore(
+        path=tmp_path / "search_refill_tokens.json",
+        key_path=tmp_path / "search_refill_tokens.key",
+    )
+    store.save_oauth_token(
+        open_id="ou_owner_refill",
+        app_id="cli_refill",
+        access_token="u-refill",
+        refresh_token="ur-refill",
+        app_secret="sec-refill",
+        expires_in=7200,
+        scope="im:message im:chat:read search:message",
+    )
+    service = FeishuAiCommandService(
+        state_path=tmp_path / "search_refill_state.json",
+        token_store=store,
+    )
+    cfg = service.update_config(
+        {
+            "enabled": True,
+            "owner_open_id": "ou_owner_refill",
+            "app_id": "cli_refill",
+            "provider": "codex",
+            "model": "gpt-5.4",
+            "reasoning_effort": "high",
+            "max_active_chats": 10,
+        }
+    )
+    now_ms = int(time.time() * 1000)
+
+    # Part A: Exact 11-hit single-page fake transport implementing only search_messages() + get_message().
+    # Tick 1 inspects 10 chats (budget=10); after those 10 complete, Tick 2 must skip m1..m10 BEFORE
+    # budget slicing, fetch m11, and discover c11.
+    fetched_single: list[str] = []
+
+    class _SinglePageTransport:
+        async def search_messages(
+            self,
+            query: str,
+            *,
+            page_size: int = 20,
+            start_time: str | None = None,
+            from_ids: list[str] | None = None,
+        ) -> list[str]:
+            assert query == "ai"
+            assert from_ids == ["ou_owner_refill"]
+            return [f"om_hit_{i}" for i in range(1, 12)]
+
+        async def get_message(self, message_id: str) -> FeishuUserMessage | None:
+            fetched_single.append(message_id)
+            idx = int(message_id.rsplit("_", 1)[-1])
+            return FeishuUserMessage(
+                message_id=message_id,
+                chat_id=f"oc_hidden_{idx}",
+                sender_open_id="ou_owner_refill",
+                sender_type="user",
+                msg_type="text",
+                text=f"/ai task {idx}",
+                create_time_ms=now_ms - (12 - idx) * 1_000,
+            )
+
+    poller_single = FeishuAiPoller(service)
+    first_chats = await poller_single._discover_recent_owner_command_chats(
+        _SinglePageTransport(),  # type: ignore[arg-type]
+        cfg=cfg,
+        owner_open_id="ou_owner_refill",
+        now_ms=now_ms,
+        known_chat_ids=set(),
+    )
+    assert first_chats == [f"oc_hidden_{i}" for i in range(1, 11)]
+    assert fetched_single == [f"om_hit_{i}" for i in range(1, 11)]
+    assert "om_hit_11" not in fetched_single
+
+    # Simulate hits 1..8 completed in recent_runs, hit 9 pending, hit 10 in-flight
+    with service._lock:
+        st = service._load_state()
+        st["recent_runs"] = [
+            {"message_id": f"om_hit_{i}", "chat_id": f"oc_hidden_{i}", "status": "completed"}
+            for i in range(1, 9)
+        ]
+        service._save_state(st)
+    service.enqueue_pending_command(
+        FeishuUserMessage(
+            message_id="om_hit_9",
+            chat_id="oc_hidden_9",
+            sender_open_id="ou_owner_refill",
+            sender_type="user",
+            msg_type="text",
+            text="/ai task 9",
+            create_time_ms=now_ms - 3_000,
+        )
+    )
+    poller_single._in_flight_ids.add("om_hit_10")
+
+    second_chats = await poller_single._discover_recent_owner_command_chats(
+        _SinglePageTransport(),  # type: ignore[arg-type]
+        cfg=cfg,
+        owner_open_id="ou_owner_refill",
+        now_ms=now_ms,
+        known_chat_ids=set(),
+    )
+    assert second_chats == ["oc_hidden_11"]
+    assert "om_hit_11" in fetched_single
+    assert fetched_single.count("om_hit_1") == 1
+
+    # Part B: Multi-page search_messages_page() pagination + watermarked/non-owner hit skipping.
+    # Page 1 has 20 IDs (1..10 completed, 11..15 non-owner, 16..20 watermarked), Page 2 has 21..23 fresh owner hits.
+    with service._lock:
+        st = service._load_state()
+        st["recent_runs"] = [
+            {"message_id": f"om_p_{i}", "chat_id": f"oc_p_{i}", "status": "completed"}
+            for i in range(1, 11)
+        ]
+        service._save_state(st)
+    for i in range(16, 21):
+        service.set_watermark(f"oc_p_{i}", now_ms - 1_000)
+
+    fetched_paged: list[str] = []
+    search_tokens: list[str | None] = []
+
+    class _PagedTransport:
+        async def search_messages_page(
+            self,
+            query: str,
+            *,
+            page_size: int = 20,
+            page_token: str | None = None,
+            start_time: str | None = None,
+            end_time: str | None = None,
+            from_ids: list[str] | None = None,
+        ) -> FeishuMessageSearchPage:
+            search_tokens.append(page_token)
+            if page_token is None:
+                return FeishuMessageSearchPage(
+                    items=tuple(f"om_p_{i}" for i in range(1, 21)),
+                    has_more=True,
+                    page_token="cursor_page_2",
+                )
+            assert page_token == "cursor_page_2"
+            return FeishuMessageSearchPage(
+                items=("om_p_21", "om_p_22", "om_p_23"),
+                has_more=False,
+                page_token=None,
+            )
+
+        async def get_message(self, message_id: str) -> FeishuUserMessage | None:
+            fetched_paged.append(message_id)
+            idx = int(message_id.rsplit("_", 1)[-1])
+            is_owner = not (11 <= idx <= 15)
+            return FeishuUserMessage(
+                message_id=message_id,
+                chat_id=f"oc_p_{idx}",
+                sender_open_id="ou_owner_refill" if is_owner else "ou_other_person",
+                sender_type="user",
+                msg_type="text",
+                text=f"/ai paged {idx}",
+                create_time_ms=now_ms - 5_000,
+            )
+
+    poller_paged = FeishuAiPoller(service)
+    # Tick 1 inspects unseen 11..20 (10 fetches: 5 non-owner + 5 watermarked -> 0 discovered), hits fetch budget=10
+    tick1_paged = await poller_paged._discover_recent_owner_command_chats(
+        _PagedTransport(),  # type: ignore[arg-type]
+        cfg=cfg,
+        owner_open_id="ou_owner_refill",
+        now_ms=now_ms,
+        known_chat_ids=set(),
+    )
+    assert tick1_paged == []
+    assert len(fetched_paged) == 10
+    # Tick 2 skips 1..10 (recent_runs) and 11..20 (cached non-owner/watermarked, 0 new network fetches),
+    # paginates via cursor_page_2, and discovers 21..23!
+    tick2_paged = await poller_paged._discover_recent_owner_command_chats(
+        _PagedTransport(),  # type: ignore[arg-type]
+        cfg=cfg,
+        owner_open_id="ou_owner_refill",
+        now_ms=now_ms,
+        known_chat_ids=set(),
+    )
+    assert tick2_paged == ["oc_p_21", "oc_p_22", "oc_p_23"]
+    assert "cursor_page_2" in search_tokens
+    assert fetched_paged[-3:] == ["om_p_21", "om_p_22", "om_p_23"]
+
+
+def test_provider_default_and_effort_normalization_save_reload_contract(
+    tmp_path: Path,
+) -> None:
+    """Provider default (model='') + effort normalization must stay consistent across validator, PATCH, GET reload, and CLI flags."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from claude_hub.api.routes.feishu_bot.ai_command import register_ai_command_routes
+
+    # 1. Direct validator contract for Provider default (model='') across model-bound vs ENV_KEY providers
+    assert validate_ai_command_agent_config("maso", "", "xhigh") == (AgentType.MASO, "", "")
+    assert validate_ai_command_agent_config("maso", "", "high") == (AgentType.MASO, "", "")
+    assert validate_ai_command_agent_config("maso", "", "") == (AgentType.MASO, "", "")
+    assert validate_ai_command_agent_config("cursor", "", "high") == (AgentType.CURSOR, "", "")
+    assert validate_ai_command_agent_config("cursor", "", "xhigh") == (AgentType.CURSOR, "", "")
+    assert validate_ai_command_agent_config("codex", "", "xhigh") == (AgentType.CODEX, "", "xhigh")
+    assert validate_ai_command_agent_config("traex", "", "high") == (AgentType.TRAEX, "", "high")
+    # Invalid efforts still raise even when model=''
+    with pytest.raises(ValueError, match="does not support reasoning_effort='ultra'"):
+        validate_ai_command_agent_config("maso", "", "ultra")
+    with pytest.raises(ValueError, match="does not support a separate reasoning_effort"):
+        validate_ai_command_agent_config("claude", "", "high")
+
+    codex_default_env = resolve_ai_command_agent_env("codex", "", "xhigh")
+    assert "CODEX_MODEL" not in codex_default_env
+    assert codex_default_env["CODEX_REASONING_EFFORT"] == "xhigh"
+    maso_default_env = resolve_ai_command_agent_env("maso", "", "xhigh")
+    assert "MASO_MODEL" not in maso_default_env
+
+    # 2. parse_ai_command preserves Provider default unless --effort is explicitly overridden per message
+    plain_default = parse_ai_command(
+        "/ai 你好",
+        default_provider=AgentType.MASO,
+        default_model="",
+        default_reasoning_effort="",
+    )
+    assert plain_default is not None
+    assert (plain_default.provider, plain_default.model, plain_default.reasoning_effort) == (
+        AgentType.MASO,
+        "",
+        "",
+    )
+    override_effort = parse_ai_command(
+        "/ai --effort xhigh 你好",
+        default_provider=AgentType.MASO,
+        default_model="",
+        default_reasoning_effort="",
+    )
+    assert override_effort is not None
+    assert (
+        override_effort.provider,
+        override_effort.model,
+        override_effort.reasoning_effort,
+    ) == (
+        AgentType.MASO,
+        "gpt-6.1-sol_reasoning_xhigh",
+        "xhigh",
+    )
+
+    # 3. Full FastAPI PATCH -> GET reload round-trip
+    store = FeishuUserTokenStore(
+        path=tmp_path / "norm_tokens.json",
+        key_path=tmp_path / "norm_tokens.key",
+    )
+    service = FeishuAiCommandService(
+        state_path=tmp_path / "norm_state.json",
+        token_store=store,
+    )
+    poller = FeishuAiPoller(service)
+    from fastapi import APIRouter
+
+    app = FastAPI()
+    router = APIRouter(prefix="/api/feishu/bot")
+    register_ai_command_routes(
+        router,
+        require_hub_user=lambda: SimpleNamespace(open_id="ou_norm_user"),
+        service_getter=lambda: service,
+        poller_getter=lambda: poller,
+    )
+    app.include_router(router)
+    client = TestClient(app)
+
+    # Start at MASO gpt-6.1-sol_reasoning_xhigh + xhigh, then PATCH model='' (both with stale xhigh and empty effort)
+    r1 = client.patch(
+        "/api/feishu/bot/ai-command",
+        json={
+            "provider": "maso",
+            "model": "gpt-6.1-sol_reasoning_xhigh",
+            "reasoning_effort": "xhigh",
+        },
+    )
+    assert r1.status_code == 200
+    assert r1.json()["config"]["model"] == "gpt-6.1-sol_reasoning_xhigh"
+    assert r1.json()["config"]["reasoning_effort"] == "xhigh"
+
+    r2 = client.patch(
+        "/api/feishu/bot/ai-command",
+        json={"provider": "maso", "model": "", "reasoning_effort": "xhigh"},
+    )
+    assert r2.status_code == 200
+    assert r2.json()["config"]["provider"] == "maso"
+    assert r2.json()["config"]["model"] == ""
+    assert r2.json()["config"]["reasoning_effort"] == ""
+    reload_maso = client.get("/api/feishu/bot/ai-command").json()["config"]
+    assert (reload_maso["provider"], reload_maso["model"], reload_maso["reasoning_effort"]) == (
+        "maso",
+        "",
+        "",
+    )
+
+    # Cursor gpt-5.3-codex-high + high -> partial PATCH {'model': ''} persists ('cursor', '', ''), not gpt-5.3-codex-high
+    r3 = client.patch(
+        "/api/feishu/bot/ai-command",
+        json={"provider": "cursor", "model": "gpt-5.3-codex-high", "reasoning_effort": "high"},
+    )
+    assert r3.status_code == 200
+    r4 = client.patch("/api/feishu/bot/ai-command", json={"model": ""})
+    assert r4.status_code == 200
+    reload_cursor = client.get("/api/feishu/bot/ai-command").json()["config"]
+    assert (
+        reload_cursor["provider"],
+        reload_cursor["model"],
+        reload_cursor["reasoning_effort"],
+    ) == ("cursor", "", "")
+
+    # Codex gpt-6.2-sol + xhigh -> PATCH model='' preserves ENV_KEY effort='xhigh' with empty model=''
+    r5 = client.patch(
+        "/api/feishu/bot/ai-command",
+        json={"provider": "codex", "model": "", "reasoning_effort": "xhigh"},
+    )
+    assert r5.status_code == 200
+    reload_codex = client.get("/api/feishu/bot/ai-command").json()["config"]
+    assert (reload_codex["provider"], reload_codex["model"], reload_codex["reasoning_effort"]) == (
+        "codex",
+        "",
+        "xhigh",
+    )

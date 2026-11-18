@@ -922,11 +922,39 @@ test('Personal /ai Model selector renders Provider-linked logical options, maps 
   }
 
   let savedBody = null
+  function normalizeServerAiPatch(prev, patch) {
+    const next = { ...prev, ...patch }
+    const prov = String(next.provider || 'codex')
+    const model = String(next.model ?? '').trim()
+    let effort = String(next.reasoning_effort ?? '').trim().toLowerCase()
+    if (prov === 'claude' || prov === 'antigravity') {
+      if (effort) throw new Error(`Provider ${prov} does not support reasoning_effort`)
+      return { ...next, model, reasoning_effort: '' }
+    }
+    if (prov === 'maso' || prov === 'cursor') {
+      if (!model) {
+        return { ...next, model: '', reasoning_effort: '' }
+      }
+      const catalog = capabilities.provider_model_options[prov] || []
+      const opt = catalog.find(
+        item => item.id === model
+          || item.provider_model_id === model
+          || item.supported_reasoning_efforts?.some(e => e.provider_model_id === model),
+      )
+      if (effort && opt?.supported_reasoning_efforts?.length) {
+        const variant = opt.supported_reasoning_efforts.find(e => e.id === effort)
+        if (!variant) throw new Error(`${prov} model ${opt.id} does not support effort=${effort}`)
+        return { ...next, model: variant.provider_model_id || model, reasoning_effort: effort }
+      }
+      return { ...next, model, reasoning_effort: effort }
+    }
+    return { ...next, model, reasoning_effort: effort }
+  }
   h.setTransport(async (url, init = {}) => {
     if (String(url).endsWith('/ai-command')) {
       if (init.method === 'PATCH') {
         savedBody = JSON.parse(init.body)
-        serverCfg = { ...serverCfg, ...savedBody }
+        serverCfg = normalizeServerAiPatch(serverCfg, savedBody)
       }
       return response({
         config: { ...serverCfg },
@@ -973,13 +1001,55 @@ test('Personal /ai Model selector renders Provider-linked logical options, maps 
   assert.equal(state.aiEdit.model, 'gpt-6.1-sol_reasoning_xhigh')
   assert.equal(state.aiEdit.reasoning_effort, 'xhigh')
 
-  // 4. Cursor effort-capable model preserves compatible xhigh effort as gpt-5.3-codex-xhigh; non-effort model disables effort select and clears effort
+  // 3b. MASO Provider default ('') from gpt-6.1-sol_reasoning_xhigh + xhigh clears model-bound effort,
+  //     disables effort select, saves ('maso', '', ''), and reloads cleanly without conflict or argon fallback
+  state.onAiModelChange('')
+  await flush()
+  assert.equal(state.aiEdit.model, '')
+  assert.equal(state.aiEdit.reasoning_effort, '')
+  assert.deepEqual([...state.aiEffortOptions], [])
+  assert.equal(findByTestId(state.$root, 'feishu-ai-effort-select')?.props.disabled, true)
+  assert.equal(await state.saveAiCommand(), true)
+  assert.deepEqual(
+    { provider: savedBody.provider, model: savedBody.model, reasoning_effort: savedBody.reasoning_effort },
+    { provider: 'maso', model: '', reasoning_effort: '' },
+  )
+  await state.openAiCommand()
+  await flush()
+  assert.equal(state.aiTupleConflict, null)
+  assert.equal(state.aiEdit.provider, 'maso')
+  assert.equal(state.aiEdit.model, '')
+  assert.equal(state.aiEdit.reasoning_effort, '')
+  assert.equal(state.aiSidebarMeta, 'maso · default')
+
+  // Re-selecting gpt-6.1-sol restores xhigh and unlocks Cursor switch test below
+  state.onAiModelChange('gpt-6.1-sol_reasoning_high')
+  state.onAiEffortChange('xhigh')
+  await flush()
+
+  // 4. Cursor effort-capable model preserves compatible xhigh effort as gpt-5.3-codex-xhigh; non-effort model and Provider default disable effort select and clear effort
   state.onAiProviderChange('cursor')
   await flush()
   assert.equal(state.aiEdit.model, 'gpt-5.3-codex-xhigh')
   assert.equal(state.aiEdit.reasoning_effort, 'xhigh')
   assert.deepEqual([...state.aiEffortOptions], ['low', 'high', 'xhigh'])
   assert.equal(findByTestId(state.$root, 'feishu-ai-effort-select')?.props.disabled, false)
+
+  // Cursor Provider default ('') -> PATCH -> reload persists ('cursor', '', ''), not gpt-5.3-codex-high
+  state.onAiModelChange('')
+  await flush()
+  assert.equal(state.aiEdit.model, '')
+  assert.equal(state.aiEdit.reasoning_effort, '')
+  assert.equal(findByTestId(state.$root, 'feishu-ai-effort-select')?.props.disabled, true)
+  assert.equal(await state.saveAiCommand(), true)
+  assert.deepEqual(
+    { provider: savedBody.provider, model: savedBody.model, reasoning_effort: savedBody.reasoning_effort },
+    { provider: 'cursor', model: '', reasoning_effort: '' },
+  )
+  await state.openAiCommand()
+  await flush()
+  assert.equal(state.aiEdit.model, '')
+  assert.equal(state.aiEdit.reasoning_effort, '')
 
   state.onAiModelChange('claude-4.5-sonnet')
   await flush()
@@ -988,7 +1058,7 @@ test('Personal /ai Model selector renders Provider-linked logical options, maps 
   assert.deepEqual([...state.aiEffortOptions], [])
   assert.equal(findByTestId(state.$root, 'feishu-ai-effort-select')?.props.disabled, true)
 
-  // 5. Custom/unlisted model ID is preserved via custom/current option and Provider default ('') works
+  // 5. Custom/unlisted model ID is preserved via custom/current option and Codex Provider default ('') preserves ENV_KEY effort across save/reload
   serverCfg = { ...serverCfg, provider: 'codex', model: 'my-custom-codex-preview', reasoning_effort: 'high' }
   await state.openAiCommand()
   // Draft was dirty from cursor edit, accept server tuple to inspect custom model hydration
@@ -1004,6 +1074,17 @@ test('Personal /ai Model selector renders Provider-linked logical options, maps 
   state.onAiModelChange('')
   await flush()
   assert.equal(state.aiEdit.model, '')
+  assert.equal(state.aiEdit.reasoning_effort, 'high')
+  assert.equal(findByTestId(state.$root, 'feishu-ai-effort-select')?.props.disabled, false)
+  assert.equal(await state.saveAiCommand(), true)
+  assert.deepEqual(
+    { provider: savedBody.provider, model: savedBody.model, reasoning_effort: savedBody.reasoning_effort },
+    { provider: 'codex', model: '', reasoning_effort: 'high' },
+  )
+  await state.openAiCommand()
+  await flush()
+  assert.equal(state.aiEdit.model, '')
+  assert.equal(state.aiEdit.reasoning_effort, 'high')
 
   state.onAiModelChange('gpt-6.2-sol')
   state.onAiEffortChange('max')

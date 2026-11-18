@@ -219,8 +219,8 @@ _FEISHU_DOC_URL_RE = re.compile(
 
 
 def _resolve_cursor_model_with_effort(model: str, effort: str) -> str:
-    clean_model = (model or "gpt-5.3-codex").strip()
-    if not effort:
+    clean_model = (model or "").strip()
+    if not clean_model or not effort:
         return clean_model
     if clean_model.lower() in _CURSOR_NON_EFFORT_MODELS:
         raise ValueError(
@@ -260,8 +260,8 @@ def _resolve_cursor_model_with_effort(model: str, effort: str) -> str:
 
 
 def _resolve_maso_model_with_effort(model: str, effort: str) -> str:
-    clean_model = (model or "gemini-4-argon_reasoning_high").strip()
-    if not effort:
+    clean_model = (model or "").strip()
+    if not clean_model or not effort:
         return clean_model
     base = _MASO_VARIANT_SUFFIX_RE.sub("", clean_model)
     base_lower = base.lower()
@@ -337,9 +337,15 @@ def validate_ai_command_agent_config(
                 f"reasoning_effort={resolved_effort!r}; supported efforts: {allowed_str}"
             )
         if spec.reasoning_effort == ReasoningEffortKind.MODEL_ID_SUFFIX:
-            resolved_model = _resolve_cursor_model_with_effort(resolved_model, resolved_effort)
+            if not resolved_model:
+                resolved_effort = ""
+            else:
+                resolved_model = _resolve_cursor_model_with_effort(resolved_model, resolved_effort)
         elif spec.reasoning_effort == ReasoningEffortKind.MODEL_VARIANTS:
-            resolved_model = _resolve_maso_model_with_effort(resolved_model, resolved_effort)
+            if not resolved_model:
+                resolved_effort = ""
+            else:
+                resolved_model = _resolve_maso_model_with_effort(resolved_model, resolved_effort)
 
     return resolved_provider, resolved_model, resolved_effort
 
@@ -610,6 +616,15 @@ def parse_ai_command(
         model_in = defaults[0] if defaults else ""
     else:
         model_in = default_model
+
+    if (
+        "reasoning_effort" in overrides
+        and not (model_in or "").strip()
+        and get_spec(target_provider).reasoning_effort
+        in {ReasoningEffortKind.MODEL_ID_SUFFIX, ReasoningEffortKind.MODEL_VARIANTS}
+    ):
+        defaults = DEFAULT_PROVIDER_MODELS.get(target_provider.value, ())
+        model_in = defaults[0] if defaults else ""
 
     if "reasoning_effort" in overrides:
         effort_in = overrides["reasoning_effort"]
