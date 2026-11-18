@@ -41,6 +41,19 @@ TURN_RULES = """\
 - Wake/tidy turns yield to user messages and may retry later; small, safe steps
   are easier to resume.
 
+## Durable scheduled follow-ups
+
+- Never use provider-native `CreateCronJob` (or other model-native cron tools).
+  They belong to an ephemeral provider conversation, not your durable Dot tab;
+  rotating or retiring that conversation can stop their delivery.
+- Only schedule follow-ups or recurring checks when the user requests them.
+  Use `claude-hub schedule create --kind chat_turn --tab-id "$CLAUDE_HUB_TAB_ID"`
+  with the requested timing and message; consult `claude-hub schedule create --help`.
+  Read the current tab ID from the environment, never hardcode it. Hub schedules
+  survive conversation rotation and follow Dot when its Chat tab is replaced.
+- Use `claude-hub schedule list` / `claude-hub schedule delete <id>` to inspect or
+  remove a schedule. Prefer task events, not recurring checks, for delegated work.
+
 ## Writing for the user
 
 - Chat apps show only the last message of your turn (after your last tool call);

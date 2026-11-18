@@ -121,6 +121,11 @@ def _hub_runtime_guidance(agent_run: str) -> str:
         "`feedback capture --help` to cite the exact quote. Do not invent corrections. Automatic controls: "
         "`claude-hub feedback status` / `feedback configure`.\n"
         "Schedules: create one only when the user requests a scheduled follow-up or recurring check. "
+        "Never use provider-native CreateCronJob or other model-native cron tools: their delivery "
+        "target is an ephemeral provider conversation and can be lost on rotation or exit. "
+        'For this Chat use `claude-hub schedule create --kind chat_turn --tab-id "$CLAUDE_HUB_TAB_ID"` '
+        "with the requested timing/message (consult `claude-hub schedule create --help`). "
+        "Hub schedules persist independently of provider conversations. "
         "Use `schedule create --kind hub_task --help` for scheduled independent Workspace work. "
         "For an immediate queued message to an existing Chat (no schedule):\n"
         '  claude-hub tab message "$CLAUDE_HUB_TAB_ID" --message "<follow-up>" --call-id "<intent-id>"\n'

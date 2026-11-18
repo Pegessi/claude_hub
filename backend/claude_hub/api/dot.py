@@ -209,7 +209,7 @@ async def dot_setup(
 ) -> dict[str, Any]:
     """Create the memory home, the Dot Chat tab and its schedules (idempotent)."""
     from ..models.schemas import SwitchEnvRequest
-    from ..services.dot.execution import recover_execution_locked
+    from ..services.dot.execution import DotExecutionConflict, recover_execution_locked
     from ..services.env_preset_resolver import merge_env_with_preset
     from .tabs import _switch_tab_env_locked
 
@@ -231,10 +231,15 @@ async def dot_setup(
                     current_user,
                     allow_dot_setup=True,
                 )
+    except DotExecutionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     except TabLimitExceededError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from None
+    except RuntimeError as exc:
+        # Includes MASO availability and tab startup timeouts, as on /execution.
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     return service.status()
 
 

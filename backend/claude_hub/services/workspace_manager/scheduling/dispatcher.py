@@ -9,6 +9,16 @@ from .._constants import *  # noqa: F401,F403
 from ._contract import _SchedulingHost
 
 
+def _dot_schedule_target_recovering(tab_id: str) -> bool:
+    from ...dot import get_dot_service
+    from ...dot.execution import execution_pending_for
+
+    service = get_dot_service()
+    return execution_pending_for(service, tab_id) or (
+        service.is_dot_tab(tab_id) and ttyd_manager.get_tab(tab_id) is None
+    )
+
+
 class _ScheduleDispatcherMixin(_SchedulingHost):
     _FIRE_COOLDOWN = timedelta(seconds=1)
 
@@ -39,6 +49,7 @@ class _ScheduleDispatcherMixin(_SchedulingHost):
                 or not task.enabled
                 or not task.tab_id
                 or ttyd_manager.get_tab(task.tab_id) is not None
+                or _dot_schedule_target_recovering(task.tab_id)
             ):
                 continue
             task.enabled = False
@@ -87,6 +98,17 @@ class _ScheduleDispatcherMixin(_SchedulingHost):
             if not manual and (task.next_run_at is None or task.next_run_at > now):
                 # Already advanced by a concurrent manual fire.
                 return None
+
+            if task.kind == ScheduledTaskKind.CHAT_TURN and task.tab_id:
+                # Dot still owns a deleted tab before setup/recovery starts,
+                # and after rollback clears its pending marker. Do not consume
+                # schedules until a usable Dot target is committed.
+                # This check and stamping are synchronous on the same loop as
+                # Dot's pending marker and target migration.
+                if _dot_schedule_target_recovering(task.tab_id):
+                    if manual:
+                        raise RuntimeError("Dot tab replacement is pending; retry after recovery")
+                    return None
 
             scheduled_for = now if manual else (task.next_run_at or now)
             # Stamp BEFORE the side effect (crash-idempotent, same pattern as
