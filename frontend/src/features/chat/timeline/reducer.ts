@@ -5,12 +5,14 @@ import { masoTaskMatchesThreadId, parseMasoSpawnedThreadIds, parseSubagent, suba
 import type { TimelineTurn, TimelineTool, TimelineApproval, TimelineAttachment, TimelinePart } from './types'
 import { createReducerState, type ReducerState } from './state'
 import { createTurn, payloadString, payloadRecord, statusText, toolResultText, turnProvenance, appendTextPart, trimSnapshotReplay } from './eventValues'
-import { subThreadIdOf, ensureSubthread, applySubthreadEvent, bindLaunchToolForThread, detachToolFromMainParts } from './subthreads'
+import { subThreadIdOf, ensureSubthread, applySubthreadEvent, bindLaunchToolForThread, detachToolFromMainParts, closeTurnSubthreads } from './subthreads'
 
 function resolveTurn(state: ReducerState, event: AgentStreamEvent): TimelineTurn {
   if (event.turn_id) {
     let turn = state.byTurnId.get(event.turn_id)
     if (!turn) {
+      const previous = state.turns[state.turns.length - 1]
+      if (previous) closeTurnSubthreads(state, previous)
       turn = createTurn(`turn-${event.turn_id}`, event.turn_id)
       state.byTurnId.set(event.turn_id, turn)
       state.turns.push(turn)
@@ -18,6 +20,8 @@ function resolveTurn(state: ReducerState, event: AgentStreamEvent): TimelineTurn
     return turn
   }
   if (event.type === 'turn_started' || !state.legacyCurrent) {
+    const previous = state.turns[state.turns.length - 1]
+    if (previous) closeTurnSubthreads(state, previous)
     state.legacyCurrent = createTurn(`legacy-turn-${event.stream_sequence}`, null)
     state.turns.push(state.legacyCurrent)
   }
@@ -94,6 +98,7 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
       if (child) child.thread.renderRevision += 1
       turn.renderRevision += 1
     }
+    if (turn.completed || turn !== state.turns[state.turns.length - 1]) closeTurnSubthreads(state, turn)
     return
   }
 
@@ -604,6 +609,7 @@ function applyEventToState(state: ReducerState, event: AgentStreamEvent): void {
   if (mutated) {
     turn.renderRevision += 1
   }
+  if (turn.completed || turn !== state.turns[state.turns.length - 1]) closeTurnSubthreads(state, turn)
 }
 
 /** Fold append-only events into turns keyed by the native turn identity. */

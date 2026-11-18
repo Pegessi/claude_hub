@@ -138,7 +138,7 @@ test('subthread deltas/tools group by thread; main bubble keeps only the main ag
   assert.equal(turn.parts.filter((p) => p.kind === 'subagent').length, 0)
   assert.equal(f6.launchTool.name, 'spawnAgent')
   assert.equal(f6.launchTool.status, 'completed')
-  assert.equal(f6.lifecycleStatus, 'active')
+  assert.equal(f6.lifecycleStatus, 'completed')
 
   // Main assistant text contains only the main agent's two prose lines.
   assert.equal(turn.assistantText, '我先派内建 worker 去做。Kernel 已完成，单 launch。')
@@ -286,7 +286,7 @@ test('incremental reducer groups subthread events identically on append', () => 
   assert.equal(full[0].assistantText, '我先派内建 worker 去做。Kernel 已完成，单 launch。')
 })
 
-test('dispatch and parent completion never complete a child without lifecycle evidence', () => {
+test('dispatch alone does not finish a child, but parent completion closes it', () => {
   seq = 0
   const [turn] = groupEventsIntoTurns([
     ev('turn_started', { summary: 'delegate' }, { message_id: `${TURN}:user` }),
@@ -301,10 +301,10 @@ test('dispatch and parent completion never complete a child without lifecycle ev
   ])
   const child = childThreads(turn)[0]
   assert.equal(child.launchTool.status, 'completed')
-  assert.equal(child.lifecycleStatus, 'unknown')
+  assert.equal(child.lifecycleStatus, 'completed')
 })
 
-test('child activity is active without tools and parent completion does not change it', () => {
+test('parent completion closes a child that only produced text', () => {
   seq = 0
   const [turn] = groupEventsIntoTurns([
     ev('turn_started', { summary: 'delegate' }, { message_id: `${TURN}:user` }),
@@ -312,7 +312,7 @@ test('child activity is active without tools and parent completion does not chan
     ev('turn_completed', { status: 'completed' }, { message_id: TURN }),
   ])
   const child = childThreads(turn)[0]
-  assert.equal(child.lifecycleStatus, 'active')
+  assert.equal(child.lifecycleStatus, 'completed')
   assert.equal(child.parts.filter((part) => part.kind === 'tool_group').length, 0)
 })
 
@@ -341,7 +341,7 @@ test('only scoped lifecycle evidence terminalizes and later activity reopens the
   assert.equal(childThreads(turns[0])[0].lifecycleStatus, 'active')
 })
 
-test('parent completion leaves a child tool running', () => {
+test('parent completion settles a running child tool', () => {
   seq = 0
   const [turn] = groupEventsIntoTurns([
     ev('turn_started', { summary: 'delegate' }, { message_id: `${TURN}:user` }),
@@ -351,8 +351,8 @@ test('parent completion leaves a child tool running', () => {
     ev('turn_completed', { status: 'completed' }, { message_id: TURN }),
   ])
   const child = childThreads(turn)[0]
-  assert.equal(child.parts.find((part) => part.kind === 'tool_group').tools[0].status, 'running')
-  assert.equal(child.lifecycleStatus, 'active')
+  assert.equal(child.parts.find((part) => part.kind === 'tool_group').tools[0].status, 'completed')
+  assert.equal(child.lifecycleStatus, 'completed')
 })
 
 test('full provider ids with the same prefix remain separate rows', () => {

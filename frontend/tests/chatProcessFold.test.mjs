@@ -592,7 +592,7 @@ test('a subagent region with dispatch or child errors stays pinned when process 
   const region = turn.parts.find(part => part.kind === 'subagents')
   assert.ok(region)
   assert.equal(subagentRegionErrorCount(region), 2)
-  assert.equal(region.threads[0].lifecycleStatus, 'unknown', 'errors are not lifecycle evidence')
+  assert.equal(region.threads[0].lifecycleStatus, 'completed', 'parent completion bounds activity; errors stay pinned')
   assert.deepEqual(splitTurnProcess(turn).pinned.map(part => part.kind), ['subagents'])
   assert.deepEqual(
     foldTurnParts(turn, false).map(part => part.kind),
