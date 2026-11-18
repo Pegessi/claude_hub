@@ -81,6 +81,10 @@ class FeishuUserScopeError(FeishuBotConfigurationError):
         self.auth_login_command = auth_login_command
 
 
+class FeishuDeliveryUncertainError(FeishuBotError):
+    """Raised when a send/reply request may have been accepted by Feishu without a receipt."""
+
+
 @dataclass(frozen=True)
 class FeishuScopePreflightResult:
     """Scope readiness and remediation guidance for ``/ai`` user-identity actions."""
@@ -640,6 +644,16 @@ class FeishuUserClient:
             )
             return False
 
+    @staticmethod
+    def _require_reply_receipt_identity(
+        receipt: FeishuReplyReceipt,
+    ) -> FeishuReplyReceipt:
+        if not isinstance(receipt.message_id, str) or not receipt.message_id.strip():
+            raise FeishuDeliveryUncertainError(
+                "Feishu reply message identity is unavailable; delivery may have occurred"
+            )
+        return receipt
+
     async def _send_via_bot_fallback(
         self,
         record: FeishuUserTokenRecord,
@@ -721,13 +735,14 @@ class FeishuUserClient:
         bot_app_id, bot_secret = bot_configs[0]
         bot_client = self._get_fallback_bot_client(bot_app_id, bot_secret)
         try:
-            return await bot_client._reply_message_payload(
+            receipt = await bot_client._reply_message_payload(
                 message_id,
                 msg_type,
                 content,
                 reply_in_thread=reply_in_thread,
                 uuid=uuid,
             )
+            return self._require_reply_receipt_identity(receipt)
         except FeishuBotRemoteError as exc:
             if auto_invite_bot_to_chat and exc.code in _BOT_NOT_IN_CHAT_CODES:
                 resolved_chat_id = (chat_id or "").strip()
@@ -741,13 +756,14 @@ class FeishuUserClient:
                 if resolved_chat_id and await self._ensure_bot_in_chat(
                     resolved_chat_id, bot_app_id
                 ):
-                    return await bot_client._reply_message_payload(
+                    receipt = await bot_client._reply_message_payload(
                         message_id,
                         msg_type,
                         content,
                         reply_in_thread=reply_in_thread,
                         uuid=uuid,
                     )
+                    return self._require_reply_receipt_identity(receipt)
             raise
 
     async def send_as_user(
@@ -849,7 +865,7 @@ class FeishuUserClient:
             )
 
         async def _call(token: str) -> FeishuReplyReceipt:
-            return await self._bot_client._reply_message_payload(
+            receipt = await self._bot_client._reply_message_payload(
                 message_id,
                 msg_type,
                 content,
@@ -857,6 +873,7 @@ class FeishuUserClient:
                 reply_in_thread=reply_in_thread,
                 uuid=uuid,
             )
+            return self._require_reply_receipt_identity(receipt)
 
         try:
             return await self._with_user_token_retry(_call)

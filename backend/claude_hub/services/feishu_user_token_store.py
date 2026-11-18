@@ -53,7 +53,10 @@ def _normalize_epoch_seconds(value: Any) -> float:
             from datetime import datetime
 
             try:
-                return max(0.0, datetime.fromisoformat(stripped.replace("Z", "+00:00")).timestamp())
+                return max(
+                    0.0,
+                    datetime.fromisoformat(stripped.replace("Z", "+00:00")).timestamp(),
+                )
             except ValueError:
                 return 0.0
     return 0.0
@@ -179,7 +182,10 @@ class _LibcryptoAesGcm:
 
     def encrypt(self, key: bytes, plaintext: bytes, nonce: bytes | None = None) -> bytes:
         return self._crypt(
-            True, key, plaintext, nonce if nonce is not None else secrets.token_bytes(12)
+            True,
+            key,
+            plaintext,
+            nonce if nonce is not None else secrets.token_bytes(12),
         )
 
     def decrypt(self, key: bytes, blob: bytes) -> bytes:
@@ -428,19 +434,25 @@ class FeishuUserTokenStore:
 
     @staticmethod
     def _pool_bot_secret_state(app_id: str) -> tuple[bool | None, str]:
-        """Return ``(enabled, app_secret)`` if ``app_id`` is registered in ``FeishuBotPoolStore``."""
         if not (clean_app := (app_id or "").strip()):
             return None, ""
         try:
             from claude_hub.services.feishu_bot_pool import FeishuBotPoolStore
 
-            for bot in FeishuBotPoolStore().snapshot().bots:
+            pool = FeishuBotPoolStore()
+            for bot in pool.snapshot().bots:
                 if bot.app_id == clean_app:
                     if not bot.enabled or bot.config is None:
                         return False, ""
                     return True, bot.config.app_secret.strip()
+            with pool._lock:
+                raw_bots = pool._load().get("bots", {})
+            for raw in raw_bots.values():
+                if isinstance(raw, Mapping) and str(raw.get("app_id") or "").strip() == clean_app:
+                    if raw.get("revoked_at") is not None or not raw.get("enabled"):
+                        return False, ""
         except Exception:
-            pass
+            return False, ""
         return None, ""
 
     @classmethod
@@ -452,8 +464,8 @@ class FeishuUserTokenStore:
     def _resolve_lark_cli_keychain_secret(app_id: str, search_dirs: tuple[Path, ...]) -> str:
         if not (clean_app := (app_id or "").strip()):
             return ""
-        for search_dir in search_dirs:
-            mk_file, sec_file = search_dir / "master.key", search_dir / f"appsecret_{clean_app}.enc"
+        for s_dir in search_dirs:
+            mk_file, sec_file = s_dir / "master.key", s_dir / f"appsecret_{clean_app}.enc"
             if not (mk_file.is_file() and sec_file.is_file()):
                 continue
             try:
@@ -477,7 +489,6 @@ class FeishuUserTokenStore:
         search_dirs: tuple[Path, ...] = (),
         require_enabled_pool_bot: bool = False,
     ) -> str:
-        """Resolve ``app_secret`` from record, ``lark-cli`` keychain, or enabled Hub Bot pool."""
         pool_enabled, pool_sec = cls._pool_bot_secret_state(app_id)
         if require_enabled_pool_bot and pool_enabled is False:
             return ""
@@ -493,25 +504,16 @@ class FeishuUserTokenStore:
         preferred_app_id: str | None = None,
         record: FeishuUserTokenRecord | None = None,
     ) -> list[tuple[str, str]]:
-        """Return at most one ``(app_id, app_secret)`` for the selected/authorized ``/ai`` app."""
-        target_app = (
-            preferred_app_id or (record.app_id if record is not None else "") or ""
-        ).strip()
-        if not target_app:
-            return []
-        if record is not None and record.app_id and record.app_id != target_app:
+        target_app = (preferred_app_id or (record.app_id if record else "") or "").strip()
+        if not target_app or (record is not None and record.app_id and record.app_id != target_app):
             return []
         dirs = self._resolve_lark_cli_dirs_with_overrides()
         s_dirs: tuple[Path, ...] = (dirs[1], dirs[0], dirs[0] / "keychain") if dirs else ()
         rec_sec = record.app_secret if (record is not None and record.app_id == target_app) else ""
-        if not rec_sec and record is None:
-            tok_rec = self.get_token(app_id=target_app)
-            rec_sec = tok_rec.app_secret if tok_rec is not None else ""
+        if not rec_sec and record is None and (tok_rec := self.get_token(app_id=target_app)):
+            rec_sec = tok_rec.app_secret
         sec = self.resolve_app_secret_for_app(
-            target_app,
-            record_secret=rec_sec,
-            search_dirs=s_dirs,
-            require_enabled_pool_bot=True,
+            target_app, record_secret=rec_sec, search_dirs=s_dirs, require_enabled_pool_bot=True
         )
         return [(target_app, sec)] if sec else []
 
@@ -812,7 +814,10 @@ class FeishuUserTokenStore:
                         if allowed_pairs is not None and (e_app, e_uid) not in allowed_pairs:
                             continue
                         b_name, b_meta = base_meta_by_pair.get((e_app, e_uid), ("", {}))
-                        merged = {**_normalize_cli_meta(b_meta), **_normalize_cli_meta(item)}
+                        merged = {
+                            **_normalize_cli_meta(b_meta),
+                            **_normalize_cli_meta(item),
+                        }
                         e_name = str(merged.get("userName") or b_name).strip()
                         candidates.append((e_app, e_uid, e_name, merged))
         if not candidates and not has_config_apps:
@@ -1149,7 +1154,8 @@ class FeishuUserTokenStore:
                     }
                 )
                 encrypted = aes_256_gcm_encrypt(
-                    master_key, json.dumps(existing_obj, ensure_ascii=False).encode("utf-8")
+                    master_key,
+                    json.dumps(existing_obj, ensure_ascii=False).encode("utf-8"),
                 )
                 tmp_path = enc_token_path.with_suffix(".enc.tmp")
                 fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -1216,7 +1222,7 @@ class FeishuUserTokenStore:
                 refresh_token=new_refresh,
                 expires_at=expires_at,
                 refresh_expires_at=refresh_expires_at,
-                scope=_normalize_scopes(refreshed.get("scope")) if has_exp_sc else previous.scope,
+                scope=(_normalize_scopes(refreshed.get("scope")) if has_exp_sc else previous.scope),
                 updated_at=current_now,
                 generation=max(previous.generation, existing.generation) + 1,
                 imported_fingerprint=previous.imported_fingerprint or prev_fp,
@@ -1358,7 +1364,11 @@ class FeishuUserTokenStore:
         # Fallback: plaintext token fields inside candidates
         for c_app, c_uid, c_name, meta in candidates:
             built = _build_cli_rec(
-                meta, c_app, c_uid, c_name, (keychain_dir, cfg_dir, cfg_dir / "keychain")
+                meta,
+                c_app,
+                c_uid,
+                c_name,
+                (keychain_dir, cfg_dir, cfg_dir / "keychain"),
             )
             if built is not None:
                 return self._merge_imported_record(built[0], has_explicit_scope=built[1])
