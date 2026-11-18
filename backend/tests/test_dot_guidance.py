@@ -156,3 +156,23 @@ def test_result_card_includes_tracking_without_taking_review_ownership(
     if watched:
         assert "task ownership is unchanged" in card.body
     assert store.get_work("task-1") == item
+
+
+def test_schedules_use_durable_hub_targets_even_with_a_custom_dot_role(tmp_path: Path) -> None:
+    from claude_hub.services.agent_stream.providers.guidance import (
+        HUB_RUNTIME_GUIDANCE,
+        SUBAGENT_HUB_RUNTIME_GUIDANCE,
+    )
+
+    store = DotStore(tmp_path / "dot")
+    store.ensure()
+    store.role_path.write_text("A customized Dot role.")
+    pack = build_session_pack(store)
+    for guidance in (TURN_RULES, pack, HUB_RUNTIME_GUIDANCE, SUBAGENT_HUB_RUNTIME_GUIDANCE):
+        assert "Never use provider-native" in guidance
+        assert "CreateCronJob" in guidance
+        assert (
+            'claude-hub schedule create --kind chat_turn --tab-id "$CLAUDE_HUB_TAB_ID"' in guidance
+        )
+        assert "ephemeral provider conversation" in guidance
+    assert "A customized Dot role." in pack
