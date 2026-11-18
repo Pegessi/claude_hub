@@ -3939,3 +3939,116 @@ def test_provider_default_and_effort_normalization_save_reload_contract(
         "",
         "xhigh",
     )
+
+    # 4. Real live MASO /api/models catalog shape (including mode='default' on gpt56_sol, gpt55,
+    #    gpt-6-astra, gpt-6.1-sol, es1-grape-g61s, plus mode='none'/'low' models): transform via
+    #    production maso_http._model_options -> _build_capabilities_payload and verify EVERY surfaced
+    #    (provider, model, effort) tuple passes validator AND FastAPI PATCH -> GET reload!
+    from claude_hub.services.agent_stream.maso_http import _model_options as maso_model_options
+    from claude_hub.services.feishu_ai_command import (
+        _build_capabilities_payload,
+        _sync_provider_model_options,
+    )
+    from claude_hub.services.feishu_ai_command_models import register_live_maso_model_variants
+
+    live_shaped_maso_rows = [
+        {
+            "key": "seed-stable",
+            "model_name": "ep-seed",
+            "selector_primary_key": "seed-stable",
+            "selector_variants": [
+                {"key": "seed-stable", "label": "Disabled", "mode": "none"},
+                {"key": "seed-stable-reasoning", "label": "Medium", "mode": "medium"},
+                {"key": "seed-stable-reasoning-high", "label": "High", "mode": "high"},
+            ],
+        },
+        {
+            "key": "ada-qwen-27b-superfast",
+            "model_name": "ep-qwen",
+            "selector_primary_key": "ada-qwen-27b-superfast",
+            "selector_variants": [
+                {"key": "ada-qwen-27b-superfast", "label": "Low", "mode": "low"},
+                {"key": "ada-qwen-27b-superfast-reasoning", "label": "Medium", "mode": "medium"},
+                {
+                    "key": "ada-qwen-27b-superfast-reasoning-xhigh",
+                    "label": "Extra High",
+                    "mode": "xhigh",
+                },
+            ],
+        },
+        *[
+            {
+                "key": base_key,
+                "model_name": f"ep-{base_key}",
+                "selector_primary_key": base_key,
+                "selector_variants": [
+                    {"key": base_key, "label": "Default", "mode": "default"},
+                    {"key": f"{base_key}_reasoning_high", "label": "High", "mode": "high"},
+                    {"key": f"{base_key}_reasoning_xhigh", "label": "Extra High", "mode": "xhigh"},
+                    *(
+                        [{"key": f"{base_key}_reasoning_max", "label": "Max", "mode": "max"}]
+                        if base_key != "gpt55"
+                        else []
+                    ),
+                ],
+            }
+            for base_key in (
+                "gpt56_sol",
+                "gpt55",
+                "gpt-6-astra",
+                "gpt-6.1-sol",
+                "es1-grape-g61s",
+            )
+        ],
+        {
+            "key": "gemini-4-argon",
+            "model_name": "ep-argon",
+            "selector_primary_key": "gemini-4-argon",
+            "selector_variants": [
+                {"key": "gemini-4-argon", "label": "Low", "mode": "low"},
+                {"key": "gemini-4-argon_reasoning_medium", "label": "Medium", "mode": "medium"},
+                {"key": "gemini-4-argon_reasoning_high", "label": "High", "mode": "high"},
+            ],
+        },
+        {
+            "key": "gemini-4-carbon",
+            "model_name": "ep-carbon",
+            "selector_primary_key": "gemini-4-carbon",
+            "selector_variants": [
+                {"key": "gemini-4-carbon", "label": "Low", "mode": "low"},
+                {"key": "gemini-4-carbon_reasoning_medium", "label": "Medium", "mode": "medium"},
+                {"key": "gemini-4-carbon_reasoning_high", "label": "High", "mode": "high"},
+            ],
+        },
+    ]
+    live_maso_opts = maso_model_options(live_shaped_maso_rows)
+    register_live_maso_model_variants(live_maso_opts)
+    all_opts = _sync_provider_model_options()
+    all_opts["maso"] = live_maso_opts
+    caps_payload = _build_capabilities_payload(all_opts)
+
+    for prov_name, opt_list in caps_payload["provider_model_options"].items():
+        # Empty Provider default row is valid for every provider
+        validate_ai_command_agent_config(prov_name, "", "")
+        for m_opt in opt_list:
+            base_pmid = m_opt["provider_model_id"]
+            assert validate_ai_command_agent_config(prov_name, base_pmid, "")[1] == base_pmid
+            for eff_opt in m_opt["supported_reasoning_efforts"]:
+                eff_id = eff_opt["id"]
+                expected_pmid = eff_opt.get("provider_model_id") or base_pmid
+                r_patch = client.patch(
+                    "/api/feishu/bot/ai-command",
+                    json={
+                        "provider": prov_name,
+                        "model": expected_pmid,
+                        "reasoning_effort": eff_id,
+                    },
+                )
+                assert r_patch.status_code == 200, (prov_name, expected_pmid, eff_id, r_patch.text)
+                saved_cfg = client.get("/api/feishu/bot/ai-command").json()["config"]
+                assert saved_cfg["provider"] == prov_name
+                assert saved_cfg["model"] == expected_pmid
+                assert saved_cfg["reasoning_effort"] == eff_id
+                if prov_name == "maso":
+                    env = resolve_ai_command_agent_env(prov_name, expected_pmid, eff_id)
+                    assert env["MASO_MODEL"] == expected_pmid

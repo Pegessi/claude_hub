@@ -166,6 +166,7 @@ async def main(browser_run: BrowserRun) -> None:
                     "antigravity",
                 ],
                 "reasoning_efforts": [
+                    "default",
                     "none",
                     "minimal",
                     "low",
@@ -177,9 +178,9 @@ async def main(browser_run: BrowserRun) -> None:
                 ],
                 "provider_reasoning_efforts": {
                     "claude": [],
-                    "codex": ["none", "minimal", "low", "medium", "high", "xhigh"],
-                    "traex": ["none", "minimal", "low", "medium", "high", "xhigh"],
-                    "maso": ["none", "low", "medium", "high", "xhigh", "max"],
+                    "codex": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+                    "traex": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+                    "maso": ["default", "none", "low", "medium", "high", "xhigh", "max"],
                     "cursor": [
                         "none",
                         "minimal",
@@ -266,17 +267,12 @@ async def main(browser_run: BrowserRun) -> None:
                         {
                             "id": "gpt-6.1-sol",
                             "label": "gpt-6.1-sol",
-                            "provider_model_id": "gpt-6.1-sol_reasoning_high",
-                            "default_reasoning_effort": "high",
+                            "provider_model_id": "gpt-6.1-sol",
+                            "default_reasoning_effort": "default",
                             "supported_reasoning_efforts": [
                                 {
-                                    "id": "none",
-                                    "label": "None",
-                                    "provider_model_id": "gpt-6.1-sol",
-                                },
-                                {
-                                    "id": "low",
-                                    "label": "Low",
+                                    "id": "default",
+                                    "label": "Default",
                                     "provider_model_id": "gpt-6.1-sol",
                                 },
                                 {
@@ -289,19 +285,19 @@ async def main(browser_run: BrowserRun) -> None:
                                     "label": "Extra High",
                                     "provider_model_id": "gpt-6.1-sol_reasoning_xhigh",
                                 },
+                                {
+                                    "id": "max",
+                                    "label": "Max",
+                                    "provider_model_id": "gpt-6.1-sol_reasoning_max",
+                                },
                             ],
                         },
                         {
                             "id": "gemini-4-argon",
                             "label": "gemini-4-argon",
-                            "provider_model_id": "gemini-4-argon_reasoning_high",
-                            "default_reasoning_effort": "high",
+                            "provider_model_id": "gemini-4-argon",
+                            "default_reasoning_effort": "low",
                             "supported_reasoning_efforts": [
-                                {
-                                    "id": "none",
-                                    "label": "None",
-                                    "provider_model_id": "gemini-4-argon",
-                                },
                                 {
                                     "id": "low",
                                     "label": "Low",
@@ -1067,9 +1063,27 @@ async def main(browser_run: BrowserRun) -> None:
         # Switching MASO effort updates the resolved variant value on the logical Model <select>
         await effort_select.select_option("medium")
         await expect(model_select).to_have_value("gemini-4-argon_reasoning_medium")
-        # Selecting MASO gpt-6.1-sol + xhigh, then choosing Provider default ('') clears model-bound effort,
-        # disables effort select, saves ('maso', '', ''), and survives close + reopen without argon fallback
-        await model_select.select_option("gpt-6.1-sol_reasoning_high")
+        # Selecting live-shaped MASO gpt-6.1-sol adopts mode='default' ('gpt-6.1-sol'), saves ('maso', 'gpt-6.1-sol', 'default'),
+        # and reloads cleanly; then switching to xhigh and choosing Provider default ('') clears model-bound effort and reloads ('maso', '', '')
+        await model_select.select_option(label="gpt-6.1-sol")
+        await expect(model_select).to_have_value("gpt-6.1-sol")
+        await expect(effort_select).to_have_value("default")
+        await settings.get_by_test_id("feishu-ai-save-btn").click()
+        await expect(
+            settings.get_by_text("/ai command settings saved.", exact=True)
+        ).to_be_visible()
+        await settings.locator("footer").get_by_role("button", name="Close", exact=True).click()
+        await expect(settings).to_have_count(0)
+        await page.get_by_role("button", name="Open Bot settings", exact=True).click()
+        settings = page.get_by_test_id("feishu-bot-settings-dialog")
+        await expect(settings).to_be_visible()
+        await settings.get_by_test_id("feishu-ai-command-nav").click()
+        model_select = settings.get_by_test_id("feishu-ai-model-input")
+        effort_select = settings.get_by_test_id("feishu-ai-effort-select")
+        await expect(settings.get_by_test_id("feishu-ai-provider-select")).to_have_value("maso")
+        await expect(model_select).to_have_value("gpt-6.1-sol")
+        await expect(effort_select).to_have_value("default")
+
         await effort_select.select_option("xhigh")
         await expect(model_select).to_have_value("gpt-6.1-sol_reasoning_xhigh")
         await model_select.select_option("")
@@ -1156,18 +1170,21 @@ async def main(browser_run: BrowserRun) -> None:
             for call in api_calls
             if call["method"] == "PATCH" and call["path"] == "/api/feishu/bot/ai-command"
         ]
-        assert len(ai_patches) == 2
+        assert len(ai_patches) == 3
         assert ai_patches[0]["provider"] == "maso"
-        assert ai_patches[0]["model"] == ""
-        assert ai_patches[0]["reasoning_effort"] == ""
-        assert ai_patches[1]["enabled"] is True
-        assert ai_patches[1]["provider"] == "codex"
-        assert ai_patches[1]["model"] == "gpt-6.2-sol"
-        assert ai_patches[1]["reasoning_effort"] == "xhigh"
-        assert ai_patches[1]["cwd"] == "/srv/draft-ai"
-        assert ai_patches[1]["watch_chats"] == ["oc_chat_1", "oc_chat_2"]
-        assert ai_patches[1]["owner_open_id"] == "ou_imported"
-        assert ai_patches[1]["app_id"] == "cli_imported"
+        assert ai_patches[0]["model"] == "gpt-6.1-sol"
+        assert ai_patches[0]["reasoning_effort"] == "default"
+        assert ai_patches[1]["provider"] == "maso"
+        assert ai_patches[1]["model"] == ""
+        assert ai_patches[1]["reasoning_effort"] == ""
+        assert ai_patches[2]["enabled"] is True
+        assert ai_patches[2]["provider"] == "codex"
+        assert ai_patches[2]["model"] == "gpt-6.2-sol"
+        assert ai_patches[2]["reasoning_effort"] == "xhigh"
+        assert ai_patches[2]["cwd"] == "/srv/draft-ai"
+        assert ai_patches[2]["watch_chats"] == ["oc_chat_1", "oc_chat_2"]
+        assert ai_patches[2]["owner_open_id"] == "ou_imported"
+        assert ai_patches[2]["app_id"] == "cli_imported"
         await page.screenshot(path=str(output / "feishu-ai-command-desktop.png"), full_page=True)
         await settings.locator("footer").get_by_role("button", name="Close", exact=True).click()
         await expect(settings).to_have_count(0)
