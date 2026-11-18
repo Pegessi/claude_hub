@@ -50,12 +50,14 @@ class FeishuAiWebSessionLoginPollInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     login_id: Optional[str] = Field(default=None, max_length=128)
+    switch_owner: bool = False
 
 
 class FeishuAiWebSessionImportInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: Optional[str] = Field(default=None, max_length=1024)
+    switch_owner: bool = False
 
 
 class FeishuAiCommandDryRunInput(BaseModel):
@@ -298,6 +300,8 @@ def register_ai_command_routes(
                 detail={"code": "web_login_poll_failed", "message": str(exc)},
             ) from exc
         if st == "done" and sess is not None:
+            if body and body.switch_owner:
+                service.switch_owner_to_web_session()
             await poller.reconcile()
         payload = await abuild_ai_command_status_payload(
             service, poller, auto_import_lark_cli=False
@@ -316,6 +320,8 @@ def register_ai_command_routes(
         custom_path = (body.path.strip() if body and body.path else "") or None
         imported = service.web_session_store.import_from_larkx(custom_path)
         if imported is not None:
+            if body and body.switch_owner:
+                service.switch_owner_to_web_session()
             await poller.reconcile()
         payload = await abuild_ai_command_status_payload(
             service, poller, auto_import_lark_cli=False
@@ -330,7 +336,14 @@ def register_ai_command_routes(
     ) -> dict[str, Any]:
         service = _get_service()
         poller = _get_poller()
-        cleared = service.web_login_manager.logout()
+        try:
+            cleared = service.web_login_manager.logout()
+        except OSError as exc:
+            await poller.reconcile()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to delete Feishu web session file: {exc}",
+            ) from exc
         await poller.reconcile()
         payload = await abuild_ai_command_status_payload(
             service, poller, auto_import_lark_cli=False

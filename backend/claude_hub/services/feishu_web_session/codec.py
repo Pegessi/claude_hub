@@ -142,14 +142,22 @@ _CONTENT_SCHEMA: dict[str, list[list[Any]]] = {
         ["audioRecognition", 4, "lark_entities_AudioRecognition", False],
     ],
     "lark_entities_AudioRecognition": [["recognitionResult", 1, 9, False]],
-    "lark_entities_ShareUserCardContent": [["userId", 1, 9, False], ["name", 3, 9, False]],
+    "lark_entities_ShareUserCardContent": [
+        ["userId", 1, 9, False],
+        ["name", 3, 9, False],
+    ],
     "lark_entities_ShareGroupChatContent": [["chat", 1, "lark_entities_Chat", False]],
     "lark_entities_ShareCalendarEventContent": [
         ["calendarEvent", 1, "lark_entities_CalendarEvent", False]
     ],
     "lark_entities_CalendarEvent": [["summary", 29, 9, False]],
     "lark_entities_LocationContent": [
-        ["locationDescription", 1, "lark_entities_LocationContent_LocationDescription", False]
+        [
+            "locationDescription",
+            1,
+            "lark_entities_LocationContent_LocationDescription",
+            False,
+        ]
     ],
     "lark_entities_LocationContent_LocationDescription": [
         ["name", 1, 9, False],
@@ -626,20 +634,29 @@ def encode(name: str, body: Mapping[str, Any] | None) -> bytes:
         raise ValueError(f"encode {name}: expected mapping, got {type(body).__name__}")
 
     out = bytearray()
+    ordered_items: list[tuple[_FieldDef, str, Any]] = []
     for key, val in body.items():
         if val is None:
             continue
         fdef = fields.get(key)
         if fdef is None:
             raise ValueError(f"encode {name}: unknown field {key!r}")
+        ordered_items.append((fdef, key, val))
+    ordered_items.sort(key=lambda item: item[0].number)
+
+    for fdef, key, val in ordered_items:
         kind = fdef.kind
         if isinstance(kind, tuple) and kind[0] == "map":
             _, key_type, val_type = kind
             if not isinstance(val, Mapping):
                 raise ValueError(f"encode {name}.{key}: expected map dict")
-            for mk, mv in val.items():
-                if mv is None:
-                    continue
+            sorted_map_items = sorted(
+                ((mk, mv) for mk, mv in val.items() if mv is not None),
+                key=lambda pair: (
+                    _coerce_int(pair[0]) if key_type in _VARINT_TYPES else str(pair[0])
+                ),
+            )
+            for mk, mv in sorted_map_items:
                 entry_bytes = _encode_scalar_field(1, key_type, mk) + _encode_scalar_field(
                     2, val_type, mv
                 )
@@ -720,7 +737,11 @@ def _decode_map_entry(data: bytes, key_type: int, val_type: int | str) -> tuple[
                 chunk = data[pos : pos + length]
                 pos += length
                 if isinstance(val_type, str):
-                    v_val = decode(val_type, chunk)
+                    v_val = decode(
+                        val_type,
+                        chunk,
+                        into=v_val if isinstance(v_val, dict) else None,
+                    )
                 elif val_type == TYPE_STRING:
                     v_val = chunk.decode("utf-8", errors="replace")
                 elif val_type == TYPE_BYTES:
@@ -753,18 +774,23 @@ def _skip_wire_value(data: bytes, pos: int, wire_type: int) -> int:
     raise ValueError(f"unsupported protobuf wire type {wire_type}")
 
 
-def decode(name: str, data: bytes | bytearray | memoryview | None) -> dict[str, Any]:
+def decode(
+    name: str,
+    data: bytes | bytearray | memoryview | None,
+    *,
+    into: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Decode protobuf wire ``data`` for schema message ``name`` into a JSON-shaped dict."""
     reg = _REGISTRY or _registry()
     fields = reg.by_number.get(name)
     if fields is None:
         raise KeyError(f"web schema has no message {name}")
+    out: dict[str, Any] = into if isinstance(into, dict) else {}
     if not data:
-        return {}
+        return out
     buf = bytes(data)
     pos = 0
     n = len(buf)
-    out: dict[str, Any] = {}
 
     while pos < n:
         tag, pos = _decode_varint(buf, pos)
@@ -790,7 +816,15 @@ def decode(name: str, data: bytes | bytearray | memoryview | None) -> dict[str, 
             _, key_type, val_type = kind
             mk, mv = _decode_map_entry(entry_chunk, key_type, val_type)
             target_map = out.setdefault(fdef.name, {})
-            target_map[mk] = mv
+            if (
+                isinstance(val_type, str)
+                and mk in target_map
+                and isinstance(target_map[mk], dict)
+                and isinstance(mv, dict)
+            ):
+                _merge_message_dicts(val_type, target_map[mk], mv)
+            else:
+                target_map[mk] = mv
             continue
 
         if isinstance(kind, int) and kind in _VARINT_TYPES:
@@ -827,14 +861,15 @@ def decode(name: str, data: bytes | bytearray | memoryview | None) -> dict[str, 
         pos += length
 
         if isinstance(kind, str):
-            nested_val = decode(kind, chunk)
             if fdef.repeated:
-                out.setdefault(fdef.name, []).append(nested_val)
+                out.setdefault(fdef.name, []).append(decode(kind, chunk))
             else:
-                if fdef.name in out and isinstance(out[fdef.name], dict):
-                    out[fdef.name].update(nested_val)
-                else:
-                    out[fdef.name] = nested_val
+                existing = out.get(fdef.name)
+                out[fdef.name] = decode(
+                    kind,
+                    chunk,
+                    into=existing if isinstance(existing, dict) else None,
+                )
         elif kind == TYPE_STRING:
             sval = chunk.decode("utf-8", errors="replace")
             if fdef.repeated:
@@ -849,3 +884,31 @@ def decode(name: str, data: bytes | bytearray | memoryview | None) -> dict[str, 
                 out[fdef.name] = b64
 
     return out
+
+
+def _merge_message_dicts(name: str, dst: dict[str, Any], src: Mapping[str, Any]) -> None:
+    """Recursively merge protobuf message dict ``src`` into ``dst`` per schema ``name``."""
+    reg = _REGISTRY or _registry()
+    fields = reg.by_name.get(name, {})
+    for k, v in src.items():
+        fdef = fields.get(k)
+        if fdef is not None and fdef.repeated and isinstance(v, list):
+            dst.setdefault(k, []).extend(v)
+        elif (
+            fdef is not None
+            and isinstance(fdef.kind, tuple)
+            and fdef.kind[0] == "map"
+            and isinstance(v, Mapping)
+        ):
+            tmap = dst.setdefault(k, {})
+            for mk, mv in v.items():
+                tmap[mk] = mv
+        elif (
+            fdef is not None
+            and isinstance(fdef.kind, str)
+            and isinstance(dst.get(k), dict)
+            and isinstance(v, Mapping)
+        ):
+            _merge_message_dicts(fdef.kind, dst[k], v)
+        else:
+            dst[k] = v

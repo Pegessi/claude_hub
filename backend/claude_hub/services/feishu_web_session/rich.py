@@ -199,6 +199,7 @@ class WebChat:
     has_last: bool = False
     thread: bool = False
     updated_s: int = 0
+    last_message_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -271,14 +272,15 @@ def chat_of(x: Mapping[str, Any]) -> WebChat:
     if "isRemind" in x and isinstance(x["isRemind"], bool):
         muted = not x["isRemind"]
     dissolved = bool(x.get("isDissolved"))
-    last_msg_id = _str(x.get("lastMessageId"))
-    has_last = bool(last_msg_id and last_msg_id != "0")
+    last_msg_id = _zero(_str(x.get("lastMessageId")))
+    has_last = bool(last_msg_id)
     mode = _num(x.get("chatMode"))
-    is_thread = mode in {CHAT_MODE_THREAD, CHAT_MODE_THREAD_V2}
+    chat_type = _num(x.get("type"))
+    is_thread = mode in {CHAT_MODE_THREAD, CHAT_MODE_THREAD_V2} or chat_type == CHAT_TOPIC_CHAT
     is_bot = bool(x.get("isP2pAi")) or bool(x.get("isP2pOfficialBotAi"))
     return WebChat(
         id=_str(x.get("id")),
-        type=_num(x.get("type")),
+        type=chat_type,
         name=_str(x.get("name")),
         open_chat_id=_str(x.get("openChatId")),
         last_position=_num(x.get("lastMessagePosition")),
@@ -289,6 +291,7 @@ def chat_of(x: Mapping[str, Any]) -> WebChat:
         has_last=has_last,
         thread=is_thread,
         updated_s=_i64(x.get("updateTime")),
+        last_message_id=last_msg_id,
     )
 
 

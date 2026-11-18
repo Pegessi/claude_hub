@@ -4,6 +4,8 @@ from claude_hub.services.feishu_web_session.adapter import (
     FeishuWebLoginManager,
     FeishuWebUserTransport,
     is_in_topic,
+    matches_authorized_owner_sender,
+    normalize_and_claim_ai_command_message,
 )
 from claude_hub.services.feishu_web_session.client import (
     CMD_ACK,
@@ -24,6 +26,7 @@ from claude_hub.services.feishu_web_session.client import (
     compute_frontier_access_key,
     cookie_header_from_map,
     feishu_host,
+    is_web_entity_id,
     parse_frontier_frame,
 )
 from claude_hub.services.feishu_web_session.codec import (
@@ -227,9 +230,12 @@ __all__ = [
     "has_markdown",
     "inline_nodes",
     "is_in_topic",
+    "is_web_entity_id",
     "markdown_blocks",
+    "matches_authorized_owner_sender",
     "meeting_text",
     "message_of",
+    "normalize_and_claim_ai_command_message",
     "normalize_web_region",
     "parse_frontier_frame",
     "render_qr_svg_data_url",

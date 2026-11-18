@@ -16,7 +16,12 @@ from typing import Any, Awaitable, Callable, Mapping, Sequence
 import httpx
 
 from claude_hub.config import settings
-from claude_hub.models import AgentType, SessionKind, StreamModelOption, StreamReasoningEffortOption
+from claude_hub.models import (
+    AgentType,
+    SessionKind,
+    StreamModelOption,
+    StreamReasoningEffortOption,
+)
 from claude_hub.services.feishu_ai_command_models import (
     _MASO_MODEL_VARIANTS,
     _MAX_PENDING_QUEUE,
@@ -84,6 +89,8 @@ from claude_hub.services.feishu_web_session import (
     FeishuWebLoginManager,
     FeishuWebSessionStore,
     get_feishu_web_session_store,
+    matches_authorized_owner_sender,
+    normalize_and_claim_ai_command_message,
 )
 from claude_hub.services.local_storage import (
     document_exists,
@@ -260,6 +267,7 @@ class FeishuAiCommandService:
         self._turn_dispatcher: AiTurnDispatcher | None = turn_dispatcher
         self._lock = threading.RLock()
         self._channel_locks: dict[str, asyncio.Lock] = {}
+        self._cross_claims: dict[tuple[str, str, str], tuple[int, str, str]] = {}
 
     @property
     def web_session_store(self) -> FeishuWebSessionStore:
@@ -268,6 +276,15 @@ class FeishuAiCommandService:
     @property
     def web_login_manager(self) -> FeishuWebLoginManager:
         return self._web_login_manager
+
+    def switch_owner_to_web_session(self) -> FeishuAiCommandConfig:
+        """Explicitly switch ``owner_open_id`` to the currently authenticated web session's identity."""
+        sess = self._web_session_store.load(auto_import_larkx=False)
+        if sess is not None and sess.is_valid_structure():
+            eff_open = (sess.open_id or sess.user_id).strip()
+            if eff_open:
+                return self.update_config({"owner_open_id": eff_open, "app_id": "web_session"})
+        return self.get_config(auto_import_lark_cli=False)
 
     def _apply_web_session_owner_fallback(
         self, cfg: FeishuAiCommandConfig
@@ -286,19 +303,12 @@ class FeishuAiCommandService:
         return cfg
 
     def _matches_owner_sender(self, sender_id: str, cfg: FeishuAiCommandConfig) -> bool:
-        clean_sender = (sender_id or "").strip()
-        if not clean_sender:
-            return False
-        if cfg.owner_open_id and hmac.compare_digest(clean_sender, cfg.owner_open_id.strip()):
-            return True
-        if cfg.send_mode != "openapi":
-            sess = self._web_session_store.load(auto_import_larkx=False)
-            if sess is not None and sess.is_valid_structure():
-                for candidate in (sess.user_id, sess.open_id):
-                    c = (candidate or "").strip()
-                    if c and hmac.compare_digest(clean_sender, c):
-                        return True
-        return False
+        return matches_authorized_owner_sender(
+            sender_id,
+            owner_open_id=cfg.owner_open_id,
+            web_session=self._web_session_store.load(auto_import_larkx=False),
+            send_mode=cfg.send_mode,
+        )
 
     def _load_state(self) -> dict[str, Any]:
         default_doc: dict[str, Any] = {
@@ -1070,10 +1080,24 @@ class FeishuAiCommandService:
             and pending_item.get("dispatch_state") == "turn_completed"
             and isinstance(pending_item.get("answer"), str)
         )
-        dedup_claim_key = f"ai_cmd:{cfg.owner_open_id or 'owner'}:{message.message_id}"
-        if resuming_completed:
-            self._dedup.claim(dedup_claim_key)
-        elif not dry_run and not self._dedup.claim(dedup_claim_key):
+        user_client = self.build_user_client(cfg)
+        (
+            message,
+            dedup_claim_key,
+            extra_dedup_keys,
+            claimed_ok,
+        ) = await normalize_and_claim_ai_command_message(
+            message=message,
+            parsed_instruction=parsed.instruction,
+            owner_open_id=cfg.owner_open_id,
+            user_client=user_client,
+            dedup_store=self._dedup,
+            cross_claims=self._cross_claims,
+            lock=self._lock,
+            dry_run=dry_run,
+            resuming_completed=resuming_completed,
+        )
+        if not claimed_ok:
             return self._skip_result(
                 message,
                 dry_run=dry_run,
@@ -1081,8 +1105,6 @@ class FeishuAiCommandService:
                 reason="already_claimed",
                 parsed=parsed,
             )
-
-        user_client = self.build_user_client(cfg)
         ack_reaction_id: str | None = (
             str(pending_item["ack_reaction_id"])
             if resuming_completed and pending_item and pending_item.get("ack_reaction_id")
@@ -1303,7 +1325,8 @@ class FeishuAiCommandService:
                 self.mark_pending_command_state(
                     message.message_id, "interrupted", dispatch_state="not_started"
                 )
-                self._dedup.release(dedup_claim_key)
+                for dk in (dedup_claim_key, *extra_dedup_keys):
+                    self._dedup.release(dk)
             elif type(exc).__name__ == "ExternalDispatchRetired":
                 status_val, reason_val = "cancelled", "retired_retry_safe"
                 self.mark_pending_command_state(
@@ -1311,7 +1334,8 @@ class FeishuAiCommandService:
                     "interrupted",
                     dispatch_state="retired_retry_safe",
                 )
-                self._dedup.release(dedup_claim_key)
+                for dk in (dedup_claim_key, *extra_dedup_keys):
+                    self._dedup.release(dk)
             else:
                 self.mark_pending_command_state(
                     message.message_id, "interrupted", dispatch_state="uncertain"
@@ -1396,12 +1420,13 @@ class FeishuAiCommandService:
                             message.message_id,
                         )
                 if status_val != "cancelled":
-                    self._dedup.finish(
-                        dedup_claim_key,
-                        status_val,
-                        stage="ai_command",
-                        reason=reason_val or None,
-                    )
+                    for dk in (dedup_claim_key, *extra_dedup_keys):
+                        self._dedup.finish(
+                            dk,
+                            status_val,
+                            stage="ai_command",
+                            reason=reason_val or None,
+                        )
 
     async def handle_ws_event(self, event: FeishuMessageEvent) -> bool:
         """Handle a WebSocket ``FeishuMessageEvent`` if it matches the owner's ``/ai`` command."""

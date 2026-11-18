@@ -37,7 +37,6 @@ from claude_hub.services.feishu_web_session.qr import (
 )
 from claude_hub.services.feishu_web_session.rich import (
     FEED_INBOX,
-    REACT_DONE,
     REACT_ON_IT,
     TYPE_POST,
     TYPE_TEXT,
@@ -136,6 +135,11 @@ class FeishuWebQRLoginSession:
     qr_svg_data_url: str
     expires_at: float
     cookies: dict[str, str]
+    cancelled: bool = False
+    store_generation: int | None = None
+
+    def cancel(self) -> None:
+        self.cancelled = True
 
     def __repr__(self) -> str:
         return (
@@ -157,6 +161,29 @@ class FeishuWebQRLoginSession:
         }
 
 
+_OPENAPI_PREFIXES = ("om_", "oc_", "ou_", "on_", "omt_", "cli_")
+
+
+def is_web_entity_id(value: str | None) -> bool:
+    """Return True if ``value`` is a Feishu web-gateway entity ID (not an OpenAPI ``om_``/``oc_`` ID)."""
+    clean = (value or "").strip()
+    if not clean:
+        return False
+    return not clean.startswith(_OPENAPI_PREFIXES)
+
+
+def _require_web_entity_id(value: str | None, *, kind: str) -> str:
+    clean = (value or "").strip()
+    if not clean:
+        raise FeishuWebSessionError(f"missing web {kind} ID")
+    if not is_web_entity_id(clean):
+        raise FeishuWebSessionError(
+            f"OpenAPI {kind} ID {clean!r} cannot be sent to the Feishu web gateway; "
+            "a numeric web ID is required"
+        )
+    return clean
+
+
 def feishu_host(hostname: str) -> bool:
     """Return True if ``hostname`` is a Feishu or Lark domain (including tenant subdomains)."""
     h = (hostname or "").strip().lower().rstrip(".")
@@ -173,8 +200,11 @@ def carry_cookies(
     url: str | httpx.URL,
     cookies: Mapping[str, str],
 ) -> None:
-    """Give a redirect to a Feishu/Lark tenant domain host-only session cookies if it has none yet."""
+    """Give an HTTPS redirect to a Feishu/Lark tenant domain host-only session cookies if it has none yet."""
     parsed = urlparse(str(url))
+    scheme = (parsed.scheme or "").strip().lower()
+    if scheme != "https":
+        return
     host = (parsed.hostname or "").strip().lower()
     if not feishu_host(host) or host in jar and jar[host]:
         return
@@ -289,6 +319,9 @@ class FeishuWebClient:
     def set_session(self, sess: FeishuWebSession | None) -> FeishuWebSession | None:
         return self._store.save(sess)
 
+    def logout(self) -> bool:
+        return self._store.clear()
+
     def _require_session(self, session: FeishuWebSession | None = None) -> FeishuWebSession:
         s = session or self.session()
         if s is None or not s.is_valid_structure():
@@ -355,12 +388,14 @@ class FeishuWebClient:
         current_url = url
         for _ in range(11):
             parsed = urlparse(current_url)
+            scheme = (parsed.scheme or "").strip().lower()
             host = (parsed.hostname or "").strip().lower()
-            carry_cookies(host_jar, current_url, s.cookies)
+            if scheme == "https":
+                carry_cookies(host_jar, current_url, s.cookies)
             req_headers = {"user-agent": UA}
             if extra_headers:
                 req_headers.update(extra_headers)
-            if host in host_jar:
+            if scheme == "https" and host in host_jar:
                 req_headers["cookie"] = cookie_header_from_map(host_jar[host])
             resp = await self._do_request(
                 "GET",
@@ -368,8 +403,8 @@ class FeishuWebClient:
                 headers=req_headers,
                 follow_redirects=False,
             )
-            # Capture any Set-Cookie headers for this Feishu host
-            if feishu_host(host) and resp.cookies:
+            # Capture any Set-Cookie headers for this HTTPS Feishu host
+            if scheme == "https" and feishu_host(host) and resp.cookies:
                 bucket = host_jar.setdefault(host, dict(s.cookies))
                 for ck_name, ck_val in resp.cookies.items():
                     bucket[ck_name] = ck_val
@@ -391,6 +426,8 @@ class FeishuWebClient:
         _, final_url = await self.page(f"https://www.{s.domain()}/messenger/", session=s)
         host = (urlparse(final_url).hostname or "").strip().lower()
         if not host or not feishu_host(host) or host.startswith(("www.", "accounts.")):
+            if session is None:
+                self._store.mark_invalid()
             raise FeishuWebSignedOutError("no tenant host: the sign-in page answered")
         self._tenant_host = host
         self._tenant_of_session_uid = s.user_id
@@ -410,13 +447,19 @@ class FeishuWebClient:
             },
         )
         if resp.status_code in {401, 403}:
+            if session is None:
+                self._store.mark_invalid()
             raise FeishuWebSignedOutError("feishu web session rejected (401/403)")
         try:
             data = resp.json()
         except Exception as exc:
+            if session is None:
+                self._store.mark_invalid()
             raise FeishuWebSignedOutError("frontier_ticket returned non-JSON") from exc
         ticket_val = str(data.get("ticket") or "").strip() if isinstance(data, Mapping) else ""
         if not ticket_val:
+            if session is None:
+                self._store.mark_invalid()
             raise FeishuWebSignedOutError("frontier_ticket returned empty ticket")
         return ticket_val
 
@@ -429,6 +472,8 @@ class FeishuWebClient:
             await self.ticket(session=s)
             return True
         except FeishuWebSignedOutError:
+            if session is None:
+                self._store.mark_invalid()
             return False
 
     async def profile(self, *, session: FeishuWebSession | None = None) -> FeishuWebSession:
@@ -446,23 +491,37 @@ class FeishuWebClient:
         )
         resp = await self._do_request("GET", url, headers=hdrs)
         if resp.status_code in {401, 403}:
+            if session is None:
+                self._store.mark_invalid()
             raise FeishuWebSignedOutError("feishu web profile rejected (401/403)")
         raw_text = resp.text
         try:
             payload = json.loads(raw_text)
         except Exception as exc:
+            if session is None:
+                self._store.mark_invalid()
             raise FeishuWebSignedOutError("web user profile returned non-JSON") from exc
         data = payload.get("data") if isinstance(payload, Mapping) else None
         user = data.get("user") if isinstance(data, Mapping) else None
         if not isinstance(user, Mapping):
+            if session is None:
+                self._store.mark_invalid()
             raise FeishuWebSignedOutError("web user profile missing data.user")
         # Extract exact integer digits from raw JSON first so 64-bit user IDs never lose precision
         m_id = _USER_ID_JSON_RE.search(raw_text)
         uid = m_id.group(1) if m_id else _str(user.get("id")).strip()
         if not uid:
+            if session is None:
+                self._store.mark_invalid()
             raise FeishuWebSignedOutError("web user profile returned empty user id")
         uname = _str(user.get("name")).strip()
-        updated = replace(s, user_id=uid, name=uname or s.name)
+        uopen = _str(user.get("open_id") or user.get("openId")).strip()
+        updated = replace(
+            s,
+            user_id=uid,
+            name=uname or s.name,
+            open_id=uopen or s.open_id,
+        )
         if session is None:
             self._store.save(updated)
         return updated
@@ -517,7 +576,18 @@ class FeishuWebClient:
             qr_svg_data_url=render_qr_svg_data_url(matrix),
             expires_at=time.time() + 170.0,
             cookies=cookies,
+            store_generation=self._store.generation,
         )
+
+    def _ensure_qr_login_active(self, qr_login: FeishuWebQRLoginSession) -> None:
+        if qr_login.cancelled or time.time() > qr_login.expires_at:
+            raise FeishuWebQRLoginExpiredError("QR code expired or cancelled")
+        if (
+            qr_login.store_generation is not None
+            and self._store.generation != qr_login.store_generation
+        ):
+            qr_login.cancelled = True
+            raise FeishuWebQRLoginExpiredError("QR login cancelled by concurrent logout")
 
     async def poll_login(
         self, qr_login: FeishuWebQRLoginSession
@@ -527,8 +597,9 @@ class FeishuWebClient:
         Returns ``("waiting", None)``, ``("done", session)``, or raises
         ``FeishuWebQRLoginExpiredError`` when expired/cancelled.
         """
-        if time.time() > qr_login.expires_at:
-            raise FeishuWebQRLoginExpiredError("QR code expired or cancelled")
+        if qr_login.store_generation is None:
+            qr_login.store_generation = self._store.generation
+        self._ensure_qr_login_active(qr_login)
         dom = "larksuite.com" if qr_login.region == "lark" else "feishu.cn"
         origin = f"https://accounts.{dom}"
         headers = {
@@ -552,6 +623,7 @@ class FeishuWebClient:
             headers=headers,
             json_body={},
         )
+        self._ensure_qr_login_active(qr_login)
         for ck_name, ck_val in resp.cookies.items():
             if ck_name and ck_val is not None:
                 qr_login.cookies[str(ck_name)] = str(ck_val)
@@ -567,8 +639,8 @@ class FeishuWebClient:
         if isinstance(step, Mapping):
             st = _num(step.get("status"))
             if st in {3, 4, 5}:
+                qr_login.cancelled = True
                 raise FeishuWebQRLoginExpiredError("QR code expired or cancelled")
-            # Also support cookies returned inside data/step_info if any
             raw_cks = step.get("cookies") or (
                 data.get("cookies") if isinstance(data, Mapping) else None
             )
@@ -591,12 +663,15 @@ class FeishuWebClient:
         )
         # Validate frontier ticket and load user profile
         await self.ticket(session=candidate)
+        self._ensure_qr_login_active(qr_login)
         candidate = await self.profile(session=candidate)
+        self._ensure_qr_login_active(qr_login)
         try:
             page_bytes, _ = await self.page(
                 f"https://open-dev.{dom}/messenger/",
                 session=candidate,
             )
+            self._ensure_qr_login_active(qr_login)
             m_app = _TEA_APP_ID_RE.search(page_bytes)
             m_key = _APP_KEY_RE.search(page_bytes) or _APP_KEY_FALLBACK_RE.search(page_bytes)
             candidate = replace(
@@ -606,10 +681,19 @@ class FeishuWebClient:
                     m_key.group(1).decode("utf-8", errors="ignore") if m_key else candidate.app_key
                 ),
             )
+        except FeishuWebQRLoginExpiredError:
+            raise
         except Exception:
             pass
-        saved = self._store.save(candidate)
-        return "done", (saved or candidate)
+        self._ensure_qr_login_active(qr_login)
+        saved = self._store.save(
+            candidate,
+            expected_generation=qr_login.store_generation,
+        )
+        if saved is None:
+            qr_login.cancelled = True
+            raise FeishuWebQRLoginExpiredError("QR login cancelled by concurrent logout")
+        return "done", saved
 
     async def call(
         self,
@@ -660,6 +744,8 @@ class FeishuWebClient:
 
         raw = resp.content[: 32 << 20]
         if resp.status_code in {401, 403}:
+            if session is None:
+                self._store.mark_invalid()
             raise FeishuWebSignedOutError(
                 f"feishu web session rejected for {name} (HTTP {resp.status_code})"
             )
@@ -720,7 +806,7 @@ class FeishuWebClient:
         raise FeishuWebSessionError("could not open a direct chat")
 
     async def chats(self, chat_ids: Sequence[str]) -> dict[str, WebChat]:
-        ids = [str(i).strip() for i in chat_ids if str(i).strip()]
+        ids = [_require_web_entity_id(str(i), kind="chat") for i in chat_ids if str(i).strip()]
         if not ids:
             return {}
         out = await self.call("PullChatsByIdsRequest", {"chatIds": ids})
@@ -733,7 +819,9 @@ class FeishuWebClient:
         return res
 
     async def chatters(self, chatter_ids: Sequence[str]) -> dict[str, WebChatter]:
-        ids = [str(i).strip() for i in chatter_ids if str(i).strip()]
+        ids = [
+            _require_web_entity_id(str(i), kind="chatter") for i in chatter_ids if str(i).strip()
+        ]
         if not ids:
             return {}
         out = await self.call("PullChattersByIdsRequest", {"chatterIds": ids})
@@ -750,9 +838,10 @@ class FeishuWebClient:
         return res
 
     async def chat_members(self, chat_id: str, limit: int = 100) -> dict[str, WebChatter]:
+        web_cid = _require_web_entity_id(chat_id, kind="chat")
         out = await self.call(
             "PullChatChattersRequest",
-            {"chatId": chat_id, "needChatters": True, "limit": limit},
+            {"chatId": web_cid, "needChatters": True, "limit": limit},
         )
         res: dict[str, WebChatter] = {}
         m = out.get("chatters")
@@ -789,24 +878,30 @@ class FeishuWebClient:
         return feed_page_of(out)
 
     async def messages_at(self, chat_id: str, positions: Sequence[int]) -> list[WebMessage]:
+        web_cid = _require_web_entity_id(chat_id, kind="chat")
         pos_list = [int(p) for p in positions if int(p) >= 0]
         if not pos_list:
             return []
         out = await self.call(
             "PullMessagesByPositionsRequest",
-            {"chatId": chat_id, "positions": pos_list},
+            {"chatId": web_cid, "positions": pos_list},
         )
         res: list[WebMessage] = []
         m = out.get("messages")
         if isinstance(m, Mapping):
             for v in m.values():
                 if isinstance(v, Mapping):
-                    res.append(message_of(v))
+                    msg = message_of(v)
+                    if not msg.chat_id:
+                        msg = replace(msg, chat_id=web_cid)
+                    res.append(msg)
         res.sort(key=lambda item: item.position)
         return res
 
     async def messages_by_id(self, message_ids: Sequence[str]) -> list[WebMessage]:
-        ids = [str(i).strip() for i in message_ids if str(i).strip()]
+        ids = [
+            _require_web_entity_id(str(i), kind="message") for i in message_ids if str(i).strip()
+        ]
         if not ids:
             return []
         out = await self.call("PullMessagesByIdsRequest", {"messageIds": ids})
@@ -819,7 +914,7 @@ class FeishuWebClient:
         return res
 
     async def topics(self, thread_ids: Sequence[str]) -> dict[str, WebTopic]:
-        ids = [str(i).strip() for i in thread_ids if str(i).strip()]
+        ids = [_require_web_entity_id(str(i), kind="thread") for i in thread_ids if str(i).strip()]
         if not ids:
             return {}
         out = await self.call("PullThreadsByIDsRequest", {"threadIds": ids})
@@ -828,13 +923,20 @@ class FeishuWebClient:
         if isinstance(ts, Mapping):
             for tid, v in ts.items():
                 if isinstance(v, Mapping):
-                    last = _num(v["lastMessagePosition"]) if "lastMessagePosition" in v else -1
+                    replies = _num(v.get("replyCount"))
+                    start = _num(v.get("messageStartPosition"))
+                    if "lastMessagePosition" in v:
+                        last = _num(v["lastMessagePosition"])
+                    elif replies > 0:
+                        last = start + replies - 1
+                    else:
+                        last = -1
                     res[str(tid)] = WebTopic(
-                        id=str(tid),
+                        id=_str(v.get("id")) or str(tid),
                         chat=_str(v.get("channelId")),
                         last=last,
-                        start=_num(v.get("messageStartPosition")),
-                        replies=_num(v.get("replyCount")),
+                        start=start,
+                        replies=replies,
                         latest_reply_s=_i64(v.get("latestReplyTime")),
                     )
         return res
@@ -842,15 +944,17 @@ class FeishuWebClient:
     async def topic_messages(
         self, thread_id: str, chat_id: str, positions: Sequence[int]
     ) -> list[WebMessage]:
+        web_tid = _require_web_entity_id(thread_id, kind="thread")
+        web_cid = _require_web_entity_id(chat_id, kind="chat")
         pos_list = [int(p) for p in positions if int(p) >= 0]
         if not pos_list:
             return []
         out = await self.call(
             "PullThreadMessagesByPositionsRequest",
             {
-                "threadId": thread_id,
+                "threadId": web_tid,
                 "positions": pos_list,
-                "channelId": chat_id,
+                "channelId": web_cid,
                 "channelType": 1,
             },
         )
@@ -860,21 +964,33 @@ class FeishuWebClient:
             for v in ms.values():
                 if isinstance(v, Mapping):
                     m = message_of(v)
-                    m = replace(m, position=_num(v.get("threadPosition")))
+                    t_pos = _num(v.get("threadPosition")) if "threadPosition" in v else m.position
+                    root_val = m.root_id or (web_tid if m.id != web_tid else "")
+                    thread_val = m.thread_id or web_tid
+                    chat_val = m.chat_id or web_cid
+                    m = replace(
+                        m,
+                        chat_id=chat_val,
+                        root_id=root_val,
+                        thread_id=thread_val,
+                        position=t_pos,
+                    )
                     res.append(m)
         res.sort(key=lambda item: item.position)
         return res
 
     async def react(self, message_id: str, reaction_type: str = REACT_ON_IT) -> None:
+        web_mid = _require_web_entity_id(message_id, kind="message")
         await self.call(
             "PutReactionRequest",
-            {"messageId": message_id, "reactionType": reaction_type},
+            {"messageId": web_mid, "reactionType": reaction_type},
         )
 
     async def unreact(self, message_id: str, reaction_type: str = REACT_ON_IT) -> None:
+        web_mid = _require_web_entity_id(message_id, kind="message")
         await self.call(
             "DeleteReactionRequest",
-            {"messageId": message_id, "reactionType": reaction_type},
+            {"messageId": web_mid, "reactionType": reaction_type},
         )
 
     async def send(self, out: WebOut) -> WebMessage:
@@ -883,6 +999,7 @@ class FeishuWebClient:
         Raises ``FeishuDeliveryUncertainError`` if post-submit transport fails or
         if the gateway returns HTTP 200 without a non-empty message ID.
         """
+        web_cid = _require_web_entity_id(out.chat, kind="chat")
         is_post = bool(out.title or len(out.rows) > 1 or len(out.blocks) > 0)
         if not is_post and not out.rows:
             raise ValueError("nothing to send")
@@ -901,7 +1018,7 @@ class FeishuWebClient:
         cid = out.cid or str(uuid.uuid4())
         body: dict[str, Any] = {
             "type": typ,
-            "chatId": out.chat,
+            "chatId": web_cid,
             "cid": cid,
             "version": 1,
             "isNotified": True,
@@ -910,9 +1027,13 @@ class FeishuWebClient:
         if mentions:
             body["atUserIdList"] = mentions
         if out.reply_to is not None:
-            root = out.reply_to.root_id or out.reply_to.id
-            body["parentId"] = out.reply_to.id
-            body["rootId"] = root
+            parent_id = _require_web_entity_id(out.reply_to.id, kind="message")
+            root_id = _require_web_entity_id(
+                out.reply_to.root_id or out.reply_to.id,
+                kind="message",
+            )
+            body["parentId"] = parent_id
+            body["rootId"] = root_id
             body["isReplyInThread"] = bool(out.in_thread)
 
         res = await self.call("PutMessageRequest", body, is_mutation=True)
