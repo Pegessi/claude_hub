@@ -8,6 +8,7 @@ seam) keeps its own coverage in ``test_feishu_ai_command.py``.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -104,6 +105,7 @@ def _make_service(
             archived=False,
             env=dict(kwargs["env"]),
             agent_type=kwargs["agent_type"],
+            cwd=kwargs.get("cwd"),
         )
         provided.append(session)
         fake_manager.add_session(session)
@@ -158,6 +160,10 @@ async def test_default_resolution_creates_dedicated_workspace_on_demand(tmp_path
     assert provision["workspace_id"] == "ws-created"
     assert provision["agent_type"] == AgentType.CODEX
     assert provision["env"]["CODEX_MODEL"] == "gpt-5.4"
+    # The validated /ai cwd is propagated so a pinned workspace cannot relocate
+    # the session to the workspace root.
+    assert provision["cwd"] == str(tmp_path)
+    assert service._provided[0].cwd == str(tmp_path)  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -373,6 +379,7 @@ def test_production_resolver_creates_default_when_none_configured(
     def fake_create(payload: Any) -> Any:
         created["name"] = payload.name
         created["path"] = payload.path
+        created["allow_duplicate"] = payload.allow_duplicate
         ws = _workspace("ws-new", payload.name, payload.path)
         workspace_manager.workspaces[ws.id] = ws
         return ws
@@ -386,6 +393,9 @@ def test_production_resolver_creates_default_when_none_configured(
     assert ws.id == "ws-new"
     assert created["name"] == DEFAULT_AI_COMMAND_WORKSPACE_NAME
     assert created["path"] == str(tmp_path)
+    # allow_duplicate bypasses the identity-collision guard so a cwd that already
+    # hosts another workspace does not raise DuplicateWorkspaceError.
+    assert created["allow_duplicate"] is True
 
 
 def test_production_resolver_missing_pinned_id_falls_back_to_default(
@@ -466,3 +476,288 @@ async def test_unsupported_managed_provider_falls_back_to_standalone_tab(
     assert manager.provision_calls == []
     # The fallback record carries no managed session identity.
     assert service._channel_record_for_tab("tab-traex") == {"tab_id": "tab-traex"}
+
+
+# ---------------------------------------------------------------------------
+# Review-fix round 2: session isolation, duplicate identity, stale sessions,
+# and safe-retry cancellation.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_distinct_channels_provision_distinct_sessions(tmp_path: Path) -> None:
+    """reuse_existing=False: two Feishu channels never share one WORKER session."""
+    manager = _FakeWorkspaceManager()
+    service = _make_service(tmp_path, fake_manager=manager)
+    service.update_config({"enabled": True, "cwd": str(tmp_path)})
+    cfg = service.get_config()
+    parsed = _parsed()
+
+    first_msg = _message(message_id="om_a", thread_id="thread-a")
+    second_msg = _message(message_id="om_b", thread_id="thread-b")
+    first_tab = await service._ensure_execution_tab(first_msg, parsed, cfg)
+    second_tab = await service._ensure_execution_tab(second_msg, parsed, cfg)
+
+    assert first_tab != second_tab
+    assert len(manager.provision_calls) == 2  # no advisory reuse across channels
+    # Every provisioning request forbids best-effort reuse.
+    assert all(call["cwd"] == str(tmp_path) for call in manager.provision_calls)
+
+
+@pytest.mark.asyncio
+async def test_stale_managed_session_triggers_fresh_provisioning(tmp_path: Path) -> None:
+    """A mapped record whose managed session is gone is not reused."""
+    manager = _FakeWorkspaceManager()
+    service = _make_service(tmp_path, fake_manager=manager)
+    service.update_config({"enabled": True, "cwd": str(tmp_path)})
+    cfg = service.get_config()
+    message = _message()
+    parsed = _parsed()
+
+    first_tab = await service._ensure_execution_tab(message, parsed, cfg)
+    assert len(manager.provision_calls) == 1
+    record = service._channel_record_for_tab(first_tab)
+    session_id = record["session_id"]
+
+    # Simulate the managed WORKER session being deleted/archived while its tab
+    # record (and the channel map entry) still lingers.
+    manager.sessions.pop(session_id, None)
+
+    second_tab = await service._ensure_execution_tab(message, parsed, cfg)
+
+    # A fresh managed session is provisioned and the channel map repointed to it.
+    assert len(manager.provision_calls) == 2
+    new_record = service._channel_record_for_tab(second_tab)
+    assert new_record["session_id"] != session_id
+    assert manager.sessions[new_record["session_id"]] is not None
+
+
+@pytest.mark.asyncio
+async def test_archived_managed_session_triggers_fresh_provisioning(tmp_path: Path) -> None:
+    manager = _FakeWorkspaceManager()
+    service = _make_service(tmp_path, fake_manager=manager)
+    service.update_config({"enabled": True, "cwd": str(tmp_path)})
+    cfg = service.get_config()
+    message = _message()
+    parsed = _parsed()
+
+    first_tab = await service._ensure_execution_tab(message, parsed, cfg)
+    record = service._channel_record_for_tab(first_tab)
+    manager.sessions[record["session_id"]].archived = True
+
+    # The tab itself still resolves as a live, non-archived tab; only the
+    # backing managed session is dead. This isolates the new session-liveness
+    # guard from the pre-existing tab liveness check.
+    assert service._get_tab(first_tab) is not None
+    assert service._get_managed_session(record["session_id"]) is None
+
+    second_tab = await service._ensure_execution_tab(message, parsed, cfg)
+
+    assert len(manager.provision_calls) == 2
+    assert service._channel_record_for_tab(second_tab)["session_id"] != record["session_id"]
+
+
+class _FakeTailerManager:
+    """Minimal managed Chat tailer for exercising cancellation/retirement."""
+
+    def __init__(self, retirement: Any) -> None:
+        self._retirement = retirement
+        self.retired: list[tuple[str, str | None]] = []
+        self.unsubscribed: list[str] = []
+
+    async def subscribe_completion(self, session: Any) -> asyncio.Queue[Any]:
+        return asyncio.Queue()  # never emits; the awaiting task gets cancelled
+
+    async def send_message(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def retire_external_turn(self, session: Any, expected_turn_id: str | None = None) -> Any:
+        self.retired.append((session.id, expected_turn_id))
+        return self._retirement
+
+    def unsubscribe_completion(self, session_id: str, queue: Any) -> None:
+        self.unsubscribed.append(session_id)
+
+
+async def _run_dispatch_until_cancelled(
+    monkeypatch: pytest.MonkeyPatch, retirement: Any
+) -> tuple[Any, _FakeTailerManager]:
+    from claude_hub.api import agent_stream as agent_stream_module
+    from claude_hub.services import feishu_ai_workspace as faw
+
+    fake_tailer = _FakeTailerManager(retirement)
+    monkeypatch.setattr(agent_stream_module, "get_managed_tailer_manager", lambda: fake_tailer)
+    session = SimpleNamespace(id="sess-cancel", tab_id="tab-cancel", archived=False)
+    task = asyncio.ensure_future(
+        faw.dispatch_managed_turn(
+            session,
+            "prompt",
+            "turn-1",
+            "visible",
+            {"origin": "feishu_ai_command"},
+        )
+    )
+    # Let the task subscribe and park on queue.get(), then cancel it.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    task.cancel()
+    return task, fake_tailer
+
+
+@pytest.mark.asyncio
+async def test_safe_retry_cancellation_raises_external_dispatch_retired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.api.routes.agent_stream.dispatch import ExternalDispatchRetired
+    from claude_hub.services.agent_stream.runtime.values import ExternalTurnRetirement
+
+    task, fake_tailer = await _run_dispatch_until_cancelled(
+        monkeypatch, ExternalTurnRetirement.CANCELLED_MATCHING
+    )
+    with pytest.raises(ExternalDispatchRetired):
+        await task
+    assert fake_tailer.retired == [("sess-cancel", "turn-1")]
+    assert fake_tailer.unsubscribed == ["sess-cancel"]
+
+
+@pytest.mark.asyncio
+async def test_not_started_cancellation_also_raises_retired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.api.routes.agent_stream.dispatch import ExternalDispatchRetired
+    from claude_hub.services.agent_stream.runtime.values import ExternalTurnRetirement
+
+    task, _fake_tailer = await _run_dispatch_until_cancelled(
+        monkeypatch, ExternalTurnRetirement.NOT_STARTED
+    )
+    with pytest.raises(ExternalDispatchRetired):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_unsafe_retry_cancellation_preserves_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-retryable retirement re-raises plain CancelledError (claim retained)."""
+    from claude_hub.api.routes.agent_stream.dispatch import ExternalDispatchRetired
+    from claude_hub.services.agent_stream.runtime.values import ExternalTurnRetirement
+
+    task, _fake_tailer = await _run_dispatch_until_cancelled(
+        monkeypatch, ExternalTurnRetirement.ALREADY_TERMINAL
+    )
+    # CancelledError is re-raised, but it must NOT be promoted to the
+    # retry-safe subclass (that would wrongly release the delivery claim).
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await task
+    assert not isinstance(exc_info.value, ExternalDispatchRetired)
+    assert task.done()
+
+
+@pytest.mark.asyncio
+async def test_production_provisioning_creates_tab_with_workspace_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: real ensure_workspace_agent -> ttyd_manager.create_tab stamps
+    workspace_id/workspace_role/managed_session_id on the runtime tab."""
+    from datetime import datetime
+
+    from claude_hub.models import (
+        SessionKind,
+        TerminalTab,
+        WorkspaceSessionRole,
+    )
+    from claude_hub.services import feishu_ai_workspace as faw
+    from claude_hub.services import ttyd_manager
+    from claude_hub.services.workspace_manager import workspace_manager
+
+    workspace_manager.workspaces.clear()
+    workspace_manager.sessions.clear()
+    monkeypatch.setattr(workspace_manager, "_save_state", lambda: None)
+    monkeypatch.setattr(workspace_manager, "_save_workspace_state", lambda _id: None)
+
+    captured: dict[str, Any] = {}
+
+    async def fake_create_tab(**kwargs: Any) -> TerminalTab:
+        captured.update(kwargs)
+        return TerminalTab(
+            id="tab-runtime-1",
+            name=kwargs["name"],
+            cwd=kwargs.get("cwd"),
+            solo_mode=kwargs.get("solo_mode", True),
+            agent_type=kwargs["agent_type"],
+            session_kind=kwargs["session_kind"],
+            target=kwargs["target"],
+            port=19001,
+            created_at=datetime.now(),
+            is_active=True,
+            workspace_id=kwargs.get("workspace_id"),
+            workspace_name=kwargs.get("workspace_name"),
+            workspace_role=kwargs.get("workspace_role"),
+            managed_session_id=kwargs.get("managed_session_id"),
+        )
+
+    monkeypatch.setattr(ttyd_manager, "create_tab", fake_create_tab)
+
+    # Wrap (not replace) the real platform method so we can assert the exact
+    # EnsureWorkspaceAgentRequest the /ai path sends while still exercising the
+    # full provisioning -> create_tab -> ManagedSession flow.
+    real_ensure = workspace_manager.ensure_workspace_agent
+    request_seen: dict[str, Any] = {}
+
+    async def spy_ensure(workspace_id: str, payload: Any, *, bootstrap: bool = True) -> Any:
+        request_seen["payload"] = payload
+        request_seen["bootstrap"] = bootstrap
+        return await real_ensure(workspace_id, payload, bootstrap=bootstrap)
+
+    monkeypatch.setattr(workspace_manager, "ensure_workspace_agent", spy_ensure)
+
+    workspace = workspace_manager.create_workspace(
+        _workspace_create_payload(tmp_path, "ws-runtime", "Feishu /ai Runtime")
+    )
+    try:
+        session = await faw.provide_managed_session(
+            workspace_id=workspace.id,
+            agent_type=AgentType.CODEX,
+            env={"CODEX_MODEL": "gpt-5.4"},
+            title="Feishu /ai · abc123",
+            cwd=str(tmp_path),
+        )
+
+        # The production request forbids advisory reuse and runs without a
+        # bootstrap prompt, and carries the validated /ai cwd.
+        request = request_seen["payload"]
+        assert request.reuse_existing is False
+        assert request_seen["bootstrap"] is False
+        assert request.cwd == str(tmp_path)
+        assert request.session_kind == SessionKind.CHAT
+        assert request.role == WorkspaceSessionRole.WORKER
+
+        # The provisioning request disabled advisory reuse.
+        assert session.workspace_id == workspace.id
+        assert session.role == WorkspaceSessionRole.WORKER
+        assert session.session_kind == SessionKind.CHAT
+
+        # The runtime tab created through the real provisioning path carries the
+        # workspace attribution that makes it render under the workspace.
+        assert captured["workspace_id"] == workspace.id
+        assert captured["workspace_name"] == workspace.name
+        assert captured["workspace_role"] == WorkspaceSessionRole.WORKER
+        assert captured["managed_session_id"] == session.id
+        assert captured["session_kind"] == SessionKind.CHAT
+        assert captured["cwd"] == str(tmp_path)
+        # The managed session points back at the tab the stub created, so the
+        # service can later look up the tab by id and dispatch through it.
+        assert session.tab_id == "tab-runtime-1"
+    finally:
+        workspace_manager.workspaces.clear()
+        workspace_manager.sessions.clear()
+
+
+def _workspace_create_payload(tmp_path: Path, workspace_id: str, name: str) -> Any:
+    from claude_hub.models import WorkspaceCreate
+
+    return WorkspaceCreate(
+        name=name,
+        path=str(tmp_path),
+        session_prefix=workspace_id.replace("-", "")[:12] or "feishuai",
+    )

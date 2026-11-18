@@ -36,16 +36,28 @@ Feishu → managed workspace Chat → synchronous answer, and was used as the re
 2. **Managed workspace execution** — new `services/feishu_ai_workspace.py`
    - `resolve_workspace()`: use a pinned, existing `workspace_id`; otherwise reuse an existing
      workspace named `Feishu /ai`, else create it on demand at the /ai cwd. A pinned id that no
-     longer exists logs a warning and falls back rather than failing silently.
+     longer exists logs a warning and falls back rather than failing silently. The on-demand create
+     sends `allow_duplicate=True` so a cwd that already hosts another workspace does not raise
+     `DuplicateWorkspaceError` (the dedicated workspace is keyed by name, not path identity).
    - `ensure_execution_tab()`: keeps the existing channel→tab reuse map (keyed by
      `chat:thread:provider`) and env hot-switch semantics, but provisions new tabs as managed
-     `WORKER` Chat sessions via `workspace_manager.ensure_workspace_agent(..., reuse_existing=True,
-     bootstrap=False)`. The resulting tab carries `workspace_id` + `workspace_role` +
-     `managed_session_id`, so it renders under the workspace and survives restart.
+     `WORKER` Chat sessions via `workspace_manager.ensure_workspace_agent(..., reuse_existing=False,
+     bootstrap=False)`. `reuse_existing=False` is deliberate: each Feishu channel owns its own
+     session through the channel map, and advisory workspace-manager reuse would hand one channel an
+     idle WORKER session built for another. Before reusing a mapped managed record it now verifies
+     the backing session is still live and non-archived (`_get_managed_session`); a stale/deleted
+     session falls through to fresh provisioning. The validated /ai cwd is propagated into the
+     request so a pinned workspace cannot silently relocate the session. The resulting tab carries
+     `workspace_id` + `workspace_role` + `managed_session_id`, so it renders under the workspace and
+     survives restart.
    - `dispatch_turn()` / `dispatch_managed_turn()`: route managed sessions through the shared
      managed tailer (`subscribe_completion` + `send_message`), preserving the
      `feishu-ai-<message_id>` turn id and full turn metadata; await `TURN_COMPLETED` for the final
-     answer; retire the native turn on cancellation. Standalone tabs still use
+     answer; retire the native turn on cancellation. On cancellation, when
+     `ExternalTurnRetirement.safe_to_retry` (matching turn cancelled or never started) it raises the
+     same `ExternalDispatchRetired(turn_id)` as the tab-dispatch path so `handle_message` marks the
+     command `retired_retry_safe` and releases the dedup claim for safe replay; non-retryable
+     retirements preserve the claim and re-raise the plain cancellation. Standalone tabs still use
      `dispatch_tab_chat_and_wait`.
    - `switch_managed_env()` mirrors the HTTP switch-env managed branch (tab env +
      `update_managed_chat_configuration` + tailer `set_env`) for model/effort hot-switches.
@@ -66,19 +78,26 @@ Feishu → managed workspace Chat → synchronous answer, and was used as the re
 
 ## Tests
 
-- New `tests/test_feishu_ai_command_workspace.py` (15 tests): default resolution (reuse +
-  on-demand create), explicit `workspace_id`, missing-id fallback, channel reuse (no second
-  session), managed dispatch routing, managed env hot-switch, TraeX standalone fallback, legacy
-  string-record compatibility, config persist/clear, and PATCH schema validation.
-- Existing `tests/test_feishu_ai_command.py` (19) unchanged and green; all 801 `feishu`-keyword
-  tests, plus managed-chat, workspace-manager, agent-stream, tab, and CLI suites pass.
-- `./scripts/verify.sh` gates run locally: `docs` (incl. AI metrics line ceiling),
-  `backend-format`, `backend-types` (660 files), `frontend-lint`, `frontend-types`,
-  `frontend-tests`, `frontend-build` all green.
-- Pre-existing, environment-only failure
+- `tests/test_feishu_ai_command_workspace.py` (22 tests): default resolution (reuse +
+  on-demand create with `allow_duplicate=True`), explicit `workspace_id`, missing-id fallback,
+  channel reuse (no second session), managed dispatch routing, managed env hot-switch, TraeX
+  standalone fallback, legacy string-record compatibility, config persist/clear, PATCH schema
+  validation, plus the review-fix coverage: distinct channels provision distinct sessions
+  (`reuse_existing=False` + cwd propagation), stale/archived managed-session recovery, safe-retry
+  cancellation raising `ExternalDispatchRetired` (and claim preservation when not retry-safe), and a
+  real `provide_managed_session` → `workspace_manager.ensure_workspace_agent` →
+  `ttyd_manager.create_tab` integration test asserting the runtime tab carries
+  `workspace_id`/`workspace_role=WORKER`/`managed_session_id` and the request carries
+  `reuse_existing=False`.
+- Existing `tests/test_feishu_ai_command.py` (19) unchanged and green; the combined feishu/workspace/
+  agent-stream suites pass.
+- `./scripts/verify.sh` gates run locally with `NO_COLOR=1 FORCE_COLOR=` (the `docs` AI-metrics line
+  ceiling, `backend-format`, `backend-types`, `frontend-lint`, `frontend-types`, `frontend-tests`,
+  `frontend-build`, and `backend-tests` all green).
+- The pre-existing, environment-only failure
   `test_ci_health.py::test_payload_id_stops_before_execution_with_bounded_diagnostics`
-  reproduces identically on the untouched base commit `6fce264` (pytest stderr-format mismatch);
-  it is unrelated to this change.
+  is a pytest stderr/color-format mismatch. It reproduces on the untouched base commit and passes
+  when color is disabled (`NO_COLOR=1 FORCE_COLOR=`); it is unrelated to this change.
 
 ## Manual verification
 

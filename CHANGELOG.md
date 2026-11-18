@@ -23,6 +23,13 @@
   managed and legacy stream namespaces, and direct-Chat-only providers (TraeX) keep the standalone
   tab path (`backend/claude_hub/services/feishu_ai_command_models.py`,
   `backend/claude_hub/api/routes/feishu_bot/ai_command.py`, `backend/claude_hub/cli/commands/feishu.py`).
+- Harden managed-session lifecycle: provision each `/ai` channel with `reuse_existing=False` so
+  distinct Feishu chats/threads never share one idle `WORKER` session; create the default `Feishu /ai`
+  workspace with `allow_duplicate=True` and propagate the validated `/ai` cwd into the session request
+  so a pinned workspace cannot relocate it to the workspace root; verify the backing managed session is
+  live before reusing a mapped record (re-provisioning when stale/archived); and raise
+  `ExternalDispatchRetired` on a safe-to-retry cancellation so the interrupted-command dedup claim is
+  released for replay (`backend/claude_hub/services/feishu_ai_workspace.py`).
 - See [design and validation](docs/working-logs/2026-11-18-feishu-ai-workspace-sessions.md).
 
 ### fix(feishu): replace `/ai` plain-text Model input with Provider-linked dropdown and fix live `/ai` P2P/WS/230002 trigger & delivery

@@ -920,12 +920,14 @@ class FeishuAiCommandService:
         agent_type: AgentType,
         env: Mapping[str, str],
         title: str,
+        cwd: str | None = None,
     ) -> Any:
         return await feishu_ai_workspace.provide_managed_session(
             workspace_id=workspace_id,
             agent_type=agent_type,
             env=env,
             title=title,
+            cwd=cwd,
             provider_seam=self._managed_session_provider,
         )
 
