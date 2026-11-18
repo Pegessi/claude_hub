@@ -13,8 +13,19 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 
-from claude_hub.models import AgentType, StreamModelOption, StreamReasoningEffortOption
-from claude_hub.models.subagent import Subagent, SubagentCreate, SubagentTurn, SubagentTurnStatus
+from claude_hub.models import (
+    AgentRuntimeStatus,
+    AgentType,
+    EnsureWorkspaceAgentRequest,
+    ExecutionTarget,
+    ManagedSession,
+    ManagedSessionStatus,
+    SessionKind,
+    StreamModelOption,
+    StreamReasoningEffortOption,
+    Workspace,
+    WorkspaceSessionRole,
+)
 from claude_hub.services.demand_patrol import feishu_triage as triage_module
 from claude_hub.services.demand_patrol.commands import CommandError
 from claude_hub.services.demand_patrol.feishu_triage import (
@@ -25,7 +36,11 @@ from claude_hub.services.demand_patrol.feishu_triage import (
     read_capabilities,
     run_feishu_triage,
 )
-from claude_hub.services.demand_patrol.models import PatrolConfig, PatrolState
+from claude_hub.services.demand_patrol.models import (
+    DEFAULT_PATROL_WORKSPACE_ID,
+    PatrolConfig,
+    PatrolState,
+)
 
 NOW = datetime(2026, 11, 14, 3, 0, tzinfo=timezone.utc)
 ME = "ou_current_user"
@@ -249,7 +264,11 @@ def isolated_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     monkeypatch.setenv("INFOWALL_URL", "http://127.0.0.1:18899")
     monkeypatch.setenv("INFOWALL_API_KEY_FILE", KEY_PATH)
     # A missed seam must fail the test rather than silently reaching a service.
-    monkeypatch.setattr(triage_module, "get_subagent_service", lambda: pytest.fail("live provider"))
+    monkeypatch.setattr(
+        triage_module,
+        "_run_workspace_triage_turn",
+        lambda *_a, **_kw: pytest.fail("live provider"),
+    )
 
 
 @pytest.mark.parametrize("rows", [[], [message("noise", text="今天大家辛苦了")]])
@@ -538,43 +557,82 @@ async def test_capabilities_public_transport_never_sends_auth(
     assert await read_capabilities("http://127.0.0.1:18899") == {"service": "infowall"}
 
 
-class FakeSubagentService:
-    def __init__(self, *, running: bool = False) -> None:
-        self.requests: list[SubagentCreate] = []
-        self.closed: list[str] = []
-        self.entered_wait = asyncio.Event()
-        self.running = running
-
-    async def create(
-        self, req: SubagentCreate, *, created_by: str | None = None
-    ) -> tuple[Subagent, SubagentTurn]:
-        self.requests.append(req)
-        turn = SubagentTurn(
-            turn_id="turn-one",
-            status=SubagentTurnStatus.RUNNING if self.running else SubagentTurnStatus.COMPLETED,
-            started_at=NOW,
-            timeout_seconds=600,
-            final_text=diagnosis().model_dump_json(),
-        )
-        record = Subagent(
-            id="sa-test",
-            agent_type=req.agent_type,
-            cwd=req.cwd or "",
-            name="Patrol test",
+class FakeWorkspaceManager:
+    def __init__(
+        self,
+        *,
+        workspaces: list[Workspace] | None = None,
+    ) -> None:
+        default_ws = Workspace(
+            id=DEFAULT_PATROL_WORKSPACE_ID,
+            name="evo_workspace",
+            target=ExecutionTarget.LOCAL,
+            path="/home/tiger/evo_workspace",
+            default_branch="main",
+            session_prefix="evo-workspace",
             created_at=NOW,
-            turns=[turn],
+            updated_at=NOW,
         )
-        return record, turn
+        items = workspaces if workspaces is not None else [default_ws]
+        self._workspaces = {ws.id: ws for ws in items}
+        self.ensure_calls: list[tuple[str, EnsureWorkspaceAgentRequest, bool]] = []
+        self.archived: list[tuple[str, str]] = []
 
-    async def wait_turn(
-        self, subagent_id: str, turn_id: str, wait_seconds: float = 0
-    ) -> tuple[Subagent, SubagentTurn]:
-        self.entered_wait.set()
-        await asyncio.Event().wait()
-        raise AssertionError("unreachable")
+    def get_workspace(self, workspace_id: str) -> Workspace | None:
+        return self._workspaces.get(workspace_id)
 
-    async def close(self, subagent_id: str, reason: str) -> None:
-        self.closed.append(subagent_id)
+    def list_workspaces(self) -> list[Workspace]:
+        return list(self._workspaces.values())
+
+    async def ensure_workspace_agent(
+        self,
+        workspace_id: str,
+        payload: EnsureWorkspaceAgentRequest,
+        *,
+        bootstrap: bool = True,
+    ) -> ManagedSession:
+        self.ensure_calls.append((workspace_id, payload, bootstrap))
+        ws = self._workspaces[workspace_id]
+        return ManagedSession(
+            id="patrol-session-1",
+            workspace_id=workspace_id,
+            workspace_path=ws.path,
+            role=payload.role,
+            title=payload.title or "Patrol triage",
+            tab_id="tab-patrol-1",
+            tmux_session="claude-hub-tab-patrol",
+            agent_type=payload.agent_type,
+            session_kind=payload.session_kind,
+            target=ws.target,
+            env=dict(payload.env),
+            solo_mode=payload.solo_mode,
+            ephemeral=payload.ephemeral,
+            caller_owned_ephemeral=payload.caller_owned_ephemeral,
+            status=ManagedSessionStatus.IDLE,
+            runtime_status=AgentRuntimeStatus.IDLE,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
+    async def archive_session(self, workspace_id: str, session_id: str) -> ManagedSession:
+        self.archived.append((workspace_id, session_id))
+        return ManagedSession(
+            id=session_id,
+            workspace_id=workspace_id,
+            workspace_path="/home/tiger/evo_workspace",
+            role=WorkspaceSessionRole.WORKER,
+            title="Archived",
+            tab_id="tab-patrol-1",
+            tmux_session="claude-hub-tab-patrol",
+            agent_type=AgentType.CODEX,
+            session_kind=SessionKind.CHAT,
+            target=ExecutionTarget.LOCAL,
+            archived=True,
+            status=ManagedSessionStatus.STOPPED,
+            runtime_status=AgentRuntimeStatus.OFFLINE,
+            created_at=NOW,
+            updated_at=NOW,
+        )
 
 
 def candidate_for_adapter() -> FeishuCandidate:
@@ -583,11 +641,26 @@ def candidate_for_adapter() -> FeishuCandidate:
     )
 
 
-async def test_subagent_adapter_prefers_available_maso_and_scopes_read_only(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+async def test_workspace_chat_adapter_prefers_available_maso_and_auto_archives(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service = FakeSubagentService()
-    monkeypatch.setattr(triage_module, "get_subagent_service", lambda: service)
+    wm = FakeWorkspaceManager()
+    monkeypatch.setattr(triage_module, "workspace_manager", wm)
+    captured_prompts: list[str] = []
+
+    async def fake_run_turn(
+        session: ManagedSession,
+        prompt: str,
+        *,
+        timeout_seconds: float,
+    ) -> str:
+        assert session.workspace_id == DEFAULT_PATROL_WORKSPACE_ID
+        assert session.session_kind == SessionKind.CHAT
+        assert timeout_seconds == 600
+        captured_prompts.append(prompt)
+        return f"```json\n{diagnosis().model_dump_json()}\n```"
+
+    monkeypatch.setattr(triage_module, "_run_workspace_triage_turn", fake_run_turn)
     discovery = AsyncMock(
         return_value=(
             "http://127.0.0.1:19999",
@@ -598,19 +671,52 @@ async def test_subagent_adapter_prefers_available_maso_and_scopes_read_only(
     monkeypatch.setattr(triage_module, "discover_maso_service", discovery)
     result = await diagnose_message(candidate_for_adapter())
     assert result.headline == diagnosis().headline
-    req = service.requests[0]
-    assert req.agent_type == AgentType.MASO and req.model == "gemini-4-argon_reasoning_high"
-    assert req.keep is False and req.solo_mode is True and req.timeout_seconds == 600
-    assert req.cwd and Path(req.cwd).is_relative_to(tmp_path)
-    assert "禁止修改文件" in req.prompt and "\\u003c/untrusted_feishu_evidence\\u003e" in req.prompt
-    assert not service.closed, "normal completion must preserve the service's archive grace"
+    assert len(wm.ensure_calls) == 1
+    ws_id, req, bootstrap = wm.ensure_calls[0]
+    assert ws_id == DEFAULT_PATROL_WORKSPACE_ID
+    assert bootstrap is False
+    assert req.agent_type == AgentType.MASO
+    assert req.session_kind == SessionKind.CHAT
+    assert req.ephemeral is True and req.caller_owned_ephemeral is True
+    assert req.reuse_existing is False and req.solo_mode is True
+    assert req.title == "Patrol triage: source"
+    assert req.env == {
+        "MASO_BASE_URL": "http://127.0.0.1:19999",
+        "MASO_MODEL": "gemini-4-argon_reasoning_high",
+    }
+    assert "禁止修改文件" in captured_prompts[0]
+    assert "\\u003c/untrusted_feishu_evidence\\u003e" in captured_prompts[0]
+    assert wm.archived == [(DEFAULT_PATROL_WORKSPACE_ID, "patrol-session-1")]
 
 
-async def test_subagent_adapter_falls_back_and_cancellation_retires_turn(
+async def test_workspace_chat_adapter_falls_back_workspace_and_cancellation_archives_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service = FakeSubagentService(running=True)
-    monkeypatch.setattr(triage_module, "get_subagent_service", lambda: service)
+    fallback_ws = Workspace(
+        id="ws-fallback",
+        name="fallback_workspace",
+        target=ExecutionTarget.LOCAL,
+        path="/home/tiger/claude_hub",
+        default_branch="main",
+        session_prefix="fallback-workspace",
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    wm = FakeWorkspaceManager(workspaces=[fallback_ws])
+    monkeypatch.setattr(triage_module, "workspace_manager", wm)
+    entered_turn = asyncio.Event()
+
+    async def blocking_turn(
+        session: ManagedSession,
+        prompt: str,
+        *,
+        timeout_seconds: float,
+    ) -> str:
+        entered_turn.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(triage_module, "_run_workspace_triage_turn", blocking_turn)
     monkeypatch.setattr(
         triage_module,
         "discover_maso_service",
@@ -619,13 +725,16 @@ async def test_subagent_adapter_falls_back_and_cancellation_retires_turn(
     monkeypatch.setattr(
         triage_module.shutil, "which", lambda value: "/fake/codex" if value == "codex" else None
     )
-    task = asyncio.create_task(diagnose_message(candidate_for_adapter()))
-    await asyncio.wait_for(service.entered_wait.wait(), timeout=2)
+    task = asyncio.create_task(
+        diagnose_message(candidate_for_adapter(), workspace_id="nonexistent-workspace")
+    )
+    await asyncio.wait_for(entered_turn.wait(), timeout=2)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert service.requests[0].agent_type == AgentType.CODEX
-    assert service.closed == ["sa-test"]
+    assert wm.ensure_calls[0][0] == "ws-fallback"
+    assert wm.ensure_calls[0][1].agent_type == AgentType.CODEX
+    assert wm.archived == [("ws-fallback", "patrol-session-1")]
 
 
 async def test_nested_sender_identity_and_body_text_are_handled_without_self_noise() -> None:
@@ -1127,10 +1236,22 @@ async def test_f6_participated_thread_with_over_500_historical_rows_in_same_thre
 
 
 async def test_rc5_rc6_maso_effort_model_discovery_and_prompt_metadata(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service = FakeSubagentService()
-    monkeypatch.setattr(triage_module, "get_subagent_service", lambda: service)
+    wm = FakeWorkspaceManager()
+    monkeypatch.setattr(triage_module, "workspace_manager", wm)
+    captured_prompts: list[str] = []
+
+    async def fake_run_turn(
+        session: ManagedSession,
+        prompt: str,
+        *,
+        timeout_seconds: float,
+    ) -> str:
+        captured_prompts.append(prompt)
+        return diagnosis().model_dump_json()
+
+    monkeypatch.setattr(triage_module, "_run_workspace_triage_turn", fake_run_turn)
     discovery = AsyncMock(
         return_value=(
             "http://127.0.0.1:11004",
@@ -1158,9 +1279,123 @@ async def test_rc5_rc6_maso_effort_model_discovery_and_prompt_metadata(
     candidate = triage_module._candidate(row)
     assert candidate.reply_to == "om_parent_456"
     await diagnose_message(candidate)
-    req = service.requests[0]
+    _, req, bootstrap = wm.ensure_calls[0]
+    assert bootstrap is False
     assert req.agent_type == AgentType.MASO
-    assert req.model == "gemini-4-argon_reasoning_high"
-    assert '"chat_id": "oc_chat"' in req.prompt
-    assert '"thread_id": "omt_thread_123"' in req.prompt
-    assert '"reply_to": "om_parent_456"' in req.prompt
+    assert req.env["MASO_MODEL"] == "gemini-4-argon_reasoning_high"
+    assert '"chat_id": "oc_chat"' in captured_prompts[0]
+    assert '"thread_id": "omt_thread_123"' in captured_prompts[0]
+    assert '"reply_to": "om_parent_456"' in captured_prompts[0]
+
+
+async def test_bot_and_automated_system_notifications_are_filtered_out() -> None:
+    codebase_assistant_mr = {
+        "message_id": "om_codebase_mr",
+        "chat_id": "oc_6d40e5ff8120544d7c3681a92145a41c",
+        "chat_name": "Codebase Assistant",
+        "chat_type": "p2p",
+        "chat_partner": {"open_id": "ou_83910fd2f33be74f9ff9f6d72b19d63f"},
+        "create_time": "2026-11-14 10:32",
+        "sender": {
+            "id": "cli_9d4e506e06f99108",
+            "id_type": "app_id",
+            "sender_type": "app",
+            "name": "Codebase Assistant",
+            "open_bot_id": "ou_83910fd2f33be74f9ff9f6d72b19d63f",
+        },
+        "content": (
+            '<card title="Merge Request Review Requested">'
+            "@王泽华 Review requested https://code.byted.org/seed/llmserver/merge_requests/123"
+            "</card>"
+        ),
+        "mentions": [{"id": ME, "name": "王泽华"}],
+        "message_app_link": "https://applink.feishu.cn/client/message/om_codebase_mr",
+    }
+    kani_permission_notice = {
+        "message_id": "om_kani_recycle",
+        "chat_id": "oc_544f4ef6a6740fc417ab9df0c640d5fd",
+        "chat_name": "Kani权限通知",
+        "chat_type": "p2p",
+        "chat_partner": {"open_id": "ou_bd0cf2bd4849f8368f9e4c5ab50dc271"},
+        "create_time": "2026-11-14 10:42",
+        "sender": {
+            "id": "cli_9f4b18a2ee74d00c",
+            "id_type": "app_id",
+            "sender_type": "app",
+            "name": "Kani权限通知",
+            "open_bot_id": "ou_bd0cf2bd4849f8368f9e4c5ab50dc271",
+        },
+        "content": (
+            '<card title="[CN]Your Personal Permissions Are Expiring Soon" template="yellow">'
+            "**你的个人权限即将到期或被回收**\n"
+            "seed 应用下 62 个个人资源权限因 90 天未使用即将静默回收，请及时查看处理？"
+            "</card>"
+        ),
+        "mentions": [],
+        "message_app_link": "https://applink.feishu.cn/client/message/om_kani_recycle",
+    }
+    merlin_bot_group_notice = {
+        "message_id": "om_merlin_bot",
+        "chat_id": "oc_group_1",
+        "chat_name": "研发群",
+        "chat_type": "group",
+        "create_time": "2026-11-14 10:45",
+        "sender": {
+            "id": "cli_a62a00bb71fd100b",
+            "id_type": "app_id",
+            "sender_type": "app",
+            "name": "Merlin Bot",
+            "open_bot_id": "ou_32d032a99923d46672b6f6a8697da57e",
+        },
+        "content": ("@王泽华 任务失败报错 https://seed.bytedance.net/ml/ares/idelegate/task/123"),
+        "mentions": [{"id": ME, "name": "王泽华"}],
+        "message_app_link": "https://applink.feishu.cn/client/message/om_merlin_bot",
+    }
+    bpm_weekly_notice = {
+        "message_id": "om_bpm_weekly",
+        "chat_id": "oc_bpm_chat",
+        "chat_name": "bpm小助手",
+        "chat_type": "p2p",
+        "create_time": "2026-11-14 10:46",
+        "sender": {
+            "id": "ou_bpm_spoofed",
+            "name": "bpm小助手",
+        },
+        "content": "Here are your unprocessed tasks from last week, 帮忙处理？",
+        "mentions": [],
+        "message_app_link": "https://applink.feishu.cn/client/message/om_bpm_weekly",
+    }
+    human_question = message(
+        "om_human_question",
+        chat_type="p2p",
+        sender="ou_real_colleague",
+        minutes_ago=5,
+        text="泽华，这个训练任务 OOM 失败了能帮忙看下吗 https://seed.bytedance.net/job/999",
+    )
+    state = PatrolState()
+    runner = FakeRunner(
+        [
+            codebase_assistant_mr,
+            kani_permission_notice,
+            merlin_bot_group_notice,
+            bpm_weekly_notice,
+            human_question,
+        ]
+    )
+    callback = AsyncMock(return_value=diagnosis())
+    result = await run_feishu_triage(
+        state,
+        now=NOW,
+        dot=FakeDot(),
+        runner=runner,
+        triage=callback,
+        capabilities=capabilities,
+    )
+    assert not result.errors
+    assert result.candidates == 1
+    assert result.llm_invoked == 1
+    assert result.details["candidate_ids"] == ["om_human_question"]
+    assert len(runner.applied) == 1
+    assert runner.applied[0]["demands"][0]["sources"][0]["external_id"] == "om_human_question"
+    for bot_id in ("om_codebase_mr", "om_kani_recycle", "om_merlin_bot", "om_bpm_weekly"):
+        assert bot_id in state.processed_feishu_ids

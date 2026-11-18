@@ -629,6 +629,8 @@ class _WorkspaceManagerBase(_RuntimeHostContract):
         self,
         workspace_id: str,
         payload_or_agent_type: EnsureWorkspaceAgentRequest | AgentType = AgentType.CODEX,
+        *,
+        bootstrap: bool = True,
     ) -> ManagedSession: ...
 
     @abstractmethod

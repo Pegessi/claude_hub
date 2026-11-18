@@ -135,6 +135,7 @@ class SubagentRuntime:
     resolve_env: Callable[[Optional[str], Dict[str, str]], Dict[str, str]]
     resolve_workspace: ResolveWorkspace = _no_workspace_attribution
     detach_tab: Callable[[str], Optional[TerminalTab]] = lambda _tab_id: None
+    delete_tab: Optional[Callable[[str], Awaitable[bool]]] = None
 
 
 def _digest(payload: Dict[str, Any]) -> str:
@@ -328,6 +329,7 @@ class SubagentService:
             await self._save()
         self._remove_listener = add_tab_retired_listener(self._on_tab_retired)
         self._started = True
+        await self.purge_by_name_prefix("Patrol triage: ")
         known_tabs = {s.tab_id: s for s in self._subagents.values() if s.tab_id}
         # Retirements while the backend was down produced no notification.
         for record in list(self._subagents.values()):
@@ -739,6 +741,39 @@ class SubagentService:
             )
         return record
 
+    async def purge_by_name_prefix(self, prefix: str = "Patrol triage: ") -> List[str]:
+        """Remove legacy subagent records (and their owned tabs) matching ``prefix``."""
+        if not prefix:
+            return []
+        if not self._started and not self._subagents:
+            await asyncio.to_thread(self._load)
+        matched = [
+            record for record in list(self._subagents.values()) if record.name.startswith(prefix)
+        ]
+        if not matched:
+            return []
+        purged_ids: List[str] = []
+        for record in matched:
+            await self._cancel_running(record)
+            if record.tab_id:
+                tab = self.runtime.get_tab(record.tab_id)
+                if tab is not None and tab.subagent_id == record.id:
+                    deleted = False
+                    if self.runtime.delete_tab is not None:
+                        try:
+                            deleted = bool(await self.runtime.delete_tab(record.tab_id))
+                        except Exception:
+                            logger.exception("Failed to delete subagent tab %s", record.tab_id)
+                    if not deleted:
+                        await self._archive_tab(record.tab_id)
+            self._subagents.pop(record.id, None)
+            purged_ids.append(record.id)
+        try:
+            await self._save()
+        except Exception:
+            logger.exception("Failed to persist subagent state after purging %s*", prefix)
+        return purged_ids
+
     # ── internals ────────────────────────────────────────────────────────
 
     @staticmethod
@@ -1013,6 +1048,7 @@ def _default_runtime() -> SubagentRuntime:
         resolve_env=lambda preset, env: merge_env_with_preset(preset=preset, explicit_env=env),
         resolve_workspace=_resolve_subagent_workspace,
         detach_tab=ttyd_manager.detach_subagent_tab,
+        delete_tab=ttyd_manager.delete_tab,
     )
 
 

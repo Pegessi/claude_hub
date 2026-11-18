@@ -12,6 +12,8 @@ class _SessionProvisioningMixin(_WorkspaceManagerBase):
         self,
         workspace_id: str,
         payload_or_agent_type: EnsureWorkspaceAgentRequest | AgentType = AgentType.CODEX,
+        *,
+        bootstrap: bool = True,
     ) -> ManagedSession:
         from claude_hub.services.env_preset_resolver import (
             EnvPresetNotFoundError,
@@ -105,7 +107,9 @@ class _SessionProvisioningMixin(_WorkspaceManagerBase):
         try:
             async with self.workspace_mutation_lock(workspace_id):
                 session = await self._create_managed_session(workspace, payload)
-            bootstrap_prompt = self._build_session_bootstrap_prompt(workspace, session)
+            bootstrap_prompt = (
+                self._build_session_bootstrap_prompt(workspace, session) if bootstrap else ""
+            )
             if bootstrap_prompt:
                 await self._wait_for_agent_prompt(session)
                 await self.send_session_message(session.id, bootstrap_prompt)
