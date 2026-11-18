@@ -39,6 +39,9 @@ browser-mocks and terminal-hmr require CLAUDE_HUB_BROWSER_EXECUTABLE
 (an existing absolute path).
 CLAUDE_HUB_BROWSER_PORT and CLAUDE_HUB_BROWSER_TIMEOUT are optional.
 
+'all' runs the standard targets concurrently and reports each target's wall
+clock; CLAUDE_HUB_VERIFY_JOBS bounds the pool (default 4) and
+CLAUDE_HUB_VERIFY_ALL_LOGS chooses where the per-target logs are kept.
 Install locked dependencies explicitly before running checks. Verification does
 not install dependencies or browsers. Backend tests use a private runtime and
 retain logs/reports, including on failure. Disposable runtime data is removed
@@ -396,19 +399,104 @@ run_one() {
   esac
 }
 
+format_elapsed() {
+  local ms="$1"
+  printf '%d.%03ds' "$(( ms / 1000 ))" "$(( ms % 1000 ))"
+}
+
+prefixed_lines() {
+  # Keep interleaved output attributable and flushed: a long target must still
+  # show progress while its siblings finish.
+  awk -v prefix="$1" '{ print prefix $0; fflush() }'
+}
+
+run_all_target() {
+  local target="$1" logdir="$2" status=0
+  local started ended out_fd err_fd
+  started=$(date +%s%N)
+  # The two streams stay separate (callers distinguish warnings on stderr); each
+  # keeps a per-target log so a shared log line can never be misread as another
+  # target's evidence. The loggers are forked here, not by the target: a verify
+  # runtime owner refuses to clean up while a child of its own is still alive.
+  exec {out_fd}> >(prefixed_lines "[$target] " | tee -i "$logdir/$target.stdout.log")
+  exec {err_fd}> >(prefixed_lines "[$target] " | tee -i "$logdir/$target.stderr.log" >&2)
+  "$ROOT/scripts/verify.sh" "$target" 1>&"$out_fd" 2>&"$err_fd" || status=$?
+  exec {out_fd}>&- {err_fd}>&-
+  # Drain both loggers before publishing the receipt: a reader must never see a
+  # truncated log next to a completed status file.
+  wait || true
+  ended=$(date +%s%N)
+  printf '%s %s\n' "$(( (ended - started) / 1000000 ))" "$status" \
+    > "$logdir/.$target.status"
+  mv "$logdir/.$target.status" "$logdir/$target.status"
+}
+
 run_all() {
-  local failures=0 target
-  for target in docs checkout-safety backend-format backend-types backend-tests \
-    frontend-lint frontend-types frontend-tests frontend-build; do
-    printf '\n==> %s\n' "$target"
-    if "$ROOT/scripts/verify.sh" "$target"; then
-      printf '<== PASS %s\n' "$target"
-    else
-      printf '<== FAIL %s\n' "$target" >&2
-      failures=$((failures + 1))
-    fi
+  local failures=0 target jobs result
+  local running=0 finished=0 total=0 elapsed status wallclock
+  local -a targets=(docs checkout-safety backend-format backend-types backend-tests \
+    frontend-lint frontend-types frontend-tests frontend-build)
+  local -a pending=("${targets[@]}")
+  local -A reported=()
+  local logdir started
+  # Independent targets share no files, ports or runtime homes, and the slowest
+  # one (backend-tests) used to hold the whole run while the rest waited. Run
+  # them concurrently, bounded so a shared development host stays usable.
+  jobs="${CLAUDE_HUB_VERIFY_JOBS:-4}"
+  [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || fail "CLAUDE_HUB_VERIFY_JOBS must be a positive integer"
+  logdir="${CLAUDE_HUB_VERIFY_ALL_LOGS:-$(mktemp -d "${TMPDIR:-/tmp}/ch-verify-all.XXXXXXXX")}"
+  mkdir -p "$logdir"
+  started=$(date +%s%N)
+  printf 'Running %s standard targets, up to %s at a time (CLAUDE_HUB_VERIFY_JOBS); logs: %s\n' \
+    "${#targets[@]}" "$jobs" "$logdir"
+  while (( ${#pending[@]} > 0 || running > 0 )); do
+    while (( running < jobs && ${#pending[@]} > 0 )); do
+      target="${pending[0]}"
+      pending=("${pending[@]:1}")
+      rm -f "$logdir/$target.status"
+      printf '\n==> %s\n' "$target"
+      run_all_target "$target" "$logdir" &
+      running=$((running + 1))
+    done
+    wait -n || true
+    # Status receipts, not child ordering, attribute each result: several
+    # targets can finish while another is still streaming.
+    for target in "${targets[@]}"; do
+      [[ -f "$logdir/$target.status" ]] || continue
+      [[ -n "${reported[$target]:-}" ]] && continue
+      reported["$target"]=1
+      finished=$((finished + 1))
+      read -r elapsed status < "$logdir/$target.status" || { elapsed=0; status=1; }
+      if (( status == 0 )); then
+        printf '<== PASS %s (%s)\n' "$target" "$(format_elapsed "$elapsed")"
+      else
+        printf '<== FAIL %s (%s) exit=%s; log: %s/%s\n' "$target" \
+          "$(format_elapsed "$elapsed")" "$status" "$logdir" "$target" >&2
+        failures=$((failures + 1))
+      fi
+    done
+    running=$(( ${#targets[@]} - ${#pending[@]} - finished ))
+    # No live target subshell left: a receipt that will never arrive is reported
+    # below as a failure instead of spinning the scheduler forever.
+    (( $(jobs -pr | wc -l) > 0 )) || break
   done
-  printf 'Not run by all: browser-mocks, terminal-hmr, terminal-replay, check-staged, merge-decisions; performance/manual UI checks remain separate.\n'
+  printf '\nNot run by all: browser-mocks, terminal-hmr, terminal-replay, check-staged, merge-decisions; performance/manual UI checks remain separate.\n'
+  printf 'Standard target seconds (targets overlap, so their sum exceeds the wall clock):\n'
+  for target in "${targets[@]}"; do
+    elapsed=0 status=1
+    read -r elapsed status < "$logdir/$target.status" 2>/dev/null || true
+    total=$(( total + elapsed ))
+    if (( status == 0 )); then
+      result=PASS
+    else
+      result="FAIL exit=$status"
+      [[ -n "${reported[$target]:-}" ]] || failures=$((failures + 1))
+    fi
+    printf '  %-16s %8s  %s\n' "$target" "$(format_elapsed "$elapsed")" "$result"
+  done
+  wallclock=$(( ( $(date +%s%N) - started ) / 1000000 ))
+  printf '  %-16s %8s  (pool %s; per-target sum %s)\n' "wall clock" \
+    "$(format_elapsed "$wallclock")" "$jobs" "$(format_elapsed "$total")"
   ((failures == 0)) || fail "$failures verification target(s) failed"
 }
 
