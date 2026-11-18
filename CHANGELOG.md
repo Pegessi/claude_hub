@@ -16,6 +16,10 @@
 - Migrate every Dot-bound `chat_turn` schedule with wake/tidy schedules during
   backend replacement and deleted-tab recovery. Preserve IDs, timing, messages,
   enabled state and run history; roll custom targets back on failure/restart.
+- Keep deleted-but-still-Dot-owned targets fenced before setup begins and after
+  rollback, so scheduler ticks cannot disable schedules or consume one-shots.
+  Deleted-tab setup still upgrades retired standing defaults and reports
+  replacement conflicts/unavailability as HTTP 409/503 instead of unhandled errors.
 - MASO must expose per-session runtime options with an effective `cron.enabled`
   switch (verified against the local v0.9.0 API); unsupported endpoints fail
   before message delivery. Existing provider-native jobs are not converted into

@@ -41,8 +41,11 @@ reference before custom schedules could migrate.
 - Deleted-tab recovery reuses the same lock/transaction/rollback path. Retargeting
   preserves schedule ID, name, message, enabled flag, timing, next due time and
   history. The provider field follows the new tab. Completed one-shots are not
-  rearmed; disabled schedules stay disabled, including those the scheduler had
-  already disabled for a deleted target. Other tabs and non-Chat schedules are
+  rearmed; custom disabled schedules stay disabled, including those the scheduler
+  had already disabled for a deleted target. Explicit backend switches also keep
+  standing choices unchanged. Deleted-tab setup retains the historical standing
+  repair behavior: wake/tidy are rearmed/rescheduled and retired defaults updated.
+  Other tabs and non-Chat schedules are
   not migrated. While replacement is pending, timer fire and run-now cannot
   stamp/advance a schedule on either old or candidate tab; deleted-target
   disabling also waits for recovery. This prevents startup scheduler activity
@@ -85,12 +88,12 @@ The brief's `runtime_guidance.py` and `dot/session.py` now live at
 - Full verification before that final scheduler fence: all standard targets
   passed, including 6861 backend tests (10 skipped) and frontend checks; evidence
   `/tmp/claude-hub-verify.592s2ygm`, `/tmp/dot-schedules-verify-reviewed.log`.
-- Final local independent re-review: no remaining actionable findings; both
+- Round-1 local independent re-review: no remaining actionable findings; both
   P2s closed. Reviewer inspected the regression red/green artifacts and the
   full cumulative diff (read-only, without running tests or mutating services).
 - Shared scheduler/Dot/MASO focused suite: 215 passed,
   `/tmp/claude-hub-verify.4mp_wuml`.
-- Final `./scripts/verify.sh all`: **PASS** on the final code. Backend: 6863
+- Round-1 `./scripts/verify.sh all`: **PASS** on `58de998`. Backend: 6863
   passed, 10 skipped, 17 warnings in 502.85s; evidence
   `/tmp/claude-hub-verify.mcuain5d`. Docs, checkout safety, backend format/types,
   frontend lint/types/tests/build also passed. Full log:
@@ -98,6 +101,52 @@ The brief's `runtime_guidance.py` and `dot/session.py` now live at
   warnings. Browser/manual UI checks were not run (no frontend change).
 - Final document update checked with `./scripts/verify.sh docs`; staged content
   checked with `./scripts/verify.sh check-staged` before committing.
+
+## Managed review cycle 2
+
+The managed reviewer rejected `58de998` after reproducing a missing coverage
+window: with Dot's tab deleted but no pending replacement marker yet, a scheduler
+tick disabled standing and custom schedules. The same window exists after a
+failed replacement rolls back to a missing old tab. The new setup replacement
+path also let `DotExecutionConflict` and provider/runtime errors escape HTTP.
+
+- Added seven red regressions, all failing on `58de998`:
+  `/tmp/claude-hub-verify.oh_9d_kg` (7 failed, 1 preexisting selected test passed).
+- A single scheduler predicate now covers both pending execution targets and a
+  missing tab still owned by Dot. Sweep and fire/run-now share it. Full tick
+  regressions cover before setup and after interrupted-replacement rollback,
+  without disabling custom tasks, advancing timers or consuming one-shots.
+- Deleted-tab setup explicitly selects normal standing recovery *during*
+  replacement, while the old target is still distinguishable. The existing
+  normal branch rearms wake/tidy, recomputes stale next occurrences, and upgrades
+  retired messages/legacy wake timing. Explicit backend switches retain their
+  all-choice-preserving migration mode; custom schedules retain disabled and
+  completed status in both modes. This repairs standing schedules already
+  disabled by the old scheduler or queued-run target validation.
+- An intermediate post-migration refresh only upgraded retired text/timing but
+  could not rearm/reschedule because the old target had already been replaced.
+  Independent re-review caught this; reproduced with a new disabled-standing
+  regression (`/tmp/claude-hub-verify.v8d5hmli`, failed), then moved recovery into
+  the migration as above.
+- `/api/dot/setup` now returns 409 for ownership conflicts and 503 for runtime,
+  MASO availability and tab startup failures; existing 400/429 mappings remain.
+- Focused Dot/execution/API/scheduler suites: **224 passed** in 11.87s,
+  `/tmp/claude-hub-verify.sa23gxat`. Regression tests exercise the real timer and
+  HTTP application; provider processes and drain are mocked.
+- With complete standing recovery: **225 passed** in 11.97s,
+  `/tmp/claude-hub-verify.edxzf9a7`. The additional regression proves usable,
+  future-due wake/tidy while custom disabled schedules remain unchanged.
+- Cycle-2 local independent re-review: no remaining actionable blocker; missing
+  target fencing, standing recovery and HTTP mappings are closed. On a failed
+  deleted-tab setup, rollback restores ownership, not already-applied standing
+  default/timer repairs; the missing-target fence keeps them from firing before
+  retry. Custom schedule rollback and user Stop/retarget preservation are unchanged.
+- Cycle-2 final `./scripts/verify.sh all`: **PASS**, backend **6871 passed,
+  10 skipped, 17 warnings** in 502.98s; evidence
+  `/tmp/claude-hub-verify.7koa93av`, full log
+  `/tmp/dot-schedules-verify-cycle2-final.log`. All docs/safety/format/types and
+  frontend lint/types/tests/build passed (1532 frontend tests). No declared
+  toolchain drift warnings. Final docs/index checked again before commit.
 
 ## Boundaries / handoff
 
