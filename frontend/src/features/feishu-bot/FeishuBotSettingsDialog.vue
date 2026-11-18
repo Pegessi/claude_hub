@@ -841,7 +841,7 @@ const DEFAULT_PROVIDER_EFFORTS: Record<FeishuAiCommandProvider, string[]> = {
   claude: [],
   codex: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
   traex: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
-  maso: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+  maso: ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max'],
   cursor: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
   antigravity: [],
 }
@@ -871,12 +871,10 @@ const DEFAULT_PROVIDER_MODEL_OPTIONS: Record<FeishuAiCommandProvider, FeishuAiCo
     {
       id: 'gpt-6.1-sol',
       label: 'gpt-6.1-sol',
-      provider_model_id: 'gpt-6.1-sol_reasoning_high',
-      default_reasoning_effort: 'high',
+      provider_model_id: 'gpt-6.1-sol',
+      default_reasoning_effort: 'default',
       supported_reasoning_efforts: [
-        { id: 'none', label: 'None', provider_model_id: 'gpt-6.1-sol' },
-        { id: 'low', label: 'Low', provider_model_id: 'gpt-6.1-sol' },
-        { id: 'medium', label: 'Medium', provider_model_id: 'gpt-6.1-sol_reasoning_high' },
+        { id: 'default', label: 'Default', provider_model_id: 'gpt-6.1-sol' },
         { id: 'high', label: 'High', provider_model_id: 'gpt-6.1-sol_reasoning_high' },
         { id: 'xhigh', label: 'Extra High', provider_model_id: 'gpt-6.1-sol_reasoning_xhigh' },
         { id: 'max', label: 'Max', provider_model_id: 'gpt-6.1-sol_reasoning_max' },
@@ -885,12 +883,10 @@ const DEFAULT_PROVIDER_MODEL_OPTIONS: Record<FeishuAiCommandProvider, FeishuAiCo
     {
       id: 'gpt-6-astra',
       label: 'gpt-6-astra',
-      provider_model_id: 'gpt-6-astra_reasoning_high',
-      default_reasoning_effort: 'high',
+      provider_model_id: 'gpt-6-astra',
+      default_reasoning_effort: 'default',
       supported_reasoning_efforts: [
-        { id: 'none', label: 'None', provider_model_id: 'gpt-6-astra' },
-        { id: 'low', label: 'Low', provider_model_id: 'gpt-6-astra' },
-        { id: 'medium', label: 'Medium', provider_model_id: 'gpt-6-astra_reasoning_high' },
+        { id: 'default', label: 'Default', provider_model_id: 'gpt-6-astra' },
         { id: 'high', label: 'High', provider_model_id: 'gpt-6-astra_reasoning_high' },
         { id: 'xhigh', label: 'Extra High', provider_model_id: 'gpt-6-astra_reasoning_xhigh' },
         { id: 'max', label: 'Max', provider_model_id: 'gpt-6-astra_reasoning_max' },
@@ -933,6 +929,7 @@ const DEFAULT_PROVIDER_MODEL_OPTIONS: Record<FeishuAiCommandProvider, FeishuAiCo
   ],
 }
 const EFFORT_DISPLAY_LABELS: Record<string, string> = {
+  default: 'Default (default)',
   none: 'None (none)',
   minimal: 'Minimal (minimal)',
   low: 'Low (low)',
@@ -1380,7 +1377,7 @@ function onAiEffortChange(nextEffort: FeishuAiCommandReasoningEffort) {
   aiTupleConflict.value = null
   aiEdit.reasoning_effort = nextEffort
   const matched = currentAiModelOption.value
-  if (matched && nextEffort && (aiEdit.provider === 'maso' || aiEdit.provider === 'cursor')) {
+  if (matched && (aiEdit.provider === 'maso' || aiEdit.provider === 'cursor')) {
     aiEdit.model = resolveVariantModelId(aiEdit.provider, matched, nextEffort)
   }
 }
