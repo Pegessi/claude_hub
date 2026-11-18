@@ -22,6 +22,7 @@ from claude_hub.services.feishu_bot import (
     FeishuBotError,
     FeishuBotRemoteError,
     FeishuChatInfo,
+    FeishuDeliveryUncertainError,
     FeishuReplyReceipt,
     _chat_info_from_payload,
     _forward_body,
@@ -41,7 +42,6 @@ REQUIRED_SEND_AS_USER_SCOPE = "im:message.send_as_user"
 REQUIRED_IM_MESSAGE_SCOPE = "im:message"
 RECOMMENDED_AI_COMMAND_SCOPES: tuple[str, ...] = (
     "im:message",
-    "im:message.send_as_user",
     "im:message.reactions:write_only",
     "im:chat:read",
     "im:message.group_msg:get_as_user",
@@ -57,10 +57,18 @@ _EXPIRED_TOKEN_CODES = {
     "99991663",
     "99991668",
 }
+_MISSING_SEND_AS_USER_CODES = {
+    230027,
+    "230027",
+}
+_BOT_NOT_IN_CHAT_CODES = {
+    230002,
+    "230002",
+}
 
 
 class FeishuUserScopeError(FeishuBotConfigurationError):
-    """Raised when the user token lacks ``im:message.send_as_user``."""
+    """Raised when the user token lacks required scopes and no fallback bot can send."""
 
     def __init__(
         self,
@@ -94,6 +102,11 @@ class FeishuScopePreflightResult:
     missing_recommended_scopes: tuple[str, ...]
     auth_login_command: str
     remediation_steps: tuple[str, ...]
+    can_send: bool = False
+    send_mode: str = "none"
+    has_send_as_user_scope: bool = False
+    can_send_via_bot: bool = False
+    fallback_bot_app_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -106,7 +119,12 @@ class FeishuScopePreflightResult:
             "token_expired": self.token_expired,
             "granted_scopes": list(self.granted_scopes),
             "required_send_scope": self.required_send_scope,
+            "can_send": self.can_send,
             "can_send_as_user": self.can_send_as_user,
+            "has_send_as_user_scope": self.has_send_as_user_scope,
+            "can_send_via_bot": self.can_send_via_bot,
+            "fallback_bot_app_id": self.fallback_bot_app_id,
+            "send_mode": self.send_mode,
             "can_react_as_user": self.can_react_as_user,
             "can_read_messages": self.can_read_messages,
             "missing_required_scopes": list(self.missing_required_scopes),
@@ -166,16 +184,14 @@ def evaluate_scope_preflight(
     record: FeishuUserTokenRecord | None,
     *,
     now: float | None = None,
+    fallback_bot_app_id: str | None = None,
 ) -> FeishuScopePreflightResult:
     """Inspect a user token record and produce clear scope & auth guidance."""
     cmd = build_auth_login_command()
     if record is None:
         steps = (
-            "1. In Feishu Developer Console, enable user-identity permission "
-            "`im:message.send_as_user` (plus `im:message`, `im:message.reactions:write_only`, "
-            "`im:chat:read`, `im:message.group_msg:get_as_user`, `search:message`) and publish a version.",
-            f"2. Authenticate via lark-cli: `{cmd}` (or sign in via Hub Feishu OAuth).",
-            "3. Run `claude-hub feishu ai-command status` or click 'Import ~/.lark-cli Token' in Settings.",
+            f"1. Authenticate via lark-cli: `{cmd}` (or sign in via Hub Feishu OAuth).",
+            "2. Run `claude-hub feishu ai-command status` or click 'Import ~/.lark-cli Token' in Settings.",
         )
         return FeishuScopePreflightResult(
             has_token=False,
@@ -197,12 +213,15 @@ def evaluate_scope_preflight(
             missing_recommended_scopes=RECOMMENDED_AI_COMMAND_SCOPES,
             auth_login_command=cmd,
             remediation_steps=steps,
+            can_send=False,
+            send_mode="none",
+            has_send_as_user_scope=False,
+            can_send_via_bot=False,
+            fallback_bot_app_id=None,
         )
 
     granted = record.scopes_set()
-    # If Hub OAuth did not return a scope string in the v1 token response,
-    # granted may be empty; when scope metadata is present we enforce exact checks.
-    can_send = REQUIRED_SEND_AS_USER_SCOPE in granted
+    has_send_as_user = REQUIRED_SEND_AS_USER_SCOPE in granted
     can_react = bool(granted & {"im:message.reactions:write_only", "im:message"})
     can_read = bool(
         granted
@@ -213,18 +232,36 @@ def evaluate_scope_preflight(
             "im:message.p2p_msg:get_as_user",
         }
     )
+    resolved_bot_app = (
+        record.app_id
+        if (fallback_bot_app_id or "").strip() == record.app_id
+        else (record.app_id if (fallback_bot_app_id is None and record.app_secret.strip()) else "")
+    )
+    can_send_via_bot = bool(resolved_bot_app and can_read)
+    can_send = has_send_as_user or can_send_via_bot
+    send_mode = "user" if has_send_as_user else ("bot_fallback" if can_send_via_bot else "none")
     missing_req: list[str] = []
-    if REQUIRED_SEND_AS_USER_SCOPE not in granted:
+    if not has_send_as_user:
         missing_req.append(REQUIRED_SEND_AS_USER_SCOPE)
-    if REQUIRED_IM_MESSAGE_SCOPE not in granted:
+    if not can_read and REQUIRED_IM_MESSAGE_SCOPE not in granted:
         missing_req.append(REQUIRED_IM_MESSAGE_SCOPE)
     missing_rec = [s for s in RECOMMENDED_AI_COMMAND_SCOPES if s not in granted]
 
     steps_list: list[str] = []
-    if missing_req:
+    if has_send_as_user:
         steps_list.append(
-            f"1. In Feishu Developer Console for app `{record.app_id}`, grant user permission "
-            f"`{', '.join(missing_req)}`, create an app version, and publish/approve it."
+            "User token includes `im:message.send_as_user` and is ready to send as user."
+        )
+    elif can_send_via_bot:
+        steps_list.append(
+            f"Ready via bot fallback (`{resolved_bot_app}`): user token reads context and reacts "
+            f"as {record.open_id}, while replies are sent by app `{resolved_bot_app}` "
+            f"(`{REQUIRED_SEND_AS_USER_SCOPE}` is not granted on `{record.app_id}`)."
+        )
+    else:
+        steps_list.append(
+            f"1. Configure app secret for `{record.app_id}` (or enable `{REQUIRED_SEND_AS_USER_SCOPE}` "
+            f"in Feishu Developer Console for `{record.app_id}`)."
         )
         steps_list.append(
             f"2. Re-authorize your user token with: `{cmd}` and complete device verification."
@@ -232,10 +269,6 @@ def evaluate_scope_preflight(
         steps_list.append(
             "3. Reload the token with `claude-hub feishu ai-command configure --import-lark-cli` "
             "or via the Hub Feishu Settings UI."
-        )
-    else:
-        steps_list.append(
-            "User token includes `im:message.send_as_user` and is ready to send as user."
         )
 
     return FeishuScopePreflightResult(
@@ -248,13 +281,18 @@ def evaluate_scope_preflight(
         token_expired=record.is_expired(now=now, skew_seconds=0.0),
         granted_scopes=tuple(sorted(granted)),
         required_send_scope=REQUIRED_SEND_AS_USER_SCOPE,
-        can_send_as_user=can_send,
+        can_send_as_user=has_send_as_user,
         can_react_as_user=can_react,
         can_read_messages=can_read,
         missing_required_scopes=tuple(missing_req),
         missing_recommended_scopes=tuple(missing_rec),
         auth_login_command=cmd,
         remediation_steps=tuple(steps_list),
+        can_send=can_send,
+        send_mode=send_mode,
+        has_send_as_user_scope=has_send_as_user,
+        can_send_via_bot=can_send_via_bot,
+        fallback_bot_app_id=resolved_bot_app or None,
     )
 
 
@@ -361,6 +399,33 @@ class FeishuUserClient:
             ),
             client=client,
         )
+        self._fallback_bot_clients: dict[str, FeishuBotClient] = {}
+
+    def _resolve_fallback_bot_configs(
+        self, record: FeishuUserTokenRecord | None = None
+    ) -> list[tuple[str, str]]:
+        if hasattr(self._store, "resolve_fallback_bot_configs"):
+            return self._store.resolve_fallback_bot_configs(
+                preferred_app_id=self._app_id, record=record
+            )
+        if record is not None and record.app_id and record.app_secret.strip():
+            return [(record.app_id, record.app_secret.strip())]
+        return []
+
+    def _get_fallback_bot_client(self, app_id: str, app_secret: str) -> FeishuBotClient:
+        key = f"{app_id}:{app_secret}"
+        bot_client = self._fallback_bot_clients.get(key)
+        if bot_client is None:
+            bot_client = FeishuBotClient(
+                FeishuBotConfig(
+                    app_id=app_id,
+                    app_secret=app_secret,
+                    api_base_url=self._api_base_url,
+                ),
+                client=self._client,
+            )
+            self._fallback_bot_clients[key] = bot_client
+        return bot_client
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         if self._client is not None:
@@ -399,7 +464,9 @@ class FeishuUserClient:
             target = self.resolve_record(auto_import_lark_cli=auto_import_lark_cli)
         else:
             target = record if isinstance(record, FeishuUserTokenRecord) else None
-        return evaluate_scope_preflight(target)
+        fb_configs = self._resolve_fallback_bot_configs(target)
+        fb_app_id = fb_configs[0][0] if fb_configs else ""
+        return evaluate_scope_preflight(target, fallback_bot_app_id=fb_app_id)
 
     async def apreflight_scopes(
         self,
@@ -411,19 +478,24 @@ class FeishuUserClient:
             target = await self.aresolve_record(auto_import_lark_cli=auto_import_lark_cli)
         else:
             target = record if isinstance(record, FeishuUserTokenRecord) else None
-        return evaluate_scope_preflight(target)
+        fb_configs = self._resolve_fallback_bot_configs(target)
+        fb_app_id = fb_configs[0][0] if fb_configs else ""
+        return evaluate_scope_preflight(target, fallback_bot_app_id=fb_app_id)
 
     def require_send_as_user_scope(
         self,
         record: FeishuUserTokenRecord | None | object = _RECORD_OMITTED,
         *,
         auto_import_lark_cli: bool = True,
+        allow_bot_fallback: bool = False,
     ) -> FeishuUserTokenRecord:
         if record is _RECORD_OMITTED:
             target = self.resolve_record(auto_import_lark_cli=auto_import_lark_cli)
         else:
             target = record if isinstance(record, FeishuUserTokenRecord) else None
-        preflight = evaluate_scope_preflight(target)
+        fb_configs = self._resolve_fallback_bot_configs(target) if allow_bot_fallback else []
+        fb_app_id = fb_configs[0][0] if fb_configs else ""
+        preflight = evaluate_scope_preflight(target, fallback_bot_app_id=fb_app_id)
         if target is None:
             raise FeishuUserScopeError(
                 "No Feishu user access token is available. "
@@ -431,13 +503,16 @@ class FeishuUserClient:
                 missing_scopes=preflight.missing_required_scopes,
                 auth_login_command=preflight.auth_login_command,
             )
-        if not preflight.can_send_as_user:
+        can_proceed = preflight.can_send if allow_bot_fallback else preflight.has_send_as_user_scope
+        if not can_proceed:
+            missing = preflight.missing_required_scopes or (REQUIRED_SEND_AS_USER_SCOPE,)
             raise FeishuUserScopeError(
                 f"Feishu user token for {target.open_id} is missing required scope "
-                f"`{REQUIRED_SEND_AS_USER_SCOPE}`. "
+                f"`{REQUIRED_SEND_AS_USER_SCOPE}` and no bot fallback is configured for "
+                f"`{target.app_id}`. "
                 f"Run `{preflight.auth_login_command}` after enabling `{REQUIRED_SEND_AS_USER_SCOPE}` "
-                f"on app `{target.app_id}`.",
-                missing_scopes=preflight.missing_required_scopes,
+                f"on app `{target.app_id}` or configure app secret for `{target.app_id}`.",
+                missing_scopes=missing,
                 auth_login_command=preflight.auth_login_command,
             )
         return target
@@ -447,12 +522,13 @@ class FeishuUserClient:
         record: FeishuUserTokenRecord | None | object = _RECORD_OMITTED,
         *,
         auto_import_lark_cli: bool = True,
+        allow_bot_fallback: bool = False,
     ) -> FeishuUserTokenRecord:
         if record is _RECORD_OMITTED:
             target = await self.aresolve_record(auto_import_lark_cli=auto_import_lark_cli)
         else:
             target = record if isinstance(record, FeishuUserTokenRecord) else None
-        return self.require_send_as_user_scope(target)
+        return self.require_send_as_user_scope(target, allow_bot_fallback=allow_bot_fallback)
 
     async def refresh_token(self, record: FeishuUserTokenRecord) -> FeishuUserTokenRecord:
         async with self._store.async_refresh_lock(app_id=record.app_id, open_id=record.open_id):
@@ -527,6 +603,166 @@ class FeishuUserClient:
                 return await op(refreshed_token)
             raise
 
+    async def _ensure_bot_in_chat(self, chat_id: str, bot_app_id: str) -> bool:
+        """Invite ``bot_app_id`` into ``chat_id`` using the user's ``im:chat.members:write_only`` scope."""
+        clean_chat = (chat_id or "").strip()
+        clean_bot = (bot_app_id or "").strip()
+        if not clean_chat or not clean_bot:
+            return False
+
+        async def _call(token: str) -> bool:
+            response = await self._request(
+                "POST",
+                f"/open-apis/im/v1/chats/{quote(clean_chat, safe='')}/members",
+                params={"member_id_type": "app_id", "succeed_type": 0},
+                headers={"Authorization": f"Bearer {token}"},
+                json={"id_list": [clean_bot]},
+            )
+            try:
+                payload = response.json()
+            except ValueError:
+                return False
+            if (
+                response.is_error
+                and isinstance(payload, dict)
+                and payload.get("code") in _EXPIRED_TOKEN_CODES
+            ):
+                raise FeishuBotClient._remote_error(response, payload, "the user chat member add")
+            return bool(isinstance(payload, Mapping) and payload.get("code") == 0)
+
+        try:
+            return await self._with_user_token_retry(_call)
+        except Exception:
+            logger.debug(
+                "Could not auto-add bot %s to chat %s via user token",
+                clean_bot,
+                clean_chat,
+                exc_info=True,
+            )
+            return False
+
+    @staticmethod
+    def _require_reply_receipt_identity(
+        receipt: FeishuReplyReceipt,
+    ) -> FeishuReplyReceipt:
+        if not isinstance(receipt.message_id, str) or not receipt.message_id.strip():
+            raise FeishuDeliveryUncertainError(
+                "Feishu reply message identity is unavailable; delivery may have occurred"
+            )
+        return receipt
+
+    async def _send_via_bot_fallback(
+        self,
+        record: FeishuUserTokenRecord,
+        chat_id: str,
+        msg_type: str,
+        content: Mapping[str, object],
+        *,
+        uuid: str | None = None,
+        auto_invite_bot_to_chat: bool = False,
+    ) -> dict[str, Any]:
+        bot_configs = self._resolve_fallback_bot_configs(record)
+        if not bot_configs:
+            preflight = evaluate_scope_preflight(record, fallback_bot_app_id="")
+            raise FeishuUserScopeError(
+                f"Feishu user token for {record.open_id} is missing required scope "
+                f"`{REQUIRED_SEND_AS_USER_SCOPE}` and no bot fallback is configured for "
+                f"`{record.app_id}`. "
+                f"Run `{preflight.auth_login_command}` after enabling `{REQUIRED_SEND_AS_USER_SCOPE}` "
+                f"on app `{record.app_id}`.",
+                missing_scopes=(REQUIRED_SEND_AS_USER_SCOPE,),
+                auth_login_command=preflight.auth_login_command,
+            )
+        bot_app_id, bot_secret = bot_configs[0]
+        bot_client = self._get_fallback_bot_client(bot_app_id, bot_secret)
+        try:
+            msg_id = await bot_client.send_message_with_identity(
+                chat_id, msg_type, content, uuid=uuid
+            )
+            return {
+                "message_id": msg_id,
+                "chat_id": chat_id,
+                "msg_type": msg_type,
+                "send_mode": "bot_fallback",
+                "bot_app_id": bot_app_id,
+            }
+        except FeishuBotRemoteError as exc:
+            if (
+                auto_invite_bot_to_chat
+                and exc.code in _BOT_NOT_IN_CHAT_CODES
+                and chat_id
+                and await self._ensure_bot_in_chat(chat_id, bot_app_id)
+            ):
+                msg_id = await bot_client.send_message_with_identity(
+                    chat_id, msg_type, content, uuid=uuid
+                )
+                return {
+                    "message_id": msg_id,
+                    "chat_id": chat_id,
+                    "msg_type": msg_type,
+                    "send_mode": "bot_fallback",
+                    "bot_app_id": bot_app_id,
+                }
+            raise
+
+    async def _reply_via_bot_fallback(
+        self,
+        record: FeishuUserTokenRecord,
+        message_id: str,
+        msg_type: str,
+        content: Mapping[str, object],
+        *,
+        chat_id: str | None = None,
+        reply_in_thread: bool = False,
+        uuid: str | None = None,
+        auto_invite_bot_to_chat: bool = False,
+    ) -> FeishuReplyReceipt:
+        bot_configs = self._resolve_fallback_bot_configs(record)
+        if not bot_configs:
+            preflight = evaluate_scope_preflight(record, fallback_bot_app_id="")
+            raise FeishuUserScopeError(
+                f"Feishu user token for {record.open_id} is missing required scope "
+                f"`{REQUIRED_SEND_AS_USER_SCOPE}` and no bot fallback is configured for "
+                f"`{record.app_id}`. "
+                f"Run `{preflight.auth_login_command}` after enabling `{REQUIRED_SEND_AS_USER_SCOPE}` "
+                f"on app `{record.app_id}`.",
+                missing_scopes=(REQUIRED_SEND_AS_USER_SCOPE,),
+                auth_login_command=preflight.auth_login_command,
+            )
+        bot_app_id, bot_secret = bot_configs[0]
+        bot_client = self._get_fallback_bot_client(bot_app_id, bot_secret)
+        try:
+            receipt = await bot_client._reply_message_payload(
+                message_id,
+                msg_type,
+                content,
+                reply_in_thread=reply_in_thread,
+                uuid=uuid,
+            )
+            return self._require_reply_receipt_identity(receipt)
+        except FeishuBotRemoteError as exc:
+            if auto_invite_bot_to_chat and exc.code in _BOT_NOT_IN_CHAT_CODES:
+                resolved_chat_id = (chat_id or "").strip()
+                if not resolved_chat_id:
+                    try:
+                        msg_info = await self.get_message(message_id)
+                        if msg_info is not None and msg_info.chat_id:
+                            resolved_chat_id = msg_info.chat_id
+                    except Exception:
+                        pass
+                if resolved_chat_id and await self._ensure_bot_in_chat(
+                    resolved_chat_id, bot_app_id
+                ):
+                    receipt = await bot_client._reply_message_payload(
+                        message_id,
+                        msg_type,
+                        content,
+                        reply_in_thread=reply_in_thread,
+                        uuid=uuid,
+                    )
+                    return self._require_reply_receipt_identity(receipt)
+            raise
+
     async def send_as_user(
         self,
         chat_id: str,
@@ -535,8 +771,10 @@ class FeishuUserClient:
         *,
         uuid: str | None = None,
         dry_run: bool = False,
+        allow_bot_fallback: bool = True,
+        auto_invite_bot_to_chat: bool = False,
     ) -> dict[str, Any]:
-        """Send a message to ``chat_id`` as the authenticated user."""
+        """Send a message to ``chat_id`` as the authenticated user (or bot fallback when configured)."""
         if dry_run:
             preflight = await self.apreflight_scopes()
             return {
@@ -546,10 +784,21 @@ class FeishuUserClient:
                 "msg_type": msg_type,
                 "content": dict(content),
                 "uuid": uuid,
+                "can_send": preflight.can_send,
                 "can_send_as_user": preflight.can_send_as_user,
+                "send_mode": preflight.send_mode,
                 "missing_required_scopes": list(preflight.missing_required_scopes),
             }
-        await self.arequire_send_as_user_scope()
+        record = await self.arequire_send_as_user_scope(allow_bot_fallback=allow_bot_fallback)
+        if REQUIRED_SEND_AS_USER_SCOPE not in record.scopes_set():
+            return await self._send_via_bot_fallback(
+                record,
+                chat_id,
+                msg_type,
+                content,
+                uuid=uuid,
+                auto_invite_bot_to_chat=auto_invite_bot_to_chat,
+            )
 
         async def _call(token: str) -> dict[str, Any]:
             message_id = await self._bot_client.send_message_with_identity(
@@ -559,9 +808,26 @@ class FeishuUserClient:
                 uuid=uuid,
                 access_token=token,
             )
-            return {"message_id": message_id, "chat_id": chat_id, "msg_type": msg_type}
+            return {
+                "message_id": message_id,
+                "chat_id": chat_id,
+                "msg_type": msg_type,
+                "send_mode": "user",
+            }
 
-        return await self._with_user_token_retry(_call)
+        try:
+            return await self._with_user_token_retry(_call)
+        except FeishuBotRemoteError as exc:
+            if allow_bot_fallback and exc.code in _MISSING_SEND_AS_USER_CODES:
+                return await self._send_via_bot_fallback(
+                    record,
+                    chat_id,
+                    msg_type,
+                    content,
+                    uuid=uuid,
+                    auto_invite_bot_to_chat=auto_invite_bot_to_chat,
+                )
+            raise
 
     async def reply_as_user(
         self,
@@ -569,20 +835,34 @@ class FeishuUserClient:
         msg_type: str,
         content: Mapping[str, object],
         *,
+        chat_id: str | None = None,
         reply_in_thread: bool = False,
         uuid: str | None = None,
         dry_run: bool = False,
+        allow_bot_fallback: bool = True,
+        auto_invite_bot_to_chat: bool = False,
     ) -> FeishuReplyReceipt:
-        """Reply to ``message_id`` as the authenticated user."""
+        """Reply to ``message_id`` as the authenticated user (or bot fallback when configured)."""
         if dry_run:
             return FeishuReplyReceipt(
                 message_id=f"dry-run:{uuid or message_id}",
                 thread_id="dry-run-thread" if reply_in_thread else None,
             )
-        await self.arequire_send_as_user_scope()
+        record = await self.arequire_send_as_user_scope(allow_bot_fallback=allow_bot_fallback)
+        if REQUIRED_SEND_AS_USER_SCOPE not in record.scopes_set():
+            return await self._reply_via_bot_fallback(
+                record,
+                message_id,
+                msg_type,
+                content,
+                chat_id=chat_id,
+                reply_in_thread=reply_in_thread,
+                uuid=uuid,
+                auto_invite_bot_to_chat=auto_invite_bot_to_chat,
+            )
 
         async def _call(token: str) -> FeishuReplyReceipt:
-            return await self._bot_client._reply_message_payload(
+            receipt = await self._bot_client._reply_message_payload(
                 message_id,
                 msg_type,
                 content,
@@ -590,8 +870,23 @@ class FeishuUserClient:
                 reply_in_thread=reply_in_thread,
                 uuid=uuid,
             )
+            return self._require_reply_receipt_identity(receipt)
 
-        return await self._with_user_token_retry(_call)
+        try:
+            return await self._with_user_token_retry(_call)
+        except FeishuBotRemoteError as exc:
+            if allow_bot_fallback and exc.code in _MISSING_SEND_AS_USER_CODES:
+                return await self._reply_via_bot_fallback(
+                    record,
+                    message_id,
+                    msg_type,
+                    content,
+                    chat_id=chat_id,
+                    reply_in_thread=reply_in_thread,
+                    uuid=uuid,
+                    auto_invite_bot_to_chat=auto_invite_bot_to_chat,
+                )
+            raise
 
     async def add_reaction_as_user(
         self,

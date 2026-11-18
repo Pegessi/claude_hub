@@ -152,7 +152,7 @@
             <span class="bot-row__name">
               <strong>/ai Assistant</strong>
             </span>
-            <span class="bot-row__meta">{{ aiEdit.enabled ? `${aiEdit.provider} · ${aiEdit.model || 'default'}` : 'Personal account reply' }}</span>
+            <span class="bot-row__meta">{{ aiSidebarMeta }}</span>
           </span>
           <svg
             class="bot-row__chevron"
@@ -178,15 +178,15 @@
               <span
                 v-if="aiTokenStatus"
                 class="source-chip"
-              >{{ aiTokenStatus.can_send_as_user ? 'Scope ready' : 'Missing send_as_user' }}</span>
+              >{{ aiTokenChipLabel }}</span>
             </div>
-            <p>Detect your own <code>{{ aiEdit.prefix || '/ai' }} &lt;instruction&gt;</code> messages, react <code>{{ aiEdit.ack_emoji }}</code> &rarr; <code>{{ aiEdit.done_emoji }}</code>, and reply as your personal Feishu account.</p>
+            <p>Detect your own <code>{{ aiEdit.prefix || '/ai' }} &lt;instruction&gt;</code> messages, react <code>{{ aiEdit.ack_emoji }}</code> &rarr; <code>{{ aiEdit.done_emoji }}</code>, and reply as your personal Feishu account (or configured bot fallback when <code>im:message.send_as_user</code> is not granted).</p>
           </div>
         </div>
 
         <div
           class="connection-card"
-          :data-state="aiTokenStatus?.can_send_as_user ? 'connected' : 'failed'"
+          :data-state="aiTokenCanSend ? 'connected' : 'failed'"
           data-testid="feishu-ai-token-card"
         >
           <span
@@ -196,7 +196,16 @@
           <div>
             <span class="section-eyebrow">User access token &amp; scope check</span>
             <strong>{{ aiTokenSummary }}</strong>
-            <small v-if="aiTokenStatus?.auth_login_command && !aiTokenStatus?.can_send_as_user">
+            <small
+              v-if="aiTokenGuidance"
+              data-testid="feishu-ai-token-guidance"
+            >
+              {{ aiTokenGuidance }}
+            </small>
+            <small
+              v-if="aiTokenStatus?.auth_login_command && !aiTokenCanSend"
+              data-testid="feishu-ai-token-login-cmd"
+            >
               Run: <code>{{ aiTokenStatus.auth_login_command }}</code>
             </small>
             <div class="section-actions">
@@ -855,12 +864,45 @@ const aiEffortOptions = computed<string[]>(() => {
   if (Array.isArray(perProvider)) return perProvider
   return DEFAULT_PROVIDER_EFFORTS[aiEdit.provider] ?? []
 })
+const aiSidebarMeta = computed(() => {
+  if (aiEdit.enabled) return `${aiEdit.provider} · ${aiEdit.model || 'default'}`
+  const tok = aiTokenStatus.value
+  if (tok?.can_send_as_user) return 'Personal account reply'
+  if (tok && (tok.send_mode === 'bot_fallback' || tok.can_send_via_bot)) {
+    return tok.fallback_bot_app_id ? `Bot fallback (${tok.fallback_bot_app_id})` : 'Bot fallback reply'
+  }
+  return 'Personal account reply'
+})
+const aiTokenCanSend = computed(() => {
+  const tok = aiTokenStatus.value
+  if (!tok) return false
+  return Boolean(tok.can_send ?? (tok.can_send_as_user || tok.can_send_via_bot))
+})
+const aiTokenChipLabel = computed(() => {
+  const tok = aiTokenStatus.value
+  if (!tok) return ''
+  if (tok.can_send_as_user) return 'Scope ready'
+  if (tok.send_mode === 'bot_fallback' || tok.can_send_via_bot) {
+    return tok.fallback_bot_app_id ? `Bot fallback (${tok.fallback_bot_app_id})` : 'Bot fallback'
+  }
+  return 'Missing send_as_user'
+})
 const aiTokenSummary = computed(() => {
   const tok = aiTokenStatus.value
   if (!tok || !tok.has_token) return 'No user token loaded yet (sign in via Feishu OAuth or import ~/.lark-cli token)'
   const userLabel = tok.user_name ? `${tok.user_name} (${tok.open_id})` : (tok.open_id ?? 'User')
   if (tok.can_send_as_user) return `Ready: ${userLabel} · im:message.send_as_user granted`
-  return `${userLabel} · Missing required scope: ${tok.missing_required_scopes.join(', ') || 'im:message.send_as_user'}`
+  if (tok.send_mode === 'bot_fallback' || tok.can_send_via_bot) {
+    const botLabel = tok.fallback_bot_app_id ?? tok.app_id ?? 'app bot'
+    return `Ready (bot fallback: ${botLabel}): ${userLabel} · im:message.send_as_user not granted`
+  }
+  return `${userLabel} · Missing required scope: ${tok.missing_required_scopes.join(', ') || 'im:message.send_as_user'} (and no bot fallback configured)`
+})
+const aiTokenGuidance = computed(() => {
+  const tok = aiTokenStatus.value
+  if (!tok || aiTokenCanSend.value) return ''
+  const firstStep = tok.remediation_steps?.[0]
+  return typeof firstStep === 'string' ? firstStep : ''
 })
 const selected = computed(() => store.botById(selectedId.value))
 const selectedBindings = computed(() => botBindings(selected.value))

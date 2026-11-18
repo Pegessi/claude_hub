@@ -180,6 +180,8 @@ export interface FeishuAiCommandConfig {
   reply_in_thread: boolean
 }
 
+export type FeishuAiCommandSendMode = 'user' | 'bot_fallback' | 'none'
+
 export interface FeishuAiCommandTokenStatus {
   has_token: boolean
   open_id: string | null
@@ -190,7 +192,12 @@ export interface FeishuAiCommandTokenStatus {
   token_expired: boolean
   granted_scopes: string[]
   required_send_scope: string
+  can_send?: boolean
   can_send_as_user: boolean
+  has_send_as_user_scope?: boolean
+  can_send_via_bot?: boolean
+  fallback_bot_app_id?: string | null
+  send_mode?: FeishuAiCommandSendMode
   can_react_as_user: boolean
   can_read_messages: boolean
   missing_required_scopes: string[]

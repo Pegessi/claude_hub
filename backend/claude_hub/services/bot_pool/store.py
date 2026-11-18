@@ -197,7 +197,9 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             ):
                 if value is not None:
                     callbacks[key] = _as_text(
-                        value, key, limit=_MAX_ID_CHARS if key == "expected_tenant_key" else 4096
+                        value,
+                        key,
+                        limit=_MAX_ID_CHARS if key == "expected_tenant_key" else 4096,
                     )
             if callback_enabled and not all(
                 callbacks.get(key)
@@ -306,6 +308,7 @@ class FeishuBotPoolStore(FeishuBotPoolStateStore):
             self._check_revision(raw, expected_revision)
             state["bots"][bot_id] = {
                 "bot_id": bot_id,
+                "app_id": _as_optional_text(raw.get("app_id"), "app_id") or "",
                 "revision": _as_int(raw.get("revision"), "revision") + 1,
                 "generation": _as_int(raw.get("generation"), "generation") + 1,
                 "revoked_at": now,

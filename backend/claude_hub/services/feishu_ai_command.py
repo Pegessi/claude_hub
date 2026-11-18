@@ -13,6 +13,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
+import httpx
+
 from claude_hub.config import settings
 from claude_hub.models import AgentType, SessionKind
 from claude_hub.services.feishu_ai_command_models import (
@@ -55,6 +57,7 @@ from claude_hub.services.feishu_bot import (
     FeishuReplyReceipt,
 )
 from claude_hub.services.feishu_user_client import (
+    FeishuDeliveryUncertainError,
     FeishuScopePreflightResult,
     FeishuUserClient,
     FeishuUserMessage,
@@ -757,7 +760,12 @@ class FeishuAiCommandService:
     def _skip_result(self, msg: FeishuUserMessage, **kw: Any) -> AiCommandExecutionResult:
         kw.setdefault("status", "skipped")
         return AiCommandExecutionResult(
-            False, bool(kw.pop("dry_run", False)), msg.message_id, msg.chat_id, msg.thread_id, **kw
+            False,
+            bool(kw.pop("dry_run", False)),
+            msg.message_id,
+            msg.chat_id,
+            msg.thread_id,
+            **kw,
         )
 
     def _done_result(self, msg: FeishuUserMessage, **kw: Any) -> AiCommandExecutionResult:
@@ -838,6 +846,7 @@ class FeishuAiCommandService:
         interim_receipt = FeishuReplyReceipt()
         final_receipt = FeishuReplyReceipt()
         dispatch_entered = False
+        final_reply_started = False
         turn_completed = resuming_completed
         answer = str(pending_item["answer"]) if resuming_completed and pending_item else ""
 
@@ -871,12 +880,18 @@ class FeishuAiCommandService:
                 )
 
             if hasattr(user_client, "arequire_send_as_user_scope"):
-                await user_client.arequire_send_as_user_scope()
+                try:
+                    await user_client.arequire_send_as_user_scope(allow_bot_fallback=True)
+                except TypeError:
+                    await user_client.arequire_send_as_user_scope()
             else:
                 async with self._token_store.async_file_lock(
                     app_id=cfg.app_id, open_id=cfg.owner_open_id
                 ):
-                    user_client.require_send_as_user_scope()
+                    try:
+                        user_client.require_send_as_user_scope(allow_bot_fallback=True)
+                    except TypeError:
+                        user_client.require_send_as_user_scope()
             if resuming_completed and pending_item is not None:
                 raw_refs = pending_item.get("refs")
                 refs = (
@@ -913,13 +928,31 @@ class FeishuAiCommandService:
                 )
                 interim_text = build_interim_reply_text(parsed, refs, footer=cfg.footer)
                 interim_post = build_ai_post_payload(interim_text, footer=cfg.footer)
-                interim_receipt = await user_client.reply_as_user(
-                    message.message_id,
-                    "post",
-                    interim_post,
-                    reply_in_thread=reply_in_thread,
-                    uuid=bounded_message_uuid(message.message_id, "interim"),
-                )
+                try:
+                    interim_receipt = await user_client.reply_as_user(
+                        message.message_id,
+                        "post",
+                        interim_post,
+                        chat_id=message.chat_id,
+                        reply_in_thread=reply_in_thread,
+                        uuid=bounded_message_uuid(message.message_id, "interim"),
+                    )
+                except TypeError:
+                    interim_receipt = await user_client.reply_as_user(
+                        message.message_id,
+                        "post",
+                        interim_post,
+                        reply_in_thread=reply_in_thread,
+                        uuid=bounded_message_uuid(message.message_id, "interim"),
+                    )
+
+                if (
+                    not isinstance(interim_receipt.message_id, str)
+                    or not interim_receipt.message_id.strip()
+                ):
+                    raise FeishuDeliveryUncertainError(
+                        "Feishu interim reply message identity is unavailable; delivery may have occurred"
+                    )
 
                 lock_key = f"{message.chat_id}:{message.thread_id or 'main'}"
                 with self._lock:
@@ -971,13 +1004,31 @@ class FeishuAiCommandService:
 
             final_text = ensure_ai_footer(answer, footer=cfg.footer)
             final_post = build_ai_post_payload(final_text, footer=cfg.footer)
-            final_receipt = await user_client.reply_as_user(
-                message.message_id,
-                "post",
-                final_post,
-                reply_in_thread=reply_in_thread,
-                uuid=bounded_message_uuid(message.message_id, "final"),
-            )
+            final_reply_started = True
+            try:
+                final_receipt = await user_client.reply_as_user(
+                    message.message_id,
+                    "post",
+                    final_post,
+                    chat_id=message.chat_id,
+                    reply_in_thread=reply_in_thread,
+                    uuid=bounded_message_uuid(message.message_id, "final"),
+                )
+            except TypeError:
+                final_receipt = await user_client.reply_as_user(
+                    message.message_id,
+                    "post",
+                    final_post,
+                    reply_in_thread=reply_in_thread,
+                    uuid=bounded_message_uuid(message.message_id, "final"),
+                )
+            if (
+                not isinstance(final_receipt.message_id, str)
+                or not final_receipt.message_id.strip()
+            ):
+                raise FeishuDeliveryUncertainError(
+                    "Feishu final reply message identity is unavailable; delivery may have occurred"
+                )
             result = self._done_result(
                 message,
                 status="completed",
@@ -1021,7 +1072,9 @@ class FeishuAiCommandService:
             elif type(exc).__name__ == "ExternalDispatchRetired":
                 status_val, reason_val = "cancelled", "retired_retry_safe"
                 self.mark_pending_command_state(
-                    message.message_id, "interrupted", dispatch_state="retired_retry_safe"
+                    message.message_id,
+                    "interrupted",
+                    dispatch_state="retired_retry_safe",
                 )
                 self._dedup.release(dedup_claim_key)
             else:
@@ -1034,28 +1087,55 @@ class FeishuAiCommandService:
             status_val = "failed"
             reason_val = str(exc) or type(exc).__name__
             logger.exception("Feishu /ai command execution failed for %s", message.message_id)
-            error_text = ensure_ai_footer(
-                f"没能生成回答，请稍后再试或直接联系本人。（{reason_val[:160]}）",
-                footer=cfg.footer,
+            uncertain_final_delivery = final_reply_started and isinstance(
+                exc,
+                (
+                    FeishuDeliveryUncertainError,
+                    httpx.TimeoutException,
+                    httpx.ReadError,
+                    httpx.WriteError,
+                    httpx.RemoteProtocolError,
+                    httpx.DecodingError,
+                ),
             )
-            error_post = build_ai_post_payload(error_text, footer=cfg.footer)
-            try:
-                final_receipt = await user_client.reply_as_user(
-                    message.message_id,
-                    "post",
-                    error_post,
-                    reply_in_thread=reply_in_thread,
-                    uuid=bounded_message_uuid(message.message_id, "error"),
+            error_text = ""
+            error_post: dict[str, Any] = {}
+            if not uncertain_final_delivery:
+                error_text = ensure_ai_footer(
+                    f"没能生成回答，请稍后再试或直接联系本人。（{reason_val[:160]}）",
+                    footer=cfg.footer,
                 )
-            except Exception:
-                logger.warning("Failed to post /ai error fallback reply for %s", message.message_id)
+                error_post = build_ai_post_payload(error_text, footer=cfg.footer)
+                try:
+                    try:
+                        final_receipt = await user_client.reply_as_user(
+                            message.message_id,
+                            "post",
+                            error_post,
+                            chat_id=message.chat_id,
+                            reply_in_thread=reply_in_thread,
+                            uuid=bounded_message_uuid(message.message_id, "error"),
+                        )
+                    except TypeError:
+                        final_receipt = await user_client.reply_as_user(
+                            message.message_id,
+                            "post",
+                            error_post,
+                            reply_in_thread=reply_in_thread,
+                            uuid=bounded_message_uuid(message.message_id, "error"),
+                        )
+                except Exception:
+                    logger.warning(
+                        "Failed to post /ai error fallback reply for %s",
+                        message.message_id,
+                    )
             result = self._done_result(
                 message,
                 status=status_val,
                 reason=reason_val,
                 parsed=parsed,
-                final_text=error_text,
-                final_post=error_post,
+                final_text=final_text if uncertain_final_delivery else error_text,
+                final_post=final_post if uncertain_final_delivery else error_post,
                 tab_id=tab_id,
                 interim_message_id=interim_receipt.message_id,
                 final_message_id=final_receipt.message_id,

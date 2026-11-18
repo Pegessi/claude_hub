@@ -2051,7 +2051,11 @@ async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
                 200,
                 json={
                     "code": 0,
-                    "data": {"message_id": "om_c4_send", "items": [], "has_more": False},
+                    "data": {
+                        "message_id": "om_c4_send",
+                        "items": [],
+                        "has_more": False,
+                    },
                 },
             )
         if request.url.path.endswith("/app_access_token/internal"):
@@ -2333,7 +2337,11 @@ async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
             {
                 "currentApp": "secondary",
                 "apps": [
-                    {"appId": "cli_c4", "name": "primary", "users": [{"userOpenId": "ou_c4"}]},
+                    {
+                        "appId": "cli_c4",
+                        "name": "primary",
+                        "users": [{"userOpenId": "ou_c4"}],
+                    },
                     {
                         "appId": "cli_other",
                         "name": "secondary",
@@ -2523,7 +2531,10 @@ async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
                         {
                             "name": "primary",
                             "appId": "cli_pt",
-                            "appSecret": {"source": "keychain", "id": "appsecret:cli_pt"},
+                            "appSecret": {
+                                "source": "keychain",
+                                "id": "appsecret:cli_pt",
+                            },
                             "scope": "im:message",
                             "users": [
                                 {"userOpenId": "ou_pt_first", "userName": "First User"},
@@ -2701,3 +2712,451 @@ async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
             .can_send_as_user
             is False
         )
+
+
+@pytest.mark.asyncio
+async def test_bot_fallback_reply_send_and_auto_invite_without_send_as_user(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User token with im:message (no im:message.send_as_user) sends/replies via single authorized bot fallback."""
+    import time
+
+    from claude_hub.services.feishu_bot import (
+        FeishuBotConfig,
+        FeishuBotError,
+        FeishuBotRemoteError,
+    )
+    from claude_hub.services.feishu_bot_pool import FeishuBotPoolStore
+
+    cli_cfg = tmp_path / "fb_cli_cfg"
+    cli_data = tmp_path / "fb_cli_data"
+    cli_cfg.mkdir()
+    cli_data.mkdir()
+    master_key = secrets.token_bytes(32)
+    (cli_data / "master.key").write_bytes(master_key)
+    (cli_data / "appsecret_cli_fb.enc").write_bytes(
+        aes_256_gcm_encrypt(master_key, b"fb-bot-secret")
+    )
+    (cli_cfg / "config.json").write_text(
+        json.dumps(
+            {
+                "currentApp": "cli_fb",
+                "apps": [
+                    {
+                        "appId": "cli_fb",
+                        "users": [{"userOpenId": "ou_fb", "userName": "王泽华"}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (cli_data / "cli_fb_ou_fb.enc").write_bytes(
+        aes_256_gcm_encrypt(
+            master_key,
+            json.dumps(
+                {
+                    "appId": "cli_fb",
+                    "userOpenId": "ou_fb",
+                    "userName": "王泽华",
+                    "accessToken": "fb-user-at",
+                    "refreshToken": "fb-user-rt",
+                    "expiresAt": int((time.time() + 7200) * 1000),
+                    "refreshExpiresAt": int((time.time() + 600_000) * 1000),
+                    "scope": (
+                        "im:message im:chat:read im:chat.members:write_only "
+                        "im:message.reactions:write_only im:message.group_msg:get_as_user"
+                    ),
+                }
+            ).encode("utf-8"),
+        )
+    )
+    store = FeishuUserTokenStore(
+        path=tmp_path / "fb_tokens.json",
+        key_path=tmp_path / "fb_tokens.key",
+        lark_cli_dir=cli_cfg,
+        lark_cli_data_dir=cli_data,
+    )
+    # Also store an unrelated user token with a secret in the same store; fallback must NEVER select it.
+    store.save_oauth_token(
+        open_id="ou_unrelated",
+        app_id="cli_unrelated",
+        access_token="unrelated-user-at",
+        refresh_token="unrelated-user-rt",
+        app_secret="unrelated-bot-secret",
+        expires_in=7200,
+        scope="im:message",
+    )
+
+    rec = await store.aresolve_token(open_id="ou_fb", app_id="cli_fb", auto_import_lark_cli=True)
+    assert rec is not None
+    assert rec.app_secret == "fb-bot-secret"
+    assert not rec.has_scope("im:message.send_as_user")
+    assert store.resolve_fallback_bot_configs(preferred_app_id="cli_fb", record=rec) == [
+        ("cli_fb", "fb-bot-secret")
+    ]
+    # Mismatched preferred_app_id vs record.app_id fails closed
+    assert store.resolve_fallback_bot_configs(preferred_app_id="cli_unrelated", record=rec) == []
+
+    calls: list[tuple[str, str, str, dict[str, Any]]] = []
+    bot_in_chat = False
+    simulate_timeout = False
+    simulate_missing_id = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal bot_in_chat
+        path = request.url.path
+        auth_hdr = request.headers.get("Authorization", "")
+        body = json.loads(request.content.decode("utf-8")) if request.content else {}
+        calls.append((request.method, path, auth_hdr, body))
+
+        if path == "/open-apis/auth/v3/tenant_access_token/internal":
+            assert body.get("app_id") == "cli_fb"
+            assert body.get("app_secret") == "fb-bot-secret"
+            return httpx.Response(
+                200,
+                json={"code": 0, "tenant_access_token": "t-bot-token", "expire": 7200},
+            )
+        if path.endswith("/reactions"):
+            assert auth_hdr == "Bearer fb-user-at"
+            return httpx.Response(
+                200,
+                json={"code": 0, "data": {"reaction_id": "rx_fb_1"}},
+            )
+        if path == "/open-apis/im/v1/chats/oc_group_fb/members":
+            assert auth_hdr == "Bearer fb-user-at"
+            assert request.url.params.get("member_id_type") == "app_id"
+            assert body == {"id_list": ["cli_fb"]}
+            bot_in_chat = True
+            return httpx.Response(200, json={"code": 0, "data": {}})
+        if path.endswith("/reply"):
+            assert auth_hdr == "Bearer t-bot-token"
+            if simulate_timeout:
+                raise httpx.ReadTimeout("simulated post-accept read timeout")
+            if simulate_missing_id:
+                return httpx.Response(200, json={"code": 0, "data": {}})
+            if not bot_in_chat:
+                return httpx.Response(
+                    400,
+                    json={
+                        "code": 230002,
+                        "msg": "Bot/User can NOT be out of the chat.",
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {"message_id": "om_bot_reply_1", "thread_id": "omt_fb_1"},
+                },
+            )
+        if path == "/open-apis/im/v1/messages" and request.method == "POST":
+            assert auth_hdr == "Bearer t-bot-token"
+            if simulate_timeout:
+                raise httpx.ReadTimeout("simulated post-accept read timeout")
+            if simulate_missing_id:
+                return httpx.Response(200, json={"code": 0, "data": {}})
+            if not bot_in_chat:
+                return httpx.Response(
+                    400,
+                    json={
+                        "code": 230002,
+                        "msg": "Bot/User can NOT be out of the chat.",
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={"code": 0, "data": {"message_id": "om_bot_send_1"}},
+            )
+        if path == "/open-apis/im/v1/messages" and request.method == "GET":
+            assert auth_hdr == "Bearer fb-user-at"
+            return httpx.Response(200, json={"code": 0, "data": {"items": []}})
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    mock_http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://open.feishu.cn",
+    )
+    try:
+        user_client = FeishuUserClient(store, open_id="ou_fb", app_id="cli_fb", client=mock_http)
+        preflight = await user_client.apreflight_scopes()
+        # F3: can_send_as_user truthfully reports im:message.send_as_user (False), while can_send is True via bot_fallback
+        assert preflight.can_send_as_user is False
+        assert preflight.has_send_as_user_scope is False
+        assert preflight.can_send is True
+        assert preflight.can_send_via_bot is True
+        assert preflight.send_mode == "bot_fallback"
+        assert preflight.fallback_bot_app_id == "cli_fb"
+        assert preflight.missing_required_scopes == ("im:message.send_as_user",)
+
+        # Strict require_send_as_user_scope(allow_bot_fallback=False) still raises
+        with pytest.raises(FeishuUserScopeError):
+            await user_client.arequire_send_as_user_scope(allow_bot_fallback=False)
+        # With allow_bot_fallback=True it succeeds
+        verified_rec = await user_client.arequire_send_as_user_scope(allow_bot_fallback=True)
+        assert verified_rec.open_id == "ou_fb"
+
+        # Default auto_invite_bot_to_chat=False does NOT mutate chat membership on 230002
+        with pytest.raises(FeishuBotRemoteError) as exc_230002:
+            await user_client.reply_as_user(
+                "om_trigger_fb",
+                "post",
+                {"zh_cn": {"content": [[{"tag": "text", "text": "hi"}]]}},
+                chat_id="oc_group_fb",
+            )
+        assert exc_230002.value.code == 230002
+        assert bot_in_chat is False
+        assert not any(p.endswith("/members") for _, p, _, _ in calls)
+
+        # Explicit auto_invite_bot_to_chat=True invites only cli_fb and succeeds
+        explicit_invite_reply = await user_client.reply_as_user(
+            "om_trigger_fb",
+            "post",
+            {"zh_cn": {"content": [[{"tag": "text", "text": "hi"}]]}},
+            chat_id="oc_group_fb",
+            auto_invite_bot_to_chat=True,
+        )
+        assert explicit_invite_reply.message_id == "om_bot_reply_1"
+        assert bot_in_chat is True
+
+        # Full /ai command flow works end-to-end when bot is in chat
+        svc = FeishuAiCommandService(
+            state_path=tmp_path / "fb_ai_cfg.json",
+            token_store=store,
+            user_client_factory=lambda cfg: user_client,
+            tab_creator=lambda **_kw: "tab-fb-1",
+            tab_getter=lambda _tid: None,
+            tab_env_switcher=lambda *_a, **_kw: None,
+            turn_dispatcher=lambda *_a, **_kw: asyncio.sleep(0, result="Bot fallback reply ok"),
+        )
+        svc.update_config(
+            {
+                "enabled": True,
+                "owner_open_id": "ou_fb",
+                "app_id": "cli_fb",
+                "cwd": str(tmp_path),
+            }
+        )
+        msg = FeishuUserMessage(
+            message_id="om_trigger_fb",
+            chat_id="oc_group_fb",
+            sender_open_id="ou_fb",
+            sender_type="user",
+            msg_type="text",
+            text="/ai test fallback without send_as_user",
+            create_time_ms=int(time.time() * 1000),
+        )
+        res = await svc.handle_message(msg, source="ws")
+        assert res.handled is True
+        assert res.status == "completed"
+        assert res.final_message_id == "om_bot_reply_1"
+
+        # Direct send_as_user also uses bot fallback
+        send_res = await user_client.send_as_user("oc_group_fb", "text", {"text": "hello"})
+        assert send_res["message_id"] == "om_bot_send_1"
+        assert send_res["send_mode"] == "bot_fallback"
+
+        # F2 / R2: Post-accept timeout or missing receipt raises immediately without switching/retrying another bot
+        simulate_timeout = True
+        before_calls = len(calls)
+        with pytest.raises(httpx.ReadTimeout):
+            await user_client.send_as_user("oc_group_fb", "text", {"text": "timeout-msg"})
+        assert len(calls) == before_calls + 1
+        with pytest.raises(httpx.ReadTimeout):
+            await user_client.reply_as_user(
+                "om_trigger_fb",
+                "post",
+                {"zh_cn": {"content": [[{"tag": "text", "text": "timeout-reply"}]]}},
+                chat_id="oc_group_fb",
+            )
+        simulate_timeout = False
+
+        simulate_missing_id = True
+        before_calls = len(calls)
+        with pytest.raises(FeishuBotError, match="delivery may have occurred"):
+            await user_client.send_as_user("oc_group_fb", "text", {"text": "missing-id-msg"})
+        assert len(calls) == before_calls + 1
+        with pytest.raises(FeishuBotError, match="delivery may have occurred"):
+            await user_client.reply_as_user(
+                "om_trigger_fb",
+                "post",
+                {"zh_cn": {"content": [[{"tag": "text", "text": "missing-id-reply"}]]}},
+                chat_id="oc_group_fb",
+            )
+        # R2: handle_message with missing reply receipt must NEVER report completed or send a duplicate error reply
+        msg_missing_receipt = FeishuUserMessage(
+            message_id="om_trigger_missing_receipt",
+            chat_id="oc_group_fb",
+            sender_open_id="ou_fb",
+            sender_type="user",
+            msg_type="text",
+            text="/ai test missing reply receipt",
+            create_time_ms=int(time.time() * 1000),
+        )
+        res_missing = await svc.handle_message(msg_missing_receipt, source="ws")
+        assert res_missing.status == "failed"
+        assert "delivery may have occurred" in (res_missing.reason or "")
+        assert res_missing.final_message_id is None
+        simulate_missing_id = False
+
+        # R2: Also verify final reply missing receipt (when interim reply succeeds but final reply returns empty data={})
+        reply_attempt = 0
+        orig_handler = handler
+
+        def final_missing_handler(request: httpx.Request) -> httpx.Response:
+            nonlocal reply_attempt
+            if request.url.path.endswith("/reply"):
+                reply_attempt += 1
+                if reply_attempt >= 2:
+                    calls.append(
+                        (
+                            request.method,
+                            request.url.path,
+                            request.headers.get("Authorization", ""),
+                            (
+                                json.loads(request.content.decode("utf-8"))
+                                if request.content
+                                else {}
+                            ),
+                        )
+                    )
+                    return httpx.Response(200, json={"code": 0, "data": {"message_id": "   "}})
+            return orig_handler(request)
+
+        mock_http._transport = httpx.MockTransport(final_missing_handler)
+        msg_final_missing = FeishuUserMessage(
+            message_id="om_trigger_final_missing",
+            chat_id="oc_group_fb",
+            sender_open_id="ou_fb",
+            sender_type="user",
+            msg_type="text",
+            text="/ai test final reply missing receipt",
+            create_time_ms=int(time.time() * 1000),
+        )
+        before_reply_calls = sum(1 for _, p, _, _ in calls if p.endswith("/reply"))
+        res_final_missing = await svc.handle_message(msg_final_missing, source="ws")
+        after_reply_calls = sum(1 for _, p, _, _ in calls if p.endswith("/reply"))
+        assert res_final_missing.status == "failed"
+        assert "delivery may have occurred" in (res_final_missing.reason or "")
+        assert res_final_missing.final_message_id is None
+        # Only 2 reply calls (1 interim + 1 final), no 3rd blind error-fallback reply after uncertain final delivery
+        assert after_reply_calls - before_reply_calls == 2
+
+        # R2-remnant: Verify ReadError, RemoteProtocolError, and HTTP 200 malformed JSON on final reply
+        # are all classified as FeishuDeliveryUncertainError and suppress any 3rd error-fallback reply
+        for case_label, failure_mode in (
+            ("read_error", "read_error"),
+            ("remote_protocol_error", "remote_protocol_error"),
+            ("malformed_200_json", "malformed_200_json"),
+            ("unrecognizable_200_json", "unrecognizable_200_json"),
+        ):
+            case_reply_attempt = 0
+
+            def uncertain_final_handler(
+                request: httpx.Request,
+                *,
+                _mode: str = failure_mode,
+            ) -> httpx.Response:
+                nonlocal case_reply_attempt
+                if request.url.path.endswith("/reply"):
+                    case_reply_attempt += 1
+                    if case_reply_attempt >= 2:
+                        calls.append(
+                            (
+                                request.method,
+                                request.url.path,
+                                request.headers.get("Authorization", ""),
+                                (
+                                    json.loads(request.content.decode("utf-8"))
+                                    if request.content
+                                    else {}
+                                ),
+                            )
+                        )
+                        if _mode == "read_error":
+                            raise httpx.ReadError("connection reset after submit", request=request)
+                        if _mode == "remote_protocol_error":
+                            raise httpx.RemoteProtocolError(
+                                "server closed connection without response", request=request
+                            )
+                        if _mode == "malformed_200_json":
+                            return httpx.Response(200, text="<html>gateway cut off</html>")
+                        return httpx.Response(200, json={"unexpected": "shape"})
+                return orig_handler(request)
+
+            mock_http._transport = httpx.MockTransport(uncertain_final_handler)
+            msg_uncertain = FeishuUserMessage(
+                message_id=f"om_trigger_{case_label}",
+                chat_id="oc_group_fb",
+                sender_open_id="ou_fb",
+                sender_type="user",
+                msg_type="text",
+                text=f"/ai test {case_label}",
+                create_time_ms=int(time.time() * 1000),
+            )
+            before_case_replies = sum(1 for _, p, _, _ in calls if p.endswith("/reply"))
+            res_uncertain = await svc.handle_message(msg_uncertain, source="ws")
+            after_case_replies = sum(1 for _, p, _, _ in calls if p.endswith("/reply"))
+            assert res_uncertain.status == "failed", case_label
+            assert "delivery may have occurred" in (res_uncertain.reason or ""), case_label
+            assert res_uncertain.final_message_id is None, case_label
+            assert after_case_replies - before_case_replies == 2, case_label
+
+        mock_http._transport = httpx.MockTransport(orig_handler)
+
+        # F1 / R1: If cli_fb is registered in FeishuBotPoolStore and disabled, fallback is rejected even when keychain has secret
+        pool = FeishuBotPoolStore(
+            path=tmp_path / "fb_pool.json", legacy_path=tmp_path / "fb_legacy.json"
+        )
+        bot_id = pool.create_bot(
+            name="FB Bot",
+            config=FeishuBotConfig(app_id="cli_fb", app_secret="fb-bot-secret"),
+        )
+        cur_rev = next(b.revision for b in pool.snapshot().bots if b.bot_id == bot_id)
+        pool.update_bot(bot_id, enabled=False, expected_revision=cur_rev)
+        monkeypatch.setattr(
+            "claude_hub.services.feishu_bot_pool.FeishuBotPoolStore",
+            lambda: pool,
+        )
+        assert store.resolve_fallback_bot_configs(preferred_app_id="cli_fb", record=rec) == []
+        disabled_pf = await user_client.apreflight_scopes(rec)
+        assert disabled_pf.can_send_via_bot is False
+        assert disabled_pf.can_send is False
+        assert disabled_pf.send_mode == "none"
+        with pytest.raises(FeishuUserScopeError):
+            await user_client.send_as_user("oc_group_fb", "text", {"text": "blocked-when-disabled"})
+
+        # R1: Deleting the bot from FeishuBotPoolStore preserves a revoked tombstone and does NOT re-enable cached credentials
+        del_rev = next(b.revision for b in pool.snapshot().bots if b.bot_id == bot_id)
+        pool.delete_bot(bot_id, expected_revision=del_rev)
+        assert store.resolve_fallback_bot_configs(preferred_app_id="cli_fb", record=rec) == []
+        deleted_pf = await user_client.apreflight_scopes(rec)
+        assert deleted_pf.can_send_via_bot is False
+        assert deleted_pf.can_send is False
+        assert deleted_pf.send_mode == "none"
+        with pytest.raises(FeishuUserScopeError):
+            await user_client.send_as_user("oc_group_fb", "text", {"text": "blocked-when-deleted"})
+
+        # R1: If FeishuBotPoolStore state cannot be read (raises FeishuBotPoolStateError), fail closed
+        from claude_hub.services.feishu_bot_pool import FeishuBotPoolStateError
+
+        class _UnreadablePool:
+            def snapshot(self) -> Any:
+                raise FeishuBotPoolStateError("simulated corrupt pool state")
+
+        monkeypatch.setattr(
+            "claude_hub.services.feishu_bot_pool.FeishuBotPoolStore",
+            lambda: _UnreadablePool(),
+        )
+        assert store.resolve_fallback_bot_configs(preferred_app_id="cli_fb", record=rec) == []
+        unreadable_pf = await user_client.apreflight_scopes(rec)
+        assert unreadable_pf.can_send_via_bot is False
+        assert unreadable_pf.can_send is False
+        assert unreadable_pf.send_mode == "none"
+        with pytest.raises(FeishuUserScopeError):
+            await user_client.send_as_user(
+                "oc_group_fb", "text", {"text": "blocked-when-pool-unreadable"}
+            )
+    finally:
+        await mock_http.aclose()
