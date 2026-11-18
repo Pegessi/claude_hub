@@ -427,18 +427,26 @@ class FeishuUserTokenStore:
         return f"{app_id.strip()}:{open_id.strip()}"
 
     @staticmethod
-    def _resolve_pool_bot_secret(app_id: str) -> str:
+    def _pool_bot_secret_state(app_id: str) -> tuple[bool | None, str]:
+        """Return ``(enabled, app_secret)`` if ``app_id`` is registered in ``FeishuBotPoolStore``."""
         if not (clean_app := (app_id or "").strip()):
-            return ""
+            return None, ""
         try:
             from claude_hub.services.feishu_bot_pool import FeishuBotPoolStore
 
             for bot in FeishuBotPoolStore().snapshot().bots:
-                if bot.app_id == clean_app and bot.config and bot.config.app_secret.strip():
-                    return bot.config.app_secret.strip()
+                if bot.app_id == clean_app:
+                    if not bot.enabled or bot.config is None:
+                        return False, ""
+                    return True, bot.config.app_secret.strip()
         except Exception:
             pass
-        return ""
+        return None, ""
+
+    @classmethod
+    def _resolve_pool_bot_secret(cls, app_id: str) -> str:
+        enabled, secret = cls._pool_bot_secret_state(app_id)
+        return secret if enabled is True else ""
 
     @staticmethod
     def _resolve_lark_cli_keychain_secret(app_id: str, search_dirs: tuple[Path, ...]) -> str:
@@ -462,14 +470,22 @@ class FeishuUserTokenStore:
 
     @classmethod
     def resolve_app_secret_for_app(
-        cls, app_id: str, *, record_secret: str = "", search_dirs: tuple[Path, ...] = ()
+        cls,
+        app_id: str,
+        *,
+        record_secret: str = "",
+        search_dirs: tuple[Path, ...] = (),
+        require_enabled_pool_bot: bool = False,
     ) -> str:
-        """Resolve ``app_secret`` from record, ``lark-cli`` keychain, or Hub Bot pool."""
+        """Resolve ``app_secret`` from record, ``lark-cli`` keychain, or enabled Hub Bot pool."""
+        pool_enabled, pool_sec = cls._pool_bot_secret_state(app_id)
+        if require_enabled_pool_bot and pool_enabled is False:
+            return ""
         if record_secret and record_secret.strip():
             return record_secret.strip()
         if search_dirs and (cli_sec := cls._resolve_lark_cli_keychain_secret(app_id, search_dirs)):
             return cli_sec
-        return cls._resolve_pool_bot_secret(app_id)
+        return pool_sec if pool_enabled is True else ""
 
     def resolve_fallback_bot_configs(
         self,
@@ -477,53 +493,27 @@ class FeishuUserTokenStore:
         preferred_app_id: str | None = None,
         record: FeishuUserTokenRecord | None = None,
     ) -> list[tuple[str, str]]:
-        """Return ordered ``(app_id, app_secret)`` bot credentials for tenant-token fallback."""
-        pairs: list[tuple[str, str]] = []
-        seen: set[str] = set()
+        """Return at most one ``(app_id, app_secret)`` for the selected/authorized ``/ai`` app."""
+        target_app = (
+            preferred_app_id or (record.app_id if record is not None else "") or ""
+        ).strip()
+        if not target_app:
+            return []
+        if record is not None and record.app_id and record.app_id != target_app:
+            return []
         dirs = self._resolve_lark_cli_dirs_with_overrides()
         s_dirs: tuple[Path, ...] = (dirs[1], dirs[0], dirs[0] / "keychain") if dirs else ()
-
-        def _add(aid: str | None, sec: str | None) -> None:
-            c_aid, c_sec = (aid or "").strip(), (sec or "").strip()
-            if c_aid and c_sec and c_aid not in seen:
-                seen.add(c_aid)
-                pairs.append((c_aid, c_sec))
-
-        if record is not None:
-            _add(
-                record.app_id,
-                self.resolve_app_secret_for_app(
-                    record.app_id, record_secret=record.app_secret, search_dirs=s_dirs
-                ),
-            )
-        if (pref := (preferred_app_id or "").strip()) and pref not in seen:
-            tok_rec = self.get_token(app_id=pref)
-            _add(
-                pref,
-                self.resolve_app_secret_for_app(
-                    pref,
-                    record_secret=tok_rec.app_secret if tok_rec else "",
-                    search_dirs=s_dirs,
-                ),
-            )
-        try:
-            from claude_hub.services.feishu_bot_pool import FeishuBotPoolStore
-
-            bots = FeishuBotPoolStore().snapshot().bots
-            for enabled_flag in (True, False):
-                for bot in bots:
-                    if bot.enabled is enabled_flag and bot.config is not None:
-                        _add(bot.app_id, bot.config.app_secret)
-        except Exception:
-            pass
-        for sr in self.list_tokens():
-            _add(
-                sr.app_id,
-                self.resolve_app_secret_for_app(
-                    sr.app_id, record_secret=sr.app_secret, search_dirs=s_dirs
-                ),
-            )
-        return pairs
+        rec_sec = record.app_secret if (record is not None and record.app_id == target_app) else ""
+        if not rec_sec and record is None:
+            tok_rec = self.get_token(app_id=target_app)
+            rec_sec = tok_rec.app_secret if tok_rec is not None else ""
+        sec = self.resolve_app_secret_for_app(
+            target_app,
+            record_secret=rec_sec,
+            search_dirs=s_dirs,
+            require_enabled_pool_bot=True,
+        )
+        return [(target_app, sec)] if sec else []
 
     def upsert_token(self, record: FeishuUserTokenRecord) -> FeishuUserTokenRecord:
         if (
