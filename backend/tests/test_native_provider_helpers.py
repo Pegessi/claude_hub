@@ -342,3 +342,135 @@ async def test_model_cache_and_probe_remain_owned_by_native(monkeypatch) -> None
     assert await native.available_models_for("cursor") is options
     probe.assert_awaited_once()
     assert cache["cursor"].options is options
+
+
+def _cached_codex_model(model_id: str, **overrides):
+    return {
+        "slug": model_id,
+        "display_name": f"Cached {model_id}",
+        "visibility": "list",
+        "supported_in_api": True,
+        "default_reasoning_level": "low",
+        "supported_reasoning_levels": [
+            {"effort": effort, "description": f"Use {effort}"}
+            for effort in ["low", "medium", "high", "xhigh", "max", "ultra"]
+        ],
+        **overrides,
+    }
+
+
+@pytest.mark.asyncio
+async def test_codex_catalog_reads_cache_before_start_and_observes_replacement(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    root = tmp_path / ".codex"
+    root.mkdir()
+    path = root / "models_cache.json"
+    path.write_text(
+        json.dumps(
+            {
+                "models": [
+                    _cached_codex_model("gpt-6.2-sol"),
+                    _cached_codex_model("gpt-6.2-astra"),
+                    _cached_codex_model("custom-before"),
+                    _cached_codex_model("gpt-6-luna", visibility="hide"),
+                    _cached_codex_model("gpt-6-sol", supported_in_api=False),
+                ]
+            }
+        )
+    )
+    # A preexisting process-global fallback must not hide file updates.
+    monkeypatch.setattr(
+        native, "_models_cache", {"codex": native._ModelsCacheEntry([], expires_at=float("inf"))}
+    )
+    first = await native.model_catalog_for("codex")
+    options = {m.id: m for m in first.options}
+    assert first.metadata_cacheable is False
+    assert options["gpt-6.2-sol"].label == "Cached gpt-6.2-sol"
+    assert options["gpt-6.2-astra"].default_reasoning_effort == "low"
+    assert [e.id for e in options["gpt-6.2-sol"].supported_reasoning_efforts] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    ]
+    assert options["gpt-6.2-sol"].supported_reasoning_efforts[-1].description == "Use ultra"
+    assert "gpt-6-luna" not in options
+    assert "gpt-6-sol" not in options
+    assert "gpt-6.1-terra" in options
+    replacement = root / "replacement.json"
+    replacement.write_text(json.dumps({"models": [_cached_codex_model("custom-after")]}))
+    replacement.replace(path)
+    second = {m.id: m for m in await native.available_models_for("codex")}
+    assert "custom-after" in second and "custom-before" not in second
+    # A fallback does not invent model-specific reasoning capabilities.
+    assert second["gpt-6.2-sol"].supported_reasoning_efforts == []
+    assert second["gpt-6.2-sol"].provider_model_id is None
+
+
+@pytest.mark.parametrize("contents", [None, b"{broken", b"\xff", b"[]", b'{"models":null}'])
+def test_codex_catalog_missing_or_invalid_cache_has_current_fallback(
+    tmp_path, monkeypatch, contents
+) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    if contents is not None:
+        (tmp_path / "models_cache.json").write_bytes(contents)
+    options = native._codex_model_options({})
+    assert {m.id for m in options} == set(native._STATIC_MODELS["codex"])
+    assert {"gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-sol"} <= {m.id for m in options}
+
+
+def test_codex_catalog_respects_session_home_without_cross_session_leakage(
+    tmp_path, monkeypatch
+) -> None:
+    roots = [tmp_path / name for name in ["default", "session", "home/.codex"]]
+    for index, root in enumerate(roots):
+        root.mkdir(parents=True)
+        (root / "models_cache.json").write_text(
+            json.dumps({"models": [_cached_codex_model(f"private-{index}")]})
+        )
+    monkeypatch.setenv("CODEX_HOME", str(roots[0]))
+    default = {m.id for m in native._codex_model_options({})}
+    custom = {m.id for m in native._codex_model_options({"CODEX_HOME": str(roots[1])})}
+    home = {
+        m.id
+        for m in native._codex_model_options({"HOME": str(tmp_path / "home"), "CODEX_HOME": ""})
+    }
+    assert "private-0" in default and "private-1" not in default
+    assert "private-1" in custom and "private-0" not in custom
+    assert "private-2" in home and "private-0" not in home
+
+
+def test_codex_cache_normalization_filters_malformed_rows_and_efforts() -> None:
+    rows = provider_model_options.codex_cache_rows(
+        {
+            "models": [
+                None,
+                {},
+                _cached_codex_model(""),
+                _cached_codex_model("hidden", visibility="hide"),
+                _cached_codex_model(
+                    "valid",
+                    default_reasoning_level="ultra",
+                    supported_reasoning_levels=[
+                        None,
+                        {"effort": "invented"},
+                        {"effort": "high", "description": 1},
+                        {"effort": "high", "description": "duplicate"},
+                    ],
+                ),
+                _cached_codex_model("valid", display_name="duplicate"),
+            ]
+        }
+    )
+    options = provider_model_options.parse_codex_models(
+        rows, reasoning_efforts=native._REASONING_EFFORTS, reasoning_labels=native._REASONING_LABELS
+    )
+    assert [m.id for m in options] == ["valid"]
+    assert [e.id for e in options[0].supported_reasoning_efforts] == ["high"]
+    assert options[0].supported_reasoning_efforts[0].description == ""
+    assert options[0].default_reasoning_effort is None

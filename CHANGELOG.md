@@ -7,6 +7,17 @@
 
 ## Released
 
+### fix(codex): merge cached models with live discovery and current fallbacks
+
+- Read visible local Codex cache entries with model-specific reasoning efforts,
+  merge them with live app-server metadata, and include 6.2 Sol/Astra and the
+  current 6.x IDs in the static fallback. Keep hidden models excluded and reread
+  cache changes without cross-session catalog leakage.
+- Expose the pre-start catalog for local session creation and preserve exact
+  selections through initial thread configuration and existing Chat model
+  switching. Catalog membership does not assert account entitlement.
+- See [investigation and validation](docs/working-logs/2026-11-18-codex-model-catalog.md).
+
 ### fix(patrol): route Feishu patrol triage to an Agent Workspace Chat session and filter out bot notifications
 
 - Route `diagnose_message()` (`services/demand_patrol/feishu_triage.py`) through an ephemeral Workspace Chat `ManagedSession` (`ensure_workspace_agent(..., bootstrap=False)` + `_run_workspace_triage_turn`) in the configured patrol workspace (`PatrolConfig.workspace_id`, defaulting to `evo_workspace` `9b6725ac-68fa-4111-8ea9-b729764c6e97`, with `patrol_workspace_id` alias support and first-available workspace fallback) and auto-archive the workspace session in a `finally` block (with quarantine + `PatrolTriageDiagnosisError` retained-session evidence on combined or standalone archive failure, per-candidate error isolation, and retained-session reconciliation before spawning any replacement) instead of creating standalone Terminal `SubagentService` records.

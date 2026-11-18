@@ -11,12 +11,21 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, Depends
 
 from ..auth.dependencies import get_current_user
-from ..models import User
+from ..models import StreamModelOption, User
+from ..services.agent_stream.native import available_models_for
 from ..services.ttyd_manager import list_codex_sessions as _list_codex_sessions
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/codex", tags=["codex"])
+
+
+@router.get("/models", response_model=List[StreamModelOption])
+async def list_codex_models(
+    current_user: User = Depends(get_current_user),
+) -> List[StreamModelOption]:
+    """Offer the host-local catalog before creating a session or provider process."""
+    return await available_models_for("codex")
 
 
 @router.get("/sessions", response_model=List[Dict[str, Any]])
