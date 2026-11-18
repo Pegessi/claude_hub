@@ -139,6 +139,11 @@ class FeishuAiPoller:
         if not cfg.enabled or cfg.send_mode == "openapi":
             return False
         user_client = self._service.build_user_client(cfg)
+        if (
+            hasattr(user_client, "should_use_web_session")
+            and not user_client.should_use_web_session()
+        ):
+            return False
         wt = (
             user_client._get_web_transport() if hasattr(user_client, "_get_web_transport") else None
         )
@@ -166,6 +171,14 @@ class FeishuAiPoller:
                 self._frontier_task.cancel()
             return
         user_client = self._service.build_user_client(cfg)
+        if (
+            hasattr(user_client, "should_use_web_session")
+            and not user_client.should_use_web_session()
+        ):
+            if self._frontier_task is not None and not self._frontier_task.done():
+                self._frontier_stop.set()
+                self._frontier_task.cancel()
+            return
         wt = (
             user_client._get_web_transport() if hasattr(user_client, "_get_web_transport") else None
         )

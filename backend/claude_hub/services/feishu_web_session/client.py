@@ -426,8 +426,7 @@ class FeishuWebClient:
         _, final_url = await self.page(f"https://www.{s.domain()}/messenger/", session=s)
         host = (urlparse(final_url).hostname or "").strip().lower()
         if not host or not feishu_host(host) or host.startswith(("www.", "accounts.")):
-            if session is None:
-                self._store.mark_invalid()
+            self._store.mark_invalid(s)
             raise FeishuWebSignedOutError("no tenant host: the sign-in page answered")
         self._tenant_host = host
         self._tenant_of_session_uid = s.user_id
@@ -447,19 +446,20 @@ class FeishuWebClient:
             },
         )
         if resp.status_code in {401, 403}:
-            if session is None:
-                self._store.mark_invalid()
+            self._store.mark_invalid(s)
             raise FeishuWebSignedOutError("feishu web session rejected (401/403)")
+        if resp.status_code != 200:
+            raise FeishuWebGatewayError(
+                f"frontier_ticket HTTP {resp.status_code}",
+                status_code=resp.status_code,
+            )
         try:
             data = resp.json()
         except Exception as exc:
-            if session is None:
-                self._store.mark_invalid()
-            raise FeishuWebSignedOutError("frontier_ticket returned non-JSON") from exc
+            raise FeishuWebSessionError("frontier_ticket returned non-JSON") from exc
         ticket_val = str(data.get("ticket") or "").strip() if isinstance(data, Mapping) else ""
         if not ticket_val:
-            if session is None:
-                self._store.mark_invalid()
+            self._store.mark_invalid(s)
             raise FeishuWebSignedOutError("frontier_ticket returned empty ticket")
         return ticket_val
 
@@ -472,8 +472,7 @@ class FeishuWebClient:
             await self.ticket(session=s)
             return True
         except FeishuWebSignedOutError:
-            if session is None:
-                self._store.mark_invalid()
+            self._store.mark_invalid(s)
             return False
 
     async def profile(self, *, session: FeishuWebSession | None = None) -> FeishuWebSession:
@@ -491,28 +490,28 @@ class FeishuWebClient:
         )
         resp = await self._do_request("GET", url, headers=hdrs)
         if resp.status_code in {401, 403}:
-            if session is None:
-                self._store.mark_invalid()
+            self._store.mark_invalid(s)
             raise FeishuWebSignedOutError("feishu web profile rejected (401/403)")
+        if resp.status_code != 200:
+            raise FeishuWebGatewayError(
+                f"web user profile HTTP {resp.status_code}",
+                status_code=resp.status_code,
+            )
         raw_text = resp.text
         try:
             payload = json.loads(raw_text)
         except Exception as exc:
-            if session is None:
-                self._store.mark_invalid()
-            raise FeishuWebSignedOutError("web user profile returned non-JSON") from exc
+            raise FeishuWebSessionError("web user profile returned non-JSON") from exc
         data = payload.get("data") if isinstance(payload, Mapping) else None
         user = data.get("user") if isinstance(data, Mapping) else None
         if not isinstance(user, Mapping):
-            if session is None:
-                self._store.mark_invalid()
+            self._store.mark_invalid(s)
             raise FeishuWebSignedOutError("web user profile missing data.user")
         # Extract exact integer digits from raw JSON first so 64-bit user IDs never lose precision
         m_id = _USER_ID_JSON_RE.search(raw_text)
         uid = m_id.group(1) if m_id else _str(user.get("id")).strip()
         if not uid:
-            if session is None:
-                self._store.mark_invalid()
+            self._store.mark_invalid(s)
             raise FeishuWebSignedOutError("web user profile returned empty user id")
         uname = _str(user.get("name")).strip()
         uopen = _str(user.get("open_id") or user.get("openId")).strip()
@@ -523,11 +522,12 @@ class FeishuWebClient:
             open_id=uopen or s.open_id,
         )
         if session is None:
-            self._store.save(updated)
+            self._store.save(updated, expected_fingerprint=s.credential_fingerprint())
         return updated
 
     async def start_login(self, region: str = "feishu") -> FeishuWebQRLoginSession:
         """Initiate a Feishu web QR sign-in flow (`POST /accounts/qrlogin/init`)."""
+        initial_store_gen = self._store.generation
         norm_region = normalize_web_region(region)
         dom = "larksuite.com" if norm_region == "lark" else "feishu.cn"
         origin = f"https://accounts.{dom}"
@@ -576,7 +576,8 @@ class FeishuWebClient:
             qr_svg_data_url=render_qr_svg_data_url(matrix),
             expires_at=time.time() + 170.0,
             cookies=cookies,
-            store_generation=self._store.generation,
+            cancelled=self._store.generation != initial_store_gen,
+            store_generation=initial_store_gen,
         )
 
     def _ensure_qr_login_active(self, qr_login: FeishuWebQRLoginSession) -> None:
@@ -744,8 +745,7 @@ class FeishuWebClient:
 
         raw = resp.content[: 32 << 20]
         if resp.status_code in {401, 403}:
-            if session is None:
-                self._store.mark_invalid()
+            self._store.mark_invalid(s)
             raise FeishuWebSignedOutError(
                 f"feishu web session rejected for {name} (HTTP {resp.status_code})"
             )

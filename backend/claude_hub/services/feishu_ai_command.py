@@ -267,7 +267,6 @@ class FeishuAiCommandService:
         self._turn_dispatcher: AiTurnDispatcher | None = turn_dispatcher
         self._lock = threading.RLock()
         self._channel_locks: dict[str, asyncio.Lock] = {}
-        self._cross_claims: dict[tuple[str, str, str], tuple[int, str, str]] = {}
 
     @property
     def web_session_store(self) -> FeishuWebSessionStore:
@@ -1092,7 +1091,6 @@ class FeishuAiCommandService:
             owner_open_id=cfg.owner_open_id,
             user_client=user_client,
             dedup_store=self._dedup,
-            cross_claims=self._cross_claims,
             lock=self._lock,
             dry_run=dry_run,
             resuming_completed=resuming_completed,

@@ -31,6 +31,7 @@ from claude_hub.services.feishu_web_session.client import (
     FeishuWebQRLoginExpiredError,
     FeishuWebQRLoginSession,
     FeishuWebSessionError,
+    FeishuWebSignedOutError,
     PushedMessage,
     is_web_entity_id,
 )
@@ -101,37 +102,52 @@ async def normalize_and_claim_ai_command_message(
     owner_open_id: str,
     user_client: Any,
     dedup_store: Any,
-    cross_claims: dict[tuple[str, str, str], tuple[int, str, str]],
+    cross_claims: dict[Any, Any] | None = None,
     lock: threading.RLock,
     dry_run: bool = False,
     resuming_completed: bool = False,
 ) -> tuple[FeishuUserMessage, str, list[str], bool]:
-    """Normalize an incoming OpenAPI/web message and claim deduplication across both ID namespaces.
+    """Normalize an incoming OpenAPI/web message and claim deduplication across authoritative aliases.
 
     Returns ``(effective_message, primary_dedup_key, alias_dedup_keys, claimed_ok)``.
     """
+    _ = parsed_instruction, cross_claims
     orig_mid = (message.message_id or "").strip()
     orig_ns = "web" if is_web_entity_id(orig_mid) else "openapi"
     wt = user_client._get_web_transport() if hasattr(user_client, "_get_web_transport") else None
+    prefer_web = (
+        bool(user_client.should_use_web_session())
+        if hasattr(user_client, "should_use_web_session")
+        else (wt is not None)
+    )
     effective_msg = message
     alias_mids: list[str] = []
 
-    if not dry_run and not resuming_completed and wt is not None and orig_ns == "openapi":
+    if (
+        not dry_run
+        and not resuming_completed
+        and prefer_web
+        and wt is not None
+        and orig_ns == "openapi"
+    ):
         try:
             resolved_web = await wt.resolve_web_message(
                 orig_mid,
                 chat_id=message.chat_id,
                 text=message.text,
                 create_time_ms=message.create_time_ms,
+                thread_id=message.thread_id,
             )
         except Exception:
             resolved_web = None
-        if resolved_web is not None:
-            converted = wt.to_user_message(resolved_web)
-            if converted is not None:
-                wt.bind_message_alias(orig_mid, converted.message_id)
-                alias_mids.append(orig_mid)
-                effective_msg = converted
+        if resolved_web is None:
+            return effective_msg, "", [], False
+        converted = wt.to_user_message(resolved_web)
+        if converted is None:
+            return effective_msg, "", [], False
+        wt.bind_message_alias(orig_mid, converted.message_id)
+        alias_mids.append(orig_mid)
+        effective_msg = converted
 
     if wt is not None:
         mapped_alias = wt.get_message_alias(effective_msg.message_id)
@@ -155,46 +171,13 @@ async def normalize_and_claim_ai_command_message(
             dedup_store.claim(ek)
         return effective_msg, primary_key, extra_keys, True
 
-    canonical_chat = (
-        wt.canonical_chat_id(effective_msg.chat_id)
-        if wt is not None
-        else (effective_msg.chat_id or "").strip()
-    )
-    norm_instr = " ".join((parsed_instruction or effective_msg.text or "").strip().split()).lower()
-    cross_key = (owner_key, canonical_chat, norm_instr)
-
     with lock:
-        prev = cross_claims.get(cross_key)
-        if prev is not None and canonical_chat and norm_instr:
-            prev_ms, prev_ns, prev_mid = prev
-            if prev_ns != orig_ns and (
-                prev_ms == 0
-                or effective_msg.create_time_ms == 0
-                or abs(effective_msg.create_time_ms - prev_ms) <= 30_000
-            ):
-                if wt is not None:
-                    if orig_ns == "openapi":
-                        wt.bind_message_alias(orig_mid, prev_mid)
-                    else:
-                        wt.bind_message_alias(prev_mid, orig_mid)
-                return effective_msg, primary_key, extra_keys, False
-
         if not dedup_store.claim(primary_key):
             return effective_msg, primary_key, extra_keys, False
         for ek in extra_keys:
             if not dedup_store.claim(ek):
                 dedup_store.release(primary_key)
                 return effective_msg, primary_key, extra_keys, False
-
-        if canonical_chat and norm_instr:
-            cross_claims[cross_key] = (
-                effective_msg.create_time_ms,
-                orig_ns,
-                effective_msg.message_id,
-            )
-            if len(cross_claims) > 512:
-                oldest_key = next(iter(cross_claims))
-                cross_claims.pop(oldest_key, None)
 
     return effective_msg, primary_key, extra_keys, True
 
@@ -597,7 +580,9 @@ class FeishuWebUserTransport:
         chat_id: str | None = None,
         text: str | None = None,
         create_time_ms: int | None = None,
+        thread_id: str | None = None,
     ) -> WebMessage | None:
+        _ = chat_id, text, create_time_ms, thread_id
         clean_mid = (message_id or "").strip()
         if not clean_mid:
             return None
@@ -605,46 +590,14 @@ class FeishuWebUserTransport:
             mapped_id = self._open_to_web_msg.get(clean_mid)
             if mapped_id and mapped_id in self._msg_cache:
                 return self._msg_cache[mapped_id]
-            raw_cid = (chat_id or "").strip()
-            if not raw_cid:
-                return None
-            try:
-                web_cid = await self.resolve_web_chat_id(raw_cid)
-            except FeishuWebSessionError:
-                return None
-            if not web_cid:
-                return None
-            try:
-                await self.list_messages_page(
-                    container_id_type="chat",
-                    container_id=web_cid,
-                    page_size=20,
-                )
-            except Exception:
-                pass
-            s = self._web.session()
-            web_uid = s.user_id.strip() if s is not None else ""
-            want_text = (text or "").strip()
-            candidates: list[WebMessage] = []
-            for m in reversed(list(self._msg_cache.values())):
-                if m.chat_id != web_cid or not is_web_entity_id(m.id):
-                    continue
-                if web_uid and m.from_id != web_uid:
-                    continue
-                m_text = describe(m.type, m.content, web_uid).strip()
-                if want_text and m_text != want_text:
-                    continue
-                if (
-                    create_time_ms
-                    and m.create_time_ms
-                    and abs(m.create_time_ms - create_time_ms) > 60_000
-                ):
-                    continue
-                candidates.append(m)
-            if candidates:
-                chosen = candidates[0]
-                self.bind_message_alias(clean_mid, chosen.id)
-                return chosen
+            if mapped_id:
+                try:
+                    fetched = await self._web.messages_by_id([mapped_id])
+                    if fetched:
+                        self._remember_msg(fetched[0])
+                        return fetched[0]
+                except Exception:
+                    pass
             return None
 
         if clean_mid in self._msg_cache:
@@ -1052,10 +1005,20 @@ class FeishuWebLoginManager:
             return q
 
     async def start_login(self, *, region: str = "feishu") -> FeishuWebQRLoginSession:
+        with self._lock:
+            mgr_gen = self._generation
+            store_gen = self._store.generation
         client = self.build_client()
         qr_session = await client.start_login(region=region)
         with self._lock:
-            qr_session.store_generation = self._store.generation
+            if (
+                qr_session.cancelled
+                or self._generation != mgr_gen
+                or self._store.generation != store_gen
+            ):
+                qr_session.cancelled = True
+                return qr_session
+            qr_session.store_generation = store_gen
             self._logins[qr_session.login_id] = qr_session
             self._latest_login_id = qr_session.login_id
         return qr_session
@@ -1118,19 +1081,24 @@ class FeishuWebLoginManager:
                 "active_login": active.to_public_dict() if active is not None else None,
             }
         is_valid: bool | None = None
+        auth_rejected = False
         if validate:
             client = self.build_client()
             try:
-                is_valid = await client.valid(session=sess)
-                if is_valid and not sess.user_id:
+                await client.ticket(session=sess)
+                is_valid = True
+                if not sess.user_id:
                     sess = await client.profile(session=sess)
+            except FeishuWebSignedOutError:
+                is_valid = False
+                auth_rejected = True
+                self._store.mark_invalid(sess)
             except Exception:
                 is_valid = False
-            if not is_valid:
-                self._store.mark_invalid()
         out = sess.to_redacted_dict()
         if validate and not is_valid:
-            out["has_session"] = False
+            if auth_rejected:
+                out["has_session"] = False
             out["valid"] = False
         else:
             out["valid"] = is_valid if validate else True
