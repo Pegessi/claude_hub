@@ -7,6 +7,17 @@
 
 ## Released
 
+### fix(codex): merge cached models with live discovery and current fallbacks
+
+- Read visible local Codex cache entries with model-specific reasoning efforts,
+  merge them with live app-server metadata, and include 6.2 Sol/Astra and the
+  current 6.x IDs in the static fallback. Keep hidden models excluded and reread
+  cache changes without cross-session catalog leakage.
+- Expose the pre-start catalog for local session creation and preserve exact
+  selections through initial thread configuration and existing Chat model
+  switching. Catalog membership does not assert account entitlement.
+- See [investigation and validation](docs/working-logs/2026-11-18-codex-model-catalog.md).
+
 ### fix(antigravity): suppress false trailing API error banners after completed replies
 
 - Track per-turn tool/response/error step ordering (`saw_tool_step`, `post_tool_text`, `saw_error_step`, `saw_error_after_response`) in `AntigravityEventAdapter` (`services/agent_stream/antigravity_events.py`) and suppress false `result.status = "ERROR"` banners when `agy`'s `steps.BuildJSONOutput` / `LastStepError` contaminates a completed turn's `result` with an earlier recovered `API error (attempt N): ...` retry notice or trailing `streamGenerateContent` EOF.

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import AbstractSet, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import AbstractSet, Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ....models import StreamModelOption, StreamReasoningEffortOption
 
@@ -13,6 +13,93 @@ def model_options_from_ids(model_ids: Sequence[str]) -> List[StreamModelOption]:
     return [
         StreamModelOption(id=model_id, label=model_id, description="") for model_id in model_ids
     ]
+
+
+def codex_cache_rows(payload: Any) -> List[Dict[str, Any]]:
+    """Translate the CLI cache schema into the app-server model/list schema."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+        return []
+    rows = []
+    for item in payload["models"]:
+        if not isinstance(item, dict):
+            continue
+        raw_efforts = item.get("supported_reasoning_levels")
+        rows.append(
+            {
+                "model": item.get("slug"),
+                "displayName": item.get("display_name"),
+                "description": item.get("description"),
+                "hidden": item.get("visibility") != "list" or item.get("supported_in_api") is False,
+                "defaultReasoningEffort": item.get("default_reasoning_level"),
+                "supportedReasoningEfforts": [
+                    {
+                        "reasoningEffort": effort.get("effort"),
+                        "description": effort.get("description"),
+                    }
+                    for effort in (raw_efforts if isinstance(raw_efforts, list) else [])
+                    if isinstance(effort, dict)
+                ],
+            }
+        )
+    return rows
+
+
+def parse_codex_models(
+    data: Sequence[Any],
+    *,
+    reasoning_efforts: AbstractSet[str],
+    reasoning_labels: Mapping[str, str],
+) -> List[StreamModelOption]:
+    """Parse highest-priority rows first, including hidden-row exclusions."""
+    options: List[StreamModelOption] = []
+    seen: set[str] = set()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        model = item.get("model")
+        if not isinstance(model, str) or not model.strip() or model in seen:
+            continue
+        seen.add(model)
+        if item.get("hidden") is True:
+            continue
+        efforts: List[StreamReasoningEffortOption] = []
+        seen_efforts: set[str] = set()
+        raw_efforts = item.get("supportedReasoningEfforts")
+        for raw in raw_efforts if isinstance(raw_efforts, list) else []:
+            if not isinstance(raw, dict):
+                continue
+            effort = raw.get("reasoningEffort")
+            if (
+                not isinstance(effort, str)
+                or effort not in reasoning_efforts
+                or effort in seen_efforts
+            ):
+                continue
+            seen_efforts.add(effort)
+            description = raw.get("description")
+            efforts.append(
+                StreamReasoningEffortOption(
+                    id=effort,
+                    label=reasoning_labels[effort],
+                    description=description if isinstance(description, str) else "",
+                )
+            )
+        default_effort = item.get("defaultReasoningEffort")
+        if not isinstance(default_effort, str) or default_effort not in seen_efforts:
+            default_effort = None
+        label = item.get("displayName")
+        description = item.get("description")
+        options.append(
+            StreamModelOption(
+                id=model,
+                label=label if isinstance(label, str) and label else model,
+                description=description if isinstance(description, str) else "",
+                provider_model_id=model,
+                default_reasoning_effort=default_effort,
+                supported_reasoning_efforts=efforts,
+            )
+        )
+    return options
 
 
 def claude_env_options(

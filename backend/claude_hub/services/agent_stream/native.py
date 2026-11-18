@@ -270,6 +270,13 @@ _STATIC_MODELS: Dict[str, List[str]] = {
         "doubao-seed-2.0-code",
     ],
     "codex": [
+        "gpt-6.2-sol",
+        "gpt-6.2-astra",
+        "gpt-6.1-terra",
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
@@ -343,6 +350,35 @@ _CLAUDE_MODEL_ENV_KEYS = (
 
 def _static_options(agent_type: str) -> List[StreamModelOption]:
     return provider_model_options.model_options_from_ids(_STATIC_MODELS.get(agent_type, []))
+
+
+def _codex_model_options(env: Dict[str, str]) -> List[StreamModelOption]:
+    """Read this Codex home's catalog without freezing it in a process-wide TTL."""
+    effective = {**os.environ, **env}
+    home = Path(effective.get("HOME") or "~").expanduser()
+    root = Path(effective.get("CODEX_HOME") or home / ".codex").expanduser()
+    try:
+        payload = json.loads((root / "models_cache.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        payload = None
+    rows = provider_model_options.codex_cache_rows(payload)
+    # The cache enriches known IDs and may advertise releases the persistent
+    # app-server has not loaded yet. Fallback rows carry no guessed effort
+    # capabilities; catalog membership is not proof of account entitlement.
+    options = provider_model_options.parse_codex_models(
+        rows, reasoning_efforts=_REASONING_EFFORTS, reasoning_labels=_REASONING_LABELS
+    )
+    cache_ids = {row["model"] for row in rows if isinstance(row.get("model"), str)}
+    options.extend(
+        StreamModelOption(
+            id=model,
+            label=model,
+            description="Codex fallback model; availability depends on your account.",
+        )
+        for model in _STATIC_MODELS["codex"]
+        if model not in cache_ids
+    )
+    return options
 
 
 def _claude_env_options(env: Dict[str, str]) -> List[StreamModelOption]:
@@ -479,6 +515,8 @@ def _models_lock_for(agent_type: str) -> asyncio.Lock:
 
 async def model_catalog_for(agent_type: str) -> ModelCatalog:
     """Return the model catalog and whether long-lived metadata caching is safe."""
+    if agent_type == "codex":
+        return ModelCatalog(_codex_model_options({}), metadata_cacheable=False)
     entry = _models_cache.get(agent_type)
     now = time.monotonic()
     if entry is not None and entry.expires_at > now:
@@ -510,7 +548,8 @@ async def available_models_for(agent_type: str) -> List[StreamModelOption]:
     """Return the available models for an agent type, cached with a TTL.
 
     Cursor is discovered at runtime via ``agent --list-models`` and Antigravity
-    via ``agyx models``; other agent types return the curated static list.
+    via ``agyx models``; Codex reads its local cache plus a static fallback.
+    Other agent types return the curated static list.
     Per-provider locks with double-checked locking dedup concurrent probes for
     the same agent type without serializing independent providers.
     """
@@ -578,6 +617,7 @@ _NATIVE_RUNTIME = ProviderRuntime(
     logger=lambda: logger,
     claude_env_options=lambda env: _claude_env_options(env),
     model_catalog_for=lambda agent_type: model_catalog_for(agent_type),
+    codex_model_options=lambda env: _codex_model_options(env),
     provider_subprocess_env=lambda provider, parent, overrides: provider_subprocess_env(
         provider, parent, overrides
     ),

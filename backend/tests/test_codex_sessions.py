@@ -608,3 +608,39 @@ async def test_codex_title_long_task_title_is_truncated(
     assert len(title) == 80
     assert title.endswith("…")
     assert title.startswith("A" * 79)
+
+
+@pytest.mark.asyncio
+async def test_codex_models_endpoint_reads_cache_without_starting_provider(
+    client: AsyncClient, monkeypatch: MonkeyPatch, tmp_path
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from claude_hub.services.agent_stream import native
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    (tmp_path / "models_cache.json").write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "slug": "gpt-6.2-sol",
+                        "display_name": "GPT-6.2 Sol",
+                        "visibility": "list",
+                        "default_reasoning_level": "ultra",
+                        "supported_reasoning_levels": [{"effort": "ultra"}],
+                    },
+                    {"slug": "gpt-6-luna", "visibility": "hide"},
+                ]
+            }
+        )
+    )
+    spawn = AsyncMock(side_effect=AssertionError("catalog must not start a provider"))
+    monkeypatch.setattr(native.asyncio, "create_subprocess_exec", spawn)
+    response = await client.get("/api/codex/models")
+    assert response.status_code == 200
+    options = {m["id"]: m for m in response.json()}
+    assert options["gpt-6.2-sol"]["label"] == "GPT-6.2 Sol"
+    assert options["gpt-6.2-sol"]["supported_reasoning_efforts"][0]["id"] == "ultra"
+    assert "gpt-6.2-astra" in options and "gpt-6-luna" not in options
+    spawn.assert_not_awaited()
