@@ -93,12 +93,29 @@ _AUTOMATED_FALLBACK_NAME_PATTERNS = re.compile(
 )
 _AUTOMATED_CARD_PATTERNS = re.compile(
     r"^\s*<card\b[^>]*\btitle=\"(?:"
-    r"Merge\s+Request\b"
-    r"|\[(?:CN|EN)\]\s*Your\s+Personal\s+Permissions\s+Are\s+Expiring\s+Soon"
-    r"|[^\"\n]*(?:权限.*(?:到期|回收|过期)|自动推进结果|定期提醒|值班提醒)"
+    r"Merge\s+Request\b[^\"\n]*"
+    r"|\[(?:CN|EN)\]\s*Your\s+Personal\s+Permissions\s+Are\s+Expiring\s+Soon[^\"\n]*"
+    r"|[^\"\n]*(?:权限.*(?:到期|回收|过期)|自动推进结果|定期提醒|值班提醒)[^\"\n]*"
     r")\"[^>]*>.*</card>\s*$",
     re.IGNORECASE | re.DOTALL,
 )
+
+
+class PatrolTriageDiagnosisError(CommandError):
+    """Triage failure that preserves actionable retained-session cleanup evidence."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        primary_error_type: str | None = None,
+        retained_session_id: str | None = None,
+        cleanup_error: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.primary_error_type = primary_error_type or "CommandError"
+        self.retained_session_id = retained_session_id
+        self.cleanup_error = cleanup_error
 
 
 @dataclass(frozen=True)
@@ -117,6 +134,7 @@ class FeishuCandidate:
     reply_to: str = ""
     sender_type: str = "user"
     is_bot_sender: bool = False
+    authoritative_human: bool = False
 
     @property
     def group_key(self) -> tuple[str, str]:
@@ -225,7 +243,7 @@ def _extract_sender_metadata(
     chat_name: str,
     chat_id: str,
     text: str,
-) -> tuple[str, bool]:
+) -> tuple[str, bool, bool]:
     raw_sender_type = (
         str(sender.get("sender_type") or sender.get("type") or row.get("sender_type") or "")
         .strip()
@@ -272,7 +290,7 @@ def _extract_sender_metadata(
             authoritative_human=authoritative_human,
         )
     )
-    return raw_sender_type or "user", is_automated
+    return raw_sender_type or "user", is_automated, authoritative_human
 
 
 def _is_automated_notification_fields(
@@ -289,14 +307,14 @@ def _is_automated_notification_fields(
         return True
     if sender_id.startswith(("cli_", "app_", "bot_")):
         return True
+    if authoritative_human:
+        return False
     normalized_sender = " ".join(sender_name.split()).lower()
     if normalized_sender in _AUTOMATED_EXACT_NAMES:
         return True
     normalized_chat = " ".join(chat_name.split()).lower()
     if chat_type == "p2p" and normalized_chat in _AUTOMATED_EXACT_NAMES:
         return True
-    if authoritative_human:
-        return False
     if normalized_sender and _AUTOMATED_FALLBACK_NAME_PATTERNS.fullmatch(normalized_sender):
         return True
     if (
@@ -322,8 +340,7 @@ def _is_automated_candidate(message: FeishuCandidate) -> bool:
         sender_name=message.sender_name,
         chat_name=message.chat_name,
         text=message.text,
-        authoritative_human=message.sender_id.startswith("ou_")
-        and message.sender_type.lower() == "user",
+        authoritative_human=message.authoritative_human,
     )
 
 
@@ -363,7 +380,7 @@ def _candidate(
     sender_name = str(sender.get("name") or sender.get("sender_name") or "")
     chat_name = str(row.get("chat_name") or fallback.get("chat_name") or "")
     text = content[:6000]
-    sender_type, is_bot_sender = _extract_sender_metadata(
+    sender_type, is_bot_sender, authoritative_human = _extract_sender_metadata(
         row,
         sender,
         sender_id,
@@ -390,6 +407,7 @@ def _candidate(
         reply_to=str(row.get("reply_to") or row.get("parent_id") or ""),
         sender_type=sender_type,
         is_bot_sender=is_bot_sender,
+        authoritative_human=authoritative_human,
     )
 
 
@@ -843,16 +861,40 @@ async def _archive_patrol_session(workspace_id: str, session_id: str) -> None:
                 workspace_manager._quarantine_failed_session_deletion(session_id)
             except Exception:
                 pass
-        raise CommandError(
+        raise PatrolTriageDiagnosisError(
             f"Patrol triage session {session_id} could not be archived and remains quarantined: "
-            f"{second_exc}"
+            f"{second_exc}",
+            retained_session_id=session_id,
+            cleanup_error=str(second_exc),
         ) from (first_error or second_exc)
     if hasattr(workspace_manager, "_quarantine_failed_session_deletion"):
         try:
             workspace_manager._quarantine_failed_session_deletion(session_id)
         except Exception:
             pass
-    raise CommandError(f"Patrol triage session {session_id} did not report archived after cleanup")
+    raise PatrolTriageDiagnosisError(
+        f"Patrol triage session {session_id} did not report archived after cleanup",
+        retained_session_id=session_id,
+        cleanup_error="session did not report archived after cleanup",
+    )
+
+
+def _find_retained_patrol_session(workspace_id: str, title: str) -> ManagedSession | None:
+    sessions_map = getattr(workspace_manager, "sessions", None)
+    if not isinstance(sessions_map, Mapping):
+        return None
+    for existing in sessions_map.values():
+        if (
+            isinstance(existing, ManagedSession)
+            and existing.workspace_id == workspace_id
+            and not existing.archived
+            and existing.session_kind == SessionKind.CHAT
+            and existing.role == WorkspaceSessionRole.WORKER
+            and existing.caller_owned_ephemeral
+            and existing.title == title
+        ):
+            return existing
+    return None
 
 
 async def diagnose_message(
@@ -887,6 +929,12 @@ async def diagnose_message(
     if model and agent_type in _MODEL_ENV_KEYS:
         launch_env[_MODEL_ENV_KEYS[agent_type]] = model.strip()
     target_workspace_id = _resolve_patrol_workspace_id(workspace_id)
+    session_title = f"Patrol triage: {candidate.message_id}"
+    retained = _find_retained_patrol_session(target_workspace_id, session_title)
+    if retained is not None:
+        # Attempt to reconcile and archive the previously retained session first
+        # instead of spawning a duplicate unarchived session for the same source.
+        await _archive_patrol_session(retained.workspace_id, retained.id)
     try:
         session = await workspace_manager.ensure_workspace_agent(
             target_workspace_id,
@@ -894,7 +942,7 @@ async def diagnose_message(
                 agent_type=agent_type,
                 session_kind=SessionKind.CHAT,
                 role=WorkspaceSessionRole.WORKER,
-                title=f"Patrol triage: {candidate.message_id}",
+                title=session_title,
                 solo_mode=True,
                 reuse_existing=False,
                 ephemeral=True,
@@ -925,8 +973,36 @@ async def diagnose_message(
         try:
             await asyncio.shield(_archive_patrol_session(session.workspace_id, session.id))
         except Exception as archive_exc:
+            cleanup_msg = getattr(archive_exc, "cleanup_error", None) or str(archive_exc)
             if primary_exc is None:
                 raise archive_exc
+            if isinstance(primary_exc, asyncio.CancelledError):
+                primary_exc.add_note(
+                    f"retained_session_id={session.id}; archive_failed={cleanup_msg}"
+                )
+            elif isinstance(
+                primary_exc,
+                (
+                    CommandError,
+                    SubagentError,
+                    DeliveryUncertain,
+                    managed_chat.ManagedChatDeliveryUncertain,
+                    WorkspaceAgentInitializationError,
+                    RuntimeError,
+                    KeyError,
+                    TimeoutError,
+                    ValueError,
+                    OSError,
+                    httpx.HTTPError,
+                ),
+            ):
+                raise PatrolTriageDiagnosisError(
+                    f"{primary_exc}; session {session.id} could not be archived and remains "
+                    f"quarantined ({cleanup_msg})",
+                    primary_error_type=type(primary_exc).__name__,
+                    retained_session_id=session.id,
+                    cleanup_error=cleanup_msg,
+                ) from primary_exc
 
 
 async def read_capabilities(base_url: str) -> dict[str, Any]:
@@ -1200,7 +1276,25 @@ async def run_feishu_triage(
             OSError,
             httpx.HTTPError,
         ) as exc:
-            result.errors.append(f"{candidate.message_id}: diagnosis failed ({type(exc).__name__})")
+            error_type = (
+                exc.primary_error_type
+                if isinstance(exc, PatrolTriageDiagnosisError)
+                else type(exc).__name__
+            )
+            retained_session_id = getattr(exc, "retained_session_id", None)
+            cleanup_error = getattr(exc, "cleanup_error", None)
+            if retained_session_id:
+                retained_map = result.details.setdefault("retained_sessions", {})
+                retained_map[candidate.message_id] = {
+                    "session_id": retained_session_id,
+                    "cleanup_error": cleanup_error or str(exc),
+                }
+                result.errors.append(
+                    f"{candidate.message_id}: diagnosis failed ({error_type}; "
+                    f"session {retained_session_id} retained: {cleanup_error or exc})"
+                )
+            else:
+                result.errors.append(f"{candidate.message_id}: diagnosis failed ({error_type})")
             continue
         try:
             infowall_status = await record_infowall(candidate, diagnosis, runner, capabilities)
