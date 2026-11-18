@@ -478,8 +478,8 @@ class FeishuAiPoller:
                             and fetched.create_time_ms <= wm
                         ):
                             continue
-                        if fetched.sender_type == "user" and hmac.compare_digest(
-                            fetched.sender_open_id.strip(), owner_open_id
+                        if fetched.sender_type == "user" and self._service._matches_owner_sender(
+                            fetched.sender_open_id, cfg
                         ):
                             discovered.append(fetched.chat_id)
                             if len(discovered) >= max_discover:
@@ -620,8 +620,8 @@ class FeishuAiPoller:
                 if msg.create_time_ms <= watermark_ms:
                     self._skipped_count += 1
                     continue
-                if msg.sender_type != "user" or not hmac.compare_digest(
-                    msg.sender_open_id.strip(), owner_open_id
+                if msg.sender_type != "user" or not self._service._matches_owner_sender(
+                    msg.sender_open_id, cfg
                 ):
                     self._skipped_count += 1
                     continue
