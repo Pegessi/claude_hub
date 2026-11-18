@@ -43,26 +43,94 @@ SUPPORTED_REASONING_EFFORTS: tuple[str, ...] = (
 )
 PROVIDER_SUPPORTED_REASONING_EFFORTS: dict[str, tuple[str, ...]] = {
     "claude": (),
-    "codex": tuple("none minimal low medium high xhigh".split()),
-    "traex": tuple("none minimal low medium high xhigh".split()),
+    "codex": tuple("none minimal low medium high xhigh max ultra".split()),
+    "traex": tuple("none minimal low medium high xhigh max ultra".split()),
     "maso": tuple("none low medium high xhigh max".split()),
     "cursor": tuple("none minimal low medium high xhigh max".split()),
     "antigravity": (),
 }
 DEFAULT_PROVIDER_MODELS: dict[str, tuple[str, ...]] = {
-    "claude": ("doubao-seed-2.0-code", "claude-sonnet-4-6", "claude-opus-4-8"),
-    "codex": ("gpt-5.4", "gpt-5.6-sol", "gpt-5.3-codex", "o3"),
-    "traex": ("gpt-5.4", "Seed-2.1-Pro", "doubao-seed-2.0-code"),
-    "maso": tuple(
-        "gemini-4-argon_reasoning_high gemini-4-argon_reasoning_medium "
-        "gemini-4-argon gpt-6-astra_reasoning_high seed-stable-reasoning-high".split()
+    "claude": (
+        "claude-opus-4-8",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+        "doubao-seed-2.0-code",
+    ),
+    "codex": (
+        "gpt-5.4",
+        "gpt-6.2-sol",
+        "gpt-6.2-astra",
+        "gpt-6.1-terra",
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4-mini",
+        "gpt-5.3-codex-spark",
+        "o3",
+    ),
+    "traex": (
+        "Seed-Evolving",
+        "Seed-2.1-Pro",
+        "Seed-2.1-Turbo",
+        "Seed-Code",
+        "Seed-Dogfooding-2.0",
+        "GPT-6-Astra",
+        "GPT-5.6-Sol",
+        "GPT-5.6-Terra",
+        "GPT-5.6-Luna",
+        "GPT-5.5",
+        "GPT-5.4",
+        "GPT-5.2",
+        "DeepSeek-V4-Pro",
+        "DeepSeek-V4-Flash",
+        "Gemini-3.1-Pro-Preview",
+        "Gemini-3-Flash-Preview",
+    ),
+    "maso": (
+        "gpt-6.1-sol_reasoning_high",
+        "gpt-6-astra_reasoning_high",
+        "gpt56_sol_reasoning_high",
+        "gemini-4-carbon_reasoning_high",
+        "es1-grape-g61s_reasoning_high",
+        "seed-stable-reasoning-high",
+        "gemini-4-argon_reasoning_high",
+        "gemini-4-argon_reasoning_medium",
+        "gemini-4-argon",
     ),
     "cursor": (
         "gpt-5.3-codex-high",
         "claude-opus-4-8-thinking-high",
+        "claude-opus-4-8-high",
         "claude-4.6-sonnet-medium-thinking",
+        "claude-4.6-sonnet-medium",
+        "claude-4.5-sonnet",
+        "gpt-5.2",
+        "gemini-3.7-flash-high",
+        "cursor-grok-4.6-high",
     ),
-    "antigravity": ("gemini-4-carbon-high", "gemini-2.5-pro", "claude-sonnet-4-6"),
+    "antigravity": (
+        "gemini-4-carbon-high",
+        "gemini-4-carbon-medium",
+        "gemini-4-carbon-low",
+        "gemini-4-argon-high",
+        "gemini-4-argon-medium",
+        "gemini-4-argon-low",
+        "gemini-3.8-flash-high",
+        "gemini-3.8-flash-medium",
+        "gemini-3.8-flash-low",
+        "claude-opus-5-5-high",
+        "claude-opus-5-5-medium",
+        "claude-opus-5-5-low",
+        "claude-sonnet-5-5-high",
+        "claude-sonnet-5-5-medium",
+        "claude-sonnet-5-5-low",
+        "gpt-oss-120b-medium",
+    ),
 }
 _MASO_VARIANT_SUFFIX_RE = re.compile(
     r"(?:[_-]reasoning(?:[_-](?:xhigh|high|medium|low|max))?"
@@ -80,16 +148,23 @@ def _maso_std_variants(base: str, *, has_max: bool = True) -> dict[str, str]:
 
 
 _MASO_MODEL_VARIANTS: dict[str, dict[str, str]] = {
+    "gpt-6.1-sol": _maso_std_variants("gpt-6.1-sol"),
+    "gpt-6-astra": _maso_std_variants("gpt-6-astra"),
+    "gpt56_sol": _maso_std_variants("gpt56_sol"),
+    "gemini-4-carbon": {
+        "none": "gemini-4-carbon",
+        "low": "gemini-4-carbon",
+        "medium": "gemini-4-carbon_reasoning_medium",
+        "high": "gemini-4-carbon_reasoning_high",
+    },
+    "es1-grape-g61s": _maso_std_variants("es1-grape-g61s"),
+    "gpt55": _maso_std_variants("gpt55", has_max=False),
     "gemini-4-argon": {
         "none": "gemini-4-argon",
         "low": "gemini-4-argon",
         "medium": "gemini-4-argon_reasoning_medium",
         "high": "gemini-4-argon_reasoning_high",
     },
-    "gpt-6-astra": _maso_std_variants("gpt-6-astra"),
-    "gpt56_sol": _maso_std_variants("gpt56_sol"),
-    "gpt55": _maso_std_variants("gpt55", has_max=False),
-    "es1-grape-g61s": _maso_std_variants("es1-grape-g61s"),
     **{
         b: {
             "none": b,
@@ -144,8 +219,8 @@ _FEISHU_DOC_URL_RE = re.compile(
 
 
 def _resolve_cursor_model_with_effort(model: str, effort: str) -> str:
-    clean_model = (model or "gpt-5.3-codex").strip()
-    if not effort:
+    clean_model = (model or "").strip()
+    if not clean_model or not effort:
         return clean_model
     if clean_model.lower() in _CURSOR_NON_EFFORT_MODELS:
         raise ValueError(
@@ -185,8 +260,8 @@ def _resolve_cursor_model_with_effort(model: str, effort: str) -> str:
 
 
 def _resolve_maso_model_with_effort(model: str, effort: str) -> str:
-    clean_model = (model or "gemini-4-argon_reasoning_high").strip()
-    if not effort:
+    clean_model = (model or "").strip()
+    if not clean_model or not effort:
         return clean_model
     base = _MASO_VARIANT_SUFFIX_RE.sub("", clean_model)
     base_lower = base.lower()
@@ -262,9 +337,15 @@ def validate_ai_command_agent_config(
                 f"reasoning_effort={resolved_effort!r}; supported efforts: {allowed_str}"
             )
         if spec.reasoning_effort == ReasoningEffortKind.MODEL_ID_SUFFIX:
-            resolved_model = _resolve_cursor_model_with_effort(resolved_model, resolved_effort)
+            if not resolved_model:
+                resolved_effort = ""
+            else:
+                resolved_model = _resolve_cursor_model_with_effort(resolved_model, resolved_effort)
         elif spec.reasoning_effort == ReasoningEffortKind.MODEL_VARIANTS:
-            resolved_model = _resolve_maso_model_with_effort(resolved_model, resolved_effort)
+            if not resolved_model:
+                resolved_effort = ""
+            else:
+                resolved_model = _resolve_maso_model_with_effort(resolved_model, resolved_effort)
 
     return resolved_provider, resolved_model, resolved_effort
 
@@ -535,6 +616,15 @@ def parse_ai_command(
         model_in = defaults[0] if defaults else ""
     else:
         model_in = default_model
+
+    if (
+        "reasoning_effort" in overrides
+        and not (model_in or "").strip()
+        and get_spec(target_provider).reasoning_effort
+        in {ReasoningEffortKind.MODEL_ID_SUFFIX, ReasoningEffortKind.MODEL_VARIANTS}
+    ):
+        defaults = DEFAULT_PROVIDER_MODELS.get(target_provider.value, ())
+        model_in = defaults[0] if defaults else ""
 
     if "reasoning_effort" in overrides:
         effort_in = overrides["reasoning_effort"]

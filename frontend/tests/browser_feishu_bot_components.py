@@ -192,9 +192,167 @@ async def main(browser_run: BrowserRun) -> None:
                     "antigravity": [],
                 },
                 "provider_models": {
-                    "claude": ["doubao-seed-2.0-code"],
-                    "codex": ["gpt-5.4", "o3"],
-                    "maso": ["gemini-4-argon_reasoning_high"],
+                    "claude": ["claude-opus-4-8", "doubao-seed-2.0-code"],
+                    "codex": ["gpt-5.4", "gpt-6.2-sol", "o3"],
+                    "maso": [
+                        "gpt-6.1-sol_reasoning_high",
+                        "gemini-4-argon_reasoning_high",
+                    ],
+                    "cursor": ["gpt-5.3-codex-high", "claude-4.5-sonnet"],
+                    "antigravity": ["gemini-4-carbon-high"],
+                },
+                "provider_model_options": {
+                    "claude": [
+                        {
+                            "id": "claude-opus-4-8",
+                            "label": "claude-opus-4-8",
+                            "provider_model_id": "claude-opus-4-8",
+                        },
+                        {
+                            "id": "doubao-seed-2.0-code",
+                            "label": "doubao-seed-2.0-code",
+                            "provider_model_id": "doubao-seed-2.0-code",
+                        },
+                    ],
+                    "codex": [
+                        {
+                            "id": "gpt-5.4",
+                            "label": "gpt-5.4",
+                            "provider_model_id": "gpt-5.4",
+                            "default_reasoning_effort": "high",
+                            "supported_reasoning_efforts": [
+                                {
+                                    "id": "low",
+                                    "label": "Low",
+                                    "provider_model_id": "gpt-5.4",
+                                },
+                                {
+                                    "id": "high",
+                                    "label": "High",
+                                    "provider_model_id": "gpt-5.4",
+                                },
+                                {
+                                    "id": "xhigh",
+                                    "label": "Extra High",
+                                    "provider_model_id": "gpt-5.4",
+                                },
+                            ],
+                        },
+                        {
+                            "id": "gpt-6.2-sol",
+                            "label": "gpt-6.2-sol",
+                            "provider_model_id": "gpt-6.2-sol",
+                            "default_reasoning_effort": "high",
+                            "supported_reasoning_efforts": [
+                                {
+                                    "id": "high",
+                                    "label": "High",
+                                    "provider_model_id": "gpt-6.2-sol",
+                                },
+                                {
+                                    "id": "xhigh",
+                                    "label": "Extra High",
+                                    "provider_model_id": "gpt-6.2-sol",
+                                },
+                                {
+                                    "id": "max",
+                                    "label": "Max",
+                                    "provider_model_id": "gpt-6.2-sol",
+                                },
+                            ],
+                        },
+                    ],
+                    "maso": [
+                        {
+                            "id": "gpt-6.1-sol",
+                            "label": "gpt-6.1-sol",
+                            "provider_model_id": "gpt-6.1-sol_reasoning_high",
+                            "default_reasoning_effort": "high",
+                            "supported_reasoning_efforts": [
+                                {
+                                    "id": "none",
+                                    "label": "None",
+                                    "provider_model_id": "gpt-6.1-sol",
+                                },
+                                {
+                                    "id": "low",
+                                    "label": "Low",
+                                    "provider_model_id": "gpt-6.1-sol",
+                                },
+                                {
+                                    "id": "high",
+                                    "label": "High",
+                                    "provider_model_id": "gpt-6.1-sol_reasoning_high",
+                                },
+                                {
+                                    "id": "xhigh",
+                                    "label": "Extra High",
+                                    "provider_model_id": "gpt-6.1-sol_reasoning_xhigh",
+                                },
+                            ],
+                        },
+                        {
+                            "id": "gemini-4-argon",
+                            "label": "gemini-4-argon",
+                            "provider_model_id": "gemini-4-argon_reasoning_high",
+                            "default_reasoning_effort": "high",
+                            "supported_reasoning_efforts": [
+                                {
+                                    "id": "none",
+                                    "label": "None",
+                                    "provider_model_id": "gemini-4-argon",
+                                },
+                                {
+                                    "id": "low",
+                                    "label": "Low",
+                                    "provider_model_id": "gemini-4-argon",
+                                },
+                                {
+                                    "id": "medium",
+                                    "label": "Medium",
+                                    "provider_model_id": "gemini-4-argon_reasoning_medium",
+                                },
+                                {
+                                    "id": "high",
+                                    "label": "High",
+                                    "provider_model_id": "gemini-4-argon_reasoning_high",
+                                },
+                            ],
+                        },
+                    ],
+                    "cursor": [
+                        {
+                            "id": "gpt-5.3-codex",
+                            "label": "gpt-5.3-codex",
+                            "provider_model_id": "gpt-5.3-codex-high",
+                            "default_reasoning_effort": "high",
+                            "supported_reasoning_efforts": [
+                                {
+                                    "id": "low",
+                                    "label": "Low",
+                                    "provider_model_id": "gpt-5.3-codex-low",
+                                },
+                                {
+                                    "id": "high",
+                                    "label": "High",
+                                    "provider_model_id": "gpt-5.3-codex-high",
+                                },
+                            ],
+                        },
+                        {
+                            "id": "claude-4.5-sonnet",
+                            "label": "claude-4.5-sonnet",
+                            "provider_model_id": "claude-4.5-sonnet",
+                            "supported_reasoning_efforts": [],
+                        },
+                    ],
+                    "antigravity": [
+                        {
+                            "id": "gemini-4-carbon-high",
+                            "label": "gemini-4-carbon-high",
+                            "provider_model_id": "gemini-4-carbon-high",
+                        }
+                    ],
                 },
             },
         }
@@ -390,7 +548,59 @@ async def main(browser_run: BrowserRun) -> None:
 
             if method in {"PATCH", "PUT"} and path == "/api/feishu/bot/ai-command":
                 assert isinstance(submitted, dict)
-                ai_config.update(submitted)
+                merged = {**ai_config, **submitted}
+                prov = str(merged.get("provider") or "codex").strip().lower()
+                raw_model = str(merged.get("model") or "").strip()
+                raw_effort = str(merged.get("reasoning_effort") or "").strip().lower()
+                if prov in {"claude", "antigravity"}:
+                    assert (
+                        raw_effort == ""
+                    ), f"{prov} must not submit reasoning_effort={raw_effort!r}"
+                    merged["model"] = raw_model
+                    merged["reasoning_effort"] = ""
+                elif prov in {"maso", "cursor"}:
+                    if not raw_model:
+                        merged["model"] = ""
+                        merged["reasoning_effort"] = ""
+                    else:
+                        opts = ai_command_payload()["capabilities"]["provider_model_options"].get(
+                            prov, []
+                        )
+                        opt = next(
+                            (
+                                item
+                                for item in opts
+                                if item["id"] == raw_model
+                                or item.get("provider_model_id") == raw_model
+                                or any(
+                                    e.get("provider_model_id") == raw_model
+                                    for e in item.get("supported_reasoning_efforts", [])
+                                )
+                            ),
+                            None,
+                        )
+                        if raw_effort and opt and opt.get("supported_reasoning_efforts"):
+                            matched_eff = next(
+                                (
+                                    e
+                                    for e in opt["supported_reasoning_efforts"]
+                                    if e["id"] == raw_effort
+                                ),
+                                None,
+                            )
+                            assert (
+                                matched_eff is not None
+                            ), f"{prov} model {opt['id']} does not support {raw_effort}"
+                            merged["model"] = matched_eff["provider_model_id"]
+                            merged["reasoning_effort"] = raw_effort
+                        else:
+                            merged["model"] = raw_model
+                            merged["reasoning_effort"] = raw_effort
+                else:
+                    merged["model"] = raw_model
+                    merged["reasoning_effort"] = raw_effort
+                ai_config.clear()
+                ai_config.update(merged)
                 await fulfill_json(route, ai_command_payload())
                 return
 
@@ -842,11 +1052,59 @@ async def main(browser_run: BrowserRun) -> None:
             "1. Configure app secret for `cli_unconfigured` (or enable `im:message.send_as_user` in Feishu Developer Console for `cli_unconfigured`)."
         )
         await expect(settings.get_by_test_id("feishu-ai-token-login-cmd")).to_be_visible()
+        model_select = settings.get_by_test_id("feishu-ai-model-input")
+        effort_select = settings.get_by_test_id("feishu-ai-effort-select")
+        # Verify Model control is a real HTML <select> (not a plain text <input>) with logical labels
+        assert await model_select.evaluate("el => el.tagName") == "SELECT"
+        assert await model_select.locator("option").all_text_contents() == [
+            "Provider default",
+            "gpt-6.1-sol",
+            "gemini-4-argon",
+        ]
         await expect(settings.get_by_test_id("feishu-ai-provider-select")).to_have_value("maso")
-        await expect(settings.get_by_test_id("feishu-ai-model-input")).to_have_value(
-            "gemini-4-argon_reasoning_high"
-        )
-        await expect(settings.get_by_test_id("feishu-ai-effort-select")).to_have_value("high")
+        await expect(model_select).to_have_value("gemini-4-argon_reasoning_high")
+        await expect(effort_select).to_have_value("high")
+        # Switching MASO effort updates the resolved variant value on the logical Model <select>
+        await effort_select.select_option("medium")
+        await expect(model_select).to_have_value("gemini-4-argon_reasoning_medium")
+        # Selecting MASO gpt-6.1-sol + xhigh, then choosing Provider default ('') clears model-bound effort,
+        # disables effort select, saves ('maso', '', ''), and survives close + reopen without argon fallback
+        await model_select.select_option("gpt-6.1-sol_reasoning_high")
+        await effort_select.select_option("xhigh")
+        await expect(model_select).to_have_value("gpt-6.1-sol_reasoning_xhigh")
+        await model_select.select_option("")
+        await expect(model_select).to_have_value("")
+        await expect(effort_select).to_be_disabled()
+        await expect(effort_select).to_have_value("")
+        await settings.get_by_test_id("feishu-ai-save-btn").click()
+        await expect(
+            settings.get_by_text("/ai command settings saved.", exact=True)
+        ).to_be_visible()
+        await settings.locator("footer").get_by_role("button", name="Close", exact=True).click()
+        await expect(settings).to_have_count(0)
+        await page.get_by_role("button", name="Open Bot settings", exact=True).click()
+        settings = page.get_by_test_id("feishu-bot-settings-dialog")
+        await expect(settings).to_be_visible()
+        await settings.get_by_test_id("feishu-ai-command-nav").click()
+        model_select = settings.get_by_test_id("feishu-ai-model-input")
+        effort_select = settings.get_by_test_id("feishu-ai-effort-select")
+        token_card = settings.get_by_test_id("feishu-ai-token-card")
+        await expect(settings.get_by_test_id("feishu-ai-provider-select")).to_have_value("maso")
+        await expect(model_select).to_have_value("")
+        await expect(effort_select).to_be_disabled()
+        await expect(effort_select).to_have_value("")
+        # Switching Provider to claude disables effort selection and lists Claude models
+        await settings.get_by_test_id("feishu-ai-provider-select").select_option("claude")
+        await expect(model_select).to_have_value("claude-opus-4-8")
+        await expect(effort_select).to_be_disabled()
+        await expect(effort_select).to_have_value("")
+        # Switching Provider to cursor and selecting a non-effort model disables effort select
+        await settings.get_by_test_id("feishu-ai-provider-select").select_option("cursor")
+        await expect(model_select).to_have_value("gpt-5.3-codex-high")
+        await expect(effort_select).to_be_enabled()
+        await model_select.select_option("claude-4.5-sonnet")
+        await expect(effort_select).to_be_disabled()
+        await expect(effort_select).to_have_value("")
         await expect(settings.get_by_test_id("feishu-ai-cwd-input")).to_have_value(
             "/srv/persisted-ai"
         )
@@ -857,8 +1115,10 @@ async def main(browser_run: BrowserRun) -> None:
         # Edit draft fields, then import ~/.lark-cli token before saving: draft edits must survive
         await settings.get_by_test_id("feishu-ai-enabled-toggle").check()
         await settings.get_by_test_id("feishu-ai-provider-select").select_option("codex")
-        await expect(settings.get_by_test_id("feishu-ai-model-input")).to_have_value("gpt-5.4")
-        await settings.get_by_test_id("feishu-ai-effort-select").select_option("xhigh")
+        await expect(model_select).to_have_value("gpt-5.4")
+        await model_select.select_option("gpt-6.2-sol")
+        await expect(model_select).to_have_value("gpt-6.2-sol")
+        await effort_select.select_option("xhigh")
         await settings.get_by_test_id("feishu-ai-cwd-input").fill("/srv/draft-ai")
         await settings.get_by_test_id("feishu-ai-watch-chats-input").fill("oc_chat_1, oc_chat_2")
 
@@ -876,8 +1136,8 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(settings.get_by_test_id("feishu-ai-token-guidance")).to_have_count(0)
         await expect(settings.get_by_test_id("feishu-ai-token-login-cmd")).to_have_count(0)
         await expect(settings.get_by_test_id("feishu-ai-provider-select")).to_have_value("codex")
-        await expect(settings.get_by_test_id("feishu-ai-model-input")).to_have_value("gpt-5.4")
-        await expect(settings.get_by_test_id("feishu-ai-effort-select")).to_have_value("xhigh")
+        await expect(model_select).to_have_value("gpt-6.2-sol")
+        await expect(effort_select).to_have_value("xhigh")
         await expect(settings.get_by_test_id("feishu-ai-cwd-input")).to_have_value("/srv/draft-ai")
         await expect(settings.get_by_test_id("feishu-ai-watch-chats-input")).to_have_value(
             "oc_chat_1, oc_chat_2"
@@ -896,15 +1156,18 @@ async def main(browser_run: BrowserRun) -> None:
             for call in api_calls
             if call["method"] == "PATCH" and call["path"] == "/api/feishu/bot/ai-command"
         ]
-        assert len(ai_patches) == 1
-        assert ai_patches[0]["enabled"] is True
-        assert ai_patches[0]["provider"] == "codex"
-        assert ai_patches[0]["model"] == "gpt-5.4"
-        assert ai_patches[0]["reasoning_effort"] == "xhigh"
-        assert ai_patches[0]["cwd"] == "/srv/draft-ai"
-        assert ai_patches[0]["watch_chats"] == ["oc_chat_1", "oc_chat_2"]
-        assert ai_patches[0]["owner_open_id"] == "ou_imported"
-        assert ai_patches[0]["app_id"] == "cli_imported"
+        assert len(ai_patches) == 2
+        assert ai_patches[0]["provider"] == "maso"
+        assert ai_patches[0]["model"] == ""
+        assert ai_patches[0]["reasoning_effort"] == ""
+        assert ai_patches[1]["enabled"] is True
+        assert ai_patches[1]["provider"] == "codex"
+        assert ai_patches[1]["model"] == "gpt-6.2-sol"
+        assert ai_patches[1]["reasoning_effort"] == "xhigh"
+        assert ai_patches[1]["cwd"] == "/srv/draft-ai"
+        assert ai_patches[1]["watch_chats"] == ["oc_chat_1", "oc_chat_2"]
+        assert ai_patches[1]["owner_open_id"] == "ou_imported"
+        assert ai_patches[1]["app_id"] == "cli_imported"
         await page.screenshot(path=str(output / "feishu-ai-command-desktop.png"), full_page=True)
         await settings.locator("footer").get_by_role("button", name="Close", exact=True).click()
         await expect(settings).to_have_count(0)
@@ -937,6 +1200,12 @@ async def main(browser_run: BrowserRun) -> None:
         assert narrow_settings_box["x"] + narrow_settings_box["width"] <= 721
         assert (
             narrow_ai_box["x"] + narrow_ai_box["width"]
+            <= narrow_settings_box["x"] + narrow_settings_box["width"] + 1
+        )
+        narrow_model_box = await settings.get_by_test_id("feishu-ai-model-input").bounding_box()
+        assert narrow_model_box is not None
+        assert (
+            narrow_model_box["x"] + narrow_model_box["width"]
             <= narrow_settings_box["x"] + narrow_settings_box["width"] + 1
         )
         await page.screenshot(path=str(output / "feishu-ai-command-narrow.png"), full_page=True)
@@ -1006,6 +1275,15 @@ async def main(browser_run: BrowserRun) -> None:
             mobile_ai_box["x"] + mobile_ai_box["width"]
             <= settings_box["x"] + settings_box["width"] + 1
         )
+        mobile_model_select = settings.get_by_test_id("feishu-ai-model-input")
+        mobile_model_box = await mobile_model_select.bounding_box()
+        assert mobile_model_box is not None
+        assert mobile_model_box["x"] >= settings_box["x"]
+        assert (
+            mobile_model_box["x"] + mobile_model_box["width"]
+            <= settings_box["x"] + settings_box["width"] + 1
+        )
+        await expect(mobile_model_select).to_have_value("gpt-6.2-sol")
         mobile_save_btn = settings.get_by_test_id("feishu-ai-save-btn")
         await mobile_save_btn.scroll_into_view_if_needed()
         await expect(mobile_save_btn).to_be_visible()
@@ -1013,6 +1291,8 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(
             settings.get_by_role("status").filter(has_text="/ai command settings saved.")
         ).to_be_visible()
+        await settings.get_by_test_id("feishu-ai-provider-select").scroll_into_view_if_needed()
+        await expect(mobile_model_select).to_be_visible()
         await page.screenshot(path=str(output / "feishu-ai-command-mobile.png"), full_page=True)
         await settings.locator("footer").get_by_role("button", name="Close", exact=True).click()
         await expect(settings).to_have_count(0)

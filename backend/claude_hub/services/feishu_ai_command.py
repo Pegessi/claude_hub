@@ -16,7 +16,7 @@ from typing import Any, Awaitable, Callable, Mapping, Sequence
 import httpx
 
 from claude_hub.config import settings
-from claude_hub.models import AgentType, SessionKind
+from claude_hub.models import AgentType, SessionKind, StreamModelOption, StreamReasoningEffortOption
 from claude_hub.services.feishu_ai_command_models import (
     _MASO_MODEL_VARIANTS,
     _MAX_PENDING_QUEUE,
@@ -77,6 +77,162 @@ from claude_hub.services.runtime_isolation import resolve_runtime_home
 logger = logging.getLogger(__name__)
 
 AiTurnDispatcher = Callable[[str, str, str, str, Mapping[str, Any]], Awaitable[str]]
+
+
+_AI_MASO_CATALOG_CACHE: tuple[float, list[StreamModelOption]] | None = None
+_AI_EFFORT_LABELS: dict[str, str] = {
+    "none": "None",
+    "minimal": "Minimal",
+    "low": "Low",
+    "medium": "Medium",
+    "high": "High",
+    "xhigh": "Extra High",
+    "max": "Max",
+    "ultra": "Ultra",
+}
+
+
+def _static_maso_model_options() -> list[StreamModelOption]:
+    options: list[StreamModelOption] = []
+    for base, variants in _MASO_MODEL_VARIANTS.items():
+        efforts = [
+            StreamReasoningEffortOption(
+                id=effort_id,
+                label=_AI_EFFORT_LABELS.get(effort_id, effort_id.title()),
+                provider_model_id=variant_id,
+            )
+            for effort_id, variant_id in variants.items()
+        ]
+        default_effort = (
+            "high"
+            if "high" in variants
+            else next((e.id for e in efforts if e.provider_model_id == base), efforts[0].id)
+        )
+        options.append(
+            StreamModelOption(
+                id=base,
+                label=base,
+                provider_model_id=variants.get(default_effort, base),
+                default_reasoning_effort=default_effort,
+                supported_reasoning_efforts=efforts,
+            )
+        )
+    return options
+
+
+def _sync_provider_model_options() -> dict[str, list[StreamModelOption]]:
+    from claude_hub.services.agent_stream import native as native_mod
+    from claude_hub.services.agent_stream.providers import model_options as provider_model_options
+
+    now = time.monotonic()
+    out: dict[str, list[StreamModelOption]] = {}
+    for prov_enum in SUPPORTED_AI_COMMAND_PROVIDERS:
+        prov = prov_enum.value
+        if prov == "maso":
+            if _AI_MASO_CATALOG_CACHE is not None and _AI_MASO_CATALOG_CACHE[0] > now:
+                out[prov] = list(_AI_MASO_CATALOG_CACHE[1])
+            else:
+                out[prov] = _static_maso_model_options()
+            continue
+        if prov == "codex":
+            out[prov] = native_mod._codex_model_options({})
+            continue
+        cached = native_mod._models_cache.get(prov)
+        if cached is not None and cached.expires_at > now:
+            out[prov] = list(cached.options)
+            continue
+        if prov == "cursor":
+            out[prov] = native_mod._group_cursor_model_options(native_mod._static_options("cursor"))
+        else:
+            out[prov] = provider_model_options.model_options_from_ids(
+                DEFAULT_PROVIDER_MODELS.get(prov, ())
+            )
+    return out
+
+
+async def _async_provider_model_options() -> dict[str, list[StreamModelOption]]:
+    global _AI_MASO_CATALOG_CACHE
+    from claude_hub.services.agent_stream.maso_http import check_maso_service
+
+    out = _sync_provider_model_options()
+    now = time.monotonic()
+    if _AI_MASO_CATALOG_CACHE is None or _AI_MASO_CATALOG_CACHE[0] <= now:
+        try:
+            async with asyncio.timeout(0.8):
+                live_maso, _ = await check_maso_service(dict(os.environ))
+            if live_maso:
+                _AI_MASO_CATALOG_CACHE = (time.monotonic() + 120.0, list(live_maso))
+                out["maso"] = list(live_maso)
+        except Exception:
+            _AI_MASO_CATALOG_CACHE = (time.monotonic() + 30.0, out["maso"])
+    return out
+
+
+def _serialize_model_option(option: StreamModelOption) -> dict[str, Any]:
+    return {
+        "id": option.id,
+        "label": option.label,
+        "description": option.description,
+        "provider_model_id": option.provider_model_id or option.id,
+        "default_reasoning_effort": option.default_reasoning_effort,
+        "supported_reasoning_efforts": [
+            {
+                "id": eff.id,
+                "label": eff.label,
+                "description": eff.description,
+                "provider_model_id": eff.provider_model_id,
+            }
+            for eff in option.supported_reasoning_efforts
+        ],
+    }
+
+
+def _build_capabilities_payload(
+    options_by_provider: Mapping[str, Sequence[StreamModelOption]],
+) -> dict[str, Any]:
+    model_efforts: dict[str, list[str]] = {}
+    for base, variants in _MASO_MODEL_VARIANTS.items():
+        effs = list(variants.keys())
+        model_efforts[base] = effs
+        for v in set(variants.values()):
+            model_efforts[v] = effs
+
+    provider_models: dict[str, list[str]] = {}
+    serialized_options: dict[str, list[dict[str, Any]]] = {}
+    for prov_enum in SUPPORTED_AI_COMMAND_PROVIDERS:
+        prov = prov_enum.value
+        opts = list(options_by_provider.get(prov, ()))
+        serialized_options[prov] = [_serialize_model_option(opt) for opt in opts]
+        seen_ids: list[str] = []
+        for opt in opts:
+            eff_ids = [eff.id for eff in opt.supported_reasoning_efforts]
+            if eff_ids:
+                model_efforts.setdefault(opt.id, eff_ids)
+                if opt.provider_model_id:
+                    model_efforts.setdefault(opt.provider_model_id, eff_ids)
+                for eff in opt.supported_reasoning_efforts:
+                    if eff.provider_model_id:
+                        model_efforts.setdefault(eff.provider_model_id, eff_ids)
+            elif prov in {"cursor", "maso"}:
+                model_efforts.setdefault(opt.id, [])
+            primary_id = opt.provider_model_id or opt.id
+            if primary_id and primary_id not in seen_ids:
+                seen_ids.append(primary_id)
+        for fallback_id in DEFAULT_PROVIDER_MODELS.get(prov, ()):
+            if fallback_id not in seen_ids:
+                seen_ids.append(fallback_id)
+        provider_models[prov] = seen_ids
+
+    return {
+        "providers": [p.value for p in SUPPORTED_AI_COMMAND_PROVIDERS],
+        "reasoning_efforts": [e for e in SUPPORTED_REASONING_EFFORTS if e],
+        "provider_reasoning_efforts": {
+            k: list(v) for k, v in PROVIDER_SUPPORTED_REASONING_EFFORTS.items()
+        },
+        "model_reasoning_efforts": model_efforts,
+        "provider_models": provider_models,
+        "provider_model_options": serialized_options,
+    }
 
 
 def _recover_completed_stream_answer(tab_id: str, turn_id: str) -> tuple[str, str | None]:
@@ -259,6 +415,14 @@ class FeishuAiCommandService:
                         merged["reasoning_effort"] = ""
                     elif str(merged.get("reasoning_effort") or "") not in supported:
                         merged["reasoning_effort"] = "high" if "high" in supported else supported[0]
+            if (
+                "model" in patch
+                and patch["model"] is not None
+                and not str(patch["model"]).strip()
+                and ("reasoning_effort" not in patch or patch["reasoning_effort"] is None)
+                and new_provider in {"maso", "cursor", "claude", "antigravity"}
+            ):
+                merged["reasoning_effort"] = ""
             updated = FeishuAiCommandConfig.from_mapping(merged)
             state["config"] = updated.to_dict()
             self._save_state(state)
@@ -550,21 +714,28 @@ class FeishuAiCommandService:
         return cfg, preflight
 
     def capabilities_dict(self) -> dict[str, Any]:
-        model_efforts: dict[str, list[str]] = {}
-        for base, variants in _MASO_MODEL_VARIANTS.items():
-            effs = list(variants.keys())
-            model_efforts[base] = effs
-            for v in set(variants.values()):
-                model_efforts[v] = effs
-        return {
-            "providers": [p.value for p in SUPPORTED_AI_COMMAND_PROVIDERS],
-            "reasoning_efforts": [e for e in SUPPORTED_REASONING_EFFORTS if e],
-            "provider_reasoning_efforts": {
-                k: list(v) for k, v in PROVIDER_SUPPORTED_REASONING_EFFORTS.items()
-            },
-            "model_reasoning_efforts": model_efforts,
-            "provider_models": {k: list(v) for k, v in DEFAULT_PROVIDER_MODELS.items()},
-        }
+        return _build_capabilities_payload(_sync_provider_model_options())
+
+    async def acapabilities_dict(self) -> dict[str, Any]:
+        return _build_capabilities_payload(await _async_provider_model_options())
+
+    def _is_valid_ai_command_text(
+        self,
+        text: str,
+        cfg: FeishuAiCommandConfig,
+    ) -> bool:
+        try:
+            parsed = parse_ai_command(
+                text,
+                prefix=cfg.prefix,
+                default_provider=cfg.provider,
+                default_model=cfg.model,
+                default_reasoning_effort=cfg.reasoning_effort,
+                footer=cfg.footer,
+            )
+        except ValueError:
+            return False
+        return parsed is not None
 
     def is_owner_ai_command_candidate(
         self,
@@ -579,18 +750,52 @@ class FeishuAiCommandService:
             return False
         if not hmac.compare_digest(sender_open_id.strip(), cfg.owner_open_id.strip()):
             return False
+        return self._is_valid_ai_command_text(text, cfg)
+
+    async def _verify_cross_app_ws_owner(
+        self,
+        event: FeishuMessageEvent,
+        cfg: FeishuAiCommandConfig,
+    ) -> FeishuUserMessage | None:
+        """Authoritatively verify a cross-app WebSocket ``/ai`` message under ``cfg.app_id``.
+
+        Feishu ``open_id`` values are app-scoped: an event received on another Hub pool bot
+        reports that bot app's ``sender_open_id`` rather than ``cfg.owner_open_id``. Instead
+        of trusting display names or unverified local aliases, fetch ``event.message_id`` via
+        the owner's token on ``cfg.app_id`` so Feishu returns the authoritative sender
+        ``open_id`` in ``cfg.app_id``'s namespace.
+        """
+        if not cfg.enabled or not cfg.owner_open_id.strip() or not event.message_id.strip():
+            return None
+        if not self._is_valid_ai_command_text(event.text, cfg):
+            return None
+        user_client = self.build_user_client(cfg)
         try:
-            parsed = parse_ai_command(
-                text,
-                prefix=cfg.prefix,
-                default_provider=cfg.provider,
-                default_model=cfg.model,
-                default_reasoning_effort=cfg.reasoning_effort,
-                footer=cfg.footer,
+            async with asyncio.timeout(5.0):
+                fetched = await user_client.get_message(event.message_id)
+        except Exception:
+            logger.debug(
+                "Cross-app WS /ai owner verification could not fetch message %s",
+                event.message_id,
+                exc_info=True,
             )
-        except ValueError:
-            return False
-        return parsed is not None
+            return None
+        if fetched is None or fetched.sender_type != "user":
+            return None
+        if not hmac.compare_digest(fetched.sender_open_id.strip(), cfg.owner_open_id.strip()):
+            return None
+        return FeishuUserMessage(
+            message_id=event.message_id,
+            chat_id=event.chat_id or fetched.chat_id,
+            sender_open_id=cfg.owner_open_id.strip(),
+            sender_type="user",
+            msg_type=event.message_type or fetched.msg_type,
+            text=event.text,
+            create_time_ms=event.message_created_at_ms or fetched.create_time_ms,
+            thread_id=event.thread_id or fetched.thread_id,
+            parent_id=event.parent_id or fetched.parent_id,
+            root_id=event.root_id or fetched.root_id,
+        )
 
     async def _fetch_context_and_refs(
         self,
@@ -773,6 +978,45 @@ class FeishuAiCommandService:
         dry = bool(kw.pop("dry_run", False))
         return AiCommandExecutionResult(True, dry, msg.message_id, msg.chat_id, tid, **kw)
 
+    async def _reply_ai_command(
+        self,
+        user_client: FeishuUserClient,
+        message_id: str,
+        post_payload: Mapping[str, object],
+        *,
+        chat_id: str,
+        reply_in_thread: bool,
+        uuid: str,
+    ) -> FeishuReplyReceipt:
+        try:
+            return await user_client.reply_as_user(
+                message_id,
+                "post",
+                post_payload,
+                chat_id=chat_id,
+                reply_in_thread=reply_in_thread,
+                uuid=uuid,
+                allow_bound_or_dm_fallback_on_not_in_chat=True,
+            )
+        except TypeError:
+            try:
+                return await user_client.reply_as_user(
+                    message_id,
+                    "post",
+                    post_payload,
+                    chat_id=chat_id,
+                    reply_in_thread=reply_in_thread,
+                    uuid=uuid,
+                )
+            except TypeError:
+                return await user_client.reply_as_user(
+                    message_id,
+                    "post",
+                    post_payload,
+                    reply_in_thread=reply_in_thread,
+                    uuid=uuid,
+                )
+
     async def handle_message(
         self,
         message: FeishuUserMessage,
@@ -928,23 +1172,14 @@ class FeishuAiCommandService:
                 )
                 interim_text = build_interim_reply_text(parsed, refs, footer=cfg.footer)
                 interim_post = build_ai_post_payload(interim_text, footer=cfg.footer)
-                try:
-                    interim_receipt = await user_client.reply_as_user(
-                        message.message_id,
-                        "post",
-                        interim_post,
-                        chat_id=message.chat_id,
-                        reply_in_thread=reply_in_thread,
-                        uuid=bounded_message_uuid(message.message_id, "interim"),
-                    )
-                except TypeError:
-                    interim_receipt = await user_client.reply_as_user(
-                        message.message_id,
-                        "post",
-                        interim_post,
-                        reply_in_thread=reply_in_thread,
-                        uuid=bounded_message_uuid(message.message_id, "interim"),
-                    )
+                interim_receipt = await self._reply_ai_command(
+                    user_client,
+                    message.message_id,
+                    interim_post,
+                    chat_id=message.chat_id,
+                    reply_in_thread=reply_in_thread,
+                    uuid=bounded_message_uuid(message.message_id, "interim"),
+                )
 
                 if (
                     not isinstance(interim_receipt.message_id, str)
@@ -1005,23 +1240,14 @@ class FeishuAiCommandService:
             final_text = ensure_ai_footer(answer, footer=cfg.footer)
             final_post = build_ai_post_payload(final_text, footer=cfg.footer)
             final_reply_started = True
-            try:
-                final_receipt = await user_client.reply_as_user(
-                    message.message_id,
-                    "post",
-                    final_post,
-                    chat_id=message.chat_id,
-                    reply_in_thread=reply_in_thread,
-                    uuid=bounded_message_uuid(message.message_id, "final"),
-                )
-            except TypeError:
-                final_receipt = await user_client.reply_as_user(
-                    message.message_id,
-                    "post",
-                    final_post,
-                    reply_in_thread=reply_in_thread,
-                    uuid=bounded_message_uuid(message.message_id, "final"),
-                )
+            final_receipt = await self._reply_ai_command(
+                user_client,
+                message.message_id,
+                final_post,
+                chat_id=message.chat_id,
+                reply_in_thread=reply_in_thread,
+                uuid=bounded_message_uuid(message.message_id, "final"),
+            )
             if (
                 not isinstance(final_receipt.message_id, str)
                 or not final_receipt.message_id.strip()
@@ -1107,23 +1333,14 @@ class FeishuAiCommandService:
                 )
                 error_post = build_ai_post_payload(error_text, footer=cfg.footer)
                 try:
-                    try:
-                        final_receipt = await user_client.reply_as_user(
-                            message.message_id,
-                            "post",
-                            error_post,
-                            chat_id=message.chat_id,
-                            reply_in_thread=reply_in_thread,
-                            uuid=bounded_message_uuid(message.message_id, "error"),
-                        )
-                    except TypeError:
-                        final_receipt = await user_client.reply_as_user(
-                            message.message_id,
-                            "post",
-                            error_post,
-                            reply_in_thread=reply_in_thread,
-                            uuid=bounded_message_uuid(message.message_id, "error"),
-                        )
+                    final_receipt = await self._reply_ai_command(
+                        user_client,
+                        message.message_id,
+                        error_post,
+                        chat_id=message.chat_id,
+                        reply_in_thread=reply_in_thread,
+                        uuid=bounded_message_uuid(message.message_id, "error"),
+                    )
                 except Exception:
                     logger.warning(
                         "Failed to post /ai error fallback reply for %s",
@@ -1180,25 +1397,29 @@ class FeishuAiCommandService:
     async def handle_ws_event(self, event: FeishuMessageEvent) -> bool:
         """Handle a WebSocket ``FeishuMessageEvent`` if it matches the owner's ``/ai`` command."""
         cfg = await self.aget_config()
-        if not self.is_owner_ai_command_candidate(
+        if self.is_owner_ai_command_candidate(
             sender_open_id=event.sender_open_id,
             sender_type="user",
             text=event.text,
             config=cfg,
         ):
-            return False
-        user_msg = FeishuUserMessage(
-            event.message_id,
-            event.chat_id,
-            event.sender_open_id,
-            "user",
-            event.message_type,
-            event.text,
-            event.message_created_at_ms,
-            event.thread_id,
-            event.parent_id,
-            event.root_id,
-        )
+            user_msg = FeishuUserMessage(
+                event.message_id,
+                event.chat_id,
+                event.sender_open_id,
+                "user",
+                event.message_type,
+                event.text,
+                event.message_created_at_ms,
+                event.thread_id,
+                event.parent_id,
+                event.root_id,
+            )
+        else:
+            verified_msg = await self._verify_cross_app_ws_owner(event, cfg)
+            if verified_msg is None:
+                return False
+            user_msg = verified_msg
         outcome = await self.handle_message(user_msg, source="websocket")
         return outcome.handled or outcome.status in {
             "duplicate",
