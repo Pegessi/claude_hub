@@ -1399,3 +1399,146 @@ async def test_bot_and_automated_system_notifications_are_filtered_out() -> None
     assert runner.applied[0]["demands"][0]["sources"][0]["external_id"] == "om_human_question"
     for bot_id in ("om_codebase_mr", "om_kani_recycle", "om_merlin_bot", "om_bpm_weekly"):
         assert bot_id in state.processed_feishu_ids
+
+
+async def test_human_questions_with_overlapping_names_or_quoted_notice_text_are_preserved() -> None:
+    kanishka_dm = {
+        **message(
+            "om_kanishka",
+            chat_type="p2p",
+            sender="ou_kanishka",
+            minutes_ago=12,
+            text="[redacted]，这个 job OOM 报错能帮我看下吗 https://[redacted]/job/101",
+        ),
+        "chat_name": "Kanishka",
+        "sender": {
+            "id": "ou_kanishka",
+            "id_type": "open_id",
+            "sender_type": "user",
+            "name": "Kanishka",
+        },
+    }
+    feishu_team_human = {
+        **message(
+            "om_feishu_team_human",
+            chat_type="group",
+            sender="ou_zhangsan",
+            mentions=[{"id": ME, "name": "[redacted]"}],
+            minutes_ago=10,
+            text="@[redacted] 这个配置怎么报错了？",
+        ),
+        "sender": {
+            "id": "ou_zhangsan",
+            "id_type": "open_id",
+            "sender_type": "user",
+            "name": "张三（飞书团队）",
+        },
+    }
+    quoted_notice_human = {
+        **message(
+            "om_alice_quoted",
+            chat_type="p2p",
+            sender="ou_alice",
+            minutes_ago=8,
+            text=(
+                "我刚收到「你的个人权限即将到期或被回收」还有 "
+                "「seed 应用下 62 个个人资源权限因 90 天未使用即将静默回收」，"
+                "导致我访问 https://[redacted]/job/202 报错，怎么恢复？"
+            ),
+        ),
+        "chat_name": "Alice",
+        "sender": {
+            "id": "ou_alice",
+            "id_type": "open_id",
+            "sender_type": "user",
+            "name": "Alice",
+        },
+    }
+    state = PatrolState(config=PatrolConfig(max_triage_per_run=5))
+    runner = FakeRunner([kanishka_dm, feishu_team_human, quoted_notice_human])
+    callback = AsyncMock(return_value=diagnosis())
+    result = await run_feishu_triage(
+        state,
+        now=NOW,
+        dot=FakeDot(),
+        runner=runner,
+        triage=callback,
+        capabilities=capabilities,
+    )
+    assert not result.errors
+    assert result.candidates == 3
+    assert result.llm_invoked == 3
+    assert result.details["candidate_ids"] == [
+        "om_kanishka",
+        "om_feishu_team_human",
+        "om_alice_quoted",
+    ]
+
+
+async def test_workspace_delivery_and_archive_failures_are_isolated_per_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.services.workspace_manager import DeliveryUncertain
+
+    wm = FakeWorkspaceManager()
+    quarantined: list[str] = []
+    wm._quarantine_failed_session_deletion = quarantined.append  # type: ignore[attr-defined]
+    monkeypatch.setattr(triage_module, "workspace_manager", wm)
+    monkeypatch.setattr(
+        triage_module,
+        "discover_maso_service",
+        AsyncMock(side_effect=triage_module.MasoServiceUnavailable("absent")),
+    )
+    monkeypatch.setattr(
+        triage_module.shutil, "which", lambda value: "/fake/codex" if value == "codex" else None
+    )
+
+    call_count = 0
+
+    async def mixed_turn(
+        session: ManagedSession,
+        prompt: str,
+        *,
+        timeout_seconds: float,
+    ) -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise DeliveryUncertain("ambiguous delivery")
+        return diagnosis().model_dump_json()
+
+    monkeypatch.setattr(triage_module, "_run_workspace_triage_turn", mixed_turn)
+    rows = [
+        message("om_first", minutes_ago=15),
+        message("om_second_uncertain", minutes_ago=10),
+        message("om_third", minutes_ago=5),
+    ]
+    state = PatrolState(config=PatrolConfig(max_triage_per_run=3))
+    dot = FakeDot()
+    runner = FakeRunner(rows)
+    result = await run_feishu_triage(
+        state,
+        now=NOW,
+        dot=dot,
+        runner=runner,
+        capabilities=capabilities,
+    )
+    assert result.candidates == 3
+    assert result.llm_invoked == 3
+    assert result.notified == 2
+    assert len(result.errors) == 1 and "om_second_uncertain" in result.errors[0]
+    assert set(state.processed_feishu_ids) == {"om_first", "om_third"}
+    assert state.feishu_watermark_iso == (NOW - timedelta(minutes=10)).isoformat()
+
+    # Now verify that an archive failure (e.g. MASO uncertain delivery sidecar blocking archive)
+    # quarantines the session and raises CommandError instead of silently swallowing it.
+    async def failing_archive(_ws_id: str, _sess_id: str) -> ManagedSession:
+        raise triage_module.managed_chat.ManagedChatDeliveryUncertain(
+            "cannot discard a managed Chat while MASO delivery is uncertain"
+        )
+
+    monkeypatch.setattr(wm, "archive_session", failing_archive)
+    monkeypatch.setattr(triage_module, "fence_session_stream", AsyncMock(return_value=True))
+    with pytest.raises(CommandError, match="could not be archived and remains quarantined"):
+        await diagnose_message(candidate_for_adapter())
+    assert quarantined == ["patrol-session-1"]

@@ -1351,12 +1351,17 @@ async def test_startup_and_purge_delete_legacy_patrol_triage_records_and_tabs(
     chats = FakeChats()
     chats.add_tab("patrol-tab-1", cwd=str(tmp_path), subagent_id="sa-patrol-1")
     chats.add_tab("keep-tab-1", cwd=str(tmp_path), subagent_id="sa-keep-1")
+    fail_once = True
 
-    async def delete_tab_async(tab_id: str) -> bool:
+    async def flaky_delete_tab(tab_id: str) -> bool:
+        nonlocal fail_once
+        if fail_once:
+            fail_once = False
+            raise OSError("transient tab retirement failure")
         chats.delete_tab(tab_id)
         return True
 
-    runtime = dataclasses.replace(chats.runtime(), delete_tab=delete_tab_async)
+    runtime = dataclasses.replace(chats.runtime(), delete_tab=flaky_delete_tab)
     path = tmp_path / "subagents.json"
     now = datetime.now(timezone.utc).isoformat()
     write_document(
@@ -1389,12 +1394,23 @@ async def test_startup_and_purge_delete_legacy_patrol_triage_records_and_tabs(
             },
         },
     )
+    # First start: delete_tab fails transiently; record and tab ownership must be retained!
     service = SubagentService(path, runtime, archive_grace_seconds=0)
     await service.start()
-    remaining_ids = [s.id for s in service.list_subagents(include_closed=True)]
+    assert {s.id for s in service.list_subagents(include_closed=True)} == {
+        "sa-patrol-1",
+        "sa-keep-1",
+    }
+    assert "patrol-tab-1" in chats.tabs
+    await service.stop()
+
+    # Second start: delete_tab succeeds; record and tab are now durably removed.
+    restarted = SubagentService(path, runtime, archive_grace_seconds=0)
+    await restarted.start()
+    remaining_ids = [s.id for s in restarted.list_subagents(include_closed=True)]
     assert remaining_ids == ["sa-keep-1"]
     assert "patrol-tab-1" not in chats.tabs
     assert "keep-tab-1" in chats.tabs
     stored = read_document(path)
     assert list(stored["subagents"].keys()) == ["sa-keep-1"]
-    await service.stop()
+    await restarted.stop()

@@ -111,7 +111,11 @@ class DemandPatrolService:
     async def configure(self, changes: dict[str, Any]) -> PatrolConfig:
         async with self._state_lock:
             state = await asyncio.to_thread(self.store.load)
-            state.config = PatrolConfig.model_validate({**state.config.model_dump(), **changes})
+            merged = state.config.model_dump()
+            if "patrol_workspace_id" in changes and "workspace_id" not in changes:
+                merged.pop("workspace_id", None)
+            merged.update(changes)
+            state.config = PatrolConfig.model_validate(merged)
             await asyncio.to_thread(self.store.save, state)
             return state.config
 
