@@ -39,13 +39,14 @@ SUPPORTED_AI_COMMAND_PROVIDERS: tuple[AgentType, ...] = tuple(
 )
 SUPPORTED_REASONING_EFFORTS: tuple[str, ...] = (
     "",
+    "default",
     *"none minimal low medium high xhigh max ultra".split(),
 )
 PROVIDER_SUPPORTED_REASONING_EFFORTS: dict[str, tuple[str, ...]] = {
     "claude": (),
     "codex": tuple("none minimal low medium high xhigh max ultra".split()),
     "traex": tuple("none minimal low medium high xhigh max ultra".split()),
-    "maso": tuple("none low medium high xhigh max".split()),
+    "maso": tuple("default none low medium high xhigh max".split()),
     "cursor": tuple("none minimal low medium high xhigh max".split()),
     "antigravity": (),
 }
@@ -141,10 +142,49 @@ _MASO_VARIANT_SUFFIX_RE = re.compile(
 
 def _maso_std_variants(base: str, *, has_max: bool = True) -> dict[str, str]:
     hi, xhi = f"{base}_reasoning_high", f"{base}_reasoning_xhigh"
-    out = {"none": base, "low": base, "medium": hi, "high": hi, "xhigh": xhi}
+    out = {
+        "default": base,
+        "none": base,
+        "low": base,
+        "medium": hi,
+        "high": hi,
+        "xhigh": xhi,
+    }
     if has_max:
         out["max"] = f"{base}_reasoning_max"
     return out
+
+
+_DYNAMIC_MASO_MODEL_VARIANTS: dict[str, dict[str, str]] = {}
+
+
+def register_live_maso_model_variants(options: Sequence[Any]) -> None:
+    """Sync live MASO ``StreamModelOption`` variant mappings into runtime validation."""
+    fresh: dict[str, dict[str, str]] = {}
+    for opt in options:
+        opt_id = str(getattr(opt, "id", "") or "").strip()
+        if not opt_id:
+            continue
+        efforts = getattr(opt, "supported_reasoning_efforts", None) or ()
+        variant_map: dict[str, str] = {}
+        for eff in efforts:
+            eff_id = str(getattr(eff, "id", "") or "").strip().lower()
+            pmid = str(
+                getattr(eff, "provider_model_id", None)
+                or getattr(opt, "provider_model_id", None)
+                or opt_id
+            ).strip()
+            if eff_id and pmid:
+                variant_map[eff_id] = pmid
+        if variant_map:
+            fresh[opt_id.lower()] = variant_map
+            opt_pmid = str(getattr(opt, "provider_model_id", "") or "").strip()
+            if opt_pmid:
+                fresh.setdefault(opt_pmid.lower(), variant_map)
+            for pmid in set(variant_map.values()):
+                fresh.setdefault(pmid.lower(), variant_map)
+    _DYNAMIC_MASO_MODEL_VARIANTS.clear()
+    _DYNAMIC_MASO_MODEL_VARIANTS.update(fresh)
 
 
 _MASO_MODEL_VARIANTS: dict[str, dict[str, str]] = {
@@ -265,15 +305,30 @@ def _resolve_maso_model_with_effort(model: str, effort: str) -> str:
         return clean_model
     base = _MASO_VARIANT_SUFFIX_RE.sub("", clean_model)
     base_lower = base.lower()
+    dyn_variants = _DYNAMIC_MASO_MODEL_VARIANTS.get(
+        clean_model.lower()
+    ) or _DYNAMIC_MASO_MODEL_VARIANTS.get(base_lower)
+    if dyn_variants and effort in dyn_variants:
+        return dyn_variants[effort]
     if base_lower in _MASO_MODEL_VARIANTS:
         variants = _MASO_MODEL_VARIANTS[base_lower]
-        if effort not in variants:
-            allowed = ", ".join(variants.keys())
-            raise ValueError(
-                f"MASO model {base_lower!r} does not support reasoning_effort={effort!r}; "
-                f"supported efforts: {allowed}"
-            )
-        return variants[effort]
+        if effort in variants:
+            return variants[effort]
+        if effort == "default":
+            return variants.get("none") or variants.get("low") or base
+        allowed = ", ".join(variants.keys())
+        raise ValueError(
+            f"MASO model {base_lower!r} does not support reasoning_effort={effort!r}; "
+            f"supported efforts: {allowed}"
+        )
+    if dyn_variants is not None:
+        allowed = ", ".join(dyn_variants.keys())
+        raise ValueError(
+            f"MASO model {base_lower!r} does not support reasoning_effort={effort!r}; "
+            f"supported efforts: {allowed}"
+        )
+    if effort == "default":
+        return base
     if _MASO_VARIANT_SUFFIX_RE.search(clean_model):
         return base if effort == "none" else f"{base}_reasoning_{effort}"
     for cand in _CURSOR_EFFORT_SUFFIXES:
@@ -319,6 +374,8 @@ def validate_ai_command_agent_config(
         )
 
     spec = get_spec(resolved_provider)
+    if resolved_effort == "default" and resolved_provider != AgentType.MASO:
+        resolved_effort = ""
     allowed_provider_efforts = PROVIDER_SUPPORTED_REASONING_EFFORTS.get(resolved_provider.value, ())
     if resolved_effort:
         if not allowed_provider_efforts or spec.reasoning_effort in {
