@@ -750,28 +750,51 @@ class SubagentService:
         matched = [
             record for record in list(self._subagents.values()) if record.name.startswith(prefix)
         ]
-        if not matched:
-            return []
         purged_ids: List[str] = []
+        retained_ids: set[str] = set()
         for record in matched:
             await self._cancel_running(record)
+            tab_retired = True
             if record.tab_id:
                 tab = self.runtime.get_tab(record.tab_id)
                 if tab is not None and tab.subagent_id == record.id:
-                    deleted = False
+                    tab_retired = False
                     if self.runtime.delete_tab is not None:
                         try:
-                            deleted = bool(await self.runtime.delete_tab(record.tab_id))
+                            tab_retired = bool(await self.runtime.delete_tab(record.tab_id))
                         except Exception:
                             logger.exception("Failed to delete subagent tab %s", record.tab_id)
-                    if not deleted:
-                        await self._archive_tab(record.tab_id)
+                    else:
+                        tab_retired = await self._archive_tab(record.tab_id)
+                    if not tab_retired and self.runtime.get_tab(record.tab_id) is None:
+                        tab_retired = True
+            if not tab_retired:
+                # Retain the record in durable state so the next startup or
+                # purge retries deleting its tab instead of orphaning it.
+                retained_ids.add(record.id)
+                continue
             self._subagents.pop(record.id, None)
             purged_ids.append(record.id)
-        try:
-            await self._save()
-        except Exception:
-            logger.exception("Failed to persist subagent state after purging %s*", prefix)
+        for tab in list(self.runtime.list_tabs()):
+            if (
+                tab.subagent_id
+                and tab.name.startswith(prefix)
+                and not tab.workspace_id
+                and tab.subagent_id not in retained_ids
+                and tab.subagent_id not in self._subagents
+            ):
+                if self.runtime.delete_tab is not None:
+                    try:
+                        await self.runtime.delete_tab(tab.id)
+                        continue
+                    except Exception:
+                        logger.exception("Failed to delete orphan subagent tab %s", tab.id)
+                await self._archive_tab(tab.id)
+        if purged_ids:
+            try:
+                await self._save()
+            except Exception:
+                logger.exception("Failed to persist subagent state after purging %s*", prefix)
         return purged_ids
 
     # ── internals ────────────────────────────────────────────────────────

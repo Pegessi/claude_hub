@@ -235,12 +235,16 @@ async def test_status_and_disable_remain_responsive_during_run(
         await asyncio.wait_for(entered.wait(), timeout=1)
         status = await asyncio.wait_for(patrol.status(), timeout=1)
         assert status["running"] is True
-        config = await asyncio.wait_for(patrol.configure({"enabled": False}), timeout=1)
+        config = await asyncio.wait_for(
+            patrol.configure({"enabled": False, "patrol_workspace_id": "ws-alias"}), timeout=1
+        )
         assert config.enabled is False
+        assert config.workspace_id == "ws-alias"
     finally:
         release.set()
         await run
     assert store.load().config.enabled is False
+    assert store.load().config.workspace_id == "ws-alias"
     assert (await patrol.status())["running"] is False
 
 

@@ -25,6 +25,7 @@ from claude_hub.models import (
     SessionKind,
     WorkspaceSessionRole,
 )
+from claude_hub.services import managed_chat
 from claude_hub.services.agent_stream.maso_http import MasoServiceUnavailable
 from claude_hub.services.agent_stream.providers.spec import all_specs
 from claude_hub.services.agent_stream.tailer import fence_session_stream
@@ -43,7 +44,11 @@ from claude_hub.services.demand_patrol.models import (
 )
 from claude_hub.services.maso_discovery import discover_maso_service
 from claude_hub.services.subagents import SubagentError
-from claude_hub.services.workspace_manager import workspace_manager
+from claude_hub.services.workspace_manager import (
+    DeliveryUncertain,
+    WorkspaceAgentInitializationError,
+    workspace_manager,
+)
 
 _ACTIONABLE = re.compile(
     r"(?:seed|megavision)\.(?:bytedance|byteintl)\.net|code\.byted\.org"
@@ -64,38 +69,35 @@ _AUTOMATED_CHAT_IDS = frozenset(
         "oc_6d40e5ff8120544d7c3681a92145a41c",  # Codebase Assistant
     }
 )
-_AUTOMATED_NAME_PATTERNS = re.compile(
-    r"(?:"
-    r"codebase\s*assistant"
-    r"|kani(?:权限通知|\s*permission\s*notification)?"
-    r"|bpm(?:小助手|\s*assistant)?"
-    r"|merlin\s*bot"
-    r"|merlinted"
-    r"|bytetech"
-    r"|定期提醒"
-    r"|飞书(?:审批|安全|考勤|日历|文档|云文档|妙记|汇报|人事|招聘|报销|采购|法务|合同|工单|值班|监控|告警)?(?:助手|机器人|通知|提醒)?"
-    r"|(?:告警|监控|审批|权限|值班|周报|日报|月报|系统|自动)(?:小?助手|机器人|通知|提醒)"
-    r"|\b(?:bot|robot|assistant|notifier|webhook|alert\s*bot)\b"
-    r"|小助手|机器人"
-    r")",
+_AUTOMATED_EXACT_NAMES = frozenset(
+    {
+        "codebase assistant",
+        "kani",
+        "kani权限通知",
+        "kani permission notification",
+        "bpm",
+        "bpm小助手",
+        "bpm assistant",
+        "merlin bot",
+        "merlinted",
+        "bytetech",
+        "定期提醒",
+    }
+)
+_AUTOMATED_FALLBACK_NAME_PATTERNS = re.compile(
+    r"^(?:"
+    r"[\w\s\u4e00-\u9fff·._-]{0,30}(?:小助手|机器人|助手|通知|提醒)"
+    r"|[\w\s._-]{1,40}\b(?:bot|robot|assistant|notifier|webhook)\b"
+    r")$",
     re.IGNORECASE,
 )
-_AUTOMATED_TEXT_PATTERNS = re.compile(
-    r"(?:"
-    r"<card\b[^>]*\btitle=\"(?:"
+_AUTOMATED_CARD_PATTERNS = re.compile(
+    r"^\s*<card\b[^>]*\btitle=\"(?:"
     r"Merge\s+Request\b"
     r"|\[(?:CN|EN)\]\s*Your\s+Personal\s+Permissions\s+Are\s+Expiring\s+Soon"
-    r"|[^\"\n]*(?:权限.*(?:到期|回收|过期)|审批|周报|日报|月报|定期提醒|值班提醒|体检|问卷)"
-    r")"
-    r"|你的个人权限即将到期或被回收"
-    r"|个人资源权限因\s*\d+\s*天未使用即将(?:静默)?回收"
-    r"|长期未使用权限即将被回收"
-    r"|请及时挑选需续期的权限"
-    r"|Here\s+are\s+your\s+unprocessed\s+tasks\s+from\s+last\s+week"
-    r"|以下是你上周未处理的任务"
-    r"|自动推进结果[:：]"
-    r")",
-    re.IGNORECASE,
+    r"|[^\"\n]*(?:权限.*(?:到期|回收|过期)|自动推进结果|定期提醒|值班提醒)"
+    r")\"[^>]*>.*</card>\s*$",
+    re.IGNORECASE | re.DOTALL,
 )
 
 
@@ -224,8 +226,8 @@ def _extract_sender_metadata(
     chat_id: str,
     text: str,
 ) -> tuple[str, bool]:
-    sender_type = (
-        str(sender.get("sender_type") or sender.get("type") or row.get("sender_type") or "user")
+    raw_sender_type = (
+        str(sender.get("sender_type") or sender.get("type") or row.get("sender_type") or "")
         .strip()
         .lower()
     )
@@ -235,7 +237,7 @@ def _extract_sender_metadata(
         sender.get("is_bot")
         or row.get("is_bot")
         or open_bot_id
-        or sender_type in {"app", "bot", "system", "anonymous"}
+        or raw_sender_type in {"app", "bot", "system", "anonymous"}
         or id_type in {"app_id", "bot_id"}
         or sender_id.startswith(("cli_", "app_", "bot_"))
     )
@@ -252,9 +254,14 @@ def _extract_sender_metadata(
                 or (open_bot_id and partner_open_id and open_bot_id == partner_open_id)
             ):
                 is_bot_flag = True
+    authoritative_human = (
+        not is_bot_flag
+        and sender_id.startswith("ou_")
+        and (raw_sender_type == "user" or id_type in {"open_id", "user_id"})
+    )
     is_automated = (
         is_bot_flag
-        or (bool(sender_type) and sender_type != "user")
+        or (bool(raw_sender_type) and raw_sender_type != "user")
         or _is_automated_notification_fields(
             chat_id=chat_id,
             chat_type=chat_type,
@@ -262,9 +269,10 @@ def _extract_sender_metadata(
             sender_name=sender_name,
             chat_name=chat_name,
             text=text,
+            authoritative_human=authoritative_human,
         )
     )
-    return sender_type or "user", is_automated
+    return raw_sender_type or "user", is_automated
 
 
 def _is_automated_notification_fields(
@@ -275,16 +283,29 @@ def _is_automated_notification_fields(
     sender_name: str,
     chat_name: str,
     text: str,
+    authoritative_human: bool = False,
 ) -> bool:
     if chat_id in _AUTOMATED_CHAT_IDS:
         return True
     if sender_id.startswith(("cli_", "app_", "bot_")):
         return True
-    if sender_name and _AUTOMATED_NAME_PATTERNS.search(sender_name):
+    normalized_sender = " ".join(sender_name.split()).lower()
+    if normalized_sender in _AUTOMATED_EXACT_NAMES:
         return True
-    if chat_type == "p2p" and chat_name and _AUTOMATED_NAME_PATTERNS.search(chat_name):
+    normalized_chat = " ".join(chat_name.split()).lower()
+    if chat_type == "p2p" and normalized_chat in _AUTOMATED_EXACT_NAMES:
         return True
-    if text and _AUTOMATED_TEXT_PATTERNS.search(text):
+    if authoritative_human:
+        return False
+    if normalized_sender and _AUTOMATED_FALLBACK_NAME_PATTERNS.fullmatch(normalized_sender):
+        return True
+    if (
+        chat_type == "p2p"
+        and normalized_chat
+        and _AUTOMATED_FALLBACK_NAME_PATTERNS.fullmatch(normalized_chat)
+    ):
+        return True
+    if text and _AUTOMATED_CARD_PATTERNS.fullmatch(text):
         return True
     return False
 
@@ -301,6 +322,8 @@ def _is_automated_candidate(message: FeishuCandidate) -> bool:
         sender_name=message.sender_name,
         chat_name=message.chat_name,
         text=message.text,
+        authoritative_human=message.sender_id.startswith("ou_")
+        and message.sender_type.lower() == "user",
     )
 
 
@@ -707,7 +730,6 @@ async def _run_workspace_triage_turn(
 ) -> str:
     from claude_hub.api.agent_stream import get_managed_tailer_manager
     from claude_hub.models import AgentStreamEvent, AgentStreamEventType
-    from claude_hub.services import managed_chat
     from claude_hub.services.agent_stream import ExternalTurnRetirement
     from claude_hub.services.agent_stream.base import is_substantive_answer
 
@@ -717,11 +739,19 @@ async def _run_workspace_triage_turn(
     last_error = ""
     try:
         queue = await manager.subscribe_completion(session)
-        await workspace_manager.send_chat_session_message(
-            session.id,
-            prompt,
-            call_id=call_id,
-        )
+        try:
+            await workspace_manager.send_chat_session_message(
+                session.id,
+                prompt,
+                call_id=call_id,
+            )
+        except (
+            DeliveryUncertain,
+            managed_chat.ManagedChatDeliveryUncertain,
+            WorkspaceAgentInitializationError,
+            RuntimeError,
+        ) as exc:
+            raise CommandError(f"Patrol triage session delivery failed: {exc}") from exc
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_seconds
         while True:
@@ -791,16 +821,38 @@ async def _run_workspace_triage_turn(
 
 
 async def _archive_patrol_session(workspace_id: str, session_id: str) -> None:
+    first_error: Exception | None = None
     try:
-        await workspace_manager.archive_session(workspace_id, session_id)
+        archived = await workspace_manager.archive_session(workspace_id, session_id)
+        if getattr(archived, "archived", False):
+            return
+    except KeyError:
         return
-    except Exception:
-        pass
+    except Exception as exc:
+        first_error = exc
     try:
         await fence_session_stream(session_id)
-        await workspace_manager.archive_session(workspace_id, session_id)
-    except Exception:
-        pass
+        archived = await workspace_manager.archive_session(workspace_id, session_id)
+        if getattr(archived, "archived", False):
+            return
+    except KeyError:
+        return
+    except Exception as second_exc:
+        if hasattr(workspace_manager, "_quarantine_failed_session_deletion"):
+            try:
+                workspace_manager._quarantine_failed_session_deletion(session_id)
+            except Exception:
+                pass
+        raise CommandError(
+            f"Patrol triage session {session_id} could not be archived and remains quarantined: "
+            f"{second_exc}"
+        ) from (first_error or second_exc)
+    if hasattr(workspace_manager, "_quarantine_failed_session_deletion"):
+        try:
+            workspace_manager._quarantine_failed_session_deletion(session_id)
+        except Exception:
+            pass
+    raise CommandError(f"Patrol triage session {session_id} did not report archived after cleanup")
 
 
 async def diagnose_message(
@@ -835,21 +887,25 @@ async def diagnose_message(
     if model and agent_type in _MODEL_ENV_KEYS:
         launch_env[_MODEL_ENV_KEYS[agent_type]] = model.strip()
     target_workspace_id = _resolve_patrol_workspace_id(workspace_id)
-    session = await workspace_manager.ensure_workspace_agent(
-        target_workspace_id,
-        EnsureWorkspaceAgentRequest(
-            agent_type=agent_type,
-            session_kind=SessionKind.CHAT,
-            role=WorkspaceSessionRole.WORKER,
-            title=f"Patrol triage: {candidate.message_id}",
-            solo_mode=True,
-            reuse_existing=False,
-            ephemeral=True,
-            caller_owned_ephemeral=True,
-            env=launch_env,
-        ),
-        bootstrap=False,
-    )
+    try:
+        session = await workspace_manager.ensure_workspace_agent(
+            target_workspace_id,
+            EnsureWorkspaceAgentRequest(
+                agent_type=agent_type,
+                session_kind=SessionKind.CHAT,
+                role=WorkspaceSessionRole.WORKER,
+                title=f"Patrol triage: {candidate.message_id}",
+                solo_mode=True,
+                reuse_existing=False,
+                ephemeral=True,
+                caller_owned_ephemeral=True,
+                env=launch_env,
+            ),
+            bootstrap=False,
+        )
+    except (WorkspaceAgentInitializationError, RuntimeError, ValueError, KeyError) as exc:
+        raise CommandError(f"Failed to provision patrol triage workspace session: {exc}") from exc
+    primary_exc: BaseException | None = None
     try:
         answer = await _run_workspace_triage_turn(
             session,
@@ -862,8 +918,15 @@ async def diagnose_message(
         if raw.startswith("```"):
             raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw)
         return TriageDiagnosis.model_validate_json(raw)
+    except BaseException as exc:
+        primary_exc = exc
+        raise
     finally:
-        await asyncio.shield(_archive_patrol_session(session.workspace_id, session.id))
+        try:
+            await asyncio.shield(_archive_patrol_session(session.workspace_id, session.id))
+        except Exception as archive_exc:
+            if primary_exc is None:
+                raise archive_exc
 
 
 async def read_capabilities(base_url: str) -> dict[str, Any]:
@@ -1127,6 +1190,11 @@ async def run_feishu_triage(
         except (
             CommandError,
             SubagentError,
+            DeliveryUncertain,
+            managed_chat.ManagedChatDeliveryUncertain,
+            WorkspaceAgentInitializationError,
+            RuntimeError,
+            KeyError,
             TimeoutError,
             ValueError,
             OSError,
