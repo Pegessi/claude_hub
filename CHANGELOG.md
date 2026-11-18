@@ -7,6 +7,24 @@
 
 ## Released
 
+### feat(feishu): create personal `/ai` Chat sessions inside an Agent Workspace
+
+- Route assistant-created personal Feishu `/ai` Chat tabs into an Agent Workspace instead of the
+  ungrouped Terminal/cwd list. New tabs are now provisioned as managed `WORKER` Chat sessions
+  (`workspace_id` + `workspace_role` + `managed_session_id`) so they render under the workspace and
+  survive restart, and turns dispatch through the managed Chat tailer while preserving the
+  `feishu-ai-<message_id>` turn id and metadata (`backend/claude_hub/services/feishu_ai_workspace.py`,
+  `backend/claude_hub/services/feishu_ai_command.py`).
+- Add an optional `workspace_id` to the `/ai` config (REST PATCH + CLI
+  `feishu ai-command configure --workspace-id/--clear-workspace-id`). When unset, `/ai` reuses an
+  existing workspace named `Feishu /ai` or creates it on demand; a pinned-but-missing id warns and
+  falls back rather than failing silently. Old configs without the field keep working, channel→tab
+  reuse and model/effort hot-switch are preserved, durable interrupted-command recovery reads both
+  managed and legacy stream namespaces, and direct-Chat-only providers (TraeX) keep the standalone
+  tab path (`backend/claude_hub/services/feishu_ai_command_models.py`,
+  `backend/claude_hub/api/routes/feishu_bot/ai_command.py`, `backend/claude_hub/cli/commands/feishu.py`).
+- See [design and validation](docs/working-logs/2026-11-18-feishu-ai-workspace-sessions.md).
+
 ### fix(feishu): replace `/ai` plain-text Model input with Provider-linked dropdown and fix live `/ai` P2P/WS/230002 trigger & delivery
 
 - Replace the plain-text Model `<input>` (`data-testid="feishu-ai-model-input"`) in `FeishuBotSettingsDialog.vue`'s Personal `/ai` Assistant section with a dynamic Provider-linked logical Model `<select>` consistent with the Chat UI model selector (`StreamModelOption` / `provider_model_options` across `claude`, `codex`, `traex`, `maso`, `cursor`, and `antigravity`), mapping persisted MASO/Cursor variant IDs (e.g. `[redacted]_reasoning_high`) without falsely marking unmodified server tuples dirty, preserving custom/current unlisted model IDs, supporting live MASO `mode="default"` per-model effort variants (`[redacted]`, `[redacted]`, `[redacted]`, `[redacted]`, `[redacted]` + dynamic catalog registration) alongside empty-model `Provider default` (`model=""`) normalization across model-bound (`maso`, `cursor` -> `(provider, "", "")`) vs. `ENV_KEY` (`codex`, `traex` -> `(provider, "", effort)`) providers, syncing per-model `reasoning_effort` options (disabling effort selection when unsupported), and expanding MASO (`[redacted]`, `[redacted]`) and Codex/TraeX (`max`, `ultra`) validation (`frontend/src/features/feishu-bot/FeishuBotSettingsDialog.vue`, `frontend/src/utils/feishuBotConfig.ts`, `backend/claude_hub/services/feishu_ai_command_models.py`, `backend/claude_hub/services/feishu_ai_command.py`, `backend/claude_hub/api/routes/feishu_bot/ai_command.py`).
