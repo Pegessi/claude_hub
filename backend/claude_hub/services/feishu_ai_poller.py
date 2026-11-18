@@ -328,6 +328,74 @@ class FeishuAiPoller:
 
         return collected, reached_watermark, next_cursor, scan_upper_ms
 
+    async def _discover_recent_owner_command_chats(
+        self,
+        user_client: FeishuUserClient,
+        *,
+        cfg: FeishuAiCommandConfig,
+        owner_open_id: str,
+        now_ms: int,
+        known_chat_ids: set[str],
+    ) -> list[str]:
+        """Supplement active-chat polling with a bounded owner ``/ai`` message search."""
+        if not hasattr(user_client, "search_messages") or not hasattr(user_client, "get_message"):
+            return []
+        query = cfg.prefix.lstrip("/").strip() or "ai"
+        lookback_sec = max(60, int(self._initial_lookback_ms / 1000))
+        start_time = str(max(0, int(now_ms / 1000) - lookback_sec))
+        try:
+            async with asyncio.timeout(5.0):
+                try:
+                    msg_ids = await user_client.search_messages(
+                        query,
+                        page_size=min(20, max(10, cfg.max_active_chats)),
+                        start_time=start_time,
+                        from_ids=[owner_open_id],
+                    )
+                except TypeError:
+                    msg_ids = await user_client.search_messages(
+                        query,
+                        page_size=min(20, max(10, cfg.max_active_chats)),
+                        start_time=start_time,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("Feishu /ai message search supplement unavailable", exc_info=True)
+            return []
+        if not msg_ids:
+            return []
+
+        seen_msg_ids = {
+            str(entry["message"]["message_id"])
+            for entry in self._service.list_pending_commands()
+            if isinstance(entry.get("message"), Mapping) and entry["message"].get("message_id")
+        } | {
+            str(run["message_id"])
+            for run in self._service.get_recent_runs()
+            if isinstance(run, Mapping) and run.get("message_id")
+        }
+        discovered: list[str] = []
+        for mid in msg_ids[:10]:
+            if mid in seen_msg_ids or mid in self._in_flight_ids:
+                continue
+            try:
+                async with asyncio.timeout(3.0):
+                    fetched = await user_client.get_message(mid)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
+            if fetched is None or not fetched.chat_id:
+                continue
+            if fetched.chat_id in known_chat_ids or fetched.chat_id in discovered:
+                continue
+            if fetched.sender_type == "user" and hmac.compare_digest(
+                fetched.sender_open_id.strip(), owner_open_id
+            ):
+                discovered.append(fetched.chat_id)
+        return discovered
+
     async def poll_once(self) -> list[str]:
         """Execute one polling pass across watched or active chats.
 
@@ -378,6 +446,9 @@ class FeishuAiPoller:
             self._last_error = "pending_queue_backpressure"
             return processed_ids
 
+        watermarks = self._service.get_watermarks()
+        now_ms = int(time.time() * 1000)
+
         chat_ids: list[str] = list(cfg.watch_chats)
         if not chat_ids:
             chats = await user_client.list_chats(
@@ -385,9 +456,16 @@ class FeishuAiPoller:
                 page_size=cfg.max_active_chats,
             )
             chat_ids = [c.chat_id for c in chats if c.chat_id]
-
-        watermarks = self._service.get_watermarks()
-        now_ms = int(time.time() * 1000)
+            extra_chats = await self._discover_recent_owner_command_chats(
+                user_client,
+                cfg=cfg,
+                owner_open_id=owner_open_id,
+                now_ms=now_ms,
+                known_chat_ids=set(chat_ids),
+            )
+            for extra_chat_id in extra_chats:
+                if extra_chat_id not in chat_ids:
+                    chat_ids.append(extra_chat_id)
 
         last_chat_error: str | None = None
         for chat_id in chat_ids:

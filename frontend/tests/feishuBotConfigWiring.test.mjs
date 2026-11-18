@@ -21,5 +21,7 @@ test('Bot pool dialog retains shared controls and explicit selection and secret 
   assert.ok(dialog.includes('data-testid="feishu-ai-command-panel"'))
   assert.ok(dialog.includes('data-testid="feishu-ai-provider-select"'))
   assert.ok(dialog.includes('data-testid="feishu-ai-model-input"'))
+  assert.match(dialog, /<select[\s\S]{0,240}data-testid="feishu-ai-model-input"/)
+  assert.doesNotMatch(dialog, /<input[\s\S]{0,240}data-testid="feishu-ai-model-input"/)
   assert.ok(dialog.includes('data-testid="feishu-ai-effort-select"'))
 })

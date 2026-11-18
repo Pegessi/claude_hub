@@ -7,7 +7,7 @@ import json
 import secrets
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Mapping
 
 import httpx
 import pytest
@@ -3160,3 +3160,451 @@ async def test_bot_fallback_reply_send_and_auto_invite_without_send_as_user(
             )
     finally:
         await mock_http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ai_capabilities_provider_model_options_and_new_model_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Capabilities expose logical StreamModelOption rows per provider and validate new MASO/Codex variants."""
+    import claude_hub.services.feishu_ai_command as ai_cmd_mod
+    from claude_hub.models import StreamModelOption, StreamReasoningEffortOption
+
+    # Validate MASO gemini-4-carbon and gpt-6.1-sol variants + Codex max/ultra efforts
+    prov_carbon, model_carbon, eff_carbon = validate_ai_command_agent_config(
+        "maso", "gemini-4-carbon", "high"
+    )
+    assert prov_carbon == AgentType.MASO
+    assert model_carbon == "gemini-4-carbon_reasoning_high"
+    assert eff_carbon == "high"
+
+    prov_carbon_med, model_carbon_med, _ = validate_ai_command_agent_config(
+        "maso", "gemini-4-carbon_reasoning_high", "medium"
+    )
+    assert prov_carbon_med == AgentType.MASO
+    assert model_carbon_med == "gemini-4-carbon_reasoning_medium"
+
+    with pytest.raises(ValueError, match="does not support reasoning_effort='xhigh'"):
+        validate_ai_command_agent_config("maso", "gemini-4-carbon", "xhigh")
+
+    _, model_sol61_xhigh, _ = validate_ai_command_agent_config("maso", "gpt-6.1-sol", "xhigh")
+    assert model_sol61_xhigh == "gpt-6.1-sol_reasoning_xhigh"
+
+    _, model_codex_max, eff_codex_max = validate_ai_command_agent_config(
+        "codex", "gpt-6.2-sol", "max"
+    )
+    assert model_codex_max == "gpt-6.2-sol"
+    assert eff_codex_max == "max"
+    _, _, eff_codex_ultra = validate_ai_command_agent_config("codex", "gpt-6.2-sol", "ultra")
+    assert eff_codex_ultra == "ultra"
+
+    monkeypatch.setattr(ai_cmd_mod, "_AI_MASO_CATALOG_CACHE", None)
+
+    async def fake_check_maso_service(
+        _env: Mapping[str, str],
+    ) -> tuple[list[StreamModelOption], str]:
+        return (
+            [
+                StreamModelOption(
+                    id="gpt-6.1-sol",
+                    label="gpt-6.1-sol",
+                    provider_model_id="gpt-6.1-sol",
+                    default_reasoning_effort="high",
+                    supported_reasoning_efforts=[
+                        StreamReasoningEffortOption(
+                            id="low", label="Low", provider_model_id="gpt-6.1-sol"
+                        ),
+                        StreamReasoningEffortOption(
+                            id="high",
+                            label="High",
+                            provider_model_id="gpt-6.1-sol_reasoning_high",
+                        ),
+                        StreamReasoningEffortOption(
+                            id="xhigh",
+                            label="Extra High",
+                            provider_model_id="gpt-6.1-sol_reasoning_xhigh",
+                        ),
+                    ],
+                ),
+                StreamModelOption(
+                    id="gemini-4-carbon",
+                    label="gemini-4-carbon",
+                    provider_model_id="gemini-4-carbon",
+                    default_reasoning_effort="high",
+                    supported_reasoning_efforts=[
+                        StreamReasoningEffortOption(
+                            id="low", label="Low", provider_model_id="gemini-4-carbon"
+                        ),
+                        StreamReasoningEffortOption(
+                            id="medium",
+                            label="Medium",
+                            provider_model_id="gemini-4-carbon_reasoning_medium",
+                        ),
+                        StreamReasoningEffortOption(
+                            id="high",
+                            label="High",
+                            provider_model_id="gemini-4-carbon_reasoning_high",
+                        ),
+                    ],
+                ),
+            ],
+            "gpt-6.1-sol_reasoning_high",
+        )
+
+    monkeypatch.setattr(
+        "claude_hub.services.agent_stream.maso_http.check_maso_service",
+        fake_check_maso_service,
+    )
+    service = FeishuAiCommandService(
+        state_path=tmp_path / "caps_ai.json",
+        token_store=FeishuUserTokenStore(
+            path=tmp_path / "caps_tokens.json",
+            key_path=tmp_path / "caps_tokens.key",
+        ),
+        dedup_store=FeishuMessageDedupStore(tmp_path / "caps_dedup.json"),
+    )
+    caps = await service.acapabilities_dict()
+    opts_by_prov = caps["provider_model_options"]
+    for prov in ("claude", "codex", "traex", "maso", "cursor", "antigravity"):
+        assert prov in opts_by_prov
+        assert len(opts_by_prov[prov]) >= 1
+
+    maso_ids = [opt["id"] for opt in opts_by_prov["maso"]]
+    assert maso_ids == ["gpt-6.1-sol", "gemini-4-carbon"]
+    # Logical options must NOT duplicate _reasoning_* suffix variants as separate top-level rows
+    assert not any("_reasoning_" in mid for mid in maso_ids)
+    cursor_ids = [opt["id"] for opt in opts_by_prov["cursor"]]
+    assert len(cursor_ids) == len(set(cursor_ids))
+    assert caps["model_reasoning_efforts"]["gemini-4-carbon"] == ["none", "low", "medium", "high"]
+    assert caps["model_reasoning_efforts"]["gemini-4-carbon_reasoning_high"] == [
+        "none",
+        "low",
+        "medium",
+        "high",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_live_feishu_p2p_discovery_search_cross_app_ws_owner_and_230002_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end regression for live '/ai 你好' P2P discovery, bounded search, cross-app WS owner check, and 230002 fallback."""
+    import time
+
+    from claude_hub.services.bot_pool.common import OwnerIdentity
+    from claude_hub.services.feishu_bot import (
+        FeishuBotConfig,
+        FeishuBotRemoteError,
+        FeishuMessageEvent,
+    )
+    from claude_hub.services.feishu_bot_pool import FeishuBotPoolStore
+
+    store = FeishuUserTokenStore(
+        path=tmp_path / "live_tokens.json",
+        key_path=tmp_path / "live_tokens.key",
+    )
+    # Primary /ai owner token on MacWorker app (cli_macworker) WITHOUT im:message.send_as_user
+    store.save_oauth_token(
+        open_id="ou_owner_macworker",
+        app_id="cli_macworker",
+        access_token="u-owner-macworker",
+        refresh_token="ur-owner-macworker",
+        app_secret="sec-macworker",
+        user_name="王泽华",
+        expires_in=7200,
+        scope="im:message im:chat:read im:message.reactions:write_only",
+    )
+    # Unrelated user who happens to share the exact same display_name ("王泽华") on another app:
+    # must NEVER be trusted without authoritative get_message() verification under cli_macworker!
+    store.save_oauth_token(
+        open_id="ou_impersonator_same_name",
+        app_id="cli_other",
+        access_token="u-other",
+        refresh_token="ur-other",
+        user_name="王泽华",
+        expires_in=7200,
+        scope="im:message",
+    )
+
+    pool = FeishuBotPoolStore(
+        path=tmp_path / "live_pool.json",
+        legacy_path=tmp_path / "live_legacy.json",
+    )
+    # Enabled pool bot MerlinTed (cli_merlinted) bound to group/chat oc_bound_chat
+    merlin_bot_id = pool.create_bot(
+        name="MerlinTed",
+        config=FeishuBotConfig(app_id="cli_merlinted", app_secret="sec-merlinted"),
+    )
+    merlin_rev = next(b.revision for b in pool.snapshot().bots if b.bot_id == merlin_bot_id)
+    pool.bind_group(
+        merlin_bot_id,
+        owner=OwnerIdentity(open_id="local", email="", kind="local"),
+        tab_id="tab-merlin-bound",
+        workspace_id=None,
+        chat_id="oc_bound_chat",
+        chat_name="Merlin Bound Chat",
+        expected_revision=merlin_rev,
+    )
+    # Disabled/revoked pool bot also bound to oc_p2p_merlinbot: must NEVER be used as fallback!
+    revoked_bot_id = pool.create_bot(
+        name="RevokedBot",
+        config=FeishuBotConfig(app_id="cli_revoked", app_secret="sec-revoked"),
+    )
+    rev_bot_rev = next(b.revision for b in pool.snapshot().bots if b.bot_id == revoked_bot_id)
+    pool.bind_group(
+        revoked_bot_id,
+        owner=OwnerIdentity(open_id="local", email="", kind="local"),
+        tab_id="tab-revoked",
+        workspace_id=None,
+        chat_id="oc_p2p_merlinbot",
+        chat_name="Revoked Chat",
+        expected_revision=rev_bot_rev,
+    )
+    rev_bot_rev2 = next(b.revision for b in pool.snapshot().bots if b.bot_id == revoked_bot_id)
+    pool.update_bot(revoked_bot_id, enabled=False, expected_revision=rev_bot_rev2)
+
+    monkeypatch.setattr(
+        "claude_hub.services.feishu_bot_pool.FeishuBotPoolStore",
+        lambda: pool,
+    )
+
+    now_ms = int(time.time() * 1000)
+    chats_calls: list[dict[str, str]] = []
+    search_bodies: list[dict[str, Any]] = []
+    dm_sends: list[tuple[str, dict[str, str], dict[str, Any]]] = []
+    bound_replies: list[tuple[str, str]] = []
+    member_add_calls: list[str] = []
+
+    messages_by_id: dict[str, dict[str, Any]] = {
+        "om_p2p_hello": {
+            "message_id": "om_p2p_hello",
+            "chat_id": "oc_p2p_merlinbot",
+            "sender": {"id": "ou_owner_macworker", "sender_type": "user"},
+            "msg_type": "text",
+            "create_time": str(now_ms - 10_000),
+            "body": {"content": json.dumps({"text": "/ai 你好"})},
+        },
+        "om_search_outside_top": {
+            "message_id": "om_search_outside_top",
+            "chat_id": "oc_older_active_chat",
+            "sender": {"id": "ou_owner_macworker", "sender_type": "user"},
+            "msg_type": "text",
+            "create_time": str(now_ms - 8_000),
+            "body": {"content": json.dumps({"text": "/ai 帮我看下搜索发现"})},
+        },
+        "om_ws_cross_app_owner": {
+            "message_id": "om_ws_cross_app_owner",
+            "chat_id": "oc_bound_chat",
+            # When looked up via cli_macworker user token, Feishu returns ou_owner_macworker!
+            "sender": {"id": "ou_owner_macworker", "sender_type": "user"},
+            "msg_type": "text",
+            "create_time": str(now_ms - 5_000),
+            "body": {"content": json.dumps({"text": "/ai 跨应用触发"})},
+        },
+        "om_ws_spoof_non_owner": {
+            "message_id": "om_ws_spoof_non_owner",
+            "chat_id": "oc_bound_chat",
+            # Authoritative lookup reveals a different open_id under cli_macworker
+            "sender": {"id": "ou_someone_else_on_macworker", "sender_type": "user"},
+            "msg_type": "text",
+            "create_time": str(now_ms - 4_000),
+            "body": {"content": json.dumps({"text": "/ai 冒充指令"})},
+        },
+    }
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        auth = req.headers.get("Authorization", "")
+        body = json.loads(req.content.decode("utf-8")) if req.content else {}
+
+        if path == "/open-apis/auth/v3/tenant_access_token/internal":
+            app_id = body.get("app_id")
+            if app_id == "cli_macworker" and body.get("app_secret") == "sec-macworker":
+                return httpx.Response(
+                    200, json={"code": 0, "tenant_access_token": "t-macworker", "expire": 7200}
+                )
+            if app_id == "cli_merlinted" and body.get("app_secret") == "sec-merlinted":
+                return httpx.Response(
+                    200, json={"code": 0, "tenant_access_token": "t-merlinted", "expire": 7200}
+                )
+            if app_id == "cli_revoked":
+                raise AssertionError("Revoked/disabled pool bot must never be used")
+            return httpx.Response(400, json={"code": 10003, "msg": "invalid app"})
+
+        if path == "/open-apis/im/v1/chats":
+            params = dict(req.url.params)
+            chats_calls.append(params)
+            # Simulate real Feishu OpenAPI: P2P chats are returned ONLY when types includes p2p
+            items = [{"chat_id": "oc_group_1", "name": "Group 1", "chat_mode": "group"}]
+            if "p2p" in params.get("types", ""):
+                items.insert(0, {"chat_id": "oc_p2p_merlinbot", "name": "", "chat_mode": "p2p"})
+            return httpx.Response(
+                200, json={"code": 0, "data": {"items": items, "has_more": False}}
+            )
+
+        if path == "/open-apis/search/v2/message":
+            search_bodies.append(body)
+            return httpx.Response(
+                200,
+                json={"code": 0, "data": {"items": ["om_search_outside_top"], "has_more": False}},
+            )
+
+        if path.startswith("/open-apis/im/v1/messages/om_") and req.method == "GET":
+            mid = path.rsplit("/", 1)[-1]
+            assert auth == "Bearer u-owner-macworker"
+            raw_msg = messages_by_id.get(mid)
+            if raw_msg is None:
+                return httpx.Response(404, json={"code": 230001, "msg": "not found"})
+            return httpx.Response(200, json={"code": 0, "data": {"items": [raw_msg]}})
+
+        if path == "/open-apis/im/v1/messages" and req.method == "GET":
+            cid = req.url.params.get("container_id", "")
+            items = [
+                m
+                for m in messages_by_id.values()
+                if m["chat_id"] == cid and "ws_" not in m["message_id"]
+            ]
+            return httpx.Response(
+                200, json={"code": 0, "data": {"items": items, "has_more": False}}
+            )
+
+        if path.endswith("/members"):
+            member_add_calls.append(path)
+            return httpx.Response(400, json={"code": 232006, "msg": "p2p cannot add members"})
+
+        if path.endswith("/reactions"):
+            return httpx.Response(200, json={"code": 0, "data": {"reaction_id": "rx_live_1"}})
+
+        if "/reactions/" in path and req.method == "DELETE":
+            return httpx.Response(200, json={"code": 0, "data": {}})
+
+        if path.endswith("/reply") and req.method == "POST":
+            target_mid = path.split("/messages/", 1)[1].split("/reply", 1)[0]
+            if auth == "Bearer t-macworker":
+                # Primary fallback bot cli_macworker is NOT in oc_p2p_merlinbot, oc_older_active_chat, or oc_bound_chat
+                return httpx.Response(400, json={"code": 230002, "msg": "bot not in chat"})
+            if auth == "Bearer t-merlinted":
+                # MerlinTed IS in oc_bound_chat
+                bound_replies.append((auth, target_mid))
+                return httpx.Response(
+                    200,
+                    json={
+                        "code": 0,
+                        "data": {"message_id": f"om_bound_reply_{len(bound_replies)}"},
+                    },
+                )
+            return httpx.Response(400, json={"code": 230002, "msg": "bot not in chat"})
+
+        if path == "/open-apis/im/v1/messages" and req.method == "POST":
+            params = dict(req.url.params)
+            if params.get("receive_id_type") == "open_id":
+                dm_sends.append((auth, params, body))
+                return httpx.Response(
+                    200,
+                    json={"code": 0, "data": {"message_id": f"om_owner_dm_{len(dm_sends)}"}},
+                )
+            return httpx.Response(400, json={"code": 230002, "msg": "bot not in chat"})
+
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    async with httpx.AsyncClient(
+        base_url="https://open.feishu.cn",
+        transport=httpx.MockTransport(handler),
+    ) as mock_http:
+        user_client = FeishuUserClient(
+            store,
+            open_id="ou_owner_macworker",
+            app_id="cli_macworker",
+            client=mock_http,
+        )
+        dispatched_prompts: list[str] = []
+
+        async def fake_turn_dispatcher(
+            _tab_id: str, prompt: str, _turn_id: str, _vis: str, _meta: Mapping[str, Any]
+        ) -> str:
+            dispatched_prompts.append(prompt)
+            return "你好！已收到并处理。"
+
+        service = FeishuAiCommandService(
+            state_path=tmp_path / "live_ai.json",
+            token_store=store,
+            dedup_store=FeishuMessageDedupStore(tmp_path / "live_dedup.json"),
+            user_client_factory=lambda _cfg: user_client,
+            tab_creator=lambda **_kw: "tab-live-ai",
+            tab_getter=lambda _tid: None,
+            tab_env_switcher=lambda *_a, **_kw: None,
+            turn_dispatcher=fake_turn_dispatcher,
+        )
+        service.update_config(
+            {
+                "enabled": True,
+                "owner_open_id": "ou_owner_macworker",
+                "app_id": "cli_macworker",
+                "provider": "maso",
+                "model": "gpt-6.1-sol_reasoning_high",
+                "reasoning_effort": "high",
+                "cwd": str(tmp_path),
+                "watch_chats": [],
+                "max_active_chats": 2,
+            }
+        )
+
+        # Low-level reply_as_user default MUST still raise 230002 (no implicit DM or membership mutation)
+        with pytest.raises(FeishuBotRemoteError) as low_exc:
+            await user_client.reply_as_user(
+                "om_p2p_hello",
+                "post",
+                build_ai_post_payload("low-level check"),
+                chat_id="oc_p2p_merlinbot",
+            )
+        assert low_exc.value.code == 230002
+        assert member_add_calls == []
+        assert dm_sends == []
+
+        # 1. Poller discovers both P2P chat (via types='p2p,group') and outside-top chat (via search_messages)
+        poller = FeishuAiPoller(service)
+        detected = await poller.poll_once()
+        await poller.wait_for_inflight(timeout=5.0)
+
+        assert set(detected) == {"om_p2p_hello", "om_search_outside_top"}
+        assert chats_calls and chats_calls[0].get("types") == "p2p,group"
+        assert search_bodies and search_bodies[0].get("from_ids") == ["ou_owner_macworker"]
+        # Both non-bound chats fell back cleanly to owner DM (interim + final = 2 DMs per command = 4 total)
+        assert len(dm_sends) == 4
+        assert all(auth == "Bearer t-macworker" for auth, _, _ in dm_sends)
+        assert all(body["receive_id"] == "ou_owner_macworker" for _, _, body in dm_sends)
+        assert member_add_calls == []
+
+        # 2. Cross-app WebSocket event from MerlinTed (ou_merlinted_owner != ou_owner_macworker):
+        #    verified authoritatively via get_message() under cli_macworker and replied in-chat via bound MerlinTed!
+        ws_owner_event = FeishuMessageEvent(
+            event_id="ev_ws_cross_owner_1",
+            app_id="cli_merlinted",
+            chat_id="oc_bound_chat",
+            chat_type="p2p",
+            sender_open_id="ou_merlinted_owner",
+            message_id="om_ws_cross_app_owner",
+            message_type="text",
+            text="/ai 跨应用触发",
+            message_created_at_ms=now_ms - 5_000,
+        )
+        assert await service.handle_ws_event(ws_owner_event) is True
+        assert len(bound_replies) == 2
+        assert all(auth == "Bearer t-merlinted" for auth, _ in bound_replies)
+
+        # 3. Spoofed cross-app WebSocket event (even if display_name matches elsewhere) is rejected!
+        ws_spoof_event = FeishuMessageEvent(
+            event_id="ev_ws_spoof_1",
+            app_id="cli_merlinted",
+            chat_id="oc_bound_chat",
+            chat_type="p2p",
+            sender_open_id="ou_impersonator_same_name",
+            message_id="om_ws_spoof_non_owner",
+            message_type="text",
+            text="/ai 冒充指令",
+            message_created_at_ms=now_ms - 4_000,
+        )
+        assert await service.handle_ws_event(ws_spoof_event) is False
+        assert len(dispatched_prompts) == 3
