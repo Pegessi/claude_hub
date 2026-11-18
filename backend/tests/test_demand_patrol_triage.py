@@ -575,14 +575,28 @@ class FakeWorkspaceManager:
         )
         items = workspaces if workspaces is not None else [default_ws]
         self._workspaces = {ws.id: ws for ws in items}
+        self.sessions: dict[str, ManagedSession] = {}
         self.ensure_calls: list[tuple[str, EnsureWorkspaceAgentRequest, bool]] = []
         self.archived: list[tuple[str, str]] = []
+        self.quarantined: list[str] = []
 
     def get_workspace(self, workspace_id: str) -> Workspace | None:
         return self._workspaces.get(workspace_id)
 
     def list_workspaces(self) -> list[Workspace]:
         return list(self._workspaces.values())
+
+    def _quarantine_failed_session_deletion(self, session_id: str) -> None:
+        self.quarantined.append(session_id)
+        existing = self.sessions.get(session_id)
+        if existing is not None:
+            self.sessions[session_id] = existing.model_copy(
+                update={
+                    "status": ManagedSessionStatus.NEEDS_INPUT,
+                    "runtime_status": AgentRuntimeStatus.ATTENTION,
+                    "chat_paused": True,
+                }
+            )
 
     async def ensure_workspace_agent(
         self,
@@ -593,14 +607,19 @@ class FakeWorkspaceManager:
     ) -> ManagedSession:
         self.ensure_calls.append((workspace_id, payload, bootstrap))
         ws = self._workspaces[workspace_id]
-        return ManagedSession(
-            id="patrol-session-1",
+        session_id = (
+            "patrol-session-1"
+            if "patrol-session-1" not in self.sessions
+            else f"patrol-session-{len(self.ensure_calls)}"
+        )
+        session = ManagedSession(
+            id=session_id,
             workspace_id=workspace_id,
             workspace_path=ws.path,
             role=payload.role,
             title=payload.title or "Patrol triage",
-            tab_id="tab-patrol-1",
-            tmux_session="claude-hub-tab-patrol",
+            tab_id=f"tab-{session_id}",
+            tmux_session=f"claude-hub-{session_id}",
             agent_type=payload.agent_type,
             session_kind=payload.session_kind,
             target=ws.target,
@@ -613,26 +632,41 @@ class FakeWorkspaceManager:
             created_at=NOW,
             updated_at=NOW,
         )
+        self.sessions[session_id] = session
+        return session
 
     async def archive_session(self, workspace_id: str, session_id: str) -> ManagedSession:
         self.archived.append((workspace_id, session_id))
-        return ManagedSession(
-            id=session_id,
-            workspace_id=workspace_id,
-            workspace_path="/home/tiger/evo_workspace",
-            role=WorkspaceSessionRole.WORKER,
-            title="Archived",
-            tab_id="tab-patrol-1",
-            tmux_session="claude-hub-tab-patrol",
-            agent_type=AgentType.CODEX,
-            session_kind=SessionKind.CHAT,
-            target=ExecutionTarget.LOCAL,
-            archived=True,
-            status=ManagedSessionStatus.STOPPED,
-            runtime_status=AgentRuntimeStatus.OFFLINE,
-            created_at=NOW,
-            updated_at=NOW,
+        existing = self.sessions.get(session_id)
+        archived_session = (
+            existing.model_copy(
+                update={
+                    "archived": True,
+                    "status": ManagedSessionStatus.STOPPED,
+                    "runtime_status": AgentRuntimeStatus.OFFLINE,
+                }
+            )
+            if existing is not None
+            else ManagedSession(
+                id=session_id,
+                workspace_id=workspace_id,
+                workspace_path="/home/tiger/evo_workspace",
+                role=WorkspaceSessionRole.WORKER,
+                title="Archived",
+                tab_id="tab-patrol-1",
+                tmux_session="claude-hub-tab-patrol",
+                agent_type=AgentType.CODEX,
+                session_kind=SessionKind.CHAT,
+                target=ExecutionTarget.LOCAL,
+                archived=True,
+                status=ManagedSessionStatus.STOPPED,
+                runtime_status=AgentRuntimeStatus.OFFLINE,
+                created_at=NOW,
+                updated_at=NOW,
+            )
         )
+        self.sessions[session_id] = archived_session
+        return archived_session
 
 
 def candidate_for_adapter() -> FeishuCandidate:
@@ -1418,6 +1452,22 @@ async def test_human_questions_with_overlapping_names_or_quoted_notice_text_are_
             "name": "Kanishka",
         },
     }
+    kani_exact_name_human = {
+        **message(
+            "om_kani_human",
+            chat_type="p2p",
+            sender="ou_kani_person",
+            minutes_ago=11,
+            text="[redacted]，这个训练任务 OOM 失败了能帮忙排查吗 https://[redacted]/job/102",
+        ),
+        "chat_name": "Kani",
+        "sender": {
+            "id": "ou_kani_person",
+            "id_type": "open_id",
+            "sender_type": "user",
+            "name": "Kani",
+        },
+    }
     feishu_team_human = {
         **message(
             "om_feishu_team_human",
@@ -1454,8 +1504,31 @@ async def test_human_questions_with_overlapping_names_or_quoted_notice_text_are_
             "name": "Alice",
         },
     }
+    standalone_mr_card_fallback = {
+        "message_id": "om_standalone_mr_card",
+        "chat_id": "oc_unknown_bot_chat",
+        "chat_name": "Project Notifications",
+        "chat_type": "group",
+        "create_time": "2026-11-14 10:53",
+        "sender": {"id": "ou_legacy_webhook"},
+        "content": (
+            '<card title="Merge Request Review Requested">'
+            "@[redacted] Review requested https://[redacted]/[redacted]/merge_requests/999"
+            "</card>"
+        ),
+        "mentions": [{"id": ME, "name": "[redacted]"}],
+        "message_app_link": "https://applink.feishu.cn/client/message/om_standalone_mr_card",
+    }
     state = PatrolState(config=PatrolConfig(max_triage_per_run=5))
-    runner = FakeRunner([kanishka_dm, feishu_team_human, quoted_notice_human])
+    runner = FakeRunner(
+        [
+            kanishka_dm,
+            kani_exact_name_human,
+            feishu_team_human,
+            quoted_notice_human,
+            standalone_mr_card_fallback,
+        ]
+    )
     callback = AsyncMock(return_value=diagnosis())
     result = await run_feishu_triage(
         state,
@@ -1466,13 +1539,15 @@ async def test_human_questions_with_overlapping_names_or_quoted_notice_text_are_
         capabilities=capabilities,
     )
     assert not result.errors
-    assert result.candidates == 3
-    assert result.llm_invoked == 3
+    assert result.candidates == 4
+    assert result.llm_invoked == 4
     assert result.details["candidate_ids"] == [
         "om_kanishka",
+        "om_kani_human",
         "om_feishu_team_human",
         "om_alice_quoted",
     ]
+    assert "om_standalone_mr_card" in state.processed_feishu_ids
 
 
 async def test_workspace_delivery_and_archive_failures_are_isolated_per_candidate(
@@ -1481,8 +1556,6 @@ async def test_workspace_delivery_and_archive_failures_are_isolated_per_candidat
     from claude_hub.services.workspace_manager import DeliveryUncertain
 
     wm = FakeWorkspaceManager()
-    quarantined: list[str] = []
-    wm._quarantine_failed_session_deletion = quarantined.append  # type: ignore[attr-defined]
     monkeypatch.setattr(triage_module, "workspace_manager", wm)
     monkeypatch.setattr(
         triage_module,
@@ -1530,15 +1603,125 @@ async def test_workspace_delivery_and_archive_failures_are_isolated_per_candidat
     assert set(state.processed_feishu_ids) == {"om_first", "om_third"}
     assert state.feishu_watermark_iso == (NOW - timedelta(minutes=10)).isoformat()
 
-    # Now verify that an archive failure (e.g. MASO uncertain delivery sidecar blocking archive)
-    # quarantines the session and raises CommandError instead of silently swallowing it.
-    async def failing_archive(_ws_id: str, _sess_id: str) -> ManagedSession:
-        raise triage_module.managed_chat.ManagedChatDeliveryUncertain(
-            "cannot discard a managed Chat while MASO delivery is uncertain"
-        )
 
-    monkeypatch.setattr(wm, "archive_session", failing_archive)
+async def test_combined_primary_and_archive_failure_preserves_evidence_and_recovers_without_proliferation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wm = FakeWorkspaceManager()
+    monkeypatch.setattr(triage_module, "workspace_manager", wm)
+    monkeypatch.setattr(
+        triage_module,
+        "discover_maso_service",
+        AsyncMock(side_effect=triage_module.MasoServiceUnavailable("absent")),
+    )
+    monkeypatch.setattr(
+        triage_module.shutil, "which", lambda value: "/fake/codex" if value == "codex" else None
+    )
     monkeypatch.setattr(triage_module, "fence_session_stream", AsyncMock(return_value=True))
-    with pytest.raises(CommandError, match="could not be archived and remains quarantined"):
-        await diagnose_message(candidate_for_adapter())
-    assert quarantined == ["patrol-session-1"]
+
+    original_archive = wm.archive_session
+    delivery_uncertain = True
+
+    async def conditional_archive(ws_id: str, sess_id: str) -> ManagedSession:
+        if delivery_uncertain:
+            raise triage_module.managed_chat.ManagedChatDeliveryUncertain(
+                "cannot discard a managed Chat while MASO delivery is uncertain"
+            )
+        return await original_archive(ws_id, sess_id)
+
+    monkeypatch.setattr(wm, "archive_session", conditional_archive)
+
+    async def turn_by_state(
+        session: ManagedSession,
+        prompt: str,
+        *,
+        timeout_seconds: float,
+    ) -> str:
+        if delivery_uncertain:
+            raise CommandError("Patrol triage session delivery failed: MASO POST failed")
+        return diagnosis().model_dump_json()
+
+    monkeypatch.setattr(triage_module, "_run_workspace_triage_turn", turn_by_state)
+
+    state = PatrolState(config=PatrolConfig(max_triage_per_run=3))
+    dot = FakeDot()
+    runner = FakeRunner([message("om_retry_human", minutes_ago=10)])
+
+    # Run 1: both primary turn delivery and archive fail -> session quarantined,
+    # error + details.retained_sessions record both primary failure and retained session.
+    run1 = await run_feishu_triage(
+        state,
+        now=NOW,
+        dot=dot,
+        runner=runner,
+        capabilities=capabilities,
+    )
+    assert len(wm.ensure_calls) == 1
+    assert len(wm.sessions) == 1
+    assert wm.sessions["patrol-session-1"].archived is False
+    assert wm.sessions["patrol-session-1"].chat_paused is True
+    assert wm.sessions["patrol-session-1"].status == ManagedSessionStatus.NEEDS_INPUT
+    assert len(run1.errors) == 1
+    assert "om_retry_human: diagnosis failed (CommandError;" in run1.errors[0]
+    assert "session patrol-session-1 retained" in run1.errors[0]
+    assert run1.details["retained_sessions"] == {
+        "om_retry_human": {
+            "session_id": "patrol-session-1",
+            "cleanup_error": "cannot discard a managed Chat while MASO delivery is uncertain",
+        }
+    }
+
+    # Run 2 while still uncertain: does NOT spawn a second unarchived session!
+    run2 = await run_feishu_triage(
+        state,
+        now=NOW,
+        dot=dot,
+        runner=runner,
+        capabilities=capabilities,
+    )
+    assert len(wm.ensure_calls) == 1
+    assert len(wm.sessions) == 1
+    assert "session patrol-session-1 retained" in run2.errors[0]
+
+    # Also verify cancellation + archive failure preserves CancelledError with note.
+    entered = asyncio.Event()
+
+    async def cancellable_turn(
+        session: ManagedSession,
+        prompt: str,
+        *,
+        timeout_seconds: float,
+    ) -> str:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(triage_module, "_run_workspace_triage_turn", cancellable_turn)
+    cancel_candidate = triage_module._candidate(message("om_cancel_uncertain", minutes_ago=8))
+    cancel_task = asyncio.create_task(diagnose_message(cancel_candidate))
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    cancel_task.cancel()
+    with pytest.raises(asyncio.CancelledError) as cancel_info:
+        await cancel_task
+    assert any(
+        "retained_session_id=patrol-session-2" in note
+        for note in getattr(cancel_info.value, "__notes__", [])
+    )
+    # Clean up the second test session so Run 3 tests recovery of om_retry_human cleanly.
+    wm.sessions.pop("patrol-session-2", None)
+    monkeypatch.setattr(triage_module, "_run_workspace_triage_turn", turn_by_state)
+
+    # Run 3 after uncertainty clears: archives retained patrol-session-1, then runs
+    # a fresh session and archives it on completion.
+    delivery_uncertain = False
+    run3 = await run_feishu_triage(
+        state,
+        now=NOW,
+        dot=dot,
+        runner=runner,
+        capabilities=capabilities,
+    )
+    assert not run3.errors
+    assert run3.notified == 1
+    assert "om_retry_human" in state.processed_feishu_ids
+    assert all(sess.archived for sess in wm.sessions.values())
