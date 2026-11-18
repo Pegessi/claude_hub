@@ -2706,9 +2706,13 @@ async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
 @pytest.mark.asyncio
 async def test_bot_fallback_reply_send_and_auto_invite_without_send_as_user(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """User token with im:message (no im:message.send_as_user) sends/replies via bot fallback and auto-invites on 230002."""
+    """User token with im:message (no im:message.send_as_user) sends/replies via single authorized bot fallback."""
     import time
+
+    from claude_hub.services.feishu_bot import FeishuBotConfig, FeishuBotError, FeishuBotRemoteError
+    from claude_hub.services.feishu_bot_pool import FeishuBotPoolStore
 
     cli_cfg = tmp_path / "fb_cli_cfg"
     cli_data = tmp_path / "fb_cli_data"
@@ -2759,13 +2763,31 @@ async def test_bot_fallback_reply_send_and_auto_invite_without_send_as_user(
         lark_cli_dir=cli_cfg,
         lark_cli_data_dir=cli_data,
     )
-    rec = await store.aresolve_token(auto_import_lark_cli=True)
+    # Also store an unrelated user token with a secret in the same store; fallback must NEVER select it.
+    store.save_oauth_token(
+        open_id="ou_unrelated",
+        app_id="cli_unrelated",
+        access_token="unrelated-user-at",
+        refresh_token="unrelated-user-rt",
+        app_secret="unrelated-bot-secret",
+        expires_in=7200,
+        scope="im:message",
+    )
+
+    rec = await store.aresolve_token(open_id="ou_fb", app_id="cli_fb", auto_import_lark_cli=True)
     assert rec is not None
     assert rec.app_secret == "fb-bot-secret"
     assert not rec.has_scope("im:message.send_as_user")
+    assert store.resolve_fallback_bot_configs(preferred_app_id="cli_fb", record=rec) == [
+        ("cli_fb", "fb-bot-secret")
+    ]
+    # Mismatched preferred_app_id vs record.app_id fails closed
+    assert store.resolve_fallback_bot_configs(preferred_app_id="cli_unrelated", record=rec) == []
 
     calls: list[tuple[str, str, str, dict[str, Any]]] = []
     bot_in_chat = False
+    simulate_timeout = False
+    simulate_missing_id = False
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal bot_in_chat
@@ -2795,6 +2817,10 @@ async def test_bot_fallback_reply_send_and_auto_invite_without_send_as_user(
             return httpx.Response(200, json={"code": 0, "data": {}})
         if path.endswith("/reply"):
             assert auth_hdr == "Bearer t-bot-token"
+            if simulate_timeout:
+                raise httpx.ReadTimeout("simulated post-accept read timeout")
+            if simulate_missing_id:
+                return httpx.Response(200, json={"code": 0, "data": {}})
             if not bot_in_chat:
                 return httpx.Response(
                     400,
@@ -2809,6 +2835,15 @@ async def test_bot_fallback_reply_send_and_auto_invite_without_send_as_user(
             )
         if path == "/open-apis/im/v1/messages" and request.method == "POST":
             assert auth_hdr == "Bearer t-bot-token"
+            if simulate_timeout:
+                raise httpx.ReadTimeout("simulated post-accept read timeout")
+            if simulate_missing_id:
+                return httpx.Response(200, json={"code": 0, "data": {}})
+            if not bot_in_chat:
+                return httpx.Response(
+                    400,
+                    json={"code": 230002, "msg": "Bot/User can NOT be out of the chat."},
+                )
             return httpx.Response(
                 200,
                 json={"code": 0, "data": {"message_id": "om_bot_send_1"}},
@@ -2825,12 +2860,14 @@ async def test_bot_fallback_reply_send_and_auto_invite_without_send_as_user(
     try:
         user_client = FeishuUserClient(store, open_id="ou_fb", app_id="cli_fb", client=mock_http)
         preflight = await user_client.apreflight_scopes()
-        assert preflight.can_send_as_user is True
+        # F3: can_send_as_user truthfully reports im:message.send_as_user (False), while can_send is True via bot_fallback
+        assert preflight.can_send_as_user is False
         assert preflight.has_send_as_user_scope is False
+        assert preflight.can_send is True
         assert preflight.can_send_via_bot is True
         assert preflight.send_mode == "bot_fallback"
         assert preflight.fallback_bot_app_id == "cli_fb"
-        assert preflight.missing_required_scopes == ()
+        assert preflight.missing_required_scopes == ("im:message.send_as_user",)
 
         # Strict require_send_as_user_scope(allow_bot_fallback=False) still raises
         with pytest.raises(FeishuUserScopeError):
@@ -2839,7 +2876,30 @@ async def test_bot_fallback_reply_send_and_auto_invite_without_send_as_user(
         verified_rec = await user_client.arequire_send_as_user_scope(allow_bot_fallback=True)
         assert verified_rec.open_id == "ou_fb"
 
-        # Full /ai command flow works end-to-end (reacts as user, auto-invites bot on 230002, replies via bot)
+        # Default auto_invite_bot_to_chat=False does NOT mutate chat membership on 230002
+        with pytest.raises(FeishuBotRemoteError) as exc_230002:
+            await user_client.reply_as_user(
+                "om_trigger_fb",
+                "post",
+                {"zh_cn": {"content": [[{"tag": "text", "text": "hi"}]]}},
+                chat_id="oc_group_fb",
+            )
+        assert exc_230002.value.code == 230002
+        assert bot_in_chat is False
+        assert not any(p.endswith("/members") for _, p, _, _ in calls)
+
+        # Explicit auto_invite_bot_to_chat=True invites only cli_fb and succeeds
+        explicit_invite_reply = await user_client.reply_as_user(
+            "om_trigger_fb",
+            "post",
+            {"zh_cn": {"content": [[{"tag": "text", "text": "hi"}]]}},
+            chat_id="oc_group_fb",
+            auto_invite_bot_to_chat=True,
+        )
+        assert explicit_invite_reply.message_id == "om_bot_reply_1"
+        assert bot_in_chat is True
+
+        # Full /ai command flow works end-to-end when bot is in chat
         svc = FeishuAiCommandService(
             state_path=tmp_path / "fb_ai_cfg.json",
             token_store=store,
@@ -2870,11 +2930,45 @@ async def test_bot_fallback_reply_send_and_auto_invite_without_send_as_user(
         assert res.handled is True
         assert res.status == "completed"
         assert res.final_message_id == "om_bot_reply_1"
-        assert bot_in_chat is True
 
         # Direct send_as_user also uses bot fallback
         send_res = await user_client.send_as_user("oc_group_fb", "text", {"text": "hello"})
         assert send_res["message_id"] == "om_bot_send_1"
         assert send_res["send_mode"] == "bot_fallback"
+
+        # F2: Post-accept timeout or missing receipt raises immediately without switching/retrying another bot
+        simulate_timeout = True
+        before_calls = len(calls)
+        with pytest.raises(httpx.ReadTimeout):
+            await user_client.send_as_user("oc_group_fb", "text", {"text": "timeout-msg"})
+        assert len(calls) == before_calls + 1
+        simulate_timeout = False
+
+        simulate_missing_id = True
+        before_calls = len(calls)
+        with pytest.raises(FeishuBotError, match="delivery may have occurred"):
+            await user_client.send_as_user("oc_group_fb", "text", {"text": "missing-id-msg"})
+        assert len(calls) == before_calls + 1
+        simulate_missing_id = False
+
+        # F1: If cli_fb is registered in FeishuBotPoolStore and disabled, fallback is rejected even when keychain has secret
+        pool = FeishuBotPoolStore(path=tmp_path / "fb_pool.json")
+        bot_id = pool.create_bot(
+            name="FB Bot",
+            config=FeishuBotConfig(app_id="cli_fb", app_secret="fb-bot-secret"),
+        )
+        cur_rev = next(b.revision for b in pool.snapshot().bots if b.bot_id == bot_id)
+        pool.update_bot(bot_id, enabled=False, expected_revision=cur_rev)
+        monkeypatch.setattr(
+            "claude_hub.services.feishu_bot_pool.FeishuBotPoolStore",
+            lambda: pool,
+        )
+        assert store.resolve_fallback_bot_configs(preferred_app_id="cli_fb", record=rec) == []
+        disabled_pf = await user_client.apreflight_scopes(rec)
+        assert disabled_pf.can_send_via_bot is False
+        assert disabled_pf.can_send is False
+        assert disabled_pf.send_mode == "none"
+        with pytest.raises(FeishuUserScopeError):
+            await user_client.send_as_user("oc_group_fb", "text", {"text": "blocked-when-disabled"})
     finally:
         await mock_http.aclose()
