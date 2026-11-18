@@ -109,6 +109,8 @@ class MasoServer:
         self.ignore_cron_policy = False
         self.fail_status = False
         self.malformed_status = False
+        self.children: list[dict[str, Any]] = []
+        self.indicator: dict[str, Any] = {"running": [], "condensing": {}}
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -183,6 +185,8 @@ class MasoServer:
                 json={
                     "agent_id": "main",
                     "is_running": self.running,
+                    "children": self.children,
+                    "indicator": self.indicator,
                     "status": "running" if self.running else "idle",
                     "model": self.model,
                 },
@@ -260,6 +264,9 @@ class MasoServer:
                 raise httpx.ReadTimeout("ambiguous accepted POST with sk-sensitive-provider-body")
             self.running = True
             self.streams[-1].emit("agent_start", {"agent_id": "main"})
+            self.streams[-1].emit(
+                "message_injected", {"agent_id": "main", "injected": [{"id": body["message_id"]}]}
+            )
             self.streams[-1].emit("turn_start", {"agent_id": "main", "turn": 0})
             return httpx.Response(
                 202, json={"status": "queued", "message": {"id": body["message_id"]}}
@@ -573,7 +580,7 @@ def test_offsets_snapshots_and_compression_are_not_new_turns(response_event: str
     ]
     assert statuses[0].message_id == statuses[1].message_id
     assert (
-        adapter.normalize_line(raw("agent_end", stop_reason="completed"), ctx)[0].type
+        adapter.normalize_line(raw("hub_tree_settled", stop_reason="completed"), ctx)[0].type
         == AgentStreamEventType.TURN_COMPLETED
     )
 
@@ -855,9 +862,9 @@ async def test_ambiguous_post_is_not_retried_and_guard_is_released() -> None:
             await provider.send_message("single prompt", [])
         assert not provider.turn_in_flight
         assert len([1 for _, path, _ in server.calls if path.endswith("/messages")]) == 1
-        assert any(path.endswith("/control") for _, path, _ in server.calls)
+        assert not any(path.endswith(("/control", "/exit")) for _, path, _ in server.calls)
         assert server.streams[-1].closed
-        assert not server.pending and not server.running
+        assert server.pending and not server.running
         assert provider._delivery_uncertain and provider._delivery_path.exists()
         with pytest.raises(RuntimeError, match="Further sends are refused"):
             await provider.send_message("no retry", [])
@@ -1076,7 +1083,7 @@ async def test_verified_session_resume_does_not_create_or_replay_hub_context() -
     try:
         await provider.send_message("new prompt", [])
         assert not any(path == "/api/sessions" for _, path, _ in server.calls)
-        assert any(path.endswith("/control") for _, path, _ in server.calls)
+        assert not any(path.endswith(("/control", "/exit")) for _, path, _ in server.calls)
         assert provider.active_thread_id == "opaque-sid"
     finally:
         await provider.stop()
@@ -1239,7 +1246,7 @@ async def test_tool_confirmation_routes_to_http_without_another_prompt() -> None
 
 
 @pytest.mark.asyncio
-async def test_stream_disconnect_fails_and_stops_run_without_retrying_prompt() -> None:
+async def test_stream_disconnect_quarantines_without_aborting_or_retrying_prompt() -> None:
     server = MasoServer()
     provider = transport(server)
     try:
@@ -1250,11 +1257,13 @@ async def test_stream_disconnect_fails_and_stops_run_without_retrying_prompt() -
             assert record is not None
             if record["type"] == "hub_transport_error":
                 break
-        assert not server.running
+        assert server.running
+        assert not any(path.endswith(("/control", "/exit")) for _, path, _ in server.calls)
         assert len([1 for _, path, _ in server.calls if path.endswith("/messages")]) == 1
         provider.acknowledge_turn_complete()
-        await provider.send_message("try next turn", [])
-        assert len(server.streams) == 2
+        with pytest.raises(RuntimeError, match="Further sends are refused"):
+            await provider.send_message("do not silently interrupt children", [])
+        assert len(server.streams) == 1
     finally:
         await provider.stop()
 
@@ -1510,7 +1519,7 @@ def test_cancelled_adapter_epochs_do_not_accumulate() -> None:
         adapter.normalize_line(raw("llm_token", content="x" * 4096, content_offset=0), ctx)
         assert len(adapter._messages) == 1
         assert next(iter(adapter._messages))[1] == epoch
-    adapter.normalize_line(raw("agent_end", stop_reason="completed"), ctx)
+    adapter.normalize_line(raw("hub_tree_settled", stop_reason="completed"), ctx)
     assert not adapter._messages
 
 
@@ -1537,7 +1546,7 @@ async def test_abort_failure_recovers_cleanup_before_any_new_prompt() -> None:
 
 
 @pytest.mark.asyncio
-async def test_restart_with_pending_delivery_removes_only_owned_queue_item() -> None:
+async def test_restart_with_pending_delivery_preserves_native_work_and_queued_input() -> None:
     server = MasoServer()
     record = session(agent_session_id="opaque-sid", agent_session_id_verified=True)
     first = transport(server, record)
@@ -1549,11 +1558,12 @@ async def test_restart_with_pending_delivery_removes_only_owned_queue_item() -> 
     restarted = transport(server, record)
     try:
         await restarted.send_message("new prompt", [])
-        assert not server.pending
+        assert server.pending == {message_id: "old unconsumed prompt"}
         assert not any(path == "/api/sessions" for _, path, _ in server.calls)
-        delete = next(i for i, (method, _, _) in enumerate(server.calls) if method == "DELETE")
-        send = next(i for i, (_, path, _) in enumerate(server.calls) if path.endswith("/messages"))
-        assert delete < send
+        assert not any(
+            method == "DELETE" or path.endswith(("/control", "/exit"))
+            for method, path, _ in server.calls
+        )
     finally:
         await restarted.stop()
 
@@ -1569,7 +1579,7 @@ async def test_post_enqueued_after_timeout_keeps_chat_blocked_across_restart() -
         with pytest.raises(RuntimeError, match="acceptance is uncertain"):
             await provider.send_message("delayed prompt", [])
         assert not server.pending
-        # The service handler resumes after DELETE+abort already saw idle.
+        # The service handler resumes after the request timeout.
         assert server.delayed_message is not None
         server.pending[server.delayed_message["message_id"]] = "delayed prompt"
         await provider.stop()
@@ -1608,7 +1618,8 @@ async def test_stream_drops_before_successful_post_response_preserves_uncertaint
         server.send_release.set()
         with pytest.raises(RuntimeError, match="acceptance is uncertain"):
             await send
-        assert not server.running
+        assert server.running
+        assert not any(path.endswith(("/control", "/exit")) for _, path, _ in server.calls)
         assert provider._delivery_uncertain and provider._delivery_path.exists()
         with pytest.raises(RuntimeError, match="Further sends are refused"):
             await provider.send_message("never automatically retry", [])
@@ -1687,3 +1698,438 @@ async def test_native_cron_policy_failure_is_fail_closed_and_retryable(failure: 
         assert server.runtime_overrides["cron.enabled"] is False
     finally:
         await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_children_keep_one_hub_turn_through_multiple_root_wakeups() -> None:
+    server = MasoServer()
+    record = session()
+    provider = transport(server, record)
+    tailer = SessionTailer(
+        workspace_id=record.workspace_id,
+        session_id=record.id,
+        adapter=MasoEventAdapter(),
+        session_getter=lambda: record,
+        native_transport=provider,
+    )
+    live = await tailer.subscribe()
+    completion = await tailer.subscribe_completion()
+
+    async def read_live_until(kind: AgentStreamEventType, text: str = "") -> list:
+        received = []
+        async with asyncio.timeout(3):
+            while True:
+                event = await live.get()
+                received.append(event)
+                if event.type == kind and (not text or event.payload.get("text") == text):
+                    return received
+
+    try:
+        await tailer.send_message("Delegate and summarize the reports", [], "delegation")
+        stream = server.streams[-1]
+        stream.emit("agent_start", {"agent_id": "child-one"})
+        stream.emit("agent_start", {"agent_id": "child-two"})
+        stream.emit("post_llm_response", {"agent_id": "main", "content": "Waiting for reports."})
+        server.running = False
+        stream.emit("agent_end", {"agent_id": "main", "stop_reason": "completed"})
+        await read_live_until(AgentStreamEventType.TEXT_DELTA, "Waiting for reports.")
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(completion.get(), 0.1)
+        assert provider.turn_in_flight and not stream.closed
+
+        for index, child in enumerate(("child-one", "child-two"), 1):
+            # Each child SendMessage can wake the root before the child ends.
+            server.running = True
+            stream.emit("agent_start", {"agent_id": "main"})
+            stream.emit("turn_start", {"agent_id": "main", "turn": 0})
+            stream.emit("agent_end", {"agent_id": child, "stop_reason": "completed"})
+            stream.emit(
+                "tool_use", {"agent_id": "main", "tool_call_id": f"read-{index}", "tool": "Read"}
+            )
+            stream.emit(
+                "tool_result",
+                {
+                    "agent_id": "main",
+                    "tool_call_id": f"read-{index}",
+                    "tool": "Read",
+                    "output": "ok",
+                },
+            )
+            stream.emit("post_llm_response", {"agent_id": "main", "content": f"Report {index}."})
+            await read_live_until(AgentStreamEventType.TEXT_DELTA, f"Report {index}.")
+            page = await tailer._store.read_since(-1, 100)
+            assert any(e.payload.get("text") == f"Report {index}." for e in page.events)
+            server.running = False
+            stream.emit("agent_end", {"agent_id": "main", "stop_reason": "completed"})
+            if index == 1:
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(completion.get(), 0.1)
+                assert provider.turn_in_flight and not stream.closed
+
+        terminal = await asyncio.wait_for(completion.get(), 3)
+        assert terminal.type == AgentStreamEventType.TURN_COMPLETED
+        assert terminal.turn_id == "delegation"
+        assert terminal.payload["status"] == "completed"
+        await read_live_until(AgentStreamEventType.TURN_COMPLETED)
+        page = await tailer._store.read_since(-1, 100)
+        assert len([e for e in page.events if e.type == AgentStreamEventType.TURN_STARTED]) == 1
+        assert len([e for e in page.events if e.type == AgentStreamEventType.TURN_COMPLETED]) == 1
+        texts = [e for e in page.events if e.type == AgentStreamEventType.TEXT_DELTA]
+        assert [e.payload["text"] for e in texts] == [
+            "Waiting for reports.",
+            "Report 1.",
+            "Report 2.",
+        ]
+        assert len({e.message_id for e in texts}) == 3
+        assert all(e.turn_id == "delegation" for e in page.events)
+        assert (
+            len([e for e in page.events if e.type == AgentStreamEventType.TOOL_CALL_STARTED]) == 2
+        )
+        assert not provider.turn_in_flight and not provider._delivery_path.exists()
+        assert not any(path.endswith(("/control", "/exit")) for _, path, _ in server.calls)
+    finally:
+        tailer.unsubscribe(live)
+        tailer.unsubscribe_completion(completion)
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_late_root_wakeup_after_quiescence_is_live_persisted_and_headless_safe(
+    monkeypatch,
+) -> None:
+    from claude_hub.services.agent_stream import tailer as tailer_module
+
+    monkeypatch.setattr(tailer_module, "POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(tailer_module, "IDLE_TTL_S", 0)
+    server = MasoServer()
+    record = session()
+    provider = transport(server, record)
+    tailer = SessionTailer(
+        workspace_id=record.workspace_id,
+        session_id=record.id,
+        adapter=MasoEventAdapter(),
+        session_getter=lambda: record,
+        native_transport=provider,
+    )
+    completion = await tailer.subscribe_completion()
+    live = await tailer.subscribe()
+    try:
+        await tailer.send_message("Start", [], "initial")
+        stream = server.streams[-1]
+        stream.emit("post_llm_response", {"agent_id": "main", "content": "Initial."})
+        server.running = False
+        stream.emit("agent_end", {"agent_id": "main", "stop_reason": "completed"})
+        assert (await asyncio.wait_for(completion.get(), 2)).turn_id == "initial"
+        tailer.unsubscribe_completion(completion)
+        tailer.unsubscribe(live)
+        await asyncio.sleep(0.05)
+        assert tailer.is_running() and not stream.closed
+
+        # /status has no pending-RPC fence. Keep the SSE subscription even if
+        # the scheduler starts this root beyond the quiescence window.
+        server.running = True
+        stream.emit("agent_start", {"agent_id": "main"})
+        stream.emit("turn_start", {"agent_id": "main", "turn": 0})
+        stream.emit("post_llm_response", {"agent_id": "main", "content": "Late report."})
+        for _ in range(100):
+            page = await tailer._store.read_since(-1, 100)
+            if any(e.payload.get("text") == "Late report." for e in page.events):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("Headless root wake-up was not persisted")
+        assert provider.turn_in_flight
+        starts = [e for e in page.events if e.type == AgentStreamEventType.TURN_STARTED]
+        assert len(starts) == 2 and starts[-1].turn_id != "initial"
+        assert starts[-1].run_epoch == 2
+        wake_id = starts[-1].turn_id
+        assert all(
+            e.turn_id == wake_id for e in page.events if e.payload.get("text") == "Late report."
+        )
+
+        # Reattach while still running: no message POST or provider reconnect.
+        completion = await tailer.subscribe_completion()
+        live = await tailer.subscribe()
+        stream.emit("tool_use", {"agent_id": "main", "tool_call_id": "wake-tool", "tool": "Read"})
+        stream.emit(
+            "tool_result",
+            {"agent_id": "main", "tool_call_id": "wake-tool", "tool": "Read", "output": "ok"},
+        )
+        stream.emit("turn_start", {"agent_id": "main", "turn": 1})
+        stream.emit("post_llm_response", {"agent_id": "main", "content": "Wake finished."})
+        server.running = False
+        stream.emit("agent_end", {"agent_id": "main", "stop_reason": "completed"})
+        terminal = await asyncio.wait_for(completion.get(), 2)
+        assert terminal.turn_id == wake_id
+        assert terminal.payload["final_text"] == "Wake finished."
+        received = []
+        while not live.empty():
+            received.append(live.get_nowait())
+        assert any(e.payload.get("text") == "Wake finished." for e in received)
+        assert any(e.type == AgentStreamEventType.TOOL_CALL_STARTED for e in received)
+        assert received[-1].type == AgentStreamEventType.TURN_COMPLETED
+        assert len(server.streams) == 1
+        assert sum(path.endswith("/messages") for _, path, _ in server.calls) == 1
+        assert not any(path.endswith(("/control", "/exit")) for _, path, _ in server.calls)
+    finally:
+        tailer.unsubscribe(live)
+        tailer.unsubscribe_completion(completion)
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "activity", ["nested-running", "nested-waiting", "paused", "condensing", "root-finalizer"]
+)
+async def test_root_end_waits_for_authoritative_tree_activity(activity: str) -> None:
+    server = MasoServer()
+    provider = transport(server)
+    try:
+        await provider.send_message("Work", [])
+        stream = server.streams[-1]
+        server.running = activity == "root-finalizer"
+        if activity.startswith("nested"):
+            server.children = [
+                {"status": "idle", "children": [{"status": activity.split("-")[1], "children": []}]}
+            ]
+        elif activity == "paused":
+            server.indicator["running"] = ["paused-child"]
+        elif activity == "condensing":
+            server.indicator["condensing"] = {"main": "Condenser"}
+        stream.emit("agent_end", {"agent_id": "main", "stop_reason": "completed"})
+        while True:
+            event = await asyncio.wait_for(provider.read_line(), 2)
+            assert event is not None and event["type"] != "hub_tree_settled"
+            if event["type"] == "hub_tree_waiting":
+                break
+        server.running = False
+        server.children = []
+        server.indicator = {"running": [], "condensing": {}}
+        while True:
+            event = await asyncio.wait_for(provider.read_line(), 2)
+            assert event is not None
+            if event["type"] == "hub_tree_settled":
+                break
+        provider.acknowledge_turn_complete()
+        assert not stream.closed
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_during_idle_child_wait_fences_automatic_root_wake() -> None:
+    server = MasoServer()
+    provider = transport(server)
+    try:
+        await provider.send_message("Delegate", [])
+        stream = server.streams[-1]
+        stream.emit("agent_start", {"agent_id": "child"})
+        server.running = False
+        stream.emit("agent_end", {"agent_id": "main", "stop_reason": "completed"})
+        while True:
+            event = await asyncio.wait_for(provider.read_line(), 2)
+            assert event is not None
+            if event["type"] == "hub_tree_waiting":
+                break
+        generation = provider._stdout_generation
+        await provider.cancel_active_turn()
+        assert stream.closed and not provider.turn_in_flight
+        assert not provider.accepts_notification({**raw("agent_start"), "generation": generation})
+        assert any(path.endswith("/control") for _, path, _ in server.calls)
+        assert any(path.endswith("/exit") for _, path, _ in server.calls)
+    finally:
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_status_monitor_failure_cannot_hang_or_abort_children() -> None:
+    server = MasoServer()
+    provider = transport(server)
+    try:
+        await provider.send_message("Delegate", [])
+        stream = server.streams[-1]
+        stream.emit("agent_start", {"agent_id": "child"})
+        stream.emit("agent_end", {"agent_id": "main", "stop_reason": "completed"})
+        server.fail_status = True
+        while True:
+            event = await asyncio.wait_for(provider.read_line(), 2)
+            assert event is not None
+            if event["type"] == "hub_transport_error":
+                break
+        assert stream.closed and server.running
+        assert not any(path.endswith(("/control", "/exit")) for _, path, _ in server.calls)
+        provider.acknowledge_turn_complete()
+        with pytest.raises(RuntimeError, match="Further sends are refused"):
+            await provider.send_message("No destructive retry", [])
+    finally:
+        server.fail_status = False
+        await provider.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_phase", ["preparation", "post"])
+async def test_native_wake_cannot_retire_a_new_user_submission(blocked_phase: str) -> None:
+    server = MasoServer()
+    record = session()
+    provider = transport(server, record)
+    tailer = SessionTailer(
+        workspace_id=record.workspace_id,
+        session_id=record.id,
+        adapter=MasoEventAdapter(),
+        session_getter=lambda: record,
+        native_transport=provider,
+    )
+    completion = await tailer.subscribe_completion()
+    entered, release = asyncio.Event(), asyncio.Event()
+    send = None
+
+    async def before_send() -> None:
+        entered.set()
+        await release.wait()
+
+    try:
+        await tailer.send_message("Initial", [], "initial")
+        stream = server.streams[-1]
+        server.running = False
+        stream.emit("agent_end", {"agent_id": "main", "stop_reason": "completed"})
+        await asyncio.wait_for(completion.get(), 2)
+        if blocked_phase == "post":
+            server.send_entered, server.send_release = entered, release
+        send = asyncio.create_task(
+            tailer.send_message(
+                "User next",
+                [],
+                "next",
+                before_send=before_send if blocked_phase == "preparation" else None,
+            )
+        )
+        await asyncio.wait_for(entered.wait(), 2)
+        stream.emit("agent_start", {"agent_id": "main"})
+        stream.emit("turn_start", {"agent_id": "main", "turn": 0})
+        stream.emit(
+            "post_llm_response", {"agent_id": "main", "content": "Native report, not user response"}
+        )
+        stream.emit("agent_end", {"agent_id": "main", "stop_reason": "completed"})
+        await asyncio.sleep(0.8)
+        release.set()
+        await asyncio.wait_for(send, 2)
+        await asyncio.sleep(0.1)
+        assert completion.empty(), "Unrelated native end completed the newly submitted user prompt"
+        assert tailer._active_turn_id == "next" and provider.turn_in_flight
+        stream.emit("post_llm_response", {"agent_id": "main", "content": "Actual user answer."})
+        server.running = False
+        stream.emit("agent_end", {"agent_id": "main", "stop_reason": "completed"})
+        terminal = await asyncio.wait_for(completion.get(), 2)
+        assert terminal.turn_id == "next" and terminal.payload["status"] == "completed"
+        assert "Actual user answer." in terminal.payload["assistant_text"]
+        page = await tailer._store.read_since(-1, 100)
+        starts = [e.turn_id for e in page.events if e.type == AgentStreamEventType.TURN_STARTED]
+        ends = [e.turn_id for e in page.events if e.type == AgentStreamEventType.TURN_COMPLETED]
+        assert starts == ends == ["initial", "next"]
+        assert not any(e.turn_id is None for e in page.events)
+    finally:
+        release.set()
+        if send is not None:
+            await asyncio.gather(send, return_exceptions=True)
+        tailer.unsubscribe_completion(completion)
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop", [False, True])
+async def test_late_child_only_wake_has_owned_stoppable_turn(stop: bool) -> None:
+    server = MasoServer()
+    record = session()
+    provider = transport(server, record)
+    tailer = SessionTailer(
+        workspace_id=record.workspace_id,
+        session_id=record.id,
+        adapter=MasoEventAdapter(),
+        session_getter=lambda: record,
+        native_transport=provider,
+    )
+    completion = await tailer.subscribe_completion()
+    try:
+        await tailer.send_message("Initial", [], "initial")
+        stream = server.streams[-1]
+        server.running = False
+        stream.emit("agent_end", {"agent_id": "main", "stop_reason": "completed"})
+        await asyncio.wait_for(completion.get(), 2)
+        stream.emit("agent_start", {"agent_id": "child"})
+        stream.emit("turn_start", {"agent_id": "child", "turn": 0})
+        stream.emit("tool_use", {"agent_id": "child", "tool_call_id": "child-task", "tool": "Bash"})
+        stream.emit("post_llm_response", {"agent_id": "child", "content": "Child woke."})
+        for _ in range(100):
+            page = await tailer._store.read_since(-1, 100)
+            if any(e.payload.get("text") == "Child woke." for e in page.events):
+                break
+            await asyncio.sleep(0.01)
+        assert provider.turn_in_flight and tailer._active_turn_id
+        wake_id = tailer._active_turn_id
+        assert all(e.turn_id == wake_id for e in page.events if e.payload.get("subagent_thread"))
+        if stop:
+            assert await tailer.cancel_turn(wake_id)
+            await tailer._await_turn_teardown()
+        else:
+            stream.emit(
+                "tool_result",
+                {
+                    "agent_id": "child",
+                    "tool_call_id": "child-task",
+                    "tool": "Bash",
+                    "output": "done",
+                },
+            )
+            stream.emit("agent_end", {"agent_id": "child", "stop_reason": "completed"})
+        terminal = await asyncio.wait_for(completion.get(), 2)
+        assert terminal.turn_id == wake_id
+        assert terminal.payload["status"] == ("cancelled" if stop else "completed")
+        assert not provider.turn_in_flight
+    finally:
+        tailer.unsubscribe_completion(completion)
+        await tailer.stop()
+
+
+@pytest.mark.asyncio
+async def test_input_retained_before_agent_start_can_finish_failed_turn() -> None:
+    server = MasoServer()
+    record = session()
+    original = server.handle
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/messages"):
+            body = json.loads(request.content)
+            stream = server.streams[-1]
+            stream.emit(
+                "message_injected", {"agent_id": "main", "injected": [{"id": body["message_id"]}]}
+            )
+            stream.emit("agent_error", {"agent_id": "main", "error": "before_input failed"})
+            stream.emit("agent_end", {"agent_id": "main", "stop_reason": "error"})
+            return httpx.Response(202, json={"status": "queued"})
+        return await original(request)
+
+    provider = MasoHttpSession(record)
+    provider._client = httpx.AsyncClient(
+        base_url="http://maso.test", transport=httpx.MockTransport(handle)
+    )
+    tailer = SessionTailer(
+        workspace_id=record.workspace_id,
+        session_id=record.id,
+        adapter=MasoEventAdapter(),
+        session_getter=lambda: record,
+        native_transport=provider,
+    )
+    completion = await tailer.subscribe_completion()
+    try:
+        await tailer.send_message("Fails before agent_start", [], "input-error")
+        async with asyncio.timeout(2):
+            while True:
+                event = await completion.get()
+                if event.type == AgentStreamEventType.TURN_COMPLETED:
+                    break
+        assert event.turn_id == "input-error" and event.payload["status"] == "failed"
+        assert not provider.turn_in_flight and provider._awaiting_message_id is None
+        assert not any(path.endswith(("/control", "/exit")) for _, path, _ in server.calls)
+    finally:
+        tailer.unsubscribe_completion(completion)
+        await tailer.stop()

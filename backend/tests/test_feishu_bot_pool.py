@@ -2824,6 +2824,7 @@ def test_completed_native_turn_is_not_replayed_after_route_cancellation(
             self._records: asyncio.Queue[Any] = asyncio.Queue()
             self._turn_in_flight = False
             self.eof_is_fatal = False
+            self.keep_alive_when_idle = False
             self.exit_error = None
             self.last_error = None
             self.sent_messages: list[str] = []
