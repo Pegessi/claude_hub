@@ -871,12 +871,18 @@ class FeishuAiCommandService:
                 )
 
             if hasattr(user_client, "arequire_send_as_user_scope"):
-                await user_client.arequire_send_as_user_scope()
+                try:
+                    await user_client.arequire_send_as_user_scope(allow_bot_fallback=True)
+                except TypeError:
+                    await user_client.arequire_send_as_user_scope()
             else:
                 async with self._token_store.async_file_lock(
                     app_id=cfg.app_id, open_id=cfg.owner_open_id
                 ):
-                    user_client.require_send_as_user_scope()
+                    try:
+                        user_client.require_send_as_user_scope(allow_bot_fallback=True)
+                    except TypeError:
+                        user_client.require_send_as_user_scope()
             if resuming_completed and pending_item is not None:
                 raw_refs = pending_item.get("refs")
                 refs = (
@@ -913,13 +919,23 @@ class FeishuAiCommandService:
                 )
                 interim_text = build_interim_reply_text(parsed, refs, footer=cfg.footer)
                 interim_post = build_ai_post_payload(interim_text, footer=cfg.footer)
-                interim_receipt = await user_client.reply_as_user(
-                    message.message_id,
-                    "post",
-                    interim_post,
-                    reply_in_thread=reply_in_thread,
-                    uuid=bounded_message_uuid(message.message_id, "interim"),
-                )
+                try:
+                    interim_receipt = await user_client.reply_as_user(
+                        message.message_id,
+                        "post",
+                        interim_post,
+                        chat_id=message.chat_id,
+                        reply_in_thread=reply_in_thread,
+                        uuid=bounded_message_uuid(message.message_id, "interim"),
+                    )
+                except TypeError:
+                    interim_receipt = await user_client.reply_as_user(
+                        message.message_id,
+                        "post",
+                        interim_post,
+                        reply_in_thread=reply_in_thread,
+                        uuid=bounded_message_uuid(message.message_id, "interim"),
+                    )
 
                 lock_key = f"{message.chat_id}:{message.thread_id or 'main'}"
                 with self._lock:
@@ -971,13 +987,23 @@ class FeishuAiCommandService:
 
             final_text = ensure_ai_footer(answer, footer=cfg.footer)
             final_post = build_ai_post_payload(final_text, footer=cfg.footer)
-            final_receipt = await user_client.reply_as_user(
-                message.message_id,
-                "post",
-                final_post,
-                reply_in_thread=reply_in_thread,
-                uuid=bounded_message_uuid(message.message_id, "final"),
-            )
+            try:
+                final_receipt = await user_client.reply_as_user(
+                    message.message_id,
+                    "post",
+                    final_post,
+                    chat_id=message.chat_id,
+                    reply_in_thread=reply_in_thread,
+                    uuid=bounded_message_uuid(message.message_id, "final"),
+                )
+            except TypeError:
+                final_receipt = await user_client.reply_as_user(
+                    message.message_id,
+                    "post",
+                    final_post,
+                    reply_in_thread=reply_in_thread,
+                    uuid=bounded_message_uuid(message.message_id, "final"),
+                )
             result = self._done_result(
                 message,
                 status="completed",
@@ -1040,13 +1066,23 @@ class FeishuAiCommandService:
             )
             error_post = build_ai_post_payload(error_text, footer=cfg.footer)
             try:
-                final_receipt = await user_client.reply_as_user(
-                    message.message_id,
-                    "post",
-                    error_post,
-                    reply_in_thread=reply_in_thread,
-                    uuid=bounded_message_uuid(message.message_id, "error"),
-                )
+                try:
+                    final_receipt = await user_client.reply_as_user(
+                        message.message_id,
+                        "post",
+                        error_post,
+                        chat_id=message.chat_id,
+                        reply_in_thread=reply_in_thread,
+                        uuid=bounded_message_uuid(message.message_id, "error"),
+                    )
+                except TypeError:
+                    final_receipt = await user_client.reply_as_user(
+                        message.message_id,
+                        "post",
+                        error_post,
+                        reply_in_thread=reply_in_thread,
+                        uuid=bounded_message_uuid(message.message_id, "error"),
+                    )
             except Exception:
                 logger.warning("Failed to post /ai error fallback reply for %s", message.message_id)
             result = self._done_result(
