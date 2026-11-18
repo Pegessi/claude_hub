@@ -61,6 +61,7 @@ def patrol_run(ctx: click.Context, channel: str, dry_run: bool, notify: bool) ->
 @click.option("--feishu-interval", type=click.IntRange(1, 1440), default=None)
 @click.option("--window-start", default=None)
 @click.option("--window-end", default=None)
+@click.option("--workspace-id", default=None)
 @click.pass_context
 def patrol_config(
     ctx: click.Context,
@@ -71,6 +72,7 @@ def patrol_config(
     feishu_interval: int | None,
     window_start: str | None,
     window_end: str | None,
+    workspace_id: str | None,
 ) -> None:
     changes: dict[str, Any] = {}
     for name, value in (
@@ -80,6 +82,7 @@ def patrol_config(
         ("feishu_interval_minutes", feishu_interval),
         ("feishu_window_start", window_start),
         ("feishu_window_end", window_end),
+        ("workspace_id", workspace_id),
     ):
         if value is not None:
             changes[name] = value

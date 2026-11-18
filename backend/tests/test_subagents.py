@@ -1343,3 +1343,58 @@ async def test_parent_close_waits_for_a_child_close_in_progress(env) -> None:
     closed = await client.post(f"/api/subagents/{parent['subagent_id']}/close")
     await other
     assert closed.status_code == 200 and closed.json()["closed"] is True
+
+
+async def test_startup_and_purge_delete_legacy_patrol_triage_records_and_tabs(
+    tmp_path: Path,
+) -> None:
+    chats = FakeChats()
+    chats.add_tab("patrol-tab-1", cwd=str(tmp_path), subagent_id="sa-patrol-1")
+    chats.add_tab("keep-tab-1", cwd=str(tmp_path), subagent_id="sa-keep-1")
+
+    async def delete_tab_async(tab_id: str) -> bool:
+        chats.delete_tab(tab_id)
+        return True
+
+    runtime = dataclasses.replace(chats.runtime(), delete_tab=delete_tab_async)
+    path = tmp_path / "subagents.json"
+    now = datetime.now(timezone.utc).isoformat()
+    write_document(
+        path,
+        {
+            "version": 1,
+            "subagents": {
+                "sa-patrol-1": {
+                    "id": "sa-patrol-1",
+                    "tab_id": "patrol-tab-1",
+                    "agent_type": "maso",
+                    "cwd": str(tmp_path),
+                    "name": "Patrol triage: om_legacy_1",
+                    "keep": False,
+                    "closed": True,
+                    "created_at": now,
+                    "turns": [],
+                },
+                "sa-keep-1": {
+                    "id": "sa-keep-1",
+                    "tab_id": "keep-tab-1",
+                    "agent_type": "codex",
+                    "cwd": str(tmp_path),
+                    "name": "Normal subagent",
+                    "keep": True,
+                    "closed": False,
+                    "created_at": now,
+                    "turns": [],
+                },
+            },
+        },
+    )
+    service = SubagentService(path, runtime, archive_grace_seconds=0)
+    await service.start()
+    remaining_ids = [s.id for s in service.list_subagents(include_closed=True)]
+    assert remaining_ids == ["sa-keep-1"]
+    assert "patrol-tab-1" not in chats.tabs
+    assert "keep-tab-1" in chats.tabs
+    stored = read_document(path)
+    assert list(stored["subagents"].keys()) == ["sa-keep-1"]
+    await service.stop()

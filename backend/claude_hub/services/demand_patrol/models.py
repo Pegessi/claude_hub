@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from typing import Any, Literal, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 PatrolChannel = Literal["all", "feishu", "daily"]
+DEFAULT_PATROL_WORKSPACE_ID = "9b6725ac-68fa-4111-8ea9-b729764c6e97"
 
 
 class PatrolNotifier(Protocol):
@@ -22,6 +24,7 @@ class PatrolConfig(BaseModel):
 
     enabled: bool = False
     timezone: str = "Asia/Shanghai"
+    workspace_id: str = DEFAULT_PATROL_WORKSPACE_ID
     feishu_enabled: bool = True
     feishu_interval_minutes: int = Field(default=20, ge=1, le=1440)
     feishu_window_start: str = "09:30"
@@ -31,6 +34,31 @@ class PatrolConfig(BaseModel):
     stalled_hours: float = Field(default=48.0, gt=0, le=8760, allow_inf_nan=False)
     pending_top_n: int = Field(default=5, ge=1, le=50)
     max_triage_per_run: int = Field(default=3, ge=1, le=20)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_workspace_id_alias(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping) or "patrol_workspace_id" not in value:
+            return value
+        copied = dict(value)
+        alias_value = copied.pop("patrol_workspace_id")
+        if "workspace_id" not in copied or copied["workspace_id"] is None:
+            copied["workspace_id"] = alias_value
+        elif copied["workspace_id"] != alias_value:
+            raise ValueError("workspace_id and patrol_workspace_id must match")
+        return copied
+
+    @property
+    def patrol_workspace_id(self) -> str:
+        return self.workspace_id
+
+    @field_validator("workspace_id")
+    @classmethod
+    def valid_workspace_id(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("workspace_id must not be empty")
+        return cleaned
 
     @field_validator("timezone")
     @classmethod

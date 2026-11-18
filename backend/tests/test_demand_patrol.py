@@ -27,6 +27,7 @@ from claude_hub.cli import main as cli_main
 from claude_hub.cli.client import HubClient
 from claude_hub.services.demand_patrol import commands
 from claude_hub.services.demand_patrol.models import (
+    DEFAULT_PATROL_WORKSPACE_ID,
     PatrolConfig,
     PatrolRunRecord,
     PatrolState,
@@ -111,11 +112,18 @@ def test_exact_shanghai_daily_due_windows(offset: int, slots: list[str]) -> None
 def test_default_config_is_disabled_and_validation() -> None:
     default_cfg = PatrolConfig()
     assert default_cfg.enabled is False
+    assert default_cfg.workspace_id == DEFAULT_PATROL_WORKSPACE_ID
+    assert default_cfg.patrol_workspace_id == DEFAULT_PATROL_WORKSPACE_ID
     assert default_cfg.feishu_enabled is True
     assert default_cfg.daily_enabled is True
     assert default_cfg.daily_slots == ["11:00", "17:30"]
+    alias_cfg = PatrolConfig.model_validate({"patrol_workspace_id": "ws-custom"})
+    assert alias_cfg.workspace_id == "ws-custom"
+    assert alias_cfg.patrol_workspace_id == "ws-custom"
     for changes in [
         {"timezone": "not/a-zone"},
+        {"workspace_id": "   "},
+        {"workspace_id": "ws-a", "patrol_workspace_id": "ws-b"},
         {"feishu_window_start": "9:30"},
         {"daily_slots": ["24:00"]},
         {"feishu_interval_minutes": 0},
@@ -348,6 +356,8 @@ async def test_rest_status_partial_config_run_and_auth(
                 "10:00",
                 "--window-end",
                 "22:00",
+                "--workspace-id",
+                "ws-patrol",
             ],
             "PUT",
             "/api/patrol/config",
@@ -359,6 +369,7 @@ async def test_rest_status_partial_config_run_and_auth(
                 "feishu_interval_minutes": 30,
                 "feishu_window_start": "10:00",
                 "feishu_window_end": "22:00",
+                "workspace_id": "ws-patrol",
             },
         ),
         (["dot", "patrol"], "GET", "/api/dot/patrol", None),

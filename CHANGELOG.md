@@ -7,6 +7,11 @@
 
 ## Released
 
+### fix(patrol): route Feishu patrol triage to an Agent Workspace Chat session and filter out bot notifications
+
+- Route `diagnose_message()` (`services/demand_patrol/feishu_triage.py`) through an ephemeral Workspace Chat `ManagedSession` (`ensure_workspace_agent(..., bootstrap=False)` + `dispatch_external_chat_and_wait`) in the configured patrol workspace (`PatrolConfig.workspace_id`, defaulting to `evo_workspace` `9b6725ac-68fa-4111-8ea9-b729764c6e97`, with `patrol_workspace_id` alias support and first-available workspace fallback) and auto-archive the workspace session in a `finally` block instead of creating standalone Terminal `SubagentService` records.
+- Filter out automated bot/app/system senders and notification cards (including `Codebase Assistant`, `[redacted]`, `[redacted]`, `[redacted]`, `[redacted]`, `[redacted]`, and bot P2P chats) in `_candidate()` and `filter_unanswered()` before LLM triage so only human questions are triaged and synced to InfoWall, and purge legacy `Patrol triage: *` subagent records and tabs on `SubagentService` startup (`services/subagents.py`).
+
 ### fix(antigravity): suppress false trailing API error banners after completed replies
 
 - Track per-turn tool/response/error step ordering (`saw_tool_step`, `post_tool_text`, `saw_error_step`, `saw_error_after_response`) in `AntigravityEventAdapter` (`services/agent_stream/antigravity_events.py`) and suppress false `result.status = "ERROR"` banners when `agy`'s `steps.BuildJSONOutput` / `LastStepError` contaminates a completed turn's `result` with an earlier recovered `API error (attempt N): ...` retry notice or trailing `streamGenerateContent` EOF.

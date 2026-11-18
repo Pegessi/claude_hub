@@ -17,9 +17,17 @@ from zoneinfo import ZoneInfo
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from claude_hub.models import AgentType
-from claude_hub.models.subagent import SubagentCreate, SubagentTurnStatus
+from claude_hub.models import (
+    AgentType,
+    EnsureWorkspaceAgentRequest,
+    ExecutionTarget,
+    ManagedSession,
+    SessionKind,
+    WorkspaceSessionRole,
+)
 from claude_hub.services.agent_stream.maso_http import MasoServiceUnavailable
+from claude_hub.services.agent_stream.providers.spec import all_specs
+from claude_hub.services.agent_stream.tailer import fence_session_stream
 from claude_hub.services.demand_patrol.commands import (
     CommandError,
     CommandRunner,
@@ -27,10 +35,15 @@ from claude_hub.services.demand_patrol.commands import (
     infowall_env,
     run_command,
 )
-from claude_hub.services.demand_patrol.models import PatrolNotifier, PatrolRunRecord, PatrolState
+from claude_hub.services.demand_patrol.models import (
+    DEFAULT_PATROL_WORKSPACE_ID,
+    PatrolNotifier,
+    PatrolRunRecord,
+    PatrolState,
+)
 from claude_hub.services.maso_discovery import discover_maso_service
-from claude_hub.services.runtime_isolation import resolve_runtime_home
-from claude_hub.services.subagents import SubagentError, get_subagent_service
+from claude_hub.services.subagents import SubagentError
+from claude_hub.services.workspace_manager import workspace_manager
 
 _ACTIONABLE = re.compile(
     r"(?:seed|megavision)\.(?:bytedance|byteintl)\.net|[redacted]"
@@ -41,6 +54,49 @@ _ACTIONABLE = re.compile(
     re.IGNORECASE,
 )
 _PREFERRED_MODEL = "[redacted]_reasoning_high"
+_MODEL_ENV_KEYS = {
+    agent_type: spec.model_env_key
+    for agent_type, spec in all_specs().items()
+    if spec.model_env_key is not None
+}
+_AUTOMATED_CHAT_IDS = frozenset(
+    {
+        "[redacted]",  # Codebase Assistant
+    }
+)
+_AUTOMATED_NAME_PATTERNS = re.compile(
+    r"(?:"
+    r"codebase\s*assistant"
+    r"|kani(?:权限通知|\s*permission\s*notification)?"
+    r"|bpm(?:小助手|\s*assistant)?"
+    r"|merlin\s*bot"
+    r"|[redacted]"
+    r"|[redacted]"
+    r"|定期提醒"
+    r"|飞书(?:审批|安全|考勤|日历|文档|云文档|妙记|汇报|人事|招聘|报销|采购|法务|合同|工单|值班|监控|告警)?(?:助手|机器人|通知|提醒)?"
+    r"|(?:告警|监控|审批|权限|值班|周报|日报|月报|系统|自动)(?:小?助手|机器人|通知|提醒)"
+    r"|\b(?:bot|robot|assistant|notifier|webhook|alert\s*bot)\b"
+    r"|小助手|机器人"
+    r")",
+    re.IGNORECASE,
+)
+_AUTOMATED_TEXT_PATTERNS = re.compile(
+    r"(?:"
+    r"<card\b[^>]*\btitle=\"(?:"
+    r"Merge\s+Request\b"
+    r"|\[(?:CN|EN)\]\s*Your\s+Personal\s+Permissions\s+Are\s+Expiring\s+Soon"
+    r"|[^\"\n]*(?:权限.*(?:到期|回收|过期)|审批|周报|日报|月报|定期提醒|值班提醒|体检|问卷)"
+    r")"
+    r"|你的个人权限即将到期或被回收"
+    r"|个人资源权限因\s*\d+\s*天未使用即将(?:静默)?回收"
+    r"|长期未使用权限即将被回收"
+    r"|请及时挑选需续期的权限"
+    r"|Here\s+are\s+your\s+unprocessed\s+tasks\s+from\s+last\s+week"
+    r"|以下是你上周未处理的任务"
+    r"|自动推进结果[:：]"
+    r")",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -57,6 +113,8 @@ class FeishuCandidate:
     permalink: str
     mentioned_ids: tuple[str, ...]
     reply_to: str = ""
+    sender_type: str = "user"
+    is_bot_sender: bool = False
 
     @property
     def group_key(self) -> tuple[str, str]:
@@ -97,7 +155,7 @@ class TriageDiagnosis(BaseModel):
     needs_code_fix: bool = False
 
 
-TriageCallback = Callable[[FeishuCandidate], Awaitable[TriageDiagnosis]]
+TriageCallback = Callable[..., Awaitable[TriageDiagnosis]]
 CapabilitiesReader = Callable[[str], Awaitable[dict[str, Any]]]
 
 
@@ -156,6 +214,96 @@ def _identity_id(value: Any) -> str:
     return ""
 
 
+def _extract_sender_metadata(
+    row: Mapping[str, Any],
+    sender: Mapping[str, Any],
+    sender_id: str,
+    chat_type: str,
+    sender_name: str,
+    chat_name: str,
+    chat_id: str,
+    text: str,
+) -> tuple[str, bool]:
+    sender_type = (
+        str(sender.get("sender_type") or sender.get("type") or row.get("sender_type") or "user")
+        .strip()
+        .lower()
+    )
+    id_type = str(sender.get("id_type") or row.get("sender_id_type") or "").strip().lower()
+    open_bot_id = str(sender.get("open_bot_id") or row.get("open_bot_id") or "").strip()
+    is_bot_flag = bool(
+        sender.get("is_bot")
+        or row.get("is_bot")
+        or open_bot_id
+        or sender_type in {"app", "bot", "system", "anonymous"}
+        or id_type in {"app_id", "bot_id"}
+        or sender_id.startswith(("cli_", "app_", "bot_"))
+    )
+    if chat_type == "p2p":
+        partner = row.get("chat_partner")
+        if isinstance(partner, Mapping):
+            partner_type = (
+                str(partner.get("sender_type") or partner.get("type") or "").strip().lower()
+            )
+            partner_open_id = _identity_id(partner)
+            if (
+                partner.get("is_bot")
+                or partner_type in {"app", "bot", "system"}
+                or (open_bot_id and partner_open_id and open_bot_id == partner_open_id)
+            ):
+                is_bot_flag = True
+    is_automated = (
+        is_bot_flag
+        or (bool(sender_type) and sender_type != "user")
+        or _is_automated_notification_fields(
+            chat_id=chat_id,
+            chat_type=chat_type,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            chat_name=chat_name,
+            text=text,
+        )
+    )
+    return sender_type or "user", is_automated
+
+
+def _is_automated_notification_fields(
+    *,
+    chat_id: str,
+    chat_type: str,
+    sender_id: str,
+    sender_name: str,
+    chat_name: str,
+    text: str,
+) -> bool:
+    if chat_id in _AUTOMATED_CHAT_IDS:
+        return True
+    if sender_id.startswith(("cli_", "app_", "bot_")):
+        return True
+    if sender_name and _AUTOMATED_NAME_PATTERNS.search(sender_name):
+        return True
+    if chat_type == "p2p" and chat_name and _AUTOMATED_NAME_PATTERNS.search(chat_name):
+        return True
+    if text and _AUTOMATED_TEXT_PATTERNS.search(text):
+        return True
+    return False
+
+
+def _is_automated_candidate(message: FeishuCandidate) -> bool:
+    if message.is_bot_sender:
+        return True
+    if message.sender_type and message.sender_type.lower() != "user":
+        return True
+    return _is_automated_notification_fields(
+        chat_id=message.chat_id,
+        chat_type=message.chat_type,
+        sender_id=message.sender_id,
+        sender_name=message.sender_name,
+        chat_name=message.chat_name,
+        text=message.text,
+    )
+
+
 def _candidate(
     row: Mapping[str, Any],
     *,
@@ -188,21 +336,37 @@ def _candidate(
         for mention in mentions:
             if isinstance(mention, dict):
                 mention_ids.append(_identity_id(mention.get("id", mention)))
+    chat_type = str(row.get("chat_type") or fallback.get("chat_type") or "")
+    sender_name = str(sender.get("name") or sender.get("sender_name") or "")
+    chat_name = str(row.get("chat_name") or fallback.get("chat_name") or "")
+    text = content[:6000]
+    sender_type, is_bot_sender = _extract_sender_metadata(
+        row,
+        sender,
+        sender_id,
+        chat_type,
+        sender_name,
+        chat_name,
+        chat_id,
+        text,
+    )
     return FeishuCandidate(
         message_id=message_id,
         chat_id=chat_id,
         thread_id=str(
             row.get("thread_id") or row.get("root_id") or fallback.get("thread_id") or ""
         ),
-        chat_type=str(row.get("chat_type") or fallback.get("chat_type") or ""),
+        chat_type=chat_type,
         sender_id=sender_id,
-        sender_name=str(sender.get("name") or sender.get("sender_name") or ""),
-        chat_name=str(row.get("chat_name") or fallback.get("chat_name") or ""),
+        sender_name=sender_name,
+        chat_name=chat_name,
         created_at=_timestamp(row.get("create_time"), tz=tz),
-        text=content[:6000],
+        text=text,
         permalink=_http_url(row.get("message_app_link") or row.get("url")),
         mentioned_ids=tuple(mention_ids),
         reply_to=str(row.get("reply_to") or row.get("parent_id") or ""),
+        sender_type=sender_type,
+        is_bot_sender=is_bot_sender,
     )
 
 
@@ -225,7 +389,7 @@ def _is_answered_by(message: FeishuCandidate, own: FeishuCandidate) -> bool:
 def filter_unanswered(
     messages: Sequence[FeishuCandidate], user_open_id: str, processed_ids: Sequence[str]
 ) -> tuple[list[FeishuCandidate], list[str]]:
-    """Admit only direct, explicitly mentioned, or participated-thread questions."""
+    """Admit only direct, explicitly mentioned, or participated-thread human questions."""
     own_messages = [message for message in messages if message.sender_id == user_open_id]
     seen = set(processed_ids)
     candidates, answered = [], []
@@ -233,6 +397,9 @@ def filter_unanswered(
         if message.message_id in seen or message.sender_id == user_open_id:
             continue
         seen.add(message.message_id)
+        if _is_automated_candidate(message):
+            answered.append(message.message_id)
+            continue
         if any(_is_answered_by(message, own) for own in own_messages):
             answered.append(message.message_id)
             continue
@@ -513,8 +680,135 @@ def _has_maso_model(models: Sequence[Any], target: str) -> bool:
     return False
 
 
-async def diagnose_message(candidate: FeishuCandidate) -> TriageDiagnosis:
-    """Use one disposable native Chat; cancellation retires its provider turn."""
+def _resolve_patrol_workspace_id(configured_workspace_id: str | None) -> str:
+    requested = (configured_workspace_id or DEFAULT_PATROL_WORKSPACE_ID).strip()
+    if requested:
+        workspace = workspace_manager.get_workspace(requested)
+        if workspace is not None:
+            return workspace.id
+    if DEFAULT_PATROL_WORKSPACE_ID and DEFAULT_PATROL_WORKSPACE_ID != requested:
+        default_ws = workspace_manager.get_workspace(DEFAULT_PATROL_WORKSPACE_ID)
+        if default_ws is not None:
+            return default_ws.id
+    workspaces = workspace_manager.list_workspaces()
+    for candidate in workspaces:
+        if candidate.target == ExecutionTarget.LOCAL:
+            return candidate.id
+    if workspaces:
+        return workspaces[0].id
+    raise CommandError("No Agent Workspace is available for Feishu patrol triage")
+
+
+async def _run_workspace_triage_turn(
+    session: ManagedSession,
+    prompt: str,
+    *,
+    timeout_seconds: float,
+) -> str:
+    from claude_hub.api.agent_stream import get_managed_tailer_manager
+    from claude_hub.models import AgentStreamEvent, AgentStreamEventType
+    from claude_hub.services import managed_chat
+    from claude_hub.services.agent_stream import ExternalTurnRetirement
+    from claude_hub.services.agent_stream.base import is_substantive_answer
+
+    manager = get_managed_tailer_manager()
+    call_id = f"patrol-triage-{session.id}"
+    queue: asyncio.Queue[AgentStreamEvent] | None = None
+    last_error = ""
+    try:
+        queue = await manager.subscribe_completion(session)
+        await workspace_manager.send_chat_session_message(
+            session.id,
+            prompt,
+            call_id=call_id,
+        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                await managed_chat.cancel(session, expected_turn_id=call_id)
+                raise TimeoutError(
+                    f"Patrol triage turn {call_id} did not complete within {timeout_seconds} seconds"
+                )
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=remaining)
+            except asyncio.TimeoutError as exc:
+                await managed_chat.cancel(session, expected_turn_id=call_id)
+                raise TimeoutError(
+                    f"Patrol triage turn {call_id} did not complete within {timeout_seconds} seconds"
+                ) from exc
+            if event.turn_id != call_id:
+                continue
+            if event.type == AgentStreamEventType.APPROVAL_REQUIRED:
+                try:
+                    retirement = await manager.retire_external_turn(
+                        session, expected_turn_id=call_id
+                    )
+                except Exception as exc:
+                    raise CommandError(
+                        "Patrol triage turn requires Web Chat interaction and could not be stopped"
+                    ) from exc
+                if retirement != ExternalTurnRetirement.CANCELLED_MATCHING:
+                    raise CommandError(
+                        "Patrol triage turn requires Web Chat interaction (" f"{retirement.value})"
+                    )
+                raise CommandError("Patrol triage turn requires an approval or answer in Web Chat")
+            if event.type == AgentStreamEventType.ERROR:
+                message = event.payload.get("message")
+                if isinstance(message, str):
+                    last_error = message
+                continue
+            if event.type != AgentStreamEventType.TURN_COMPLETED:
+                continue
+            status_value = event.payload.get("status")
+            if status_value not in {None, "completed", "success"}:
+                error_message = event.payload.get("error_message")
+                raise CommandError(
+                    last_error
+                    or (error_message if isinstance(error_message, str) else "")
+                    or f"Patrol triage turn ended with status {status_value}"
+                )
+            assistant_text = event.payload.get("assistant_text")
+            if not isinstance(assistant_text, str) or not is_substantive_answer(assistant_text):
+                raise CommandError(last_error or "Patrol triage turn completed without text")
+            final_text = event.payload.get("final_text")
+            if isinstance(final_text, str) and is_substantive_answer(final_text):
+                return final_text.strip()
+            return assistant_text.strip()
+    except asyncio.CancelledError:
+        try:
+            await asyncio.wait_for(
+                manager.retire_external_turn(session, expected_turn_id=call_id),
+                timeout=10.0,
+            )
+        except Exception:
+            pass
+        raise
+    finally:
+        if queue is not None:
+            manager.unsubscribe_completion(session.id, queue)
+
+
+async def _archive_patrol_session(workspace_id: str, session_id: str) -> None:
+    try:
+        await workspace_manager.archive_session(workspace_id, session_id)
+        return
+    except Exception:
+        pass
+    try:
+        await fence_session_stream(session_id)
+        await workspace_manager.archive_session(workspace_id, session_id)
+    except Exception:
+        pass
+
+
+async def diagnose_message(
+    candidate: FeishuCandidate,
+    *,
+    workspace_id: str = DEFAULT_PATROL_WORKSPACE_ID,
+) -> TriageDiagnosis:
+    """Run one read-only Workspace Chat session and auto-archive it when done."""
     agent_type, model, env = AgentType.CODEX, None, {}
     try:
         base_url, models, _ = await discover_maso_service(
@@ -523,7 +817,11 @@ async def diagnose_message(candidate: FeishuCandidate) -> TriageDiagnosis:
             else {}
         )
         if _has_maso_model(models, _PREFERRED_MODEL):
-            agent_type, model, env = AgentType.MASO, _PREFERRED_MODEL, {"MASO_BASE_URL": base_url}
+            agent_type, model, env = (
+                AgentType.MASO,
+                _PREFERRED_MODEL,
+                {"MASO_BASE_URL": base_url},
+            )
     except MasoServiceUnavailable:
         pass
     if agent_type != AgentType.MASO:
@@ -533,38 +831,39 @@ async def diagnose_message(candidate: FeishuCandidate) -> TriageDiagnosis:
             agent_type = AgentType.CLAUDE
         else:
             raise CommandError("No supported read-only diagnosis provider is available")
-    cwd = resolve_runtime_home() / "demand_patrol" / "triage"
-    cwd.mkdir(parents=True, exist_ok=True)
-    service = get_subagent_service()
-    record, turn = await service.create(
-        SubagentCreate(
+    launch_env = dict(env)
+    if model and agent_type in _MODEL_ENV_KEYS:
+        launch_env[_MODEL_ENV_KEYS[agent_type]] = model.strip()
+    target_workspace_id = _resolve_patrol_workspace_id(workspace_id)
+    session = await workspace_manager.ensure_workspace_agent(
+        target_workspace_id,
+        EnsureWorkspaceAgentRequest(
             agent_type=agent_type,
-            model=model,
-            env=env,
-            cwd=str(cwd),
-            prompt=_diagnosis_prompt(candidate),
-            name=f"Patrol triage: {candidate.message_id}",
-            keep=False,
+            session_kind=SessionKind.CHAT,
+            role=WorkspaceSessionRole.WORKER,
+            title=f"Patrol triage: {candidate.message_id}",
             solo_mode=True,
-            timeout_seconds=600,
+            reuse_existing=False,
+            ephemeral=True,
+            caller_owned_ephemeral=True,
+            env=launch_env,
         ),
-        created_by="demand-patrol",
+        bootstrap=False,
     )
     try:
-        async with asyncio.timeout(600):
-            while turn.status == SubagentTurnStatus.RUNNING:
-                _, turn = await service.wait_turn(record.id, turn.turn_id, wait_seconds=120)
-        if turn.status != SubagentTurnStatus.COMPLETED or not turn.final_text:
+        answer = await _run_workspace_triage_turn(
+            session,
+            _diagnosis_prompt(candidate),
+            timeout_seconds=600,
+        )
+        if not answer or not answer.strip():
             raise CommandError("Read-only diagnosis did not complete")
-        raw = turn.final_text.strip()
+        raw = answer.strip()
         if raw.startswith("```"):
             raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw)
         return TriageDiagnosis.model_validate_json(raw)
     finally:
-        # Normal completion uses SubagentService's keep=False archive grace period.
-        # Cancellation/timeout of this caller must not leave a provider turn running.
-        if turn.status == SubagentTurnStatus.RUNNING:
-            await service.close(record.id, reason="patrol diagnosis interrupted")
+        await asyncio.shield(_archive_patrol_session(session.workspace_id, session.id))
 
 
 async def read_capabilities(base_url: str) -> dict[str, Any]:
@@ -818,7 +1117,13 @@ async def run_feishu_triage(
     for candidate in candidates[: state.config.max_triage_per_run]:
         result.llm_invoked += 1
         try:
-            diagnosis = await (triage or diagnose_message)(candidate)
+            if triage is not None:
+                diagnosis = await triage(candidate)
+            else:
+                diagnosis = await diagnose_message(
+                    candidate,
+                    workspace_id=state.config.workspace_id,
+                )
         except (
             CommandError,
             SubagentError,

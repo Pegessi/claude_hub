@@ -169,6 +169,7 @@ export interface DotHealth {
 export interface DotPatrolConfig {
   enabled: boolean
   timezone: string
+  workspace_id?: string
   feishu_enabled: boolean
   feishu_interval_minutes: number
   feishu_window_start: string
