@@ -7,6 +7,11 @@
 
 ## Released
 
+### feat(feishu): support bot tenant fallback for `/ai` without `im:message.send_as_user`
+
+- Remove `im:message.send_as_user` from `RECOMMENDED_AI_COMMAND_SCOPES` so `lark-cli auth login` commands succeed on Feishu apps that do not enable the restricted `im:message.send_as_user` permission in the Feishu Developer Console (`services/feishu_user_client.py`).
+- Resolve bot `app_secret` from the user token record, `lark-cli` encrypted keychain (`appsecret_<appId>.enc`), or `FeishuBotPoolStore` (`resolve_app_secret_for_app`, `resolve_fallback_bot_configs` in `services/feishu_user_token_store.py`), and update `evaluate_scope_preflight()`, `require_send_as_user_scope()`, `send_as_user()`, `reply_as_user()`, and `FeishuAiCommandService.handle_message()` (`services/feishu_ai_command.py`) so `/ai` reads context and adds/deletes emoji reactions using the user token (`im:message`, `im:message.reactions:write_only`) while automatically falling back to the bot `tenant_access_token` (`send_mode="bot_fallback"`) and auto-inviting the bot into group chats on `code=230002` via `im:chat.members:write_only`.
+
 ### fix(patrol): fix Feishu @mention proactive patrol pipeline (RC1-RC6) for live `lark-cli` output
 
 - Format `lark-cli im +messages-search` `--start` and `--end` flags with second precision (`isoformat(timespec="seconds")`) in the configured patrol timezone, floor `_search_start()` to the minute so minute-precision `create_time` boundaries never drop messages, and surface sanitized CLI `stderr`/JSON error details on `CommandError` while failing closed on unrecognized structures and redacting quoted sensitive keys and URL userinfo (`services/demand_patrol/feishu_triage.py`, `services/demand_patrol/commands.py`).

@@ -2701,3 +2701,180 @@ async def test_cycle4_async_entrypoints_and_lock_cancellation_cleanup(
             .can_send_as_user
             is False
         )
+
+
+@pytest.mark.asyncio
+async def test_bot_fallback_reply_send_and_auto_invite_without_send_as_user(
+    tmp_path: Path,
+) -> None:
+    """User token with im:message (no im:message.send_as_user) sends/replies via bot fallback and auto-invites on 230002."""
+    import time
+
+    cli_cfg = tmp_path / "fb_cli_cfg"
+    cli_data = tmp_path / "fb_cli_data"
+    cli_cfg.mkdir()
+    cli_data.mkdir()
+    master_key = secrets.token_bytes(32)
+    (cli_data / "master.key").write_bytes(master_key)
+    (cli_data / "appsecret_cli_fb.enc").write_bytes(
+        aes_256_gcm_encrypt(master_key, b"fb-bot-secret")
+    )
+    (cli_cfg / "config.json").write_text(
+        json.dumps(
+            {
+                "currentApp": "cli_fb",
+                "apps": [
+                    {
+                        "appId": "cli_fb",
+                        "users": [{"userOpenId": "ou_fb", "userName": "王泽华"}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (cli_data / "cli_fb_ou_fb.enc").write_bytes(
+        aes_256_gcm_encrypt(
+            master_key,
+            json.dumps(
+                {
+                    "appId": "cli_fb",
+                    "userOpenId": "ou_fb",
+                    "userName": "王泽华",
+                    "accessToken": "fb-user-at",
+                    "refreshToken": "fb-user-rt",
+                    "expiresAt": int((time.time() + 7200) * 1000),
+                    "refreshExpiresAt": int((time.time() + 600_000) * 1000),
+                    "scope": (
+                        "im:message im:chat:read im:chat.members:write_only "
+                        "im:message.reactions:write_only im:message.group_msg:get_as_user"
+                    ),
+                }
+            ).encode("utf-8"),
+        )
+    )
+    store = FeishuUserTokenStore(
+        path=tmp_path / "fb_tokens.json",
+        key_path=tmp_path / "fb_tokens.key",
+        lark_cli_dir=cli_cfg,
+        lark_cli_data_dir=cli_data,
+    )
+    rec = await store.aresolve_token(auto_import_lark_cli=True)
+    assert rec is not None
+    assert rec.app_secret == "fb-bot-secret"
+    assert not rec.has_scope("im:message.send_as_user")
+
+    calls: list[tuple[str, str, str, dict[str, Any]]] = []
+    bot_in_chat = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal bot_in_chat
+        path = request.url.path
+        auth_hdr = request.headers.get("Authorization", "")
+        body = json.loads(request.content.decode("utf-8")) if request.content else {}
+        calls.append((request.method, path, auth_hdr, body))
+
+        if path == "/open-apis/auth/v3/tenant_access_token/internal":
+            assert body.get("app_id") == "cli_fb"
+            assert body.get("app_secret") == "fb-bot-secret"
+            return httpx.Response(
+                200,
+                json={"code": 0, "tenant_access_token": "t-bot-token", "expire": 7200},
+            )
+        if path.endswith("/reactions"):
+            assert auth_hdr == "Bearer fb-user-at"
+            return httpx.Response(
+                200,
+                json={"code": 0, "data": {"reaction_id": "rx_fb_1"}},
+            )
+        if path == "/open-apis/im/v1/chats/oc_group_fb/members":
+            assert auth_hdr == "Bearer fb-user-at"
+            assert request.url.params.get("member_id_type") == "app_id"
+            assert body == {"id_list": ["cli_fb"]}
+            bot_in_chat = True
+            return httpx.Response(200, json={"code": 0, "data": {}})
+        if path.endswith("/reply"):
+            assert auth_hdr == "Bearer t-bot-token"
+            if not bot_in_chat:
+                return httpx.Response(
+                    400,
+                    json={"code": 230002, "msg": "Bot/User can NOT be out of the chat."},
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {"message_id": "om_bot_reply_1", "thread_id": "omt_fb_1"},
+                },
+            )
+        if path == "/open-apis/im/v1/messages" and request.method == "POST":
+            assert auth_hdr == "Bearer t-bot-token"
+            return httpx.Response(
+                200,
+                json={"code": 0, "data": {"message_id": "om_bot_send_1"}},
+            )
+        if path == "/open-apis/im/v1/messages" and request.method == "GET":
+            assert auth_hdr == "Bearer fb-user-at"
+            return httpx.Response(200, json={"code": 0, "data": {"items": []}})
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    mock_http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://open.feishu.cn",
+    )
+    try:
+        user_client = FeishuUserClient(store, open_id="ou_fb", app_id="cli_fb", client=mock_http)
+        preflight = await user_client.apreflight_scopes()
+        assert preflight.can_send_as_user is True
+        assert preflight.has_send_as_user_scope is False
+        assert preflight.can_send_via_bot is True
+        assert preflight.send_mode == "bot_fallback"
+        assert preflight.fallback_bot_app_id == "cli_fb"
+        assert preflight.missing_required_scopes == ()
+
+        # Strict require_send_as_user_scope(allow_bot_fallback=False) still raises
+        with pytest.raises(FeishuUserScopeError):
+            await user_client.arequire_send_as_user_scope(allow_bot_fallback=False)
+        # With allow_bot_fallback=True it succeeds
+        verified_rec = await user_client.arequire_send_as_user_scope(allow_bot_fallback=True)
+        assert verified_rec.open_id == "ou_fb"
+
+        # Full /ai command flow works end-to-end (reacts as user, auto-invites bot on 230002, replies via bot)
+        svc = FeishuAiCommandService(
+            state_path=tmp_path / "fb_ai_cfg.json",
+            token_store=store,
+            user_client_factory=lambda cfg: user_client,
+            tab_creator=lambda **_kw: "tab-fb-1",
+            tab_getter=lambda _tid: None,
+            tab_env_switcher=lambda *_a, **_kw: None,
+            turn_dispatcher=lambda *_a, **_kw: asyncio.sleep(0, result="Bot fallback reply ok"),
+        )
+        svc.update_config(
+            {
+                "enabled": True,
+                "owner_open_id": "ou_fb",
+                "app_id": "cli_fb",
+                "cwd": str(tmp_path),
+            }
+        )
+        msg = FeishuUserMessage(
+            message_id="om_trigger_fb",
+            chat_id="oc_group_fb",
+            sender_open_id="ou_fb",
+            sender_type="user",
+            msg_type="text",
+            text="/ai test fallback without send_as_user",
+            create_time_ms=int(time.time() * 1000),
+        )
+        res = await svc.handle_message(msg, source="ws")
+        assert res.handled is True
+        assert res.status == "completed"
+        assert res.final_message_id == "om_bot_reply_1"
+        assert bot_in_chat is True
+
+        # Direct send_as_user also uses bot fallback
+        send_res = await user_client.send_as_user("oc_group_fb", "text", {"text": "hello"})
+        assert send_res["message_id"] == "om_bot_send_1"
+        assert send_res["send_mode"] == "bot_fallback"
+    finally:
+        await mock_http.aclose()
