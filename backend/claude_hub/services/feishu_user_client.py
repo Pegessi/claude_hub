@@ -380,16 +380,15 @@ class FeishuUserClient:
         return self._web_transport
 
     def _should_use_web_session_for_send(self, record: FeishuUserTokenRecord | None) -> bool:
-        if self._send_mode == "openapi":
+        if self._send_mode == "openapi" or self._active_web_session(record) is None:
             return False
-        sess = self._active_web_session(record)
-        if sess is None:
-            return False
-        if self._send_mode == "web_session":
-            return True
-        if record is None or record.source == "web_session":
+        if self._send_mode == "web_session" or record is None or record.source == "web_session":
             return True
         return REQUIRED_SEND_AS_USER_SCOPE not in record.scopes_set()
+
+    def should_use_web_session(self, record: FeishuUserTokenRecord | None = None) -> bool:
+        rec = record or self._store.resolve_token(open_id=self._open_id, app_id=self._app_id)
+        return self._should_use_web_session_for_send(rec)
 
     def _resolve_fallback_bot_configs(
         self, record: FeishuUserTokenRecord | None = None
@@ -1029,6 +1028,8 @@ class FeishuUserClient:
                         uuid=uuid,
                     )
                     return reply_res
+                except FeishuDeliveryUncertainError:
+                    raise
                 except FeishuBotError:
                     if (
                         self._send_mode == "web_session"
@@ -1093,7 +1094,7 @@ class FeishuUserClient:
         wt = self._get_web_transport()
         has_oauth = self._has_oauth_token()
         if wt is not None and (
-            self._send_mode == "web_session"
+            self.should_use_web_session()
             or not (message_id or "").startswith("om_")
             or not has_oauth
         ):
@@ -1129,7 +1130,7 @@ class FeishuUserClient:
         wt = self._get_web_transport()
         has_oauth = self._has_oauth_token()
         if wt is not None and (
-            self._send_mode == "web_session"
+            self.should_use_web_session()
             or (reaction_id or "").startswith("web-reaction:")
             or not (message_id or "").startswith("om_")
             or not has_oauth
@@ -1163,11 +1164,9 @@ class FeishuUserClient:
     ) -> list[FeishuChatInfo]:
         """List recent chats (both P2P and group by default) for the authenticated user."""
         wt = self._get_web_transport()
-        if wt is not None:
-            rec = self._store.resolve_token(open_id=self._open_id, app_id=self._app_id)
-            if self._should_use_web_session_for_send(rec):
-                chats_res: list[FeishuChatInfo] = await wt.list_chats(page_size=page_size)
-                return chats_res
+        if wt is not None and self.should_use_web_session():
+            chats_res: list[FeishuChatInfo] = await wt.list_chats(page_size=page_size)
+            return chats_res
 
         async def _call(token: str) -> list[FeishuChatInfo]:
             params: dict[str, Any] = {
@@ -1355,7 +1354,7 @@ class FeishuUserClient:
         wt = self._get_web_transport()
         has_oauth = self._has_oauth_token()
         if wt is not None and (
-            self._send_mode == "web_session"
+            self.should_use_web_session()
             or not (message_id or "").startswith("om_")
             or not has_oauth
         ):
@@ -1408,13 +1407,11 @@ class FeishuUserClient:
     ) -> FeishuMessageSearchPage:
         """Search messages via ``/open-apis/search/v2/message`` with pagination metadata."""
         wt = self._get_web_transport()
-        if wt is not None:
-            rec = self._store.resolve_token(open_id=self._open_id, app_id=self._app_id)
-            if self._should_use_web_session_for_send(rec):
-                search_res: FeishuMessageSearchPage = await wt.search_messages_page(
-                    query, page_size=page_size
-                )
-                return search_res
+        if wt is not None and self.should_use_web_session():
+            search_res: FeishuMessageSearchPage = await wt.search_messages_page(
+                query, page_size=page_size
+            )
+            return search_res
 
         async def _call(token: str) -> FeishuMessageSearchPage:
             body: dict[str, Any] = {"query": query}

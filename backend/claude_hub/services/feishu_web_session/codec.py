@@ -816,15 +816,7 @@ def decode(
             _, key_type, val_type = kind
             mk, mv = _decode_map_entry(entry_chunk, key_type, val_type)
             target_map = out.setdefault(fdef.name, {})
-            if (
-                isinstance(val_type, str)
-                and mk in target_map
-                and isinstance(target_map[mk], dict)
-                and isinstance(mv, dict)
-            ):
-                _merge_message_dicts(val_type, target_map[mk], mv)
-            else:
-                target_map[mk] = mv
+            target_map[mk] = mv
             continue
 
         if isinstance(kind, int) and kind in _VARINT_TYPES:
@@ -884,31 +876,3 @@ def decode(
                 out[fdef.name] = b64
 
     return out
-
-
-def _merge_message_dicts(name: str, dst: dict[str, Any], src: Mapping[str, Any]) -> None:
-    """Recursively merge protobuf message dict ``src`` into ``dst`` per schema ``name``."""
-    reg = _REGISTRY or _registry()
-    fields = reg.by_name.get(name, {})
-    for k, v in src.items():
-        fdef = fields.get(k)
-        if fdef is not None and fdef.repeated and isinstance(v, list):
-            dst.setdefault(k, []).extend(v)
-        elif (
-            fdef is not None
-            and isinstance(fdef.kind, tuple)
-            and fdef.kind[0] == "map"
-            and isinstance(v, Mapping)
-        ):
-            tmap = dst.setdefault(k, {})
-            for mk, mv in v.items():
-                tmap[mk] = mv
-        elif (
-            fdef is not None
-            and isinstance(fdef.kind, str)
-            and isinstance(dst.get(k), dict)
-            and isinstance(v, Mapping)
-        ):
-            _merge_message_dicts(fdef.kind, dst[k], v)
-        else:
-            dst[k] = v

@@ -1577,8 +1577,38 @@ async def test_group_chat_topic_thread_mixed_id_dedup_and_frontier_push(
         service.update_config({"enabled": True, "send_mode": "web_session"})
         poller = FeishuAiPoller(service)
 
-        # 1. Simulate bot event (handle_ws_event) arriving FIRST with OpenAPI IDs (om_... / oc_...)
-        # for the group main command (`group_main_cmd_id`)
+        # 1a. If an OpenAPI bot WS event arrives without an authoritative web message alias,
+        # web_session mode refuses to guess across messages and defers to authoritative web intake.
+        unmapped_outcome = await service.handle_message(
+            FeishuUserMessage(
+                message_id="om_unmapped_bot_event_999",
+                chat_id=group_open_chat_id,
+                sender_open_id=owner_uid,
+                sender_type="user",
+                msg_type="text",
+                text="/ai 总结一下群里的结论",
+                create_time_ms=(now_s - 5) * 1000,
+            ),
+            source="websocket",
+        )
+        assert unmapped_outcome.handled is False
+        assert len(dispatched_prompts) == 0
+
+        # 1b. When an authoritative alias binding exists (om_openapi_alias_305 <-> group_main_cmd_id),
+        # handle_ws_event normalizes to the numeric web ID and claims both namespaces.
+        shared_user_client = FeishuUserClient(
+            token_store,
+            open_id=owner_uid,
+            app_id="web_session",
+            client=mock_http,
+            web_session_store=web_store,
+            send_mode="web_session",
+        )
+        wt_shared = shared_user_client._get_web_transport()
+        assert wt_shared is not None
+        wt_shared.bind_message_alias("om_openapi_alias_305", group_main_cmd_id)
+        service._user_client_factory = lambda cfg: shared_user_client
+
         ws_handled = await service.handle_ws_event(
             FeishuMessageEvent(
                 event_id="evt_mixed_1",
@@ -1653,5 +1683,393 @@ async def test_group_chat_topic_thread_mixed_id_dedup_and_frontier_push(
         assert accepted is True
         await poller.wait_for_inflight(timeout=5.0)
         assert len(dispatched_prompts) == 3
+    finally:
+        await mock_http.aclose()
+
+
+def test_protobuf_duplicate_map_key_uses_whole_value_last_key_wins() -> None:
+    """Verify C2-5: duplicate keys across separate protobuf map entries replace the whole value (last-key-wins), while repeated field 2 inside a single map entry still merges."""
+    # Exact wire from C2-5 (verified against canonical google.protobuf descriptor):
+    # Two separate map entries for key "42" in PushMessagesRequest.messages:
+    # - Entry 1 (0a18...): key="42", value={id="42", type=4, content=b"first", chatId="111"}
+    # - Entry 2 (0a0d...): key="42", value={id="42", isRemoved=True}
+    # Canonical protobuf map semantics replace the entire entry value for duplicate key "42".
+    dup_map_wire = bytes.fromhex(
+        "0a180a02343212120a02343210042a0566697273745203313131" "0a0d0a02343212070a023432b80101"
+    )
+    decoded = decode("PushMessagesRequest", dup_map_wire)
+    candidate_val = decoded["messages"]["42"]
+    assert list(candidate_val.keys()) == ["id", "isRemoved"]
+    assert candidate_val == {"id": "42", "isRemoved": True}
+
+    # Conversely, when a SINGLE map entry contains two occurrences of field 2 (value),
+    # protobuf merges those two value submessages within that entry.
+    intra_entry_merge_wire = bytes.fromhex(
+        "0a210a02343212120a02343210042a056669727374520331313112070a023432b80101"
+    )
+    decoded_intra = decode("PushMessagesRequest", intra_entry_merge_wire)
+    assert decoded_intra["messages"]["42"] == {
+        "id": "42",
+        "type": 4,
+        "content": base64.b64encode(b"first").decode("ascii"),
+        "chatId": "111",
+        "isRemoved": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_distinct_repeated_commands_across_topics_and_auto_send_as_user_transport_consistency(
+    tmp_path: Path,
+) -> None:
+    """Verify C2-1 & C2-2:
+    1) Two identical '/ai summarize' commands 5s apart in different topics do not cross-contaminate or suppress each other.
+    2) In auto mode with im:message.send_as_user granted AND an active same-owner web session, effective transport is OpenAPI ('user'), retaining om_/oc_ IDs end-to-end and ignoring web frontier intake.
+    """
+    token_store = FeishuUserTokenStore(
+        path=tmp_path / "c21_tokens.json",
+        key_path=tmp_path / "c21_tokens.key",
+    )
+    web_store = FeishuWebSessionStore(
+        path=tmp_path / "c21_web_session.json",
+        key_path=tmp_path / "c21_web_session.key",
+    )
+    owner_uid = "7111222333444555666"
+    owner_open_id = "ou_owner_c21"
+    web_store.save(
+        FeishuWebSession(
+            region="feishu",
+            cookies={"session": "sess-c21", "passport_web_did": "did-c21"},
+            saved_at=time.time(),
+            device_id="did-c21",
+            csrf_token="csrf-c21",
+            web_app_id="161471",
+            user_id=owner_uid,
+            name="Owner C21",
+            open_id=owner_open_id,
+        )
+    )
+
+    chat_web_id = "7333333333333333331"
+    thread_1 = "7555555555555555551"
+    thread_2 = "7555555555555555552"
+    msg_1_id = "7444444444444444441"
+    msg_2_id = "7444444444444444442"
+    now_ms = 1_760_000_000_000
+
+    # Part A (C2-1): Two '/ai summarize' commands 5s apart in different topics
+    wt_client = FeishuWebClient(web_store)
+    wt = FeishuWebUserTransport(wt_client, owner_open_id=owner_open_id)
+    cmd_bytes = encode("lark_entities_TextContent", {"text": "/ai summarize"})
+    wm1 = WebMessage(
+        id=msg_1_id,
+        from_id=owner_uid,
+        chat_id=chat_web_id,
+        root_id=thread_1,
+        parent_id=thread_1,
+        thread_id=thread_1,
+        type=TYPE_TEXT,
+        position=1,
+        create_time_s=now_ms // 1000,
+        content=cmd_bytes,
+    )
+    wm2 = WebMessage(
+        id=msg_2_id,
+        from_id=owner_uid,
+        chat_id=chat_web_id,
+        root_id=thread_2,
+        parent_id=thread_2,
+        thread_id=thread_2,
+        type=TYPE_TEXT,
+        position=2,
+        create_time_s=(now_ms // 1000) + 5,
+        content=cmd_bytes,
+    )
+    wt._remember_msg(wm1)
+    wt._remember_msg(wm2)
+
+    # Without an explicit alias binding, resolve_web_message must NOT guess wm2 for an unmapped OpenAPI event
+    guessed = await wt.resolve_web_message(
+        "om_unmapped_first",
+        chat_id="oc_group_c21",
+        text="/ai summarize",
+        create_time_ms=now_ms,
+    )
+    assert guessed is None
+
+    # Pre-seed authoritative alias for the first message only; then claim first OpenAPI command AND second numeric web command
+    import threading
+
+    from claude_hub.services.feishu_web_session import (
+        normalize_and_claim_ai_command_message,
+    )
+
+    wt.bind_message_alias("om_first_topic_1", msg_1_id)
+    dedup = FeishuMessageDedupStore(tmp_path / "c21_dedup.json")
+    lock = threading.RLock()
+    fake_uc = type(
+        "FakeUC",
+        (),
+        {
+            "_get_web_transport": lambda self: wt,
+            "should_use_web_session": lambda self: True,
+        },
+    )()
+
+    eff1, _pk1, _ek1, claimed1 = await normalize_and_claim_ai_command_message(
+        message=FeishuUserMessage(
+            message_id="om_first_topic_1",
+            chat_id="oc_group_c21",
+            sender_open_id=owner_open_id,
+            sender_type="user",
+            msg_type="text",
+            text="/ai summarize",
+            create_time_ms=now_ms,
+            thread_id="omt_topic_1",
+        ),
+        parsed_instruction="summarize",
+        owner_open_id=owner_open_id,
+        user_client=fake_uc,
+        dedup_store=dedup,
+        lock=lock,
+    )
+    assert claimed1 is True
+    assert eff1.message_id == msg_1_id
+    assert eff1.thread_id == thread_1
+
+    eff2, _pk2, _ek2, claimed2 = await normalize_and_claim_ai_command_message(
+        message=FeishuUserMessage(
+            message_id=msg_2_id,
+            chat_id=chat_web_id,
+            sender_open_id=owner_open_id,
+            sender_type="user",
+            msg_type="text",
+            text="/ai summarize",
+            create_time_ms=now_ms + 5000,
+            thread_id=thread_2,
+        ),
+        parsed_instruction="summarize",
+        owner_open_id=owner_open_id,
+        user_client=fake_uc,
+        dedup_store=dedup,
+        lock=lock,
+    )
+    assert claimed2 is True
+    assert eff2.message_id == msg_2_id
+    assert eff2.thread_id == thread_2
+
+    # Part B (C2-2): Auto mode with im:message.send_as_user granted + active same-owner web session
+    token_store.save_oauth_token(
+        open_id=owner_open_id,
+        app_id="cli_c22_app",
+        access_token="u-token-with-send-scope",
+        refresh_token="r-token",
+        expires_in=7200,
+        scope="im:message im:message.send_as_user im:message.reactions:write_only",
+        user_name="Owner C21",
+    )
+    outgoing_paths: list[str] = []
+
+    def openapi_handler(request: httpx.Request) -> httpx.Response:
+        outgoing_paths.append(request.url.path)
+        if request.url.path.endswith("/reply"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "message_id": "om_reply_openapi_1",
+                        "sender": {"id": owner_open_id, "sender_type": "user"},
+                    },
+                },
+            )
+        return httpx.Response(200, json={"code": 0, "data": {"reaction_id": "react_1"}})
+
+    mock_openapi_http = httpx.AsyncClient(
+        base_url="https://open.feishu.cn",
+        transport=httpx.MockTransport(openapi_handler),
+    )
+    try:
+        real_uc = FeishuUserClient(
+            token_store,
+            open_id=owner_open_id,
+            app_id="cli_c22_app",
+            client=mock_openapi_http,
+            web_session_store=web_store,
+            send_mode="auto",
+        )
+        # Even if wt has an alias seeded, auto mode with im:message.send_as_user selects OpenAPI ("user")
+        wt_real = real_uc._get_web_transport()
+        assert wt_real is not None
+        wt_real._remember_msg(wm1)
+        wt_real.bind_message_alias("om_first_openapi", msg_1_id)
+
+        assert real_uc.should_use_web_session() is False
+        dedup_c22 = FeishuMessageDedupStore(tmp_path / "c22_dedup.json")
+        eff_open, _, _, claimed_open = await normalize_and_claim_ai_command_message(
+            message=FeishuUserMessage(
+                message_id="om_first_openapi",
+                chat_id="oc_group_c21",
+                sender_open_id=owner_open_id,
+                sender_type="user",
+                msg_type="text",
+                text="/ai summarize",
+                create_time_ms=now_ms,
+            ),
+            parsed_instruction="summarize",
+            owner_open_id=owner_open_id,
+            user_client=real_uc,
+            dedup_store=dedup_c22,
+            lock=lock,
+        )
+        assert claimed_open is True
+        assert eff_open.message_id == "om_first_openapi"
+        await real_uc.reply_as_user(
+            eff_open.message_id,
+            "post",
+            {"zh_cn": {"title": "", "content": [[{"tag": "text", "text": "ok"}]]}},
+            chat_id=eff_open.chat_id,
+        )
+        assert outgoing_paths == ["/open-apis/im/v1/messages/om_first_openapi/reply"]
+    finally:
+        await mock_openapi_http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_transient_503_preserves_session_stale_401_preserves_replacement_and_pending_start_logout(
+    tmp_path: Path,
+) -> None:
+    """Verify C2-3 & C2-4:
+    1) Temporary HTTP 503 on frontier_ticket does not mark stored credentials invalid; subsequent validation succeeds.
+    2) An in-flight 401 on an old session does not invalidate a newly saved replacement session.
+    3) Logout while start_login (/accounts/qrlogin/init) is in flight marks the late QR session cancelled so confirmation cannot restore a session.
+    """
+    web_store = FeishuWebSessionStore(
+        path=tmp_path / "c23_web_session.json",
+        key_path=tmp_path / "c23_web_session.key",
+    )
+    web_store.save(
+        FeishuWebSession(
+            region="feishu",
+            cookies={"session": "sess-good-1", "passport_web_did": "did-1"},
+            user_id="7111111111111111111",
+            name="Good User",
+        )
+    )
+
+    # 1. Temporary 503 followed by 200 OK
+    ticket_attempts = 0
+    block_old_401 = asyncio.Event()
+    release_old_401 = asyncio.Event()
+    block_qr_init = asyncio.Event()
+    release_qr_init = asyncio.Event()
+    mode = "temp_503"
+
+    async def lifecycle_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal ticket_attempts
+        url = str(request.url)
+        if "/suite/passport/frontier_ticket/" in url:
+            if mode == "temp_503":
+                ticket_attempts += 1
+                if ticket_attempts == 1:
+                    return httpx.Response(503, content=b"<html>503 Service Unavailable</html>")
+                return httpx.Response(200, json={"ticket": "ticket-ok-2"})
+            if mode == "stale_401":
+                cookie_hdr = request.headers.get("cookie") or ""
+                if "sess-old-stale" in cookie_hdr:
+                    block_old_401.set()
+                    await release_old_401.wait()
+                    return httpx.Response(401, json={"error": "unauthorized"})
+                return httpx.Response(200, json={"ticket": "ticket-replacement-ok"})
+            return httpx.Response(200, json={"ticket": "ticket-qr-ok"})
+        if url.endswith("/accounts/qrlogin/init"):
+            block_qr_init.set()
+            await release_qr_init.wait()
+            return httpx.Response(
+                200,
+                headers={"x-flow-key": "flow-late-start"},
+                json={"code": 0, "data": {"step_info": {"token": "tok-late-start"}}},
+            )
+        if url.endswith("/accounts/qrlogin/polling"):
+            return httpx.Response(
+                200,
+                headers={"set-cookie": "session=sess-late-restored; Path=/"},
+                json={"code": 0, "data": {"step_info": {"status": 2}}},
+            )
+        if "/accounts/web/user?app_id=12" in url:
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {"user": {"id": "7333333333333333333", "name": "Late"}},
+                },
+            )
+        return httpx.Response(200, content=b"")
+
+    mock_http = httpx.AsyncClient(transport=httpx.MockTransport(lifecycle_handler))
+    try:
+        mgr = FeishuWebLoginManager(
+            web_store,
+            client_factory=lambda s: FeishuWebClient(s, http_client=mock_http),
+        )
+        # First validate hits 503: valid=False, but has_session stays True and store remains loadable
+        st1 = await mgr.astatus_dict(validate=True)
+        assert st1["valid"] is False
+        assert st1["has_session"] is True
+        assert web_store.load() is not None
+
+        # Second validate hits 200 OK: valid=True, total HTTP attempts == 2
+        st2 = await mgr.astatus_dict(validate=True)
+        assert st2["valid"] is True
+        assert st2["has_session"] is True
+        assert ticket_attempts == 2
+        assert web_store.load() is not None
+
+        # 2. Stale 401 on old credential does NOT disable newly saved replacement credential
+        mode = "stale_401"
+        web_store.save(
+            FeishuWebSession(
+                region="feishu",
+                cookies={"session": "sess-old-stale", "passport_web_did": "did-old"},
+                user_id="7111111111111111111",
+                name="Old",
+            )
+        )
+        val_task = asyncio.create_task(mgr.astatus_dict(validate=True))
+        await asyncio.wait_for(block_old_401.wait(), timeout=5.0)
+
+        # Save replacement credentials while old validation is awaiting 401
+        web_store.save(
+            FeishuWebSession(
+                region="feishu",
+                cookies={
+                    "session": "sess-new-replacement",
+                    "passport_web_did": "did-new",
+                },
+                user_id="7222222222222222222",
+                name="Replacement",
+            )
+        )
+        assert web_store.load() is not None
+        release_old_401.set()
+        await val_task
+
+        loaded_after = web_store.load()
+        assert loaded_after is not None
+        assert loaded_after.cookies["session"] == "sess-new-replacement"
+
+        # 3. Pending start_login cancelled by logout while init is in flight (C2-4)
+        mode = "qr_init_race"
+        start_task = asyncio.create_task(mgr.start_login(region="feishu"))
+        await asyncio.wait_for(block_qr_init.wait(), timeout=5.0)
+        mgr.logout()
+        release_qr_init.set()
+        late_qr = await start_task
+        assert late_qr.cancelled is True
+        assert mgr.get_active_login(late_qr.login_id) is None
+
+        poll_state, poll_sess, _ = await mgr.poll_login(login_id=late_qr.login_id)
+        assert poll_state == "expired"
+        assert poll_sess is None
+        assert web_store.load() is None
     finally:
         await mock_http.aclose()

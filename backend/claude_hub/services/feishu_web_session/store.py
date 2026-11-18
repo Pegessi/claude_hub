@@ -7,6 +7,7 @@ and status/API serialization so live cookies or CSRF tokens are never logged or 
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -160,6 +161,13 @@ class FeishuWebSession:
     def effective_csrf_token(self) -> str:
         return (self.csrf_token or str(self.cookies.get("swp_csrf_token") or "")).strip()
 
+    def credential_fingerprint(self) -> str:
+        sess_cookie = str(self.cookies.get("session") or "").strip()
+        if not sess_cookie:
+            return ""
+        raw = f"{normalize_web_region(self.region)}:{sess_cookie}".encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()
+
     def to_redacted_dict(self) -> dict[str, Any]:
         cookie_names = sorted(str(k) for k in (self.cookies or {}).keys() if str(k).strip())
         return {
@@ -279,11 +287,18 @@ class FeishuWebSessionStore:
         with self._lock:
             return self._invalidated
 
-    def mark_invalid(self) -> None:
-        """Mark the currently stored session as rejected/expired so auto mode stops selecting it."""
+    def mark_invalid(self, session: FeishuWebSession | None = None) -> bool:
+        """Mark the stored session as rejected/expired if it still matches ``session``."""
         with self._lock:
+            if session is not None:
+                current = self._read_stored_session()
+                if current is None:
+                    return False
+                if current.credential_fingerprint() != session.credential_fingerprint():
+                    return False
             self._invalidated = True
             self._generation += 1
+            return True
 
     def _key(self) -> bytes:
         return _ensure_0600_key(self._key_path)
@@ -355,6 +370,7 @@ class FeishuWebSessionStore:
         session: FeishuWebSession | None,
         *,
         expected_generation: int | None = None,
+        expected_fingerprint: str | None = None,
     ) -> FeishuWebSession | None:
         with self._lock:
             if expected_generation is not None and self._generation != expected_generation:
@@ -362,6 +378,10 @@ class FeishuWebSessionStore:
             if session is None or not session.is_valid_structure():
                 self.clear()
                 return None
+            current = self._read_stored_session()
+            if expected_fingerprint is not None:
+                if current is None or current.credential_fingerprint() != expected_fingerprint:
+                    return None
             now_ts = float(self._now())
             normalized = replace(
                 session,
@@ -369,6 +389,10 @@ class FeishuWebSessionStore:
                 saved_at=session.saved_at or now_ts,
                 device_id=session.effective_device_id(),
                 csrf_token=session.effective_csrf_token(),
+            )
+            credential_changed = (
+                current is None
+                or current.credential_fingerprint() != normalized.credential_fingerprint()
             )
             key = self._key()
             cookies_json = json.dumps(dict(normalized.cookies), ensure_ascii=False, sort_keys=True)
@@ -390,6 +414,8 @@ class FeishuWebSessionStore:
                 self._path,
                 json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8"),
             )
+            if credential_changed or self._invalidated:
+                self._generation += 1
             self._invalidated = False
             return normalized
 

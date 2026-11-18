@@ -799,6 +799,34 @@ test('Personal /ai Assistant truthfully renders user mode, bot fallback with dis
   )
   assert.equal(state.aiSidebarMeta, 'Personal account reply')
   assert.equal(findByTestId(state.$root, 'feishu-ai-token-card')?.props['data-state'], 'connected')
+
+  // 4. Web session state (send_mode === 'web_session' without im:message.send_as_user scope)
+  tokenStatus = {
+    ...tokenStatus,
+    open_id: '7111222333444555666',
+    user_name: '王泽华',
+    app_id: 'web_session',
+    source: 'web_session',
+    granted_scopes: ['im:message'],
+    can_send: true,
+    can_send_as_user: true,
+    has_send_as_user_scope: false,
+    has_web_session: true,
+    web_session_user_id: '7111222333444555666',
+    web_session_name: '王泽华',
+    send_mode: 'web_session',
+    missing_required_scopes: [],
+  }
+  await state.refresh()
+  await flush()
+  assert.equal(state.aiTokenCanSend, true)
+  assert.equal(state.aiTokenChipLabel, 'Web session ready')
+  assert.equal(
+    state.aiTokenSummary,
+    'Ready (web session): 王泽华 (7111222333444555666) · user-identity reply active',
+  )
+  assert.equal(state.aiSidebarMeta, 'Personal account reply')
+  assert.equal(findByTestId(state.$root, 'feishu-ai-token-card')?.props['data-state'], 'connected')
 })
 
 test('Personal /ai Model selector renders Provider-linked logical options, maps persisted variants without false dirty state, syncs efforts, and preserves custom models', async t => {
