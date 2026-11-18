@@ -30,9 +30,91 @@ REDACTED_SECRET = "[REDACTED]"
 
 def normalize_web_region(region: str | None) -> str:
     raw = (region or "").strip().lower()
-    if raw in {"lark", "larksuite", "i18n", "overseas", "sg", "us"}:
+    if raw in {"lark", "larksuite", "larkoffice", "i18n", "overseas", "sg", "us"}:
         return "lark"
     return "feishu"
+
+
+def infer_region_from_api_base_url(api_base_url: str | None) -> str | None:
+    raw = (api_base_url or "").strip().lower()
+    if not raw:
+        return None
+    if "larksuite.com" in raw or "larkoffice.com" in raw:
+        return "lark"
+    if "feishu.cn" in raw:
+        return "feishu"
+    return None
+
+
+def is_web_session_authorized_for_owner(
+    session: FeishuWebSession | None,
+    owner_open_id: str | None = None,
+    *,
+    token_record: Any | None = None,
+    api_base_url: str | None = None,
+) -> tuple[bool, str | None]:
+    """Verify whether ``session`` is authorized to act as ``owner_open_id`` / ``token_record``.
+
+    Never infers app-scoped ``ou_...`` equivalence from configuration alone:
+    if ``owner_open_id`` (or a non-web ``token_record.open_id``) is an ``ou_...`` OpenID,
+    ``session.open_id`` must explicitly match it (or the operator must explicitly switch
+    ``owner_open_id`` to the web session's identity).
+    """
+    if session is None or not session.is_valid_structure():
+        return False, "no_web_session"
+
+    sess_region = normalize_web_region(session.region)
+    expected_region = infer_region_from_api_base_url(api_base_url)
+    if expected_region is not None and sess_region != expected_region:
+        return (
+            False,
+            f"web_session_tenant_mismatch:expected={expected_region},got={sess_region}",
+        )
+
+    rec_open = ""
+    if (
+        token_record is not None
+        and str(getattr(token_record, "source", "") or "").strip() != "web_session"
+    ):
+        rec_open = str(getattr(token_record, "open_id", "") or "").strip()
+
+    target_owner = (owner_open_id or "").strip() or rec_open
+    sess_open = (session.open_id or "").strip()
+    sess_uid = (session.user_id or "").strip()
+
+    if not target_owner:
+        return True, None
+
+    if target_owner.startswith("ou_"):
+        if sess_open and sess_open == target_owner:
+            if rec_open and rec_open != sess_open:
+                return (
+                    False,
+                    f"web_session_owner_mismatch:expected={rec_open},got={sess_open}",
+                )
+            return True, None
+        return (
+            False,
+            f"web_session_owner_mismatch:expected={target_owner},got={sess_open or sess_uid or 'unverified'}",
+        )
+
+    # target_owner is a numeric web user_id (or custom non-ou_ identifier)
+    if sess_open and sess_open != target_owner and sess_uid != target_owner:
+        return (
+            False,
+            f"web_session_owner_mismatch:expected={target_owner},got={sess_open}",
+        )
+    if rec_open and rec_open != target_owner and sess_open != rec_open:
+        return (
+            False,
+            f"web_session_owner_mismatch:expected={rec_open},got={sess_open or sess_uid or 'unverified'}",
+        )
+    if sess_uid == target_owner or sess_open == target_owner:
+        return True, None
+    return (
+        False,
+        f"web_session_owner_mismatch:expected={target_owner},got={sess_uid or sess_open or 'unverified'}",
+    )
 
 
 @dataclass(frozen=True)
@@ -176,6 +258,8 @@ class FeishuWebSessionStore:
         self._larkx_path = larkx_credentials_path
         self._now = now
         self._lock = threading.RLock()
+        self._generation: int = 0
+        self._invalidated: bool = False
 
     @property
     def path(self) -> Path:
@@ -184,6 +268,22 @@ class FeishuWebSessionStore:
     @property
     def key_path(self) -> Path:
         return self._key_path
+
+    @property
+    def generation(self) -> int:
+        with self._lock:
+            return self._generation
+
+    @property
+    def is_invalidated(self) -> bool:
+        with self._lock:
+            return self._invalidated
+
+    def mark_invalid(self) -> None:
+        """Mark the currently stored session as rejected/expired so auto mode stops selecting it."""
+        with self._lock:
+            self._invalidated = True
+            self._generation += 1
 
     def _key(self) -> bytes:
         return _ensure_0600_key(self._key_path)
@@ -200,6 +300,8 @@ class FeishuWebSessionStore:
 
     def load(self, *, auto_import_larkx: bool = False) -> FeishuWebSession | None:
         with self._lock:
+            if self._invalidated:
+                return None
             sess = self._read_stored_session()
             if sess is not None:
                 return sess
@@ -221,6 +323,8 @@ class FeishuWebSessionStore:
             return None
         if not isinstance(raw_obj, Mapping):
             return None
+        if raw_obj.get("invalidated") is True:
+            return None
 
         decrypted_obj = dict(raw_obj)
         cookies_enc = raw_obj.get("cookies_enc")
@@ -231,7 +335,8 @@ class FeishuWebSessionStore:
                 decrypted_obj["cookies"] = json.loads(cookies_json)
             except Exception:
                 logger.warning(
-                    "Failed to decrypt Feishu web session cookies in %s", self._path.name
+                    "Failed to decrypt Feishu web session cookies in %s",
+                    self._path.name,
                 )
                 return None
 
@@ -245,8 +350,15 @@ class FeishuWebSessionStore:
 
         return FeishuWebSession.from_mapping(decrypted_obj)
 
-    def save(self, session: FeishuWebSession | None) -> FeishuWebSession | None:
+    def save(
+        self,
+        session: FeishuWebSession | None,
+        *,
+        expected_generation: int | None = None,
+    ) -> FeishuWebSession | None:
         with self._lock:
+            if expected_generation is not None and self._generation != expected_generation:
+                return None
             if session is None or not session.is_valid_structure():
                 self.clear()
                 return None
@@ -278,16 +390,29 @@ class FeishuWebSessionStore:
                 self._path,
                 json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8"),
             )
+            self._invalidated = False
             return normalized
 
     def clear(self) -> bool:
         with self._lock:
+            self._generation += 1
+            self._invalidated = True
             existed = self._path.exists()
+            if not existed:
+                return False
             try:
-                self._path.unlink(missing_ok=True)
+                self._path.unlink()
+            except FileNotFoundError:
+                return False
             except OSError:
-                pass
-            return existed
+                try:
+                    self._path.write_bytes(b'{"invalidated": true}')
+                except OSError:
+                    pass
+                raise
+            if self._path.exists():
+                raise OSError(f"Failed to remove Feishu web session file {self._path}")
+            return True
 
     def import_from_larkx(self, path: Path | str | None = None) -> FeishuWebSession | None:
         """Import a session from ``~/.larkx/credentials.json`` (or explicit ``path``) into the encrypted store."""

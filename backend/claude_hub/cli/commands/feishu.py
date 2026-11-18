@@ -200,7 +200,8 @@ def _build_card(
                 board = client.get_board(ws_id)
                 sessions = board.get("sessions", []) if isinstance(board, dict) else []
                 session = next(
-                    (s for s in sessions if s.get("id") == match.get("session_id")), None
+                    (s for s in sessions if s.get("id") == match.get("session_id")),
+                    None,
                 )
                 fetched = client.get_task_reports(ws_id, task_id)
         except HubError as e:
@@ -319,7 +320,9 @@ def _build_card(
 
     if kind == "result":
         return build_result_card(
-            title or "Command result", body or "_No result body supplied._", kind="result"
+            title or "Command result",
+            body or "_No result body supplied._",
+            kind="result",
         )
 
     if kind == "action_catalog":
@@ -346,7 +349,9 @@ def _build_card(
 @click.option("--field-name", default="reply", help="Form field name (for kind=needs_input).")
 @click.option("--tab-id", default=None, help="Terminal tab id (for kind=terminal).")
 @click.option(
-    "--path", default=None, help="Directory path (for kind=filesystem/remote_filesystem)."
+    "--path",
+    default=None,
+    help="Directory path (for kind=filesystem/remote_filesystem).",
 )
 @click.option(
     "--remote-profile-id",
@@ -459,7 +464,10 @@ def feishu_ai_command_status(ctx: click.Context) -> None:
 
 @feishu_ai_command.command("configure")
 @click.option(
-    "--enabled/--disabled", "enabled", default=None, help="Enable or disable /ai command."
+    "--enabled/--disabled",
+    "enabled",
+    default=None,
+    help="Enable or disable /ai command.",
 )
 @click.option(
     "--provider",
@@ -699,6 +707,12 @@ def feishu_ai_command_auth_guide(ctx: click.Context, import_lark_cli: bool) -> N
     default=170.0,
     help="Maximum seconds to wait for QR scan confirmation (default: 170).",
 )
+@click.option(
+    "--switch-owner",
+    is_flag=True,
+    default=False,
+    help="Explicitly switch configured owner_open_id to the logged-in web session identity.",
+)
 @click.pass_context
 def feishu_ai_command_web_login(
     ctx: click.Context,
@@ -707,6 +721,7 @@ def feishu_ai_command_web_login(
     larkx_path: Optional[str],
     no_wait: bool,
     timeout_seconds: float,
+    switch_owner: bool,
 ) -> None:
     """Sign in to a Feishu web session via QR code (or import ~/.larkx/credentials.json)."""
     client = cli_main.get_client(ctx)
@@ -715,7 +730,7 @@ def feishu_ai_command_web_login(
             payload = client._request(
                 "POST",
                 "/api/feishu-bot/ai-command/web-session/import-larkx",
-                json={"path": larkx_path},
+                json={"path": larkx_path, "switch_owner": switch_owner},
             )
             emit(payload, as_json=True)
             return
@@ -743,7 +758,7 @@ def feishu_ai_command_web_login(
             polled = client._request(
                 "POST",
                 "/api/feishu-bot/ai-command/web-session/login/poll",
-                json={"login_id": login_id},
+                json={"login_id": login_id, "switch_owner": switch_owner},
             )
             st = polled.get("login_status") if isinstance(polled, dict) else None
             if st == "done":
