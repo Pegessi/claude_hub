@@ -6,10 +6,11 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from ....models import AgentStreamEvent, AgentStreamEventType
 from ..base import NormalizeContext, is_substantive_answer
+from ..native import ProviderSession
 from ..redaction import redact_event
 from .session_state import SessionState
 
@@ -42,6 +43,51 @@ class NativeConsumerMixin(SessionState):
         count as ABSENT. Invisible chars embedded inside a normal answer do not.
         """
         return is_substantive_answer(self._final_assistant_text)
+
+    async def _adopt_provider_turn_started(
+        self, event: AgentStreamEvent, record: Dict[str, Any], transport: ProviderSession
+    ) -> None:
+        # An already-owned provider start is just acknowledgment. Do not block
+        # consumption of its completion behind an in-flight submission RPC.
+        if self._active_turn_id is not None:
+            return
+        # Submission can await attachment IO before publishing its turn. Native
+        # adoption must share that lock, or it can acquire a guard/turn that the
+        # pending submission then overwrites. Recheck Stop's generation as well.
+        async with self._send_lock:
+            if (
+                self._active_turn_id is not None
+                or self._turn_teardown_pending
+                or self._stopped
+                or not transport.accepts_notification(record)
+            ):
+                return
+            provider_turn_id = event.payload.get("provider_turn_id")
+            stable_key = (
+                provider_turn_id
+                if isinstance(provider_turn_id, str) and provider_turn_id
+                else f"{self._run_epoch + 1}:{event.created_at.isoformat()}"
+            )
+            self._active_turn_id = str(
+                uuid.uuid5(uuid.NAMESPACE_URL, f"claude-hub:{self.session_id}:{stable_key}")
+            )
+            self._run_epoch += 1
+            self._reset_turn_watchdog_state()
+            self._turn_completed_seen = False
+            self._native_terminal_status = None
+            self._goal_protocol_turn = False
+            self._goal_protocol_sanitizer = None
+            transport.acknowledge_provider_turn_started()
+            event.turn_id = self._active_turn_id
+            event.message_id = f"{self._active_turn_id}:user"
+            event.run_epoch = self._run_epoch
+            event = redact_event(event)
+            try:
+                await self._publish(event)
+            except Exception:
+                logger.exception("provider turn start persistence failed for %s", self.session_id)
+                return
+            self._notify_post_persist(event)
 
     async def _run_native(self) -> None:
         """Push consumer for native provider transports.
@@ -240,7 +286,8 @@ class NativeConsumerMixin(SessionState):
             # long-poll self-expires) — it completes on its own and the next
             # idle check reaps it.
             if (
-                not self._subscribers
+                not transport.keep_alive_when_idle
+                and not self._subscribers
                 and not self._completion_subscribers
                 and time.monotonic() - self._last_subscriber_at > self._deps.IDLE_TTL_S
             ):
@@ -519,34 +566,8 @@ class NativeConsumerMixin(SessionState):
                 continue
             for event in events:
                 if event.type == AgentStreamEventType.TURN_STARTED:
-                    # The authoritative turn_started was already published by
-                    # send_message with the frontend's client_turn_id. Provider
-                    # records that also signal a turn start (Claude
-                    # message_start, Codex turn/started) must NOT create a
-                    # second turn — skip them.
-                    if self._active_turn_id is not None:
-                        continue
-                    provider_turn_id = event.payload.get("provider_turn_id")
-                    stable_key = (
-                        provider_turn_id
-                        if isinstance(provider_turn_id, str) and provider_turn_id
-                        else f"{self._run_epoch + 1}:{event.created_at.isoformat()}"
-                    )
-                    self._active_turn_id = str(
-                        uuid.uuid5(uuid.NAMESPACE_URL, f"claude-hub:{self.session_id}:{stable_key}")
-                    )
-                    self._run_epoch += 1
-                    self._reset_turn_watchdog_state()
-                    self._turn_completed_seen = False
-                    # Native continuation starts a new turn, not a continuation
-                    # of Hub's previous output protocol or terminal status.
-                    self._native_terminal_status = None
-                    self._goal_protocol_turn = False
-                    self._goal_protocol_sanitizer = None
-                    transport.acknowledge_provider_turn_started()
-                    event.turn_id = self._active_turn_id
-                    event.message_id = f"{self._active_turn_id}:user"
-                    event.run_epoch = self._run_epoch
+                    await self._adopt_provider_turn_started(event, record, transport)
+                    continue
                 # Defensive boundary for persistent app-servers (TraeX/Codex):
                 # a turn-interior record arriving with NO owning Hub turn is an
                 # unreferenceable replay or background/goal execution, not the
@@ -732,7 +753,7 @@ class NativeConsumerMixin(SessionState):
                     # with a manual Stop's ``cancelled`` edge for the same turn.
                     try:
                         consumed = await self._consume_turn_completion_record(
-                            event, observer_event, transport
+                            event, observer_event, transport, record=record
                         )
                     except Exception:
                         logger.exception(

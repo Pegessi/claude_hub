@@ -2,7 +2,7 @@
 
 MASO's ``post_llm_response`` carries the authoritative response snapshot.
 ``turn_end`` ends one LLM call, not the user run. Condensation archives and
-rewrites its trajectory; only root ``agent_end`` completes a Hub turn.
+rewrites its trajectory; only transport-confirmed tree quiescence completes a Hub turn.
 """
 
 from __future__ import annotations
@@ -333,7 +333,11 @@ class MasoEventAdapter(AgentStreamAdapter):
                     },
                 )
             ]
-        if kind == "agent_end" and not child:
+        if kind == "hub_tree_started" and not child:
+            # The manager adopts this only when no Hub turn is already active.
+            # Native SendMessage can wake a root after display quiescence.
+            return [event(AgentStreamEventType.TURN_STARTED, {"source": "provider"})]
+        if kind == "hub_tree_settled" and not child:
             reason = data.get("stop_reason")
             status = (
                 "interrupted"

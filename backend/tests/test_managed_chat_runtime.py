@@ -71,6 +71,7 @@ class _BlockingSubmitTransport:
         self.last_error = None
         self.exit_error = None
         self.eof_is_fatal = False
+        self.keep_alive_when_idle = False
         self.active_thread_id = None
         self.fail = fail
         self.entered = asyncio.Event()
