@@ -83,6 +83,7 @@ class ProviderRuntime:
     logger: Callable[[], logging.Logger]
     claude_env_options: Callable[[Dict[str, str]], List[StreamModelOption]]
     model_catalog_for: Callable[[str], Awaitable[ModelCatalog]]
+    codex_model_options: Callable[[Dict[str, str]], List[StreamModelOption]]
     provider_subprocess_env: Callable[[str, Mapping[str, str], Mapping[str, str]], Dict[str, str]]
     redact_diagnostic: Callable[[str], str]
     select_provider_env: Callable[[str, Mapping[str, str]], Awaitable[Dict[str, str]]]
