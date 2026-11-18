@@ -25,6 +25,8 @@ class PublicationMixin(SessionState):
         event: AgentStreamEvent,
         observer_event: AgentStreamEvent,
         transport: ProviderSession,
+        *,
+        record: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """Persist the provider's terminal ``turn_completed`` and release the
         guard, atomically against a concurrent manual Stop.
@@ -44,6 +46,10 @@ class PublicationMixin(SessionState):
         """
         completion_turn_id = event.turn_id
         async with self._send_lock:
+            # A pending submission can supersede a queued quiescence record
+            # while this consumer is waiting for the send lock.
+            if record is not None and not transport.accepts_notification(record):
+                return False
             active = self._active_turn_id
             if completion_turn_id is not None and active != completion_turn_id:
                 logger.warning(

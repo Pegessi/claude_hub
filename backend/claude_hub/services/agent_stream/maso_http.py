@@ -1,6 +1,6 @@
 """MASO session HTTP transport. No MASO CLI or local trajectory access.
 
-Each Hub turn subscribes before posting its message. Initial replay/snapshots
+The session subscribes before posting its first message and stays subscribed across runs. Initial replay/snapshots
 establish a baseline, not UI backfill. MASO owns model context and condensation;
 Hub's event store owns the immutable display timeline. A broken SSE connection
 fails the turn rather than guessing continuity from MASO's bounded, resettable
@@ -265,10 +265,22 @@ async def check_maso_service(
         return await maso_model_catalog(client)
 
 
+def _tree_is_active(status: Dict[str, Any]) -> bool:
+    indicator = status.get("indicator") or {}
+    if (
+        status.get("is_running") is True
+        or status.get("status") in {"running", "waiting", "paused", "aborting"}
+        or indicator.get("running")
+        or indicator.get("condensing")
+    ):
+        return True
+    return any(_tree_is_active(child) for child in status.get("children", []))
+
+
 class MasoHttpSession(ProviderSession):
     adapter_id = "maso_http"
     # Capability flags (HTTP-chunked images, tool timeline, HTTP confirm
-    # cards, Hub-managed goals, root-only agent_end completion) come from the
+    # cards, Hub-managed goals, tree settlement completion) come from the
     # ProviderSpec registry via SessionCore property defaults.
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -283,6 +295,13 @@ class MasoHttpSession(ProviderSession):
         self._stream_ready: Optional[asyncio.Future[None]] = None
         self._accept_events = False
         self._root_started = False
+        self._active_agents: set[str] = set()
+        self._tree_end: Optional[Dict[str, Any]] = None
+        self._tree_open = False
+        self._activity_serial = 0
+        self._submission_serial = 0
+        self._submission_in_progress = False
+        self._awaiting_message_id: Optional[str] = None
         self._stream_failed_generation: Optional[int] = None
         self._pending_confirmations: Dict[str, str] = {}
         self._needs_abort = False
@@ -306,7 +325,7 @@ class MasoHttpSession(ProviderSession):
                 self._delivery_uncertain = delivery.get("uncertain") is True
                 if not self._conversation_id_verified:
                     self._persist_conversation_id(delivery["session_id"])
-                self._needs_abort = True
+                self._needs_abort = delivery.get("abort_required") is True
             except (OSError, ValueError, KeyError, TypeError):
                 raise ValueError("MASO pending delivery identity could not be verified") from None
 
@@ -350,6 +369,8 @@ class MasoHttpSession(ProviderSession):
             raise ValueError("MASO Chat only supports default mode")
         if self._delivery_uncertain:
             raise RuntimeError(_UNCERTAIN_MESSAGE)
+        if self._stream_failed_generation == self._stdout_generation:
+            raise RuntimeError(self._last_error or "MASO stream interrupted; inspect the session")
         if self._needs_abort:
             # Resume first so a persisted MASO session has an active broker.
             await self._request("GET", self._path("status"))
@@ -492,10 +513,8 @@ class MasoHttpSession(ProviderSession):
             if not isinstance(status, dict) or not isinstance(status.get("agent_id"), str):
                 raise RuntimeError("MASO returned an invalid session status")
         self._apply_session_status(status)
-        # After a Hub crash the old display turn is interrupted by the tailer.
-        # Stop its still-running service-side execution before a new prompt.
-        if status.get("status") in {"running", "waiting", "aborting"} or self._message_id:
-            status = await self._abort_and_wait()
+        # A live root/child may be handling a native SendMessage. Its status
+        # is not permission to abort the tree before submitting queued input.
         await self._disable_native_cron()
         return status
 
@@ -535,6 +554,8 @@ class MasoHttpSession(ProviderSession):
 
     async def _abort_and_wait(self) -> Dict[str, Any]:
         self._needs_abort = True
+        if self._message_id:
+            self._save_delivery(self._message_id, uncertain=self._delivery_uncertain)
         # MASO abort leaves broker messages queued and can re-wake them. Remove
         # this Hub-owned message before aborting; UUID correlation is not POST
         # idempotency. Retain the delivery sidecar until both steps succeed.
@@ -574,6 +595,7 @@ class MasoHttpSession(ProviderSession):
                     "session_id": self._conversation_id,
                     "message_id": message_id,
                     "uncertain": uncertain,
+                    "abort_required": self._needs_abort,
                 }
             )
         )
@@ -589,13 +611,18 @@ class MasoHttpSession(ProviderSession):
     def acknowledge_turn_complete(self) -> None:
         # A completed root run consumed its message. A transport error may
         # still need an abort; keep that recovery identity until it succeeds.
-        if not self._needs_abort:
+        if not self._needs_abort and self._stream_failed_generation != self._stdout_generation:
             self._clear_delivery()
-        super().acknowledge_turn_complete()
+        # MASO is session-persistent, not a one-shot process generation.
+        self._end_turn()
 
     async def _close_stream(self) -> None:
         self._accept_events = False
         self._pending_confirmations.clear()
+        self._tree_end = None
+        self._tree_open = False
+        self._awaiting_message_id = None
+        self._active_agents.clear()
         self._invalidate_stdout_stream()
         task, self._reader_task = self._reader_task, None
         if task is not None:
@@ -654,6 +681,15 @@ class MasoHttpSession(ProviderSession):
         return parts
 
     async def _send_text(self, text: str) -> None:
+        self._submission_serial += 1
+        self._submission_in_progress = True
+        self._tree_end = None
+        try:
+            await self._deliver_text(text)
+        finally:
+            self._submission_in_progress = False
+
+    async def _deliver_text(self, text: str) -> None:
         images, self._staged_images = self._staged_images, []
         try:
             await self._ensure_session()
@@ -661,7 +697,6 @@ class MasoHttpSession(ProviderSession):
             if selected and selected != self._effective_model:
                 await self._request("PATCH", self._path("model"), json={"model": selected})
                 self._effective_model = selected
-            await self._close_stream()
             generation = self._stdout_generation
             if not self.turn_in_flight:
                 raise RuntimeError("MASO turn was cancelled before message delivery")
@@ -677,11 +712,14 @@ class MasoHttpSession(ProviderSession):
             if self._guidance_in_this_send:
                 self._hub_runtime_guidance_injected = False
             raise
-        self._root_started = False
-        self._stream_ready = asyncio.get_running_loop().create_future()
-        self._reader_task = asyncio.create_task(self._consume_stream(generation))
+        if self._reader_task is None or self._reader_task.done():
+            self._root_started = False
+            self._stream_ready = asyncio.get_running_loop().create_future()
+            self._accept_events = True
+            self._reader_task = asyncio.create_task(self._consume_stream(generation))
         post_started = False
         try:
+            assert self._stream_ready is not None
             await asyncio.wait_for(asyncio.shield(self._stream_ready), 10.0)
             if not self.turn_in_flight or generation != self._stdout_generation:
                 raise RuntimeError("MASO turn was cancelled before message delivery")
@@ -690,6 +728,7 @@ class MasoHttpSession(ProviderSession):
             # Until the response arrives, a crash cannot distinguish rejection
             # from a request still enqueueing on the service. Persist that fact.
             self._save_delivery(message_id, uncertain=True)
+            self._awaiting_message_id = message_id
             self._accept_events = True
             post_started = True
             await self._request(
@@ -710,13 +749,8 @@ class MasoHttpSession(ProviderSession):
         except (Exception, asyncio.CancelledError):
             await self._close_stream()
             if post_started:
-                # DELETE cannot tombstone a message the server has not queued
-                # yet. Keep uncertain identity even after best-effort abort;
-                # a later send/restart must not silently reuse this session.
-                try:
-                    await self._abort_and_wait()
-                except RuntimeError:
-                    pass
+                # A failed POST can still enqueue later. Quarantine its
+                # identity, never abort unrelated native children as cleanup.
                 self._end_turn()
                 raise RuntimeError(_UNCERTAIN_MESSAGE) from None
             self._end_turn()
@@ -724,91 +758,167 @@ class MasoHttpSession(ProviderSession):
                 self._hub_runtime_guidance_injected = False
             raise
 
+    @property
+    def keep_alive_when_idle(self) -> bool:
+        # Even an all-idle status has no pending-RPC fence. Keep the subscriber
+        # available to adopt a later native root wake, including without a UI.
+        return self._reader_task is not None and not self._reader_task.done()
+
+    def _queue_event(self, generation: int, kind: str, data: Dict[str, Any]) -> None:
+        self._stdout_queue.put_nowait(
+            (
+                generation,
+                {
+                    "type": kind,
+                    "data": data,
+                    "root_agent_id": self._root_agent_id,
+                    "generation": generation,
+                    "submission_serial": self._submission_serial,
+                },
+            )
+        )
+
+    async def _watch_settlement(self, generation: int) -> None:
+        quiet_serial: Optional[int] = None
+        while True:
+            await asyncio.sleep(0.25)
+            if (
+                self._tree_end is None
+                or not self._accept_events
+                or self._submission_in_progress
+                or self._awaiting_message_id is not None
+            ):
+                quiet_serial = None
+                continue
+            serial = self._activity_serial
+            status = await self._request("GET", self._path("status"))
+            if not isinstance(status, dict) or status.get("agent_id") != self._root_agent_id:
+                raise RuntimeError("MASO returned invalid settlement status")
+            if generation != self._stdout_generation:
+                return
+            if (
+                self._tree_end is None
+                or serial != self._activity_serial
+                or self._submission_in_progress
+                or self._awaiting_message_id is not None
+            ):
+                quiet_serial = None
+                continue
+            if self._active_agents or _tree_is_active(status):
+                quiet_serial = None
+                # This is verified remote liveness, not a synthetic timer
+                # heartbeat: keep the manager from reaping a legitimate wait.
+                self._queue_event(generation, "hub_tree_waiting", {})
+                continue
+            if quiet_serial != serial:
+                quiet_serial = serial
+                continue
+            ended, self._tree_end = self._tree_end, None
+            self._tree_open = False
+            self._queue_event(generation, "hub_tree_settled", ended)
+
     async def _consume_stream(self, generation: int) -> None:
-        kind = ""
-        data_lines: List[str] = []
-        baseline = False
         try:
-            async with self._http().stream("GET", self._path("stream"), timeout=None) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if line.startswith("event:"):
-                        kind = line[6:].strip()
-                    elif line.startswith("data:"):
-                        data_lines.append(line[5:].lstrip(" "))
-                    elif line == "":
-                        if data_lines:
-                            data = json.loads("\n".join(data_lines))
-                            if isinstance(data, dict):
-                                if kind == "indicator_snapshot":
-                                    baseline = True
-                                    if (
-                                        self._stream_ready is not None
-                                        and not self._stream_ready.done()
-                                    ):
-                                        self._stream_ready.set_result(None)
-                                elif baseline and self._accept_events:
-                                    root = data.get("agent_id") == self._root_agent_id
-                                    if root and kind in {
-                                        "agent_start",
-                                        "turn_start",
-                                        "agent_error",
-                                    }:
-                                        self._root_started = True
-                                    if self._root_started:
-                                        call_id = data.get("tool_call_id")
-                                        agent_id = data.get("agent_id")
-                                        if isinstance(call_id, str) and isinstance(agent_id, str):
-                                            if kind == "confirmation_required":
-                                                self._pending_confirmations[call_id] = agent_id
-                                            elif kind == "confirmation_resolved":
-                                                self._pending_confirmations.pop(call_id, None)
-                                        await self._stdout_queue.put(
-                                            (
-                                                generation,
-                                                {
-                                                    "type": kind,
-                                                    "data": data,
-                                                    "root_agent_id": self._root_agent_id,
-                                                    "generation": generation,
-                                                },
-                                            )
-                                        )
-                                        if kind == "agent_end" and root:
-                                            return
-                        kind, data_lines = "", []
-            raise RuntimeError("MASO stream closed before the run ended")
+            # One owner cancels both the reader and its status monitor on Stop
+            # or either channel's failure. A broken monitor cannot hang a turn.
+            async with asyncio.TaskGroup() as tasks:
+                tasks.create_task(self._read_stream(generation))
+                tasks.create_task(self._watch_settlement(generation))
         except asyncio.CancelledError:
             raise
         except Exception:
-            self._stream_failed_generation = generation
-            message = "MASO event stream disconnected; the turn was stopped"
-            if self._stream_ready is not None and not self._stream_ready.done():
-                self._stream_ready.set_exception(
-                    RuntimeError("MASO event stream could not be opened")
-                )
-            elif self._accept_events and generation == self._stdout_generation:
-                try:
-                    await self._abort_and_wait()
-                except RuntimeError:
-                    message = (
-                        "MASO event stream disconnected; execution stop could not be confirmed"
-                    )
-                    self._last_error = message
-                await self._stdout_queue.put(
-                    (
-                        generation,
-                        {
-                            "type": "hub_transport_error",
-                            "data": {"error": message},
-                            "root_agent_id": self._root_agent_id,
-                            "generation": generation,
-                        },
-                    )
-                )
+            await self._stream_disconnected(generation)
+
+    async def _read_stream(self, generation: int) -> None:
+        kind = ""
+        data_lines: List[str] = []
+        baseline = False
+        async with self._http().stream("GET", self._path("stream"), timeout=None) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if line.startswith("event:"):
+                    kind = line[6:].strip()
+                elif line.startswith("data:"):
+                    data_lines.append(line[5:].lstrip(" "))
+                elif line == "":
+                    if data_lines:
+                        data = json.loads("\n".join(data_lines))
+                        if isinstance(data, dict):
+                            if kind == "indicator_snapshot":
+                                baseline = True
+                                self._active_agents = set(data.get("running", []))
+                                self._root_started = bool(self._active_agents)
+                                if self._stream_ready is not None and not self._stream_ready.done():
+                                    self._stream_ready.set_result(None)
+                            elif baseline and self._accept_events:
+                                root = data.get("agent_id") == self._root_agent_id
+                                if (
+                                    root
+                                    and kind == "message_injected"
+                                    and any(
+                                        item.get("id") == self._awaiting_message_id
+                                        for item in data.get("injected", [])
+                                        if isinstance(item, dict)
+                                        and self._awaiting_message_id is not None
+                                    )
+                                ):
+                                    # Only this echo proves that a later end
+                                    # includes our queued user input.
+                                    self._awaiting_message_id = None
+                                    self._tree_end = None
+                                if root and kind in {
+                                    "agent_start",
+                                    "turn_start",
+                                    "agent_error",
+                                }:
+                                    self._root_started = True
+                                if self._root_started:
+                                    self._activity_serial += 1
+                                    agent_id = data.get("agent_id")
+                                    if kind == "agent_start" and isinstance(agent_id, str):
+                                        self._active_agents.add(agent_id)
+                                        if not self._tree_open:
+                                            self._tree_open = True
+                                            self._queue_event(generation, "hub_tree_started", {})
+                                        if root:
+                                            self._tree_end = None
+                                    elif kind == "agent_end" and isinstance(agent_id, str):
+                                        self._active_agents.discard(agent_id)
+                                        if root or self._tree_end is None:
+                                            self._tree_end = {
+                                                **data,
+                                                "agent_id": self._root_agent_id,
+                                            }
+                                    call_id = data.get("tool_call_id")
+                                    if isinstance(call_id, str) and isinstance(agent_id, str):
+                                        if kind == "confirmation_required":
+                                            self._pending_confirmations[call_id] = agent_id
+                                        elif kind == "confirmation_resolved":
+                                            self._pending_confirmations.pop(call_id, None)
+                                    self._queue_event(generation, kind, data)
+                    kind, data_lines = "", []
+        raise RuntimeError("MASO session event stream closed")
+
+    async def _stream_disconnected(self, generation: int) -> None:
+        self._stream_failed_generation = generation
+        message = "MASO event stream disconnected; remote execution was not stopped. Inspect the MASO session before retrying."
+        self._last_error = message
+        if self._stream_ready is not None and not self._stream_ready.done():
+            self._stream_ready.set_exception(RuntimeError("MASO event stream could not be opened"))
+        elif self._accept_events and generation == self._stdout_generation:
+            if self._message_id:
+                self._save_delivery(self._message_id, uncertain=True)
+            self._queue_event(generation, "hub_transport_error", {"error": message})
 
     def accepts_notification(self, record: Dict[str, Any]) -> bool:
-        return record.get("generation") == self._stdout_generation
+        return record.get("generation") == self._stdout_generation and (
+            record.get("type") != "hub_tree_settled"
+            or (
+                record.get("submission_serial") == self._submission_serial
+                and not self._submission_in_progress
+                and self._awaiting_message_id is None
+            )
+        )
 
     async def answer_pending_question(
         self,

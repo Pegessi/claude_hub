@@ -2860,6 +2860,7 @@ class _FakeNativeTransport:
         self._started = True
         self._records: asyncio.Queue = asyncio.Queue()
         self.eof_is_fatal = eof_is_fatal
+        self.keep_alive_when_idle = False
         self.goal_completion_requires_provider_event = goal_completion_requires_provider_event
         self.stop_called = False
         self.sent_messages: List[Tuple[str, List[bytes]]] = []

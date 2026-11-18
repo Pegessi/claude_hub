@@ -514,7 +514,12 @@ class SessionState(ABC):
 
     @abstractmethod
     async def _consume_turn_completion_record(
-        self, event: AgentStreamEvent, observer_event: AgentStreamEvent, transport: ProviderSession
+        self,
+        event: AgentStreamEvent,
+        observer_event: AgentStreamEvent,
+        transport: ProviderSession,
+        *,
+        record: Optional[Dict[str, Any]] = None,
     ) -> bool:
         raise NotImplementedError()
 

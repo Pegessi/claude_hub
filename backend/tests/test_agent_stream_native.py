@@ -1603,6 +1603,7 @@ class _BlockingSubmitTransport:
         self.last_error = None
         self.exit_error = None
         self.eof_is_fatal = False
+        self.keep_alive_when_idle = False
         self.fail = fail
         self.calls = 0
         self.entered = asyncio.Event()

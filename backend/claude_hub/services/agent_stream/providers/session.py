@@ -324,6 +324,11 @@ class SessionCore(ABC):
         self.session.env = dict(env)
 
     @property
+    def keep_alive_when_idle(self) -> bool:
+        """Retain a session subscription that can deliver native wake-ups."""
+        return False
+
+    @property
     def eof_is_fatal(self) -> bool:
         """Whether an EOF on the transport's stdout is a fatal error.
 
