@@ -608,3 +608,39 @@ async def test_codex_title_long_task_title_is_truncated(
     assert len(title) == 80
     assert title.endswith("…")
     assert title.startswith("A" * 79)
+
+
+@pytest.mark.asyncio
+async def test_codex_models_endpoint_reads_cache_without_starting_provider(
+    client: AsyncClient, monkeypatch: MonkeyPatch, tmp_path
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from claude_hub.services.agent_stream import native
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    (tmp_path / "models_cache.json").write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "slug": "[redacted]",
+                        "display_name": "[redacted]",
+                        "visibility": "list",
+                        "default_reasoning_level": "ultra",
+                        "supported_reasoning_levels": [{"effort": "ultra"}],
+                    },
+                    {"slug": "[redacted]", "visibility": "hide"},
+                ]
+            }
+        )
+    )
+    spawn = AsyncMock(side_effect=AssertionError("catalog must not start a provider"))
+    monkeypatch.setattr(native.asyncio, "create_subprocess_exec", spawn)
+    response = await client.get("/api/codex/models")
+    assert response.status_code == 200
+    options = {m["id"]: m for m in response.json()}
+    assert options["[redacted]"]["label"] == "[redacted]"
+    assert options["[redacted]"]["supported_reasoning_efforts"][0]["id"] == "ultra"
+    assert "[redacted]" in options and "[redacted]" not in options
+    spawn.assert_not_awaited()

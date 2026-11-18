@@ -495,6 +495,7 @@ async def main(browser_run: BrowserRun) -> None:
     # cwds submitted through the real Create Session flow; the cwd removal
     # scenario uses this to prove addCwd re-add restores a dismissed entry.
     created_cwds: list[str] = []
+    created_codex_sessions: list[dict] = []
     tab = {
         "id": TAB,
         "name": "MASO composer fixture",
@@ -520,6 +521,7 @@ async def main(browser_run: BrowserRun) -> None:
         "maso_available": False,
         "existing_maso_available": True,
         "managed_available": True,
+        "codex_models_status": 200,
         "capability_delays": {},
         "capability_status": {},
         "retry_delays": {},
@@ -618,7 +620,10 @@ async def main(browser_run: BrowserRun) -> None:
                 # fixture tab keeps the pane mounted, so no stream id or other
                 # follow-up request is introduced into the strict mock surface.
                 payload = json.loads(request.post_data or "{}")
-                created_cwds.append(payload.get("cwd"))
+                if payload.get("agent_type") == "codex":
+                    created_codex_sessions.append(payload)
+                else:
+                    created_cwds.append(payload.get("cwd"))
                 body = tab
             elif method == "GET" and path == "/api/tabs":
                 body = [
@@ -927,6 +932,29 @@ async def main(browser_run: BrowserRun) -> None:
                         ],
                     }
                 ]
+            elif method == "GET" and path == "/api/codex/models":
+                # Mock catalog support, not evidence of local account entitlement.
+                body = [
+                    {
+                        "id": model,
+                        "label": label,
+                        "default_reasoning_effort": "low",
+                        "supported_reasoning_efforts": [
+                            {"id": effort, "label": effort.title()}
+                            for effort in ["low", "high", "max", "ultra"]
+                        ],
+                    }
+                    for model, label in [
+                        ("[redacted]", "[redacted]"),
+                        ("[redacted]", "[redacted]"),
+                    ]
+                ]
+                await route.fulfill(
+                    status=state["codex_models_status"],
+                    content_type="application/json",
+                    body=json.dumps(body),
+                )
+                return
             elif method == "GET" and path == "/api/auth/check":
                 body = {"auth_required": False, "user": None}
             elif method == "GET" and path == "/api/env-presets":
@@ -936,7 +964,12 @@ async def main(browser_run: BrowserRun) -> None:
                             "id": "maso-missing",
                             "name": "MASO missing service",
                             "text": "MASO_BASE_URL=http://maso-missing.test:9796",
-                        }
+                        },
+                        {
+                            "id": "codex-custom",
+                            "name": "Codex custom model",
+                            "text": "CODEX_MODEL=private-model\nCODEX_REASONING_EFFORT=future-effort\nKEEP_FROM_PRESET=keep-value",
+                        },
                     ],
                     "hidden_builtin_ids": [],
                 }
@@ -2762,6 +2795,67 @@ async def main(browser_run: BrowserRun) -> None:
 
         assert created_cwds == ["/fixture/five", "/fixture/five"], created_cwds
 
+        # Local Codex creation: model + effort come from the same resolved env
+        # as presets; catalog errors and custom values never discard that env.
+        await page.locator(".modal").get_by_role("button", name="Cancel", exact=True).click()
+        for width, model_id, effort in (
+            (1280, "[redacted]", "ultra"),
+            (720, "[redacted]", "high"),
+            (390, "[redacted]", "max"),
+        ):
+            await page.set_viewport_size({"width": width, "height": 900})
+            state["codex_models_status"] = 503 if width == 1280 else 200
+            await page.locator(".add-tab").click()
+            await page.get_by_label("Chat Provider", exact=True).select_option("codex")
+            model = page.get_by_label("Codex Model", exact=True)
+            reasoning = page.get_by_label("Codex Reasoning Effort", exact=True)
+            await expect(model).to_have_value("")
+            await expect(reasoning).to_have_value("")
+            await page.locator(".modal .env-preset-row select").select_option("codex-custom")
+            await expect(model).to_have_value("private-model")
+            await expect(reasoning).to_have_value("future-effort")
+            if width == 1280:
+                await expect(page.locator(".codex-model-selector [role='alert']")).to_contain_text(
+                    "Could not load local Codex models"
+                )
+                state["codex_models_status"] = 200
+                await page.get_by_role("button", name="Retry models", exact=True).click()
+            await expect(model.locator(f'option[value="{model_id}"]')).to_have_count(1)
+            await expect(model).to_have_value("private-model")
+            await model.click()
+            await page.keyboard.press("Escape")
+            await model.select_option(model_id)
+            await expect(reasoning).to_have_value("")
+            await reasoning.click()
+            await page.keyboard.press("Escape")
+            await reasoning.select_option(effort)
+            for control in (model, reasoning):
+                bounds = await control.bounding_box()
+                assert bounds and bounds["x"] >= 0 and bounds["x"] + bounds["width"] <= width + 1
+                assert bounds["height"] >= 44
+                assert await control.evaluate("""el => {
+                  const r = el.getBoundingClientRect();
+                  return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2) === el;
+                }"""), "Codex picker is covered by the sticky Create actions"
+            assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+            await page.screenshot(path=str(output / f"codex-create-model-{width}.png"))
+            await page.locator(".modal").get_by_role("button", name="Create", exact=True).click()
+            await expect(page.locator(".modal-overlay")).to_have_count(0)
+            assert created_codex_sessions[-1]["env"] == {
+                "CODEX_MODEL": model_id,
+                "CODEX_REASONING_EFFORT": effort,
+                "KEEP_FROM_PRESET": "keep-value",
+            }
+
+        # The local catalog must not be offered for a remote Terminal target.
+        await page.locator(".add-tab").click()
+        await page.get_by_label("Chat Provider", exact=True).select_option("codex")
+        await page.locator(".modal").get_by_role("button", name="Terminal", exact=True).click()
+        await expect(page.get_by_label("Codex Model", exact=True)).to_be_visible()
+        await page.locator(".modal").get_by_role("button", name="Remote", exact=True).click()
+        await expect(page.locator(".codex-model-selector")).to_have_count(0)
+        await page.locator(".modal").get_by_role("button", name="Cancel", exact=True).click()
+
         assert not errors, errors
         assert not unexpected_external, unexpected_external
         assert not unknown_requests, unknown_requests
@@ -2773,6 +2867,7 @@ async def main(browser_run: BrowserRun) -> None:
                     "sends": len(sends),
                     "interrupts": len(interrupts),
                     "codex_session_requests": codex_session_requests,
+                    "created_codex_sessions": created_codex_sessions,
                     "maso_model_changes": model_changes,
                     "maso_preflight_requests": preflight_requests,
                     "capability_requests": capability_requests,

@@ -562,8 +562,9 @@ async def test_codex_capability_metadata_retries_after_empty_model_list() -> Non
     assert first.metadata_cacheable is False
     assert first.available_models
     assert native._model_discovery_attempted is True
-    assert recovered.metadata_cacheable is True
-    assert [item.id for item in recovered.available_models] == ["recovered-model"]
+    assert recovered.metadata_cacheable is False
+    assert recovered.available_models[0].id == "recovered-model"
+    assert {"[redacted]", "[redacted]"} <= {item.id for item in recovered.available_models}
     assert native._send_request.await_count == 2
 
 
@@ -2788,7 +2789,10 @@ async def test_codex_no_model_selection_falls_back_to_thread_model() -> None:
 
 
 @pytest.mark.asyncio
-async def test_codex_model_switch_via_update_env_takes_effect_next_turn() -> None:
+@pytest.mark.parametrize("selected_model", ["[redacted]", "[redacted]"])
+async def test_codex_model_switch_via_update_env_takes_effect_next_turn(
+    selected_model: str,
+) -> None:
     """update_env() mid-session must change the model on the NEXT turn/start,
     and clearing CODEX_MODEL must revert to the thread model.
 
@@ -2861,7 +2865,7 @@ async def test_codex_model_switch_via_update_env_takes_effect_next_turn() -> Non
         await _complete_turn("tu-1")
 
         # Switch model mid-session (the model-picker path).
-        native.update_env({"CODEX_MODEL": "gpt-5.4"})
+        native.update_env({"CODEX_MODEL": selected_model})
         proc.stdout.push(
             json.dumps({"jsonrpc": "2.0", "id": 6, "result": {"turn": {"id": "tu-2"}}}).encode()
             + b"\n"
@@ -2881,7 +2885,7 @@ async def test_codex_model_switch_via_update_env_takes_effect_next_turn() -> Non
     turns = [m for m in messages if m.get("method") == "turn/start"]
     assert len(turns) == 3
     assert turns[0]["params"]["collaborationMode"]["settings"]["model"] == "[redacted]"
-    assert turns[1]["params"]["collaborationMode"]["settings"]["model"] == "gpt-5.4"
+    assert turns[1]["params"]["collaborationMode"]["settings"]["model"] == selected_model
     assert turns[2]["params"]["collaborationMode"]["settings"]["model"] == "[redacted]"
 
 
@@ -6050,3 +6054,99 @@ def test_cursor_acp_task_tool_and_subagent_spawned_correlate_by_tool_call_id() -
     assert completed[0].payload["args"]["subagentType"] == "explore"
     assert completed[0].payload["args"]["agentId"] == "child-sid"
     assert completed[0].payload["args"]["receiverThreadIds"] == ["child-sid.1"]
+
+
+@pytest.mark.asyncio
+async def test_codex_merges_live_subset_with_cache_and_refreshes_cache_only_models(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "models_cache.json"
+    path.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "slug": model,
+                        "visibility": "list",
+                        "display_name": "Cached " + model,
+                        "default_reasoning_level": "ultra",
+                        "supported_reasoning_levels": [{"effort": "low"}, {"effort": "ultra"}],
+                    }
+                    for model in ["[redacted]", "[redacted]", "cache-only", "[redacted]"]
+                ]
+            }
+        )
+    )
+    native = _codex_session()
+    native.session.env = {"CODEX_HOME": str(tmp_path)}
+    native.start = AsyncMock()  # type: ignore[method-assign]
+    native._mode_discovery_attempted = True
+    native._send_request = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "data": [
+                {
+                    "model": "[redacted]",
+                    "displayName": "Live Sol",
+                    "defaultReasoningEffort": "high",
+                    "supportedReasoningEfforts": [{"reasoningEffort": "high"}],
+                },
+                {"model": "[redacted]", "hidden": True},
+            ]
+        }
+    )
+    await native.prepare_capabilities()
+    options = {m.id: m for m in native.capabilities().available_models}
+    assert len(options) == len(native.capabilities().available_models)
+    assert options["[redacted]"].label == "Live Sol"
+    assert [e.id for e in options["[redacted]"].supported_reasoning_efforts] == ["high"]
+    assert options["[redacted]"].default_reasoning_effort == "ultra"
+    assert "[redacted]" not in options
+    native.update_env(
+        {
+            "CODEX_HOME": str(tmp_path),
+            "CODEX_MODEL": "[redacted]",
+            "CODEX_REASONING_EFFORT": "ultra",
+        }
+    )
+    assert native._selected_reasoning_effort() == "ultra"
+    payload = native._collaboration_mode_payload()
+    assert payload is not None
+    assert payload["settings"]["model"] == "[redacted]"
+    assert native._thread_config()["model"] == "[redacted]"
+    path.write_text('{"models": []}')
+    await native.prepare_capabilities()
+    assert "cache-only" not in {m.id for m in native.capabilities().available_models}
+    assert "[redacted]" not in {m.id for m in native.capabilities().available_models}
+    native._send_request.assert_awaited_once()
+    assert native.capabilities().metadata_cacheable is False
+    # Static fallback has no effort schema and must not discard an explicit override.
+    assert native._selected_reasoning_effort() == "ultra"
+
+
+@pytest.mark.asyncio
+async def test_codex_failed_model_rpc_retains_cached_reasoning_options(tmp_path: Path) -> None:
+    (tmp_path / "models_cache.json").write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "slug": "[redacted]",
+                        "visibility": "list",
+                        "default_reasoning_level": "max",
+                        "supported_reasoning_levels": [{"effort": "max"}],
+                    }
+                ]
+            }
+        )
+    )
+    native = _codex_session()
+    native.session.env = {"CODEX_HOME": str(tmp_path), "CODEX_MODEL": "[redacted]"}
+    native.start = AsyncMock()  # type: ignore[method-assign]
+    native._mode_discovery_attempted = True
+    native._send_request = AsyncMock(side_effect=RuntimeError("offline"))  # type: ignore[method-assign]
+    await native.prepare_capabilities()
+    options = {m.id: m for m in native.capabilities().available_models}
+    assert options["[redacted]"].default_reasoning_effort == "max"
+    assert native.current_reasoning_effort() == "max"
+    assert "[redacted]" in options
+    assert native._provider_model_options is None

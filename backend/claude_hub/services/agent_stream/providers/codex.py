@@ -16,10 +16,10 @@ from ....models import (
     StreamCapabilities,
     StreamModelOption,
     StreamModeOption,
-    StreamReasoningEffortOption,
 )
 from ..provider_network import ProviderNetworkError
 from .contracts import ProviderGoal, ProviderGoalOrigin, ProviderGoalSnapshot, ProviderRpcError
+from .model_options import parse_codex_models
 from .process import ProcessSession
 
 _NATIVE_GOAL_STATUSES = frozenset(
@@ -134,6 +134,7 @@ class CodexConfiguredSession(ProcessSession):
         self._provider_goal_api_available: Optional[bool] = None
         self._model_discovery_attempted = False
         self._provider_model_options: Optional[List[StreamModelOption]] = None
+        self._provider_hidden_model_ids: set[str] = set()
         self._network_config_fingerprint: Optional[str] = None
         self._defer_initial_thread_adoption = False
         self._pending_rotation: Optional[Tuple[str, Dict[str, Any]]] = None
@@ -477,7 +478,11 @@ class CodexConfiguredSession(ProcessSession):
         }
 
     def _thread_config(self) -> Dict[str, Any]:
-        return {"cwd": self._cwd, **self._permission_config()}
+        config = {"cwd": self._cwd, **self._permission_config()}
+        model = self._selected_model_override()
+        if model is not None and self.session.agent_type == AgentType.CODEX:
+            config["model"] = model
+        return config
 
     def _turn_config(self) -> Dict[str, Any]:
         return self._permission_config()
@@ -516,17 +521,33 @@ class CodexConfiguredSession(ProcessSession):
             self._mode_presets[ui_mode] = dict(item)
 
     async def prepare_capabilities(self) -> None:
-        # Populate ``_available_models`` (base implementation); without this
-        # super call the codex override would skip model discovery.
-        await super().prepare_capabilities()
+        # Capture the on-disk catalog before startup can refresh the CLI cache.
+        if self.session.agent_type == AgentType.CODEX:
+            self._available_models = self._runtime.codex_model_options(self.session.env)
+        else:
+            await super().prepare_capabilities()
         await self.start()
         if not self._mode_discovery_attempted:
             await self._discover_modes()
         if self._provider_model_options is not None:
-            self._available_models = self._provider_model_options
+            self._merge_provider_models()
         else:
             await self._discover_models()
-        self._metadata_cacheable = self._provider_model_options is not None
+        # Keep rereading the file on explicit/polling capability requests even
+        # when this persistent app-server still advertises an older subset.
+        self._metadata_cacheable = (
+            self.session.agent_type != AgentType.CODEX and self._provider_model_options is not None
+        )
+
+    def _merge_provider_models(self) -> None:
+        provider = self._provider_model_options or []
+        if self.session.agent_type != AgentType.CODEX:
+            self._available_models = provider
+            return
+        excluded = {item.id for item in provider} | self._provider_hidden_model_ids
+        self._available_models = provider + [
+            item for item in self._available_models if item.id not in excluded
+        ]
 
     async def _discover_models(self) -> bool:
         """Load the app-server's model-specific reasoning capabilities."""
@@ -551,58 +572,23 @@ class CodexConfiguredSession(ProcessSession):
                 break
             seen_cursors.add(next_cursor)
             cursor = next_cursor
-        options: List[StreamModelOption] = []
-        seen: set[str] = set()
         data = [item for page in pages for item in page["data"]]
-        for item in data:
-            if not isinstance(item, dict) or item.get("hidden") is True:
-                continue
-            model = item.get("model")
-            if not isinstance(model, str) or not model or model in seen:
-                continue
-            seen.add(model)
-            efforts: List[StreamReasoningEffortOption] = []
-            raw_efforts = item.get("supportedReasoningEfforts")
-            if isinstance(raw_efforts, list):
-                for raw_effort in raw_efforts:
-                    if not isinstance(raw_effort, dict):
-                        continue
-                    effort = raw_effort.get("reasoningEffort")
-                    if (
-                        not isinstance(effort, str)
-                        or effort not in self._runtime.reasoning_efforts()
-                    ):
-                        continue
-                    description = raw_effort.get("description")
-                    efforts.append(
-                        StreamReasoningEffortOption(
-                            id=effort,
-                            label=self._runtime.reasoning_labels()[effort],
-                            description=description if isinstance(description, str) else "",
-                        )
-                    )
-            default_effort = item.get("defaultReasoningEffort")
-            if (
-                not isinstance(default_effort, str)
-                or default_effort not in self._runtime.reasoning_efforts()
-            ):
-                default_effort = None
-            label = item.get("displayName")
-            description = item.get("description")
-            options.append(
-                StreamModelOption(
-                    id=model,
-                    label=label if isinstance(label, str) and label else model,
-                    description=description if isinstance(description, str) else "",
-                    provider_model_id=model,
-                    default_reasoning_effort=default_effort,
-                    supported_reasoning_efforts=efforts,
-                )
-            )
-        if options:
+        options = parse_codex_models(
+            data,
+            reasoning_efforts=self._runtime.reasoning_efforts(),
+            reasoning_labels=self._runtime.reasoning_labels(),
+        )
+        self._provider_hidden_model_ids = {
+            item["model"]
+            for item in data
+            if isinstance(item, dict)
+            and isinstance(item.get("model"), str)
+            and item.get("hidden") is True
+        }
+        if options or self._provider_hidden_model_ids:
             self._model_discovery_attempted = True
             self._provider_model_options = options
-            self._available_models = options
+            self._merge_provider_models()
             return True
         return False
 
@@ -635,11 +621,16 @@ class CodexConfiguredSession(ProcessSession):
         if isinstance(effort, str) and effort.strip() in self._runtime.reasoning_efforts():
             selected = effort.strip()
             model_id = self.current_model()
-            catalog = self._provider_model_options or []
+            catalog = self._available_models
             model = next((item for item in catalog if item.id == model_id), None)
-            if model is not None and selected not in {
-                item.id for item in model.supported_reasoning_efforts
-            }:
+            if (
+                model is not None
+                and (
+                    model.provider_model_id is not None
+                    or model in (self._provider_model_options or [])
+                )
+                and selected not in {item.id for item in model.supported_reasoning_efforts}
+            ):
                 return None
             return selected
         return None
@@ -654,7 +645,7 @@ class CodexConfiguredSession(ProcessSession):
         preset_effort = preset.get("reasoning_effort")
         if isinstance(preset_effort, str) and preset_effort in self._runtime.reasoning_efforts():
             return preset_effort
-        catalog = self._provider_model_options or self._available_models
+        catalog = self._available_models
         model_id = self.current_model()
         if model_id is None and len(catalog) == 1:
             model_id = catalog[0].id

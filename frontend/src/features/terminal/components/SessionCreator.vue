@@ -250,6 +250,10 @@
             Retry check
           </button>
         </div>
+        <CodexModelSelector
+          v-if="form.agent_type === 'codex' && form.target === 'local'"
+          v-model:env-text="form.env_text"
+        />
         <CodexSessionSelector
           v-if="form.agent_type === 'codex' && form.target === 'local'"
           v-model:session-id="form.agent_session_id"
@@ -404,6 +408,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import AgentConfigFields from '@/components/AgentConfigFields.vue'
+import CodexModelSelector from '@/components/CodexModelSelector.vue'
 import CodexSessionSelector from '@/components/CodexSessionSelector.vue'
 import LoadingButton from '@/components/LoadingButton.vue'
 import { defaultLaunchEnvPresetForAgent, parseLaunchEnv, useLaunchEnvPresets } from '@/composables/useLaunchEnvPresets'
