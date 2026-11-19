@@ -356,6 +356,71 @@ async def switch_managed_env(session_id: str, env: Mapping[str, str]) -> None:
     get_managed_tailer_manager().set_env(updated, dict(updated.env))
 
 
+async def create_legacy_tab(
+    service: Any,
+    message: FeishuUserMessage,
+    parsed: ParsedAiCommand,
+    cfg: FeishuAiCommandConfig,
+    target_env: Mapping[str, str],
+) -> str:
+    """Create a standalone ungrouped Chat tab via the legacy/direct-Chat path."""
+    cwd = service._resolve_cwd(cfg)
+    short_target = (message.thread_id or message.chat_id)[-6:]
+    created = await service._create_tab(
+        name=f"Feishu /ai · {short_target}"[:64],
+        session_kind=SessionKind.CHAT,
+        agent_type=parsed.provider,
+        cwd=cwd,
+        solo_mode=True,
+        env=dict(target_env),
+    )
+    tab_id = created if isinstance(created, str) else getattr(created, "id", "")
+    if not isinstance(tab_id, str) or not tab_id.strip():
+        raise RuntimeError("Failed to create Hub Chat tab for Feishu /ai command")
+    return tab_id.strip()
+
+
+async def switch_tab_env(
+    service: Any,
+    tab_id: str,
+    env: dict[str, str],
+    *,
+    tab: Any = None,
+) -> None:
+    """Hot-swap a standalone tab's launch env and sync its live stream tailer."""
+    if service._tab_env_switcher is not None:
+        res = service._tab_env_switcher(tab_id, env)
+        if inspect.isawaitable(res):
+            await res
+        return
+    switch_fn = getattr(tab, "switch_env", None) if tab is not None else None
+    if callable(switch_fn):
+        res = switch_fn(env)
+        if inspect.isawaitable(res):
+            await res
+        return
+    from claude_hub.services import ttyd_manager
+
+    res = ttyd_manager.switch_env(tab_id, env)
+    updated_tab = await res if inspect.isawaitable(res) else res
+    try:
+        from claude_hub.api.agent_stream import (
+            _get_tab_tailer_manager,
+            _terminal_tab_stream_session,
+        )
+
+        stream_session = _terminal_tab_stream_session(tab_id)
+        if stream_session is not None:
+            effective_env = dict(getattr(updated_tab, "env", None) or env)
+            _get_tab_tailer_manager().set_env(stream_session, effective_env)
+    except Exception:
+        logger.debug(
+            "Could not sync live stream tailer env for tab %s",
+            tab_id,
+            exc_info=True,
+        )
+
+
 async def dispatch_managed_turn(
     session: Any,
     prompt: str,

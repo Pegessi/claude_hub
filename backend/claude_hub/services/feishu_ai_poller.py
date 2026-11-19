@@ -12,7 +12,6 @@ and executes turns asynchronously so a slow turn never blocks intake across chat
 from __future__ import annotations
 
 import asyncio
-import hmac
 import logging
 import time
 from collections import OrderedDict
@@ -89,6 +88,8 @@ class FeishuAiPoller:
         self._max_pages_per_chat = max(1, max_pages_per_chat)
         self._dispatch_sem = asyncio.Semaphore(max(1, max_concurrent_dispatches))
         self._task: asyncio.Task[None] | None = None
+        self._frontier_task: asyncio.Task[None] | None = None
+        self._frontier_stop = asyncio.Event()
         self._worker_tasks: set[asyncio.Task[None]] = set()
         self._in_flight_ids: set[str] = set()
         self._search_msg_cache: OrderedDict[str, FeishuUserMessage | None] = OrderedDict()
@@ -106,10 +107,19 @@ class FeishuAiPoller:
     def running(self) -> bool:
         return self._task is not None and not self._task.done() and not self._stopping
 
+    @property
+    def frontier_running(self) -> bool:
+        return (
+            self._frontier_task is not None
+            and not self._frontier_task.done()
+            and not self._stopping
+        )
+
     def status_dict(self) -> dict[str, Any]:
         watermarks = self._service.get_watermarks()
         return {
             "running": self.running,
+            "frontier_running": self.frontier_running,
             "poll_count": self._poll_count,
             "last_poll_at": self._last_poll_at,
             "last_error": self._last_error,
@@ -123,6 +133,68 @@ class FeishuAiPoller:
             "recent_runs": self._service.get_recent_runs(),
         }
 
+    async def handle_pushed_web_message(self, pushed: Any) -> bool:
+        """Process a ``PushedMessage`` delivered over ``FeishuWebFrontierListener``."""
+        cfg = await self._service.aget_config()
+        if not cfg.enabled or cfg.send_mode == "openapi":
+            return False
+        user_client = self._service.build_user_client(cfg)
+        if (
+            hasattr(user_client, "should_use_web_session")
+            and not user_client.should_use_web_session()
+        ):
+            return False
+        wt = (
+            user_client._get_web_transport() if hasattr(user_client, "_get_web_transport") else None
+        )
+        if wt is None:
+            return False
+        user_msg = wt.ingest_pushed_message(pushed)
+        if user_msg is None:
+            return False
+        if not self._service.is_owner_ai_command_candidate(
+            sender_open_id=user_msg.sender_open_id,
+            sender_type=user_msg.sender_type,
+            text=user_msg.text,
+            config=cfg,
+        ):
+            return False
+        self._commands_detected += 1
+        self._service.enqueue_pending_command(user_msg, source="web_frontier")
+        self._schedule_durable_pending_queue()
+        return True
+
+    def _ensure_frontier_task(self, cfg: Any) -> None:
+        if self._stopping or not cfg.enabled or cfg.send_mode == "openapi":
+            if self._frontier_task is not None and not self._frontier_task.done():
+                self._frontier_stop.set()
+                self._frontier_task.cancel()
+            return
+        user_client = self._service.build_user_client(cfg)
+        if (
+            hasattr(user_client, "should_use_web_session")
+            and not user_client.should_use_web_session()
+        ):
+            if self._frontier_task is not None and not self._frontier_task.done():
+                self._frontier_stop.set()
+                self._frontier_task.cancel()
+            return
+        wt = (
+            user_client._get_web_transport() if hasattr(user_client, "_get_web_transport") else None
+        )
+        if wt is None:
+            if self._frontier_task is not None and not self._frontier_task.done():
+                self._frontier_stop.set()
+                self._frontier_task.cancel()
+            return
+        if self._frontier_task is None or self._frontier_task.done():
+            self._frontier_stop = asyncio.Event()
+            listener = wt.create_frontier_listener(self.handle_pushed_web_message)
+            self._frontier_task = asyncio.create_task(
+                listener.run(stop_event=self._frontier_stop),
+                name="feishu-web-frontier",
+            )
+
     async def start(self) -> None:
         self._stopping = False
         if self._task is None or self._task.done():
@@ -134,6 +206,7 @@ class FeishuAiPoller:
         cfg = self._service.get_config(auto_import_lark_cli=False)
         if cfg.enabled and not self.running and not self._stopping:
             await self.start()
+        self._ensure_frontier_task(cfg)
         self._wake_event.set()
 
     async def wait_for_inflight(self, timeout: float = 5.0) -> None:
@@ -146,6 +219,13 @@ class FeishuAiPoller:
     async def quiesce(self) -> None:
         self._stopping = True
         self._wake_event.set()
+        self._frontier_stop.set()
+        if self._frontier_task is not None and not self._frontier_task.done():
+            self._frontier_task.cancel()
+            try:
+                await self._frontier_task
+            except asyncio.CancelledError:
+                pass
         if self._task is not None and not self._task.done():
             self._task.cancel()
             try:
@@ -162,6 +242,7 @@ class FeishuAiPoller:
     async def stop(self) -> None:
         await self.quiesce()
         self._task = None
+        self._frontier_task = None
 
     async def _run_loop(self) -> None:
         while not self._stopping:
@@ -169,6 +250,7 @@ class FeishuAiPoller:
             try:
                 cfg = await self._service.aget_config()
                 interval = max(2.0, cfg.poll_interval_seconds)
+                self._ensure_frontier_task(cfg)
                 if cfg.enabled:
                     await self.poll_once()
             except asyncio.CancelledError:
@@ -238,7 +320,9 @@ class FeishuAiPoller:
         task.add_done_callback(self._worker_tasks.discard)
         return task
 
-    def _schedule_durable_pending_queue(self) -> tuple[list[asyncio.Task[None]], list[str]]:
+    def _schedule_durable_pending_queue(
+        self,
+    ) -> tuple[list[asyncio.Task[None]], list[str]]:
         spawned: list[asyncio.Task[None]] = []
         scheduled_ids: list[str] = []
         entries = self._service.list_pending_commands()
@@ -441,7 +525,8 @@ class FeishuAiPoller:
                         raise
                     except Exception:
                         logger.debug(
-                            "Feishu /ai message search supplement unavailable", exc_info=True
+                            "Feishu /ai message search supplement unavailable",
+                            exc_info=True,
                         )
                         break
 
@@ -478,8 +563,8 @@ class FeishuAiPoller:
                             and fetched.create_time_ms <= wm
                         ):
                             continue
-                        if fetched.sender_type == "user" and hmac.compare_digest(
-                            fetched.sender_open_id.strip(), owner_open_id
+                        if fetched.sender_type == "user" and self._service._matches_owner_sender(
+                            fetched.sender_open_id, cfg
                         ):
                             discovered.append(fetched.chat_id)
                             if len(discovered) >= max_discover:
@@ -588,15 +673,18 @@ class FeishuAiPoller:
                 resume_upper_ms = max(watermark_ms, int(saved_scan.get("upper_ms") or 0))
 
             try:
-                messages, _reached, next_cursor, scan_upper_ms = (
-                    await self._collect_unprocessed_chat_messages(
-                        user_client,
-                        chat_id,
-                        watermark_ms=watermark_ms,
-                        cfg=cfg,
-                        resume_cursor=resume_cursor,
-                        resume_upper_ms=resume_upper_ms,
-                    )
+                (
+                    messages,
+                    _reached,
+                    next_cursor,
+                    scan_upper_ms,
+                ) = await self._collect_unprocessed_chat_messages(
+                    user_client,
+                    chat_id,
+                    watermark_ms=watermark_ms,
+                    cfg=cfg,
+                    resume_cursor=resume_cursor,
+                    resume_upper_ms=resume_upper_ms,
                 )
             except asyncio.CancelledError:
                 raise
@@ -620,8 +708,8 @@ class FeishuAiPoller:
                 if msg.create_time_ms <= watermark_ms:
                     self._skipped_count += 1
                     continue
-                if msg.sender_type != "user" or not hmac.compare_digest(
-                    msg.sender_open_id.strip(), owner_open_id
+                if msg.sender_type != "user" or not self._service._matches_owner_sender(
+                    msg.sender_open_id, cfg
                 ):
                     self._skipped_count += 1
                     continue

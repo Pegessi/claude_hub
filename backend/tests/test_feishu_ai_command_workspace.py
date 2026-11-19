@@ -913,3 +913,164 @@ def _workspace_create_payload(tmp_path: Path, workspace_id: str, name: str) -> A
         path=str(tmp_path),
         session_prefix=workspace_id.replace("-", "")[:12] or "feishuai",
     )
+
+
+@pytest.mark.asyncio
+async def test_web_session_and_agent_workspace_integrated_ai_command(tmp_path: Path) -> None:
+    """Combined regression: web_session user-identity transport + Agent Workspace managed Chat."""
+    import base64
+    import time
+
+    import httpx
+
+    from claude_hub.services.feishu_bot import FeishuMessageDedupStore
+    from claude_hub.services.feishu_user_client import FeishuUserClient
+    from claude_hub.services.feishu_user_token_store import FeishuUserTokenStore
+    from claude_hub.services.feishu_web_session import (
+        REACT_DONE,
+        REACT_ON_IT,
+        TYPE_POST,
+        FeishuWebSession,
+        FeishuWebSessionStore,
+        decode,
+        encode,
+    )
+
+    token_store = FeishuUserTokenStore(
+        path=tmp_path / "feishu_user_tokens.json",
+        key_path=tmp_path / "feishu_user_tokens.key",
+    )
+    web_store = FeishuWebSessionStore(
+        path=tmp_path / "feishu_web_session.json",
+        key_path=tmp_path / "feishu_web_session.key",
+    )
+    web_store.save(
+        FeishuWebSession(
+            region="feishu",
+            cookies={"session": "sess_integrated_token_123456"},
+            csrf_token="csrf_integrated_123456",
+            user_id="7111222333444555666",
+            open_id="ou_owner",
+            name="Dot Owner",
+            saved_at=time.time(),
+        )
+    )
+
+    reactions_added: list[tuple[str, str]] = []
+    sent_messages: list[dict[str, Any]] = []
+
+    def gateway_handler(request: httpx.Request) -> httpx.Response:
+        pkt = decode("Packet", request.content)
+        cmd_id = int(pkt.get("cmd", 0))
+        inner_raw = base64.b64decode(pkt.get("payload", ""))
+        if cmd_id == 43:  # PullMessagesByPositionsRequest
+            resp_bytes = encode("lark_messages_PullMessagesByPositionsResponse", {"messages": {}})
+        elif cmd_id == 8:  # PullMessagesByIdsRequest
+            resp_bytes = encode("lark_messages_PullMessagesByIdsResponse", {"messages": {}})
+        elif cmd_id == 25:  # PutReactionRequest
+            req_dec = decode("reactions_PutReactionRequest", inner_raw)
+            reactions_added.append((req_dec["messageId"], req_dec["reactionType"]))
+            resp_bytes = encode("reactions_PutReactionResponse", {"count": 1})
+        elif cmd_id == 26:  # DeleteReactionRequest
+            resp_bytes = encode("reactions_DeleteReactionResponse", {})
+        elif cmd_id == 5:  # PutMessageRequest
+            req_dec = decode("lark_messages_PutMessageRequest", inner_raw)
+            sent_messages.append(req_dec)
+            resp_bytes = encode(
+                "lark_messages_PutMessageResponse",
+                {
+                    "message": {
+                        "id": f"740000000000000990{len(sent_messages)}",
+                        "type": req_dec.get("type", TYPE_POST),
+                        "fromId": "7111222333444555666",
+                        "createTime": int(time.time()),
+                        "chatId": req_dec.get("chatId", "7300000000000000101"),
+                        "parentId": req_dec.get("parentId", ""),
+                        "rootId": req_dec.get("rootId", ""),
+                        "position": 10 + len(sent_messages),
+                    }
+                },
+            )
+        else:
+            raise AssertionError(f"Unexpected gateway cmd {cmd_id}")
+        out_pkt = encode(
+            "Packet",
+            {
+                "payloadType": 1,
+                "cmd": cmd_id,
+                "status": 0,
+                "cid": pkt.get("cid") or "cid-int",
+                "payload": base64.b64encode(resp_bytes).decode("ascii"),
+            },
+        )
+        return httpx.Response(200, content=out_pkt)
+
+    mock_http = httpx.AsyncClient(transport=httpx.MockTransport(gateway_handler))
+    fake_manager = _FakeWorkspaceManager(
+        workspaces=[
+            SimpleNamespace(id="ws-pinned-integrated", name="Feishu /ai", path=str(tmp_path))
+        ]
+    )
+    managed_dispatches: list[tuple[str, str, str]] = []
+
+    async def dispatch_managed(
+        session: Any,
+        prompt: str,
+        turn_id: str,
+        visible_text: str,
+        metadata: Mapping[str, Any],
+    ) -> str:
+        managed_dispatches.append((session.id, session.workspace_id, turn_id))
+        return "Agent Workspace 与 Web Session 联合验证通过。"
+
+    try:
+        service = _make_service(
+            tmp_path,
+            fake_manager=fake_manager,
+            managed_dispatcher=dispatch_managed,
+        )
+        service._token_store = token_store
+        service._web_session_store = web_store
+        service._dedup = FeishuMessageDedupStore(tmp_path / "dedup_integrated.json")
+        service._user_client_factory = lambda cfg: FeishuUserClient(
+            token_store,
+            open_id=cfg.owner_open_id or None,
+            app_id=cfg.app_id or None,
+            client=mock_http,
+            web_session_store=web_store,
+            send_mode=cfg.send_mode,
+        )
+        service.update_config(
+            {
+                "enabled": True,
+                "owner_open_id": "ou_owner",
+                "workspace_id": "ws-pinned-integrated",
+                "send_mode": "web_session",
+                "cwd": str(tmp_path),
+            }
+        )
+
+        msg = FeishuUserMessage(
+            message_id="7400000000000000888",
+            chat_id="7300000000000000101",
+            sender_open_id="7111222333444555666",
+            sender_type="user",
+            msg_type="text",
+            text="/ai 检查联合工作流",
+            create_time_ms=1710000005000,
+        )
+        result = await service.handle_message(msg)
+        assert result.handled is True
+        assert result.status == "completed"
+        assert result.tab_id == "tab-1"
+        assert managed_dispatches == [
+            ("sess-1", "ws-pinned-integrated", "feishu-ai-7400000000000000888")
+        ]
+        assert ("7400000000000000888", REACT_ON_IT) in reactions_added
+        assert ("7400000000000000888", REACT_DONE) in reactions_added
+        assert len(sent_messages) == 2
+        final_text = sent_messages[1]["content"]["richText"]["innerText"]
+        assert "Agent Workspace 与 Web Session 联合验证通过。" in final_text
+        assert "🤖 AI 代答，仅供参考" in final_text
+    finally:
+        await mock_http.aclose()

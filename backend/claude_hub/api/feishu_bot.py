@@ -1202,6 +1202,7 @@ async def stop_feishu_websockets(*, drain_timeout_seconds: float | None = None) 
 
 
 __all__ = [
+    "alias_router",
     "quiesce_feishu_websockets",
     "require_hub_user",
     "router",
@@ -1215,5 +1216,8 @@ from ..services.feishu_ai_poller import get_feishu_ai_poller
 from .routes.feishu_bot.ai_command import register_ai_command_routes
 from .routes.feishu_bot.card_actions import register_card_routes
 
+alias_router = APIRouter(prefix="/api/feishu-bot", tags=["feishu-bot"], include_in_schema=False)
+
 register_card_routes(router)
 register_ai_command_routes(router, require_hub_user=require_hub_user)
+register_ai_command_routes(alias_router, require_hub_user=require_hub_user)

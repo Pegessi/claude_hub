@@ -107,6 +107,9 @@ class FeishuScopePreflightResult:
     has_send_as_user_scope: bool = False
     can_send_via_bot: bool = False
     fallback_bot_app_id: str | None = None
+    has_web_session: bool = False
+    web_user_id: str | None = None
+    web_user_name: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -124,6 +127,9 @@ class FeishuScopePreflightResult:
             "has_send_as_user_scope": self.has_send_as_user_scope,
             "can_send_via_bot": self.can_send_via_bot,
             "fallback_bot_app_id": self.fallback_bot_app_id,
+            "has_web_session": self.has_web_session,
+            "web_user_id": self.web_user_id,
+            "web_user_name": self.web_user_name,
             "send_mode": self.send_mode,
             "can_react_as_user": self.can_react_as_user,
             "can_read_messages": self.can_read_messages,
@@ -194,114 +200,24 @@ def evaluate_scope_preflight(
     *,
     now: float | None = None,
     fallback_bot_app_id: str | None = None,
+    web_session: Any | None = None,
+    configured_send_mode: str = "auto",
+    configured_owner_open_id: str | None = None,
+    api_base_url: str | None = None,
 ) -> FeishuScopePreflightResult:
-    """Inspect a user token record and produce clear scope & auth guidance."""
-    cmd = build_auth_login_command()
-    if record is None:
-        steps = (
-            f"1. Authenticate via lark-cli: `{cmd}` (or sign in via Hub Feishu OAuth).",
-            "2. Run `claude-hub feishu ai-command status` or click 'Import ~/.lark-cli Token' in Settings.",
-        )
-        return FeishuScopePreflightResult(
-            has_token=False,
-            open_id=None,
-            user_name=None,
-            app_id=None,
-            source=None,
-            expires_at=0.0,
-            token_expired=True,
-            granted_scopes=(),
-            required_send_scope=REQUIRED_SEND_AS_USER_SCOPE,
-            can_send_as_user=False,
-            can_react_as_user=False,
-            can_read_messages=False,
-            missing_required_scopes=(
-                REQUIRED_SEND_AS_USER_SCOPE,
-                REQUIRED_IM_MESSAGE_SCOPE,
-            ),
-            missing_recommended_scopes=RECOMMENDED_AI_COMMAND_SCOPES,
-            auth_login_command=cmd,
-            remediation_steps=steps,
-            can_send=False,
-            send_mode="none",
-            has_send_as_user_scope=False,
-            can_send_via_bot=False,
-            fallback_bot_app_id=None,
-        )
-
-    granted = record.scopes_set()
-    has_send_as_user = REQUIRED_SEND_AS_USER_SCOPE in granted
-    can_react = bool(granted & {"im:message.reactions:write_only", "im:message"})
-    can_read = bool(
-        granted
-        & {
-            "im:message:readonly",
-            "im:message",
-            "im:message.group_msg:get_as_user",
-            "im:message.p2p_msg:get_as_user",
-        }
+    """Inspect a user token record (and optional web session) and produce clear scope & auth guidance."""
+    from claude_hub.services.feishu_web_session.adapter import (
+        evaluate_scope_preflight_with_web_session,
     )
-    resolved_bot_app = (
-        record.app_id
-        if (fallback_bot_app_id or "").strip() == record.app_id
-        else (record.app_id if (fallback_bot_app_id is None and record.app_secret.strip()) else "")
-    )
-    can_send_via_bot = bool(resolved_bot_app and can_read)
-    can_send = has_send_as_user or can_send_via_bot
-    send_mode = "user" if has_send_as_user else ("bot_fallback" if can_send_via_bot else "none")
-    missing_req: list[str] = []
-    if not has_send_as_user:
-        missing_req.append(REQUIRED_SEND_AS_USER_SCOPE)
-    if not can_read and REQUIRED_IM_MESSAGE_SCOPE not in granted:
-        missing_req.append(REQUIRED_IM_MESSAGE_SCOPE)
-    missing_rec = [s for s in RECOMMENDED_AI_COMMAND_SCOPES if s not in granted]
 
-    steps_list: list[str] = []
-    if has_send_as_user:
-        steps_list.append(
-            "User token includes `im:message.send_as_user` and is ready to send as user."
-        )
-    elif can_send_via_bot:
-        steps_list.append(
-            f"Ready via bot fallback (`{resolved_bot_app}`): user token reads context and reacts "
-            f"as {record.open_id}, while replies are sent by app `{resolved_bot_app}` "
-            f"(`{REQUIRED_SEND_AS_USER_SCOPE}` is not granted on `{record.app_id}`)."
-        )
-    else:
-        steps_list.append(
-            f"1. Configure app secret for `{record.app_id}` (or enable `{REQUIRED_SEND_AS_USER_SCOPE}` "
-            f"in Feishu Developer Console for `{record.app_id}`)."
-        )
-        steps_list.append(
-            f"2. Re-authorize your user token with: `{cmd}` and complete device verification."
-        )
-        steps_list.append(
-            "3. Reload the token with `claude-hub feishu ai-command configure --import-lark-cli` "
-            "or via the Hub Feishu Settings UI."
-        )
-
-    return FeishuScopePreflightResult(
-        has_token=True,
-        open_id=record.open_id,
-        user_name=record.user_name or None,
-        app_id=record.app_id,
-        source=record.source,
-        expires_at=record.expires_at,
-        token_expired=record.is_expired(now=now, skew_seconds=0.0),
-        granted_scopes=tuple(sorted(granted)),
-        required_send_scope=REQUIRED_SEND_AS_USER_SCOPE,
-        can_send_as_user=has_send_as_user,
-        can_react_as_user=can_react,
-        can_read_messages=can_read,
-        missing_required_scopes=tuple(missing_req),
-        missing_recommended_scopes=tuple(missing_rec),
-        auth_login_command=cmd,
-        remediation_steps=tuple(steps_list),
-        can_send=can_send,
-        send_mode=send_mode,
-        has_send_as_user_scope=has_send_as_user,
-        can_send_via_bot=can_send_via_bot,
-        fallback_bot_app_id=resolved_bot_app or None,
+    return evaluate_scope_preflight_with_web_session(
+        record,
+        now=now,
+        fallback_bot_app_id=fallback_bot_app_id,
+        web_session=web_session,
+        configured_send_mode=configured_send_mode,
+        configured_owner_open_id=configured_owner_open_id,
+        api_base_url=api_base_url,
     )
 
 
@@ -393,6 +309,8 @@ class FeishuUserClient:
         api_base_url: str = "https://open.feishu.cn",
         client: httpx.AsyncClient | None = None,
         token_refresher: Callable[..., Any] | None = None,
+        web_session_store: Any | None = None,
+        send_mode: str = "auto",
     ) -> None:
         self._store = token_store or get_feishu_user_token_store()
         self._open_id = (open_id or "").strip() or None
@@ -400,6 +318,9 @@ class FeishuUserClient:
         self._api_base_url = api_base_url.rstrip("/")
         self._client = client
         self._token_refresher = token_refresher or refresh_user_access_token_bundle
+        self._web_session_store = web_session_store
+        self._send_mode = (send_mode or "auto").strip().lower()
+        self._web_transport: Any | None = None
         self._bot_client = FeishuBotClient(
             FeishuBotConfig(
                 app_id=self._app_id or "user-client",
@@ -409,6 +330,65 @@ class FeishuUserClient:
             client=client,
         )
         self._fallback_bot_clients: dict[str, FeishuBotClient] = {}
+
+    def _raw_web_session(self) -> Any | None:
+        if self._send_mode == "openapi" or self._web_session_store is None:
+            return None
+        try:
+            sess = self._web_session_store.load(auto_import_larkx=False)
+            if sess is not None and sess.is_valid_structure():
+                return sess
+        except Exception:
+            pass
+        return None
+
+    def _active_web_session(self, record: FeishuUserTokenRecord | None = None) -> Any | None:
+        sess = self._raw_web_session()
+        if sess is None:
+            return None
+        from claude_hub.services.feishu_web_session.store import (
+            is_web_session_authorized_for_owner,
+        )
+
+        auth_ok, _ = is_web_session_authorized_for_owner(
+            sess,
+            self._open_id,
+            token_record=record,
+            api_base_url=self._api_base_url,
+        )
+        return sess if auth_ok else None
+
+    def _get_web_transport(self) -> Any | None:
+        sess = self._active_web_session()
+        if sess is None:
+            return None
+        if self._web_transport is None:
+            from claude_hub.services.feishu_web_session import (
+                FeishuWebClient,
+                FeishuWebUserTransport,
+            )
+
+            web_client = FeishuWebClient(
+                self._web_session_store,
+                http_client=self._client,
+            )
+            self._web_transport = FeishuWebUserTransport(
+                web_client,
+                owner_open_id=self._open_id or "",
+                api_base_url=self._api_base_url,
+            )
+        return self._web_transport
+
+    def _should_use_web_session_for_send(self, record: FeishuUserTokenRecord | None) -> bool:
+        if self._send_mode == "openapi" or self._active_web_session(record) is None:
+            return False
+        if self._send_mode == "web_session" or record is None or record.source == "web_session":
+            return True
+        return REQUIRED_SEND_AS_USER_SCOPE not in record.scopes_set()
+
+    def should_use_web_session(self, record: FeishuUserTokenRecord | None = None) -> bool:
+        rec = record or self._store.resolve_token(open_id=self._open_id, app_id=self._app_id)
+        return self._should_use_web_session_for_send(rec)
 
     def _resolve_fallback_bot_configs(
         self, record: FeishuUserTokenRecord | None = None
@@ -442,26 +422,64 @@ class FeishuUserClient:
         async with create_feishu_http_client(self._api_base_url, timeout=15.0) as client:
             return await client.request(method, path, **kwargs)
 
+    def _synthetic_web_record(self, sess: Any) -> FeishuUserTokenRecord:
+        eff_open = (sess.open_id or sess.user_id or self._open_id or "web_user").strip()
+        return FeishuUserTokenRecord(
+            open_id=eff_open,
+            app_id=self._app_id or "web_session",
+            access_token="web-session",
+            refresh_token="",
+            expires_at=0.0,
+            scope=" ".join(RECOMMENDED_AI_COMMAND_SCOPES),
+            user_name=sess.name or "",
+            source="web_session",
+            updated_at=sess.saved_at,
+        )
+
     def resolve_record(self, *, auto_import_lark_cli: bool = True) -> FeishuUserTokenRecord | None:
-        return self._store.resolve_token(
+        rec = self._store.resolve_token(
             open_id=self._open_id,
             app_id=self._app_id,
             auto_import_lark_cli=auto_import_lark_cli,
         )
+        if rec is not None or self._send_mode == "openapi":
+            return rec
+        sess = self._active_web_session()
+        return self._synthetic_web_record(sess) if sess is not None else None
 
     async def aresolve_record(
         self, *, auto_import_lark_cli: bool = True
     ) -> FeishuUserTokenRecord | None:
         if hasattr(self._store, "aresolve_token"):
-            return await self._store.aresolve_token(
+            rec = await self._store.aresolve_token(
                 open_id=self._open_id,
                 app_id=self._app_id,
                 auto_import_lark_cli=auto_import_lark_cli,
             )
-        async with self._store.async_file_lock(
-            app_id=self._app_id or "", open_id=self._open_id or ""
-        ):
-            return self.resolve_record(auto_import_lark_cli=auto_import_lark_cli)
+        else:
+            async with self._store.async_file_lock(
+                app_id=self._app_id or "", open_id=self._open_id or ""
+            ):
+                rec = self._store.resolve_token(
+                    open_id=self._open_id,
+                    app_id=self._app_id,
+                    auto_import_lark_cli=auto_import_lark_cli,
+                )
+        if rec is not None or self._send_mode == "openapi":
+            return rec
+        sess = self._active_web_session()
+        return self._synthetic_web_record(sess) if sess is not None else None
+
+    def _eval_preflight(self, target: FeishuUserTokenRecord | None) -> FeishuScopePreflightResult:
+        fb_configs = self._resolve_fallback_bot_configs(target)
+        return evaluate_scope_preflight(
+            target,
+            fallback_bot_app_id=fb_configs[0][0] if fb_configs else "",
+            web_session=self._raw_web_session(),
+            configured_send_mode=self._send_mode,
+            configured_owner_open_id=self._open_id,
+            api_base_url=self._api_base_url,
+        )
 
     def preflight_scopes(
         self,
@@ -469,13 +487,12 @@ class FeishuUserClient:
         *,
         auto_import_lark_cli: bool = True,
     ) -> FeishuScopePreflightResult:
-        if record is _RECORD_OMITTED:
-            target = self.resolve_record(auto_import_lark_cli=auto_import_lark_cli)
-        else:
-            target = record if isinstance(record, FeishuUserTokenRecord) else None
-        fb_configs = self._resolve_fallback_bot_configs(target)
-        fb_app_id = fb_configs[0][0] if fb_configs else ""
-        return evaluate_scope_preflight(target, fallback_bot_app_id=fb_app_id)
+        target = (
+            self.resolve_record(auto_import_lark_cli=auto_import_lark_cli)
+            if record is _RECORD_OMITTED
+            else (record if isinstance(record, FeishuUserTokenRecord) else None)
+        )
+        return self._eval_preflight(target)
 
     async def apreflight_scopes(
         self,
@@ -483,13 +500,12 @@ class FeishuUserClient:
         *,
         auto_import_lark_cli: bool = True,
     ) -> FeishuScopePreflightResult:
-        if record is _RECORD_OMITTED:
-            target = await self.aresolve_record(auto_import_lark_cli=auto_import_lark_cli)
-        else:
-            target = record if isinstance(record, FeishuUserTokenRecord) else None
-        fb_configs = self._resolve_fallback_bot_configs(target)
-        fb_app_id = fb_configs[0][0] if fb_configs else ""
-        return evaluate_scope_preflight(target, fallback_bot_app_id=fb_app_id)
+        target = (
+            await self.aresolve_record(auto_import_lark_cli=auto_import_lark_cli)
+            if record is _RECORD_OMITTED
+            else (record if isinstance(record, FeishuUserTokenRecord) else None)
+        )
+        return self._eval_preflight(target)
 
     def require_send_as_user_scope(
         self,
@@ -504,7 +520,19 @@ class FeishuUserClient:
             target = record if isinstance(record, FeishuUserTokenRecord) else None
         fb_configs = self._resolve_fallback_bot_configs(target) if allow_bot_fallback else []
         fb_app_id = fb_configs[0][0] if fb_configs else ""
-        preflight = evaluate_scope_preflight(target, fallback_bot_app_id=fb_app_id)
+        preflight = evaluate_scope_preflight(
+            target,
+            fallback_bot_app_id=fb_app_id,
+            web_session=self._active_web_session(),
+            configured_send_mode=self._send_mode,
+        )
+        if self._send_mode == "web_session" and not preflight.has_web_session:
+            raise FeishuUserScopeError(
+                "Feishu web session is required when send_mode='web_session'. "
+                "Run `claude-hub feishu ai-command web-login`.",
+                missing_scopes=preflight.missing_required_scopes,
+                auth_login_command="claude-hub feishu ai-command web-login",
+            )
         if target is None:
             raise FeishuUserScopeError(
                 "No Feishu user access token is available. "
@@ -512,7 +540,7 @@ class FeishuUserClient:
                 missing_scopes=preflight.missing_required_scopes,
                 auth_login_command=preflight.auth_login_command,
             )
-        can_proceed = preflight.can_send if allow_bot_fallback else preflight.has_send_as_user_scope
+        can_proceed = preflight.can_send if allow_bot_fallback else preflight.can_send_as_user
         if not can_proceed:
             missing = preflight.missing_required_scopes or (REQUIRED_SEND_AS_USER_SCOPE,)
             raise FeishuUserScopeError(
@@ -755,7 +783,10 @@ class FeishuUserClient:
                         "bot_app_id": bot_app_id,
                     }
                 if allow_bound_or_dm_fallback_on_not_in_chat:
-                    for bound_app_id, bound_secret in self._resolve_chat_bound_pool_bot_configs(
+                    for (
+                        bound_app_id,
+                        bound_secret,
+                    ) in self._resolve_chat_bound_pool_bot_configs(
                         chat_id, exclude_app_id=bot_app_id
                     ):
                         bound_client = self._get_fallback_bot_client(bound_app_id, bound_secret)
@@ -855,7 +886,10 @@ class FeishuUserClient:
                     return self._require_reply_receipt_identity(receipt)
                 if allow_bound_or_dm_fallback_on_not_in_chat:
                     if resolved_chat_id:
-                        for bound_app_id, bound_secret in self._resolve_chat_bound_pool_bot_configs(
+                        for (
+                            bound_app_id,
+                            bound_secret,
+                        ) in self._resolve_chat_bound_pool_bot_configs(
                             resolved_chat_id, exclude_app_id=bot_app_id
                         ):
                             bound_client = self._get_fallback_bot_client(bound_app_id, bound_secret)
@@ -912,6 +946,13 @@ class FeishuUserClient:
                 "missing_required_scopes": list(preflight.missing_required_scopes),
             }
         record = await self.arequire_send_as_user_scope(allow_bot_fallback=allow_bot_fallback)
+        if self._should_use_web_session_for_send(record):
+            wt = self._get_web_transport()
+            if wt is not None:
+                sent_res: dict[str, Any] = await wt.send_message(
+                    chat_id, msg_type, content, uuid=uuid
+                )
+                return sent_res
         if REQUIRED_SEND_AS_USER_SCOPE not in record.scopes_set():
             return await self._send_via_bot_fallback(
                 record,
@@ -974,6 +1015,28 @@ class FeishuUserClient:
                 thread_id="dry-run-thread" if reply_in_thread else None,
             )
         record = await self.arequire_send_as_user_scope(allow_bot_fallback=allow_bot_fallback)
+        if self._should_use_web_session_for_send(record):
+            wt = self._get_web_transport()
+            if wt is not None:
+                try:
+                    reply_res: FeishuReplyReceipt = await wt.reply_message(
+                        message_id,
+                        msg_type,
+                        content,
+                        chat_id=chat_id,
+                        reply_in_thread=reply_in_thread,
+                        uuid=uuid,
+                    )
+                    return reply_res
+                except FeishuDeliveryUncertainError:
+                    raise
+                except FeishuBotError:
+                    if (
+                        self._send_mode == "web_session"
+                        or record.source == "web_session"
+                        or not (message_id or "").startswith("om_")
+                    ):
+                        raise
         if REQUIRED_SEND_AS_USER_SCOPE not in record.scopes_set():
             return await self._reply_via_bot_fallback(
                 record,
@@ -1015,6 +1078,9 @@ class FeishuUserClient:
                 )
             raise
 
+    def _has_oauth_token(self) -> bool:
+        return self._store.resolve_token(open_id=self._open_id, app_id=self._app_id) is not None
+
     async def add_reaction_as_user(
         self,
         message_id: str,
@@ -1025,6 +1091,22 @@ class FeishuUserClient:
         """Add an emoji reaction (e.g. ``OnIt`` or ``DONE``) as the user."""
         if dry_run:
             return f"dry-run-reaction:{emoji_type}"
+        wt = self._get_web_transport()
+        has_oauth = self._has_oauth_token()
+        if wt is not None and (
+            self.should_use_web_session()
+            or not (message_id or "").startswith("om_")
+            or not has_oauth
+        ):
+            try:
+                return str(await wt.add_reaction(message_id, emoji_type))
+            except FeishuBotError:
+                if (
+                    self._send_mode == "web_session"
+                    or not has_oauth
+                    or not (message_id or "").startswith("om_")
+                ):
+                    raise
 
         async def _call(token: str) -> str:
             return await self._bot_client.add_reaction(
@@ -1045,6 +1127,24 @@ class FeishuUserClient:
         """Delete a reaction previously added by the user."""
         if dry_run:
             return
+        wt = self._get_web_transport()
+        has_oauth = self._has_oauth_token()
+        if wt is not None and (
+            self.should_use_web_session()
+            or (reaction_id or "").startswith("web-reaction:")
+            or not (message_id or "").startswith("om_")
+            or not has_oauth
+        ):
+            try:
+                await wt.delete_reaction(message_id, reaction_id)
+                return
+            except FeishuBotError:
+                if (
+                    self._send_mode == "web_session"
+                    or not has_oauth
+                    or not (message_id or "").startswith("om_")
+                ):
+                    raise
 
         async def _call(token: str) -> None:
             await self._bot_client.delete_reaction(
@@ -1063,6 +1163,10 @@ class FeishuUserClient:
         types: str = "p2p,group",
     ) -> list[FeishuChatInfo]:
         """List recent chats (both P2P and group by default) for the authenticated user."""
+        wt = self._get_web_transport()
+        if wt is not None and self.should_use_web_session():
+            chats_res: list[FeishuChatInfo] = await wt.list_chats(page_size=page_size)
+            return chats_res
 
         async def _call(token: str) -> list[FeishuChatInfo]:
             params: dict[str, Any] = {
@@ -1117,6 +1221,22 @@ class FeishuUserClient:
         """Fetch one page of messages in a ``chat`` or ``thread`` container."""
         if container_id_type not in {"chat", "thread"}:
             raise ValueError("container_id_type must be 'chat' or 'thread'")
+        wt = self._get_web_transport()
+        if wt is not None:
+            rec = self._store.resolve_token(open_id=self._open_id, app_id=self._app_id)
+            if self._should_use_web_session_for_send(rec) and (
+                self._send_mode == "web_session"
+                or rec is None
+                or not (container_id or "").startswith(("oc_", "omt_"))
+            ):
+                page_res: FeishuMessagePage = await wt.list_messages_page(
+                    container_id_type=container_id_type,
+                    container_id=container_id,
+                    sort_type=sort_type,
+                    page_size=page_size,
+                    page_token=page_token,
+                )
+                return page_res
 
         async def _call(token: str) -> FeishuMessagePage:
             params: dict[str, Any] = {
@@ -1231,6 +1351,23 @@ class FeishuUserClient:
 
     async def get_message(self, message_id: str) -> FeishuUserMessage | None:
         """Fetch one message by ``message_id`` using the user token."""
+        wt = self._get_web_transport()
+        has_oauth = self._has_oauth_token()
+        if wt is not None and (
+            self.should_use_web_session()
+            or not (message_id or "").startswith("om_")
+            or not has_oauth
+        ):
+            try:
+                msg_res: FeishuUserMessage | None = await wt.get_message(message_id)
+                return msg_res
+            except FeishuBotError:
+                if (
+                    self._send_mode == "web_session"
+                    or not has_oauth
+                    or not (message_id or "").startswith("om_")
+                ):
+                    raise
 
         async def _call(token: str) -> FeishuUserMessage | None:
             response = await self._request(
@@ -1269,6 +1406,12 @@ class FeishuUserClient:
         from_ids: Sequence[str] | None = None,
     ) -> FeishuMessageSearchPage:
         """Search messages via ``/open-apis/search/v2/message`` with pagination metadata."""
+        wt = self._get_web_transport()
+        if wt is not None and self.should_use_web_session():
+            search_res: FeishuMessageSearchPage = await wt.search_messages_page(
+                query, page_size=page_size
+            )
+            return search_res
 
         async def _call(token: str) -> FeishuMessageSearchPage:
             body: dict[str, Any] = {"query": query}
