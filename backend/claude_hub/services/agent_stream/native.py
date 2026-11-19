@@ -270,6 +270,7 @@ _STATIC_MODELS: Dict[str, List[str]] = {
         "doubao-seed-2.0-code",
     ],
     "codex": [
+        "gpt-5.4",
         "gpt-6.2-sol",
         "gpt-6.2-astra",
         "gpt-6.1-terra",
@@ -281,7 +282,6 @@ _STATIC_MODELS: Dict[str, List[str]] = {
         "gpt-5.6-terra",
         "gpt-5.6-luna",
         "gpt-5.5",
-        "gpt-5.4",
         "gpt-5.4-mini",
         "gpt-5.3-codex-spark",
     ],

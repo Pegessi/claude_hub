@@ -634,6 +634,19 @@ def _strip_quotes(val: str) -> str:
     return val[1:-1] if len(val) >= 2 and val[0] == val[-1] and val[0] in {'"', "'"} else val
 
 
+def default_provider_model(provider: str) -> str:
+    """Prefer the local Codex catalog when choosing an implicit model."""
+    if provider == "codex":
+        from claude_hub.services.agent_stream.native import _codex_model_options
+
+        # Cache rows carry a provider model ID; synthetic fallback rows do not.
+        for option in _codex_model_options({}):
+            if option.provider_model_id:
+                return option.provider_model_id
+    defaults = DEFAULT_PROVIDER_MODELS.get(provider, ())
+    return defaults[0] if defaults else ""
+
+
 def parse_ai_command(
     text: str,
     *,
@@ -688,8 +701,7 @@ def parse_ai_command(
     if "model" in overrides:
         model_in = overrides["model"]
     elif target_provider != base_provider:
-        defaults = DEFAULT_PROVIDER_MODELS.get(target_provider.value, ())
-        model_in = defaults[0] if defaults else ""
+        model_in = default_provider_model(target_provider.value)
     else:
         model_in = default_model
 
@@ -699,8 +711,7 @@ def parse_ai_command(
         and get_spec(target_provider).reasoning_effort
         in {ReasoningEffortKind.MODEL_ID_SUFFIX, ReasoningEffortKind.MODEL_VARIANTS}
     ):
-        defaults = DEFAULT_PROVIDER_MODELS.get(target_provider.value, ())
-        model_in = defaults[0] if defaults else ""
+        model_in = default_provider_model(target_provider.value)
 
     if "reasoning_effort" in overrides:
         effort_in = overrides["reasoning_effort"]

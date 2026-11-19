@@ -58,6 +58,7 @@ from claude_hub.services.feishu_ai_command_models import (
 )
 from claude_hub.services.feishu_ai_command_models import (
     build_interim_reply_text,
+    default_provider_model,
     ensure_ai_footer,
     extract_context_references,
     parse_ai_command,
@@ -402,9 +403,7 @@ class FeishuAiCommandService:
             if "provider" in patch and patch["provider"] is not None:
                 if "model" not in patch or patch["model"] is None:
                     if new_provider != old_provider.strip().lower():
-                        defaults = DEFAULT_PROVIDER_MODELS.get(new_provider, ())
-                        if defaults:
-                            merged["model"] = defaults[0]
+                        merged["model"] = default_provider_model(new_provider)
                 if "reasoning_effort" not in patch or patch["reasoning_effort"] is None:
                     supported = PROVIDER_SUPPORTED_REASONING_EFFORTS.get(new_provider, ())
                     if not supported:

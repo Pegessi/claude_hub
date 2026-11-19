@@ -1315,7 +1315,9 @@ function onAiProviderChange(nextProvider: FeishuAiCommandProvider) {
   aiTupleConflict.value = null
   const catalog = resolveAiModelOptionsForProvider(nextProvider)
   const legacySuggestions = aiCapabilities.value?.provider_models?.[nextProvider]
-  const preferredId = legacySuggestions?.[0]
+  const preferredId = nextProvider === 'codex' && aiCapabilities.value?.provider_model_options?.codex?.length
+    ? catalog[0]?.provider_model_id || catalog[0]?.id
+    : legacySuggestions?.[0]
   const preferredOpt = (preferredId
     ? catalog.find(opt => matchesAiModelOption(opt, preferredId))
     : undefined) ?? catalog[0] ?? null

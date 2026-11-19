@@ -4052,3 +4052,44 @@ def test_provider_default_and_effort_normalization_save_reload_contract(
                 if prov_name == "maso":
                     env = resolve_ai_command_agent_env(prov_name, expected_pmid, eff_id)
                     assert env["MASO_MODEL"] == expected_pmid
+
+
+def test_codex_provider_defaults_prefer_local_catalog(tmp_path, monkeypatch) -> None:
+    import json
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    (tmp_path / "models_cache.json").write_text(
+        json.dumps(
+            {
+                "models": [
+                    {"slug": "gpt-6.1-terra", "visibility": "list", "supported_in_api": True},
+                    {"slug": "gpt-6.1-sol", "visibility": "list", "supported_in_api": True},
+                ]
+            }
+        )
+    )
+    service = FeishuAiCommandService(state_path=tmp_path / "state.json")
+    service.update_config({"provider": "maso", "model": "gpt-6.1-sol_reasoning_high"})
+    assert service.update_config({"provider": "codex"}).model == "gpt-6.1-terra"
+    assert (
+        service.update_config({"provider": "codex", "model": "gpt-6.2-sol"}).model == "gpt-6.2-sol"
+    )
+    parsed = parse_ai_command(
+        "/ai --provider codex test",
+        default_provider=AgentType.MASO,
+        default_model="gpt-6.1-sol_reasoning_high",
+        default_reasoning_effort="high",
+    )
+    assert parsed is not None and parsed.model == "gpt-6.1-terra"
+    capabilities = service.capabilities_dict()
+    assert capabilities["provider_models"]["codex"][0] == "gpt-6.1-terra"
+
+
+def test_codex_provider_default_without_cache_matches_capability_order(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    service = FeishuAiCommandService(state_path=tmp_path / "state.json")
+    service.update_config({"provider": "claude"})
+    default = service.update_config({"provider": "codex"}).model
+    assert default == service.capabilities_dict()["provider_models"]["codex"][0] == "gpt-5.4"
