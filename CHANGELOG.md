@@ -7,6 +7,34 @@
 
 ## Released
 
+### feat(feishu): create personal `/ai` Chat sessions inside an Agent Workspace
+
+- Route assistant-created personal Feishu `/ai` Chat tabs into an Agent Workspace instead of the
+  ungrouped Terminal/cwd list. New tabs are now provisioned as managed `WORKER` Chat sessions
+  (`workspace_id` + `workspace_role` + `managed_session_id`) so they render under the workspace and
+  survive restart, and turns dispatch through the managed Chat tailer while preserving the
+  `feishu-ai-<message_id>` turn id and metadata (`backend/claude_hub/services/feishu_ai_workspace.py`,
+  `backend/claude_hub/services/feishu_ai_command.py`).
+- Add an optional `workspace_id` to the `/ai` config (REST PATCH + CLI
+  `feishu ai-command configure --workspace-id/--clear-workspace-id`). When unset, `/ai` reuses an
+  existing workspace named `Feishu /ai` or creates it on demand; a pinned-but-missing id warns and
+  falls back rather than failing silently. Old configs without the field keep working, channel→tab
+  reuse and model/effort hot-switch are preserved, durable interrupted-command recovery reads both
+  managed and legacy stream namespaces, and direct-Chat-only providers (TraeX) keep the standalone
+  tab path (`backend/claude_hub/services/feishu_ai_command_models.py`,
+  `backend/claude_hub/api/routes/feishu_bot/ai_command.py`, `backend/claude_hub/cli/commands/feishu.py`).
+- Harden managed-session lifecycle: provision each `/ai` channel with `reuse_existing=False` so
+  distinct Feishu chats/threads never share one idle `WORKER` session; create the default `Feishu /ai`
+  workspace with `allow_duplicate=True` to avoid `DuplicateWorkspaceError`; forward the /ai cwd only
+  when admissible for the resolved workspace (`safe_session_cwd` — empty `cfg.cwd` or an
+  out-of-workspace path defers to `workspace.path` with a warning instead of crashing
+  `ensure_workspace_agent`), and only reuse an existing `Feishu /ai` workspace whose path allows the
+  cwd; verify the backing managed session is live before reusing a mapped record (re-provisioning when
+  stale/archived); and raise `ExternalDispatchRetired` on a safe-to-retry cancellation so the
+  interrupted-command dedup claim is released for replay
+  (`backend/claude_hub/services/feishu_ai_workspace.py`).
+- See [design and validation](docs/working-logs/2026-11-18-feishu-ai-workspace-sessions.md).
+
 ### fix(feishu): replace `/ai` plain-text Model input with Provider-linked dropdown and fix live `/ai` P2P/WS/230002 trigger & delivery
 
 - Replace the plain-text Model `<input>` (`data-testid="feishu-ai-model-input"`) in `FeishuBotSettingsDialog.vue`'s Personal `/ai` Assistant section with a dynamic Provider-linked logical Model `<select>` consistent with the Chat UI model selector (`StreamModelOption` / `provider_model_options` across `claude`, `codex`, `traex`, `maso`, `cursor`, and `antigravity`), mapping persisted MASO/Cursor variant IDs (e.g. `[redacted]_reasoning_high`) without falsely marking unmodified server tuples dirty, preserving custom/current unlisted model IDs, supporting live MASO `mode="default"` per-model effort variants (`[redacted]`, `[redacted]`, `[redacted]`, `[redacted]`, `[redacted]` + dynamic catalog registration) alongside empty-model `Provider default` (`model=""`) normalization across model-bound (`maso`, `cursor` -> `(provider, "", "")`) vs. `ENV_KEY` (`codex`, `traex` -> `(provider, "", effort)`) providers, syncing per-model `reasoning_effort` options (disabling effort selection when unsupported), and expanding MASO (`[redacted]`, `[redacted]`) and Codex/TraeX (`max`, `ultra`) validation (`frontend/src/features/feishu-bot/FeishuBotSettingsDialog.vue`, `frontend/src/utils/feishuBotConfig.ts`, `backend/claude_hub/services/feishu_ai_command_models.py`, `backend/claude_hub/services/feishu_ai_command.py`, `backend/claude_hub/api/routes/feishu_bot/ai_command.py`).

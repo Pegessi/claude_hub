@@ -17,6 +17,7 @@ import httpx
 
 from claude_hub.config import settings
 from claude_hub.models import AgentType, SessionKind, StreamModelOption, StreamReasoningEffortOption
+from claude_hub.services import feishu_ai_workspace
 from claude_hub.services.feishu_ai_command_models import (
     _MASO_MODEL_VARIANTS,
     _MAX_PENDING_QUEUE,
@@ -238,38 +239,6 @@ def _build_capabilities_payload(
     }
 
 
-def _recover_completed_stream_answer(tab_id: str, turn_id: str) -> tuple[str, str | None]:
-    """Inspect durable AgentStreamStore evidence for ``(tab_id, turn_id)`` without starting a runtime."""
-    if not tab_id or not turn_id:
-        return "absent", None
-    try:
-        from claude_hub.models import AgentStreamEventType
-        from claude_hub.services.agent_stream.store import AgentStreamStore
-
-        store = AgentStreamStore("terminal-tabs", f"terminal-tab-{tab_id}")
-        events = store._read_rows(-1, None, turn_id)
-    except Exception:
-        return "unknown", None
-    started = False
-    for event in events:
-        if event.turn_id != turn_id:
-            continue
-        if event.type == AgentStreamEventType.TURN_STARTED:
-            started = True
-        elif event.type == AgentStreamEventType.TURN_COMPLETED:
-            if event.payload.get("delivery_rejected"):
-                started = True
-                continue
-            status = event.payload.get("status")
-            if status in {None, "completed", "success", "ok"}:
-                text = str(
-                    event.payload.get("final_text") or event.payload.get("assistant_text") or ""
-                ).strip()
-                return "completed", (text or None)
-            return ("cancelled" if status in {"cancelled", "canceled"} else "failed"), None
-    return ("started" if started else "absent"), None
-
-
 class FeishuAiCommandService:
     """Coordinates ``/ai`` configuration, deduplication, context fetch, reactions, and replies."""
 
@@ -284,6 +253,10 @@ class FeishuAiCommandService:
         tab_getter: Callable[[str], Any] | None = None,
         tab_env_switcher: Callable[[str, dict[str, str]], Any] | None = None,
         turn_dispatcher: AiTurnDispatcher | None = None,
+        workspace_resolver: Callable[[FeishuAiCommandConfig, str], Any] | None = None,
+        managed_session_provider: Callable[..., Any] | None = None,
+        managed_session_getter: Callable[[str], Any] | None = None,
+        managed_turn_dispatcher: Callable[..., Awaitable[str]] | None = None,
     ) -> None:
         runtime_home = resolve_runtime_home()
         self._state_path: Path = state_path or (runtime_home / "feishu_ai_command.json")
@@ -294,6 +267,14 @@ class FeishuAiCommandService:
         self._tab_getter = tab_getter
         self._tab_env_switcher = tab_env_switcher
         self._turn_dispatcher: AiTurnDispatcher | None = turn_dispatcher
+        # Managed Agent Workspace seams. Production wires these to the singleton
+        # workspace manager + managed Chat tailer so /ai Chat tabs are created
+        # inside a workspace; tests inject fakes. A None resolver lazily uses
+        # the real workspace manager.
+        self._workspace_resolver = workspace_resolver
+        self._managed_session_provider = managed_session_provider
+        self._managed_session_getter = managed_session_getter
+        self._managed_turn_dispatcher = managed_turn_dispatcher
         self._lock = threading.RLock()
         self._channel_locks: dict[str, asyncio.Lock] = {}
 
@@ -524,7 +505,13 @@ class FeishuAiCommandService:
                 return True
             tab_id = str(item.get("tab_id") or "")
             turn_id = str(item.get("turn_id") or f"feishu-ai-{message_id}")
-            ev_state, recovered_answer = _recover_completed_stream_answer(tab_id, turn_id)
+            managed_record = self._channel_record_for_tab(tab_id)
+            ev_state, recovered_answer = feishu_ai_workspace.recover_completed_stream_answer(
+                tab_id,
+                turn_id,
+                managed_workspace_id=managed_record.get("workspace_id") or None,
+                managed_session_id=managed_record.get("session_id") or None,
+            )
             if ev_state == "completed" and recovered_answer:
                 self.mark_pending_command_state(
                     message_id,
@@ -853,28 +840,60 @@ class FeishuAiCommandService:
         parsed: ParsedAiCommand,
         cfg: FeishuAiCommandConfig,
     ) -> str:
-        channel_key = f"{message.chat_id}:{message.thread_id or 'main'}:{parsed.provider.value}"
+        return await feishu_ai_workspace.ensure_execution_tab(self, message, parsed, cfg)
+
+    @staticmethod
+    def _channel_key(message: FeishuUserMessage, parsed: ParsedAiCommand) -> str:
+        return feishu_ai_workspace.channel_key(message, parsed)
+
+    @staticmethod
+    def _resolve_cwd(cfg: FeishuAiCommandConfig) -> str:
+        return feishu_ai_workspace.resolve_cwd(cfg)
+
+    def _uses_legacy_tabs(self) -> bool:
+        # An injected tab_creator is the explicit legacy/terminal seam used by
+        # older callers and unit tests. Production constructs the service with
+        # no tab_creator, so it defaults to managed workspace Chat tabs.
+        return self._tab_creator is not None
+
+    @staticmethod
+    def _provider_supports_managed_chat(agent_type: AgentType) -> bool:
+        return feishu_ai_workspace.provider_supports_managed_chat(agent_type)
+
+    async def _switch_managed_env(self, session_id: str, env: Mapping[str, str]) -> None:
+        await feishu_ai_workspace.switch_managed_env(session_id, env)
+
+    @staticmethod
+    def _normalize_channel_record(raw: Any) -> dict[str, str]:
+        return feishu_ai_workspace.normalize_channel_record(raw)
+
+    def _store_channel_record(self, channel_key: str, record: Mapping[str, str]) -> None:
         with self._lock:
-            existing_tab_id = dict(self._load_state().get("channel_tabs") or {}).get(channel_key)
+            state = self._load_state()
+            channel_tabs = dict(state.get("channel_tabs") or {})
+            channel_tabs[channel_key] = dict(record)
+            state["channel_tabs"] = channel_tabs
+            self._save_state(state)
 
-        target_env = parsed.effective_env
-        if existing_tab_id:
-            tab = self._get_tab(existing_tab_id)
-            if tab is not None and not getattr(tab, "archived", False):
-                current_env = dict(getattr(tab, "env", {}) or {})
-                merged_env = resolve_ai_command_agent_env(
-                    parsed.provider,
-                    parsed.model,
-                    parsed.reasoning_effort,
-                    base_env=current_env,
-                )
-                if merged_env != current_env:
-                    await self._switch_tab_env(str(existing_tab_id), merged_env, tab=tab)
-                return str(existing_tab_id)
+    def _channel_record_for_tab(self, tab_id: str) -> dict[str, str]:
+        if not tab_id:
+            return {}
+        with self._lock:
+            channel_tabs = dict(self._load_state().get("channel_tabs") or {})
+        for raw in channel_tabs.values():
+            record = self._normalize_channel_record(raw)
+            if record.get("tab_id") == tab_id:
+                return record
+        return {}
 
-        cwd = cfg.cwd.strip() or str(Path.home())
-        if not os.path.isdir(cwd):
-            cwd = str(Path.home())
+    async def _create_legacy_tab(
+        self,
+        message: FeishuUserMessage,
+        parsed: ParsedAiCommand,
+        cfg: FeishuAiCommandConfig,
+        target_env: Mapping[str, str],
+    ) -> str:
+        cwd = self._resolve_cwd(cfg)
         short_target = (message.thread_id or message.chat_id)[-6:]
         created = await self._create_tab(
             name=f"Feishu /ai · {short_target}"[:64],
@@ -882,19 +901,52 @@ class FeishuAiCommandService:
             agent_type=parsed.provider,
             cwd=cwd,
             solo_mode=True,
-            env=target_env,
+            env=dict(target_env),
         )
         tab_id = created if isinstance(created, str) else getattr(created, "id", "")
         if not isinstance(tab_id, str) or not tab_id.strip():
             raise RuntimeError("Failed to create Hub Chat tab for Feishu /ai command")
-        tab_id = tab_id.strip()
-        with self._lock:
-            state = self._load_state()
-            channel_tabs = dict(state.get("channel_tabs") or {})
-            channel_tabs[channel_key] = tab_id
-            state["channel_tabs"] = channel_tabs
-            self._save_state(state)
-        return tab_id
+        return tab_id.strip()
+
+    def _resolve_workspace(self, cfg: FeishuAiCommandConfig, cwd: str) -> Any:
+        return feishu_ai_workspace.resolve_workspace(
+            cfg, cwd, resolver_seam=self._workspace_resolver
+        )
+
+    async def _provide_managed_session(
+        self,
+        *,
+        workspace_id: str,
+        agent_type: AgentType,
+        env: Mapping[str, str],
+        title: str,
+        cwd: str | None = None,
+    ) -> Any:
+        return await feishu_ai_workspace.provide_managed_session(
+            workspace_id=workspace_id,
+            agent_type=agent_type,
+            env=env,
+            title=title,
+            cwd=cwd,
+            provider_seam=self._managed_session_provider,
+        )
+
+    async def _dispatch_managed_turn(
+        self,
+        session: Any,
+        prompt: str,
+        turn_id: str,
+        visible_text: str,
+        turn_metadata: Mapping[str, Any],
+    ) -> str:
+        return await feishu_ai_workspace.dispatch_managed_turn(
+            session,
+            prompt,
+            turn_id,
+            visible_text,
+            turn_metadata,
+            dispatcher_seam=self._managed_turn_dispatcher,
+        )
 
     def _get_tab(self, tab_id: str) -> Any:
         if self._tab_getter is not None:
@@ -953,16 +1005,13 @@ class FeishuAiCommandService:
         visible_text: str,
         turn_metadata: Mapping[str, Any],
     ) -> str:
-        if self._turn_dispatcher is not None:
-            return await self._turn_dispatcher(tab_id, prompt, turn_id, visible_text, turn_metadata)
-        from claude_hub.api.agent_stream import dispatch_tab_chat_and_wait
+        return await feishu_ai_workspace.dispatch_turn(
+            self, tab_id, prompt, turn_id, visible_text, turn_metadata
+        )
 
-        return await dispatch_tab_chat_and_wait(
-            tab_id,
-            prompt,
-            turn_id,
-            visible_text=visible_text,
-            turn_metadata=dict(turn_metadata),
+    def _get_managed_session(self, session_id: str) -> Any:
+        return feishu_ai_workspace.get_managed_session(
+            session_id, getter_seam=self._managed_session_getter
         )
 
     def _skip_result(self, msg: FeishuUserMessage, **kw: Any) -> AiCommandExecutionResult:

@@ -30,6 +30,10 @@ DEFAULT_AI_COMMAND_REASONING_EFFORT = "high"
 DEFAULT_POLL_INTERVAL_SECONDS = 15.0
 DEFAULT_MAX_ACTIVE_CHATS = 10
 DEFAULT_MAX_CONTEXT_MESSAGES = 20
+# Dedicated Agent Workspace that owns assistant-created /ai Chat sessions when
+# the operator has not pinned an explicit ``workspace_id``. The workspace is
+# reused if one with this name already exists and created on demand otherwise.
+DEFAULT_AI_COMMAND_WORKSPACE_NAME = "Feishu /ai"
 _REACTION_TIMEOUT_SECONDS = 3.0
 _MAX_RECENT_RUNS = 30
 _MAX_PENDING_QUEUE = 256
@@ -455,6 +459,9 @@ class FeishuAiCommandConfig:
     model: str = DEFAULT_AI_COMMAND_MODEL
     reasoning_effort: str = DEFAULT_AI_COMMAND_REASONING_EFFORT
     cwd: str = ""
+    # Optional pinned Agent Workspace id that owns spawned /ai Chat sessions.
+    # Empty means "resolve the dedicated default workspace (reuse or create)".
+    workspace_id: str = ""
     watch_chats: tuple[str, ...] = ()
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS
     max_active_chats: int = DEFAULT_MAX_ACTIVE_CHATS
@@ -519,6 +526,7 @@ class FeishuAiCommandConfig:
             "model": model,
             "reasoning_effort": effort,
             "cwd": s("cwd"),
+            "workspace_id": s("workspace_id"),
             "watch_chats": tuple(dict.fromkeys(watch_chats)),
             "poll_interval_seconds": poll_interval,
             "max_active_chats": max_active,
