@@ -677,16 +677,38 @@ async def push_to_tab(
                         client.send_message(binding.chat_id, payload.msg_type, payload.content),
                         timeout=_OUTBOUND_POST_TIMEOUT_SECONDS,
                     )
-                except (FeishuBotError, httpx.HTTPStatusError):
-                    # Feishu refused the card (no card scope, bad layout): send it plain.
+                except FeishuBotRemoteError as exc:
+                    if payload.msg_type == "text":
+                        raise
+                    logger.warning(
+                        "Feishu Bot formatted push rejected; trying fallback: %s "
+                        "(remote_message=%s, log_id=%s)",
+                        exc,
+                        exc.remote_message,
+                        exc.log_id,
+                    )
                     if index + 1 < len(payloads):
-                        logger.warning("Feishu Bot card refused; sending it as a post")
                         continue
-                    raise
+                    if not _pool.is_current_for_delivery(effective) or not _binding_still_routes(
+                        effective, binding
+                    ):
+                        return False
+                    await asyncio.wait_for(
+                        client.send_text(binding.chat_id, text),
+                        timeout=_OUTBOUND_POST_TIMEOUT_SECONDS,
+                    )
                 return True
             return False
     except Exception as exc:
-        logger.warning("Feishu Bot push failed: %s", type(exc).__name__)
+        if isinstance(exc, FeishuBotRemoteError):
+            logger.warning(
+                "Feishu Bot push failed: %s (remote_message=%s, log_id=%s)",
+                exc,
+                exc.remote_message,
+                exc.log_id,
+            )
+        else:
+            logger.warning("Feishu Bot push failed: %s", type(exc).__name__)
         return False
 
 

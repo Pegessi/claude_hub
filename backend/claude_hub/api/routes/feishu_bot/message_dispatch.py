@@ -33,6 +33,7 @@ from claude_hub.services.agent_stream.turn_source import (
 from claude_hub.services.feishu_bot import (
     FeishuBotClient,
     FeishuBotError,
+    FeishuBotRemoteError,
     FeishuMessageEvent,
     FeishuMessageTimeStatus,
     FeishuReplyReceipt,
@@ -508,8 +509,10 @@ class FeishuMessageDispatcher:
                 # Only a thread reply carries the flag: a private reply keeps its
                 # previous request shape exactly.
                 thread_flag = {"reply_in_thread": True} if reply_in_thread else {}
+                can_fallback = False
                 if formatted:
                     payload = build_feishu_message_payload(text)
+                    can_fallback = payload.msg_type != "text"
                     outbound = client.reply_message(
                         event.message_id,
                         payload.msg_type,
@@ -524,9 +527,30 @@ class FeishuMessageDispatcher:
                         access_token=token,
                         **thread_flag,
                     )
-                receipt = await asyncio.wait_for(
-                    outbound, timeout=self.bindings.outbound_post_timeout_seconds()
-                )
+                try:
+                    receipt = await asyncio.wait_for(
+                        outbound, timeout=self.bindings.outbound_post_timeout_seconds()
+                    )
+                except FeishuBotRemoteError as exc:
+                    if not can_fallback:
+                        raise
+                    logger.warning(
+                        "Feishu Bot formatted reply rejected; retrying as text: %s "
+                        "(remote_message=%s, log_id=%s)",
+                        exc,
+                        exc.remote_message,
+                        exc.log_id,
+                    )
+                    if not self.bindings.pool().is_current_for_delivery(effective):
+                        return False
+                    if still_valid is not None and not still_valid():
+                        return False
+                    receipt = await asyncio.wait_for(
+                        client.reply_text(
+                            event.message_id, text, access_token=token, **thread_flag
+                        ),
+                        timeout=self.bindings.outbound_post_timeout_seconds(),
+                    )
                 # Remember our own message and the topic it landed in: a
                 # follow-up there is recognised without another @mention.
                 sent_id = receipt.message_id if isinstance(receipt, FeishuReplyReceipt) else None
@@ -538,7 +562,15 @@ class FeishuMessageDispatcher:
                 )
                 return True
         except Exception as exc:
-            logger.warning("Feishu Bot reply failed: %s", type(exc).__name__)
+            if isinstance(exc, FeishuBotRemoteError):
+                logger.warning(
+                    "Feishu Bot reply failed: %s (remote_message=%s, log_id=%s)",
+                    exc,
+                    exc.remote_message,
+                    exc.log_id,
+                )
+            else:
+                logger.warning("Feishu Bot reply failed: %s", type(exc).__name__)
             return False
 
     async def _add_processing_reaction(
