@@ -1,7 +1,7 @@
 # seedclaw-v1 任务全生命周期 Prompt 构建与状态转换机分析
 
 > 日期：2026-06-12
-> 分析对象：`https://[redacted]/[redacted]`（repo id 997582，默认分支 `main`）
+> 分析对象：`[redacted]`（repo id 997582，默认分支 `main`）
 > 分析工具：bytedcli `codebase` 域（认证账号 [redacted]）
 > 对照项目：本仓库 claude_hub（Python / FastAPI + tmux/ttyd workspace 会话）
 > 范围：本报告只做只读分析与对照，不修改任一项目代码。

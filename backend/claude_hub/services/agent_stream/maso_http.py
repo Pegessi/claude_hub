@@ -14,10 +14,13 @@ import json
 import os
 import shlex
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote, urlsplit
 
 import httpx
+
+from claude_hub.services.runtime_isolation import resolve_runtime_home
 
 from ...config import settings
 from ...models import StreamCapabilities, StreamModelOption, StreamReasoningEffortOption
@@ -79,40 +82,28 @@ def maso_base_url(env: Dict[str, str]) -> str:
     return value
 
 
-# Upstream deployments that Code Router pins a model to while the catalog MASO
-# serves still names that model logically, so `/api/models` carries no row
-# naming the deployment and a quota row for it would read as unlisted.
-#
-# Router's quota ledger names deployments (`ep-<timestamp>-<code>`), and the
-# catalog names what a person selects; the two agree only when the config MASO
-# loaded already carries the deployment id. Router moved three in-house models
-# onto explicit Ark deployments on 2026-11-12, and the MASO process serving this
-# Hub still holds the config from before that, so:
-#
-#   [redacted] -> [redacted]
-#   [redacted], [redacted], [redacted] -> [redacted]
-#
-# One ceiling can cover several models, so the label names every model the
-# deployment serves (joined the way MASO's own quota rows join grouped
-# variants). `[redacted]` is left out because this catalog has no such key to
-# select. Re-derive the table from Router with:
-#
-#   curl -sX POST https://[redacted]/api/v1/zti-authorize \
-#     -H "Authorization: Bearer $(cat [redacted]/identity.token)" \
-#     | jq -r '.providers[] | "\(.model)\t\(.name)"'
-#
-# This is a stopgap, not a second identity: a catalog that does name the
-# deployment wins, and an id absent here keeps the honest unlisted fallback, so
-# a rotated deployment under-reports rather than mislabels.
-_PINNED_DEPLOYMENT_LABELS = {
-    "[redacted]": "[redacted]",
-    "[redacted]": "[redacted] · [redacted]",
-}
-
-
 def pinned_deployment_labels() -> Dict[str, str]:
-    """Model names for deployments the catalog MASO serves cannot name yet."""
-    return dict(_PINNED_DEPLOYMENT_LABELS)
+    """Read installation-specific deployment labels from a private JSON file.
+
+    Catalog labels remain authoritative. Missing or malformed files are ignored.
+    """
+    override = os.environ.get("CLAUDE_HUB_MASO_DEPLOYMENT_LABELS_FILE")
+    path = (
+        Path(override).expanduser()
+        if override
+        else resolve_runtime_home() / "maso_deployment_labels.json"
+    )
+    try:
+        labels = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return {}
+    if not isinstance(labels, dict):
+        return {}
+    return {
+        key: value
+        for key, value in labels.items()
+        if isinstance(key, str) and isinstance(value, str)
+    }
 
 
 def _model_options(rows: Any) -> List[StreamModelOption]:
@@ -134,13 +125,16 @@ def _model_options(rows: Any) -> List[StreamModelOption]:
                 if not isinstance(variant, dict):
                     continue
                 mode, model = variant.get("mode"), variant.get("key")
-                if not isinstance(mode, str) or not isinstance(model, str) or mode in effort_ids:
+                if not isinstance(mode, str) or not isinstance(model, str):
                     continue
-                effort_ids.add(mode)
+                effort_id = mode if mode not in effort_ids else model
+                if effort_id in effort_ids:
+                    continue
+                effort_ids.add(effort_id)
                 efforts.append(
                     StreamReasoningEffortOption(
-                        id=mode,
-                        label=str(variant.get("label") or mode),
+                        id=effort_id,
+                        label=str(variant.get("label") or effort_id),
                         provider_model_id=model,
                     )
                 )
@@ -156,7 +150,11 @@ def _model_options(rows: Any) -> List[StreamModelOption]:
                 default_reasoning_effort=next(
                     (item.id for item in efforts if item.provider_model_id == key), None
                 ),
-                supported_reasoning_efforts=efforts if len(efforts) > 1 else [],
+                supported_reasoning_efforts=(
+                    efforts
+                    if len(efforts) > 1 or any(item.provider_model_id != key for item in efforts)
+                    else []
+                ),
             )
         )
     return options

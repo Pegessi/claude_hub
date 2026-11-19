@@ -43,6 +43,70 @@ from claude_hub.services.feishu_user_token_store import (
 )
 
 
+@pytest.fixture(autouse=True)
+def synthetic_model_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from claude_hub.services.feishu_ai_command_models import register_live_maso_model_variants
+
+    variants = {
+        "example-model-a0f983bf4c15": {
+            "none": "example-model-a0f983bf4c15",
+            "low": "example-model-a0f983bf4c15",
+            "medium": "example-model-a0f983bf4c15_reasoning_medium",
+            "high": "example-model-a0f983bf4c15_reasoning_high",
+        },
+        "example-model-93cb3095572e": {
+            "none": "example-model-93cb3095572e",
+            "low": "example-model-93cb3095572e",
+            "medium": "example-model-93cb3095572e_reasoning_medium",
+            "high": "example-model-93cb3095572e_reasoning_high",
+        },
+        "example-model-92b0e30c47c0": {
+            "default": "example-model-92b0e30c47c0",
+            "none": "example-model-92b0e30c47c0",
+            "low": "example-model-92b0e30c47c0",
+            "medium": "example-model-92b0e30c47c0_reasoning_high",
+            "high": "example-model-92b0e30c47c0_reasoning_high",
+            "xhigh": "example-model-92b0e30c47c0_reasoning_xhigh",
+            "max": "example-model-92b0e30c47c0_reasoning_max",
+        },
+        "example-seed": {
+            "none": "example-seed",
+            "low": "example-seed",
+            "medium": "example-seed-reasoning",
+            "high": "example-seed-reasoning-high",
+        },
+    }
+
+    def option(model, efforts):
+        return {
+            "id": model,
+            "label": model,
+            "provider_model_id": model,
+            "supported_reasoning_efforts": [
+                {"id": effort, "label": effort, "provider_model_id": value}
+                for effort, value in efforts.items()
+            ],
+        }
+
+    providers = {
+        name: [{"id": "example", "label": "Example"}] for name in ("claude", "traex", "antigravity")
+    }
+    providers["maso"] = [option(model, efforts) for model, efforts in variants.items()]
+    path = tmp_path / "catalog.json"
+    path.write_text(
+        json.dumps(
+            {
+                "maso_default_model": "example-model-92b0e30c47c0_reasoning_high",
+                "providers": providers,
+            }
+        )
+    )
+    monkeypatch.setenv("CLAUDE_HUB_AI_MODEL_CATALOG_FILE", str(path))
+    register_live_maso_model_variants([])
+    yield
+    register_live_maso_model_variants([])
+
+
 def test_user_token_store_oauth_and_encrypted_lark_cli_import(tmp_path: Path) -> None:
     store = FeishuUserTokenStore(
         path=tmp_path / "secrets" / "feishu_user_tokens.json",
@@ -85,7 +149,7 @@ def test_user_token_store_oauth_and_encrypted_lark_cli_import(tmp_path: Path) ->
                         },
                         "brand": "feishu",
                         "users": [
-                            {"userOpenId": "ou_lark_user", "userName": "[redacted]"},
+                            {"userOpenId": "ou_lark_user", "userName": "example_person"},
                         ],
                     }
                 ]
@@ -118,7 +182,7 @@ def test_user_token_store_oauth_and_encrypted_lark_cli_import(tmp_path: Path) ->
     )
     assert imported is not None
     assert imported.open_id == "ou_lark_user"
-    assert imported.user_name == "[redacted]"
+    assert imported.user_name == "example_person"
     assert imported.access_token == "u-lark-cli-decrypted"
     assert imported.app_secret == "sec_from_keychain"
     assert imported.source == "lark_cli"
@@ -164,7 +228,7 @@ async def test_feishu_user_client_preflight_and_operations(tmp_path: Path) -> No
                 json={
                     "code": 0,
                     "data": {
-                        "items": [{"chat_id": "oc_chat_1", "name": "[redacted] review"}],
+                        "items": [{"chat_id": "oc_chat_1", "name": "example/project review"}],
                         "has_more": False,
                     },
                 },
@@ -185,7 +249,7 @@ async def test_feishu_user_client_preflight_and_operations(tmp_path: Path) -> No
                                 "create_time": "1700000001000",
                                 "body": {
                                     "content": json.dumps(
-                                        {"text": "请看 [redacted]!4045 最新 commit 2a0bab453f"}
+                                        {"text": "请看 example/project!4045 最新 commit 2a0bab453f"}
                                     )
                                 },
                             }
@@ -244,16 +308,17 @@ async def test_feishu_user_client_preflight_and_operations(tmp_path: Path) -> No
 
         msgs = await user_client.list_messages(container_id_type="thread", container_id="omt_1")
         assert len(msgs) == 1
-        assert "[redacted]!4045" in msgs[0].text
+        assert "example/project!4045" in msgs[0].text
 
     assert all(auth == "Bearer u-valid-user-token" for _, _, auth, _ in requests_seen)
 
 
-def test_parse_ai_command_and_reference_extraction() -> None:
+def test_parse_ai_command_and_reference_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_HUB_PATROL_MR_HOSTS", "git.example.invalid")
     parsed = parse_ai_command(
         "/ai --provider codex --model gpt-5.4 --effort xhigh review一下 没问题approve",
         default_provider=AgentType.CLAUDE,
-        default_model="[redacted]",
+        default_model="example-claude",
         default_reasoning_effort="high",
     )
     assert parsed is not None
@@ -292,7 +357,7 @@ def test_parse_ai_command_and_reference_extraction() -> None:
     with pytest.raises(ValueError, match="Invalid reasoning_effort"):
         validate_ai_command_agent_config("codex", "gpt-5.4", "super-duper")
     with pytest.raises(ValueError, match="does not support a separate reasoning_effort"):
-        validate_ai_command_agent_config("claude", "[redacted]", "high")
+        validate_ai_command_agent_config("claude", "example-claude", "high")
 
     cursor_env = resolve_ai_command_agent_env("cursor", "gpt-5.3-codex", "xhigh")
     assert cursor_env["CURSOR_MODEL"] == "gpt-5.3-codex-xhigh"
@@ -305,26 +370,34 @@ def test_parse_ai_command_and_reference_extraction() -> None:
     assert cursor_fast_env["CURSOR_MODEL"] == "gpt-5.3-codex-xhigh-fast"
 
     # MASO maps reasoning_effort onto real model variants consumed by MasoHttpSession
-    maso_low_env = resolve_ai_command_agent_env("maso", "[redacted]_reasoning_high", "low")
-    assert maso_low_env["MASO_MODEL"] == "[redacted]"
-    maso_med_env = resolve_ai_command_agent_env("maso", "[redacted]_reasoning_high", "medium")
-    assert maso_med_env["MASO_MODEL"] == "[redacted]_reasoning_medium"
-    maso_seed_env = resolve_ai_command_agent_env("maso", "[redacted]-reasoning-high", "medium")
-    assert maso_seed_env["MASO_MODEL"] == "[redacted]-reasoning"
+    maso_low_env = resolve_ai_command_agent_env(
+        "maso", "example-model-a0f983bf4c15_reasoning_high", "low"
+    )
+    assert maso_low_env["MASO_MODEL"] == "example-model-a0f983bf4c15"
+    maso_med_env = resolve_ai_command_agent_env(
+        "maso", "example-model-a0f983bf4c15_reasoning_high", "medium"
+    )
+    assert maso_med_env["MASO_MODEL"] == "example-model-a0f983bf4c15_reasoning_medium"
+    maso_seed_env = resolve_ai_command_agent_env("maso", "example-seed-reasoning-high", "medium")
+    assert maso_seed_env["MASO_MODEL"] == "example-seed-reasoning"
 
     refs = extract_context_references(
         [
-            "[redacted]发起了 https://[redacted]/[redacted]/merge_requests/4045",
-            "最新 commit 2a0bab453f9988776655，文档见 https://[redacted]/docx/doxcnAbc123",
+            "example_person发起了 https://git.example.invalid/example/project/merge_requests/4045",
+            "最新 commit 2a0bab453f9988776655，文档见 https://example.feishu.cn/docx/doxcnAbc123",
             "顺便看下 !4046",
         ]
     )
-    assert refs.mr_refs == ("[redacted]!4045", "[redacted]!4046")
+    assert refs.mr_refs == ("example/project!4045", "example/project!4046")
+    untrusted = extract_context_references(
+        ["https://git.example.invalid.attacker.test/a/b/merge_requests/7"]
+    )
+    assert not untrusted.mr_refs
     assert refs.commit_refs == ("2a0bab453f",)
-    assert refs.doc_refs == ("https://[redacted]/docx/doxcnAbc123",)
+    assert refs.doc_refs == ("https://example.feishu.cn/docx/doxcnAbc123",)
 
     interim = build_interim_reply_text(parsed, refs)
-    assert "正在派 Subagent 对 [redacted]!4045（最新 commit 2a0bab453f）" in interim
+    assert "正在派 Subagent 对 example/project!4045（最新 commit 2a0bab453f）" in interim
     assert interim.endswith(DEFAULT_AI_COMMAND_FOOTER)
 
 
@@ -392,7 +465,7 @@ async def test_ai_command_pipeline_poller_and_ws_hook(tmp_path: Path) -> None:
                                     "body": {
                                         "content": json.dumps(
                                             {
-                                                "text": "请 review [redacted]!4045 commit 2a0bab453f"
+                                                "text": "请 review example/project!4045 commit 2a0bab453f"
                                             }
                                         )
                                     },
@@ -486,7 +559,7 @@ async def test_ai_command_pipeline_poller_and_ws_hook(tmp_path: Path) -> None:
                 "owner_open_id": "ou_owner",
                 "app_id": "cli_app_1",
                 "provider": "maso",
-                "model": "[redacted]_reasoning_high",
+                "model": "example-model-a0f983bf4c15_reasoning_high",
                 "reasoning_effort": "high",
             }
         )
@@ -499,13 +572,13 @@ async def test_ai_command_pipeline_poller_and_ws_hook(tmp_path: Path) -> None:
         # Verify tab creation & turn dispatch metadata
         assert len(created_tabs) == 1
         assert created_tabs[0]["agent_type"] == AgentType.MASO
-        assert created_tabs[0]["env"]["MASO_MODEL"] == "[redacted]_reasoning_high"
+        assert created_tabs[0]["env"]["MASO_MODEL"] == "example-model-a0f983bf4c15_reasoning_high"
         assert len(dispatched_turns) == 1
         _, prompt_sent, _, meta = dispatched_turns[0]
         assert meta["origin"] == "feishu_ai_command"
-        assert meta["mr_refs"] == ["[redacted]!4045"]
+        assert meta["mr_refs"] == ["example/project!4045"]
         assert meta["commit_refs"] == ["2a0bab453f"]
-        assert "[redacted]!4045" in prompt_sent
+        assert "example/project!4045" in prompt_sent
 
         # Verify reaction lifecycle: OnIt added -> interim post -> final post -> OnIt deleted -> DONE added
         reaction_Adds = [
@@ -522,7 +595,7 @@ async def test_ai_command_pipeline_poller_and_ws_hook(tmp_path: Path) -> None:
         assert len(replies) == 2
         assert replies[0]["msg_type"] == "post"
         assert (
-            "正在派 Subagent 对 [redacted]!4045（最新 commit 2a0bab453f）"
+            "正在派 Subagent 对 example/project!4045（最新 commit 2a0bab453f）"
             in replies[0]["content"]
         )
         assert DEFAULT_AI_COMMAND_FOOTER in replies[0]["content"]
@@ -627,7 +700,8 @@ async def test_ai_command_pipeline_poller_and_ws_hook(tmp_path: Path) -> None:
         assert unowned_res.reason == "no_owner_open_id"
 
 
-def test_ai_command_rest_api_routes(tmp_path: Path) -> None:
+def test_ai_command_rest_api_routes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_HUB_PATROL_MR_HOSTS", "git.example.invalid")
     store = FeishuUserTokenStore(
         path=tmp_path / "secrets" / "tokens.json",
         key_path=tmp_path / "secrets" / "tokens.key",
@@ -694,7 +768,7 @@ def test_ai_command_rest_api_routes(tmp_path: Path) -> None:
         json={
             "text": "/ai --model o3 --effort high review !4045",
             "context_messages": [
-                "https://[redacted]/[redacted]/merge_requests/4045 2a0bab453f"
+                "https://git.example.invalid/example/project/merge_requests/4045 2a0bab453f"
             ],
         },
     )
@@ -703,7 +777,7 @@ def test_ai_command_rest_api_routes(tmp_path: Path) -> None:
     assert dry_data["handled"] is True
     assert dry_data["model"] == "o3"
     assert dry_data["reasoning_effort"] == "high"
-    assert dry_data["refs"]["mr_refs"] == ["[redacted]!4045"]
+    assert dry_data["refs"]["mr_refs"] == ["example/project!4045"]
 
     res_guide = client.get("/api/feishu/bot/ai-command/auth-guide")
     assert res_guide.status_code == 200
@@ -1234,7 +1308,9 @@ def test_f4_maso_transport_boundary_consumes_resolved_reasoning_effort(
 
     seen_models: list[str | None] = []
     for effort in ("low", "medium", "high"):
-        env = resolve_ai_command_agent_env("maso", "[redacted]_reasoning_high", effort)
+        env = resolve_ai_command_agent_env(
+            "maso", "example-model-a0f983bf4c15_reasoning_high", effort
+        )
         env["MASO_BASE_URL"] = "http://127.0.0.1:9796"
         ms = ManagedSession(
             id=f"test-maso-{effort}",
@@ -1255,9 +1331,9 @@ def test_f4_maso_transport_boundary_consumes_resolved_reasoning_effort(
         seen_models.append(transport.current_model())
 
     assert seen_models == [
-        "[redacted]",
-        "[redacted]_reasoning_medium",
-        "[redacted]_reasoning_high",
+        "example-model-a0f983bf4c15",
+        "example-model-a0f983bf4c15_reasoning_medium",
+        "example-model-a0f983bf4c15_reasoning_high",
     ]
     assert len(set(seen_models)) == 3
 
@@ -2745,7 +2821,7 @@ async def test_bot_fallback_reply_send_and_auto_invite_without_send_as_user(
                 "apps": [
                     {
                         "appId": "cli_fb",
-                        "users": [{"userOpenId": "ou_fb", "userName": "[redacted]"}],
+                        "users": [{"userOpenId": "ou_fb", "userName": "example_person"}],
                     }
                 ],
             }
@@ -2759,7 +2835,7 @@ async def test_bot_fallback_reply_send_and_auto_invite_without_send_as_user(
                 {
                     "appId": "cli_fb",
                     "userOpenId": "ou_fb",
-                    "userName": "[redacted]",
+                    "userName": "example_person",
                     "accessToken": "fb-user-at",
                     "refreshToken": "fb-user-rt",
                     "expiresAt": int((time.time() + 7200) * 1000),
@@ -3171,90 +3247,93 @@ async def test_ai_capabilities_provider_model_options_and_new_model_validation(
     import claude_hub.services.feishu_ai_command as ai_cmd_mod
     from claude_hub.models import StreamModelOption, StreamReasoningEffortOption
 
-    # Validate MASO [redacted] and [redacted] variants + Codex max/ultra efforts
+    # Validate MASO example-model-93cb3095572e and example-model-92b0e30c47c0 variants + Codex max/ultra efforts
     prov_carbon, model_carbon, eff_carbon = validate_ai_command_agent_config(
-        "maso", "[redacted]", "high"
+        "maso", "example-model-93cb3095572e", "high"
     )
     assert prov_carbon == AgentType.MASO
-    assert model_carbon == "[redacted]_reasoning_high"
+    assert model_carbon == "example-model-93cb3095572e_reasoning_high"
     assert eff_carbon == "high"
 
     prov_carbon_med, model_carbon_med, _ = validate_ai_command_agent_config(
-        "maso", "[redacted]_reasoning_high", "medium"
+        "maso", "example-model-93cb3095572e_reasoning_high", "medium"
     )
     assert prov_carbon_med == AgentType.MASO
-    assert model_carbon_med == "[redacted]_reasoning_medium"
+    assert model_carbon_med == "example-model-93cb3095572e_reasoning_medium"
 
     with pytest.raises(ValueError, match="does not support reasoning_effort='xhigh'"):
-        validate_ai_command_agent_config("maso", "[redacted]", "xhigh")
+        validate_ai_command_agent_config("maso", "example-model-93cb3095572e", "xhigh")
 
-    _, model_sol61_xhigh, _ = validate_ai_command_agent_config("maso", "[redacted]", "xhigh")
-    assert model_sol61_xhigh == "[redacted]_reasoning_xhigh"
+    _, model_sol61_xhigh, _ = validate_ai_command_agent_config(
+        "maso", "example-model-92b0e30c47c0", "xhigh"
+    )
+    assert model_sol61_xhigh == "example-model-92b0e30c47c0_reasoning_xhigh"
 
     _, model_codex_max, eff_codex_max = validate_ai_command_agent_config(
-        "codex", "[redacted]", "max"
+        "codex", "example-codex", "max"
     )
-    assert model_codex_max == "[redacted]"
+    assert model_codex_max == "example-codex"
     assert eff_codex_max == "max"
-    _, _, eff_codex_ultra = validate_ai_command_agent_config("codex", "[redacted]", "ultra")
+    _, _, eff_codex_ultra = validate_ai_command_agent_config("codex", "example-codex", "ultra")
     assert eff_codex_ultra == "ultra"
 
     monkeypatch.setattr(ai_cmd_mod, "_AI_MASO_CATALOG_CACHE", None)
 
-    async def fake_check_maso_service(
+    async def fake_discover_maso_service(
         _env: Mapping[str, str],
-    ) -> tuple[list[StreamModelOption], str]:
+    ) -> tuple[str, list[StreamModelOption], str]:
         return (
+            "http://example.test",
             [
                 StreamModelOption(
-                    id="[redacted]",
-                    label="[redacted]",
-                    provider_model_id="[redacted]",
+                    id="example-model-92b0e30c47c0",
+                    label="example-model-92b0e30c47c0",
+                    provider_model_id="example-model-92b0e30c47c0",
                     default_reasoning_effort="high",
                     supported_reasoning_efforts=[
                         StreamReasoningEffortOption(
-                            id="low", label="Low", provider_model_id="[redacted]"
+                            id="low", label="Low", provider_model_id="example-model-92b0e30c47c0"
                         ),
                         StreamReasoningEffortOption(
                             id="high",
                             label="High",
-                            provider_model_id="[redacted]_reasoning_high",
+                            provider_model_id="example-model-92b0e30c47c0_reasoning_high",
                         ),
                         StreamReasoningEffortOption(
                             id="xhigh",
                             label="Extra High",
-                            provider_model_id="[redacted]_reasoning_xhigh",
+                            provider_model_id="example-model-92b0e30c47c0_reasoning_xhigh",
                         ),
                     ],
                 ),
                 StreamModelOption(
-                    id="[redacted]",
-                    label="[redacted]",
-                    provider_model_id="[redacted]",
+                    id="example-model-93cb3095572e",
+                    label="example-model-93cb3095572e",
+                    provider_model_id="example-model-93cb3095572e",
                     default_reasoning_effort="high",
                     supported_reasoning_efforts=[
                         StreamReasoningEffortOption(
-                            id="low", label="Low", provider_model_id="[redacted]"
+                            id="low", label="Low", provider_model_id="example-model-93cb3095572e"
                         ),
                         StreamReasoningEffortOption(
                             id="medium",
                             label="Medium",
-                            provider_model_id="[redacted]_reasoning_medium",
+                            provider_model_id="example-model-93cb3095572e_reasoning_medium",
                         ),
                         StreamReasoningEffortOption(
                             id="high",
                             label="High",
-                            provider_model_id="[redacted]_reasoning_high",
+                            provider_model_id="example-model-93cb3095572e_reasoning_high",
                         ),
                     ],
                 ),
             ],
-            "[redacted]_reasoning_high",
+            "example-model-92b0e30c47c0_reasoning_high",
         )
 
     monkeypatch.setattr(
-        "claude_hub.services.agent_stream.maso_http.check_maso_service",
-        fake_check_maso_service,
+        "claude_hub.services.maso_discovery.discover_maso_service",
+        fake_discover_maso_service,
     )
     service = FeishuAiCommandService(
         state_path=tmp_path / "caps_ai.json",
@@ -3271,14 +3350,17 @@ async def test_ai_capabilities_provider_model_options_and_new_model_validation(
         assert len(opts_by_prov[prov]) >= 1
 
     maso_ids = [opt["id"] for opt in opts_by_prov["maso"]]
-    assert maso_ids == ["[redacted]", "[redacted]"]
+    assert maso_ids == ["example-model-92b0e30c47c0", "example-model-93cb3095572e"]
     # Logical options must NOT duplicate _reasoning_* suffix variants as separate top-level rows
     assert not any("_reasoning_" in mid for mid in maso_ids)
     cursor_ids = [opt["id"] for opt in opts_by_prov["cursor"]]
     assert len(cursor_ids) == len(set(cursor_ids))
-    assert caps["model_reasoning_efforts"]["[redacted]"] == ["none", "low", "medium", "high"]
-    assert caps["model_reasoning_efforts"]["[redacted]_reasoning_high"] == [
-        "none",
+    assert caps["model_reasoning_efforts"]["example-model-93cb3095572e"] == [
+        "low",
+        "medium",
+        "high",
+    ]
+    assert caps["model_reasoning_efforts"]["example-model-93cb3095572e_reasoning_high"] == [
         "low",
         "medium",
         "high",
@@ -3305,25 +3387,25 @@ async def test_live_feishu_p2p_discovery_search_cross_app_ws_owner_and_230002_fa
         path=tmp_path / "live_tokens.json",
         key_path=tmp_path / "live_tokens.key",
     )
-    # Primary /ai owner token on [redacted] app (cli_[redacted]) WITHOUT im:message.send_as_user
+    # Primary /ai owner token on example_1 app (cli_example_1) WITHOUT im:message.send_as_user
     store.save_oauth_token(
-        open_id="ou_owner_[redacted]",
-        app_id="cli_[redacted]",
-        access_token="u-owner-[redacted]",
-        refresh_token="ur-owner-[redacted]",
-        app_secret="sec-[redacted]",
-        user_name="[redacted]",
+        open_id="ou_owner_example_1",
+        app_id="cli_example_1",
+        access_token="u-owner-example_1",
+        refresh_token="ur-owner-example_1",
+        app_secret="sec-example_1",
+        user_name="example_2",
         expires_in=7200,
         scope="im:message im:chat:read im:message.reactions:write_only",
     )
-    # Unrelated user who happens to share the exact same display_name ("[redacted]") on another app:
-    # must NEVER be trusted without authoritative get_message() verification under cli_[redacted]!
+    # Unrelated user who happens to share the exact same display_name ("example_2") on another app:
+    # must NEVER be trusted without authoritative get_message() verification under cli_example_1!
     store.save_oauth_token(
         open_id="ou_impersonator_same_name",
         app_id="cli_other",
         access_token="u-other",
         refresh_token="ur-other",
-        user_name="[redacted]",
+        user_name="example_2",
         expires_in=7200,
         scope="im:message",
     )
@@ -3332,10 +3414,10 @@ async def test_live_feishu_p2p_discovery_search_cross_app_ws_owner_and_230002_fa
         path=tmp_path / "live_pool.json",
         legacy_path=tmp_path / "live_legacy.json",
     )
-    # Enabled pool bot [redacted] (cli_[redacted]) bound to group/chat oc_bound_chat
+    # Enabled pool bot example_3 (cli_example_3) bound to group/chat oc_bound_chat
     merlin_bot_id = pool.create_bot(
-        name="[redacted]",
-        config=FeishuBotConfig(app_id="cli_[redacted]", app_secret="sec-[redacted]"),
+        name="example_3",
+        config=FeishuBotConfig(app_id="cli_example_3", app_secret="sec-example_3"),
     )
     merlin_rev = next(b.revision for b in pool.snapshot().bots if b.bot_id == merlin_bot_id)
     pool.bind_group(
@@ -3381,7 +3463,7 @@ async def test_live_feishu_p2p_discovery_search_cross_app_ws_owner_and_230002_fa
         "om_p2p_hello": {
             "message_id": "om_p2p_hello",
             "chat_id": "oc_p2p_merlinbot",
-            "sender": {"id": "ou_owner_[redacted]", "sender_type": "user"},
+            "sender": {"id": "ou_owner_example_1", "sender_type": "user"},
             "msg_type": "text",
             "create_time": str(now_ms - 10_000),
             "body": {"content": json.dumps({"text": "/ai 你好"})},
@@ -3389,7 +3471,7 @@ async def test_live_feishu_p2p_discovery_search_cross_app_ws_owner_and_230002_fa
         "om_search_outside_top": {
             "message_id": "om_search_outside_top",
             "chat_id": "oc_older_active_chat",
-            "sender": {"id": "ou_owner_[redacted]", "sender_type": "user"},
+            "sender": {"id": "ou_owner_example_1", "sender_type": "user"},
             "msg_type": "text",
             "create_time": str(now_ms - 8_000),
             "body": {"content": json.dumps({"text": "/ai 帮我看下搜索发现"})},
@@ -3397,8 +3479,8 @@ async def test_live_feishu_p2p_discovery_search_cross_app_ws_owner_and_230002_fa
         "om_ws_cross_app_owner": {
             "message_id": "om_ws_cross_app_owner",
             "chat_id": "oc_bound_chat",
-            # When looked up via cli_[redacted] user token, Feishu returns ou_owner_[redacted]!
-            "sender": {"id": "ou_owner_[redacted]", "sender_type": "user"},
+            # When looked up via cli_example_1 user token, Feishu returns ou_owner_example_1!
+            "sender": {"id": "ou_owner_example_1", "sender_type": "user"},
             "msg_type": "text",
             "create_time": str(now_ms - 5_000),
             "body": {"content": json.dumps({"text": "/ai 跨应用触发"})},
@@ -3406,8 +3488,8 @@ async def test_live_feishu_p2p_discovery_search_cross_app_ws_owner_and_230002_fa
         "om_ws_spoof_non_owner": {
             "message_id": "om_ws_spoof_non_owner",
             "chat_id": "oc_bound_chat",
-            # Authoritative lookup reveals a different open_id under cli_[redacted]
-            "sender": {"id": "ou_someone_else_on_[redacted]", "sender_type": "user"},
+            # Authoritative lookup reveals a different open_id under cli_example_1
+            "sender": {"id": "ou_someone_else_on_example_1", "sender_type": "user"},
             "msg_type": "text",
             "create_time": str(now_ms - 4_000),
             "body": {"content": json.dumps({"text": "/ai 冒充指令"})},
@@ -3421,13 +3503,13 @@ async def test_live_feishu_p2p_discovery_search_cross_app_ws_owner_and_230002_fa
 
         if path == "/open-apis/auth/v3/tenant_access_token/internal":
             app_id = body.get("app_id")
-            if app_id == "cli_[redacted]" and body.get("app_secret") == "sec-[redacted]":
+            if app_id == "cli_example_1" and body.get("app_secret") == "sec-example_1":
                 return httpx.Response(
-                    200, json={"code": 0, "tenant_access_token": "t-[redacted]", "expire": 7200}
+                    200, json={"code": 0, "tenant_access_token": "t-example_1", "expire": 7200}
                 )
-            if app_id == "cli_[redacted]" and body.get("app_secret") == "sec-[redacted]":
+            if app_id == "cli_example_3" and body.get("app_secret") == "sec-example_3":
                 return httpx.Response(
-                    200, json={"code": 0, "tenant_access_token": "t-[redacted]", "expire": 7200}
+                    200, json={"code": 0, "tenant_access_token": "t-example_3", "expire": 7200}
                 )
             if app_id == "cli_revoked":
                 raise AssertionError("Revoked/disabled pool bot must never be used")
@@ -3453,7 +3535,7 @@ async def test_live_feishu_p2p_discovery_search_cross_app_ws_owner_and_230002_fa
 
         if path.startswith("/open-apis/im/v1/messages/om_") and req.method == "GET":
             mid = path.rsplit("/", 1)[-1]
-            assert auth == "Bearer u-owner-[redacted]"
+            assert auth == "Bearer u-owner-example_1"
             raw_msg = messages_by_id.get(mid)
             if raw_msg is None:
                 return httpx.Response(404, json={"code": 230001, "msg": "not found"})
@@ -3482,11 +3564,11 @@ async def test_live_feishu_p2p_discovery_search_cross_app_ws_owner_and_230002_fa
 
         if path.endswith("/reply") and req.method == "POST":
             target_mid = path.split("/messages/", 1)[1].split("/reply", 1)[0]
-            if auth == "Bearer t-[redacted]":
-                # Primary fallback bot cli_[redacted] is NOT in oc_p2p_merlinbot, oc_older_active_chat, or oc_bound_chat
+            if auth == "Bearer t-example_1":
+                # Primary fallback bot cli_example_1 is NOT in oc_p2p_merlinbot, oc_older_active_chat, or oc_bound_chat
                 return httpx.Response(400, json={"code": 230002, "msg": "bot not in chat"})
-            if auth == "Bearer t-[redacted]":
-                # [redacted] IS in oc_bound_chat
+            if auth == "Bearer t-example_3":
+                # example_3 IS in oc_bound_chat
                 bound_replies.append((auth, target_mid))
                 return httpx.Response(
                     200,
@@ -3515,8 +3597,8 @@ async def test_live_feishu_p2p_discovery_search_cross_app_ws_owner_and_230002_fa
     ) as mock_http:
         user_client = FeishuUserClient(
             store,
-            open_id="ou_owner_[redacted]",
-            app_id="cli_[redacted]",
+            open_id="ou_owner_example_1",
+            app_id="cli_example_1",
             client=mock_http,
         )
         dispatched_prompts: list[str] = []
@@ -3540,10 +3622,10 @@ async def test_live_feishu_p2p_discovery_search_cross_app_ws_owner_and_230002_fa
         service.update_config(
             {
                 "enabled": True,
-                "owner_open_id": "ou_owner_[redacted]",
-                "app_id": "cli_[redacted]",
+                "owner_open_id": "ou_owner_example_1",
+                "app_id": "cli_example_1",
                 "provider": "maso",
-                "model": "[redacted]_reasoning_high",
+                "model": "example-model-92b0e30c47c0_reasoning_high",
                 "reasoning_effort": "high",
                 "cwd": str(tmp_path),
                 "watch_chats": [],
@@ -3570,21 +3652,21 @@ async def test_live_feishu_p2p_discovery_search_cross_app_ws_owner_and_230002_fa
 
         assert set(detected) == {"om_p2p_hello", "om_search_outside_top"}
         assert chats_calls and chats_calls[0].get("types") == "p2p,group"
-        assert search_bodies and search_bodies[0].get("from_ids") == ["ou_owner_[redacted]"]
+        assert search_bodies and search_bodies[0].get("from_ids") == ["ou_owner_example_1"]
         # Both non-bound chats fell back cleanly to owner DM (interim + final = 2 DMs per command = 4 total)
         assert len(dm_sends) == 4
-        assert all(auth == "Bearer t-[redacted]" for auth, _, _ in dm_sends)
-        assert all(body["receive_id"] == "ou_owner_[redacted]" for _, _, body in dm_sends)
+        assert all(auth == "Bearer t-example_1" for auth, _, _ in dm_sends)
+        assert all(body["receive_id"] == "ou_owner_example_1" for _, _, body in dm_sends)
         assert member_add_calls == []
 
-        # 2. Cross-app WebSocket event from [redacted] (ou_[redacted]_owner != ou_owner_[redacted]):
-        #    verified authoritatively via get_message() under cli_[redacted] and replied in-chat via bound [redacted]!
+        # 2. Cross-app WebSocket event from example_3 (ou_example_3_owner != ou_owner_example_1):
+        #    verified authoritatively via get_message() under cli_example_1 and replied in-chat via bound example_3!
         ws_owner_event = FeishuMessageEvent(
             event_id="ev_ws_cross_owner_1",
-            app_id="cli_[redacted]",
+            app_id="cli_example_3",
             chat_id="oc_bound_chat",
             chat_type="p2p",
-            sender_open_id="ou_[redacted]_owner",
+            sender_open_id="ou_example_3_owner",
             message_id="om_ws_cross_app_owner",
             message_type="text",
             text="/ai 跨应用触发",
@@ -3592,12 +3674,12 @@ async def test_live_feishu_p2p_discovery_search_cross_app_ws_owner_and_230002_fa
         )
         assert await service.handle_ws_event(ws_owner_event) is True
         assert len(bound_replies) == 2
-        assert all(auth == "Bearer t-[redacted]" for auth, _ in bound_replies)
+        assert all(auth == "Bearer t-example_3" for auth, _ in bound_replies)
 
         # 3. Spoofed cross-app WebSocket event (even if display_name matches elsewhere) is rejected!
         ws_spoof_event = FeishuMessageEvent(
             event_id="ev_ws_spoof_1",
-            app_id="cli_[redacted]",
+            app_id="cli_example_3",
             chat_id="oc_bound_chat",
             chat_type="p2p",
             sender_open_id="ou_impersonator_same_name",
@@ -3857,7 +3939,7 @@ def test_provider_default_and_effort_normalization_save_reload_contract(
         override_effort.reasoning_effort,
     ) == (
         AgentType.MASO,
-        "[redacted]_reasoning_xhigh",
+        "example-model-92b0e30c47c0_reasoning_xhigh",
         "xhigh",
     )
 
@@ -3884,17 +3966,17 @@ def test_provider_default_and_effort_normalization_save_reload_contract(
     app.include_router(router)
     client = TestClient(app)
 
-    # Start at MASO [redacted]_reasoning_xhigh + xhigh, then PATCH model='' (both with stale xhigh and empty effort)
+    # Start at MASO example-model-92b0e30c47c0_reasoning_xhigh + xhigh, then PATCH model='' (both with stale xhigh and empty effort)
     r1 = client.patch(
         "/api/feishu/bot/ai-command",
         json={
             "provider": "maso",
-            "model": "[redacted]_reasoning_xhigh",
+            "model": "example-model-92b0e30c47c0_reasoning_xhigh",
             "reasoning_effort": "xhigh",
         },
     )
     assert r1.status_code == 200
-    assert r1.json()["config"]["model"] == "[redacted]_reasoning_xhigh"
+    assert r1.json()["config"]["model"] == "example-model-92b0e30c47c0_reasoning_xhigh"
     assert r1.json()["config"]["reasoning_effort"] == "xhigh"
 
     r2 = client.patch(
@@ -3927,7 +4009,7 @@ def test_provider_default_and_effort_normalization_save_reload_contract(
         reload_cursor["reasoning_effort"],
     ) == ("cursor", "", "")
 
-    # Codex [redacted] + xhigh -> PATCH model='' preserves ENV_KEY effort='xhigh' with empty model=''
+    # Codex example-codex + xhigh -> PATCH model='' preserves ENV_KEY effort='xhigh' with empty model=''
     r5 = client.patch(
         "/api/feishu/bot/ai-command",
         json={"provider": "codex", "model": "", "reasoning_effort": "xhigh"},
@@ -3940,8 +4022,8 @@ def test_provider_default_and_effort_normalization_save_reload_contract(
         "xhigh",
     )
 
-    # 4. Real live MASO /api/models catalog shape (including mode='default' on [redacted], [redacted],
-    #    [redacted], [redacted], [redacted], plus mode='none'/'low' models): transform via
+    # 4. Real live MASO /api/models catalog shape (including mode='default' on example-model-75c87952ca70, example-model-051bc3aafde0,
+    #    gpt-example-model-d050a243e4ed, example-model-92b0e30c47c0, example-backend, plus mode='none'/'low' models): transform via
     #    production maso_http._model_options -> _build_capabilities_payload and verify EVERY surfaced
     #    (provider, model, effort) tuple passes validator AND FastAPI PATCH -> GET reload!
     from claude_hub.services.agent_stream.maso_http import _model_options as maso_model_options
@@ -3953,24 +4035,28 @@ def test_provider_default_and_effort_normalization_save_reload_contract(
 
     live_shaped_maso_rows = [
         {
-            "key": "[redacted]",
+            "key": "example-seed",
             "model_name": "ep-seed",
-            "selector_primary_key": "[redacted]",
+            "selector_primary_key": "example-seed",
             "selector_variants": [
-                {"key": "[redacted]", "label": "Disabled", "mode": "none"},
-                {"key": "[redacted]-reasoning", "label": "Medium", "mode": "medium"},
-                {"key": "[redacted]-reasoning-high", "label": "High", "mode": "high"},
+                {"key": "example-seed", "label": "Disabled", "mode": "none"},
+                {"key": "example-seed-reasoning", "label": "Medium", "mode": "medium"},
+                {"key": "example-seed-reasoning-high", "label": "High", "mode": "high"},
             ],
         },
         {
-            "key": "[redacted]",
+            "key": "example-model-e5d82e99e8a1",
             "model_name": "ep-qwen",
-            "selector_primary_key": "[redacted]",
+            "selector_primary_key": "example-model-e5d82e99e8a1",
             "selector_variants": [
-                {"key": "[redacted]", "label": "Low", "mode": "low"},
-                {"key": "[redacted]-reasoning", "label": "Medium", "mode": "medium"},
+                {"key": "example-model-e5d82e99e8a1", "label": "Low", "mode": "low"},
                 {
-                    "key": "[redacted]-reasoning-xhigh",
+                    "key": "example-model-e5d82e99e8a1-reasoning",
+                    "label": "Medium",
+                    "mode": "medium",
+                },
+                {
+                    "key": "example-model-e5d82e99e8a1-reasoning-xhigh",
                     "label": "Extra High",
                     "mode": "xhigh",
                 },
@@ -3987,37 +4073,53 @@ def test_provider_default_and_effort_normalization_save_reload_contract(
                     {"key": f"{base_key}_reasoning_xhigh", "label": "Extra High", "mode": "xhigh"},
                     *(
                         [{"key": f"{base_key}_reasoning_max", "label": "Max", "mode": "max"}]
-                        if base_key != "[redacted]"
+                        if base_key != "example-model-051bc3aafde0"
                         else []
                     ),
                 ],
             }
             for base_key in (
-                "[redacted]",
-                "[redacted]",
-                "[redacted]",
-                "[redacted]",
-                "[redacted]",
+                "example-model-75c87952ca70",
+                "example-model-051bc3aafde0",
+                "gpt-example-model-d050a243e4ed",
+                "example-model-92b0e30c47c0",
+                "example-backend",
             )
         ],
         {
-            "key": "[redacted]",
-            "model_name": "[redacted]",
-            "selector_primary_key": "[redacted]",
+            "key": "example-model-a0f983bf4c15",
+            "model_name": "example-model-975db9c77ece",
+            "selector_primary_key": "example-model-a0f983bf4c15",
             "selector_variants": [
-                {"key": "[redacted]", "label": "Low", "mode": "low"},
-                {"key": "[redacted]_reasoning_medium", "label": "Medium", "mode": "medium"},
-                {"key": "[redacted]_reasoning_high", "label": "High", "mode": "high"},
+                {"key": "example-model-a0f983bf4c15", "label": "Low", "mode": "low"},
+                {
+                    "key": "example-model-a0f983bf4c15_reasoning_medium",
+                    "label": "Medium",
+                    "mode": "medium",
+                },
+                {
+                    "key": "example-model-a0f983bf4c15_reasoning_high",
+                    "label": "High",
+                    "mode": "high",
+                },
             ],
         },
         {
-            "key": "[redacted]",
-            "model_name": "[redacted]",
-            "selector_primary_key": "[redacted]",
+            "key": "example-model-93cb3095572e",
+            "model_name": "example-model-4f2119b1c5d4",
+            "selector_primary_key": "example-model-93cb3095572e",
             "selector_variants": [
-                {"key": "[redacted]", "label": "Low", "mode": "low"},
-                {"key": "[redacted]_reasoning_medium", "label": "Medium", "mode": "medium"},
-                {"key": "[redacted]_reasoning_high", "label": "High", "mode": "high"},
+                {"key": "example-model-93cb3095572e", "label": "Low", "mode": "low"},
+                {
+                    "key": "example-model-93cb3095572e_reasoning_medium",
+                    "label": "Medium",
+                    "mode": "medium",
+                },
+                {
+                    "key": "example-model-93cb3095572e_reasoning_high",
+                    "label": "High",
+                    "mode": "high",
+                },
             ],
         },
     ]
@@ -4062,27 +4164,38 @@ def test_codex_provider_defaults_prefer_local_catalog(tmp_path, monkeypatch) -> 
         json.dumps(
             {
                 "models": [
-                    {"slug": "[redacted]", "visibility": "list", "supported_in_api": True},
-                    {"slug": "[redacted]", "visibility": "list", "supported_in_api": True},
+                    {
+                        "slug": "example-model-901b67697666",
+                        "visibility": "list",
+                        "supported_in_api": True,
+                    },
+                    {
+                        "slug": "example-model-92b0e30c47c0",
+                        "visibility": "list",
+                        "supported_in_api": True,
+                    },
                 ]
             }
         )
     )
     service = FeishuAiCommandService(state_path=tmp_path / "state.json")
-    service.update_config({"provider": "maso", "model": "[redacted]_reasoning_high"})
-    assert service.update_config({"provider": "codex"}).model == "[redacted]"
+    service.update_config(
+        {"provider": "maso", "model": "example-model-92b0e30c47c0_reasoning_high"}
+    )
+    assert service.update_config({"provider": "codex"}).model == "example-model-901b67697666"
     assert (
-        service.update_config({"provider": "codex", "model": "[redacted]"}).model == "[redacted]"
+        service.update_config({"provider": "codex", "model": "example-codex"}).model
+        == "example-codex"
     )
     parsed = parse_ai_command(
         "/ai --provider codex test",
         default_provider=AgentType.MASO,
-        default_model="[redacted]_reasoning_high",
+        default_model="example-model-92b0e30c47c0_reasoning_high",
         default_reasoning_effort="high",
     )
-    assert parsed is not None and parsed.model == "[redacted]"
+    assert parsed is not None and parsed.model == "example-model-901b67697666"
     capabilities = service.capabilities_dict()
-    assert capabilities["provider_models"]["codex"][0] == "[redacted]"
+    assert capabilities["provider_models"]["codex"][0] == "example-model-901b67697666"
 
 
 def test_codex_provider_default_without_cache_matches_capability_order(

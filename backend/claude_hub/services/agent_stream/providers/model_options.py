@@ -191,7 +191,7 @@ def group_cursor_model_options(
     """Collapse Cursor's parameterized model ids into model + effort groups.
 
     Cursor exposes effort as part of the provider model id (for example
-    ``[redacted]-high``), unlike Codex-family app servers which accept model
+    ``example-model-419255f2bb4c-high``), unlike Codex-family app servers which accept model
     and effort separately.  Capabilities normalize both representations while
     retaining the exact Cursor id on each effort option.
     """

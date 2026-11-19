@@ -1,4 +1,4 @@
-[1;2m› [0mContinue workspace task from review. Task ID: 8dc753e4-cd1b-4c6d-87e2-095563a9cdaa Task title: Investigate frozen ViT/USM weights across OneEval models and assess shared ViT/USM pool opportuni…
+[1;2m› [0mContinue workspace task from review. Task ID: 8dc753e4-cd1b-4c6d-87e2-095563a9cdaa Task title: Investigate frozen ViT/USM weights across ExampleEval models and assess shared ViT/USM pool opportuni…
 
 [1m[38;5;2m•[0m [1mRan[0m [38;2;137;180;250mpython[38;2;205;214;244m - [38;2;148;226;213m<<[38;2;166;227;161m'[38;2;203;166;247mPY[38;2;166;227;161m'[39m …
 [2m  └[0m
@@ -40,5 +40,5 @@
 
 [0;1m›[0m [2mAsk Codex to do anything[0m
 
-  [38;2;246;226;183m[redacted] default[39m · [38;2;171;223;167m~/evo_workspace[39m · [38;2;180;190;254mAwait workspace tasks[39m · Main [default]
+  [38;2;246;226;183mexample-model-dedfefd51120 default[39m · [38;2;171;223;167m~/evo_workspace[39m · [38;2;180;190;254mAwait workspace tasks[39m · Main [default]
   [1m←[0m for agents · [1m?[0m for shortcuts

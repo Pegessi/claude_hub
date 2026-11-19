@@ -44,7 +44,7 @@ test('model and effort environment keys remain provider-specific', () => {
 
 test('Antigravity preserves complete model ids without a separate effort channel', () => {
   const entry = {
-    id: '[redacted]-high', label: 'Gemini 4 Argon (High)', supported_reasoning_efforts: [],
+    id: 'gemini-example-model-1dd583607df6-high', label: 'Gemini 3 Argon (High)', supported_reasoning_efforts: [],
   }
   const result = presentChatModel(tab('antigravity', { ANTIGRAVITY_MODEL: entry.id }), caps({
     available_models: [entry], current_model: 'gemini-3.8-flash-medium',

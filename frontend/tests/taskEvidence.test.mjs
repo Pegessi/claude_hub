@@ -175,15 +175,15 @@ test('an empty task reports no evidence instead of empty sections', () => {
 
 test('bare review and CI URLs become chips with stable derived labels', () => {
   const links = evidence.evidenceLinks([
-    'Ready: MR https://[redacted]/seed/xperf_evo/-/merge_requests/3705.',
-    'See the run https://[redacted]/seed/xperf_evo/-/pipelines/998877.',
+    'Ready: MR https://git.example.com/team/project/-/merge_requests/3705.',
+    'See the run https://git.example.com/team/project/-/pipelines/998877.',
     'GitHub PR https://github.com/acme/hub/pull/42',
   ])
   assert.deepEqual(links, [
-    { label: 'MR 3705', url: 'https://[redacted]/seed/xperf_evo/-/merge_requests/3705' },
+    { label: 'MR 3705', url: 'https://git.example.com/team/project/-/merge_requests/3705' },
     {
       label: 'CI pipeline 998877',
-      url: 'https://[redacted]/seed/xperf_evo/-/pipelines/998877',
+      url: 'https://git.example.com/team/project/-/pipelines/998877',
     },
     { label: 'PR 42', url: 'https://github.com/acme/hub/pull/42' },
   ])
@@ -191,24 +191,24 @@ test('bare review and CI URLs become chips with stable derived labels', () => {
 
 test('a named Markdown link keeps the executor label over the derived one', () => {
   const links = evidence.evidenceLinks([
-    'Blocked on [Release blocker MR](https://[redacted]/acme/hub/-/merge_requests/42).',
-    'Package: [nightly CI](https://[redacted]/acme/hub/-/pipelines/998877)',
+    'Blocked on [Release blocker MR](https://git.example.com/acme/hub/-/merge_requests/42).',
+    'Package: [nightly CI](https://git.example.com/acme/hub/-/pipelines/998877)',
     'Proof: [**bench numbers**](https://ci.example.com/-/jobs/123)',
   ])
   assert.deepEqual(links, [
     {
       label: 'Release blocker MR',
-      url: 'https://[redacted]/acme/hub/-/merge_requests/42',
+      url: 'https://git.example.com/acme/hub/-/merge_requests/42',
     },
-    { label: 'nightly CI', url: 'https://[redacted]/acme/hub/-/pipelines/998877' },
+    { label: 'nightly CI', url: 'https://git.example.com/acme/hub/-/pipelines/998877' },
     { label: 'bench numbers', url: 'https://ci.example.com/-/jobs/123' },
   ])
 })
 
 test('a generic Markdown label falls back to the derived destination', () => {
   assert.deepEqual(
-    evidence.evidenceLinks(['See [here](https://[redacted]/acme/hub/-/merge_requests/42).']),
-    [{ label: 'MR 42', url: 'https://[redacted]/acme/hub/-/merge_requests/42' }],
+    evidence.evidenceLinks(['See [here](https://git.example.com/acme/hub/-/merge_requests/42).']),
+    [{ label: 'MR 42', url: 'https://git.example.com/acme/hub/-/merge_requests/42' }],
   )
 })
 

@@ -615,7 +615,7 @@ async def test_unsupported_managed_provider_falls_back_to_standalone_tab(
     parsed = parse_ai_command(
         "/ai do the thing",
         default_provider=AgentType.TRAEX,
-        default_model="[redacted]",
+        default_model="example-model-4df7bc7c84eb",
         default_reasoning_effort="high",
     )
     assert parsed is not None
@@ -665,13 +665,13 @@ async def test_maso_model_switch_reuses_pinned_endpoint(tmp_path: Path) -> None:
     first = parse_ai_command(
         "/ai test",
         default_provider=AgentType.MASO,
-        default_model="[redacted]_reasoning_high",
+        default_model="example-backend_reasoning_high",
         default_reasoning_effort="high",
     )
     second = parse_ai_command(
         "/ai test",
         default_provider=AgentType.MASO,
-        default_model="[redacted]-reasoning-high",
+        default_model="deepseek-example-reasoning-high",
         default_reasoning_effort="high",
     )
     assert first is not None and second is not None
@@ -685,7 +685,7 @@ async def test_maso_model_switch_reuses_pinned_endpoint(tmp_path: Path) -> None:
     service._switch_managed_env = switch  # type: ignore[method-assign, assignment]
     assert await service._ensure_execution_tab(message, second, cfg) == tab_id
     assert switched[0]["MASO_BASE_URL"] == "http://127.0.0.1:11004"
-    assert switched[0]["MASO_MODEL"] == "[redacted]-reasoning-high"
+    assert switched[0]["MASO_MODEL"] == "deepseek-example-reasoning-high"
 
 
 @pytest.mark.asyncio
@@ -697,7 +697,7 @@ async def test_maso_legacy_endpoint_mismatch_provisions_fresh_session(tmp_path: 
     parsed = parse_ai_command(
         "/ai test",
         default_provider=AgentType.MASO,
-        default_model="[redacted]_reasoning_high",
+        default_model="example-backend_reasoning_high",
         default_reasoning_effort="high",
     )
     assert parsed is not None
@@ -1144,7 +1144,7 @@ async def test_maso_live_transport_mismatch_replaces_even_without_model_change(
     parsed = parse_ai_command(
         "/ai test",
         default_provider=AgentType.MASO,
-        default_model="[redacted]_reasoning_high",
+        default_model="example-backend_reasoning_high",
         default_reasoning_effort="high",
     )
     assert parsed is not None
@@ -1169,13 +1169,13 @@ async def test_maso_switch_endpoint_error_provisions_new_session(tmp_path, monke
     first = parse_ai_command(
         "/ai test",
         default_provider=AgentType.MASO,
-        default_model="[redacted]_reasoning_high",
+        default_model="example-backend_reasoning_high",
         default_reasoning_effort="high",
     )
     second = parse_ai_command(
         "/ai test",
         default_provider=AgentType.MASO,
-        default_model="[redacted]-reasoning-high",
+        default_model="deepseek-example-reasoning-high",
         default_reasoning_effort="high",
     )
     assert first is not None and second is not None

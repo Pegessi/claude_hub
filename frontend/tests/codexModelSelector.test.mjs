@@ -25,8 +25,8 @@ const Component = (await import(moduleUrl(script
 Component.render = () => null
 
 const models = [
-  { id: '[redacted]', label: '[redacted]', default_reasoning_effort: 'low', supported_reasoning_efforts: [{ id: 'low' }, { id: 'high' }] },
-  { id: '[redacted]', label: '[redacted]', default_reasoning_effort: 'medium', supported_reasoning_efforts: [{ id: 'medium' }, { id: 'high' }] },
+  { id: 'gpt-example-model-c886ad270fea', label: 'gpt-example-model-c886ad270fea', default_reasoning_effort: 'low', supported_reasoning_efforts: [{ id: 'low' }, { id: 'high' }] },
+  { id: 'gpt-example-model-d050a243e4ed', label: 'gpt-example-model-d050a243e4ed', default_reasoning_effort: 'medium', supported_reasoning_efforts: [{ id: 'medium' }, { id: 'high' }] },
 ]
 const response = (body, status = 200) => new Response(JSON.stringify(body), { status })
 const flush = async () => { await vue.nextTick(); await new Promise(resolve => setImmediate(resolve)); await vue.nextTick() }
@@ -61,16 +61,16 @@ test('local creation wires the picker to resolved preset text, not to a separate
 })
 
 test('model and effort choices preserve preset keys and drop only incompatible effort on an explicit switch', async t => {
-  const h = mount(t, 'KEEP=value\nHTTP_PROXY=http://proxy.test\nCODEX_MODEL=[redacted]\nCODEX_REASONING_EFFORT=low')
+  const h = mount(t, 'KEEP=value\nHTTP_PROXY=http://proxy.test\nCODEX_MODEL=gpt-example-model-c886ad270fea\nCODEX_REASONING_EFFORT=low')
   await flush()
   assert.equal(h.calls[0].url, '/api/codex/models')
   assert.deepEqual(h.changes, [], 'discovery does not rewrite preset configuration')
-  h.state.selectModel('[redacted]')
+  h.state.selectModel('gpt-example-model-d050a243e4ed')
   await flush()
-  assert.deepEqual(parseLaunchEnv(h.envText.value), { KEEP: 'value', HTTP_PROXY: 'http://proxy.test', CODEX_MODEL: '[redacted]' })
+  assert.deepEqual(parseLaunchEnv(h.envText.value), { KEEP: 'value', HTTP_PROXY: 'http://proxy.test', CODEX_MODEL: 'gpt-example-model-d050a243e4ed' })
   h.state.updateEnv({ CODEX_REASONING_EFFORT: 'high' })
   await flush()
-  h.state.selectModel('[redacted]')
+  h.state.selectModel('gpt-example-model-c886ad270fea')
   await flush()
   assert.equal(parseLaunchEnv(h.envText.value).CODEX_REASONING_EFFORT, 'high')
   h.state.selectModel('')
@@ -99,11 +99,11 @@ test('model overrides preserve unrelated raw preset quotes and comments and repl
   const unrelated = `# Keep this preset comment\nexport QUOTED='"literal quotes"'\nSPACED='  padded  '`
   const h = mount(t, `${unrelated}\nCODEX_MODEL=old\nexport CODEX_MODEL=private-model`)
   await flush()
-  h.state.selectModel('[redacted]')
+  h.state.selectModel('gpt-example-model-c886ad270fea')
   await flush()
-  assert.equal(h.envText.value, `${unrelated}\nCODEX_MODEL=[redacted]`)
+  assert.equal(h.envText.value, `${unrelated}\nCODEX_MODEL=gpt-example-model-c886ad270fea`)
   assert.deepEqual(parseLaunchEnv(h.envText.value), {
-    QUOTED: '"literal quotes"', SPACED: '  padded  ', CODEX_MODEL: '[redacted]',
+    QUOTED: '"literal quotes"', SPACED: '  padded  ', CODEX_MODEL: 'gpt-example-model-c886ad270fea',
   })
 })
 

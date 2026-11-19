@@ -595,7 +595,9 @@ async def test_direct_tab_switch_env_preserves_legacy_runtime_error_status(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("selected_model", ["[redacted]", "[redacted]"])
+@pytest.mark.parametrize(
+    "selected_model", ["gpt-example-model-c886ad270fea", "gpt-example-model-d050a243e4ed"]
+)
 async def test_managed_codex_model_reasoning_update_reaches_real_transport(
     managed_workspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selected_model: str
 ) -> None:

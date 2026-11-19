@@ -61,6 +61,7 @@ from uuid import uuid4
 
 import claude_hub.services.agent_stream.providers.guidance as provider_guidance
 import claude_hub.services.agent_stream.providers.model_options as provider_model_options
+from claude_hub.services.local_runtime_settings import local_setting
 
 from ...config import settings
 from ...models import (
@@ -267,40 +268,19 @@ _STATIC_MODELS: Dict[str, List[str]] = {
         "claude-opus-4-8",
         "claude-sonnet-4-6",
         "claude-haiku-4-5",
-        "[redacted]",
     ],
     "codex": [
         "gpt-5.4",
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
         "gpt-5.5",
         "gpt-5.4-mini",
         "gpt-5.3-codex-spark",
     ],
     "traex": [
         # Slugs as reported by ``traex models`` / thread/start ``model``.
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
         "Seed-Code",
-        "Seed-[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
         "GPT-5.5",
         "GPT-5.4",
         "GPT-5.2",
-        "[redacted]",
-        "[redacted]",
         "Gemini-3.1-Pro-Preview",
         "Gemini-3-Flash-Preview",
         "openrouter-3o",
@@ -322,12 +302,6 @@ _STATIC_MODELS: Dict[str, List[str]] = {
     "antigravity": [
         # Fallback slugs when ``agyx models`` cannot be probed; at runtime the
         # catalog is discovered via ``_probe_antigravity_models``.
-        "[redacted]-medium",
-        "[redacted]-high",
-        "[redacted]-low",
-        "[redacted]-high",
-        "[redacted]-medium",
-        "[redacted]-low",
         "gemini-3.8-flash-high",
         "gemini-3.8-flash-medium",
         "gemini-3.8-flash-low",
@@ -349,7 +323,11 @@ _CLAUDE_MODEL_ENV_KEYS = (
 
 
 def _static_options(agent_type: str) -> List[StreamModelOption]:
-    return provider_model_options.model_options_from_ids(_STATIC_MODELS.get(agent_type, []))
+    configured = local_setting(f"CLAUDE_HUB_{agent_type.upper()}_FALLBACK_MODELS")
+    model_ids = [item.strip() for item in configured.split(",") if item.strip()]
+    return provider_model_options.model_options_from_ids(
+        model_ids if configured else _STATIC_MODELS.get(agent_type, [])
+    )
 
 
 def _codex_model_options(env: Dict[str, str]) -> List[StreamModelOption]:
@@ -375,7 +353,7 @@ def _codex_model_options(env: Dict[str, str]) -> List[StreamModelOption]:
             label=model,
             description="Codex fallback model; availability depends on your account.",
         )
-        for model in _STATIC_MODELS["codex"]
+        for model in (option.id for option in _static_options("codex"))
         if model not in cache_ids
     )
     return options

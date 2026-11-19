@@ -2,7 +2,7 @@
 
 ## Problem & Investigation
 
-When authenticating `lark-cli` for the personal Feishu `/ai` command on `[redacted]` (`[redacted]`) / `[redacted]` (`[redacted]`) / `[redacted]` (`[redacted]`), Feishu device verification rejected `im:message.send_as_user` because that user-identity send scope is not enabled in the Feishu Developer Console.
+When authenticating `lark-cli` for the personal Feishu `/ai` command on `cliexample_a30368` (`Example Person`) / `cliexample_e35673` (`Example Person`) / `cliexample_564e44` (`Example Person`), Feishu device verification rejected `im:message.send_as_user` because that user-identity send scope is not enabled in the Feishu Developer Console.
 
 ### Verified Findings (Sanitized Probe & Codebase Evidence)
 
@@ -11,7 +11,7 @@ When authenticating `lark-cli` for the personal Feishu `/ai` command on `[redact
      - `~/.lark-cli/config.json` and `~/.local/share/lark-cli/` contain encrypted user tokens (`token_cli_a9f715f8d6b89bcb_ou_a24354b644a3bef61a41bd05f07c1aac.enc` with 75 granted user scopes including `im:message`, `im:chat:read`, `im:chat.members:write_only`, and `im:message.reactions:write_only`; `token_cli_aa47b1efcd78dbdb_ou_e6c73de7313bf222d1951de75ef2c2ba.enc` with 210 granted user scopes) and AES-256-GCM encrypted bot secrets (`appsecret_cli_a9f715f8d6b89bcb.enc`, `appsecret_cli_aa47b1efcd78dbdb.enc`).
      - Inspecting the `lark-cli` v1.1.0 binary (`~/.nvm/versions/node/v24.21.0/lib/node_modules/@larksuite/cli/bin/lark-cli`) confirmed that `lark-cli im +messages-send --as user` and `im +messages-reply --as user` call `POST /open-apis/im/v1/messages` and `POST /open-apis/im/v1/messages/:message_id/reply` with `user_access_token`, and that `im:message.send_as_user` is explicitly placed in `lark-cli`'s internal `recommend.deny` scope list (`cmd/lark-cli/scope_DefaultScopeSet.go`).
    - **Sanitized live OpenAPI probe receipts**:
-     - Calling `POST https://open.feishu.cn/open-apis/im/v1/messages/om_invalid_dry_run_probe/reply` with the live `user_access_token` (`[redacted]`, 75 scopes including `im:message` but without `im:message.send_as_user`) returned HTTP 400 before message ID validation:
+     - Calling `POST https://open.feishu.cn/open-apis/im/v1/messages/om_invalid_dry_run_probe/reply` with the live `user_access_token` (`cliexample_a30368`, 75 scopes including `im:message` but without `im:message.send_as_user`) returned HTTP 400 before message ID validation:
        ```json
        {
          "code": 230027,
@@ -23,19 +23,19 @@ When authenticating `lark-cli` for the personal Feishu `/ai` command on `[redact
          }
        }
        ```
-     - Querying `GET https://open.feishu.cn/open-apis/application/v6/scopes` with each app's `tenant_access_token` confirmed that none of `[redacted]` (`[redacted]`, 284 active scopes), `[redacted]` (`[redacted]`, 666 active scopes), or `[redacted]` (`[redacted]`, 7 active scopes) has `im:message.send_as_user` enabled in the Feishu Developer Console, whereas all three apps have `im:message:send_as_bot` (`scope_status=1`) active.
+     - Querying `GET https://open.feishu.cn/open-apis/application/v6/scopes` with each app's `tenant_access_token` confirmed that none of `cliexample_a30368` (`Example Person`, 284 active scopes), `cliexample_564e44` (`Example Person`, 666 active scopes), or `cliexample_e35673` (`Example Person`, 7 active scopes) has `im:message.send_as_user` enabled in the Feishu Developer Console, whereas all three apps have `im:message:send_as_bot` (`scope_status=1`) active.
 
 2. **How internal `openlark-standin` / `lark-desk` / `lark-bridge` send `> 🤖 AI 代答，仅供参考` replies**:
    - The public GitHub Rust crate `foxzool/openlark` is an unrelated third-party OpenAPI SDK wrapper.
-   - Internal ByteDance Codebase (`[redacted]`) repositories producing the `> 🤖 AI 代答，仅供参考` personal reply footer were verified by reading the actual files at their pinned commit SHAs:
-     - **`openlark-standin` (`[redacted]` at commit `157b2fe33e7818211c7d4242d227dcad24633149`)**:
+   - Internal ByteDance Codebase (`git.example.invalid`) repositories producing the `> 🤖 AI 代答，仅供参考` personal reply footer were verified by reading the actual files at their pinned commit SHAs:
+     - **`openlark-standin` (`example/project` at commit `157b2fe33e7818211c7d4242d227dcad24633149`)**:
        - Verified in `mew/plugin/openlark-standin/README.md` (lines 1–39), `mew/plugin/openlark-standin/runtime/src/openlark.mjs` (lines 3–128), `mew/plugin/openlark-standin/runtime/src/worker.mjs` (lines 157–212), and `mew/plugin/openlark-standin/runtime/src/filter.mjs` (lines 1–4, 103–117).
        - **Read/receive**: Connects to a local **OpenLark** desktop agent API (`config.openlarkBase`, authenticated with `Bearer ${OPEN_LARK_AGENT_TOKEN}` and `X-Open-Lark-Account` header in `openlark.mjs:5-29`), receiving `message.upserted` events over WebSocket `/events?ol_account=<account>` (`openlark.mjs:104-121`) and reading conversations/messages via `GET /conversations/:feed/messages` and `GET /messages/:rootId/thread` (`openlark.mjs:69-103`).
        - **Reaction & reply**: Adds the `OnIt` reaction via `POST /messages/:message_id/reactions` (`worker.mjs:160`), formats the reply with `FOOTER = "🤖 AI 代答，仅供参考"` (`filter.mjs:2, 103-117`), and posts the user-identity reply via `POST /messages/:message_id/replies` (`worker.mjs:205-211`).
-     - **`lark-desk` (`[redacted]` at commit `a17d5840f32f5f732c9eb1747b567aae14452642`)**:
+     - **`lark-desk` (`example/project` at commit `a17d5840f32f5f732c9eb1747b567aae14452642`)**:
        - Verified in `extensions/lark-desk/README.md` (lines 1–34), `extensions/lark-desk/internal/web/client.go` (lines 31–100), and `extensions/lark-desk/internal/web/messages.go` (lines 200–359).
        - **Read/receive & send**: Does **not** use `lark-cli`; instead, its `larkweb` Go connector (`internal/web`) uses a Feishu web-client QR login session (`Session` cookies/CSRF token in `client.go:31-73`, compatible with the JSON shape that standalone `send-as-user` / `LarkAgentX` stores in `~/.larkx/credentials.json` so an existing hub login can be taken over as-is, `README.md:3`). Incoming DMs, group `@me`, and replies arrive over the Feishu web client's `msg-frontier` WebSocket long connection (`README.md:5, 13`), chat history is pulled via web gateway protobuf commands (`PullMessagesByPositionsRequest` / `PullMessagesByIdsRequest` in `messages.go:200-215`, exposed as `larkweb_chats` / `larkweb_messages` / `larkweb_search`, `README.md:9`), and replies (including `/agent` replies ending with `> 🤖 AI 代答，仅供参考`, `README.md:11, 27`) are sent as the user via `PutMessageRequest` protobuf commands over the web client gateway (`messages.go:315-359`).
-     - **`lark-bridge` (`[redacted]` at commit `2819a96f2322d4edc67ebbe4643a7a78428c1a88`)**:
+     - **`lark-bridge` (`example/project` at commit `2819a96f2322d4edc67ebbe4643a7a78428c1a88`)**:
        - Verified in `extensions/lark-bridge/README.md` (lines 1–68), `extensions/lark-bridge/larkx_persona/openlark.py` (lines 74–231), `extensions/lark-bridge/larkx_persona/real.py` (lines 51–263), and `extensions/lark-bridge/larkx_persona/cli.py` (lines 1–26).
        - **Read/receive & send backends**: Supports two user-identity chat backends selected by setting (`README.md:12-21`):
          1. **Existing local Open Lark (`OpenLarkBackend` in `larkx_persona/openlark.py:74-231`)**: Connects to loopback `http://127.0.0.1:8095/agent/v1` (with Hub-encrypted agent token, `README.md:15-16`), receives `message.upserted` over WebSocket (`openlark.py:180-183`), reads history via `/conversations` (`openlark.py:197-211, 252-269`), and sends/replies as the user via `POST /messages/:reply_to/replies` or `POST /conversations/:chat/messages` (`openlark.py:220-230`).

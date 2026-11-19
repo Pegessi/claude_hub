@@ -20,7 +20,7 @@ broken image / "图片不可用". Evidence: terminal tab `257420e9`
 contains markdown with a **bare key** and no scheme/directory/extension:
 
 ```
-![Image]([redacted])
+![Image](img_v3_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)
 ```
 
 lark-cli had already downloaded the image locally:

@@ -225,10 +225,15 @@ async def test_spec_implement_review_worktree_cross_review_and_remote_push(
         return (
             "http://127.0.0.1:11004",
             [
-                StreamModelOption(id="[redacted]", label="[redacted]"),
-                StreamModelOption(id="[redacted]", label="[redacted]"),
+                StreamModelOption(
+                    id="gemini-example-model-1dd583607df6",
+                    label="gemini-example-model-1dd583607df6",
+                ),
+                StreamModelOption(
+                    id="gpt-example-model-d050a243e4ed", label="gpt-example-model-d050a243e4ed"
+                ),
             ],
-            "[redacted]",
+            "gemini-example-model-1dd583607df6",
         )
 
     monkeypatch.setattr(cross_reviewer, "discover_maso_service", fake_discover_maso)
@@ -609,8 +614,8 @@ sys.exit(1)
         task,
         milestone="review_passed",
         summary=(
-            "Cross-review passed for https://[redacted]/seed/xperf_evo/merge_requests/262 "
-            "and doc https://[redacted]/docx/abc123"
+            "Cross-review passed for https://git.example.com/team/project/merge_requests/262 "
+            "and doc https://docs.example.com/docx/abc123"
         ),
     )
     assert ok is True
@@ -626,8 +631,8 @@ sys.exit(1)
     assert prog["dedupe_key"] == f"claude-hub-pipeline:{task.id}:review_passed"
     assert "origin/feat/mr-262@abc1234" in prog["text"]
     link_kinds = {item["kind"]: item["url"] for item in prog["links"]}
-    assert link_kinds["mr"] == "https://[redacted]/seed/xperf_evo/merge_requests/262"
-    assert link_kinds["doc"] == "https://[redacted]/docx/abc123"
+    assert link_kinds["mr"] == "https://git.example.com/team/project/merge_requests/262"
+    assert link_kinds["doc"] == "https://docs.example.com/docx/abc123"
 
 
 @pytest.mark.asyncio
@@ -653,8 +658,13 @@ async def test_dot_delegate_maso_model_recipe_and_cli(
     async def fake_discover_maso(_env: dict[str, str]):
         return (
             "http://127.0.0.1:11004",
-            [StreamModelOption(id="[redacted]", label="[redacted]")],
-            "[redacted]",
+            [
+                StreamModelOption(
+                    id="gemini-example-model-1dd583607df6",
+                    label="gemini-example-model-1dd583607df6",
+                )
+            ],
+            "gemini-example-model-1dd583607df6",
         )
 
     monkeypatch.setattr(maso_discovery, "discover_maso_service", fake_discover_maso)
@@ -679,7 +689,7 @@ async def test_dot_delegate_maso_model_recipe_and_cli(
             done_when=["pytest tests/test_kv.py passes"],
             output="src/kv.py",
             agent_type="maso",
-            model="[redacted]_reasoning_high",
+            model="gemini-example-model-1dd583607df6_reasoning_high",
             recipe="spec_implement_review",
             demand_id="dem-kv-1",
             ephemeral=True,
@@ -706,7 +716,9 @@ async def test_dot_delegate_maso_model_recipe_and_cli(
         assert assigned_session.ephemeral is True
         assert assigned_session.caller_owned_ephemeral is True
         assert assigned_session.env["MASO_BASE_URL"] == "http://127.0.0.1:11004"
-        assert assigned_session.env["MASO_MODEL"] == "[redacted]_reasoning_high"
+        assert (
+            assigned_session.env["MASO_MODEL"] == "gemini-example-model-1dd583607df6_reasoning_high"
+        )
         assert Path(assigned_session.workspace_path).resolve() == Path(task.worktree_path).resolve()
     finally:
         reset_dot_service(None)
@@ -753,7 +765,7 @@ async def test_dot_delegate_maso_model_recipe_and_cli(
             "--agent",
             "maso",
             "--model",
-            "[redacted]_reasoning_high",
+            "gemini-example-model-1dd583607df6_reasoning_high",
             "--recipe",
             "spec_implement_review",
             "--demand-id",
@@ -766,7 +778,7 @@ async def test_dot_delegate_maso_model_recipe_and_cli(
     path, delegate_body = captured_requests[-1]
     assert path == "/api/dot/delegate"
     assert delegate_body["agent_type"] == "maso"
-    assert delegate_body["model"] == "[redacted]_reasoning_high"
+    assert delegate_body["model"] == "gemini-example-model-1dd583607df6_reasoning_high"
     assert delegate_body["recipe"] == "spec_implement_review"
     assert delegate_body["demand_id"] == "dem-cli-1"
     assert delegate_body["ephemeral"] is True
@@ -1141,10 +1153,15 @@ async def test_concurrent_todo_edit_to_auto_worktree_and_reviewer_incarnation_sa
         return (
             "http://127.0.0.1:11004",
             [
-                StreamModelOption(id="[redacted]", label="[redacted]"),
-                StreamModelOption(id="[redacted]", label="[redacted]"),
+                StreamModelOption(
+                    id="gemini-example-model-1dd583607df6",
+                    label="gemini-example-model-1dd583607df6",
+                ),
+                StreamModelOption(
+                    id="gpt-example-model-d050a243e4ed", label="gpt-example-model-d050a243e4ed"
+                ),
             ],
-            "[redacted]",
+            "gemini-example-model-1dd583607df6",
         )
 
     monkeypatch.setattr(cross_reviewer, "discover_maso_service", fake_discover_maso)
@@ -1243,7 +1260,10 @@ async def test_concurrent_todo_edit_to_auto_worktree_and_reviewer_incarnation_sa
             caller_owned_ephemeral=False,
             reuse_existing=False,
             cwd=str(repo),
-            env={"MASO_BASE_URL": "http://127.0.0.1:11004", "MASO_MODEL": "[redacted]"},
+            env={
+                "MASO_BASE_URL": "http://127.0.0.1:11004",
+                "MASO_MODEL": "gemini-example-model-1dd583607df6",
+            },
         ),
     )
     # Task B's reviewer must not collide with Task A's reserved review_session_id
@@ -1275,7 +1295,10 @@ async def test_concurrent_todo_edit_to_auto_worktree_and_reviewer_incarnation_sa
             caller_owned_ephemeral=False,
             reuse_existing=False,
             cwd=str(repo),
-            env={"MASO_BASE_URL": "http://127.0.0.1:11004", "MASO_MODEL": "[redacted]"},
+            env={
+                "MASO_BASE_URL": "http://127.0.0.1:11004",
+                "MASO_MODEL": "gemini-example-model-1dd583607df6",
+            },
         ),
     )
     assert rev_c.id != rev_b.id
@@ -1402,8 +1425,13 @@ async def test_dot_delegate_concurrent_done_and_push_immutable_sha_fences(
     async def fake_discover_maso(_env: dict[str, str]):
         return (
             "http://127.0.0.1:11004",
-            [StreamModelOption(id="[redacted]", label="[redacted]")],
-            "[redacted]",
+            [
+                StreamModelOption(
+                    id="gemini-example-model-1dd583607df6",
+                    label="gemini-example-model-1dd583607df6",
+                )
+            ],
+            "gemini-example-model-1dd583607df6",
         )
 
     monkeypatch.setattr(maso_discovery, "discover_maso_service", fake_discover_maso)
@@ -1444,7 +1472,7 @@ async def test_dot_delegate_concurrent_done_and_push_immutable_sha_fences(
                 done_when=["status stays done"],
                 output="out.txt",
                 agent_type="maso",
-                model="[redacted]_reasoning_high",
+                model="gemini-example-model-1dd583607df6_reasoning_high",
                 recipe="spec_implement_review",
                 ephemeral=True,
                 confirm=True,

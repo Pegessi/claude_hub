@@ -81,7 +81,7 @@ normalization improvements apply to both providers.
   remain. Frontend lint, type check, build and all **390 tests** passed; the
   existing bundle-size warning remains.
 - Live CLI: generated TraeX 0.205.1 JSON schemas; reproduced the invalid cancel
-  request and ignored Solo settings; verified selected [redacted] model,
+  request and ignored Solo settings; verified selected example-model-2dd391fe0fbe model,
   full-access/never settings, command item notifications, and interruption of
   a running sleep command with the app-server remaining reusable.
 - Isolated UI on 5279/8279: created TraeX Chat, sent a real command request,

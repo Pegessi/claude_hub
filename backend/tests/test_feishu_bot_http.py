@@ -60,9 +60,9 @@ def test_self_hosted_bot_endpoints_stay_direct_under_the_poisoned_environment(
 ) -> None:
     apply_poisoned_proxy_environment(monkeypatch)
 
-    client = create_feishu_http_client("https://[redacted]", timeout=15.0)
+    client = create_feishu_http_client("https://internal.example.invalid", timeout=15.0)
 
-    assert resolved_proxy(client, "https://[redacted]/open-apis") is None
+    assert resolved_proxy(client, "https://internal.example.invalid/open-apis") is None
 
 
 def test_websocket_discovery_shares_the_bot_client_factory() -> None:

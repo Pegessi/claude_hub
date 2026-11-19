@@ -64,10 +64,10 @@ def _parse_cursor_model_spec(
     parameterized base model catalog.
 
     ``agent --list-models`` emits flat legacy slugs (e.g.
-    ``[redacted]-high``, ``cursor-grok-4.6-high-fast``, ``gpt-5.3-codex-xhigh``,
+    ``example-model-high``, ``cursor-grok-4.6-high-fast``, ``gpt-5.3-codex-xhigh``,
     ``sonnet-4.6-1m-thinking-high``, ``auto``), whereas ``agent acp`` with
     ``parameterizedModelPicker=True`` splits selection into a base model ID
-    (``[redacted]``, ``grok-4.6``, ``gpt-5.3-codex``, ``claude-sonnet-4-6``,
+    (``example-model``, ``grok-4.6``, ``gpt-5.3-codex``, ``claude-sonnet-4-6``,
     ``auto-smart``) plus ``session/set_config_option`` parameter values
     (``reasoning_effort``, ``reasoning``, ``effort``, ``fast``, ``thinking``,
     ``context``, ``optimize_for``).

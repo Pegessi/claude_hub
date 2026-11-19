@@ -34,7 +34,7 @@ two optional fields on `RemoteProfile`:
 `services/remote_profiles.py` is now a capability resolver
 (`profile_capabilities() → RemoteCapabilities(transport, interactive_supported)`).
 Gateway signatures: the `merlin_dev*` aliases, `merlin-ssh-proxy*` hosts,
-`[redacted]`/`[redacted]`, generic `.worker_*[redacted]` users, plus
+`gateway.example.test`/`.example.`, generic `.worker_*.example.` users, plus
 `CLAUDE_HUB_PTY_GATEWAY_HOSTS` (comma-separated host substrings) and per-profile
 `transport`. The derived `stdin_shell` field is kept populated (`== is gateway`)
 for back-compat. `reject_unsupported_interactive()` raises only for

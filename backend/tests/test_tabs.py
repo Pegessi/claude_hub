@@ -47,7 +47,7 @@ async def _post_tab_then_disconnect(
             "agent_type": "codex",
             "session_kind": "chat",
             "cwd": "/tmp/proxy-ab-controlled",
-            "env": {"CODEX_MODEL": "[redacted]"},
+            "env": {"CODEX_MODEL": "example-model-dedfefd51120"},
         }
     ).encode()
     incoming: asyncio.Queue[Message] = asyncio.Queue()
@@ -157,7 +157,7 @@ async def test_create_tab_asgi_disconnect_cancels_and_waits_for_rollback(
     assert isinstance(session_kind, SessionKind)
     assert session_kind.value == "chat"
     assert captured["cwd"] == "/tmp/proxy-ab-controlled"
-    assert captured["env"] == {"CODEX_MODEL": "[redacted]"}
+    assert captured["env"] == {"CODEX_MODEL": "example-model-dedfefd51120"}
     response_start = next(message for message in sent if message["type"] == "http.response.start")
     assert response_start["status"] == 499
 

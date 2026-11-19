@@ -98,6 +98,11 @@ def clear_quota_cache(tmp_path, monkeypatch):
     """Keep the module-level reading cache and host Antigravity home isolated."""
     pq._QUOTA_CACHE.clear()
     pq._QUOTA_IN_FLIGHT.clear()
+    labels = tmp_path / "deployment-labels.json"
+    labels.write_text(
+        json.dumps({"ep-test-one": "astra-example", "ep-test-two": "model-one · model-extra"})
+    )
+    monkeypatch.setenv("CLAUDE_HUB_MASO_DEPLOYMENT_LABELS_FILE", str(labels))
     monkeypatch.setenv("ANTIGRAVITY_HOME", str(tmp_path / "antigravity-empty"))
     yield
     pq._QUOTA_CACHE.clear()
@@ -402,7 +407,7 @@ MASO_PAYLOAD = {
     "state": "within",
     "models": [
         {
-            "model": "[redacted]",
+            "model": "astra-example",
             "state": "over",
             "percentUsed": 95,
             "effectiveState": "within",
@@ -410,7 +415,7 @@ MASO_PAYLOAD = {
             "resetAt": "2026-10-15T16:00:00.000Z",
         },
         {
-            "model": "[redacted]",
+            "model": "ep-test-three",
             "state": "no_limit",
             "percentUsed": None,
             "effectiveState": "no_limit",
@@ -426,22 +431,22 @@ MASO_PAYLOAD = {
 
 MASO_MODELS = [
     {
-        "key": "[redacted]",
-        "model_name": "[redacted]",
-        "display_name": "[redacted]",
-        "selector_primary_key": "[redacted]",
+        "key": "seed-example",
+        "model_name": "ep-test-three",
+        "display_name": "seed-example",
+        "selector_primary_key": "seed-example",
     },
     {
-        "key": "[redacted]-reasoning",
-        "model_name": "[redacted]",
-        "display_name": "[redacted]-reasoning",
-        "selector_primary_key": "[redacted]",
+        "key": "seed-example-reasoning",
+        "model_name": "ep-test-three",
+        "display_name": "seed-example-reasoning",
+        "selector_primary_key": "seed-example",
     },
     {
-        "key": "[redacted]",
-        "model_name": "[redacted]",
-        "display_name": "[redacted]",
-        "selector_primary_key": "[redacted]",
+        "key": "astra-example",
+        "model_name": "astra-example",
+        "display_name": "astra-example",
+        "selector_primary_key": "astra-example",
     },
 ]
 
@@ -497,7 +502,7 @@ async def test_maso_reading_prefers_the_effective_figures(maso_service) -> None:
     assert quota.enforcing is True
     assert quota.plan is None and quota.credit_balance is None
     assert quota.as_of == "2026-10-15T03:49:58.710000Z"
-    assert [limit.scope for limit in quota.limits] == ["[redacted]", "[redacted]"]
+    assert [limit.scope for limit in quota.limits] == ["astra-example", "ep-test-three"]
     # effectiveState/effectiveUsedPercent win over the raw figures.
     assert quota.limits[0].state == "within"
     assert quota.limits[0].used_percent == 14
@@ -507,7 +512,7 @@ async def test_maso_reading_prefers_the_effective_figures(maso_service) -> None:
     assert quota.limits[1].used_percent is None
     assert quota.limits[1].remaining_percent is None
     # The endpoint id becomes the model people select; scope keeps the endpoint.
-    assert [limit.label for limit in quota.limits] == ["[redacted]", "[redacted]"]
+    assert [limit.label for limit in quota.limits] == ["astra-example", "seed-example"]
     assert calls == ["http://maso.test/api/llm-quota"]
 
 
@@ -518,20 +523,20 @@ async def test_maso_quota_labels_an_unlisted_endpoint_as_unlisted(maso_service) 
     # Two selectors without a shared primary marker name one endpoint: the first
     # wins, and the unlisted endpoint is named for what it is.
     state["catalog"] = [
-        {"key": "astra-first", "model_name": "[redacted]"},
-        {"key": "astra-second", "model_name": "[redacted]"},
+        {"key": "astra-first", "model_name": "astra-example"},
+        {"key": "astra-second", "model_name": "astra-example"},
     ]
 
     quota = await pq.read_maso_quota()
 
     assert quota.available is True
-    assert [limit.scope for limit in quota.limits] == ["[redacted]", "[redacted]"]
+    assert [limit.scope for limit in quota.limits] == ["astra-example", "ep-test-three"]
     assert [limit.label for limit in quota.limits] == [
         "astra-first",
         # The endpoint stays in scope; the label says what it is.
-        "Unlisted endpoint · vfr5s",
+        "Unlisted endpoint · three",
     ]
-    assert quota.limits[1].scope == "[redacted]"
+    assert quota.limits[1].scope == "ep-test-three"
     # The raw catalog was consulted once, and still had no row for it.
     assert calls == ["http://maso.test/api/llm-quota", "http://maso.test/api/models"]
 
@@ -584,8 +589,8 @@ async def test_maso_quota_names_unlisted_endpoints_with_the_catalog_failing(
     state["payload"] = {
         "state": "within",
         "models": [
-            {"model": "[redacted]", "state": "within", "effectiveUsedPercent": 14},
-            {"model": "[redacted]", "state": "no_limit"},
+            {"model": "astra-example", "state": "within", "effectiveUsedPercent": 14},
+            {"model": "ep-test-three", "state": "no_limit"},
             {"model": "ep-3-zzz", "state": "no_data"},
         ],
         "grants": [],
@@ -599,8 +604,8 @@ async def test_maso_quota_names_unlisted_endpoints_with_the_catalog_failing(
     # endpoint only the failing catalog could have named stays unlisted.
     assert quota.available is True
     assert [limit.label for limit in quota.limits] == [
-        "[redacted]",
-        "[redacted]",
+        "astra-example",
+        "seed-example",
         "Unlisted endpoint · zzz",
     ]
 
@@ -611,8 +616,8 @@ async def test_maso_quota_names_a_deployment_the_served_catalog_hides(
 ) -> None:
     """A deployment Router pinned after this catalog was built still gets a name.
 
-    The catalog MASO serves names `[redacted]` by its logical model, but Router
-    pins that model to `[redacted]` and its quota ledger names the
+    The catalog MASO serves names `astra-example` by its logical model, but Router
+    pins that model to `ep-test-one` and its quota ledger names the
     deployment, so the catalog has no row for the quota row's id.
     """
     state, calls = maso_service
@@ -620,7 +625,7 @@ async def test_maso_quota_names_a_deployment_the_served_catalog_hides(
         "state": "within",
         "models": [
             {
-                "model": "[redacted]",
+                "model": "ep-test-one",
                 "state": "within",
                 "effectiveState": "within",
                 "effectiveUsedPercent": 34,
@@ -636,7 +641,7 @@ async def test_maso_quota_names_a_deployment_the_served_catalog_hides(
 
     assert [(limit.label, limit.scope) for limit in quota.limits] == [
         # The label names the model; scope keeps what MASO enforces.
-        ("[redacted]", "[redacted]"),
+        ("astra-example", "ep-test-one"),
     ]
     assert quota.limits[0].used_percent == 34
     assert quota.limits[0].remaining_percent == 66
@@ -653,9 +658,7 @@ async def test_maso_quota_names_every_model_a_shared_deployment_serves(
     state, _calls = maso_service
     state["payload"] = {
         "state": "within",
-        "models": [
-            {"model": "[redacted]", "state": "within", "effectiveUsedPercent": 3}
-        ],
+        "models": [{"model": "ep-test-two", "state": "within", "effectiveUsedPercent": 3}],
         "grants": [],
         "enforcing": True,
         "fetchedAt": 1792036198.71,
@@ -663,8 +666,8 @@ async def test_maso_quota_names_every_model_a_shared_deployment_serves(
 
     quota = await pq.read_maso_quota()
 
-    assert [limit.label for limit in quota.limits] == ["[redacted] · [redacted]"]
-    assert [limit.scope for limit in quota.limits] == ["[redacted]"]
+    assert [limit.label for limit in quota.limits] == ["model-one · model-extra"]
+    assert [limit.scope for limit in quota.limits] == ["ep-test-two"]
 
 
 @pytest.mark.asyncio
@@ -675,17 +678,15 @@ async def test_maso_catalog_name_wins_over_the_pinned_deployment_label(
     state, _calls = maso_service
     state["catalog"] = [
         {
-            "key": "[redacted]",
-            "model_name": "[redacted]",
-            "display_name": "[redacted]",
-            "selector_primary_key": "[redacted]",
+            "key": "astra-example",
+            "model_name": "ep-test-one",
+            "display_name": "astra-example",
+            "selector_primary_key": "astra-example",
         }
     ]
     state["payload"] = {
         "state": "within",
-        "models": [
-            {"model": "[redacted]", "state": "within", "effectiveUsedPercent": 34}
-        ],
+        "models": [{"model": "ep-test-one", "state": "within", "effectiveUsedPercent": 34}],
         "grants": [],
         "enforcing": True,
         "fetchedAt": 1792036198.71,
@@ -695,15 +696,15 @@ async def test_maso_catalog_name_wins_over_the_pinned_deployment_label(
 
     # Same name here because the catalog agrees; a catalog that renamed it would
     # win outright, which is what lets the pin retire without a code change.
-    assert [limit.label for limit in quota.limits] == ["[redacted]"]
+    assert [limit.label for limit in quota.limits] == ["astra-example"]
 
 
 def test_maso_pinned_deployment_labels_are_not_shared_state() -> None:
     """Callers get a copy, so one reading cannot rename another's deployments."""
     labels = maso_http.pinned_deployment_labels()
-    labels["[redacted]"] = "renamed"
+    labels["ep-test-one"] = "renamed"
 
-    assert maso_http.pinned_deployment_labels()["[redacted]"] == "[redacted]"
+    assert maso_http.pinned_deployment_labels()["ep-test-one"] == "astra-example"
 
 
 def test_maso_unlisted_labels_stay_distinct_when_codes_collide() -> None:
@@ -725,18 +726,18 @@ def test_maso_catalog_options_carry_the_endpoint_a_quota_row_names() -> None:
     options = maso_http._model_options(
         [
             {
-                "key": "[redacted]-reasoning-high",
+                "key": "seed-example-reasoning-high",
                 "model_name": "ep-1",
-                "selector_primary_key": "[redacted]",
+                "selector_primary_key": "seed-example",
             },
-            {"key": "[redacted]", "model_name": "ep-1", "selector_primary_key": "[redacted]"},
+            {"key": "seed-example", "model_name": "ep-1", "selector_primary_key": "seed-example"},
             {"key": "gone", "model_name": "ep-2", "deprecated": True},
             {"key": "solo", "model_name": "ep-3"},
         ]
     )
 
     assert [(option.label, option.description) for option in options] == [
-        ("[redacted]", "ep-1"),
+        ("seed-example", "ep-1"),
         ("solo", "ep-3"),
     ]
 
@@ -1319,3 +1320,13 @@ async def test_antigravity_query_reaps_its_process_on_timeout_or_cancel(
     with pytest.raises(asyncio.CancelledError if cancel else TimeoutError):
         await asyncio.wait_for(task, 2)
     assert processes[0].returncode is not None
+
+
+def test_maso_deployment_labels_missing_and_invalid_file(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "labels.json"
+    monkeypatch.setenv("CLAUDE_HUB_MASO_DEPLOYMENT_LABELS_FILE", str(path))
+    assert maso_http.pinned_deployment_labels() == {}
+    path.write_text("not json")
+    assert maso_http.pinned_deployment_labels() == {}
+    path.write_text(json.dumps({"endpoint": "label", "bad": 12}))
+    assert maso_http.pinned_deployment_labels() == {"endpoint": "label"}

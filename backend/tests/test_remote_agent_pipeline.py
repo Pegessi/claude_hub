@@ -75,6 +75,7 @@ async def test_tabs_api_rejects_chat_remote(client: AsyncClient) -> None:
 
 
 def test_ssh_config_strips_inline_host_comments(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_HUB_PTY_GATEWAY_ALIASES", "merlin_dev")
     cfg = tmp_path / "config"
     cfg.write_text(
         "Host merlin_persistent                             # 自定义，必须为 ASCII 字符\n"

@@ -253,6 +253,7 @@ const {
   envPresets,
   getPresetText,
   defaultPresetTextForAgent,
+  ensureLoaded,
 } = useLaunchEnvPresets()
 const execution = ref<DotExecution | null>(null)
 const draftAgentType = ref<DotProvider | ''>('')
@@ -344,7 +345,8 @@ async function loadExecution() {
   loading.value = true
   loadError.value = ''
   try {
-    hydrateDraft(await loadDotExecution())
+    const [next] = await Promise.all([loadDotExecution(), ensureLoaded()])
+    hydrateDraft(next)
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : 'Could not load execution settings.'
   } finally {

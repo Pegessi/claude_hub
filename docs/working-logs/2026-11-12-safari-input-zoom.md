@@ -103,7 +103,7 @@ Vite port, with a **new** evidence directory:
 ```sh
 backend/.venv/bin/python frontend/tests/browser_chat_composer.py \
   http://127.0.0.1:5299 .artifacts/safari-zoom/NEW-RUN \
-  [redacted]Library/Caches/ms-playwright/webkit-2248/pw_run.sh --iphone-webkit
+  /Users/exampleLibrary/Caches/ms-playwright/webkit-2248/pw_run.sh --iphone-webkit
 ```
 
 - WebKit 26.0 / Playwright 1.58.0: `webkit-final-dismiss/` PASS, exit 0,

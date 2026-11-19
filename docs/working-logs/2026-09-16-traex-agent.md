@@ -28,7 +28,7 @@ The installer migrated the legacy Coco config `~/.trae/traecli.yaml`
 (`model.name: GLM-5.1`) into `~/.trae/traecli.toml` (`model = "GLM-5.1"`), but
 the current `trae` provider catalog has no GLM model, so every TUI/thread start
 failed with `-32603 model 'GLM-5.1' is unavailable because its metadata could
-not be resolved`. Fixed by setting `model = "[redacted]"` (the
+not be resolved`. Fixed by setting `model = "example-model-2dd391fe0fbe"` (the
 `priority=0` default in `~/.trae/cli/models_cache.json`, also the model
 returned by `thread/start`).
 
@@ -38,7 +38,7 @@ Hand-probed `traex app-server` over NDJSON, then drove the real Hub transport:
 
 - `initialize`/`initialized` — same params (`clientInfo`,
   `capabilities.experimentalApi`); result adds `codexHome: ~/.trae`.
-- `thread/start` → `result.thread.id`, `result.model: "[redacted]"`,
+- `thread/start` → `result.thread.id`, `result.model: "example-model-2dd391fe0fbe"`,
   `modelProvider: "trae"`; emits `thread/started`.
 - `collaborationMode/list` → Plan + Default.
 - One real turn emitted, in order: `turn/started`, `item/reasoning/textDelta`,

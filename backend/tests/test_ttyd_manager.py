@@ -621,7 +621,7 @@ async def test_create_tab_tmux_ensure_timeout_rolls_back_owned_resources(
             cwd=str(tmp_path),
             agent_type=AgentType.CODEX,
             session_kind=SessionKind.CHAT,
-            env={"CODEX_MODEL": "[redacted]"},
+            env={"CODEX_MODEL": "example-model-dedfefd51120"},
         )
 
     assert ensure_cancelled.is_set()
@@ -1621,6 +1621,27 @@ def test_claude_env_model_is_passed_as_startup_model_flag() -> None:
     assert "export ANTHROPIC_MODEL=claude-opus-4-8" in wrapper
 
 
+@pytest.fixture(autouse=True)
+def _configured_coding_plan(monkeypatch: MonkeyPatch) -> None:
+    from claude_hub.services.ttyd_manager import _VOLCENGINE_CODING_PLAN_MODEL_ALIASES
+
+    for key in (
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+    ):
+        monkeypatch.setitem(DEFAULT_CLAUDE_LAUNCH_ENV, key, "example-code-model")
+    for key in (
+        "ark/seed-code-0602",
+        "ark/seed-code-0602[1m]",
+        "ark/seed-code-6062",
+        "ark/seed-code-6062[1m]",
+    ):
+        monkeypatch.setitem(_VOLCENGINE_CODING_PLAN_MODEL_ALIASES, key, "example-code-model")
+
+
 def test_claude_launch_defaults_to_volcengine_model_env() -> None:
     process = TTYDProcess(
         tab_id="tab-claude-default-model-env",
@@ -1639,7 +1660,7 @@ def test_claude_launch_defaults_to_volcengine_model_env() -> None:
         assert process.env[key] == value
         assert f"export {key}={shlex.quote(value)}" in wrapper
         assert settings["env"][key] == value
-    assert "--model [redacted]" in cmd[-1]
+    assert "--model example-code-model" in cmd[-1]
     assert settings_mode == 0o600
     assert "deepseek" not in json.dumps(settings)
 
@@ -1776,12 +1797,12 @@ def test_claude_volcengine_coding_plan_model_alias_is_normalized() -> None:
 
     cmd = process._build_ttyd_command(session_exists=False)
 
-    assert process.env["ANTHROPIC_MODEL"] == "[redacted]"
-    assert process.env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "[redacted]"
-    assert process.env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "[redacted]"
-    assert process.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "[redacted]"
-    assert process.env["CLAUDE_CODE_SUBAGENT_MODEL"] == "[redacted]"
-    assert "--model [redacted]" in cmd[-1]
+    assert process.env["ANTHROPIC_MODEL"] == "example-code-model"
+    assert process.env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "example-code-model"
+    assert process.env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "example-code-model"
+    assert process.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "example-code-model"
+    assert process.env["CLAUDE_CODE_SUBAGENT_MODEL"] == "example-code-model"
+    assert "--model example-code-model" in cmd[-1]
 
 
 def test_claude_volcengine_coding_plan_template_typo_alias_is_normalized() -> None:
@@ -1802,13 +1823,13 @@ def test_claude_volcengine_coding_plan_template_typo_alias_is_normalized() -> No
 
     cmd = process._build_ttyd_command(session_exists=False)
 
-    assert process.env["ANTHROPIC_MODEL"] == "[redacted]"
-    assert process.env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "[redacted]"
-    assert process.env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "[redacted]"
-    assert process.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "[redacted]"
-    assert process.env["CLAUDE_CODE_SUBAGENT_MODEL"] == "[redacted]"
+    assert process.env["ANTHROPIC_MODEL"] == "example-code-model"
+    assert process.env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "example-code-model"
+    assert process.env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "example-code-model"
+    assert process.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "example-code-model"
+    assert process.env["CLAUDE_CODE_SUBAGENT_MODEL"] == "example-code-model"
     assert "ark/seed-code-6062" not in cmd[-1]
-    assert "--model [redacted]" in cmd[-1]
+    assert "--model example-code-model" in cmd[-1]
 
 
 def test_claude_super_relay_launch_env_is_preserved_with_proxy() -> None:
@@ -1818,7 +1839,7 @@ def test_claude_super_relay_launch_env_is_preserved_with_proxy() -> None:
         name="Claude Super Relay",
         agent_type=AgentType.CLAUDE,
         env={
-            "ANTHROPIC_BASE_URL": "https://[redacted]",
+            "ANTHROPIC_BASE_URL": "https://internal.example.invalid",
             "ANTHROPIC_AUTH_TOKEN": "token",
             "ANTHROPIC_MODEL": "ark/seed-code-0602",
             "ANTHROPIC_DEFAULT_OPUS_MODEL": "ark/seed-code-0602",
@@ -1836,18 +1857,18 @@ def test_claude_super_relay_launch_env_is_preserved_with_proxy() -> None:
     wrapper = _wrapper_script(cmd[-1])
     settings = json.load(open(_claude_settings_path(cmd[-1]), encoding="utf-8"))
 
-    assert process.env["ANTHROPIC_BASE_URL"] == "https://[redacted]"
+    assert process.env["ANTHROPIC_BASE_URL"] == "https://internal.example.invalid"
     assert process.env["ANTHROPIC_MODEL"] == "ark/seed-code-0602"
     assert process.env["HTTP_PROXY"] == "http://127.0.0.1:23456"
     assert process.env["HTTPS_PROXY"] == "http://127.0.0.1:23456"
     assert "ANTHROPIC_CUSTOM_MODEL_OPTION" not in process.env
     assert "NODE_TLS_REJECT_UNAUTHORIZED" not in process.env
     assert "https://127.0.0.1:" not in json.dumps(settings)
-    assert "export ANTHROPIC_BASE_URL=https://[redacted]" in wrapper
+    assert "export ANTHROPIC_BASE_URL=https://internal.example.invalid" in wrapper
     assert "export ANTHROPIC_MODEL=ark/seed-code-0602" in wrapper
     assert "export HTTP_PROXY=http://127.0.0.1:23456" in wrapper
     assert "export HTTPS_PROXY=http://127.0.0.1:23456" in wrapper
-    assert settings["env"]["ANTHROPIC_BASE_URL"] == "https://[redacted]"
+    assert settings["env"]["ANTHROPIC_BASE_URL"] == "https://internal.example.invalid"
     assert settings["env"]["ANTHROPIC_MODEL"] == "ark/seed-code-0602"
     assert "--model ark/seed-code-0602" in cmd[-1]
 
@@ -4191,13 +4212,13 @@ def test_parse_session_meta_new_payload_format() -> None:
         "payload": {
             "id": "019f8e90-79d1-7a92-a165-8075ab17f552",
             "session_id": "parent-thread-id-on-fork",
-            "cwd": "[redacted]/claude_hub",
+            "cwd": "/Users/example/claude_hub",
             "timestamp": "2026-07-23T10:00:00.000Z",
         },
     }
     sid, epoch, cwd, thread_source = ttyd_manager_module._parse_session_meta(json.dumps(meta))
     assert sid == "019f8e90-79d1-7a92-a165-8075ab17f552"
-    assert cwd == "[redacted]/claude_hub"
+    assert cwd == "/Users/example/claude_hub"
     assert epoch is not None
     assert abs(epoch - datetime(2026, 7, 23, 10, 0, 0, tzinfo=timezone.utc).timestamp()) < 1.0
     assert thread_source == ""

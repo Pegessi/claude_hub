@@ -41,6 +41,7 @@ function compileSfcUrl(path, id) {
 }
 const configUrl = moduleUrl(source('utils/feishuBotConfig.ts'))
 imports['@/utils/feishuBotConfig'] = configUrl
+imports['./feishuModelOptions'] = moduleUrl(rewrite(source('features/feishu-bot/feishuModelOptions.ts')))
 export const config = await import(configUrl)
 const identityUrl = moduleUrl(source('utils/feishuIdentity.ts'))
 imports['@/utils/feishuIdentity'] = identityUrl

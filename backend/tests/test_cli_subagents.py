@@ -124,7 +124,7 @@ def test_antigravity_uses_full_model_id_and_explicit_solo(
         "--provider",
         "antigravity",
         "--model",
-        "[redacted]-high",
+        "gemini-example-model-1dd583607df6-high",
         "--prompt",
         "Reply briefly",
     ]
@@ -135,7 +135,7 @@ def test_antigravity_uses_full_model_id_and_explicit_solo(
     assert result.stdout == "Ready.\n"
     body = hub.bodies()[0]
     assert body["agent_type"] == "antigravity"
-    assert body["model"] == "[redacted]-high"
+    assert body["model"] == "gemini-example-model-1dd583607df6-high"
     assert body["solo_mode"] is expected_solo
     assert "effort" not in body
 

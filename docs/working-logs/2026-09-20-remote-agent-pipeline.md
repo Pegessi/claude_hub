@@ -26,7 +26,7 @@ touched.
 | Path | Result |
 | --- | --- |
 | `GET /api/remote/profiles` | 20 aliases, including fake `ASCII` from an SSH `Host` comment |
-| Remote fs list `mac_mini` | 200, `[redacted]` |
+| Remote fs list `mac_mini` | 200, `/Users/example` |
 | Remote fs list `merlin_dev` | 502 `Remote returned invalid directory data` (stdout is not JSON) |
 | Chat + Remote create | **201**, `target=remote` persisted, pane is local zsh (no SSH) |
 | Terminal + Remote create | 201, pane `Apple@Mac-mini ~ %`, process is `ssh` |
@@ -67,7 +67,7 @@ touched.
    RequestTTY=no. `parse_remote_listing_stdout` takes the last JSON object
    that looks like a directory payload so MOTD can precede it. Merlin
    workspace / ssh-candy aliases (`merlin_dev`, `merlin_dev_2`,
-   `merlin_dev_evo`, merlin-ssh-proxy, `*[redacted]*` on workspace hosts)
+   `merlin_dev_evo`, merlin-ssh-proxy, `*.example.*` on workspace hosts)
    swallow `ssh host 'cmd'` (rc 0, empty stdout) and instead run a line
    from stdin. `list_remote_directory` therefore sends a **single-line**
    base64-wrapped python listing command on stdin for those profiles only —
@@ -101,7 +101,7 @@ Isolated Hub `127.0.0.1:18273` / Vite `5276`, runtime
 
 | Path | Result |
 | --- | --- |
-| Remote fs list `mac_mini` | 200, `[redacted]` |
+| Remote fs list `mac_mini` | 200, `/Users/example` |
 | Remote fs list `merlin_dev` | 200, `/home/tiger` (stdin-shell + one-line base64 listing) |
 | Chat + Remote create | **422** `CHAT_REMOTE_UNSUPPORTED` |
 | Terminal + Remote `mac_mini` | 201, local pane `ssh -tt mac_mini …` |

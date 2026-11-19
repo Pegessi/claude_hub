@@ -28,7 +28,7 @@ const {
   LARK_IMG_V3_MATCHER,
 } = mod
 
-const KEY = '[redacted]'
+const KEY = 'img_v3_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 
 // ── matcher registry shape / extension point ──────────────────────────────
 

@@ -2,8 +2,8 @@
 
 ## Symptom
 
-The provider-quota panel listed `[redacted]`, `[redacted]`, `[redacted]` and
-`[redacted]` by name, but two rows read
+The provider-quota panel listed `[redacted]`, `example-model-051bc3aafde0`, `[redacted]` and
+`example-model-e5d82e99e8a1` by name, but two rows read
 `Unlisted endpoint · ktzs4` (66% left) and `Unlisted endpoint · lmdcb` (97%
 left). Reported by the user: those two rows are models they use, not gateway
 keys.
@@ -31,19 +31,19 @@ them".
 They are not stubs. Router's model config pins models to them:
 
 ```
-$ curl -sX POST https://[redacted]/api/v1/zti-authorize \
-    -H "Authorization: Bearer $(cat [redacted]/identity.token)" \
+$ curl -sX POST https://internal.example.invalid/api/v1/zti-authorize \
+    -H "Authorization: Bearer $(cat [redacted])" \
   | jq -r '.providers[] | select(.model|startswith("[redacted]")) | "\(.model)\t\(.name)\t\(.client_type)\t\(.provider)"'
 [redacted]  [redacted]                AzureResponsesAPI  pioneer-inhouse-ark
 [redacted]  [redacted]_reasoning_high AzureResponsesAPI  pioneer-inhouse-ark
-[redacted]  [redacted]                  AzureResponsesAPI  pioneer-inhouse-ark
-[redacted]  [redacted]_reasoning_max    AzureResponsesAPI  pioneer-inhouse-ark
-[redacted]  [redacted]                AzureResponsesAPI  pioneer-inhouse-ark
+[redacted]  example-model-75c87952ca70                  AzureResponsesAPI  pioneer-inhouse-ark
+[redacted]  example-model-75c87952ca70_reasoning_max    AzureResponsesAPI  pioneer-inhouse-ark
+[redacted]  example-model-dedfefd51120                AzureResponsesAPI  pioneer-inhouse-ark
 [redacted]  [redacted]             AzureResponsesAPI  pioneer-inhouse-ark
 ```
 
 So `ktzs4` is the deployment behind `[redacted]`, and `lmdcb` is one shared
-in-house deployment behind `[redacted]`, `[redacted]` and `[redacted]`; the
+in-house deployment behind `example-model-75c87952ca70`, `example-model-dedfefd51120` and `[redacted]`; the
 ledger keeps one ceiling per deployment, not one per model. MASO's own logs
 agree independently — every 429 during a `[redacted]` turn names the
 deployment:
@@ -83,16 +83,16 @@ pinned after this catalog was built:
 ```python
 {
     "[redacted]": "[redacted]",
-    "[redacted]": "[redacted] · [redacted]",
+    "[redacted]": "example-model-75c87952ca70 · [redacted]",
 }
 ```
 
 `read_maso_quota` seeds its endpoint-label map with it and then lets every
 catalog row override the seed, so:
 
-- the two rows read `[redacted]` and `[redacted] · [redacted]` — every
+- the two rows read `[redacted]` and `example-model-75c87952ca70 · [redacted]` — every
   selectable model the one ceiling covers, joined the way MASO's own quota rows
-  join grouped variants (`[redacted]` is left out because this catalog has no
+  join grouped variants (`example-model-dedfefd51120` is left out because this catalog has no
   such key to select);
 - `scope` still keeps the deployment, so the row tooltip reads
   `[redacted] ([redacted])`;
@@ -133,5 +133,5 @@ second model identity.
   every name and appends the deployment in its tooltip.
 - Live read against `127.0.0.1:11004` with the fixed code: the two rows report
   `[redacted] ([redacted], 35% used)` and
-  `[redacted] · [redacted] ([redacted], 4% used)`.
+  `example-model-75c87952ca70 · [redacted] ([redacted], 4% used)`.
 - `./scripts/verify.sh all` for the rest.

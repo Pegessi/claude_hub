@@ -10,7 +10,7 @@
 //
 // Additionally:
 // 1. ModelManager.prototype.mapModelToParameterizedSelection in 1623.index.js
-//    maps legacy variant slugs (e.g. [redacted]-high) to the base model's
+//    maps legacy variant slugs (e.g. example-model-high) to the base model's
 //    saved/default parameters instead of consulting
 //    mapInitialModelVariantToParameterizedSelection for the variant's exact
 //    parameterValues.

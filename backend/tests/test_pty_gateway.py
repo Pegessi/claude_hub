@@ -51,17 +51,19 @@ tmod = importlib.import_module("claude_hub.services.ttyd_manager")
 # --------------------------------------------------------------------------- #
 
 
-def test_transport_detects_gateway_signatures() -> None:
+def test_transport_detects_gateway_signatures(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_HUB_PTY_GATEWAY_HOSTS", "gateway.example.test")
+    monkeypatch.setenv("CLAUDE_HUB_PTY_GATEWAY_ALIASES", "merlin_dev")
     cases = [
         RemoteProfile(id="merlin_dev", name="m", ssh_host="merlin_dev"),
-        RemoteProfile(id="p", name="p", ssh_host="[redacted]", user="u"),
+        RemoteProfile(id="p", name="p", ssh_host="gateway.example.test", user="u"),
         RemoteProfile(
             id="c",
             name="c",
-            ssh_host="ssh-candy.[redacted]",
-            user="a.worker_0[redacted]x",
+            ssh_host="gateway.example.test",
+            user="test-worker-0",
         ),
-        RemoteProfile(id="w", name="w", ssh_host="whatever", user="a.worker_9[redacted]x"),
+        RemoteProfile(id="w", name="w", ssh_host="gateway.example.test", user="test-worker-9"),
     ]
     for profile in cases:
         caps = profile_capabilities(profile)
@@ -144,14 +146,12 @@ def test_guarded_line_is_single_line_and_roundtrips() -> None:
 
 
 def test_build_ssh_argv_is_tty_and_has_no_command() -> None:
-    profile = RemoteProfile(
-        id="m", name="m", ssh_host="[redacted]", user="u", port=22222
-    )
+    profile = RemoteProfile(id="m", name="m", ssh_host="gateway.example.test", user="u", port=22222)
     argv = pty_exec.build_ssh_argv(profile)
     assert argv[0] == "ssh"
     assert "-tt" in argv
     assert argv[-2] == "--"  # option parsing ends before the destination
-    assert argv[-1] == "u@[redacted]"  # host is last, no argv command
+    assert argv[-1] == "u@gateway.example.test"  # host is last, no argv command
     assert "-p" in argv and "22222" in argv
     # All ssh options and the port precede `--`; only the destination follows it.
     dashdash = argv.index("--")
@@ -168,7 +168,7 @@ def test_build_ssh_argv_is_tty_and_has_no_command() -> None:
         "-p",
         "22222",
     ]
-    assert argv[dashdash + 1 :] == ["u@[redacted]"]
+    assert argv[dashdash + 1 :] == ["u@gateway.example.test"]
 
 
 # --------------------------------------------------------------------------- #

@@ -1,6 +1,6 @@
 """Pure-Python protobuf wire encoder/decoder for the Feishu web gateway & msg-frontier protocol.
 
-Ported from ``[redacted]`` ``extensions/lark-desk/internal/web/codec.go``
+Web-session protocol client
 (and schema additions in ``feed.go``, ``content.go``, ``media.go``, ``reactions.go``,
 ``threads.go``, ``calendar.go``). Speaks the exact ``proto2`` wire format used by the
 Feishu web client gateway (``/im/gateway/``) and ``msg-frontier`` WebSocket without

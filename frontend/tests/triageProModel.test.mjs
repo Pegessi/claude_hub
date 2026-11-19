@@ -41,7 +41,7 @@ function makeTask(overrides = {}) {
     id: '47e984bf-da2e-4488-bf27-188273d4927f',
     workspace_id: 'ws-evo',
     title: 'MR !3953 lifecycle session_id lineage fix',
-    prompt: 'Verify https://[redacted]/[redacted]/merge_requests/3953 and report.',
+    prompt: 'Verify https://git.example.com/team/project/merge_requests/3953 and report.',
     attachments: [],
     agent_type: 'maso',
     session_kind: 'chat',
@@ -146,7 +146,7 @@ test('buildTriageTaskViewModel constructs consensus, artifact links, and multi-r
       {
         id: 'rev-1',
         tab_id: 'tab-rev',
-        title: '[redacted]',
+        title: 'GPT-example-model-d050a243e4ed',
         agent_type: 'codex',
         ephemeral: true,
       },
@@ -160,7 +160,7 @@ test('buildTriageTaskViewModel constructs consensus, artifact links, and multi-r
       task_id: '47e984bf-da2e-4488-bf27-188273d4927f',
       session_id: 'worker-1',
       state: 'ready_for_review',
-      message: 'Implemented hooks and published [Feishu report]([redacted])',
+      message: 'Implemented hooks and published [Feishu report](https://docs.example.com/docx/TzbmdyYlioujByxeHPUcSSUCnAf)',
       changed_files: ['llmhub/session_trace.cc', 'llmserver/events.py'],
       validation: 'pytest 717 passed',
       review_decision: 'none',
@@ -205,7 +205,7 @@ test('buildTriageTaskViewModel constructs consensus, artifact links, and multi-r
   assert.equal(vm.statusTone, 'review')
   assert.equal(vm.statusLabel, 'R2 Review PASS')
   assert.equal(vm.consensus.implementer, 'Argon High')
-  assert.equal(vm.consensus.reviewer, '[redacted]')
+  assert.equal(vm.consensus.reviewer, 'GPT-example-model-d050a243e4ed')
   assert.equal(vm.consensus.verdictLabel, 'PASS · VERIFIED')
   assert.equal(vm.links.length, 2)
   assert.deepEqual(vm.links.map(l => l.kind).sort(), ['doc', 'mr'])
@@ -219,7 +219,7 @@ test('buildTriageTaskViewModel constructs consensus, artifact links, and multi-r
   assert.equal(groups[2].key, 'review')
   assert.equal(groups[2].items.length, 1)
   assert.equal(vm.hasIndependentReview, true)
-  assert.equal(vm.reviewSummaryChip, 'Argon High → [redacted] · R2 PASS')
+  assert.equal(vm.reviewSummaryChip, 'Argon High → GPT-example-model-d050a243e4ed · R2 PASS')
   assert.equal(vm.milestones.at(-1).isCurrentEcho, true)
 })
 

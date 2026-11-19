@@ -67,7 +67,7 @@ def test_parse_strict_review_output_enforces_p0_p1_block() -> None:
     parsed_pass = parse_strict_review_output(
         raw_pass,
         reviewer_provider="maso",
-        reviewer_model="[redacted]_reasoning_high",
+        reviewer_model="gemini-example-model-1dd583607df6_reasoning_high",
         reviewer_subagent_id="sa-1",
     )
     assert parsed_pass.verdict == "PASS"
@@ -128,31 +128,49 @@ def test_parse_strict_review_output_30_p2_plus_1_p1_forces_block_and_retains_p1(
     assert parsed.findings[0].file == "critical_bug.py:99"
 
 
+@pytest.fixture(autouse=True)
+def _configured_review_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    from claude_hub.services import cross_reviewer
+
+    monkeypatch.setattr(
+        cross_reviewer,
+        "DEFAULT_ARGON_REVIEW_MODEL",
+        "gemini-example-model-1dd583607df6_reasoning_high",
+    )
+    monkeypatch.setattr(
+        cross_reviewer,
+        "DEFAULT_ASTRA_REVIEW_MODEL",
+        "gpt-example-model-d050a243e4ed_reasoning_high",
+    )
+
+
 def test_select_cross_reviewer_candidates_picks_heterogeneous_models() -> None:
     codex_targets = select_cross_reviewer_candidates(
         AgentType.CODEX,
         {},
         maso_base_url="http://127.0.0.1:11004",
-        maso_models=["[redacted]", "[redacted]"],
+        maso_models=["gemini-example-model-1dd583607df6", "gpt-example-model-d050a243e4ed"],
     )
     assert codex_targets[0].provider == "maso"
-    assert codex_targets[0].model == "[redacted]_reasoning_high"
+    assert codex_targets[0].model == "gemini-example-model-1dd583607df6_reasoning_high"
     assert all(t.provider != "codex" for t in codex_targets[:-1])
     assert codex_targets[-1].provider == "codex"
     assert codex_targets[-1].effort == "high"
 
     argon_targets = select_cross_reviewer_candidates(
         AgentType.MASO,
-        {"MASO_MODEL": "[redacted]_reasoning_high"},
+        {"MASO_MODEL": "gemini-example-model-1dd583607df6_reasoning_high"},
         maso_base_url="http://127.0.0.1:11004",
-        maso_models=["[redacted]", "[redacted]"],
+        maso_models=["gemini-example-model-1dd583607df6", "gpt-example-model-d050a243e4ed"],
     )
     assert argon_targets[0].provider == "maso"
-    assert argon_targets[0].model == "[redacted]_reasoning_high"
+    assert argon_targets[0].model == "gpt-example-model-d050a243e4ed_reasoning_high"
     assert any(t.provider == "codex" for t in argon_targets)
-    assert all(t.model != "[redacted]_reasoning_high" for t in argon_targets[:-1])
+    assert all(
+        t.model != "gemini-example-model-1dd583607df6_reasoning_high" for t in argon_targets[:-1]
+    )
     assert argon_targets[-1].provider == "maso"
-    assert argon_targets[-1].model == "[redacted]_reasoning_high"
+    assert argon_targets[-1].model == "gemini-example-model-1dd583607df6_reasoning_high"
 
 
 @pytest.mark.asyncio
@@ -182,7 +200,7 @@ async def test_strict_review_blocks_p1_continues_and_completes_on_consensus(tmp_
                     )
                 ],
                 reviewer_provider="maso",
-                reviewer_model="[redacted]_reasoning_high",
+                reviewer_model="gemini-example-model-1dd583607df6_reasoning_high",
                 reviewer_subagent_id="sa-r1",
             )
         return StrictReviewOutcome(
@@ -190,7 +208,7 @@ async def test_strict_review_blocks_p1_continues_and_completes_on_consensus(tmp_
             summary="Lock fix verified and tests pass.",
             findings=[],
             reviewer_provider="maso",
-            reviewer_model="[redacted]_reasoning_high",
+            reviewer_model="gemini-example-model-1dd583607df6_reasoning_high",
             reviewer_subagent_id="sa-r2",
         )
 
@@ -329,7 +347,7 @@ async def test_strict_review_converging_blockers_grants_grace_round_and_complete
                 summary="All remaining blockers resolved in grace round 4.",
                 findings=[],
                 reviewer_provider="maso",
-                reviewer_model="[redacted]_reasoning_high",
+                reviewer_model="gpt-example-model-d050a243e4ed_reasoning_high",
             )
         findings = [
             GoalStrictReviewFinding(
@@ -345,7 +363,7 @@ async def test_strict_review_converging_blockers_grants_grace_round_and_complete
             summary=f"{count} blocking defect(s) remain in round {round_number}",
             findings=findings,
             reviewer_provider="maso",
-            reviewer_model="[redacted]_reasoning_high",
+            reviewer_model="gpt-example-model-d050a243e4ed_reasoning_high",
         )
 
     ctrl = GoalRunController(
@@ -562,7 +580,7 @@ def test_build_strict_review_prompt_includes_prior_blocker_ledger_and_rebuttal_r
                 round_number=1,
                 worker_turn_id="turn-1",
                 reviewer_provider="maso",
-                reviewer_model="[redacted]_reasoning_high",
+                reviewer_model="gemini-example-model-1dd583607df6_reasoning_high",
                 verdict="BLOCK",
                 summary="Race condition when task completes during cancel.",
                 findings=[
@@ -1152,7 +1170,7 @@ async def test_run_subagent_strict_review_uses_active_maso_session_model_over_ch
 
     fake_transport = SimpleNamespace(
         session=SimpleNamespace(tab_id="tab-maso-live"),
-        current_model=lambda: "[redacted]_reasoning_high",
+        current_model=lambda: "gemini-example-model-1dd583607df6_reasoning_high",
     )
     fake_tailer = SimpleNamespace(native_transport=fake_transport)
     fake_manager = SimpleNamespace(
@@ -1165,10 +1183,10 @@ async def test_run_subagent_strict_review_uses_active_maso_session_model_over_ch
         return (
             "http://127.0.0.1:11004",
             [
-                StreamModelOption(id="[redacted]", label="Argon"),
-                StreamModelOption(id="[redacted]", label="Astra"),
+                StreamModelOption(id="gemini-example-model-1dd583607df6", label="Argon"),
+                StreamModelOption(id="gpt-example-model-d050a243e4ed", label="Astra"),
             ],
-            "[redacted]_reasoning_high",
+            "gpt-example-model-d050a243e4ed_reasoning_high",
         )
 
     monkeypatch.setattr(sr_mod, "discover_maso_service", fake_discover)
@@ -1208,7 +1226,7 @@ async def test_run_subagent_strict_review_uses_active_maso_session_model_over_ch
     assert len(created_requests) == 1
     # Because the active session was Argon, the reviewer MUST be Astra (not Argon self-review)!
     assert created_requests[0].agent_type == AgentType.MASO
-    assert created_requests[0].model == "[redacted]_reasoning_high"
+    assert created_requests[0].model == "gpt-example-model-d050a243e4ed_reasoning_high"
 
 
 @pytest.mark.asyncio

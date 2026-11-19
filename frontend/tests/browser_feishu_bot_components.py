@@ -103,7 +103,7 @@ async def main(browser_run: BrowserRun) -> None:
         "owner_open_id": "",
         "app_id": "",
         "provider": "maso",
-        "model": "[redacted]_reasoning_high",
+        "model": "gemini-example-model-1dd583607df6_reasoning_high",
         "reasoning_effort": "high",
         "cwd": "/srv/persisted-ai",
         "watch_chats": ["oc_persisted"],
@@ -193,14 +193,14 @@ async def main(browser_run: BrowserRun) -> None:
                     "antigravity": [],
                 },
                 "provider_models": {
-                    "claude": ["claude-opus-4-8", "[redacted]"],
-                    "codex": ["[redacted]", "gpt-5.4", "o3"],
+                    "claude": ["claude-opus-4-8", "example-code-model"],
+                    "codex": ["gpt-example-model-c886ad270fea", "gpt-5.4", "o3"],
                     "maso": [
-                        "[redacted]_reasoning_high",
-                        "[redacted]_reasoning_high",
+                        "example-model-dedfefd51120_reasoning_high",
+                        "gemini-example-model-1dd583607df6_reasoning_high",
                     ],
                     "cursor": ["gpt-5.3-codex-high", "claude-4.5-sonnet"],
-                    "antigravity": ["[redacted]-high"],
+                    "antigravity": ["gemini-example-model-1d11bad5f3fe-high"],
                 },
                 "provider_model_options": {
                     "claude": [
@@ -210,9 +210,9 @@ async def main(browser_run: BrowserRun) -> None:
                             "provider_model_id": "claude-opus-4-8",
                         },
                         {
-                            "id": "[redacted]",
-                            "label": "[redacted]",
-                            "provider_model_id": "[redacted]",
+                            "id": "example-code-model",
+                            "label": "example-code-model",
+                            "provider_model_id": "example-code-model",
                         },
                     ],
                     "codex": [
@@ -240,78 +240,78 @@ async def main(browser_run: BrowserRun) -> None:
                             ],
                         },
                         {
-                            "id": "[redacted]",
-                            "label": "[redacted]",
-                            "provider_model_id": "[redacted]",
+                            "id": "gpt-example-model-c886ad270fea",
+                            "label": "gpt-example-model-c886ad270fea",
+                            "provider_model_id": "gpt-example-model-c886ad270fea",
                             "default_reasoning_effort": "high",
                             "supported_reasoning_efforts": [
                                 {
                                     "id": "high",
                                     "label": "High",
-                                    "provider_model_id": "[redacted]",
+                                    "provider_model_id": "gpt-example-model-c886ad270fea",
                                 },
                                 {
                                     "id": "xhigh",
                                     "label": "Extra High",
-                                    "provider_model_id": "[redacted]",
+                                    "provider_model_id": "gpt-example-model-c886ad270fea",
                                 },
                                 {
                                     "id": "max",
                                     "label": "Max",
-                                    "provider_model_id": "[redacted]",
+                                    "provider_model_id": "gpt-example-model-c886ad270fea",
                                 },
                             ],
                         },
                     ],
                     "maso": [
                         {
-                            "id": "[redacted]",
-                            "label": "[redacted]",
-                            "provider_model_id": "[redacted]",
+                            "id": "example-model-dedfefd51120",
+                            "label": "example-model-dedfefd51120",
+                            "provider_model_id": "example-model-dedfefd51120",
                             "default_reasoning_effort": "default",
                             "supported_reasoning_efforts": [
                                 {
                                     "id": "default",
                                     "label": "Default",
-                                    "provider_model_id": "[redacted]",
+                                    "provider_model_id": "example-model-dedfefd51120",
                                 },
                                 {
                                     "id": "high",
                                     "label": "High",
-                                    "provider_model_id": "[redacted]_reasoning_high",
+                                    "provider_model_id": "example-model-dedfefd51120_reasoning_high",
                                 },
                                 {
                                     "id": "xhigh",
                                     "label": "Extra High",
-                                    "provider_model_id": "[redacted]_reasoning_xhigh",
+                                    "provider_model_id": "example-model-dedfefd51120_reasoning_xhigh",
                                 },
                                 {
                                     "id": "max",
                                     "label": "Max",
-                                    "provider_model_id": "[redacted]_reasoning_max",
+                                    "provider_model_id": "example-model-dedfefd51120_reasoning_max",
                                 },
                             ],
                         },
                         {
-                            "id": "[redacted]",
-                            "label": "[redacted]",
-                            "provider_model_id": "[redacted]",
+                            "id": "gemini-example-model-1dd583607df6",
+                            "label": "gemini-example-model-1dd583607df6",
+                            "provider_model_id": "gemini-example-model-1dd583607df6",
                             "default_reasoning_effort": "low",
                             "supported_reasoning_efforts": [
                                 {
                                     "id": "low",
                                     "label": "Low",
-                                    "provider_model_id": "[redacted]",
+                                    "provider_model_id": "gemini-example-model-1dd583607df6",
                                 },
                                 {
                                     "id": "medium",
                                     "label": "Medium",
-                                    "provider_model_id": "[redacted]_reasoning_medium",
+                                    "provider_model_id": "gemini-example-model-1dd583607df6_reasoning_medium",
                                 },
                                 {
                                     "id": "high",
                                     "label": "High",
-                                    "provider_model_id": "[redacted]_reasoning_high",
+                                    "provider_model_id": "gemini-example-model-1dd583607df6_reasoning_high",
                                 },
                             ],
                         },
@@ -344,9 +344,9 @@ async def main(browser_run: BrowserRun) -> None:
                     ],
                     "antigravity": [
                         {
-                            "id": "[redacted]-high",
-                            "label": "[redacted]-high",
-                            "provider_model_id": "[redacted]-high",
+                            "id": "gemini-example-model-1d11bad5f3fe-high",
+                            "label": "gemini-example-model-1d11bad5f3fe-high",
+                            "provider_model_id": "gemini-example-model-1d11bad5f3fe-high",
                         }
                     ],
                 },
@@ -1054,19 +1054,21 @@ async def main(browser_run: BrowserRun) -> None:
         assert await model_select.evaluate("el => el.tagName") == "SELECT"
         assert await model_select.locator("option").all_text_contents() == [
             "Provider default",
-            "[redacted]",
-            "[redacted]",
+            "example-model-dedfefd51120",
+            "gemini-example-model-1dd583607df6",
         ]
         await expect(settings.get_by_test_id("feishu-ai-provider-select")).to_have_value("maso")
-        await expect(model_select).to_have_value("[redacted]_reasoning_high")
+        await expect(model_select).to_have_value("gemini-example-model-1dd583607df6_reasoning_high")
         await expect(effort_select).to_have_value("high")
         # Switching MASO effort updates the resolved variant value on the logical Model <select>
         await effort_select.select_option("medium")
-        await expect(model_select).to_have_value("[redacted]_reasoning_medium")
-        # Selecting live-shaped MASO [redacted] adopts mode='default' ('[redacted]'), saves ('maso', '[redacted]', 'default'),
+        await expect(model_select).to_have_value(
+            "gemini-example-model-1dd583607df6_reasoning_medium"
+        )
+        # Selecting live-shaped MASO example-model-dedfefd51120 adopts mode='default' ('example-model-dedfefd51120'), saves ('maso', 'example-model-dedfefd51120', 'default'),
         # and reloads cleanly; then switching to xhigh and choosing Provider default ('') clears model-bound effort and reloads ('maso', '', '')
-        await model_select.select_option(label="[redacted]")
-        await expect(model_select).to_have_value("[redacted]")
+        await model_select.select_option(label="example-model-dedfefd51120")
+        await expect(model_select).to_have_value("example-model-dedfefd51120")
         await expect(effort_select).to_have_value("default")
         await settings.get_by_test_id("feishu-ai-save-btn").click()
         await expect(
@@ -1081,11 +1083,11 @@ async def main(browser_run: BrowserRun) -> None:
         model_select = settings.get_by_test_id("feishu-ai-model-input")
         effort_select = settings.get_by_test_id("feishu-ai-effort-select")
         await expect(settings.get_by_test_id("feishu-ai-provider-select")).to_have_value("maso")
-        await expect(model_select).to_have_value("[redacted]")
+        await expect(model_select).to_have_value("example-model-dedfefd51120")
         await expect(effort_select).to_have_value("default")
 
         await effort_select.select_option("xhigh")
-        await expect(model_select).to_have_value("[redacted]_reasoning_xhigh")
+        await expect(model_select).to_have_value("example-model-dedfefd51120_reasoning_xhigh")
         await model_select.select_option("")
         await expect(model_select).to_have_value("")
         await expect(effort_select).to_be_disabled()
@@ -1130,8 +1132,8 @@ async def main(browser_run: BrowserRun) -> None:
         await settings.get_by_test_id("feishu-ai-enabled-toggle").check()
         await settings.get_by_test_id("feishu-ai-provider-select").select_option("codex")
         await expect(model_select).to_have_value("gpt-5.4")
-        await model_select.select_option("[redacted]")
-        await expect(model_select).to_have_value("[redacted]")
+        await model_select.select_option("gpt-example-model-c886ad270fea")
+        await expect(model_select).to_have_value("gpt-example-model-c886ad270fea")
         await effort_select.select_option("xhigh")
         await settings.get_by_test_id("feishu-ai-cwd-input").fill("/srv/draft-ai")
         await settings.get_by_test_id("feishu-ai-watch-chats-input").fill("oc_chat_1, oc_chat_2")
@@ -1150,7 +1152,7 @@ async def main(browser_run: BrowserRun) -> None:
         await expect(settings.get_by_test_id("feishu-ai-token-guidance")).to_have_count(0)
         await expect(settings.get_by_test_id("feishu-ai-token-login-cmd")).to_have_count(0)
         await expect(settings.get_by_test_id("feishu-ai-provider-select")).to_have_value("codex")
-        await expect(model_select).to_have_value("[redacted]")
+        await expect(model_select).to_have_value("gpt-example-model-c886ad270fea")
         await expect(effort_select).to_have_value("xhigh")
         await expect(settings.get_by_test_id("feishu-ai-cwd-input")).to_have_value("/srv/draft-ai")
         await expect(settings.get_by_test_id("feishu-ai-watch-chats-input")).to_have_value(
@@ -1172,14 +1174,14 @@ async def main(browser_run: BrowserRun) -> None:
         ]
         assert len(ai_patches) == 3
         assert ai_patches[0]["provider"] == "maso"
-        assert ai_patches[0]["model"] == "[redacted]"
+        assert ai_patches[0]["model"] == "example-model-dedfefd51120"
         assert ai_patches[0]["reasoning_effort"] == "default"
         assert ai_patches[1]["provider"] == "maso"
         assert ai_patches[1]["model"] == ""
         assert ai_patches[1]["reasoning_effort"] == ""
         assert ai_patches[2]["enabled"] is True
         assert ai_patches[2]["provider"] == "codex"
-        assert ai_patches[2]["model"] == "[redacted]"
+        assert ai_patches[2]["model"] == "gpt-example-model-c886ad270fea"
         assert ai_patches[2]["reasoning_effort"] == "xhigh"
         assert ai_patches[2]["cwd"] == "/srv/draft-ai"
         assert ai_patches[2]["watch_chats"] == ["oc_chat_1", "oc_chat_2"]
@@ -1300,7 +1302,7 @@ async def main(browser_run: BrowserRun) -> None:
             mobile_model_box["x"] + mobile_model_box["width"]
             <= settings_box["x"] + settings_box["width"] + 1
         )
-        await expect(mobile_model_select).to_have_value("[redacted]")
+        await expect(mobile_model_select).to_have_value("gpt-example-model-c886ad270fea")
         mobile_save_btn = settings.get_by_test_id("feishu-ai-save-btn")
         await mobile_save_btn.scroll_into_view_if_needed()
         await expect(mobile_save_btn).to_be_visible()

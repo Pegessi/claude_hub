@@ -110,8 +110,8 @@ def _record(
 
 def test_bundle_orders_children_handles_nested_types_and_preserves_urls() -> None:
     urls = [
-        "https://[redacted]/evaluation/arena/123?view=log&run=1",
-        "https://[redacted]/team/repo/merge_requests/12",
+        "https://compute.example.com/evaluation/arena/123?view=log&run=1",
+        "https://git.example.com/team/repo/merge_requests/12",
         "https://team.feishu.cn/docx/document",
         "https://team.feishu.cn/wiki/page",
         "https://team.feishu.cn/sheets/sheet",
@@ -153,7 +153,7 @@ def test_bundle_orders_children_handles_nested_types_and_preserves_urls() -> Non
 
 
 def test_bundle_omits_code_block_language_metadata_but_preserves_code() -> None:
-    code = 'raise RuntimeError("https://[redacted]/team/repo/merge_requests/12")'
+    code = 'raise RuntimeError("https://git.example.com/team/repo/merge_requests/12")'
     text, refs = render_merged_forward_bundle(
         [
             _record(
@@ -196,7 +196,7 @@ def test_bundle_bounds_messages_images_and_untrusted_delimiters() -> None:
 
 
 def test_bundle_keeps_closing_boundary_and_avoids_partial_urls() -> None:
-    url = "https://[redacted]/" + "a" * 13000
+    url = "https://compute.example.com/" + "a" * 13000
     text, _ = render_merged_forward_bundle(
         [_record("om", "text", {"text": "see " + url})], root_message_id="root"
     )

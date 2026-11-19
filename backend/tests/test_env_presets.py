@@ -491,3 +491,16 @@ def test_builtin_preset_ids_constant_matches_frontend() -> None:
     volcengine-coding-plan)."""
     expected = {"none", "local-proxy-7890", "socks-proxy-1080", "volcengine-coding-plan"}
     assert set(BUILT_IN_PRESET_IDS) == expected
+
+
+def test_builtin_api_and_cli_share_private_model_config(monkeypatch):
+    from claude_hub.api.env_presets import _state_to_response
+    from claude_hub.services.env_preset_resolver import resolve_env_preset
+    from claude_hub.services.terminal_runtime.defaults import DEFAULT_CLAUDE_LAUNCH_ENV
+
+    monkeypatch.setitem(DEFAULT_CLAUDE_LAUNCH_ENV, "ANTHROPIC_MODEL", "private-model")
+    _, launch_env = resolve_env_preset("volcengine-coding-plan")
+    response = _state_to_response()
+    preset = next(p for p in response.builtin_presets if p.id == "volcengine-coding-plan")
+    assert launch_env["ANTHROPIC_MODEL"] == "private-model"
+    assert "ANTHROPIC_MODEL=private-model" in preset.text.splitlines()

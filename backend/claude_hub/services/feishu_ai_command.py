@@ -60,8 +60,10 @@ from claude_hub.services.feishu_ai_command_models import (
     build_interim_reply_text,
     default_provider_model,
     ensure_ai_footer,
+    ensure_private_maso_catalog,
     extract_context_references,
     parse_ai_command,
+    private_provider_model_options,
     register_live_maso_model_variants,
     resolve_ai_command_agent_env,
 )
@@ -160,7 +162,8 @@ def _sync_provider_model_options() -> dict[str, list[StreamModelOption]]:
             if _AI_MASO_CATALOG_CACHE is not None and _AI_MASO_CATALOG_CACHE[0] > now:
                 out[prov] = list(_AI_MASO_CATALOG_CACHE[1])
             else:
-                out[prov] = _static_maso_model_options()
+                out[prov] = private_provider_model_options("maso")
+                ensure_private_maso_catalog()
             continue
         if prov == "codex":
             out[prov] = native_mod._codex_model_options({})
@@ -172,7 +175,9 @@ def _sync_provider_model_options() -> dict[str, list[StreamModelOption]]:
         if prov == "cursor":
             out[prov] = native_mod._group_cursor_model_options(native_mod._static_options("cursor"))
         else:
-            out[prov] = provider_model_options.model_options_from_ids(
+            out[prov] = private_provider_model_options(
+                prov
+            ) or provider_model_options.model_options_from_ids(
                 DEFAULT_PROVIDER_MODELS.get(prov, ())
             )
     return out
@@ -180,16 +185,16 @@ def _sync_provider_model_options() -> dict[str, list[StreamModelOption]]:
 
 async def _async_provider_model_options() -> dict[str, list[StreamModelOption]]:
     global _AI_MASO_CATALOG_CACHE
-    from claude_hub.services.agent_stream.maso_http import check_maso_service
+    from claude_hub.services.maso_discovery import discover_maso_service
 
     out = _sync_provider_model_options()
     now = time.monotonic()
     if _AI_MASO_CATALOG_CACHE is None or _AI_MASO_CATALOG_CACHE[0] <= now:
         try:
             async with asyncio.timeout(0.8):
-                live_maso, _ = await check_maso_service(dict(os.environ))
+                _, live_maso, default_model = await discover_maso_service(dict(os.environ))
             if live_maso:
-                register_live_maso_model_variants(live_maso)
+                register_live_maso_model_variants(live_maso, default_model)
                 _AI_MASO_CATALOG_CACHE = (time.monotonic() + 120.0, list(live_maso))
                 out["maso"] = list(live_maso)
         except Exception:
@@ -1060,6 +1065,11 @@ class FeishuAiCommandService:
                 return self._skip_result(message, dry_run=dry_run, reason="no_owner_open_id")
             if not self._matches_owner_sender(message.sender_open_id, cfg):
                 return self._skip_result(message, dry_run=dry_run, reason="sender_not_owner")
+
+        # Refresh the catalog before resolving an explicit model or effort; the
+        # capability endpoint may not have been opened in this process.
+        if cfg.provider == AgentType.MASO or "maso" in message.text.lower():
+            await _async_provider_model_options()
 
         try:
             parsed = parse_ai_command(

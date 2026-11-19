@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Mapping, Sequence
+from urllib.parse import urlsplit
 
 from claude_hub.models import AgentType, StreamModelOption
 from claude_hub.services.agent_stream.providers.spec import (
@@ -17,6 +21,8 @@ from claude_hub.services.feishu_message_format import (
     build_feishu_post_content,
 )
 from claude_hub.services.feishu_user_client import FeishuUserMessage
+from claude_hub.services.local_runtime_settings import local_setting
+from claude_hub.services.runtime_isolation import resolve_runtime_home
 from claude_hub.services.terminal_runtime.defaults import DEFAULT_CLAUDE_LAUNCH_ENV
 
 _STATE_VERSION = 1
@@ -56,88 +62,9 @@ PROVIDER_SUPPORTED_REASONING_EFFORTS: dict[str, tuple[str, ...]] = {
     "cursor": tuple("none minimal low medium high xhigh max".split()),
     "antigravity": (),
 }
+# Provider catalogs are discovered at runtime; keep only a public generic fallback.
 DEFAULT_PROVIDER_MODELS: dict[str, tuple[str, ...]] = {
-    "claude": (
-        "claude-opus-4-8",
-        "claude-sonnet-4-6",
-        "claude-haiku-4-5",
-        "[redacted]",
-    ),
-    "codex": (
-        "gpt-5.4",
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "gpt-5.5",
-        "gpt-5.4-mini",
-        "gpt-5.3-codex-spark",
-        "o3",
-    ),
-    "traex": (
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "Seed-Code",
-        "Seed-[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "GPT-5.5",
-        "GPT-5.4",
-        "GPT-5.2",
-        "[redacted]",
-        "[redacted]",
-        "Gemini-3.1-Pro-Preview",
-        "Gemini-3-Flash-Preview",
-    ),
-    "maso": (
-        "[redacted]_reasoning_high",
-        "[redacted]_reasoning_high",
-        "[redacted]_reasoning_high",
-        "[redacted]_reasoning_high",
-        "[redacted]_reasoning_high",
-        "[redacted]-reasoning-high",
-        "[redacted]_reasoning_high",
-        "[redacted]_reasoning_medium",
-        "[redacted]",
-    ),
-    "cursor": (
-        "gpt-5.3-codex-high",
-        "claude-opus-4-8-thinking-high",
-        "claude-opus-4-8-high",
-        "claude-4.6-sonnet-medium-thinking",
-        "claude-4.6-sonnet-medium",
-        "claude-4.5-sonnet",
-        "gpt-5.2",
-        "gemini-3.7-flash-high",
-        "cursor-grok-4.6-high",
-    ),
-    "antigravity": (
-        "[redacted]-high",
-        "[redacted]-medium",
-        "[redacted]-low",
-        "[redacted]-high",
-        "[redacted]-medium",
-        "[redacted]-low",
-        "gemini-3.8-flash-high",
-        "gemini-3.8-flash-medium",
-        "gemini-3.8-flash-low",
-        "claude-opus-5-5-high",
-        "claude-opus-5-5-medium",
-        "claude-opus-5-5-low",
-        "claude-sonnet-5-5-high",
-        "claude-sonnet-5-5-medium",
-        "claude-sonnet-5-5-low",
-        "gpt-oss-120b-medium",
-    ),
+    "codex": (DEFAULT_AI_COMMAND_MODEL,),
 }
 _MASO_VARIANT_SUFFIX_RE = re.compile(
     r"(?:[_-]reasoning(?:[_-](?:xhigh|high|medium|low|max))?"
@@ -146,26 +73,19 @@ _MASO_VARIANT_SUFFIX_RE = re.compile(
 )
 
 
-def _maso_std_variants(base: str, *, has_max: bool = True) -> dict[str, str]:
-    hi, xhi = f"{base}_reasoning_high", f"{base}_reasoning_xhigh"
-    out = {
-        "default": base,
-        "none": base,
-        "low": base,
-        "medium": hi,
-        "high": hi,
-        "xhigh": xhi,
-    }
-    if has_max:
-        out["max"] = f"{base}_reasoning_max"
-    return out
-
-
 _DYNAMIC_MASO_MODEL_VARIANTS: dict[str, dict[str, str]] = {}
+_DYNAMIC_MASO_DEFAULT_MODEL = ""
 
 
-def register_live_maso_model_variants(options: Sequence[Any]) -> None:
+def register_live_maso_model_variants(
+    options: Sequence[Any], default_model: str | None = None
+) -> None:
     """Sync live MASO ``StreamModelOption`` variant mappings into runtime validation."""
+    global _DYNAMIC_MASO_DEFAULT_MODEL
+    configured_default = private_model_catalog().get("maso_default_model")
+    _DYNAMIC_MASO_DEFAULT_MODEL = str(
+        configured_default or default_model or (getattr(options[0], "id", "") if options else "")
+    )
     fresh: dict[str, dict[str, str]] = {}
     for opt in options:
         opt_id = str(getattr(opt, "id", "") or "").strip()
@@ -182,6 +102,22 @@ def register_live_maso_model_variants(options: Sequence[Any]) -> None:
             ).strip()
             if eff_id and pmid:
                 variant_map[eff_id] = pmid
+        # Duplicate modes are retained with model keys as IDs. Infer standard
+        # effort suffixes only where no explicit effort was advertised.
+        for eff in efforts:
+            pmid = str(getattr(eff, "provider_model_id", "") or "").strip()
+            match = re.search(
+                r"[_-](?:reasoning|thinking)[_-](low|medium|high|xhigh|max)$", pmid, re.IGNORECASE
+            )
+            if match:
+                variant_map.setdefault(match.group(1).lower(), pmid)
+        base_pmid = str(getattr(opt, "provider_model_id", None) or opt_id).strip()
+        for effort in ("default", "none", "low"):
+            variant_map.setdefault(effort, base_pmid)
+        if "medium" in variant_map:
+            variant_map.setdefault("high", variant_map["medium"])
+        if "high" in variant_map:
+            variant_map.setdefault("medium", variant_map["high"])
         if variant_map:
             fresh[opt_id.lower()] = variant_map
             opt_pmid = str(getattr(opt, "provider_model_id", "") or "").strip()
@@ -193,47 +129,7 @@ def register_live_maso_model_variants(options: Sequence[Any]) -> None:
     _DYNAMIC_MASO_MODEL_VARIANTS.update(fresh)
 
 
-_MASO_MODEL_VARIANTS: dict[str, dict[str, str]] = {
-    "[redacted]": _maso_std_variants("[redacted]"),
-    "[redacted]": _maso_std_variants("[redacted]"),
-    "[redacted]": _maso_std_variants("[redacted]"),
-    "[redacted]": {
-        "none": "[redacted]",
-        "low": "[redacted]",
-        "medium": "[redacted]_reasoning_medium",
-        "high": "[redacted]_reasoning_high",
-    },
-    "[redacted]": _maso_std_variants("[redacted]"),
-    "[redacted]": _maso_std_variants("[redacted]", has_max=False),
-    "[redacted]": {
-        "none": "[redacted]",
-        "low": "[redacted]",
-        "medium": "[redacted]_reasoning_medium",
-        "high": "[redacted]_reasoning_high",
-    },
-    **{
-        b: {
-            "none": b,
-            "low": b,
-            "medium": f"{b}_thinking",
-            "high": f"{b}_thinking",
-            "xhigh": f"{b}_thinking_max",
-            "max": f"{b}_thinking_max",
-        }
-        for b in ("[redacted]", "[redacted]")
-    },
-    **{
-        b: {"none": b, "low": b, "medium": f"{b}-reasoning", "high": f"{b}-reasoning-high"}
-        for b in ("[redacted]", "[redacted]", "[redacted]")
-    },
-    "[redacted]": {
-        "none": "[redacted]",
-        "low": "[redacted]",
-        "medium": "[redacted]-reasoning",
-        "high": "[redacted]-reasoning",
-        "xhigh": "[redacted]-reasoning-xhigh",
-    },
-}
+_MASO_MODEL_VARIANTS: dict[str, dict[str, str]] = {}
 _CURSOR_EFFORT_SUFFIXES: tuple[str, ...] = tuple(
     "extra-high minimal medium xhigh high none low max".split()
 )
@@ -242,14 +138,14 @@ _CURSOR_NON_EFFORT_MODELS: frozenset[str] = frozenset(
 )
 
 _CODEBASE_MR_URL_RE = re.compile(
-    r"https?://[redacted]/(?P<repo>[\w.-]+(?:/[\w.-]+)+)/merge_requests/(?P<iid>\d+)",
+    r"https?://[\w.-]+/(?P<repo>[\w.-]+(?:/[\w.-]+)+)/merge_requests/(?P<iid>\d+)",
     re.IGNORECASE,
 )
 _REPO_BANG_MR_RE = re.compile(r"(?<![\w/.-])(?P<repo>[\w.-]+/[\w.-]+)!(?P<iid>\d+)\b")
 _BARE_BANG_MR_RE = re.compile(r"(?<![\w/.-])!(?P<iid>\d+)\b")
 _REPO_NAME_RE = re.compile(r"\b([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)\b")
 _COMMIT_URL_RE = re.compile(
-    r"https?://[redacted]/[\w./-]+/commit/(?P<sha>[0-9a-f]{7,40})\b",
+    r"https?://[\w.-]+/[\w./-]+/commit/(?P<sha>[0-9a-f]{7,40})\b",
     re.IGNORECASE,
 )
 _COMMIT_TEXT_RE = re.compile(
@@ -262,6 +158,44 @@ _FEISHU_DOC_URL_RE = re.compile(
     r"(?:docx|wiki|sheets|base|docs|minutes)/[A-Za-z0-9_-]+(?:\?[^\s<>\"')]*)?",
     re.IGNORECASE,
 )
+
+
+def private_model_catalog() -> dict[str, Any]:
+    """Read optional installation-specific provider options, without persisting them."""
+    override = os.environ.get("CLAUDE_HUB_AI_MODEL_CATALOG_FILE")
+    path = (
+        Path(override).expanduser()
+        if override
+        else resolve_runtime_home() / "ai-model-catalog.json"
+    )
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def private_provider_model_options(provider: str) -> list[StreamModelOption]:
+    providers = private_model_catalog().get("providers", {})
+    rows = providers.get(provider, []) if isinstance(providers, dict) else []
+    if not isinstance(rows, list):
+        return []
+    options: list[StreamModelOption] = []
+    for row in rows:
+        try:
+            options.append(StreamModelOption.model_validate(row))
+        except Exception:
+            continue
+    return options
+
+
+def ensure_private_maso_catalog() -> None:
+    if _DYNAMIC_MASO_MODEL_VARIANTS:
+        return
+    options = private_provider_model_options("maso")
+    if options:
+        default = private_model_catalog().get("maso_default_model")
+        register_live_maso_model_variants(options, default if isinstance(default, str) else None)
 
 
 def _resolve_cursor_model_with_effort(model: str, effort: str) -> str:
@@ -309,6 +243,7 @@ def _resolve_maso_model_with_effort(model: str, effort: str) -> str:
     clean_model = (model or "").strip()
     if not clean_model or not effort:
         return clean_model
+    ensure_private_maso_catalog()
     base = _MASO_VARIANT_SUFFIX_RE.sub("", clean_model)
     base_lower = base.lower()
     dyn_variants = _DYNAMIC_MASO_MODEL_VARIANTS.get(
@@ -316,17 +251,21 @@ def _resolve_maso_model_with_effort(model: str, effort: str) -> str:
     ) or _DYNAMIC_MASO_MODEL_VARIANTS.get(base_lower)
     if dyn_variants and effort in dyn_variants:
         return dyn_variants[effort]
-    if base_lower in _MASO_MODEL_VARIANTS:
-        variants = _MASO_MODEL_VARIANTS[base_lower]
-        if effort in variants:
-            return variants[effort]
-        if effort == "default":
-            return variants.get("none") or variants.get("low") or base
-        allowed = ", ".join(variants.keys())
-        raise ValueError(
-            f"MASO model {base_lower!r} does not support reasoning_effort={effort!r}; "
-            f"supported efforts: {allowed}"
-        )
+    legacy = private_model_catalog().get("maso_legacy_variants", {})
+    if isinstance(legacy, dict):
+        variants = legacy.get(base_lower)
+        if isinstance(variants, dict) and all(
+            isinstance(key, str) and isinstance(value, str) for key, value in variants.items()
+        ):
+            if effort in variants:
+                return str(variants[effort])
+            if effort == "default":
+                return str(variants.get("none") or variants.get("low") or base)
+            allowed = ", ".join(variants.keys())
+            raise ValueError(
+                f"MASO model {base_lower!r} does not support reasoning_effort={effort!r}; "
+                f"supported efforts: {allowed}"
+            )
     if dyn_variants is not None:
         allowed = ", ".join(dyn_variants.keys())
         raise ValueError(
@@ -335,6 +274,8 @@ def _resolve_maso_model_with_effort(model: str, effort: str) -> str:
         )
     if effort == "default":
         return base
+    if re.search(rf"[_-](?:reasoning|thinking)[_-]{re.escape(effort)}$", clean_model, re.I):
+        return clean_model
     if _MASO_VARIANT_SUFFIX_RE.search(clean_model):
         return base if effort == "none" else f"{base}_reasoning_{effort}"
     for cand in _CURSOR_EFFORT_SUFFIXES:
@@ -636,6 +577,9 @@ def _strip_quotes(val: str) -> str:
 
 def default_provider_model(provider: str) -> str:
     """Prefer the local Codex catalog when choosing an implicit model."""
+    if provider == "maso":
+        ensure_private_maso_catalog()
+        return _DYNAMIC_MASO_DEFAULT_MODEL
     if provider == "codex":
         from claude_hub.services.agent_stream.native import _codex_model_options
 
@@ -643,6 +587,9 @@ def default_provider_model(provider: str) -> str:
         for option in _codex_model_options({}):
             if option.provider_model_id:
                 return option.provider_model_id
+    private_options = private_provider_model_options(provider)
+    if private_options:
+        return private_options[0].provider_model_id or private_options[0].id
     defaults = DEFAULT_PROVIDER_MODELS.get(provider, ())
     return defaults[0] if defaults else ""
 
@@ -747,9 +694,19 @@ def extract_context_references(
         for m in (_REPO_NAME_RE.finditer(chat_name) if chat_name else ())
         if not m.group(1).startswith(("http", "open-apis"))
     ]
+    repo_hosts = {
+        host.strip().lower()
+        for host in local_setting("CLAUDE_HUB_PATROL_MR_HOSTS", "").split(",")
+        if host.strip()
+    }
     for text in combined_texts:
         for regex in (_CODEBASE_MR_URL_RE, _REPO_BANG_MR_RE):
             for m in regex.finditer(text):
+                if (
+                    regex is _CODEBASE_MR_URL_RE
+                    and (urlsplit(m.group()).hostname or "").lower() not in repo_hosts
+                ):
+                    continue
                 repo, iid = m.group("repo"), m.group("iid")
                 if repo not in known_repos:
                     known_repos.append(repo)
@@ -765,6 +722,11 @@ def extract_context_references(
                     mr_refs.append(ref)
         for regex in (_COMMIT_URL_RE, _COMMIT_TEXT_RE):
             for m in regex.finditer(text):
+                if (
+                    regex is _COMMIT_URL_RE
+                    and (urlsplit(m.group()).hostname or "").lower() not in repo_hosts
+                ):
+                    continue
                 sha = m.group("sha").lower()[:10]
                 if sha not in commit_refs:
                     commit_refs.append(sha)

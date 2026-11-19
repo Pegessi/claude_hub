@@ -4,7 +4,7 @@ Agents quote images in chat markdown using provider-specific **bare tokens** —
 no scheme, directory, or extension — for example a Lark/Feishu ``img_v3_…``
 key::
 
-    ![Image]([redacted])
+    ![Image](img_v3_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)
 
 The browser cannot resolve such a token directly. This module is the single
 proxy/resolve layer between the markdown ``<img src>`` and the real bytes. It

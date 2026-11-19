@@ -264,8 +264,12 @@ async def test_sqlite_stream_summary_and_mr_cache_drive_tab_review_and_auto_done
     repo.mkdir()
     ws = manager.create_workspace(WorkspaceCreate(name="MR Repo", path=str(repo)))
 
-    mr_url = "https://[redacted]/seed/xperf_evo/merge_requests/1483"
-    doc_example = "https://[redacted]/byteapi/bytedcli/merge_requests/821"
+    monkeypatch.setenv("CLAUDE_HUB_PATROL_MR_HOSTS", "git.example.com")
+    monkeypatch.setenv(
+        "CLAUDE_HUB_MR_EXAMPLE_PREFIXES", "https://git.example.com/team/tool/merge_requests/"
+    )
+    mr_url = "https://git.example.com/team/project/merge_requests/1483"
+    doc_example = "https://git.example.com/team/tool/merge_requests/821"
     assert extract_codebase_mr_urls([f"See {doc_example} and {mr_url}"]) == [mr_url]
     assert format_mr_badge_label([mr_url]) == "MR !1483"
 
@@ -567,7 +571,7 @@ async def test_sqlite_stream_summary_and_mr_cache_drive_tab_review_and_auto_done
         assert stale_st.review_label is None
 
         # Verify reference-only MR URLs in title/prompt do NOT prematurely complete unfinished work!
-        ref_only_url = "https://[redacted]/[redacted]/merge_requests/3001"
+        ref_only_url = "https://git.example.com/team/project/merge_requests/3001"
         mr_status_cache.seed(MRStateSnapshot(url=ref_only_url, state="merged", title="Old MR"))
         diag_task, _ = await manager.register_task(
             ws.id,
@@ -668,8 +672,8 @@ async def test_mr_status_cache_nonblocking_refresh_and_error_backoff() -> None:
         return {"data": {"merge_request": {"Status": "open", "Title": "Demo MR"}}}
 
     cache = MRStatusCache(runner=fake_runner, ttl_seconds=60.0, allow_in_tests=True)
-    ok_url = "https://[redacted]/[redacted]/merge_requests/4164"
-    fail_url = "https://[redacted]/[redacted]/merge_requests/9999_fail"
+    ok_url = "https://git.example.com/team/project/merge_requests/4164"
+    fail_url = "https://git.example.com/team/project/merge_requests/9999_fail"
     try:
         # First observe returns immediately (0 blocking wait) and schedules background refresh
         assert cache.observe([ok_url, fail_url]) == {}

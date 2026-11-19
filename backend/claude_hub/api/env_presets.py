@@ -19,7 +19,12 @@ from ..models import (
     EnvPresetUpdate,
     User,
 )
-from ..services.env_preset_resolver import EnvPresetParseError, validate_env_preset_text
+from ..services.env_preset_resolver import (
+    BUILT_IN_PRESET_NAMES,
+    EnvPresetParseError,
+    resolve_env_preset,
+    validate_env_preset_text,
+)
 from ..services.env_presets import BUILT_IN_PRESET_IDS, env_preset_manager
 
 router = APIRouter(prefix="/api/env-presets", tags=["env-presets"])
@@ -37,6 +42,14 @@ def _state_to_response() -> EnvPresetsResponse:
     return EnvPresetsResponse(
         custom_presets=[EnvPreset(**p) for p in state["custom_presets"]],
         hidden_builtin_ids=list(state["hidden_builtin_ids"]),
+        builtin_presets=[
+            EnvPreset(
+                id=key,
+                name=name,
+                text="\n".join(f"{k}={v}" for k, v in resolve_env_preset(key)[1].items()),
+            )
+            for key, name in BUILT_IN_PRESET_NAMES.items()
+        ],
     )
 
 
@@ -165,4 +178,12 @@ async def bulk_import_env_presets(
     return EnvPresetsResponse(
         custom_presets=[EnvPreset(**p) for p in state["custom_presets"]],
         hidden_builtin_ids=list(state["hidden_builtin_ids"]),
+        builtin_presets=[
+            EnvPreset(
+                id=key,
+                name=name,
+                text="\n".join(f"{k}={v}" for k, v in resolve_env_preset(key)[1].items()),
+            )
+            for key, name in BUILT_IN_PRESET_NAMES.items()
+        ],
     )

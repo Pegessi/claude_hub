@@ -29,6 +29,7 @@ from claude_hub.services import managed_chat
 from claude_hub.services.agent_stream.maso_http import MasoServiceUnavailable
 from claude_hub.services.agent_stream.providers.spec import all_specs
 from claude_hub.services.agent_stream.tailer import fence_session_stream
+from claude_hub.services.cross_reviewer import _advertised_model_ids
 from claude_hub.services.demand_patrol.commands import (
     CommandError,
     CommandRunner,
@@ -42,6 +43,7 @@ from claude_hub.services.demand_patrol.models import (
     PatrolRunRecord,
     PatrolState,
 )
+from claude_hub.services.local_runtime_settings import local_setting
 from claude_hub.services.maso_discovery import discover_maso_service
 from claude_hub.services.subagents import SubagentError
 from claude_hub.services.workspace_manager import (
@@ -51,39 +53,35 @@ from claude_hub.services.workspace_manager import (
 )
 
 _ACTIONABLE = re.compile(
-    r"(?:seed|megavision)\.(?:bytedance|byteintl)\.net|[redacted]"
-    r"|(?:feishu\.cn|larkoffice\.com)/(?:docx|wiki|sheets|base)|grafana"
+    r"(?:feishu\.cn|larkoffice\.com)/(?:docx|wiki|sheets|base)|grafana"
     r"|[?？]|报错|失败|挂了|卡住|超时|慢|怎么|为什么|帮忙|看一下|看看|看下|瞅瞅|排查|检查"
     r"|问题|异常|不对|不正常|不行|是不是|能否|能不能|吗"
     r"|\b(?:oom|error\w*|crash\w*|hang\w*|fail\w*)\b",
     re.IGNORECASE,
 )
-_PREFERRED_MODEL = "[redacted]_reasoning_high"
+
+
+def _is_actionable(text: str) -> bool:
+    if _ACTIONABLE.search(text):
+        return True
+    return any(
+        host.strip().lower() in text.lower()
+        for host in local_setting("CLAUDE_HUB_PATROL_ACTIONABLE_HOSTS", "").split(",")
+        if host.strip()
+    )
+
+
+def _private_items(name: str) -> frozenset[str]:
+    return frozenset(
+        item.strip().casefold() for item in local_setting(name, "").split(",") if item.strip()
+    )
+
+
 _MODEL_ENV_KEYS = {
     agent_type: spec.model_env_key
     for agent_type, spec in all_specs().items()
     if spec.model_env_key is not None
 }
-_AUTOMATED_CHAT_IDS = frozenset(
-    {
-        "[redacted]",  # Codebase Assistant
-    }
-)
-_AUTOMATED_EXACT_NAMES = frozenset(
-    {
-        "codebase assistant",
-        "kani",
-        "[redacted]",
-        "kani permission notification",
-        "bpm",
-        "[redacted]",
-        "bpm assistant",
-        "[redacted]",
-        "[redacted]",
-        "[redacted]",
-        "定期提醒",
-    }
-)
 _AUTOMATED_FALLBACK_NAME_PATTERNS = re.compile(
     r"^(?:"
     r"[\w\s\u4e00-\u9fff·._-]{0,30}(?:小助手|机器人|助手|通知|提醒)"
@@ -303,17 +301,19 @@ def _is_automated_notification_fields(
     text: str,
     authoritative_human: bool = False,
 ) -> bool:
-    if chat_id in _AUTOMATED_CHAT_IDS:
+    if chat_id.casefold() in _private_items("CLAUDE_HUB_PATROL_AUTOMATED_CHAT_IDS"):
         return True
     if sender_id.startswith(("cli_", "app_", "bot_")):
         return True
     if authoritative_human:
         return False
     normalized_sender = " ".join(sender_name.split()).lower()
-    if normalized_sender in _AUTOMATED_EXACT_NAMES:
+    if normalized_sender in _private_items("CLAUDE_HUB_PATROL_AUTOMATED_NAMES"):
         return True
     normalized_chat = " ".join(chat_name.split()).lower()
-    if chat_type == "p2p" and normalized_chat in _AUTOMATED_EXACT_NAMES:
+    if chat_type == "p2p" and normalized_chat in _private_items(
+        "CLAUDE_HUB_PATROL_AUTOMATED_NAMES"
+    ):
         return True
     if normalized_sender and _AUTOMATED_FALLBACK_NAME_PATTERNS.fullmatch(normalized_sender):
         return True
@@ -457,7 +457,7 @@ def filter_unanswered(
                 )
             )
         )
-        if relevant and _ACTIONABLE.search(message.text):
+        if relevant and _is_actionable(message.text):
             candidates.append(message)
     return candidates, answered
 
@@ -703,24 +703,6 @@ def _diagnosis_prompt(candidate: FeishuCandidate) -> str:
     )
 
 
-def _has_maso_model(models: Sequence[Any], target: str) -> bool:
-    for option in models:
-        if (
-            getattr(option, "id", None) == target
-            or getattr(option, "provider_model_id", None) == target
-        ):
-            return True
-        for effort in getattr(option, "supported_reasoning_efforts", None) or ():
-            effort_model = (
-                effort.get("provider_model_id")
-                if isinstance(effort, Mapping)
-                else getattr(effort, "provider_model_id", None)
-            )
-            if effort_model == target:
-                return True
-    return False
-
-
 def _resolve_patrol_workspace_id(configured_workspace_id: str | None) -> str:
     requested = (configured_workspace_id or DEFAULT_PATROL_WORKSPACE_ID).strip()
     if requested:
@@ -910,12 +892,15 @@ async def diagnose_message(
             if os.environ.get("MASO_BASE_URL")
             else {}
         )
-        if _has_maso_model(models, _PREFERRED_MODEL):
-            agent_type, model, env = (
-                AgentType.MASO,
-                _PREFERRED_MODEL,
-                {"MASO_BASE_URL": base_url},
-            )
+        preferred = local_setting("CLAUDE_HUB_PATROL_MODEL", "").strip()
+        advertised = sorted(_advertised_model_ids(models))
+        selected = (
+            (preferred if preferred in advertised else None)
+            if preferred
+            else next((name for name in advertised if name.endswith("_reasoning_high")), None)
+        )
+        if selected:
+            agent_type, model, env = AgentType.MASO, selected, {"MASO_BASE_URL": base_url}
     except MasoServiceUnavailable:
         pass
     if agent_type != AgentType.MASO:

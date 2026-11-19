@@ -88,7 +88,7 @@ uv 0.12.15, pnpm 9.15.9 and Playwright 1.58.0.
   `/tmp/claude-hub-browser-mocks.BPylSo/run`. All owned browsers/Vite closed;
   port 5313 no longer accepted connections.
 - Real browser → isolated Hub 18307/Vite 5314 → MASO 9796:
-  `[redacted]_reasoning_xhigh` correctly answered
+  `example-model-75c87952ca70_reasoning_xhigh` correctly answered
   `左侧是红色，右侧是蓝色。` for a 320×160 PNG. The prompt asked for the left/right
   colors without revealing them. One send, no tools or API mocks. Original
   image bytes were retrieved from Hub's cache; normalized events contained
@@ -118,7 +118,7 @@ uv 0.12.15, pnpm 9.15.9 and Playwright 1.58.0.
   suite. No additional retries, assertion changes or unrelated terminal fixes.
 
 The installed catalog has no per-model visual capability field. Real inference
-was verified for the user's selected [redacted] Extra High variant with PNG;
+was verified for the user's selected example-model-75c87952ca70 Extra High variant with PNG;
 other model/upstream combinations were not independently invoked. Remote
 endpoint behavior, large chunking and narrower format/size rejection are covered
 by mock contracts; the live model check used the local service and a small PNG.

@@ -34,8 +34,6 @@ from claude_hub.models import (
 from claude_hub.services import cross_reviewer, managed_chat
 from claude_hub.services.agent_stream.maso_http import MasoServiceUnavailable
 from claude_hub.services.cross_reviewer import (
-    DEFAULT_ARGON_REVIEW_MODEL,
-    DEFAULT_ASTRA_REVIEW_MODEL,
     is_heterogeneous_reviewer,
     maso_model_family,
     resolve_cross_reviewer_target,
@@ -45,6 +43,10 @@ from claude_hub.services.workspace_manager import WorkspaceManager
 _wm = import_module("claude_hub.services.workspace_manager")
 
 
+DEFAULT_ARGON_REVIEW_MODEL = "gemini-example_reasoning_high"
+DEFAULT_ASTRA_REVIEW_MODEL = "astra-example_reasoning_high"
+
+
 def _maso_catalog(
     *, include_argon: bool = True, include_astra: bool = True, include_deepseek: bool = False
 ) -> list[StreamModelOption]:
@@ -52,14 +54,14 @@ def _maso_catalog(
     if include_argon:
         models.append(
             StreamModelOption(
-                id="[redacted]",
-                label="[redacted]",
-                provider_model_id="[redacted]",
+                id="gemini-example",
+                label="gemini-example",
+                provider_model_id="gemini-example",
                 supported_reasoning_efforts=[
                     StreamReasoningEffortOption(
                         id="high",
                         label="High",
-                        provider_model_id="[redacted]_reasoning_high",
+                        provider_model_id="gemini-example_reasoning_high",
                     )
                 ],
             )
@@ -67,14 +69,14 @@ def _maso_catalog(
     if include_astra:
         models.append(
             StreamModelOption(
-                id="[redacted]",
-                label="[redacted]",
-                provider_model_id="[redacted]",
+                id="astra-example",
+                label="astra-example",
+                provider_model_id="astra-example",
                 supported_reasoning_efforts=[
                     StreamReasoningEffortOption(
                         id="high",
                         label="High",
-                        provider_model_id="[redacted]_reasoning_high",
+                        provider_model_id="astra-example_reasoning_high",
                     )
                 ],
             )
@@ -82,14 +84,14 @@ def _maso_catalog(
     if include_deepseek:
         models.append(
             StreamModelOption(
-                id="[redacted]",
-                label="[redacted]",
-                provider_model_id="[redacted]",
+                id="deepseek-example",
+                label="deepseek-example",
+                provider_model_id="deepseek-example",
                 supported_reasoning_efforts=[
                     StreamReasoningEffortOption(
                         id="high",
                         label="High",
-                        provider_model_id="[redacted]-reasoning-high",
+                        provider_model_id="deepseek-example-reasoning-high",
                     )
                 ],
             )
@@ -98,10 +100,10 @@ def _maso_catalog(
 
 
 def test_heterogeneity_matrix() -> None:
-    assert maso_model_family({"MASO_MODEL": "[redacted]_reasoning_high"}) == "argon"
-    assert maso_model_family({"MASO_MODEL": "[redacted]_reasoning_high"}) == "astra"
-    assert maso_model_family({"MASO_MODEL": "[redacted]-reasoning"}) == "deepseek"
-    assert maso_model_family({"MASO_MODEL": "[redacted]-reasoning-high"}) == "seed"
+    assert maso_model_family({"MASO_MODEL": "gemini-example_reasoning_high"}) == "argon"
+    assert maso_model_family({"MASO_MODEL": "astra-example_reasoning_high"}) == "astra"
+    assert maso_model_family({"MASO_MODEL": "deepseek-example-reasoning"}) == "deepseek"
+    assert maso_model_family({"MASO_MODEL": "seed-example-reasoning-high"}) == "seed"
     assert maso_model_family({}) == ""
 
     # Different agent_type -> True
@@ -121,29 +123,29 @@ def test_heterogeneity_matrix() -> None:
     # Both MASO with different model families -> True
     assert is_heterogeneous_reviewer(
         AgentType.MASO,
-        {"MASO_MODEL": "[redacted]_reasoning_high"},
+        {"MASO_MODEL": "gemini-example_reasoning_high"},
         AgentType.MASO,
-        {"MASO_MODEL": "[redacted]_reasoning_high"},
+        {"MASO_MODEL": "astra-example_reasoning_high"},
     )
     assert is_heterogeneous_reviewer(
         AgentType.MASO,
-        {"MASO_MODEL": "[redacted]"},
+        {"MASO_MODEL": "astra-example"},
         AgentType.MASO,
-        {"MASO_MODEL": "[redacted]_reasoning_medium"},
+        {"MASO_MODEL": "gemini-example_reasoning_medium"},
     )
 
     # Same provider + same model family -> False
     assert not is_heterogeneous_reviewer(
         AgentType.MASO,
-        {"MASO_MODEL": "[redacted]"},
+        {"MASO_MODEL": "gemini-example"},
         AgentType.MASO,
-        {"MASO_MODEL": "[redacted]_reasoning_high"},
+        {"MASO_MODEL": "gemini-example_reasoning_high"},
     )
     assert not is_heterogeneous_reviewer(
         AgentType.MASO,
-        {"MASO_MODEL": "[redacted]"},
+        {"MASO_MODEL": "astra-example"},
         AgentType.MASO,
-        {"MASO_MODEL": "[redacted]_reasoning_xhigh"},
+        {"MASO_MODEL": "astra-example_reasoning_xhigh"},
     )
     assert not is_heterogeneous_reviewer(
         AgentType.CLAUDE,
@@ -168,12 +170,12 @@ async def test_resolve_cross_reviewer_target_pairing_and_fallbacks(
     assert await resolve_cross_reviewer_target(AgentType.CLAUDE, {}) is None
 
     async def fake_probe(env: dict[str, str]):
-        return ("http://127.0.0.1:11004", _maso_catalog(), "[redacted]")
+        return ("http://127.0.0.1:11004", _maso_catalog(), "gemini-example")
 
     # 1. MASO Argon worker -> paired with MASO Astra
     target_for_argon = await resolve_cross_reviewer_target(
         AgentType.MASO,
-        {"MASO_BASE_URL": "http://127.0.0.1:11004", "MASO_MODEL": "[redacted]_reasoning_high"},
+        {"MASO_BASE_URL": "http://127.0.0.1:11004", "MASO_MODEL": "gemini-example_reasoning_high"},
         maso_probe=fake_probe,
     )
     assert target_for_argon is not None
@@ -187,7 +189,7 @@ async def test_resolve_cross_reviewer_target_pairing_and_fallbacks(
     # 2. MASO Astra worker -> paired with MASO Argon
     target_for_astra = await resolve_cross_reviewer_target(
         AgentType.MASO,
-        {"MASO_BASE_URL": "http://127.0.0.1:11004", "MASO_MODEL": "[redacted]_reasoning_high"},
+        {"MASO_BASE_URL": "http://127.0.0.1:11004", "MASO_MODEL": "astra-example_reasoning_high"},
         maso_probe=fake_probe,
     )
     assert target_for_astra is not None
@@ -214,7 +216,7 @@ async def test_resolve_cross_reviewer_target_pairing_and_fallbacks(
         return (
             "http://127.0.0.1:11004",
             _maso_catalog(include_argon=False, include_astra=True),
-            "[redacted]",
+            "astra-example",
         )
 
     fallback_target = await resolve_cross_reviewer_target(
@@ -230,16 +232,16 @@ async def test_resolve_cross_reviewer_target_pairing_and_fallbacks(
         return (
             "http://127.0.0.1:11004",
             _maso_catalog(include_argon=True, include_astra=False, include_deepseek=True),
-            "[redacted]",
+            "gemini-example",
         )
 
     alt_target = await resolve_cross_reviewer_target(
         AgentType.MASO,
-        {"MASO_MODEL": "[redacted]_reasoning_high"},
+        {"MASO_MODEL": "gemini-example_reasoning_high"},
         maso_probe=argon_and_deepseek_probe,
     )
     assert alt_target is not None
-    assert alt_target.env["MASO_MODEL"] == "[redacted]-reasoning-high"
+    assert alt_target.env["MASO_MODEL"] == "deepseek-example-reasoning-high"
 
     # 6. Offline / unavailable MASO -> returns None gracefully
     async def failing_probe(_env: dict[str, str]):
@@ -286,7 +288,7 @@ async def test_workspace_manager_prefers_heterogeneous_reviewer_and_cleans_up_ep
     monkeypatch.setattr(tabs, "delete_tab", tracking_delete_tab)
 
     async def fake_discover_maso(_env: dict[str, str]):
-        return ("http://127.0.0.1:11004", _maso_catalog(), "[redacted]")
+        return ("http://127.0.0.1:11004", _maso_catalog(), "gemini-example")
 
     from claude_hub.services import maso_discovery
 
@@ -320,7 +322,7 @@ async def test_workspace_manager_prefers_heterogeneous_reviewer_and_cleans_up_ep
             cwd=str(repo),
             env={
                 "MASO_BASE_URL": "http://127.0.0.1:11004",
-                "MASO_MODEL": "[redacted]_reasoning_high",
+                "MASO_MODEL": "gemini-example_reasoning_high",
             },
             reuse_existing=False,
         ),
@@ -336,7 +338,7 @@ async def test_workspace_manager_prefers_heterogeneous_reviewer_and_cleans_up_ep
             cwd=str(repo),
             env={
                 "MASO_BASE_URL": "http://127.0.0.1:11004",
-                "MASO_MODEL": "[redacted]_reasoning_high",
+                "MASO_MODEL": "gemini-example_reasoning_high",
             },
             reuse_existing=False,
         ),
@@ -350,7 +352,7 @@ async def test_workspace_manager_prefers_heterogeneous_reviewer_and_cleans_up_ep
             cwd=str(repo),
             env={
                 "MASO_BASE_URL": "http://127.0.0.1:11004",
-                "MASO_MODEL": "[redacted]_reasoning_high",
+                "MASO_MODEL": "astra-example_reasoning_high",
             },
             reuse_existing=False,
         ),
@@ -464,7 +466,7 @@ async def test_reviewer_selection_reuses_independent_same_model_reviewer_and_fal
         return (
             "http://127.0.0.1:11004",
             _maso_catalog(),
-            "[redacted]_reasoning_high",
+            "gemini-example_reasoning_high",
         )
 
     from claude_hub.services import maso_discovery
@@ -483,7 +485,7 @@ async def test_reviewer_selection_reuses_independent_same_model_reviewer_and_fal
     )
     assert resolved is not None
     assert resolved.env["MASO_MODEL"] == DEFAULT_ASTRA_REVIEW_MODEL
-    assert resolved.default_maso_model == "[redacted]_reasoning_high"
+    assert resolved.default_maso_model == "gemini-example_reasoning_high"
 
     manager = WorkspaceManager()
     monkeypatch.setattr(manager, "_build_session_bootstrap_prompt", lambda *_a, **_k: "")
@@ -516,7 +518,7 @@ async def test_reviewer_selection_reuses_independent_same_model_reviewer_and_fal
             cwd=str(repo),
             env={
                 "MASO_BASE_URL": "http://127.0.0.1:11004",
-                "MASO_MODEL": "[redacted]_reasoning_high",
+                "MASO_MODEL": "gemini-example_reasoning_high",
             },
             reuse_existing=False,
         ),
@@ -565,7 +567,7 @@ async def test_reviewer_selection_reuses_independent_same_model_reviewer_and_fal
         return (
             "http://127.0.0.1:11004",
             _maso_catalog(include_argon=True, include_astra=False),
-            "[redacted]_reasoning_high",
+            "gemini-example_reasoning_high",
         )
 
     monkeypatch.setattr(maso_discovery, "discover_maso_service", argon_only_discover)
@@ -578,3 +580,51 @@ async def test_reviewer_selection_reuses_independent_same_model_reviewer_and_fal
     assert spawned_same_model.caller_owned_ephemeral is False
     assert spawned_same_model.env["MASO_BASE_URL"] == "http://127.0.0.1:11004"
     assert "CLAUDE_HUB_TAB_ID" not in spawned_same_model.env
+
+
+def test_reviewer_keeps_high_variant_advertised_under_duplicate_default_mode() -> None:
+    from claude_hub.services.agent_stream.maso_http import _model_options
+    from claude_hub.services.cross_reviewer import _pick_family_model
+
+    models = _model_options(
+        [
+            {
+                "key": "gemini-example",
+                "selector_variants": [
+                    {"mode": "default", "key": "gemini-example"},
+                    {"mode": "default", "key": "gemini-example_reasoning_high"},
+                ],
+            }
+        ]
+    )
+    assert (
+        _pick_family_model(
+            models, preferred_full_id="", base_prefix="gemini", target_family="argon"
+        )
+        == "gemini-example_reasoning_high"
+    )
+
+
+def test_reviewer_uses_configured_fallback_when_catalog_unavailable(monkeypatch) -> None:
+    from claude_hub.services import cross_reviewer
+
+    monkeypatch.setattr(cross_reviewer, "DEFAULT_ARGON_REVIEW_MODEL", "fixture-reasoning-high")
+    monkeypatch.setattr(cross_reviewer, "DEFAULT_ASTRA_REVIEW_MODEL", "")
+    candidates = cross_reviewer.select_cross_reviewer_candidates(
+        AgentType.CODEX, maso_base_url="http://127.0.0.1:11004", maso_models=[]
+    )
+    assert any(candidate.model == "fixture-reasoning-high" for candidate in candidates)
+
+
+def test_reviewer_retains_sorted_fallback_for_configured_preference() -> None:
+    from claude_hub.services.cross_reviewer import _pick_family_model
+
+    assert (
+        _pick_family_model(
+            ["gemini-z_reasoning_high", "gemini-a"],
+            preferred_full_id="gemini-preferred_reasoning_high",
+            base_prefix="gemini",
+            target_family="argon",
+        )
+        == "gemini-a"
+    )

@@ -52,7 +52,7 @@ defineProps<{ compact?: boolean }>()
 const appStore = useAppStore()
 const { identity, setIdentity, refreshIdentity } = useDotIdentity()
 const terminalStore = useTerminalStore()
-const { defaultPresetTextForAgent } = useLaunchEnvPresets()
+const { defaultPresetTextForAgent, ensureLoaded } = useLaunchEnvPresets()
 const opening = ref(false)
 const panelOpen = ref(false)
 
@@ -71,6 +71,7 @@ onMounted(() => { void refreshIdentity() })
 async function openDot() {
   opening.value = true
   try {
+    await ensureLoaded()
     const status = await setupDot(providerEnv())
     if (status.identity) setIdentity(status.identity)
     appStore.setMode('terminal')

@@ -10,7 +10,7 @@ visible.
 
 ## Evidence: source vs normalized
 
-A live probe against `codex app-server` (CLI 0.156.1, model `[redacted]`,
+A live probe against `codex app-server` (CLI 0.156.1, model `example-model-7388db16debd`,
 `reasoningEffort: xhigh`) captured the raw JSON-RPC notifications for a
 reasoning turn:
 

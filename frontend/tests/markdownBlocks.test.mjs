@@ -835,7 +835,7 @@ test('long streamed list: per-delta render time is informational (not asserted)'
 
 // ── Bare quoted-image token rewriting through the block cache ────────────
 
-const QUOTED_KEY = '[redacted]'
+const QUOTED_KEY = 'img_v3_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 
 test('bare quoted-image src is rewritten only when quotedTabId is given', () => {
   const src = `![Image](${QUOTED_KEY})`

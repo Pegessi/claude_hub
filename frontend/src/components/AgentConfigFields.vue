@@ -136,7 +136,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import EnvPresetManager from '@/components/EnvPresetManager.vue'
 import {
   defaultLaunchEnvPresetForAgent,
@@ -183,6 +183,14 @@ const { envPresets, getPresetText, defaultPresetTextForAgent } =
 
 const uid = `acf-${Math.random().toString(36).slice(2, 9)}`
 const showEnvManager = ref(false)
+
+// Update an untouched preset when its server-provided text arrives. A user edit
+// or a switch to another preset wins over the asynchronous response.
+watch(() => getPresetText(props.envPreset), (text, previous) => {
+  if (text !== null && previous !== null && props.envText === previous) {
+    emit('update:envText', text)
+  }
+})
 
 const supportsSoloMode = computed(
   () => !['terminal', 'maso'].includes(props.agentType)

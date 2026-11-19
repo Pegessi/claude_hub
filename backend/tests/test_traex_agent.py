@@ -297,7 +297,7 @@ def test_traex_working_indicator_classifies_as_working(monkeypatch: pytest.Monke
             "    2. continue",
             "    3. continue",
             "",
-            "  [redacted] · ~/Downloads",
+            "  example-model-2dd391fe0fbe · ~/Downloads",
         ]
     )
 
@@ -373,7 +373,10 @@ async def test_traex_capabilities_use_live_model_reasoning_metadata(
         [
             json.dumps({"id": 1, "result": {}}).encode() + b"\n",
             json.dumps(
-                {"id": 2, "result": {"thread": {"id": "thread-1"}, "model": "[redacted]"}}
+                {
+                    "id": 2,
+                    "result": {"thread": {"id": "thread-1"}, "model": "example-model-419255f2bb4c"},
+                }
             ).encode()
             + b"\n",
             json.dumps(
@@ -398,7 +401,7 @@ async def test_traex_capabilities_use_live_model_reasoning_metadata(
                     "result": {
                         "data": [
                             {
-                                "model": "[redacted]",
+                                "model": "example-model-419255f2bb4c",
                                 "displayName": "GPT 5.6 Sol",
                                 "description": "Fast coding model",
                                 "hidden": False,
@@ -427,11 +430,11 @@ async def test_traex_capabilities_use_live_model_reasoning_metadata(
     try:
         await transport.prepare_capabilities()
         capabilities = transport.capabilities()
-        assert capabilities.current_model == "[redacted]"
+        assert capabilities.current_model == "example-model-419255f2bb4c"
         assert len(capabilities.available_models) == 1
         model = capabilities.available_models[0]
         assert (model.id, model.label, model.description) == (
-            "[redacted]",
+            "example-model-419255f2bb4c",
             "GPT 5.6 Sol",
             "Fast coding model",
         )
@@ -467,7 +470,7 @@ async def test_traex_selected_reasoning_effort_reaches_collaboration_mode(
     transport._started = True
     transport._process = cast(asyncio.subprocess.Process, _FakeProcess([]))
     transport._thread_id = "thread-1"
-    transport._thread_model = "[redacted]"
+    transport._thread_model = "example-model-419255f2bb4c"
     transport._mode_presets[mode.value] = {
         "name": mode.value.title(),
         "mode": mode.value,
@@ -489,7 +492,7 @@ async def test_traex_selected_reasoning_effort_reaches_collaboration_mode(
     assert params["collaborationMode"] == {
         "mode": mode.value,
         "settings": {
-            "model": "[redacted]",
+            "model": "example-model-419255f2bb4c",
             "developer_instructions": None,
             "reasoning_effort": "high",
         },
@@ -744,7 +747,7 @@ async def test_traex_permission_changes_apply_on_next_turn(monkeypatch: pytest.M
     transport.acknowledge_turn_complete()
     transport._current_mode = "plan"
     transport._mode_discovery_attempted = True
-    transport._thread_model = "[redacted]"
+    transport._thread_model = "example-model-2dd391fe0fbe"
     transport._mode_presets = {"plan": {"mode": "plan"}}
     await transport.send_message("plan only", [])
     assert send.await_args is not None

@@ -202,7 +202,7 @@ test('Personal /ai Assistant panel loads status, updates provider/model/reasonin
       owner_open_id: 'ou_owner_1',
       app_id: 'cli_app_1',
       provider: 'claude',
-      model: '[redacted]',
+      model: 'example-code-model',
       reasoning_effort: '',
       cwd: '',
       watch_chats: ['oc_chat_1'],
@@ -253,9 +253,9 @@ test('Personal /ai Assistant panel loads status, updates provider/model/reasonin
         maso: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
       },
       provider_models: {
-        claude: ['[redacted]'],
+        claude: ['example-code-model'],
         codex: ['gpt-5.4', 'o3'],
-        maso: ['[redacted]_reasoning_high'],
+        maso: ['gemini-example-model-1dd583607df6_reasoning_high'],
       },
     },
     imported: true,
@@ -313,7 +313,7 @@ test('Personal /ai Assistant blocks save before initial hydration and preserves 
     owner_open_id: '',
     app_id: '',
     provider: 'maso',
-    model: '[redacted]_reasoning_high',
+    model: 'gemini-example-model-1dd583607df6_reasoning_high',
     reasoning_effort: 'high',
     cwd: '/srv/persisted',
     watch_chats: ['oc_persisted'],
@@ -366,7 +366,7 @@ test('Personal /ai Assistant blocks save before initial hydration and preserves 
       },
       provider_models: {
         codex: ['gpt-5.4'],
-        maso: ['[redacted]_reasoning_high'],
+        maso: ['gemini-example-model-1dd583607df6_reasoning_high'],
       },
     },
     imported,
@@ -421,7 +421,7 @@ test('Personal /ai Assistant blocks save before initial hydration and preserves 
   assert.equal(state.aiCommandLoaded, true)
   assert.equal(state.aiCommandLoadError, null)
   assert.equal(state.aiEdit.provider, 'maso')
-  assert.equal(state.aiEdit.model, '[redacted]_reasoning_high')
+  assert.equal(state.aiEdit.model, 'gemini-example-model-1dd583607df6_reasoning_high')
   assert.equal(state.aiEdit.cwd, '/srv/persisted')
   assert.equal(state.aiWatchChatsText, 'oc_persisted')
 
@@ -474,8 +474,8 @@ test('Personal /ai Assistant handles Reload during initial GET, re-entry draft p
       providers: ['codex', 'claude', 'maso'],
       provider_models: {
         codex: ['gpt-5.4', 'o3'],
-        claude: ['[redacted]'],
-        maso: ['[redacted]_reasoning_high'],
+        claude: ['example-code-model'],
+        maso: ['gemini-example-model-1dd583607df6_reasoning_high'],
       },
       reasoning_efforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
       provider_reasoning_efforts: {
@@ -484,7 +484,7 @@ test('Personal /ai Assistant handles Reload during initial GET, re-entry draft p
         maso: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
       },
       model_reasoning_efforts: {
-        '[redacted]_reasoning_high': ['none', 'low', 'medium', 'high'],
+        'gemini-example-model-1dd583607df6_reasoning_high': ['none', 'low', 'medium', 'high'],
       },
     },
   })
@@ -498,7 +498,7 @@ test('Personal /ai Assistant handles Reload during initial GET, re-entry draft p
           return response({
             detail: {
               code: 'invalid_ai_command_config',
-              message: "MASO model '[redacted]' does not support reasoning_effort='xhigh'; supported efforts: none, low, medium, high",
+              message: "MASO model 'gemini-example-model-1dd583607df6' does not support reasoning_effort='xhigh'; supported efforts: none, low, medium, high",
             },
           }, 400)
         }
@@ -540,7 +540,7 @@ test('Personal /ai Assistant handles Reload during initial GET, re-entry draft p
 
   // 3. R2-07c: Editing effort then refreshing after external provider change keeps coherent tuple
   state.aiEdit.reasoning_effort = 'low'
-  currentCfg = { ...baseCfg, provider: 'claude', model: '[redacted]', reasoning_effort: '' }
+  currentCfg = { ...baseCfg, provider: 'claude', model: 'example-code-model', reasoning_effort: '' }
   await state.refresh()
   await flush()
   assert.equal(state.aiEdit.provider, 'codex')
@@ -554,18 +554,18 @@ test('Personal /ai Assistant handles Reload during initial GET, re-entry draft p
   await flush()
   assert.equal(state.aiTupleConflict, null)
   assert.equal(state.aiEdit.provider, 'claude')
-  assert.equal(state.aiEdit.model, '[redacted]')
+  assert.equal(state.aiEdit.model, 'example-code-model')
   assert.equal(state.aiEdit.reasoning_effort, '')
 
   // 4. Actionable backend validation message is preserved on 400 invalid_ai_command_config
   state.onAiProviderChange('maso')
   await flush()
-  // Model-aware effort filtering limits [redacted]_reasoning_high to none/low/medium/high
+  // Model-aware effort filtering limits gemini-example-model-1dd583607df6_reasoning_high to none/low/medium/high
   assert.deepEqual([...state.aiEffortOptions], ['none', 'low', 'medium', 'high'])
   state.aiEdit.reasoning_effort = 'xhigh'
   assert.equal(await state.saveAiCommand(), false)
   await flush()
-  assert.match(state.error, /MASO model '[redacted]' does not support reasoning_effort='xhigh'/)
+  assert.match(state.error, /MASO model 'gemini-example-model-1dd583607df6' does not support reasoning_effort='xhigh'/)
 })
 
 test('Personal /ai navigation retires pending load and conflict adoption respects busy lock', async t => {
@@ -594,7 +594,7 @@ test('Personal /ai navigation retires pending load and conflict adoption respect
     config: { ...currentCfg },
     capabilities: {
       providers: ['codex', 'claude'],
-      provider_models: { codex: ['gpt-5.4'], claude: ['[redacted]'] },
+      provider_models: { codex: ['gpt-5.4'], claude: ['example-code-model'] },
       reasoning_efforts: ['low', 'high'],
       provider_reasoning_efforts: { codex: ['low', 'high'], claude: [] },
     },
@@ -634,7 +634,7 @@ test('Personal /ai navigation retires pending load and conflict adoption respect
   await flush()
   assert.equal(state.aiCommandLoaded, true)
   state.aiEdit.reasoning_effort = 'low'
-  currentCfg = { ...currentCfg, provider: 'claude', model: '[redacted]', reasoning_effort: '' }
+  currentCfg = { ...currentCfg, provider: 'claude', model: 'example-code-model', reasoning_effort: '' }
   await state.refresh()
   await flush()
   assert.ok(state.aiTupleConflict)
@@ -667,7 +667,7 @@ test('Personal /ai Assistant truthfully renders user mode, bot fallback with dis
     owner_open_id: 'ou_owner_fb',
     app_id: 'cli_bot_fb',
     provider: 'claude',
-    model: '[redacted]',
+    model: 'example-code-model',
     reasoning_effort: '',
     cwd: '/srv',
     watch_chats: ['oc_chat_fb'],
@@ -682,7 +682,7 @@ test('Personal /ai Assistant truthfully renders user mode, bot fallback with dis
   let tokenStatus = {
     has_token: true,
     open_id: 'ou_owner_fb',
-    user_name: '[redacted]',
+    user_name: 'Example Person',
     app_id: 'cli_user_app',
     source: 'lark_cli',
     expires_at: 9999999999,
@@ -722,7 +722,7 @@ test('Personal /ai Assistant truthfully renders user mode, bot fallback with dis
         },
         capabilities: {
           providers: ['claude', 'codex'],
-          provider_models: { claude: ['[redacted]'], codex: ['gpt-5.4'] },
+          provider_models: { claude: ['example-code-model'], codex: ['gpt-5.4'] },
           reasoning_efforts: ['low', 'high'],
           provider_reasoning_efforts: { claude: [], codex: ['low', 'high'] },
         },
@@ -740,7 +740,7 @@ test('Personal /ai Assistant truthfully renders user mode, bot fallback with dis
   assert.equal(state.aiTokenChipLabel, 'Missing send_as_user')
   assert.equal(
     state.aiTokenSummary,
-    '[redacted] (ou_owner_fb) · Missing required scope: im:message.send_as_user (and no bot fallback configured)',
+    'Example Person (ou_owner_fb) · Missing required scope: im:message.send_as_user (and no bot fallback configured)',
   )
   assert.equal(
     state.aiTokenGuidance,
@@ -770,7 +770,7 @@ test('Personal /ai Assistant truthfully renders user mode, bot fallback with dis
   assert.equal(state.aiTokenChipLabel, 'Bot fallback (cli_bot_fallback_99)')
   assert.equal(
     state.aiTokenSummary,
-    'Ready (bot fallback: cli_bot_fallback_99): [redacted] (ou_owner_fb) · im:message.send_as_user not granted',
+    'Ready (bot fallback: cli_bot_fallback_99): Example Person (ou_owner_fb) · im:message.send_as_user not granted',
   )
   assert.equal(state.aiSidebarMeta, 'Bot fallback (cli_bot_fallback_99)')
   assert.equal(state.aiTokenGuidance, '')
@@ -795,7 +795,7 @@ test('Personal /ai Assistant truthfully renders user mode, bot fallback with dis
   assert.equal(state.aiTokenChipLabel, 'Scope ready')
   assert.equal(
     state.aiTokenSummary,
-    'Ready: [redacted] (ou_owner_fb) · im:message.send_as_user granted',
+    'Ready: Example Person (ou_owner_fb) · im:message.send_as_user granted',
   )
   assert.equal(state.aiSidebarMeta, 'Personal account reply')
   assert.equal(findByTestId(state.$root, 'feishu-ai-token-card')?.props['data-state'], 'connected')
@@ -804,7 +804,7 @@ test('Personal /ai Assistant truthfully renders user mode, bot fallback with dis
   tokenStatus = {
     ...tokenStatus,
     open_id: '7111222333444555666',
-    user_name: '[redacted]',
+    user_name: 'Example Person',
     app_id: 'web_session',
     source: 'web_session',
     granted_scopes: ['im:message'],
@@ -813,7 +813,7 @@ test('Personal /ai Assistant truthfully renders user mode, bot fallback with dis
     has_send_as_user_scope: false,
     has_web_session: true,
     web_session_user_id: '7111222333444555666',
-    web_session_name: '[redacted]',
+    web_session_name: 'Example Person',
     send_mode: 'web_session',
     missing_required_scopes: [],
   }
@@ -823,7 +823,7 @@ test('Personal /ai Assistant truthfully renders user mode, bot fallback with dis
   assert.equal(state.aiTokenChipLabel, 'Web session ready')
   assert.equal(
     state.aiTokenSummary,
-    'Ready (web session): [redacted] (7111222333444555666) · user-identity reply active',
+    'Ready (web session): Example Person (7111222333444555666) · user-identity reply active',
   )
   assert.equal(state.aiSidebarMeta, 'Personal account reply')
   assert.equal(findByTestId(state.$root, 'feishu-ai-token-card')?.props['data-state'], 'connected')
@@ -837,7 +837,7 @@ test('Personal /ai Model selector renders Provider-linked logical options, maps 
     owner_open_id: 'ou_owner',
     app_id: 'cli_owner',
     provider: 'maso',
-    model: '[redacted]_reasoning_high',
+    model: 'gemini-example-model-1dd583607df6_reasoning_high',
     reasoning_effort: 'high',
     cwd: '/srv/ai',
     watch_chats: [],
@@ -861,16 +861,16 @@ test('Personal /ai Model selector renders Provider-linked logical options, maps 
       antigravity: [],
     },
     provider_models: {
-      claude: ['claude-opus-4-8', '[redacted]'],
-      codex: ['[redacted]', 'gpt-5.4'],
-      maso: ['[redacted]_reasoning_high', '[redacted]_reasoning_high'],
+      claude: ['claude-opus-4-8', 'example-code-model'],
+      codex: ['gpt-example-model-c886ad270fea', 'gpt-5.4'],
+      maso: ['example-model-dedfefd51120_reasoning_high', 'gemini-example-model-1dd583607df6_reasoning_high'],
       cursor: ['gpt-5.3-codex-high', 'claude-4.5-sonnet'],
-      antigravity: ['[redacted]-high'],
+      antigravity: ['gemini-example-model-1d11bad5f3fe-high'],
     },
     provider_model_options: {
       claude: [
         { id: 'claude-opus-4-8', label: 'claude-opus-4-8', provider_model_id: 'claude-opus-4-8' },
-        { id: '[redacted]', label: '[redacted]', provider_model_id: '[redacted]' },
+        { id: 'example-code-model', label: 'example-code-model', provider_model_id: 'example-code-model' },
       ],
       codex: [
         {
@@ -885,39 +885,39 @@ test('Personal /ai Model selector renders Provider-linked logical options, maps 
           ],
         },
         {
-          id: '[redacted]',
-          label: '[redacted]',
-          provider_model_id: '[redacted]',
+          id: 'gpt-example-model-c886ad270fea',
+          label: 'gpt-example-model-c886ad270fea',
+          provider_model_id: 'gpt-example-model-c886ad270fea',
           default_reasoning_effort: 'high',
           supported_reasoning_efforts: [
-            { id: 'medium', label: 'Medium', provider_model_id: '[redacted]' },
-            { id: 'high', label: 'High', provider_model_id: '[redacted]' },
-            { id: 'max', label: 'Max', provider_model_id: '[redacted]' },
+            { id: 'medium', label: 'Medium', provider_model_id: 'gpt-example-model-c886ad270fea' },
+            { id: 'high', label: 'High', provider_model_id: 'gpt-example-model-c886ad270fea' },
+            { id: 'max', label: 'Max', provider_model_id: 'gpt-example-model-c886ad270fea' },
           ],
         },
       ],
       maso: [
         {
-          id: '[redacted]',
-          label: '[redacted]',
-          provider_model_id: '[redacted]',
+          id: 'example-model-dedfefd51120',
+          label: 'example-model-dedfefd51120',
+          provider_model_id: 'example-model-dedfefd51120',
           default_reasoning_effort: 'default',
           supported_reasoning_efforts: [
-            { id: 'default', label: 'Default', provider_model_id: '[redacted]' },
-            { id: 'high', label: 'High', provider_model_id: '[redacted]_reasoning_high' },
-            { id: 'xhigh', label: 'Extra High', provider_model_id: '[redacted]_reasoning_xhigh' },
-            { id: 'max', label: 'Max', provider_model_id: '[redacted]_reasoning_max' },
+            { id: 'default', label: 'Default', provider_model_id: 'example-model-dedfefd51120' },
+            { id: 'high', label: 'High', provider_model_id: 'example-model-dedfefd51120_reasoning_high' },
+            { id: 'xhigh', label: 'Extra High', provider_model_id: 'example-model-dedfefd51120_reasoning_xhigh' },
+            { id: 'max', label: 'Max', provider_model_id: 'example-model-dedfefd51120_reasoning_max' },
           ],
         },
         {
-          id: '[redacted]',
-          label: '[redacted]',
-          provider_model_id: '[redacted]',
+          id: 'gemini-example-model-1dd583607df6',
+          label: 'gemini-example-model-1dd583607df6',
+          provider_model_id: 'gemini-example-model-1dd583607df6',
           default_reasoning_effort: 'low',
           supported_reasoning_efforts: [
-            { id: 'low', label: 'Low', provider_model_id: '[redacted]' },
-            { id: 'medium', label: 'Medium', provider_model_id: '[redacted]_reasoning_medium' },
-            { id: 'high', label: 'High', provider_model_id: '[redacted]_reasoning_high' },
+            { id: 'low', label: 'Low', provider_model_id: 'gemini-example-model-1dd583607df6' },
+            { id: 'medium', label: 'Medium', provider_model_id: 'gemini-example-model-1dd583607df6_reasoning_medium' },
+            { id: 'high', label: 'High', provider_model_id: 'gemini-example-model-1dd583607df6_reasoning_high' },
           ],
         },
       ],
@@ -941,7 +941,7 @@ test('Personal /ai Model selector renders Provider-linked logical options, maps 
         },
       ],
       antigravity: [
-        { id: '[redacted]-high', label: '[redacted]-high', provider_model_id: '[redacted]-high' },
+        { id: 'gemini-example-model-1d11bad5f3fe-high', label: 'gemini-example-model-1d11bad5f3fe-high', provider_model_id: 'gemini-example-model-1d11bad5f3fe-high' },
       ],
     },
   }
@@ -998,49 +998,49 @@ test('Personal /ai Model selector renders Provider-linked logical options, maps 
   assert.equal(modelSelect?.tag, 'select')
   assert.deepEqual(
     state.aiModelSelectOptions.map(o => o.label),
-    ['[redacted]', '[redacted]'],
+    ['example-model-dedfefd51120', 'gemini-example-model-1dd583607df6'],
   )
   assert.equal(state.aiCustomModelOption, null)
-  assert.equal(state.aiSidebarMeta, 'maso · [redacted]')
+  assert.equal(state.aiSidebarMeta, 'maso · gemini-example-model-1dd583607df6')
   assert.deepEqual([...state.aiEffortOptions], ['low', 'medium', 'high'])
 
   // 2. Hydrating persisted variant did NOT mark server tuple dirty: external server change adopts cleanly without conflict
-  serverCfg = { ...serverCfg, model: '[redacted]_reasoning_medium', reasoning_effort: 'medium' }
+  serverCfg = { ...serverCfg, model: 'gemini-example-model-1dd583607df6_reasoning_medium', reasoning_effort: 'medium' }
   await state.refresh()
   await flush()
   assert.equal(state.aiTupleConflict, null)
-  assert.equal(state.aiEdit.model, '[redacted]_reasoning_medium')
+  assert.equal(state.aiEdit.model, 'gemini-example-model-1dd583607df6_reasoning_medium')
   assert.equal(state.aiEdit.reasoning_effort, 'medium')
 
-  // 3. Changing effort on MASO updates variant provider_model_id; switching to live-shaped [redacted]
-  //    supports mode='default' ('[redacted]') across selection -> PATCH -> reload as well as xhigh/max!
+  // 3. Changing effort on MASO updates variant provider_model_id; switching to live-shaped example-model-dedfefd51120
+  //    supports mode='default' ('example-model-dedfefd51120') across selection -> PATCH -> reload as well as xhigh/max!
   state.onAiEffortChange('low')
   await flush()
-  assert.equal(state.aiEdit.model, '[redacted]')
+  assert.equal(state.aiEdit.model, 'gemini-example-model-1dd583607df6')
   assert.equal(state.aiEdit.reasoning_effort, 'low')
 
-  state.onAiModelChange('[redacted]')
+  state.onAiModelChange('example-model-dedfefd51120')
   await flush()
   assert.deepEqual([...state.aiEffortOptions], ['default', 'high', 'xhigh', 'max'])
-  assert.equal(state.aiEdit.model, '[redacted]')
+  assert.equal(state.aiEdit.model, 'example-model-dedfefd51120')
   assert.equal(state.aiEdit.reasoning_effort, 'default')
   assert.equal(await state.saveAiCommand(), true)
   assert.deepEqual(
     { provider: savedBody.provider, model: savedBody.model, reasoning_effort: savedBody.reasoning_effort },
-    { provider: 'maso', model: '[redacted]', reasoning_effort: 'default' },
+    { provider: 'maso', model: 'example-model-dedfefd51120', reasoning_effort: 'default' },
   )
   await state.openAiCommand()
   await flush()
   assert.equal(state.aiTupleConflict, null)
-  assert.equal(state.aiEdit.model, '[redacted]')
+  assert.equal(state.aiEdit.model, 'example-model-dedfefd51120')
   assert.equal(state.aiEdit.reasoning_effort, 'default')
 
   state.onAiEffortChange('xhigh')
   await flush()
-  assert.equal(state.aiEdit.model, '[redacted]_reasoning_xhigh')
+  assert.equal(state.aiEdit.model, 'example-model-dedfefd51120_reasoning_xhigh')
   assert.equal(state.aiEdit.reasoning_effort, 'xhigh')
 
-  // 3b. MASO Provider default ('') from [redacted]_reasoning_xhigh + xhigh clears model-bound effort,
+  // 3b. MASO Provider default ('') from example-model-dedfefd51120_reasoning_xhigh + xhigh clears model-bound effort,
   //     disables effort select, saves ('maso', '', ''), and reloads cleanly without conflict or argon fallback
   state.onAiModelChange('')
   await flush()
@@ -1061,8 +1061,8 @@ test('Personal /ai Model selector renders Provider-linked logical options, maps 
   assert.equal(state.aiEdit.reasoning_effort, '')
   assert.equal(state.aiSidebarMeta, 'maso · default')
 
-  // Re-selecting [redacted] restores xhigh and unlocks Cursor switch test below
-  state.onAiModelChange('[redacted]_reasoning_high')
+  // Re-selecting example-model-dedfefd51120 restores xhigh and unlocks Cursor switch test below
+  state.onAiModelChange('example-model-dedfefd51120_reasoning_high')
   state.onAiEffortChange('xhigh')
   await flush()
 
@@ -1070,7 +1070,7 @@ test('Personal /ai Model selector renders Provider-linked logical options, maps 
   state.onAiProviderChange('codex')
   assert.equal(state.aiEdit.model, 'gpt-5.4')
   state.onAiProviderChange('maso')
-  state.onAiModelChange('[redacted]_reasoning_high')
+  state.onAiModelChange('example-model-dedfefd51120_reasoning_high')
   state.onAiEffortChange('xhigh')
   await flush()
 
@@ -1133,11 +1133,11 @@ test('Personal /ai Model selector renders Provider-linked logical options, maps 
   assert.equal(state.aiEdit.model, '')
   assert.equal(state.aiEdit.reasoning_effort, 'high')
 
-  state.onAiModelChange('[redacted]')
+  state.onAiModelChange('gpt-example-model-c886ad270fea')
   state.onAiEffortChange('max')
   await flush()
   assert.equal(await state.saveAiCommand(), true)
   assert.equal(savedBody.provider, 'codex')
-  assert.equal(savedBody.model, '[redacted]')
+  assert.equal(savedBody.model, 'gpt-example-model-c886ad270fea')
   assert.equal(savedBody.reasoning_effort, 'max')
 })

@@ -1,6 +1,6 @@
 """Rich-text, Markdown block, message content, and feed parsing/formatting for Feishu web protocol.
 
-Ported from ``[redacted]`` ``extensions/lark-desk/internal/web/``
+Web-session protocol client
 (``messages.go``, ``rich.go``, ``content.go``, ``feed.go``).
 """
 

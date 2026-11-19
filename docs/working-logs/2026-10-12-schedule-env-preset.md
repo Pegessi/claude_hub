@@ -19,7 +19,7 @@ launch environment. `_fire_hub_task` / `_fire_new_session` built
 `EnsureWorkspaceAgentRequest` without `env_preset` and without explicit env, so
 `create_tab` fell back to `DEFAULT_CLAUDE_LAUNCH_ENV`
 (`ark.cn-beijing.volces.com/api/coding` + `[redacted]`). The
-workspace's healthy `day1` custom preset (super-relay, `ark/[redacted]`)
+workspace's healthy `day1` custom preset (super-relay, `ark/example-model-2dd391fe0fbe`)
 could only be used by manually created agents, never by the scheduler.
 
 ## Change

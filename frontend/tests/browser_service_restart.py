@@ -297,7 +297,7 @@ async def main(browser_run: BrowserRun) -> None:
                                 "limits": [
                                     {
                                         "scope": (
-                                            "[redacted]"
+                                            "ep-test-b8c6q"
                                             if provider == "maso"
                                             else f"{provider}-window"
                                         ),
@@ -372,7 +372,7 @@ async def main(browser_run: BrowserRun) -> None:
             maso_label = maso_quota.locator(".quota-row-label").first
             await expect(maso_label).to_have_text("Unlisted endpoint · b8c6q")
             await expect(maso_label).to_have_attribute(
-                "title", "Unlisted endpoint · b8c6q ([redacted])"
+                "title", "Unlisted endpoint · b8c6q (ep-test-b8c6q)"
             )
             report["quota_mock_visible_ms"]["maso"] = round(
                 (asyncio.get_running_loop().time() - quota_started) * 1000

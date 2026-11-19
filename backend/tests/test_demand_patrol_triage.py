@@ -55,7 +55,7 @@ def message(
     chat_type: str = "p2p",
     thread: str = "",
     mentions: list[dict[str, Any]] | None = None,
-    text: str = "服务 OOM 报错，帮忙排查 https://[redacted]/job/123",
+    text: str = "服务 OOM 报错，帮忙排查 https://compute.example.com/job/123",
 ) -> dict[str, Any]:
     return {
         "message_id": message_id,
@@ -76,7 +76,7 @@ def diagnosis(*, next_action: str = "检查配置与失败日志并确认修复�
         headline="定位服务启动阶段 OOM 并核对缓存配置",
         root_cause="日志显示启动时分配缓存超出设备可用显存，需继续核对配置来源。",
         evidence_links=[
-            TriageEvidenceLink(title="任务失败日志", url="https://[redacted]/job/123")
+            TriageEvidenceLink(title="任务失败日志", url="https://compute.example.com/job/123")
         ],
         reply_draft=(
             "已查看这次启动失败日志，错误发生在缓存初始化分配显存时，目前能确认可用显存不足。"
@@ -261,6 +261,9 @@ async def capabilities(_base_url: str) -> dict[str, Any]:
 @pytest.fixture(autouse=True)
 def isolated_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("CLAUDE_HUB_HOME", str(tmp_path / "hub"))
+    monkeypatch.setenv(
+        "CLAUDE_HUB_PATROL_ACTIONABLE_HOSTS", "compute.example.invalid,git.example.invalid"
+    )
     monkeypatch.setenv("INFOWALL_URL", "http://127.0.0.1:18899")
     monkeypatch.setenv("INFOWALL_API_KEY_FILE", KEY_PATH)
     # A missed seam must fail the test rather than silently reaching a service.
@@ -401,7 +404,7 @@ async def test_mention_and_participated_thread_apply_and_notify() -> None:
     assert first["status"] == "pending" and first["priority"] == "none"
     assert first["sources"][0]["dedupe_key"] == "feishu-im:mention:0"
     assert first["sources"][0]["sender_id"] == "ou_sender"
-    assert "[redacted]" in first["progress"][0]["links"][1]["url"]
+    assert "compute.example.com" in first["progress"][0]["links"][1]["url"]
     assert "project_id" not in first
     assert first["next_action"] == diagnosis().next_action
     assert set(state.processed_feishu_ids) == {"mention", "followup"}
@@ -695,13 +698,22 @@ async def test_workspace_chat_adapter_prefers_available_maso_and_auto_archives(
         return f"```json\n{diagnosis().model_dump_json()}\n```"
 
     monkeypatch.setattr(triage_module, "_run_workspace_triage_turn", fake_run_turn)
-    discovery = AsyncMock(
-        return_value=(
-            "http://127.0.0.1:19999",
-            [StreamModelOption(id="[redacted]_reasoning_high", label="Gemini")],
-            "default",
-        )
+    from claude_hub.services.agent_stream.maso_http import _model_options
+
+    preferred = "gemini-example-model-1dd583607df6_reasoning_high"
+    monkeypatch.setenv("CLAUDE_HUB_PATROL_MODEL", preferred)
+    models = _model_options(
+        [
+            {
+                "key": "gemini-example-model-1dd583607df6",
+                "selector_variants": [
+                    {"mode": "default", "key": "gemini-example-model-1dd583607df6"},
+                    {"mode": "default", "key": preferred},
+                ],
+            }
+        ]
     )
+    discovery = AsyncMock(return_value=("http://127.0.0.1:19999", models, "default"))
     monkeypatch.setattr(triage_module, "discover_maso_service", discovery)
     result = await diagnose_message(candidate_for_adapter())
     assert result.headline == diagnosis().headline
@@ -716,7 +728,7 @@ async def test_workspace_chat_adapter_prefers_available_maso_and_auto_archives(
     assert req.title == "Patrol triage: source"
     assert req.env == {
         "MASO_BASE_URL": "http://127.0.0.1:19999",
-        "MASO_MODEL": "[redacted]_reasoning_high",
+        "MASO_MODEL": "gemini-example-model-1dd583607df6_reasoning_high",
     }
     assert "禁止修改文件" in captured_prompts[0]
     assert "\\u003c/untrusted_feishu_evidence\\u003e" in captured_prompts[0]
@@ -853,13 +865,13 @@ async def test_rc1_rc2_minute_precision_naive_timestamps_and_microsecond_now() -
     boundary_row = {
         "message_id": "om_boundary",
         "chat_id": "oc_group",
-        "chat_name": "[redacted]群",
+        "chat_name": "Example Person群",
         "chat_type": "group",
         "thread_id": "omt_1",
         "create_time": "2026-11-17 15:31",
-        "sender": {"id": "ou_colleague", "name": "[redacted]"},
-        "content": "<p>@[redacted] 看起来升级了相比xgpt也不太正常，求看看</p>",
-        "mentions": [{"id": ME, "name": "[redacted]"}],
+        "sender": {"id": "ou_colleague", "name": "Example Person"},
+        "content": "<p>@Example Person 看起来升级了相比xgpt也不太正常，求看看</p>",
+        "mentions": [{"id": ME, "name": "Example Person"}],
         "message_app_link": "https://applink.feishu.cn/client/message/om_boundary",
     }
     runner = FakeRunner([boundary_row])
@@ -881,21 +893,21 @@ async def test_rc1_rc2_minute_precision_naive_timestamps_and_microsecond_now() -
 @pytest.mark.parametrize(
     "text",
     [
-        "<p>@[redacted] 看起来升级了相比xgpt也不太正常，求看看</p>",
-        "@冯子原 @[redacted] 这里又遇到一个问题。",
-        "![Image](img_v3_123)\n@[redacted] server是不是没成功启动",
-        "可以帮我检查下吗 @陈亮强 @田浩炜 @[redacted]",
-        "@[redacted] 麻烦看下这个指标异常",
-        "@[redacted] 帮忙瞅瞅 https://[redacted]/docx/abc123",
-        "@[redacted] https://[redacted]/evaluation/arena/123",
-        "@[redacted] https://[redacted]/job/456",
+        "<p>@Example Person 看起来升级了相比xgpt也不太正常，求看看</p>",
+        "@冯子原 @Example Person 这里又遇到一个问题。",
+        "![Image](img_v3_123)\n@Example Person server是不是没成功启动",
+        "可以帮我检查下吗 @陈亮强 @田浩炜 @Example Person",
+        "@Example Person 麻烦看下这个指标异常",
+        "@Example Person 帮忙瞅瞅 https://git.example.invalid/docx/abc123",
+        "@Example Person https://compute.example.invalid/evaluation/arena/123",
+        "@Example Person https://compute.example.invalid/job/456",
     ],
 )
 async def test_rc4_broadened_actionable_phrases_and_internal_urls(text: str) -> None:
     row = message(
         "om_real",
         chat_type="group",
-        mentions=[{"id": ME, "name": "[redacted]"}],
+        mentions=[{"id": ME, "name": "Example Person"}],
         text=text,
     )
     result = await run_feishu_triage(
@@ -916,7 +928,7 @@ async def test_rc3_rc4_non_threaded_group_unrelated_own_message_does_not_mark_an
         minutes_ago=25,
         sender="ou_alice",
         mentions=[{"id": ME}],
-        text="@[redacted] 这里又遇到一个问题。",
+        text="@Example Person 这里又遇到一个问题。",
     )
     mention_replied = message(
         "om_replied",
@@ -925,7 +937,7 @@ async def test_rc3_rc4_non_threaded_group_unrelated_own_message_does_not_mark_an
         minutes_ago=20,
         sender="ou_bob",
         mentions=[{"id": ME}],
-        text="@[redacted] 可以帮我检查下吗",
+        text="@Example Person 可以帮我检查下吗",
     )
     own_unrelated = message(
         "om_own_unrelated",
@@ -989,7 +1001,7 @@ async def test_f1_f2_f3_scoped_discovery_reply_anchoring_and_self_mention_covera
         sender="ou_alice",
         mentions=[{"id": ME}],
         minutes_ago=25,
-        text="@[redacted] 第一个问题：服务是不是挂了",
+        text="@Example Person 第一个问题：服务是不是挂了",
     )
     second_question = message(
         "second-question",
@@ -998,7 +1010,7 @@ async def test_f1_f2_f3_scoped_discovery_reply_anchoring_and_self_mention_covera
         sender="ou_alice",
         mentions=[{"id": ME}],
         minutes_ago=20,
-        text="@[redacted] 第二个问题：配置怎么不对",
+        text="@Example Person 第二个问题：配置怎么不对",
     )
     own_second_answer = {
         **message(
@@ -1020,7 +1032,7 @@ async def test_f1_f2_f3_scoped_discovery_reply_anchoring_and_self_mention_covera
             sender=ME,
             mentions=[{"id": ME}],
             minutes_ago=18,
-            text="备忘 @[redacted]",
+            text="备忘 @Example Person",
         ),
         "chat_id": "oc_other",
     }
@@ -1032,7 +1044,7 @@ async def test_f1_f2_f3_scoped_discovery_reply_anchoring_and_self_mention_covera
             sender="ou_bob",
             mentions=[{"id": ME}],
             minutes_ago=16,
-            text="@[redacted] 帮忙看看这个报错",
+            text="@Example Person 帮忙看看这个报错",
         ),
         "chat_id": "oc_group2",
     }
@@ -1081,7 +1093,7 @@ async def test_f5_participated_thread_in_busy_group_with_over_500_irrelevant_row
             sender="ou_alice",
             mentions=[{"id": ME}],
             minutes_ago=15,
-            text="@[redacted] 这个配置怎么报错了？",
+            text="@Example Person 这个配置怎么报错了？",
         ),
         "chat_id": "oc_quiet",
         "chat_name": "安静排障群",
@@ -1149,7 +1161,7 @@ async def test_f6_participated_thread_with_over_500_historical_rows_in_same_thre
             sender="ou_alice",
             mentions=[{"id": ME}],
             minutes_ago=30,
-            text="@[redacted] 这个配置怎么报错了？",
+            text="@Example Person 这个配置怎么报错了？",
         ),
         "chat_id": "oc_quiet",
         "chat_name": "安静排障群",
@@ -1291,23 +1303,25 @@ async def test_rc5_rc6_maso_effort_model_discovery_and_prompt_metadata(
             "http://127.0.0.1:11004",
             [
                 StreamModelOption(
-                    id="[redacted]",
+                    id="gemini-example-model-1dd583607df6",
                     label="Gemini 4 Argon",
                     supported_reasoning_efforts=[
                         StreamReasoningEffortOption(
                             id="high",
                             label="High",
-                            provider_model_id="[redacted]_reasoning_high",
+                            provider_model_id="gemini-example-model-1dd583607df6_reasoning_high",
                         )
                     ],
                 )
             ],
-            "[redacted]",
+            "gemini-example-model-1dd583607df6",
         )
     )
     monkeypatch.setattr(triage_module, "discover_maso_service", discovery)
     row = {
-        **message("om_reply_mention", thread="omt_thread_123", text="@[redacted] [redacted]，帮忙看看这个"),
+        **message(
+            "om_reply_mention", thread="omt_thread_123", text="@Example Person 同事，帮忙看看这个"
+        ),
         "reply_to": "om_parent_456",
     }
     candidate = triage_module._candidate(row)
@@ -1316,48 +1330,51 @@ async def test_rc5_rc6_maso_effort_model_discovery_and_prompt_metadata(
     _, req, bootstrap = wm.ensure_calls[0]
     assert bootstrap is False
     assert req.agent_type == AgentType.MASO
-    assert req.env["MASO_MODEL"] == "[redacted]_reasoning_high"
+    assert req.env["MASO_MODEL"] == "gemini-example-model-1dd583607df6_reasoning_high"
     assert '"chat_id": "oc_chat"' in captured_prompts[0]
     assert '"thread_id": "omt_thread_123"' in captured_prompts[0]
     assert '"reply_to": "om_parent_456"' in captured_prompts[0]
 
 
-async def test_bot_and_automated_system_notifications_are_filtered_out() -> None:
+async def test_bot_and_automated_system_notifications_are_filtered_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CLAUDE_HUB_PATROL_AUTOMATED_NAMES", "Example Person,Codebase Assistant")
     codebase_assistant_mr = {
         "message_id": "om_codebase_mr",
-        "chat_id": "[redacted]",
+        "chat_id": "oc_example_872fe1",
         "chat_name": "Codebase Assistant",
         "chat_type": "p2p",
-        "chat_partner": {"open_id": "[redacted]"},
+        "chat_partner": {"open_id": "ou_example_d23853"},
         "create_time": "2026-11-14 10:32",
         "sender": {
-            "id": "[redacted]",
+            "id": "cliexample_4f20e5",
             "id_type": "app_id",
             "sender_type": "app",
             "name": "Codebase Assistant",
-            "open_bot_id": "[redacted]",
+            "open_bot_id": "ou_example_d23853",
         },
         "content": (
             '<card title="Merge Request Review Requested">'
-            "@[redacted] Review requested https://[redacted]/[redacted]/merge_requests/123"
+            "@Example Person Review requested https://git.example.invalid/example/project/merge_requests/123"
             "</card>"
         ),
-        "mentions": [{"id": ME, "name": "[redacted]"}],
+        "mentions": [{"id": ME, "name": "Example Person"}],
         "message_app_link": "https://applink.feishu.cn/client/message/om_codebase_mr",
     }
     kani_permission_notice = {
         "message_id": "om_kani_recycle",
-        "chat_id": "[redacted]",
-        "chat_name": "[redacted]",
+        "chat_id": "oc_example_7eb885",
+        "chat_name": "Example Person",
         "chat_type": "p2p",
-        "chat_partner": {"open_id": "[redacted]"},
+        "chat_partner": {"open_id": "ou_example_86f38f"},
         "create_time": "2026-11-14 10:42",
         "sender": {
-            "id": "[redacted]",
+            "id": "cliexample_5a28c3",
             "id_type": "app_id",
             "sender_type": "app",
-            "name": "[redacted]",
-            "open_bot_id": "[redacted]",
+            "name": "Example Person",
+            "open_bot_id": "ou_example_86f38f",
         },
         "content": (
             '<card title="[CN]Your Personal Permissions Are Expiring Soon" template="yellow">'
@@ -1375,25 +1392,27 @@ async def test_bot_and_automated_system_notifications_are_filtered_out() -> None
         "chat_type": "group",
         "create_time": "2026-11-14 10:45",
         "sender": {
-            "id": "[redacted]",
+            "id": "cliexample_d56bd9",
             "id_type": "app_id",
             "sender_type": "app",
-            "name": "[redacted]",
-            "open_bot_id": "[redacted]",
+            "name": "Example Person",
+            "open_bot_id": "ou_example_adcc44",
         },
-        "content": ("@[redacted] 任务失败报错 https://[redacted]/ml/ares/idelegate/task/123"),
-        "mentions": [{"id": ME, "name": "[redacted]"}],
+        "content": (
+            "@Example Person 任务失败报错 https://git.example.invalid/ml/ares/idelegate/task/123"
+        ),
+        "mentions": [{"id": ME, "name": "Example Person"}],
         "message_app_link": "https://applink.feishu.cn/client/message/om_merlin_bot",
     }
     bpm_weekly_notice = {
         "message_id": "om_bpm_weekly",
         "chat_id": "oc_bpm_chat",
-        "chat_name": "[redacted]",
+        "chat_name": "Example Person",
         "chat_type": "p2p",
         "create_time": "2026-11-14 10:46",
         "sender": {
             "id": "ou_bpm_spoofed",
-            "name": "[redacted]",
+            "name": "Example Person",
         },
         "content": "Here are your unprocessed tasks from last week, 帮忙处理？",
         "mentions": [],
@@ -1404,7 +1423,7 @@ async def test_bot_and_automated_system_notifications_are_filtered_out() -> None
         chat_type="p2p",
         sender="ou_real_colleague",
         minutes_ago=5,
-        text="[redacted]，这个训练任务 OOM 失败了能帮忙看下吗 https://[redacted]/job/999",
+        text="同事，这个训练任务 OOM 失败了能帮忙看下吗 https://git.example.invalid/job/999",
     )
     state = PatrolState()
     runner = FakeRunner(
@@ -1442,7 +1461,7 @@ async def test_human_questions_with_overlapping_names_or_quoted_notice_text_are_
             chat_type="p2p",
             sender="ou_kanishka",
             minutes_ago=12,
-            text="[redacted]，这个 job OOM 报错能帮我看下吗 https://[redacted]/job/101",
+            text="同事，这个 job OOM 报错能帮我看下吗 https://git.example.invalid/job/101",
         ),
         "chat_name": "Kanishka",
         "sender": {
@@ -1458,7 +1477,7 @@ async def test_human_questions_with_overlapping_names_or_quoted_notice_text_are_
             chat_type="p2p",
             sender="ou_kani_person",
             minutes_ago=11,
-            text="[redacted]，这个训练任务 OOM 失败了能帮忙排查吗 https://[redacted]/job/102",
+            text="同事，这个训练任务 OOM 失败了能帮忙排查吗 https://git.example.invalid/job/102",
         ),
         "chat_name": "Kani",
         "sender": {
@@ -1473,9 +1492,9 @@ async def test_human_questions_with_overlapping_names_or_quoted_notice_text_are_
             "om_feishu_team_human",
             chat_type="group",
             sender="ou_zhangsan",
-            mentions=[{"id": ME, "name": "[redacted]"}],
+            mentions=[{"id": ME, "name": "Example Person"}],
             minutes_ago=10,
-            text="@[redacted] 这个配置怎么报错了？",
+            text="@Example Person 这个配置怎么报错了？",
         ),
         "sender": {
             "id": "ou_zhangsan",
@@ -1493,7 +1512,7 @@ async def test_human_questions_with_overlapping_names_or_quoted_notice_text_are_
             text=(
                 "我刚收到「你的个人权限即将到期或被回收」还有 "
                 "「seed 应用下 62 个个人资源权限因 90 天未使用即将静默回收」，"
-                "导致我访问 https://[redacted]/job/202 报错，怎么恢复？"
+                "导致我访问 https://git.example.invalid/job/202 报错，怎么恢复？"
             ),
         ),
         "chat_name": "Alice",
@@ -1513,10 +1532,10 @@ async def test_human_questions_with_overlapping_names_or_quoted_notice_text_are_
         "sender": {"id": "ou_legacy_webhook"},
         "content": (
             '<card title="Merge Request Review Requested">'
-            "@[redacted] Review requested https://[redacted]/[redacted]/merge_requests/999"
+            "@Example Person Review requested https://git.example.invalid/example/project/merge_requests/999"
             "</card>"
         ),
-        "mentions": [{"id": ME, "name": "[redacted]"}],
+        "mentions": [{"id": ME, "name": "Example Person"}],
         "message_app_link": "https://applink.feishu.cn/client/message/om_standalone_mr_card",
     }
     state = PatrolState(config=PatrolConfig(max_triage_per_run=5))
@@ -1725,3 +1744,26 @@ async def test_combined_primary_and_archive_failure_preserves_evidence_and_recov
     assert run3.notified == 1
     assert "om_retry_human" in state.processed_feishu_ids
     assert all(sess.archived for sess in wm.sessions.values())
+
+
+async def test_patrol_keeps_original_fallback_when_configured_model_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_hub.services.agent_stream.maso_http import _model_options
+
+    wm = FakeWorkspaceManager()
+    monkeypatch.setattr(triage_module, "workspace_manager", wm)
+    monkeypatch.setenv("CLAUDE_HUB_PATROL_MODEL", "preferred_reasoning_high")
+    models = _model_options([{"key": "alternative_reasoning_high"}])
+    monkeypatch.setattr(
+        triage_module,
+        "discover_maso_service",
+        AsyncMock(return_value=("http://127.0.0.1:19999", models, "default")),
+    )
+
+    async def fake_run_turn(session, prompt, *, timeout_seconds):
+        return f"```json\n{diagnosis().model_dump_json()}\n```"
+
+    monkeypatch.setattr(triage_module, "_run_workspace_triage_turn", fake_run_turn)
+    await diagnose_message(candidate_for_adapter())
+    assert wm.ensure_calls[0][1].agent_type == AgentType.CODEX

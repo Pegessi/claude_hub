@@ -18,7 +18,7 @@ from claude_hub.services.proxy_rules import (
 # private ranges. HTTPX 0.28 cannot translate them into URL patterns, so a
 # client that lets HTTPX read NO_PROXY fails while it is being constructed.
 POISONED_NO_PROXY = (
-    "localhost,.[redacted],[redacted],127.0.0.1,127.0.0.0/8,169.254.0.0/16,"
+    "localhost,.example.invalid,example.invalid,127.0.0.1,127.0.0.0/8,169.254.0.0/16,"
     "172.16.0.0/12,192.168.0.0/16,10.0.0.0/8,::1,fe80::/10,fd00::/8"
 )
 PROXY_URL = "http://sys-proxy.example.test:8118"
@@ -77,7 +77,11 @@ def test_factory_builds_a_direct_client_for_bypassed_targets(
 ) -> None:
     apply_poisoned_proxy_environment(monkeypatch)
 
-    for bypassed in ("https://[redacted]", "http://10.1.2.3:9000", "http://[fd00::1]"):
+    for bypassed in (
+        "https://internal.example.invalid",
+        "http://10.1.2.3:9000",
+        "http://[fd00::1]",
+    ):
         client = create_async_client(bypassed, timeout=1.0)
         assert resolved_proxy(client, bypassed) is None, bypassed
         # Environment CA settings must survive the transport that suppresses
@@ -94,7 +98,7 @@ def test_real_world_no_proxy_routes_public_and_internal_targets() -> None:
 
     assert environment_proxy_for_url("https://open.feishu.cn/open-apis/x", proxies) == PROXY_URL
     assert environment_proxy_for_url("https://api.anthropic.com", proxies) == PROXY_URL
-    assert environment_proxy_for_url("https://[redacted]/a", proxies) is None
+    assert environment_proxy_for_url("https://internal.example.invalid/a", proxies) is None
     assert environment_proxy_for_url("http://127.0.0.1:8173/", proxies) is None
     assert environment_proxy_for_url("http://[fd00::1]/", proxies) is None
     assert environment_proxy_for_url("http://[fe80::1]/", proxies) is None

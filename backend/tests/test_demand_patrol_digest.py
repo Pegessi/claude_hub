@@ -15,7 +15,7 @@ from claude_hub.services.demand_patrol.models import MRStateSnapshot, PatrolConf
 from claude_hub.services.task_lifecycle import LifecycleFacts, derive_task_lifecycle
 
 NOW = datetime(2026, 11, 14, 3, 0, tzinfo=timezone.utc)
-MR = "https://[redacted]/seed/example/merge_requests/42"
+MR = "https://git.example.com/seed/example/merge_requests/42"
 
 
 class DigestRunner:
@@ -222,7 +222,7 @@ async def test_pending_top_n_uses_created_time_and_not_input_order() -> None:
 
 @pytest.mark.asyncio
 async def test_queries_are_deduplicated_capped_and_concurrency_bounded() -> None:
-    urls = [f"https://[redacted]/team/repo/merge_requests/{index}" for index in range(20)]
+    urls = [f"https://git.example.com/team/repo/merge_requests/{index}" for index in range(20)]
     demand = _demand(
         sources=[{"url": url + "#discussion"} for url in urls],
         progress=[{"links": [{"url": urls[0]}]}],
@@ -243,8 +243,8 @@ async def test_terminal_demands_do_not_consume_mr_query_slots(
     terminal_status: str,
     priority: str,
 ) -> None:
-    closed_urls = [f"https://[redacted]/a/history/merge_requests/{i}" for i in range(20)]
-    open_urls = [f"https://[redacted]/z/active/merge_requests/{i}" for i in range(15)]
+    closed_urls = [f"https://git.example.com/a/history/merge_requests/{i}" for i in range(20)]
+    open_urls = [f"https://git.example.com/z/active/merge_requests/{i}" for i in range(15)]
     closed = _demand(
         title="历史需求不应巡检",
         status=terminal_status,
@@ -330,7 +330,7 @@ def test_evidence_url_extraction_preserves_identity_and_excludes_lookalike_hosts
     demand = _demand(
         sources=[
             {"url": MR + "?foo=1"},
-            {"url": "https://[redacted].evil.test/a/merge_requests/1"},
+            {"url": "https://git.example.com.evil.test/a/merge_requests/1"},
         ],
         progress=[{"links": [{"url": MR + "#note"}, {"url": MR + "0"}]}],
     )
@@ -353,3 +353,8 @@ async def test_exact_title_matches_active_task_but_not_completed_task() -> None:
         PatrolState(), now=NOW, tasks=[task], lifecycles={}, runner=runner
     )
     assert completed.details["stalled_or_unassigned"] == 1
+
+
+@pytest.fixture(autouse=True)
+def _configure_mr_host(monkeypatch):
+    monkeypatch.setenv("CLAUDE_HUB_PATROL_MR_HOSTS", "git.example.com")

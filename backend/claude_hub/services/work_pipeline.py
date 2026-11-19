@@ -16,6 +16,7 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 from claude_hub.models import ExecutionTarget, Workspace, WorkspaceTask
+from claude_hub.services.local_runtime_settings import local_setting
 
 logger = logging.getLogger(__name__)
 
@@ -422,7 +423,8 @@ def _classify_link_kind(url: str) -> str:
         or "/wiki/" in lowered
     ):
         return "doc"
-    if "[redacted]" in lowered or "merlin" in lowered or "arena" in lowered:
+    markers = local_setting("CLAUDE_HUB_EVALUATION_LINK_MARKERS", "merlin,arena")
+    if any(marker.strip().lower() in lowered for marker in markers.split(",") if marker.strip()):
         return "eval"
     return "link"
 

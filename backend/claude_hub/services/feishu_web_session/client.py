@@ -1,6 +1,6 @@
 """Feishu web-session client, QR login state machine, gateway caller, and msg-frontier WebSocket listener.
 
-Ported from ``[redacted]`` ``extensions/lark-desk/internal/web/``
+Web-session protocol client
 (``client.go``, ``messages.go``, ``feed.go``, ``reactions.go``, ``threads.go``, ``push.go``).
 """
 

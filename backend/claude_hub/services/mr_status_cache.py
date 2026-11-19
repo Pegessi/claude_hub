@@ -10,17 +10,18 @@ import sys
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from claude_hub.services.demand_patrol.commands import CommandError, CommandRunner, run_command
 from claude_hub.services.demand_patrol.daily_digest import _mr_snapshot
 from claude_hub.services.demand_patrol.models import MRStateSnapshot
+from claude_hub.services.local_runtime_settings import local_setting
 
 logger = logging.getLogger(__name__)
 
 CODEBASE_MR_URL_RE = re.compile(
-    r"https://[redacted]/(?:[A-Za-z0-9_.-]+/)+merge_requests/(\d+)\b"
+    r"https://[A-Za-z0-9.-]+(?::[0-9]+)?/(?:[A-Za-z0-9_.-]+/)+merge_requests/(\d+)\b"
 )
-_DOC_EXAMPLE_MR_PREFIX = "https://[redacted]/byteapi/bytedcli/merge_requests/"
 
 _CACHE_TTL_SECONDS = 180.0
 _ERROR_BACKOFF_SECONDS = 120.0
@@ -37,12 +38,23 @@ def extract_codebase_mr_urls(
     """Extract deduplicated canonical Codebase MR URLs in appearance order."""
     found: list[str] = []
     seen: set[str] = set()
+    hosts = {
+        item.strip().lower()
+        for item in local_setting("CLAUDE_HUB_PATROL_MR_HOSTS", "").split(",")
+        if item.strip()
+    }
     for text in texts:
         if not text:
             continue
         for match in CODEBASE_MR_URL_RE.finditer(text):
             url = match.group(0)
-            if exclude_doc_examples and url.startswith(_DOC_EXAMPLE_MR_PREFIX):
+            if (urlsplit(url).hostname or "").lower() not in hosts:
+                continue
+            if exclude_doc_examples and any(
+                url.startswith(prefix.strip())
+                for prefix in local_setting("CLAUDE_HUB_MR_EXAMPLE_PREFIXES", "").split(",")
+                if prefix.strip()
+            ):
                 continue
             if url not in seen:
                 seen.add(url)

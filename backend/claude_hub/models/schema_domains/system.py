@@ -87,3 +87,4 @@ class EnvPresetsResponse(BaseModel):
 
     custom_presets: List[EnvPreset]
     hidden_builtin_ids: List[str]
+    builtin_presets: List[EnvPreset] = Field(default_factory=list)

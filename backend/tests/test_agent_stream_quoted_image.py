@@ -30,7 +30,7 @@ from claude_hub.services.agent_stream import quoted_images as qi
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"\x00" * 32
 
-KEY = "[redacted]"
+KEY = "img_v3_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 
 def _make_tab(tab_id: str) -> SimpleNamespace:

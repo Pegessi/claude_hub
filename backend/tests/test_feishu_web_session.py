@@ -348,7 +348,7 @@ def test_web_session_store_encryption_0600_permissions_redaction_and_larkx_impor
         csrf_token=raw_csrf_secret,
         web_app_id="161471",
         user_id="7123456789012345678",
-        name="[redacted]",
+        name="Example Person",
         open_id="ou_owner_wzh",
     )
 
@@ -383,7 +383,7 @@ def test_web_session_store_encryption_0600_permissions_redaction_and_larkx_impor
     assert loaded.cookies["session"] == raw_cookie_secret
     assert loaded.effective_csrf_token() == raw_csrf_secret
     assert loaded.user_id == "7123456789012345678"
-    assert loaded.name == "[redacted]"
+    assert loaded.name == "Example Person"
 
     # 4. Verify clear() removes the file and import_from_larkx() imports ~/.larkx/credentials.json
     assert store.clear() is True
@@ -527,7 +527,7 @@ async def test_web_session_1v1_dm_and_group_ai_command_in_place_reply_and_uncert
         app_id="cli_no_send_scope",
         access_token="u-token-readonly",
         refresh_token="ur-token-readonly",
-        user_name="[redacted]",
+        user_name="Example Person",
         expires_in=7200,
         scope="im:message:readonly im:chat:read",
     )
@@ -545,7 +545,7 @@ async def test_web_session_1v1_dm_and_group_ai_command_in_place_reply_and_uncert
             csrf_token="csrf-1v1",
             web_app_id="161471",
             user_id="7111222333444555666",
-            name="[redacted]",
+            name="Example Person",
             open_id="ou_owner_1v1",
         )
     )
@@ -1000,11 +1000,11 @@ def test_cli_and_api_web_session_routes_and_send_mode(
         assert feishu_host("internal-api-lark-api.feishu.cn") is True
         assert feishu_host("evil-feishu.cn") is False
         jar: dict[str, dict[str, str]] = {}
-        carry_cookies(jar, "https://[redacted]/messenger/", {"session": "s1"})
-        assert jar["[redacted]"]["session"] == "s1"
+        carry_cookies(jar, "https://www.feishu.cn/messenger/", {"session": "s1"})
+        assert jar["www.feishu.cn"]["session"] == "s1"
         # HTTP-downgrade URLs must NOT receive session cookies
-        carry_cookies(jar, "http://[redacted]/messenger/", {"session": "leaked"})
-        assert jar["[redacted]"]["session"] == "s1"
+        carry_cookies(jar, "http://www.feishu.cn/messenger/", {"session": "leaked"})
+        assert jar["www.feishu.cn"]["session"] == "s1"
 
 
 def test_independent_google_protobuf_wire_golden_vectors_and_recursive_embedded_merge() -> None:
@@ -1310,7 +1310,7 @@ async def test_group_chat_topic_thread_mixed_id_dedup_and_frontier_push(
             csrf_token="csrf-r34",
             web_app_id="161471",
             user_id=owner_uid,
-            name="[redacted]",
+            name="Example Person",
         )
     )
 

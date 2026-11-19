@@ -438,7 +438,7 @@ def _maso_limits(rows: Any, labels: Optional[Mapping[str, str]] = None) -> List[
     """Map MASO's per-model rows, preferring its grant-adjusted figures.
 
     The row's ``model`` is an upstream deployment, so the label is the model
-    name known for it — the catalog's (`[redacted]`), or the model Router pinned
+    name known for it — the catalog's (`example-model`), or the model Router pinned
     to it when the catalog predates that pin — and a deployment neither names is
     labelled as unlisted instead of posing as a model; ``scope`` keeps the
     deployment itself, which is what MASO enforces.

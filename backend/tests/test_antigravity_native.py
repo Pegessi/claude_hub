@@ -1281,12 +1281,12 @@ async def test_persistent_launch_changes_restart_only_before_next_turn(
     persistent_native, changed: str
 ) -> None:
     native, spawn, processes = persistent_native
-    native.update_env({"ANTIGRAVITY_MODEL": "[redacted]-high"})
+    native.update_env({"ANTIGRAVITY_MODEL": "gemini-example-model-1dd583607df6-high"})
     await native.send_message("first", [])
     native.maybe_capture_conversation_id({"event": "init", "conversation_id": "same-history"})
     native.acknowledge_turn_complete()
     if changed == "model":
-        native.update_env({"ANTIGRAVITY_MODEL": "[redacted]-low"})
+        native.update_env({"ANTIGRAVITY_MODEL": "gemini-example-model-1dd583607df6-low"})
     elif changed == "environment":
         native.update_env({**native.session.env, "SSL_CERT_FILE": "/new/test-ca.pem"})
     elif changed == "solo":
@@ -1300,7 +1300,7 @@ async def test_persistent_launch_changes_restart_only_before_next_turn(
     args = list(spawn.await_args.args)
     assert args[args.index("--conversation") + 1] == "same-history"
     if changed == "model":
-        assert args[args.index("--model") + 1] == "[redacted]-low"
+        assert args[args.index("--model") + 1] == "gemini-example-model-1dd583607df6-low"
     elif changed == "environment":
         assert spawn.await_args.kwargs["env"]["SSL_CERT_FILE"] == "/new/test-ca.pem"
     elif changed == "solo":
@@ -1326,7 +1326,7 @@ async def test_persistent_inflight_env_and_mode_change_do_not_replace_process(
 ) -> None:
     native, spawn, processes = persistent_native
     await native.send_message("working", [])
-    native.update_env({"ANTIGRAVITY_MODEL": "[redacted]-low"})
+    native.update_env({"ANTIGRAVITY_MODEL": "gemini-example-model-1dd583607df6-low"})
     with pytest.raises(RuntimeError, match="already in flight"):
         await native.send_message("overlap", [])
     with pytest.raises(RuntimeError, match="in flight"):
@@ -1720,7 +1720,7 @@ async def test_persistent_config_replacement_eof_before_init_fails_accepted_turn
         await tailer.send_message("first", [], client_turn_id="completed")
         _emit(processes[0], _usage_result({"input_tokens": 10}, 1))
         assert (await _through_completion(queue))[-1].payload["status"] == "completed"
-        native.update_env({"ANTIGRAVITY_MODEL": "[redacted]-low"})
+        native.update_env({"ANTIGRAVITY_MODEL": "gemini-example-model-1dd583607df6-low"})
         await tailer.send_message("next", [], client_turn_id="replacement-turn")
         assert spawn.await_count == 2
         assert len(processes[1].stdin.written) == 1
@@ -1846,11 +1846,11 @@ async def test_persistent_image_attachments_cleaned_on_cancel_and_reject_invalid
 
 _SAMPLE_AGYX_MODELS = (
     "\x1b[?25l\r⠋ Fetching available models...\rLoading  models...\r\x1b[?25h"
-    "[redacted]-medium\tGemini 4 Carbon (Medium)\n"
-    "[redacted]-high\tGemini 4 Carbon (High)\r\x1b[?25h\n"
-    "[redacted]-low  Gemini 4 Carbon (Low) (default)\n"
-    "[redacted]-high\tGemini 4 Argon (High)\n"
-    "[redacted]-high\tDuplicate Ignored\n"
+    "gemini-example-model-1d11bad5f3fe-medium\tGemini 3 Carbon (Medium)\n"
+    "gemini-example-model-1d11bad5f3fe-high\tGemini 3 Carbon (High)\r\x1b[?25h\n"
+    "gemini-example-model-1d11bad5f3fe-low  Gemini 3 Carbon (Low) (default)\n"
+    "gemini-example-model-1dd583607df6-high\tGemini 3 Argon (High)\n"
+    "gemini-example-model-1d11bad5f3fe-high\tDuplicate Ignored\n"
     "Loading  models...\n"
     "Fetching available models...\n"
     "bad id\tInvalid Slug\n"
@@ -1861,10 +1861,10 @@ def test_parse_antigravity_models_handles_pipe_and_tty_rows() -> None:
     native_module = importlib.import_module("claude_hub.services.agent_stream.native")
     options = native_module._parse_antigravity_models(_SAMPLE_AGYX_MODELS)
     assert [(m.id, m.label) for m in options] == [
-        ("[redacted]-medium", "Gemini 4 Carbon (Medium)"),
-        ("[redacted]-high", "Gemini 4 Carbon (High)"),
-        ("[redacted]-low", "Gemini 4 Carbon (Low)"),
-        ("[redacted]-high", "Gemini 4 Argon (High)"),
+        ("gemini-example-model-1d11bad5f3fe-medium", "Gemini 3 Carbon (Medium)"),
+        ("gemini-example-model-1d11bad5f3fe-high", "Gemini 3 Carbon (High)"),
+        ("gemini-example-model-1d11bad5f3fe-low", "Gemini 3 Carbon (Low)"),
+        ("gemini-example-model-1dd583607df6-high", "Gemini 3 Argon (High)"),
     ]
 
 
@@ -1896,10 +1896,10 @@ async def test_antigravity_prepare_capabilities_probes_agyx_models(
     assert spawn.await_args.args == ("agyx", "models")
     assert caps.metadata_cacheable is True
     assert [(m.id, m.label) for m in caps.available_models] == [
-        ("[redacted]-medium", "Gemini 4 Carbon (Medium)"),
-        ("[redacted]-high", "Gemini 4 Carbon (High)"),
-        ("[redacted]-low", "Gemini 4 Carbon (Low)"),
-        ("[redacted]-high", "Gemini 4 Argon (High)"),
+        ("gemini-example-model-1d11bad5f3fe-medium", "Gemini 3 Carbon (Medium)"),
+        ("gemini-example-model-1d11bad5f3fe-high", "Gemini 3 Carbon (High)"),
+        ("gemini-example-model-1d11bad5f3fe-low", "Gemini 3 Carbon (Low)"),
+        ("gemini-example-model-1dd583607df6-high", "Gemini 3 Argon (High)"),
     ]
 
 
@@ -1908,6 +1908,10 @@ async def test_antigravity_models_probe_fallback_includes_carbon(
 ) -> None:
     native_module = importlib.import_module("claude_hub.services.agent_stream.native")
     monkeypatch.setattr(native_module, "_models_cache", {})
+    monkeypatch.setenv(
+        "CLAUDE_HUB_ANTIGRAVITY_FALLBACK_MODELS",
+        "gemini-example-model-1d11bad5f3fe-high,gemini-example-model-1d11bad5f3fe-medium,gemini-example-model-1d11bad5f3fe-low",
+    )
 
     class _FailedModelsProc:
         returncode = 1
@@ -1924,9 +1928,9 @@ async def test_antigravity_models_probe_fallback_includes_carbon(
     catalog = await native_module.model_catalog_for("antigravity")
     assert catalog.metadata_cacheable is False
     ids = [m.id for m in catalog.options]
-    assert "[redacted]-high" in ids
-    assert "[redacted]-medium" in ids
-    assert "[redacted]-low" in ids
+    assert "gemini-example-model-1d11bad5f3fe-high" in ids
+    assert "gemini-example-model-1d11bad5f3fe-medium" in ids
+    assert "gemini-example-model-1d11bad5f3fe-low" in ids
 
     monkeypatch.setattr(native_module, "_models_cache", {})
     monkeypatch.setattr(
@@ -1942,6 +1946,9 @@ async def test_antigravity_models_probe_timeout_and_cancel_kill_process(
 ) -> None:
     native_module = importlib.import_module("claude_hub.services.agent_stream.native")
     monkeypatch.setattr(native_module, "_models_cache", {})
+    monkeypatch.setenv(
+        "CLAUDE_HUB_ANTIGRAVITY_FALLBACK_MODELS", "gemini-example-model-1d11bad5f3fe-high"
+    )
     monkeypatch.setattr(native_module.settings, "antigravity_models_probe_timeout_seconds", 0.05)
 
     class _HungModelsProc:
@@ -1960,7 +1967,7 @@ async def test_antigravity_models_probe_timeout_and_cancel_kill_process(
     catalog = await native_module.model_catalog_for("antigravity")
     assert timed_out_proc.killed is True
     assert catalog.metadata_cacheable is False
-    assert "[redacted]-high" in [m.id for m in catalog.options]
+    assert "gemini-example-model-1d11bad5f3fe-high" in [m.id for m in catalog.options]
 
     monkeypatch.setattr(native_module, "_models_cache", {})
     monkeypatch.setattr(native_module.settings, "antigravity_models_probe_timeout_seconds", 10.0)

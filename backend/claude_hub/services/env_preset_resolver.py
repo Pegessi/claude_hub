@@ -6,6 +6,7 @@ import re
 from typing import Dict, Optional
 
 from .env_presets import BUILT_IN_PRESET_IDS, env_preset_manager
+from .terminal_runtime.defaults import DEFAULT_CLAUDE_LAUNCH_ENV
 
 _EXPORT_PREFIX = re.compile(r"^export\s+", re.IGNORECASE)
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -31,11 +32,6 @@ BUILT_IN_PRESET_TEXT: dict[str, str] = {
     "volcengine-coding-plan": "\n".join(
         [
             "ANTHROPIC_BASE_URL=https://ark.cn-beijing.volces.com/api/coding",
-            "ANTHROPIC_MODEL=[redacted]",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL=[redacted]",
-            "ANTHROPIC_DEFAULT_SONNET_MODEL=[redacted]",
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL=[redacted]",
-            "CLAUDE_CODE_SUBAGENT_MODEL=[redacted]",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
         ]
     ),
@@ -173,6 +169,12 @@ def _lookup_custom_preset(name_or_id: str) -> Optional[tuple[str, str]]:
     return None
 
 
+def _builtin_env(preset_id: str) -> Dict[str, str]:
+    if preset_id == "volcengine-coding-plan":
+        return dict(DEFAULT_CLAUDE_LAUNCH_ENV)
+    return parse_env_text(BUILT_IN_PRESET_TEXT.get(preset_id, ""))
+
+
 def resolve_env_preset(name_or_id: str) -> tuple[str, Dict[str, str]]:
     """Resolve preset by id or name. Returns (resolved_id, env dict)."""
     needle = name_or_id.strip()
@@ -180,12 +182,12 @@ def resolve_env_preset(name_or_id: str) -> tuple[str, Dict[str, str]]:
         raise EnvPresetNotFoundError("env preset name/id cannot be empty")
 
     if needle in BUILT_IN_PRESET_IDS:
-        return needle, parse_env_text(BUILT_IN_PRESET_TEXT.get(needle, ""))
+        return needle, _builtin_env(needle)
 
     lowered = needle.casefold()
     for preset_id, display_name in BUILT_IN_PRESET_NAMES.items():
         if display_name.casefold() == lowered:
-            return preset_id, parse_env_text(BUILT_IN_PRESET_TEXT.get(preset_id, ""))
+            return preset_id, _builtin_env(preset_id)
 
     custom = _lookup_custom_preset(needle)
     if custom is not None:

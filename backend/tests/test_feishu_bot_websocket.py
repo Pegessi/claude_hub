@@ -685,7 +685,7 @@ def test_sdk_group_topic_message_requires_and_strips_the_current_bot_mention() -
                     SimpleNamespace(
                         key="@_user_1",
                         id=SimpleNamespace(open_id="ou-current-bot"),
-                        name="[redacted]",
+                        name="示例用户",
                     )
                 ],
             ),
@@ -728,7 +728,7 @@ def test_sdk_group_text_does_not_strip_a_longer_other_user_mention_key() -> None
                     SimpleNamespace(
                         key="@_user_1",
                         id=SimpleNamespace(open_id="ou-current-bot"),
-                        name="[redacted]",
+                        name="示例用户",
                     ),
                     SimpleNamespace(
                         key="@_user_10",
@@ -769,7 +769,7 @@ def test_sdk_group_topic_post_strips_only_the_current_bot_at_node() -> None:
                                 {
                                     "tag": "at",
                                     "user_id": "ou-current-bot",
-                                    "user_name": "[redacted]",
+                                    "user_name": "示例用户",
                                 },
                                 {"tag": "text", "text": " 请和 "},
                                 {
@@ -787,7 +787,7 @@ def test_sdk_group_topic_post_strips_only_the_current_bot_at_node() -> None:
                     SimpleNamespace(
                         key="@_user_1",
                         id=SimpleNamespace(open_id="ou-current-bot"),
-                        name="[redacted]",
+                        name="示例用户",
                     )
                 ],
             ),

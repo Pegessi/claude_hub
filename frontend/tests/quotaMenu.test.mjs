@@ -88,11 +88,11 @@ const masoProvider = provider({
   as_of: at(-30_000),
   enforcing: true,
   limits: [
-    limit({ scope: '[redacted]', label: '[redacted]', used_percent: 14, remaining_percent: 86 }),
-    limit({ scope: '[redacted]', label: '[redacted]', used_percent: 2, remaining_percent: 98 }),
-    limit({ scope: '[redacted]', label: '[redacted]', state: 'no_limit', used_percent: null, remaining_percent: null }),
-    limit({ scope: '[redacted]', label: '[redacted]', state: 'no_limit', used_percent: null, remaining_percent: null }),
-    limit({ scope: '[redacted]', label: '[redacted]', state: 'no_data', used_percent: null, remaining_percent: null }),
+    limit({ scope: 'gpt-example-model-d050a243e4ed', label: 'gpt-example-model-d050a243e4ed', used_percent: 14, remaining_percent: 86 }),
+    limit({ scope: 'example-model-69e766ba3b77', label: 'example-model-69e766ba3b77', used_percent: 2, remaining_percent: 98 }),
+    limit({ scope: 'example-model-423e08e011d5', label: 'example-model-423e08e011d5', state: 'no_limit', used_percent: null, remaining_percent: null }),
+    limit({ scope: 'example-model-70f30bb0c645', label: 'example-model-70f30bb0c645', state: 'no_limit', used_percent: null, remaining_percent: null }),
+    limit({ scope: 'example-model-2bc4b63260d0', label: 'example-model-2bc4b63260d0', state: 'no_data', used_percent: null, remaining_percent: null }),
   ],
 })
 const fullPayload = { providers: [codexProvider, masoProvider] }
@@ -146,23 +146,23 @@ test('a label that describes a limit keeps the identifier in its tooltip', () =>
     enforcing: true,
     limits: [
       limit({
-        scope: '[redacted]',
+        scope: 'ep-test-b8c6q',
         label: 'Unlisted endpoint · b8c6q',
         used_percent: 49,
         remaining_percent: 51,
       }),
-      limit({ scope: '[redacted]', label: '[redacted]', used_percent: 0, remaining_percent: 100 }),
+      limit({ scope: 'ep-test-vfr5s', label: 'example-stable', used_percent: 0, remaining_percent: 100 }),
     ],
   }
   const rows = rowsOf(viewOf({ providers: [provider] })[0])
 
-  assert.equal(rows['[redacted]'].label, 'Unlisted endpoint · b8c6q')
+  assert.equal(rows['ep-test-b8c6q'].label, 'Unlisted endpoint · b8c6q')
   assert.equal(
-    rows['[redacted]'].labelTitle,
-    'Unlisted endpoint · b8c6q ([redacted])',
+    rows['ep-test-b8c6q'].labelTitle,
+    'Unlisted endpoint · b8c6q (ep-test-b8c6q)',
   )
   // A model name and its endpoint both appear, so either identity is readable.
-  assert.equal(rows['[redacted]'].labelTitle, '[redacted] ([redacted])')
+  assert.equal(rows['ep-test-vfr5s'].labelTitle, 'example-stable (ep-test-vfr5s)')
 })
 
 test('a deployment shared by several models keeps every name and its id', () => {
@@ -175,8 +175,8 @@ test('a deployment shared by several models keeps every name and its id', () => 
     enforcing: true,
     limits: [
       limit({
-        scope: '[redacted]',
-        label: '[redacted] · [redacted]',
+        scope: 'ep-test-lmdcb',
+        label: 'example-model-75c87952ca70 · example-model',
         used_percent: 4,
         remaining_percent: 96,
       }),
@@ -184,20 +184,20 @@ test('a deployment shared by several models keeps every name and its id', () => 
   }
   const rows = rowsOf(viewOf({ providers: [provider] })[0])
 
-  assert.equal(rows['[redacted]'].label, '[redacted] · [redacted]')
+  assert.equal(rows['ep-test-lmdcb'].label, 'example-model-75c87952ca70 · example-model')
   assert.equal(
-    rows['[redacted]'].labelTitle,
-    '[redacted] · [redacted] ([redacted])',
+    rows['ep-test-lmdcb'].labelTitle,
+    'example-model-75c87952ca70 · example-model (ep-test-lmdcb)',
   )
-  assert.equal(rows['[redacted]'].value, '96% left')
+  assert.equal(rows['ep-test-lmdcb'].value, '96% left')
 })
 
 test('a missing percentage never renders as zero and keeps its reason', () => {
   const [, maso] = viewOf(fullPayload)
   const rows = rowsOf(maso)
-  assert.equal(rows.[redacted].value, 'No limit')
-  assert.equal(rows.[redacted].value, 'No data yet')
-  for (const key of ['[redacted]', '[redacted]', '[redacted]']) {
+  assert.equal(rows['example-model-423e08e011d5'].value, 'No limit')
+  assert.equal(rows['example-model-2bc4b63260d0'].value, 'No data yet')
+  for (const key of ['example-model-423e08e011d5', 'example-model-70f30bb0c645', 'example-model-2bc4b63260d0']) {
     assert.equal(rows[key].remainingPercent, null)
     assert.equal(rows[key].barPercent, null, `${key} must not draw a bar`)
     assert.equal(rows[key].tone, 'neutral')
@@ -911,7 +911,7 @@ test('the rendered panel shows every limit honestly, with no invented zero', asy
   const text = renderedText(tree)
   for (const expected of [
     'Codex', 'MASO', 'Weekly limit', '42% left', '58% used', 'Resets in 3d',
-    '[redacted]', '86% left', '[redacted]', 'No limit', '[redacted]', 'No data yet',
+    'gpt-example-model-d050a243e4ed', '86% left', 'example-model-423e08e011d5', 'No limit', 'example-model-2bc4b63260d0', 'No data yet',
     'Plan: pro', 'Updated 5m ago', 'Updated 47h ago',
   ]) {
     assert.ok(text.includes(expected), `the panel should show "${expected}"`)

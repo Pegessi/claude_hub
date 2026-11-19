@@ -372,11 +372,11 @@ async def test_codex_catalog_reads_cache_before_start_and_observes_replacement(
         json.dumps(
             {
                 "models": [
-                    _cached_codex_model("[redacted]"),
-                    _cached_codex_model("[redacted]"),
+                    _cached_codex_model("gpt-example-model-c886ad270fea"),
+                    _cached_codex_model("gpt-example-model-d050a243e4ed"),
                     _cached_codex_model("custom-before"),
-                    _cached_codex_model("[redacted]", visibility="hide"),
-                    _cached_codex_model("[redacted]", supported_in_api=False),
+                    _cached_codex_model("example-model-9a7e60cd1c7b", visibility="hide"),
+                    _cached_codex_model("example-model-7388db16debd", supported_in_api=False),
                 ]
             }
         )
@@ -388,9 +388,13 @@ async def test_codex_catalog_reads_cache_before_start_and_observes_replacement(
     first = await native.model_catalog_for("codex")
     options = {m.id: m for m in first.options}
     assert first.metadata_cacheable is False
-    assert options["[redacted]"].label == "Cached [redacted]"
-    assert options["[redacted]"].default_reasoning_effort == "low"
-    assert [e.id for e in options["[redacted]"].supported_reasoning_efforts] == [
+    assert (
+        options["gpt-example-model-c886ad270fea"].label == "Cached gpt-example-model-c886ad270fea"
+    )
+    assert options["gpt-example-model-d050a243e4ed"].default_reasoning_effort == "low"
+    assert [
+        e.id for e in options["gpt-example-model-c886ad270fea"].supported_reasoning_efforts
+    ] == [
         "low",
         "medium",
         "high",
@@ -398,18 +402,21 @@ async def test_codex_catalog_reads_cache_before_start_and_observes_replacement(
         "max",
         "ultra",
     ]
-    assert options["[redacted]"].supported_reasoning_efforts[-1].description == "Use ultra"
-    assert "[redacted]" not in options
-    assert "[redacted]" not in options
-    assert "[redacted]" in options
+    assert (
+        options["gpt-example-model-c886ad270fea"].supported_reasoning_efforts[-1].description
+        == "Use ultra"
+    )
+    assert "example-model-9a7e60cd1c7b" not in options
+    assert "example-model-7388db16debd" not in options
+    assert "gpt-5.4" in options
     replacement = root / "replacement.json"
     replacement.write_text(json.dumps({"models": [_cached_codex_model("custom-after")]}))
     replacement.replace(path)
     second = {m.id: m for m in await native.available_models_for("codex")}
     assert "custom-after" in second and "custom-before" not in second
     # A fallback does not invent model-specific reasoning capabilities.
-    assert second["[redacted]"].supported_reasoning_efforts == []
-    assert second["[redacted]"].provider_model_id is None
+    assert second["gpt-5.4"].supported_reasoning_efforts == []
+    assert second["gpt-5.4"].provider_model_id is None
 
 
 @pytest.mark.parametrize("contents", [None, b"{broken", b"\xff", b"[]", b'{"models":null}'])
@@ -422,7 +429,7 @@ def test_codex_catalog_missing_or_invalid_cache_has_current_fallback(
     options = native._codex_model_options({})
     assert options[0].id == "gpt-5.4"
     assert {m.id for m in options} == set(native._STATIC_MODELS["codex"])
-    assert {"[redacted]", "[redacted]", "[redacted]"} <= {m.id for m in options}
+    assert {"gpt-5.4", "gpt-5.5", "gpt-5.4-mini"} <= {m.id for m in options}
 
 
 def test_codex_catalog_respects_session_home_without_cross_session_leakage(

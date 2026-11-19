@@ -619,18 +619,22 @@ async def test_codex_models_endpoint_reads_cache_without_starting_provider(
     from claude_hub.services.agent_stream import native
 
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setenv(
+        "CLAUDE_HUB_CODEX_FALLBACK_MODELS",
+        "gpt-example-model-c886ad270fea,gpt-example-model-d050a243e4ed",
+    )
     (tmp_path / "models_cache.json").write_text(
         json.dumps(
             {
                 "models": [
                     {
-                        "slug": "[redacted]",
-                        "display_name": "[redacted]",
+                        "slug": "gpt-example-model-c886ad270fea",
+                        "display_name": "Example Sol",
                         "visibility": "list",
                         "default_reasoning_level": "ultra",
                         "supported_reasoning_levels": [{"effort": "ultra"}],
                     },
-                    {"slug": "[redacted]", "visibility": "hide"},
+                    {"slug": "example-model-9a7e60cd1c7b", "visibility": "hide"},
                 ]
             }
         )
@@ -640,7 +644,11 @@ async def test_codex_models_endpoint_reads_cache_without_starting_provider(
     response = await client.get("/api/codex/models")
     assert response.status_code == 200
     options = {m["id"]: m for m in response.json()}
-    assert options["[redacted]"]["label"] == "[redacted]"
-    assert options["[redacted]"]["supported_reasoning_efforts"][0]["id"] == "ultra"
-    assert "[redacted]" in options and "[redacted]" not in options
+    assert options["gpt-example-model-c886ad270fea"]["label"] == "Example Sol"
+    assert (
+        options["gpt-example-model-c886ad270fea"]["supported_reasoning_efforts"][0]["id"] == "ultra"
+    )
+    assert (
+        "gpt-example-model-d050a243e4ed" in options and "example-model-9a7e60cd1c7b" not in options
+    )
     spawn.assert_not_awaited()

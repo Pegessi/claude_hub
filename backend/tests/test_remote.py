@@ -228,7 +228,10 @@ async def test_listing_with_motd_returns_payload(
     assert "-T" not in ssh_cmd[dashdash + 1 :]
 
 
-def test_profile_uses_stdin_shell_for_merlin_and_seedjob() -> None:
+def test_profile_uses_stdin_shell_for_aliases_and_configured_gateways(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CLAUDE_HUB_PTY_GATEWAY_HOSTS", "gateway.example.test,merlin_dev")
     assert profile_uses_stdin_shell(
         RemoteProfile(id="merlin_dev", name="merlin_dev", ssh_host="merlin_dev")
     )
@@ -249,16 +252,16 @@ def test_profile_uses_stdin_shell_for_merlin_and_seedjob() -> None:
         RemoteProfile(
             id="proxy",
             name="proxy",
-            ssh_host="[redacted]",
-            user="abc.worker_0[redacted][redacted]",
+            ssh_host="gateway.example.test",
+            user="test-worker",
         )
     )
     assert profile_uses_stdin_shell(
         RemoteProfile(
             id="candy",
             name="candy",
-            ssh_host="ssh-candy-wlby.[redacted]",
-            user="abc.worker_0[redacted][redacted]",
+            ssh_host="gateway.example.test",
+            user="test-worker",
         )
     )
     assert not profile_uses_stdin_shell(_profile())
@@ -270,7 +273,8 @@ async def test_gateway_listing_routes_through_pty_exec(
 ) -> None:
     # A PTY gateway (merlin_dev) swallows argv/non-tty stdin; the listing route
     # must drive it through the PTY-exec primitive instead of spawning argv ssh.
-    gateway = RemoteProfile(id="merlin_dev", name="merlin_dev", ssh_host="merlin_dev")
+    monkeypatch.setenv("CLAUDE_HUB_PTY_GATEWAY_HOSTS", "gateway.example.test")
+    gateway = RemoteProfile(id="gateway", name="gateway", ssh_host="gateway.example.test")
     _patch_profile(monkeypatch, gateway)
 
     payload = {
@@ -290,7 +294,7 @@ async def test_gateway_listing_routes_through_pty_exec(
     monkeypatch.setattr(remote_api, "pty_exec", fake_pty_exec)
     monkeypatch.setattr(remote_api.asyncio, "create_subprocess_exec", boom)
 
-    resp = await client.get("/api/remote/filesystem/list", params={"profile_id": "merlin_dev"})
+    resp = await client.get("/api/remote/filesystem/list", params={"profile_id": "gateway"})
 
     assert resp.status_code == 200
     assert resp.json()["current_path"] == "/root"

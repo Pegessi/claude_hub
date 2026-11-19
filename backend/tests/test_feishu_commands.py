@@ -416,7 +416,7 @@ def test_feishu_ai_command_cli_subcommands(monkeypatch: pytest.MonkeyPatch) -> N
                 "config": {
                     "enabled": True,
                     "provider": (body or {}).get("provider", "claude"),
-                    "model": (body or {}).get("model", "[redacted]"),
+                    "model": (body or {}).get("model", "example-code-model"),
                     "reasoning_effort": (body or {}).get("reasoning_effort", "high"),
                 },
                 "token_status": {"can_send_as_user": True},
@@ -462,7 +462,7 @@ def test_feishu_ai_command_cli_subcommands(monkeypatch: pytest.MonkeyPatch) -> N
             "dry-run",
             "/ai --provider codex --model gpt-5.4 --effort xhigh review !4045",
             "--context",
-            "https://[redacted]/[redacted]/merge_requests/4045 commit 2a0bab453f",
+            "https://git.example.invalid/example/project/merge_requests/4045 commit 2a0bab453f",
         ],
     )
     assert res_dry.exit_code == 0, res_dry.output

@@ -398,7 +398,7 @@ class CursorSession(ProcessSession):
         ``agent acp``'s ``loadSession`` resets the in-memory ``modelManager``
         to the SQLite store's ``lastUsedModel``, and ``newSession``'s
         ``syncCurrentSelectionWithParameterizedModels`` collapses legacy CLI
-        slugs (such as ``[redacted]-high``) to the base model's saved/default
+        slugs (such as ``example-model-high``) to the base model's saved/default
         parameters when startup parameterized probing times out. When the ACP
         server advertises parameterized ``configOptions``, resolve ``CURSOR_MODEL``
         into its base model ID and parameter options via

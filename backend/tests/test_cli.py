@@ -1627,7 +1627,7 @@ def test_tab_create_antigravity_chat_body(monkeypatch):
             "--session-kind",
             "chat",
             "--env",
-            "ANTIGRAVITY_MODEL=[redacted]-high",
+            "ANTIGRAVITY_MODEL=gemini-example-model-1dd583607df6-high",
         ],
     )
     assert result.exit_code == 0, result.output
@@ -1635,7 +1635,7 @@ def test_tab_create_antigravity_chat_body(monkeypatch):
     assert bodies[0]["session_kind"] == "chat"
     assert bodies[0]["target"] == "local"
     assert bodies[0]["solo_mode"] is False
-    assert bodies[0]["env"] == {"ANTIGRAVITY_MODEL": "[redacted]-high"}
+    assert bodies[0]["env"] == {"ANTIGRAVITY_MODEL": "gemini-example-model-1dd583607df6-high"}
 
 
 def test_tab_update_accepts_antigravity_type_and_preserves_model_id(monkeypatch):

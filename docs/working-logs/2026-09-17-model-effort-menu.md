@@ -20,8 +20,8 @@ thinking levels. On narrow screens the panels stack vertically.
   `collaborationMode.settings.reasoning_effort` on the next turn. The legacy
   `TRAEX_REASONING_EFFORT` key remains readable for existing tabs.
 - Cursor encodes effort in the model ID itself. The runtime catalog parser
-  groups variants such as `[redacted]-low` and `[redacted]-high` under one
-  `[redacted]` UI model. Each effort retains its exact provider model ID, so
+  groups variants such as `example-model-419255f2bb4c-low` and `example-model-419255f2bb4c-high` under one
+  `example-model-419255f2bb4c` UI model. Each effort retains its exact provider model ID, so
   selection still reaches Cursor through the existing `--model` launch flag.
 - Models without effort metadata remain one-click choices. Custom model IDs
   remain available at the bottom of the menu.

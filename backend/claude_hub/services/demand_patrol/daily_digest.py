@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 from claude_hub.models import TaskLifecycle, WorkspaceTask
 from claude_hub.services.demand_patrol.commands import (
@@ -16,8 +18,9 @@ from claude_hub.services.demand_patrol.commands import (
     run_command,
 )
 from claude_hub.services.demand_patrol.models import MRStateSnapshot, PatrolRunRecord, PatrolState
+from claude_hub.services.local_runtime_settings import local_setting
 
-_MR_URL = re.compile(r"https://[redacted]/(?:[A-Za-z0-9_.-]+/)+merge_requests/\d+\b")
+_MR_URL = re.compile(r"https://[A-Za-z0-9.-]+/(?:[A-Za-z0-9_.-]+/)+merge_requests/\d+\b")
 _OPEN_DEMAND_STATUSES = frozenset({"active", "waiting", "planned"})
 _ACTIVE_TASK_STATUSES = frozenset({"todo", "queued", "working", "review"})
 _FAILURES = frozenset({"failed", "failure", "error", "timed_out", "timeout"})
@@ -60,6 +63,19 @@ def _demands(payload: Any) -> list[Mapping[str, Any]]:
     return rows
 
 
+def _mr_urls(text: str) -> set[str]:
+    hosts = {
+        item.strip().lower()
+        for item in local_setting("CLAUDE_HUB_PATROL_MR_HOSTS", "").split(",")
+        if item.strip()
+    }
+    return {
+        match.group()
+        for match in _MR_URL.finditer(text)
+        if (urlsplit(match.group()).hostname or "").lower() in hosts
+    }
+
+
 def demand_mr_urls(demand: Mapping[str, Any]) -> set[str]:
     """Extract canonical MR identities only from explicit source/progress evidence."""
     values: list[str] = []
@@ -68,7 +84,7 @@ def demand_mr_urls(demand: Mapping[str, Any]) -> set[str]:
     for progress in _records(demand.get("progress")):
         for link in _records(progress.get("links")):
             values.append(_text(link.get("url")))
-    return {match.group() for value in values for match in _MR_URL.finditer(value)}
+    return {url for value in values for url in _mr_urls(value)}
 
 
 def _last_touch(demand: Mapping[str, Any]) -> datetime | None:
@@ -92,7 +108,7 @@ def _matching_tasks(
         title_match = bool(title) and (
             task.title.casefold().strip() == title or (len(title) >= 6 and title in task_text)
         )
-        if title_match or urls.intersection(_MR_URL.findall(f"{task.title} {task.prompt}")):
+        if title_match or urls.intersection(_mr_urls(f"{task.title} {task.prompt}")):
             matches.append(task)
     return matches
 

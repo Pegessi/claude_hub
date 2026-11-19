@@ -1,7 +1,10 @@
 """Default terminal policies; runtime lookups use the compatibility bindings."""
 
+import os
 import re
 from typing import Dict
+
+from claude_hub.services.local_runtime_settings import local_setting
 
 TMUX_SESSION_PREFIX = "claude-hub-"
 
@@ -69,12 +72,21 @@ _MAX_TTYD_BIND_ATTEMPTS = 3
 
 _REMOTE_CAPTURE_TIMEOUT_SECONDS = 10.0
 
-_VOLCENGINE_CODING_PLAN_MODEL_ALIASES = {
-    "ark/seed-code-0602": "[redacted]",
-    "ark/seed-code-0602[1m]": "[redacted]",
-    "ark/seed-code-6062": "[redacted]",
-    "ark/seed-code-6062[1m]": "[redacted]",
-}
+# The deployed model identifier is operator configuration, not a public default.
+_CODING_PLAN_MODEL = local_setting("CLAUDE_HUB_CODING_PLAN_MODEL", "").strip()
+_VOLCENGINE_CODING_PLAN_MODEL_ALIASES = (
+    dict.fromkeys(
+        (
+            "ark/seed-code-0602",
+            "ark/seed-code-0602[1m]",
+            "ark/seed-code-6062",
+            "ark/seed-code-6062[1m]",
+        ),
+        _CODING_PLAN_MODEL,
+    )
+    if _CODING_PLAN_MODEL
+    else {}
+)
 
 _MODEL_ENV_KEYS = (
     "ANTHROPIC_MODEL",
@@ -86,12 +98,8 @@ _MODEL_ENV_KEYS = (
 
 DEFAULT_CLAUDE_LAUNCH_ENV: Dict[str, str] = {
     "ANTHROPIC_BASE_URL": "https://ark.cn-beijing.volces.com/api/coding",
-    "ANTHROPIC_MODEL": "[redacted]",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "[redacted]",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "[redacted]",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "[redacted]",
-    "CLAUDE_CODE_SUBAGENT_MODEL": "[redacted]",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    **({key: _CODING_PLAN_MODEL for key in _MODEL_ENV_KEYS} if _CODING_PLAN_MODEL else {}),
 }
 
 _TMUX_LAUNCH_ENV_KEYS = (

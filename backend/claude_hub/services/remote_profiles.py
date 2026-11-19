@@ -5,7 +5,7 @@ There are three effective capability states for a remote alias:
 * ``normal`` — a conventional sshd. ``ssh host 'cmd'`` runs the argv command and
   a persistent ``ssh -tt host '<bootstrap>'`` carries the interactive tmux
   session. One-shot capture uses the argv channel.
-* ``pty_gateway`` — a jump/gateway sshd such as the merlin_dev Trial proxy. The
+* ``pty_gateway`` — a jump/gateway sshd such as an interactive SSH proxy. The
   OpenSSH command channel is swallowed (``ssh host 'cmd'`` → rc 0, empty) and a
   non-tty stdin is ignored, *but* an argv-less ``ssh -tt`` connection lands in a
   real interactive PTY after a short connect flash. Interactive tabs are
@@ -18,8 +18,8 @@ There are three effective capability states for a remote alias:
 The transport is normally inferred from host/alias signatures, but it can be
 pinned explicitly per profile (``"transport": "pty_gateway"``) or via the
 ``CLAUDE_HUB_PTY_GATEWAY_HOSTS`` env var (comma-separated host substrings).
-Detection is deliberately signature-based rather than a single hard-coded alias
-so every merlin/seedjob gateway is classified consistently.
+Host/user substring pairs can also be supplied via
+``CLAUDE_HUB_PTY_GATEWAY_HOST_USERS`` as comma-separated ``host:user`` pairs.
 """
 
 import json
@@ -32,6 +32,8 @@ from typing import Optional
 
 from pydantic import ValidationError
 
+from claude_hub.services.local_runtime_settings import local_setting, private_setting
+
 from ..models import RemoteProfile
 from ..models.schemas import NONINTERACTIVE_REMOTE_UNSUPPORTED, RemoteTransport
 
@@ -41,15 +43,10 @@ REMOTE_PROFILES_FILE = Path.home() / ".claude_hub" / "remote_profiles.json"
 SSH_CONFIG_FILE = Path.home() / ".ssh" / "config"
 _PROFILE_ID_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
-# Aliases known to be merlin-style PTY gateways. Host/user signatures below are
-# the primary classifier; this set is a convenience for short ssh-config aliases.
-_PTY_GATEWAY_ALIAS_IDS = frozenset({"merlin_dev", "merlin_dev_2", "merlin_dev_evo"})
-# Substrings in ssh_host that identify a gateway sshd.
-_PTY_GATEWAY_HOST_SIGNATURES = ("merlin-ssh-proxy",)
-# (host substring, user substring) composite signatures, e.g. ssh-candy.
-_PTY_GATEWAY_HOST_USER_SIGNATURES = (("[redacted]", "[redacted]"),)
-# Comma-separated extra host substrings treated as gateways (operational override).
+# Configured signatures are private deployment configuration, not source code.
 _GATEWAY_HOSTS_ENV = "CLAUDE_HUB_PTY_GATEWAY_HOSTS"
+_GATEWAY_ALIASES_ENV = "CLAUDE_HUB_PTY_GATEWAY_ALIASES"
+_GATEWAY_HOST_USERS_ENV = "CLAUDE_HUB_PTY_GATEWAY_HOST_USERS"
 
 
 @dataclass(frozen=True)
@@ -75,8 +72,8 @@ class RemoteCapabilities:
 
 
 def _env_gateway_signatures() -> tuple[str, ...]:
-    raw = os.environ.get(_GATEWAY_HOSTS_ENV, "")
-    return tuple(part.strip().lower() for part in raw.split(",") if part.strip())
+    values = (private_setting(_GATEWAY_HOSTS_ENV), os.environ.get(_GATEWAY_HOSTS_ENV, ""))
+    return tuple(part.strip().lower() for raw in values for part in raw.split(",") if part.strip())
 
 
 def _coerce_transport(value: object) -> Optional[RemoteTransport]:
@@ -106,17 +103,20 @@ def resolve_transport(profile: RemoteProfile) -> RemoteTransport:
     host = profile.ssh_host.strip().lower()
     user = (profile.user or "").strip().lower()
 
-    if alias in _PTY_GATEWAY_ALIAS_IDS:
+    aliases = {item.strip().lower() for item in local_setting(_GATEWAY_ALIASES_ENV).split(",")}
+    if alias in aliases:
         return RemoteTransport.PTY_GATEWAY
-    for signature in (*_PTY_GATEWAY_HOST_SIGNATURES, *_env_gateway_signatures()):
+    for signature in _env_gateway_signatures():
         if signature in host or signature in alias:
             return RemoteTransport.PTY_GATEWAY
-    for host_sig, user_sig in _PTY_GATEWAY_HOST_USER_SIGNATURES:
-        if host_sig in host and user_sig in user:
+    for pair in local_setting(_GATEWAY_HOST_USERS_ENV, "").split(","):
+        host_sig, separator, user_sig = pair.strip().lower().partition(":")
+        if separator and host_sig and user_sig and host_sig in host and user_sig in user:
             return RemoteTransport.PTY_GATEWAY
-    # Generic seedjob worker identity (ssh-candy / Trial proxies).
-    if ".worker_" in user and "[redacted]" in user:
-        return RemoteTransport.PTY_GATEWAY
+    for group in local_setting("CLAUDE_HUB_PTY_GATEWAY_USER_MARKERS", "").split(","):
+        markers = [part.strip().lower() for part in group.split("&") if part.strip()]
+        if markers and all(marker in user for marker in markers):
+            return RemoteTransport.PTY_GATEWAY
     return RemoteTransport.NORMAL
 
 
@@ -145,7 +145,7 @@ def profile_uses_stdin_shell(profile: RemoteProfile) -> bool:
     """Back-compat: True when ``ssh host 'cmd'`` is swallowed (a PTY gateway).
 
     Historically this also meant "no interactive TTY". That is no longer true for
-    merlin-style gateways — those are fully interactive through a real PTY — so
+    PTY gateways — those are fully interactive through a real PTY — so
     new code must use :func:`profile_capabilities` instead.
     """
 

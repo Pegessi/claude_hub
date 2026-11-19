@@ -2783,7 +2783,7 @@ async def test_agent_create_env_preset_redacts_api_and_cli_json(
         name="day1",
         text=(
             f"export ANTHROPIC_AUTH_TOKEN={DAY1_RESPONSE_SENTINEL}\n"
-            "export ANTHROPIC_MODEL=[redacted]"
+            "export ANTHROPIC_MODEL=example-code-model"
         ),
         preset_id="day1-test",
     )

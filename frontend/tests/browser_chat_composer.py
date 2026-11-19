@@ -945,8 +945,8 @@ async def main(browser_run: BrowserRun) -> None:
                         ],
                     }
                     for model, label in [
-                        ("[redacted]", "[redacted]"),
-                        ("[redacted]", "[redacted]"),
+                        ("gpt-example-model-c886ad270fea", "gpt-example-model-c886ad270fea"),
+                        ("gpt-example-model-d050a243e4ed", "gpt-example-model-d050a243e4ed"),
                     ]
                 ]
                 await route.fulfill(
@@ -2806,9 +2806,9 @@ async def main(browser_run: BrowserRun) -> None:
         # as presets; catalog errors and custom values never discard that env.
         await page.locator(".modal").get_by_role("button", name="Cancel", exact=True).click()
         for width, model_id, effort in (
-            (1280, "[redacted]", "ultra"),
-            (720, "[redacted]", "high"),
-            (390, "[redacted]", "max"),
+            (1280, "gpt-example-model-c886ad270fea", "ultra"),
+            (720, "gpt-example-model-d050a243e4ed", "high"),
+            (390, "gpt-example-model-c886ad270fea", "max"),
         ):
             await page.set_viewport_size({"width": width, "height": 900})
             state["codex_models_status"] = 503 if width == 1280 else 200

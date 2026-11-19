@@ -83,8 +83,8 @@ unlisted endpoints properly still needs MASO to publish a name for them.
   variant rows collapsed). Call counts stay at one quota request per reading and
   none when the reading is cached.
 - Live check against the running service: 6 of 9 rows now carry model names
-  (`[redacted]`, `[redacted]`, `[redacted]`, `[redacted]`, `[redacted]`,
-  `[redacted]`); the three endpoints MASO does not list read
+  (`[redacted]`, `[redacted]`, `example-model-051bc3aafde0`, `[redacted]`, `[redacted]`,
+  `example-model-e5d82e99e8a1`); the three endpoints MASO does not list read
   `Unlisted endpoint · <code>` with the endpoint kept in `scope` (above).
 - `frontend/tests/quotaMenu.test.mjs`: a row whose label describes the limit
   keeps `label (scope)` in its tooltip; `browser_service_restart.py` opens the

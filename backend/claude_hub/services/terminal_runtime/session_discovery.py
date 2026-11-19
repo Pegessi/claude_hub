@@ -24,7 +24,7 @@ def _claude_project_dir_for_cwd(runtime: RuntimeBindings, cwd: str) -> Path:
 
     Claude derives the dir name by dropping the leading slash and replacing
     every ``/``, ``_`` and ``.`` with ``-``, then prefixing ``-``. Example:
-    ``[redacted]/claude_hub`` -> ``[redacted]``.
+    ``/Users/example/project`` -> ``-Users-example-project``.
     """
     key = re.sub(r"[/_.]", "-", cwd.lstrip("/"))
     return Path.home() / ".claude" / "projects" / f"-{key}"

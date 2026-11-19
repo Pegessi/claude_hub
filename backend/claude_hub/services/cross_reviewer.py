@@ -17,12 +17,13 @@ from typing import Awaitable, Callable, Mapping, Sequence
 
 from claude_hub.models import AgentType, ProviderQuota, SessionKind, StreamModelOption
 from claude_hub.services import maso_discovery
+from claude_hub.services.local_runtime_settings import local_setting
 from claude_hub.services.maso_discovery import discover_maso_service
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ARGON_REVIEW_MODEL = "[redacted]_reasoning_high"
-DEFAULT_ASTRA_REVIEW_MODEL = "[redacted]_reasoning_high"
+DEFAULT_ARGON_REVIEW_MODEL = local_setting("CLAUDE_HUB_REVIEW_MODEL_ARGON", "")
+DEFAULT_ASTRA_REVIEW_MODEL = local_setting("CLAUDE_HUB_REVIEW_MODEL_ASTRA", "")
 _ORIGINAL_DISCOVER_MASO_SERVICE = maso_discovery.discover_maso_service
 _QUOTA_READ_TIMEOUT_SECONDS = 1.5
 _MASO_VARIANT_SUFFIX_RE = re.compile(
@@ -290,16 +291,35 @@ def _pick_family_model(
     target_family: str,
 ) -> str | None:
     if not models:
-        return preferred_full_id
+        return preferred_full_id or None
     advertised = _advertised_model_ids(models)
-    if preferred_full_id in advertised or base_prefix in advertised:
+    if preferred_full_id and (
+        preferred_full_id in advertised
+        or canonical_maso_base_model(preferred_full_id) in advertised
+    ):
         return preferred_full_id
-    for candidate in sorted(advertised):
-        if maso_model_family({"MASO_MODEL": candidate}) == target_family:
-            if candidate == base_prefix:
-                return preferred_full_id
-            return candidate
-    return None
+    family = [
+        item for item in advertised if maso_model_family({"MASO_MODEL": item}) == target_family
+    ]
+    if preferred_full_id:
+        # Preserve the historical sorted family fallback when the installation
+        # supplies its preferred model but it is absent from the live catalog.
+        return min(family, default=None)
+    # Prefer an advertised high-effort variant, including variants advertised as
+    # mode=default; never invent a model name the service did not return.
+    return next(
+        iter(
+            sorted(
+                family,
+                key=lambda item: (
+                    0 if re.search(r"[_-](?:reasoning|thinking)[_-]high$", item, re.I) else 1,
+                    0 if re.search(r"[_-](?:reasoning|thinking)$", item, re.I) else 1,
+                    item,
+                ),
+            )
+        ),
+        None,
+    )
 
 
 def _pick_alternate_non_family_model(
@@ -371,7 +391,7 @@ def select_cross_reviewer_candidates(
 
     if parent_agent_type == AgentType.MASO:
         if parent_family == "argon":
-            add_maso("[redacted]", DEFAULT_ASTRA_REVIEW_MODEL, "astra")
+            add_maso("astra", DEFAULT_ASTRA_REVIEW_MODEL, "astra")
             if maso_base_url and model_seq and not candidates:
                 alt = _pick_alternate_non_family_model(model_seq, "argon")
                 if alt:
@@ -385,9 +405,9 @@ def select_cross_reviewer_candidates(
             candidates.append(CrossReviewCandidate(provider=AgentType.CODEX.value, effort="high"))
             candidates.append(CrossReviewCandidate(provider=AgentType.CLAUDE.value))
         else:
-            add_maso("[redacted]", DEFAULT_ARGON_REVIEW_MODEL, "argon")
+            add_maso("gemini", DEFAULT_ARGON_REVIEW_MODEL, "argon")
             if parent_family not in {"astra", ""}:
-                add_maso("[redacted]", DEFAULT_ASTRA_REVIEW_MODEL, "astra")
+                add_maso("astra", DEFAULT_ASTRA_REVIEW_MODEL, "astra")
             if maso_base_url and model_seq and not candidates:
                 alt = _pick_alternate_non_family_model(model_seq, parent_family or "other")
                 if alt:
@@ -401,16 +421,16 @@ def select_cross_reviewer_candidates(
             candidates.append(CrossReviewCandidate(provider=AgentType.CODEX.value, effort="high"))
             candidates.append(CrossReviewCandidate(provider=AgentType.CLAUDE.value))
     elif parent_agent_type in {AgentType.CODEX, AgentType.TRAEX}:
-        add_maso("[redacted]", DEFAULT_ARGON_REVIEW_MODEL, "argon")
-        add_maso("[redacted]", DEFAULT_ASTRA_REVIEW_MODEL, "astra")
+        add_maso("gemini", DEFAULT_ARGON_REVIEW_MODEL, "argon")
+        add_maso("astra", DEFAULT_ASTRA_REVIEW_MODEL, "astra")
         candidates.append(CrossReviewCandidate(provider=AgentType.CLAUDE.value))
     elif parent_agent_type == AgentType.CLAUDE:
-        add_maso("[redacted]", DEFAULT_ARGON_REVIEW_MODEL, "argon")
-        add_maso("[redacted]", DEFAULT_ASTRA_REVIEW_MODEL, "astra")
+        add_maso("gemini", DEFAULT_ARGON_REVIEW_MODEL, "argon")
+        add_maso("astra", DEFAULT_ASTRA_REVIEW_MODEL, "astra")
         candidates.append(CrossReviewCandidate(provider=AgentType.CODEX.value, effort="high"))
     else:
-        add_maso("[redacted]", DEFAULT_ARGON_REVIEW_MODEL, "argon")
-        add_maso("[redacted]", DEFAULT_ASTRA_REVIEW_MODEL, "astra")
+        add_maso("gemini", DEFAULT_ARGON_REVIEW_MODEL, "argon")
+        add_maso("astra", DEFAULT_ASTRA_REVIEW_MODEL, "astra")
         candidates.append(CrossReviewCandidate(provider=AgentType.CODEX.value, effort="high"))
         candidates.append(CrossReviewCandidate(provider=AgentType.CLAUDE.value))
 
@@ -467,15 +487,7 @@ async def resolve_cross_reviewer_target(
 ) -> CrossReviewerTarget | None:
     """Resolve a heterogeneous Chat reviewer target, or return None if unavailable.
 
-    Pairing matrix:
-    - Worker is ``AgentType.MASO`` with Argon/Gemini family (explicit or via MASO
-      service ``default_model``) -> MASO ``[redacted]_reasoning_high`` (or alternate
-      [redacted] model).
-    - Worker is ``AgentType.MASO`` with Astra/GPT/Seed/DeepSeek/other family (or
-      empty default model) -> MASO ``[redacted]_reasoning_high`` (or alternate
-      non-worker-family model).
-    - Worker is ``claude`` / ``codex`` / ``cursor`` / ``traex`` / ``antigravity`` ->
-      MASO ``[redacted]_reasoning_high`` (falling back to ``[redacted]_reasoning_high``).
+    Select an advertised model from a different family when possible.
     """
     env = dict(worker_env or {})
     if (
@@ -518,7 +530,7 @@ async def resolve_cross_reviewer_target(
                 _pick_family_model(
                     models,
                     preferred_full_id=DEFAULT_ASTRA_REVIEW_MODEL,
-                    base_prefix="[redacted]",
+                    base_prefix="astra",
                     target_family="astra",
                 ),
                 _pick_alternate_non_family_model(models, "argon"),
@@ -531,14 +543,14 @@ async def resolve_cross_reviewer_target(
                 _pick_family_model(
                     models,
                     preferred_full_id=DEFAULT_ARGON_REVIEW_MODEL,
-                    base_prefix="[redacted]",
+                    base_prefix="gemini",
                     target_family="argon",
                 ),
                 (
                     _pick_family_model(
                         models,
                         preferred_full_id=DEFAULT_ASTRA_REVIEW_MODEL,
-                        base_prefix="[redacted]",
+                        base_prefix="astra",
                         target_family="astra",
                     )
                     if worker_family not in {"astra", ""}
@@ -554,13 +566,13 @@ async def resolve_cross_reviewer_target(
             _pick_family_model(
                 models,
                 preferred_full_id=DEFAULT_ARGON_REVIEW_MODEL,
-                base_prefix="[redacted]",
+                base_prefix="gemini",
                 target_family="argon",
             ),
             _pick_family_model(
                 models,
                 preferred_full_id=DEFAULT_ASTRA_REVIEW_MODEL,
-                base_prefix="[redacted]",
+                base_prefix="astra",
                 target_family="astra",
             ),
             _pick_alternate_non_family_model(models, ""),

@@ -533,7 +533,14 @@ async def test_codex_send_message_injects_hub_guidance_once() -> None:
 
 
 @pytest.mark.asyncio
-async def test_codex_capability_metadata_retries_after_empty_model_list() -> None:
+async def test_codex_capability_metadata_retries_after_empty_model_list(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setenv(
+        "CLAUDE_HUB_CODEX_FALLBACK_MODELS",
+        "gpt-example-model-c886ad270fea,gpt-example-model-d050a243e4ed",
+    )
     native = CodexNativeSession(_session(AgentType.CODEX))
     native._mode_discovery_attempted = True
     responses = iter(
@@ -564,7 +571,9 @@ async def test_codex_capability_metadata_retries_after_empty_model_list() -> Non
     assert native._model_discovery_attempted is True
     assert recovered.metadata_cacheable is False
     assert recovered.available_models[0].id == "recovered-model"
-    assert {"[redacted]", "[redacted]"} <= {item.id for item in recovered.available_models}
+    assert {"gpt-example-model-c886ad270fea", "gpt-example-model-d050a243e4ed"} <= {
+        item.id for item in recovered.available_models
+    }
     assert native._send_request.await_count == 2
 
 
@@ -2585,7 +2594,7 @@ async def test_codex_selected_model_overrides_thread_model_in_default_mode() -> 
                 {
                     "jsonrpc": "2.0",
                     "id": 2,
-                    "result": {"thread": {"id": "th-1"}, "model": "[redacted]"},
+                    "result": {"thread": {"id": "th-1"}, "model": "example-model-419255f2bb4c"},
                 }
             ).encode()
             + b"\n",
@@ -2649,7 +2658,7 @@ async def test_codex_selected_model_sent_even_without_advertised_preset() -> Non
                 {
                     "jsonrpc": "2.0",
                     "id": 2,
-                    "result": {"thread": {"id": "th-1"}, "model": "[redacted]"},
+                    "result": {"thread": {"id": "th-1"}, "model": "example-model-419255f2bb4c"},
                 }
             ).encode()
             + b"\n",
@@ -2687,7 +2696,7 @@ async def test_codex_selected_model_overrides_in_plan_mode() -> None:
                 {
                     "jsonrpc": "2.0",
                     "id": 2,
-                    "result": {"thread": {"id": "th-1"}, "model": "[redacted]"},
+                    "result": {"thread": {"id": "th-1"}, "model": "example-model-419255f2bb4c"},
                 }
             ).encode()
             + b"\n",
@@ -2751,7 +2760,7 @@ async def test_codex_no_model_selection_falls_back_to_thread_model() -> None:
                 {
                     "jsonrpc": "2.0",
                     "id": 2,
-                    "result": {"thread": {"id": "th-1"}, "model": "[redacted]"},
+                    "result": {"thread": {"id": "th-1"}, "model": "example-model-419255f2bb4c"},
                 }
             ).encode()
             + b"\n",
@@ -2786,11 +2795,13 @@ async def test_codex_no_model_selection_falls_back_to_thread_model() -> None:
 
     messages = _written_requests(proc)
     turn = next(item for item in messages if item.get("method") == "turn/start")
-    assert turn["params"]["collaborationMode"]["settings"]["model"] == "[redacted]"
+    assert turn["params"]["collaborationMode"]["settings"]["model"] == "example-model-419255f2bb4c"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("selected_model", ["[redacted]", "[redacted]"])
+@pytest.mark.parametrize(
+    "selected_model", ["gpt-example-model-c886ad270fea", "gpt-example-model-d050a243e4ed"]
+)
 async def test_codex_model_switch_via_update_env_takes_effect_next_turn(
     selected_model: str,
 ) -> None:
@@ -2810,7 +2821,7 @@ async def test_codex_model_switch_via_update_env_takes_effect_next_turn(
                 {
                     "jsonrpc": "2.0",
                     "id": 2,
-                    "result": {"thread": {"id": "th-1"}, "model": "[redacted]"},
+                    "result": {"thread": {"id": "th-1"}, "model": "example-model-419255f2bb4c"},
                 }
             ).encode()
             + b"\n",
@@ -2885,9 +2896,13 @@ async def test_codex_model_switch_via_update_env_takes_effect_next_turn(
     messages = _written_requests(proc)
     turns = [m for m in messages if m.get("method") == "turn/start"]
     assert len(turns) == 3
-    assert turns[0]["params"]["collaborationMode"]["settings"]["model"] == "[redacted]"
+    assert (
+        turns[0]["params"]["collaborationMode"]["settings"]["model"] == "example-model-419255f2bb4c"
+    )
     assert turns[1]["params"]["collaborationMode"]["settings"]["model"] == selected_model
-    assert turns[2]["params"]["collaborationMode"]["settings"]["model"] == "[redacted]"
+    assert (
+        turns[2]["params"]["collaborationMode"]["settings"]["model"] == "example-model-419255f2bb4c"
+    )
 
 
 @pytest.mark.asyncio
@@ -3782,7 +3797,7 @@ async def test_cursor_acp_tailer_survives_recovery_restart_and_isolates_subagent
 
     sess = _session(AgentType.CURSOR)
     sess.solo_mode = True
-    sess.env = {"CURSOR_MODEL": "[redacted]-high"}
+    sess.env = {"CURSOR_MODEL": "gemini-example-model-1d11bad5f3fe-high"}
     native = CursorNativeSession(sess)
     monkeypatch.setattr(native, "_build_provider_env", AsyncMock(return_value={"PATH": "/bin"}))
     monkeypatch.setattr(
@@ -3832,7 +3847,7 @@ async def test_cursor_acp_tailer_survives_recovery_restart_and_isolates_subagent
         set_model_req = next(r for r in proc2.requests if r.get("method") == "session/set_model")
         assert set_model_req["params"] == {
             "sessionId": "acp-main-1",
-            "modelId": "[redacted]-high",
+            "modelId": "gemini-example-model-1d11bad5f3fe-high",
         }
 
         # Send a turn on the restarted process and interleave a child subagent frame.
@@ -5093,22 +5108,22 @@ def test_parse_list_models_strips_ansi_and_markers() -> None:
 def test_cursor_model_variants_group_into_effort_options() -> None:
     grouped = native_module._group_cursor_model_options(
         native_module._parse_list_models(
-            "[redacted]-low - GPT-5.6 Sol Low\n"
-            "[redacted]-medium - GPT-5.6 Sol\n"
-            "[redacted]-high - GPT-5.6 Sol High\n"
+            "example-model-419255f2bb4c-low - GPT-5.6 Sol Low\n"
+            "example-model-419255f2bb4c-medium - GPT-5.6 Sol\n"
+            "example-model-419255f2bb4c-high - GPT-5.6 Sol High\n"
         )
     )
 
     assert len(grouped) == 1
-    assert grouped[0].id == "[redacted]"
+    assert grouped[0].id == "example-model-419255f2bb4c"
     assert grouped[0].label == "GPT-5.6 Sol"
     assert grouped[0].default_reasoning_effort == "medium"
     assert [
         (item.id, item.provider_model_id) for item in grouped[0].supported_reasoning_efforts
     ] == [
-        ("low", "[redacted]-low"),
-        ("medium", "[redacted]-medium"),
-        ("high", "[redacted]-high"),
+        ("low", "example-model-419255f2bb4c-low"),
+        ("medium", "example-model-419255f2bb4c-medium"),
+        ("high", "example-model-419255f2bb4c-high"),
     ]
 
 
@@ -5143,7 +5158,7 @@ def test_cursor_group_label_removes_effort_before_thinking_suffix() -> None:
 def test_codex_reasoning_effort_overrides_mode_preset() -> None:
     session = _session(AgentType.CODEX)
     session.env = {
-        "CODEX_MODEL": "[redacted]",
+        "CODEX_MODEL": "example-model-419255f2bb4c",
         "CODEX_REASONING_EFFORT": "high",
     }
     native = CodexNativeSession(session)
@@ -5157,7 +5172,7 @@ def test_codex_reasoning_effort_overrides_mode_preset() -> None:
     assert native._collaboration_mode_payload() == {
         "mode": "read",
         "settings": {
-            "model": "[redacted]",
+            "model": "example-model-419255f2bb4c",
             "developer_instructions": None,
             "reasoning_effort": "high",
         },
@@ -5171,8 +5186,8 @@ async def test_codex_discovers_model_specific_reasoning_efforts() -> None:
         return_value={
             "data": [
                 {
-                    "model": "[redacted]",
-                    "displayName": "[redacted]",
+                    "model": "example-model-419255f2bb4c",
+                    "displayName": "example-model-419255f2bb4c",
                     "description": "Agentic coding model",
                     "defaultReasoningEffort": "low",
                     "supportedReasoningEfforts": [
@@ -5187,7 +5202,7 @@ async def test_codex_discovers_model_specific_reasoning_efforts() -> None:
 
     await native._discover_models()
 
-    assert native._available_models[0].label == "[redacted]"
+    assert native._available_models[0].label == "example-model-419255f2bb4c"
     assert native._available_models[0].default_reasoning_effort == "low"
     assert [item.id for item in native._available_models[0].supported_reasoning_efforts] == [
         "low",
@@ -5403,7 +5418,10 @@ async def test_probe_cancelled_kills_process() -> None:
 
 
 @pytest.mark.asyncio
-async def test_claude_codex_return_static_without_probe() -> None:
+async def test_claude_codex_return_static_without_probe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     """claude/codex have no list-models flag, so they return the curated static
     list without spawning a subprocess."""
     with patch("asyncio.create_subprocess_exec") as spawn:
@@ -5417,7 +5435,7 @@ async def test_claude_codex_return_static_without_probe() -> None:
 
 @pytest.mark.asyncio
 async def test_cursor_acp_parameterized_model_resolution_and_config_options() -> None:
-    """Regression for Cursor ACP -32602 ``Invalid model value: [redacted]-high``:
+    """Regression for Cursor ACP -32602 ``Invalid model value: gemini-example-model-1d11bad5f3fe-high``:
     ``agent acp`` rejects legacy CLI variant slugs on ``session/set_model`` and
     requires negotiating ``clientCapabilities._meta.parameterizedModelPicker=True``
     plus applying base model IDs and parameter options via
@@ -5429,16 +5447,16 @@ async def test_cursor_acp_parameterized_model_resolution_and_config_options() ->
 
     base_ids = {
         "auto-smart",
-        "[redacted]",
-        "[redacted]",
+        "gemini-example-model-1d11bad5f3fe",
+        "gemini-example-model-1dd583607df6",
         "grok-4.6",
         "gpt-5.3-codex",
         "claude-opus-4-8",
         "claude-sonnet-4-6",
         "composer-2",
     }
-    assert _parse_cursor_model_spec("[redacted]-high", base_ids) == (
-        "[redacted]",
+    assert _parse_cursor_model_spec("gemini-example-model-1d11bad5f3fe-high", base_ids) == (
+        "gemini-example-model-1d11bad5f3fe",
         {
             "_fast_default": "false",
             "_thinking_default": "false",
@@ -5505,8 +5523,10 @@ async def test_cursor_acp_parameterized_model_resolution_and_config_options() ->
         {"fast": "false", "_context_default": "default", "_effort_default": "medium"},
     )
     assert _parse_cursor_model_spec("auto", base_ids) == ("auto-smart", {})
-    assert _parse_cursor_model_spec("[redacted][reasoning_effort=low]", base_ids) == (
-        "[redacted]",
+    assert _parse_cursor_model_spec(
+        "gemini-example-model-1d11bad5f3fe[reasoning_effort=low]", base_ids
+    ) == (
+        "gemini-example-model-1d11bad5f3fe",
         {"reasoning_effort": "low"},
     )
 
@@ -5551,7 +5571,7 @@ async def test_cursor_acp_parameterized_model_resolution_and_config_options() ->
     ]
 
     class _ParameterizedAcpProc(_InteractiveAcpProc):
-        def __init__(self, *, initial_model: str = "[redacted]") -> None:
+        def __init__(self, *, initial_model: str = "gemini-example-model-1d11bad5f3fe") -> None:
             super().__init__(session_id="acp-param-1")
             self.current_model = initial_model
             self.current_effort = "medium"
@@ -5564,12 +5584,12 @@ async def test_cursor_acp_parameterized_model_resolution_and_config_options() ->
                     "currentValue": self.current_model,
                     "options": [
                         {"value": "auto-smart"},
-                        {"value": "[redacted]"},
+                        {"value": "gemini-example-model-1d11bad5f3fe"},
                         {"value": "grok-4.6"},
                     ],
                 }
             ]
-            if self.current_model == "[redacted]":
+            if self.current_model == "gemini-example-model-1d11bad5f3fe":
                 opts.append(
                     {
                         "id": "reasoning_effort",
@@ -5624,7 +5644,7 @@ async def test_cursor_acp_parameterized_model_resolution_and_config_options() ->
                                 "currentModelId": self.current_model,
                                 "availableModels": [
                                     {"modelId": "auto-smart"},
-                                    {"modelId": "[redacted]"},
+                                    {"modelId": "gemini-example-model-1d11bad5f3fe"},
                                     {"modelId": "grok-4.6"},
                                 ],
                             },
@@ -5664,8 +5684,8 @@ async def test_cursor_acp_parameterized_model_resolution_and_config_options() ->
                 self.stdout.push_json({"jsonrpc": "2.0", "id": req_id, "result": {}})
 
     sess = _session(AgentType.CURSOR)
-    sess.env = {"CURSOR_MODEL": "[redacted]-high"}
-    proc = _ParameterizedAcpProc(initial_model="[redacted]")
+    sess.env = {"CURSOR_MODEL": "gemini-example-model-1d11bad5f3fe-high"}
+    proc = _ParameterizedAcpProc(initial_model="gemini-example-model-1d11bad5f3fe")
     native = CursorNativeSession(sess)
     native._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
     native._spawn_subprocess = AsyncMock(return_value=proc)  # type: ignore[method-assign]
@@ -5934,14 +5954,19 @@ async def test_cursor_acp_session_load_process_exit_does_not_fall_back_to_sessio
     def crash_on_load(msg: Dict[str, Any]) -> None:
         if msg.get("method") == "session/load":
             proc.requests.append(msg)
-            proc.crash(exit_code=1, stderr_msg="Cannot use this model: [redacted]-high")
+            proc.crash(
+                exit_code=1,
+                stderr_msg="Cannot use this model: gemini-example-model-1d11bad5f3fe-high",
+            )
             return
         orig_on_stdin(msg)
 
     proc.stdin._handler = crash_on_load
     native._spawn_subprocess = AsyncMock(return_value=proc)  # type: ignore[method-assign]
 
-    with pytest.raises(RuntimeError, match="Cannot use this model: [redacted]-high"):
+    with pytest.raises(
+        RuntimeError, match="Cannot use this model: gemini-example-model-1d11bad5f3fe-high"
+    ):
         await native.start()
 
     assert [r.get("method") for r in proc.requests] == ["initialize", "session/load"]
@@ -6073,7 +6098,12 @@ async def test_codex_merges_live_subset_with_cache_and_refreshes_cache_only_mode
                         "default_reasoning_level": "ultra",
                         "supported_reasoning_levels": [{"effort": "low"}, {"effort": "ultra"}],
                     }
-                    for model in ["[redacted]", "[redacted]", "cache-only", "[redacted]"]
+                    for model in [
+                        "gpt-example-model-c886ad270fea",
+                        "gpt-example-model-d050a243e4ed",
+                        "cache-only",
+                        "example-model-9a7e60cd1c7b",
+                    ]
                 ]
             }
         )
@@ -6086,38 +6116,42 @@ async def test_codex_merges_live_subset_with_cache_and_refreshes_cache_only_mode
         return_value={
             "data": [
                 {
-                    "model": "[redacted]",
+                    "model": "gpt-example-model-c886ad270fea",
                     "displayName": "Live Sol",
                     "defaultReasoningEffort": "high",
                     "supportedReasoningEfforts": [{"reasoningEffort": "high"}],
                 },
-                {"model": "[redacted]", "hidden": True},
+                {"model": "example-model-9a7e60cd1c7b", "hidden": True},
             ]
         }
     )
     await native.prepare_capabilities()
     options = {m.id: m for m in native.capabilities().available_models}
     assert len(options) == len(native.capabilities().available_models)
-    assert options["[redacted]"].label == "Live Sol"
-    assert [e.id for e in options["[redacted]"].supported_reasoning_efforts] == ["high"]
-    assert options["[redacted]"].default_reasoning_effort == "ultra"
-    assert "[redacted]" not in options
+    assert options["gpt-example-model-c886ad270fea"].label == "Live Sol"
+    assert [
+        e.id for e in options["gpt-example-model-c886ad270fea"].supported_reasoning_efforts
+    ] == ["high"]
+    assert options["gpt-example-model-d050a243e4ed"].default_reasoning_effort == "ultra"
+    assert "example-model-9a7e60cd1c7b" not in options
     native.update_env(
         {
             "CODEX_HOME": str(tmp_path),
-            "CODEX_MODEL": "[redacted]",
+            "CODEX_MODEL": "gpt-example-model-d050a243e4ed",
             "CODEX_REASONING_EFFORT": "ultra",
         }
     )
     assert native._selected_reasoning_effort() == "ultra"
     payload = native._collaboration_mode_payload()
     assert payload is not None
-    assert payload["settings"]["model"] == "[redacted]"
-    assert native._thread_config()["model"] == "[redacted]"
+    assert payload["settings"]["model"] == "gpt-example-model-d050a243e4ed"
+    assert native._thread_config()["model"] == "gpt-example-model-d050a243e4ed"
     path.write_text('{"models": []}')
     await native.prepare_capabilities()
     assert "cache-only" not in {m.id for m in native.capabilities().available_models}
-    assert "[redacted]" not in {m.id for m in native.capabilities().available_models}
+    assert "example-model-9a7e60cd1c7b" not in {
+        m.id for m in native.capabilities().available_models
+    }
     native._send_request.assert_awaited_once()
     assert native.capabilities().metadata_cacheable is False
     # Static fallback has no effort schema and must not discard an explicit override.
@@ -6125,13 +6159,19 @@ async def test_codex_merges_live_subset_with_cache_and_refreshes_cache_only_mode
 
 
 @pytest.mark.asyncio
-async def test_codex_failed_model_rpc_retains_cached_reasoning_options(tmp_path: Path) -> None:
+async def test_codex_failed_model_rpc_retains_cached_reasoning_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "CLAUDE_HUB_CODEX_FALLBACK_MODELS",
+        "gpt-example-model-c886ad270fea,gpt-example-model-d050a243e4ed",
+    )
     (tmp_path / "models_cache.json").write_text(
         json.dumps(
             {
                 "models": [
                     {
-                        "slug": "[redacted]",
+                        "slug": "gpt-example-model-c886ad270fea",
                         "visibility": "list",
                         "default_reasoning_level": "max",
                         "supported_reasoning_levels": [{"effort": "max"}],
@@ -6141,13 +6181,16 @@ async def test_codex_failed_model_rpc_retains_cached_reasoning_options(tmp_path:
         )
     )
     native = _codex_session()
-    native.session.env = {"CODEX_HOME": str(tmp_path), "CODEX_MODEL": "[redacted]"}
+    native.session.env = {
+        "CODEX_HOME": str(tmp_path),
+        "CODEX_MODEL": "gpt-example-model-c886ad270fea",
+    }
     native.start = AsyncMock()  # type: ignore[method-assign]
     native._mode_discovery_attempted = True
     native._send_request = AsyncMock(side_effect=RuntimeError("offline"))  # type: ignore[method-assign]
     await native.prepare_capabilities()
     options = {m.id: m for m in native.capabilities().available_models}
-    assert options["[redacted]"].default_reasoning_effort == "max"
+    assert options["gpt-example-model-c886ad270fea"].default_reasoning_effort == "max"
     assert native.current_reasoning_effort() == "max"
-    assert "[redacted]" in options
+    assert "gpt-example-model-d050a243e4ed" in options
     assert native._provider_model_options is None

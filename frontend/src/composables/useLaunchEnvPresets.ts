@@ -17,6 +17,7 @@ interface StoredLaunchEnvPreset {
 
 interface BackendPresetsResponse {
   custom_presets: StoredLaunchEnvPreset[]
+  builtin_presets?: StoredLaunchEnvPreset[]
   hidden_builtin_ids: string[]
 }
 
@@ -62,17 +63,13 @@ const builtInPresets: LaunchEnvPreset[] = [
     name: 'Volcengine Coding Plan',
     text: [
       'ANTHROPIC_BASE_URL=https://ark.cn-beijing.volces.com/api/coding',
-      'ANTHROPIC_MODEL=[redacted]',
-      'ANTHROPIC_DEFAULT_OPUS_MODEL=[redacted]',
-      'ANTHROPIC_DEFAULT_SONNET_MODEL=[redacted]',
-      'ANTHROPIC_DEFAULT_HAIKU_MODEL=[redacted]',
-      'CLAUDE_CODE_SUBAGENT_MODEL=[redacted]',
       'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1',
     ].join('\n'),
   },
 ]
 
 // Module-level singleton state (shared across all consumers)
+const hydratedBuiltins = ref<LaunchEnvPreset[]>([])
 const customPresets = ref<LaunchEnvPreset[]>(loadCustomPresetsFromStorage())
 const hiddenIds = ref<Set<string>>(loadHiddenIdsFromStorage())
 const ready = ref(false)
@@ -142,6 +139,7 @@ async function _loadFromBackend(): Promise<void> {
       return
     }
     const data: BackendPresetsResponse = await response.json()
+    hydratedBuiltins.value = Array.isArray(data.builtin_presets) ? data.builtin_presets : []
     const backendCustom = Array.isArray(data.custom_presets) ? data.custom_presets : []
     const backendHidden = Array.isArray(data.hidden_builtin_ids)
       ? new Set(data.hidden_builtin_ids)
@@ -258,7 +256,10 @@ export function useLaunchEnvPresets() {
   ensureLoaded()
 
   const envPresets = computed(() => {
-    const all = [...builtInPresets, ...customPresets.value]
+    const all = [
+      ...builtInPresets.map(preset => hydratedBuiltins.value.find(item => item.id === preset.id) ?? preset),
+      ...customPresets.value,
+    ]
     return all.filter(preset => !hiddenIds.value.has(preset.id))
   })
 

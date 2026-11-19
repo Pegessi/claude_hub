@@ -27,7 +27,7 @@ Hub 持久化流
   `assistant_text` 与当回仅有的 text_delta 拼接逐字相等（56/5 字符），在 token
   中间被切断，前序各有 2 次工具调用。
 
-真实 provider transcript（Dot 以 `CLAUDE_CONFIG_DIR=[redacted].claude-pai`
+真实 provider transcript（Dot 以 `CLAUDE_CONFIG_DIR=/Users/example.claude-pai`
 运行，会话目录
 `~/.claude-pai/projects/-Users-Apple--claude-hub-dot`）证明模型/CLI 已生成完整、
 闭合的最终答复：

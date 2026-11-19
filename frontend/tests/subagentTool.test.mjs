@@ -182,11 +182,11 @@ test('parseSubagent projects the TraeX spawnAgent view (thread target, no type)'
     prompt: 'Spawned cpu_callers4d_final_review',
     receiverThreadIds: ['01a1d2d2-b9c1-70b2-a989-b08f07910a26'],
     agentPath: '/root/cpu_callers4d_final_review',
-    model: '[redacted]',
+    model: 'gpt-example-model-d050a243e4ed',
     reasoningEffort: 'xhigh',
   })
   assert.equal(codexNamed.agentType, 'cpu_callers4d_final_review')
-  assert.equal(codexNamed.description, '[redacted] · xhigh')
+  assert.equal(codexNamed.description, 'gpt-example-model-d050a243e4ed · xhigh')
   assert.equal(codexNamed.directive, false)
 })
 

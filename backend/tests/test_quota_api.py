@@ -24,7 +24,7 @@ MASO_PAYLOAD = {
     "state": "within",
     "models": [
         {
-            "model": "[redacted]",
+            "model": "gpt-example-model-d050a243e4ed",
             "state": "within",
             "percentUsed": 14,
             "effectiveState": "within",
@@ -130,7 +130,7 @@ async def test_quota_returns_both_providers_in_order(
     assert maso["available"] is True
     assert maso["enforcing"] is True
     assert maso["plan"] is None and maso["credit_balance"] is None
-    assert maso["limits"][0]["scope"] == "[redacted]"
+    assert maso["limits"][0]["scope"] == "gpt-example-model-d050a243e4ed"
     assert antigravity["available"] is False
     assert antigravity["state"] == "not_configured"
 

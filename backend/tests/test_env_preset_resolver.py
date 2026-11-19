@@ -37,7 +37,7 @@ def _invalid_day1_preset_text(sentinel: str = SENTINEL) -> str:
         [
             "export ANTHROPIC_BASE_URL=https://ark.cn-beijing.volces.com/api/coding",
             f"export 1BAD={sentinel}",
-            "export ANTHROPIC_MODEL=[redacted]",
+            "export ANTHROPIC_MODEL=example-code-model",
         ]
     )
 
@@ -85,13 +85,13 @@ def test_parse_env_text_supports_export_tab_and_day1_shape() -> None:
             [
                 "export\tANTHROPIC_BASE_URL=https://ark.cn-beijing.volces.com/api/coding",
                 'export ANTHROPIC_AUTH_TOKEN="sk-day1-token"',
-                "export ANTHROPIC_MODEL=[redacted]",
+                "export ANTHROPIC_MODEL=example-code-model",
             ]
         )
     )
     assert env["ANTHROPIC_BASE_URL"] == "https://ark.cn-beijing.volces.com/api/coding"
     assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-day1-token"
-    assert env["ANTHROPIC_MODEL"] == "[redacted]"
+    assert env["ANTHROPIC_MODEL"] == "example-code-model"
 
 
 def test_parse_env_text_invalid_line_does_not_leak_value() -> None:

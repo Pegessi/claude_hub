@@ -1,8 +1,8 @@
 # MASO native sub-agent wake-up streaming
 
-Task: `b5cd8ece-2408-4fb6-94da-4790bd7707a9`  
-Base: `fd5eaed`  
-Branch: `fix/maso-wakeup-b5cd8ece`  
+Task: `b5cd8ece-2408-4fb6-94da-4790bd7707a9`<br>
+Base: `fd5eaed`<br>
+Branch: `fix/maso-wakeup-b5cd8ece`<br>
 Worktree: `/home/tiger/claude_hub_worktree/maso-wakeup-b5cd8ece`
 
 ## Outcome and ownership

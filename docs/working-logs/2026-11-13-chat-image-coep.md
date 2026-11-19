@@ -12,7 +12,7 @@ The screenshot matches `visual output测试`, tab
 `e5780b1b-7040-45b1-985b-2a76251c3ea1`, turn
 `5452d55a-74ac-44de-8930-591b8c6e5791`. Events 85–86 record a successful
 `DeployFile` of `/tmp/arena_progress_comparison.png`; the assistant's final
-Markdown embeds its returned `[redacted]` PNG URL. The sampled
+Markdown embeds its returned `internal.example.invalid` PNG URL. The sampled
 stream page had `has_more=false`.
 
 The CDN returned HTTP 200, `image/png`, 774059 bytes and

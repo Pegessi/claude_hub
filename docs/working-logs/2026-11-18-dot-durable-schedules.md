@@ -1,7 +1,7 @@
 # Dot durable schedules across rotation and replacement
 
-Task: `e83d2540-a651-447b-b720-a55548a51659`  
-Base: `1d92bce968343bf95c463f7e7e8e615bdf13158d`  
+Task: `e83d2540-a651-447b-b720-a55548a51659`<br>
+Base: `1d92bce968343bf95c463f7e7e8e615bdf13158d`<br>
 Branch: `feat/preserve-scheduled-tasks-across-e83d2540`
 
 ## Goal and root cause
