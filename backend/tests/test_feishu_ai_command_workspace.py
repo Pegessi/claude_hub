@@ -1129,3 +1129,129 @@ async def test_web_session_and_agent_workspace_integrated_ai_command(tmp_path: P
         assert "🤖 AI 代答，仅供参考" in final_text
     finally:
         await mock_http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_maso_live_transport_mismatch_replaces_even_without_model_change(
+    tmp_path, monkeypatch
+):
+    from claude_hub.services import feishu_ai_workspace
+
+    manager = _FakeWorkspaceManager()
+    service = _make_service(tmp_path, fake_manager=manager)
+    service.update_config({"enabled": True, "cwd": str(tmp_path)})
+    cfg, message = service.get_config(), _message()
+    parsed = parse_ai_command(
+        "/ai test",
+        default_provider=AgentType.MASO,
+        default_model="es1-grape-g61s_reasoning_high",
+        default_reasoning_effort="high",
+    )
+    assert parsed is not None
+    first = await service._ensure_execution_tab(message, parsed, cfg)
+    manager.sessions["sess-1"].env["MASO_BASE_URL"] = "http://127.0.0.1:11004"
+    monkeypatch.setattr(
+        feishu_ai_workspace, "live_maso_endpoint", lambda *_: "http://127.0.0.1:9796"
+    )
+    second = await service._ensure_execution_tab(message, parsed, cfg)
+    assert second != first
+    assert len(manager.provision_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_maso_switch_endpoint_error_provisions_new_session(tmp_path, monkeypatch):
+    from claude_hub.services import feishu_ai_workspace
+
+    manager = _FakeWorkspaceManager()
+    service = _make_service(tmp_path, fake_manager=manager)
+    service.update_config({"enabled": True, "cwd": str(tmp_path)})
+    cfg, message = service.get_config(), _message()
+    first = parse_ai_command(
+        "/ai test",
+        default_provider=AgentType.MASO,
+        default_model="es1-grape-g61s_reasoning_high",
+        default_reasoning_effort="high",
+    )
+    second = parse_ai_command(
+        "/ai test",
+        default_provider=AgentType.MASO,
+        default_model="deepseek-v41-flash-reasoning-high",
+        default_reasoning_effort="high",
+    )
+    assert first is not None and second is not None
+    first_tab = await service._ensure_execution_tab(message, first, cfg)
+    monkeypatch.setattr(feishu_ai_workspace, "live_maso_endpoint", lambda *_: None)
+
+    async def fail_switch(*_args):
+        raise ValueError("Create a new MASO Chat to change MASO_BASE_URL")
+
+    service._switch_managed_env = fail_switch
+    assert await service._ensure_execution_tab(message, second, cfg) != first_tab
+    assert len(manager.provision_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_managed_switch_rolls_back_tab_and_session_on_tailer_failure(monkeypatch):
+    from claude_hub.api import agent_stream
+    from claude_hub.services import feishu_ai_workspace, ttyd_manager
+    from claude_hub.services.workspace_manager import workspace_manager
+
+    old = {"MASO_BASE_URL": "http://127.0.0.1:11004", "MASO_MODEL": "old"}
+    new = {"MASO_BASE_URL": "http://127.0.0.1:11004", "MASO_MODEL": "new"}
+    session = SimpleNamespace(tab_id="tab", solo_mode=True, env=dict(old))
+    tab = SimpleNamespace(id="tab", solo_mode=True, env=dict(old))
+    state = {"env": dict(old)}
+    monkeypatch.setattr(workspace_manager, "sessions", {"session": session})
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda _id: tab)
+
+    async def switch(_id, env, solo_mode=None):
+        state["env"] = dict(env)
+        return SimpleNamespace(id="tab", solo_mode=solo_mode, env=dict(env))
+
+    def update(_id, *, tab_id, env, solo_mode):
+        updated = SimpleNamespace(tab_id=tab_id, env=dict(env), solo_mode=solo_mode)
+        workspace_manager.sessions["session"] = updated
+        return updated
+
+    def fail(_session, _env):
+        raise ValueError("Create a new MASO Chat to change MASO_BASE_URL")
+
+    monkeypatch.setattr(ttyd_manager, "switch_env", switch)
+    monkeypatch.setattr(workspace_manager, "update_managed_chat_configuration", update)
+    monkeypatch.setattr(
+        agent_stream, "get_managed_tailer_manager", lambda: SimpleNamespace(set_env=fail)
+    )
+    with pytest.raises(ValueError, match="MASO_BASE_URL"):
+        await feishu_ai_workspace.switch_managed_env("session", new)
+    assert state["env"] == old
+    assert workspace_manager.sessions["session"].env == old
+
+
+@pytest.mark.asyncio
+async def test_legacy_maso_switch_rolls_back_on_tailer_failure(monkeypatch):
+    from claude_hub.api import agent_stream
+    from claude_hub.services import feishu_ai_workspace, ttyd_manager
+
+    old = {"MASO_BASE_URL": "http://127.0.0.1:11004", "MASO_MODEL": "old"}
+    new = {"MASO_BASE_URL": "http://127.0.0.1:11004", "MASO_MODEL": "new"}
+    tab = SimpleNamespace(id="tab", solo_mode=True, agent_type=AgentType.MASO, env=dict(old))
+    state = {"env": dict(old)}
+    monkeypatch.setattr(ttyd_manager, "get_tab", lambda _id: tab)
+
+    async def switch(_id, env, solo_mode=None):
+        state["env"] = dict(env)
+        return SimpleNamespace(env=dict(env))
+
+    def fail(_session, _env):
+        raise ValueError("Create a new MASO Chat to change MASO_BASE_URL")
+
+    monkeypatch.setattr(ttyd_manager, "switch_env", switch)
+    monkeypatch.setattr(agent_stream, "_terminal_tab_stream_session", lambda _id: object())
+    monkeypatch.setattr(
+        agent_stream, "_get_tab_tailer_manager", lambda: SimpleNamespace(set_env=fail)
+    )
+    with pytest.raises(ValueError, match="MASO_BASE_URL"):
+        await feishu_ai_workspace.switch_tab_env(
+            SimpleNamespace(_tab_env_switcher=None), "tab", new
+        )
+    assert state["env"] == old

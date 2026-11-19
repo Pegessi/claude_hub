@@ -11,7 +11,8 @@
 
 - Honor thread replies in P2P web sessions and preserve thread roots on follow-up replies.
 - Prefer discovered Codex models for implicit /ai provider changes instead of unverified synthetic suggestions.
-- Persist the MASO endpoint discovered for managed Chat tabs, replace legacy mismatched /ai sessions, and identify transport failures without exposing request data.
+- Persist the MASO endpoint discovered for managed Chat tabs, replace sessions with mismatched live transports, roll back failed switches, and identify transport failures without exposing request data.
+- Retain incoming web thread metadata across fresh /ai transports when message lookup is unavailable.
 
 ### feat(feishu): integrate native Python Feishu web-session user-identity transport (`larkweb` / `LarkAgentX` protocol) for `/ai`
 

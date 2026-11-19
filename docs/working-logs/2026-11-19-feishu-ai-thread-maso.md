@@ -7,3 +7,5 @@ The 12:41 failure in backend.log occurred during MASO session creation. Tab admi
 Live Feishu folding and end-to-end model execution require separate acceptance against a safe chat and a restarted deployment; the running services were not restarted for this change.
 
 Codex /ai provider switching also used a static or legacy-first selection despite the local catalog advertising `gpt-6.1-terra` first and not advertising `gpt-6.2-sol`. Provider-change defaults now prefer visible cache-backed entries; explicit model selections remain supported. The cache is a discovery hint, not a guarantee of current entitlement.
+
+Review cycle 2: a previously failed model switch could persist the tab endpoint while the already-live tailer retained its old endpoint. Reuse now checks the live tailer, and failed switches restore tab and managed-session environments before provisioning a replacement. Incoming web messages seed each per-turn transport with their thread metadata, including when message pulling fails. Focused tests cover both switch paths and fresh-client replies.

@@ -139,6 +139,25 @@ def provider_supports_managed_chat(agent_type: AgentType) -> bool:
     return get_spec(agent_type).runs_on(Surface.MANAGED_CHAT)
 
 
+def live_maso_endpoint(session_id: str | None, tab_id: str) -> str | None:
+    """Read an existing transport's pinned endpoint without creating a transport."""
+    from claude_hub.api.agent_stream import (
+        _get_tab_tailer_manager,
+        _tab_stream_session_id,
+        get_managed_tailer_manager,
+    )
+    from claude_hub.services.agent_stream.maso_http import MasoHttpSession
+
+    manager = get_managed_tailer_manager() if session_id else _get_tab_tailer_manager()
+    tailer = manager.get_tailer(session_id or _tab_stream_session_id(tab_id))
+    transport = tailer.native_transport if tailer is not None else None
+    return transport._base if isinstance(transport, MasoHttpSession) else None
+
+
+def is_maso_endpoint_error(exc: ValueError) -> bool:
+    return str(exc) == "Create a new MASO Chat to change MASO_BASE_URL"
+
+
 async def ensure_execution_tab(service: Any, message: Any, parsed: Any, cfg: Any) -> str:
     """Resolve (reusing or creating) the Chat tab that owns one /ai command.
 
@@ -169,13 +188,22 @@ async def ensure_execution_tab(service: Any, message: Any, parsed: Any, cfg: Any
         )
         if tab is not None and not getattr(tab, "archived", False) and managed_session_live:
             current_env = dict(getattr(tab, "env", {}) or {})
-            if parsed.provider == AgentType.MASO and managed_session_id:
+            if parsed.provider == AgentType.MASO:
                 from claude_hub.services.agent_stream.maso_http import maso_base_url
 
-                session = service._get_managed_session(str(managed_session_id))
-                if session is not None and maso_base_url(dict(session.env or {})) != maso_base_url(
-                    current_env
-                ):
+                session = (
+                    service._get_managed_session(str(managed_session_id))
+                    if managed_session_id and not service._uses_legacy_tabs()
+                    else None
+                )
+                live_base = live_maso_endpoint(
+                    str(managed_session_id) if session is not None else None,
+                    str(existing["tab_id"]),
+                )
+                if (
+                    session is not None
+                    and maso_base_url(dict(session.env or {})) != maso_base_url(current_env)
+                ) or (live_base is not None and live_base != maso_base_url(current_env)):
                     # A legacy managed session may have lost the endpoint pinned on its tab.
                     # Its transport cannot safely be rebound, so provision a fresh session.
                     tab = None
@@ -187,12 +215,17 @@ async def ensure_execution_tab(service: Any, message: Any, parsed: Any, cfg: Any
                 parsed.reasoning_effort,
                 base_env=current_env,
             )
-            if merged_env != current_env:
-                if existing.get("session_id") and not service._uses_legacy_tabs():
-                    await service._switch_managed_env(existing["session_id"], merged_env)
-                else:
-                    await service._switch_tab_env(str(existing["tab_id"]), merged_env, tab=tab)
-            return str(existing["tab_id"])
+            try:
+                if merged_env != current_env:
+                    if existing.get("session_id") and not service._uses_legacy_tabs():
+                        await service._switch_managed_env(existing["session_id"], merged_env)
+                    else:
+                        await service._switch_tab_env(str(existing["tab_id"]), merged_env, tab=tab)
+            except ValueError as exc:
+                if parsed.provider != AgentType.MASO or not is_maso_endpoint_error(exc):
+                    raise
+            else:
+                return str(existing["tab_id"])
 
     if service._uses_legacy_tabs() or not provider_supports_managed_chat(parsed.provider):
         tab_id = str(await service._create_legacy_tab(message, parsed, cfg, target_env))
@@ -358,14 +391,23 @@ async def switch_managed_env(session_id: str, env: Mapping[str, str]) -> None:
     session = workspace_manager.sessions.get(session_id)
     if session is None:
         raise KeyError(session_id)
+    old_tab = ttyd_manager.get_tab(session.tab_id)
+    if old_tab is None:
+        raise KeyError(session.tab_id)
     tab = await ttyd_manager.switch_env(session.tab_id, dict(env), solo_mode=session.solo_mode)
-    updated = workspace_manager.update_managed_chat_configuration(
-        session_id,
-        tab_id=tab.id,
-        env=dict(tab.env),
-        solo_mode=tab.solo_mode,
-    )
-    get_managed_tailer_manager().set_env(updated, dict(updated.env))
+    try:
+        updated = workspace_manager.update_managed_chat_configuration(
+            session_id, tab_id=tab.id, env=dict(tab.env), solo_mode=tab.solo_mode
+        )
+        get_managed_tailer_manager().set_env(updated, dict(updated.env))
+    except Exception:
+        await ttyd_manager.switch_env(
+            session.tab_id, dict(old_tab.env), solo_mode=old_tab.solo_mode
+        )
+        workspace_manager.update_managed_chat_configuration(
+            session_id, tab_id=old_tab.id, env=dict(session.env), solo_mode=session.solo_mode
+        )
+        raise
 
 
 async def create_legacy_tab(
@@ -413,6 +455,9 @@ async def switch_tab_env(
         return
     from claude_hub.services import ttyd_manager
 
+    old_tab = ttyd_manager.get_tab(tab_id)
+    if old_tab is None:
+        raise KeyError(tab_id)
     res = ttyd_manager.switch_env(tab_id, env)
     updated_tab = await res if inspect.isawaitable(res) else res
     try:
@@ -425,7 +470,14 @@ async def switch_tab_env(
         if stream_session is not None:
             effective_env = dict(getattr(updated_tab, "env", None) or env)
             _get_tab_tailer_manager().set_env(stream_session, effective_env)
-    except Exception:
+    except Exception as exc:
+        if getattr(old_tab, "agent_type", None) == AgentType.MASO:
+            rollback = ttyd_manager.switch_env(
+                tab_id, dict(old_tab.env), solo_mode=old_tab.solo_mode
+            )
+            if inspect.isawaitable(rollback):
+                await rollback
+            raise
         logger.debug(
             "Could not sync live stream tailer env for tab %s",
             tab_id,
