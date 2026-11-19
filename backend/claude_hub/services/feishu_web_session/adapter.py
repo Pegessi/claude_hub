@@ -150,6 +150,10 @@ async def normalize_and_claim_ai_command_message(
         effective_msg = converted
 
     if wt is not None:
+        # A per-turn transport may never have seen this incoming web message.
+        # Preserve its thread metadata even when fetching it later fails.
+        if isinstance(wt, FeishuWebUserTransport) and is_web_entity_id(effective_msg.message_id):
+            wt.remember_user_message(effective_msg)
         mapped_alias = wt.get_message_alias(effective_msg.message_id)
         if (
             mapped_alias
@@ -470,6 +474,20 @@ class FeishuWebUserTransport:
         self._msg_cache.move_to_end(msg.id)
         while len(self._msg_cache) > _MAX_CACHED_MESSAGES:
             self._msg_cache.popitem(last=False)
+
+    def remember_user_message(self, msg: FeishuUserMessage) -> None:
+        """Seed incoming web metadata without replacing a richer cached message."""
+        if msg.message_id in self._msg_cache:
+            return
+        self._remember_msg(
+            WebMessage(
+                id=msg.message_id,
+                chat_id=msg.chat_id,
+                root_id=msg.root_id or "",
+                parent_id=msg.parent_id or "",
+                thread_id=msg.thread_id or "",
+            )
+        )
 
     def _remember_chat(self, chat: WebChat) -> None:
         if not chat.id:
