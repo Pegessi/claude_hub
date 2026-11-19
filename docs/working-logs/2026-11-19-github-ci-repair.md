@@ -50,3 +50,7 @@ plus the same scenario and suite deadlines. No lifecycle/verifier gate is relaxe
 702661b0 hosted attempt1 仅 HTML 外链 popup30s失败，attempt2该场景通过但 composer移动端Local按钮定位30s失败。两次失败均保留，不继续重跑。同源码本地完整 image/composer 加只读输入探针通过，尚未证明生产缺陷，不凭猜测改变安全策略、UI或期限。
 
 连续Playwright trace在本地使原本通过的inbox超过120秒，实测不合适，未推送。改用轻量输入ring：各frame仅记录最近60次pointerdown/up/click的目标tag/id/class/button或link短标签、坐标、modal前后数量与viewport，不采集输入value。成功不截图或读取DOM；普通失败仅在总计2秒内采集最多2page×4frame的ring/modal按钮几何与一张截图，写现有runner artifact目录。诊断异常不替代原结果；signal/cancel优先原清理路径。Goal额外child context尚未注入该ring，报告明确覆盖边界。测试覆盖成功/失败与诊断异常/超时，以及record/capture中取消仍完成context/browser/driver清理；真实Chromium probe证明ring上限60、目标记录、截图与原始异常均保留。所有原门禁与断言保留。
+
+c7d7f720 hosted仍仅image_quality popup30秒失败，其余13job通过。该runner在context内捕获异常、退出后再raise，揭示body_failed-only诊断覆盖缺口；不重跑。现改为每次普通context退出均写有界input-state.json(仍最多2page×4frame、总2秒)，成功不截图；body_failed或既有failure.png仅启截图，不决定PASS/FAIL。新增deferred-error回归与真实Chromium probe证明环形输入和截图在延后抛错时也保留。尚未证明popup生产根因，所有原检查仍保留。
+
+本地完整图像安全测试暴露诊断注入中的DOM clobber兼容问题：id=addEventListener遮蔽document方法。改用EventTarget/Document原生prototype调用；保留全部原page_errors断言，不放宽安全fixture。

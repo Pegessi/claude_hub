@@ -50,17 +50,21 @@ class BrowserRun:
         self.diagnostics: list[dict[str, str]] = []
         self._cleanup_tasks: list[asyncio.Task[Any]] = []
 
-    async def _diagnose(self, context: Any, *, capture: bool = False) -> None:
+    async def _diagnose(
+        self, context: Any, *, capture: bool = False, screenshot: bool = False
+    ) -> None:
         """Bounded evidence collection never replaces the original result."""
 
         async def operation() -> None:
             if not capture:
                 await context.add_init_script("""(() => {
                   const ring = window.__hubInputDiagnostics = [];
+                  const listen = EventTarget.prototype.addEventListener;
+                  const select = Document.prototype.querySelectorAll.bind(document);
                   for (const type of ['pointerdown', 'pointerup', 'click']) {
-                    document.addEventListener(type, event => {
+                    listen.call(document, type, event => {
                       const node = event.target;
-                      const before = document.querySelectorAll('.modal').length;
+                      const before = select('.modal').length;
                       const target = node instanceof Element ? {
                         tag: node.tagName, id: node.id, class: String(node.className).slice(0, 160),
                         role: node.getAttribute('role'),
@@ -69,7 +73,7 @@ class BrowserRun:
                       queueMicrotask(() => {
                         ring.push({type, target, x: event.clientX, y: event.clientY,
                           prevented: event.defaultPrevented, modalBefore: before,
-                          modalAfter: document.querySelectorAll('.modal').length,
+                          modalAfter: select('.modal').length,
                           keyboard: document.documentElement.dataset.keyboardOpen || '',
                           viewport: [innerWidth, innerHeight]});
                         if (ring.length > 60) ring.shift();
@@ -94,8 +98,8 @@ class BrowserRun:
                         }))
                       }))
                     })"""))
-            (self.output / "failure-input.json").write_text(json.dumps(records, indent=2))
-            if pages:
+            (self.output / "input-state.json").write_text(json.dumps(records, indent=2))
+            if pages and screenshot:
                 await pages[0].screenshot(path=str(self.output / "failure-owner.png"), timeout=1500)
 
         step = "input-capture" if capture else "input-record"
@@ -183,16 +187,15 @@ class BrowserRun:
             body_failed = True
             raise
         finally:
-            if (
-                body_failed
-                and context is not None
-                and not self.cancelled
-                and self.signal_number is None
-            ):
+            if context is not None and not self.cancelled and self.signal_number is None:
                 task = asyncio.current_task()
                 if task is None or not task.cancelling():
                     try:
-                        await self._diagnose(context, capture=True)
+                        await self._diagnose(
+                            context,
+                            capture=True,
+                            screenshot=body_failed or (self.output / "failure.png").is_file(),
+                        )
                     except asyncio.CancelledError:
                         self.cancelled = True
             await self._close("context", context.close() if context is not None else None)

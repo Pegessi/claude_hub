@@ -64,12 +64,12 @@ async def test_input_diagnostics_preserve_result_and_cleanup(
     record.assert_awaited_once()
     assert "ring.length > 60" in record.call_args.args[0]
     assert ".value" not in record.call_args.args[0]
-    assert evaluate.await_count == int(scenario_fails)
-    if scenario_fails and diagnostic_failure in {"none", "record"}:
-        assert json.loads((run.output / "failure-input.json").read_text()) == [
+    assert evaluate.await_count == 1
+    if diagnostic_failure in {"none", "record"}:
+        assert json.loads((run.output / "input-state.json").read_text()) == [
             {"input": [{"target": {"tag": "BUTTON"}}]}
         ]
-    if diagnostic_failure == "record" or (scenario_fails and diagnostic_failure != "none"):
+    if diagnostic_failure != "none":
         assert any(item["state"] == "error" for item in report["diagnostics"])
 
 
@@ -119,6 +119,39 @@ def lifecycle(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     assert module.__file__ is not None
     assert Path(module.__file__).resolve() == (directory / "browser_lifecycle.py").resolve()
     return module
+
+
+@pytest.mark.asyncio
+async def test_deferred_scenario_error_keeps_input_evidence(
+    lifecycle: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _FakePlaywright()
+    page = SimpleNamespace(
+        frames=[SimpleNamespace(evaluate=AsyncMock(return_value={"input": ["last click"]}))],
+        screenshot=AsyncMock(),
+    )
+    monkeypatch.setattr(_FakeContext, "add_init_script", AsyncMock(), raising=False)
+    monkeypatch.setattr(_FakeContext, "pages", [page], raising=False)
+    monkeypatch.setattr(lifecycle, "async_playwright", lambda: fake)
+    run = lifecycle.BrowserRun(tmp_path / "evidence", tmp_path / "unused-browser")
+
+    async def scenario(owner: Any) -> None:
+        async with owner.context(viewport={"width": 800, "height": 600}):
+            try:
+                raise ValueError("deferred failure")
+            except ValueError as exc:
+                failure = exc
+                run.output.mkdir()
+                (run.output / "failure.png").touch()
+        raise failure
+
+    assert await lifecycle._execute(scenario, run, {}) == 1
+    assert json.loads((run.output / "input-state.json").read_text()) == [{"input": ["last click"]}]
+    page.screenshot.assert_awaited_once()
+    report = json.loads((run.output / "lifecycle.json").read_text())
+    assert report["error_type"] == "ValueError"
+    assert report["cleanup_complete"]
+    assert fake.attempts == ["context", "browser", "driver"]
 
 
 class _FakeContext:
