@@ -345,7 +345,9 @@ class _SessionProvisioningMixin(_WorkspaceManagerBase):
             solo_mode=payload.solo_mode,
             ephemeral=payload.ephemeral,
             caller_owned_ephemeral=bool(payload.caller_owned_ephemeral),
-            env=launch_env,
+            # MASO discovery pins the actual endpoint on the tab during creation.
+            # The managed transport must use that same endpoint from its first turn.
+            env=dict(tab.env) if payload.agent_type == AgentType.MASO else launch_env,
             env_preset=payload.env_preset,
             remote_forward_port=remote_forward_port,
             agent_session_id=tab.agent_session_id,

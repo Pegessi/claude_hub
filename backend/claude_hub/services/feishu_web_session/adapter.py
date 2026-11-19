@@ -893,20 +893,9 @@ class FeishuWebUserTransport:
         if target_msg is None:
             target_msg = WebMessage(id=clean_mid, chat_id=web_chat_id)
 
-        # In 1v1 DMs (CHAT_P2P), keep replies in the main DM stream unless the message itself is in a topic
-        chat_obj = self._chat_cache.get(web_chat_id)
-        if chat_obj is None:
-            try:
-                loaded_chats = await self._web.chats([web_chat_id])
-                chat_obj = loaded_chats.get(web_chat_id)
-                if chat_obj is not None:
-                    self._remember_chat(chat_obj)
-            except Exception:
-                pass
-        if chat_obj is not None and chat_obj.type == CHAT_P2P and not is_in_topic(target_msg):
-            effective_in_thread = False
-        else:
-            effective_in_thread = bool(reply_in_thread) or is_in_topic(target_msg)
+        # Explicit thread replies apply to P2P chats as well as groups. Existing
+        # topic replies must stay in their topic even without the explicit flag.
+        effective_in_thread = bool(reply_in_thread) or is_in_topic(target_msg)
 
         text, title = extract_text_and_title_from_openapi_content(msg_type, content)
         out = formatted_out(

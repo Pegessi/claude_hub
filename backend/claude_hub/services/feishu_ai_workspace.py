@@ -169,6 +169,18 @@ async def ensure_execution_tab(service: Any, message: Any, parsed: Any, cfg: Any
         )
         if tab is not None and not getattr(tab, "archived", False) and managed_session_live:
             current_env = dict(getattr(tab, "env", {}) or {})
+            if parsed.provider == AgentType.MASO and managed_session_id:
+                from claude_hub.services.agent_stream.maso_http import maso_base_url
+
+                session = service._get_managed_session(str(managed_session_id))
+                if session is not None and maso_base_url(dict(session.env or {})) != maso_base_url(
+                    current_env
+                ):
+                    # A legacy managed session may have lost the endpoint pinned on its tab.
+                    # Its transport cannot safely be rebound, so provision a fresh session.
+                    tab = None
+        if tab is not None and not getattr(tab, "archived", False) and managed_session_live:
+            current_env = dict(getattr(tab, "env", {}) or {})
             merged_env = resolve_ai_command_agent_env(
                 parsed.provider,
                 parsed.model,

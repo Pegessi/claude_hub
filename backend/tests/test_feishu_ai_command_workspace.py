@@ -273,7 +273,7 @@ async def test_reuse_with_changed_env_uses_managed_env_switch(tmp_path: Path) ->
     async def fake_switch_managed_env(session_id: str, env: Mapping[str, str]) -> None:
         switched.append((session_id, dict(env)))
 
-    service._switch_managed_env = fake_switch_managed_env  # type: ignore[method-assign]
+    service._switch_managed_env = fake_switch_managed_env  # type: ignore[method-assign, assignment]
 
     # A follow-up with a different reasoning effort reuses the same mapped tab
     # but hot-switches the managed session env instead of provisioning again.
@@ -542,7 +542,7 @@ async def test_out_of_workspace_cwd_falls_back_instead_of_crashing(
     def resolver(cfg: FeishuAiCommandConfig, cwd: str) -> SimpleNamespace:
         return pinned
 
-    service._workspace_resolver = resolver  # type: ignore[method-assign]
+    service._workspace_resolver = resolver  # type: ignore[method-assign, assignment]
     service.update_config({"enabled": True, "workspace_id": "ws-pinned", "cwd": str(outside)})
 
     # Spy on the safe helper to prove the fallback is exercised without raising.
@@ -654,6 +654,61 @@ async def test_distinct_channels_provision_distinct_sessions(tmp_path: Path) -> 
     assert len(manager.provision_calls) == 2  # no advisory reuse across channels
     # Every provisioning request forbids best-effort reuse.
     assert all(call["cwd"] == str(tmp_path) for call in manager.provision_calls)
+
+
+@pytest.mark.asyncio
+async def test_maso_model_switch_reuses_pinned_endpoint(tmp_path: Path) -> None:
+    manager = _FakeWorkspaceManager()
+    service = _make_service(tmp_path, fake_manager=manager)
+    service.update_config({"enabled": True, "cwd": str(tmp_path)})
+    cfg, message = service.get_config(), _message()
+    first = parse_ai_command(
+        "/ai test",
+        default_provider=AgentType.MASO,
+        default_model="[redacted]_reasoning_high",
+        default_reasoning_effort="high",
+    )
+    second = parse_ai_command(
+        "/ai test",
+        default_provider=AgentType.MASO,
+        default_model="[redacted]-reasoning-high",
+        default_reasoning_effort="high",
+    )
+    assert first is not None and second is not None
+    tab_id = await service._ensure_execution_tab(message, first, cfg)
+    manager.sessions["sess-1"].env["MASO_BASE_URL"] = "http://127.0.0.1:11004"
+    switched: list[dict[str, str]] = []
+
+    async def switch(_session_id: str, env: Mapping[str, str]) -> None:
+        switched.append(dict(env))
+
+    service._switch_managed_env = switch  # type: ignore[method-assign, assignment]
+    assert await service._ensure_execution_tab(message, second, cfg) == tab_id
+    assert switched[0]["MASO_BASE_URL"] == "http://127.0.0.1:11004"
+    assert switched[0]["MASO_MODEL"] == "[redacted]-reasoning-high"
+
+
+@pytest.mark.asyncio
+async def test_maso_legacy_endpoint_mismatch_provisions_fresh_session(tmp_path: Path) -> None:
+    manager = _FakeWorkspaceManager()
+    service = _make_service(tmp_path, fake_manager=manager)
+    service.update_config({"enabled": True, "cwd": str(tmp_path)})
+    message, cfg = _message(), service.get_config()
+    parsed = parse_ai_command(
+        "/ai test",
+        default_provider=AgentType.MASO,
+        default_model="[redacted]_reasoning_high",
+        default_reasoning_effort="high",
+    )
+    assert parsed is not None
+    first = await service._ensure_execution_tab(message, parsed, cfg)
+    manager.sessions["sess-1"].env["MASO_BASE_URL"] = "http://127.0.0.1:9796"
+    service._tab_getter = lambda tab_id: SimpleNamespace(  # type: ignore[assignment]
+        id=tab_id, archived=False, env={"MASO_BASE_URL": "http://127.0.0.1:11004"}
+    )
+    second = await service._ensure_execution_tab(message, parsed, cfg)
+    assert second != first
+    assert len(manager.provision_calls) == 2
 
 
 @pytest.mark.asyncio

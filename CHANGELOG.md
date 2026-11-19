@@ -7,6 +7,11 @@
 
 ## Released
 
+### fix(feishu): preserve thread replies and MASO service identity
+
+- Honor thread replies in P2P web sessions and preserve thread roots on follow-up replies.
+- Persist the MASO endpoint discovered for managed Chat tabs, replace legacy mismatched /ai sessions, and identify transport failures without exposing request data.
+
 ### feat(feishu): integrate native Python Feishu web-session user-identity transport (`larkweb` / `LarkAgentX` protocol) for `/ai`
 
 - Add the native Python `backend/claude_hub/services/feishu_web_session/` package (`protocol_schema.json`, `codec.py`, `rich.py`, `qr.py`, `store.py`, `client.py`, `adapter.py`) ported from `[redacted]` (`extensions/lark-desk/internal/web`), implementing pure-Python `proto2` wire encoding/decoding (with recursive singular embedded-message merging, whole-value last-key-wins map entry assignment, and `google.protobuf` wire golden parity), ISO/IEC 18004 QR code generation (terminal half-block Unicode + SVG data URI), QR login initiation and polling (`/accounts/qrlogin/init` and `/accounts/qrlogin/polling`) with pre-request generation capture so neither pending `start_login` nor pending `poll_login` can survive logout, `frontier_ticket` validation and 64-bit safe `/accounts/web/user` profile lookup (distinguishing transient HTTP/gateway errors from definite 401/403 auth rejection and binding invalidation/writeback to credential fingerprints), AES-256-GCM encrypted `0600` credential persistence with strict secret redaction (`[REDACTED]`), truthful unlink failure propagation, and `~/.larkx/credentials.json` import, `msg-frontier` WebSocket push frame/gzip decoding and listener integration, feed/chat/topic-thread/message history pull (`PullThreadsByIDsRequest` + `PullThreadMessagesByPositionsRequest`), authoritative OpenAPI `om_`/`oc_` to numeric web ID alias resolution, owner identity isolation (`is_web_session_authorized_for_owner`), `OnIt`/`DONE` reactions, and `PutMessageRequest` user-identity replies with `FeishuDeliveryUncertainError` classification on post-submit transport errors.
