@@ -44,3 +44,9 @@ handling remain unchanged. TaskGroup propagates either failure and cancellation;
 focused tests cover both phase results and context cleanup on success/failure/
 cancellation. Retain every original assertion, awaited oracle and screenshot,
 plus the same scenario and suite deadlines. No lifecycle/verifier gate is relaxed.
+
+## 失败诊断补齐
+
+702661b0 hosted attempt1 仅 HTML 外链 popup30s失败，attempt2该场景通过但 composer移动端Local按钮定位30s失败。两次失败均保留，不继续重跑。同源码本地完整 image/composer 加只读输入探针通过，尚未证明生产缺陷，不凭猜测改变安全策略、UI或期限。
+
+连续Playwright trace在本地使原本通过的inbox超过120秒，实测不合适，未推送。改用轻量输入ring：各frame仅记录最近60次pointerdown/up/click的目标tag/id/class/button或link短标签、坐标、modal前后数量与viewport，不采集输入value。成功不截图或读取DOM；普通失败仅在总计2秒内采集最多2page×4frame的ring/modal按钮几何与一张截图，写现有runner artifact目录。诊断异常不替代原结果；signal/cancel优先原清理路径。Goal额外child context尚未注入该ring，报告明确覆盖边界。测试覆盖成功/失败与诊断异常/超时，以及record/capture中取消仍完成context/browser/driver清理；真实Chromium probe证明ring上限60、目标记录、截图与原始异常均保留。所有原门禁与断言保留。

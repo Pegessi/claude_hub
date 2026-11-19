@@ -47,7 +47,65 @@ class BrowserRun:
         self.cancelled = False
         self.used = False
         self.cleanup: list[dict[str, str]] = []
+        self.diagnostics: list[dict[str, str]] = []
         self._cleanup_tasks: list[asyncio.Task[Any]] = []
+
+    async def _diagnose(self, context: Any, *, capture: bool = False) -> None:
+        """Bounded evidence collection never replaces the original result."""
+
+        async def operation() -> None:
+            if not capture:
+                await context.add_init_script("""(() => {
+                  const ring = window.__hubInputDiagnostics = [];
+                  for (const type of ['pointerdown', 'pointerup', 'click']) {
+                    document.addEventListener(type, event => {
+                      const node = event.target;
+                      const before = document.querySelectorAll('.modal').length;
+                      const target = node instanceof Element ? {
+                        tag: node.tagName, id: node.id, class: String(node.className).slice(0, 160),
+                        role: node.getAttribute('role'),
+                        label: node.matches('button,a') ? node.textContent?.slice(0, 80) : null
+                      } : null;
+                      queueMicrotask(() => {
+                        ring.push({type, target, x: event.clientX, y: event.clientY,
+                          prevented: event.defaultPrevented, modalBefore: before,
+                          modalAfter: document.querySelectorAll('.modal').length,
+                          keyboard: document.documentElement.dataset.keyboardOpen || '',
+                          viewport: [innerWidth, innerHeight]});
+                        if (ring.length > 60) ring.shift();
+                      });
+                    }, true);
+                  }
+                })()""")
+                return
+            self.output.mkdir(mode=0o700, parents=True, exist_ok=True)
+            records = []
+            pages = context.pages[:2]
+            for page in pages:
+                for frame in page.frames[:4]:
+                    records.append(await frame.evaluate("""() => ({
+                      input: window.__hubInputDiagnostics || [],
+                      viewport: [innerWidth, innerHeight],
+                      modals: Array.from(document.querySelectorAll('.modal')).slice(0, 3).map(el => ({
+                        bounds: el.getBoundingClientRect().toJSON(),
+                        buttons: Array.from(el.querySelectorAll('button')).slice(0, 20).map(button => ({
+                          label: button.textContent?.slice(0, 80),
+                          bounds: button.getBoundingClientRect().toJSON()
+                        }))
+                      }))
+                    })"""))
+            (self.output / "failure-input.json").write_text(json.dumps(records, indent=2))
+            if pages:
+                await pages[0].screenshot(path=str(self.output / "failure-owner.png"), timeout=1500)
+
+        step = "input-capture" if capture else "input-record"
+        try:
+            await asyncio.wait_for(operation(), timeout=2.0)
+            self.diagnostics.append({"step": step, "state": "saved" if capture else "done"})
+        except Exception as exc:
+            self.diagnostics.append(
+                {"step": step, "state": "error", "error_type": type(exc).__name__}
+            )
 
     async def _close(self, name: str, operation: Coroutine[Any, Any, Any] | None) -> None:
         if operation is None:
@@ -119,11 +177,24 @@ class BrowserRun:
             options = dict(playwright.devices[device]) if device else {}
             options.update(viewport=viewport, service_workers=service_workers)
             context = await browser.new_context(**options)
+            await self._diagnose(context)
             yield context
         except BaseException:
             body_failed = True
             raise
         finally:
+            if (
+                body_failed
+                and context is not None
+                and not self.cancelled
+                and self.signal_number is None
+            ):
+                task = asyncio.current_task()
+                if task is None or not task.cancelling():
+                    try:
+                        await self._diagnose(context, capture=True)
+                    except asyncio.CancelledError:
+                        self.cancelled = True
             await self._close("context", context.close() if context is not None else None)
             await self._close("browser", browser.close() if browser is not None else None)
             # Attempt driver exit even if startup did not return a driver object.
@@ -188,6 +259,7 @@ async def _execute(
         "versions": versions,
         "error_type": type(failure).__name__ if failure is not None else None,
         "cleanup": run.cleanup,
+        "diagnostics": run.diagnostics,
         "cleanup_complete": run.cleanup_complete,
         "process_tree_exit": "not_verified",
     }

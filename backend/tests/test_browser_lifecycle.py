@@ -16,8 +16,99 @@ from functools import partial
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, Callable
+from unittest.mock import AsyncMock
 
 import pytest
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("diagnostic_failure", ["none", "record", "capture", "timeout"])
+@pytest.mark.parametrize("scenario_fails", [False, True])
+async def test_input_diagnostics_preserve_result_and_cleanup(
+    lifecycle: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    diagnostic_failure: str,
+    scenario_fails: bool,
+) -> None:
+    fake = _FakePlaywright()
+    record = AsyncMock()
+    evaluate = AsyncMock(return_value={"input": [{"target": {"tag": "BUTTON"}}]})
+    page = SimpleNamespace(frames=[SimpleNamespace(evaluate=evaluate)], screenshot=AsyncMock())
+    if diagnostic_failure == "record":
+        record.side_effect = RuntimeError("record unavailable")
+    if diagnostic_failure == "capture":
+        evaluate.side_effect = RuntimeError("page closed")
+    if diagnostic_failure == "timeout":
+
+        async def hang(*args: Any) -> None:
+            await asyncio.Future()
+
+        evaluate.side_effect = hang
+    monkeypatch.setattr(_FakeContext, "add_init_script", record, raising=False)
+    monkeypatch.setattr(_FakeContext, "pages", [page], raising=False)
+    monkeypatch.setattr(lifecycle, "async_playwright", lambda: fake)
+    run = lifecycle.BrowserRun(tmp_path / "evidence", tmp_path / "unused-browser")
+
+    async def scenario(owner: Any) -> None:
+        async with owner.context(viewport={"width": 800, "height": 600}):
+            if scenario_fails:
+                raise ValueError("original scenario failure")
+
+    result = await lifecycle._execute(scenario, run, {})
+    assert result == (1 if scenario_fails else 0)
+    report = json.loads((run.output / "lifecycle.json").read_text())
+    assert report["error_type"] == ("ValueError" if scenario_fails else None)
+    assert report["cleanup_complete"]
+    assert fake.attempts == ["context", "browser", "driver"]
+    record.assert_awaited_once()
+    assert "ring.length > 60" in record.call_args.args[0]
+    assert ".value" not in record.call_args.args[0]
+    assert evaluate.await_count == int(scenario_fails)
+    if scenario_fails and diagnostic_failure in {"none", "record"}:
+        assert json.loads((run.output / "failure-input.json").read_text()) == [
+            {"input": [{"target": {"tag": "BUTTON"}}]}
+        ]
+    if diagnostic_failure == "record" or (scenario_fails and diagnostic_failure != "none"):
+        assert any(item["state"] == "error" for item in report["diagnostics"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["record", "capture"])
+async def test_cancelled_diagnostics_never_skip_browser_cleanup(
+    lifecycle: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stage: str
+) -> None:
+    fake = _FakePlaywright()
+    entered = asyncio.Event()
+
+    async def hang(*args: Any) -> None:
+        entered.set()
+        await asyncio.Future()
+
+    record = AsyncMock()
+    evaluate = AsyncMock()
+    if stage == "record":
+        record.side_effect = hang
+    else:
+        evaluate.side_effect = hang
+    page = SimpleNamespace(frames=[SimpleNamespace(evaluate=evaluate)], screenshot=AsyncMock())
+    monkeypatch.setattr(_FakeContext, "add_init_script", record, raising=False)
+    monkeypatch.setattr(_FakeContext, "pages", [page], raising=False)
+    monkeypatch.setattr(lifecycle, "async_playwright", lambda: fake)
+    run = lifecycle.BrowserRun(tmp_path / "evidence", tmp_path / "unused-browser")
+
+    async def scenario() -> None:
+        async with run.context(viewport={"width": 800, "height": 600}):
+            raise ValueError("original scenario failure")
+
+    task = asyncio.create_task(scenario())
+    await entered.wait()
+    task.cancel()
+    expected = asyncio.CancelledError if stage == "record" else ValueError
+    with pytest.raises(expected):
+        await task
+    assert fake.attempts == ["context", "browser", "driver"]
+    assert run.cleanup_complete
 
 
 @pytest.fixture
