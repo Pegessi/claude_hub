@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import time
 from typing import Any, Dict, List, Optional
 
 import click
@@ -52,11 +53,13 @@ from claude_hub.cli.feishu_cards import (
 from claude_hub.cli.output import emit
 from claude_hub.services.feishu_ai_command import (
     SUPPORTED_AI_COMMAND_PROVIDERS,
+    SUPPORTED_AI_COMMAND_SEND_MODES,
     SUPPORTED_REASONING_EFFORTS,
 )
 
 AI_COMMAND_PROVIDER_CHOICES = [p.value for p in SUPPORTED_AI_COMMAND_PROVIDERS]
 AI_COMMAND_EFFORT_CHOICES = [e for e in SUPPORTED_REASONING_EFFORTS if e]
+AI_COMMAND_SEND_MODE_CHOICES = list(SUPPORTED_AI_COMMAND_SEND_MODES)
 
 
 @click.group()
@@ -197,7 +200,8 @@ def _build_card(
                 board = client.get_board(ws_id)
                 sessions = board.get("sessions", []) if isinstance(board, dict) else []
                 session = next(
-                    (s for s in sessions if s.get("id") == match.get("session_id")), None
+                    (s for s in sessions if s.get("id") == match.get("session_id")),
+                    None,
                 )
                 fetched = client.get_task_reports(ws_id, task_id)
         except HubError as e:
@@ -316,7 +320,9 @@ def _build_card(
 
     if kind == "result":
         return build_result_card(
-            title or "Command result", body or "_No result body supplied._", kind="result"
+            title or "Command result",
+            body or "_No result body supplied._",
+            kind="result",
         )
 
     if kind == "action_catalog":
@@ -343,7 +349,9 @@ def _build_card(
 @click.option("--field-name", default="reply", help="Form field name (for kind=needs_input).")
 @click.option("--tab-id", default=None, help="Terminal tab id (for kind=terminal).")
 @click.option(
-    "--path", default=None, help="Directory path (for kind=filesystem/remote_filesystem)."
+    "--path",
+    default=None,
+    help="Directory path (for kind=filesystem/remote_filesystem).",
 )
 @click.option(
     "--remote-profile-id",
@@ -456,7 +464,10 @@ def feishu_ai_command_status(ctx: click.Context) -> None:
 
 @feishu_ai_command.command("configure")
 @click.option(
-    "--enabled/--disabled", "enabled", default=None, help="Enable or disable /ai command."
+    "--enabled/--disabled",
+    "enabled",
+    default=None,
+    help="Enable or disable /ai command.",
 )
 @click.option(
     "--provider",
@@ -526,6 +537,12 @@ def feishu_ai_command_status(ctx: click.Context) -> None:
     help="Whether replies default to thread mode.",
 )
 @click.option(
+    "--send-mode",
+    type=click.Choice(AI_COMMAND_SEND_MODE_CHOICES, case_sensitive=False),
+    default=None,
+    help="Reply transport mode: auto, web_session, or openapi.",
+)
+@click.option(
     "--import-lark-cli",
     is_flag=True,
     default=False,
@@ -552,6 +569,7 @@ def feishu_ai_command_configure(
     done_emoji: Optional[str],
     footer: Optional[str],
     reply_in_thread: Optional[bool],
+    send_mode: Optional[str],
     import_lark_cli: bool,
 ) -> None:
     """Update Feishu /ai command settings and default execution agent configuration."""
@@ -592,6 +610,8 @@ def feishu_ai_command_configure(
         patch_body["footer"] = footer
     if reply_in_thread is not None:
         patch_body["reply_in_thread"] = reply_in_thread
+    if send_mode is not None:
+        patch_body["send_mode"] = send_mode.lower()
 
     client = cli_main.get_client(ctx)
     try:
@@ -672,6 +692,135 @@ def feishu_ai_command_auth_guide(ctx: click.Context, import_lark_cli: bool) -> N
         if import_lark_cli:
             client._request("POST", "/api/feishu/bot/ai-command/import-token", json={})
         payload = client._request("GET", "/api/feishu/bot/ai-command/auth-guide")
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(payload, as_json=True)
+
+
+@feishu_ai_command.command("web-login")
+@click.option(
+    "--region",
+    type=click.Choice(["feishu", "lark"], case_sensitive=False),
+    default="feishu",
+    help="Feishu region: feishu (feishu.cn) or lark (larksuite.com).",
+)
+@click.option(
+    "--import-larkx",
+    is_flag=True,
+    default=False,
+    help="Import an existing session from ~/.larkx/credentials.json instead of scanning a QR code.",
+)
+@click.option(
+    "--larkx-path",
+    default=None,
+    help="Explicit path to a larkx credentials.json file to import.",
+)
+@click.option(
+    "--no-wait",
+    is_flag=True,
+    default=False,
+    help="Start QR login and print the QR code without blocking for phone confirmation.",
+)
+@click.option(
+    "--timeout",
+    "timeout_seconds",
+    type=float,
+    default=170.0,
+    help="Maximum seconds to wait for QR scan confirmation (default: 170).",
+)
+@click.option(
+    "--switch-owner",
+    is_flag=True,
+    default=False,
+    help="Explicitly switch configured owner_open_id to the logged-in web session identity.",
+)
+@click.pass_context
+def feishu_ai_command_web_login(
+    ctx: click.Context,
+    region: str,
+    import_larkx: bool,
+    larkx_path: Optional[str],
+    no_wait: bool,
+    timeout_seconds: float,
+    switch_owner: bool,
+) -> None:
+    """Sign in to a Feishu web session via QR code (or import ~/.larkx/credentials.json)."""
+    client = cli_main.get_client(ctx)
+    try:
+        if import_larkx or larkx_path:
+            payload = client._request(
+                "POST",
+                "/api/feishu-bot/ai-command/web-session/import-larkx",
+                json={"path": larkx_path, "switch_owner": switch_owner},
+            )
+            emit(payload, as_json=True)
+            return
+
+        started = client._request(
+            "POST",
+            "/api/feishu-bot/ai-command/web-session/login/start",
+            json={"region": region.lower()},
+        )
+        login_info = started.get("login") if isinstance(started, dict) else None
+        if isinstance(login_info, dict):
+            qr_unicode = login_info.get("qr_unicode")
+            hint = login_info.get("hint") or "Scan QR code with Feishu App"
+            if isinstance(qr_unicode, str) and qr_unicode:
+                click.echo(f"\n{hint}:\n\n{qr_unicode}\n", err=True)
+
+        if no_wait or not isinstance(login_info, dict):
+            emit(started, as_json=True)
+            return
+
+        login_id = str(login_info.get("login_id") or "")
+        deadline = time.time() + max(5.0, timeout_seconds)
+        while time.time() < deadline:
+            time.sleep(2.0)
+            polled = client._request(
+                "POST",
+                "/api/feishu-bot/ai-command/web-session/login/poll",
+                json={"login_id": login_id, "switch_owner": switch_owner},
+            )
+            st = polled.get("login_status") if isinstance(polled, dict) else None
+            if st == "done":
+                emit(polled, as_json=True)
+                return
+            if st == "expired":
+                raise click.ClickException("Feishu QR code expired or was cancelled.")
+        raise click.ClickException("Timed out waiting for Feishu QR scan confirmation.")
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+
+
+@feishu_ai_command.command("web-status")
+@click.option(
+    "--validate",
+    is_flag=True,
+    default=False,
+    help="Validate the stored web session against Feishu frontier_ticket.",
+)
+@click.pass_context
+def feishu_ai_command_web_status(ctx: click.Context, validate: bool) -> None:
+    """Show current Feishu web-session authentication status (redacted)."""
+    client = cli_main.get_client(ctx)
+    try:
+        payload = client._request(
+            "GET",
+            "/api/feishu-bot/ai-command/web-session/status",
+            params={"validate": "true"} if validate else None,
+        )
+    except HubError as e:
+        raise click.ClickException(str(e)) from e
+    emit(payload, as_json=True)
+
+
+@feishu_ai_command.command("web-logout")
+@click.pass_context
+def feishu_ai_command_web_logout(ctx: click.Context) -> None:
+    """Clear the stored Feishu web session from Hub's local store."""
+    client = cli_main.get_client(ctx)
+    try:
+        payload = client._request("POST", "/api/feishu-bot/ai-command/web-session/logout", json={})
     except HubError as e:
         raise click.ClickException(str(e)) from e
     emit(payload, as_json=True)

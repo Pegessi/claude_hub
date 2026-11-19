@@ -38,6 +38,27 @@ class FeishuAiCommandPatchInput(BaseModel):
     done_emoji: Optional[str] = Field(default=None, max_length=64)
     footer: Optional[str] = Field(default=None, max_length=256)
     reply_in_thread: Optional[bool] = None
+    send_mode: Optional[str] = Field(default=None, max_length=32)
+
+
+class FeishuAiWebSessionLoginStartInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    region: str = Field(default="feishu", max_length=32)
+
+
+class FeishuAiWebSessionLoginPollInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    login_id: Optional[str] = Field(default=None, max_length=128)
+    switch_owner: bool = False
+
+
+class FeishuAiWebSessionImportInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: Optional[str] = Field(default=None, max_length=1024)
+    switch_owner: bool = False
 
 
 class FeishuAiCommandDryRunInput(BaseModel):
@@ -70,6 +91,7 @@ def build_ai_command_status_payload(
     return {
         "config": cfg.to_dict(),
         "token_status": preflight.to_dict(),
+        "web_session_status": service.web_login_manager.status_dict(),
         "poller_status": poller.status_dict(),
         "capabilities": service.capabilities_dict(),
     }
@@ -92,6 +114,7 @@ async def abuild_ai_command_status_payload(
     return {
         "config": cfg.to_dict(),
         "token_status": preflight.to_dict(),
+        "web_session_status": service.web_login_manager.status_dict(),
         "poller_status": poller.status_dict(),
         "capabilities": capabilities,
     }
@@ -101,17 +124,27 @@ def register_ai_command_routes(
     router: APIRouter,
     *,
     require_hub_user: Callable[..., Any],
-    service_getter: Callable[[], FeishuAiCommandService] = get_feishu_ai_command_service,
-    poller_getter: Callable[[], FeishuAiPoller] = get_feishu_ai_poller,
+    service_getter: Callable[[], FeishuAiCommandService] | None = None,
+    poller_getter: Callable[[], FeishuAiPoller] | None = None,
 ) -> None:
     """Register ``/api/feishu/bot/ai-command`` endpoints on the Feishu router."""
+
+    def _get_service() -> FeishuAiCommandService:
+        if service_getter is not None:
+            return service_getter()
+        return get_feishu_ai_command_service()
+
+    def _get_poller() -> FeishuAiPoller:
+        if poller_getter is not None:
+            return poller_getter()
+        return get_feishu_ai_poller()
 
     @router.get("/ai-command")
     async def get_ai_command_status(
         _user: Any = Depends(require_hub_user),
     ) -> dict[str, Any]:
-        service = service_getter()
-        poller = poller_getter()
+        service = _get_service()
+        poller = _get_poller()
         return await abuild_ai_command_status_payload(service, poller)
 
     @router.put("/ai-command")
@@ -120,8 +153,8 @@ def register_ai_command_routes(
         body: FeishuAiCommandPatchInput,
         _user: Any = Depends(require_hub_user),
     ) -> dict[str, Any]:
-        service = service_getter()
-        poller = poller_getter()
+        service = _get_service()
+        poller = _get_poller()
         try:
             patch_dict = body.model_dump(exclude_none=True)
             service.update_config(patch_dict)
@@ -138,8 +171,8 @@ def register_ai_command_routes(
         body: Optional[FeishuAiCommandTokenImportInput] = None,
         _user: Any = Depends(require_hub_user),
     ) -> dict[str, Any]:
-        service = service_getter()
-        poller = poller_getter()
+        service = _get_service()
+        poller = _get_poller()
         explicit_app_id = (body.app_id.strip() if body and body.app_id else "") or None
         explicit_open_id = (body.open_id.strip() if body and body.open_id else "") or None
         explicit_profile = (body.profile.strip() if body and body.profile else "") or None
@@ -167,7 +200,7 @@ def register_ai_command_routes(
         body: FeishuAiCommandDryRunInput,
         _user: Any = Depends(require_hub_user),
     ) -> dict[str, Any]:
-        service = service_getter()
+        service = _get_service()
         cfg, preflight = await service.aget_config_and_preflight()
         sender = (body.sender_open_id or cfg.owner_open_id or "ou_dry_run_owner").strip()
         msg = FeishuUserMessage(
@@ -209,10 +242,112 @@ def register_ai_command_routes(
     async def get_ai_command_auth_guide(
         _user: Any = Depends(require_hub_user),
     ) -> dict[str, Any]:
-        service = service_getter()
+        service = _get_service()
         preflight = await service.apreflight_status()
         return {
             "token_status": preflight.to_dict(),
             "auth_login_command": preflight.auth_login_command,
             "remediation_steps": list(preflight.remediation_steps),
         }
+
+    @router.get("/ai-command/web-session")
+    @router.get("/ai-command/web-session/status")
+    async def get_ai_command_web_session_status(
+        validate: bool = False,
+        _user: Any = Depends(require_hub_user),
+    ) -> dict[str, Any]:
+        service = _get_service()
+        poller = _get_poller()
+        web_status = await service.web_login_manager.astatus_dict(validate=validate)
+        payload = await abuild_ai_command_status_payload(
+            service, poller, auto_import_lark_cli=False
+        )
+        payload["web_session_status"] = web_status
+        return payload
+
+    @router.post("/ai-command/web-session/login/start")
+    async def start_ai_command_web_session_login(
+        body: Optional[FeishuAiWebSessionLoginStartInput] = None,
+        _user: Any = Depends(require_hub_user),
+    ) -> dict[str, Any]:
+        service = _get_service()
+        region = (body.region if body is not None else "feishu").strip() or "feishu"
+        try:
+            qr_session = await service.web_login_manager.start_login(region=region)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={"code": "web_login_start_failed", "message": str(exc)},
+            ) from exc
+        return {
+            "status": "waiting",
+            "login": qr_session.to_public_dict(),
+            "web_session_status": service.web_login_manager.status_dict(),
+        }
+
+    @router.post("/ai-command/web-session/login/poll")
+    async def poll_ai_command_web_session_login(
+        body: Optional[FeishuAiWebSessionLoginPollInput] = None,
+        _user: Any = Depends(require_hub_user),
+    ) -> dict[str, Any]:
+        service = _get_service()
+        poller = _get_poller()
+        login_id = (body.login_id.strip() if body and body.login_id else "") or None
+        try:
+            st, sess, qr = await service.web_login_manager.poll_login(login_id=login_id)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={"code": "web_login_poll_failed", "message": str(exc)},
+            ) from exc
+        if st == "done" and sess is not None:
+            if body and body.switch_owner:
+                service.switch_owner_to_web_session()
+            await poller.reconcile()
+        payload = await abuild_ai_command_status_payload(
+            service, poller, auto_import_lark_cli=False
+        )
+        payload["login_status"] = st
+        payload["login"] = qr.to_public_dict() if (qr is not None and st == "waiting") else None
+        return payload
+
+    @router.post("/ai-command/web-session/import-larkx")
+    async def import_ai_command_web_session_larkx(
+        body: Optional[FeishuAiWebSessionImportInput] = None,
+        _user: Any = Depends(require_hub_user),
+    ) -> dict[str, Any]:
+        service = _get_service()
+        poller = _get_poller()
+        custom_path = (body.path.strip() if body and body.path else "") or None
+        imported = service.web_session_store.import_from_larkx(custom_path)
+        if imported is not None:
+            if body and body.switch_owner:
+                service.switch_owner_to_web_session()
+            await poller.reconcile()
+        payload = await abuild_ai_command_status_payload(
+            service, poller, auto_import_lark_cli=False
+        )
+        payload["imported"] = imported is not None
+        return payload
+
+    @router.post("/ai-command/web-session/logout")
+    @router.delete("/ai-command/web-session")
+    async def logout_ai_command_web_session(
+        _user: Any = Depends(require_hub_user),
+    ) -> dict[str, Any]:
+        service = _get_service()
+        poller = _get_poller()
+        try:
+            cleared = service.web_login_manager.logout()
+        except OSError as exc:
+            await poller.reconcile()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to delete Feishu web session file: {exc}",
+            ) from exc
+        await poller.reconcile()
+        payload = await abuild_ai_command_status_payload(
+            service, poller, auto_import_lark_cli=False
+        )
+        payload["cleared"] = cleared
+        return payload

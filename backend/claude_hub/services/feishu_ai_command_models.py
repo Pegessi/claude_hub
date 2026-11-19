@@ -7,7 +7,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping, Sequence
 
-from claude_hub.models import AgentType
+from claude_hub.models import AgentType, StreamModelOption
 from claude_hub.services.agent_stream.providers.spec import (
     ReasoningEffortKind,
     get_spec,
@@ -46,6 +46,8 @@ SUPPORTED_REASONING_EFFORTS: tuple[str, ...] = (
     "default",
     *"none minimal low medium high xhigh max ultra".split(),
 )
+DEFAULT_AI_COMMAND_SEND_MODE = "auto"
+SUPPORTED_AI_COMMAND_SEND_MODES: tuple[str, ...] = ("auto", "web_session", "openapi")
 PROVIDER_SUPPORTED_REASONING_EFFORTS: dict[str, tuple[str, ...]] = {
     "claude": (),
     "codex": tuple("none minimal low medium high xhigh max ultra".split()),
@@ -470,6 +472,7 @@ class FeishuAiCommandConfig:
     done_emoji: str = DEFAULT_AI_COMMAND_DONE_EMOJI
     footer: str = DEFAULT_AI_COMMAND_FOOTER
     reply_in_thread: bool = True
+    send_mode: str = DEFAULT_AI_COMMAND_SEND_MODE
 
     def to_dict(self) -> dict[str, Any]:
         out = asdict(self)
@@ -517,6 +520,13 @@ class FeishuAiCommandConfig:
         def s(key: str, default: str = "") -> str:
             return str(data.get(key) or default).strip()
 
+        raw_send_mode = str(data.get("send_mode") or DEFAULT_AI_COMMAND_SEND_MODE).strip().lower()
+        if raw_send_mode not in SUPPORTED_AI_COMMAND_SEND_MODES:
+            allowed_modes = ", ".join(SUPPORTED_AI_COMMAND_SEND_MODES)
+            raise ValueError(
+                f"Invalid send_mode {raw_send_mode!r}; expected one of: {allowed_modes}"
+            )
+
         kw: dict[str, Any] = {
             "enabled": bool(data.get("enabled", False)),
             "prefix": prefix,
@@ -535,6 +545,7 @@ class FeishuAiCommandConfig:
             "done_emoji": s("done_emoji", DEFAULT_AI_COMMAND_DONE_EMOJI),
             "footer": s("footer", DEFAULT_AI_COMMAND_FOOTER),
             "reply_in_thread": bool(data.get("reply_in_thread", True)),
+            "send_mode": raw_send_mode,
         }
         return cls(**kw)
 
@@ -828,3 +839,71 @@ def build_ai_dispatch_prompt(
             )
         lines.append("</feishu_thread_context>")
     return "\n".join(lines)
+
+
+def serialize_model_option(option: StreamModelOption) -> dict[str, Any]:
+    return {
+        "id": option.id,
+        "label": option.label,
+        "description": option.description,
+        "provider_model_id": option.provider_model_id or option.id,
+        "default_reasoning_effort": option.default_reasoning_effort,
+        "supported_reasoning_efforts": [
+            {
+                "id": eff.id,
+                "label": eff.label,
+                "description": eff.description,
+                "provider_model_id": eff.provider_model_id,
+            }
+            for eff in option.supported_reasoning_efforts
+        ],
+    }
+
+
+def build_capabilities_payload(
+    options_by_provider: Mapping[str, Sequence[StreamModelOption]],
+) -> dict[str, Any]:
+    model_efforts: dict[str, list[str]] = {}
+    for base, variants in _MASO_MODEL_VARIANTS.items():
+        effs = list(variants.keys())
+        model_efforts[base] = effs
+        for v in set(variants.values()):
+            model_efforts[v] = effs
+
+    provider_models: dict[str, list[str]] = {}
+    serialized_options: dict[str, list[dict[str, Any]]] = {}
+    for prov_enum in SUPPORTED_AI_COMMAND_PROVIDERS:
+        prov = prov_enum.value
+        opts = list(options_by_provider.get(prov, ()))
+        serialized_options[prov] = [serialize_model_option(opt) for opt in opts]
+        seen_ids: list[str] = []
+        for opt in opts:
+            eff_ids = [eff.id for eff in opt.supported_reasoning_efforts]
+            if eff_ids:
+                model_efforts.setdefault(opt.id, eff_ids)
+                if opt.provider_model_id:
+                    model_efforts.setdefault(opt.provider_model_id, eff_ids)
+                for eff in opt.supported_reasoning_efforts:
+                    if eff.provider_model_id:
+                        model_efforts.setdefault(eff.provider_model_id, eff_ids)
+            elif prov in {"cursor", "maso"}:
+                model_efforts.setdefault(opt.id, [])
+            primary_id = opt.provider_model_id or opt.id
+            if primary_id and primary_id not in seen_ids:
+                seen_ids.append(primary_id)
+        for fallback_id in DEFAULT_PROVIDER_MODELS.get(prov, ()):
+            if fallback_id not in seen_ids:
+                seen_ids.append(fallback_id)
+        provider_models[prov] = seen_ids
+
+    return {
+        "providers": [p.value for p in SUPPORTED_AI_COMMAND_PROVIDERS],
+        "send_modes": list(SUPPORTED_AI_COMMAND_SEND_MODES),
+        "reasoning_efforts": [e for e in SUPPORTED_REASONING_EFFORTS if e],
+        "provider_reasoning_efforts": {
+            k: list(v) for k, v in PROVIDER_SUPPORTED_REASONING_EFFORTS.items()
+        },
+        "model_reasoning_efforts": model_efforts,
+        "provider_models": provider_models,
+        "provider_model_options": serialized_options,
+    }

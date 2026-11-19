@@ -16,7 +16,12 @@ from typing import Any, Awaitable, Callable, Mapping, Sequence
 import httpx
 
 from claude_hub.config import settings
-from claude_hub.models import AgentType, SessionKind, StreamModelOption, StreamReasoningEffortOption
+from claude_hub.models import (
+    AgentType,
+    SessionKind,
+    StreamModelOption,
+    StreamReasoningEffortOption,
+)
 from claude_hub.services import feishu_ai_workspace
 from claude_hub.services.feishu_ai_command_models import (
     _MASO_MODEL_VARIANTS,
@@ -31,12 +36,14 @@ from claude_hub.services.feishu_ai_command_models import (
     DEFAULT_AI_COMMAND_PREFIX,
     DEFAULT_AI_COMMAND_PROVIDER,
     DEFAULT_AI_COMMAND_REASONING_EFFORT,
+    DEFAULT_AI_COMMAND_SEND_MODE,
     DEFAULT_MAX_ACTIVE_CHATS,
     DEFAULT_MAX_CONTEXT_MESSAGES,
     DEFAULT_POLL_INTERVAL_SECONDS,
     DEFAULT_PROVIDER_MODELS,
     PROVIDER_SUPPORTED_REASONING_EFFORTS,
     SUPPORTED_AI_COMMAND_PROVIDERS,
+    SUPPORTED_AI_COMMAND_SEND_MODES,
     SUPPORTED_REASONING_EFFORTS,
     AiCommandContextRefs,
     AiCommandExecutionResult,
@@ -45,12 +52,22 @@ from claude_hub.services.feishu_ai_command_models import (
     bounded_message_uuid,
     build_ai_dispatch_prompt,
     build_ai_post_payload,
+)
+from claude_hub.services.feishu_ai_command_models import (
+    build_capabilities_payload as _build_capabilities_payload,
+)
+from claude_hub.services.feishu_ai_command_models import (
     build_interim_reply_text,
     ensure_ai_footer,
     extract_context_references,
     parse_ai_command,
     register_live_maso_model_variants,
     resolve_ai_command_agent_env,
+)
+from claude_hub.services.feishu_ai_command_models import (
+    serialize_model_option as _serialize_model_option,
+)
+from claude_hub.services.feishu_ai_command_models import (
     validate_ai_command_agent_config,
 )
 from claude_hub.services.feishu_bot import (
@@ -68,6 +85,13 @@ from claude_hub.services.feishu_user_client import (
 from claude_hub.services.feishu_user_token_store import (
     FeishuUserTokenStore,
     get_feishu_user_token_store,
+)
+from claude_hub.services.feishu_web_session import (
+    FeishuWebLoginManager,
+    FeishuWebSessionStore,
+    get_feishu_web_session_store,
+    matches_authorized_owner_sender,
+    normalize_and_claim_ai_command_message,
 )
 from claude_hub.services.local_storage import (
     document_exists,
@@ -172,73 +196,6 @@ async def _async_provider_model_options() -> dict[str, list[StreamModelOption]]:
     return out
 
 
-def _serialize_model_option(option: StreamModelOption) -> dict[str, Any]:
-    return {
-        "id": option.id,
-        "label": option.label,
-        "description": option.description,
-        "provider_model_id": option.provider_model_id or option.id,
-        "default_reasoning_effort": option.default_reasoning_effort,
-        "supported_reasoning_efforts": [
-            {
-                "id": eff.id,
-                "label": eff.label,
-                "description": eff.description,
-                "provider_model_id": eff.provider_model_id,
-            }
-            for eff in option.supported_reasoning_efforts
-        ],
-    }
-
-
-def _build_capabilities_payload(
-    options_by_provider: Mapping[str, Sequence[StreamModelOption]],
-) -> dict[str, Any]:
-    model_efforts: dict[str, list[str]] = {}
-    for base, variants in _MASO_MODEL_VARIANTS.items():
-        effs = list(variants.keys())
-        model_efforts[base] = effs
-        for v in set(variants.values()):
-            model_efforts[v] = effs
-
-    provider_models: dict[str, list[str]] = {}
-    serialized_options: dict[str, list[dict[str, Any]]] = {}
-    for prov_enum in SUPPORTED_AI_COMMAND_PROVIDERS:
-        prov = prov_enum.value
-        opts = list(options_by_provider.get(prov, ()))
-        serialized_options[prov] = [_serialize_model_option(opt) for opt in opts]
-        seen_ids: list[str] = []
-        for opt in opts:
-            eff_ids = [eff.id for eff in opt.supported_reasoning_efforts]
-            if eff_ids:
-                model_efforts.setdefault(opt.id, eff_ids)
-                if opt.provider_model_id:
-                    model_efforts.setdefault(opt.provider_model_id, eff_ids)
-                for eff in opt.supported_reasoning_efforts:
-                    if eff.provider_model_id:
-                        model_efforts.setdefault(eff.provider_model_id, eff_ids)
-            elif prov in {"cursor", "maso"}:
-                model_efforts.setdefault(opt.id, [])
-            primary_id = opt.provider_model_id or opt.id
-            if primary_id and primary_id not in seen_ids:
-                seen_ids.append(primary_id)
-        for fallback_id in DEFAULT_PROVIDER_MODELS.get(prov, ()):
-            if fallback_id not in seen_ids:
-                seen_ids.append(fallback_id)
-        provider_models[prov] = seen_ids
-
-    return {
-        "providers": [p.value for p in SUPPORTED_AI_COMMAND_PROVIDERS],
-        "reasoning_efforts": [e for e in SUPPORTED_REASONING_EFFORTS if e],
-        "provider_reasoning_efforts": {
-            k: list(v) for k, v in PROVIDER_SUPPORTED_REASONING_EFFORTS.items()
-        },
-        "model_reasoning_efforts": model_efforts,
-        "provider_models": provider_models,
-        "provider_model_options": serialized_options,
-    }
-
-
 class FeishuAiCommandService:
     """Coordinates ``/ai`` configuration, deduplication, context fetch, reactions, and replies."""
 
@@ -247,6 +204,8 @@ class FeishuAiCommandService:
         *,
         state_path: Path | None = None,
         token_store: FeishuUserTokenStore | None = None,
+        web_session_store: FeishuWebSessionStore | None = None,
+        web_login_manager: FeishuWebLoginManager | None = None,
         dedup_store: FeishuMessageDedupStore | None = None,
         user_client_factory: Callable[[FeishuAiCommandConfig], FeishuUserClient] | None = None,
         tab_creator: Callable[..., Any] | None = None,
@@ -261,6 +220,18 @@ class FeishuAiCommandService:
         runtime_home = resolve_runtime_home()
         self._state_path: Path = state_path or (runtime_home / "feishu_ai_command.json")
         self._token_store: FeishuUserTokenStore = token_store or get_feishu_user_token_store()
+        if web_session_store is not None:
+            self._web_session_store = web_session_store
+        elif state_path is not None:
+            self._web_session_store = FeishuWebSessionStore(
+                path=state_path.parent / "feishu_web_session.json",
+                key_path=state_path.parent / "feishu_web_session.key",
+            )
+        else:
+            self._web_session_store = get_feishu_web_session_store()
+        self._web_login_manager = web_login_manager or FeishuWebLoginManager(
+            self._web_session_store
+        )
         self._dedup: FeishuMessageDedupStore = dedup_store or FeishuMessageDedupStore()
         self._user_client_factory = user_client_factory
         self._tab_creator = tab_creator
@@ -277,6 +248,47 @@ class FeishuAiCommandService:
         self._managed_turn_dispatcher = managed_turn_dispatcher
         self._lock = threading.RLock()
         self._channel_locks: dict[str, asyncio.Lock] = {}
+
+    @property
+    def web_session_store(self) -> FeishuWebSessionStore:
+        return self._web_session_store
+
+    @property
+    def web_login_manager(self) -> FeishuWebLoginManager:
+        return self._web_login_manager
+
+    def switch_owner_to_web_session(self) -> FeishuAiCommandConfig:
+        """Explicitly switch ``owner_open_id`` to the currently authenticated web session's identity."""
+        sess = self._web_session_store.load(auto_import_larkx=False)
+        if sess is not None and sess.is_valid_structure():
+            eff_open = (sess.open_id or sess.user_id).strip()
+            if eff_open:
+                return self.update_config({"owner_open_id": eff_open, "app_id": "web_session"})
+        return self.get_config(auto_import_lark_cli=False)
+
+    def _apply_web_session_owner_fallback(
+        self, cfg: FeishuAiCommandConfig
+    ) -> FeishuAiCommandConfig:
+        if cfg.owner_open_id or cfg.send_mode == "openapi":
+            return cfg
+        sess = self._web_session_store.load(auto_import_larkx=False)
+        if sess is not None and sess.is_valid_structure():
+            eff_open = (sess.open_id or sess.user_id).strip()
+            if eff_open:
+                return replace(
+                    cfg,
+                    owner_open_id=eff_open,
+                    app_id=cfg.app_id or "web_session",
+                )
+        return cfg
+
+    def _matches_owner_sender(self, sender_id: str, cfg: FeishuAiCommandConfig) -> bool:
+        return matches_authorized_owner_sender(
+            sender_id,
+            owner_open_id=cfg.owner_open_id,
+            web_session=self._web_session_store.load(auto_import_larkx=False),
+            send_mode=cfg.send_mode,
+        )
 
     def _load_state(self) -> dict[str, Any]:
         default_doc: dict[str, Any] = {
@@ -328,7 +340,7 @@ class FeishuAiCommandService:
                         owner_open_id=cfg.owner_open_id or record.open_id,
                         app_id=cfg.app_id or record.app_id,
                     )
-            return cfg
+            return self._apply_web_session_owner_fallback(cfg)
 
     def _read_persisted_config(self) -> FeishuAiCommandConfig:
         with self._lock:
@@ -371,7 +383,7 @@ class FeishuAiCommandService:
                     owner_open_id=cfg.owner_open_id or record.open_id,
                     app_id=cfg.app_id or record.app_id,
                 )
-        return cfg
+        return self._apply_web_session_owner_fallback(cfg)
 
     def update_config(self, patch: Mapping[str, Any]) -> FeishuAiCommandConfig:
         with self._lock:
@@ -641,6 +653,8 @@ class FeishuAiCommandService:
             self._token_store,
             open_id=cfg.owner_open_id or None,
             app_id=cfg.app_id or settings.feishu_app_id or None,
+            web_session_store=self._web_session_store,
+            send_mode=cfg.send_mode,
         )
 
     def preflight_status(
@@ -696,6 +710,7 @@ class FeishuAiCommandService:
                     owner_open_id=cfg.owner_open_id or rec.open_id,
                     app_id=cfg.app_id or rec.app_id,
                 )
+            cfg = self._apply_web_session_owner_fallback(cfg)
             return cfg, self.build_user_client(cfg).preflight_scopes(rec)
         cfg = await self.aget_config(auto_import_lark_cli=auto_import_lark_cli)
         preflight = await self.apreflight_status(
@@ -736,9 +751,9 @@ class FeishuAiCommandService:
         config: FeishuAiCommandConfig | None = None,
     ) -> bool:
         cfg = config or self.get_config()
-        if not cfg.enabled or sender_type != "user" or not cfg.owner_open_id or not sender_open_id:
+        if not cfg.enabled or sender_type != "user" or not sender_open_id:
             return False
-        if not hmac.compare_digest(sender_open_id.strip(), cfg.owner_open_id.strip()):
+        if not self._matches_owner_sender(sender_open_id, cfg):
             return False
         return self._is_valid_ai_command_text(text, cfg)
 
@@ -893,20 +908,7 @@ class FeishuAiCommandService:
         cfg: FeishuAiCommandConfig,
         target_env: Mapping[str, str],
     ) -> str:
-        cwd = self._resolve_cwd(cfg)
-        short_target = (message.thread_id or message.chat_id)[-6:]
-        created = await self._create_tab(
-            name=f"Feishu /ai · {short_target}"[:64],
-            session_kind=SessionKind.CHAT,
-            agent_type=parsed.provider,
-            cwd=cwd,
-            solo_mode=True,
-            env=dict(target_env),
-        )
-        tab_id = created if isinstance(created, str) else getattr(created, "id", "")
-        if not isinstance(tab_id, str) or not tab_id.strip():
-            raise RuntimeError("Failed to create Hub Chat tab for Feishu /ai command")
-        return tab_id.strip()
+        return await feishu_ai_workspace.create_legacy_tab(self, message, parsed, cfg, target_env)
 
     def _resolve_workspace(self, cfg: FeishuAiCommandConfig, cwd: str) -> Any:
         return feishu_ai_workspace.resolve_workspace(
@@ -956,37 +958,7 @@ class FeishuAiCommandService:
         return ttyd_manager.get_tab(tab_id)
 
     async def _switch_tab_env(self, tab_id: str, env: dict[str, str], *, tab: Any = None) -> None:
-        if self._tab_env_switcher is not None:
-            res = self._tab_env_switcher(tab_id, env)
-            if inspect.isawaitable(res):
-                await res
-            return
-        switch_fn = getattr(tab, "switch_env", None) if tab is not None else None
-        if callable(switch_fn):
-            res = switch_fn(env)
-            if inspect.isawaitable(res):
-                await res
-            return
-        from claude_hub.services import ttyd_manager
-
-        res = ttyd_manager.switch_env(tab_id, env)
-        updated_tab = await res if inspect.isawaitable(res) else res
-        try:
-            from claude_hub.api.agent_stream import (
-                _get_tab_tailer_manager,
-                _terminal_tab_stream_session,
-            )
-
-            stream_session = _terminal_tab_stream_session(tab_id)
-            if stream_session is not None:
-                effective_env = dict(getattr(updated_tab, "env", None) or env)
-                _get_tab_tailer_manager().set_env(stream_session, effective_env)
-        except Exception:
-            logger.debug(
-                "Could not sync live stream tailer env for tab %s",
-                tab_id,
-                exc_info=True,
-            )
+        await feishu_ai_workspace.switch_tab_env(self, tab_id, env, tab=tab)
 
     async def _create_tab(self, **kwargs: Any) -> Any:
         if self._tab_creator is not None:
@@ -1087,7 +1059,7 @@ class FeishuAiCommandService:
         if not dry_run:
             if not cfg.owner_open_id.strip():
                 return self._skip_result(message, dry_run=dry_run, reason="no_owner_open_id")
-            if not hmac.compare_digest(message.sender_open_id.strip(), cfg.owner_open_id.strip()):
+            if not self._matches_owner_sender(message.sender_open_id, cfg):
                 return self._skip_result(message, dry_run=dry_run, reason="sender_not_owner")
 
         try:
@@ -1113,10 +1085,23 @@ class FeishuAiCommandService:
             and pending_item.get("dispatch_state") == "turn_completed"
             and isinstance(pending_item.get("answer"), str)
         )
-        dedup_claim_key = f"ai_cmd:{cfg.owner_open_id or 'owner'}:{message.message_id}"
-        if resuming_completed:
-            self._dedup.claim(dedup_claim_key)
-        elif not dry_run and not self._dedup.claim(dedup_claim_key):
+        user_client = self.build_user_client(cfg)
+        (
+            message,
+            dedup_claim_key,
+            extra_dedup_keys,
+            claimed_ok,
+        ) = await normalize_and_claim_ai_command_message(
+            message=message,
+            parsed_instruction=parsed.instruction,
+            owner_open_id=cfg.owner_open_id,
+            user_client=user_client,
+            dedup_store=self._dedup,
+            lock=self._lock,
+            dry_run=dry_run,
+            resuming_completed=resuming_completed,
+        )
+        if not claimed_ok:
             return self._skip_result(
                 message,
                 dry_run=dry_run,
@@ -1124,8 +1109,6 @@ class FeishuAiCommandService:
                 reason="already_claimed",
                 parsed=parsed,
             )
-
-        user_client = self.build_user_client(cfg)
         ack_reaction_id: str | None = (
             str(pending_item["ack_reaction_id"])
             if resuming_completed and pending_item and pending_item.get("ack_reaction_id")
@@ -1346,7 +1329,8 @@ class FeishuAiCommandService:
                 self.mark_pending_command_state(
                     message.message_id, "interrupted", dispatch_state="not_started"
                 )
-                self._dedup.release(dedup_claim_key)
+                for dk in (dedup_claim_key, *extra_dedup_keys):
+                    self._dedup.release(dk)
             elif type(exc).__name__ == "ExternalDispatchRetired":
                 status_val, reason_val = "cancelled", "retired_retry_safe"
                 self.mark_pending_command_state(
@@ -1354,7 +1338,8 @@ class FeishuAiCommandService:
                     "interrupted",
                     dispatch_state="retired_retry_safe",
                 )
-                self._dedup.release(dedup_claim_key)
+                for dk in (dedup_claim_key, *extra_dedup_keys):
+                    self._dedup.release(dk)
             else:
                 self.mark_pending_command_state(
                     message.message_id, "interrupted", dispatch_state="uncertain"
@@ -1439,12 +1424,13 @@ class FeishuAiCommandService:
                             message.message_id,
                         )
                 if status_val != "cancelled":
-                    self._dedup.finish(
-                        dedup_claim_key,
-                        status_val,
-                        stage="ai_command",
-                        reason=reason_val or None,
-                    )
+                    for dk in (dedup_claim_key, *extra_dedup_keys):
+                        self._dedup.finish(
+                            dk,
+                            status_val,
+                            stage="ai_command",
+                            reason=reason_val or None,
+                        )
 
     async def handle_ws_event(self, event: FeishuMessageEvent) -> bool:
         """Handle a WebSocket ``FeishuMessageEvent`` if it matches the owner's ``/ai`` command."""

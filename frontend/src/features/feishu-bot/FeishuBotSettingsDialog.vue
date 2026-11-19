@@ -1074,6 +1074,9 @@ const aiTokenCanSend = computed(() => {
 const aiTokenChipLabel = computed(() => {
   const tok = aiTokenStatus.value
   if (!tok) return ''
+  if (tok.send_mode === 'web_session' || (tok.has_web_session && tok.can_send_as_user && !tok.has_send_as_user_scope)) {
+    return 'Web session ready'
+  }
   if (tok.can_send_as_user) return 'Scope ready'
   if (tok.send_mode === 'bot_fallback' || tok.can_send_via_bot) {
     return tok.fallback_bot_app_id ? `Bot fallback (${tok.fallback_bot_app_id})` : 'Bot fallback'
@@ -1084,6 +1087,9 @@ const aiTokenSummary = computed(() => {
   const tok = aiTokenStatus.value
   if (!tok || !tok.has_token) return 'No user token loaded yet (sign in via Feishu OAuth or import ~/.lark-cli token)'
   const userLabel = tok.user_name ? `${tok.user_name} (${tok.open_id})` : (tok.open_id ?? 'User')
+  if (tok.send_mode === 'web_session' || (tok.has_web_session && tok.can_send_as_user && !tok.has_send_as_user_scope)) {
+    return `Ready (web session): ${userLabel} · user-identity reply active`
+  }
   if (tok.can_send_as_user) return `Ready: ${userLabel} · im:message.send_as_user granted`
   if (tok.send_mode === 'bot_fallback' || tok.can_send_via_bot) {
     const botLabel = tok.fallback_bot_app_id ?? tok.app_id ?? 'app bot'
