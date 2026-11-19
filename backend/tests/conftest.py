@@ -328,6 +328,31 @@ def _cursor_recovery_cli_capability(
 
 
 @pytest.fixture(autouse=True)
+def _patrol_fallback_cli_capability(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mocked fallback regression owns an available Codex executable.
+
+    Keep absence/failure discovery tests untouched. The large owning test module
+    cannot be edited within this task's source-size limit.
+    """
+    if request.node.nodeid != (
+        "tests/test_demand_patrol_triage.py::"
+        "test_patrol_keeps_original_fallback_when_configured_model_unavailable"
+    ):
+        return
+
+    from claude_hub.services.demand_patrol import feishu_triage
+
+    which = shutil.which
+    monkeypatch.setattr(
+        feishu_triage.shutil,
+        "which",
+        lambda name: "/fixture/bin/codex" if name == "codex" else which(name),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _shorten_agent_prompt_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stop tests from idling through the production agent-prompt budget.
 

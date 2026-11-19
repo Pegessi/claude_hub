@@ -25,3 +25,22 @@ run. Full result receipts and final SHAs are delivered in the external task repo
 
 The reviewed Feishu fallback commit is integrated without real chat sends. No
 live service restart or primary checkout history rewrite is part of this repair.
+
+## Hosted follow-up findings
+
+The first hosted candidate reached a different 0.2-second stream delivery check
+and timed out. The same test passed unchanged locally, and one diagnostic rerun
+passed it remotely; no deadline, durability or assertion was changed. That rerun
+then exposed another unmocked host capability: the Patrol fallback regression
+assumed Codex was installed. Model availability only for that mocked case,
+leaving provider-absence tests untouched; reproduce with no provider CLIs on PATH.
+
+The mocked Goal UI runner also exhausted its unchanged 120-second scenario
+budget after the wide-theme matrix. Run its independent behavior and appearance
+phases concurrently in isolated contexts with separate localStorage/mock state.
+The extra context is an explicitly closed child of the same BrowserRun-owned
+browser; the lifecycle owner's single managed context/browser/driver and failure
+handling remain unchanged. TaskGroup propagates either failure and cancellation;
+focused tests cover both phase results and context cleanup on success/failure/
+cancellation. Retain every original assertion, awaited oracle and screenshot,
+plus the same scenario and suite deadlines. No lifecycle/verifier gate is relaxed.

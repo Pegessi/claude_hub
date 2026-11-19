@@ -18,11 +18,11 @@ import zlib
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from playwright.async_api import expect
+from playwright.async_api import BrowserContext, expect
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from appearance_assertions import (  # noqa: E402
-    filled_button_themes,
+from appearance_assertions import filled_button_themes  # noqa: E402
+from appearance_assertions import (
     select_appearance,
     wide_chat_themes,
 )
@@ -223,7 +223,7 @@ GOAL = {
 }
 
 
-async def main(browser_run: BrowserRun) -> None:
+async def _scenario(context: BrowserContext, *, appearance: bool) -> dict:
     if len(sys.argv) != 4:
         raise SystemExit(__doc__)
     base = sys.argv[1].rstrip("/")
@@ -276,577 +276,245 @@ async def main(browser_run: BrowserRun) -> None:
     failure: BaseException | None = None
     page = None
 
-    async with browser_run.context(
-        viewport={"width": 1280, "height": 900},
-        launch_args=["--disable-background-networking", "--disable-component-update"],
-    ) as context:
-        try:
+    try:
 
-            async def block_websocket(socket) -> None:
-                report["blocked_websockets"].append(socket.url)
-                await socket.close(code=1000, reason="mocked goal smoke")
+        async def block_websocket(socket) -> None:
+            report["blocked_websockets"].append(socket.url)
+            await socket.close(code=1000, reason="mocked goal smoke")
 
-            async def route_all(route) -> None:
-                nonlocal current_goal, fail_next_send, plan_fixture
-                request = route.request
-                parsed = urlparse(request.url)
-                if origin(request.url) != origin(base):
-                    report["blocked_external_requests"].append(request.url)
-                    await route.abort("blockedbyclient")
-                    return
-                path = parsed.path
-                if not path.startswith("/api/"):
-                    await route.continue_()
-                    return
-                report["api_requests"].append([request.method, path])
+        async def route_all(route) -> None:
+            nonlocal current_goal, fail_next_send, plan_fixture
+            request = route.request
+            parsed = urlparse(request.url)
+            if origin(request.url) != origin(base):
+                report["blocked_external_requests"].append(request.url)
+                await route.abort("blockedbyclient")
+                return
+            path = parsed.path
+            if not path.startswith("/api/"):
+                await route.continue_()
+                return
+            report["api_requests"].append([request.method, path])
 
-                body: object
-                if path == "/api/auth/check":
-                    body = {"auth_required": False, "user": None}
-                elif (
-                    request.method == "GET"
-                    and path.startswith("/api/workspaces/tabs/")
-                    and path.endswith("/messages")
-                ):
-                    body = {"messages": []}
-                elif path == "/api/tabs":
-                    body = tabs
-                elif path in {
-                    "/api/tabs/status",
-                    "/api/tabs/archived",
-                    "/api/workspaces",
-                    "/api/remote/profiles",
-                }:
-                    body = []
-                elif path.startswith("/api/tabs/sidebar-preferences"):
-                    body = {"pinned_tab_ids": []}
-                elif path == "/api/env-presets":
-                    body = {"custom_presets": [], "hidden_builtin_ids": []}
-                elif path == "/api/feishu/bot/bots":
-                    body = {
-                        "pool_revision": 0,
-                        "bots": [],
-                        "pool_editable": True,
-                        "deprecated_env": [],
-                        "focus_bot_id": None,
-                    }
-                elif path.endswith("/capabilities"):
-                    body = {
-                        "structured": True,
-                        "send_message": True,
-                        "supports_goals": True,
-                        "supports_images": True,
-                        "agent_type": "codex",
-                        "supports_mode_switch": False,
-                    }
-                elif path.endswith("/events"):
-                    since = int(parse_qs(parsed.query).get("since_sequence", ["-1"])[0])
-                    fixture_events = list(EVENTS)
-                    if idle_fixture:
-                        fixture_events.append(
-                            event(
-                                4,
-                                "turn_completed",
-                                LIVE_TURN,
-                                {"status": "completed"},
-                                LIVE_TURN,
-                            )
+            body: object
+            if path == "/api/auth/check":
+                body = {"auth_required": False, "user": None}
+            elif (
+                request.method == "GET"
+                and path.startswith("/api/workspaces/tabs/")
+                and path.endswith("/messages")
+            ):
+                body = {"messages": []}
+            elif path == "/api/tabs":
+                body = tabs
+            elif path in {
+                "/api/tabs/status",
+                "/api/tabs/archived",
+                "/api/workspaces",
+                "/api/remote/profiles",
+            }:
+                body = []
+            elif path.startswith("/api/tabs/sidebar-preferences"):
+                body = {"pinned_tab_ids": []}
+            elif path == "/api/env-presets":
+                body = {"custom_presets": [], "hidden_builtin_ids": []}
+            elif path == "/api/feishu/bot/bots":
+                body = {
+                    "pool_revision": 0,
+                    "bots": [],
+                    "pool_editable": True,
+                    "deprecated_env": [],
+                    "focus_bot_id": None,
+                }
+            elif path.endswith("/capabilities"):
+                body = {
+                    "structured": True,
+                    "send_message": True,
+                    "supports_goals": True,
+                    "supports_images": True,
+                    "agent_type": "codex",
+                    "supports_mode_switch": False,
+                }
+            elif path.endswith("/events"):
+                since = int(parse_qs(parsed.query).get("since_sequence", ["-1"])[0])
+                fixture_events = list(EVENTS)
+                if idle_fixture:
+                    fixture_events.append(
+                        event(
+                            4,
+                            "turn_completed",
+                            LIVE_TURN,
+                            {"status": "completed"},
+                            LIVE_TURN,
                         )
-                    if plan_fixture:
-                        fixture_events.append(
-                            event(
-                                5,
-                                "turn_started",
-                                PLAN_TURN,
-                                {
-                                    "summary": "Plan this Goal before starting",
-                                    "mode": "default",
-                                    "metadata": {
-                                        "origin": "goal",
-                                        "protocol": "goal-continuation-v1",
-                                    },
+                    )
+                if plan_fixture:
+                    fixture_events.append(
+                        event(
+                            5,
+                            "turn_started",
+                            PLAN_TURN,
+                            {
+                                "summary": "Plan this Goal before starting",
+                                "mode": "default",
+                                "metadata": {
+                                    "origin": "goal",
+                                    "protocol": "goal-continuation-v1",
                                 },
-                                f"{PLAN_TURN}:user",
-                            )
+                            },
+                            f"{PLAN_TURN}:user",
                         )
-                        fixture_events.append(
-                            event(
-                                6,
-                                "text_delta",
-                                PLAN_TURN,
-                                {"text": PLAN_TEXT},
-                                f"{PLAN_TURN}:assistant",
-                            )
-                        )
-                        fixture_events.append(
-                            event(
-                                7,
-                                "turn_completed",
-                                PLAN_TURN,
-                                {"status": "completed"},
-                                PLAN_TURN,
-                            )
-                        )
-                    if approval_fixture:
-                        fixture_events.extend(
-                            [
-                                event(
-                                    8,
-                                    "turn_started",
-                                    "theme-approval",
-                                    {"summary": "Confirm implementation scope"},
-                                    "theme-approval:user",
-                                ),
-                                event(
-                                    9,
-                                    "approval_required",
-                                    "theme-approval",
-                                    {
-                                        "tool_call_id": "theme-approval-call",
-                                        "kind": "ask_question",
-                                        "questions": [
-                                            {
-                                                "id": "scope",
-                                                "prompt": "Choose the implementation scope",
-                                                "options": [
-                                                    {"id": "bounded", "label": "Keep scope bounded"}
-                                                ],
-                                            }
-                                        ],
-                                    },
-                                    "theme-approval:question",
-                                ),
-                            ]
-                        )
-                    rows = [item for item in fixture_events if item["stream_sequence"] > since]
-                    next_sequence = rows[-1]["stream_sequence"] if rows else since
-                    body = {
-                        "events": rows,
-                        "next_sequence": next_sequence,
-                        "has_more": False,
-                    }
-                elif request.method == "GET" and path == f"/api/workspaces/tabs/{TAB}/questions":
-                    body = {"questions": []}
-                elif path.endswith("/wait"):
-                    since = int(parse_qs(parsed.query).get("since_sequence", ["-1"])[0])
-                    await asyncio.sleep(0.2)
-                    body = {"events": [], "next_sequence": since, "has_more": False}
-                elif path.endswith("/live"):
-                    await route.fulfill(
-                        status=200, content_type="text/event-stream", body=": mock\n\n"
                     )
-                    return
-                elif path.endswith("/stream/send") and request.method == "POST":
-                    send_payloads.append(json.loads(request.post_data or "{}"))
-                    if fail_next_send:
-                        fail_next_send = False
-                        current_goal = {
-                            **current_goal,
-                            "status": "paused",
-                            "dispatch_state": "uncertain",
-                            "pending_image_count": 1,
-                        }
-                        await route.fulfill(
-                            status=503,
-                            content_type="application/json",
-                            body=json.dumps(
-                                {
-                                    "detail": "Image delivery interrupted; reattach images and recover"
-                                }
+                    fixture_events.append(
+                        event(
+                            6,
+                            "text_delta",
+                            PLAN_TURN,
+                            {"text": PLAN_TEXT},
+                            f"{PLAN_TURN}:assistant",
+                        )
+                    )
+                    fixture_events.append(
+                        event(
+                            7,
+                            "turn_completed",
+                            PLAN_TURN,
+                            {"status": "completed"},
+                            PLAN_TURN,
+                        )
+                    )
+                if approval_fixture:
+                    fixture_events.extend(
+                        [
+                            event(
+                                8,
+                                "turn_started",
+                                "theme-approval",
+                                {"summary": "Confirm implementation scope"},
+                                "theme-approval:user",
                             ),
-                        )
-                        return
-                    if current_goal:
-                        # The approval message is dispatched as the Goal's next
-                        # turn, which is what ends the plan's approval request.
-                        current_goal = {
-                            **current_goal,
-                            "status": "active",
-                            "dispatch_state": "dispatched",
-                            "pending_image_count": 0,
-                            "plan_answered": bool(current_goal.get("plan_turn_id")),
-                        }
-                    body = {"ok": True}
-                elif path.endswith("/goal/current"):
-                    body = current_goal
-                elif path.endswith("/objective") and request.method == "PATCH":
-                    update = json.loads(request.post_data or "{}")
-                    goal_updates.append(update)
-                    current_goal = {**current_goal, "objective": update["objective"]}
-                    body = current_goal
-                elif path.endswith("/goal") and request.method == "POST":
-                    creation = json.loads(request.post_data or "{}")
-                    goal_creates.append(creation)
-                    current_goal = {**GOAL, "objective": creation["objective"]}
-                    body = current_goal
-                elif path.endswith("/view"):
-                    body = {"ok": True}
-                elif "network" in path:
-                    body = {"hostname": "fixture", "addresses": []}
-                elif path == "/api/dot/identity" and request.method == "GET":
-                    # The Dot launcher in the tab bar reads Dot's name and avatar.
-                    body = {"name": "Dot", "avatar": "", "avatar_image": None}
-                elif request.method == "GET" and path == "/api/subagents":
-                    # Every Chat polls Hub sub-agent links; this fixture has none.
-                    body = []
-                else:
-                    report["unknown_requests"].append([request.method, path])
+                            event(
+                                9,
+                                "approval_required",
+                                "theme-approval",
+                                {
+                                    "tool_call_id": "theme-approval-call",
+                                    "kind": "ask_question",
+                                    "questions": [
+                                        {
+                                            "id": "scope",
+                                            "prompt": "Choose the implementation scope",
+                                            "options": [
+                                                {
+                                                    "id": "bounded",
+                                                    "label": "Keep scope bounded",
+                                                }
+                                            ],
+                                        }
+                                    ],
+                                },
+                                "theme-approval:question",
+                            ),
+                        ]
+                    )
+                rows = [item for item in fixture_events if item["stream_sequence"] > since]
+                next_sequence = rows[-1]["stream_sequence"] if rows else since
+                body = {
+                    "events": rows,
+                    "next_sequence": next_sequence,
+                    "has_more": False,
+                }
+            elif request.method == "GET" and path == f"/api/workspaces/tabs/{TAB}/questions":
+                body = {"questions": []}
+            elif path.endswith("/wait"):
+                since = int(parse_qs(parsed.query).get("since_sequence", ["-1"])[0])
+                await asyncio.sleep(0.2)
+                body = {"events": [], "next_sequence": since, "has_more": False}
+            elif path.endswith("/live"):
+                await route.fulfill(status=200, content_type="text/event-stream", body=": mock\n\n")
+                return
+            elif path.endswith("/stream/send") and request.method == "POST":
+                send_payloads.append(json.loads(request.post_data or "{}"))
+                if fail_next_send:
+                    fail_next_send = False
+                    current_goal = {
+                        **current_goal,
+                        "status": "paused",
+                        "dispatch_state": "uncertain",
+                        "pending_image_count": 1,
+                    }
                     await route.fulfill(
-                        status=501,
+                        status=503,
                         content_type="application/json",
-                        body=json.dumps({"detail": f"unmocked API: {request.method} {path}"}),
+                        body=json.dumps(
+                            {"detail": "Image delivery interrupted; reattach images and recover"}
+                        ),
                     )
                     return
-                await route.fulfill(
-                    status=200, content_type="application/json", body=json.dumps(body)
-                )
-
-            await context.route_web_socket("**/*", block_websocket)
-            await context.route("**/*", route_all)
-            # Match remote HTTP deployments where randomUUID is unavailable.
-            await context.add_init_script(
-                "Object.defineProperty(globalThis.crypto, 'randomUUID', {value: undefined, configurable: true})"
-            )
-            page = await context.new_page()
-            page.on("pageerror", lambda error: report["page_errors"].append(str(error)))
-            await page.goto(base + f"/?tab={TAB}", wait_until="domcontentloaded")
-
-            await expect(page.get_by_text("Step one finished.")).to_be_visible()
-            assert "goal-status" not in await page.locator(".structured-pane").first.inner_text()
-
-            composer = page.locator(".composer-textarea").first
-            await expect(composer).to_be_enabled()
-            await expect(page.get_by_text("⌘/Ctrl+Enter steer Goal")).to_be_visible()
-
-            await composer.fill("Queue me for later")
-            await composer.press("Enter")
-            queue = page.get_by_role("region", name="Queued messages")
-            await expect(queue).to_be_visible()
-            item = queue.locator(".queued-draft").first
-            await item.get_by_role("button", name="Edit", exact=True).click()
-            await item.get_by_role("textbox").fill("Updated queued instruction")
-            await item.get_by_role("button", name="Save", exact=True).click()
-            await expect(item.locator("summary")).to_contain_text("Updated queued instruction")
-            await composer.fill("Cancel this input")
-            await composer.press("Enter")
-            await queue.locator(".queued-draft").nth(1).get_by_role(
-                "button", name="Cancel", exact=True
-            ).click()
-            await expect(queue.locator(".queued-draft")).to_have_count(1)
-            assert not send_payloads
-
-            await page.get_by_role("button", name="Edit Goal", exact=True).click()
-            dialog = page.get_by_role("dialog", name="Edit Goal", exact=True)
-            await dialog.get_by_role("textbox").fill("Updated Goal outcome")
-            await dialog.get_by_role("button", name="Save Goal", exact=True).click()
-            await expect(dialog).not_to_be_visible()
-            assert goal_updates[-1]["objective"] == "Updated Goal outcome"
-
-            # A queued image opens at original resolution and is steered without Stop.
-            await item.get_by_role("button", name="Cancel", exact=True).click()
-            await page.locator('input[type="file"]').set_input_files(
-                {
-                    "name": "shot.png",
-                    "mimeType": "image/png",
-                    "buffer": PNG_IMAGE,
-                }
-            )
-            await expect(page.locator(".composer-attachments .attachment-thumb")).to_have_count(1)
-            await composer.fill("Look at this reference")
-            await composer.press("Enter")
-            item = queue.locator(".queued-draft").first
-            await item.locator("summary").click()
-            await item.get_by_role("button", name="View shot.png", exact=True).click()
-            await expect(page.get_by_role("dialog", name="Attachment preview")).to_be_visible()
-            await expect(page.locator(".attachment-preview-dialog img")).to_have_attribute(
-                "src", re.compile("^data:image/png;base64,")
-            )
-            await page.get_by_role("button", name="Close preview").click()
-            await expect(page.get_by_role("dialog", name="Attachment preview")).not_to_be_visible()
-            await page.screenshot(
-                path=str(output / "goal-queued-image-controls.png"), full_page=True
-            )
-            report["screenshots"].append("goal-queued-image-controls.png")
-            await composer.press("Meta+Enter")
-            await expect(queue).not_to_be_visible()
-            assert len(send_payloads) == 1, send_payloads
-            assert send_payloads[0]["text"] == "Look at this reference"
-            assert send_payloads[0]["delivery"] == "steer"
-            assert len(send_payloads[0]["attachments"]) == 1
-            assert not any(
-                path.endswith("/cancel") or path.endswith("/pause")
-                for _, path in report["api_requests"]
-            )
-            await expect(page.get_by_role("button", name="Pause", exact=True)).to_be_visible()
-
-            # Interrupted image steering offers explicit recovery with a new
-            # intent ID even when the exact same image is reattached.
-            await page.locator('input[type="file"]').set_input_files(
-                {"name": "recovery.png", "mimeType": "image/png", "buffer": PNG_IMAGE}
-            )
-            await composer.fill("Recover using the same reference")
-            fail_next_send = True
-            await composer.press("Meta+Enter")
-            recover = page.get_by_role("button", name="Recover Goal", exact=True)
-            await expect(recover).to_be_enabled()
-            failed_id = send_payloads[-1]["client_turn_id"]
-            await page.get_by_role("button", name="Remove recovery.png", exact=True).click()
-            await page.locator('input[type="file"]').set_input_files(
-                {"name": "recovery.png", "mimeType": "image/png", "buffer": PNG_IMAGE}
-            )
-            await expect(recover).to_be_enabled()
-            await recover.click()
-            await expect(recover).not_to_be_visible()
-            assert send_payloads[-1]["client_turn_id"] != failed_id
-            assert (
-                base64.b64decode(send_payloads[-1]["attachments"][0]["data_url"].split(",", 1)[1])
-                == PNG_IMAGE
-            )
-            await expect(page.get_by_role("button", name="Pause", exact=True)).to_be_visible()
-
-            # Goal creation includes composer images in its first request.
-            current_goal = None
-            idle_fixture = True
-            await page.reload(wait_until="domcontentloaded")
-            await expect(composer).to_be_enabled()
-            await page.get_by_role("button", name="Add to chat", exact=True).click()
-            await page.get_by_role("menuitem", name="Set a Goal").click()
-            dialog = page.get_by_role("dialog", name="Set a Goal", exact=True)
-            described_by = await dialog.get_by_role("textbox").get_attribute("aria-describedby")
-            assert described_by, "the objective field lost its hint association"
-            assert await dialog.locator(f"#{described_by}").count() == 1, described_by
-            await dialog.get_by_role("textbox").fill("Build from the attached reference")
-            await page.locator('input[type="file"]').set_input_files(
-                {
-                    "name": "goal-reference.png",
-                    "mimeType": "image/png",
-                    "buffer": PNG_IMAGE,
-                }
-            )
-            await expect(
-                dialog.get_by_role("button", name="View goal-reference.png")
-            ).to_be_visible()
-            # The attachment row is the parent's; the dialog may frame it but
-            # must not restyle the chip preview or its remove badge.
-            chip = await dialog.locator(".attachment-chip").first.bounding_box()
-            remove = await dialog.locator(".attachment-remove").first.bounding_box()
-            trigger = await dialog.get_by_role("button", name="Add images").bounding_box()
-            assert chip and chip["width"] <= 48.5 and chip["height"] <= 48.5, chip
-            assert remove and remove["height"] <= 19, f"remove badge was restyled: {remove}"
-            assert remove["width"] <= 19, remove
-            assert trigger and trigger["height"] >= 30, f"the picker trigger shrank: {trigger}"
-            # The row's composition is the picker's own: caption above, trigger
-            # and chips side by side. Reverting that layout must fail here.
-            caption = await dialog.locator(".goal-image-picker > p").first.bounding_box()
-            assert caption, "the picker caption is missing"
-            assert caption["y"] + caption["height"] <= trigger["y"] + 2, (caption, trigger)
-            assert (
-                abs((chip["y"] + chip["height"] / 2) - (trigger["y"] + trigger["height"] / 2)) <= 6
-            ), (
-                chip,
-                trigger,
-            )
-            await page.screenshot(path=str(output / "goal-setup-attachment.png"), full_page=True)
-            report["screenshots"].append("goal-setup-attachment.png")
-            await expect(
-                dialog.get_by_role("button", name="Start Goal", exact=True)
-            ).to_be_enabled()
-            await dialog.get_by_role("button", name="Start Goal", exact=True).click()
-            await expect(dialog).not_to_be_visible()
-            assert len(goal_creates[-1]["attachments"]) == 1
-            assert goal_creates[-1]["objective"] == "Build from the attached reference"
-            # Nothing asked for approval, so nothing sends the gate either;
-            # Strict cross-review opens checked by default.
-            assert goal_creates[-1]["plan_first"] is False, goal_creates[-1]
-            assert goal_creates[-1]["strict_review"] is True, goal_creates[-1]
-            await page.set_viewport_size({"width": 390, "height": 844})
-            await page.screenshot(path=str(output / "goal-controls-mobile.png"), full_page=True)
-            report["screenshots"].append("goal-controls-mobile.png")
-
-            # The setup dialog carries the remembered "Plan first" choice and
-            # sends it as an additive optional field. Clear the previous Goal
-            # first: a Chat with a Goal cannot start a second one.
-            current_goal = None
-            await page.set_viewport_size({"width": 1440, "height": 900})
-            await page.reload(wait_until="domcontentloaded")
-            await expect(page.get_by_role("button", name="Add to chat", exact=True)).to_be_visible()
-            await page.get_by_role("button", name="Add to chat", exact=True).click()
-            await page.get_by_role("menuitem", name="Set a Goal").click()
-            dialog = page.get_by_role("dialog", name="Set a Goal", exact=True)
-            plan_toggle = dialog.get_by_label("Plan first", exact=True)
-            strict_toggle = dialog.get_by_label("Strict cross-review", exact=True)
-            # No approval gate unless asked for: a new Goal starts working, so
-            # the option opens unchecked and says so. Strict cross-review opens checked.
-            await expect(plan_toggle).not_to_be_checked()
-            await expect(strict_toggle).to_be_checked()
-            await expect(dialog.get_by_text("Consensus gate", exact=True)).to_be_visible()
-            await expect(dialog.get_by_text("starts working immediately")).to_be_visible()
-            await dialog.get_by_role("textbox").fill("Plan the cache before building it")
-            # Opting in is what turns the review gate (and its card) on.
-            await plan_toggle.check()
-            await expect(plan_toggle).to_be_checked()
-            await expect(dialog.get_by_text("Nothing starts until you approve")).to_be_visible()
-            # The dialog fade-in is a 220ms entrance animation; shoot after it.
-            await page.wait_for_timeout(400)
-            await page.screenshot(path=str(output / "goal-setup-plan-first.png"), full_page=True)
-            report["screenshots"].append("goal-setup-plan-first.png")
-            # Both modes must stay readable. Close the Goal modal before using
-            # the real Appearance dialog; changing mode must retain the palette.
-            # Contrast walks the real computed colours for the effective backdrop.
-            setup_palette = await page.locator("html").get_attribute("data-palette")
-            assert setup_palette is not None
-            dark_ratio = await dialog.evaluate(CONTRAST_SCRIPT)
-            assert dark_ratio["title"] >= 4.5, dark_ratio
-            assert dark_ratio["label"] >= 4.5, dark_ratio
-            assert dark_ratio["hint"] >= 4.5, dark_ratio
-            assert dark_ratio["note"] >= 4.5, dark_ratio
-            assert dark_ratio["tips"] >= 4.5, dark_ratio
-            await dialog.get_by_role("button", name="Cancel", exact=True).click()
-            await expect(dialog).not_to_be_visible()
-            await select_appearance(page, "light", setup_palette)
-            await page.get_by_role("button", name="Add to chat", exact=True).click()
-            await page.get_by_role("menuitem", name="Set a Goal").click()
-            dialog = page.get_by_role("dialog", name="Set a Goal", exact=True)
-            plan_toggle = dialog.get_by_label("Plan first", exact=True)
-            # A cancelled dialog remembered nothing, so the light pass starts
-            # from the same resting state.
-            await expect(plan_toggle).not_to_be_checked()
-            await dialog.get_by_role("textbox").fill("Plan the cache before building it")
-            await plan_toggle.check()
-            await page.wait_for_timeout(300)
-            light_ratio = await dialog.evaluate(CONTRAST_SCRIPT)
-            assert light_ratio["title"] >= 4.5, light_ratio
-            assert light_ratio["label"] >= 4.5, light_ratio
-            assert light_ratio["hint"] >= 4.5, light_ratio
-            assert light_ratio["note"] >= 4.5, light_ratio
-            assert light_ratio["tips"] >= 4.5, light_ratio
-            await page.screenshot(
-                path=str(output / "goal-setup-plan-first-light.png"), full_page=True
-            )
-            report["screenshots"].append("goal-setup-plan-first-light.png")
-            await dialog.get_by_role("button", name="Cancel", exact=True).click()
-            await expect(dialog).not_to_be_visible()
-            await select_appearance(page, "dark", setup_palette)
-            await page.get_by_role("button", name="Add to chat", exact=True).click()
-            await page.get_by_role("menuitem", name="Set a Goal").click()
-            dialog = page.get_by_role("dialog", name="Set a Goal", exact=True)
-            plan_toggle = dialog.get_by_label("Plan first", exact=True)
-            await expect(plan_toggle).not_to_be_checked()
-            await dialog.get_by_role("textbox").fill("Plan the cache before building it")
-            await expect(dialog.locator(".goal-dialog-count")).to_have_attribute(
-                "data-near-limit", "false"
-            )
-            # The counter warns before the hard limit, not only at it.
-            await dialog.get_by_role("textbox").fill("x" * 3700)
-            await expect(dialog.locator(".goal-dialog-count")).to_have_attribute(
-                "data-near-limit", "true"
-            )
-            await expect(dialog.locator(".goal-dialog-count")).to_have_text("3700/4000")
-            await dialog.get_by_role("textbox").fill("Plan the cache before building it")
-            await plan_toggle.check()
-            await page.wait_for_timeout(300)
-            # The same open dialog reflows to a phone width.
-            await page.set_viewport_size({"width": 390, "height": 844})
-            await page.wait_for_timeout(200)
-            await expect(plan_toggle).to_be_checked()
-            await page.screenshot(
-                path=str(output / "goal-setup-plan-first-mobile.png"), full_page=True
-            )
-            # The phone sheet is bounded by the shared overlay rule, which reads
-            # the visual viewport so an on-screen keyboard shrinks it instead of
-            # hiding the footer. A desktop-only `100dvh` must fail this.
-            sheet_hint = await dialog.evaluate("""el => {
-                    const root = document.documentElement
-                    root.style.setProperty('--visual-viewport-height', '480px')
-                    root.style.setProperty('--keyboard-height', '364px')
-                    const box = el.getBoundingClientRect()
-                    return { height: box.height, bottom: box.bottom, top: box.top }
-                }""")
-            assert sheet_hint["top"] >= -1, sheet_hint
-            assert sheet_hint["height"] <= 480 - 24 + 1, sheet_hint
-            assert sheet_hint["bottom"] <= 480 + 1, sheet_hint
-            start_button = await dialog.get_by_role(
-                "button", name="Start Goal", exact=True
-            ).bounding_box()
-            assert start_button, "the sheet footer lost its actions"
-            assert start_button["y"] + start_button["height"] <= 480 + 1, start_button
-            # Also verify with a panned visualViewport (offsetTop: 60px, height: 420px)
-            # that the GoalSetupDialog stays within [60, 480] and focusing the objective
-            # textarea keeps it scrolled into view inside .goal-dialog-body.
-            panned_goal_sheet = await dialog.evaluate("""async el => {
-                    const root = document.documentElement
-                    root.style.setProperty('--visual-viewport-offset-top', '60px')
-                    root.style.setProperty('--visual-viewport-height', '420px')
-                    root.style.setProperty('--keyboard-height', '364px')
-                    const box = el.getBoundingClientRect()
-                    const textarea = el.querySelector('#goal-dialog-objective')
-                    const body = el.querySelector('.goal-dialog-body')
-                    body.scrollTop = body.scrollHeight
-                    textarea.focus({ preventScroll: true })
-                    textarea.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
-                    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
-                    const taBox = textarea.getBoundingClientRect()
-                    const bodyBox = body.getBoundingClientRect()
-                    const headBox = el.querySelector('.goal-dialog-head').getBoundingClientRect()
-                    const footBox = el.querySelector('.goal-dialog-actions').getBoundingClientRect()
-                    return {
-                      top: box.top,
-                      bottom: box.bottom,
-                      taTop: taBox.top,
-                      taBottom: taBox.bottom,
-                      bodyTop: bodyBox.top,
-                      bodyBottom: bodyBox.bottom,
-                      headBottom: headBox.bottom,
-                      footTop: footBox.top,
+                if current_goal:
+                    # The approval message is dispatched as the Goal's next
+                    # turn, which is what ends the plan's approval request.
+                    current_goal = {
+                        **current_goal,
+                        "status": "active",
+                        "dispatch_state": "dispatched",
+                        "pending_image_count": 0,
+                        "plan_answered": bool(current_goal.get("plan_turn_id")),
                     }
-                }""")
-            assert panned_goal_sheet["top"] >= 60 - 1, panned_goal_sheet
-            assert abs(panned_goal_sheet["bottom"] - 480) <= 1, panned_goal_sheet
-            assert panned_goal_sheet["taTop"] >= panned_goal_sheet["bodyTop"] - 1, panned_goal_sheet
-            assert (
-                panned_goal_sheet["taBottom"] <= panned_goal_sheet["footTop"] + 1
-            ), panned_goal_sheet
-            await page.screenshot(path=str(output / "goal-setup-keyboard-sheet.png"))
-            report["screenshots"].append("goal-setup-keyboard-sheet.png")
-            await page.evaluate("""() => {
-                    const root = document.documentElement
-                    root.style.removeProperty('--visual-viewport-offset-top')
-                    root.style.removeProperty('--visual-viewport-height')
-                    root.style.removeProperty('--keyboard-height')
-                }""")
-            report["screenshots"].append("goal-setup-plan-first-mobile.png")
-            await page.set_viewport_size({"width": 1440, "height": 900})
-            strict_toggle = dialog.get_by_label("Strict cross-review", exact=True)
-            await strict_toggle.uncheck()
-            await expect(strict_toggle).not_to_be_checked()
-            await dialog.get_by_role("button", name="Start Goal", exact=True).click()
-            await expect(dialog).not_to_be_visible()
-            assert goal_creates[-1]["plan_first"] is True, goal_creates[-1]
-            assert goal_creates[-1]["strict_review"] is False, goal_creates[-1]
-            assert goal_creates[-1]["objective"] == "Plan the cache before building it"
+                body = {"ok": True}
+            elif path.endswith("/goal/current"):
+                body = current_goal
+            elif path.endswith("/objective") and request.method == "PATCH":
+                update = json.loads(request.post_data or "{}")
+                goal_updates.append(update)
+                current_goal = {**current_goal, "objective": update["objective"]}
+                body = current_goal
+            elif path.endswith("/goal") and request.method == "POST":
+                creation = json.loads(request.post_data or "{}")
+                goal_creates.append(creation)
+                current_goal = {**GOAL, "objective": creation["objective"]}
+                body = current_goal
+            elif path.endswith("/view"):
+                body = {"ok": True}
+            elif "network" in path:
+                body = {"hostname": "fixture", "addresses": []}
+            elif path == "/api/dot/identity" and request.method == "GET":
+                # The Dot launcher in the tab bar reads Dot's name and avatar.
+                body = {"name": "Dot", "avatar": "", "avatar_image": None}
+            elif request.method == "GET" and path == "/api/subagents":
+                # Every Chat polls Hub sub-agent links; this fixture has none.
+                body = []
+            else:
+                report["unknown_requests"].append([request.method, path])
+                await route.fulfill(
+                    status=501,
+                    content_type="application/json",
+                    body=json.dumps({"detail": f"unmocked API: {request.method} {path}"}),
+                )
+                return
+            await route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
 
-            # A planning turn that parked on needs_input renders the approval
-            # card from the Goal snapshot, not from the transcript text.
+        await context.route_web_socket("**/*", block_websocket)
+        await context.route("**/*", route_all)
+        # Match remote HTTP deployments where randomUUID is unavailable.
+        await context.add_init_script(
+            "Object.defineProperty(globalThis.crypto, 'randomUUID', {value: undefined, configurable: true})"
+        )
+        page = await context.new_page()
+        page.on("pageerror", lambda error: report["page_errors"].append(str(error)))
+        if appearance:
             current_goal = dict(PLAN_GOAL)
+            idle_fixture = True
             plan_fixture = True
-            await page.reload(wait_until="domcontentloaded")
+        await page.goto(base + f"/?tab={TAB}", wait_until="domcontentloaded")
+
+        if appearance:
             await expect(
                 page.get_by_text("Scope: add the bounded cache and verify it.")
             ).to_be_visible()
             card = page.locator(".goal-plan-card")
-            await expect(card).to_be_visible()
             await expect(card).to_have_attribute("data-mode", "review")
-            await expect(card.locator(".goal-plan-eyebrow")).to_have_text("Execution plan")
-            await expect(card.locator(".goal-plan-budget")).to_contain_text("Execution budget")
-            await expect(card.locator(".goal-plan-budget")).to_contain_text(
-                "2 helpers · claude/opus, codex/gpt-5 · max 2 in parallel · about 12 minutes"
-            )
-            await expect(card.locator(".goal-plan-budget-helpers li")).to_have_count(2)
-            await expect(card.locator(".goal-plan-steps li")).to_have_count(2)
-            assert "goal-plan" not in await page.locator(".structured-pane").first.inner_text()
             await card.scroll_into_view_if_needed()
-            await page.screenshot(path=str(output / "goal-plan-card-desktop.png"), full_page=True)
-            report["screenshots"].append("goal-plan-card-desktop.png")
             off_origin_before_themes = list(report["blocked_external_requests"])
             report["plan_button_theme_contrast"] = await filled_button_themes(
                 page,
@@ -855,77 +523,13 @@ async def main(browser_run: BrowserRun) -> None:
                 screenshot_dir=output,
             )
             report["wide_chat_artwork"] = await wide_chat_themes(
-                page, output, card.get_by_role("button", name="Approve & start", exact=True)
+                page,
+                output,
+                card.get_by_role("button", name="Approve & start", exact=True),
             )
             assert set(report["blocked_external_requests"]) <= set(off_origin_before_themes), (
                 "Theme assets attempted new off-origin requests",
                 report["blocked_external_requests"],
-            )
-
-            # Reload at each width: the app chooses its mobile shell from the
-            # viewport it boots in, so resizing alone would keep the desktop one.
-            await page.set_viewport_size({"width": 390, "height": 844})
-            await page.reload(wait_until="domcontentloaded")
-            await expect(
-                page.get_by_text("Scope: add the bounded cache and verify it.")
-            ).to_be_visible()
-            card = page.locator(".goal-plan-card")
-            await expect(card).to_have_attribute("data-mode", "review")
-            await card.scroll_into_view_if_needed()
-            approve_button = card.get_by_role("button", name="Approve & start", exact=True)
-            await expect(approve_button).to_be_visible()
-            assert (await approve_button.bounding_box())["height"] >= 44
-            await page.screenshot(path=str(output / "goal-plan-card-mobile.png"), full_page=True)
-            report["screenshots"].append("goal-plan-card-mobile.png")
-
-            # Revise only prepares the composer; nothing is sent.
-            await page.set_viewport_size({"width": 1440, "height": 900})
-            await page.reload(wait_until="domcontentloaded")
-            card = page.locator(".goal-plan-card")
-            await expect(card).to_have_attribute("data-mode", "review")
-            sends_before_revise = len(send_payloads)
-            await card.get_by_role("button", name="Revise", exact=True).click()
-            await expect(composer).to_have_value("Revise the plan: ")
-            assert len(send_payloads) == sends_before_revise
-            approve_button = card.get_by_role("button", name="Approve & start", exact=True)
-
-            # Approve sends the fixed approval message on the Goal steer path.
-            await composer.fill("")
-            await approve_button.click()
-            # The dispatched turn is still running, so the card must not claim
-            # the Goal continued yet.
-            await expect(card).to_have_attribute("data-mode", "continuing")
-            await expect(card.locator(".goal-plan-note")).to_have_text(
-                "The Goal is continuing with this plan during its current turn."
-            )
-            await expect(
-                card.get_by_role("button", name="Approve & start", exact=True)
-            ).not_to_be_visible()
-            assert send_payloads[-1]["text"] == "Approve the plan. Start implementing it now."
-            assert send_payloads[-1]["delivery"] == "steer"
-            await page.screenshot(
-                path=str(output / "goal-plan-card-continuing.png"), full_page=True
-            )
-            report["screenshots"].append("goal-plan-card-continuing.png")
-
-            # Once that turn settles the same card reports the Goal continued.
-            current_goal = {
-                **PLAN_GOAL,
-                "status": "active",
-                "dispatch_state": "idle",
-                "plan_answered": True,
-            }
-            await page.reload(wait_until="domcontentloaded")
-            card = page.locator(".goal-plan-card")
-            await expect(card).to_have_attribute("data-mode", "answered")
-            await expect(card.locator(".goal-plan-note")).to_have_text(
-                "The Goal continued after this plan."
-            )
-            await page.screenshot(path=str(output / "goal-plan-card-answered.png"), full_page=True)
-            report["screenshots"].append("goal-plan-card-answered.png")
-            assert not any(
-                path.endswith("/resume") or path.endswith("/pause")
-                for _, path in report["api_requests"]
             )
 
             # The same full SPA renders the provider's approval-required event
@@ -949,19 +553,449 @@ async def main(browser_run: BrowserRun) -> None:
             assert not report["unknown_requests"], report["unknown_requests"]
             assert not report["page_errors"], report["page_errors"]
             report["result"] = "PASS"
-        except BaseException as exc:
-            failure = exc
-            report["error_type"] = type(exc).__name__
-            if page is not None:
-                try:
-                    await page.screenshot(path=str(output / "failure.png"), full_page=True)
-                except Exception:
-                    pass
+            (output / "appearance-report.json").write_text(json.dumps(report, indent=2))
+            return report
 
-    (output / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print(json.dumps(report, indent=2))
+        await expect(page.get_by_text("Step one finished.")).to_be_visible()
+        assert "goal-status" not in await page.locator(".structured-pane").first.inner_text()
+
+        composer = page.locator(".composer-textarea").first
+        await expect(composer).to_be_enabled()
+        await expect(page.get_by_text("⌘/Ctrl+Enter steer Goal")).to_be_visible()
+
+        await composer.fill("Queue me for later")
+        await composer.press("Enter")
+        queue = page.get_by_role("region", name="Queued messages")
+        await expect(queue).to_be_visible()
+        item = queue.locator(".queued-draft").first
+        await item.get_by_role("button", name="Edit", exact=True).click()
+        await item.get_by_role("textbox").fill("Updated queued instruction")
+        await item.get_by_role("button", name="Save", exact=True).click()
+        await expect(item.locator("summary")).to_contain_text("Updated queued instruction")
+        await composer.fill("Cancel this input")
+        await composer.press("Enter")
+        await queue.locator(".queued-draft").nth(1).get_by_role(
+            "button", name="Cancel", exact=True
+        ).click()
+        await expect(queue.locator(".queued-draft")).to_have_count(1)
+        assert not send_payloads
+
+        await page.get_by_role("button", name="Edit Goal", exact=True).click()
+        dialog = page.get_by_role("dialog", name="Edit Goal", exact=True)
+        await dialog.get_by_role("textbox").fill("Updated Goal outcome")
+        await dialog.get_by_role("button", name="Save Goal", exact=True).click()
+        await expect(dialog).not_to_be_visible()
+        assert goal_updates[-1]["objective"] == "Updated Goal outcome"
+
+        # A queued image opens at original resolution and is steered without Stop.
+        await item.get_by_role("button", name="Cancel", exact=True).click()
+        await page.locator('input[type="file"]').set_input_files(
+            {
+                "name": "shot.png",
+                "mimeType": "image/png",
+                "buffer": PNG_IMAGE,
+            }
+        )
+        await expect(page.locator(".composer-attachments .attachment-thumb")).to_have_count(1)
+        await composer.fill("Look at this reference")
+        await composer.press("Enter")
+        item = queue.locator(".queued-draft").first
+        await item.locator("summary").click()
+        await item.get_by_role("button", name="View shot.png", exact=True).click()
+        await expect(page.get_by_role("dialog", name="Attachment preview")).to_be_visible()
+        await expect(page.locator(".attachment-preview-dialog img")).to_have_attribute(
+            "src", re.compile("^data:image/png;base64,")
+        )
+        await page.get_by_role("button", name="Close preview").click()
+        await expect(page.get_by_role("dialog", name="Attachment preview")).not_to_be_visible()
+        await page.screenshot(path=str(output / "goal-queued-image-controls.png"), full_page=True)
+        report["screenshots"].append("goal-queued-image-controls.png")
+        await composer.press("Meta+Enter")
+        await expect(queue).not_to_be_visible()
+        assert len(send_payloads) == 1, send_payloads
+        assert send_payloads[0]["text"] == "Look at this reference"
+        assert send_payloads[0]["delivery"] == "steer"
+        assert len(send_payloads[0]["attachments"]) == 1
+        assert not any(
+            path.endswith("/cancel") or path.endswith("/pause")
+            for _, path in report["api_requests"]
+        )
+        await expect(page.get_by_role("button", name="Pause", exact=True)).to_be_visible()
+
+        # Interrupted image steering offers explicit recovery with a new
+        # intent ID even when the exact same image is reattached.
+        await page.locator('input[type="file"]').set_input_files(
+            {"name": "recovery.png", "mimeType": "image/png", "buffer": PNG_IMAGE}
+        )
+        await composer.fill("Recover using the same reference")
+        fail_next_send = True
+        await composer.press("Meta+Enter")
+        recover = page.get_by_role("button", name="Recover Goal", exact=True)
+        await expect(recover).to_be_enabled()
+        failed_id = send_payloads[-1]["client_turn_id"]
+        await page.get_by_role("button", name="Remove recovery.png", exact=True).click()
+        await page.locator('input[type="file"]').set_input_files(
+            {"name": "recovery.png", "mimeType": "image/png", "buffer": PNG_IMAGE}
+        )
+        await expect(recover).to_be_enabled()
+        await recover.click()
+        await expect(recover).not_to_be_visible()
+        assert send_payloads[-1]["client_turn_id"] != failed_id
+        assert (
+            base64.b64decode(send_payloads[-1]["attachments"][0]["data_url"].split(",", 1)[1])
+            == PNG_IMAGE
+        )
+        await expect(page.get_by_role("button", name="Pause", exact=True)).to_be_visible()
+
+        # Goal creation includes composer images in its first request.
+        current_goal = None
+        idle_fixture = True
+        await page.reload(wait_until="domcontentloaded")
+        await expect(composer).to_be_enabled()
+        await page.get_by_role("button", name="Add to chat", exact=True).click()
+        await page.get_by_role("menuitem", name="Set a Goal").click()
+        dialog = page.get_by_role("dialog", name="Set a Goal", exact=True)
+        described_by = await dialog.get_by_role("textbox").get_attribute("aria-describedby")
+        assert described_by, "the objective field lost its hint association"
+        assert await dialog.locator(f"#{described_by}").count() == 1, described_by
+        await dialog.get_by_role("textbox").fill("Build from the attached reference")
+        await page.locator('input[type="file"]').set_input_files(
+            {
+                "name": "goal-reference.png",
+                "mimeType": "image/png",
+                "buffer": PNG_IMAGE,
+            }
+        )
+        await expect(dialog.get_by_role("button", name="View goal-reference.png")).to_be_visible()
+        # The attachment row is the parent's; the dialog may frame it but
+        # must not restyle the chip preview or its remove badge.
+        chip = await dialog.locator(".attachment-chip").first.bounding_box()
+        remove = await dialog.locator(".attachment-remove").first.bounding_box()
+        trigger = await dialog.get_by_role("button", name="Add images").bounding_box()
+        assert chip and chip["width"] <= 48.5 and chip["height"] <= 48.5, chip
+        assert remove and remove["height"] <= 19, f"remove badge was restyled: {remove}"
+        assert remove["width"] <= 19, remove
+        assert trigger and trigger["height"] >= 30, f"the picker trigger shrank: {trigger}"
+        # The row's composition is the picker's own: caption above, trigger
+        # and chips side by side. Reverting that layout must fail here.
+        caption = await dialog.locator(".goal-image-picker > p").first.bounding_box()
+        assert caption, "the picker caption is missing"
+        assert caption["y"] + caption["height"] <= trigger["y"] + 2, (caption, trigger)
+        assert (
+            abs((chip["y"] + chip["height"] / 2) - (trigger["y"] + trigger["height"] / 2)) <= 6
+        ), (
+            chip,
+            trigger,
+        )
+        await page.screenshot(path=str(output / "goal-setup-attachment.png"), full_page=True)
+        report["screenshots"].append("goal-setup-attachment.png")
+        await expect(dialog.get_by_role("button", name="Start Goal", exact=True)).to_be_enabled()
+        await dialog.get_by_role("button", name="Start Goal", exact=True).click()
+        await expect(dialog).not_to_be_visible()
+        assert len(goal_creates[-1]["attachments"]) == 1
+        assert goal_creates[-1]["objective"] == "Build from the attached reference"
+        # Nothing asked for approval, so nothing sends the gate either;
+        # Strict cross-review opens checked by default.
+        assert goal_creates[-1]["plan_first"] is False, goal_creates[-1]
+        assert goal_creates[-1]["strict_review"] is True, goal_creates[-1]
+        await page.set_viewport_size({"width": 390, "height": 844})
+        await page.screenshot(path=str(output / "goal-controls-mobile.png"), full_page=True)
+        report["screenshots"].append("goal-controls-mobile.png")
+
+        # The setup dialog carries the remembered "Plan first" choice and
+        # sends it as an additive optional field. Clear the previous Goal
+        # first: a Chat with a Goal cannot start a second one.
+        current_goal = None
+        await page.set_viewport_size({"width": 1440, "height": 900})
+        await page.reload(wait_until="domcontentloaded")
+        await expect(page.get_by_role("button", name="Add to chat", exact=True)).to_be_visible()
+        await page.get_by_role("button", name="Add to chat", exact=True).click()
+        await page.get_by_role("menuitem", name="Set a Goal").click()
+        dialog = page.get_by_role("dialog", name="Set a Goal", exact=True)
+        plan_toggle = dialog.get_by_label("Plan first", exact=True)
+        strict_toggle = dialog.get_by_label("Strict cross-review", exact=True)
+        # No approval gate unless asked for: a new Goal starts working, so
+        # the option opens unchecked and says so. Strict cross-review opens checked.
+        await expect(plan_toggle).not_to_be_checked()
+        await expect(strict_toggle).to_be_checked()
+        await expect(dialog.get_by_text("Consensus gate", exact=True)).to_be_visible()
+        await expect(dialog.get_by_text("starts working immediately")).to_be_visible()
+        await dialog.get_by_role("textbox").fill("Plan the cache before building it")
+        # Opting in is what turns the review gate (and its card) on.
+        await plan_toggle.check()
+        await expect(plan_toggle).to_be_checked()
+        await expect(dialog.get_by_text("Nothing starts until you approve")).to_be_visible()
+        # The dialog fade-in is a 220ms entrance animation; shoot after it.
+        await page.wait_for_timeout(400)
+        await page.screenshot(path=str(output / "goal-setup-plan-first.png"), full_page=True)
+        report["screenshots"].append("goal-setup-plan-first.png")
+        # Both modes must stay readable. Close the Goal modal before using
+        # the real Appearance dialog; changing mode must retain the palette.
+        # Contrast walks the real computed colours for the effective backdrop.
+        setup_palette = await page.locator("html").get_attribute("data-palette")
+        assert setup_palette is not None
+        dark_ratio = await dialog.evaluate(CONTRAST_SCRIPT)
+        assert dark_ratio["title"] >= 4.5, dark_ratio
+        assert dark_ratio["label"] >= 4.5, dark_ratio
+        assert dark_ratio["hint"] >= 4.5, dark_ratio
+        assert dark_ratio["note"] >= 4.5, dark_ratio
+        assert dark_ratio["tips"] >= 4.5, dark_ratio
+        await dialog.get_by_role("button", name="Cancel", exact=True).click()
+        await expect(dialog).not_to_be_visible()
+        await select_appearance(page, "light", setup_palette)
+        await page.get_by_role("button", name="Add to chat", exact=True).click()
+        await page.get_by_role("menuitem", name="Set a Goal").click()
+        dialog = page.get_by_role("dialog", name="Set a Goal", exact=True)
+        plan_toggle = dialog.get_by_label("Plan first", exact=True)
+        # A cancelled dialog remembered nothing, so the light pass starts
+        # from the same resting state.
+        await expect(plan_toggle).not_to_be_checked()
+        await dialog.get_by_role("textbox").fill("Plan the cache before building it")
+        await plan_toggle.check()
+        await page.wait_for_timeout(300)
+        light_ratio = await dialog.evaluate(CONTRAST_SCRIPT)
+        assert light_ratio["title"] >= 4.5, light_ratio
+        assert light_ratio["label"] >= 4.5, light_ratio
+        assert light_ratio["hint"] >= 4.5, light_ratio
+        assert light_ratio["note"] >= 4.5, light_ratio
+        assert light_ratio["tips"] >= 4.5, light_ratio
+        await page.screenshot(path=str(output / "goal-setup-plan-first-light.png"), full_page=True)
+        report["screenshots"].append("goal-setup-plan-first-light.png")
+        await dialog.get_by_role("button", name="Cancel", exact=True).click()
+        await expect(dialog).not_to_be_visible()
+        await select_appearance(page, "dark", setup_palette)
+        await page.get_by_role("button", name="Add to chat", exact=True).click()
+        await page.get_by_role("menuitem", name="Set a Goal").click()
+        dialog = page.get_by_role("dialog", name="Set a Goal", exact=True)
+        plan_toggle = dialog.get_by_label("Plan first", exact=True)
+        await expect(plan_toggle).not_to_be_checked()
+        await dialog.get_by_role("textbox").fill("Plan the cache before building it")
+        await expect(dialog.locator(".goal-dialog-count")).to_have_attribute(
+            "data-near-limit", "false"
+        )
+        # The counter warns before the hard limit, not only at it.
+        await dialog.get_by_role("textbox").fill("x" * 3700)
+        await expect(dialog.locator(".goal-dialog-count")).to_have_attribute(
+            "data-near-limit", "true"
+        )
+        await expect(dialog.locator(".goal-dialog-count")).to_have_text("3700/4000")
+        await dialog.get_by_role("textbox").fill("Plan the cache before building it")
+        await plan_toggle.check()
+        await page.wait_for_timeout(300)
+        # The same open dialog reflows to a phone width.
+        await page.set_viewport_size({"width": 390, "height": 844})
+        await page.wait_for_timeout(200)
+        await expect(plan_toggle).to_be_checked()
+        await page.screenshot(path=str(output / "goal-setup-plan-first-mobile.png"), full_page=True)
+        # The phone sheet is bounded by the shared overlay rule, which reads
+        # the visual viewport so an on-screen keyboard shrinks it instead of
+        # hiding the footer. A desktop-only `100dvh` must fail this.
+        sheet_hint = await dialog.evaluate("""el => {
+                const root = document.documentElement
+                root.style.setProperty('--visual-viewport-height', '480px')
+                root.style.setProperty('--keyboard-height', '364px')
+                const box = el.getBoundingClientRect()
+                return { height: box.height, bottom: box.bottom, top: box.top }
+            }""")
+        assert sheet_hint["top"] >= -1, sheet_hint
+        assert sheet_hint["height"] <= 480 - 24 + 1, sheet_hint
+        assert sheet_hint["bottom"] <= 480 + 1, sheet_hint
+        start_button = await dialog.get_by_role(
+            "button", name="Start Goal", exact=True
+        ).bounding_box()
+        assert start_button, "the sheet footer lost its actions"
+        assert start_button["y"] + start_button["height"] <= 480 + 1, start_button
+        # Also verify with a panned visualViewport (offsetTop: 60px, height: 420px)
+        # that the GoalSetupDialog stays within [60, 480] and focusing the objective
+        # textarea keeps it scrolled into view inside .goal-dialog-body.
+        panned_goal_sheet = await dialog.evaluate("""async el => {
+                const root = document.documentElement
+                root.style.setProperty('--visual-viewport-offset-top', '60px')
+                root.style.setProperty('--visual-viewport-height', '420px')
+                root.style.setProperty('--keyboard-height', '364px')
+                const box = el.getBoundingClientRect()
+                const textarea = el.querySelector('#goal-dialog-objective')
+                const body = el.querySelector('.goal-dialog-body')
+                body.scrollTop = body.scrollHeight
+                textarea.focus({ preventScroll: true })
+                textarea.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
+                await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+                const taBox = textarea.getBoundingClientRect()
+                const bodyBox = body.getBoundingClientRect()
+                const headBox = el.querySelector('.goal-dialog-head').getBoundingClientRect()
+                const footBox = el.querySelector('.goal-dialog-actions').getBoundingClientRect()
+                return {
+                  top: box.top,
+                  bottom: box.bottom,
+                  taTop: taBox.top,
+                  taBottom: taBox.bottom,
+                  bodyTop: bodyBox.top,
+                  bodyBottom: bodyBox.bottom,
+                  headBottom: headBox.bottom,
+                  footTop: footBox.top,
+                }
+            }""")
+        assert panned_goal_sheet["top"] >= 60 - 1, panned_goal_sheet
+        assert abs(panned_goal_sheet["bottom"] - 480) <= 1, panned_goal_sheet
+        assert panned_goal_sheet["taTop"] >= panned_goal_sheet["bodyTop"] - 1, panned_goal_sheet
+        assert panned_goal_sheet["taBottom"] <= panned_goal_sheet["footTop"] + 1, panned_goal_sheet
+        await page.screenshot(path=str(output / "goal-setup-keyboard-sheet.png"))
+        report["screenshots"].append("goal-setup-keyboard-sheet.png")
+        await page.evaluate("""() => {
+                const root = document.documentElement
+                root.style.removeProperty('--visual-viewport-offset-top')
+                root.style.removeProperty('--visual-viewport-height')
+                root.style.removeProperty('--keyboard-height')
+            }""")
+        report["screenshots"].append("goal-setup-plan-first-mobile.png")
+        await page.set_viewport_size({"width": 1440, "height": 900})
+        strict_toggle = dialog.get_by_label("Strict cross-review", exact=True)
+        await strict_toggle.uncheck()
+        await expect(strict_toggle).not_to_be_checked()
+        await dialog.get_by_role("button", name="Start Goal", exact=True).click()
+        await expect(dialog).not_to_be_visible()
+        assert goal_creates[-1]["plan_first"] is True, goal_creates[-1]
+        assert goal_creates[-1]["strict_review"] is False, goal_creates[-1]
+        assert goal_creates[-1]["objective"] == "Plan the cache before building it"
+
+        # A planning turn that parked on needs_input renders the approval
+        # card from the Goal snapshot, not from the transcript text.
+        current_goal = dict(PLAN_GOAL)
+        plan_fixture = True
+        await page.reload(wait_until="domcontentloaded")
+        await expect(
+            page.get_by_text("Scope: add the bounded cache and verify it.")
+        ).to_be_visible()
+        card = page.locator(".goal-plan-card")
+        await expect(card).to_be_visible()
+        await expect(card).to_have_attribute("data-mode", "review")
+        await expect(card.locator(".goal-plan-eyebrow")).to_have_text("Execution plan")
+        await expect(card.locator(".goal-plan-budget")).to_contain_text("Execution budget")
+        await expect(card.locator(".goal-plan-budget")).to_contain_text(
+            "2 helpers · claude/opus, codex/gpt-5 · max 2 in parallel · about 12 minutes"
+        )
+        await expect(card.locator(".goal-plan-budget-helpers li")).to_have_count(2)
+        await expect(card.locator(".goal-plan-steps li")).to_have_count(2)
+        assert "goal-plan" not in await page.locator(".structured-pane").first.inner_text()
+        await card.scroll_into_view_if_needed()
+        await page.screenshot(path=str(output / "goal-plan-card-desktop.png"), full_page=True)
+        report["screenshots"].append("goal-plan-card-desktop.png")
+        # Reload at each width: the app chooses its mobile shell from the
+        # viewport it boots in, so resizing alone would keep the desktop one.
+        await page.set_viewport_size({"width": 390, "height": 844})
+        await page.reload(wait_until="domcontentloaded")
+        await expect(
+            page.get_by_text("Scope: add the bounded cache and verify it.")
+        ).to_be_visible()
+        card = page.locator(".goal-plan-card")
+        await expect(card).to_have_attribute("data-mode", "review")
+        await card.scroll_into_view_if_needed()
+        approve_button = card.get_by_role("button", name="Approve & start", exact=True)
+        await expect(approve_button).to_be_visible()
+        assert (await approve_button.bounding_box())["height"] >= 44
+        await page.screenshot(path=str(output / "goal-plan-card-mobile.png"), full_page=True)
+        report["screenshots"].append("goal-plan-card-mobile.png")
+
+        # Revise only prepares the composer; nothing is sent.
+        await page.set_viewport_size({"width": 1440, "height": 900})
+        await page.reload(wait_until="domcontentloaded")
+        card = page.locator(".goal-plan-card")
+        await expect(card).to_have_attribute("data-mode", "review")
+        sends_before_revise = len(send_payloads)
+        await card.get_by_role("button", name="Revise", exact=True).click()
+        await expect(composer).to_have_value("Revise the plan: ")
+        assert len(send_payloads) == sends_before_revise
+        approve_button = card.get_by_role("button", name="Approve & start", exact=True)
+
+        # Approve sends the fixed approval message on the Goal steer path.
+        await composer.fill("")
+        await approve_button.click()
+        # The dispatched turn is still running, so the card must not claim
+        # the Goal continued yet.
+        await expect(card).to_have_attribute("data-mode", "continuing")
+        await expect(card.locator(".goal-plan-note")).to_have_text(
+            "The Goal is continuing with this plan during its current turn."
+        )
+        await expect(
+            card.get_by_role("button", name="Approve & start", exact=True)
+        ).not_to_be_visible()
+        assert send_payloads[-1]["text"] == "Approve the plan. Start implementing it now."
+        assert send_payloads[-1]["delivery"] == "steer"
+        await page.screenshot(path=str(output / "goal-plan-card-continuing.png"), full_page=True)
+        report["screenshots"].append("goal-plan-card-continuing.png")
+
+        # Once that turn settles the same card reports the Goal continued.
+        current_goal = {
+            **PLAN_GOAL,
+            "status": "active",
+            "dispatch_state": "idle",
+            "plan_answered": True,
+        }
+        await page.reload(wait_until="domcontentloaded")
+        card = page.locator(".goal-plan-card")
+        await expect(card).to_have_attribute("data-mode", "answered")
+        await expect(card.locator(".goal-plan-note")).to_have_text(
+            "The Goal continued after this plan."
+        )
+        await page.screenshot(path=str(output / "goal-plan-card-answered.png"), full_page=True)
+        report["screenshots"].append("goal-plan-card-answered.png")
+        assert not any(
+            path.endswith("/resume") or path.endswith("/pause")
+            for _, path in report["api_requests"]
+        )
+
+        assert not report["unknown_requests"], report["unknown_requests"]
+        assert not report["page_errors"], report["page_errors"]
+        report["result"] = "PASS"
+    except BaseException as exc:
+        failure = exc
+        report["error_type"] = type(exc).__name__
+        if page is not None:
+            try:
+                await page.screenshot(
+                    path=str(output / ("appearance-failure.png" if appearance else "failure.png")),
+                    full_page=True,
+                )
+            except Exception:
+                pass
+
+    (output / ("appearance-report.json" if appearance else "behavior-report.json")).write_text(
+        json.dumps(report, indent=2), encoding="utf-8"
+    )
     if failure is not None:
         raise failure
+    return report
+
+
+async def main(browser_run: BrowserRun) -> None:
+    # Keep the original runner deadline and every assertion/screenshot. Separate
+    # localStorage and mock state let independent behavior and theme checks run
+    # concurrently instead of exhausting the deadline serially on a slow runner.
+    async with browser_run.context(
+        viewport={"width": 1280, "height": 900},
+        launch_args=["--disable-background-networking", "--disable-component-update"],
+    ) as context:
+        assert context.browser is not None
+        appearance_context = await context.browser.new_context(
+            viewport={"width": 1440, "height": 900}, service_workers="block"
+        )
+        try:
+            async with asyncio.TaskGroup() as tasks:
+                behavior = tasks.create_task(_scenario(context, appearance=False))
+                appearance = tasks.create_task(_scenario(appearance_context, appearance=True))
+        finally:
+            # The BrowserRun owner also closes the browser if cancellation
+            # interrupts this close; no context or driver has a separate owner.
+            await appearance_context.close()
+    report = behavior.result()
+    for key, value in appearance.result().items():
+        if isinstance(value, list) and isinstance(report.get(key), list):
+            report[key].extend(value)
+        else:
+            report[key] = value
+    report["phases"] = {"behavior": "PASS", "appearance": "PASS"}
+    (Path(sys.argv[2]) / "report.json").write_text(json.dumps(report, indent=2))
+    print(json.dumps(report, indent=2))
 
 
 if __name__ == "__main__":
