@@ -301,6 +301,33 @@ def backend_server() -> Generator[None, None, None]:
 
 
 @pytest.fixture(autouse=True)
+def _cursor_recovery_cli_capability(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Give the mocked ACP recovery transport its supported Plan-mode CLI.
+
+    This regression exercises recovery, not host CLI discovery. Its fake ACP
+    process supports Plan mode; a runner without ``agent`` must model that same
+    capability. Keep the double local to this case so capability rejection tests
+    and all other discovery paths retain their own contracts. The owning test
+    module exceeds the source-size budget, so the fixture lives here.
+    """
+    if request.node.nodeid != (
+        "tests/test_agent_stream_native.py::"
+        "test_cursor_acp_tailer_survives_recovery_restart_and_isolates_subagent_threads"
+    ):
+        return
+
+    from claude_hub.services.agent_stream import native
+
+    def supported_plan_mode(binary: str, flag: str) -> bool:
+        assert (binary, flag) == ("agent", "--mode")
+        return True
+
+    monkeypatch.setattr(native, "_help_confirms_plan_mode", supported_plan_mode)
+
+
+@pytest.fixture(autouse=True)
 def _shorten_agent_prompt_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stop tests from idling through the production agent-prompt budget.
 

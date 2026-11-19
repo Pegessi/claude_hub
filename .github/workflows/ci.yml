@@ -102,7 +102,8 @@ jobs:
 
   browser-mocks:
     name: Browser / mocked UI acceptance
-    runs-on: ubuntu-latest
+    # The locked Playwright release supports Ubuntu 24.04, not 26.04.
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - name: Set runner-local browser and evidence paths
@@ -165,7 +166,8 @@ jobs:
 
   terminal-hmr:
     name: Browser / isolated terminal HMR
-    runs-on: ubuntu-latest
+    # The locked Playwright release supports Ubuntu 24.04, not 26.04.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       CLAUDE_HUB_E2E_TIMEOUT_SCALE: "3"
@@ -262,7 +264,8 @@ jobs:
 
   terminal-e2e:
     name: Terminal E2E (Playwright)
-    runs-on: ubuntu-latest
+    # The locked Playwright release supports Ubuntu 24.04, not 26.04.
+    runs-on: ubuntu-24.04
     # These were long treated as runner flakiness and left non-blocking. They
     # were in fact failing deterministically for two reasons, both fixed:
     # the tmux pane was re-wrapped at a different width than the one the
