@@ -29,6 +29,7 @@ class FeishuAiCommandPatchInput(BaseModel):
     model: Optional[str] = Field(default=None, max_length=128)
     reasoning_effort: Optional[str] = Field(default=None, max_length=32)
     cwd: Optional[str] = Field(default=None, max_length=1024)
+    workspace_id: Optional[str] = Field(default=None, max_length=128)
     watch_chats: Optional[List[str]] = None
     poll_interval_seconds: Optional[float] = Field(default=None, ge=2.0, le=300.0)
     max_active_chats: Optional[int] = Field(default=None, ge=1, le=50)
