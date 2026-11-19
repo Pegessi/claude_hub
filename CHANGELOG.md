@@ -13,6 +13,14 @@
   when live catalogs are unavailable or omit previously configured options.
 - Extend the public history audit to inspect complete histories including merge parents.
 
+### fix(feishu): reuse sessions for reply-created /ai threads
+
+- Key Chat provisioning, dispatch locks and turn metadata by the thread created by
+  the interim reply; bind a final-only thread receipt to the same session.
+- Keep separate main-chat-created threads isolated and retain main-chat reuse
+  when no thread identity is available.
+
+
 ### chore(security): prepare public-safe runtime defaults
 
 - Move installation-specific model and gateway settings to private runtime configuration,

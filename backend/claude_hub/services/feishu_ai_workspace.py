@@ -14,6 +14,7 @@ import asyncio
 import inspect
 import logging
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -30,6 +31,93 @@ logger = logging.getLogger(__name__)
 
 def channel_key(message: FeishuUserMessage, parsed: ParsedAiCommand) -> str:
     return f"{message.chat_id}:{message.thread_id or 'main'}:{parsed.provider.value}"
+
+
+def execution_message(
+    message: FeishuUserMessage, receipt_thread_id: str | None, *, reply_in_thread: bool
+) -> FeishuUserMessage:
+    """Keep incoming identity, using a reply-created thread only for thread replies."""
+    thread_id = message.thread_id or (receipt_thread_id if reply_in_thread else None)
+    return replace(message, thread_id=thread_id)
+
+
+async def acquire_execution_lock(service: Any, message: FeishuUserMessage) -> asyncio.Lock:
+    """Wait for a provisional main reply to reveal its mapping before thread lookup."""
+    main_key = f"{message.chat_id}:main"
+    with service._lock:
+        main_lock = service._channel_locks.get(main_key)
+    if message.thread_id and main_lock is not None:
+        async with main_lock:
+            pass
+    key = f"{message.chat_id}:{message.thread_id or 'main'}"
+    with service._lock:
+        lock: asyncio.Lock = service._channel_locks.setdefault(key, asyncio.Lock())
+    await lock.acquire()
+    return lock
+
+
+def bind_reply_thread(
+    service: Any,
+    message: FeishuUserMessage,
+    parsed: ParsedAiCommand,
+    tab_id: str | None,
+    interim_receipt: Any,
+    final_receipt: Any,
+    reply_in_thread: bool,
+) -> str | None:
+    """Move provisional main mapping when only the final reply reveals its thread.
+
+    Never leave a main alias behind: a later main command may create an
+    unrelated thread. Do not overwrite a thread already owned by another tab.
+    """
+    interim = execution_message(message, interim_receipt.thread_id, reply_in_thread=reply_in_thread)
+    effective = execution_message(interim, final_receipt.thread_id, reply_in_thread=reply_in_thread)
+    old_key, new_key = channel_key(interim, parsed), channel_key(effective, parsed)
+    pending_key = f"{old_key}:pending:{message.message_id}"
+    with service._lock:
+        state = service._load_state()
+        channels = dict(state.get("channel_tabs") or {})
+        record = normalize_channel_record(channels.get(old_key))
+        if record.get("tab_id") != tab_id:
+            old_key = pending_key
+            record = normalize_channel_record(channels.get(old_key))
+        existing = normalize_channel_record(channels.get(new_key))
+        if (
+            tab_id
+            and record.get("tab_id") == tab_id
+            and (not existing or existing.get("tab_id") == tab_id)
+        ):
+            channels[new_key] = channels[old_key]
+            if old_key != new_key:
+                del channels[old_key]
+            state["channel_tabs"] = channels
+            service._save_state(state)
+            if effective.thread_id and not interim.thread_id:
+                old_lock = service._channel_locks.get(f"{message.chat_id}:main")
+                if old_lock is not None:
+                    service._channel_locks[f"{message.chat_id}:{effective.thread_id}"] = old_lock
+    return effective.thread_id
+
+
+def preserve_interrupted_channel(
+    service: Any,
+    message: FeishuUserMessage,
+    parsed: ParsedAiCommand,
+    tab_id: str | None,
+    interim_receipt: Any,
+    reply_in_thread: bool,
+) -> None:
+    """Keep a completed turn's provisional session private until final delivery resumes."""
+    if not reply_in_thread or message.thread_id or interim_receipt.thread_id or not tab_id:
+        return
+    key = channel_key(message, parsed)
+    with service._lock:
+        state = service._load_state()
+        channels = dict(state.get("channel_tabs") or {})
+        if normalize_channel_record(channels.get(key)).get("tab_id") == tab_id:
+            channels[f"{key}:pending:{message.message_id}"] = channels.pop(key)
+            state["channel_tabs"] = channels
+            service._save_state(state)
 
 
 def resolve_cwd(cfg: FeishuAiCommandConfig) -> str:

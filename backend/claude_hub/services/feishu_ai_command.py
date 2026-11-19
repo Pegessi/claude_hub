@@ -1135,6 +1135,7 @@ class FeishuAiCommandService:
         final_receipt = FeishuReplyReceipt()
         dispatch_entered = False
         final_reply_started = False
+        held_channel_lock: asyncio.Lock | None = None
         turn_completed = resuming_completed
         answer = str(pending_item["answer"]) if resuming_completed and pending_item else ""
 
@@ -1233,54 +1234,57 @@ class FeishuAiCommandService:
                         "Feishu interim reply message identity is unavailable; delivery may have occurred"
                     )
 
-                lock_key = f"{message.chat_id}:{message.thread_id or 'main'}"
-                with self._lock:
-                    channel_lock = self._channel_locks.setdefault(lock_key, asyncio.Lock())
+                execution_message = feishu_ai_workspace.execution_message(
+                    message, interim_receipt.thread_id, reply_in_thread=reply_in_thread
+                )
+                held_channel_lock = await feishu_ai_workspace.acquire_execution_lock(
+                    self, execution_message
+                )
+                tab_id = await self._ensure_execution_tab(execution_message, parsed, cfg)
+                prompt = build_ai_dispatch_prompt(message, parsed, context_msgs, refs)
+                turn_id = f"feishu-ai-{message.message_id}"
+                turn_metadata = {
+                    "origin": "feishu_ai_command",
+                    "source": source,
+                    "message_id": message.message_id,
+                    "chat_id": message.chat_id,
+                    "thread_id": execution_message.thread_id,
+                    "provider": parsed.provider.value,
+                    "model": parsed.model,
+                    "reasoning_effort": parsed.reasoning_effort,
+                    **refs.to_dict(),
+                }
+                dispatch_entered = True
+                self.mark_pending_command_state(
+                    message.message_id,
+                    "in_flight",
+                    dispatch_state="dispatched",
+                    tab_id=tab_id,
+                    turn_id=turn_id,
+                    ack_reaction_id=ack_reaction_id,
+                    interim_message_id=interim_receipt.message_id,
+                    thread_id=execution_message.thread_id,
+                    refs=refs.to_dict(),
+                    interim_text=interim_text,
+                    interim_post=interim_post,
+                )
+                answer = await self._dispatch_turn(
+                    tab_id,
+                    prompt,
+                    turn_id,
+                    parsed.instruction or message.text,
+                    turn_metadata,
+                )
+                turn_completed = True
+                self.mark_pending_command_state(
+                    message.message_id,
+                    "in_flight",
+                    dispatch_state="turn_completed",
+                    answer=answer,
+                )
 
-                async with channel_lock:
-                    tab_id = await self._ensure_execution_tab(message, parsed, cfg)
-                    prompt = build_ai_dispatch_prompt(message, parsed, context_msgs, refs)
-                    turn_id = f"feishu-ai-{message.message_id}"
-                    turn_metadata = {
-                        "origin": "feishu_ai_command",
-                        "source": source,
-                        "message_id": message.message_id,
-                        "chat_id": message.chat_id,
-                        "thread_id": message.thread_id,
-                        "provider": parsed.provider.value,
-                        "model": parsed.model,
-                        "reasoning_effort": parsed.reasoning_effort,
-                        **refs.to_dict(),
-                    }
-                    dispatch_entered = True
-                    self.mark_pending_command_state(
-                        message.message_id,
-                        "in_flight",
-                        dispatch_state="dispatched",
-                        tab_id=tab_id,
-                        turn_id=turn_id,
-                        ack_reaction_id=ack_reaction_id,
-                        interim_message_id=interim_receipt.message_id,
-                        thread_id=message.thread_id or interim_receipt.thread_id,
-                        refs=refs.to_dict(),
-                        interim_text=interim_text,
-                        interim_post=interim_post,
-                    )
-                    answer = await self._dispatch_turn(
-                        tab_id,
-                        prompt,
-                        turn_id,
-                        parsed.instruction or message.text,
-                        turn_metadata,
-                    )
-                    turn_completed = True
-                    self.mark_pending_command_state(
-                        message.message_id,
-                        "in_flight",
-                        dispatch_state="turn_completed",
-                        answer=answer,
-                    )
-
+            if resuming_completed:
+                held_channel_lock = await feishu_ai_workspace.acquire_execution_lock(self, message)
             final_text = ensure_ai_footer(answer, footer=cfg.footer)
             final_post = build_ai_post_payload(final_text, footer=cfg.footer)
             final_reply_started = True
@@ -1299,11 +1303,14 @@ class FeishuAiCommandService:
                 raise FeishuDeliveryUncertainError(
                     "Feishu final reply message identity is unavailable; delivery may have occurred"
                 )
+            effective_thread_id = feishu_ai_workspace.bind_reply_thread(
+                self, message, parsed, tab_id, interim_receipt, final_receipt, reply_in_thread
+            )
             result = self._done_result(
                 message,
                 status="completed",
                 parsed=parsed,
-                thread_id=message.thread_id or interim_receipt.thread_id,
+                thread_id=effective_thread_id,
                 refs=refs,
                 interim_text=interim_text,
                 interim_post=interim_post,
@@ -1328,6 +1335,9 @@ class FeishuAiCommandService:
         except asyncio.CancelledError as exc:
             status_val, reason_val = "cancelled", "cancelled"
             if turn_completed:
+                feishu_ai_workspace.preserve_interrupted_channel(
+                    self, message, parsed, tab_id, interim_receipt, reply_in_thread
+                )
                 self.mark_pending_command_state(
                     message.message_id,
                     "interrupted",
@@ -1407,6 +1417,8 @@ class FeishuAiCommandService:
             return result
 
         finally:
+            if held_channel_lock is not None:
+                held_channel_lock.release()
             if not dry_run and not (status_val == "cancelled" and turn_completed):
                 if ack_reaction_id:
                     try:

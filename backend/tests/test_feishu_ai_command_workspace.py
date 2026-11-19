@@ -1255,3 +1255,190 @@ async def test_legacy_maso_switch_rolls_back_on_tailer_failure(monkeypatch):
             SimpleNamespace(_tab_env_switcher=None), "tab", new
         )
     assert state["env"] == old
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("concurrent", [False, True])
+@pytest.mark.parametrize(
+    ("reply_in_thread", "interims", "finals", "incoming", "expected"),
+    [
+        (True, ["omt_first"] * 2, ["omt_first"] * 2, [None, "omt_first"], 1),
+        (True, ["omt_first", "omt_second"], ["omt_first", "omt_second"], [None, None], 2),
+        (False, ["omt_ignored"] * 2, ["omt_ignored"] * 2, [None, None], 1),
+        (True, [None, None], [None, None], [None, None], 1),
+        (True, [None, "omt_final"], ["omt_final"] * 2, [None, "omt_final"], 1),
+        (True, [None, None], ["omt_first", "omt_second"], [None, None], 2),
+    ],
+)
+async def test_reply_created_thread_session_identity(
+    tmp_path: Path, reply_in_thread, interims, finals, incoming, expected, concurrent
+) -> None:
+    from claude_hub.services.feishu_bot import FeishuMessageDedupStore, FeishuReplyReceipt
+
+    manager = _FakeWorkspaceManager()
+    dispatches = []
+    final_started, second_interim, release_final = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def dispatch(session, prompt, turn_id, visible, metadata):
+        thread = metadata["thread_id"]
+        assert service._channel_locks[f"oc_ws_chat:{thread or 'main'}"].locked()
+        dispatches.append((session.id, session.tab_id, thread))
+        return "answer"
+
+    service = _make_service(tmp_path, fake_manager=manager, managed_dispatcher=dispatch)
+    service._dedup = FeishuMessageDedupStore(tmp_path / "dedup.json")
+
+    class Client:
+        def resolve_record(self):
+            return SimpleNamespace(open_id="ou_owner")
+
+        def require_send_as_user_scope(self, **kwargs):
+            pass
+
+        async def list_messages(self, **kwargs):
+            return []
+
+        async def add_reaction_as_user(self, *args):
+            return "reaction"
+
+        async def delete_reaction_as_user(self, *args):
+            pass
+
+        async def reply_as_user(self, message_id, *args, **kwargs):
+            index = int(message_id.rsplit("_", 1)[-1])
+            is_final = "final" in kwargs["uuid"]
+            if concurrent and is_final and index == 0:
+                final_started.set()
+                await release_final.wait()
+            if not is_final and index == 1:
+                second_interim.set()
+            threads = finals if is_final else interims
+            return FeishuReplyReceipt(
+                message_id=f"reply-{kwargs['uuid']}", thread_id=threads[index]
+            )
+
+    client: Any = Client()
+    service._user_client_factory = lambda cfg: client
+    service.update_config(
+        {
+            "enabled": True,
+            "owner_open_id": "ou_owner",
+            "provider": "codex",
+            "model": "gpt-5.4",
+            "cwd": str(tmp_path),
+            "reply_in_thread": reply_in_thread,
+        }
+    )
+    if concurrent:
+        async with asyncio.timeout(5):
+            first = asyncio.create_task(service.handle_message(_message("om_ws_0", incoming[0])))
+            await final_started.wait()
+            second = asyncio.create_task(service.handle_message(_message("om_ws_1", incoming[1])))
+            await second_interim.wait()
+            initial_threads = [
+                thread or (interim if reply_in_thread else None)
+                for thread, interim in zip(incoming, interims)
+            ]
+            if initial_threads[0] == initial_threads[1]:
+                assert len(dispatches) == 1
+            release_final.set()
+            results = list(await asyncio.gather(first, second))
+    else:
+        results = [
+            await service.handle_message(_message(f"om_ws_{index}", thread))
+            for index, thread in enumerate(incoming)
+        ]
+    assert [result.status for result in results] == ["completed", "completed"]
+    assert len(manager.provision_calls) == expected
+    assert len({entry[0] for entry in dispatches}) == expected
+    assert len({result.tab_id for result in results}) == expected
+    channels = service._load_state()["channel_tabs"]
+    effective = [
+        thread or ((interim or final) if reply_in_thread else None)
+        for thread, interim, final in zip(incoming, interims, finals)
+    ]
+    assert [result.thread_id for result in results] == effective
+    for index, thread in enumerate(effective):
+        record = channels[f"oc_ws_chat:{thread or 'main'}:codex"]
+        assert (record["session_id"], record["tab_id"]) == dispatches[index][:2]
+    if all(effective):
+        assert "oc_ws_chat:main:codex" not in channels
+    for index, provision in enumerate(manager.provision_calls):
+        initial_thread = incoming[index] or (interims[index] if reply_in_thread else None)
+        assert provision["title"].endswith((initial_thread or "oc_ws_chat")[-6:])
+    assert [entry[2] for entry in dispatches] == [
+        thread or (interim if reply_in_thread else None)
+        for thread, interim in zip(incoming, interims)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_final_only_thread_recovery_keeps_session_private(tmp_path: Path) -> None:
+    from unittest.mock import AsyncMock
+
+    from claude_hub.services.feishu_bot import FeishuMessageDedupStore, FeishuReplyReceipt
+
+    manager = _FakeWorkspaceManager()
+    dispatched = []
+
+    async def dispatch(session, *args):
+        dispatched.append(session.id)
+        return "answer"
+
+    service = _make_service(tmp_path, fake_manager=manager, managed_dispatcher=dispatch)
+    service._dedup = FeishuMessageDedupStore(tmp_path / "dedup.json")
+    final_started = asyncio.Event()
+    attempts = 0
+
+    async def reply(message_id, *args, **kwargs):
+        nonlocal attempts
+        thread = None
+        if "final" in kwargs["uuid"]:
+            if message_id == "om_ws_0":
+                attempts += 1
+                if attempts == 1:
+                    final_started.set()
+                    await asyncio.Event().wait()
+            thread = "omt_first" if message_id == "om_ws_0" else "omt_second"
+        return FeishuReplyReceipt(message_id=f"reply-{kwargs['uuid']}", thread_id=thread)
+
+    client: Any = SimpleNamespace(
+        resolve_record=lambda: SimpleNamespace(open_id="ou_owner"),
+        require_send_as_user_scope=lambda **kwargs: None,
+        list_messages=AsyncMock(return_value=[]),
+        add_reaction_as_user=AsyncMock(return_value="reaction"),
+        delete_reaction_as_user=AsyncMock(),
+        reply_as_user=reply,
+    )
+    service._user_client_factory = lambda cfg: client
+    service.update_config(
+        {
+            "enabled": True,
+            "owner_open_id": "ou_owner",
+            "provider": "codex",
+            "model": "gpt-5.4",
+            "cwd": str(tmp_path),
+            "reply_in_thread": True,
+        }
+    )
+    first_message = _message("om_ws_0")
+    service.enqueue_pending_command(first_message)
+    first = asyncio.create_task(service.handle_message(first_message))
+    async with asyncio.timeout(5):
+        await final_started.wait()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    pending = service.get_pending_command("om_ws_0")
+    assert pending is not None and pending["dispatch_state"] == "turn_completed"
+    assert "oc_ws_chat:main:codex" not in service._load_state()["channel_tabs"]
+    second = await service.handle_message(_message("om_ws_1"))
+    resumed = await service.handle_message(first_message)
+    assert second.status == resumed.status == "completed"
+    assert (resumed.tab_id, second.tab_id) == ("tab-1", "tab-2")
+    assert dispatched == ["sess-1", "sess-2"]
+    channels = service._load_state()["channel_tabs"]
+    assert channels["oc_ws_chat:omt_first:codex"]["session_id"] == "sess-1"
+    assert channels["oc_ws_chat:omt_second:codex"]["session_id"] == "sess-2"
+    assert len(channels) == 2
+    assert not service._channel_locks["oc_ws_chat:main"].locked()
