@@ -862,7 +862,7 @@ test('Personal /ai Model selector renders Provider-linked logical options, maps 
     },
     provider_models: {
       claude: ['claude-opus-4-8', '[redacted]'],
-      codex: ['gpt-5.4', '[redacted]'],
+      codex: ['[redacted]', 'gpt-5.4'],
       maso: ['[redacted]_reasoning_high', '[redacted]_reasoning_high'],
       cursor: ['gpt-5.3-codex-high', 'claude-4.5-sonnet'],
       antigravity: ['[redacted]-high'],
@@ -1062,6 +1062,14 @@ test('Personal /ai Model selector renders Provider-linked logical options, maps 
   assert.equal(state.aiSidebarMeta, 'maso · default')
 
   // Re-selecting [redacted] restores xhigh and unlocks Cursor switch test below
+  state.onAiModelChange('[redacted]_reasoning_high')
+  state.onAiEffortChange('xhigh')
+  await flush()
+
+  // Rich Codex discovery takes precedence over stale legacy synthetic ordering.
+  state.onAiProviderChange('codex')
+  assert.equal(state.aiEdit.model, 'gpt-5.4')
+  state.onAiProviderChange('maso')
   state.onAiModelChange('[redacted]_reasoning_high')
   state.onAiEffortChange('xhigh')
   await flush()

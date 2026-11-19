@@ -420,6 +420,7 @@ def test_codex_catalog_missing_or_invalid_cache_has_current_fallback(
     if contents is not None:
         (tmp_path / "models_cache.json").write_bytes(contents)
     options = native._codex_model_options({})
+    assert options[0].id == "gpt-5.4"
     assert {m.id for m in options} == set(native._STATIC_MODELS["codex"])
     assert {"[redacted]", "[redacted]", "[redacted]"} <= {m.id for m in options}
 

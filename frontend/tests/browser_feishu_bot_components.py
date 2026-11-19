@@ -194,7 +194,7 @@ async def main(browser_run: BrowserRun) -> None:
                 },
                 "provider_models": {
                     "claude": ["claude-opus-4-8", "[redacted]"],
-                    "codex": ["gpt-5.4", "[redacted]", "o3"],
+                    "codex": ["[redacted]", "gpt-5.4", "o3"],
                     "maso": [
                         "[redacted]_reasoning_high",
                         "[redacted]_reasoning_high",

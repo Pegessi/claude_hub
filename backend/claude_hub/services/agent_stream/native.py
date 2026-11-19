@@ -270,6 +270,7 @@ _STATIC_MODELS: Dict[str, List[str]] = {
         "[redacted]",
     ],
     "codex": [
+        "gpt-5.4",
         "[redacted]",
         "[redacted]",
         "[redacted]",
@@ -281,7 +282,6 @@ _STATIC_MODELS: Dict[str, List[str]] = {
         "[redacted]",
         "[redacted]",
         "gpt-5.5",
-        "gpt-5.4",
         "gpt-5.4-mini",
         "gpt-5.3-codex-spark",
     ],
