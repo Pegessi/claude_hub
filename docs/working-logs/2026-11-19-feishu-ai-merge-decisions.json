@@ -1,0 +1,132 @@
+{
+  "schema": 1,
+  "git_version": "git version 2.43.0",
+  "merge": "6d7fa7f256489cf829e25a5d8b4d3f6756019d46",
+  "parents": [
+    "7e96c70dba88e54750c0e7f471c796ec146a9f7d",
+    "97d140dbd79152aeb39320c69c85dd4a02c76c76"
+  ],
+  "base": "6fce264e5f84c3ccf109e556f8c28bed30e19f5c",
+  "shallow_boundaries": [
+    "683e1f5d5cc299044aab1c6e196b5dd7c16aba80"
+  ],
+  "tree": "436e3eef01f949d94c9fc0693e005eb7a61f0af5",
+  "reconstructed_tree": "d680a8c63f1271c9a4d872b7e141ca3e1afc90d5",
+  "conflicts": [
+    "CHANGELOG.md",
+    "backend/claude_hub/services/feishu_ai_command.py"
+  ],
+  "decisions": [
+    {
+      "path": "CHANGELOG.md",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "ac0333a32bf360b1b0f5ebd8500f8848c90b81cd"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "1e7bd1b54b7f76a5380815e893b0314ad4ab68da"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0dd25023f88ae0cd904e7ec0da3a88d9ce5efd46"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "43c39c635e4df808ccb1af154d4ab380c4bcf6d3"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "08a628f3ebdf91415938e65233d671584935a9eb"
+      },
+      "reason": "Keep both Released entries in chronological order: the Feishu web-session user-identity transport entry (97d140db) followed by the Agent Workspace /ai Chat sessions entry (25a0f49e), above existing main entries.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/claude_hub/services/feishu_ai_command.py",
+      "base": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "2688e7026b21f98327dae00e640b1396f0325221"
+      },
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "0014b16e77e261c3c22eca3acdacf94c0233fbc4"
+      },
+      "parent2": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "df6c14e293cd149c26ea10de8e1c20ef8200848c"
+      },
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "6d0862faa04201d9411de074b9bfcb00191ddf03"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "380802efe8cb7ecdbbb8ab68294a6a86b3d87c01"
+      },
+      "reason": "Combine Agent Workspace session provisioning/dispatch (parent1) and Feishu web-session transport/auth/dedup (parent2), keep both helper extractions (serialize_model_option + build_capabilities_payload in feishu_ai_command_models.py and recover_completed_stream_answer in feishu_ai_workspace.py), and transplant create_legacy_tab and switch_tab_env bodies into feishu_ai_workspace.py with thin service delegators so feishu_ai_command.py stays at 1476 lines (< 1500 ceiling).",
+      "disposition": "transplant",
+      "destinations": [
+        "backend/claude_hub/services/feishu_ai_command_models.py",
+        "backend/claude_hub/services/feishu_ai_workspace.py"
+      ]
+    },
+    {
+      "path": "backend/claude_hub/services/feishu_ai_workspace.py",
+      "base": null,
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c0ff2b36c5de0f59ac48868fcb2def4bc6d18f24"
+      },
+      "parent2": null,
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "c0ff2b36c5de0f59ac48868fcb2def4bc6d18f24"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "938359dbed6d61dc98f374f357043ddfeb890cc6"
+      },
+      "reason": "Receive create_legacy_tab and switch_tab_env helper implementations transplanted from feishu_ai_command.py to enforce the 1500-line source ceiling without changing behavior or public imports.",
+      "disposition": "resolve",
+      "destinations": []
+    },
+    {
+      "path": "backend/tests/test_feishu_ai_command_workspace.py",
+      "base": null,
+      "parent1": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "47f788c4d8f269abb1f1d26af82b425a26cf4af8"
+      },
+      "parent2": null,
+      "reconstructed": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "47f788c4d8f269abb1f1d26af82b425a26cf4af8"
+      },
+      "merged": {
+        "mode": "100644",
+        "type": "blob",
+        "oid": "5c3055c16e19bf7221fdc72f1b6b15a1ba464526"
+      },
+      "reason": "Add test_web_session_and_agent_workspace_integrated_ai_command to verify end-to-end interaction between web_session user-identity transport and Agent Workspace managed Chat session provisioning/dispatch.",
+      "disposition": "resolve",
+      "destinations": []
+    }
+  ]
+}
