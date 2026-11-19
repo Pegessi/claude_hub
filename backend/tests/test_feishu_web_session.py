@@ -777,8 +777,8 @@ async def test_web_session_1v1_dm_and_group_ai_command_in_place_reply_and_uncert
             assert sent_req["chatId"] == dm_chat_id
             assert sent_req["parentId"] == "7400000000000000202"
             assert sent_req["rootId"] == "7400000000000000202"
-            # In a 1v1 P2P DM (not in a topic), replies stay in the main DM stream (isReplyInThread=False)
-            assert bool(sent_req.get("isReplyInThread", False)) is False
+            # Both replies belong to the thread rooted at the original command.
+            assert bool(sent_req.get("isReplyInThread", False)) is True
             inner_text = sent_req["content"]["richText"]["innerText"]
             assert "🤖 AI 代答，仅供参考" in inner_text
 
@@ -1630,6 +1630,9 @@ async def test_group_chat_topic_thread_mixed_id_dedup_and_frontier_push(
         assert sent_messages[0]["parentId"] == group_main_cmd_id
         assert sent_messages[0]["rootId"] == group_main_cmd_id
         assert bool(sent_messages[0].get("isReplyInThread")) is True
+        assert sent_messages[1]["parentId"] == group_main_cmd_id
+        assert sent_messages[1]["rootId"] == group_main_cmd_id
+        assert bool(sent_messages[1].get("isReplyInThread")) is True
 
         # 2. Now run poller.poll_once():
         # - `group_main_cmd_id` (7400000000000000305) must be skipped as a duplicate of `om_openapi_alias_305`!

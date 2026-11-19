@@ -195,6 +195,43 @@ async def test_managed_session_creation_preserves_requested_chat_surface(
 
 
 @pytest.mark.asyncio
+async def test_managed_maso_session_persists_discovered_tab_endpoint(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo-managed-maso"
+    repo.mkdir()
+    workspace = workspace_manager.workspaces[_make_workspace(TestClient(app), repo)["id"]]
+
+    async def fake_create_tab(**kwargs: object) -> TerminalTab:
+        return TerminalTab(
+            id="mock-maso-tab",
+            name=str(kwargs["name"]),
+            cwd=str(repo),
+            solo_mode=True,
+            agent_type=AgentType.MASO,
+            session_kind=SessionKind.CHAT,
+            target=ExecutionTarget.LOCAL,
+            port=12345,
+            created_at=datetime.now(),
+            is_active=True,
+            env={"MASO_MODEL": "first", "MASO_BASE_URL": "http://127.0.0.1:11004"},
+        )
+
+    monkeypatch.setattr(workspace_module.ttyd_manager, "create_tab", fake_create_tab)
+    session = await workspace_manager._create_managed_session(
+        workspace,
+        EnsureWorkspaceAgentRequest(
+            agent_type=AgentType.MASO,
+            session_kind=SessionKind.CHAT,
+            role=WorkspaceSessionRole.WORKER,
+            env={"MASO_MODEL": "first"},
+        ),
+    )
+    assert session.env["MASO_BASE_URL"] == "http://127.0.0.1:11004"
+    assert ManagedSession.model_validate(session.model_dump(mode="json")).env == session.env
+
+
+@pytest.mark.asyncio
 async def test_managed_session_records_requested_env_preset(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

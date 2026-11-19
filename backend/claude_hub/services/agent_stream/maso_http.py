@@ -348,8 +348,10 @@ class MasoHttpSession(ProviderSession):
             raise RuntimeError(
                 f"MASO {method} {path} returned HTTP {exc.response.status_code}"
             ) from None
-        except (httpx.HTTPError, ValueError):
-            raise RuntimeError(f"MASO {method} request failed") from None
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"MASO {method} request failed ({type(exc).__name__})") from None
+        except ValueError:
+            raise RuntimeError(f"MASO {method} returned invalid JSON") from None
 
     def _path(self, suffix: str) -> str:
         if not self._conversation_id or not self._conversation_id_verified:
