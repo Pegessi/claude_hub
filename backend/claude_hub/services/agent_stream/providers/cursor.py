@@ -44,6 +44,7 @@ from .process import ProcessSession
 _ACP_SESSION_INIT_TIMEOUT_S = 60.0
 _ACP_CANCEL_CONFIRM_TIMEOUT_S = 10.0
 _ACP_STARTUP_RETRY_DELAY_S = 0.25
+_ACP_EXIT_DIAGNOSTIC_TIMEOUT_S = 2.25
 _ACP_TRANSIENT_NETWORK_MARKERS = (
     "econnreset",
     "etimedout",
@@ -306,19 +307,25 @@ class CursorSession(ProcessSession):
             ) from None
         except TimeoutError:
             raise _AcpStartupRetry(method, "request timed out") from None
-        except _AcpConnectionClosed as exc:
-            if exc.retry_category is not None:
-                raise _AcpStartupRetry(method, exc.retry_category) from None
+        except RuntimeError as exc:
+            if not isinstance(exc, _AcpConnectionClosed) and not isinstance(
+                exc.__cause__, (BrokenPipeError, ConnectionResetError)
+            ):
+                raise
+            reader = self._reader_task
+            if reader is not None and self._exit_error is None:
+                # A write can fail before stdout EOF and stderr have been drained.
+                # Let the same process supply its diagnostic before deciding to retry.
+                await asyncio.wait({reader}, timeout=_ACP_EXIT_DIAGNOSTIC_TIMEOUT_S)
+            closed = self._connection_closed_error(str(exc))
+            if closed.retry_category is not None:
+                raise _AcpStartupRetry(method, closed.retry_category) from None
             self._runtime.logger().warning(
                 "cursor acp startup failure tab=%s phase=%s category=process_exit retry=False",
                 self.session.tab_id,
                 method,
             )
-            raise
-        except RuntimeError as exc:
-            if isinstance(exc.__cause__, (BrokenPipeError, ConnectionResetError)):
-                raise _AcpStartupRetry(method, "connection closed") from None
-            raise
+            raise closed from None
 
     def _connection_closed_error(self, fallback: str) -> _AcpConnectionClosed:
         if self._exit_error is None or not self._stderr_buffer.strip():

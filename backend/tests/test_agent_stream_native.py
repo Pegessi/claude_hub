@@ -6027,6 +6027,8 @@ async def test_cursor_acp_failed_resume_preserves_binding(
         ("session/load", True, "rpc"),
         ("initialize", True, "reset"),
         ("session/load", True, "reset"),
+        ("session/load", True, "reset_after_pipe"),
+        ("session/load", True, "pipe_without_eof"),
         ("session/load", True, "silent_exit"),
     ],
 )
@@ -6037,6 +6039,11 @@ async def test_cursor_acp_retries_transient_startup_on_same_binding(
         "claude_hub.services.agent_stream.providers.cursor._migrate_legacy_cli_store_for_acp",
         lambda *args, **kwargs: None,
     )
+    if failure == "pipe_without_eof":
+        monkeypatch.setattr(
+            "claude_hub.services.agent_stream.providers.cursor._ACP_EXIT_DIAGNOSTIC_TIMEOUT_S",
+            0.02,
+        )
     sess = _session(AgentType.CURSOR)
     if verified:
         sess.agent_session_id = "verified-existing-sid"
@@ -6054,7 +6061,12 @@ async def test_cursor_acp_retries_transient_startup_on_same_binding(
             return
         first.requests.append(msg)
         if failure != "rpc":
-            stderr = "socket connection failed: ECONNRESET" if failure == "reset" else ""
+            if failure == "pipe_without_eof":
+                raise BrokenPipeError("stdin closed without stdout EOF")
+            stderr = "" if failure == "silent_exit" else "socket connection failed: ECONNRESET"
+            if failure == "reset_after_pipe":
+                asyncio.get_running_loop().call_soon(first.crash, 1, stderr)
+                raise BrokenPipeError("stdin closed before diagnostic")
             first.crash(exit_code=1, stderr_msg=stderr)
             return
         first.stdout.push_json(
@@ -6090,8 +6102,9 @@ async def test_cursor_acp_retries_transient_startup_on_same_binding(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("write_fails_first", [False, True])
 async def test_cursor_acp_session_load_process_exit_does_not_fall_back_to_session_new(
-    monkeypatch: MonkeyPatch,
+    monkeypatch: MonkeyPatch, write_fails_first: bool
 ) -> None:
     """When ``agent acp`` exits during ``session/load`` (e.g. ``Cannot use this
     model``) or times out, ``start()`` must fail closed instead of falling back
@@ -6114,21 +6127,24 @@ async def test_cursor_acp_session_load_process_exit_does_not_fall_back_to_sessio
     def crash_on_load(msg: Dict[str, Any]) -> None:
         if msg.get("method") == "session/load":
             proc.requests.append(msg)
-            proc.crash(
-                exit_code=1,
-                stderr_msg="Cannot use this model: gemini-example-model-1d11bad5f3fe-high",
-            )
+            stderr = "Cannot use this model: gemini-example-model-1d11bad5f3fe-high"
+            if write_fails_first:
+                asyncio.get_running_loop().call_soon(proc.crash, 1, stderr)
+                raise BrokenPipeError("stdin closed before diagnostic")
+            proc.crash(exit_code=1, stderr_msg=stderr)
             return
         orig_on_stdin(msg)
 
     proc.stdin._handler = crash_on_load
-    native._spawn_subprocess = AsyncMock(return_value=proc)  # type: ignore[method-assign]
+    spawn = AsyncMock(side_effect=[proc])
+    native._spawn_subprocess = spawn  # type: ignore[method-assign]
 
     with pytest.raises(
         RuntimeError, match="Cannot use this model: gemini-example-model-1d11bad5f3fe-high"
     ):
         await native.start()
 
+    assert spawn.await_count == 1
     assert [r.get("method") for r in proc.requests] == ["initialize", "session/load"]
     assert persisted == []
     assert native._conversation_id == "verified-existing-sid"
