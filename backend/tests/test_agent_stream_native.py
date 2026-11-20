@@ -6104,7 +6104,13 @@ async def test_cursor_acp_retries_transient_startup_on_same_binding(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure_order",
-    ["exit_first", "pipe_first", "pipe_with_open_stdout", "timeout_with_open_stdout"],
+    [
+        "exit_first",
+        "pipe_first",
+        "pipe_with_open_stdout",
+        "timeout_with_open_stdout",
+        "rpc_rejection_with_pipe",
+    ],
 )
 async def test_cursor_acp_session_load_process_exit_does_not_fall_back_to_session_new(
     monkeypatch: MonkeyPatch, failure_order: str
@@ -6139,6 +6145,15 @@ async def test_cursor_acp_session_load_process_exit_does_not_fall_back_to_sessio
         if msg.get("method") == "session/load":
             proc.requests.append(msg)
             stderr = "Cannot use this model: gemini-example-model-1d11bad5f3fe-high"
+            if failure_order == "rpc_rejection_with_pipe":
+                proc.stdout.push_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": msg["id"],
+                        "error": {"code": -32602, "message": "Model rejected"},
+                    }
+                )
+                raise BrokenPipeError("stdin closed with a correlated RPC rejection")
             if failure_order == "pipe_first":
                 asyncio.get_running_loop().call_soon(proc.crash, 1, stderr)
                 raise BrokenPipeError("stdin closed before diagnostic")
@@ -6158,9 +6173,12 @@ async def test_cursor_acp_session_load_process_exit_does_not_fall_back_to_sessio
     spawn = AsyncMock(side_effect=[proc])
     native._spawn_subprocess = spawn  # type: ignore[method-assign]
 
-    with pytest.raises(
-        RuntimeError, match="Cannot use this model: gemini-example-model-1d11bad5f3fe-high"
-    ):
+    expected_error = (
+        r"session/load was rejected \(RPC code -32602\)"
+        if failure_order == "rpc_rejection_with_pipe"
+        else "Cannot use this model: gemini-example-model-1d11bad5f3fe-high"
+    )
+    with pytest.raises(RuntimeError, match=expected_error):
         await native.start()
 
     assert spawn.await_count == 1

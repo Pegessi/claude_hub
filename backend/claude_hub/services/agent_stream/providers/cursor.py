@@ -45,6 +45,7 @@ _ACP_SESSION_INIT_TIMEOUT_S = 60.0
 _ACP_CANCEL_CONFIRM_TIMEOUT_S = 10.0
 _ACP_STARTUP_RETRY_DELAY_S = 0.25
 _ACP_EXIT_DIAGNOSTIC_TIMEOUT_S = 2.25
+_ACP_STARTUP_REQUESTS = ("initialize", "session/load")
 _ACP_TRANSIENT_NETWORK_MARKERS = (
     "econnreset",
     "etimedout",
@@ -55,8 +56,11 @@ _ACP_TRANSIENT_NETWORK_MARKERS = (
 
 
 class _AcpConnectionClosed(RuntimeError):
-    def __init__(self, message: str, retry_category: Optional[str]) -> None:
+    def __init__(
+        self, message: str, retry_category: Optional[str], *, diagnostics_waited: bool = False
+    ) -> None:
         self.retry_category = retry_category
+        self.diagnostics_waited = diagnostics_waited
         super().__init__(message)
 
 
@@ -318,6 +322,7 @@ class CursorSession(ProcessSession):
             if (
                 reader is not None
                 and self._exit_error is None
+                and not (isinstance(exc, _AcpConnectionClosed) and exc.diagnostics_waited)
                 and (not timed_out or (proc is not None and proc.returncode is not None))
             ):
                 # A write can fail before stdout EOF and stderr have been drained.
@@ -881,8 +886,26 @@ class CursorSession(ProcessSession):
         try:
             await self._write_stdin_payload(payload)
         except (BrokenPipeError, ConnectionResetError, OSError, RuntimeError) as exc:
-            self._pending_requests.pop(req_id, None)
             self._last_error = f"cursor acp {method} write failed: {exc}"
+            if method in _ACP_STARTUP_REQUESTS and isinstance(
+                exc, (BrokenPipeError, ConnectionResetError)
+            ):
+                # The request may have reached ACP before drain detected the broken pipe.
+                # Keep its correlation alive for a rejection or the reader's exit signal.
+                deadline = loop.time() + _ACP_EXIT_DIAGNOSTIC_TIMEOUT_S
+                try:
+                    await asyncio.wait({future}, timeout=_ACP_EXIT_DIAGNOSTIC_TIMEOUT_S)
+                    if future.done() and not future.cancelled() and future.exception() is None:
+                        if "error" in future.result():
+                            return req_id, future
+                        # A reply alone does not make a disconnected process usable.
+                        reader = self._reader_task
+                        if reader is not None:
+                            await asyncio.wait({reader}, timeout=max(0.0, deadline - loop.time()))
+                finally:
+                    self._pending_requests.pop(req_id, None)
+                raise _AcpConnectionClosed(self._last_error, None, diagnostics_waited=True) from exc
+            self._pending_requests.pop(req_id, None)
             raise RuntimeError(self._last_error) from exc
         if (
             self._process is None or self._reader_task is None or self._reader_task.done()
@@ -902,7 +925,7 @@ class CursorSession(ProcessSession):
         except asyncio.TimeoutError:
             self._pending_requests.pop(req_id, None)
             self._last_error = f"cursor acp {method} timed out"
-            if method in ("initialize", "session/load"):
+            if method in _ACP_STARTUP_REQUESTS:
                 raise TimeoutError(self._last_error) from None
             raise RuntimeError(self._last_error) from None
         if "error" in response:
