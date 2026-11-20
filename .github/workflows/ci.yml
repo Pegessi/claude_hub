@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Reject machine-local configuration in the committed tree
         run: ./scripts/verify.sh checkout-safety
 
@@ -31,7 +31,7 @@ jobs:
           - target: backend-tests
             label: pytest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: uv-version
         name: Read declared uv version
         run: echo "version=$(tr -d '[:space:]' < .uv-version)" >> "$GITHUB_OUTPUT"
@@ -62,7 +62,7 @@ jobs:
     name: Repo hygiene & docs integrity
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Verify document invariants
         run: ./scripts/verify.sh docs
 
@@ -83,7 +83,7 @@ jobs:
           - target: frontend-build
             label: bundle
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install declared pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -110,7 +110,7 @@ jobs:
         run: |
           echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/claude-hub-browsers" >> "$GITHUB_ENV"
           echo "CLAUDE_HUB_VERIFY_ARTIFACT_ROOT=$RUNNER_TEMP/claude-hub-browser-evidence" >> "$GITHUB_ENV"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: uv-version
         name: Read declared uv version
         run: echo "version=$(tr -d '[:space:]' < .uv-version)" >> "$GITHUB_OUTPUT"
@@ -176,7 +176,7 @@ jobs:
         run: |
           echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/claude-hub-browsers" >> "$GITHUB_ENV"
           echo "CLAUDE_HUB_VERIFY_ARTIFACT_ROOT=$RUNNER_TEMP/claude-hub-hmr-evidence" >> "$GITHUB_ENV"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: uv-version
         name: Read declared uv version
         run: echo "version=$(tr -d '[:space:]' < .uv-version)" >> "$GITHUB_OUTPUT"
@@ -235,7 +235,7 @@ jobs:
     name: Verify ttyd & tmux
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install tmux
         run: sudo apt-get update && sudo apt-get install -y tmux
       - name: Install ttyd
@@ -276,7 +276,7 @@ jobs:
       run:
         working-directory: ./backend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -321,7 +321,7 @@ jobs:
     name: Security audit (informational only — never fails the pipeline)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # --- Python side ----------------------------------------------------
       - name: Set up Python 3.11
