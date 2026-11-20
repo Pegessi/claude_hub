@@ -16,6 +16,9 @@
 
 - Show an explicit continuation error when Cursor ACP cannot load the verified
   conversation and preserve the binding for the next attempt.
+- Retry transient ACP startup failures once on a fresh process, resuming the
+  verified conversation when one exists. Give native Chat transports their
+  full idle window after a turn completes so headless follow-ups can reuse them.
 
 ### fix(runtime): preserve configured model fallbacks
 

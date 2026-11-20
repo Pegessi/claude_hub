@@ -412,10 +412,12 @@ class PublicationMixin(SessionState):
 
         Raises if persistence of a non-coalescable event fails.
         """
-        if event.type == AgentStreamEventType.TURN_COMPLETED and event.agent_type == AgentType.MASO:
-            # Retire service confirmations with their owning turn, durably, so
-            # reload cannot present an actionable card after Stop or failure.
-            await self._emit_approval_resolved([])
+        if event.type == AgentStreamEventType.TURN_COMPLETED:
+            if self._native_transport is not None:
+                self._last_native_turn_completed_at = time.monotonic()
+            if event.agent_type == AgentType.MASO:
+                # Reload must not present actionable service confirmations after Stop or failure.
+                await self._emit_approval_resolved([])
         if await self._coalescer.handle(event):
             return  # buffered; the coalescer will flush it
         # Non-coalescable: drain pending text before emitting so ordering is

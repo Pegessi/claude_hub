@@ -89,6 +89,14 @@ class NativeConsumerMixin(SessionState):
                 return
             self._notify_post_persist(event)
 
+    def _native_idle_expired(self) -> bool:
+        last_activity = max(self._last_subscriber_at, self._last_native_turn_completed_at)
+        return (
+            not self._subscribers
+            and not self._completion_subscribers
+            and time.monotonic() - last_activity > self._deps.IDLE_TTL_S
+        )
+
     async def _run_native(self) -> None:
         """Push consumer for native provider transports.
 
@@ -285,12 +293,7 @@ class NativeConsumerMixin(SessionState):
             # viewers vanished (e.g. mobile backgrounding kills SSE and the
             # long-poll self-expires) — it completes on its own and the next
             # idle check reaps it.
-            if (
-                not transport.keep_alive_when_idle
-                and not self._subscribers
-                and not self._completion_subscribers
-                and time.monotonic() - self._last_subscriber_at > self._deps.IDLE_TTL_S
-            ):
+            if not transport.keep_alive_when_idle and self._native_idle_expired():
                 # A headless background turn (a scheduled chat_turn with no
                 # viewer attached) must survive exactly like a watched one.
                 # Re-check liveness UNDER the send lock: a concurrent send may
@@ -302,7 +305,7 @@ class NativeConsumerMixin(SessionState):
                 # above.
                 async with self._send_lock:
                     turn_active = transport.turn_in_flight or self._active_turn_id is not None
-                    if not turn_active:
+                    if not turn_active and self._native_idle_expired():
                         # Stop the native transport so the provider subprocess
                         # (e.g. the Codex app-server) is reaped, not left orphaned.
                         try:
@@ -316,6 +319,7 @@ class NativeConsumerMixin(SessionState):
                     else:
                         idle_stop = False
                 if idle_stop:
+                    logger.info("reaped idle native transport for session %s", self.session_id)
                     break
                 # Active (possibly viewer-less) turn: fall through and keep
                 # consuming. Records are still persisted even with zero
