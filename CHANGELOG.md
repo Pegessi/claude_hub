@@ -12,6 +12,11 @@
 - Retain the last discovered Cursor catalog during probe failures and retry a
   non-cacheable catalog when the model picker opens; log probe failure classes.
 
+### fix(cursor): preserve verified Chat conversations on resume failure
+
+- Show an explicit continuation error when Cursor ACP cannot load the verified
+  conversation and preserve the binding for the next attempt.
+
 ### fix(runtime): preserve configured model fallbacks
 
 - Preserve configured review and patrol fallbacks and private historical model variants

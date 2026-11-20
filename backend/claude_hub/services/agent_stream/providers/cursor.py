@@ -345,8 +345,6 @@ class CursorSession(ProcessSession):
         ):
             sid = self._conversation_id
             await asyncio.to_thread(_migrate_legacy_cli_store_for_acp, sid, cwd, provider_env)
-            loaded_resp: Any = None
-            loaded_ok = False
             self._replaying_history = True
             try:
                 loaded_resp = await self._send_request(
@@ -354,21 +352,19 @@ class CursorSession(ProcessSession):
                     {"sessionId": sid, "cwd": cwd, "mcpServers": []},
                     timeout=_ACP_SESSION_INIT_TIMEOUT_S,
                 )
-                loaded_ok = True
-            except ProviderRpcError:
-                if self._required_conversation_id is not None:
-                    raise
-                self._runtime.logger().warning(
-                    "cursor acp session/load failed for %s; starting a new session", sid
-                )
+            except ProviderRpcError as exc:
+                raise RuntimeError(f"could not resume Cursor conversation {sid}: {exc}") from exc
             finally:
                 self._replaying_history = False
-            if loaded_ok:
-                self._acp_session_id = sid
-                self._capture_session_metadata(loaded_resp)
-                await self._ensure_session_model()
-                await self._ensure_session_mode()
-                return
+            if isinstance(loaded_resp, dict) and loaded_resp.get("sessionId", sid) != sid:
+                raise RuntimeError(
+                    f"Cursor session/load returned a different conversation for {sid}"
+                )
+            self._acp_session_id = sid
+            self._capture_session_metadata(loaded_resp)
+            await self._ensure_session_model()
+            await self._ensure_session_mode()
+            return
 
         if self._required_conversation_id is not None:
             raise RuntimeError("the original provider conversation could not be resumed")
@@ -1267,6 +1263,8 @@ class CursorSession(ProcessSession):
 
     def maybe_capture_conversation_id(self, record: Dict[str, Any]) -> None:
         """Capture session_id for legacy stream-json records when present."""
+        if self._conversation_id_verified or self._defer_initial_adoption:
+            return
         if record.get("type") == "system" and record.get("subtype") == "init":
             sid = record.get("session_id")
             if isinstance(sid, str) and sid:

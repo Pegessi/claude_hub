@@ -5668,6 +5668,8 @@ async def test_cursor_acp_parameterized_model_resolution_and_config_options() ->
                     {"jsonrpc": "2.0", "id": req_id, "result": {"protocolVersion": 1}}
                 )
             elif method in ("session/new", "session/load"):
+                if method == "session/load":
+                    self.session_id = msg["params"]["sessionId"]
                 self.stdout.push_json(
                     {
                         "jsonrpc": "2.0",
@@ -5960,6 +5962,58 @@ async def test_cursor_acp_cold_discarded_rotation_recovers_and_preserves_clean_l
             generation=native._stdout_generation,
         )
         assert native._turn_error_emitted is False
+    finally:
+        await native.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("load_result", ["rpc_error", "different_id"])
+async def test_cursor_acp_failed_resume_preserves_binding(
+    monkeypatch: MonkeyPatch, load_result: str
+) -> None:
+    monkeypatch.setattr(
+        "claude_hub.services.agent_stream.providers.cursor._migrate_legacy_cli_store_for_acp",
+        lambda *args, **kwargs: None,
+    )
+    sess = _session(AgentType.CURSOR)
+    sess.agent_session_id = "verified-existing-sid"
+    sess.agent_session_id_verified = True
+    persisted: List[str] = []
+    native = CursorNativeSession(sess, conversation_id_persist=persisted.append)
+    native._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
+    proc = _InteractiveAcpProc(session_id="replacement-sid")
+
+    def reject_load(msg: Dict[str, Any]) -> None:
+        if msg.get("method") != "session/load":
+            proc._on_stdin(msg)
+            return
+        proc.requests.append(msg)
+        response: Dict[str, Any] = {"jsonrpc": "2.0", "id": msg["id"]}
+        if load_result == "rpc_error":
+            response["error"] = {"code": -32602, "message": "Session not found"}
+        else:
+            response["result"] = {"sessionId": "replacement-sid"}
+        proc.stdout.push_json(response)
+
+    proc.stdin._handler = reject_load
+    recovered_proc = _InteractiveAcpProc(session_id="unused")
+    native._spawn_subprocess = AsyncMock(side_effect=[proc, recovered_proc])  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match=r"session setup failed: .*verified-existing-sid"):
+        await native.start()
+
+    native.maybe_capture_conversation_id(
+        {"type": "system", "subtype": "init", "session_id": "replacement-sid"}
+    )
+    assert [r.get("method") for r in proc.requests] == ["initialize", "session/load"]
+    assert native.active_thread_id == "verified-existing-sid"
+    assert persisted == []
+
+    try:
+        await native.start()
+        assert recovered_proc.requests[1]["params"]["sessionId"] == "verified-existing-sid"
+        assert native.active_thread_id == "verified-existing-sid"
+        assert persisted == []
     finally:
         await native.stop()
 
