@@ -6020,11 +6020,18 @@ async def test_cursor_acp_failed_resume_preserves_binding(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("phase", "verified"),
-    [("initialize", False), ("initialize", True), ("session/load", True)],
+    ("phase", "verified", "failure"),
+    [
+        ("initialize", False, "rpc"),
+        ("initialize", True, "rpc"),
+        ("session/load", True, "rpc"),
+        ("initialize", True, "reset"),
+        ("session/load", True, "reset"),
+        ("session/load", True, "silent_exit"),
+    ],
 )
 async def test_cursor_acp_retries_transient_startup_on_same_binding(
-    monkeypatch: MonkeyPatch, phase: str, verified: bool
+    monkeypatch: MonkeyPatch, phase: str, verified: bool, failure: str
 ) -> None:
     monkeypatch.setattr(
         "claude_hub.services.agent_stream.providers.cursor._migrate_legacy_cli_store_for_acp",
@@ -6038,6 +6045,7 @@ async def test_cursor_acp_retries_transient_startup_on_same_binding(
     native = CursorNativeSession(sess, conversation_id_persist=persisted.append)
     native._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
     first = _InteractiveAcpProc(session_id="unused")
+    first.stderr = _InteractiveAcpStream(eof=False)
     second = _InteractiveAcpProc(session_id="initial-sid")
 
     def reject_first(msg: Dict[str, Any]) -> None:
@@ -6045,6 +6053,10 @@ async def test_cursor_acp_retries_transient_startup_on_same_binding(
             first._on_stdin(msg)
             return
         first.requests.append(msg)
+        if failure != "rpc":
+            stderr = "socket connection failed: ECONNRESET" if failure == "reset" else ""
+            first.crash(exit_code=1, stderr_msg=stderr)
+            return
         first.stdout.push_json(
             {
                 "jsonrpc": "2.0",
