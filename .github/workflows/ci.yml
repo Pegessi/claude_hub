@@ -36,7 +36,7 @@ jobs:
         name: Read declared uv version
         run: echo "version=$(tr -d '[:space:]' < .uv-version)" >> "$GITHUB_OUTPUT"
       - name: Set up declared Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version-file: .python-test-version
       - name: Set up declared uv
@@ -115,7 +115,7 @@ jobs:
         name: Read declared uv version
         run: echo "version=$(tr -d '[:space:]' < .uv-version)" >> "$GITHUB_OUTPUT"
       - name: Set up declared Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version-file: .python-test-version
       - name: Set up declared uv
@@ -181,7 +181,7 @@ jobs:
         name: Read declared uv version
         run: echo "version=$(tr -d '[:space:]' < .uv-version)" >> "$GITHUB_OUTPUT"
       - name: Set up declared Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version-file: .python-test-version
       - name: Set up declared uv
@@ -278,7 +278,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version-file: .python-test-version
       - id: uv-version
@@ -325,7 +325,7 @@ jobs:
 
       # --- Python side ----------------------------------------------------
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version-file: .python-test-version
       - id: uv-version
