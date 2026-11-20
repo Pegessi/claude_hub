@@ -69,3 +69,8 @@ reports a recognized startup, network, or SQLite contention error. Only the
 original verified ID is sent on a retry. The process becomes ready after
 session setup completes. Diagnostics emit the phase, error category and
 RPC code without copying the RPC payload.
+
+The independent review also reproduced a nonzero subprocess exit carrying
+a connection reset during session/load. The exit now enters the same
+bounded startup retry, including when a subprocess exits without a
+diagnostic. Other nonzero exits with a diagnostic still surface the failure.

@@ -44,10 +44,19 @@ from .process import ProcessSession
 _ACP_SESSION_INIT_TIMEOUT_S = 60.0
 _ACP_CANCEL_CONFIRM_TIMEOUT_S = 10.0
 _ACP_STARTUP_RETRY_DELAY_S = 0.25
+_ACP_TRANSIENT_NETWORK_MARKERS = (
+    "econnreset",
+    "etimedout",
+    "eai_again",
+    "econnrefused",
+    "connection reset by peer",
+)
 
 
 class _AcpConnectionClosed(RuntimeError):
-    pass
+    def __init__(self, message: str, retry_category: Optional[str]) -> None:
+        self.retry_category = retry_category
+        super().__init__(message)
 
 
 class _AcpStartupRetry(RuntimeError):
@@ -284,10 +293,7 @@ class CursorSession(ProcessSession):
             if exc.code in (-32603, -32000, -32001):
                 if any(marker in detail for marker in ("sqlite_busy", "database is locked")):
                     raise _AcpStartupRetry(method, "sqlite_busy", exc.code) from None
-                if any(
-                    marker in detail
-                    for marker in ("econnreset", "etimedout", "eai_again", "econnrefused")
-                ):
+                if any(marker in detail for marker in _ACP_TRANSIENT_NETWORK_MARKERS):
                     raise _AcpStartupRetry(method, "network_unavailable", exc.code) from None
             self._runtime.logger().warning(
                 "cursor acp startup failure tab=%s phase=%s category=rpc_rejected rpc_code=%s retry=False",
@@ -300,12 +306,26 @@ class CursorSession(ProcessSession):
             ) from None
         except TimeoutError:
             raise _AcpStartupRetry(method, "request timed out") from None
+        except _AcpConnectionClosed as exc:
+            if exc.retry_category is not None:
+                raise _AcpStartupRetry(method, exc.retry_category) from None
+            self._runtime.logger().warning(
+                "cursor acp startup failure tab=%s phase=%s category=process_exit retry=False",
+                self.session.tab_id,
+                method,
+            )
+            raise
         except RuntimeError as exc:
-            if isinstance(exc, _AcpConnectionClosed) or isinstance(
-                exc.__cause__, (BrokenPipeError, ConnectionResetError)
-            ):
+            if isinstance(exc.__cause__, (BrokenPipeError, ConnectionResetError)):
                 raise _AcpStartupRetry(method, "connection closed") from None
             raise
+
+    def _connection_closed_error(self, fallback: str) -> _AcpConnectionClosed:
+        if self._exit_error is None or not self._stderr_buffer.strip():
+            return _AcpConnectionClosed(self._exit_error or fallback, "connection closed")
+        if any(marker in self._exit_error.lower() for marker in _ACP_TRANSIENT_NETWORK_MARKERS):
+            return _AcpConnectionClosed(self._exit_error, "network_unavailable")
+        return _AcpConnectionClosed(self._exit_error, None)
 
     async def stop(self) -> None:
         async with self._start_lock:
@@ -815,9 +835,7 @@ class CursorSession(ProcessSession):
             or self._process.returncode is not None
             or (self._reader_task is not None and self._reader_task.done())
         ):
-            if self._exit_error:
-                raise RuntimeError(self._exit_error)
-            raise _AcpConnectionClosed("cursor acp server is not running")
+            raise self._connection_closed_error("cursor acp server is not running")
         self._jsonrpc_id += 1
         req_id = self._jsonrpc_id
         loop = asyncio.get_running_loop()
@@ -842,9 +860,7 @@ class CursorSession(ProcessSession):
         ) and not future.done():
             self._pending_requests.pop(req_id, None)
             self._last_error = self._exit_error or f"cursor acp {method} failed: server exited"
-            if self._exit_error:
-                raise RuntimeError(self._exit_error)
-            raise _AcpConnectionClosed(self._last_error)
+            raise self._connection_closed_error(self._last_error)
         return req_id, future
 
     async def _send_request(
@@ -1316,9 +1332,7 @@ class CursorSession(ProcessSession):
             for future in self._pending_requests.values():
                 if not future.done():
                     future.set_exception(
-                        RuntimeError(self._exit_error)
-                        if self._exit_error
-                        else _AcpConnectionClosed("cursor acp server exited before response")
+                        self._connection_closed_error("cursor acp server exited before response")
                     )
             self._pending_requests.clear()
             if not cancelled:
