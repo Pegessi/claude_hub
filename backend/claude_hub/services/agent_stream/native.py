@@ -410,7 +410,8 @@ async def _probe_cursor_models() -> Tuple[List[StreamModelOption], bool]:
             stderr=asyncio.subprocess.PIPE,
             env=provider_subprocess_env("cursor", os.environ),
         )
-    except (OSError, NotImplementedError):
+    except (OSError, NotImplementedError) as exc:
+        logger.warning("Cursor model probe could not start: %s", type(exc).__name__)
         return _group_cursor_model_options(_static_options("cursor")), True
     try:
         stdout, _ = await asyncio.wait_for(
@@ -422,14 +423,20 @@ async def _probe_cursor_models() -> Tuple[List[StreamModelOption], bool]:
         # leaked (possibly hung) probe, then re-raise.
         _safe_kill(proc)
         raise
-    except Exception:
+    except Exception as exc:
         # Timeout or other failure: ``wait_for`` cancels the communicate
         # coroutine but does not kill the underlying process.
         _safe_kill(proc)
+        logger.warning("Cursor model probe failed: %s", type(exc).__name__)
+        return _group_cursor_model_options(_static_options("cursor")), True
+    if proc.returncode not in (0, None):
+        logger.warning("Cursor model probe exited with status %s", proc.returncode)
         return _group_cursor_model_options(_static_options("cursor")), True
     parsed = _group_cursor_model_options(
         _parse_list_models(stdout.decode("utf-8", errors="replace"))
     )
+    if not parsed:
+        logger.warning("Cursor model probe returned no parseable models")
     return (
         (parsed, False)
         if parsed
@@ -507,6 +514,10 @@ async def model_catalog_for(agent_type: str) -> ModelCatalog:
         metadata_cacheable = True
         if agent_type == "cursor":
             options, is_fallback = await _probe_cursor_models()
+            # A transient outage should not replace a previously discovered
+            # catalog with the much smaller static emergency list.
+            if is_fallback and entry is not None:
+                options = entry.options
             ttl = _MODELS_NEGATIVE_TTL_S if is_fallback else _MODELS_POSITIVE_TTL_S
             metadata_cacheable = not is_fallback
         elif agent_type == "antigravity":

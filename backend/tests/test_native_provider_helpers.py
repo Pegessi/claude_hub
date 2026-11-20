@@ -313,6 +313,7 @@ def test_stateless_model_options_are_fresh_per_call() -> None:
 @pytest.mark.asyncio
 async def test_cursor_probe_keeps_native_parser_and_grouping_patches(monkeypatch) -> None:
     process = MagicMock()
+    process.returncode = 0
     process.communicate = AsyncMock(return_value=(b"provider output", b""))
     monkeypatch.setattr(native.asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
     parsed = [StreamModelOption(id="parsed", label="Parsed", description="")]

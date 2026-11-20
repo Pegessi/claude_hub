@@ -177,6 +177,11 @@ export function useChatSettings(deps: Dependencies) {
     }
     isModelMenuOpen.value = true
     selectedMenuModelId.value = currentModelOption.value?.id ?? filteredModelOptions.value[0]?.id ?? ''
+    // A failed discovery is deliberately not cached, but a long-lived pane
+    // otherwise keeps its emergency catalog until another hydration.
+    if (deps.currentTab.value?.agent_type === 'cursor' && deps.capabilities.value?.metadata_cacheable === false) {
+      void deps.refreshCapabilities().catch(() => {})
+    }
     if (shouldAutoFocusTextInput()) {
       void nextTick(() => {
         modelSearchEl.value?.focus({ preventScroll: true })
