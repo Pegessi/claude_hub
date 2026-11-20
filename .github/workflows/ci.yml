@@ -289,7 +289,7 @@ jobs:
         with:
           version: ${{ steps.uv-version.outputs.version }}
       - name: Cache uv packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             .venv
@@ -336,7 +336,7 @@ jobs:
         with:
           version: ${{ steps.uv-version.outputs.version }}
       - name: Cache uv packages (security-audit)
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             .venv
@@ -372,7 +372,7 @@ jobs:
         with:
           package_json_file: frontend/package.json
       - name: Cache pnpm packages (security-audit)
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             node_modules
