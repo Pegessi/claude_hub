@@ -36,3 +36,36 @@ stream-init records can only establish an unverified binding. The explicit
 rotation workflow still prepares a replacement and defers adoption to its
 caller. Regression tests cover RPC rejection, a mismatched load response,
 late legacy init records, and recovery on the original ID.
+
+## Follow-up on cold starts
+
+The next launch selected a proxy at 07:24:39.788 UTC. The prior logged
+launch had selected the same route. The launch fingerprint hashes network
+configuration inputs, so changes in probe outcomes alone leave the
+fingerprint stable. The historical records omit the prior process's exit
+status and the trigger for the next launch.
+
+The native idle check used the last subscriber timestamp and could reap a
+healthy process immediately after a long turn finished with no viewers.
+The timeout now starts from the later of the last subscriber activity and
+the last turn completion. The reaper checks both again under the send lock.
+Diagnostics now distinguish idle reap, a configuration restart, and
+unexpected Cursor stdout closure.
+
+An isolated copy of the prior Cursor store, including its WAL, passed
+SQLite quick check. Its schema version, conversation ID, and canonical
+working directory matched. With network syscalls blocked, initialize
+succeeded but session/load returned `-32603` with
+`Failed to initialize session services` and empty stderr. A fresh-session
+control produced the same error. In the installed Cursor bundle both
+methods emit this detail when shared-service initialization throws,
+before the load handler looks up the conversation ID. The historical RPC
+detail was unavailable, so the reproduction cannot attribute that failure
+to a specific network or provider error.
+
+ACP now retries a startup handshake or verified session load once after
+short backoff if the request times out, its connection closes, or the server
+reports a recognized startup, network, or SQLite contention error. Only the
+original verified ID is sent on a retry. The process becomes ready after
+session setup completes. Diagnostics emit the phase, error category and
+RPC code without copying the RPC payload.

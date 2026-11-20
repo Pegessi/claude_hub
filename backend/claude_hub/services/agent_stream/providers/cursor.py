@@ -43,6 +43,19 @@ from .process import ProcessSession
 # one-shot handshake grace over a corporate proxy.
 _ACP_SESSION_INIT_TIMEOUT_S = 60.0
 _ACP_CANCEL_CONFIRM_TIMEOUT_S = 10.0
+_ACP_STARTUP_RETRY_DELAY_S = 0.25
+
+
+class _AcpConnectionClosed(RuntimeError):
+    pass
+
+
+class _AcpStartupRetry(RuntimeError):
+    def __init__(self, method: str, category: str, code: Optional[int] = None) -> None:
+        self.method = method
+        self.category = category
+        self.code = code
+        super().__init__(f"Cursor ACP {method}: {category} (RPC code {code})")
 
 
 class CursorSession(ProcessSession):
@@ -156,6 +169,10 @@ class CursorSession(ProcessSession):
         if current == self._launch_fingerprint:
             return
         await self._build_provider_env()
+        self._runtime.logger().info(
+            "cursor acp restarting after launch configuration changed tab=%s",
+            self.session.tab_id,
+        )
         await self.restart_for_recovery()
 
     async def start(self) -> None:
@@ -181,8 +198,8 @@ class CursorSession(ProcessSession):
             self._pending_questions.clear()
             self._pending_permissions.clear()
 
-            cmd = self._build_command()
             for attempt in range(2):
+                cmd = self._build_command()
                 fingerprint = self._configuration_fingerprint()
                 provider_env = await self._build_provider_env()
                 if self._configuration_fingerprint() != fingerprint:
@@ -204,19 +221,29 @@ class CursorSession(ProcessSession):
                     raise
                 self._stderr_buffer = b""
                 self._exit_error = None
-                self._started = True
                 reader_generation = self._stdout_generation
                 self._reader_task = asyncio.create_task(self._drain_stdout(reader_generation))
                 self._stderr_task = asyncio.create_task(self._drain_stderr())
+                phase = "initialization"
                 try:
                     await self._initialize_protocol()
+                    configuration_changed = self._configuration_fingerprint() != fingerprint
+                    if not configuration_changed:
+                        phase = "session setup"
+                        await self._initialize_session(provider_env)
+                except _AcpStartupRetry as exc:
+                    await self._terminate_process()
+                    if await self._retry_startup(exc, attempt):
+                        continue
+                    raise RuntimeError(self._last_error) from None
+                except asyncio.CancelledError:
+                    await self._terminate_process()
+                    raise
                 except Exception as exc:
-                    self._last_error = f"cursor acp initialization failed: {exc}"
-                    self._started = False
+                    self._last_error = f"cursor acp {phase} failed: {exc}"
                     await self._terminate_process()
                     raise RuntimeError(self._last_error) from exc
-                if self._configuration_fingerprint() != fingerprint:
-                    self._started = False
+                if configuration_changed:
                     await self._terminate_process()
                     if attempt == 0:
                         continue
@@ -224,17 +251,61 @@ class CursorSession(ProcessSession):
                         "provider network configuration changed repeatedly during startup"
                     )
                     raise ProviderNetworkError(self._last_error)
-                try:
-                    await self._initialize_session(provider_env)
-                except Exception as exc:
-                    self._last_error = f"cursor acp session setup failed: {exc}"
-                    self._started = False
-                    await self._terminate_process()
-                    raise RuntimeError(self._last_error) from exc
+                self._started = True
                 self._handshake_complete = True
                 self._last_error = None
                 self._launch_fingerprint = fingerprint
                 return
+
+    async def _retry_startup(self, error: _AcpStartupRetry, attempt: int) -> bool:
+        self._last_error = str(error)
+        self._runtime.logger().warning(
+            "cursor acp startup failure tab=%s phase=%s category=%s rpc_code=%s retry=%s",
+            self.session.tab_id,
+            error.method,
+            error.category,
+            error.code,
+            attempt == 0,
+        )
+        if attempt == 0:
+            await asyncio.sleep(_ACP_STARTUP_RETRY_DELAY_S)
+            return True
+        return False
+
+    async def _startup_request(self, method: str, params: Dict[str, Any], timeout: float) -> Any:
+        try:
+            return await self._send_request(method, params, timeout=timeout)
+        except ProviderRpcError as exc:
+            detail = str(exc).lower()
+            if exc.code == -32603 and "failed to initialize session services" in detail:
+                raise _AcpStartupRetry(
+                    method, "session_services_initialization", exc.code
+                ) from None
+            if exc.code in (-32603, -32000, -32001):
+                if any(marker in detail for marker in ("sqlite_busy", "database is locked")):
+                    raise _AcpStartupRetry(method, "sqlite_busy", exc.code) from None
+                if any(
+                    marker in detail
+                    for marker in ("econnreset", "etimedout", "eai_again", "econnrefused")
+                ):
+                    raise _AcpStartupRetry(method, "network_unavailable", exc.code) from None
+            self._runtime.logger().warning(
+                "cursor acp startup failure tab=%s phase=%s category=rpc_rejected rpc_code=%s retry=False",
+                self.session.tab_id,
+                method,
+                exc.code,
+            )
+            raise ProviderRpcError(
+                f"Cursor ACP {method} was rejected (RPC code {exc.code})", code=exc.code
+            ) from None
+        except TimeoutError:
+            raise _AcpStartupRetry(method, "request timed out") from None
+        except RuntimeError as exc:
+            if isinstance(exc, _AcpConnectionClosed) or isinstance(
+                exc.__cause__, (BrokenPipeError, ConnectionResetError)
+            ):
+                raise _AcpStartupRetry(method, "connection closed") from None
+            raise
 
     async def stop(self) -> None:
         async with self._start_lock:
@@ -272,7 +343,7 @@ class CursorSession(ProcessSession):
             },
             "clientInfo": {"name": "claude-hub", "version": "1.0.0"},
         }
-        await self._send_request("initialize", init_params, timeout=self._runtime.startup_grace_s())
+        await self._startup_request("initialize", init_params, self._runtime.startup_grace_s())
 
     def _capture_session_metadata(self, resp: Any) -> None:
         if not isinstance(resp, dict):
@@ -347,10 +418,10 @@ class CursorSession(ProcessSession):
             await asyncio.to_thread(_migrate_legacy_cli_store_for_acp, sid, cwd, provider_env)
             self._replaying_history = True
             try:
-                loaded_resp = await self._send_request(
+                loaded_resp = await self._startup_request(
                     "session/load",
                     {"sessionId": sid, "cwd": cwd, "mcpServers": []},
-                    timeout=_ACP_SESSION_INIT_TIMEOUT_S,
+                    _ACP_SESSION_INIT_TIMEOUT_S,
                 )
             except ProviderRpcError as exc:
                 raise RuntimeError(f"could not resume Cursor conversation {sid}: {exc}") from exc
@@ -744,7 +815,9 @@ class CursorSession(ProcessSession):
             or self._process.returncode is not None
             or (self._reader_task is not None and self._reader_task.done())
         ):
-            raise RuntimeError(self._exit_error or "cursor acp server is not running")
+            if self._exit_error:
+                raise RuntimeError(self._exit_error)
+            raise _AcpConnectionClosed("cursor acp server is not running")
         self._jsonrpc_id += 1
         req_id = self._jsonrpc_id
         loop = asyncio.get_running_loop()
@@ -769,7 +842,9 @@ class CursorSession(ProcessSession):
         ) and not future.done():
             self._pending_requests.pop(req_id, None)
             self._last_error = self._exit_error or f"cursor acp {method} failed: server exited"
-            raise RuntimeError(self._last_error)
+            if self._exit_error:
+                raise RuntimeError(self._exit_error)
+            raise _AcpConnectionClosed(self._last_error)
         return req_id, future
 
     async def _send_request(
@@ -782,6 +857,8 @@ class CursorSession(ProcessSession):
         except asyncio.TimeoutError:
             self._pending_requests.pop(req_id, None)
             self._last_error = f"cursor acp {method} timed out"
+            if method in ("initialize", "session/load"):
+                raise TimeoutError(self._last_error) from None
             raise RuntimeError(self._last_error) from None
         if "error" in response:
             error = response["error"]
@@ -1225,6 +1302,9 @@ class CursorSession(ProcessSession):
                         await asyncio.wait_for(stderr_task, timeout=1.0)
                     except Exception:
                         pass
+                self._runtime.logger().info(
+                    "cursor acp stdout closed tab=%s exit_code=%s", self.session.tab_id, returncode
+                )
                 if returncode != 0:
                     stderr_text = self._runtime.redact_diagnostic(
                         self._stderr_buffer.decode("utf-8", errors="ignore").strip()
@@ -1236,7 +1316,9 @@ class CursorSession(ProcessSession):
             for future in self._pending_requests.values():
                 if not future.done():
                     future.set_exception(
-                        RuntimeError(self._exit_error or "cursor acp server exited before response")
+                        RuntimeError(self._exit_error)
+                        if self._exit_error
+                        else _AcpConnectionClosed("cursor acp server exited before response")
                     )
             self._pending_requests.clear()
             if not cancelled:

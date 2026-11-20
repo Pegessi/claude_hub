@@ -6019,6 +6019,65 @@ async def test_cursor_acp_failed_resume_preserves_binding(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("phase", "verified"),
+    [("initialize", False), ("initialize", True), ("session/load", True)],
+)
+async def test_cursor_acp_retries_transient_startup_on_same_binding(
+    monkeypatch: MonkeyPatch, phase: str, verified: bool
+) -> None:
+    monkeypatch.setattr(
+        "claude_hub.services.agent_stream.providers.cursor._migrate_legacy_cli_store_for_acp",
+        lambda *args, **kwargs: None,
+    )
+    sess = _session(AgentType.CURSOR)
+    if verified:
+        sess.agent_session_id = "verified-existing-sid"
+        sess.agent_session_id_verified = True
+    persisted: List[str] = []
+    native = CursorNativeSession(sess, conversation_id_persist=persisted.append)
+    native._build_provider_env = AsyncMock(return_value={"PATH": "/bin"})  # type: ignore[method-assign]
+    first = _InteractiveAcpProc(session_id="unused")
+    second = _InteractiveAcpProc(session_id="initial-sid")
+
+    def reject_first(msg: Dict[str, Any]) -> None:
+        if msg.get("method") != phase:
+            first._on_stdin(msg)
+            return
+        first.requests.append(msg)
+        first.stdout.push_json(
+            {
+                "jsonrpc": "2.0",
+                "id": msg["id"],
+                "error": {
+                    "code": -32603,
+                    "message": "Internal error",
+                    "data": {"message": "Failed to initialize session services"},
+                },
+            }
+        )
+
+    first.stdin._handler = reject_first
+    spawn = AsyncMock(side_effect=[first, second])
+    native._spawn_subprocess = spawn  # type: ignore[method-assign]
+    try:
+        await native.start()
+        await native.start()
+        assert spawn.await_count == 2
+        assert first.returncode is not None
+        requests = first.requests + second.requests
+        assert not any(r["method"] == "session/new" for r in first.requests)
+        assert sum(r["method"] == "session/new" for r in requests) == int(not verified)
+        assert [r["params"]["sessionId"] for r in requests if r["method"] == "session/load"] == [
+            "verified-existing-sid"
+        ] * (2 if phase == "session/load" else int(verified))
+        assert native.active_thread_id == ("verified-existing-sid" if verified else "initial-sid")
+        assert persisted == ([] if verified else ["initial-sid"])
+    finally:
+        await native.stop()
+
+
+@pytest.mark.asyncio
 async def test_cursor_acp_session_load_process_exit_does_not_fall_back_to_session_new(
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -6067,22 +6126,28 @@ async def test_cursor_acp_session_load_process_exit_does_not_fall_back_to_sessio
         "claude_hub.services.agent_stream.providers.cursor._ACP_SESSION_INIT_TIMEOUT_S",
         0.03,
     )
-    proc_timeout = _InteractiveAcpProc(session_id="should-never-be-created-on-timeout")
-    orig_timeout_stdin = proc_timeout._on_stdin
 
-    def stall_on_load(msg: Dict[str, Any]) -> None:
-        if msg.get("method") == "session/load":
-            proc_timeout.requests.append(msg)
-            return
-        orig_timeout_stdin(msg)
+    def stalled_process() -> _InteractiveAcpProc:
+        process = _InteractiveAcpProc(session_id="should-never-be-created-on-timeout")
 
-    proc_timeout.stdin._handler = stall_on_load
-    native._spawn_subprocess = AsyncMock(return_value=proc_timeout)  # type: ignore[method-assign]
+        def stall_on_load(msg: Dict[str, Any]) -> None:
+            if msg.get("method") == "session/load":
+                process.requests.append(msg)
+                return
+            process._on_stdin(msg)
 
-    with pytest.raises(RuntimeError, match="session/load timed out"):
+        process.stdin._handler = stall_on_load
+        return process
+
+    stalled = [stalled_process(), stalled_process()]
+    native._spawn_subprocess = AsyncMock(side_effect=stalled)  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="session/load: request timed out"):
         await native.start()
 
-    assert [r.get("method") for r in proc_timeout.requests] == ["initialize", "session/load"]
+    for process in stalled:
+        assert [r.get("method") for r in process.requests] == ["initialize", "session/load"]
+        assert process.requests[1]["params"]["sessionId"] == "verified-existing-sid"
     assert persisted == []
     assert native._conversation_id == "verified-existing-sid"
 

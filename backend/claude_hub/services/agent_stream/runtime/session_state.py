@@ -128,6 +128,7 @@ class SessionState(ABC):
         self._subscribers: Set[asyncio.Queue[AgentStreamEvent]] = set()
         self._completion_subscribers: Set[asyncio.Queue[AgentStreamEvent]] = set()
         self._last_subscriber_at = time.monotonic()
+        self._last_native_turn_completed_at = 0.0
         # Wall-clock stamp of when the current in-flight turn was first
         # observed active; ``None`` when no turn is in flight. Used to clear
         # per-turn watchdog state after a turn finishes.

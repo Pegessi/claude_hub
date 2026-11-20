@@ -3941,8 +3941,16 @@ async def test_idle_reap_does_not_cancel_healthy_inflight_turn(
     await asyncio.sleep(0.2)
     assert transport.turn_in_flight is False
 
-    # Now idle (no in-flight turn): the next idle check reaps the tailer.
-    await asyncio.sleep(0.3)
+    # Losing the audience during a long turn does not spend the warm idle window.
+    assert tailer.is_running() is True
+    assert transport.stop_called is False
+    await tailer.send_message("follow-up", [], client_turn_id="turn-follow-up")
+    assert transport.turn_in_flight is True
+    transport._records.put_nowait({"type": "result", "subtype": "success"})
+    await asyncio.sleep(0.15)
+    assert transport.turn_in_flight is False
+    tailer._last_native_turn_completed_at -= tailer_module.IDLE_TTL_S + 1
+    await asyncio.sleep(0.15)
     assert tailer.is_running() is False
     assert transport.stop_called is True
 
