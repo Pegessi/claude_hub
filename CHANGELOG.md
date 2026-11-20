@@ -7,6 +7,11 @@
 
 ## Released
 
+### fix(cursor): recover model discovery after transient failures
+
+- Retain the last discovered Cursor catalog during probe failures and retry a
+  non-cacheable catalog when the model picker opens; log probe failure classes.
+
 ### fix(runtime): preserve configured model fallbacks
 
 - Preserve configured review and patrol fallbacks and private historical model variants

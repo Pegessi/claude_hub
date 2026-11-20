@@ -139,7 +139,7 @@ const stubs = {
           historyDetails.value = { ...historyDetails.value, [id]: { ...entry, status: 'loaded' } }
         }
       }
-      const stream = { events, historyReady, historyDetails, historyDetailRevision, attributedToolIds, connectionState, errorMessage, capabilities, start, stop, loadHistoryDetail, reconnect: start, retry: async (...args) => { globalThis.__chatLifecycleTest.calls.push(['retry', ...args]); await start(...args) }, refreshCapabilities: async () => {}, setMode: async () => {}, nudge() {}, reset() {} }
+      const stream = { events, historyReady, historyDetails, historyDetailRevision, attributedToolIds, connectionState, errorMessage, capabilities, start, stop, loadHistoryDetail, reconnect: start, retry: async (...args) => { globalThis.__chatLifecycleTest.calls.push(['retry', ...args]); await start(...args) }, refreshCapabilities: async () => { globalThis.__chatLifecycleTest.calls.push(['refreshCapabilities']) }, setMode: async () => {}, nudge() {}, reset() {} }
       globalThis.__chatLifecycleTest.streams.push(stream)
       return stream
     }
@@ -446,6 +446,22 @@ test('a cached Chat closes its model popover before leaving the document', async
   await flush()
   assert.equal(h.owner(h.keys.chatSettingsKey), settings)
   assert.equal(settings.isModelMenuOpen.value, false)
+})
+
+test('opening a picker retries a non-cacheable model catalog', async t => {
+  const h = await mount(t)
+  const settings = h.owner(h.keys.chatSettingsKey)
+  const stream = h.state.streams[0]
+  h.state.store.tabs[0].agent_type = 'cursor'
+  stream.capabilities.value.metadata_cacheable = false
+  settings.toggleModelMenu()
+  await flush()
+  assert.equal(h.state.calls.filter(([name]) => name === 'refreshCapabilities').length, 1)
+  settings.toggleModelMenu()
+  stream.capabilities.value.metadata_cacheable = true
+  settings.toggleModelMenu()
+  await flush()
+  assert.equal(h.state.calls.filter(([name]) => name === 'refreshCapabilities').length, 1)
 })
 
 test('cached settings cannot mutate a Chat while hydration, reconciliation or failure locks readiness', async t => {

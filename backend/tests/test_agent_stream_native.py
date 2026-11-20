@@ -5077,6 +5077,7 @@ class _FakeListModelsProc:
         self._stdout = stdout
         self._communicate_error = communicate_error
         self.killed = False
+        self.returncode = 0
 
     async def communicate(self) -> tuple[bytes, bytes]:
         if self._communicate_error is not None:
@@ -5337,6 +5338,40 @@ async def test_cursor_probe_failure_falls_back_to_static() -> None:
     assert all(model.provider_model_id for model in options)
     entry = native_module._models_cache["cursor"]
     assert entry.options is options
+
+
+@pytest.mark.asyncio
+async def test_cursor_stale_catalog_survives_repeated_failures_and_recovers(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    discovered = native_module._parse_list_models(_SAMPLE_LIST_MODELS)
+    replacement = native_module._parse_list_models("new-model - New Model")
+    outcomes = iter([(discovered, False), ([], True), ([], True), (replacement, False)])
+
+    async def probe():
+        return next(outcomes)
+
+    monkeypatch.setattr(native_module, "_probe_cursor_models", probe)
+    first = await native_module.model_catalog_for("cursor")
+    for _ in range(2):
+        native_module._models_cache["cursor"].expires_at = 0
+        stale = await native_module.model_catalog_for("cursor")
+        assert stale.options is first.options
+        assert not stale.metadata_cacheable
+    native_module._models_cache["cursor"].expires_at = 0
+    recovered = await native_module.model_catalog_for("cursor")
+    assert recovered.options is replacement
+    assert recovered.metadata_cacheable
+
+
+@pytest.mark.asyncio
+async def test_cursor_nonzero_exit_rejects_partial_output() -> None:
+    proc = _FakeListModelsProc(_SAMPLE_LIST_MODELS.encode())
+    proc.returncode = 1
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        options, fallback = await native_module._probe_cursor_models()
+    assert fallback
+    assert [model.id for model in options] == native_module._STATIC_MODELS["cursor"]
 
 
 @pytest.mark.asyncio
