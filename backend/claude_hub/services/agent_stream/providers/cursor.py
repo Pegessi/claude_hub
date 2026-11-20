@@ -305,18 +305,29 @@ class CursorSession(ProcessSession):
             raise ProviderRpcError(
                 f"Cursor ACP {method} was rejected (RPC code {exc.code})", code=exc.code
             ) from None
-        except TimeoutError:
-            raise _AcpStartupRetry(method, "request timed out") from None
-        except RuntimeError as exc:
-            if not isinstance(exc, _AcpConnectionClosed) and not isinstance(
-                exc.__cause__, (BrokenPipeError, ConnectionResetError)
+        except (RuntimeError, TimeoutError) as exc:
+            timed_out = isinstance(exc, TimeoutError)
+            if not (
+                timed_out
+                or isinstance(exc, _AcpConnectionClosed)
+                or isinstance(exc.__cause__, (BrokenPipeError, ConnectionResetError))
             ):
                 raise
+            proc = self._process
             reader = self._reader_task
-            if reader is not None and self._exit_error is None:
+            if (
+                reader is not None
+                and self._exit_error is None
+                and (not timed_out or (proc is not None and proc.returncode is not None))
+            ):
                 # A write can fail before stdout EOF and stderr have been drained.
                 # Let the same process supply its diagnostic before deciding to retry.
                 await asyncio.wait({reader}, timeout=_ACP_EXIT_DIAGNOSTIC_TIMEOUT_S)
+            if self._exit_error is None and proc is not None and proc.returncode is not None:
+                # A descendant may inherit stdout and prevent the reader from reaching EOF.
+                self._record_process_exit_error(proc.returncode)
+            if timed_out and self._exit_error is None:
+                raise _AcpStartupRetry(method, "request timed out") from None
             closed = self._connection_closed_error(str(exc))
             if closed.retry_category is not None:
                 raise _AcpStartupRetry(method, closed.retry_category) from None
@@ -326,6 +337,17 @@ class CursorSession(ProcessSession):
                 method,
             )
             raise closed from None
+
+    def _record_process_exit_error(self, returncode: int) -> None:
+        if returncode == 0:
+            return
+        stderr = self._runtime.redact_diagnostic(
+            self._stderr_buffer.decode("utf-8", errors="ignore").strip()
+        )
+        stderr = _format_acp_error_text(stderr)
+        self._exit_error = f"provider exited with code {returncode}" + (
+            f": {stderr}" if stderr else ""
+        )
 
     def _connection_closed_error(self, fallback: str) -> _AcpConnectionClosed:
         if self._exit_error is None or not self._stderr_buffer.strip():
@@ -1328,14 +1350,7 @@ class CursorSession(ProcessSession):
                 self._runtime.logger().info(
                     "cursor acp stdout closed tab=%s exit_code=%s", self.session.tab_id, returncode
                 )
-                if returncode != 0:
-                    stderr_text = self._runtime.redact_diagnostic(
-                        self._stderr_buffer.decode("utf-8", errors="ignore").strip()
-                    )
-                    stderr_text = _format_acp_error_text(stderr_text)
-                    self._exit_error = f"provider exited with code {returncode}" + (
-                        f": {stderr_text}" if stderr_text else ""
-                    )
+                self._record_process_exit_error(returncode)
             for future in self._pending_requests.values():
                 if not future.done():
                     future.set_exception(

@@ -6102,9 +6102,12 @@ async def test_cursor_acp_retries_transient_startup_on_same_binding(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("write_fails_first", [False, True])
+@pytest.mark.parametrize(
+    "failure_order",
+    ["exit_first", "pipe_first", "pipe_with_open_stdout", "timeout_with_open_stdout"],
+)
 async def test_cursor_acp_session_load_process_exit_does_not_fall_back_to_session_new(
-    monkeypatch: MonkeyPatch, write_fails_first: bool
+    monkeypatch: MonkeyPatch, failure_order: str
 ) -> None:
     """When ``agent acp`` exits during ``session/load`` (e.g. ``Cannot use this
     model``) or times out, ``start()`` must fail closed instead of falling back
@@ -6112,6 +6115,14 @@ async def test_cursor_acp_session_load_process_exit_does_not_fall_back_to_sessio
     monkeypatch.setattr(
         "claude_hub.services.agent_stream.providers.cursor._migrate_legacy_cli_store_for_acp",
         lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "claude_hub.services.agent_stream.providers.cursor._ACP_EXIT_DIAGNOSTIC_TIMEOUT_S",
+        0.03,
+    )
+    monkeypatch.setattr(
+        "claude_hub.services.agent_stream.providers.cursor._ACP_SESSION_INIT_TIMEOUT_S",
+        0.03,
     )
     sess = _session(AgentType.CURSOR)
     sess.agent_session_id = "verified-existing-sid"
@@ -6128,9 +6139,17 @@ async def test_cursor_acp_session_load_process_exit_does_not_fall_back_to_sessio
         if msg.get("method") == "session/load":
             proc.requests.append(msg)
             stderr = "Cannot use this model: gemini-example-model-1d11bad5f3fe-high"
-            if write_fails_first:
+            if failure_order == "pipe_first":
                 asyncio.get_running_loop().call_soon(proc.crash, 1, stderr)
                 raise BrokenPipeError("stdin closed before diagnostic")
+            if failure_order.endswith("_open_stdout"):
+                proc.returncode = 1
+                proc.stderr._queue.put_nowait(stderr.encode())
+                proc.stderr.push_eof()
+                # A descendant still owns stdout, so no EOF is published.
+                if failure_order.startswith("pipe"):
+                    raise BrokenPipeError("stdin closed while stdout remains open")
+                return
             proc.crash(exit_code=1, stderr_msg=stderr)
             return
         orig_on_stdin(msg)
@@ -6150,10 +6169,6 @@ async def test_cursor_acp_session_load_process_exit_does_not_fall_back_to_sessio
     assert native._conversation_id == "verified-existing-sid"
 
     # Timeout during session/load also fails closed without falling back to session/new.
-    monkeypatch.setattr(
-        "claude_hub.services.agent_stream.providers.cursor._ACP_SESSION_INIT_TIMEOUT_S",
-        0.03,
-    )
 
     def stalled_process() -> _InteractiveAcpProc:
         process = _InteractiveAcpProc(session_id="should-never-be-created-on-timeout")

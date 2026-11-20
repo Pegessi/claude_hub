@@ -77,3 +77,5 @@ diagnostic. Other nonzero exits with a diagnostic still surface the failure.
 If an ACP write fails before the reader observes EOF, startup gives that
 process a bounded window to publish its exit diagnostic. This preserves a
 permanent rejection even when the broken pipe is observed first.
+When an inherited stdout pipe stays open past that window, startup uses the
+exited child's known return code and buffered stderr to classify the error.
