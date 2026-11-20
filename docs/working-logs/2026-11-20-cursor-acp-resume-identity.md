@@ -74,3 +74,6 @@ The independent review also reproduced a nonzero subprocess exit carrying
 a connection reset during session/load. The exit now enters the same
 bounded startup retry, including when a subprocess exits without a
 diagnostic. Other nonzero exits with a diagnostic still surface the failure.
+If an ACP write fails before the reader observes EOF, startup gives that
+process a bounded window to publish its exit diagnostic. This preserves a
+permanent rejection even when the broken pipe is observed first.
