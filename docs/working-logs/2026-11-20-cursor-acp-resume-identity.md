@@ -79,3 +79,5 @@ process a bounded window to publish its exit diagnostic. This preserves a
 permanent rejection even when the broken pipe is observed first.
 When an inherited stdout pipe stays open past that window, startup uses the
 exited child's known return code and buffered stderr to classify the error.
+The same window also gives a correlated startup RPC rejection time to arrive
+when writing the request reports a broken pipe.
