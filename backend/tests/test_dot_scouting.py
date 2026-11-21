@@ -18,7 +18,9 @@ import pytest
 from claude_hub.services.dot import scouting
 from claude_hub.services.dot.scouting import (
     DEFAULT_STAGE1_MODEL,
+    DEFAULT_STAGE2_MODEL,
     INTEREST_LINES,
+    MAX_TAB_TITLES,
     SPEAK_BAR_SCORE,
     STAGE1_PASS_SCORE,
     InterestProfile,
@@ -31,7 +33,9 @@ from claude_hub.services.dot.scouting import (
     composite_score,
     parse_stage1,
     parse_stage2,
+    read_hub_tab_titles,
     render_speak_message,
+    resolve_stage2_model,
     score_candidate,
     topic_fingerprint,
     url_fingerprint,
@@ -348,6 +352,43 @@ async def test_dry_run_never_notifies_even_when_speak_bar_passes(
     assert notifier.calls == []
     assert result.notified == []
     assert result.run.dry_run is True
+    # A dry run is a preview: it must NOT poison the seen ledgers, so the item can
+    # resurface on a later real run. Only the run record is appended.
+    state = store.read_state()
+    assert state["seen_urls"] == {}
+    assert state["seen_topics"] == {}
+    assert len(state["runs"]) == 1
+    assert store.has_seen_url(url_fingerprint(candidate.url)) is False
+
+
+@pytest.mark.asyncio
+async def test_dry_run_does_not_block_a_later_live_run(store: ScoutingStore) -> None:
+    candidate = _candidate()
+    # First a dry run, then a real run with the same fresh candidate.
+    dry_engine = ScoutingEngine(
+        store,
+        stage1_caller=FakeModel([json.dumps({"candidates": [candidate.model_dump()]})]),
+        stage2_caller=FakeModel([_passing_stage2_reply(candidate.url)]),
+        notifier=FakeNotifier(),
+    )
+    dry_result = await dry_engine.run(
+        FakeDotStore(journal=["FlashAttention KV cache inference"]), dry_run=True
+    )
+    assert dry_result.stage2_invoked is True
+    assert store.has_seen_url(url_fingerprint(candidate.url)) is False
+
+    live_engine = ScoutingEngine(
+        store,
+        stage1_caller=FakeModel([json.dumps({"candidates": [candidate.model_dump()]})]),
+        stage2_caller=FakeModel([_passing_stage2_reply(candidate.url)]),
+        notifier=FakeNotifier(),
+    )
+    live_result = await live_engine.run(
+        FakeDotStore(journal=["FlashAttention KV cache inference"]), dry_run=False
+    )
+    # The real run still treats it as novel and re-runs Stage 2 (not filtered).
+    assert live_result.stage2_invoked is True
+    assert store.has_seen_url(url_fingerprint(candidate.url)) is True
 
 
 @pytest.mark.asyncio
@@ -374,6 +415,48 @@ async def test_stage2_below_speak_bar_is_silenced(store: ScoutingStore) -> None:
     assert result.stage2_invoked is True
     assert result.speaks == []
     assert result.silenced and notifier.calls == []
+
+
+class _FailingModel:
+    """Stage 2 caller that always raises, simulating an unavailable model."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self, prompt: str, model: str) -> str:
+        self.calls += 1
+        raise RuntimeError("model unavailable")
+
+
+@pytest.mark.asyncio
+async def test_live_run_withholds_ledger_when_stage2_fails(store: ScoutingStore) -> None:
+    candidate = _candidate()
+    stage1 = FakeModel([json.dumps({"candidates": [candidate.model_dump()]})])
+    stage2 = _FailingModel()
+    notifier = FakeNotifier()
+    engine = ScoutingEngine(store, stage1_caller=stage1, stage2_caller=stage2, notifier=notifier)
+
+    result = await engine.run(FakeDotStore(journal=["inference attention"]), dry_run=False)
+    assert result.stage2_invoked is True
+    assert result.verdicts == [] and result.errors
+    # The failed high-potential candidate must NOT be marked seen, so it retries.
+    assert store.has_seen_url(url_fingerprint(candidate.url)) is False
+    assert store.has_seen_topic(topic_fingerprint(candidate.title, candidate.summary)) is False
+    assert notifier.calls == []
+
+
+@pytest.mark.asyncio
+async def test_live_run_withholds_ledger_when_notify_fails(store: ScoutingStore) -> None:
+    candidate = _candidate()
+    stage1 = FakeModel([json.dumps({"candidates": [candidate.model_dump()]})])
+    stage2 = FakeModel([_passing_stage2_reply(candidate.url)])
+    notifier = FakeNotifier(result="failed")  # Feishu delivery fails
+    engine = ScoutingEngine(store, stage1_caller=stage1, stage2_caller=stage2, notifier=notifier)
+
+    result = await engine.run(FakeDotStore(journal=["inference attention"]), dry_run=False)
+    assert result.speaks and result.notified == []
+    # Delivery failed, so the Speak-Bar item stays out of the seen ledger to retry.
+    assert store.has_seen_url(url_fingerprint(candidate.url)) is False
 
 
 # ── parsing hardening / untrusted input ────────────────────────────────────
@@ -439,6 +522,76 @@ def test_parse_stage1_salvages_truncated_tail() -> None:
     assert parsed[0].url == "https://github.com/a/one"
 
 
+def test_parse_stage2_extracts_json_from_surrounding_prose() -> None:
+    # Strong models sometimes add a short preamble before the JSON object.
+    prose = (
+        "Here is my read-only verification:\n"
+        '{"url":"https://github.com/x/y","verified":true,"primary_source":true,'
+        '"speak_score":0.9,"hit_reason":"r","next_step":"n","evidence":[]}\n'
+        "Hope that helps."
+    )
+    verdict = parse_stage2(prose, "https://github.com/fallback")
+    assert verdict is not None
+    assert verdict.verified is True and verdict.speak_score == 0.9
+
+
+def test_parse_stage2_ignores_braces_inside_strings() -> None:
+    raw = (
+        '{"url":"https://github.com/x/y","verified":false,"primary_source":false,'
+        '"speak_score":0.2,"hit_reason":"note with a } brace inside",'
+        '"next_step":"","evidence":[],"verdict_note":""}'
+    )
+    verdict = parse_stage2(raw, "https://github.com/fallback")
+    assert verdict is not None
+    assert "}" in verdict.hit_reason
+
+
+def test_parse_stage2_coerces_loose_strong_model_types() -> None:
+    # Strong models may emit string scores/booleans, an out-of-range score, or a
+    # malformed evidence link; the verdict must still parse safely.
+    raw = json.dumps(
+        {
+            "url": "https://github.com/x/y",
+            "verified": "true",
+            "primary_source": "false",
+            "speak_score": "1.4",  # clamped to 1.0
+            "hit_reason": "r",
+            "evidence": [
+                {"title": "good", "url": "https://github.com/x/y"},
+                {"title": "bad", "url": "file:///etc/passwd"},
+            ],
+        }
+    )
+    verdict = parse_stage2(raw, "https://github.com/fallback")
+    assert verdict is not None
+    assert verdict.verified is True
+    assert verdict.primary_source is False
+    assert verdict.speak_score == 1.0
+    assert len(verdict.evidence) == 1  # invalid evidence link dropped, whole verdict kept
+
+
+def test_parse_stage2_tolerates_null_published_at() -> None:
+    # The strong model intermittently returns null for published_at; this must not
+    # invalidate an otherwise complete verdict (the observed production failure).
+    raw = json.dumps(
+        {
+            "url": "https://github.com/vllm-project/vllm/releases/tag/v0.34.0",
+            "title": "vLLM v0.34.0",
+            "verified": True,
+            "published_at": None,
+            "primary_source": True,
+            "speak_score": 0.9,
+            "hit_reason": "matches KV cache work",
+            "next_step": "review release",
+            "evidence": [],
+        }
+    )
+    verdict = parse_stage2(raw, "https://github.com/fallback")
+    assert verdict is not None
+    assert verdict.published_at == ""
+    assert verdict.verified is True and verdict.speak_score == 0.9
+
+
 def test_render_message_is_bounded_and_contains_link() -> None:
     candidate = _candidate()
     verdict = Stage2Verdict(
@@ -478,6 +631,128 @@ def test_run_record_and_ledger_persist(store: ScoutingStore) -> None:
 
 def test_default_stage1_model_is_the_required_deepseek() -> None:
     assert DEFAULT_STAGE1_MODEL == "deepseek-v41-flash-reasoning-high"
+
+
+# ── strong Stage 2 model resolution / fallback ─────────────────────────────
+
+
+def test_stage2_defaults_to_a_strong_model_distinct_from_stage1() -> None:
+    # The default Stage 2 verifier must be a real strong reasoning model, not the
+    # cheap DeepSeek flash model used for the Stage 1 wide net.
+    assert DEFAULT_STAGE2_MODEL
+    assert DEFAULT_STAGE2_MODEL != DEFAULT_STAGE1_MODEL
+
+
+def test_resolve_stage2_model_prefers_advertised_strong_model() -> None:
+    advertised = {
+        "deepseek-v41-flash-reasoning-high",
+        "gpt-6-astra_reasoning_high",
+        "gemini-4-argon_reasoning_high",
+    }
+    chosen = resolve_stage2_model(advertised, "")
+    assert chosen == "gpt-6-astra_reasoning_high"
+    assert chosen != DEFAULT_STAGE1_MODEL
+
+
+def test_resolve_stage2_model_honours_configured_when_advertised() -> None:
+    advertised = {"gpt-6-astra_reasoning_high", "gemini-4-argon_reasoning_high"}
+    chosen = resolve_stage2_model(advertised, "gemini-4-argon_reasoning_high")
+    assert chosen == "gemini-4-argon_reasoning_high"
+
+
+def test_resolve_stage2_model_falls_back_when_catalog_empty() -> None:
+    # No catalog snapshot: still return a concrete strong default rather than "".
+    chosen = resolve_stage2_model(set(), "")
+    assert chosen and chosen != DEFAULT_STAGE1_MODEL
+
+
+def test_stage2_fallback_chain_ends_with_the_cheap_model() -> None:
+    chain = scouting._stage2_fallback_chain("gpt-6-astra_reasoning_high")
+    assert chain[0] == "gpt-6-astra_reasoning_high"
+    # The cheap Stage 1 model is the last-resort degradation, never the first pick.
+    assert chain[-1] == DEFAULT_STAGE1_MODEL
+    assert len(chain) == len(set(chain))
+
+
+# ── active-tab filtering, recency and Chinese radar terms ──────────────────
+
+
+def _tab(
+    name: str, *, archived: bool = False, created_at: str = "", kind: str = "chat"
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "archived": archived,
+        "session_kind": kind,
+        "created_at": created_at,
+        "last_viewed_at": None,
+    }
+
+
+def test_read_tab_titles_excludes_archived_internal_and_terminal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    tabs = {
+        "version": 2,
+        "tabs": [
+            _tab("oldest active", created_at="2026-10-01T00:00:00"),
+            _tab("archived user tab", archived=True, created_at="2026-10-02T00:00:00"),
+            _tab("Dot scouting: gpt-6-astra_reasoning_high", created_at="2026-10-03T00:00:00"),
+            _tab("Patrol triage: abc123", created_at="2026-10-04T00:00:00"),
+            _tab("terminal work", kind="terminal", created_at="2026-10-05T00:00:00"),
+            _tab("最新智能体架构", created_at="2026-11-01T00:00:00"),
+            _tab("大模型推理优化", created_at="2026-11-02T00:00:00"),
+        ],
+    }
+    fake_home = tmp_path / "hub"
+    fake_home.mkdir(parents=True)
+    (fake_home / "tabs.json").write_text(json.dumps(tabs), encoding="utf-8")
+    monkeypatch.setattr(scouting, "resolve_runtime_home", lambda: fake_home)
+
+    titles = read_hub_tab_titles()
+    assert "archived user tab" not in titles
+    assert not any("scouting" in t.lower() or "triage" in t.lower() for t in titles)
+    assert "terminal work" not in titles
+    # Only active user chat tabs survive.
+    assert set(titles) == {"oldest active", "最新智能体架构", "大模型推理优化"}
+
+
+def test_read_tab_titles_takes_most_recent_active(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # More active tabs than the cap, stored oldest-first: the NEWEST must win.
+    tabs = [_tab(f"active-{i:02d}", created_at=f"2026-11-{i + 1:02d}T00:00:00") for i in range(40)]
+    fake_home = tmp_path / "hub"
+    fake_home.mkdir(parents=True)
+    (fake_home / "tabs.json").write_text(json.dumps({"version": 2, "tabs": tabs}), encoding="utf-8")
+    monkeypatch.setattr(scouting, "resolve_runtime_home", lambda: fake_home)
+
+    titles = read_hub_tab_titles()
+    assert len(titles) == MAX_TAB_TITLES
+    # The oldest tabs are dropped; the newest retained.
+    assert "active-00" not in titles
+    assert "active-39" in titles
+    assert titles[-1] == "active-39"
+
+
+def test_read_tab_titles_missing_file_returns_empty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(scouting, "resolve_runtime_home", lambda: tmp_path / "empty")
+    assert read_hub_tab_titles() == []
+
+
+def test_chinese_terms_feed_both_interest_lines() -> None:
+    profile = build_interest_profile(
+        journal_entries=["研究大模型训练框架，关注推理时延与显存带宽"],
+        card_titles=[("智能体编排", "主动式工具调用与多智能体工作流")],
+        focus_titles=["量化与投机解码落地"],
+        tab_titles=["前沿 agent 架构实操"],
+    )
+    train = {t.text for t in profile.terms if t.line == INTEREST_LINES[0]}
+    agent = {t.text for t in profile.terms if t.line == INTEREST_LINES[1]}
+    assert {"大模型", "训练", "推理", "显存"} & train
+    assert {"智能体", "工具调用", "多智能体", "工作流"} & agent
 
 
 # ── helpers ────────────────────────────────────────────────────────────────

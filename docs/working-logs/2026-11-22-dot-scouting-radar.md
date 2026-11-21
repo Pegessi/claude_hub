@@ -95,3 +95,57 @@ speak (Feishu) only past a high Speak-Bar threshold.
   so the ephemeral-Chat adapter is the correct model-call mechanism; rapid
   repeated provisioning is occasionally flaky, hence the single retry and the
   non-fatal error capture (a failed stage is recorded, never notified).
+
+## Review cycle 2 fixes
+
+Independent review (`claude-hub-reviewer-3-bbf7f5`, attempt 1) raised three
+blocking findings; all are addressed.
+
+1. **MASO discovery, strong-model selection and fallback.**
+   - Replaced the hard-coded `DEFAULT_MASO_BASE_URL` with `discover_maso_service`
+     (`resolve_maso_base_url`), honouring an explicit `MASO_BASE_URL` first and
+     otherwise probing the local registry/loopback candidates.
+   - Stage 2 now resolves a real strong model against the live catalog
+     (`resolve_stage2_model`, default `gpt-6-astra_reasoning_high`, distinct from
+     the DeepSeek-flash Stage 1) with a family-diverse `STAGE2_FALLBACK_MODELS`
+     chain (`_call_stage2` tries the strong model then fallbacks, last resort the
+     cheap Stage 1 model) so one unavailable model no longer aborts verification.
+   - `_run_ephemeral_turn` now checks `TURN_COMPLETED` status and surfaces `ERROR`
+     events instead of treating them as success; ephemeral-session archive is
+     shielded (`_shield_archive`) so cleanup failures never mask the turn result.
+2. **Dedupe-ledger poisoning.**
+   - `dry_run=True` now records only the run (`ScoutingStore.append_run`) and
+     never writes `seen_urls`/`seen_topics`, so previews do not suppress future
+     real runs.
+   - In live runs, high-potential candidates whose Stage 2 verification fails or
+     whose `dot notify` delivery fails are withheld from the ledger (and retried
+     later); only resolved outcomes (verified/silenced or notified) are committed.
+3. **Active-tab handling and Chinese radar terms.**
+   - `read_hub_tab_titles` excludes archived, terminal and internal
+     `Dot scouting:`/`Patrol triage:` tabs and returns the **newest**
+     `MAX_TAB_TITLES` active chat sessions (active tabs are stored oldest-first).
+   - Added core Chinese terms to both interest lexicons and a CJK-aware matcher
+     (`_is_cjk` substring matching, retaining token-boundary matching for Latin).
+   - Re-ran the isolated live `--dry-run`: Stage 1 DeepSeek produced 8 candidates,
+     Stage 2 ran `gpt-6-astra_reasoning_high` and returned parsed verdicts with
+     zero notifications and an untouched ledger.
+
+### Module split (line-ceiling)
+
+The single module exceeded the 1500-line doc ceiling, so the deterministic core
+moved to `services/dot/scouting_core.py` (config, untrusted-input Pydantic models,
+fingerprints, JSON store, radar, prompts, defensive parsing, scoring, with an
+explicit `__all__`). `services/dot/scouting.py` now holds only the live MASO
+adapter, the fallback chain, `ScoutingEngine` and tab discovery, and re-exports
+the core public API so `from ...scouting import X` keeps working. Line counts:
+628 (scouting) + 1187 (scouting_core).
+
+### Parser hardening for strong-model variance
+
+Observed strong-model output shapes that dropped verdicts are now tolerated
+without weakening validation: balanced-JSON extraction from surrounding prose,
+truncation repair, string/boolean coercion and 0..1 score clamping, `null`/numeric
+`published_at` and other text fields coerced to strings, and per-evidence
+filtering so one bad link no longer invalidates a whole verdict. Unit tests grew
+from 19 to 35, including new ledger-poisoning, fallback, tab-recency, Chinese-term
+and coercion cases.

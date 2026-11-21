@@ -9,21 +9,26 @@
 
 ### feat(dot): proactive interest radar and DeepSeek->strong-model scout funnel
 
-- Add `services/dot/scouting.py`: a self-contained pipeline that derives an
-  evolving two-line interest radar (LLM training/inference engineering; frontier
-  Agent/harness tooling) from local Dot journal, cards, focus and Hub tab titles,
-  with durable state in `<dot home>/scouting.json` (profile + URL/topic dedupe
-  ledger + run history) kept out of the resident session/turn packs.
-- Stage 1 fans a cheap MASO `deepseek-v41-flash-reasoning-high` model across
-  primary sources and re-scores deterministically; low-score or already-seen
-  runs short-circuit with zero Stage 2 calls and zero notifications. At most two
-  high-potential leads reach a strong read-only Stage 2 verifier, and only
-  verified, primary-source items past the Speak-Bar threshold notify via
-  `dot notify`; the rest are filed silently. All web/model content is treated as
-  untrusted read-only input with strict URL/JSON validation and truncation salvage.
+- Add `services/dot/scouting.py` + `scouting_core.py`: a self-contained pipeline
+  that derives an evolving two-line interest radar (LLM training/inference
+  engineering; frontier Agent/harness tooling) from local Dot journal, cards,
+  focus and the newest active Hub chat tab titles (archived/internal tabs
+  excluded, with CJK-aware matching), persisting profile + URL/topic dedupe
+  ledger + run history in `<dot home>/scouting.json` outside the resident
+  session/turn packs.
+- Stage 1 fans a cheap MASO `deepseek-v41-flash-reasoning-high` model (endpoint
+  resolved via `discover_maso_service`) across primary sources and re-scores
+  deterministically; low-score or already-seen runs short-circuit with zero
+  Stage 2 calls and zero notifications. At most two leads reach a strong Stage 2
+  verifier (default `gpt-6-astra_reasoning_high`, with a family-diverse fallback
+  chain), which checks turn status and only notifies verified primary-source
+  items past the Speak-Bar; the rest are filed silently. Dry runs never write the
+  seen ledger or notify, and failed verification/delivery is withheld for retry.
+- All web/model content is untrusted read-only input with strict URL/JSON
+  validation, prose/truncation-tolerant parsing and type coercion.
 - Expose `claude-hub dot scout profile|run [--dry-run]` and
-  `GET/POST /api/dot/scout/profile|/scout/run` (dry-run defaults on and never
-  notifies). Adds 19 unit tests; production Dot home and Feishu are untouched.
+  `GET/POST /api/dot/scout/profile|/scout/run` (dry-run defaults on). Adds 35
+  unit tests; production Dot home and Feishu are untouched.
 
 ### fix(cursor): recover model discovery after transient failures
 
