@@ -879,11 +879,19 @@ def _find_retained_patrol_session(workspace_id: str, title: str) -> ManagedSessi
     return None
 
 
-async def patrol_provider_env(*, prefer_low_cost: bool = False) -> tuple[AgentType, dict[str, str]]:
-    """Use the configured patrol model, a healthy MASO catalog, or an installed CLI."""
+async def patrol_provider_env(
+    *, require_read_only: bool = False
+) -> tuple[AgentType, dict[str, str]]:
+    """Select a provider the caller can use with the requested permissions."""
+    if require_read_only:
+        # The daily adapter requires a successful Codex Plan-mode transition
+        # before it submits any prompt. MASO has no equivalent Hub mode.
+        if not shutil.which("codex"):
+            raise CommandError("No provider with a read-only patrol mode is installed")
+        return AgentType.CODEX, {"CODEX_REASONING_EFFORT": "low"}
     agent_type, model, env = AgentType.CODEX, None, {}
     try:
-        base_url, models, default_model = await discover_maso_service(
+        base_url, models, _ = await discover_maso_service(
             {"MASO_BASE_URL": os.environ["MASO_BASE_URL"]}
             if os.environ.get("MASO_BASE_URL")
             else {}
@@ -895,11 +903,6 @@ async def patrol_provider_env(*, prefer_low_cost: bool = False) -> tuple[AgentTy
             if preferred
             else next((name for name in advertised if name.endswith("_reasoning_high")), None)
         )
-        if prefer_low_cost and not preferred:
-            selected = next(
-                (name for name in advertised if name.endswith("_reasoning_low")),
-                default_model if default_model in advertised else selected,
-            )
         if selected:
             agent_type, model, env = AgentType.MASO, selected, {"MASO_BASE_URL": base_url}
     except MasoServiceUnavailable:

@@ -2,7 +2,12 @@
 
 import asyncio
 
-from claude_hub.models import EnsureWorkspaceAgentRequest, SessionKind, WorkspaceSessionRole
+from claude_hub.models import (
+    ChatMode,
+    EnsureWorkspaceAgentRequest,
+    SessionKind,
+    WorkspaceSessionRole,
+)
 
 from .feishu_triage import (
     _archive_patrol_session,
@@ -15,7 +20,9 @@ from .feishu_triage import (
 
 
 async def recommend_daily_decisions(prompt: str, workspace_id: str) -> str:
-    agent_type, env = await patrol_provider_env(prefer_low_cost=True)
+    from claude_hub.api.agent_stream import get_managed_tailer_manager
+
+    agent_type, env = await patrol_provider_env(require_read_only=True)
     target = _resolve_patrol_workspace_id(workspace_id)
     title = "Patrol daily decision brief"
     retained = _find_retained_patrol_session(target, title)
@@ -37,6 +44,7 @@ async def recommend_daily_decisions(prompt: str, workspace_id: str) -> str:
         bootstrap=False,
     )
     try:
+        await get_managed_tailer_manager().set_mode(session, ChatMode.PLAN.value)
         return await _run_workspace_triage_turn(session, prompt, timeout_seconds=25)
     finally:
         await asyncio.shield(_archive_patrol_session(session.workspace_id, session.id))

@@ -479,28 +479,21 @@ async def test_new_mr_closure_is_reported_even_if_ci_becomes_unavailable() -> No
 
 
 @pytest.mark.asyncio
-async def test_daily_provider_uses_low_cost_health_route_and_archives(monkeypatch) -> None:
+@pytest.mark.parametrize("plan_available", [True, False, None])
+async def test_daily_provider_requires_read_only_plan_before_sending(
+    monkeypatch: pytest.MonkeyPatch, plan_available: bool | None
+) -> None:
     from types import SimpleNamespace
 
-    from claude_hub.services.agent_stream.maso_http import _model_options
+    from claude_hub.api import agent_stream
     from claude_hub.services.demand_patrol import digest_provider, feishu_triage
 
-    models = _model_options(
-        [
-            {
-                "key": "test-model",
-                "selector_variants": [
-                    {"mode": "default", "key": "test-model_reasoning_low"},
-                    {"mode": "default", "key": "test-model_reasoning_high"},
-                ],
-            }
-        ]
+    monkeypatch.setattr(
+        feishu_triage.shutil,
+        "which",
+        lambda binary: f"/bin/{binary}" if plan_available is not None else None,
     )
-    monkeypatch.delenv("CLAUDE_HUB_PATROL_MODEL", raising=False)
-    monkeypatch.setattr(feishu_triage, "local_setting", lambda key, default="": default)
-    discover = AsyncMock(
-        return_value=("http://127.0.0.1:19999", models, "test-model_reasoning_high")
-    )
+    discover = AsyncMock()
     monkeypatch.setattr(feishu_triage, "discover_maso_service", discover)
     session = SimpleNamespace(workspace_id="ws", id="daily-chat")
     ensure = AsyncMock(return_value=session)
@@ -511,19 +504,44 @@ async def test_daily_provider_uses_low_cost_health_route_and_archives(monkeypatc
         digest_provider, "_resolve_patrol_workspace_id", lambda workspace_id: workspace_id
     )
     monkeypatch.setattr(digest_provider, "_find_retained_patrol_session", lambda *_: None)
-    turn = AsyncMock(return_value='["A"]')
+    set_mode = AsyncMock(side_effect=None if plan_available else ValueError("unsupported Plan"))
+    monkeypatch.setattr(
+        agent_stream, "get_managed_tailer_manager", lambda: SimpleNamespace(set_mode=set_mode)
+    )
+
+    async def check_mode_then_recommend(*args: Any, **kwargs: Any) -> str:
+        set_mode.assert_awaited_once_with(session, "plan")
+        return '[[1,"A"]]'
+
+    turn = AsyncMock(side_effect=check_mode_then_recommend)
     archive = AsyncMock()
     monkeypatch.setattr(digest_provider, "_run_workspace_triage_turn", turn)
     monkeypatch.setattr(digest_provider, "_archive_patrol_session", archive)
 
-    assert await digest_provider.recommend_daily_decisions("recommend", "ws") == '["A"]'
+    if plan_available is None:
+        with pytest.raises(CommandError, match="No provider with a read-only patrol mode"):
+            await digest_provider.recommend_daily_decisions("recommend", "ws")
+        ensure.assert_not_awaited()
+        set_mode.assert_not_awaited()
+        turn.assert_not_awaited()
+        archive.assert_not_awaited()
+        discover.assert_not_awaited()
+        return
+    if plan_available:
+        assert await digest_provider.recommend_daily_decisions("recommend", "ws") == '[[1,"A"]]'
+        turn.assert_awaited_once_with(session, "recommend", timeout_seconds=25)
+    else:
+        with pytest.raises(ValueError, match="unsupported Plan"):
+            await digest_provider.recommend_daily_decisions("recommend", "ws")
+        turn.assert_not_awaited()
+
     assert ensure.await_args is not None
     workspace_id, request = ensure.await_args.args
-    assert workspace_id == "ws" and request.agent_type == AgentType.MASO
-    assert request.env["MASO_MODEL"] == "test-model_reasoning_low"
+    assert workspace_id == "ws" and request.agent_type == AgentType.CODEX
+    assert request.env["CODEX_REASONING_EFFORT"] == "low"
     assert request.ephemeral and request.caller_owned_ephemeral and not request.solo_mode
     assert ensure.await_args.kwargs == {"bootstrap": False}
-    turn.assert_awaited_once_with(session, "recommend", timeout_seconds=25)
+    discover.assert_not_awaited()
     archive.assert_awaited_once_with("ws", "daily-chat")
 
 
@@ -592,9 +610,9 @@ async def test_task_decision_uses_current_blocker_and_concrete_reply(
     lifecycle = TaskLifecycle(
         task_id=task.id,
         phase=TaskPhase.NEEDS_USER,
-        reason="agent_needs_input",
+        reason="initiator_needs_input" if source == "progress" else "reviewer_needs_input",
         reason_text="等待用户输入",
-        owner=TaskOwner(kind=TaskOwnerKind.SESSION),
+        owner=TaskOwner(kind=TaskOwnerKind.CHAT if source == "progress" else TaskOwnerKind.SESSION),
         attention=True,
         since=NOW,
         legacy_status="working",
@@ -610,6 +628,13 @@ async def test_task_decision_uses_current_blocker_and_concrete_reply(
         )
     else:
         task_details[task.id] = detail
+        task.latest_progress = TaskProgressSnapshot(
+            state=TaskProgressState.NEEDS_INPUT,
+            summary="旧问题。A：打包旧版本；B：清理旧包。",
+            call_id="same-epoch-stale-worker",
+            execution_epoch=task.execution_epoch,
+            reported_at=NOW - timedelta(hours=1),
+        )
     model = AsyncMock(return_value='[[1,"A"]]')
     state = PatrolState()
     kwargs = dict(
@@ -631,7 +656,8 @@ async def test_task_decision_uses_current_blocker_and_concrete_reply(
     assert model.await_args is not None and "新路径" not in model.await_args.args[0]
     assert (await build_daily_digest(state, **kwargs)).candidates == 0
     updated = detail.replace("启用新路径", "先开灰度")
-    if task.latest_progress:
+    if source == "progress":
+        assert task.latest_progress is not None
         task.latest_progress.summary = updated
     else:
         task_details[task.id] = updated

@@ -293,7 +293,8 @@ def _task_decision(
     if lifecycle.phase == TaskPhase.NEEDS_USER:
         progress = task.latest_progress
         if (
-            progress is not None
+            lifecycle.reason in {"initiator_needs_input", "initiator_blocked"}
+            and progress is not None
             and progress.execution_epoch == task.execution_epoch
             and progress.state in {TaskProgressState.NEEDS_INPUT, TaskProgressState.BLOCKED}
         ):
