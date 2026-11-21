@@ -8,7 +8,7 @@ import json
 import logging
 import os
 import signal
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Literal
 
 import httpx
@@ -79,17 +79,31 @@ def parse_lark_event(
     )
 
 
+async def _bounded_lines(stream: asyncio.StreamReader, label: str) -> AsyncIterator[bytes]:
+    """Skip an entire oversized record, even when it spans multiple pipe reads."""
+    dropping = False
+    while True:
+        try:
+            line = await stream.readuntil(b"\n")
+        except asyncio.LimitOverrunError as error:
+            if not dropping:
+                logger.warning("Skipping oversized Lark %s", label)
+            dropping = True
+            await stream.readexactly(error.consumed)
+            continue
+        except asyncio.IncompleteReadError as error:
+            if error.partial and not dropping:
+                yield error.partial
+            return
+        if not dropping:
+            yield line
+        dropping = False
+
+
 async def _read_stderr(stream: asyncio.StreamReader, key: str, ready: asyncio.Future[bool]) -> None:
     marker = f"[event] ready event_key={key}".encode()
     try:
-        while True:
-            try:
-                line = await stream.readline()
-            except ValueError:
-                logger.warning("Oversized Lark diagnostic for %s", key)
-                continue
-            if not line:
-                break
+        async for line in _bounded_lines(stream, f"diagnostic for {key}"):
             if line.strip() == marker and not ready.done():
                 ready.set_result(True)
                 logger.info("Lark subscription ready for %s", key)
@@ -158,7 +172,7 @@ async def consume_lark(
             raise asyncio.CancelledError
         if not await asyncio.wait_for(ready, timeout=ready_timeout):
             raise RuntimeError(f"Lark subscription exited before ready: {key}")
-        async for line in process.stdout:
+        async for line in _bounded_lines(process.stdout, f"NDJSON record for {key}"):
             try:
                 event = parse_lark_event(key, line, severity="urgent" if urgent else "normal")
             except (ValueError, RecursionError):

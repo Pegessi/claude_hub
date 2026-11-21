@@ -432,7 +432,9 @@ receipt ledger in `index.sqlite.events` in the Dot home.
 
 Urgent events request a wake through Dot's existing scheduler and yield to user
 turns. Dot can still reply quietly. Normal and digest events stay in the inbox for
-user-turn context or explicit inspection and acknowledgement. Dot gives the
+user-turn context or explicit inspection. A successful user turn acknowledges
+the passive events it received. Interrupted turns leave them available for
+retry. The pool retains the newest 200 unread passive events. Dot gives the
 model a bounded, escaped projection of the event with an
 `<external-untrusted-event>` boundary. The optional `payload` object is accepted
 for producer compatibility and discarded at intake. Keep any user-facing
@@ -449,7 +451,7 @@ It opens one personal consumer per key for meeting minutes, meeting notes, task
 changes and both approval status events. Supply repeated `--event` flags to limit
 the subscriptions or `--urgent-event KEY` for a key that should wake Dot. All keys
 default to normal. Check the service logs for each ready marker. The bridge reads
-NDJSON after readiness. On transport failures it retries with the same event ID
+NDJSON after readiness and skips malformed or oversized records. On transport failures it retries with the same event ID
 and exits nonzero if delivery still fails. Configure the supervisor to restart on
 failure. On HTTP 429 the Lark bridge logs the rejected event type and keeps
 listening. Lark streaming has no local replay spool, so events can be missed

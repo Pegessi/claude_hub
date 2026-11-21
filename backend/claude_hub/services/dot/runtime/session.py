@@ -410,9 +410,8 @@ class DotSessionService(object):
                 feishu_bound,
             ),
         )
-        # Only a wake-up handles events. The user's turn shows them, but the user
-        # comes first: they stay unread for the wake-up that follows.
-        delivered = pack.delivered_event_ids if hub else []
+        # The pack selects which shown events this turn may acknowledge.
+        delivered = pack.delivered_event_ids
         # Remembered until the turn ends: a failed turn gives its events and its
         # first-turn context back (see ``_turn_ended``).
         sent: dict[str, Any] = {
@@ -535,27 +534,32 @@ class DotSessionService(object):
             if turn.get("tidy") and finished and tidied and (last is None or tidied > last):
                 changes["last_tidy_at"] = turn["at"]
             self.store.update_state(**changes)
-        # Only a turn the provider took marked its events read; a later turn may have
-        # shown and read them since a turn that was never taken.
+        # Only apply the event lifecycle to a turn the provider accepted.
         ids = [str(one) for one in turn.get("ids") or []] if turn.get("acked") else []
-        if not finished and ids:
-            self.store.mark_inbox_unread(ids)
-            # The watcher wakes Dot again for them, after a pause: a failing
-            # provider must not be retried every minute.
-            self._yielded_at = time.monotonic()
+        if ids:
+            if not turn.get("hub"):
+                # User turns silently consume passive events only after success.
+                if finished:
+                    self.store.mark_inbox_read(ids)
+            elif not finished:
+                self.store.mark_inbox_unread(ids)
+                # Give back wake events after a pause so provider failures do not spin.
+                self._yielded_at = time.monotonic()
 
     def mark_delivered(self, event_ids: list[str]) -> None:
-        """The provider accepted a turn: its shown inbox events are now read."""
+        """Record provider acceptance and tentatively consume events in a wake turn."""
         if not event_ids:
             return
-        self.store.mark_inbox_read(event_ids)
         with self.store.lock:
             sent = _sent_turns(self.store.read_state())
             for turn in reversed(sent):
                 if turn.get("ids") == event_ids:
+                    if turn.get("hub"):
+                        self.store.mark_inbox_read(event_ids)
                     turn["acked"] = True
                     self.store.update_state(sent_turns=sent)
-                    break
+                    return
+            self.store.mark_inbox_read(event_ids)
 
     def request_rotation(
         self,

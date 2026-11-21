@@ -210,6 +210,67 @@ async def test_turn_pack_cannot_be_broken_out_of_and_passive_events_stay_out_of_
     assert "Passive" in user_turn.text
 
 
+@pytest.mark.asyncio
+async def test_passive_events_are_consumed_only_by_a_successful_user_turn(
+    dot: DotService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wake = AsyncMock()
+    monkeypatch.setattr(dot, "wake", wake)
+    async with client() as local:
+        for severity in ("normal", "digest"):
+            await local.post(
+                "/api/dot/events", json={**EVENT, "severity": severity, "dedupe_key": severity}
+            )
+    work = dot.store.add_inbox("task_failed", "Hub work failed")
+    passive = [item["id"] for item in dot.store.list_inbox() if item["id"] != work["id"]]
+    for failed, cancelled in ((True, False), (False, True), (False, False)):
+        turn = dot.prepare_turn("How is my week?", None)
+        assert turn.delivered_event_ids == passive
+        dot.mark_delivered(turn.delivered_event_ids)
+        assert len(dot.store.list_inbox()) == 3
+        dot._turn_ended(None, None, dot._utc_now().isoformat(), failed, cancelled)
+    assert [item["id"] for item in dot.store.list_inbox()] == [work["id"]]
+    assert "CI failed" not in dot.prepare_turn("Next question", None).turn_pack
+    wake.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_passive_pool_retains_newest_and_does_not_retire_other_events(
+    dot: DotService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(gateway, "PASSIVE_INBOX_LIMIT", 2)
+    wake = AsyncMock()
+    monkeypatch.setattr(dot, "wake", wake)
+    work = dot.store.add_inbox("task_failed", "Hub work failed")
+    async with client() as local:
+        for index in range(3):
+            response = await local.post(
+                "/api/dot/events",
+                json={
+                    **EVENT,
+                    "title": f"passive-{index}",
+                    "dedupe_key": f"passive-{index}",
+                },
+            )
+            assert response.status_code == 202
+        assert (
+            await local.post(
+                "/api/dot/events",
+                json={
+                    **EVENT,
+                    "title": "passive-0",
+                    "dedupe_key": "passive-0",
+                },
+            )
+        ).json() == {"status": "duplicate"}
+    assert [item["text"] for item in dot.store.list_inbox()] == [
+        work["text"],
+        "passive-1",
+        "passive-2",
+    ]
+    wake.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     ("key", "record", "summary"),
     [
@@ -267,6 +328,8 @@ async def test_consumer_waits_for_ready_and_terms_its_child(
         f"while not pathlib.Path({str(gate)!r}).exists():\n"
         "    time.sleep(0.01)\n"
         f"print('[event] ready event_key={MINUTES}', file=sys.stderr, flush=True)\n"
+        "print('x' * 160000 + '{\"event_id\":\"oversized\"}', flush=True)\n"
+        f"print({json.dumps({'type': MINUTES, 'event_id': 'e2'})!r}, flush=True)\n"
         "signal.pause()\n"
     )
     fake.chmod(0o700)
@@ -275,7 +338,8 @@ async def test_consumer_waits_for_ready_and_terms_its_child(
 
     async def send(event: gateway.ExternalEvent) -> None:
         events.append(event)
-        received.set()
+        if len(events) == 2:
+            received.set()
 
     child = asyncio.create_task(consume_lark(MINUTES, send, executable=str(fake), urgent=True))
     try:
@@ -285,8 +349,10 @@ async def test_consumer_waits_for_ready_and_terms_its_child(
         assert not received.is_set()
         gate.touch()
         await asyncio.wait_for(received.wait(), timeout=5)
-        assert len(events) == 1
-        assert (events[0].dedupe_key, events[0].severity) == ("e1", "urgent")
+        assert [(event.dedupe_key, event.severity) for event in events] == [
+            ("e1", "urgent"),
+            ("e2", "urgent"),
+        ]
     finally:
         child.cancel()
         with pytest.raises(asyncio.CancelledError):

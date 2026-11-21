@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 EXTERNAL_EVENT = "external_event"
 MAX_EVENT_BYTES = 64 * 1024
 EVENTS_PER_HOUR = 60
+PASSIVE_INBOX_LIMIT = 200
 _WINDOW_SECONDS = 3600
 _LOCAL_HOST = re.compile(r"(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]+)?", re.IGNORECASE)
 _PROXY_HEADERS = ("forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "via")
@@ -105,7 +106,8 @@ def _enqueue(store: DotStore, event: ExternalEvent) -> bool:
         with store.lock:
             # A process can stop after the atomic inbox write but before the ledger commit.
             # Recover that receipt even if a Dot turn has already acknowledged the entry.
-            existing = any(item.get("key") == key for item in store.list_inbox(unread_only=False))
+            inbox = store.list_inbox(unread_only=False)
+            existing = any(item.get("key") == key for item in inbox)
             if not existing:
                 text = " — ".join(filter(None, (event.title, event.summary)))
                 store.add_inbox(
@@ -117,6 +119,14 @@ def _enqueue(store: DotStore, event: ExternalEvent) -> bool:
                     severity=event.severity,
                     url=str(event.url) if event.url else "",
                 )
+                if event.severity != "urgent":
+                    pending = [
+                        item["id"]
+                        for item in inbox
+                        if item.get("id") and not item.get("read") and not triggers_wake(item)
+                    ]
+                    if len(pending) >= PASSIVE_INBOX_LIMIT:
+                        store.mark_inbox_read(pending[: len(pending) - PASSIVE_INBOX_LIMIT + 1])
         db.execute("INSERT INTO ingress VALUES (?, ?, ?)", (key, event.source, now))
     return not existing
 

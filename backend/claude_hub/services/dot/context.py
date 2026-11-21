@@ -240,8 +240,9 @@ def build_turn_pack(
 ) -> TurnPack:
     """Assemble the per-turn context; a section that does not fit is cut or skipped.
 
-    ``wake`` is false on the user's turn: reviews and events are shown, but left
-    for the next wake-up. ``reach`` is the ``reach_note`` line.
+    On the user's turn, only passive external events are eligible for
+    acknowledgement. Wake-triggering events stay unread for the next wake-up.
+    ``reach`` is the ``reach_note`` line.
     """
     moment = (now or datetime.now()).astimezone()
     header = (
@@ -309,5 +310,9 @@ def build_turn_pack(
     shown = events[-_EVENTS_PER_TURN:][:shown_events] if shown_events > 0 else []
     return TurnPack(
         text="\n\n".join(blocks),
-        delivered_event_ids=[str(event.get("id")) for event in shown if event.get("id")],
+        delivered_event_ids=[
+            str(event["id"])
+            for event in shown
+            if event.get("id") and (wake or not triggers_wake(event))
+        ],
     )
