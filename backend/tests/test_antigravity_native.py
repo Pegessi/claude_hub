@@ -1168,12 +1168,13 @@ async def test_dot_preparation_rotates_antigravity_before_the_first_turn(
     monkeypatch.delattr(native, "_prepare_turn_context")
     persisted: list[str] = []
     native._conversation_id_persist = persisted.append
-    plan = SimpleNamespace(
+    plan = dot_module.TurnPlan(
         prepared_generation="gen-1",
         rotate=True,
         new_session=True,
         system_pack="PACK",
         turn_pack="TURN",
+        delivery_id=None,
         delivered_event_ids=[],
     )
     associated: list[str] = []
