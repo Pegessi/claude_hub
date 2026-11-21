@@ -7,6 +7,12 @@
 
 ## Released
 
+### feat(dot): receive external events and bridge personal Lark updates
+
+- Accept authenticated events with durable deduplication and per-source sliding quotas.
+- Route urgent events through Dot's guarded wake path and keep normal and digest events in the inbox.
+- Add a supervised personal Lark bridge and Codebase/Merlin callback sender.
+
 ### fix(cursor): recover model discovery after transient failures
 
 - Retain the last discovered Cursor catalog during probe failures and retry a

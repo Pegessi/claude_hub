@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 
 from claude_hub.services import workspace_state_policy as state_policy
+from claude_hub.services.dot.events_gateway import triggers_wake
 from claude_hub.services.dot.runtime.common import (
     _ATTENTION_REPORT_STATES,
     _QUESTION_REPORT_STATES,
@@ -679,20 +680,24 @@ class DotWorkService(DotSessionService, ABC):
                 logger.exception("dot work watcher failed")
             await asyncio.sleep(self._watch_interval_seconds())
 
-    async def _wake_if_due(self) -> None:
+    async def wake_for_external_event(self) -> None:
+        self._wake_pending = True
+        await self._wake_if_due(poll_work=False)
+
+    async def _wake_if_due(self, *, poll_work: bool = True) -> None:
         """Wake while events are unread: new ones, or ones a stopped, failed or
         skipped wake-up gave back (a tidy that gave way waits for the next night).
         """
         # Pending: new events, or a wake-up gave way. They go as soon as the pause
         # and any running wake-up allow.
-        if await self.check_work():
+        if poll_work and await self.check_work():
             self._wake_pending = True
         # The user may still be talking, or the provider is failing: wait a while.
         if time.monotonic() - self._yielded_at < self._yield_pause_seconds():
             return
         if self._wake_in_flight():
             return
-        if not self.store.list_inbox():
+        if not any(map(triggers_wake, self.store.list_inbox())):
             # Nothing unread (e.g. a tidy gave way): no wake-up, and none pending.
             self._wake_pending = False
             return

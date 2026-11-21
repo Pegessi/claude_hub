@@ -9,7 +9,7 @@ import hashlib
 import json
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -17,6 +17,7 @@ from ..auth.dependencies import get_current_user
 from ..config import settings
 from ..models.schemas import User
 from ..services.dot import Card, DotService, get_dot_service
+from ..services.dot.events_gateway import receive_external_event
 from ..services.dot.service import DelegateNotStarted, LessonNotFound
 from ..services.dot.store import LESSON_RULE_LIMIT
 from ..services.ttyd_manager import TabLimitExceededError
@@ -717,6 +718,11 @@ async def dot_unwatch(
     if item is None:
         raise HTTPException(status_code=404, detail="Dot is not tracking this task")
     return item
+
+
+@router.post("/events", status_code=202)
+async def dot_events(request: Request) -> dict[str, str]:
+    return await receive_external_event(request, _service())
 
 
 @router.get("/inbox")
