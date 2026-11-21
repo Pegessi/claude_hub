@@ -7,6 +7,24 @@
 
 ## Released
 
+### feat(dot): proactive interest radar and DeepSeek->strong-model scout funnel
+
+- Add `services/dot/scouting.py`: a self-contained pipeline that derives an
+  evolving two-line interest radar (LLM training/inference engineering; frontier
+  Agent/harness tooling) from local Dot journal, cards, focus and Hub tab titles,
+  with durable state in `<dot home>/scouting.json` (profile + URL/topic dedupe
+  ledger + run history) kept out of the resident session/turn packs.
+- Stage 1 fans a cheap MASO `deepseek-v41-flash-reasoning-high` model across
+  primary sources and re-scores deterministically; low-score or already-seen
+  runs short-circuit with zero Stage 2 calls and zero notifications. At most two
+  high-potential leads reach a strong read-only Stage 2 verifier, and only
+  verified, primary-source items past the Speak-Bar threshold notify via
+  `dot notify`; the rest are filed silently. All web/model content is treated as
+  untrusted read-only input with strict URL/JSON validation and truncation salvage.
+- Expose `claude-hub dot scout profile|run [--dry-run]` and
+  `GET/POST /api/dot/scout/profile|/scout/run` (dry-run defaults on and never
+  notifies). Adds 19 unit tests; production Dot home and Feishu are untouched.
+
 ### fix(cursor): recover model discovery after transient failures
 
 - Retain the last discovered Cursor catalog during probe failures and retry a
