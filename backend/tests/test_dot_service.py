@@ -1043,7 +1043,7 @@ async def test_a_failed_turn_gives_its_events_back(
     assert service.associate_conversation(
         "provider-1", prepared_generation=plan.prepared_generation, tab_id=TAB_ID
     )
-    service.mark_delivered(plan.delivered_event_ids)
+    service.mark_delivered(plan.delivery_id)
     assert store.list_inbox() == []
     await stream.append(_event(AgentStreamEventType.TURN_STARTED, "t1", summary="[Dot wake]"))
     await stream.append(
@@ -1056,7 +1056,7 @@ async def test_a_failed_turn_gives_its_events_back(
     # The retry works: the event is read for good.
     plan = service.prepare_turn("[Dot wake] events", "provider-1")
     assert plan.rotate and plan.delivered_event_ids == [event["id"]]
-    service.mark_delivered(plan.delivered_event_ids)
+    service.mark_delivered(plan.delivery_id)
     await stream.append(_event(AgentStreamEventType.TURN_STARTED, "t2", summary="[Dot wake]"))
     await stream.append(_event(AgentStreamEventType.TURN_COMPLETED, "t2", assistant_text="Done."))
     await service.sync_journal()
@@ -1087,7 +1087,7 @@ async def test_a_turn_the_provider_never_took(
     again = _event(AgentStreamEventType.TURN_STARTED, "t2", summary="[Dot wake] hello?")
     second = service.prepare_turn("[Dot wake] hello?", "provider-1")
     assert not second.rotate and second.delivered_event_ids == [event["id"]]
-    service.mark_delivered(second.delivered_event_ids)
+    service.mark_delivered(second.delivery_id)
     for one in (started, failed, again):
         await stream.append(one)
     await service.sync_journal()
@@ -1189,7 +1189,7 @@ async def test_a_user_message_stops_a_wake_up_and_gives_its_events_back(
     event = store.add_inbox("task_done", "Paper — done", task_id="task-1")
     started = _event(AgentStreamEventType.TURN_STARTED, "scheduled-r-wake", summary=WAKE_MESSAGE)
     plan = service.prepare_turn(WAKE_MESSAGE, "conv-1")
-    service.mark_delivered(plan.delivered_event_ids)
+    service.mark_delivered(plan.delivery_id)
     assert store.list_inbox() == []
 
     calls: list[Any] = []
@@ -1209,7 +1209,7 @@ async def test_a_user_message_stops_a_wake_up_and_gives_its_events_back(
     )
     again = _event(AgentStreamEventType.TURN_STARTED, "scheduled-r-wake2", summary=WAKE_MESSAGE)
     second = service.prepare_turn(WAKE_MESSAGE, "conv-1")
-    service.mark_delivered(second.delivered_event_ids)
+    service.mark_delivered(second.delivery_id)
     for one in (started, stopped, again):
         await stream.append(one)
     assert await service.sync_journal() == 0, "a wake-up that gave way is not in the talk"
@@ -1505,7 +1505,7 @@ async def test_a_wake_up_stopped_by_hand_or_failed_runs_again(
             _event(AgentStreamEventType.TURN_STARTED, turn_id, summary=WAKE_MESSAGE)
         )
         plan = service.prepare_turn(WAKE_MESSAGE, "conv-1")
-        service.mark_delivered(plan.delivered_event_ids)
+        service.mark_delivered(plan.delivery_id)
         await stream.append(_event(AgentStreamEventType.TURN_COMPLETED, turn_id, status=status))
         await service.sync_journal()
         assert service.store.list_inbox(), f"a {status} wake-up gives its events back"

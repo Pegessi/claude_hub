@@ -10,7 +10,10 @@ in-flight checks. The first urgent attempt skips the work polling pass. Normal
 and digest events remain visible to user turns and manual inbox review, and are
 excluded from unattended wake turns. A successful accepted user turn consumes
 the passive events it saw, while failed or cancelled turns leave them pending.
-The gateway retires the oldest passive entries once 200 are pending. The context
+The gateway retires the oldest passive entries once 200 are pending. Provider
+acknowledgement identifies the exact prepared wake turn. A later acknowledgement
+has no effect once that turn ends. A successful terminal event consumes the
+turn's selected events even if it precedes acknowledgement. The context
 builder escapes external
 fields and keeps the complete boundary together when applying its size budget.
 

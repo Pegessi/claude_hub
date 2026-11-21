@@ -412,11 +412,13 @@ class DotSessionService(object):
         )
         # The pack selects which shown events this turn may acknowledge.
         delivered = pack.delivered_event_ids
+        delivery_id = str(uuid.uuid4()) if delivered else None
         # Remembered until the turn ends: a failed turn gives its events and its
         # first-turn context back (see ``_turn_ended``).
         sent: dict[str, Any] = {
             "at": self._utc_now().isoformat(),
             "ids": delivered,
+            "delivery_id": delivery_id,
             "first": new_session,
         }
         if hub:
@@ -444,6 +446,7 @@ class DotSessionService(object):
             prepared_generation=prepared_generation,
             system_pack=system_pack,
             turn_pack=pack.text,
+            delivery_id=delivery_id,
             delivered_event_ids=delivered,
         )
 
@@ -534,32 +537,27 @@ class DotSessionService(object):
             if turn.get("tidy") and finished and tidied and (last is None or tidied > last):
                 changes["last_tidy_at"] = turn["at"]
             self.store.update_state(**changes)
-        # Only apply the event lifecycle to a turn the provider accepted.
-        ids = [str(one) for one in turn.get("ids") or []] if turn.get("acked") else []
-        if ids:
-            if not turn.get("hub"):
-                # User turns silently consume passive events only after success.
-                if finished:
-                    self.store.mark_inbox_read(ids)
-            elif not finished:
+            ids = [str(one) for one in turn.get("ids") or []]
+            if ids and finished:
+                # A successful terminal event also proves acceptance when it arrives first.
+                self.store.mark_inbox_read(ids)
+            elif ids and turn.get("hub") and turn.get("acked"):
                 self.store.mark_inbox_unread(ids)
                 # Give back wake events after a pause so provider failures do not spin.
                 self._yielded_at = time.monotonic()
 
-    def mark_delivered(self, event_ids: list[str]) -> None:
-        """Record provider acceptance and tentatively consume events in a wake turn."""
-        if not event_ids:
+    def mark_delivered(self, delivery_id: str | None) -> None:
+        """Tentatively consume wake events only while their prepared turn is live."""
+        if not delivery_id:
             return
         with self.store.lock:
             sent = _sent_turns(self.store.read_state())
-            for turn in reversed(sent):
-                if turn.get("ids") == event_ids:
-                    if turn.get("hub"):
-                        self.store.mark_inbox_read(event_ids)
+            for turn in sent:
+                if turn.get("delivery_id") == delivery_id and turn.get("hub"):
+                    self.store.mark_inbox_read(turn.get("ids") or [])
                     turn["acked"] = True
                     self.store.update_state(sent_turns=sent)
                     return
-            self.store.mark_inbox_read(event_ids)
 
     def request_rotation(
         self,

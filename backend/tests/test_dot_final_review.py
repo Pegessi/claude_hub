@@ -173,7 +173,7 @@ async def test_final_pass_wakes_with_verdict_after_worker_event_was_consumed(
     assert "do not reply [quiet]" not in plan.turn_pack
     assert "goes there with `claude-hub dot notify`" in plan.turn_pack
     assert len(plan.turn_pack) <= TURN_PACK_CHARS
-    dot.mark_delivered(plan.delivered_event_ids)
+    dot.mark_delivered(plan.delivery_id)
     assert dot.store.list_inbox() == []
     assert await dot.check_work() == 0
 

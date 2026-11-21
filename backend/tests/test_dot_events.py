@@ -23,6 +23,7 @@ from claude_hub.services.dot.events_bridge import (
     parse_lark_event,
     send_event,
 )
+from claude_hub.services.dot.prompts import WAKE_MESSAGE
 
 MINUTES = "minutes.minute.generated_v1"
 TASK = "task.task.update_user_access_v2"
@@ -226,12 +227,46 @@ async def test_passive_events_are_consumed_only_by_a_successful_user_turn(
     for failed, cancelled in ((True, False), (False, True), (False, False)):
         turn = dot.prepare_turn("How is my week?", None)
         assert turn.delivered_event_ids == passive
-        dot.mark_delivered(turn.delivered_event_ids)
+        dot.mark_delivered(turn.delivery_id)
         assert len(dot.store.list_inbox()) == 3
         dot._turn_ended(None, None, dot._utc_now().isoformat(), failed, cancelled)
     assert [item["id"] for item in dot.store.list_inbox()] == [work["id"]]
     assert "CI failed" not in dot.prepare_turn("Next question", None).turn_pack
     wake.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_first", [False, True])
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_passive_lifecycle_is_independent_of_ack_order(
+    dot: DotService, terminal_first: bool, cancelled: bool
+) -> None:
+    async with client() as local:
+        assert (await local.post("/api/dot/events", json=EVENT)).status_code == 202
+    plan = dot.prepare_turn("Any updates?", None)
+    assert plan.delivery_id and len(plan.delivered_event_ids) == 1
+    if not terminal_first:
+        dot.mark_delivered(plan.delivery_id)
+    assert len(dot.store.list_inbox()) == 1
+    dot._turn_ended(None, None, dot._utc_now().isoformat(), False, cancelled)
+    if terminal_first:
+        dot.mark_delivered(plan.delivery_id)
+    assert len(dot.store.list_inbox()) == int(cancelled)
+
+
+def test_stale_wake_ack_cannot_ack_the_next_turn_with_the_same_ids(dot: DotService) -> None:
+    dot.store.add_inbox("task_failed", "Hub work failed")
+    first = dot.prepare_turn(WAKE_MESSAGE, None)
+    dot._turn_ended(None, None, dot._utc_now().isoformat(), False, True)
+    retry = dot.prepare_turn(WAKE_MESSAGE, None)
+    assert first.delivered_event_ids == retry.delivered_event_ids
+    assert first.delivery_id != retry.delivery_id
+    dot.mark_delivered(first.delivery_id)
+    assert len(dot.store.list_inbox()) == 1
+    dot.mark_delivered(retry.delivery_id)
+    assert dot.store.list_inbox() == []
+    dot._turn_ended(None, None, dot._utc_now().isoformat(), False, True)
+    assert len(dot.store.list_inbox()) == 1
 
 
 @pytest.mark.asyncio
