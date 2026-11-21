@@ -118,6 +118,8 @@ class PatrolState(BaseModel):
     processed_feishu_ids: list[str] = Field(default_factory=list)
     fired_daily_slots: list[str] = Field(default_factory=list)
     mr_snapshots: dict[str, MRStateSnapshot] = Field(default_factory=dict)
+    # Last delivered fingerprint for each decision that is still active.
+    daily_decision_receipts: dict[str, str] = Field(default_factory=dict)
     recent_runs: list[PatrolRunRecord] = Field(default_factory=list)
 
     def bound_history(self) -> None:

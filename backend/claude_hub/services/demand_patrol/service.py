@@ -13,7 +13,8 @@ from zoneinfo import ZoneInfo
 
 from ...models import TaskLifecycle, WorkspaceTask
 from .commands import CommandRunner, run_command
-from .daily_digest import build_daily_digest
+from .daily_digest import DecisionModel, build_daily_digest
+from .digest_provider import recommend_daily_decisions
 from .feishu_triage import TriageCallback, run_feishu_triage
 from .models import PatrolChannel, PatrolConfig, PatrolNotifier, PatrolRunRecord, PatrolState
 from .state import PatrolStateStore
@@ -87,6 +88,7 @@ class DemandPatrolService:
         runner: CommandRunner = run_command,
         dot: PatrolNotifier | None = None,
         triage: TriageCallback | None = None,
+        decision_model: DecisionModel = recommend_daily_decisions,
         task_source: TaskSource = _hub_tasks,
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
@@ -94,6 +96,7 @@ class DemandPatrolService:
         self.runner = runner
         self._dot_override = dot
         self.triage = triage
+        self.decision_model = decision_model
         self.task_source = task_source
         self.clock = clock
         self._run_lock = asyncio.Lock()
@@ -177,21 +180,24 @@ class DemandPatrolService:
             else:
                 tasks, lifecycles = self.task_source()
                 slot_label = slot_key.split("@", 1)[1] if slot_key else "manual"
-                record = await build_daily_digest(
+                digest = await build_daily_digest(
                     candidate,
                     now=now,
                     runner=self.runner,
                     tasks=tasks,
                     lifecycles=lifecycles,
+                    decision_model=self.decision_model,
                     slot_label=slot_label,
                     dry_run=dry_run,
                 )
-                if notify and not dry_run:
-                    # Claim before sending: a crash with ambiguous delivery must not
-                    # repeat a scheduled digest. Failed/uncertain claims remain visible.
-                    if slot_key:
-                        candidate.fired_daily_slots.append(slot_key)
+                record = digest.record
+                if slot_key and not dry_run:
+                    # A quiet run consumes its slot too. Claim before a send
+                    # so an ambiguous delivery cannot replay this slot.
+                    candidate.fired_daily_slots.append(slot_key)
+                    if record.markdown:
                         await self._save_run_state(candidate)
+                if notify and not dry_run and record.markdown:
                     result = await self._notifier().notify(
                         record.markdown,
                         title=f"📋 研发需求与 Work 巡检 ({slot_label})",
@@ -199,7 +205,9 @@ class DemandPatrolService:
                     )
                     record.notified = int(result == "sent")
                     record.details["notification"] = result
-                    if result not in {"sent", "repeat"}:
+                    if result in {"sent", "repeat"}:
+                        candidate.daily_decision_receipts.update(digest.receipts)
+                    else:
                         record.errors.append(
                             "Dot notification failed; inspect binding before manual retry"
                         )
@@ -222,6 +230,7 @@ class DemandPatrolService:
             state.processed_feishu_ids = candidate.processed_feishu_ids
             state.fired_daily_slots = candidate.fired_daily_slots
             state.mr_snapshots = candidate.mr_snapshots
+            state.daily_decision_receipts = candidate.daily_decision_receipts
             state.recent_runs = candidate.recent_runs
         return record
 

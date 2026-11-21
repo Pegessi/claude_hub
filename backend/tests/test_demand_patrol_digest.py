@@ -5,13 +5,24 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
 from claude_hub.models import AgentType, WorkspaceTask, WorkspaceTaskStatus
 from claude_hub.services.demand_patrol.commands import CommandError
-from claude_hub.services.demand_patrol.daily_digest import build_daily_digest, demand_mr_urls
-from claude_hub.services.demand_patrol.models import MRStateSnapshot, PatrolConfig, PatrolState
+from claude_hub.services.demand_patrol.daily_digest import (
+    build_daily_digest as collect_daily_digest,
+)
+from claude_hub.services.demand_patrol.daily_digest import (
+    demand_mr_urls,
+)
+from claude_hub.services.demand_patrol.models import (
+    MRStateSnapshot,
+    PatrolConfig,
+    PatrolRunRecord,
+    PatrolState,
+)
 from claude_hub.services.task_lifecycle import LifecycleFacts, derive_task_lifecycle
 
 NOW = datetime(2026, 11, 14, 3, 0, tzinfo=timezone.utc)
@@ -85,6 +96,14 @@ def _task(title: str, *, prompt: str = "", **changes: Any) -> WorkspaceTask:
     return WorkspaceTask.model_validate(fields)
 
 
+async def build_daily_digest(state: PatrolState, **kwargs: Any) -> PatrolRunRecord:
+    kwargs.setdefault("decision_model", AsyncMock(side_effect=CommandError("offline")))
+    digest = await collect_daily_digest(state, **kwargs)
+    if not digest.record.dry_run:
+        state.daily_decision_receipts.update(digest.receipts)
+    return digest.record
+
+
 @pytest.mark.asyncio
 async def test_merged_and_failed_codebase_pascal_case_envelope() -> None:
     state = PatrolState(
@@ -109,22 +128,19 @@ async def test_merged_and_failed_codebase_pascal_case_envelope() -> None:
     record = await build_daily_digest(
         state, now=NOW, tasks=[], lifecycles={}, runner=runner, slot_label="11:00"
     )
-    assert "已合入待关单" in record.markdown
-    assert "MR 状态跳变" in record.markdown
-    assert "CI 回归" in record.markdown
-    assert "success → failed" in record.markdown
-    assert "合入不等于验收通过" in record.markdown
+    assert "CI 失败" in record.markdown
     assert MR in record.markdown
     assert state.mr_snapshots[MR].state == "merged"
     assert state.mr_snapshots[MR].ci_status == "failed"
-    assert record.details["state_changes"] == 3
-    assert record.llm_invoked == record.notified == 0
+    assert record.llm_invoked == 1 and record.notified == 0
     assert runner.calls[0][1] is not None
     assert runner.calls[0][1]["INFOWALL_URL"]
-    second = await build_daily_digest(state, now=NOW, tasks=[], lifecycles={}, runner=runner)
-    assert "CI 回归" not in second.markdown
-    assert "MR 状态跳变" not in second.markdown
-    assert "已合入待关单" in second.markdown
+    model = AsyncMock()
+    second = await build_daily_digest(
+        state, now=NOW, tasks=[], lifecycles={}, runner=runner, decision_model=model
+    )
+    assert second.markdown == "" and second.llm_invoked == 0
+    model.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -138,20 +154,21 @@ async def test_dry_run_preserves_snapshots_and_reports_initial_failure() -> None
         state, now=NOW, tasks=[], lifecycles={}, runner=runner, dry_run=True
     )
     assert state.model_dump() == before
-    assert "首次发现 CI 失败" in record.markdown
+    assert "CI 失败" in record.markdown
+    assert record.llm_invoked == 0
     assert "MR 状态跳变" not in record.markdown
     assert record.dry_run
 
 
 @pytest.mark.asyncio
-async def test_stall_unassigned_and_cross_workspace_attention() -> None:
+async def test_new_threshold_crossing_and_cross_workspace_attention() -> None:
     demands = [
         _demand(id="old", title="长时间停滞", sources=[]),
         _demand(
             id="unassigned",
             title="计划但无人接手",
             status="planned",
-            updated_at=NOW.isoformat(),
+            updated_at=(NOW - timedelta(hours=47)).isoformat(),
             sources=[],
         ),
         _demand(
@@ -178,23 +195,34 @@ async def test_stall_unassigned_and_cross_workspace_attention() -> None:
         for item in [task, orphan]
     }
     runner = DigestRunner({"demands": demands}, {MR: {"state": "open"}})
+    state = PatrolState()
     record = await build_daily_digest(
-        PatrolState(), now=NOW, tasks=[task, orphan], lifecycles=lifecycles, runner=runner
+        state, now=NOW, tasks=[task, orphan], lifecycles=lifecycles, runner=runner
     )
-    assert record.details["stalled_or_unassigned"] == 2
-    assert "49h 未更新" in record.markdown
-    assert "计划但无人接手" in record.markdown
+    assert record.candidates == 2
+    assert "49 小时未更新" in record.markdown
+    assert "计划但无人接手" not in record.markdown
     assert "有活跃任务的计划" not in record.markdown
     assert "最近追加了证据" not in record.markdown
     assert "低优先级不告警" not in record.markdown
     assert "已完成不告警" not in record.markdown
-    assert record.details["attention_tasks"] == 1
-    assert "orphaned" in record.markdown
-    assert "workspace-2" in record.markdown
+    assert "Task 等待重新接手" in record.markdown
+    orphan.updated_at = NOW + timedelta(minutes=30)
+    lifecycles[orphan.id] = derive_task_lifecycle(LifecycleFacts(task=orphan, now=NOW))
+    second = await build_daily_digest(
+        state,
+        now=NOW + timedelta(hours=1),
+        tasks=[task, orphan],
+        lifecycles=lifecycles,
+        runner=runner,
+    )
+    assert second.candidates == 1
+    assert "计划但无人接手" in second.markdown
+    assert "仍待派工" in second.markdown
 
 
 @pytest.mark.asyncio
-async def test_pending_top_n_uses_created_time_and_not_input_order() -> None:
+async def test_pending_inbox_does_not_open_gate_or_render_sections() -> None:
     demands = [
         _demand(
             id=str(index),
@@ -206,18 +234,18 @@ async def test_pending_top_n_uses_created_time_and_not_input_order() -> None:
         )
         for index in [4, 2, 0, 3, 1]
     ]
+    model = AsyncMock()
     record = await build_daily_digest(
         PatrolState(config=PatrolConfig(pending_top_n=2)),
         now=NOW,
         tasks=[],
         lifecycles={},
         runner=DigestRunner({"demands": demands}),
+        decision_model=model,
     )
-    assert record.details["pending"] == 5
-    assert "待确认 **5** 项" in record.markdown
-    assert "待确认-0" in record.markdown and "待确认-1" in record.markdown
-    assert "待确认-2" not in record.markdown
-    assert record.markdown.index("待确认-0") < record.markdown.index("待确认-1")
+    assert record.markdown == "" and record.candidates == 0
+    assert record.details["decision_mode"] == "skipped"
+    model.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -278,7 +306,7 @@ async def test_terminal_demands_do_not_consume_mr_query_slots(
     assert queried_urls == set(open_urls)
     assert record.details["mrs_requested"] == record.details["mrs_queried"] == 15
     assert record.details["mrs_omitted"] == 0
-    assert record.details["state_changes"] == 0 and not record.errors
+    assert record.candidates == 0 and not record.errors
     assert not any(url in record.markdown for url in closed_urls)
     assert state.mr_snapshots[closed_urls[0]].ci_status == "success"
 
@@ -290,20 +318,19 @@ async def test_source_errors_are_unknown_not_empty_and_preserve_prior_snapshot()
     )
     before = state.model_dump()
     runner = DigestRunner(
-        {"demands": [_demand()]}, {MR: CommandError("secret stderr must not be reflected")}
+        {"demands": [_demand(priority="p2")]},
+        {MR: CommandError("secret stderr must not be reflected")},
     )
     record = await build_daily_digest(state, now=NOW, tasks=[], lifecycles={}, runner=runner)
     assert state.model_dump() == before
     assert record.details["mrs_queried"] == 0
-    assert "数据缺口" in record.markdown and MR in record.markdown
-    assert "secret stderr" not in record.markdown
+    assert record.markdown == "" and MR in record.errors[0]
+    assert "secret stderr" not in record.errors[0]
     unavailable = await build_daily_digest(
         state, now=NOW, tasks=[], lifecycles={}, runner=DigestRunner(CommandError("offline"))
     )
     assert unavailable.details["demands"] is None
-    assert unavailable.details["pending"] is None
-    assert "未知" in unavailable.markdown
-    assert "待确认 **0** 项" not in unavailable.markdown
+    assert unavailable.markdown == "" and unavailable.errors
     assert state.model_dump() == before
 
 
@@ -320,7 +347,8 @@ async def test_malformed_demands_and_mr_are_not_treated_as_empty_success() -> No
         tasks=[],
         lifecycles={},
         runner=DigestRunner(
-            {"demands": [_demand()]}, {MR: {"data": {"merge_request": {"Title": "missing status"}}}}
+            {"demands": [_demand(priority="p2")]},
+            {MR: {"data": {"merge_request": {"Title": "missing status"}}}},
         ),
     )
     assert record.errors and not state.mr_snapshots
@@ -339,22 +367,175 @@ def test_evidence_url_extraction_preserves_identity_and_excludes_lookalike_hosts
 
 @pytest.mark.asyncio
 async def test_exact_title_matches_active_task_but_not_completed_task() -> None:
-    demand = _demand(
-        title="标题关联的待办", status="planned", updated_at=NOW.isoformat(), sources=[]
-    )
+    demand = _demand(title="标题关联的待办", status="planned", sources=[])
     task = _task(demand["title"])
     runner = DigestRunner({"demands": [demand]})
     active = await build_daily_digest(
         PatrolState(), now=NOW, tasks=[task], lifecycles={}, runner=runner
     )
-    assert active.details["stalled_or_unassigned"] == 0
+    assert active.candidates == 1 and "仍待派工" not in active.markdown
     task.status = WorkspaceTaskStatus.DONE
     completed = await build_daily_digest(
         PatrolState(), now=NOW, tasks=[task], lifecycles={}, runner=runner
     )
-    assert completed.details["stalled_or_unassigned"] == 1
+    assert completed.candidates == 1 and "仍待派工" in completed.markdown
 
 
 @pytest.fixture(autouse=True)
 def _configure_mr_host(monkeypatch):
     monkeypatch.setenv("CLAUDE_HUB_PATROL_MR_HOSTS", "git.example.com")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "answer", ['[[1,"B"],[2,"A"],[3,"A"]]', '[[1,"B"],[2,"B"],[3,"B"],[4,"B"]]', TimeoutError()]
+)
+async def test_top_three_model_choices_and_deterministic_fallback(answer: str | Exception) -> None:
+    demands = [
+        _demand(
+            id=str(index), title=f"<事项|{index}>", priority="p0" if index < 3 else "p1", sources=[]
+        )
+        for index in reversed(range(6))
+    ]
+    model = AsyncMock()
+    if isinstance(answer, Exception):
+        model.side_effect = answer
+    else:
+        model.return_value = answer
+    state = PatrolState()
+    runner = DigestRunner({"demands": demands})
+    record = await build_daily_digest(
+        state, now=NOW, tasks=[], lifecycles={}, runner=runner, decision_model=model
+    )
+    assert record.candidates == 6 and record.details["selected"] == 3
+    assert record.markdown.count("快捷回复") == 3 and record.llm_invoked == 1
+    assert record.markdown.count("（推荐）") == 3
+    assert "快捷回复：「需求 0，请" in record.markdown
+    assert "＜事项｜0＞" in record.markdown and "＜事项｜3＞" not in record.markdown
+    assert all(marker not in record.markdown for marker in ("未发现", "收件箱", "<", "|"))
+    assert model.await_args is not None
+    prompt, workspace_id = model.await_args.args
+    assert (
+        "＜事项" not in prompt
+        and "<事项" not in prompt
+        and workspace_id == state.config.workspace_id
+    )
+    assert record.details["decision_mode"] == (
+        "model" if answer == '[[1,"B"],[2,"A"],[3,"A"]]' else "deterministic"
+    )
+    assert ("B（推荐）" in record.markdown) is (answer == '[[1,"B"],[2,"A"],[3,"A"]]')
+    second = await build_daily_digest(state, now=NOW, tasks=[], lifecycles={}, runner=runner)
+    assert second.candidates == 3 and "＜事项｜0＞" not in second.markdown
+    assert "＜事项｜3＞" in second.markdown
+
+
+@pytest.mark.asyncio
+async def test_ci_recovery_rearms_and_incomplete_observation_keeps_receipt() -> None:
+    state = PatrolState()
+    runner = DigestRunner(
+        {"demands": [_demand(priority="p2")]}, {MR: {"state": "open", "ci_status": "failed"}}
+    )
+    assert (
+        await build_daily_digest(state, now=NOW, tasks=[], lifecycles={}, runner=runner)
+    ).candidates == 1
+    runner.mrs[MR] = {"state": "open"}
+    assert (
+        await build_daily_digest(state, now=NOW, tasks=[], lifecycles={}, runner=runner)
+    ).candidates == 0
+    assert f"mr:{MR}" in state.daily_decision_receipts
+    runner.mrs[MR] = {"state": "open", "ci_status": "success"}
+    assert (
+        await build_daily_digest(state, now=NOW, tasks=[], lifecycles={}, runner=runner)
+    ).candidates == 0
+    assert f"mr:{MR}" not in state.daily_decision_receipts
+    runner.mrs[MR] = {"state": "open", "ci_status": "failed"}
+    assert (
+        await build_daily_digest(state, now=NOW, tasks=[], lifecycles={}, runner=runner)
+    ).candidates == 1
+
+
+@pytest.mark.asyncio
+async def test_new_mr_closure_is_reported_even_if_ci_becomes_unavailable() -> None:
+    state = PatrolState(
+        mr_snapshots={MR: MRStateSnapshot(url=MR, state="open", ci_status="failed")}
+    )
+    runner = DigestRunner({"demands": [_demand(priority="p2")]}, {MR: {"state": "closed"}})
+    record = await build_daily_digest(state, now=NOW, tasks=[], lifecycles={}, runner=runner)
+    assert "MR 已关闭" in record.markdown and "CI 失败" not in record.markdown
+    assert (
+        await build_daily_digest(state, now=NOW, tasks=[], lifecycles={}, runner=runner)
+    ).candidates == 0
+
+
+@pytest.mark.asyncio
+async def test_daily_provider_uses_low_cost_health_route_and_archives(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from claude_hub.services.agent_stream.maso_http import _model_options
+    from claude_hub.services.demand_patrol import digest_provider, feishu_triage
+
+    models = _model_options(
+        [
+            {
+                "key": "test-model",
+                "selector_variants": [
+                    {"mode": "default", "key": "test-model_reasoning_low"},
+                    {"mode": "default", "key": "test-model_reasoning_high"},
+                ],
+            }
+        ]
+    )
+    monkeypatch.delenv("CLAUDE_HUB_PATROL_MODEL", raising=False)
+    monkeypatch.setattr(feishu_triage, "local_setting", lambda key, default="": default)
+    discover = AsyncMock(
+        return_value=("http://127.0.0.1:19999", models, "test-model_reasoning_high")
+    )
+    monkeypatch.setattr(feishu_triage, "discover_maso_service", discover)
+    session = SimpleNamespace(workspace_id="ws", id="daily-chat")
+    ensure = AsyncMock(return_value=session)
+    monkeypatch.setattr(
+        digest_provider, "workspace_manager", SimpleNamespace(ensure_workspace_agent=ensure)
+    )
+    monkeypatch.setattr(
+        digest_provider, "_resolve_patrol_workspace_id", lambda workspace_id: workspace_id
+    )
+    monkeypatch.setattr(digest_provider, "_find_retained_patrol_session", lambda *_: None)
+    turn = AsyncMock(return_value='["A"]')
+    archive = AsyncMock()
+    monkeypatch.setattr(digest_provider, "_run_workspace_triage_turn", turn)
+    monkeypatch.setattr(digest_provider, "_archive_patrol_session", archive)
+
+    assert await digest_provider.recommend_daily_decisions("recommend", "ws") == '["A"]'
+    assert ensure.await_args is not None
+    workspace_id, request = ensure.await_args.args
+    assert workspace_id == "ws" and request.agent_type == AgentType.MASO
+    assert request.env["MASO_MODEL"] == "test-model_reasoning_low"
+    assert request.ephemeral and request.caller_owned_ephemeral and not request.solo_mode
+    assert ensure.await_args.kwargs == {"bootstrap": False}
+    turn.assert_awaited_once_with(session, "recommend", timeout_seconds=25)
+    archive.assert_awaited_once_with("ws", "daily-chat")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("third", [4, 5])
+async def test_model_can_select_among_tied_priorities_but_cannot_displace_p0(third: int) -> None:
+    demands = [
+        _demand(
+            id=str(index), title=f"候选-{index}", priority="p0" if index < 4 else "p1", sources=[]
+        )
+        for index in range(5)
+    ]
+    record = await build_daily_digest(
+        PatrolState(),
+        now=NOW,
+        tasks=[],
+        lifecycles={},
+        runner=DigestRunner({"demands": demands}),
+        decision_model=AsyncMock(return_value=f'[[1,"A"],[2,"A"],[{third},"B"]]'),
+    )
+    if third == 4:
+        assert record.details["decision_mode"] == "model"
+        assert "候选-3" in record.markdown and "候选-2" not in record.markdown
+    else:
+        assert record.details["decision_mode"] == "deterministic"
+        assert "候选-2" in record.markdown and "候选-4" not in record.markdown

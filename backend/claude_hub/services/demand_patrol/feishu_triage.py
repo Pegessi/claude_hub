@@ -879,15 +879,11 @@ def _find_retained_patrol_session(workspace_id: str, title: str) -> ManagedSessi
     return None
 
 
-async def diagnose_message(
-    candidate: FeishuCandidate,
-    *,
-    workspace_id: str = DEFAULT_PATROL_WORKSPACE_ID,
-) -> TriageDiagnosis:
-    """Run one read-only Workspace Chat session and auto-archive it when done."""
+async def patrol_provider_env(*, prefer_low_cost: bool = False) -> tuple[AgentType, dict[str, str]]:
+    """Use the configured patrol model, a healthy MASO catalog, or an installed CLI."""
     agent_type, model, env = AgentType.CODEX, None, {}
     try:
-        base_url, models, _ = await discover_maso_service(
+        base_url, models, default_model = await discover_maso_service(
             {"MASO_BASE_URL": os.environ["MASO_BASE_URL"]}
             if os.environ.get("MASO_BASE_URL")
             else {}
@@ -899,6 +895,11 @@ async def diagnose_message(
             if preferred
             else next((name for name in advertised if name.endswith("_reasoning_high")), None)
         )
+        if prefer_low_cost and not preferred:
+            selected = next(
+                (name for name in advertised if name.endswith("_reasoning_low")),
+                default_model if default_model in advertised else selected,
+            )
         if selected:
             agent_type, model, env = AgentType.MASO, selected, {"MASO_BASE_URL": base_url}
     except MasoServiceUnavailable:
@@ -913,6 +914,16 @@ async def diagnose_message(
     launch_env = dict(env)
     if model and agent_type in _MODEL_ENV_KEYS:
         launch_env[_MODEL_ENV_KEYS[agent_type]] = model.strip()
+    return agent_type, launch_env
+
+
+async def diagnose_message(
+    candidate: FeishuCandidate,
+    *,
+    workspace_id: str = DEFAULT_PATROL_WORKSPACE_ID,
+) -> TriageDiagnosis:
+    """Run one read-only Workspace Chat session and auto-archive it when done."""
+    agent_type, launch_env = await patrol_provider_env()
     target_workspace_id = _resolve_patrol_workspace_id(workspace_id)
     session_title = f"Patrol triage: {candidate.message_id}"
     retained = _find_retained_patrol_session(target_workspace_id, session_title)

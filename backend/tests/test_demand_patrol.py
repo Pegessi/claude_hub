@@ -57,7 +57,8 @@ class FakeDot:
 
 
 class EmptyRunner:
-    def __init__(self) -> None:
+    def __init__(self, demands: list[dict[str, Any]] | None = None) -> None:
+        self.demands = demands or []
         self.calls: list[list[str]] = []
 
     async def __call__(
@@ -70,7 +71,7 @@ class EmptyRunner:
     ) -> Any:
         self.calls.append(argv)
         assert argv == ["infowall", "demand", "list", "--json"]
-        return {"demands": []}
+        return {"demands": self.demands}
 
 
 @pytest.fixture
@@ -86,6 +87,7 @@ def service(store: PatrolStateStore, dot: FakeDot, runner: EmptyRunner) -> Deman
         dot=dot,
         runner=runner,
         task_source=lambda: ([], {}),
+        decision_model=AsyncMock(return_value='[[1,"A"]]'),
         clock=lambda: NOW,
     )
 
@@ -177,9 +179,7 @@ async def test_daily_claim_survives_restart_and_concurrent_ticks(
     dot, runner = FakeDot(), EmptyRunner()
     first = service(store, dot, runner)
     await asyncio.gather(first.tick(), first.tick())
-    assert len(dot.calls) == 1
-    assert dot.calls[0][1] == "📋 研发需求与 Work 巡检 (11:00)"
-    assert dot.calls[0][2] == "info"
+    assert not dot.calls
     assert store.load().fired_daily_slots == ["2026-11-14@11:00"]
     assert await service(store, dot, runner).tick() == []
     assert len(runner.calls) == 1
@@ -202,7 +202,7 @@ async def test_default_disabled_gate_no_notify_dry_run_and_setup_gate(
     assert runner.calls == []
     before = store.load()
     preview = await patrol.run(channel="daily", dry_run=True)
-    assert "📥" in preview["markdown"]
+    assert preview["markdown"] == ""
     assert store.load() == before
     await patrol.run(channel="daily", notify=False)
     assert dot.calls == []
@@ -252,12 +252,36 @@ async def test_failed_notice_retains_claim_and_records_outcome(
     store: PatrolStateStore,
 ) -> None:
     store.save(PatrolState(config=PatrolConfig(enabled=True, feishu_enabled=False)))
-    dot, runner = FakeDot(result="failed"), EmptyRunner()
-    records = await service(store, dot, runner).tick()
+    dot, runner = FakeDot(result="failed"), EmptyRunner(
+        [
+            {
+                "id": "d-1",
+                "title": "待拍板需求",
+                "priority": "p0",
+                "status": "active",
+                "updated_at": (NOW - timedelta(days=3)).isoformat(),
+            }
+        ]
+    )
+    patrol = service(store, dot, runner)
+    records = await patrol.tick()
     assert records[0].notified == 0
     assert records[0].errors
     assert store.load().fired_daily_slots == ["2026-11-14@11:00"]
     assert await service(store, dot, runner).tick() == []
+    assert not store.load().daily_decision_receipts
+    before_preview = store.load()
+    preview = await patrol.run(channel="daily", dry_run=True)
+    assert preview["markdown"] and preview["runs"][0]["llm_invoked"] == 0
+    assert store.load() == before_preview
+    await patrol.run(channel="daily", notify=False)
+    assert not store.load().daily_decision_receipts
+    dot.result = "sent"
+    sent = await patrol.run(channel="daily")
+    assert sent["runs"][0]["notified"] == 1 and store.load().daily_decision_receipts
+    skipped = await patrol.run(channel="daily")
+    assert skipped["markdown"] == "" and skipped["runs"][0]["llm_invoked"] == 0
+    assert len(dot.calls) == 2
 
 
 async def test_background_disabled_in_tests_and_explicit_stop(
@@ -327,7 +351,7 @@ async def test_rest_status_partial_config_run_and_auth(
         result = await client.post("/api/patrol/run", json={"channel": "daily", "dry_run": True})
         assert result.status_code == 200
         assert result.json()["runs"][0]["llm_invoked"] == 0
-        assert result.json()["markdown"]
+        assert result.json()["markdown"] == ""
         bad = await client.post("/api/patrol/run", json={"channel": "typo"})
         assert bad.status_code == 422
     assert dot.calls == []
