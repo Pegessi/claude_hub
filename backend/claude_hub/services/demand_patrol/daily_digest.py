@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from bisect import bisect_right
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from claude_hub.models import TaskLifecycle, TaskPhase, WorkspaceTask
+from claude_hub.models.schema_domains.execution import TaskProgressState
 from claude_hub.services.demand_patrol.commands import (
     CommandError,
     CommandRunner,
@@ -169,7 +171,7 @@ DecisionModel = Callable[[str, str], Awaitable[str]]
 _MAX_DECISIONS = 3
 _MAX_MODEL_CANDIDATES = 8
 _PRIORITIES = {"p0": 0, "p1": 1}
-_REPLY_SUBJECTS = {"mr": "MR", "demand": "需求", "task": "Task"}
+_REPLY_SUBJECTS = {"mr": "MR", "ci": "MR", "demand": "需求", "task": "Task"}
 
 
 @dataclass(frozen=True)
@@ -182,6 +184,7 @@ class Decision:
     situation: str
     actions: tuple[str, str]
     next_action: str = ""
+    task_option: str | None = None
 
 
 @dataclass(frozen=True)
@@ -202,7 +205,9 @@ def _mr_decision(
         default=2,
     )
     subject = f"[{_display(snapshot.title, 'MR')}]({snapshot.url})"
-    if snapshot.ci_status == "failed":
+    scope = "mr"
+    if snapshot.ci_status == "failed" and snapshot.state != "closed":
+        scope = "ci"
         kind = "CI 失败"
         actions = ("指派 MR 负责人排查并重跑 CI", "暂缓该 MR 并保留失败记录")
     elif snapshot.state == "closed":
@@ -214,8 +219,8 @@ def _mr_decision(
     else:
         return None
     return Decision(
-        key=f"mr:{snapshot.url}",
-        fingerprint=_fingerprint(kind, snapshot.state),
+        key=f"{scope}:{snapshot.url}",
+        fingerprint=_fingerprint(kind),
         rank=(priority, 0, 0),
         kind=kind,
         subject=subject,
@@ -258,17 +263,54 @@ def _stall_decision(
 _TASK_ACTIONS = {
     TaskPhase.NEEDS_USER: (
         "Task 等待用户决定",
-        ("查看最新阻塞并给出决定", "明确暂缓并约定复查时间"),
+        ("请提交待决问题和可选方案", "明确暂缓并约定复查时间"),
     ),
     TaskPhase.AWAITING_ACCEPTANCE: ("Task 等待验收", ("核对产物后验收", "退回并补充验收缺口")),
     TaskPhase.ORPHANED: ("Task 等待重新接手", ("指定接手者继续任务", "暂缓任务并记录原因")),
 }
 
 
-def _task_decision(task: WorkspaceTask, lifecycle: TaskLifecycle | None) -> Decision | None:
+_OPTION_PAIR = re.compile(
+    r"(?<![\w])(?:方案\s*)?A[.、:：)）]\s*(.+?)"
+    r"(?:[；;。\n]|\s+)+\s*(?:方案\s*)?B[.、:：)）]\s*([^；;。\n]+)",
+    re.DOTALL | re.IGNORECASE,
+)
+_NATURAL_OPTION_PAIR = re.compile(
+    r"(?:请在|需要在|需在)([^；;。\n]+?)(?:和|或|还是)([^；;。\n]+?)"
+    r"(?:之间选择|中选择|中二选一|之间二选一)"
+)
+_RECOMMENDED_OPTION = re.compile(r"(?:推荐|建议)\s*(?:方案\s*)?([AB])(?![\w])", re.IGNORECASE)
+
+
+def _task_decision(
+    task: WorkspaceTask, lifecycle: TaskLifecycle | None, detail: str
+) -> Decision | None:
     if not lifecycle or not lifecycle.attention or lifecycle.phase not in _TASK_ACTIONS:
         return None
     kind, actions = _TASK_ACTIONS[lifecycle.phase]
+    situation = _display(lifecycle.reason_text, "待处理")
+    task_option = None
+    if lifecycle.phase == TaskPhase.NEEDS_USER:
+        progress = task.latest_progress
+        if (
+            progress is not None
+            and progress.execution_epoch == task.execution_epoch
+            and progress.state in {TaskProgressState.NEEDS_INPUT, TaskProgressState.BLOCKED}
+        ):
+            detail = _text(progress.summary) or detail
+        if detail:
+            pair = _OPTION_PAIR.search(detail) or _NATURAL_OPTION_PAIR.search(detail)
+            situation = _display(detail, limit=140)
+            if pair:
+                lead = detail[: pair.start()].strip(" ：:，,；;。")
+                situation = _display(lead, "等待在以下方案中选择", limit=140)
+                second = _RECOMMENDED_OPTION.split(pair[2], maxsplit=1)[0].rstrip(" ，,")
+                actions = (
+                    f"选择{_display(pair[1], limit=90)}",
+                    f"选择{_display(second or pair[2], limit=90)}",
+                )
+                recommendation = _RECOMMENDED_OPTION.search(detail)
+                task_option = recommendation[1].upper() if recommendation else "A"
     return Decision(
         key=f"task:{task.id}",
         fingerprint=_fingerprint(
@@ -277,12 +319,14 @@ def _task_decision(task: WorkspaceTask, lifecycle: TaskLifecycle | None) -> Deci
             lifecycle.owner.id or "",
             task.review_cycle,
             task.execution_epoch,
+            " ".join(detail.split()),
         ),
         rank=(1, 1, 0),
         kind=kind,
         subject=f"{_display(task.title)}（Task {_display(task.id, limit=80)}）",
-        situation=f"{kind}（{_display(lifecycle.reason_text, '待处理')}）",
+        situation=f"{kind}（{situation}）",
         actions=actions,
+        task_option=task_option,
     )
 
 
@@ -297,7 +341,12 @@ async def _recommend(
             "kind": item.kind,
             "priority_rank": item.rank[0],
             "stalled_hours": round(-item.rank[2]) if item.rank[2] else None,
-            "options": dict(zip(("A", "B"), item.actions, strict=True)),
+            "options": (
+                {"A": "选择上报方案 A", "B": "选择上报方案 B"}
+                if item.task_option
+                else dict(zip(("A", "B"), item.actions, strict=True))
+            ),
+            "source_recommendation": item.task_option,
         }
         for index, item in enumerate(decisions, start=1)
     ]
@@ -328,7 +377,8 @@ async def _recommend(
         if option not in ("A", "B"):
             raise ValueError("Invalid daily recommendation option")
         seen.add(index)
-        selected.append((decisions[index - 1], option))
+        item = decisions[index - 1]
+        selected.append((item, item.task_option or option))
     if [decision.rank[0] for decision, _ in selected] != [
         decision.rank[0] for decision in decisions[:count]
     ]:
@@ -364,6 +414,7 @@ async def build_daily_digest(
     lifecycles: Mapping[str, TaskLifecycle],
     runner: CommandRunner = run_command,
     decision_model: DecisionModel,
+    task_details: Mapping[str, str] | None = None,
     slot_label: str = "manual",
     dry_run: bool = False,
 ) -> DailyDigest:
@@ -384,7 +435,11 @@ async def build_daily_digest(
         if demand.get("status") in _OPEN_DEMAND_STATUSES:
             for url in demand_mr_urls(demand):
                 urls_to_demands.setdefault(url, []).append(demand)
-    urls = sorted(urls_to_demands)[:_MAX_MRS]
+    ordered_urls = sorted(urls_to_demands)
+    start = bisect_right(ordered_urls, state.daily_mr_cursor)
+    urls = (ordered_urls[start:] + ordered_urls[:start])[:_MAX_MRS]
+    if urls and not dry_run:
+        state.daily_mr_cursor = urls[-1]
     gate = asyncio.Semaphore(4)
     results = await asyncio.gather(*(_read_mr(url, runner, gate) for url in urls))
     receipts = state.daily_decision_receipts.copy()
@@ -396,30 +451,33 @@ async def build_daily_digest(
         if snapshot is None:
             continue
         queried += 1
-        previous = state.mr_snapshots.get(snapshot.url)
-        # An absent CI field is an incomplete observation. Preserve the last
-        # known status so its disappearance does not re-arm an alert.
-        if (
-            snapshot.ci_status == "unknown"
-            and previous is not None
-            and snapshot.state == previous.state
-        ):
-            snapshot.ci_status = previous.ci_status
-            if previous.ci_status == "failed":
-                continue
-        decision = _mr_decision(snapshot, urls_to_demands[snapshot.url])
-        if decision is not None:
-            decisions[decision.key] = decision
-        else:
+        ci_key = f"ci:{snapshot.url}"
+        if snapshot.ci_status == "success":
+            receipts.pop(ci_key, None)
+        if snapshot.state not in {"closed", "merged"}:
             receipts.pop(f"mr:{snapshot.url}", None)
         if not dry_run:
             state.mr_snapshots[snapshot.url] = snapshot
+
+        # An unresolved failure takes precedence over merged-MR acceptance.
+        # Only a confirmed success re-arms a delivered failure, even after
+        # pending, running, missing, or otherwise inconclusive observations.
+        if (
+            snapshot.state == "merged"
+            and snapshot.ci_status not in {"success", "failed"}
+            and ci_key in receipts
+        ):
+            continue
+        decision = _mr_decision(snapshot, urls_to_demands[snapshot.url])
+        if decision is not None:
+            decisions[decision.key] = decision
 
     for demand in demand_rows:
         if (decision := _stall_decision(demand, tasks, state, now)) is not None:
             decisions[decision.key] = decision
     for task in tasks:
-        if (decision := _task_decision(task, lifecycles.get(task.id))) is not None:
+        detail = (task_details or {}).get(task.id, "")
+        if (decision := _task_decision(task, lifecycles.get(task.id), detail)) is not None:
             decisions[decision.key] = decision
     for key in list(receipts):
         scope, _, identity = key.partition(":")
@@ -427,7 +485,7 @@ async def build_daily_digest(
             continue
         if scope == "task" or (
             demands_available
-            and (scope == "demand" or (scope == "mr" and identity not in urls_to_demands))
+            and (scope == "demand" or (scope in {"mr", "ci"} and identity not in urls_to_demands))
         ):
             del receipts[key]
     if not dry_run:
@@ -435,7 +493,7 @@ async def build_daily_digest(
 
     fresh = [item for item in decisions.values() if receipts.get(item.key) != item.fingerprint]
     fresh.sort(key=lambda item: (item.rank, item.key))
-    selected = [(item, "A") for item in fresh[:_MAX_DECISIONS]]
+    selected = [(item, item.task_option or "A") for item in fresh[:_MAX_DECISIONS]]
     record.candidates = len(fresh)
     record.details = {
         "demands_available": demands_available,

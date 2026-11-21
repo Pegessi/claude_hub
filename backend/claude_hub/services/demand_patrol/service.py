@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from ...models import TaskLifecycle, WorkspaceTask
+from ...models import AgentReport, AgentReportState, TaskLifecycle, TaskPhase, WorkspaceTask
 from .commands import CommandRunner, run_command
 from .daily_digest import DecisionModel, build_daily_digest
 from .digest_provider import recommend_daily_decisions
@@ -20,14 +20,43 @@ from .models import PatrolChannel, PatrolConfig, PatrolNotifier, PatrolRunRecord
 from .state import PatrolStateStore
 
 logger = logging.getLogger(__name__)
-TaskSource = Callable[[], tuple[list[WorkspaceTask], dict[str, TaskLifecycle]]]
+TaskInputs = tuple[list[WorkspaceTask], dict[str, TaskLifecycle], dict[str, str]]
+TaskSource = Callable[[], TaskInputs]
 
 
-def _hub_tasks() -> tuple[list[WorkspaceTask], dict[str, TaskLifecycle]]:
+def _hub_tasks() -> TaskInputs:
     from .. import workspace_manager
 
     tasks = list(workspace_manager.tasks.values())
-    return tasks, workspace_manager.task_lifecycles(tasks)
+    lifecycles = workspace_manager.task_lifecycles(tasks)
+    needs_user = {
+        task.id: task for task in tasks if lifecycles[task.id].phase == TaskPhase.NEEDS_USER
+    }
+    latest: dict[str, AgentReport] = {}
+    if needs_user:
+        for report in workspace_manager.reports.values():
+            task = needs_user.get(report.task_id or "")
+            if task is None or report.review_cycle != task.review_cycle:
+                continue
+            lifecycle = lifecycles[task.id]
+            if lifecycle.reason == "reviewer_needs_input":
+                if report.state != AgentReportState.REVIEW_NEEDS_INPUT:
+                    continue
+            elif lifecycle.owner.id != report.session_id:
+                continue
+            if task.id not in latest or report.created_at > latest[task.id].created_at:
+                latest[task.id] = report
+    details = {
+        task_id: report.message_zh or report.message_en or report.message
+        for task_id, report in latest.items()
+        if report.state
+        in {
+            AgentReportState.NEEDS_INPUT,
+            AgentReportState.BLOCKED,
+            AgentReportState.REVIEW_NEEDS_INPUT,
+        }
+    }
+    return tasks, lifecycles, details
 
 
 def _dot() -> PatrolNotifier:
@@ -178,7 +207,7 @@ class DemandPatrolService:
                     triage=self.triage,
                 )
             else:
-                tasks, lifecycles = self.task_source()
+                tasks, lifecycles, task_details = self.task_source()
                 slot_label = slot_key.split("@", 1)[1] if slot_key else "manual"
                 digest = await build_daily_digest(
                     candidate,
@@ -186,6 +215,7 @@ class DemandPatrolService:
                     runner=self.runner,
                     tasks=tasks,
                     lifecycles=lifecycles,
+                    task_details=task_details,
                     decision_model=self.decision_model,
                     slot_label=slot_label,
                     dry_run=dry_run,
@@ -229,6 +259,7 @@ class DemandPatrolService:
             state.feishu_watermark_iso = candidate.feishu_watermark_iso
             state.processed_feishu_ids = candidate.processed_feishu_ids
             state.fired_daily_slots = candidate.fired_daily_slots
+            state.daily_mr_cursor = candidate.daily_mr_cursor
             state.mr_snapshots = candidate.mr_snapshots
             state.daily_decision_receipts = candidate.daily_decision_receipts
             state.recent_runs = candidate.recent_runs

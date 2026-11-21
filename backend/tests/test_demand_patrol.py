@@ -86,7 +86,7 @@ def service(store: PatrolStateStore, dot: FakeDot, runner: EmptyRunner) -> Deman
         store=store,
         dot=dot,
         runner=runner,
-        task_source=lambda: ([], {}),
+        task_source=lambda: ([], {}, {}),
         decision_model=AsyncMock(return_value='[[1,"A"]]'),
         clock=lambda: NOW,
     )

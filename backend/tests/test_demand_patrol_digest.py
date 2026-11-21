@@ -9,7 +9,16 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from claude_hub.models import AgentType, WorkspaceTask, WorkspaceTaskStatus
+from claude_hub.models import (
+    AgentType,
+    TaskLifecycle,
+    TaskOwner,
+    TaskOwnerKind,
+    TaskPhase,
+    WorkspaceTask,
+    WorkspaceTaskStatus,
+)
+from claude_hub.models.schema_domains.execution import TaskProgressSnapshot, TaskProgressState
 from claude_hub.services.demand_patrol.commands import CommandError
 from claude_hub.services.demand_patrol.daily_digest import (
     build_daily_digest as collect_daily_digest,
@@ -322,7 +331,9 @@ async def test_source_errors_are_unknown_not_empty_and_preserve_prior_snapshot()
         {MR: CommandError("secret stderr must not be reflected")},
     )
     record = await build_daily_digest(state, now=NOW, tasks=[], lifecycles={}, runner=runner)
-    assert state.model_dump() == before
+    assert state.mr_snapshots[MR].model_dump() == before["mr_snapshots"][MR]
+    assert state.daily_mr_cursor == MR
+    before = state.model_dump()
     assert record.details["mrs_queried"] == 0
     assert record.markdown == "" and MR in record.errors[0]
     assert "secret stderr" not in record.errors[0]
@@ -438,16 +449,16 @@ async def test_ci_recovery_rearms_and_incomplete_observation_keeps_receipt() -> 
     assert (
         await build_daily_digest(state, now=NOW, tasks=[], lifecycles={}, runner=runner)
     ).candidates == 1
-    runner.mrs[MR] = {"state": "open"}
-    assert (
-        await build_daily_digest(state, now=NOW, tasks=[], lifecycles={}, runner=runner)
-    ).candidates == 0
-    assert f"mr:{MR}" in state.daily_decision_receipts
+    for status in ("unknown", "pending", "running", "failed"):
+        runner.mrs[MR] = {"state": "open", "ci_status": status}
+        quiet = await build_daily_digest(state, now=NOW, tasks=[], lifecycles={}, runner=runner)
+        assert quiet.candidates == quiet.llm_invoked == 0
+        assert f"ci:{MR}" in state.daily_decision_receipts
     runner.mrs[MR] = {"state": "open", "ci_status": "success"}
     assert (
         await build_daily_digest(state, now=NOW, tasks=[], lifecycles={}, runner=runner)
     ).candidates == 0
-    assert f"mr:{MR}" not in state.daily_decision_receipts
+    assert f"ci:{MR}" not in state.daily_decision_receipts
     runner.mrs[MR] = {"state": "open", "ci_status": "failed"}
     assert (
         await build_daily_digest(state, now=NOW, tasks=[], lifecycles={}, runner=runner)
@@ -539,3 +550,137 @@ async def test_model_can_select_among_tied_priorities_but_cannot_displace_p0(thi
     else:
         assert record.details["decision_mode"] == "deterministic"
         assert "候选-2" in record.markdown and "候选-4" not in record.markdown
+
+
+@pytest.mark.asyncio
+async def test_bounded_mr_rotation_reaches_omitted_failure_and_dry_run_keeps_cursor() -> None:
+    urls = [f"https://git.example.com/team/repo/merge_requests/{index}" for index in range(10, 26)]
+    mr_status = {url: {"state": "open", "ci_status": "success"} for url in urls}
+    mr_status[urls[-1]] = {"state": "open", "ci_status": "failed"}
+    runner = DigestRunner(
+        {"demands": [_demand(priority="p2", sources=[{"url": url} for url in urls])]}, mr_status
+    )
+    state = PatrolState()
+    first = await build_daily_digest(state, now=NOW, tasks=[], lifecycles={}, runner=runner)
+    assert first.candidates == first.llm_invoked == 0
+    assert state.daily_mr_cursor == urls[-2]
+    state = PatrolState.model_validate_json(state.model_dump_json())
+    before = state.model_dump()
+    second = await build_daily_digest(
+        state, now=NOW, tasks=[], lifecycles={}, runner=runner, dry_run=True
+    )
+    assert state.model_dump() == before
+    assert urls[-1] in second.markdown and second.llm_invoked == 0
+    third = await build_daily_digest(state, now=NOW, tasks=[], lifecycles={}, runner=runner)
+    assert third.candidates == third.llm_invoked == 1
+    assert urls[-1] in third.markdown
+    assert third.details["mrs_requested"] == third.details["mrs_queried"] == 15
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "detail", "expected_option"),
+    [
+        ("progress", "发布策略待定。A：复用旧实现；B：启用新路径。推荐 B。", "B"),
+        ("report", "发布策略待定，需要在复用旧实现和启用新路径之间选择。", "A"),
+    ],
+)
+async def test_task_decision_uses_current_blocker_and_concrete_reply(
+    source: str, detail: str, expected_option: str
+) -> None:
+    task = _task("发布策略")
+    lifecycle = TaskLifecycle(
+        task_id=task.id,
+        phase=TaskPhase.NEEDS_USER,
+        reason="agent_needs_input",
+        reason_text="等待用户输入",
+        owner=TaskOwner(kind=TaskOwnerKind.SESSION),
+        attention=True,
+        since=NOW,
+        legacy_status="working",
+    )
+    task_details = {}
+    if source == "progress":
+        task.latest_progress = TaskProgressSnapshot(
+            state=TaskProgressState.NEEDS_INPUT,
+            summary=detail,
+            call_id="task-1-needs-input",
+            execution_epoch=task.execution_epoch,
+            reported_at=NOW,
+        )
+    else:
+        task_details[task.id] = detail
+    model = AsyncMock(return_value='[[1,"A"]]')
+    state = PatrolState()
+    kwargs = dict(
+        now=NOW,
+        tasks=[task],
+        lifecycles={task.id: lifecycle},
+        runner=DigestRunner({"demands": []}),
+        task_details=task_details,
+        decision_model=model,
+    )
+    record = await build_daily_digest(state, **kwargs)
+    assert "发布策略待定" in record.markdown
+    assert "选择复用旧实现" in record.markdown and "选择启用新路径" in record.markdown
+    assert f"{expected_option}（推荐）" in record.markdown
+    assert (
+        f"快捷回复：「Task {task.id}，请选择{'启用新路径' if expected_option == 'B' else '复用旧实现'}」"
+        in record.markdown
+    )
+    assert model.await_args is not None and "新路径" not in model.await_args.args[0]
+    assert (await build_daily_digest(state, **kwargs)).candidates == 0
+    updated = detail.replace("启用新路径", "先开灰度")
+    if task.latest_progress:
+        task.latest_progress.summary = updated
+    else:
+        task_details[task.id] = updated
+    assert "先开灰度" in (await build_daily_digest(state, **kwargs)).markdown
+
+
+def test_hub_task_details_select_current_reviewer_question(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from claude_hub import services
+    from claude_hub.models import AgentReport, AgentReportState
+    from claude_hub.services.demand_patrol.service import _hub_tasks
+
+    task = _task("发布策略", review_cycle=2)
+    lifecycle = TaskLifecycle(
+        task_id=task.id,
+        phase=TaskPhase.NEEDS_USER,
+        reason="reviewer_needs_input",
+        owner=TaskOwner(kind=TaskOwnerKind.SESSION, id="worker"),
+        attention=True,
+        since=NOW,
+        legacy_status="review",
+    )
+    question = AgentReport(
+        id="current",
+        task_id=task.id,
+        workspace_id=task.workspace_id,
+        session_id="reviewer",
+        state=AgentReportState.REVIEW_NEEDS_INPUT,
+        message="Choose a rollout.",
+        message_zh="A：先灰度；B：直接发布。",
+        review_cycle=2,
+        created_at=NOW,
+    )
+    stale = question.model_copy(
+        update={"id": "stale", "review_cycle": 1, "created_at": NOW + timedelta(seconds=1)}
+    )
+    worker = question.model_copy(
+        update={
+            "id": "worker",
+            "session_id": "worker",
+            "state": AgentReportState.WORKING,
+            "created_at": NOW + timedelta(seconds=1),
+        }
+    )
+    manager = SimpleNamespace(
+        tasks={task.id: task},
+        task_lifecycles=lambda _: {task.id: lifecycle},
+        reports={report.id: report for report in (question, stale, worker)},
+    )
+    monkeypatch.setattr(services, "workspace_manager", manager)
+    assert _hub_tasks() == ([task], {task.id: lifecycle}, {task.id: question.message_zh})

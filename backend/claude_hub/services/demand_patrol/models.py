@@ -117,6 +117,7 @@ class PatrolState(BaseModel):
     feishu_watermark_iso: str | None = None
     processed_feishu_ids: list[str] = Field(default_factory=list)
     fired_daily_slots: list[str] = Field(default_factory=list)
+    daily_mr_cursor: str = ""
     mr_snapshots: dict[str, MRStateSnapshot] = Field(default_factory=dict)
     # Last delivered fingerprint for each decision that is still active.
     daily_decision_receipts: dict[str, str] = Field(default_factory=dict)
