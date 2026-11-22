@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterable, Optional
 
+from .events_gateway import EXTERNAL_EVENT, render_external_event, triggers_wake
 from .index import DotIndex, recallable
 from .lessons import session_rules
 from .prompts import DOT_CONTEXT_HEADER, TOOL_GUIDE, TURN_RULES
@@ -179,6 +180,9 @@ def _event_lines(events: list[dict[str, Any]]) -> list[str]:
             "see `claude-hub dot inbox`)"
         )
     for event in events[-_EVENTS_PER_TURN:]:
+        if event.get("kind") == EXTERNAL_EVENT:
+            lines.append(render_external_event(event))
+            continue
         card = f" (card {event['card_id']})" if event.get("card_id") else ""
         action = (
             " Consider a brief update if useful; [quiet] is fine if there is nothing new "
@@ -236,8 +240,9 @@ def build_turn_pack(
 ) -> TurnPack:
     """Assemble the per-turn context; a section that does not fit is cut or skipped.
 
-    ``wake`` is false on the user's turn: reviews and events are shown, but left
-    for the next wake-up. ``reach`` is the ``reach_note`` line.
+    On the user's turn, only passive external events are eligible for
+    acknowledgement. Wake-triggering events stay unread for the next wake-up.
+    ``reach`` is the ``reach_note`` line.
     """
     moment = (now or datetime.now()).astimezone()
     header = (
@@ -247,6 +252,8 @@ def build_turn_pack(
     if reach:
         header += "\n" + reach
     events = store.list_inbox() if inbox else []
+    if wake:
+        events = [event for event in events if triggers_wake(event)]
     focus = _take_lines(_focus_lines(store), _FOCUS_CHARS)
     # The newest work is last; a cut drops the oldest.
     work = _take_lines(_work_lines(store), _WORK_CHARS, newest_last=True)
@@ -303,5 +310,9 @@ def build_turn_pack(
     shown = events[-_EVENTS_PER_TURN:][:shown_events] if shown_events > 0 else []
     return TurnPack(
         text="\n\n".join(blocks),
-        delivered_event_ids=[str(event.get("id")) for event in shown if event.get("id")],
+        delivered_event_ids=[
+            str(event["id"])
+            for event in shown
+            if event.get("id") and (wake or not triggers_wake(event))
+        ],
     )

@@ -341,7 +341,7 @@ def test_prepare_turn_delivers_events_once(store: DotStore) -> None:
     # Not sent yet (e.g. the provider failed): the event is shown again.
     retry = service.prepare_turn(WAKE_MESSAGE, "provider-1")
     assert "Build broke" in retry.turn_pack
-    service.mark_delivered(retry.delivered_event_ids)
+    service.mark_delivered(retry.delivery_id)
     second = service.prepare_turn(WAKE_MESSAGE, "provider-1")
     assert "Build broke" not in second.turn_pack
 
@@ -374,7 +374,7 @@ def test_events_cut_from_the_pack_stay_unread(store: DotStore) -> None:
     # Oldest three wait for a later turn; the budget cuts more of the twelve.
     assert shown and shown[0] == 3 and len(shown) < 12
     assert len(plan.delivered_event_ids) == len(shown)
-    service.mark_delivered(plan.delivered_event_ids)
+    service.mark_delivered(plan.delivery_id)
     assert len(store.list_inbox()) == 15 - len(shown)
 
 

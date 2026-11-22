@@ -85,7 +85,8 @@ class TurnPlan:
     prepared_generation: str
     system_pack: str
     turn_pack: str
-    # Inbox events shown in ``turn_pack``; ack them only once the turn is sent.
+    # The acknowledgement identifies this preparation, even if another turn sees the same events.
+    delivery_id: str | None
     delivered_event_ids: list[str]
 
 

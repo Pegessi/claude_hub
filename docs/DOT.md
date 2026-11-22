@@ -397,3 +397,80 @@ for the Dot tab is kept. Failed turns are journaled as `(turn failed)`, never
 as Dot's words.
 
 Voice (speak / listen) is planned for later.
+
+## External events
+
+`POST /api/dot/events` accepts a JSON object of up to 64 KiB. Set
+`CLAUDE_HUB_DOT_EVENTS_TOKEN` in the Hub process environment to require a bearer
+token on every request. Use HTTPS for remote producers. With the variable
+unset, requests must come directly from a loopback client with a loopback Host
+and without browser or proxy headers. Configure a token anywhere a reverse
+proxy or tunnel exposes the endpoint.
+
+```bash
+curl --fail-with-body http://127.0.0.1:8173/api/dot/events \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "source":"codebase",
+    "event_type":"ci.status_changed",
+    "dedupe_key":"pipeline-42-attempt-2-failed",
+    "severity":"urgent",
+    "title":"CI failed",
+    "summary":"Required checks failed on MR 7",
+    "url":"https://code.example/repo/merge_requests/7",
+    "payload":{"pipeline_id":42}
+  }'
+```
+
+For authenticated clients, add `-H "Authorization: Bearer $CLAUDE_HUB_DOT_EVENTS_TOKEN"`.
+Use a stable producer delivery ID or a transition ID that includes the resource
+and attempt. The gateway returns HTTP 202 for both `accepted` and `duplicate`
+results. Deduplication is scoped to `source` and persists across restarts and
+inbox acknowledgement. Each source can submit 60 unique events per rolling hour.
+On HTTP 429, retry the original event after `Retry-After`. The gateway keeps a
+receipt ledger in `index.sqlite.events` in the Dot home.
+
+Urgent events request a wake through Dot's existing scheduler and yield to user
+turns. Dot can still reply quietly. Normal and digest events stay in the inbox for
+user-turn context or explicit inspection. A successful user turn acknowledges
+the passive events it received. Interrupted turns leave them available for
+retry. The pool retains the newest 200 unread passive events. Dot gives the
+model a bounded, escaped projection of the event with an
+`<external-untrusted-event>` boundary. The optional `payload` object is accepted
+for producer compatibility and discarded at intake. Keep any user-facing
+evidence in `title`, `summary` or `url`.
+
+From `backend/`, run the Lark bridge under a supervisor that sends SIGTERM
+and allows time for the consumer subprocesses to unsubscribe:
+
+```bash
+uv run python -m claude_hub.services.dot.events_bridge lark --profile YOUR_PROFILE
+```
+
+It opens one personal consumer per key for meeting minutes, meeting notes, task
+changes and both approval status events. Supply repeated `--event` flags to limit
+the subscriptions or `--urgent-event KEY` for a key that should wake Dot. All keys
+default to normal. Check the service logs for each ready marker. The bridge reads
+NDJSON after readiness and skips malformed or oversized records. On transport failures it retries with the same event ID
+and exits nonzero if delivery still fails. Configure the supervisor to restart on
+failure. On HTTP 429 the Lark bridge logs the rejected event type and keeps
+listening. Lark streaming has no local replay spool, so events can be missed
+while the bridge is stopped or the gateway rejects submissions. Use graceful SIGTERM
+without forced kill escalation. The bridge uses personal event keys alongside
+the Hub-owned Ted Bot IM subscription.
+
+Use the same entry point after a producer has verified a Codebase MR/CI transition
+or Merlin training/evaluation completion. Export the gateway token in the callback
+process environment. For a remote Hub, set `CLAUDE_HUB_DOT_EVENTS_URL` to its HTTPS
+endpoint.
+
+```bash
+uv run python -m claude_hub.services.dot.events_bridge callback \
+  codebase mr.status_changed repo-mr-7-delivery-1 'MR ready for review'
+uv run python -m claude_hub.services.dot.events_bridge callback \
+  codebase ci.status_changed pipeline-42-attempt-2-failed 'CI failed' --severity urgent
+uv run python -m claude_hub.services.dot.events_bridge callback \
+  merlin training.finished training-42-attempt-3 'Training finished'
+uv run python -m claude_hub.services.dot.events_bridge callback \
+  merlin evaluation.finished eval-8-attempt-1 'Evaluation finished' --severity digest
+```

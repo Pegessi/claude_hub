@@ -166,7 +166,7 @@ class SessionCore(ABC):
         # Dot context is prepared at the shared transport boundary so every
         # native provider gets the same memory, rotation, and inbox semantics.
         self._dot_system_pack: str = ""
-        self._dot_event_ids: List[str] = []
+        self._dot_delivery_id: str | None = None
         self._dot_hidden_system_pack_delivered = False
         self._dot_hidden_system_pack_pending = False
         # Forked-tab history seed: a sentinel-wrapped transcript body prepended
@@ -463,7 +463,7 @@ class SessionCore(ABC):
 
     async def _prepare_turn_context(self, text: str) -> str:
         """Prepares provider-neutral Dot context and conversation rotation."""
-        self._dot_event_ids = []
+        self._dot_delivery_id = None
         self._dot_hidden_system_pack_pending = False
         from ...dot import get_dot_service
 
@@ -553,7 +553,7 @@ class SessionCore(ABC):
         elif plan.new_session:
             self._dot_hidden_system_pack_delivered = False
         self._dot_system_pack = plan.system_pack
-        self._dot_event_ids = plan.delivered_event_ids
+        self._dot_delivery_id = plan.delivery_id
         return self._dot_prompt_context(plan.turn_pack)
 
     def _dot_prompt_context(self, turn_pack: str) -> str:
@@ -567,13 +567,13 @@ class SessionCore(ABC):
         if self._dot_hidden_system_pack_pending:
             self._dot_hidden_system_pack_delivered = True
             self._dot_hidden_system_pack_pending = False
-        event_ids, self._dot_event_ids = self._dot_event_ids, []
-        if not event_ids:
+        delivery_id, self._dot_delivery_id = self._dot_delivery_id, None
+        if not delivery_id:
             return
         from ...dot import get_dot_service
 
         try:
-            await asyncio.to_thread(get_dot_service().mark_delivered, event_ids)
+            await asyncio.to_thread(get_dot_service().mark_delivered, delivery_id)
         except Exception:
             self._runtime.logger().exception("Dot inbox ack failed")
 

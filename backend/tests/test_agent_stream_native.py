@@ -1951,13 +1951,14 @@ async def test_dot_rotation_cancellation_before_submit_releases_provider_guard(
         def is_dot_tab(self, tab_id: Optional[str]) -> bool:
             return self.enabled and tab_id == "tab-1"
 
-        def prepare_turn(self, _text: str, _conversation_id: Optional[str]) -> Any:
-            return SimpleNamespace(
+        def prepare_turn(self, _text: str, _conversation_id: Optional[str]) -> dot_module.TurnPlan:
+            return dot_module.TurnPlan(
                 rotate=True,
                 new_session=True,
                 prepared_generation="prepared-1",
                 system_pack="system pack",
                 turn_pack="turn pack",
+                delivery_id=None,
                 delivered_event_ids=[],
             )
 
